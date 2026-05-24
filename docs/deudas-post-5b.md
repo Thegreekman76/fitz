@@ -1364,8 +1364,8 @@ estado real).
 |----|-----------|----------|
 | 8.7-ok-propagation | Python interop codegen | 3-5h |
 | dict→Map<K,V> no primitivos | Python interop codegen | 4-6h |
-| UTF-16 position strict | LSP | 2-3h |
-| F15 recovery sub-stmt | LSP | 1-2h |
+| ~~UTF-16 position strict~~ | ✓ **CERRADO v0.9.51** | LSP capability `positionEncoding: utf-8` declarada explícita |
+| ~~F15 recovery sub-stmt~~ | ✓ **CERRADO v0.9.51** | `parse_postfix` preserva `Expr::Field { field: "" }` en lugar de descartar el stmt entero |
 | R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h |
 | 8-pyi-stubs | Stubs Python | 1-2 días |
 | ~~Smoke real Docker boilerplate 5~~ | ✓ **CERRADO v0.9.50** | smoke end-to-end con Postgres VERDE, imagen 136 MB |

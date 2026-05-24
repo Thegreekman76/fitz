@@ -61,6 +61,87 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.51] — 2026-05-24 — Mini-tanda J: LSP polish (UTF-8 capability + F15 recovery sub-stmt)
+
+### Added
+
+- **Capability `positionEncoding: utf-8` declarada en el LSP
+  server** (`fitz-lsp`). Pre-fix asumía implícitamente UTF-8 sin
+  declararlo en `capabilities`; clientes que negocian UTF-16
+  default (spec LSP por defecto) rompían con chars multi-byte
+  (emoji, símbolos matemáticos, scripts del SMP). Post-fix
+  explicit. VSCode + tower-lsp soportan UTF-8 desde LSP 3.17
+  (julio 2022). Decisión técnica: mantener consistencia con
+  `TypeEnv`/`TypeInfo`/`DefinitionInfo` que indexan por chars
+  Unicode 1-based del lexer (`column += 1` por char no-newline
+  en `lexer.rs::advance`).
+
+- **F15 recovery sub-stmt — `Expr::Field` con field vacío**
+  cuando el parser encuentra `<expr>.<EOF|Newline|otro>` en
+  modo recovery. Pre-fix: el stmt entero se descartaba como
+  `Stmt::Error` y el LSP solo podía recuperar completion vía
+  el fallback "walk top-level por nombre" (cubría vars
+  top-level, NO locales/params). Post-fix: el `Expr::Field
+  { object, field: "", span }` queda en el AST, el checker lo
+  tipa via TypeInfo, y el completion ve el tipo del `object`
+  directamente — funciona para vars locales/params/cualquier
+  scope.
+
+  Impacto en completion contextual:
+  - `user.<EOF>` con `let user: User = ...` dentro de una fn →
+    el completion muestra los fields/métodos de `User`
+    (pre-fix solo funcionaba si `user` era top-level).
+  - `desconocido.` (ident sin binding) → tipa `Type::Any`
+    (gradual escape del checker) → muestra los 6 métodos
+    universales de F13.D (`as_int`/`as_float`/`as_str`/
+    `as_bool`/`as_bytes`/`type_name`). Pre-fix devolvía vacío
+    porque el stmt entero se descartaba.
+
+### Changed
+
+- **`position_to_offset` y `offset_to_position`** (`src/lsp.rs`):
+  doc actualizado para reflejar `positionEncoding: utf-8`
+  declarada en capabilities. Sin cambio funcional (ya contaban
+  chars Unicode, ahora documentado correctamente).
+- **`parse_postfix`** (`src/parser.rs`): branch `Token::Dot`
+  ahora maneja `expect_ident` fallido bajo `recovery_mode`
+  preservando el `Expr::Field` con `field: ""` en lugar de
+  propagar el error que descartaba el stmt entero.
+
+### Notes
+
+- **Tests nuevos**: 4 unit en `lsp::tests`
+  (`position_to_offset_cuenta_chars_unicode_no_utf16_code_units`,
+  `offset_to_position_cuenta_chars_unicode_paralelo_a_position_to_offset`,
+  `f15_recovery_sub_stmt_preserva_field_access_con_dot_huerfano`,
+  `f15_recovery_sub_stmt_completion_after_dot_funciona_sobre_var_local`).
+- **Tests ajustados**: 1 unit
+  (`after_dot_sobre_receiver_sin_tipo_devuelve_metodos_any`,
+  renombrado de `..._devuelve_vacio`) — cambia las expectativas
+  para reflejar el nuevo comportamiento (F15 + F13.D
+  combinados): ident sin binding ahora tipa Any y muestra los
+  6 métodos universales en lugar de devolver vacío.
+- Suite total: **2387 unit con lsp** (era 2383 + 4),
+  **2373 con python**, **2282 sin features**. Clippy
+  `--all-targets -D warnings` limpio en los 3 modos.
+- **Sin cambios a la extensión VSCode** — la capability LSP
+  negocia automáticamente al conectar.
+
+### Bundle J cerrado
+
+Con v0.9.51, el bundle J del inventario está completo. Las 2
+deudas reales del LSP residuales (UTF-16 position strict + F15
+recovery sub-stmt) cierran. **Inventario depurado** ahora baja
+a **5 deudas reales restantes**:
+
+| ID | Categoría | Esfuerzo |
+|----|-----------|----------|
+| 8.7-ok-propagation | Python interop codegen | 3-5h |
+| dict→Map<K,V> no primitivos | Python interop codegen | 4-6h |
+| R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h |
+| 8-pyi-stubs | Stubs Python | 1-2 días |
+| Smoke real Docker boilerplate 6 | Validación | 1-2h |
+
 ## [v0.9.50] — 2026-05-24 — Smoke real Docker boilerplate 5 (Dockerfile.distroless) validado end-to-end con Postgres
 
 ### Added

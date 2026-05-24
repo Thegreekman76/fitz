@@ -25,8 +25,8 @@ use tower_lsp::lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, MessageType, OneOf, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    InitializeResult, InitializedParams, MessageType, OneOf, PositionEncodingKind,
+    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -111,6 +111,17 @@ impl LanguageServer for Backend {
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
             capabilities: ServerCapabilities {
+                // v0.9.51 — declaramos `positionEncoding: utf-8` (en
+                // lugar del default UTF-16 del spec LSP). Razón:
+                // mantener consistencia con `TypeEnv`/`TypeInfo`/
+                // `DefinitionInfo` que indexan por chars Unicode
+                // 1-based del lexer (`column += 1` por char no-newline
+                // en `lexer.rs::advance`). Antes asumíamos
+                // implícitamente UTF-8 sin declararlo — clientes que
+                // negociaban UTF-16 default rompían con multi-byte
+                // chars (emoji, símbolos matemáticos). VSCode + tower-lsp
+                // soportan utf-8 desde LSP 3.17 (2022).
+                position_encoding: Some(PositionEncodingKind::UTF8),
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),

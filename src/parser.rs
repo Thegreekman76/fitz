@@ -657,7 +657,26 @@ impl Parser {
                         continue;
                     }
                     self.advance();
-                    let field = self.expect_ident("se esperaba nombre de campo después de '.'")?;
+                    // v0.9.51 F15 recovery sub-stmt — si después del `.`
+                    // no hay un ident (típico: EOF, Newline, otro stmt),
+                    // en modo recovery preservamos `Expr::Field` con
+                    // `field: ""` (placeholder) en lugar de descartar el
+                    // stmt entero. Habilita completion fino tras
+                    // `user.<typo o EOF>` — el LSP usa el tipo del
+                    // `object` para mostrar fields/métodos sugeridos.
+                    let field = match self
+                        .expect_ident("se esperaba nombre de campo después de '.'")
+                    {
+                        Ok(f) => f,
+                        Err(e) => {
+                            if self.recovery_mode {
+                                self.push_recovered(e);
+                                String::new()
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    };
                     expr = Expr::Field {
                         object: Box::new(expr),
                         field,

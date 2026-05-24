@@ -813,10 +813,23 @@ fn detect_from_import_list_context(text: &str, line: u32, character: u32) -> Opt
 
 /// Convierte una `(line, character)` LSP (0-based) a un offset en
 /// bytes dentro del `text`. Devuelve `None` si la posición está más
-/// allá del fin del texto. Asume que el cliente usa la misma convención
-/// de "character" que nosotros (chars UTF-8 — LSP por default usa
-/// UTF-16, pero el MVP asume programas mayormente ASCII; refinable
-/// post-MVP si aparece presión real con código en idiomas no-latin).
+/// allá del fin del texto.
+///
+/// **v0.9.51** — usa **chars Unicode** (equivalente a `len_utf16 ==
+/// 1`) para `character`, alineado con `positionEncoding: "utf-8"`
+/// que el server declara en `capabilities.position_encoding`. El
+/// cliente respeta esa negociación y manda offsets en bytes UTF-8
+/// (chars Unicode para ASCII + BMP; los chars del SMP suman
+/// `len_utf8()` bytes pero el cursor del cliente los cuenta como
+/// 1 unit en UTF-8 también).
+///
+/// Decisión técnica: mantener consistencia con `TypeEnv`/`TypeInfo`/
+/// `DefinitionInfo` que indexan por chars Unicode 1-based del
+/// lexer (`column += 1` por char no-newline en `lexer.rs::advance`).
+/// Pre-fix asumía implícitamente UTF-8 sin declararlo en capabilities;
+/// clientes que negocian UTF-16 default rompían con multi-byte
+/// chars (emoji, etc.). Post-fix: capability explícita + tests
+/// con multi-byte chars.
 fn position_to_offset(text: &str, line: u32, character: u32) -> Option<usize> {
     let mut offset = 0usize;
     let mut current_line = 0u32;
@@ -854,6 +867,8 @@ fn offset_to_position(text: &str, offset: usize) -> (u32, u32) {
             current_line += 1;
             current_char = 0;
         } else {
+            // v0.9.51 — chars Unicode (paralelo a `position_to_offset`,
+            // alineado con `positionEncoding: "utf-8"`).
             current_char += 1;
         }
         current_offset += ch.len_utf8();
@@ -2299,6 +2314,110 @@ mod tests {
         assert_eq!(ctx, CompletionContext::ScopeLevel);
     }
 
+    // ---- v0.9.51 Mini-tanda J — UTF-8 position + F15 recovery sub-stmt ----
+
+    #[test]
+    fn position_to_offset_cuenta_chars_unicode_no_utf16_code_units() {
+        // El cliente respeta la capability `positionEncoding: utf-8`
+        // del server (v0.9.51). Char Unicode = 1 unit en UTF-8.
+        // Caso 1: ASCII puro — col 6 apunta al `=`.
+        let text = "let x = 42";
+        let offset = position_to_offset(text, 0, 6).expect("offset válido");
+        assert_eq!(&text[offset..offset + 1], "=", "col 6 en ASCII → `=`");
+        // Caso 2: con emoji 😀 (4 bytes UTF-8, 2 code units UTF-16, 1 char
+        // Unicode). El comentario empieza en col 0 = `/`, el emoji en col
+        // 3. Sumar 1 al cursor pasa por el emoji entero (NO 2).
+        let text = "// 😀 hola";
+        let offset = position_to_offset(text, 0, 4).expect("offset válido tras emoji");
+        // Tras `// `, el emoji ocupa 1 char Unicode pero 4 bytes UTF-8.
+        // Cursor en col 4 (post-emoji) → byte offset = 3 + 4 = 7.
+        assert_eq!(offset, 7, "offset esperado tras emoji = 7 bytes UTF-8");
+    }
+
+    #[test]
+    fn offset_to_position_cuenta_chars_unicode_paralelo_a_position_to_offset() {
+        // Round-trip: offset → position → offset debe devolver el mismo
+        // offset (siempre que el offset esté en char boundary).
+        let text = "let x = 1\nlet y: Str = \"😀\"\n";
+        let original_offset = text.find('y').unwrap();
+        let (line, character) = offset_to_position(text, original_offset);
+        let recovered = position_to_offset(text, line, character).unwrap();
+        assert_eq!(
+            recovered, original_offset,
+            "round-trip offset → position → offset debe ser idempotente"
+        );
+    }
+
+    #[test]
+    fn f15_recovery_sub_stmt_preserva_field_access_con_dot_huerfano() {
+        // Pre-fix: `user.<EOF>` abortaba el stmt entero (Stmt::Error).
+        // Post-fix: `parse_with_recovery` devuelve un AST con
+        // `Stmt::Expr(Expr::Field { object: Ident("user"), field: "" })`,
+        // permitiendo que el LSP use el tipo del object para completion.
+        use crate::ast::{Expr, Stmt};
+        use crate::lexer::tokenize;
+        use crate::parser::parse_with_recovery;
+        let src = "let user = 42\nuser.";
+        let tokens = tokenize(src).expect("tokenize OK");
+        let (program, errors) = parse_with_recovery(tokens);
+        // Hay al menos 1 error reportado (se esperaba field).
+        assert!(
+            !errors.is_empty(),
+            "recovery debe reportar el error del `.` huérfano"
+        );
+        // El segundo stmt debe ser Expr::Field con `field` vacío,
+        // NO Stmt::Error.
+        assert!(
+            program.len() >= 2,
+            "esperaba al menos 2 stmts: el let + el user.<EOF>. Got: {} stmts",
+            program.len()
+        );
+        let last = program.last().expect("último stmt");
+        match last {
+            Stmt::Expr(Expr::Field { object, field, .. }, _) => {
+                assert_eq!(field, "", "field debe ser placeholder vacío");
+                assert!(
+                    matches!(object.as_ref(), Expr::Ident(name, _) if name == "user"),
+                    "object debe ser Ident(\"user\"), got: {:?}",
+                    object
+                );
+            }
+            other => panic!(
+                "esperaba Stmt::Expr(Expr::Field {{ field: \"\" }}), got: {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn f15_recovery_sub_stmt_completion_after_dot_funciona_sobre_var_local() {
+        // Caso del LSP: cursor en `user.<cursor>` adentro de una fn,
+        // con `user: User` declarado localmente. Pre-fix: el stmt entero
+        // se descartaba, el completion solo veía vars top-level via
+        // fallback. Post-fix: el Expr::Field preserva el `user`, y el
+        // lookup en TypeInfo encuentra el tipo del object.
+        let src = "type User { id: Int, name: Str }\n\
+                   fn process() {\n  \
+                     let u: User = User { id: 1, name: \"x\" }\n  \
+                     u.\n\
+                   }\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor en línea 3 (0-based: línea 3 del fuente, después de `u.`)
+        // — col 4 (después del punto).
+        let items = completion_at_position(src, &program, &type_info, &env, 3, 4);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"id"),
+            "esperaba field `id` de User en completion, labels: {:?}",
+            labels
+        );
+        assert!(
+            labels.contains(&"name"),
+            "esperaba field `name` de User en completion, labels: {:?}",
+            labels
+        );
+    }
+
     // ---- v0.9.47 Mini-tanda LSPz — chain a.b.c. + from import ----
 
     #[test]
@@ -2609,13 +2728,25 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_receiver_sin_tipo_devuelve_vacio() {
-        // `desconocido.` — ident no resuelto → TypeInfo no tiene
-        // entry → lista vacía.
+    fn after_dot_sobre_receiver_sin_tipo_devuelve_metodos_any() {
+        // `desconocido.` — ident no resuelto. v0.9.51 F15 recovery
+        // sub-stmt: el parser ahora preserva el stmt como
+        // `Expr::Field { object: Ident("desconocido"), field: "" }`
+        // (en lugar de descartarlo entero). El checker tipa Ident
+        // sin binding como `Type::Any` (gradual escape), y el
+        // dispatch `Type::Any` devuelve los 6 métodos universales
+        // de F13.D (as_int/as_float/as_str/as_bool/as_bytes/
+        // type_name). Pre-fix devolvía vacío porque el stmt entero
+        // se descartaba y `TypeInfo` no tenía entry para el ident.
         let src = "desconocido.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 0, 12);
-        assert!(items.is_empty(), "esperaba vacío, dio {items:?}");
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"as_int") && labels.contains(&"type_name"),
+            "esperaba métodos universales de Type::Any (F13.D), got: {:?}",
+            labels
+        );
     }
 
     // Mini-tanda V.2 (VSCode catch-up) — los métodos nuevos de Str
