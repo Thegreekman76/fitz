@@ -2,6 +2,29 @@
 
 ---
 
+## Estado actual del proyecto (v0.9.55 — 2026-05-24)
+
+**Hito de consolidación**. Tras 14 releases consecutivos cerrando deudas (v0.9.43 → v0.9.54), el proyecto está en estado **production-ready** para los patrones canónicos del lenguaje:
+
+- **Fases 1-9 entera CERRADAS**: lexer + parser + AST + checker estático + evaluador async + HTTP nativo + middleware + Result/match + módulos + interop Python con bundling distroless + LSP MVP completo + package manager + DX (fmt/test/dev/repl/lint) + stack web first-class (auth/WS/jobs).
+- **Cierre Bundle B/I (Python interop codegen)**: 3 deudas residuales cerradas (8.7-ok-propagation, 8.7-await-binding-split, dict→Map<K,V> primitivo). Codegen Python production-ready para el caso 90%+.
+- **6 boilerplates Dockerizados validados end-to-end**, los 2 con Postgres+Python en variante distroless real (imagen ~136 MB).
+- **CI strict reactivado**: `cargo fmt --check` + `cargo clippy --all-targets -D warnings` en los 3 modos (default, `python`, `lsp`).
+- **2290 unit (default) / 2381 (python) / 2395 (lsp)** + 90+ E2E + 79+ compile_e2e.
+
+**Deudas reales restantes** (sin presión, mantener documentadas):
+
+| ID | Categoría | Esfuerzo |
+|----|-----------|----------|
+| R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h exploratorio |
+| 8-pyi-stubs | Stubs Python | 1-2 días, post-Fase 9 |
+
+**Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. Norte estratégico que destraba el reemplazo de la layer Python en los boilerplates 5/6 con un driver Postgres puro en Fitz + ORM sobre `type` con anotaciones + migraciones autogeneradas. Sesión de diseño primero (sin código), después implementación incremental.
+
+Detalle exhaustivo de cada cierre en [`CHANGELOG.md`](../CHANGELOG.md) y deudas residuales en [`docs/deudas-post-5b.md`](deudas-post-5b.md).
+
+---
+
 ## Fase 1 — Aprender Rust 🦀
 **Estado: COMPLETADA**
 

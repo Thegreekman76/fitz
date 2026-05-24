@@ -11189,67 +11189,64 @@ ejecuten, un compilador que produce binarios standalone, y un
 puente al ecosistema Python para usar SQLAlchemy/numpy/asyncpg
 sin abandonar Fitz.
 
-### Lo que viene — más allá del LSP MVP (9.x.1 → 9.x.5 cerradas)
+### Lo que viene — post Fase 9 + bundling Python validado (estado v0.9.55)
 
-Las fases cerradas (al cierre de Fase 8): type checker estático
-(5a), codegen a binario nativo (5b), async nativo (6), DX HTTP
-con OpenAPI 3.1 + UI Scalar (7), middleware + CORS (mini-fase MW),
-Send completo + paralelismo HTTP real (F17), e **interop Python**
-end-to-end (Fase 8): embedding básico (8.1), marshaling compuesto
-(8.2), excepciones → `Result<T>` (8.3), tipos del checker + coerción
-runtime (8.4), `fitz py-types` SQLAlchemy (8.5), bridge tokio ↔
-asyncio (8.6), codegen interop en `fitz build` (8.7), guía + ejemplo
-CRUD + cierre formal (8.8 — este capítulo).
+**Fases 1-9 entera CERRADAS** + **bundle B/I (Python interop
+codegen) entero CERRADO** + **smoke real Docker distroless
+validado** en boilerplates 5/6 (v0.9.50/52). La promesa "Fitz
+usable para proyectos reales" ya está cumplida con todo el stack
+del lenguaje + ecosistema:
 
-Con eso, la promesa "Fitz usable para proyectos reales hoy" queda
-cumplida: HTTP nativo + tipos + interop con el ecosistema Python.
+- Type checker estático (5a), codegen binario nativo (5b), async
+  nativo (6), DX HTTP con OpenAPI 3.1 + UI Scalar (7), middleware
+  + CORS (MW), Send + paralelismo HTTP real (F17).
+- **Interop Python entera** (Fase 8.1 → 8.8): embedding,
+  marshaling compuesto bidireccional, excepciones → `Result<T>`,
+  coerción runtime, `fitz py-types` SQLAlchemy, bridge tokio ↔
+  asyncio, codegen interop en `fitz build`.
+- **Bundling Python standalone** (Fase 8.b → 8.c): `fitz build
+  --bundle-python` produce binario con CPython 3.14.5 embebido
+  (~22-35 MB según OS); `--bundle-pip-requirements` agrega los
+  paquetes pip del `requirements.txt`. Launcher con
+  `tar`+`flate2` inline desde v0.9.46 habilita runtime
+  `gcr.io/distroless/cc-debian12` (smoke real Docker validado
+  v0.9.50/52, imagen ~136 MB con sqlalchemy + Postgres).
+- **Fase 9 entera CERRADA**: LSP MVP completo (9.x.1 → 9.x.5,
+  ver cap 22), package manager (9.y, ver cap 16b), DX (9.z —
+  fmt/test/dev/repl/lint, caps 23-27), stack web first-class
+  (9.w — auth/WS/jobs, caps 28-30), env builtin (cap 31).
 
-Lo que sigue post-8:
+**Lo que viene** (post-Fase 9, post-bundling Python):
 
-- **Fase 9 — Ecosistema** (en curso):
-  - **Plan LSP entero cerrado** — diagnostics (9.x.1), hover
-    (9.x.2), go-to-definition (9.x.3), autocomplete contextual
-    (9.x.4) y distribución multi-platform (9.x.5). Ver cap 22.
-  - **Package manager (9.y)**: `fitz new`/`init`, manifest
-    `fitz.toml`, deps path + git con lockfile `fitz.lock`,
-    sub-comandos `fitz add`/`remove`/`update` (9.y.1 → 9.y.4
-    cerrados). Registry público (9.y.5) diferido — path + git
-    cubren el 90% del caso real. **Capítulo dedicado en la guía
-    pendiente** (deuda explícita en `docs/deudas-post-5b.md`,
-    entra cuando 9.z entera cierre).
-  - **DX (9.z) — CERRADA ENTERA**: formatter `fitz fmt` (9.z.1,
-    cap 23), test runner `fitz test` (9.z.2, cap 24), hot
-    reload `fitz dev` (9.z.3, cap 25), REPL interactivo
-    `fitz repl` (9.z.4, cap 26), linter `fitz lint` (9.z.5,
-    cap 27). Los 5 sub-pasos cerrados en 2 días (2026-05-16/17).
-- **`fitz build --bundle-python` (Fase 8.b) — CERRADO 2026-05-23**:
-  produce un binario standalone con CPython 3.14.5 embebido vía
-  python-build-standalone (Astral). NO requiere Python instalado
-  en el destino. Cap 21.11 documenta uso, tamaños (~22-35 MB
-  según OS), timing (cold ~3-5s, warm ~50-100ms), constraint del
-  builder (Linux/macOS requiere Python 3.14.x, Windows no por
-  stable ABI shim). Único lenguaje moderno activamente
-  mantenido con esta capacidad — PyOxidizer está ralentizado
-  desde 2023.
-- **Stack DB nativo** (Fase 10+): driver Postgres en Fitz puro,
-  ORM nativo declarativo sobre `type` (estilo Diesel/sqlx),
-  migraciones, pool. La interop Python de Fase 8 es el puente
-  hasta llegar ahí, no el destino final.
-- **Deuda residual comprometida**:
-  - **Coerción Python list/dict → Fitz `List<T>`/`Map<K,V>`/
-    `Instance` en `fitz build`** (deuda de 8.7): los helpers
-    `__fitz_py_to_list_*` ya están emitidos en el preludio, falta
-    el wiring en `coerce(PyAny → List<T>)` y equivalentes. En el
-    intérprete ya funciona (Fase 8.4).
-  - **Listas/mapas heterogéneos compilados** (`[1, "dos"]`): el
-    intérprete los acepta, el compilador necesita un `FitzValue`
-    tagged en runtime.
-  - **Deuda menor de F7** (post-fase): doc-strings sobre handlers
-    (para descripciones OpenAPI), `@header(into=...)` con alias del
-    param Fitz, bundle Scalar embebido offline.
+- **Fase 10 — Stack DB nativo + ORM declarativo** 🌍 (próximo
+  norte grande). Driver Postgres en Fitz puro, ORM sobre `type`
+  con anotaciones `@table`/`@primary`, migraciones autogeneradas
+  del diff, `fitz db diff`/`migrate`. La interop Python de Fase
+  8 es el puente hasta llegar ahí; Fase 10 lo reemplaza con un
+  stack nativo. Sesión de diseño primero, después implementación
+  incremental.
+- **Fase 11 — Frontend en `.fitz`** (SFC + SSR, especulativo):
+  single-file components estilo Vue, WASM/JS targets, SSR
+  built-in, sharing de `type` entre back y front. Resuelve el
+  doble tipado.
+- **Fase 12 — Deployment ciudadano primera clase**: `fitz
+  deploy`, Dockerfile autogenerado, observability nativa
+  (`@trace`/`@metric`), secrets management, feature flags
+  built-in.
 
-Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
-deuda explícita acumulada por fase.
+**Deudas reales restantes** (sin presión, no bloquean uso real):
+
+- **R.bug-pyo3-abi3-portable-link Linux/macOS**: el flag
+  `--bundle-python` en Linux/macOS exige que el Python del
+  builder sea 3.14.x (matchea el PBS embebido). Windows ya
+  resolvió con stable ABI shim. Sub-paso futuro exploratorio
+  (Docker debugging con LD_DEBUG, ~4-6h).
+- **Stubs `.pyi` parseados** para tipado mejorado de Python
+  interop (paralelo a `@types/...` de TypeScript). 1-2 días,
+  post-Fase 9.
+
+Ver [docs/roadmap.md](roadmap.md) y
+[docs/deudas-post-5b.md](deudas-post-5b.md) para el detalle.
 
 ### Cómo va a crecer esta guía
 

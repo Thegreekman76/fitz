@@ -61,6 +61,61 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.55] — 2026-05-24 — Hito de consolidación: refresh masivo de docs macro
+
+### Changed
+
+Tras 14 releases consecutivos cerrando deudas (v0.9.43 → v0.9.54),
+release de consolidación que refresca las docs macro al estado
+actual. **Cero cambios funcionales**.
+
+- **`README.md`** raíz:
+  - Sección "Interop Python via PyO3" (footnote §): actualizada
+    para reflejar que **distroless está habilitado desde v0.9.46**
+    (launcher con `tar`+`flate2` inline) y **smoke real Docker
+    validado end-to-end con Postgres** en v0.9.50/52 (imagen
+    ~136 MB). Pre-fix el README citaba distroless como "deuda
+    menor del launcher" — ya no es cierto.
+  - Tabla de boilerplates: los 2 con Python+Postgres
+    (`api-postgres-python`, `api-fullstack-postgres`) ahora
+    documentan la variante `Dockerfile.distroless` validada,
+    incluyendo CORS preflight desde otro origin para el fullstack.
+
+- **`docs/roadmap.md`**:
+  - Nueva sección "Estado actual del proyecto (v0.9.55)" al
+    inicio. Resume las fases 1-9 entera CERRADAS, el cierre del
+    bundle B/I (Python interop codegen), las métricas de tests
+    actuales (2290 default / 2381 python / 2395 lsp), las 2
+    deudas reales restantes (R.bug-pyo3-abi3 L/M, 8-pyi-stubs),
+    y el próximo norte grande (Fase 10 — Stack DB nativo + ORM).
+
+- **`docs/guide.md` cap 33 "Qué sigue"**:
+  - Sección "Lo que viene" actualizada para reflejar que Fase 9
+    está entera CERRADA (era listada "en curso"). Suma mención
+    de bundling Python `--bundle-python`/`--bundle-pip*` (Fase
+    8.b/8.c) con smoke distroless validado, env builtin (cap
+    31), y los 4 caps de stack web first-class (28-30).
+  - "Deuda residual comprometida" actualizada: las 3 que
+    listaba (coerción list/dict, heterogéneos compilados,
+    deuda menor F7) **ya cerraron** (v0.9.44/49/54).
+    Reemplazadas por las 2 reales restantes.
+  - Suma Fase 11 (Frontend en `.fitz`) y Fase 12 (Deployment
+    ciudadano primera clase) como nortes especulativos
+    siguientes al post-Fase 10.
+
+### Notes
+
+- **Cero cambios de código del lenguaje**. Suite intacta: 2290
+  default / 2381 python / 2395 lsp. Clippy + fmt limpios.
+- **Hito**: este release marca el cierre del bloque de 15
+  releases consecutivos (v0.9.43 → v0.9.55) que llevaron el
+  proyecto desde "Fase 9 + bundling con caveats" hasta
+  "production-ready en patrones canónicos + repo profesional
+  con CI strict + 6 boilerplates validados end-to-end".
+- **Próximo norte**: **Fase 10 — Stack DB nativo + ORM
+  declarativo**. Sesión de diseño primero (sin código),
+  después implementación incremental.
+
 ## [v0.9.54] — 2026-05-24 — Cierre dict→Map<K,V> primitivo: coerción `PyAny → Map<Str, V>`
 
 ### Added
