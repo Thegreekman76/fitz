@@ -123,6 +123,71 @@ pub enum Type {
     /// expresiones que el checker todavía no modela (calls antes de
     /// 5.3.2, métodos antes de 5.3.4, etc.). Cualquier comparación
     /// contra `Any` pasa: nada se rechaza por culpa de un `Any`.
+    ///
+    /// **Matriz de uso de `Type::Any` (audit F1, v0.9.45)** — los
+    /// ~180 sitios donde aparece se clasifican en estas categorías,
+    /// todas intencionales (no son bugs por silenciar):
+    ///
+    /// 1. **Builtins variádicos** (`print(...)`, `assert(...)`,
+    ///    `assert_eq`, `format!`-style): firma `params: vec![Any, ...]`
+    ///    porque aceptan cualquier tipo. Refinable en sub-fase de
+    ///    overloading multi-aridad, sin presión real.
+    ///
+    /// 2. **Builtins polimórficos sobre tipo distinto** (`len(x)` →
+    ///    Str/List/Map/Bytes; `bytes(s)` → Str): param `Any`, ret
+    ///    concreto. El dispatch real ocurre en runtime/codegen por
+    ///    tipo del receiver. Cubrir esto con tipos sum (`Str | List
+    ///    | Map | Bytes`) no aporta sin tipo unión genérico.
+    ///
+    /// 3. **Propagación gradual** (`Any op X → Any`, `Any.field →
+    ///    Any`, `Any(args) → Any`): patrón clásico de gradual
+    ///    typing. Garantiza que código sin anotaciones siga andando
+    ///    cuando entra en contacto con vars tipadas.
+    ///
+    /// 4. **Anotaciones que fallan resolución** (`Some(t) =>
+    ///    resolve_type_expr(t, &env).unwrap_or(Type::Any)`): fallback
+    ///    defensivo — si el usuario anotó un tipo inválido, el
+    ///    checker emite el error de anotación pero NO aborta el
+    ///    pipeline; el binding queda como `Any` para que el resto
+    ///    del programa siga chequeando. Sin esto, un solo typo en
+    ///    una anotación cascadea a errores de "var desconocida".
+    ///
+    /// 5. **Callbacks sin anotación** (`FnExpr` inline sin `ret`
+    ///    declarado, antes de la inferencia 5.3.5): ret type `Any`
+    ///    hasta que se procese el body. Tras 5.3.5, el ret se infiere
+    ///    via `unify_returns` + `lub`; sólo queda `Any` cuando el
+    ///    body no tiene returns o son heterogéneos irrecuperables.
+    ///
+    /// 6. **Patterns de match con scrutinee `Any`** (`Ok(x)` /
+    ///    `Err(e)` / `Ident(b)`): el binding queda `Any` para
+    ///    propagar el gradual. Refinable cuando el scrutinee tipa
+    ///    concreto.
+    ///
+    /// 7. **`Expr::Error` (F15 recovery)**: el wrapper `infer_expr`
+    ///    persiste `Expr::Error → Type::Any` para que el LSP corra
+    ///    el checker sobre AST roto sin cascadas de errores. Política
+    ///    silenciosa: el error real ya lo registró el parser.
+    ///
+    /// 8. **Result/Future built-ins sin info concreta**
+    ///    (`Result<Any>` en `Err("...")` suelto, `Future<Any>` en
+    ///    `spawn(...)` sin call literal): "no sabemos el `T`,
+    ///    refinar en el sitio destino". El `is_compatible` recursivo
+    ///    los permite contra `Result<X>` / `Future<X>` concretos.
+    ///
+    /// 9. **`Type::PyAny` se propaga como `Type::Any` en algunos
+    ///    contextos** (`Any | PyAny → Any` en BinOp/UnaryOp): el
+    ///    gradual escape de PyAny vive en su propio variante para
+    ///    diferenciarlo en hover/completion del LSP, pero degrada a
+    ///    `Any` al combinarse con vars no-Python.
+    ///
+    /// Lo que NO está en esta lista (y sería bug si apareciera):
+    /// - Usar `Type::Any` como tipo de error real (debería ser un
+    ///   variante específico o `Result<X, E>` con E claro).
+    /// - Usar `Type::Any` para silenciar un mismatch genuino (debería
+    ///   ser `ctx.error_at(...)`).
+    /// - `Type::Any` como retorno de fns user-defined sin anotación
+    ///   (cuando llegue la inferencia full, debería ser el unify de
+    ///   los returns, no fallback gradual).
     Any,
 
     /// Fase 8.4 — "Objeto Python opaco". Aparece en los bindings de

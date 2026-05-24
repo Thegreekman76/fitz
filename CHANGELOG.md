@@ -61,6 +61,74 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.45] — 2026-05-24 — Mini-tanda Cleanup-A: 4 deudas chicas del lenguaje cerradas
+
+### Added
+
+- **Fix sqrt-shadowing**: las fns importadas con el mismo nombre
+  que un builtin matemático del codegen (`sqrt`, `pow`, `abs`,
+  `ceil`, `floor`, `round`, `clamp`, `min`, `max`, `popcount`,
+  `leading_zeros`, `trailing_zeros`, `spawn`, `len`, `bytes`,
+  `sleep`, `env`, `env_or`, `load_env`) ahora tienen precedencia
+  correctamente. Pre-fix: el codegen chequeaba sólo
+  `fn_sigs.contains_key(name)` para decidir si emitir el método
+  nativo (`(x).sqrt()`) o respetar el user override. Las fns
+  importadas vivían en `module_bindings`, no en `fn_sigs`, así que
+  `from utils import sqrt` + `sqrt(x)` se traducía
+  incorrectamente al método f64. Post-fix: nuevo helper
+  `CodegenCtx::is_user_callable(name)` chequea ambos. 14 call
+  sites migrados. 3 tests nuevos (`build_fn_importada_con_nombre_
+  de_builtin_matematico_no_es_shadeada`, `build_fn_importada_con_
+  nombre_pow_no_es_shadeada`, `build_fn_local_con_nombre_de_
+  builtin_sigue_funcionando_como_antes`).
+
+- **F14 ampliado — `let X = <expr no literal>` a nivel top de
+  módulo**: el caso ya estaba cubierto vía accessor fns desde la
+  mini-tanda F14 original (v0.9.x), pero no había tests para
+  literales compuestos (List/Map/Instance). 3 tests nuevos
+  (`modulo_top_level_let_lista_literal_se_emite_como_accessor_fn`,
+  `modulo_top_level_let_map_literal_se_emite_como_accessor_fn`,
+  `modulo_top_level_let_instance_se_emite_como_accessor_fn`)
+  sellan la cobertura.
+
+- **F3 ampliado — `return`/`break`/`continue` huérfanos**: el
+  check estático ya estaba implementado (`return_stack`/
+  `loop_depth` en `CheckCtx`) con 3 tests cubriendo cada caso
+  (`return_huerfano_top_level_es_error`, `break_huerfano_es_
+  error`, `continue_huerfano_es_error`). Sin cambios al código —
+  solo actualizamos la documentación de deudas-post-5b para
+  marcar F3 como cerrado.
+
+### Documented
+
+- **F1 — Matriz de uso de `Type::Any` (audit)**: los ~180 sitios
+  donde aparece se clasificaron en 9 categorías intencionales
+  (builtins variádicos, builtins polimórficos, propagación
+  gradual, fallback de anotaciones, callbacks sin anotación,
+  patterns de match, `Expr::Error` F15, `Result<Any>`/
+  `Future<Any>` placeholder, propagación de `PyAny`). La doc
+  del enum `Type` en `src/types.rs` describe cada categoría +
+  qué NO debe aparecer (anti-patterns que sí serían bugs). Sin
+  cambios de código — audit ratifica que el uso actual es
+  correcto.
+
+### Notes
+
+- **Tests nuevos**: 6 unit (3 sqrt-shadowing + 3 F14 ampliado).
+  Suite total: 2370 unit con python (era 2364 + 6), 2279 sin
+  python (era 2273 + 6). Smoke `GUIDE_EXAMPLES_COMPILE` verde.
+  Clippy `-D warnings` limpio en ambos modos.
+- **Cierre formal de la mini-tanda Cleanup-A**: bundle pragmático
+  de 4 deudas chicas relacionadas como "limpieza de lenguaje
+  menor". F1 (audit/docs), F3 (ya cerrado, solo docs), F14
+  (ampliado con tests), sqrt-shadowing (fix real). Decisión de
+  scope (vs bundle más grande con `8.7-ok-propagation`,
+  `8.7-await-binding-split`, `dict→Map<K,V>`, F13): mantener
+  cada deuda mediana/grande como mini-fase dedicada para no
+  acumular riesgo en un solo cierre.
+- **Sin cambios a la extensión VSCode** — no se introduce sintaxis
+  nueva.
+
 ## [v0.9.44] — 2026-05-24 — Cierre sub-deuda 1.5/1.6: coerción + impls HTTP para tipos importados en `fitz build`
 
 ### Added

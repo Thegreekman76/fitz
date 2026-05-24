@@ -4157,6 +4157,31 @@ impl<'a> CodegenCtx<'a> {
         self.scopes.iter().any(|s| s.contains_key(name))
     }
 
+    /// Fix sqrt-shadowing (v0.9.45) — `true` si el nombre resuelve a
+    /// una fn callable user-defined: local del archivo principal
+    /// (`fn_sigs`) o importada de un módulo via `from X import f`
+    /// (`module_bindings` con kind `NamedKind::Fn`). Reemplaza el
+    /// chequeo `!self.is_user_callable(name)` de los builtins
+    /// matemáticos / de runtime que antes solo cubría locales —
+    /// pre-fix, `from python_math_utils import sqrt` no shadowea el
+    /// builtin `sqrt` del codegen y la llamada `sqrt(x)` se traducía
+    /// a `(x).sqrt()` (método nativo de f64) en vez de `sqrt(x)`
+    /// (la fn importada). Post-fix, las fns importadas tienen
+    /// precedencia sobre los builtins matemáticos.
+    fn is_user_callable(&self, name: &str) -> bool {
+        if self.fn_sigs.contains_key(name) {
+            return true;
+        }
+        if let Some(ResolvedBinding::Named {
+            kind: NamedKind::Fn,
+            ..
+        }) = self.module_bindings.get(name)
+        {
+            return true;
+        }
+        false
+    }
+
     /// Fase 8.7.3 — detecta el patrón `<py_call>.await` y emite
     /// `__fitz_py_invoke_await(&callable, |py| Ok(vec![<args>])).await`.
     /// Devuelve `Some(code)` si el inner del await es un call sobre
@@ -8500,7 +8525,7 @@ where
         // Solo dispara cuando `spawn` NO fue shadowed por una fn
         // user-defined (chequeamos `fn_sigs.contains_key("spawn")` —
         // si está, el usuario lo overrideó).
-        if name == "spawn" && !self.fn_sigs.contains_key("spawn") {
+        if name == "spawn" && !self.is_user_callable("spawn") {
             return self.gen_spawn_call(args, call_span);
         }
         // Mini-tanda Bits-extras — builtins globales sobre Int. Si
@@ -8510,7 +8535,7 @@ where
         if matches!(
             name.as_str(),
             "popcount" | "leading_zeros" | "trailing_zeros"
-        ) && !self.fn_sigs.contains_key(name)
+        ) && !self.is_user_callable(name)
         {
             if args.len() != 1 {
                 return Err(self.err_at(
@@ -8532,7 +8557,7 @@ where
             ));
         }
         if matches!(name.as_str(), "rotate_left" | "rotate_right")
-            && !self.fn_sigs.contains_key(name)
+            && !self.is_user_callable(name)
         {
             if args.len() != 2 {
                 return Err(self.err_at(
@@ -8565,7 +8590,7 @@ where
         // abs/min/max/clamp aceptan Int|Float (mismo tipo en todos los
         // args, devuelven ese tipo). pow/sqrt devuelven Float.
         // ceil/floor/round devuelven Int.
-        if matches!(name.as_str(), "abs") && !self.fn_sigs.contains_key(name) {
+        if matches!(name.as_str(), "abs") && !self.is_user_callable(name) {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
@@ -8585,7 +8610,7 @@ where
                 )),
             };
         }
-        if matches!(name.as_str(), "min" | "max") && !self.fn_sigs.contains_key(name) {
+        if matches!(name.as_str(), "min" | "max") && !self.is_user_callable(name) {
             if args.len() != 2 {
                 return Err(self.err_at(
                     call_span,
@@ -8619,7 +8644,7 @@ where
                 )),
             };
         }
-        if matches!(name.as_str(), "pow") && !self.fn_sigs.contains_key(name) {
+        if matches!(name.as_str(), "pow") && !self.is_user_callable(name) {
             if args.len() != 2 {
                 return Err(self.err_at(
                     call_span,
@@ -8656,7 +8681,7 @@ where
             };
             return Ok((format!("({a_f}).powf({b_f})"), Type::Float));
         }
-        if matches!(name.as_str(), "sqrt") && !self.fn_sigs.contains_key(name) {
+        if matches!(name.as_str(), "sqrt") && !self.is_user_callable(name) {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
@@ -8679,7 +8704,7 @@ where
             };
             return Ok((format!("({}).sqrt()", coerced), Type::Float));
         }
-        if matches!(name.as_str(), "ceil" | "floor" | "round") && !self.fn_sigs.contains_key(name) {
+        if matches!(name.as_str(), "ceil" | "floor" | "round") && !self.is_user_callable(name) {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
@@ -8700,7 +8725,7 @@ where
                 )),
             };
         }
-        if matches!(name.as_str(), "clamp") && !self.fn_sigs.contains_key(name) {
+        if matches!(name.as_str(), "clamp") && !self.is_user_callable(name) {
             if args.len() != 3 {
                 return Err(self.err_at(
                     call_span,
@@ -8732,7 +8757,7 @@ where
         // helpers `__fitz_env*` emitidos siempre en el preludio.
         // Política `fn_sigs` first: si el usuario definió una fn propia
         // con ese nombre, su sig gana.
-        if name == "env" && !self.fn_sigs.contains_key(name) {
+        if name == "env" && !self.is_user_callable(name) {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
@@ -8749,7 +8774,7 @@ where
                 },
             ));
         }
-        if name == "env_or" && !self.fn_sigs.contains_key(name) {
+        if name == "env_or" && !self.is_user_callable(name) {
             if args.len() != 2 {
                 return Err(self.err_at(
                     call_span,
@@ -8768,7 +8793,7 @@ where
                 Type::Str,
             ));
         }
-        if name == "load_env" && !self.fn_sigs.contains_key(name) {
+        if name == "load_env" && !self.is_user_callable(name) {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
@@ -8791,7 +8816,7 @@ where
         // Fase 6.6: builtin `sleep(ms: Int) -> Future<Null>`. Si el
         // usuario definió una fn `sleep` propia, `fn_sigs` la captura
         // antes y el builtin no dispara — misma política que `len`.
-        if name == "sleep" && !self.fn_sigs.contains_key(name) {
+        if name == "sleep" && !self.is_user_callable(name) {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
@@ -8813,7 +8838,7 @@ where
         // y Map. Si el usuario tiene una fn `len` definida (raro pero
         // válido), su sig prevalece — chequeamos `fn_sigs` antes del
         // builtin.
-        if name == "len" && !self.fn_sigs.contains_key(name) && args.len() == 1 {
+        if name == "len" && !self.is_user_callable(name) && args.len() == 1 {
             let arg_span = args[0].span();
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             return match arg_ty {
@@ -8837,7 +8862,7 @@ where
         }
         // Mini-tanda Bytes — constructor builtin `bytes(s: Str) -> Bytes`.
         // Convierte un Str a Vec<u8> Rust usando `as_bytes().to_vec()`.
-        if name == "bytes" && !self.fn_sigs.contains_key(name) && args.len() == 1 {
+        if name == "bytes" && !self.is_user_callable(name) && args.len() == 1 {
             let arg_span = args[0].span();
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             if !matches!(arg_ty, Type::Str) {
@@ -23159,6 +23184,62 @@ mod tests {
         );
     }
 
+    // ---- F14 ampliado (v0.9.45) ----
+    //
+    // El comportamiento accessor fn ya cubre listas/mapas/instances a
+    // nivel top de módulo (caen al "camino 3: runtime"). Tests
+    // adicionales para sellar la cobertura.
+
+    #[test]
+    fn modulo_top_level_let_lista_literal_se_emite_como_accessor_fn() {
+        // `let xs: List<Int> = [1, 2, 3]` en módulo top — la List
+        // literal no es const-eval, se emite como
+        // `pub fn xs() -> Arc<Mutex<Vec<i64>>> { ... }`.
+        let code = gen_module("let xs: List<Int> = [1, 2, 3]\n").unwrap();
+        let file = ast_test::parse(&code);
+        let xs = ast_test::find_item_fn(&file, "xs").expect("falta fn xs");
+        assert!(ast_test::vis_is_pub(&xs.vis), "esperaba `pub fn xs`");
+        let ret = ast_test::fn_return_type(xs).unwrap_or_default();
+        assert!(
+            ret.contains("Arc") && ret.contains("Mutex") && ret.contains("Vec") && ret.contains("i64"),
+            "esperaba return type `Arc<Mutex<Vec<i64>>>` para xs(), got: {}",
+            ret
+        );
+    }
+
+    #[test]
+    fn modulo_top_level_let_map_literal_se_emite_como_accessor_fn() {
+        // `let m: Map<Str, Int> = {"a": 1}` — accessor fn paralelo.
+        let code = gen_module("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n").unwrap();
+        let file = ast_test::parse(&code);
+        let m = ast_test::find_item_fn(&file, "m").expect("falta fn m");
+        assert!(ast_test::vis_is_pub(&m.vis), "esperaba `pub fn m`");
+        let ret = ast_test::fn_return_type(m).unwrap_or_default();
+        assert!(
+            ret.contains("Arc") && ret.contains("Mutex") && ret.contains("Vec") && ret.contains("i64"),
+            "esperaba return type basado en Vec<(String, i64)> para m(), got: {}",
+            ret
+        );
+    }
+
+    #[test]
+    fn modulo_top_level_let_instance_se_emite_como_accessor_fn() {
+        // `let u: User = User { ... }` — accessor fn que arma la
+        // instance en cada invocación. Cada call site del importer
+        // ve una instancia FRESCA (no se cachea).
+        let code = gen_module(
+            "type User { id: Int, name: Str }\nlet default_user: User = User { id: 1, name: \"x\" }\n",
+        )
+        .unwrap();
+        let file = ast_test::parse(&code);
+        let f = ast_test::find_item_fn(&file, "default_user")
+            .expect("falta fn default_user");
+        assert!(
+            ast_test::vis_is_pub(&f.vis),
+            "esperaba `pub fn default_user`"
+        );
+    }
+
     // ---- Mini-tanda Lt — let-destructure con sub-patterns ricos ----
 
     #[test]
@@ -23846,6 +23927,66 @@ mod tests {
             utils_rs.contains("use crate::{__fitz_py_to_list_i64"),
             "esperaba use crate::{{__fitz_py_to_list_i64, ...}} en utils.rs, got:\n{}",
             utils_rs
+        );
+    }
+
+    // ---- Fix sqrt-shadowing (v0.9.45) ----
+    //
+    // Pre-fix: el builtin `sqrt` del codegen (línea ~8659) chequeaba
+    // solo `fn_sigs.contains_key(name)` para decidir si emitir el
+    // método nativo de f64 `.sqrt()` o respetar una fn user-defined.
+    // Las fns importadas vivían en `module_bindings`, no en `fn_sigs`,
+    // así que `from utils import sqrt` + `sqrt(x)` se traducía
+    // (incorrectamente) a `(x).sqrt()`. Post-fix: el helper
+    // `is_user_callable(name)` chequea ambos, así fns importadas
+    // shadowean los builtins matemáticos correctamente.
+
+    #[test]
+    fn build_fn_importada_con_nombre_de_builtin_matematico_no_es_shadeada() {
+        // `from utils import sqrt` + `sqrt(16.0)` debe emitir el
+        // call a la fn importada, NO `(16.0).sqrt()` (método f64).
+        let main_src = "from utils import sqrt\nlet v: Float = sqrt(16.0)\nprint(v)\n";
+        let utils_src = "fn sqrt(x: Float) -> Float { return x + 1.0 }\n";
+        let (_tmp, project, _utils_rs) = gen_project_with_module(main_src, utils_src);
+        // El call debe ser a la fn importada, NO al método f64.
+        // Heurística: `sqrt(...)` con paréntesis prefijo, NO
+        // `(...).sqrt()` con notación de método.
+        assert!(
+            project.main_rs.contains("sqrt(16f64)") || project.main_rs.contains("sqrt(16 f64)"),
+            "esperaba call a fn importada `sqrt(16f64)`, got main_rs:\n{}",
+            project.main_rs
+        );
+        assert!(
+            !project.main_rs.contains("(16f64).sqrt()") && !project.main_rs.contains("(16f64) . sqrt ()"),
+            "NO esperaba `(16f64).sqrt()` (método nativo de f64), got main_rs:\n{}",
+            project.main_rs
+        );
+    }
+
+    #[test]
+    fn build_fn_importada_con_nombre_pow_no_es_shadeada() {
+        // Cobertura paralela para `pow` (también builtin matemático).
+        let main_src = "from utils import pow\nlet v: Int = pow(2, 8)\nprint(v)\n";
+        let utils_src = "fn pow(b: Int, e: Int) -> Int { return b * e }\n"; // user-fn falsa
+        let (_tmp, project, _utils_rs) = gen_project_with_module(main_src, utils_src);
+        assert!(
+            project.main_rs.contains("pow(2i64, 8i64)") || project.main_rs.contains("pow (2i64 , 8i64)"),
+            "esperaba call a fn importada `pow(2, 8)`, NO `(2i64).pow(...)`. main_rs:\n{}",
+            project.main_rs
+        );
+    }
+
+    #[test]
+    fn build_fn_local_con_nombre_de_builtin_sigue_funcionando_como_antes() {
+        // Sanity check: el caso PRE-existente — fn LOCAL con nombre de
+        // builtin — sigue shadeando correctamente (`fn_sigs` lo cubre
+        // como antes del fix).
+        let main_src = "fn sqrt(x: Float) -> Float { return x + 1.0 }\nlet v: Float = sqrt(4.0)\nprint(v)\n";
+        let code = gen(main_src).expect("compila");
+        assert!(
+            code.contains("sqrt(4f64)"),
+            "esperaba call a fn local `sqrt(4f64)`, got:\n{}",
+            code
         );
     }
 
