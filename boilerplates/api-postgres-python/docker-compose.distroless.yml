@@ -1,0 +1,51 @@
+# docker-compose.distroless — variante con el binario standalone
+# de `fitz build --bundle-pip-requirements` corriendo en runtime
+# distroless (`gcr.io/distroless/cc-debian12`).
+#
+# Habilitado por v0.9.46 (launcher con `tar`+`flate2` inline destraba
+# distroless) + v0.9.49 (smoke real validado end-to-end con Postgres).
+#
+# Uso:
+#   docker compose -f docker-compose.distroless.yml up --build
+#   # esperar "DB conectada y schema inicializado" en logs del api
+#
+# Test con curl en otra terminal:
+#   curl -X POST localhost:3000/users \
+#        -H 'Content-Type: application/json' \
+#        -d '{"name":"Ada","email":"ada@example.com"}'
+#   curl localhost:3000/users
+#   curl localhost:3000/users/1
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fitz-pg-distroless
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fitz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fitz}
+      POSTGRES_DB: ${POSTGRES_DB:-fitz}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fitz} -d ${POSTGRES_DB:-fitz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.distroless
+    container_name: fitz-api-postgres-distroless
+    environment:
+      DATABASE_URL: "postgresql+psycopg2://${POSTGRES_USER:-fitz}:${POSTGRES_PASSWORD:-fitz}@db:5432/${POSTGRES_DB:-fitz}"
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

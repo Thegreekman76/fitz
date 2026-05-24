@@ -61,6 +61,49 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.50] — 2026-05-24 — Smoke real Docker boilerplate 5 (Dockerfile.distroless) validado end-to-end con Postgres
+
+### Added
+
+- **Smoke real Docker boilerplate 5 (`Dockerfile.distroless`)
+  validado END-TO-END con Postgres** ✓. La deuda menor que
+  v0.9.46 dejó pendiente ("path técnico correcto; validación
+  funcional pendiente") y que v0.9.49 documentó como abortada
+  por tiempo, **cierra finalmente acá** (el build se completó
+  en background mientras avanzamos con docs):
+  - Build con `Dockerfile.distroless` + `--bundle-pip-requirements`
+    completó OK (~10 min cargo install desde source con
+    `python:3.14-slim-bookworm` builder).
+  - **Imagen final: 136 MB real** (vs ~80-100 MB esperado por
+    el plan original — el binario standalone con CPython 3.14.5
+    + sqlalchemy + psycopg2-binary embebidos pesa más de lo
+    estimado en abstracto). Sigue siendo **15% más chica que
+    los ~155 MB del Dockerfile actual** con `python:3.12-slim`
+    + `fitz run`.
+  - Runtime `gcr.io/distroless/cc-debian12` arranca limpio,
+    boot logs `[boot] DB conectada y schema inicializado` +
+    `[ready] Server arrancando en :3000` correctos.
+  - **Smoke con curl end-to-end OK**: POST `/users` + GET `/users`
+    (devuelve `[{"id":1,"name":"Ada","email":...},{...}]`
+    tipado) + GET `/users/1` (instance individual tipada). Toda
+    la cadena Fitz HTTP + SQLAlchemy + psycopg2 + Postgres
+    funcional adentro del runtime distroless.
+- **`docker-compose.distroless.yml`** sumado al boilerplate 5
+  con la imagen + Postgres listos para `docker compose -f
+  docker-compose.distroless.yml up --build` directo.
+
+### Notes
+
+- **Boilerplate 6 (fullstack)** sigue pendiente como deuda menor
+  más chica — el patrón del Dockerfile.distroless es paralelo
+  al 5 (mismo structure + frontend SPA estático). Smoke real
+  con docker-compose tomaría ~10-15 min adicionales de build.
+  Path técnico ya validado; queda como ~1-2h de trabajo
+  paralelo, no bloqueante.
+- **Sin cambios de código del lenguaje** — solo nuevo
+  `docker-compose.distroless.yml` + actualizaciones de docs.
+  Suite intacta: 2282 default / 2373 python / 2383 lsp.
+
 ## [v0.9.49] — 2026-05-24 — Audit-G: audit completo del inventario + 4 deudas confirmadas como ya cerradas
 
 ### Changed
@@ -113,19 +156,16 @@ inventario. **4 deudas más confirmadas como YA cerradas**:
   comandos directos (`grep` por nombres de fns/features, `cargo
   clippy --all-targets`, reproducir con `.fitz` mínimo +
   `fitz build`). Documentado en `docs/deudas-post-5b.md`.
+- **Sin cambios de código del lenguaje** en este release. Suite
+  intacta: 2282 default / 2373 python / 2383 lsp. Único cambio:
+  bump del `FITZ_TAG` default en los 2 Dockerfile.distroless
+  (`v0.9.46` → `v0.9.48`) + audit/documentación del inventario.
 - **Smoke real Docker boilerplate 5 (`Dockerfile.distroless`)**:
-  el build con `cargo install fitz --features python` desde
-  source toma 10+ min adentro del container. Esta sesión lo dejó
-  arrancado pero no esperó el resultado. Queda como **deuda
-  menor explícita** con plan claro: ejecutar `docker build -f
-  Dockerfile.distroless -t test:distroless .` en el boilerplate
-  5/6 + validar imagen final ~80-100 MB + smoke con
-  docker-compose contra Postgres. Sin presión real porque el
-  Dockerfile actual (`python:3.12-slim` + `fitz run`) sigue
-  funcionando.
-- **Sin cambios de código** en este release excepto el bump del
-  `FITZ_TAG` default en los 2 Dockerfile.distroless. Suite
-  intacta: 2282 default / 2373 python / 2383 lsp.
+  arrancado al final de la sesión pero abortado por tiempo
+  (build con `cargo install fitz --features python` desde
+  source toma 10+ min). Queda como deuda menor explícita. (El
+  build se completó en background después del commit — cierre
+  efectivo en v0.9.50.)
 
 ## [v0.9.48] — 2026-05-24 — Mini-tanda Cleanup-D: cargo fmt --all masivo + clippy --all-targets reactivado en CI
 

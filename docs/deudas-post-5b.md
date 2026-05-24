@@ -1368,7 +1368,8 @@ estado real).
 | F15 recovery sub-stmt | LSP | 1-2h |
 | R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h |
 | 8-pyi-stubs | Stubs Python | 1-2 días |
-| Smoke real Docker boilerplate 5/6 | Validación | 2-3h |
+| ~~Smoke real Docker boilerplate 5~~ | ✓ **CERRADO v0.9.50** | smoke end-to-end con Postgres VERDE, imagen 136 MB |
+| Smoke real Docker boilerplate 6 | Validación | 1-2h (paralelo a 5) |
 
 **Lección aprendida** (tercera vez en 3 sesiones consecutivas): los inventarios escritos hace varias mini-tandas tienden a desactualizarse rápido. **Convención nueva**: al iniciar cualquier bundle, hacer audit rápido (10-15 min) de las deudas listadas antes de prometer trabajo. Ejemplos de comandos del audit:
 - LSP: `grep -nE "fn make_hover_with_range|fn resolve_cross_module|collect_local_bindings_at" src/lsp.rs`

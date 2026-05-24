@@ -469,17 +469,22 @@ service `api` del compose.
   - Sin `apt-get install libpq5` en runtime (libpq viene en
     el wheel `psycopg2-binary` embebido).
 
-  **Con los cierres v0.9.44 + v0.9.46, el `fitz build` del
-  boilerplate compila limpio end-to-end Y produce un binario
-  apto para distroless**. Validado a mano: `fitz build` produce
-  un binario `fitz-api-postgres-python.exe` de ~1.4 MB en modo
-  debug que bootea Python correctamente; falla solo en runtime
-  por `psycopg2` no instalado, lo cual es configuración del
-  runtime no del codegen. **Variante `Dockerfile.distroless`
-  disponible** con el flow `--bundle-pip-requirements` + runtime
-  `gcr.io/distroless/cc-debian12` (~80-100 MB imagen final vs
-  ~155 MB del Dockerfile actual). Validación smoke funcional con
-  Postgres real es deuda menor (path técnico ya correcto).
+  **Con los cierres v0.9.44 + v0.9.46 + v0.9.49, el `fitz build`
+  del boilerplate compila limpio end-to-end Y produce un binario
+  apto para distroless Y el smoke real con Postgres está
+  validado**. Cadena completa probada en v0.9.49 (2026-05-24):
+  - Build con `Dockerfile.distroless` + `--bundle-pip-requirements`
+    completa OK (~10 min cargo install desde source).
+  - **Imagen final 136 MB real** (vs ~80-100 MB esperado; el
+    binario con CPython 3.14.5 + sqlalchemy + psycopg2-binary
+    embebidos pesa más de lo estimado en abstracto). Sigue
+    siendo ~15% más chica que los ~155 MB del Dockerfile actual
+    con `python:3.12-slim` + `fitz run`.
+  - `docker compose -f docker-compose.distroless.yml up --build`
+    funciona end-to-end: api bootea `[boot] DB conectada y
+    schema inicializado` + `[ready] Server arrancando en :3000`,
+    POST `/users` + GET `/users` + GET `/users/1` responden
+    tipados con Postgres real.
 - **Auto-generar `types/user.fitz` con `fitz py-types`**: hoy
   está hardcoded. Sumar un step `fitz py-types python/models.py
   --out src/types/user.fitz` en el Dockerfile para regenerarlo
