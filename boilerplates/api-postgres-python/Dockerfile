@@ -21,13 +21,19 @@
 # (mini-tanda Cleanup-Residual+ 2026-05-22 removió ese feature
 # para limpieza del init lazy), el binario sigue linkeando contra
 # la libpython específica del builder por default de PyO3 0.28.
-# La portabilidad abi3 real (binario que corre contra cualquier
-# Python 3.10+) requiere config adicional de PyO3 que es deuda
-# residual (R.bug-pyo3-abi3-portable-link).
 #
-# Solución pragmática hasta cerrar esa deuda: usar `python:3.12-slim`
-# como base de AMBOS stages. El builder agrega Rust con `rustup`; el
-# runtime descarta Rust y mantiene solo Python + libpq + el binario fitz.
+# **Constraint arquitectural** (no deuda cerrable): en Linux NO
+# existe equivalente al `python3.dll` stable-ABI shim de Windows.
+# El archivo `/usr/local/lib/libpython3.so` que traen las imágenes
+# `python:3.X-slim` es un dummy de 13 KB que solo exporta símbolos
+# glibc (no exporta el API Python). Los símbolos abi3 viven SOLO
+# en `libpython3.X.so.1.0` (versioned). Verificado empíricamente
+# 2026-05-24 con experimento Docker; ver `docs/deudas_lenguaje.md`
+# sección R.bug-pyo3-abi3-portable-link.
+#
+# Solución permanente: usar `python:3.12-slim` como base de AMBOS
+# stages. El builder agrega Rust con `rustup`; el runtime descarta
+# Rust y mantiene solo Python + libpq + el binario fitz.
 #
 # Build inicial: ~8-12 min (compila fitz + deps desde source).
 # Builds subsiguientes: ~30s si solo cambia src/ o python/.
@@ -79,8 +85,8 @@ RUN if [ -n "$FITZ_REV" ]; then \
 
 # ---- Stage 2: runtime ----------------------------------------------
 # MISMA imagen base que el builder → libpython3.12 garantizado en
-# ambos lados. Necesario mientras R.bug-pyo3-abi3-portable-link siga
-# abierta.
+# ambos lados. Constraint arquitectural permanente de PyO3 + Linux
+# (no es deuda cerrable; ver comentario al inicio del archivo).
 FROM python:3.12-slim
 
 # libpq5: client lib de Postgres que psycopg2 necesita en runtime.

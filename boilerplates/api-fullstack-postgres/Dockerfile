@@ -17,9 +17,16 @@
 # IMPORTANTE — match Python entre builder y runtime: aunque
 # `auto-initialize` ya no está en el Cargo.toml de Fitz (mini-tanda
 # Cleanup-Residual+ 2026-05-22), el binario sigue linkeando contra
-# la libpython específica del builder. La portabilidad abi3 real es
-# deuda residual (R.bug-pyo3-abi3-portable-link). Hasta cerrar eso,
-# usamos `python:3.12-slim` como base de AMBOS stages.
+# la libpython específica del builder.
+#
+# **Constraint arquitectural** (no deuda cerrable): en Linux NO
+# existe equivalente al `python3.dll` stable-ABI shim de Windows.
+# Verificado empíricamente 2026-05-24 con experimento Docker —
+# `/usr/local/lib/libpython3.so` en `python:3.X-slim` es un dummy
+# de 13 KB sin símbolos del API Python. Ver
+# `docs/deudas_lenguaje.md` sección R.bug-pyo3-abi3-portable-link.
+#
+# Solución permanente: `python:3.12-slim` como base de AMBOS stages.
 
 # ---- Stage 1: builder ----------------------------------------------
 FROM python:3.12-slim AS builder

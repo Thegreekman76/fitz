@@ -5496,6 +5496,111 @@ no reinventar la rueda.
 **Dockerfiles experimentales** descartados en `d:\tmp\fitz-pyo3-test\`
 (no van al repo). Si se retoma, recrear con el plan documentado.
 
+### Re-investigación 2026-05-24 — hallazgo definitivo: el bug NO es cerrable en Linux
+
+Retomado el 2026-05-24 con el plan documentado arriba ("combinación
+correcta del fix sin validar"). Recreado el experimento en
+`d:\tmp\fitz-pyo3-test\` con:
+
+- Builder: `FROM python:3.13-slim`
+- Runtime: `FROM python:3.10-slim` (cross-version intencional)
+- Env vars: `PYO3_NO_PYTHON=1` + `PYO3_CONFIG_FILE` apuntando a
+  config con `lib_name=python3` + `abi3=true` + `version=3.10`
+- RUSTFLAGS: `-L /usr/local/lib` para que el linker encuentre el
+  symlink unversioned
+
+**Resultado del build**: cargo build OK hasta el link final del
+binario; `rust-lld` falló con ~10+ símbolos undefined: `PyDict_Next`,
+`PyObject_CallMethodObjArgs`, `PyBool_Type`, `PyFloat_Type`,
+`PyType_IsSubtype`, `PyFloat_AsDouble`, `PyLong_AsLong`,
+`PyObject_Str`, etc. Todos son parte de la stable ABI (PEP 384,
+disponibles desde Python 3.2).
+
+**Causa raíz descubierta**: la asunción de la investigación
+2026-05-23 — *"`python:3.X-slim` SÍ incluye
+`/usr/local/lib/libpython3.so` symlink unversioned (porque el
+container build de Python desde source lo crea con
+`./configure --enable-shared`)"* — **es falsa**.
+
+Verificación empírica con `nm -D /usr/local/lib/libpython3.so` en
+las imágenes `python:3.10-slim` y `python:3.13-slim`:
+
+| Imagen | Tamaño `libpython3.so` | Símbolos exportados |
+|---|---|---|
+| `python:3.10-slim` | 13992 bytes | **4** símbolos glibc (`_ITM_*`, `__cxa_finalize`, `__gmon_start__`) |
+| `python:3.13-slim` | 13992 bytes | **4** símbolos glibc (idem) |
+
+El archivo `libpython3.so` que ambas imágenes traen **NO es un
+abi3 shim** — es un dummy/placeholder de 13KB que no exporta
+ningún símbolo del API Python. Los símbolos Python viven
+exclusivamente en `libpython3.X.so.1.0` (versioned, 3.4-5.2 MB).
+
+**El concepto de "abi3 shim" como existe en Windows** (`python3.dll`
+que delega a `python313.dll` via stable ABI forwarding) **NO tiene
+equivalente en Linux**. En Linux, la "portabilidad abi3" se logra
+solo por:
+
+1. PyO3 emite código que SOLO usa símbolos stable ABI.
+2. Esos símbolos están en la libpython versioned (`libpython3.X.so.1.0`).
+3. El binario debe linkear contra `-lpython3.X` versioned (no
+   `-lpython3` unversioned, que no existe como library real).
+
+**Conclusión**: el bug **no es cerrable** sin uno de:
+
+- **(a) Cambio upstream en PyO3** que soporte modo
+  "skip-link + dlopen runtime" (similar a `auditwheel` para wheels),
+  donde el binario no linkea con `-lpython*` y resuelve los
+  símbolos en runtime via `dlopen("libpython3.X.so.1.0", RTLD_NOW)`.
+  PyO3 0.28 no soporta esto out-of-the-box; ver pyo3#5043 (issue
+  abierto).
+- **(b) Cambio arquitectural en Fitz** que mueva el interop Python
+  a un proceso separado (CPython como subprocess + IPC). Esto
+  rompería el modelo de zero-copy GIL-shared y agregaría latencia.
+  No vale la pena por una conveniencia de portabilidad.
+- **(c) Distribuir Fitz como wheel Python** (`pip install fitz`
+  con CPython como host). Modelo invertido — Fitz pasaría a ser
+  una extensión Python en vez de embeber Python. Rompe el modelo
+  del lenguaje.
+
+**Ninguna de las tres opciones es razonable en el corto/medio
+plazo**.
+
+**Reclasificación**: este bug se mueve de "deuda activa" a
+**constraint arquitectural documentado**. El workaround actual
+("match builder=runtime Python version") es la **solución
+permanente** en Linux, no temporal. Los Dockerfiles de
+boilerplates 5/6 y la documentación de `--bundle-python` ya lo
+reflejan correctamente.
+
+**Cambios a la documentación**:
+
+- Esta sección (deudas_lenguaje.md) — explica el hallazgo y la
+  reclasificación.
+- `boilerplates/api-postgres-python/Dockerfile`: el comentario
+  "deuda residual (R.bug-pyo3-abi3-portable-link)" se actualiza
+  a "constraint arquitectural de PyO3 + Linux, ver
+  docs/deudas_lenguaje.md".
+- `boilerplates/api-fullstack-postgres/Dockerfile`: idem.
+- `docs/guide.md` cap 21.11: la nota sobre "cuando se cierre el
+  bug en Linux/macOS" se actualiza a "este constraint es
+  permanente en Linux por la naturaleza de PyO3 + glibc;
+  Windows lo bypasea via Fase 8.b".
+
+Si en el futuro PyO3 cierra pyo3#5043 (skip-link mode), retomar
+este bug. Hasta entonces, no hay trabajo pendiente.
+
+**Macos**: el experimento empírico de hoy fue solo Linux
+(Docker). Homebrew Python en macOS puede tener una situación
+distinta (verificar si el `libpython3.dylib` unversioned es un
+shim real o un dummy como en Linux). Sin máquina Mac al alcance,
+queda como verificación pendiente menor — pero la lógica de PyO3
+es la misma cross-platform, así que probablemente el constraint
+también aplique.
+
+**Dockerfile experimental + config + test program** descartados
+en `d:\tmp\fitz-pyo3-test\` (no van al repo). El hallazgo está
+en este documento.
+
 ### Cierre parcial Windows — 2026-05-23 (Fase 8.b cerrada)
 
 El sub-paso `fitz build --bundle-python` (Fase 8.b, CHANGELOG

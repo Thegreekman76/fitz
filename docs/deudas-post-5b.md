@@ -1366,7 +1366,7 @@ estado real).
 | ~~dict→Map<K,V> no primitivos~~ | ✓ **CERRADO v0.9.54** | 4 helpers `__fitz_py_to_map_string_<v>` para v primitivo (Str/Int/Float/Bool) + wiring en `coerce`. V compuesto (Nominal/List/Map) sigue gradual como deuda menor — casos raros, workaround manual con iteración del PyDict |
 | ~~UTF-16 position strict~~ | ✓ **CERRADO v0.9.51** | LSP capability `positionEncoding: utf-8` declarada explícita |
 | ~~F15 recovery sub-stmt~~ | ✓ **CERRADO v0.9.51** | `parse_postfix` preserva `Expr::Field { field: "" }` en lugar de descartar el stmt entero |
-| R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h |
+| ~~R.bug-pyo3-abi3-portable-link Linux/macOS~~ | ✓ **RECLASIFICADO v0.9.56** | Verificado empíricamente 2026-05-24 que NO es cerrable: `libpython3.so` (13 KB) en `python:3.X-slim` exporta solo 4 símbolos glibc (no exporta API Python). En Linux NO existe equivalente al `python3.dll` shim de Windows. Movido a constraint arquitectural permanente; ver `docs/deudas_lenguaje.md` |
 | 8-pyi-stubs | Stubs Python | 1-2 días |
 | ~~Smoke real Docker boilerplate 5~~ | ✓ **CERRADO v0.9.50** | smoke end-to-end con Postgres VERDE, imagen 136 MB |
 | ~~Smoke real Docker boilerplate 6~~ | ✓ **CERRADO v0.9.52** | smoke end-to-end con Postgres + nginx + CORS preflight VERDE, imagen 136 MB |

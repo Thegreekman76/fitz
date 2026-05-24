@@ -61,6 +61,91 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.56] — 2026-05-24 — Re-investigación R.bug-pyo3-abi3-portable-link Linux: reclasificado como constraint arquitectural permanente
+
+### Changed
+
+Retomado el bug R.bug-pyo3-abi3-portable-link Linux/macOS con el
+plan documentado el 2026-05-23 ("combinación correcta del fix sin
+validar"). El experimento empírico **invalidó la hipótesis del
+fix** y reveló que el bug **no es cerrable en Linux**. Se
+reclasifica de "deuda activa cerrable" a **constraint
+arquitectural permanente**. **Cero cambios de código del lenguaje**;
+solo documentación + comentarios en Dockerfiles.
+
+- **Experimento Docker en `d:\tmp\fitz-pyo3-test\`** (descartado,
+  no va al repo):
+  - Builder: `FROM python:3.13-slim`
+  - Runtime: `FROM python:3.10-slim` (cross-version intencional)
+  - Env vars: `PYO3_NO_PYTHON=1` + `PYO3_CONFIG_FILE` con
+    `lib_name=python3` + `abi3=true` + `version=3.10`
+  - RUSTFLAGS: `-L /usr/local/lib`
+  - Cargo build OK hasta el link final; `rust-lld` falló con
+    ~10+ símbolos undefined (`PyDict_Next`, `PyObject_Str`,
+    `PyLong_AsLong`, `PyBool_Type`, `PyFloat_Type`, etc.).
+
+- **Verificación con `nm -D /usr/local/lib/libpython3.so`** en
+  `python:3.10-slim` y `python:3.13-slim`:
+  - El archivo (13992 bytes en ambas imágenes) exporta **solo 4
+    símbolos glibc** (`_ITM_*`, `__cxa_finalize`, `__gmon_start__`).
+  - **NO exporta ningún símbolo del API Python**.
+  - La asunción del 2026-05-23 de que ese archivo era el "abi3
+    shim" era falsa — es un dummy/placeholder.
+
+- **Conclusión**: en Linux NO existe equivalente al `python3.dll`
+  stable-ABI shim de Windows. Los símbolos abi3 viven solo en
+  `libpython3.X.so.1.0` (versioned). El bug requiere uno de:
+  - (a) Cambio upstream en PyO3 (modo "skip-link + dlopen
+    runtime", pyo3#5043 abierto).
+  - (b) Cambio arquitectural en Fitz (CPython como subprocess).
+  - (c) Distribuir Fitz como wheel Python (modelo invertido).
+  
+  Ninguna razonable en corto/medio plazo.
+
+- **Reclasificación**: el bug pasa de "deuda activa" a
+  **constraint arquitectural documentado**. El workaround
+  "match builder=runtime Python version" es la **solución
+  permanente** en Linux, no temporal.
+
+### Files updated
+
+- **`docs/deudas_lenguaje.md`** sección
+  R.bug-pyo3-abi3-portable-link: nueva sub-sección
+  "Re-investigación 2026-05-24 — hallazgo definitivo" con tabla
+  empírica de `nm -D` y razonamiento de las 3 opciones
+  arquitecturales descartadas.
+- **`docs/roadmap.md`**: "Estado actual del proyecto" pasa a
+  v0.9.56; queda solo 1 deuda activa restante (`8-pyi-stubs`);
+  sección de Fase 8.b actualizada con cierre formal del cierre
+  parcial Windows + reclasificación Linux/macOS.
+- **`docs/guide.md`** cap 21.11: nota "Constraint conocido"
+  reescrita como "Constraint arquitectural permanente" con
+  referencia al experimento empírico y a `deudas_lenguaje.md`.
+  Cap 33 "Qué sigue" pierde la deuda de la lista de "Deudas
+  reales restantes".
+- **`docs/deudas-post-5b.md`**: la fila de la tabla pasa a
+  `~~CERRADO~~` con etiqueta "RECLASIFICADO v0.9.56".
+- **`boilerplates/api-postgres-python/Dockerfile`** +
+  **`boilerplates/api-fullstack-postgres/Dockerfile`**:
+  comentarios actualizados de "deuda residual" a "constraint
+  arquitectural permanente" con referencia a deudas_lenguaje.md.
+
+### Notes
+
+- **Cero cambios de código del lenguaje**. Suite intacta: 2290
+  default / 2381 python / 2395 lsp. Clippy + fmt limpios.
+- El experimento Docker en `d:\tmp\fitz-pyo3-test\` queda
+  descartado (no va al repo). El hallazgo empírico está
+  documentado en `docs/deudas_lenguaje.md`.
+- **Deudas reales restantes después de v0.9.56**: solo
+  `8-pyi-stubs` (1-2 días, post-Fase 9). El proyecto queda en
+  estado "una sola deuda activa cerrable".
+- **Próximo norte**: **Fase 10 — Stack DB nativo + ORM
+  declarativo**. Sesión de diseño primero (sin código),
+  después implementación incremental.
+
+---
+
 ## [v0.9.55] — 2026-05-24 — Hito de consolidación: refresh masivo de docs macro
 
 ### Changed

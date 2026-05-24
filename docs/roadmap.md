@@ -2,22 +2,24 @@
 
 ---
 
-## Estado actual del proyecto (v0.9.55 — 2026-05-24)
+## Estado actual del proyecto (v0.9.56 — 2026-05-24)
 
-**Hito de consolidación**. Tras 14 releases consecutivos cerrando deudas (v0.9.43 → v0.9.54), el proyecto está en estado **production-ready** para los patrones canónicos del lenguaje:
+**Hito de consolidación**. Tras 14 releases consecutivos cerrando deudas (v0.9.43 → v0.9.55) + 1 release de re-investigación (v0.9.56), el proyecto está en estado **production-ready** para los patrones canónicos del lenguaje:
 
 - **Fases 1-9 entera CERRADAS**: lexer + parser + AST + checker estático + evaluador async + HTTP nativo + middleware + Result/match + módulos + interop Python con bundling distroless + LSP MVP completo + package manager + DX (fmt/test/dev/repl/lint) + stack web first-class (auth/WS/jobs).
 - **Cierre Bundle B/I (Python interop codegen)**: 3 deudas residuales cerradas (8.7-ok-propagation, 8.7-await-binding-split, dict→Map<K,V> primitivo). Codegen Python production-ready para el caso 90%+.
 - **6 boilerplates Dockerizados validados end-to-end**, los 2 con Postgres+Python en variante distroless real (imagen ~136 MB).
 - **CI strict reactivado**: `cargo fmt --check` + `cargo clippy --all-targets -D warnings` en los 3 modos (default, `python`, `lsp`).
+- **R.bug-pyo3-abi3-portable-link Linux/macOS RECLASIFICADO** (v0.9.56) como constraint arquitectural permanente tras verificación empírica de que `libpython3.so` en `python:3.X-slim` es un dummy de 13 KB que no exporta el API Python — en Linux NO existe equivalente al `python3.dll` shim de Windows. El workaround "match builder=runtime Python version" es la solución permanente, no temporal. Ver `docs/deudas_lenguaje.md`.
 - **2290 unit (default) / 2381 (python) / 2395 (lsp)** + 90+ E2E + 79+ compile_e2e.
 
 **Deudas reales restantes** (sin presión, mantener documentadas):
 
 | ID | Categoría | Esfuerzo |
 |----|-----------|----------|
-| R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h exploratorio |
 | 8-pyi-stubs | Stubs Python | 1-2 días, post-Fase 9 |
+
+Sola UNA deuda activa cerrable. La otra que figuraba antes (R.bug-pyo3-abi3-portable-link) salió a constraint arquitectural documentado.
 
 **Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. Norte estratégico que destraba el reemplazo de la layer Python en los boilerplates 5/6 con un driver Postgres puro en Fitz + ORM sobre `type` con anotaciones + migraciones autogeneradas. Sesión de diseño primero (sin código), después implementación incremental.
 
@@ -4030,17 +4032,23 @@ desde 2023).
   garantizado en Win11/macOS/Linux moderno. Cero deps Rust
   nuevas.
 
-**Cierre parcial de `R.bug-pyo3-abi3-portable-link`**:
+**Cierre parcial de `R.bug-pyo3-abi3-portable-link`** + reclasificación final v0.9.56:
 
 El launcher pattern bypasea el bug en Windows completamente: el
-real binary linkea contra `python3.dll` (stable ABI shim) y
+real binary linkea contra `python3.dll` (stable ABI shim REAL) y
 cualquier libpython 3.10+ del bundle satisface la dependencia.
-En Linux/macOS el constraint sigue: PyO3 emite `-lpython3.X`
-versionada en lugar de `-lpython3` por la limitación documentada
-en la deuda — bundle PBS 3.14.5 exige builder con Python 3.14.x.
-Cuando cierre la deuda completa, `--bundle-python` será
-independiente de la versión Python del builder en las 3
-plataformas.
+
+En Linux/macOS, la verificación empírica del 2026-05-24 confirmó
+que **no es un bug cerrable** — es un constraint arquitectural de
+PyO3 + Linux/glibc. El archivo `libpython3.so` que traen las
+imágenes `python:3.X-slim` es un dummy de 13 KB sin símbolos del
+API Python (verificado con `nm -D`). En Linux NO hay equivalente
+al stable ABI shim de Windows; los símbolos abi3 viven solo en
+la libpython versioned (`libpython3.X.so.1.0`).
+
+Consecuencia permanente: el bundle PBS 3.14.5 exige builder con
+Python 3.14.x en Linux/macOS — no es temporal. Ver
+`docs/deudas_lenguaje.md` para detalle empírico y razones.
 
 **Tests al cierre**:
 
@@ -4201,8 +4209,9 @@ requests
   GLIBC del builder. READMEs actualizados.
 - **Constraint Linux/macOS heredado**: builder requiere Python
   3.14.x (R.bug-pyo3-abi3-portable-link componente Linux/macOS
-  pendiente). Cuando cierre, `--bundle-pip` es independiente
-  del Python del builder en las 3 plataformas.
+  reclasificado v0.9.56 como constraint arquitectural permanente
+  tras verificación empírica). El requerimiento del builder es
+  estructural, no cerrable.
 - **C extensions cross-platform**: `pip install` al build time
   baja wheels específicos del triple del builder. Buildear
   Linux desde Windows requiere `cross` o Docker (igual que

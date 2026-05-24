@@ -8586,18 +8586,27 @@ encuentra libpython, PyO3 boot lazy en el primer `Python::attach`,
 y todo el resto funciona igual que en `fitz run`/`fitz build`
 normal — paridad bit-a-bit.
 
-**Constraint conocido** (deuda `R.bug-pyo3-abi3-portable-link`):
+**Constraint arquitectural permanente** (Linux/macOS):
 
 En Linux y macOS, el real binary linkea contra
-`libpython3.X.so.1.0` específica del builder (PyO3 abi3 no logra
-linkear al stable ABI por una limitación de detection del
-linker). El bundle PBS trae libpython 3.14.5; entonces el builder
-necesita tener Python 3.14.x disponible al momento de
-`cargo build` para que las versiones coincidan en runtime.
+`libpython3.X.so.1.0` específica del builder. **No es un bug
+cerrable** — es una limitación intrínseca de PyO3 + Linux/glibc:
+en esas plataformas NO existe equivalente al `python3.dll`
+stable-ABI shim de Windows. El archivo
+`/usr/local/lib/libpython3.so` que traen las distros Python es un
+dummy de 13 KB sin símbolos del API Python; los símbolos abi3
+viven solo en la libpython versioned. Verificado empíricamente
+2026-05-24 con experimento Docker cross-version; ver
+`docs/deudas_lenguaje.md` sección R.bug-pyo3-abi3-portable-link.
+
+Consecuencia para `--bundle-python`: el bundle PBS trae libpython
+3.14.5, entonces el builder necesita tener Python 3.14.x
+disponible al momento de `cargo build` para que las versiones
+coincidan en runtime. Constraint permanente, no temporal.
 
 En Windows el problema no existe — el real binary linkea contra
-`python3.dll` (stable ABI shim) y cualquier versión 3.10+ del
-bundle satisface la dependencia.
+`python3.dll` (stable ABI shim real) y cualquier versión 3.10+
+del bundle satisface la dependencia.
 
 Setup del builder en Linux/macOS:
 
@@ -8634,7 +8643,8 @@ disponible en Win11/macOS/Linux moderno).
 > la promesa). Pero el dev que BUILDEA con `fitz build
 > --bundle-python` sí necesita Python al build time: en Windows
 > cualquier 3.10+, en Linux/macOS específicamente 3.14.x
-> (constraint heredado de `R.bug-pyo3-abi3-portable-link`).
+> (constraint arquitectural permanente de PyO3 + Linux/glibc;
+> ver `docs/deudas_lenguaje.md`).
 > Tabla completa de matices al final del cap 21.12, después del
 > flag hermano `--bundle-pip`.
 
@@ -8806,9 +8816,8 @@ adicionales que instalar.
 
 - Un Python instalado en la máquina (Windows: cualquier 3.10+
   por el shim `python3.dll`; Linux/macOS: 3.14.x específicamente
-  por el constraint heredado de `R.bug-pyo3-abi3-portable-link`).
-  Cuando esa deuda cierre, será cualquier 3.10+ en las 3
-  plataformas.
+  por el constraint arquitectural permanente de PyO3 +
+  Linux/glibc). Esto es estructural, no temporal.
 - **NO** necesita `pip install <paquete>` local — `fitz build`
   los baja al cache y los empaqueta solo.
 - **NO** necesita venv activado.
@@ -11236,11 +11245,6 @@ del lenguaje + ecosistema:
 
 **Deudas reales restantes** (sin presión, no bloquean uso real):
 
-- **R.bug-pyo3-abi3-portable-link Linux/macOS**: el flag
-  `--bundle-python` en Linux/macOS exige que el Python del
-  builder sea 3.14.x (matchea el PBS embebido). Windows ya
-  resolvió con stable ABI shim. Sub-paso futuro exploratorio
-  (Docker debugging con LD_DEBUG, ~4-6h).
 - **Stubs `.pyi` parseados** para tipado mejorado de Python
   interop (paralelo a `@types/...` de TypeScript). 1-2 días,
   post-Fase 9.
