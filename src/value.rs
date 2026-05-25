@@ -419,6 +419,22 @@ pub enum Value {
         /// El dispatch sobre `Value::Instance` busca primero por
         /// nombre acá; si no existe, cae a los métodos built-in.
         methods: Vec<crate::ast::MethodDef>,
+        /// Fase 10.3.b — metadata ORM cacheada: si el type tiene
+        /// `@table(...)`, contiene el nombre SQL + primary field +
+        /// column overrides. `None` para types Fitz normales sin
+        /// `@table`. El evaluator la populariza al ver `Stmt::TypeDef`
+        /// llamando `process_table_decorators` del checker.
+        ///
+        /// Cachear acá (en lugar de re-consultar `TypeEnv`) le da al
+        /// runtime acceso a la metadata sin atravesar el checker —
+        /// importante porque el evaluator solo tiene `EnvRef`, no
+        /// `TypeEnv`.
+        ///
+        /// `Box` para mantener el tamaño del enum chico (TableMetadata
+        /// pesa ~100 bytes; sin Box infla todo Value y dispara
+        /// `clippy::result_large_err` en cientos de signatures que
+        /// devuelven `Result<_, EvalSignal>`).
+        table_metadata: Option<Box<crate::types::TableMetadata>>,
     },
 
     /// Tupla en runtime (mini-tanda T). Heterogénea, tamaño fijo

@@ -1194,7 +1194,7 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
 //       tipo SQL. Ambos kwargs opcionales.
 //     - `@unique` — emite `UNIQUE` constraint.
 //     - `@index` — emite `CREATE INDEX` en la migration.
-fn process_table_decorators(
+pub fn process_table_decorators(
     type_name: &str,
     type_decorators: &[Decorator],
     fields: &[Field],

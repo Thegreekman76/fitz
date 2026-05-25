@@ -5004,6 +5004,7 @@ mod tests {
                 .collect(),
             resolved_defaults: vec![],
             methods: vec![],
+            table_metadata: None,
         }
     }
 

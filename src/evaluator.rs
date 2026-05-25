@@ -1897,6 +1897,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
             name,
             fields,
             methods,
+            table_metadata,
             ..
         }) = existing
         else {
@@ -1914,6 +1915,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
             fields,
             resolved_defaults,
             methods,
+            table_metadata,
         };
         module_env.lock().define(type_name, new_type);
     }
@@ -2383,8 +2385,8 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             name,
             fields,
             methods,
-            decorators: _,
-            span: _,
+            decorators,
+            span,
         } => {
             // PreF8.3: tipos locales arrancan con `resolved_defaults` vacío.
             // Sus `Field.default` se siguen evaluando lazy en cada struct
@@ -2396,11 +2398,28 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             //
             // R.3: los métodos se copian al `Value::Type` para
             // dispatch posterior sobre `Value::Instance`.
+            //
+            // Fase 10.3.b — si el type lleva decoradores ORM
+            // (`@table`/`@primary`/etc.), populamos `table_metadata`
+            // llamando al mismo procesador del checker para que la
+            // info quede coherente entre las dos capas. Errores se
+            // descartan acá: el checker (vuelta 2.6) ya los reportó.
+            let table_metadata = if decorators.is_empty()
+                && fields.iter().all(|f| f.decorators.is_empty())
+            {
+                None
+            } else {
+                crate::types::process_table_decorators(name, decorators, fields, *span)
+                    .ok()
+                    .flatten()
+                    .map(Box::new)
+            };
             let t = Value::Type {
                 name: name.clone(),
                 fields: fields.clone(),
                 resolved_defaults: Vec::new(),
                 methods: methods.clone(),
+                table_metadata,
             };
             env.lock().define(name.clone(), t);
             Ok(Value::Null)
@@ -4465,6 +4484,7 @@ async fn dispatch_method(
     if let Value::Type {
         name: type_name,
         methods,
+        table_metadata,
         ..
     } = &receiver
     {
@@ -4484,6 +4504,14 @@ async fn dispatch_method(
                 )));
             }
             return invoke_static_method(m, args, env, span).await;
+        }
+        // Fase 10.3.b — métodos ORM sobre `Value::Type` con
+        // `@table(...)`. Solo despachamos si el type tiene
+        // metadata cacheada; si no, cae al error genérico.
+        if table_metadata.is_some() {
+            if let Some(result) = orm_dispatch_type_method(&receiver, method, args, span)? {
+                return Ok(result);
+            }
         }
         // Si no existe el método pero el receptor es un Type, error
         // específico (mejor que el genérico "tipo X no tiene método").
@@ -10239,6 +10267,172 @@ fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> Fi
     Ok(Value::new_future(fut))
 }
 
+// =============================================================
+// Fase 10.3.b — Builder ORM sobre `Value::Type` con @table
+// =============================================================
+//
+// Cuando el user escribe `User.all(db).await?`, el dispatch_method
+// detecta que `User` es un `Value::Type` con `table_metadata.is_some()`
+// e invoca `orm_dispatch_type_method`. Esta función decide cuál
+// builder método ORM activar y delega al helper correspondiente.
+//
+// 10.3.b1 (este sub-paso): solo `all(db)` que ejecuta
+// `SELECT col1, col2, ... FROM <table>` y deserializa rows a
+// `Value::Instance`. Sin where/order/limit todavía.
+
+/// Despacha métodos ORM sobre un `Value::Type` con `@table(...)`.
+/// Devuelve:
+///   - `Ok(Some(v))`: el método existe en el ORM, devolvemos el
+///     Value (típicamente un `Future`).
+///   - `Ok(None)`: el método NO es un built-in del ORM; el caller
+///     continúa con su flujo (error "método no encontrado").
+fn orm_dispatch_type_method(
+    type_value: &Value,
+    method: &str,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<Option<Value>> {
+    match method {
+        "all" => orm_type_all(type_value.clone(), args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        _ => Ok(None),
+    }
+}
+
+/// `Type.all(db) -> Future<Result<List<Instance>>>`. Ejecuta
+/// `SELECT <cols> FROM <table>` y deserializa cada row a
+/// `Value::Instance` del type. Las columnas se piden explícitas
+/// (no `SELECT *`) en orden de declaración del `type` para que el
+/// mapping sea estable independiente del orden físico de la tabla.
+fn orm_type_all(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`Type.all(db)` espera 1 argumento (db: DbConn), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let db_handle = match &args[0] {
+        Value::DbConn(h) => Arc::clone(h),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "DbConn".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`Type.all(db)` espera DbConn como primer arg, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let (type_name, fields, meta) = match type_value {
+        Value::Type {
+            name,
+            fields,
+            table_metadata: Some(m),
+            ..
+        } => (name, fields, *m),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                "`.all(db)` solo se puede invocar sobre un `type` con `@table(...)`".to_string(),
+            ));
+        }
+    };
+
+    // Construir SQL: `SELECT col1, col2, ... FROM <table>`. Si un
+    // field tiene `@column(name="X")`, usamos `X`; si no, el nombre
+    // Fitz directo. Quoteamos identificadores con `"` para
+    // permitir mayúsculas y nombres reservados.
+    let mut col_list = String::new();
+    for (i, f) in fields.iter().enumerate() {
+        if i > 0 {
+            col_list.push_str(", ");
+        }
+        let sql_col = meta
+            .columns
+            .get(&f.name)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(f.name.as_str());
+        col_list.push('"');
+        col_list.push_str(sql_col);
+        col_list.push('"');
+    }
+    let sql = format!("SELECT {} FROM \"{}\"", col_list, meta.sql_name);
+
+    // Capturar todo lo necesario para el async block.
+    let fields_owned = fields.clone();
+    let meta_owned = meta.clone();
+    let type_name_owned = type_name.clone();
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match db_handle.query(&sql, &[]).await {
+            Ok(qr) => {
+                let mut instances = Vec::with_capacity(qr.rows.len());
+                for row in &qr.rows {
+                    match pg_row_to_instance(row, &type_name_owned, &fields_owned, &meta_owned) {
+                        Ok(inst) => instances.push(inst),
+                        Err(msg) => {
+                            return Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                                Value::Str(msg),
+                            ))));
+                        }
+                    }
+                }
+                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                    Value::new_list(instances),
+                ))))
+            }
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// Deserializa una fila Postgres a una `Value::Instance` del type
+/// declarado. Mapea cada field del type a su columna SQL (usando
+/// `@column(name=...)` si hay override) y convierte `PgValue` a
+/// `Value` Fitz nativo. Errores: columna faltante, tipo incompatible.
+fn pg_row_to_instance(
+    row: &crate::db::Row,
+    type_name: &str,
+    fields: &[crate::ast::Field],
+    meta: &crate::types::TableMetadata,
+) -> Result<Value, String> {
+    let mut field_values: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    for f in fields {
+        let sql_col = meta
+            .columns
+            .get(&f.name)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(f.name.as_str());
+        let pg = row.get(sql_col).ok_or_else(|| {
+            format!(
+                "la columna `{}` (field `{}` de `{}`) no está en el resultset",
+                sql_col, f.name, type_name
+            )
+        })?;
+        field_values.push((f.name.clone(), pg_value_to_fitz(pg)));
+    }
+    Ok(Value::new_instance(type_name.to_string(), field_values))
+}
+
 /// `cors(config: Map?)` — construye un `Value::CorsConfig` parametrizado
 /// por las keys del Map (mini-fase MW.2). Sin args (o con `{}`) emite
 /// el default permisivo (origin "*", métodos comunes, headers usuales).
@@ -13714,6 +13908,7 @@ print(_)\n";
             fields: vec![],
             resolved_defaults: vec![],
             methods: vec![],
+            table_metadata: None,
         };
         assert_eq!(t.type_name(), "Type");
     }
@@ -23273,5 +23468,90 @@ let r = match n {
             }
         }
         (env, result)
+    }
+
+    // ---- Fase 10.3.b1 — builder ORM `User.all(db)` ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_value_type_cachea_table_metadata_al_evaluarse() {
+        // Después de `@table("users") type User { ... }`, el
+        // `Value::Type` en el env tiene `table_metadata = Some(...)`
+        // con el nombre SQL y los fields.
+        let (env, res) = parse_eval_into_env(
+            "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}",
+        )
+        .await;
+        res.expect("evaluación OK");
+        let v = env.lock().get("User").expect("User bindeado");
+        match v {
+            Value::Type {
+                name,
+                table_metadata: Some(meta),
+                ..
+            } => {
+                assert_eq!(name, "User");
+                assert_eq!(meta.sql_name, "users");
+                assert_eq!(meta.primary_field.as_deref(), Some("id"));
+            }
+            other => panic!("esperaba Value::Type con table_metadata, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_type_sin_table_no_tiene_metadata() {
+        let (env, res) = parse_eval_into_env("type Plain { x: Int }").await;
+        res.expect("evaluación OK");
+        let v = env.lock().get("Plain").unwrap();
+        match v {
+            Value::Type { table_metadata, .. } => assert!(table_metadata.is_none()),
+            other => panic!("esperaba Value::Type, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_all_sobre_type_sin_table_error_claro() {
+        // `Plain.all(db)` sin `@table` debe rechazarse — error genérico
+        // de método estático no encontrado (el ORM dispatch solo activa
+        // si hay table_metadata).
+        let env = Environment::new();
+        register_builtins(&env);
+        let (_env, res) = parse_eval_into_env_with_extra(
+            "type Plain { x: Int }\nlet f = Plain.all(42)",
+            env.clone(),
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("Plain") && err.message.contains("all"),
+            "mensaje esperado sobre método no encontrado: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_all_sin_args_es_error_de_aridad() {
+        // `User.all()` sin el db → error de aridad.
+        let (_env, res) =
+            parse_eval_into_env("@table(\"users\") type User { id: Int }\nlet f = User.all()")
+                .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("1 argumento"),
+            "mensaje sobre arity: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_all_con_arg_no_dbconn_es_error_de_tipo() {
+        let (_env, res) =
+            parse_eval_into_env("@table(\"users\") type User { id: Int }\nlet f = User.all(42)")
+                .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("DbConn"),
+            "mensaje sobre tipo DbConn: {}",
+            err.message,
+        );
     }
 }

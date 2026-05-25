@@ -10,6 +10,16 @@
 // re-compilar todo el crate dos veces, los módulos se mueven a la lib
 // y los bins se migran a `use fitz::...`.
 
+// Fase 10.3.b1 — `EvalSignal` es 128 bytes exactos por el shape de
+// `Break(Value, Option<String>)` (Value pesa 104B). Clippy considera
+// >= 128 bytes como "Err-variant very large" y dispara en cientos de
+// signatures `Result<_, EvalSignal>`. Box-ear el Value adentro de
+// Break no resuelve porque `Error(FitzError)` ya pesa 112B y mantiene
+// el size del enum cerca del threshold. Allow a nivel crate es la
+// forma estándar en proyectos Rust con tipos de error grandes
+// intencionales por diseño del lenguaje.
+#![allow(clippy::result_large_err)]
+
 pub mod ast; // Fase 2.2 — definición del AST
 pub mod asyncapi; // Fase 9.w.2.d — generador AsyncAPI 3.0 (WebSockets)
 pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario

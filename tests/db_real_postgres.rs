@@ -20,6 +20,10 @@
 //! `CREATE TEMP TABLE` el server la borra al cerrar la conexión).
 
 use fitz::db::{connect_url, PgValue};
+use fitz::evaluator::{eval_program_with_env, new_repl_env};
+use fitz::lexer::tokenize;
+use fitz::parser::parse;
+use fitz::value::Value;
 
 /// Lee `FITZ_TEST_PG_URL` o panics con mensaje claro de cómo
 /// setearla. Llamado por cada test al inicio.
@@ -296,4 +300,124 @@ async fn close_idempotente_y_queries_post_close_fallan() {
     // Query después de close → error claro.
     let r = conn.query("SELECT 1", &[]).await;
     assert!(r.is_err(), "esperaba Err tras close, fue {:?}", r);
+}
+
+// =============================================================
+// Fase 10.3.b1 — ORM `User.all(db)` end-to-end con Postgres real
+// =============================================================
+
+/// Pre-setup: crea una tabla `fitz_orm_test_users` con 2 rows.
+/// Devuelve la conn (para que el test la cierre o reutilice).
+async fn seed_orm_test_table(url: &str) -> fitz::db::DbConnHandle {
+    let conn = connect_url(url).await.unwrap();
+    // Drop si existe (de runs previos), luego recrea + insert.
+    let _ = conn
+        .exec("DROP TABLE IF EXISTS fitz_orm_test_users", &[])
+        .await;
+    conn.exec(
+        "CREATE TABLE fitz_orm_test_users (id bigint, name text)",
+        &[],
+    )
+    .await
+    .expect("CREATE TABLE OK");
+    conn.exec(
+        "INSERT INTO fitz_orm_test_users VALUES (1, 'ada'), (2, 'alan')",
+        &[],
+    )
+    .await
+    .expect("INSERT seed OK");
+    conn
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_user_all_db_devuelve_instancias_reales() {
+    // Setup: tabla con 2 rows.
+    let url = pg_url();
+    let seed_conn = seed_orm_test_table(&url).await;
+
+    // Programa Fitz que define el type ORM, conecta, y llama
+    // User.all(db).await?. Resultado: List<User> con 2 instancias.
+    let src = format!(
+        "@table(\"fitz_orm_test_users\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n\
+         }}\n\
+         async fn run() -> Result<List<User>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let users = User.all(db).await?\n  \
+             return Ok(users)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    // El binding `result` es `Result<List<User>>`. Lo unwrappeamos.
+    let result_val = env.lock().get("result").expect("result bindeado");
+    let users_list = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let users_shared = match users_list {
+        Value::List(s) => s,
+        other => panic!("esperaba List, fue {:?}", other),
+    };
+    // Snapshot bajo lock corto + drop antes del await siguiente
+    // (clippy::await_holding_lock). Recolectamos las assertions
+    // primero, después limpiamos.
+    let names: Vec<String> = {
+        let users = users_shared.lock();
+        assert_eq!(users.len(), 2, "esperaba 2 users");
+        for (i, u) in users.iter().enumerate() {
+            match u {
+                Value::Instance { type_name, fields } => {
+                    assert_eq!(type_name, "User");
+                    let fields_guard = fields.lock();
+                    assert_eq!(fields_guard.len(), 2);
+                    let id = fields_guard.iter().find(|(n, _)| n == "id").unwrap();
+                    let name = fields_guard.iter().find(|(n, _)| n == "name").unwrap();
+                    match (&id.1, &name.1) {
+                        (Value::Int(_), Value::Str(_)) => {} // shape OK
+                        other => panic!("fields shape inesperado en row {}: {:?}", i, other),
+                    }
+                }
+                other => panic!("row {} no es Instance: {:?}", i, other),
+            }
+        }
+        users
+            .iter()
+            .filter_map(|u| match u {
+                Value::Instance { fields, .. } => fields
+                    .lock()
+                    .iter()
+                    .find(|(n, _)| n == "name")
+                    .and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .collect()
+        // `users` lock se dropea acá al cerrar el scope.
+    };
+    assert!(names.contains(&"ada".to_string()));
+    assert!(names.contains(&"alan".to_string()));
+
+    // Cleanup: drop tabla. Los locks ya se soltaron arriba.
+    let _ = seed_conn.exec("DROP TABLE fitz_orm_test_users", &[]).await;
+    seed_conn.close().await.unwrap();
 }
