@@ -10125,6 +10125,36 @@ fn fitz_value_to_pg(v: &Value) -> Result<crate::db::PgValue, String> {
     }
 }
 
+/// Fase 10.5.a — convierte un `Value` Fitz a su representación
+/// JSON text para una columna jsonb. Acepta cualquier Value que
+/// `crate::http::value_to_json` sepa serializar (Map, List, Str,
+/// Int, Float, Bool, Null + nested). El resultado se manda como
+/// `PgValue::Text` y se castea a `::jsonb` en el SQL emit.
+///
+/// Null Fitz → JSON null → almacenamos `Null` para que Postgres
+/// reciba NULL real (no la string "null") en la columna jsonb,
+/// preservando la semántica de `Map<...>?` nullable.
+fn fitz_value_to_jsonb(v: &Value) -> Result<crate::db::PgValue, String> {
+    if matches!(v, Value::Null) {
+        return Ok(crate::db::PgValue::Null);
+    }
+    let json = crate::http::value_to_json(v)?;
+    let s = serde_json::to_string(&json).map_err(|e| format!("serialize JSON: {}", e))?;
+    Ok(crate::db::PgValue::Text(s))
+}
+
+/// Fase 10.5.a — parsea un `PgValue::Text` que viene de una
+/// columna jsonb a un `Value` Fitz. Map/List/primitivos
+/// recursivamente. Si el text NO parsea como JSON válido,
+/// devuelve un `Value::Str` con el texto crudo (fallback
+/// defensivo — no debería pasar con columnas jsonb reales).
+fn jsonb_text_to_fitz_value(s: &str) -> Value {
+    match serde_json::from_str::<serde_json::Value>(s) {
+        Ok(j) => crate::http::json_to_value(&j),
+        Err(_) => Value::Str(s.to_string()),
+    }
+}
+
 /// Convierte un `PgValue` recibido del servidor a `Value` Fitz.
 fn pg_value_to_fitz(v: &crate::db::PgValue) -> Value {
     match v {
@@ -10932,6 +10962,23 @@ fn orm_qb_count(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzR
     Ok(Value::new_future(fut))
 }
 
+/// Fase 10.5.a — `true` si el `TypeExpr` representa un `Map<...>`
+/// (con cualquier sub-tipos). Usado por el ORM para detectar
+/// fields que mapean a columnas `jsonb`/`json` en Postgres y
+/// activar el marshalling JSON bidireccional.
+///
+/// Casos cubiertos:
+///   - `Map<K, V>` → true
+///   - `Map<K, V>?` (nullable wrapper) → true (recursa al inner)
+///   - Otros → false
+fn is_map_type(t: &crate::ast::TypeExpr) -> bool {
+    match t {
+        crate::ast::TypeExpr::Generic { name, .. } => name == "Map",
+        crate::ast::TypeExpr::Nullable(inner) => is_map_type(inner),
+        _ => false,
+    }
+}
+
 /// Fase 10.5.f1 — extrae el nombre del field accedido desde un
 /// closure `fn(u) => u.field`. Devuelve el nombre Fitz del field
 /// (sin override SQL aplicado todavía). Errores: closure de
@@ -11371,16 +11418,34 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
             .find(|(n, _)| n == &f.name)
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Null);
-        let pg = match fitz_value_to_pg(&value) {
-            Ok(v) => v,
-            Err(msg) => {
-                return Err(FitzError::new(
+        // Fase 10.5.a — si el field Fitz es Map<...>, serializamos
+        // a JSON string y emitimos `$N::jsonb` para que Postgres lo
+        // reciba como columna jsonb. Sin el cast, $N::text no se
+        // asigna a una columna jsonb sin coerción explícita.
+        let field_is_map = is_map_type(&f.type_);
+        let (pg, placeholder_suffix) = if field_is_map {
+            let pg = fitz_value_to_jsonb(&value).map_err(|msg| {
+                FitzError::new(
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    format!("`Type.insert`: field `{}`: {}", f.name, msg),
-                ));
-            }
+                    format!("`Type.insert`: field `{}` (jsonb): {}", f.name, msg),
+                )
+            })?;
+            (pg, "::jsonb")
+        } else {
+            let pg = match fitz_value_to_pg(&value) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        span.line,
+                        span.column,
+                        format!("`Type.insert`: field `{}`: {}", f.name, msg),
+                    ));
+                }
+            };
+            (pg, "")
         };
         if placeholder_idx > 0 {
             col_list.push_str(", ");
@@ -11390,7 +11455,7 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
         col_list.push_str(sql_col);
         col_list.push('"');
         placeholder_idx += 1;
-        placeholders.push_str(&format!("${}", placeholder_idx));
+        placeholders.push_str(&format!("${}{}", placeholder_idx, placeholder_suffix));
         pg_args.push(pg);
     }
     let mut returning_list = String::new();
@@ -11579,21 +11644,43 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             .get(&key_str)
             .and_then(|c| c.sql_name.as_deref())
             .unwrap_or(key_str.as_str());
-        let pg = match fitz_value_to_pg(value) {
-            Ok(v) => v,
-            Err(msg) => {
-                return Err(FitzError::new(
+        // Fase 10.5.a — si el field destino es Map<...>, marshall
+        // a JSON + cast `::jsonb`.
+        let field_def = state.fields.iter().find(|f| f.name == key_str);
+        let field_is_map = field_def.map(|f| is_map_type(&f.type_)).unwrap_or(false);
+        let (pg, placeholder_suffix) = if field_is_map {
+            let pg = fitz_value_to_jsonb(value).map_err(|msg| {
+                FitzError::new(
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    format!("`.update`: field `{}`: {}", key_str, msg),
-                ));
-            }
+                    format!("`.update`: field `{}` (jsonb): {}", key_str, msg),
+                )
+            })?;
+            (pg, "::jsonb")
+        } else {
+            let pg = match fitz_value_to_pg(value) {
+                Ok(v) => v,
+                Err(msg) => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        span.line,
+                        span.column,
+                        format!("`.update`: field `{}`: {}", key_str, msg),
+                    ));
+                }
+            };
+            (pg, "")
         };
         if i > 0 {
             set_clauses.push_str(", ");
         }
-        set_clauses.push_str(&format!("\"{}\" = ${}", sql_col, i + 1));
+        set_clauses.push_str(&format!(
+            "\"{}\" = ${}{}",
+            sql_col,
+            i + 1,
+            placeholder_suffix
+        ));
         pg_args.push(pg);
     }
     // El where_sql usa $1..$M; renumeramos a $(N+1)..$(N+M) donde N
@@ -12044,7 +12131,19 @@ fn pg_row_to_instance(
                 sql_col, f.name, type_name
             )
         })?;
-        field_values.push((f.name.clone(), pg_value_to_fitz(pg)));
+        // Fase 10.5.a — si el field Fitz es Map<...> y el PgValue
+        // es Text, parseamos como JSON. El driver mapea columnas
+        // jsonb/json a `PgValue::Text` con el JSON crudo.
+        let fitz_value = if is_map_type(&f.type_) {
+            match pg {
+                crate::db::PgValue::Text(s) => jsonb_text_to_fitz_value(s),
+                crate::db::PgValue::Null => Value::Null,
+                other => pg_value_to_fitz(other),
+            }
+        } else {
+            pg_value_to_fitz(pg)
+        };
+        field_values.push((f.name.clone(), fitz_value));
     }
     Ok(Value::new_instance(type_name.to_string(), field_values))
 }

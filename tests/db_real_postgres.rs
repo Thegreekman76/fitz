@@ -1310,3 +1310,225 @@ async fn orm_group_by_count_y_sum_e2e() {
     let _ = seed.exec("DROP TABLE fitz_orm_groupby_test", &[]).await;
     seed.close().await.unwrap();
 }
+
+// =============================================================
+// Fase 10.5.a — JSONB con marshalling automático (Map ↔ jsonb)
+// =============================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_jsonb_insert_select_round_trip() {
+    // Tabla con una columna jsonb. El field Fitz `data: Map<Str, Any>`
+    // se mapea automático. INSERT serializa el Map a JSON + cast
+    // `::jsonb`. SELECT parsea el JSON text de vuelta a Map Fitz.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_jsonb_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_jsonb_test (id bigint PRIMARY KEY, name text, data jsonb)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_jsonb_test\") type User {{\n  \
+             @primary\n  \
+             id: Int\n  \
+             name: Str\n  \
+             data: Map<Str, Any>\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // INSERT con un Map anidado.\n  \
+             let payload = {{ \"role\": \"admin\", \"likes\": 42, \"prefs\": {{ \"theme\": \"dark\", \"lang\": \"es\" }} }}\n  \
+             let inserted = User.insert(db, User {{ id: 1, name: \"ada\", data: payload }}).await?\n  \
+             // SELECT por id.\n  \
+             let fetched = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+             // UPDATE sobre el field jsonb.\n  \
+             let updated = User.where(fn(u) => u.id == 1).update(db, {{ \"data\": {{ \"role\": \"user\", \"new_field\": true }} }}).await?\n  \
+             let after_update = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+             return Ok({{ \"inserted_data\": inserted.data, \"fetched_data\": fetched.data, \"updated_rows\": updated, \"after_data\": after_update.data }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+
+    // Helpers para inspeccionar shape JSON anidado.
+    fn get_str_key(m: &Value, key: &str) -> Option<String> {
+        if let Value::Map(s) = m {
+            let map = s.lock();
+            map.iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+                .and_then(|(_, v)| match v {
+                    Value::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+        } else {
+            None
+        }
+    }
+    fn get_int_key(m: &Value, key: &str) -> Option<i64> {
+        if let Value::Map(s) = m {
+            let map = s.lock();
+            map.iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+                .and_then(|(_, v)| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                })
+        } else {
+            None
+        }
+    }
+    fn get_nested(m: &Value, key: &str) -> Option<Value> {
+        if let Value::Map(s) = m {
+            let map = s.lock();
+            map.iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+                .map(|(_, v)| v.clone())
+        } else {
+            None
+        }
+    }
+
+    let (inserted_data, fetched_data, updated_rows, after_data) = {
+        let m = match outer_map {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        let map = m.lock();
+        let get = |key: &str| {
+            map.iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        (
+            get("inserted_data"),
+            get("fetched_data"),
+            get("updated_rows"),
+            get("after_data"),
+        )
+    };
+
+    // inserted_data: round-trip via RETURNING — Postgres devuelve el
+    // JSON normalizado pero el shape se preserva.
+    assert_eq!(
+        get_str_key(&inserted_data, "role").as_deref(),
+        Some("admin")
+    );
+    assert_eq!(get_int_key(&inserted_data, "likes"), Some(42));
+    // Nested Map preservado.
+    let prefs = get_nested(&inserted_data, "prefs").expect("prefs");
+    assert_eq!(get_str_key(&prefs, "theme").as_deref(), Some("dark"));
+    assert_eq!(get_str_key(&prefs, "lang").as_deref(), Some("es"));
+
+    // fetched_data: re-read del server, mismo shape.
+    assert_eq!(get_str_key(&fetched_data, "role").as_deref(), Some("admin"));
+    assert_eq!(get_int_key(&fetched_data, "likes"), Some(42));
+
+    // UPDATE afectó 1 row.
+    assert_eq!(updated_rows, Value::Int(1));
+
+    // after_data: el Map nuevo del UPDATE reemplazó al anterior
+    // completo (UPDATE de un field jsonb sobreescribe).
+    assert_eq!(get_str_key(&after_data, "role").as_deref(), Some("user"));
+    // El "new_field": true debe estar.
+    if let Value::Map(s) = &after_data {
+        let map = s.lock();
+        let found = map
+            .iter()
+            .any(|(k, v)| matches!((k, v), (Value::Str(s), Value::Bool(true)) if s == "new_field"));
+        assert!(found, "esperaba new_field: true en after_data");
+    }
+
+    let _ = seed.exec("DROP TABLE fitz_orm_jsonb_test", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_jsonb_nullable_acepta_null() {
+    // Field `Map<Str, Any>?` nullable: el Value::Null se manda como
+    // NULL real (no como string "null") gracias al short-circuit
+    // en `fitz_value_to_jsonb`.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_jsonb_null", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_jsonb_null (id bigint PRIMARY KEY, data jsonb)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_jsonb_null\") type Row {{\n  \
+             @primary\n  \
+             id: Int\n  \
+             data: Map<Str, Any>?\n\
+         }}\n\
+         async fn run() -> Result<Bool> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // Insert con data = null (nullable).\n  \
+             let _ = Row.insert(db, Row {{ id: 1, data: null }}).await?\n  \
+             // Verificar via SELECT que volvió Null.\n  \
+             let fetched = Row.where(fn(r) => r.id == 1).first(db).await?\n  \
+             // fetched.data debería ser Null.\n  \
+             match fetched.data {{\n    \
+                 null => return Ok(true)\n    \
+                 _ => return Ok(false)\n  \
+             }}\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::Bool(true) => {}
+            other => panic!("esperaba Ok(true), fue {:?}", other),
+        },
+        other => panic!("esperaba Ok, fue {:?}", other),
+    }
+
+    let _ = seed.exec("DROP TABLE fitz_orm_jsonb_null", &[]).await;
+    seed.close().await.unwrap();
+}
