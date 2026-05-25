@@ -806,6 +806,13 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
         // heterogéneos). Habilita `body: List<Any>` / `body: Map<Str, Any>`
         // en handlers HTTP.
         "Any" => Some(Type::Any),
+        // Fase 10.1 — tipos opacos del driver Postgres nativo.
+        // `DbConn` es el handle de conexión devuelto por `db.connect`,
+        // anotable en params (`fn run(db: DbConn)`) y vars
+        // (`let conn: DbConn = ...`). `DbRow` es el row crudo devuelto
+        // por `db.query`, también anotable.
+        "DbConn" => Some(Type::DbConn),
+        "DbRow" => Some(Type::DbRow),
         _ => None,
     };
     if let Some(t) = prim {

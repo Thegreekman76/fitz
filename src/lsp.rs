@@ -935,7 +935,47 @@ fn after_dot_completions(
                 ("verify", "fn(plain: Str, hashed: Str) -> Bool".into()),
             ]);
         }
+        // Fase 10.1 — módulo built-in `db` para Postgres. Como `jwt`/
+        // `hash`, tipa como `Any` en el checker (no hay `Type::Module`
+        // dedicado en MVP), así que el dispatch por tipo no lo detecta.
+        // Resolvemos por nombre acá.
+        "db" => {
+            return method_items(&[
+                (
+                    "connect",
+                    "async fn(url: Str) -> Result<DbConn>".into(),
+                ),
+            ]);
+        }
         _ => {}
+    }
+
+    // Fase 10.3 — métodos estáticos ORM sobre `TableName.` cuando el
+    // type tiene `@table`. `recv_name` es el identificador del type
+    // (`User.`, `Order.`, etc.); resolvemos via `type_env.lookup` +
+    // `table_metadata`. Si matchea, devolvemos las 3 estáticos del ORM
+    // (all/where/insert) ANTES de caer al type lookup heurístico
+    // (que tipa al `User.` como `Value::Type`, no como `Type::Nominal`).
+    if let Some(id) = type_env.lookup(recv_name) {
+        if type_env.table_metadata(id).is_some() {
+            return method_items(&[
+                (
+                    "all",
+                    format!("async fn(db: DbConn) -> Result<List<{}>>", recv_name),
+                ),
+                (
+                    "where",
+                    "fn(predicate: fn(row) -> Bool) -> QueryBuilder".into(),
+                ),
+                (
+                    "insert",
+                    format!(
+                        "async fn(db: DbConn, row: {}) -> Result<{}>",
+                        recv_name, recv_name
+                    ),
+                ),
+            ]);
+        }
     }
 
     // Fallback 1: TypeInfo lookup heurístico (max col <= recv_col en la
@@ -1551,6 +1591,19 @@ fn after_dot_completions(
                 ("close", "fn() -> Result<Null>".into()),
             ])
         }
+        // Fase 10.1 — `DbConn` (driver Postgres nativo). Métodos query
+        // y exec son async; close es idempotente.
+        Type::DbConn => method_items(&[
+            (
+                "query",
+                "async fn(sql: Str, args: List<Any>) -> Result<List<Map>>".into(),
+            ),
+            (
+                "exec",
+                "async fn(sql: Str, args: List<Any>) -> Result<Int>  // rows affected".into(),
+            ),
+            ("close", "async fn() -> Result<Null>".into()),
+        ]),
         // PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
     }
@@ -1869,10 +1922,13 @@ fn scope_level_completions(
     // disponibles como Value::Module en el env global del evaluator
     // y como bindings `Any` en el checker. Listados como MODULE para
     // que VSCode los muestre con el icono apropiado y los distinga
-    // de fns y vars.
+    // de fns y vars. Fase 10.1 — `db` módulo nativo para Postgres,
+    // `db.connect(url) -> DbConn`, métodos en QueryBuilder y Type
+    // ORM cuando hay `@table`.
     for (name, detail) in [
         ("jwt", "module: encode, decode"),
         ("hash", "module: password, verify"),
+        ("db", "module: connect (Postgres native driver + ORM)"),
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -1885,7 +1941,7 @@ fn scope_level_completions(
     // Tipos built-in: visibles como nombres en posición de anotación.
     for name in [
         "Int", "Float", "Str", "Bool", "Null", "Bytes", "Range", "Any", "List", "Map", "Result",
-        "Future", "Request", "Response", "File", "PyAny", "WsConn",
+        "Future", "Request", "Response", "File", "PyAny", "WsConn", "DbConn", "DbRow",
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -3715,5 +3771,105 @@ mod tests {
                 "falta builtin `{expected}`: {labels:?}"
             );
         }
+    }
+
+    // Fase 10 — completions del ORM/DB en el LSP.
+
+    #[test]
+    fn scope_level_incluye_db_module_y_dbconn_dbrow_types() {
+        let src = "let a = 1\n\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Módulo db aparece como MODULE.
+        let db_item = items
+            .iter()
+            .find(|i| i.label == "db")
+            .expect("falta módulo `db`");
+        assert_eq!(db_item.kind, Some(CompletionItemKind::MODULE));
+        // Tipos built-in DbConn y DbRow aparecen como CLASS.
+        for t in ["DbConn", "DbRow"] {
+            assert!(
+                labels.contains(&t),
+                "falta tipo built-in `{t}`: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_dot_sobre_db_lista_connect() {
+        let src = "let x = db.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor justo después del punto: línea 0, col 11.
+        let items = completion_at_position(src, &program, &type_info, &env, 0, 11);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"connect"), "falta `connect`: {labels:?}");
+        // No incluye `decode`/`encode` que serían de jwt — confirma el
+        // dispatch por nombre del receiver.
+        assert!(
+            !labels.contains(&"encode"),
+            "no debería incluir jwt.encode: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn after_dot_sobre_dbconn_lista_query_exec_close() {
+        // Test del dispatch directo `Type::DbConn` → query/exec/close.
+        // Mismo patrón que `after_dot_sobre_wsconn_*`: usamos un call
+        // completo `conn.close()` para que el parser no abandone el
+        // stmt y el Expr::Ident(conn) quede en TypeInfo. Cursor entre
+        // `.` y el método dispara AfterDot.
+        let src = "async fn run(conn: DbConn) -> Null {\n  let _ = conn.close()\n  return null\n}\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor en línea 1, col 15 (justo después de `conn.`).
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 15);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["query", "exec", "close"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}`: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_dot_sobre_type_con_table_lista_orm_estaticos() {
+        let src = "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}\nUser.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor después de `User.` en línea 5, col 5.
+        let items = completion_at_position(src, &program, &type_info, &env, 5, 5);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["all", "where", "insert"] {
+            assert!(
+                labels.contains(&expected),
+                "falta estático ORM `{expected}`: {labels:?}"
+            );
+        }
+        // El detail de `all` debe mencionar `User` (el tipo concreto).
+        let all_item = items.iter().find(|i| i.label == "all").unwrap();
+        let detail = all_item.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("User"),
+            "esperaba `User` en detail de all, fue: {}",
+            detail
+        );
+    }
+
+    #[test]
+    fn after_dot_sobre_type_sin_table_no_lista_orm_estaticos() {
+        // Type sin @table NO debe ofrecer all/where/insert.
+        let src = "type Plain {\n  id: Int\n}\nPlain.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 3, 6);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // No deben aparecer estos.
+        assert!(
+            !labels.contains(&"all"),
+            "Plain sin @table no debería tener `all`: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"where"),
+            "Plain sin @table no debería tener `where`: {labels:?}"
+        );
     }
 }
