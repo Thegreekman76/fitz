@@ -755,3 +755,117 @@ async fn orm_order_limit_offset_first_count_e2e() {
     let _ = seed.exec("DROP TABLE fitz_orm_full_test", &[]).await;
     seed.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_insert_update_delete_e2e() {
+    // Cycle completo: INSERT + UPDATE + DELETE end-to-end.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_crud_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_crud_test (id bigint, name text, age int)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_crud_test\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // INSERT — crea 2 rows.\n  \
+             let ada = User.insert(db, User {{ id: 1, name: \"ada\", age: 30 }}).await?\n  \
+             let alan = User.insert(db, User {{ id: 2, name: \"alan\", age: 42 }}).await?\n  \
+             // UPDATE — cambia el age de ada a 31.\n  \
+             let updated = User\n    \
+                 .where(fn(u) => u.id == 1)\n    \
+                 .update(db, {{ \"age\": 31 }}).await?\n  \
+             // Verificar via re-fetch.\n  \
+             let ada_post = User\n    \
+                 .where(fn(u) => u.id == 1)\n    \
+                 .first(db).await?\n  \
+             // DELETE — borra alan.\n  \
+             let deleted = User\n    \
+                 .where(fn(u) => u.id == 2)\n    \
+                 .delete(db).await?\n  \
+             // Count post-delete.\n  \
+             let total = User.where(fn(u) => u.id > 0).count(db).await?\n  \
+             return Ok({{ \"ada_inserted\": ada, \"updated_rows\": updated, \"ada_post\": ada_post, \"deleted_rows\": deleted, \"total\": total }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+
+    let (updated, ada_age_post, deleted, total) = {
+        let m = match outer_map {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        let map = m.lock();
+        let get_int = |key: &str| -> i64 {
+            map.iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+                .and_then(|(_, v)| match v {
+                    Value::Int(n) => Some(*n),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("key {key} no es Int en outer_map"))
+        };
+        let ada_age = map
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "ada_post"))
+            .and_then(|(_, v)| match v {
+                Value::Instance { fields, .. } => fields
+                    .lock()
+                    .iter()
+                    .find(|(n, _)| n == "age")
+                    .and_then(|(_, v)| match v {
+                        Value::Int(n) => Some(*n),
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .expect("ada_post.age");
+        (
+            get_int("updated_rows"),
+            ada_age,
+            get_int("deleted_rows"),
+            get_int("total"),
+        )
+    };
+
+    assert_eq!(updated, 1, "1 row debería haber updated");
+    assert_eq!(ada_age_post, 31, "age de ada debería ser 31 tras update");
+    assert_eq!(deleted, 1, "1 row debería haber deleted (alan)");
+    assert_eq!(total, 1, "después del delete queda 1 (ada)");
+
+    let _ = seed.exec("DROP TABLE fitz_orm_crud_test", &[]).await;
+    seed.close().await.unwrap();
+}

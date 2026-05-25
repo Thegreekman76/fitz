@@ -23,7 +23,16 @@
 - Métodos custom dentro de `class` del stub (`def method(self, ...)`) — el parser MVP los ignora; refinable si entra demanda real.
 - Lookup `.pyi` solo adyacente — decisión consciente (NO PYTHONPATH/site-packages) por reproducibilidad. Opt-in futuro si entra demanda.
 
-**Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. **Diseño cerrado el 2026-05-25** (sesión de diseño completa antes de tocar código). Las 12 decisiones fundacionales están resueltas: driver Postgres puro Fitz (sin libpq), API toda async, pool built-in, ORM con decoradores sobre `type` (`@table` / `@primary` / `@belongs_to` / `@has_many` / `@many_to_many` / `@soft_delete`), cascades vía kwarg, lazy + eager opt-in con `.include(...)`, schema-diff autogenerado (`fitz db diff` / `migrate`), transactions closure-scope, raw SQL escape hatch, JSONB + arrays + dates + UUID + LISTEN/NOTIFY + FTS en el core. 10 sub-pasos planificados (10.1 driver wire protocol → 10.10 cierre formal). ~6300 LoC + 1 cap nuevo + ejemplo runnable + refresh boilerplates 5/6. Ver sección **Fase 10** dedicada abajo para el diseño completo. Próximo paso: arrancar 10.1.
+**Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. **Diseño cerrado el 2026-05-25** (sesión de diseño completa antes de tocar código). Las 12 decisiones fundacionales están resueltas: driver Postgres puro Fitz (sin libpq), API toda async, pool built-in, ORM con decoradores sobre `type` (`@table` / `@primary` / `@belongs_to` / `@has_many` / `@many_to_many` / `@soft_delete`), cascades vía kwarg, lazy + eager opt-in con `.include(...)`, schema-diff autogenerado (`fitz db diff` / `migrate`), transactions closure-scope, raw SQL escape hatch, JSONB + arrays + dates + UUID + LISTEN/NOTIFY + FTS en el core. 10 sub-pasos planificados (10.1 driver wire protocol → 10.10 cierre formal). ~6300 LoC + 1 cap nuevo + ejemplo runnable + refresh boilerplates 5/6. Ver sección **Fase 10** dedicada abajo para el diseño completo.
+
+**Avance Fase 10 al 2026-05-26**: sub-pasos 10.1 (driver wire
+protocol + integración evaluator + codegen guard) → 10.2 (pool de
+conexiones + reconnect + health check) → 10.3 (ORM declarativo MVP
+con @table/@primary/@column, builder where/order_by/limit/offset/
+first/count, insert/update/delete con guard de seguridad)
+**CERRADOS**. Validados contra Postgres real con **13 tests E2E**
+(driver core + ORM CRUD + ORM builder completo). Próximo:
+**10.4 — Relaciones + cascades + lazy loading**.
 
 Detalle exhaustivo de cada cierre en [`CHANGELOG.md`](../CHANGELOG.md) y deudas residuales en [`docs/deudas-post-5b.md`](deudas-post-5b.md).
 
@@ -7892,6 +7901,67 @@ CRUD sobre tablas individuales.
 **Criterio de éxito**: el ejemplo del shape arriba sin relaciones
 (solo `User` y queries básicas) corre end-to-end contra Postgres
 real, paridad `fitz run` ↔ `fitz build`.
+
+**Cierre formal 10.3 (sesiones del 2026-05-25 al 2026-05-26)**:
+ejecutada en 4 sub-pasos:
+- **10.3.a — Parser + checker para decorators ORM**: AST extendido
+  con `decorators` en `Stmt::TypeDef` y `Field`. Parser acepta
+  `@x(args)` antes de `type` y antes de cada field. Checker
+  procesa `@table`/`@primary`/`@column(name, sql_type)`/`@unique`/
+  `@index` y persiste `TableMetadata` por `TypeId` en `TypeEnv`.
+  +18 tests (parser + checker).
+- **10.3.b1 — Builder `User.all(db)`**: `Value::Type` cachea
+  `Option<Box<TableMetadata>>`. Dispatch ORM sobre `Value::Type` con
+  metadata. `SELECT col1, col2, ... FROM "table"` con columnas
+  explícitas (no `SELECT *`), `@column(name=...)` respetado en SQL
+  emitido. Helper `pg_row_to_instance` deserializa rows a
+  `Value::Instance`. +5 unit + 1 E2E real (`orm_user_all_db_devuelve_instancias_reales`).
+- **10.3.b2 — `.where(closure)` con translator Expr→SQL**:
+  `Value::QueryBuilder(Arc<dyn Any>)` opaco para chain. Translator
+  cubre BinOp (==/!=/</<=/>/>= +/-/*//and/or), UnaryOp (not/-),
+  Field access (con override `@column`), literales primitivos
+  (Int/Float/Str/Bool/Null) extraídos como `$N`. Chain
+  `.where(f).where(g)` combina con AND. +9 unit + 2 E2E real
+  (filtra por age, chain con AND).
+- **10.3.b3 — order_by/limit/offset/first/count**: state extendido
+  con `order_by_clauses` (DESC via UnaryOp Neg `-u.field`),
+  `limit/offset: Option<i64>`. `first(db)` ejecuta con LIMIT 1
+  override + devuelve `Result<Instance>` (`Err("no rows")` si vacío).
+  `count(db)` emite `SELECT COUNT(*) AS "__count" FROM ... WHERE ...`
+  ignorando order/limit/offset (count es agregado). +9 unit + 1
+  E2E real combinando todo el subset.
+- **10.3.c — insert / update / delete**: `User.insert(db, record)`
+  emite `INSERT ... RETURNING *` y devuelve la Instance completa
+  (con auto-IDs generados por Postgres). `qb.update(db, changes_map)`
+  emite `UPDATE table SET ... WHERE ...`. `qb.delete(db)` emite
+  `DELETE FROM table WHERE ...`. Guard de seguridad: update/delete
+  REQUIEREN `.where(...)` previo (rechazo explícito para evitar
+  ops masivas accidentales). Helper `renumber_placeholders` para
+  combinar args del SET con args del WHERE. +4 unit + 1 E2E real
+  (cycle CRUD completo).
+
+**Estado al cierre 10.3**: la API SELECT + CRUD del MVP del ORM
+declarativo sobre `type` está completa contra Postgres real.
+Validado con 13 E2E end-to-end (driver + ORM combinados) +
+~40 unit del builder + translator. Paridad `fitz run` ↔ `fitz
+build` aún PENDIENTE (codegen ORM llega cuando aparezca demanda
+real — por ahora el codegen guard sigue rechazando `fitz build`
+de programas con `db.connect()`, lo que cubre transitively cualquier
+uso del ORM). Deuda residual derivada listada en 10.x abajo.
+
+**Deuda residual de 10.3** (NO bloquea 10.4):
+- Auto-skip del primary key con default `Int = 0` en INSERT (hoy
+  el user debe declarar el id explícito; refinable con detección
+  "field con default = 0 + tipo Int + @primary → skip en INSERT").
+- `.update(db, instance)` con instancia (en lugar de Map) — más
+  ergonómico, traduce instance → Map automático.
+- `.where(_ => true)` sigue siendo el escape para update/delete
+  sin filtro; el guard chequea `where_sql.is_none()` directo, no
+  detecta WHERE trivialmente-true. Refinable.
+- `function calls` adentro del closure de where (`u.name.like("%a%")`,
+  `u.tags.contains("rust")`) — llegan en 10.5 cuando tipos compuestos.
+- Codegen del ORM para `fitz build` (codegen Python lo cerró en
+  8.7; este es paralelo). Cubre todos los programs del 10.x.
 
 #### 10.4 — Relaciones + cascades + lazy loading (~600 LoC)
 
