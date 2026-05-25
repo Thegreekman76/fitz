@@ -1198,6 +1198,11 @@ pub mod oid {
     pub const UUID: u32 = 2950;
     pub const JSONB: u32 = 3802;
     pub const JSON: u32 = 114;
+    /// `void` — devuelto por fns como `pg_sleep()`, `pg_notify()`,
+    /// etc. Postgres lo serializa como string vacío en text format.
+    /// Mapeamos a `PgValue::Null` para que SELECT sobre fns void
+    /// no falle con `UnsupportedType`.
+    pub const VOID: u32 = 2278;
 }
 
 /// Valor escalar Postgres parseado del wire. La representación
@@ -1260,6 +1265,10 @@ pub fn parse_text_value(oid: u32, bytes: Option<&[u8]>) -> DbResult<PgValue> {
         | oid::UUID
         | oid::JSON
         | oid::JSONB => Ok(PgValue::Text(s.to_string())),
+        // `void` siempre devuelve un string vacío en text format.
+        // Lo modelamos como Null para que `SELECT pg_sleep(...)` no
+        // falle con UnsupportedType.
+        oid::VOID => Ok(PgValue::Null),
         oid::BYTEA => {
             // Wire format text para BYTEA es "\x<hex>". Si no
             // matchea, devolvemos los bytes raw.
@@ -1678,6 +1687,17 @@ impl Connection {
             param_formats: &zero_format,
             param_values: &bind_refs,
             result_formats: &zero_format,
+        })
+        .await?;
+        // Describe(Portal "") — pide la RowDescription del portal.
+        // CRÍTICO: sin esto, el server NO envía RowDescription tras
+        // BindComplete y solo manda DataRow opacos. El parser de
+        // DataRow lee los valores pero `columns` queda vacío y
+        // `row.get("name")` retorna None.
+        // ('P' = describe portal, vs 'S' = describe statement).
+        self.write(FrontendMessage::Describe {
+            kind: b'P',
+            name: "",
         })
         .await?;
         // Execute portal con max_rows=0 (unlimited)
