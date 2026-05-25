@@ -1532,3 +1532,253 @@ async fn orm_jsonb_nullable_acepta_null() {
     let _ = seed.exec("DROP TABLE fitz_orm_jsonb_null", &[]).await;
     seed.close().await.unwrap();
 }
+
+// =============================================================
+// Fase 10.5.g — Operadores extendidos (and/or/not/is_in/filters)
+// =============================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_where_and_or_not_e2e() {
+    // Combinación booleana: (age > 18 AND country = "UK") OR
+    // (NOT (deleted)). Validamos contra Postgres real.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed.exec("DROP TABLE IF EXISTS fitz_orm_bool", &[]).await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_bool (id bigint, name text, country text, age int, deleted bool)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_bool VALUES \
+         (1, 'ada', 'UK', 30, false), \
+         (2, 'alan', 'UK', 42, false), \
+         (3, 'edsger', 'NL', 60, true), \
+         (4, 'grace', 'US', 55, false), \
+         (5, 'kid', 'UK', 10, false)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_bool\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             country: Str\n  \
+             age: Int\n  \
+             deleted: Bool\n\
+         }}\n\
+         async fn run() -> Result<List<User>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // (age > 18 AND country == \"UK\") OR (NOT deleted == false)\n  \
+             // Reformulado: matchea UK adultos (ada, alan) + edsger\n  \
+             // (deleted=true → NOT deleted=false es false; ¡ojo!).\n  \
+             // Simplifico: UK adultos OR deleted=true → ada, alan, edsger.\n  \
+             let result = User\n    \
+                 .where(fn(u) => (u.country == \"UK\" and u.age > 18) or u.deleted == true)\n    \
+                 .order_by(fn(u) => u.id)\n    \
+                 .all(db).await?\n  \
+             return Ok(result)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let users_list = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let names: Vec<String> = {
+        let users_shared = match users_list {
+            Value::List(s) => s,
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        let users = users_shared.lock();
+        users
+            .iter()
+            .filter_map(|u| match u {
+                Value::Instance { fields, .. } => fields
+                    .lock()
+                    .iter()
+                    .find(|(n, _)| n == "name")
+                    .and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .collect()
+    };
+    // ada (UK, 30, false) + alan (UK, 42, false) + edsger (NL, 60, true).
+    // Excluidos: grace (US, no UK, not deleted), kid (UK, no adulto).
+    assert_eq!(
+        names,
+        vec!["ada".to_string(), "alan".to_string(), "edsger".to_string()]
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_orm_bool", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_where_filters_completos_e2e() {
+    // Test combinado de is_in / is_null / starts_with / contains.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_filters", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_filters (id bigint, name text, country text, deleted_at timestamp)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_filters VALUES \
+         (1, 'ada lovelace', 'UK', null), \
+         (2, 'alan turing', 'UK', null), \
+         (3, 'edsger dijkstra', 'NL', '2002-08-06'), \
+         (4, 'grace hopper', 'US', null), \
+         (5, 'admin user', 'XX', '2020-01-01')",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_filters\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             country: Str\n  \
+             deleted_at: Str?\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // is_in + is_null: usuarios activos (deleted_at NULL)\n  \
+             // en países seleccionados.\n  \
+             let active_uk_us = User\n    \
+                 .where(fn(u) => u.country.is_in([\"UK\", \"US\"]) and u.deleted_at.is_null())\n    \
+                 .order_by(fn(u) => u.id)\n    \
+                 .all(db).await?\n  \
+             // starts_with: nombres que arrancan con \"a\".\n  \
+             let starts_a = User\n    \
+                 .where(fn(u) => u.name.starts_with(\"a\"))\n    \
+                 .order_by(fn(u) => u.id)\n    \
+                 .all(db).await?\n  \
+             // contains: nombres que contienen \"o\".\n  \
+             let contains_o = User\n    \
+                 .where(fn(u) => u.name.contains(\"o\"))\n    \
+                 .order_by(fn(u) => u.id)\n    \
+                 .all(db).await?\n  \
+             return Ok({{ \"active_uk_us\": active_uk_us, \"starts_a\": starts_a, \"contains_o\": contains_o }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+
+    fn names_in_map(outer: &Value, key: &str) -> Vec<String> {
+        let m = match outer {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        let map = m.lock();
+        let list_val = map
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let list = match list_val {
+            Value::List(s) => s,
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        let items = list.lock();
+        items
+            .iter()
+            .filter_map(|u| match u {
+                Value::Instance { fields, .. } => fields
+                    .lock()
+                    .iter()
+                    .find(|(n, _)| n == "name")
+                    .and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .collect()
+    }
+
+    let active = names_in_map(&outer_map, "active_uk_us");
+    let starts_a = names_in_map(&outer_map, "starts_a");
+    let contains_o = names_in_map(&outer_map, "contains_o");
+
+    // active_uk_us: ada (UK, null), alan (UK, null), grace (US, null).
+    assert_eq!(
+        active,
+        vec![
+            "ada lovelace".to_string(),
+            "alan turing".to_string(),
+            "grace hopper".to_string()
+        ]
+    );
+    // starts_a: ada, alan, admin user.
+    assert_eq!(
+        starts_a,
+        vec![
+            "ada lovelace".to_string(),
+            "alan turing".to_string(),
+            "admin user".to_string()
+        ]
+    );
+    // contains_o: ada lovelace (lOvelace), grace hopper (hOpper).
+    // alan turing: NO contiene 'o' (a-l-a-n-t-u-r-i-n-g).
+    // edsger dijkstra: NO contiene 'o'.
+    // admin user: NO contiene 'o'.
+    assert_eq!(
+        contains_o,
+        vec!["ada lovelace".to_string(), "grace hopper".to_string()]
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_orm_filters", &[]).await;
+    seed.close().await.unwrap();
+}

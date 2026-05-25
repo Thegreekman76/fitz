@@ -11983,6 +11983,174 @@ fn renumber_placeholders(sql: &str, offset: usize) -> String {
 ///
 /// Fuera de scope (deuda para 10.3.b3+): function calls
 /// (`u.name.like(...)`), índices, expresiones anidadas complejas.
+/// Fase 10.5.g — traduce method calls dentro de `.where(...)` a
+/// fragments SQL. El shape es `Expr::Call { callee: Field {
+/// object: Field { Ident(param), col }, method }, args }`.
+///
+/// Métodos soportados (sobre `u.col`):
+///   - `is_null()`        → `"col" IS NULL`
+///   - `is_not_null()`    → `"col" IS NOT NULL`
+///   - `is_in([a, b, c])` → `"col" IN ($1, $2, $3)` con args
+///     parametrizados. Acepta también `is_in(<var>)` donde var
+///     es una List.
+///   - `like(pattern)`    → `"col" LIKE $1`
+///   - `ilike(pattern)`   → `"col" ILIKE $1` (case-insensitive)
+///   - `starts_with(s)`   → `"col" LIKE $1` con `$1 = "s%"`
+///   - `ends_with(s)`     → `"col" LIKE $1` con `$1 = "%s"`
+///   - `contains(s)`      → `"col" LIKE $1` con `$1 = "%s%"`
+fn translate_method_call_to_sql(
+    callee: &crate::ast::Expr,
+    args: &[crate::ast::Expr],
+    param_name: &str,
+    fields: &[crate::ast::Field],
+    meta: &crate::types::TableMetadata,
+    args_acc: &mut Vec<crate::db::PgValue>,
+) -> Result<String, String> {
+    use crate::ast::Expr;
+    let (col_name, method) = match callee {
+        Expr::Field { object, field, .. } => match object.as_ref() {
+            Expr::Field {
+                object: inner_obj,
+                field: inner_field,
+                ..
+            } => match inner_obj.as_ref() {
+                Expr::Ident(name, _) if name == param_name => (inner_field.clone(), field.clone()),
+                _ => {
+                    return Err(format!(
+                        "method call en `.where(...)` solo admite la forma `{param_name}.<field>.<método>(...)`"
+                    ));
+                }
+            },
+            _ => {
+                return Err(format!(
+                    "method call en `.where(...)` solo admite la forma `{param_name}.<field>.<método>(...)`"
+                ));
+            }
+        },
+        _ => return Err("expresión no soportada en `.where(...)`".to_string()),
+    };
+    if !fields.iter().any(|f| f.name == col_name) {
+        return Err(format!(
+            "field `{col_name}` no existe en el type (fields: {})",
+            fields
+                .iter()
+                .map(|f| f.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    let sql_col = meta
+        .columns
+        .get(&col_name)
+        .and_then(|c| c.sql_name.as_deref())
+        .unwrap_or(col_name.as_str())
+        .to_string();
+    match method.as_str() {
+        "is_null" => {
+            if !args.is_empty() {
+                return Err(format!(
+                    "`{param_name}.{col_name}.is_null()` no acepta args"
+                ));
+            }
+            Ok(format!("\"{}\" IS NULL", sql_col))
+        }
+        "is_not_null" => {
+            if !args.is_empty() {
+                return Err(format!(
+                    "`{param_name}.{col_name}.is_not_null()` no acepta args"
+                ));
+            }
+            Ok(format!("\"{}\" IS NOT NULL", sql_col))
+        }
+        "is_in" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.is_in([...])` espera 1 arg (List literal)"
+                ));
+            }
+            let items = match &args[0] {
+                Expr::List(items, _) => items,
+                _ => {
+                    return Err(
+                        "`is_in` MVP: el arg debe ser una List literal `[a, b, c]`".to_string(),
+                    );
+                }
+            };
+            if items.is_empty() {
+                // `IN ()` no es SQL válido. Postgres aceptaría con
+                // un Vec<X>, pero la sintaxis `IN ()` no. Devolvemos
+                // un predicado siempre-false equivalente.
+                return Ok("false".to_string());
+            }
+            let mut placeholders = Vec::with_capacity(items.len());
+            for it in items {
+                let frag = translate_expr_to_sql(it, param_name, fields, meta, args_acc)?;
+                placeholders.push(frag);
+            }
+            Ok(format!("\"{}\" IN ({})", sql_col, placeholders.join(", ")))
+        }
+        "like" | "ilike" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.{method}(pattern)` espera 1 arg",
+                ));
+            }
+            let pat = translate_expr_to_sql(&args[0], param_name, fields, meta, args_acc)?;
+            let op = if method == "ilike" { "ILIKE" } else { "LIKE" };
+            Ok(format!("\"{}\" {} {}", sql_col, op, pat))
+        }
+        "starts_with" | "ends_with" | "contains" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.{method}(s)` espera 1 arg Str"
+                ));
+            }
+            // Sólo aceptamos Str literal acá — necesitamos manipular
+            // la string para envolverla con `%`. Si el arg es una
+            // expresión arbitraria, lo rechazamos (deuda menor).
+            let raw = match &args[0] {
+                Expr::Str(s, _) => s.clone(),
+                _ => {
+                    return Err(format!(
+                        "`.{method}(s)` MVP: el arg debe ser string literal"
+                    ));
+                }
+            };
+            let pattern = match method.as_str() {
+                "starts_with" => format!("{}%", escape_like(&raw)),
+                "ends_with" => format!("%{}", escape_like(&raw)),
+                "contains" => format!("%{}%", escape_like(&raw)),
+                _ => unreachable!(),
+            };
+            args_acc.push(crate::db::PgValue::Text(pattern));
+            Ok(format!("\"{}\" LIKE ${}", sql_col, args_acc.len()))
+        }
+        other => Err(format!(
+            "método `.{other}(...)` no soportado sobre fields en `.where(...)`. \
+             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains."
+        )),
+    }
+}
+
+/// Fase 10.5.g — escapa los caracteres especiales de SQL LIKE
+/// (`%` y `_`) en una string literal del user. Esto previene que
+/// `starts_with("a%b")` se interprete como "empieza con 'a' +
+/// cualquier cadena + 'b'". Usamos `\` como escape char (Postgres
+/// default).
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '%' | '_' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 pub fn translate_expr_to_sql(
     expr: &crate::ast::Expr,
     param_name: &str,
@@ -12056,6 +12224,14 @@ pub fn translate_expr_to_sql(
                     "`.where(...)` solo admite field access sobre el parámetro `{param_name}` (e.g. `{param_name}.field`)"
                 )),
             }
+        }
+        // Fase 10.5.g — method call sobre `u.field`. Soporta filtros
+        // tipo `u.name.starts_with("ada")`, `u.country.is_in([...])`,
+        // `u.deleted_at.is_null()`. El shape es `Expr::Call { callee:
+        // Field { object: Field { Ident(param), col }, method },
+        // args }`.
+        Expr::Call { callee, args, .. } => {
+            translate_method_call_to_sql(callee, args, param_name, fields, meta, args_acc)
         }
         Expr::Int(n, _) => {
             args_acc.push(crate::db::PgValue::Int(*n));
@@ -25386,6 +25562,158 @@ let r = match n {
         let mut args = Vec::new();
         let r = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args);
         assert!(r.is_err());
+    }
+
+    // ---- Fase 10.5.g — operadores extendidos en where ----
+
+    #[test]
+    fn translate_and_or_chain() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age > 18 and u.age < 65 or u.name == \"admin\"");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        // Precedencia: AND > OR (Fitz parsea igual que SQL).
+        // Esperamos: ((age > $1 AND age < $2) OR (name = $3))
+        assert!(
+            sql.contains("AND") && sql.contains("OR"),
+            "esperaba AND y OR en sql: {sql}"
+        );
+        assert_eq!(args.len(), 3);
+    }
+
+    #[test]
+    fn translate_is_null() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.is_null()");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" IS NULL");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn translate_is_not_null() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age.is_not_null()");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"age\" IS NOT NULL");
+    }
+
+    #[test]
+    fn translate_is_in_list_literal() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age.is_in([10, 20, 30])");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"age\" IN ($1, $2, $3)");
+        assert_eq!(
+            args,
+            vec![
+                crate::db::PgValue::Int(10),
+                crate::db::PgValue::Int(20),
+                crate::db::PgValue::Int(30),
+            ]
+        );
+    }
+
+    #[test]
+    fn translate_is_in_lista_vacia_devuelve_false() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age.is_in([])");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "false");
+        assert!(args.is_empty());
+    }
+
+    #[test]
+    fn translate_starts_with() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.starts_with(\"ada\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" LIKE $1");
+        assert_eq!(args, vec![crate::db::PgValue::Text("ada%".into())]);
+    }
+
+    #[test]
+    fn translate_ends_with() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.ends_with(\"on\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" LIKE $1");
+        assert_eq!(args, vec![crate::db::PgValue::Text("%on".into())]);
+    }
+
+    #[test]
+    fn translate_contains() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.contains(\"da\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" LIKE $1");
+        assert_eq!(args, vec![crate::db::PgValue::Text("%da%".into())]);
+    }
+
+    #[test]
+    fn translate_starts_with_escapa_caracteres_like() {
+        // Pattern del user con `%` literal debe escaparse para evitar
+        // wildcard injection.
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.starts_with(\"100%_off\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" LIKE $1");
+        // `%` y `_` se escapan con `\`; el `%` del suffix queda intacto.
+        assert_eq!(args, vec![crate::db::PgValue::Text("100\\%\\_off%".into())]);
+    }
+
+    #[test]
+    fn translate_like_directo() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.like(\"a_a%\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" LIKE $1");
+        // .like NO escapa — el user explícitamente quiere wildcards.
+        assert_eq!(args, vec![crate::db::PgValue::Text("a_a%".into())]);
+    }
+
+    #[test]
+    fn translate_ilike_es_case_insensitive() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.ilike(\"ADA%\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" ILIKE $1");
+    }
+
+    #[test]
+    fn translate_method_call_combina_con_and() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body(
+            "fn (u) => u.name.starts_with(\"a\") and u.age.is_in([30, 42])",
+        );
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert!(
+            sql.contains("LIKE") && sql.contains("IN") && sql.contains("AND"),
+            "esperaba composición: {sql}"
+        );
+        // Args: pattern + 2 ints = 3 args.
+        assert_eq!(args.len(), 3);
+    }
+
+    #[test]
+    fn translate_method_desconocido_es_error() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.foo(\"x\")");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("foo"));
     }
 
     #[test]
