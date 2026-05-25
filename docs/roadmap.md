@@ -23,7 +23,7 @@
 - Métodos custom dentro de `class` del stub (`def method(self, ...)`) — el parser MVP los ignora; refinable si entra demanda real.
 - Lookup `.pyi` solo adyacente — decisión consciente (NO PYTHONPATH/site-packages) por reproducibilidad. Opt-in futuro si entra demanda.
 
-**Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. Norte estratégico que destraba el reemplazo de la layer Python en los boilerplates 5/6 con un driver Postgres puro en Fitz + ORM sobre `type` con anotaciones + migraciones autogeneradas. Sesión de diseño primero (sin código), después implementación incremental.
+**Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. **Diseño cerrado el 2026-05-25** (sesión de diseño completa antes de tocar código). Las 12 decisiones fundacionales están resueltas: driver Postgres puro Fitz (sin libpq), API toda async, pool built-in, ORM con decoradores sobre `type` (`@table` / `@primary` / `@belongs_to` / `@has_many` / `@many_to_many` / `@soft_delete`), cascades vía kwarg, lazy + eager opt-in con `.include(...)`, schema-diff autogenerado (`fitz db diff` / `migrate`), transactions closure-scope, raw SQL escape hatch, JSONB + arrays + dates + UUID + LISTEN/NOTIFY + FTS en el core. 10 sub-pasos planificados (10.1 driver wire protocol → 10.10 cierre formal). ~6300 LoC + 1 cap nuevo + ejemplo runnable + refresh boilerplates 5/6. Ver sección **Fase 10** dedicada abajo para el diseño completo. Próximo paso: arrancar 10.1.
 
 Detalle exhaustivo de cada cierre en [`CHANGELOG.md`](../CHANGELOG.md) y deudas residuales en [`docs/deudas-post-5b.md`](deudas-post-5b.md).
 
@@ -7645,40 +7645,613 @@ mantenimiento" que es el 80% del uso esperado.
 
 **Fase 10** arranca con el stack DB nativo (driver Postgres puro
 Fitz + ORM declarativo + migraciones). Cierra la promesa "todo el
-stack web en el lenguaje". Ver bloque "Visión post-Fase 9" abajo.
+stack web en el lenguaje". Ver sección **Fase 10** dedicada abajo
+con el diseño completo y los 10 sub-pasos.
 
 ---
 
-## Visión post-Fase 9 — Fase 10+ 🔮
+## Fase 10 — Stack DB nativo + ORM declarativo 🗄️
+
+**Estado: planificada, diseño cerrado el 2026-05-25.** Las 12
+decisiones técnicas fundacionales están resueltas (ver sub-sección
+"Decisiones de diseño" abajo). Próximo paso: arrancar 10.1.
+
+**Promesa**: cerrar el "stack web completo en el lenguaje" —
+backend + DB nativo, sin necesidad de interop con Python/Ruby/Node
+para acceder a una base de datos relacional. Después de Fase 10,
+los boilerplates 5/6 (que hoy usan SQLAlchemy via interop Python)
+pasan a usar la DB nativa, y la interop queda como **opcional**
+para el ecosistema Python (numpy, pandas, scikit) en vez de
+**obligatoria** para DB.
+
+**Tamaño estimado**: ~6300 LoC nuevas + 1 cap nuevo en la guía
++ 1 ejemplo runnable + refresh de 2 boilerplates. Comparable a
+todo Fase 9.w combinada (Auth + WS + Cron = ~3500 LoC) **multiplicado
+por dos**. 12-15 sesiones para cerrar la fase entera. Es la fase
+más grande comprometida hasta hoy.
+
+### Decisiones de diseño (cerradas 2026-05-25)
+
+Sesión de diseño previa a cualquier código. Las 12 decisiones
+fundacionales:
+
+| # | Decisión | Razón |
+|---|---|---|
+| 1 | **Driver Postgres puro en Fitz** (~3-4k LoC, protocolo wire implementado adentro del binario) | Standalone binary preservado (cero deps de sistema como libpq), paridad bit-a-bit `fitz run` ↔ `fitz build` trivial, alineado con la filosofía HTTP nativo / Auth nativa / Jobs sin Celery. **Rechazado**: wrap libpq via FFI (rompe standalone, complica Docker), wrap crate `tokio-postgres` (Fitz como wrapper en vez de implementación nativa, choca con espíritu de 9.w) |
+| 2 | **API toda async** (`db.query(...).await?`) | Postgres es I/O-bound; bloquear thread esperando I/O mata throughput HTTP bajo carga (lección F17). Encaja natural con Fase 6 (async nativo) y 9.w.3 (`spawn`). **Rechazado**: sync con bridge (anti-pattern, F17 cerró exactamente esa deuda), dual API (doble superficie sin ganancia real) |
+| 3 | **Pool built-in en el driver** (`connect(url, max_conns=10)`) | First-class, cero ceremonia para 90% del caso real (server HTTP cualquiera lo necesita). ~300 LoC extra. **Rechazado**: sin pool (el user lo re-implementa mal), pool como módulo aparte (doble API, conveniencia perdida) |
+| 4 | **ORM con decoradores sobre `type`** (`@table` / `@primary` / `@column`) | Reusa el sistema de tipos del lenguaje, encaja con la filosofía establecida de decoradores (@get/@cron/@authenticated/@auth_provider/@middleware/@ws/@background). El checker valida queries against fields en compile-time. Tipo Fitz canonical, ORM lo extiende con metadata. **Rechazado**: builder/macro (modelo opaco, pierde el sistema de tipos), schema-first (doble fuente de verdad, ceremonia extra) |
+| 5 | **Migraciones schema-diff autogenerado** (`fitz db diff`) | Promesa Prisma/Drizzle: cambiá el `type`, te doy la migration SQL lista para revisar y commitear. ~800 LoC extra (introspección via `information_schema` + diff engine). **Rechazado**: Alembic-style (más ceremonia, refactors caros), SQL plano sin tooling (anti-pattern para feature first-class) |
+| 6 | **Query builder tipado + raw SQL escape hatch** | API principal builder type-safe (`User.where(fn (u) => u.age > 18).all().await?`), escape hatch para queries complejas (`db.query("SELECT ... ", args)`). ~600 LoC del builder + integration con checker. Best of both — type-safe default + power user escape. **Rechazado**: solo raw SQL (checker no valida queries), solo builder (mata Postgres avanzado como CTEs/window/FTS) |
+| 7 | **Transactions closure-scope** (`db.transaction(fn (tx) => ...).await?`) | Closure retorna `Ok` → commit, `Err` → rollback, panic → rollback. Imposible olvidarse de cerrar. Encaja natural con `Result` + `?`. **Rechazado**: begin/commit/rollback explícito (Fitz no tiene try/catch, fácil olvidar rollback en error path), dual API (doble superficie sin ganancia) |
+| 8 | **Core Postgres extendido**: JSONB + LISTEN/NOTIFY + arrays + FTS | MVP completo, no diferimos features que Postgres brilla. JSONB para `data: Json` con `->` y `->>` (150 LoC), LISTEN/NOTIFY integrado con `@background` reemplaza Redis pub/sub (200 LoC), arrays `tags: List<Str>` → `text[]` (100 LoC), FTS con `@tsvector` + `.search()` (300 LoC) |
+| 9 | **Relaciones: decorators dedicados sobre fields** (`@belongs_to` / `@has_many` / `@has_one` / `@many_to_many`) | Explicit, checker valida en compile-time que la tabla referenciada existe y los tipos cuadran. SQL emitido con FKs automáticos. Estilo Rails ActiveRecord / Django ORM. **Rechazado**: inferencia mágica desde tipo del field (pierde control sobre nombre de FK, cascades, lazy/eager), API explícita sin sintaxis (pierde validación compile-time + ergonomía) |
+| 10 | **Cascade vía kwarg del decorator** (`@belongs_to("User", on_delete="cascade", on_update="restrict")`) | Default `"restrict"` seguro (Postgres default). Valores: `"cascade" / "set_null" / "restrict" / "no_action"`. Validado por checker en compile-time. Descubrible via autocomplete LSP. **Rechazado**: decorator dedicado apilable (más verbose, ganancia marginal), solo restrict + edit migration manual (intent desincronizado del modelo) |
+| 11 | **Lazy por default + `.include(...)` para eager opt-in** | `post.author().await?` siempre dispara query (lazy, explicit). Para evitar N+1: `Post.where(...).include("author", "tags", "comments.author").all().await?` carga todo con LEFT JOINs en una sola query. Estilo Prisma `include` / Drizzle `with`. **Rechazado**: eager por default (queries enormes, anti-pattern para tablas grandes), sin abstracción (joins manuales en cada query) |
+| 12 | **Core relacional**: self-referential + M2M con pivot explícita + soft deletes | Self-ref via `@has_many("Comment", via="parent_id")` para threading (50 LoC validación). M2M con `@many_to_many("Tag", via="PostTag")` donde `PostTag` es un `type` declarado con 2 FKs (200 LoC). Soft deletes via `@soft_delete` agrega `deleted_at: Timestamp?` + filtro automático en queries (150 LoC). **Diferido a Fase 10.x post-MVP**: polymorphic associations (~400 LoC, complica el checker con unión de tipos, pocos casos reales) |
+
+### Shape del código Fitz (target)
+
+Diseño concreto de cómo se ve un programa Fitz usando el stack DB
+nativo. Combina relaciones, cascades, soft deletes, JSONB, eager
+loading + las features ya existentes (HTTP + Auth + decoradores):
+
+```fitz
+from db import connect, transaction
+
+@table("users")
+type User {
+  @primary id: Int = 0
+  name: Str
+  email: Str
+  data: Json?
+
+  @has_many("Post", via="author_id", on_delete="cascade")
+  posts: List<Post> = []
+
+  @has_one("Profile", on_delete="cascade")
+  profile: Profile? = null
+}
+
+@table("posts")
+@soft_delete
+type Post {
+  @primary id: Int = 0
+  title: Str
+  body: Str
+  tags_raw: List<Str> = []
+
+  @belongs_to("User", on_delete="cascade")
+  author_id: Int
+
+  @many_to_many("Tag", via="PostTag")
+  tags: List<Tag> = []
+}
+
+@table("post_tags")
+type PostTag {
+  @belongs_to("Post", on_delete="cascade")
+  post_id: Int
+
+  @belongs_to("Tag", on_delete="cascade")
+  tag_id: Int
+}
+
+@table("comments")
+type Comment {
+  @primary id: Int = 0
+  body: Str
+
+  @belongs_to("User", on_delete="cascade")
+  author_id: Int
+
+  @belongs_to("Comment", on_delete="cascade")
+  parent_id: Int?
+
+  @has_many("Comment", via="parent_id")
+  replies: List<Comment> = []
+}
+
+@server(3000)
+async fn main() => 0
+
+@get("/posts/{id}")
+async fn get_post(id: Int) -> Result<Post> {
+  let post = Post
+    .where(fn (p) => p.id == id)
+    .include("author", "tags", "comments.author")
+    .first()
+    .await?
+  return Ok(post)
+}
+
+@post("/posts")
+async fn create_post(post: Post) -> Result<Post> {
+  return db.transaction(fn (tx) => {
+    let inserted = tx.insert(post).await?
+    db.notify("post_created", inserted.id).await?
+    Ok(inserted)
+  }).await?
+}
+
+@background
+async fn index_post(post_id: Int) -> Null {
+  let post = Post.where(fn (p) => p.id == post_id).first().await?
+  // ... lógica de indexing FTS
+}
+```
+
+### Sub-pasos (10 sub-fases)
+
+División incremental, cada sub-paso cierra una pieza testeable
+end-to-end. La línea de cierre se mantiene en cada sub-paso: tests
+unit + E2E + smoke `GUIDE_EXAMPLES_COMPILE` + clippy limpio +
+paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+#### 10.1 — Driver wire protocol mínimo (~1500 LoC)
+
+Primer sub-paso: solo el driver, sin ORM todavía. Habilita
+`db.query(sql, args).await?` desde Fitz, devolviendo `List<Row>`
+donde `Row` es `Map<Str, Any>` (sin tipado fuerte hasta 10.3).
+
+- **Módulo built-in `db`** registrado en `register_builtins` (sin
+  import). `db.connect(url) -> Result<Db>` y `Db.query(sql, args)`
+  / `Db.exec(sql, args)`. Parseo de connection string URI estándar
+  (`postgres://user:pass@host:port/dbname?sslmode=...`).
+- **TCP + framing**: socket tokio + parseo de mensajes Postgres
+  (PostgreSQL wire protocol v3.0). Header (1 byte tag + 4 bytes
+  length) + body variable. Funciones `read_message` / `write_message`.
+- **Startup + auth**: StartupMessage → AuthenticationXxx →
+  PasswordMessage. Soporta cleartext (legacy), MD5 (legacy), y
+  **SCRAM-SHA-256** (Postgres 14+ default). SASL handshake con
+  iteraciones HMAC + signing. ~500 LoC solo de SCRAM.
+- **Simple Query Protocol**: Query → CommandComplete / RowDescription
+  + DataRow* / ErrorResponse. Soporte para múltiples statements en
+  un solo Query (uso interno para `BEGIN`/`COMMIT`).
+- **Extended Query Protocol**: Parse → Bind → Execute → Sync.
+  Necesario para parametrized queries (`$1`/`$2` placeholders) y
+  evita SQL injection. Todas las queries del user pasan por aquí.
+- **Tipos OID core en MVP**: Int4 (23), Int8 (20), Float4 (700),
+  Float8 (701), Text (25), Varchar (1043), Bool (16), Timestamp
+  (1114), Timestamptz (1184), UUID (2950), Bytea (17). Conversión
+  bidireccional Postgres binary format ↔ Fitz `Value`. Date/Time/
+  JSON/arrays/etc. quedan para 10.5.
+- **SSL/TLS**: `sslmode=disable` (default para dev) y `sslmode=require`
+  (TLS handshake antes del StartupMessage). Sin cert verification
+  en MVP (`verify-ca` / `verify-full` post-MVP).
+- **Errors**: `ErrorResponse` Postgres → `Err(Str)` Fitz con
+  formato `"<severity>: <message>"`. Códigos SQLSTATE preservados
+  en el mensaje cuando sean útiles.
+- **Tests**: unit sobre framing + parsing de mensajes + SCRAM
+  handshake (vectors RFC 7677). E2E **opcionales bajo feature
+  `postgres-tests`** que arranca un Postgres 14+ en docker para
+  smoke real (no obligatorio en CI de cada commit, sí en CI de
+  release tags).
+
+**Criterio de éxito**: `let db = connect("postgres://...").await?;
+let rows = db.query("SELECT 1 AS n", []).await?; print(rows[0]["n"])`
+imprime `1`. Connection con SCRAM, query parametrizada, rows
+deserializados a `Map<Str, Any>`, paridad `fitz run` ↔ `fitz build`.
+
+#### 10.2 — Pool de conexiones + reconnect + health check (~400 LoC)
+
+Refina 10.1 con pool. API pública sin cambios visibles para el
+user — `connect` ahora acepta `max_conns` opcional.
+
+- **`connect(url, max_conns=10)`** devuelve un `Db` que internamente
+  tiene un pool de N conexiones. Default `max_conns=10`.
+- **Semaphore dispatch**: cada `db.query(...)` espera un permit del
+  semaphore, agarra una conn libre, ejecuta, libera. Sin
+  contention en queries paralelas hasta `max_conns`.
+- **Health check periódico**: thread/task background que cada 30s
+  hace `SELECT 1` sobre conns idle, descarta las que fallan.
+  Reconnect lazy en el próximo `query`.
+- **Reconnect automático**: si una conn del pool muere mid-query
+  (red caída), el driver reintenta una vez con otra conn del pool.
+  Si la query había hecho `INSERT` y no hay retry seguro (no
+  idempotente), error explícito.
+- **Tests**: unit sobre el pool (acquire/release, max_conns limit,
+  reconnect path), E2E (concurrent queries no se bloquean entre sí).
+
+**Criterio de éxito**: 10 handlers HTTP concurrentes haciendo
+queries no se serializan; cada uno agarra su conn del pool.
+
+#### 10.3 — `@table` + `@primary` + `@column` + CRUD básico (~800 LoC)
+
+Primer sub-paso del ORM declarativo. Sin relaciones todavía, solo
+CRUD sobre tablas individuales.
+
+- **Decoradores sobre `type`**: el lenguaje extiende decoradores
+  para aceptar `@table("posts")` / `@primary` / `@column(name="...")` /
+  `@unique` / `@index` sobre el `type` y sobre fields. Hoy
+  decoradores solo van sobre `fn`. Requiere extensión del parser
+  (decorators antes de `type` y antes de campos) + checker
+  (registra metadata en el `TypeId`).
+- **Builder type-safe**: `User.where(fn (u) => u.age > 18)
+  .order_by(fn (u) => u.name).limit(10).all().await?`. Métodos:
+  `.where(fn)` / `.order_by(fn)` / `.limit(n)` / `.offset(n)` /
+  `.all()` / `.first()` / `.count()`. El builder NO ejecuta hasta
+  `.all()/.first()/.count()` — composable.
+- **CRUD operations**: `User.create(data).await?` / `User.where(...)
+  .update(data).await?` / `User.where(...).delete().await?` /
+  `db.insert(user).await?` (sobre instancia).
+- **Translación**: el builder se traduce a SQL parametrizado en
+  build time (`fitz build`) o run time (`fitz run`). Cada `fn (u)
+  => u.age > 18` es una closure tipada → AST traversal → SQL `WHERE
+  age > $1`. Soporta operadores `== / != / > / >= / < / <= / && / ||
+  / !`, function calls `like(s, pattern)` / `in_(x, list)` /
+  `is_null(x)` / `contains(s, sub)`.
+- **Tipos de columna**: mapping `type` Fitz → SQL Postgres. `Int →
+  bigint`, `Float → double precision`, `Str → text`, `Bool →
+  boolean`, `Null en field nullable → NULL`, `default literal →
+  DEFAULT`. Tipos avanzados (JSONB/arrays/dates) llegan en 10.5.
+- **Tests**: unit sobre traducción closure → SQL (cubre operadores,
+  comparaciones, defaults, NULL), E2E con Postgres real (insert +
+  query + update + delete sobre `type User`).
+
+**Criterio de éxito**: el ejemplo del shape arriba sin relaciones
+(solo `User` y queries básicas) corre end-to-end contra Postgres
+real, paridad `fitz run` ↔ `fitz build`.
+
+#### 10.4 — Relaciones + cascades + lazy loading (~600 LoC)
+
+Agrega navegación entre tablas. Cierra el shape "ORM declarativo"
+del MVP.
+
+- **Decorators de relación sobre fields**: `@belongs_to("User",
+  on_delete="cascade")` / `@has_many("Post", via="author_id")` /
+  `@has_one("Profile")` / `@many_to_many(...)` (M2M en 10.6).
+  Validación del checker: tabla referenciada existe, FK column
+  existe en la tabla origen.
+- **Lazy navigation methods**: por cada decorator de relación, el
+  ORM emite un método sobre el `type`. Ejemplo: `post.author().
+  await? -> Result<User>` ejecuta `SELECT * FROM users WHERE id =
+  $author_id LIMIT 1`. `user.posts().await? -> Result<List<Post>>`.
+  Cada llamada dispara una query (lazy explicit).
+- **Cascades en migrations**: el decorator emite `ON DELETE
+  CASCADE` / `ON UPDATE RESTRICT` etc. en el SQL del FK constraint
+  cuando se genera la migration (10.7). Valores: `"cascade" /
+  "set_null" / "restrict" (default) / "no_action"`.
+- **FK column inference**: `@belongs_to("User")` sobre `type Post`
+  busca un field `author_id: Int` o `user_id: Int` (convención).
+  Si quiere otro nombre, override con `@belongs_to("User",
+  fk="created_by")`.
+- **Loading guard**: si el user hace `post.author_loaded()` sin
+  haber hecho `.include("author")` antes, error claro en runtime
+  ("relación 'author' no fue eager-loaded; usá `.include(\"author\")`
+  o `post.author().await?`").
+- **Tests**: unit (decorators parsean, checker valida tablas
+  referenciadas, métodos lazy se emiten), E2E (FK constraints
+  emitidos en SQL, cascade real con DELETE que dispara).
+
+**Criterio de éxito**: dado `post: Post`, `post.author().await?`
+devuelve `Result<User>` con UN query SELECT. DELETE de un User
+cascadea a sus Posts via FK constraint.
+
+#### 10.5 — Tipos avanzados (~600 LoC)
+
+JSONB, arrays Postgres, Date/Time/Timestamp, UUID. Cierra el
+mapping completo entre `type` Fitz y columnas Postgres reales.
+
+- **JSONB**: nuevo tipo `Json` en el lenguaje (alias para `Map<Str,
+  Any>` por debajo, marshaling JSON automático). Field `data:
+  Json?` → columna `jsonb`. Builder methods con `->` (`u.data ->
+  "address"`) y `->>` (text extraction) traducen a JSONB operators
+  Postgres. Indexes GIN auto cuando `@index` sobre Json field.
+- **Arrays**: `tags: List<Str>` → `text[]`. `categories: List<Int>`
+  → `bigint[]`. Builder methods `.contains(x)` → `ANY($1)`,
+  `.overlaps(xs)` → `&&`. Decoración `@array(dim=2)` para arrays
+  multi-dimensionales (raro pero útil).
+- **Date / Time / Timestamp**: tipos nuevos `Date` / `Time` /
+  `Timestamp` (alias estructurales por debajo). Coerción ISO 8601
+  bidireccional con Postgres. Built-ins `now()` / `today()` /
+  `parse_date(s)` / `parse_timestamp(s)`. Field con default `=
+  now()` emite `DEFAULT NOW()` en SQL.
+- **UUID**: tipo `Uuid` (representado como Str adentro pero validado
+  como UUID en marshaling). Field `@primary @uuid id: Uuid =
+  uuid_v4()` emite `DEFAULT gen_random_uuid()`.
+- **Tests**: unit sobre cada tipo (marshaling Postgres binary ↔
+  Fitz Value), E2E (insert + query con cada tipo).
+
+**Criterio de éxito**: un `type Post` con `data: Json?`, `tags:
+List<Str>`, `created_at: Timestamp = now()`, `uuid: Uuid =
+uuid_v4()` se inserta y se consulta con paridad bit-a-bit.
+
+#### 10.6 — Eager loading + M2M + self-referential + soft deletes (~700 LoC)
+
+Cierra las features relacionales del MVP.
+
+- **`.include(...)` eager loading**: `Post.where(...).include("author",
+  "tags", "comments.author").all().await?`. El builder traduce a
+  LEFT JOIN(s) en una sola query, agrupa resultados por PK del row
+  principal, hidrata las relaciones embebidas en cada instancia. El
+  user accede via `post.author_loaded() -> User` (sin `.await?`,
+  ya está en memoria) o sigue usando `post.author().await?` (lazy,
+  refetch). Métodos `_loaded()` emitidos por el ORM por cada
+  relación.
+- **Nested include**: `.include("comments.author.profile")` carga
+  comments → author → profile en cascada. Genera múltiples LEFT
+  JOINs o subqueries optimizadas según depth.
+- **Many-to-many con pivot explícita**: `@many_to_many("Tag",
+  via="PostTag")` exige que `PostTag` sea un `type` declarado con
+  `@table("post_tags")` y dos `@belongs_to` (a Post y Tag). El
+  checker valida que existe y tiene el shape correcto. Navigation
+  `post.tags().await?` resuelve via 2 FKs.
+- **Self-referential**: `@has_many("Comment", via="parent_id")`
+  sobre `type Comment { parent_id: Int? }`. El checker permite el
+  self-reference si el FK column es nullable. Útil para threading
+  (replies), categorías anidadas, árboles de organización.
+- **Soft deletes**: `@soft_delete` sobre el `type` agrega un field
+  implícito `deleted_at: Timestamp?` (NULL = activo). Queries
+  default filtran rows con `deleted_at IS NULL`. Opt-out con
+  `.with_deleted()` builder method. `Post.delete()` setea
+  `deleted_at = NOW()` en vez de hacer DELETE real. `.hard_delete()`
+  fuerza DELETE real.
+- **Tests**: unit (translación de include → LEFT JOIN, M2M
+  validation, self-ref validation, soft delete filter), E2E (un
+  query con includes carga todo en una sola pasada, M2M real con
+  pivot table, threading de comments funciona, soft delete oculta
+  rows).
+
+**Criterio de éxito**: el ejemplo entero del shape arriba
+(`get_post` con includes anidados + comments self-referential +
+tags via M2M + soft delete sobre Post) corre bit-a-bit con UN
+solo query SQL.
+
+#### 10.7 — Transactions + raw SQL + `fitz db diff` + `fitz db migrate` (~1000 LoC)
+
+Migraciones autogeneradas + escape hatch + transactions. Sub-paso
+más grande del MVP (cierra el ciclo "dev workflow"). 
+
+- **Transactions closure-scope**: `db.transaction(fn (tx) => {
+  tx.insert(...).await?; tx.update(...).await?; Ok(value) }).await?`.
+  El closure recibe un `Tx` (subset de `Db` con queries) en vez
+  del pool. `Ok(...)` → COMMIT, `Err(...)` → ROLLBACK, panic → 
+  ROLLBACK. El `Tx` agarra UNA conn del pool durante la duración
+  del closure. Isolation level configurable: `db.transaction_with(
+  level="serializable", fn (tx) => ...)`. Niveles: `"read_uncommitted" /
+  "read_committed" (default) / "repeatable_read" / "serializable"`.
+- **Raw SQL escape hatch**: `db.query("SELECT ... WHERE x = $1",
+  [arg]).await?` con placeholders `$1`/`$2`. Devuelve `List<Row>`
+  donde `Row = Map<Str, Any>`. Variante tipada `db.query_as<User>("...",
+  args).await?` mapea cada row a `User` validando shape (paralelo
+  a `__FromFitzJson` de HTTP).
+- **`fitz db diff`** subcomando nuevo:
+  - Conecta a Postgres con la URL del manifest (sección
+    `[database]` en `fitz.toml`).
+  - Introspecciona el schema vivo via `information_schema`
+    (tables, columns, FKs, indexes).
+  - Compara con los `type` con `@table` del proyecto.
+  - Calcula el diff: `CREATE TABLE` para tablas nuevas, `ALTER
+    TABLE ADD COLUMN` para fields nuevos, `ALTER TABLE DROP
+    COLUMN` con confirmación (destructivo), `ALTER TABLE ALTER
+    COLUMN TYPE` cuando el tipo cambió, `CREATE INDEX` /
+    `DROP INDEX`, FK constraints con `ADD CONSTRAINT` /
+    `DROP CONSTRAINT`.
+  - Emite `migrations/0042_<auto_label>.sql` con timestamp + label
+    derivada del diff (`0042_add_email_to_user.sql`).
+  - El user revisa, edita si hace falta, y commitea.
+- **`fitz db migrate`** aplica las migrations pendientes:
+  - Tabla `_fitz_migrations` en Postgres con `(filename, applied_at)`.
+  - Detecta archivos nuevos en `migrations/` (orden alfabético) que
+    no están en `_fitz_migrations`.
+  - Aplica cada uno adentro de una transaction. Falla → ROLLBACK +
+    error claro (qué archivo, qué error, qué línea SQL).
+  - Idempotente: re-correr sin migrations nuevas es no-op.
+- **`fitz db rollback`** revierte la última migration aplicada
+  (requiere que el archivo tenga sección `-- DOWN` con SQL inverso).
+  Sin sección `-- DOWN`, error claro pidiéndolo.
+- **Tests**: unit sobre diff engine (cubre cada tipo de cambio:
+  add/drop column, change type, add/drop FK, add/drop index), E2E
+  con Postgres real (full workflow: edit `type`, `fitz db diff`,
+  inspect SQL, `fitz db migrate`, verify schema en Postgres).
+
+**Criterio de éxito**: agregar `email: Str` a `type User`, correr
+`fitz db diff`, ver `0042_add_email_to_user.sql` con `ALTER TABLE
+users ADD COLUMN email text NOT NULL`, correr `fitz db migrate`,
+ver la columna en Postgres real.
+
+#### 10.8 — LISTEN/NOTIFY pub/sub (~250 LoC)
+
+Pub/sub nativo de Postgres integrado con `@background` de 9.w.3.
+Reemplaza Redis pub/sub para el caso típico.
+
+- **`db.listen(channel, fn (payload) => ...).await?`** registra un
+  handler para mensajes en ese channel. Internamente: una conn
+  dedicada del pool queda en estado `LISTEN <channel>`, el driver
+  parsea `NotificationResponse` y dispara el callback via
+  `tokio::spawn` (paralelo a `@background`).
+- **`db.notify(channel, payload)`** emite. Payload es `Str` (Postgres
+  limit ~8000 bytes). Para payloads grandes, convención: emitir un
+  ID y dejar que el listener fetchee.
+- **Reconnect handling**: si la conn dedicada al LISTEN muere, el
+  driver re-conecta + re-emite `LISTEN <channel>`. Pero notificaciones
+  emitidas durante el downtime se pierden (limitación de Postgres,
+  documentada).
+- **Integración con `@background`**: el callback de `listen` puede
+  ser una fn `@background`, encaja con el modelo de 9.w.3 sin glue
+  extra.
+- **Tests**: unit (parsing de NotificationResponse, dispatch del
+  handler), E2E (Postgres real, un proceso emite, otro escucha,
+  payload llega).
+
+**Criterio de éxito**: dos procesos Fitz conectados al mismo
+Postgres, uno hace `db.notify("user_created", "42")`, el otro
+escucha con `db.listen("user_created", fn (payload) => ...)` y
+ejecuta el callback.
+
+#### 10.9 — Full-text search (~400 LoC)
+
+FTS nativo de Postgres con builder method. Reemplaza Elasticsearch
+para muchos casos.
+
+- **`@tsvector("title, body")`** decorator sobre `type` agrega
+  field implícito `search_tsv: Tsvector` + trigger Postgres auto
+  que actualiza el tsvector cuando title/body cambian.
+- **`.search(query)`** builder method: `Post.where(...).search("rust
+  postgres").rank().limit(10).all()`. Traduce a `WHERE search_tsv
+  @@ websearch_to_tsquery($1) ORDER BY ts_rank(search_tsv, query)
+  DESC`.
+- **Highlighting opcional**: `.search(query).highlight("title",
+  "body")` agrega columnas calculadas con `ts_headline()` para
+  resaltar matches con `<mark>...</mark>`.
+- **Language config**: `@tsvector("title, body", lang="spanish")`
+  para stemming en idioma específico. Default `english`.
+- **Tests**: unit (traducción `.search` → SQL), E2E (Postgres
+  real, FTS query con ranking devuelve rows ordenados por relevancia).
+
+**Criterio de éxito**: `Post.search("postgres tutorial").rank()
+.limit(5).all().await?` devuelve los 5 posts más relevantes
+ordenados por ts_rank.
+
+#### 10.10 — Guía + ejemplo runnable + refresh boilerplates + cierre formal (~docs)
+
+Último sub-paso. Documentación + cierre.
+
+- **Cap nuevo en `docs/guide.md`** "Stack DB nativo" entre cap 30
+  ("Jobs sin Celery") y cap 31 ("Qué sigue", renumeración 31→32).
+  Sub-secciones:
+  - "Cómo se ve" (panorama vs Prisma / Drizzle / Diesel / SQLAlchemy)
+  - Setup (`connect(...)`, connection string, pool)
+  - `@table` + `@primary` + `@column`
+  - CRUD básico (where, order_by, limit, all, first)
+  - Relaciones (belongs_to, has_one, has_many, M2M con pivot)
+  - Cascades
+  - Lazy vs eager con `.include(...)`
+  - Self-referential
+  - Soft deletes
+  - JSONB / arrays / dates / UUID
+  - Transactions
+  - Raw SQL escape hatch
+  - Migraciones (`fitz db diff` / `migrate` / `rollback`)
+  - LISTEN/NOTIFY + integración con `@background`
+  - Full-text search
+  - Por qué Fitz hace esto distinto (5 diferenciales con panorama
+    vecino vs ORMs existentes — política `feedback_guide_emphasize_uniqueness`)
+- **Ejemplo runnable** `examples/guide/31-db.fitz`: app completa
+  con usuarios + posts + comments + tags. POST/GET endpoints +
+  transactions + LISTEN/NOTIFY + FTS. <150 LoC. Se suma al smoke
+  `GUIDE_EXAMPLES_COMPILE`.
+- **Refresh boilerplates 5/6**: reemplaza la layer SQLAlchemy via
+  interop Python por la DB nativa. Mejora visible: simplifica
+  Dockerfile (~150 MB → ~80-100 MB sin necesidad de runtime
+  Python), elimina `models.py` + `db.py` Python, todo en `.fitz`.
+- **README emphasis**: bullets en feature table del README + nota
+  en "Estado del proyecto" + footnote dedicada con los 5
+  diferenciales contra Prisma/Drizzle/Diesel/SQLAlchemy.
+- **CHANGELOG v0.10.0** entrada gigante.
+- **Roadmap update**: marca Fase 10 entera como CERRADA, suma
+  deuda residual derivada.
+
+**Criterio de éxito**: el cap del guide compila el ejemplo
+runnable con `fitz build`, paridad bit-a-bit con `fitz run`,
+boilerplates 5/6 simplificados y validados end-to-end.
+
+### Decisiones tácticas chicas (resolver al arrancar 10.1)
+
+- **Postgres mínimo: 14+**. Cubre ~98% del market, SCRAM-SHA-256
+  es default desde 13, JSONB maduro. Postgres 16 tiene goodies
+  (logical replication, MERGE) pero no son MVP.
+- **Nombre del módulo built-in: `db`**. Paralelo a `jwt` / `hash`
+  / `json` de 9.w.1 y 8.x. Genérico, abre puerta a otros drivers
+  post-MVP (mysql/sqlite) sin breaking change.
+- **Connection string format**: URI estándar
+  `postgres://user:pass@host:port/dbname?sslmode=...`. Mismo que
+  libpq, psycopg2, pgx, sqlx. Familiar para todos.
+- **SSL/TLS modes**: `disable` (default dev) + `require` en MVP.
+  `verify-ca` / `verify-full` post-MVP (cert pinning).
+- **Encoding**: UTF-8 only. Postgres default desde 9.0.
+- **Migrations format**: SQL plano emitido por `fitz db diff`.
+  Sin DSL Fitz (sin mid-level IR). Máxima transparencia, el user
+  lee y entiende. DSL Fitz queda como deuda futura si aparece
+  pedido de portar a otro motor.
+- **DB URL en manifest**: nueva sección `[database]` en `fitz.toml`:
+  ```toml
+  [database]
+  url = "postgres://localhost:5432/myapp"
+  # o env-driven:
+  url = "${env:DATABASE_URL}"
+  ```
+  Resolución de `${env:...}` reusa la mini-fase env builtin
+  (`env(key)` / `env_or(key, default)`) ya cerrada el 2026-05-22.
+
+### Deuda residual diferida a Fase 10.x post-MVP
+
+Lo que NO entra al MVP pero está documentado para sub-fases futuras:
+
+- **Polymorphic associations** (~400 LoC, complica el checker con
+  unión de tipos, pocos casos reales). Estilo Rails `commentable_id` +
+  `commentable_type`.
+- **Multi-DB** (MySQL, SQLite). El abstract `db` module está
+  diseñado para soportarlo, pero los drivers concretos son fases
+  separadas. SQLite es razonable de meter por su simplicidad
+  (cero auth, archivo local) si aparece presión para dev workflow
+  sin Postgres.
+- **TLS verify-ca / verify-full**. Production security hardening.
+- **Read replicas**. `connect(primary, replicas=[...])` con routing
+  automático (writes → primary, reads → replica round-robin).
+- **Prepared statements cache**. Hoy cada query parametriza con
+  Extended Query desde cero. Cache de prepared statements ahorra
+  ~1 round-trip por query repetida.
+- **Query plan inspection** (`EXPLAIN`). Útil para debugging pero
+  no MVP.
+- **Copy protocol** (bulk insert). `db.copy_from(table, rows)`
+  para bulk loading. ~10x más rápido que `INSERT` masivo. Útil
+  para data import.
+- **Savepoints anidados explícitos**. Hoy las transactions son
+  flat (un solo nivel). Anidamiento real (`SAVEPOINT` / `RELEASE`
+  / `ROLLBACK TO`) post-MVP.
+- **Soft delete con cascade soft** (cuando un parent se soft-deletea,
+  los children también se marcan). Hoy cascade es solo en hard
+  delete.
+- **Validation hooks**: `@before_create fn validate_user(u: User) ->
+  Result<Null>`. Estilo ActiveRecord callbacks.
+- **DSL Fitz para migrations** (vs SQL plano). Sub-paso futuro si
+  aparece pedido de multi-DB portability.
+
+### Por qué Fitz hace esto distinto (diferenciales vs ORMs existentes)
+
+Política `feedback_guide_emphasize_uniqueness` aplicada al diseño:
+
+1. **Driver puro Fitz, cero deps de sistema**. Prisma necesita
+   Node.js + Rust engine binario. SQLAlchemy necesita Python +
+   psycopg2 + libpq. Diesel necesita libpq instalado. Fitz no
+   necesita nada — el binario produced por `fitz build` habla
+   Postgres wire protocol directo.
+2. **Paridad bit-a-bit `fitz run` ↔ `fitz build`**. El ORM funciona
+   IDÉNTICO en interpretado y compilado. Mismo SQL emitido, mismas
+   queries, mismo resultset. No hay "modo dev" vs "modo prod" que
+   diverja.
+3. **Validación estática end-to-end**. El checker valida `user.email`
+   contra el field declarado en el `type User`, `User.where(fn (u)
+   => u.invalid_field == 1)` falla en compile time. Prisma genera
+   un client TypeScript que valida en el TypeScript checker (capa
+   adicional). SQLAlchemy valida en runtime. Fitz valida directo
+   en el checker del lenguaje.
+4. **Migrations del diff sin DSL intermedio**. Prisma tiene
+   `schema.prisma` (DSL custom). Alembic Python tiene
+   `op.add_column()` (Python). Fitz emite SQL plano directo, el
+   user lo lee y entiende.
+5. **Integrado con el resto del lenguaje**. JSONB acoplado a `type
+   Foo` Fitz. Relaciones con type-safety. LISTEN/NOTIFY conectado
+   con `@background` de Jobs (9.w.3). Auth (9.w.1) + DB (Fase 10)
+   + WS (9.w.2) + Cron (9.w.3) son piezas que se ensamblan natural,
+   no librerías separadas que el user tiene que pegar.
+
+---
+
+## Visión post-Fase 10 — Fase 11+ 🔮
 
 **Estado: especulativo.** Estas fases no están comprometidas en
 el orden — son la visión a largo plazo del proyecto. Cada una
 requiere su propia ronda de diseño antes de arrancar. Sirven hoy
-como **norte direccional**: las decisiones de Fase 9 (package
-manager, DX, web stack) se evalúan contra "¿esto encaja con la
-visión de 10/11/12?".
+como **norte direccional**: las decisiones de Fase 10 (DB nativa)
+se evalúan contra "¿esto encaja con la visión de 11/12/13?".
 
-### Fase 10 — Stack DB nativo + ORM declarativo
-
-**Promesa**: cerrar el "stack web completo en el lenguaje" —
-backend + DB nativo, sin necesidad de interop con Python/Ruby/etc
-para acceder a una base de datos relacional.
-
-- Driver Postgres en Fitz puro (no wrapper de libpq).
-  Inspiración: sqlx-postgres en Rust.
-- ORM declarativo sobre `type` (anotaciones `@table`, `@primary`,
-  `@unique`, etc.).
-- Migraciones autogeneradas del diff de `type` vs schema actual.
-- Pool de conexiones built-in.
-- `fitz db` subcomando con `diff`, `migrate`, `rollback`, `seed`.
-
-**Por qué importa**: hoy todo proyecto serio en Fitz necesita
-SQLAlchemy via interop Python (cap 21 de la guía). Fase 10 la
-convierte en "opcional para Python ecosystem", no en "obligatorio
-para DB".
-
-**Inspiración**: sqlx (compile-time SQL check), Diesel (ORM
-tipado en Rust), Prisma (migraciones del diff de schema).
+> **Fase 10 (Stack DB nativo + ORM declarativo)** salió de esta
+> sección porque tiene **diseño cerrado** y está planificada con
+> sub-pasos detallados. Ver la sección dedicada **Fase 10 — Stack
+> DB nativo + ORM declarativo** arriba.
 
 ### Fase 11 — Frontend en `.fitz` (SFC + SSR)
 
@@ -7768,16 +8341,18 @@ solo web.
 
 ### Por qué este orden
 
-1. **Package manager primero** (Fase 9.y) — pre-requisito de
-   todo lo demás. Sin manifest no hay tests con discovery, sin
+1. **Package manager primero** (Fase 9.y, cerrada) — pre-requisito
+   de todo lo demás. Sin manifest no hay tests con discovery, sin
    deps no hay ecosystem.
-2. **DX completo** (Fase 9.z) — segunda capa de tooling.
+2. **DX completo** (Fase 9.z, cerrada) — segunda capa de tooling.
    Necesita el manifest del package manager pero no más.
-3. **Stack web first-class** (Fase 9.w) — primera extensión al
-   lenguaje core post-tooling. Aprovecha el momentum del LSP +
-   package manager + DX para meter features grandes.
-4. **Fase 10 (DB)** — necesaria antes de Fase 11 (frontend)
-   porque sin DB el "stack completo" no tiene sustancia.
+3. **Stack web first-class** (Fase 9.w, MVP cerrado) — primera
+   extensión al lenguaje core post-tooling. Aprovecha el momentum
+   del LSP + package manager + DX para meter features grandes.
+4. **Fase 10 (DB)** — planificada con diseño cerrado (ver sección
+   dedicada arriba). Próximo norte comprometido. Necesaria antes
+   de Fase 11 (frontend) porque sin DB el "stack completo" no
+   tiene sustancia.
 5. **Fase 11 (Frontend)** — la apuesta más grande. Requiere todo
    lo anterior maduro.
 6. **Fase 12 (Deploy)** — cierra el ciclo. Mejor con el
