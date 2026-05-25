@@ -4558,7 +4558,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`QueryBuilder` no tiene el método `{}` (soportados: where, order_by, limit, offset, all, first, count, update, delete)",
+                "`QueryBuilder` no tiene el método `{}` (soportados: where, order_by, limit, offset, all, first, count, sum, avg, min, max, update, delete)",
                 method,
             ),
         )));
@@ -10426,6 +10426,18 @@ pub fn orm_dispatch_qb_method(
         "delete" => orm_qb_delete(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        "sum" => orm_qb_aggregate(state, args, span, "SUM")
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "min" => orm_qb_aggregate(state, args, span, "MIN")
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "max" => orm_qb_aggregate(state, args, span, "MAX")
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "avg" => orm_qb_avg(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
         _ => Ok(None),
     }
 }
@@ -10921,6 +10933,262 @@ fn orm_qb_count(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzR
                     .unwrap_or(0);
                 Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
                     Value::Int(count),
+                ))))
+            }
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// Fase 10.5.f1 — extrae el nombre del field accedido desde un
+/// closure `fn(u) => u.field`. Devuelve el nombre Fitz del field
+/// (sin override SQL aplicado todavía). Errores: closure de
+/// aridad ≠ 1, body no es expr `u.field` (puede haber `-u.field`
+/// para soportar DESC en order_by, pero acá no — el aggregate no
+/// tiene direction).
+fn field_from_closure(
+    closure: &Value,
+    span: Span,
+    fields: &[crate::ast::Field],
+) -> FitzResult<String> {
+    let (params, body) = match closure {
+        Value::Function { params, body, .. } => (params.clone(), body.clone()),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Function".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "agregado espera `fn(u) => u.field`, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    if params.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            "el closure del agregado espera 1 parámetro".to_string(),
+        ));
+    }
+    let param_name = params[0].name.clone();
+    let body_expr = match body.as_slice() {
+        [crate::ast::Stmt::Return(e, _)] => e.clone(),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                "el closure del agregado debe ser `fn(u) => u.field`".to_string(),
+            ));
+        }
+    };
+    let (object, field) = match &body_expr {
+        crate::ast::Expr::Field { object, field, .. } => (object.as_ref(), field.clone()),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                "el closure del agregado debe ser `u.field` (sin operadores ni literales)"
+                    .to_string(),
+            ));
+        }
+    };
+    match object {
+        crate::ast::Expr::Ident(name, _) if name == &param_name => {}
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "el closure del agregado debe acceder al parámetro (`{}.field`)",
+                    param_name
+                ),
+            ));
+        }
+    }
+    if !fields.iter().any(|f| f.name == field) {
+        return Err(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "agregado: field `{field}` no existe en el type (fields: {})",
+                fields
+                    .iter()
+                    .map(|f| f.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+    Ok(field)
+}
+
+/// Fase 10.5.f1 — genérico para `sum`/`min`/`max`. Emite
+/// `SELECT <FUNC>("col") AS "__agg" FROM table [WHERE ...]`.
+/// `avg` va por `orm_qb_avg` separado porque casteamos a float8.
+///
+/// Args: `[closure, db]`. El closure es `fn(u) => u.field`.
+/// Devuelve `Future<Result<Int|Float>>` según el tipo de col:
+/// el OID del result del server determina el `PgValue` y
+/// `pg_value_to_fitz` lo convierte.
+///
+/// Para resultset vacío (e.g. SUM sobre WHERE que no matchea
+/// nada), Postgres devuelve NULL → `Result::Ok(Value::Null)`.
+/// El user matchea Null si querría tratarlo como cero.
+fn orm_qb_aggregate(
+    state: QueryBuilderState,
+    args: Vec<Value>,
+    span: Span,
+    sql_func: &'static str,
+) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.{}(closure, db)` espera 2 argumentos, recibió {}",
+                sql_func.to_lowercase(),
+                args.len()
+            ),
+        ));
+    }
+    let field_name = field_from_closure(&args[0], span, &state.fields)?;
+    let db_handle = match &args[1] {
+        Value::DbConn(h) => Arc::clone(h),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "DbConn".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.{}(closure, db)` segundo arg debe ser DbConn, recibió `{}`",
+                    sql_func.to_lowercase(),
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let sql_col = state
+        .meta
+        .columns
+        .get(&field_name)
+        .and_then(|c| c.sql_name.as_deref())
+        .unwrap_or(field_name.as_str());
+    let mut sql = format!(
+        "SELECT {}(\"{}\") AS \"__agg\" FROM \"{}\"",
+        sql_func, sql_col, state.meta.sql_name
+    );
+    if let Some(w) = &state.where_sql {
+        sql.push_str(" WHERE ");
+        sql.push_str(w);
+    }
+    let where_args = state.where_args.clone();
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match db_handle.query(&sql, &where_args).await {
+            Ok(qr) => {
+                let pg = qr
+                    .rows
+                    .first()
+                    .and_then(|r| r.get("__agg"))
+                    .cloned()
+                    .unwrap_or(crate::db::PgValue::Null);
+                let value = pg_value_to_fitz(&pg);
+                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                    value,
+                ))))
+            }
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// Fase 10.5.f1 — `.avg(closure, db)` con cast a float8.
+/// Diferenciado de sum/min/max porque Postgres devuelve `numeric`
+/// (OID 1700) por default para AVG, y nuestro driver no soporta
+/// numeric en MVP. El cast explícito `::float8` produce un OID
+/// FLOAT8 (701) que `pg_value_to_fitz` mapea a Float.
+fn orm_qb_avg(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.avg(closure, db)` espera 2 argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let field_name = field_from_closure(&args[0], span, &state.fields)?;
+    let db_handle = match &args[1] {
+        Value::DbConn(h) => Arc::clone(h),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "DbConn".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.avg(closure, db)` segundo arg debe ser DbConn, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let sql_col = state
+        .meta
+        .columns
+        .get(&field_name)
+        .and_then(|c| c.sql_name.as_deref())
+        .unwrap_or(field_name.as_str());
+    let mut sql = format!(
+        "SELECT AVG(\"{}\")::float8 AS \"__agg\" FROM \"{}\"",
+        sql_col, state.meta.sql_name
+    );
+    if let Some(w) = &state.where_sql {
+        sql.push_str(" WHERE ");
+        sql.push_str(w);
+    }
+    let where_args = state.where_args.clone();
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match db_handle.query(&sql, &where_args).await {
+            Ok(qr) => {
+                let pg = qr
+                    .rows
+                    .first()
+                    .and_then(|r| r.get("__agg"))
+                    .cloned()
+                    .unwrap_or(crate::db::PgValue::Null);
+                let value = pg_value_to_fitz(&pg);
+                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                    value,
                 ))))
             }
             Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(

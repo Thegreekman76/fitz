@@ -995,3 +995,169 @@ async fn orm_belongs_to_y_has_many_e2e() {
     let _ = seed.exec("DROP TABLE fitz_orm_users_test", &[]).await;
     seed.close().await.unwrap();
 }
+
+// =============================================================
+// Fase 10.5.f1 — Agregados (sum / avg / min / max)
+// =============================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_aggregates_sum_avg_min_max_e2e() {
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_agg_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_agg_test (id bigint, name text, age int)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_agg_test VALUES (1, 'kid', 10), (2, 'ada', 30), (3, 'alan', 42), (4, 'grace', 55)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Programa Fitz: sum/min/max/avg sobre `age` con filtro adultos.
+    // Esperado: sum = 30+42+55 = 127; min = 30; max = 55;
+    // avg = 127/3 ≈ 42.33.
+    let src = format!(
+        "@table(\"fitz_orm_agg_test\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let adultos = User.where(fn(u) => u.age > 18)\n  \
+             let total_age = adultos.sum(fn(u) => u.age, db).await?\n  \
+             let min_age = adultos.min(fn(u) => u.age, db).await?\n  \
+             let max_age = adultos.max(fn(u) => u.age, db).await?\n  \
+             let avg_age = adultos.avg(fn(u) => u.age, db).await?\n  \
+             return Ok({{ \"sum\": total_age, \"min\": min_age, \"max\": max_age, \"avg\": avg_age }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let (sum, min, max, avg) = {
+        let m = match outer_map {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        let map = m.lock();
+        let get = |key: &str| {
+            map.iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        };
+        (get("sum"), get("min"), get("max"), get("avg"))
+    };
+
+    // Sum/min/max sobre Int devuelven Int.
+    assert_eq!(sum, Value::Int(127));
+    assert_eq!(min, Value::Int(30));
+    assert_eq!(max, Value::Int(55));
+    // Avg emite CAST a float8 → Float.
+    match avg {
+        Value::Float(x) => {
+            assert!(
+                (x - 42.333_333).abs() < 0.01,
+                "esperaba avg ≈ 42.33, fue {x}"
+            );
+        }
+        other => panic!("esperaba Float, fue {:?}", other),
+    }
+
+    let _ = seed.exec("DROP TABLE fitz_orm_agg_test", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_aggregate_sobre_set_vacio_devuelve_null() {
+    // SUM/AVG/MIN/MAX sobre 0 rows → Postgres devuelve NULL.
+    // El ORM lo expone como Value::Null adentro de Result::Ok.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_empty_agg", &[])
+        .await;
+    seed.exec("CREATE TABLE fitz_orm_empty_agg (id bigint, age int)", &[])
+        .await
+        .unwrap();
+    // Insertamos 1 row pero la filtramos con WHERE imposible.
+    seed.exec("INSERT INTO fitz_orm_empty_agg VALUES (1, 10)", &[])
+        .await
+        .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_empty_agg\") type Row {{\n  \
+             id: Int\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // WHERE imposible (age > 999) → set vacío.\n  \
+             let q = Row.where(fn(r) => r.age > 999)\n  \
+             let total = q.sum(fn(r) => r.age, db).await?\n  \
+             return Ok({{ \"sum\": total }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        other => panic!("esperaba Ok, fue {:?}", other),
+    };
+    let sum = match outer_map {
+        Value::Map(s) => {
+            let map = s.lock();
+            map.iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == "sum"))
+                .map(|(_, v)| v.clone())
+                .unwrap()
+        }
+        other => panic!("esperaba Map, fue {:?}", other),
+    };
+    assert_eq!(sum, Value::Null, "SUM sobre set vacío debe ser Null");
+
+    let _ = seed.exec("DROP TABLE fitz_orm_empty_agg", &[]).await;
+    seed.close().await.unwrap();
+}
