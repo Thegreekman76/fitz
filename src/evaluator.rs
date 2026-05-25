@@ -25803,9 +25803,8 @@ let r = match n {
     #[test]
     fn translate_method_call_combina_con_and() {
         let (fields, meta) = make_test_meta();
-        let expr = parse_closure_body(
-            "fn (u) => u.name.starts_with(\"a\") and u.age.is_in([30, 42])",
-        );
+        let expr =
+            parse_closure_body("fn (u) => u.name.starts_with(\"a\") and u.age.is_in([30, 42])");
         let mut args = Vec::new();
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
         assert!(
@@ -25893,17 +25892,11 @@ let r = match n {
         // Map<Str, Int> NO es lista
         let t = TypeExpr::Generic {
             name: "Map".into(),
-            args: vec![
-                TypeExpr::Named("Str".into()),
-                TypeExpr::Named("Int".into()),
-            ],
+            args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
         };
         assert_eq!(list_elem_pg_oid(&t), None);
         // Int suelto tampoco
-        assert_eq!(
-            list_elem_pg_oid(&TypeExpr::Named("Int".into())),
-            None
-        );
+        assert_eq!(list_elem_pg_oid(&TypeExpr::Named("Int".into())), None);
     }
 
     #[test]

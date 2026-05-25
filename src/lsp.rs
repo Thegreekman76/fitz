@@ -971,12 +971,7 @@ fn after_dot_completions(
         // dedicado en MVP), así que el dispatch por tipo no lo detecta.
         // Resolvemos por nombre acá.
         "db" => {
-            return method_items(&[
-                (
-                    "connect",
-                    "async fn(url: Str) -> Result<DbConn>".into(),
-                ),
-            ]);
+            return method_items(&[("connect", "async fn(url: Str) -> Result<DbConn>".into())]);
         }
         _ => {}
     }
@@ -1642,23 +1637,29 @@ fn after_dot_completions(
             method_items(&[
                 (
                     "where",
-                    format!("fn(closure: fn({}) -> Bool) -> QueryBuilder<{}>", row_disp, row_disp),
+                    format!(
+                        "fn(closure: fn({}) -> Bool) -> QueryBuilder<{}>",
+                        row_disp, row_disp
+                    ),
                 ),
                 (
                     "order_by",
-                    format!("fn(closure: fn({}) -> Any) -> QueryBuilder<{}>", row_disp, row_disp),
+                    format!(
+                        "fn(closure: fn({}) -> Any) -> QueryBuilder<{}>",
+                        row_disp, row_disp
+                    ),
                 ),
-                (
-                    "limit",
-                    format!("fn(n: Int) -> QueryBuilder<{}>", row_disp),
-                ),
+                ("limit", format!("fn(n: Int) -> QueryBuilder<{}>", row_disp)),
                 (
                     "offset",
                     format!("fn(n: Int) -> QueryBuilder<{}>", row_disp),
                 ),
                 (
                     "group_by",
-                    format!("fn(closure: fn({}) -> Any) -> QueryBuilder<{}>", row_disp, row_disp),
+                    format!(
+                        "fn(closure: fn({}) -> Any) -> QueryBuilder<{}>",
+                        row_disp, row_disp
+                    ),
                 ),
                 (
                     "all",
@@ -1671,23 +1672,36 @@ fn after_dot_completions(
                 ("count", "async fn(db: DbConn) -> Result<Int>".into()),
                 (
                     "sum",
-                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                    format!(
+                        "async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>",
+                        row_disp
+                    ),
                 ),
                 (
                     "avg",
-                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                    format!(
+                        "async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>",
+                        row_disp
+                    ),
                 ),
                 (
                     "min",
-                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                    format!(
+                        "async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>",
+                        row_disp
+                    ),
                 ),
                 (
                     "max",
-                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                    format!(
+                        "async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>",
+                        row_disp
+                    ),
                 ),
                 (
                     "update",
-                    "async fn(db: DbConn, changes: Map<Str, Any>) -> Result<Int>  // rows affected".into(),
+                    "async fn(db: DbConn, changes: Map<Str, Any>) -> Result<Int>  // rows affected"
+                        .into(),
                 ),
                 (
                     "delete",
@@ -3880,10 +3894,7 @@ mod tests {
         assert_eq!(db_item.kind, Some(CompletionItemKind::MODULE));
         // Tipos built-in DbConn y DbRow aparecen como CLASS.
         for t in ["DbConn", "DbRow"] {
-            assert!(
-                labels.contains(&t),
-                "falta tipo built-in `{t}`: {labels:?}"
-            );
+            assert!(labels.contains(&t), "falta tipo built-in `{t}`: {labels:?}");
         }
     }
 
@@ -3910,7 +3921,8 @@ mod tests {
         // completo `conn.close()` para que el parser no abandone el
         // stmt y el Expr::Ident(conn) quede en TypeInfo. Cursor entre
         // `.` y el método dispara AfterDot.
-        let src = "async fn run(conn: DbConn) -> Null {\n  let _ = conn.close()\n  return null\n}\n";
+        let src =
+            "async fn run(conn: DbConn) -> Null {\n  let _ = conn.close()\n  return null\n}\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         // Cursor en línea 1, col 15 (justo después de `conn.`).
         let items = completion_at_position(src, &program, &type_info, &env, 1, 15);
@@ -3962,7 +3974,9 @@ mod tests {
         let items = completion_at_position(src, &program, &type_info, &env, 7, 15);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         // Si los completions del QB están funcionando, deben estar:
-        for expected in ["where", "order_by", "limit", "offset", "all", "first", "count"] {
+        for expected in [
+            "where", "order_by", "limit", "offset", "all", "first", "count",
+        ] {
             assert!(
                 labels.contains(&expected),
                 "falta método QB `{expected}`: {labels:?}"

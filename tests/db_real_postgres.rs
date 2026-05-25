@@ -2127,9 +2127,7 @@ async fn orm_date_time_timestamp_e2e() {
     // `Str` con el formato ISO 8601 que Postgres emite y acepta.
     let url = pg_url();
     let seed = connect_url(&url).await.unwrap();
-    let _ = seed
-        .exec("DROP TABLE IF EXISTS fitz_orm_dt", &[])
-        .await;
+    let _ = seed.exec("DROP TABLE IF EXISTS fitz_orm_dt", &[]).await;
     seed.exec(
         "CREATE TABLE fitz_orm_dt (\
             id bigint PRIMARY KEY,\
@@ -2230,9 +2228,7 @@ async fn orm_uuid_e2e() {
     // canonical de UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
     let url = pg_url();
     let seed = connect_url(&url).await.unwrap();
-    let _ = seed
-        .exec("DROP TABLE IF EXISTS fitz_orm_uuid", &[])
-        .await;
+    let _ = seed.exec("DROP TABLE IF EXISTS fitz_orm_uuid", &[]).await;
     seed.exec(
         "CREATE TABLE fitz_orm_uuid (id uuid PRIMARY KEY, name text)",
         &[],

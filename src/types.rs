@@ -3855,7 +3855,9 @@ fn infer_method_call(
         // `Result<...>` con el shape apropiado.
         Type::QueryBuilder(row) => {
             let row_ty = (**row).clone();
-            Some(infer_query_builder_method(ctx, &row_ty, method, args_ty, span))
+            Some(infer_query_builder_method(
+                ctx, &row_ty, method, args_ty, span,
+            ))
         }
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.

@@ -1279,7 +1279,10 @@ pub enum PgValue {
     /// Los elementos pueden ser `PgValue::Null` (Postgres soporta
     /// `{1,NULL,3}`). Anidamiento no soportado en MVP — los elem
     /// son escalares.
-    Array { elem_oid: u32, values: Vec<PgValue> },
+    Array {
+        elem_oid: u32,
+        values: Vec<PgValue>,
+    },
 }
 
 impl fmt::Display for PgValue {
@@ -1479,9 +1482,7 @@ fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, us
                 }
             }
         }
-        Err(DbError::Protocol(
-            "array element: quoted no cerrado".into(),
-        ))
+        Err(DbError::Protocol("array element: quoted no cerrado".into()))
     } else {
         // Unquoted: leemos hasta ',' o '}'.
         let mut idx = start;
@@ -3014,10 +3015,7 @@ mod tests {
                 assert_eq!(elem_oid, oid::TEXT);
                 assert_eq!(
                     values,
-                    vec![
-                        PgValue::Text("hola".into()),
-                        PgValue::Text("chau".into())
-                    ]
+                    vec![PgValue::Text("hola".into()), PgValue::Text("chau".into())]
                 );
             }
             _ => panic!("esperaba Array text"),
@@ -3078,7 +3076,11 @@ mod tests {
             PgValue::Array { values, .. } => {
                 assert_eq!(
                     values,
-                    vec![PgValue::Bool(true), PgValue::Bool(false), PgValue::Bool(true)]
+                    vec![
+                        PgValue::Bool(true),
+                        PgValue::Bool(false),
+                        PgValue::Bool(true)
+                    ]
                 );
             }
             _ => panic!(),
@@ -3092,7 +3094,11 @@ mod tests {
             PgValue::Array { values, .. } => {
                 assert_eq!(
                     values,
-                    vec![PgValue::Float(1.5), PgValue::Float(2.5), PgValue::Float(-3.0)]
+                    vec![
+                        PgValue::Float(1.5),
+                        PgValue::Float(2.5),
+                        PgValue::Float(-3.0)
+                    ]
                 );
             }
             _ => panic!(),
@@ -3143,25 +3149,16 @@ mod tests {
     fn encode_array_text_quotea_strings() {
         let v = PgValue::Array {
             elem_oid: oid::TEXT,
-            values: vec![
-                PgValue::Text("hola".into()),
-                PgValue::Text("chau".into()),
-            ],
+            values: vec![PgValue::Text("hola".into()), PgValue::Text("chau".into())],
         };
-        assert_eq!(
-            encode_text_value(&v),
-            Some(b"{\"hola\",\"chau\"}".to_vec())
-        );
+        assert_eq!(encode_text_value(&v), Some(b"{\"hola\",\"chau\"}".to_vec()));
     }
 
     #[test]
     fn encode_array_text_escapa_comillas_y_backslash() {
         let v = PgValue::Array {
             elem_oid: oid::TEXT,
-            values: vec![
-                PgValue::Text("c\"d".into()),
-                PgValue::Text("e\\f".into()),
-            ],
+            values: vec![PgValue::Text("c\"d".into()), PgValue::Text("e\\f".into())],
         };
         // "c\"d" → "c\\\"d"  (escape para Postgres)
         // "e\\f" → "e\\\\f"
