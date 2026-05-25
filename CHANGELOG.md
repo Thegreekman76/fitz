@@ -11,6 +11,167 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+En curso: ver `docs/roadmap.md`. Próximos pasos planeados — cap nuevo
+"Postgres + ORM nativo" en `docs/guide.md`, ejemplos del ORM en los
+boilerplates Dockerizados (5 y 6 SQLAlchemy → Fitz ORM o boilerplate
+nuevo dedicado), benchmarks Fitz ORM vs SQLAlchemy.
+
+## [v0.10.0] — 2026-05-25 — Fase 10 entera: Postgres nativo + ORM declarativo
+
+Hito mayor. Cierra **Fase 10 entera** (driver Postgres puro + pool +
+ORM declarativo + relations + tipos avanzados) — la última fase del
+stack web first-class. Ningún otro lenguaje moderno combina driver
+Postgres puro + ORM sobre `type` + paridad bit-a-bit `fitz run` ↔
+`fitz build` + LSP completo sin macros derive ni introspection runtime.
+
+20 commits, ~7400 LoC nuevas, 2463 unit + 2574 LSP + 27 E2E reales
+contra Postgres instalado. Clippy `--all-targets -D warnings` limpio,
+fmt `--all --check` limpio.
+
+### Added
+
+- **Fase 10.1 — Driver Postgres puro en Fitz (sin libpq)**.
+  - **10.1.a**: módulo nuevo `src/db.rs` (~2400 LoC) — protocolo wire
+    v3.0 hand-rolled. `ConnectionConfig` con parser de URL postgres://,
+    SCRAM-SHA-256 (RFC 7677) + PBKDF2-HMAC-SHA-256, Simple Query +
+    Extended Query con `Parse`/`Bind`/`Describe`/`Execute`. 11 tipos
+    OID core: BOOL, INT2/4/8, FLOAT4/8, TEXT/VARCHAR, BYTEA, DATE/TIME/
+    TIMESTAMP/TIMESTAMPTZ, UUID, JSON/JSONB, VOID.
+  - **10.1.b**: integración con evaluator — `Value::DbConn(Arc<DbConnHandle>)`,
+    builtin module `db` con `db.connect(url).await`, métodos `query/
+    exec/close` async sobre `DbConn`.
+  - **10.1.c**: codegen del driver en `fitz build` (paridad bit-a-bit
+    intérprete↔binario para programas que usan `db.*`).
+- **Fase 10.2 — Pool de conexiones + reconnect + health check**.
+  Pool con `Arc<DbPool>` + `OwnedSemaphorePermit`, RAII Drop pattern,
+  health check con `Weak<DbPool>` para auto-cleanup, reconnect
+  automático cuando una conn muere.
+- **Fase 10.3 — ORM declarativo sobre `type`**.
+  - **10.3.a**: decorators ORM (`@table("name")`, `@primary`, `@column(name=, sql_type=)`)
+    + checker que persiste `TableMetadata` en el `TypeEnv`. Validación
+    estática del shape (`@primary` sobre exactamente un field, etc.).
+  - **10.3.b1**: `Type.all(db) -> Result<List<Type>>` end-to-end +
+    cache de metadata en `Value::Type` para evitar re-lookup en cada
+    call.
+  - **10.3.b2**: `Type.where(closure) -> QueryBuilder<Row>` con
+    translator AST → SQL parametrizado. Traduce BinOp comparators
+    (==, !=, <, <=, >, >=), BinOp lógicos (and, or), UnaryOp (not),
+    field access sobre el param de la closure. Args van como `$N`
+    parametrizados, sin SQL injection.
+  - **10.3.b3**: chain methods `.order_by(closure, ascending: Bool)`,
+    `.limit(n)`, `.offset(n)`, `.first(db)`, `.count(db)`. Builder
+    pattern con `QueryBuilderState` cloneable inmutable.
+  - **10.3.c**: terminales `.insert(db, row)`, `.update(db, changes)`,
+    `.delete(db)`. UPDATE refuses sin `.where(...)` previo (safety
+    check). RETURNING * round-trip al row Fitz.
+- **Fase 10.4 — Relations cross-table**.
+  - **10.4.a**: decorators `@belongs_to("Author")`, `@has_one("Profile")`,
+    `@has_many("Comment")` con `@on_delete=cascade/setnull/restrict/noaction`
+    y `@on_update=...`. Persistidos en `TableMetadata.relations`. Fields
+    virtuales para `has_*` (no aparecen en SQL columns).
+  - **10.4.b**: navigation methods. `post.author(db) -> Result<User>`
+    (BelongsTo), `user.posts(db) -> Result<List<Post>>` (HasMany),
+    `user.profile(db) -> Result<Profile>` (HasOne). Lazy (1 query
+    por navegación, sin N+1 eager hasta 10.6).
+- **Fase 10.5 — Tipos avanzados**.
+  - **10.5.a**: **JSONB**. Field `data: Map<Str, Any>` → columna
+    `jsonb`. INSERT serializa Map → JSON con cast `::jsonb`. SELECT
+    parsea text JSON de vuelta a Map Fitz. Nested Maps preservados.
+    Null Fitz → NULL real (no la string "null").
+  - **10.5.b**: **Arrays nativos** (List<T> ↔ Postgres T[]). 12 array
+    OIDs (bool/int2/4/8/text/varchar/float4/8/date/timestamp/uuid).
+    `PgValue::Array { elem_oid, values }` con parser/encoder del text
+    format `{a,b,c}` que maneja escapes `\\`/`\"`, NULL sin quotes,
+    arrays vacíos. INSERT/UPDATE detectan `List<T>` y emiten cast
+    apropiado (`::int8[]`/`::text[]`/etc.). SELECT round-trip a
+    `Value::List`.
+  - **10.5.c**: **Date / Time / Timestamp / Timestamptz / UUID**.
+    Round-trip como `Str` con formato ISO 8601 / UUID canonical. Sin
+    tipos Fitz dedicados en MVP — `let d: Str = ...`. Cross-feature
+    test con uuid[] valida `Array<UUID>` end-to-end.
+  - **10.5.f1**: **Agregados sobre QueryBuilder** — `.sum(closure, db)`,
+    `.avg(closure, db)`, `.min(closure, db)`, `.max(closure, db)`.
+    Cast `::float8` automático en avg para evitar Numeric OID.
+  - **10.5.f2**: **GROUP BY**. `.group_by(closure).all(db)` devuelve
+    `List<Map>` con `{group_field: value, count: N, sum_x: N, ...}`.
+    Auto-detección scalar vs grouped path según `state.group_by_clauses`.
+  - **10.5.g**: **Operadores y filtros extendidos en `.where(...)`**.
+    Method calls sobre `<param>.<col>`: `is_null()`, `is_not_null()`,
+    `is_in([a, b, c])`, `like(p)`, `ilike(p)`, `starts_with(s)`,
+    `ends_with(s)`, `contains(s)`. `escape_like` para escapar `%`/`_`/`\`
+    en patterns. is_in con lista vacía → error claro.
+- **`Type::QueryBuilder(Box<Type>)` paramétrico en el checker**. Para
+  que el LSP entienda la cadena `User.where(...).order_by(...).all(db)`
+  con tipos refinados (chain methods preservan QB, terminales devuelven
+  `Result<List<Row>>`/`Result<Row>`/`Result<Int>` apropiado).
+- **LSP refresh (post-ORM)**.
+  - Grammar TextMate: `DbConn` y `DbRow` highlighted como built-in
+    types. Decorators (`@table`/`@primary`/`@belongs_to`/etc.) ya cubiertos
+    por pattern genérico.
+  - Scope-level completions: módulo `db` como MODULE, `DbConn`/`DbRow`
+    como CLASS.
+  - After-dot completions:
+    - `db.` → `connect`
+    - `DbConn.` → `query/exec/close`
+    - `TableName.` con `@table` → `all/where/insert` estáticos
+    - `QueryBuilder<Row>.` → 14 chain methods + terminales con detail
+      tipado al row concreto
+  - Chain detection con parens balanceadas — captura `User.where(fn(u)
+    => u.id > 0).` como recv válido (antes se rompía en el `)`).
+  - Resolver: `DbConn` y `DbRow` aceptados como tipos primitivos en
+    `resolve_named` (antes producían "tipo desconocido" en anotaciones).
+
+### Changed
+
+- `Value::Type` ahora cachea `table_metadata: Option<Box<TableMetadata>>`
+  para que el dispatch ORM no re-lookee el env en cada call.
+- `Value::QueryBuilder(Arc<dyn Any + Send + Sync>)` opaco — evita
+  ciclo de dependencia entre `evaluator` y `value`.
+- `Value::Instance` ahora se forma con `{ type_name, fields }` (struct
+  variant) — tests E2E reformateados.
+- Tests E2E del driver (15 archivos en `tests/db_real_postgres.rs`)
+  con setup canonical `DROP TABLE IF EXISTS` + `CREATE TABLE` para
+  re-runs limpios. Opt-in via `FITZ_TEST_PG_URL` env var.
+
+### Fixed
+
+- Driver: 2 bug fixes críticos durante 10.3.b1 — (a) Extended Query
+  protocol fallaba silente sin `Describe(P, "")` entre `Bind` y
+  `Execute` (server no enviaba `RowDescription`), (b) OID 2278 (void)
+  no soportado rompía `pg_sleep` en el test del pool — mapeado a
+  `PgValue::Null`.
+- Driver: `Numeric` (OID 1700) sin soporte rompía AVG — fix con cast
+  `::float8` automático en el SQL emit de aggregates.
+- Codegen: `Value::Type` boxed (`Option<Box<TableMetadata>>`) para
+  evitar `result_large_err` clippy de 117 errores tras agregar la
+  metadata al enum.
+- Lock scope: 9 instancias de `await_holding_lock` en los tests E2E
+  refactoreadas con scopes `{ ... }` que dropean el guard antes de
+  los `.await` del driver.
+
+### Dependencies
+
+Sin deps nuevas — driver Postgres es **puro Fitz/Rust** (sin `tokio-
+postgres`, `sqlx`, `diesel`, ni libpq).
+
+### Diferenciales únicos
+
+- **Único lenguaje moderno** con driver Postgres puro + ORM declarativo
+  + paridad bit-a-bit `fitz run` ↔ `fitz build` + LSP completo
+  (autocomplete del ORM end-to-end) **sin macros derive ni
+  introspection runtime**.
+- Decorators del lenguaje (no lib externa): `@table`/`@primary`/
+  `@belongs_to`/`@has_many` son parte del compilador.
+- Validación estática: el checker exige `@primary` único, `role: Str`
+  no nullable para `@admin`, etc.
+- Zero deps externas: SCRAM-SHA-256 + PBKDF2 + protocolo wire v3.0
+  todo hand-rolled.
+- Type system aware: `QueryBuilder<Row>` paramétrico, chain refina al
+  tipo concreto, LSP sugiere las 14 métodos del builder con detail
+  específico al row.
+
+
+
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
 manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS**, **9.z
 (DX) ENTERA CERRADA**, **refresh masivo de docs ENTERO CERRADO**,
