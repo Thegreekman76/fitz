@@ -18724,6 +18724,7 @@ fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<Stri
         | Type::WsConn { .. }
         | Type::DbConn
         | Type::DbRow
+        | Type::QueryBuilder(_)
         | Type::Any
         | Type::PyAny => Ok("false".to_string()),
         // Tuples (mini-tanda T): comparación element-wise. Rust ya
@@ -19077,6 +19078,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::WsConn { .. } => "WsConn<...>",
         Type::DbConn => "DbConn",
         Type::DbRow => "DbRow",
+        Type::QueryBuilder(_) => "QueryBuilder<...>",
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
         Type::Function { .. } => "fn(...)",
@@ -19115,6 +19117,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         }
         Type::DbConn => "DbConn".into(),
         Type::DbRow => "DbRow".into(),
+        Type::QueryBuilder(row) => format!("QueryBuilder<{}>", display_type(row, env)),
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
         Type::Nominal(id) => env.info(*id).name.clone(),
         Type::Function { params, ret } => {

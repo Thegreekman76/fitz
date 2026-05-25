@@ -689,20 +689,51 @@ fn detect_completion_context(text: &str, line: u32, character: u32) -> Option<Co
         let mut j = dot_pos;
         // v0.9.47 — chain a.b.c.: walkea back-to-front capturando
         // `<ident>(.<ident>)*` para soportar receivers compuestos.
-        // Pre-fix: solo `<ident>` (un solo segmento). Post-fix:
-        // chains de N segmentos. El `after_dot_completions` resuelve
-        // el tipo del chain entero via TypeInfo lookup por la
-        // posición del START del primer ident.
-        while j > 0 && (is_ident_continue(bytes[j - 1]) || bytes[j - 1] == b'.') {
-            j -= 1;
+        // Fase 10 deuda QB — extendido para soportar parens balanceadas
+        // dentro de chains: `User.where(fn(u) => true).` captura el
+        // chain entero saltando `(...)` cuando aparezcan en el camino.
+        // El recv_name resultante NO incluye las parens (capturamos solo
+        // los segmentos `<ident>(.<ident>)*` outermost); el lookup de
+        // tipo via TypeInfo se hace por la posición del START del
+        // primer ident, así que el matching funciona si el TypeInfo
+        // tiene un Expr registrado en esa posición.
+        while j > 0 {
+            let c = bytes[j - 1];
+            if is_ident_continue(c) || c == b'.' {
+                j -= 1;
+            } else if c == b')' {
+                // Balanced paren skip — scan back hasta el `(` que matchea.
+                let mut depth = 1;
+                let mut k = j - 1;
+                while k > 0 && depth > 0 {
+                    k -= 1;
+                    match bytes[k] {
+                        b')' => depth += 1,
+                        b'(' => depth -= 1,
+                        _ => {}
+                    }
+                }
+                if depth != 0 {
+                    // No balanceado — abortamos chain walk.
+                    break;
+                }
+                j = k;
+            } else {
+                break;
+            }
         }
         // Validar shape: el receiver no debe empezar con `.` ni tener
         // `..` consecutivos. Si pasa, devolvemos `None` para chain
         // (cae a ScopeLevel).
         if j < dot_pos {
-            let recv_name = std::str::from_utf8(&bytes[j..dot_pos])
-                .unwrap_or("")
-                .to_string();
+            // Para el recv_name, agarramos la parte ANTES del primer `(`
+            // (si hay), porque queremos `User.where` no `User.where(...)`.
+            // El TypeInfo lookup va con la posición de inicio del chain.
+            let raw = std::str::from_utf8(&bytes[j..dot_pos]).unwrap_or("");
+            let recv_name = match raw.find('(') {
+                Some(p) => raw[..p].trim_end_matches('.').to_string(),
+                None => raw.to_string(),
+            };
             if recv_name.starts_with('.') || recv_name.ends_with('.') || recv_name.contains("..") {
                 // No es un chain válido — fallback ScopeLevel.
             } else {
@@ -1604,6 +1635,66 @@ fn after_dot_completions(
             ),
             ("close", "async fn() -> Result<Null>".into()),
         ]),
+        // Fase 10.3+ — `QueryBuilder<Row>` del ORM. Chain methods
+        // preservan QB; terminales devuelven Result<...>.
+        Type::QueryBuilder(row) => {
+            let row_disp = row.display(type_env);
+            method_items(&[
+                (
+                    "where",
+                    format!("fn(closure: fn({}) -> Bool) -> QueryBuilder<{}>", row_disp, row_disp),
+                ),
+                (
+                    "order_by",
+                    format!("fn(closure: fn({}) -> Any) -> QueryBuilder<{}>", row_disp, row_disp),
+                ),
+                (
+                    "limit",
+                    format!("fn(n: Int) -> QueryBuilder<{}>", row_disp),
+                ),
+                (
+                    "offset",
+                    format!("fn(n: Int) -> QueryBuilder<{}>", row_disp),
+                ),
+                (
+                    "group_by",
+                    format!("fn(closure: fn({}) -> Any) -> QueryBuilder<{}>", row_disp, row_disp),
+                ),
+                (
+                    "all",
+                    format!("async fn(db: DbConn) -> Result<List<{}>>", row_disp),
+                ),
+                (
+                    "first",
+                    format!("async fn(db: DbConn) -> Result<{}>", row_disp),
+                ),
+                ("count", "async fn(db: DbConn) -> Result<Int>".into()),
+                (
+                    "sum",
+                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                ),
+                (
+                    "avg",
+                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                ),
+                (
+                    "min",
+                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                ),
+                (
+                    "max",
+                    format!("async fn(closure: fn({}) -> Float, db: DbConn) -> Result<Float>", row_disp),
+                ),
+                (
+                    "update",
+                    "async fn(db: DbConn, changes: Map<Str, Any>) -> Result<Int>  // rows affected".into(),
+                ),
+                (
+                    "delete",
+                    "async fn(db: DbConn) -> Result<Int>  // rows affected".into(),
+                ),
+            ])
+        }
         // PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
     }
@@ -3846,6 +3937,38 @@ mod tests {
             );
         }
         // El detail de `all` debe mencionar `User` (el tipo concreto).
+        let all_item = items.iter().find(|i| i.label == "all").unwrap();
+        let detail = all_item.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("User"),
+            "esperaba `User` en detail de all, fue: {}",
+            detail
+        );
+    }
+
+    #[test]
+    fn after_dot_sobre_query_builder_lista_chain_y_terminales() {
+        // Fase 10.3+ — el QueryBuilder tipa como `Type::QueryBuilder<Row>`
+        // y el after-dot lista los chain methods + terminales. Test
+        // simple: `let qb = User.where(...)` separa el binding, después
+        // `qb.<cursor>` dispara la heurística TypeInfo limpio (qb es
+        // top-level reference). Si el dispatch funciona, todos los
+        // métodos del QB están en el resultado.
+        let src = "@table(\"users\") type User {\n  @primary\n  id: Int\n  age: Int\n}\nasync fn run(db: DbConn) -> Result<List<User>> {\n  let qb = User.where(fn(u) => u.age > 18)\n  let _r = qb.all(db).await?\n  return Ok([])\n}\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Línea 7 (0-based) contenido: `  let _r = qb.all(db).await?`
+        // El `.` entre `qb` y `all` está en col 14; cursor en col 15
+        // (justo después del punto).
+        let items = completion_at_position(src, &program, &type_info, &env, 7, 15);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Si los completions del QB están funcionando, deben estar:
+        for expected in ["where", "order_by", "limit", "offset", "all", "first", "count"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método QB `{expected}`: {labels:?}"
+            );
+        }
+        // El detail de `all` debe mencionar el row type `User`.
         let all_item = items.iter().find(|i| i.label == "all").unwrap();
         let detail = all_item.detail.as_deref().unwrap_or("");
         assert!(

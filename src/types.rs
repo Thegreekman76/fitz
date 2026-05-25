@@ -113,6 +113,20 @@ pub enum Type {
     /// Opaca: el user no construye instancias.
     DbRow,
 
+    /// Fase 10.3+ — query builder del ORM. Devuelto por
+    /// `Type.where(closure)` cuando `Type` tiene `@table`, y
+    /// preservado por la chain `.where`/`.order_by`/`.limit`/
+    /// `.offset`/`.group_by`. Las terminales (`.all`/`.first`/
+    /// `.count`/`.sum`/`.avg`/`.min`/`.max`/`.update`/`.delete`)
+    /// rompen la chain devolviendo `Result<...>`.
+    ///
+    /// El param `row` lleva el tipo nominal del row para que las
+    /// terminales sepan qué devolver: `.all(db) → Result<List<row>>`,
+    /// `.first(db) → Result<row>`, etc. Opaco a runtime: el
+    /// evaluador usa `Value::QueryBuilder(Arc<dyn Any>)` y nunca
+    /// inspecciona el row a este nivel.
+    QueryBuilder(Box<Type>),
+
     /// Tipo declarado por el usuario (`type User { ... }`) o
     /// importado. La identidad va por `TypeId`.
     Nominal(TypeId),
@@ -276,6 +290,7 @@ impl Type {
             }
             Type::DbConn => "DbConn".into(),
             Type::DbRow => "DbRow".into(),
+            Type::QueryBuilder(row) => format!("QueryBuilder<{}>", row.display(env)),
             Type::Nominal(id) => env.info(*id).name.clone(),
             Type::Nullable(t) => format!("{}?", t.display(env)),
             Type::Function { params, ret } => {
@@ -2879,7 +2894,25 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // ruta general — la ruta general no puede modelar
             // signatures paramétricas como `List<T>.map`.
             if let Expr::Field { object, field, .. } = callee.as_ref() {
-                let obj_ty = infer_expr(ctx, object);
+                let mut obj_ty = infer_expr(ctx, object);
+                // Fase 10.3+ — ORM static methods: cuando el `object` es
+                // un Ident que matchea un nominal con `@table`, el
+                // `infer_expr` ya lo tipa como `Any` (regla del Ident
+                // arm: type-name-as-value). Refinamos a `Nominal(id)`
+                // localmente para que `infer_method_call` despache los
+                // static methods (all/where/insert) correctamente.
+                // Esto NO cambia el tipo global del Ident — solo en
+                // este Call específico. Otros usos de `User` como var
+                // siguen siendo `Any`.
+                if matches!(obj_ty, Type::Any) {
+                    if let Expr::Ident(name, _) = object.as_ref() {
+                        if let Some(id) = ctx.types.lookup(name) {
+                            if ctx.types.table_metadata(id).is_some() {
+                                obj_ty = Type::Nominal(id);
+                            }
+                        }
+                    }
+                }
                 // Fp.3 — para method calls con named args, el chequeo
                 // exacto requiere conocer los param names del método
                 // (R.3 custom methods). Para built-ins no soportamos
@@ -3650,6 +3683,45 @@ fn infer_method_call(
         // custom declarados con `fn name(self, ...)` adentro del
         // `type`). Si nada matchea: gradual (None), igual que Any.
         Type::Nominal(id) => {
+            // Fase 10.3+ — ORM static methods sobre nominal con
+            // `@table`. Antes del lookup de métodos custom para que
+            // `User.where(...)`/`.all(...)`/`.insert(...)` tipen aunque
+            // el user no haya declarado esos métodos explícitamente.
+            // El dispatch runtime los maneja desde `orm_dispatch_*`.
+            if ctx.types.table_metadata(*id).is_some() {
+                let row_ty = Type::Nominal(*id);
+                match method {
+                    "all" => {
+                        check_method_arity(ctx, method, args_ty, 1, span);
+                        // arg 0 debe ser DbConn (compatible con Any
+                        // también para escape gradual). Skipeamos
+                        // chequeo estricto para que `User.all(db)`
+                        // con db: Any siga compilando.
+                        return Some(Type::Result {
+                            ok: Box::new(Type::List(Box::new(row_ty))),
+                            err: Box::new(Type::Str),
+                        });
+                    }
+                    "where" => {
+                        check_method_arity(ctx, method, args_ty, 1, span);
+                        // arg 0 es una closure fn(Row) -> Bool. Skip
+                        // chequeo del tipo de la closure por ahora —
+                        // el evaluator valida en runtime.
+                        return Some(Type::QueryBuilder(Box::new(row_ty)));
+                    }
+                    "insert" => {
+                        check_method_arity(ctx, method, args_ty, 2, span);
+                        return Some(Type::Result {
+                            ok: Box::new(row_ty),
+                            err: Box::new(Type::Str),
+                        });
+                    }
+                    _ => {
+                        // Fall through al lookup de métodos custom
+                        // por si el user definió `User.helper(...)`.
+                    }
+                }
+            }
             let info = ctx.types.info(*id);
             // 8-pyi.C: field-as-callable (Function type registrado
             // como field por el loader de stubs `.pyi`).
@@ -3777,6 +3849,14 @@ fn infer_method_call(
         // Mini-tanda Mb9 — métodos sobre primitivos Int/Float.
         Type::Int => Some(infer_int_method(ctx, method, args_ty, span)),
         Type::Float => Some(infer_float_method(ctx, method, args_ty, span)),
+        // Fase 10.3+ — métodos del ORM sobre `QueryBuilder<Row>`.
+        // Chain methods (where/order_by/limit/offset/group_by) preservan
+        // el row type. Terminales rompen la chain devolviendo
+        // `Result<...>` con el shape apropiado.
+        Type::QueryBuilder(row) => {
+            let row_ty = (**row).clone();
+            Some(infer_query_builder_method(ctx, &row_ty, method, args_ty, span))
+        }
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
@@ -3790,6 +3870,100 @@ fn infer_method_call(
                 ),
             );
             Some(Type::Any)
+        }
+    }
+}
+
+/// Fase 10.3+ — signatures de los métodos del ORM sobre `QueryBuilder<Row>`.
+///
+/// Chain methods (preservan el row type):
+///   - `where(closure) -> QueryBuilder<Row>`
+///   - `order_by(closure) -> QueryBuilder<Row>`
+///   - `limit(n: Int) -> QueryBuilder<Row>`
+///   - `offset(n: Int) -> QueryBuilder<Row>`
+///   - `group_by(closure) -> QueryBuilder<Row>` (terminal vía .all)
+///
+/// Terminales (rompen la chain):
+///   - `all(db) -> Result<List<Row>>`
+///   - `first(db) -> Result<Row>`
+///   - `count(db) -> Result<Int>`
+///   - `sum/avg/min/max(closure, db) -> Result<Number>`
+///   - `update(db, changes: Map) -> Result<Int>` (rows affected)
+///   - `delete(db) -> Result<Int>` (rows affected)
+///
+/// Args: skipeamos chequeo estricto para escape gradual. El evaluator
+/// valida en runtime con mensajes claros.
+fn infer_query_builder_method(
+    ctx: &mut CheckCtx,
+    row: &Type,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
+    let result_int = || Type::Result {
+        ok: Box::new(Type::Int),
+        err: Box::new(Type::Str),
+    };
+    let result_float = || Type::Result {
+        ok: Box::new(Type::Float),
+        err: Box::new(Type::Str),
+    };
+    let qb = || Type::QueryBuilder(Box::new(row.clone()));
+    match method {
+        // Chain methods — todas preservan QueryBuilder<Row>.
+        "where" | "order_by" | "group_by" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            qb()
+        }
+        "limit" | "offset" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            qb()
+        }
+        // Terminales async.
+        "all" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            Type::Result {
+                ok: Box::new(Type::List(Box::new(row.clone()))),
+                err: Box::new(Type::Str),
+            }
+        }
+        "first" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            Type::Result {
+                ok: Box::new(row.clone()),
+                err: Box::new(Type::Str),
+            }
+        }
+        "count" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            result_int()
+        }
+        "sum" | "avg" | "min" | "max" => {
+            // 2 args: closure de selección + db
+            check_method_arity(ctx, method, args_ty, 2, span);
+            // `avg` siempre retorna Float; sum/min/max dependen del
+            // tipo de columna. Para MVP devolvemos Float (compatible
+            // con Int via promoción en el caller).
+            result_float()
+        }
+        "update" => {
+            check_method_arity(ctx, method, args_ty, 2, span);
+            result_int()
+        }
+        "delete" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            result_int()
+        }
+        other => {
+            ctx.error_at(
+                span,
+                format!(
+                    "el método `QueryBuilder<{}>.{}` no existe (chain: where/order_by/limit/offset/group_by; terminales: all/first/count/sum/avg/min/max/update/delete)",
+                    row.display(ctx.types),
+                    other
+                ),
+            );
+            Type::Any
         }
     }
 }
@@ -6012,6 +6186,9 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
         (Type::Tuple(a), Type::Tuple(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| is_compatible(x, y))
         }
+        // Fase 10.3+ — QueryBuilder<Row> compatible si el row type
+        // es compatible. Useful para retornar QB de fns helper.
+        (Type::QueryBuilder(a), Type::QueryBuilder(b)) => is_compatible(a, b),
         _ => actual == expected,
     }
 }
