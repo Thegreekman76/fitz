@@ -599,3 +599,159 @@ async fn orm_where_chain_combina_con_and() {
     let _ = seed.exec("DROP TABLE fitz_orm_chain_test", &[]).await;
     seed.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_order_limit_offset_first_count_e2e() {
+    // E2E completo del subset 10.3.b3: ORDER BY DESC + LIMIT +
+    // OFFSET + first + count, todo combinado.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_full_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_full_test (id bigint, name text, age int)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_full_test VALUES (1, 'kid', 10), (2, 'ada', 30), (3, 'alan', 42), (4, 'grace', 55), (5, 'admin', 99)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Programa Fitz: top 2 adultos ordenados por edad DESC,
+    // saltando el primero (offset 1). Esperamos: alan (42) y
+    // ada (30) — porque grace (55) y admin (99) son los más
+    // viejos, saltamos el primero (admin 99 con DESC), nos
+    // quedamos con grace (55) y alan (42).
+    //
+    // Validamos también `first(db)` (devuelve un solo Instance)
+    // y `count(db)` (devuelve Int).
+    let src = format!(
+        "@table(\"fitz_orm_full_test\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // Sub-query 1: top 2 adultos ordenados por edad DESC, offset 1.\n  \
+             let pagina = User\n    \
+                 .where(fn(u) => u.age > 18)\n    \
+                 .order_by(fn(u) => -u.age)\n    \
+                 .limit(2)\n    \
+                 .offset(1)\n    \
+                 .all(db).await?\n  \
+             // Sub-query 2: el más joven adulto.\n  \
+             let primero = User\n    \
+                 .where(fn(u) => u.age > 18)\n    \
+                 .order_by(fn(u) => u.age)\n    \
+                 .first(db).await?\n  \
+             // Sub-query 3: count de adultos.\n  \
+             let total = User.where(fn(u) => u.age > 18).count(db).await?\n  \
+             return Ok({{ \"pagina\": pagina, \"primero\": primero, \"total\": total }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    // Extraer y validar.
+    let (pagina_names, primero_name, total) = {
+        let m = match outer_map {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        let map = m.lock();
+        let pagina = map
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "pagina"))
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let primero = map
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "primero"))
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let total_v = map
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "total"))
+            .map(|(_, v)| v.clone())
+            .unwrap();
+
+        // pagina: List<User>
+        let pagina_names: Vec<String> = match pagina {
+            Value::List(l) => {
+                let users = l.lock();
+                users
+                    .iter()
+                    .filter_map(|u| match u {
+                        Value::Instance { fields, .. } => fields
+                            .lock()
+                            .iter()
+                            .find(|(n, _)| n == "name")
+                            .and_then(|(_, v)| match v {
+                                Value::Str(s) => Some(s.clone()),
+                                _ => None,
+                            }),
+                        _ => None,
+                    })
+                    .collect()
+            }
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        // primero: Instance
+        let primero_name = match primero {
+            Value::Instance { fields, .. } => fields
+                .lock()
+                .iter()
+                .find(|(n, _)| n == "name")
+                .and_then(|(_, v)| match v {
+                    Value::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap(),
+            other => panic!("esperaba Instance, fue {:?}", other),
+        };
+        // total: Int
+        let total = match total_v {
+            Value::Int(n) => n,
+            other => panic!("esperaba Int, fue {:?}", other),
+        };
+        (pagina_names, primero_name, total)
+    };
+
+    // pagina: order=DESC, limit=2, offset=1. Adultos DESC: admin(99),
+    // grace(55), alan(42), ada(30). Skipeamos admin, nos quedamos
+    // con grace y alan.
+    assert_eq!(pagina_names, vec!["grace".to_string(), "alan".to_string()]);
+    // primero (order ASC): ada (30) — el más joven adulto.
+    assert_eq!(primero_name, "ada");
+    // total: 4 adultos (ada, alan, grace, admin; kid queda fuera).
+    assert_eq!(total, 4);
+
+    let _ = seed.exec("DROP TABLE fitz_orm_full_test", &[]).await;
+    seed.close().await.unwrap();
+}

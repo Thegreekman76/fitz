@@ -4536,7 +4536,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`QueryBuilder` no tiene el método `{}` (soportados: where, all)",
+                "`QueryBuilder` no tiene el método `{}` (soportados: where, order_by, limit, offset, all, first, count)",
                 method,
             ),
         )));
@@ -10313,6 +10313,17 @@ pub struct QueryBuilderState {
     /// Args parametrizados acumulados ($1, $2, ...) en orden de
     /// aparición en `where_sql`.
     pub where_args: Vec<crate::db::PgValue>,
+    /// Fase 10.3.b3 — fragmentos `ORDER BY` acumulados. Cada
+    /// `.order_by(closure)` agrega una clause; se emiten
+    /// separados por coma en orden de aparición. Cada clause
+    /// incluye `ASC`/`DESC` derivado de si el closure usa
+    /// `-u.field` (DESC) o `u.field` (ASC default).
+    pub order_by_clauses: Vec<String>,
+    /// Fase 10.3.b3 — `LIMIT N`. Si hay múltiples `.limit()`,
+    /// el último gana (overwrite). `None` = sin LIMIT.
+    pub limit: Option<i64>,
+    /// Fase 10.3.b3 — `OFFSET N`. Mismo criterio que `limit`.
+    pub offset: Option<i64>,
 }
 
 /// Despacha métodos ORM sobre un `Value::Type` con `@table(...)`.
@@ -10369,6 +10380,21 @@ pub fn orm_dispatch_qb_method(
         "where" => orm_qb_where(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        "order_by" => orm_qb_order_by(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "limit" => orm_qb_limit(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "offset" => orm_qb_offset(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "first" => orm_qb_first(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "count" => orm_qb_count(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
         _ => Ok(None),
     }
 }
@@ -10388,6 +10414,9 @@ fn type_value_to_state(type_value: Value, span: Span) -> FitzResult<QueryBuilder
             meta: *m,
             where_sql: None,
             where_args: Vec::new(),
+            order_by_clauses: Vec::new(),
+            limit: None,
+            offset: None,
         }),
         _ => Err(FitzError::new(
             ErrorKind::InvalidSyntax,
@@ -10500,42 +10529,13 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
     Ok(Value::QueryBuilder(Arc::new(state)))
 }
 
-/// `qb.all(db)` — ejecuta el SELECT con el WHERE acumulado y
-/// devuelve `Future<Result<List<Instance>>>`.
-fn orm_qb_all(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
-    if args.len() != 1 {
-        return Err(FitzError::new(
-            ErrorKind::WrongArgCount {
-                expected: 1,
-                found: args.len(),
-            },
-            span.line,
-            span.column,
-            format!(
-                "`.all(db)` espera 1 argumento (db: DbConn), recibió {}",
-                args.len()
-            ),
-        ));
-    }
-    let db_handle = match &args[0] {
-        Value::DbConn(h) => Arc::clone(h),
-        other => {
-            return Err(FitzError::new(
-                ErrorKind::TypeMismatch {
-                    expected: "DbConn".into(),
-                    found: other.type_name().into(),
-                },
-                span.line,
-                span.column,
-                format!(
-                    "`.all(db)` espera DbConn como primer arg, recibió `{}`",
-                    other.type_name()
-                ),
-            ));
-        }
-    };
-
-    // Construir SQL: `SELECT col1, col2, ... FROM <table> [WHERE ...]`.
+/// Construye el SELECT completo para un state del builder. Útil
+/// tanto para `all()` como para `first()` (que solo agrega LIMIT 1).
+/// Devuelve `(sql, args_in_order)` donde args es el `where_args` del
+/// state (el SQL builder no agrega nuevos args — LIMIT/OFFSET se
+/// emiten inline como literales numéricos seguros, son `i64`).
+fn build_select_sql(state: &QueryBuilderState, override_limit: Option<i64>) -> String {
+    // Columnas explícitas en orden de declaración.
     let mut col_list = String::new();
     for (i, f) in state.fields.iter().enumerate() {
         if i > 0 {
@@ -10556,7 +10556,62 @@ fn orm_qb_all(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzRes
         sql.push_str(" WHERE ");
         sql.push_str(w);
     }
+    if !state.order_by_clauses.is_empty() {
+        sql.push_str(" ORDER BY ");
+        sql.push_str(&state.order_by_clauses.join(", "));
+    }
+    let effective_limit = override_limit.or(state.limit);
+    if let Some(n) = effective_limit {
+        sql.push_str(&format!(" LIMIT {}", n.max(0)));
+    }
+    if let Some(n) = state.offset {
+        sql.push_str(&format!(" OFFSET {}", n.max(0)));
+    }
+    sql
+}
 
+/// Helper: valida que args sea `[DbConn]` y extrae el handle.
+fn extract_db_handle_arg(
+    args: &[Value],
+    method: &str,
+    span: Span,
+) -> FitzResult<Arc<crate::db::DbConnHandle>> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.{method}(db)` espera 1 argumento (db: DbConn), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    match &args[0] {
+        Value::DbConn(h) => Ok(Arc::clone(h)),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "DbConn".into(),
+                found: other.type_name().into(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.{method}(db)` espera DbConn como primer arg, recibió `{}`",
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+/// `qb.all(db)` — ejecuta el SELECT con todo el state acumulado
+/// y devuelve `Future<Result<List<Instance>>>`.
+fn orm_qb_all(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    let db_handle = extract_db_handle_arg(&args, "all", span)?;
+    let sql = build_select_sql(&state, None);
     let fields_owned = state.fields.clone();
     let meta_owned = state.meta.clone();
     let type_name_owned = state.type_name.clone();
@@ -10578,6 +10633,256 @@ fn orm_qb_all(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzRes
                 }
                 Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
                     Value::new_list(instances),
+                ))))
+            }
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// `qb.order_by(closure)` — el closure debe ser `fn(u) => u.field`
+/// (ASC) o `fn(u) => -u.field` (DESC). Acumula la clause en
+/// `order_by_clauses` y devuelve un nuevo QueryBuilder.
+fn orm_qb_order_by(
+    mut state: QueryBuilderState,
+    args: Vec<Value>,
+    span: Span,
+) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.order_by(closure)` espera 1 argumento, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let (params, body) = match &args[0] {
+        Value::Function { params, body, .. } => (params.clone(), body.clone()),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Function".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.order_by(closure)` espera `fn(u) => u.field` o `fn(u) => -u.field`, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    if params.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            "`.order_by(closure)` espera una closure con 1 parámetro".to_string(),
+        ));
+    }
+    let param_name = params[0].name.clone();
+    let body_expr = match body.as_slice() {
+        [crate::ast::Stmt::Return(e, _)] => e.clone(),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                "`.order_by(closure)` MVP: el body debe ser una sola expresión `u.field` o `-u.field`".to_string(),
+            ));
+        }
+    };
+
+    // Detectar dirección: `-u.field` = DESC, `u.field` = ASC.
+    let (direction, field_expr) = match &body_expr {
+        crate::ast::Expr::UnaryOp {
+            op: crate::ast::UnaryOpKind::Neg,
+            operand,
+            ..
+        } => ("DESC", operand.as_ref().clone()),
+        other => ("ASC", other.clone()),
+    };
+    let column = match &field_expr {
+        crate::ast::Expr::Field { object, field, .. } => match object.as_ref() {
+            crate::ast::Expr::Ident(name, _) if name == &param_name => {
+                if !state.fields.iter().any(|f| f.name == *field) {
+                    return Err(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        span.line,
+                        span.column,
+                        format!(
+                            "`.order_by`: field `{field}` no existe en el type (fields: {})",
+                            state
+                                .fields
+                                .iter()
+                                .map(|f| f.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    ));
+                }
+                state
+                    .meta
+                    .columns
+                    .get(field)
+                    .and_then(|c| c.sql_name.as_deref())
+                    .unwrap_or(field.as_str())
+                    .to_string()
+            }
+            _ => {
+                return Err(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    format!(
+                        "`.order_by(closure)` solo admite `{param_name}.field` (opcionalmente prefijado con `-`)"
+                    ),
+                ));
+            }
+        },
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                "`.order_by(closure)`: el body debe ser `u.field` o `-u.field`".to_string(),
+            ));
+        }
+    };
+    state
+        .order_by_clauses
+        .push(format!("\"{}\" {}", column, direction));
+    Ok(Value::QueryBuilder(Arc::new(state)))
+}
+
+/// Helper: extrae un arg `Int` no negativo. Usado por `limit`/`offset`.
+fn extract_int_arg(args: &[Value], method: &str, span: Span) -> FitzResult<i64> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.{method}(n)` espera 1 argumento (n: Int), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(*n),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            span.line,
+            span.column,
+            format!("`.{method}(n)` espera Int, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+/// `qb.limit(n)` — emite `LIMIT N`. Solo el último call de
+/// `.limit()` en una cadena aplica (overwrite). N negativo se
+/// clampea a 0 en `build_select_sql`.
+fn orm_qb_limit(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    let n = extract_int_arg(&args, "limit", span)?;
+    state.limit = Some(n);
+    Ok(Value::QueryBuilder(Arc::new(state)))
+}
+
+/// `qb.offset(n)` — emite `OFFSET N`. Mismo criterio que `limit`.
+fn orm_qb_offset(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    let n = extract_int_arg(&args, "offset", span)?;
+    state.offset = Some(n);
+    Ok(Value::QueryBuilder(Arc::new(state)))
+}
+
+/// `qb.first(db)` — equivalente a `.limit(1).all(db)` pero
+/// devuelve `Result<Instance>` directo (sin envolver en List).
+/// Si el resultset está vacío, `Err("no rows")`. Si hay error
+/// DB, `Err(<mensaje>)`.
+fn orm_qb_first(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    let db_handle = extract_db_handle_arg(&args, "first", span)?;
+    // Forzamos LIMIT 1 sin tocar el state original (el user puede
+    // haber seteado uno distinto; lo override-amos para esta
+    // ejecución específica).
+    let sql = build_select_sql(&state, Some(1));
+    let fields_owned = state.fields.clone();
+    let meta_owned = state.meta.clone();
+    let type_name_owned = state.type_name.clone();
+    let where_args = state.where_args.clone();
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match db_handle.query(&sql, &where_args).await {
+            Ok(qr) => {
+                if let Some(row) = qr.rows.first() {
+                    match pg_row_to_instance(row, &type_name_owned, &fields_owned, &meta_owned) {
+                        Ok(inst) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                            inst,
+                        )))),
+                        Err(msg) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                            Value::Str(msg),
+                        )))),
+                    }
+                } else {
+                    Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                        Value::Str("no rows".to_string()),
+                    ))))
+                }
+            }
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// `qb.count(db)` — ejecuta `SELECT COUNT(*) FROM ... [WHERE ...]`
+/// y devuelve `Result<Int>`. ORDER BY / LIMIT / OFFSET no aplican
+/// (el count es un agregado y los ignora — Postgres lo permite
+/// igual, pero los omitimos para SQL más limpio).
+fn orm_qb_count(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    let db_handle = extract_db_handle_arg(&args, "count", span)?;
+    // Solo necesitamos WHERE; el resto del state se ignora.
+    let mut sql = format!(
+        "SELECT COUNT(*) AS \"__count\" FROM \"{}\"",
+        state.meta.sql_name
+    );
+    if let Some(w) = &state.where_sql {
+        sql.push_str(" WHERE ");
+        sql.push_str(w);
+    }
+    let where_args = state.where_args.clone();
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match db_handle.query(&sql, &where_args).await {
+            Ok(qr) => {
+                let count = qr
+                    .rows
+                    .first()
+                    .and_then(|r| r.get("__count"))
+                    .and_then(|v| match v {
+                        crate::db::PgValue::Int(n) => Some(*n),
+                        _ => None,
+                    })
+                    .unwrap_or(0);
+                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                    Value::Int(count),
                 ))))
             }
             Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
@@ -24030,6 +24335,158 @@ let r = match n {
         assert!(
             err.message.contains("does_not_exist"),
             "mensaje sobre field inexistente: {}",
+            err.message
+        );
+    }
+
+    // ---- Fase 10.3.b3 — order_by/limit/offset/first/count ----
+
+    /// Helper local: construye un QueryBuilder vacío para tests
+    /// del build_select_sql directo, sin depender del evaluator
+    /// completo.
+    fn empty_state() -> QueryBuilderState {
+        QueryBuilderState {
+            type_name: "User".into(),
+            fields: vec![
+                crate::ast::Field {
+                    name: "id".into(),
+                    type_: crate::ast::TypeExpr::named("Int"),
+                    default: None,
+                    decorators: vec![],
+                },
+                crate::ast::Field {
+                    name: "name".into(),
+                    type_: crate::ast::TypeExpr::named("Str"),
+                    default: None,
+                    decorators: vec![],
+                },
+                crate::ast::Field {
+                    name: "age".into(),
+                    type_: crate::ast::TypeExpr::named("Int"),
+                    default: None,
+                    decorators: vec![],
+                },
+            ],
+            meta: crate::types::TableMetadata {
+                sql_name: "users".into(),
+                primary_field: Some("id".into()),
+                columns: std::collections::HashMap::new(),
+            },
+            where_sql: None,
+            where_args: Vec::new(),
+            order_by_clauses: Vec::new(),
+            limit: None,
+            offset: None,
+        }
+    }
+
+    #[test]
+    fn build_sql_sin_where_ni_clauses() {
+        let s = empty_state();
+        let sql = build_select_sql(&s, None);
+        assert_eq!(sql, "SELECT \"id\", \"name\", \"age\" FROM \"users\"");
+    }
+
+    #[test]
+    fn build_sql_con_where_y_order_by() {
+        let mut s = empty_state();
+        s.where_sql = Some("(\"age\" > $1)".into());
+        s.where_args = vec![crate::db::PgValue::Int(18)];
+        s.order_by_clauses.push("\"age\" DESC".into());
+        s.order_by_clauses.push("\"name\" ASC".into());
+        let sql = build_select_sql(&s, None);
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"name\", \"age\" FROM \"users\" WHERE (\"age\" > $1) ORDER BY \"age\" DESC, \"name\" ASC"
+        );
+    }
+
+    #[test]
+    fn build_sql_con_limit_y_offset() {
+        let mut s = empty_state();
+        s.limit = Some(10);
+        s.offset = Some(20);
+        let sql = build_select_sql(&s, None);
+        assert_eq!(
+            sql,
+            "SELECT \"id\", \"name\", \"age\" FROM \"users\" LIMIT 10 OFFSET 20"
+        );
+    }
+
+    #[test]
+    fn build_sql_override_limit_para_first() {
+        // `first()` pasa Some(1) como override; respeta sobre el
+        // state.limit del user (que podría ser != 1).
+        let mut s = empty_state();
+        s.limit = Some(50);
+        let sql = build_select_sql(&s, Some(1));
+        assert!(sql.ends_with("LIMIT 1"), "esperaba LIMIT 1, fue: {sql}");
+    }
+
+    #[test]
+    fn build_sql_limit_negativo_clampea_a_cero() {
+        let mut s = empty_state();
+        s.limit = Some(-5);
+        let sql = build_select_sql(&s, None);
+        assert!(
+            sql.ends_with("LIMIT 0"),
+            "esperaba LIMIT 0 (clamp), fue: {sql}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_order_by_devuelve_query_builder() {
+        let (env, res) = parse_eval_into_env(
+            "@table(\"users\") type User {\n  id: Int\n  age: Int\n}\n\
+             let qb = User.where(fn(u) => u.age > 0).order_by(fn(u) => u.age)",
+        )
+        .await;
+        res.expect("evaluación OK");
+        let qb = env.lock().get("qb").unwrap();
+        assert!(matches!(qb, Value::QueryBuilder(_)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_order_by_field_inexistente_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "@table(\"users\") type User {\n  id: Int\n}\n\
+             let qb = User.where(fn(u) => u.id > 0).order_by(fn(u) => u.missing)",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("missing"),
+            "esperaba error sobre field missing: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_limit_con_arg_no_int_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "@table(\"users\") type User { id: Int }\n\
+             let qb = User.where(fn(u) => u.id > 0).limit(\"diez\")",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("Int"),
+            "esperaba error sobre tipo Int: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_qb_metodo_desconocido_lista_soportados() {
+        let (_env, res) = parse_eval_into_env(
+            "@table(\"users\") type User { id: Int }\n\
+             let qb = User.where(fn(u) => u.id > 0).bogus_method()",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("bogus_method") && err.message.contains("count"),
+            "esperaba mensaje con método y lista de soportados: {}",
             err.message
         );
     }
