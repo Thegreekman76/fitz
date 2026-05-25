@@ -3697,10 +3697,12 @@ fn infer_method_call(
                         // también para escape gradual). Skipeamos
                         // chequeo estricto para que `User.all(db)`
                         // con db: Any siga compilando.
-                        return Some(Type::Result {
+                        // Fase 10.b: el evaluator devuelve Future, el
+                        // checker lo refleja para que `.await?` tipe OK.
+                        return Some(Type::Future(Box::new(Type::Result {
                             ok: Box::new(Type::List(Box::new(row_ty))),
                             err: Box::new(Type::Str),
-                        });
+                        })));
                     }
                     "where" => {
                         check_method_arity(ctx, method, args_ty, 1, span);
@@ -3711,10 +3713,11 @@ fn infer_method_call(
                     }
                     "insert" => {
                         check_method_arity(ctx, method, args_ty, 2, span);
-                        return Some(Type::Result {
+                        // Fase 10.b: ditto — evaluator devuelve Future.
+                        return Some(Type::Future(Box::new(Type::Result {
                             ok: Box::new(row_ty),
                             err: Box::new(Type::Str),
-                        });
+                        })));
                     }
                     _ => {
                         // Fall through al lookup de métodos custom
@@ -3902,13 +3905,20 @@ fn infer_query_builder_method(
     args_ty: &[Type],
     span: Span,
 ) -> Type {
-    let result_int = || Type::Result {
-        ok: Box::new(Type::Int),
-        err: Box::new(Type::Str),
+    // Fase 10.b: los terminales son async — devuelven Future para
+    // que `.await?` tipe contra el shape correcto. Chain methods son
+    // sync (devuelven QueryBuilder directo).
+    let future_result_int = || {
+        Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Str),
+        }))
     };
-    let result_float = || Type::Result {
-        ok: Box::new(Type::Float),
-        err: Box::new(Type::Str),
+    let future_result_float = || {
+        Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::Float),
+            err: Box::new(Type::Str),
+        }))
     };
     let qb = || Type::QueryBuilder(Box::new(row.clone()));
     match method {
@@ -3921,24 +3931,25 @@ fn infer_query_builder_method(
             check_method_arity(ctx, method, args_ty, 1, span);
             qb()
         }
-        // Terminales async.
+        // Terminales async — envueltos en Future para que `.await?`
+        // tipe correcto.
         "all" => {
             check_method_arity(ctx, method, args_ty, 1, span);
-            Type::Result {
+            Type::Future(Box::new(Type::Result {
                 ok: Box::new(Type::List(Box::new(row.clone()))),
                 err: Box::new(Type::Str),
-            }
+            }))
         }
         "first" => {
             check_method_arity(ctx, method, args_ty, 1, span);
-            Type::Result {
+            Type::Future(Box::new(Type::Result {
                 ok: Box::new(row.clone()),
                 err: Box::new(Type::Str),
-            }
+            }))
         }
         "count" => {
             check_method_arity(ctx, method, args_ty, 1, span);
-            result_int()
+            future_result_int()
         }
         "sum" | "avg" | "min" | "max" => {
             // 2 args: closure de selección + db
@@ -3946,15 +3957,15 @@ fn infer_query_builder_method(
             // `avg` siempre retorna Float; sum/min/max dependen del
             // tipo de columna. Para MVP devolvemos Float (compatible
             // con Int via promoción en el caller).
-            result_float()
+            future_result_float()
         }
         "update" => {
             check_method_arity(ctx, method, args_ty, 2, span);
-            result_int()
+            future_result_int()
         }
         "delete" => {
             check_method_arity(ctx, method, args_ty, 1, span);
-            result_int()
+            future_result_int()
         }
         other => {
             ctx.error_at(

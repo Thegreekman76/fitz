@@ -1786,7 +1786,10 @@ fn cargo_toml_for(
     // async-mutex para la conexión). El driver no usa cron/signal,
     // así que las features puntuales no cambian.
     let needs_tokio = has_http || uses_async || uses_jobs || uses_db;
-    let needs_time = uses_async || uses_jobs;
+    // Fase 10.b fix: `uses_db` también necesita `time` porque el driver
+    // (`src/db.rs` embebido) usa `tokio::time::timeout` para health-check
+    // del pool + reconnect lazy. Sin feature `time` → E0433 al compilar.
+    let needs_time = uses_async || uses_jobs || uses_db;
     let needs_signal = uses_jobs && !has_http; // cron-only mode
     let needs_net = uses_db; // TcpStream del driver
     let tokio_features: Vec<&str> = {
@@ -8893,14 +8896,16 @@ async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
             span: field_span,
         } = callee
         {
-            // Fase 10.1.c — built-in `db`: dispatch antes de
-            // cualquier otra cosa. `db.connect(url)` se traduce a
-            // `__fitz_db_connect(url)` (helper async del preludio).
-            // Si el codegen ve `db.X` con un X que el módulo no
-            // ofrece, emite un error claro citando los nombres
-            // válidos (igual que el evaluator).
+            // Fase 10.1.c — built-in `db`: dispatch del módulo
+            // `db.connect(url)` → `__fitz_db_connect(url)`. Fase 10.b
+            // fix: solo cuando `db` NO está shadowed por una var
+            // local. Si el user hizo `let db = db.connect(...).await?`,
+            // el siguiente `db.query(...)` debe ir al dispatch de
+            // método sobre DbConn (abajo), no al módulo. Paralelo a
+            // cómo el evaluator resuelve dinámicamente: var local
+            // gana sobre el binding global del módulo.
             if let Expr::Ident(recv, _) = object.as_ref() {
-                if recv == "db" {
+                if recv == "db" && self.lookup_var(recv).is_none() {
                     return self.gen_db_module_call(field, args, *field_span);
                 }
             }
@@ -9853,6 +9858,376 @@ async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
             format!("__fitz_hash_verify({}, {})", plain_c, hashed_c),
             Type::Bool,
         ))
+    }
+
+    // =========================================================
+    // Fase 10.b.2 — closure → SQL translator en codegen.
+    //
+    // Port de `translate_expr_to_sql` + `translate_method_call_to_sql`
+    // del evaluator (src/evaluator.rs líneas 12111-12382) adaptado
+    // para emitir código Rust en lugar de evaluar.
+    //
+    // Diferencia clave con el evaluator: los literales del closure
+    // body están en el AST en codegen-time, por lo que las
+    // construcciones `__FitzPgValue::Int(N)` se emiten directo como
+    // strings Rust. Para variables externas capturadas del scope
+    // outer, emitimos `<rust_code>.into_pg()` con el trait
+    // `__IntoPgValue` que ya existe en el preludio (Fase 10.1.c).
+    //
+    // Output: SQL fragment string (con $1, $2, ...) + Vec<String>
+    // de código Rust para construir cada __FitzPgValue del Vec en
+    // runtime.
+    // =========================================================
+
+    /// Walks AST de la closure body de un `.where(closure)` y
+    /// devuelve `(sql_fragment, bindings_rust_code)`.
+    ///
+    /// `param_name` es el nombre del param del closure (típicamente
+    /// `u`). `fields` es la lista de fields del `type` decorado con
+    /// `@table` (para validar referencias `u.field` contra los reales
+    /// y resolver sql_name overrides).
+    fn translate_closure_to_sql(
+        &mut self,
+        body: &Expr,
+        param_name: &str,
+        fields: &[crate::ast::Field],
+        table_meta: &crate::types::TableMetadata,
+        bindings: &mut Vec<String>,
+    ) -> Result<String, FitzError> {
+        use crate::ast::{BinOpKind, UnaryOpKind};
+        match body {
+            Expr::BinOp {
+                op, left, right, ..
+            } => {
+                let l = self.translate_closure_to_sql(
+                    left, param_name, fields, table_meta, bindings,
+                )?;
+                let r = self.translate_closure_to_sql(
+                    right, param_name, fields, table_meta, bindings,
+                )?;
+                let op_sql = match op {
+                    BinOpKind::Eq => "=",
+                    BinOpKind::NotEq => "<>",
+                    BinOpKind::Lt => "<",
+                    BinOpKind::LtEq => "<=",
+                    BinOpKind::Gt => ">",
+                    BinOpKind::GtEq => ">=",
+                    BinOpKind::And => "AND",
+                    BinOpKind::Or => "OR",
+                    BinOpKind::Add => "+",
+                    BinOpKind::Sub => "-",
+                    BinOpKind::Mul => "*",
+                    BinOpKind::Div => "/",
+                    other => {
+                        return Err(self.err_at(
+                            body.span(),
+                            format!(
+                                "operador `{:?}` no soportado en `.where(...)` MVP",
+                                other
+                            ),
+                        ));
+                    }
+                };
+                Ok(format!("({} {} {})", l, op_sql, r))
+            }
+            Expr::UnaryOp { op, operand, .. } => {
+                let inner = self.translate_closure_to_sql(
+                    operand, param_name, fields, table_meta, bindings,
+                )?;
+                match op {
+                    UnaryOpKind::Not => Ok(format!("(NOT {})", inner)),
+                    UnaryOpKind::Neg => Ok(format!("(-{})", inner)),
+                    UnaryOpKind::BitNot => Err(self.err_at(
+                        body.span(),
+                        "operador `~` (bitwise NOT) no soportado en `.where(...)`",
+                    )),
+                }
+            }
+            Expr::Field { object, field, .. } => {
+                // Solo aceptamos `<param>.<field>` — accesos sobre
+                // otros valores (vars locales, etc.) NO soportados.
+                match object.as_ref() {
+                    Expr::Ident(name, _) if name == param_name => {
+                        if !fields.iter().any(|f| f.name == *field) {
+                            return Err(self.err_at(
+                                body.span(),
+                                format!(
+                                    "field `{}` no existe en el type (fields disponibles: {})",
+                                    field,
+                                    fields
+                                        .iter()
+                                        .map(|f| f.name.as_str())
+                                        .collect::<Vec<_>>()
+                                        .join(", ")
+                                ),
+                            ));
+                        }
+                        let sql_col = table_meta
+                            .columns
+                            .get(field)
+                            .and_then(|c| c.sql_name.as_deref())
+                            .unwrap_or(field.as_str());
+                        Ok(format!("\"{}\"", sql_col))
+                    }
+                    _ => Err(self.err_at(
+                        body.span(),
+                        format!(
+                            "`.where(...)` solo admite field access sobre el parámetro `{}` (e.g. `{}.field`)",
+                            param_name, param_name
+                        ),
+                    )),
+                }
+            }
+            // Method call sobre `u.field.method(...)` — is_in, is_null,
+            // is_not_null, like, ilike, starts_with, ends_with, contains.
+            Expr::Call { callee, args, .. } => self
+                .translate_closure_method_call_to_sql(
+                    callee, args, param_name, fields, table_meta, bindings,
+                ),
+            Expr::Int(n, _) => {
+                bindings.push(format!("__FitzPgValue::Int({}i64)", n));
+                Ok(format!("${}", bindings.len()))
+            }
+            Expr::Float(x, _) => {
+                bindings.push(format!("__FitzPgValue::Float({}f64)", x));
+                Ok(format!("${}", bindings.len()))
+            }
+            Expr::Str(s, _) => {
+                bindings.push(format!(
+                    "__FitzPgValue::Text({}.to_string())",
+                    rust_str_literal(s)
+                ));
+                Ok(format!("${}", bindings.len()))
+            }
+            Expr::Bool(b, _) => {
+                bindings.push(format!("__FitzPgValue::Bool({})", b));
+                Ok(format!("${}", bindings.len()))
+            }
+            Expr::Null(_) => Ok("NULL".to_string()),
+            Expr::Ident(name, _) => {
+                if name == param_name {
+                    Err(self.err_at(
+                        body.span(),
+                        format!(
+                            "no podés comparar el row entero (`{}`); accedé a un field específico",
+                            name
+                        ),
+                    ))
+                } else {
+                    // Variable externa capturada del scope outer. La
+                    // resolvemos con `gen_expr` y la wrappemos con
+                    // `__IntoPgValue::into_pg(...)`. Eso requiere que
+                    // el tipo del valor implemente `__IntoPgValue` en
+                    // runtime (i64/f64/String/&str/bool/Vec<u8> en
+                    // 10.1.c; List<T>/Map<Str,Any> en 10.b.8).
+                    let (code, _ty) = self.gen_expr(body)?;
+                    bindings.push(format!(
+                        "<_ as __IntoPgValue>::into_pg({})",
+                        code
+                    ));
+                    Ok(format!("${}", bindings.len()))
+                }
+            }
+            other => Err(self.err_at(
+                other.span(),
+                format!(
+                    "expresión no soportada en `.where(...)` MVP: {:?}",
+                    std::mem::discriminant(other)
+                ),
+            )),
+        }
+    }
+
+    /// Helper de `translate_closure_to_sql` para method calls del
+    /// shape `u.field.method(args)`. Soporta is_null/is_not_null,
+    /// is_in([...]), like/ilike, starts_with/ends_with/contains.
+    fn translate_closure_method_call_to_sql(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        param_name: &str,
+        fields: &[crate::ast::Field],
+        table_meta: &crate::types::TableMetadata,
+        bindings: &mut Vec<String>,
+    ) -> Result<String, FitzError> {
+        let (col_name, method, callee_span) = match callee {
+            Expr::Field {
+                object,
+                field,
+                span,
+            } => match object.as_ref() {
+                Expr::Field {
+                    object: inner_obj,
+                    field: inner_field,
+                    ..
+                } => match inner_obj.as_ref() {
+                    Expr::Ident(name, _) if name == param_name => {
+                        (inner_field.clone(), field.clone(), *span)
+                    }
+                    _ => {
+                        return Err(self.err_at(
+                            *span,
+                            format!(
+                                "method call en `.where(...)` solo admite la forma `{}.<field>.<método>(...)`",
+                                param_name
+                            ),
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(self.err_at(
+                        *span,
+                        format!(
+                            "method call en `.where(...)` solo admite la forma `{}.<field>.<método>(...)`",
+                            param_name
+                        ),
+                    ));
+                }
+            },
+            _ => {
+                return Err(self.err_at(
+                    callee.span(),
+                    "expresión no soportada como callee en `.where(...)`",
+                ));
+            }
+        };
+        if !fields.iter().any(|f| f.name == col_name) {
+            return Err(self.err_at(
+                callee_span,
+                format!(
+                    "field `{}` no existe en el type (fields: {})",
+                    col_name,
+                    fields
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            ));
+        }
+        let sql_col = table_meta
+            .columns
+            .get(&col_name)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(col_name.as_str())
+            .to_string();
+        match method.as_str() {
+            "is_null" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!("`{}.{}.is_null()` no acepta args", param_name, col_name),
+                    ));
+                }
+                Ok(format!("\"{}\" IS NULL", sql_col))
+            }
+            "is_not_null" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.is_not_null()` no acepta args",
+                            param_name, col_name
+                        ),
+                    ));
+                }
+                Ok(format!("\"{}\" IS NOT NULL", sql_col))
+            }
+            "is_in" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.is_in([...])` espera 1 arg (List literal)",
+                            param_name, col_name
+                        ),
+                    ));
+                }
+                let items = match &args[0] {
+                    Expr::List(items, _) => items,
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            "`is_in` MVP: el arg debe ser una List literal `[a, b, c]`",
+                        ));
+                    }
+                };
+                if items.is_empty() {
+                    // `IN ()` no es SQL válido — predicado siempre-false.
+                    return Ok("false".to_string());
+                }
+                let mut placeholders = Vec::with_capacity(items.len());
+                for it in items {
+                    let frag = self.translate_closure_to_sql(
+                        it, param_name, fields, table_meta, bindings,
+                    )?;
+                    placeholders.push(frag);
+                }
+                Ok(format!(
+                    "\"{}\" IN ({})",
+                    sql_col,
+                    placeholders.join(", ")
+                ))
+            }
+            "like" | "ilike" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.{}(pattern)` espera 1 arg",
+                            param_name, col_name, method
+                        ),
+                    ));
+                }
+                let pat = self.translate_closure_to_sql(
+                    &args[0], param_name, fields, table_meta, bindings,
+                )?;
+                let op = if method == "ilike" { "ILIKE" } else { "LIKE" };
+                Ok(format!("\"{}\" {} {}", sql_col, op, pat))
+            }
+            "starts_with" | "ends_with" | "contains" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.{}(s)` espera 1 arg Str",
+                            param_name, col_name, method
+                        ),
+                    ));
+                }
+                let raw = match &args[0] {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            format!(
+                                "`.{}(s)` MVP: el arg debe ser string literal",
+                                method
+                            ),
+                        ));
+                    }
+                };
+                let pattern = match method.as_str() {
+                    "starts_with" => format!("{}%", translate_escape_like(&raw)),
+                    "ends_with" => format!("%{}", translate_escape_like(&raw)),
+                    "contains" => format!("%{}%", translate_escape_like(&raw)),
+                    _ => unreachable!(),
+                };
+                bindings.push(format!(
+                    "__FitzPgValue::Text({}.to_string())",
+                    rust_str_literal(&pattern)
+                ));
+                Ok(format!("\"{}\" LIKE ${}", sql_col, bindings.len()))
+            }
+            other => Err(self.err_at(
+                callee_span,
+                format!(
+                    "método `.{}(...)` no soportado sobre fields en `.where(...)`. \
+                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains.",
+                    other
+                ),
+            )),
+        }
     }
 
     // =========================================================
@@ -19717,6 +20092,25 @@ fn rust_str_literal(s: &str) -> String {
         }
     }
     out.push('"');
+    out
+}
+
+/// Fase 10.b.2 — escapa caracteres especiales LIKE (`%`/`_`/`\`)
+/// para los método `.starts_with`/`.ends_with`/`.contains` en
+/// `.where(...)`. Paralelo a `escape_like` del evaluator (línea
+/// 12250 de src/evaluator.rs). Postgres usa `\` como escape char
+/// por default.
+fn translate_escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '%' | '_' | '\\' => {
+                out.push('\\');
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
     out
 }
 

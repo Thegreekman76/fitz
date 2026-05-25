@@ -8363,6 +8363,359 @@ Política `feedback_guide_emphasize_uniqueness` aplicada al diseño:
 
 ---
 
+## Fase 10.b — Cierre del codegen ORM (paridad `fitz run` ↔ `fitz build`) 🔧
+
+**Estado**: en curso, arrancada 2026-05-25 post-release v0.10.0.
+**Scope**: 7-10 días focused. **Target version**: v0.10.1 (cierre
+formal de paridad bit-a-bit).
+
+### Motivación
+
+Al cerrar Fase 10 entera (v0.10.0) el ORM nativo está funcional en
+`fitz run` pero **el codegen para `fitz build` está sólo parcialmente
+implementado**:
+
+- ✅ Driver Postgres en codegen (10.1.c): `db.connect`/`query`/`exec`/
+  `close`/`is_closed` emiten Rust válido que compila y corre.
+- ❌ **ORM declarativo: CERO codegen.** `User.all(db)` /
+  `User.where(closure).first(db)` / `User.insert(db, row)` /
+  `.update`/`.delete`/`.order_by`/`.limit`/`.offset`/`.group_by` /
+  agregados (`.sum`/`.avg`/`.min`/`.max`) / navigation methods
+  (`post.author_id(db)`/`user.posts(db)`) NO emiten código.
+- ❌ **Traductor closure → SQL: CERO codegen.** El evaluator tiene
+  `translate_expr_to_sql` (~390 LoC) que recorre AST de closures
+  `fn(u) => u.age > 18` y emite SQL parametrizado. El codegen NO
+  tiene equivalente.
+- ❌ **JSONB / arrays marshalling**: parcialmente en preludio
+  driver, pero no integrado con el ORM (porque no hay ORM en
+  codegen).
+
+Bug síntoma reportado al arrancar 10.b: `let db = db.connect(...)`
+en `fitz build` emite Rust con `let db: Pin<Box<dyn Future...>> =
+__fitz_db_connect(...)` sin envolver en `Box::pin(...)` (E0308),
+más warnings de imports unused.
+
+### Decisiones de diseño (tomadas 2026-05-25)
+
+**Estrategia híbrida** sobre las 3 alternativas evaluadas:
+
+1. **SQL constante en codegen-time**: cada `.where(fn(u) => u.age >
+   18)` se walka del AST del closure DURANTE EL CODEGEN, emitiendo
+   un fragmento SQL constante (`"\"age\" > $1"`) más un Vec<PgValue>
+   construido en runtime con los args. Zero overhead runtime para
+   construir el SQL (comparable a Diesel/sqlx, mejor que SQLAlchemy/
+   ActiveRecord que construyen SQL via objetos en runtime).
+2. **Instances tipadas**: `User.where(...).first(db).await?`
+   retorna `User` (alias `Arc<Mutex<UserData>>` ya existente del
+   codegen 5b.2), NO `__FitzValue` dinámico. Cero overhead de enum
+   dispatch en el hot path de los rows.
+3. **`__FitzValue` solo donde de verdad hace falta**: JSONB
+   (`Map<Str, Any>` ↔ jsonb) y agregados con `group_by` cuyo
+   retorno es `List<Map<Str, Any>>` con shape heterogéneo. El enum
+   `__FitzValue` ya existe en el preludio (F13 SPIKE para literales
+   heterogéneos), se reusa.
+4. **Arrays tipados**: `List<Int>` ↔ `Vec<i64>`, `List<Str>` ↔
+   `Vec<String>`, etc. Marshalling directo sin pasar por
+   `__FitzValue`.
+5. **Deserializador per-type emitido**: por cada `type Foo` con
+   `@table`, codegen emite `impl __FromFitzDbRow for FooData` con
+   conversión field-por-field desde `__FitzPgValue` (paralelo a
+   `__FromFitzJson` para JSON HTTP).
+6. **`QueryBuilderState` Rust runtime**: struct `__FitzQueryBuilder
+   <Row>` con state mínimo (Vec<(String, Vec<PgValue>)> de WHERE
+   fragments + Vec<(String, bool)> de ORDER BY + Option<i64> de
+   limit/offset + Vec<String> de GROUP BY). Métodos `.where_sql_
+   fragment(...)` agregan al state, terminales `.all/.first/.count`
+   componen el SQL final con `INNER JOIN`s (relations futuras) +
+   ejecutan via `__fitz_db_runtime`.
+
+### Por qué híbrida (y no las otras 2)
+
+- **Opción 1 (`__FitzValue` puro paralelo al evaluator)**: scope
+  conocido, pero hereda el overhead de enum dispatch en cada field
+  access, contradice "binario nativo performante". Rechazada.
+- **Opción 2 (Rust idiomático cero-overhead con todo concreto)**:
+  máximo perf pero scope ~14 días y mucha superficie nueva donde
+  romper paridad bit-a-bit. Rechazada.
+- **Opción 3 (HÍBRIDA, elegida)**: SQL constante en codegen-time +
+  rows tipadas + `__FitzValue` sólo para JSONB/agregados con
+  groupby. Mejor balance scope/perf/paridad.
+
+### Sub-pasos (11 sub-fases)
+
+División incremental, cada sub-paso cierra una pieza testeable
+end-to-end con `fitz build` produciendo binario que corre contra
+Postgres real con paridad bit-a-bit al `fitz run` equivalente.
+
+#### 10.b.1 — Fixes preludio runtime + smoke `fitz build` con `db.connect` solo (~200 LoC)
+
+Cierra los 3 bugs detectados al arrancar 10.b. Smoke: `let db =
+db.connect("postgres://...").await?` compila a Rust válido sin
+ORM methods.
+
+- **`Box::pin(...)` wrap del Future de `__fitz_db_connect`**: en
+  `gen_db_module_call`, el Type retornado es `Type::Future(...)`,
+  el emit del callsite debe envolver en `Box::pin(...)`. Paralelo
+  a cómo se emiten otros futures `.await`-eables (Fase 6).
+- **Imports condicionales `Arc, Mutex`**: el preludio HTTP emite
+  `use std::sync::{Arc, Mutex};` siempre. Con `db.connect` sin HTTP
+  ni state compartido, las imports quedan unused. Fix: emit
+  condicional según los flags `has_http`/`uses_db`/`uses_python`.
+- **Feature `time` de tokio**: el Cargo.toml emitido necesita
+  `tokio = { features = ["..., time"] }` cuando hay `sleep(...)` o
+  cuando `uses_db = true` (el pool del driver usa intervals
+  internos).
+- **Tests**: 3 unit + 1 E2E (binario que conecta a Postgres,
+  ejecuta `SELECT 1` via `db.query`, imprime el resultado).
+
+**Criterio de éxito**: `fitz build` sobre `let db =
+db.connect(url).await?; let rows = db.query("SELECT 1 AS n",
+[]).await?; print(rows[0]["n"])` produce binario que imprime `1`
+contra Postgres local.
+
+#### 10.b.2 — Closure → SQL translator en codegen (~400 LoC)
+
+Port de `translate_expr_to_sql` del evaluator al codegen. Esta es
+la pieza más crítica porque habilita todo el `.where(...)`.
+
+- **Helper `gen_closure_to_sql(closure: &Expr, table_meta:
+  &TableMetadata) -> (String, Vec<RustExpr>)`**: el primer return
+  es el SQL fragment con placeholders `$N`, el segundo es el
+  Vec<Rust expression code> que se evalúa en runtime para los
+  bindings. Recorre AST: BinOp (Eq/NotEq/Lt/Gt/Lte/Gte/And/Or),
+  UnaryOp (Not), Field access sobre el param (`u.field` → nombre
+  SQL de la columna respetando `@column(name="...")`), literales
+  (Int/Float/Str/Bool/Null), variables del scope outer (capturadas
+  como bindings runtime).
+- **Validación estática**: si el closure referencia un field que
+  no existe en el `type`, error de codegen claro con span.
+  Replica la regla del checker.
+- **Method calls dentro del closure**: `.is_in([...])` /
+  `.starts_with(s)` / `.contains(s)` / `.is_null()` se traducen a
+  IN / LIKE / IS NULL (Fase 10.5.g). Implementación paralela al
+  `translate_method_call_to_sql` del evaluator (~150 LoC).
+- **Tests**: replicar los 17 unit tests `translate_*` del evaluator
+  apuntados al helper de codegen.
+
+**Criterio de éxito**: golden tests que validan SQL emitido
+bit-a-bit idéntico entre evaluator y codegen sobre 17 patterns
+(BinOps, And/Or chains, is_null, is_in, starts_with, etc.).
+
+#### 10.b.3 — ORM read methods en `gen_call`: `.all`/`.first`/`.count` (~600 LoC)
+
+Detección de método ORM sobre `Type::Nominal(id)` con
+`@table` + emisión del SELECT correspondiente.
+
+- **Dispatch en `gen_call`**: cuando `callee` es `Type.method(...)`
+  donde Type tiene metadata `@table`, ruta a `gen_orm_terminal_*`.
+- **`User.all(db)`** → emite `__fitz_db_runtime::query(&db,
+  "SELECT col1, col2, ... FROM \"users\"", &[])` + deserialización
+  de cada row a `UserData`. Retorna `Result<Vec<User>, String>`.
+- **`User.first(db)`** → SELECT con `LIMIT 1`, fallback a
+  `Err("no rows".to_string())` si vacío.
+- **`User.count(db)`** → `SELECT COUNT(*) FROM ...`, parse del
+  Int del row.
+- **Deserializador per-type**: `impl __FromFitzDbRow for UserData`
+  emitido en `gen_type_def` cuando el type tiene `@table`. Lee
+  cada field del row + coerce desde `__FitzPgValue` al tipo Fitz
+  concreto del field.
+- **Tests**: 5 unit + 3 E2E (User.all sin filter, User.first hit/
+  miss, User.count, con/sin LIMIT).
+
+**Criterio de éxito**: `fitz build` sobre `let users = User.all(db)
+.await?; print(users.len())` produce binario que imprime el count
+real desde la DB, idéntico bit-a-bit al `fitz run` equivalente.
+
+#### 10.b.4 — ORM write methods: `.insert`/`.update`/`.delete` (~500 LoC)
+
+- **`User.insert(db, User { ... })`** → INSERT con RETURNING * del
+  PK y campos generados. Skip de fields virtuales (relations).
+  Skip del PK si tiene default Int = 0 (convención para auto-id).
+  Retorna `Result<User, String>` con la instance hidratada
+  (incluyendo el id generado).
+- **`User.where(...).update(db, changes_map)`** → UPDATE con SET
+  fields del map. Guard: requiere `.where(...)` previo, error si
+  no. Retorna `Result<i64, String>` con rows affected.
+- **`User.where(...).delete(db)`** → DELETE WHERE. Mismo guard.
+  Retorna `Result<i64, String>`.
+- **Marshalling de field values**: bool/Int/Float/Str/Bytes
+  directos via `__IntoPgValue`. List<Int>/Str/Float/Bool → arrays
+  PG (preparación para 10.b.8). Map<Str, Any> → JSONB
+  (preparación). `Value::Null` para nullable.
+- **Tests**: 4 unit + 3 E2E (insert + read-back, update con count,
+  delete con count, guard que aborta sin .where).
+
+**Criterio de éxito**: cycle CRUD completo sobre binario nativo,
+paridad con el cycle del intérprete.
+
+#### 10.b.5 — QueryBuilder chain: `.where`/`.order_by`/`.limit`/`.offset`/`.group_by` (~400 LoC)
+
+- **Struct `__FitzQueryBuilder<T>` en preludio**: state con
+  `where_fragments: Vec<(String, Vec<__FitzPgValue>)>`, `order_by:
+  Vec<(String, bool)>` (col + descending), `limit: Option<i64>`,
+  `offset: Option<i64>`, `group_by: Vec<String>`.
+- **Chain methods**: cada `.where(closure)` agrega un fragment con
+  el SQL ya traducido en codegen-time + los runtime bindings.
+  `.order_by(fn(u) => u.field)` y `.order_by(fn(u) => -u.field)`
+  parsean el `-` como descending. `.limit(n)/.offset(n)` setean
+  campos. `.group_by(fn(u) => u.field)` agrega a la lista.
+- **Compose final**: el método terminal (`.all/.first/.count/etc.`)
+  combina state + table + cols en el SELECT final.
+- **Múltiples `.where()` se combinan con AND**: matchea evaluator.
+- **Tests**: 6 unit + 4 E2E (chain de 3 métodos, múltiples wheres,
+  order_by + limit, group_by + count).
+
+**Criterio de éxito**: `User.where(fn(u) => u.age > 18)
+.order_by(fn(u) => -u.age).limit(10).all(db).await?` produce el
+mismo resultset en `fitz run` y `fitz build`.
+
+#### 10.b.6 — Agregados: `.sum`/`.avg`/`.min`/`.max` (~250 LoC)
+
+- **Sintaxis**: `.sum(fn(u) => u.field, db)` — closure que
+  identifica el field + db como segundo arg.
+- **Sin group_by**: retorna scalar `Result<Int|Float|Null, String>`
+  (Null cuando 0 rows). Emite `SELECT SUM(col) FROM ... WHERE ...`.
+- **Con group_by**: retorna `Result<Vec<HashMap<String,
+  __FitzValue>>, String>` con una entry por grupo. Emite
+  `SELECT group_col1, ..., AGG(col) AS sum FROM ... GROUP BY
+  group_col1, ...`.
+- **Coerción ret type**: `sum`/`min`/`max` retornan el tipo del
+  field (Int o Float). `avg` siempre Float (paralelo a Postgres).
+- **Tests**: 4 unit + 3 E2E (sum scalar, avg con groupby, min/max
+  combinados, set vacío → Null).
+
+**Criterio de éxito**: agregados sobre binario nativo coinciden
+bit-a-bit con evaluator, incluyendo el caso `Null` sobre set
+vacío.
+
+#### 10.b.7 — Relations + navigation methods (`@belongs_to` / `@has_many` / `@has_one`) (~500 LoC)
+
+- **Metadata persistida**: `TableMetadata.relations` ya está en el
+  checker (Fase 10.4.a). El codegen consume la metadata y emite,
+  por cada relation, un método sobre el struct generado del type
+  origin.
+- **`@belongs_to("User")` sobre `Post.author_id: Int`**: emite
+  `impl PostData { pub async fn author_id(&self, db: &__FitzDbConn)
+  -> Result<User, String> { /* SELECT * FROM users WHERE id =
+  $self.author_id LIMIT 1 */ } }`. El nombre del método es el FK
+  field name (`author_id`).
+- **`@has_many("Post", via="author_id")` sobre `User.posts:
+  List<Post>`**: emite `impl UserData { pub async fn posts(&self,
+  db: &__FitzDbConn) -> Result<Vec<Post>, String> { /* SELECT *
+  FROM posts WHERE author_id = $self.id */ } }`.
+- **`@has_one`**: igual que `has_many` pero `.first()` interno.
+- **Validación cross-type en codegen**: target_type debe existir
+  con `@table` en el env. Error de codegen claro si falta.
+- **Virtual fields**: el field `posts: List<Post>` con `@has_many`
+  NO va al `UserData` struct (es virtual). Skip en gen_type_def
+  + `__FromFitzDbRow`.
+- **Tests**: 3 unit + 2 E2E (belongs_to navega correcto, has_many
+  retorna list, has_one retorna Result).
+
+**Criterio de éxito**: `post.author_id(db).await?` y
+`user.posts(db).await?` funcionan idéntico en `fitz run` y `fitz
+build`.
+
+#### 10.b.8 — JSONB + arrays marshallers en preludio (~300 LoC)
+
+- **JSONB**: helpers `__fitz_value_to_jsonb_pg(&__FitzValue) ->
+  __FitzPgValue` y `__fitz_jsonb_pg_to_value(&__FitzPgValue) ->
+  __FitzValue`. Para field `data: Map<Str, Any>` del type ORM, el
+  marshalling pasa por aquí.
+- **Arrays**: `__FitzPgValue::ArrayInt(Vec<i64>)`/`ArrayFloat`/
+  `ArrayStr`/`ArrayBool`. Conversiones bidireccionales con
+  `List<T>` Fitz. Heredan el formato `{e1,e2,e3}::int8[]` que el
+  driver ya soporta.
+- **Tests**: 5 unit + 3 E2E (JSONB round-trip simple, JSONB
+  anidado, JSONB nullable Null, array<text>, array<bigint>, array
+  vacío).
+
+**Criterio de éxito**: `INSERT` con field jsonb anidado + array, y
+`SELECT` posterior, devuelve la misma estructura bit-a-bit en
+`fitz run` y `fitz build`.
+
+#### 10.b.9 — Operadores extendidos en `.where`: `is_in`/`starts_with`/`contains`/`is_null` (~200 LoC)
+
+Cubierto en 10.b.2 (el translator hace dispatch sobre method calls
+del closure), pero los marshallers de args + tests E2E quedan
+separados acá.
+
+- **`.is_in([...])`**: cuando el arg es lista literal, expande a
+  `col IN ($1, $2, ...)`. Cuando el arg es variable (lista
+  runtime), construye los `$N` dinámicos.
+- **`.starts_with(s)` / `.contains(s)`**: traducen a `col LIKE
+  's%'` / `col LIKE '%s%'`. Escape automático de `%`/`_` en `s`
+  (igual que evaluator).
+- **`.is_null()`** sobre nullable field: traduce a `col IS NULL`.
+- **Tests**: 4 unit + 2 E2E (is_in con literal, starts_with con
+  escape, contains, is_null nullable).
+
+**Criterio de éxito**: filtros complejos `.where(fn(u) =>
+u.country.is_in(["AR", "UK"]) and u.deleted_at.is_null())` en
+binario nativo idéntico al intérprete.
+
+#### 10.b.10 — Tests E2E paridad bit-a-bit (~ports de db_real_postgres.rs)
+
+Replicar los ~20 tests E2E de `tests/db_real_postgres.rs` que hoy
+solo corren contra el evaluator, agregando una variante por test
+que use `fitz build` + binario + ejecuta el mismo programa con la
+misma DB, comparando outputs.
+
+- **Infrastructure compartida**: env var `FITZ_TEST_PG_URL` ya
+  existe. Sumar feature flag `postgres-build-tests` (paralelo al
+  `postgres-tests` actual) para que el CI no las corra siempre.
+- **Helper test**: dado un programa Fitz src, lo compila con
+  `fitz build`, lo ejecuta, captura stdout, lo compara contra el
+  stdout de `fitz run` del mismo src. Test pasa si match.
+- **Cobertura objetivo**: 100% de los E2E del evaluator
+  reportados en paridad bit-a-bit.
+- **Tests**: ~15-20 E2E nuevos en `tests/db_build_paridad.rs`.
+
+**Criterio de éxito**: todos los E2E del evaluator (CRUD, relations,
+JSONB, arrays, agregados, group_by) pasan también en `fitz build`
+con outputs idénticos.
+
+#### 10.b.11 — Cierre formal de Fase 10.b
+
+- **CHANGELOG v0.10.1** con el detalle de 10.b.1 → 10.b.10 +
+  resumen del shape final.
+- **roadmap.md**: esta sección con status CERRADA + stats finales.
+- **deudas-post-5b.md**: nota de cierre paralela a 10.5 marcando
+  que el codegen ORM ya está al nivel del evaluator.
+- **CLAUDE.md**: actualizar contexto del proyecto reflejando
+  paridad bit-a-bit ORM.
+- **README.md**: refresh del marker Fase 10 (✅ con sub-bullet de
+  paridad codegen confirmada).
+
+Total esperado al cierre 10.b: **~3400 LoC nuevos** del codegen
+ORM + **~20 tests E2E** de paridad + zero deuda residual del
+codegen ORM.
+
+### Deuda residual derivada de 10.b (NO bloquea boilerplates / cap 31)
+
+Estos items son refinements post-10.b. No bloquean la promesa de
+paridad bit-a-bit.
+
+- **Migraciones automáticas (`fitz db diff`/`migrate`)**: roadmap
+  original de Fase 10.6+. NO entra a 10.b. Hoy el user crea las
+  tablas con `db.exec("CREATE TABLE ...")` al boot.
+- **Eager loading (`.include(...)`)**: las navigations son lazy
+  (1 SELECT por call). N+1 manual con `is_in([...])` por ahora.
+  Refinable post-10.b.
+- **Transactions** (`BEGIN`/`COMMIT`/`ROLLBACK`): cada query corre
+  en auto-commit. Bloques transaccionales llegan en 10.7 separada.
+- **Composite primary keys**: hoy solo un `@primary` por type.
+- **Date/Time/UUID nativos como tipos del lenguaje**: hoy se
+  modelan como `Str` ISO 8601. Tipos dedicados son mini-fase
+  aparte.
+- **TLS strict (`sslmode=require`)**: driver MVP solo soporta
+  `disable`. TLS llega en sub-paso 10.1.b.
+- **JSON operators (`->`, `->>`, `@>`)**: el JSONB se trae completo
+  como Map<Str, Any> y se opera del lado Fitz, o se baja a SQL
+  crudo via `db.query(...)`.
+
+---
+
 ## Visión post-Fase 10 — Fase 11+ 🔮
 
 **Estado: especulativo.** Estas fases no están comprometidas en
