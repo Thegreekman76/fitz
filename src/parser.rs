@@ -1048,7 +1048,7 @@ impl Parser {
             Token::Return => self.parse_return(span),
             Token::Fn | Token::Async => self.parse_fndef(span),
             Token::Type => self.parse_typedef(span),
-            Token::At => self.parse_decorated_fndef(span),
+            Token::At => self.parse_decorated_stmt(span),
             Token::Break => {
                 self.advance();
                 // Mini-tanda L — sintaxis `break ['label] [<expr>]`.
@@ -2353,6 +2353,7 @@ impl Parser {
                 self.advance();
                 return Ok(Stmt::TypeDef {
                     name,
+                    decorators: Vec::new(),
                     fields,
                     methods,
                     span,
@@ -2364,9 +2365,24 @@ impl Parser {
                     "se esperaba '}' para cerrar 'type'",
                 ));
             }
+            // Fase 10.3.a — decoradores por field (`@primary`,
+            // `@column(name="...")`, `@unique`, `@index`). Acumulamos
+            // antes de leer el field/método target. Soportamos
+            // apilamiento (`@primary @unique id: Int`).
+            let mut field_decorators: Vec<Decorator> = Vec::new();
+            while matches!(self.peek(), Token::At) {
+                field_decorators.push(self.parse_one_decorator()?);
+                self.skip_newlines();
+            }
             // R.3 — método de instancia: `[async] fn nombre(...) [-> T] { ... }`.
             // Mini-tanda St — método estático: `static [async] fn nombre(...)`.
             if matches!(self.peek(), Token::Async | Token::Fn | Token::Static) {
+                if !field_decorators.is_empty() {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        "decoradores sobre métodos de un `type` no se soportan (solo sobre fields)",
+                    ));
+                }
                 let method_span = self.cur_span();
                 let method = self.parse_method_def(method_span)?;
                 methods.push(method);
@@ -2386,6 +2402,7 @@ impl Parser {
                     name: field_name,
                     type_,
                     default,
+                    decorators: field_decorators,
                 });
             }
             // Separador opcional: coma. Newline se consume en la
@@ -2460,7 +2477,12 @@ impl Parser {
     // decorators no vacíos; 4.2 cablea `@get`/`@post`/`@put`/`@delete`
     // contra el runtime HTTP.
 
-    fn parse_decorated_fndef(&mut self, span: Span) -> FitzResult<Stmt> {
+    /// Parsea uno o más decoradores apilados (`@x @y @z`) seguidos de
+    /// un `fn`, `async fn` o `type`. Renombrado desde
+    /// `parse_decorated_fndef` en Fase 10.3.a — antes solo permitía
+    /// decoradores sobre fns; ahora también sobre `type` para
+    /// `@table("users") type User { ... }` del ORM declarativo.
+    fn parse_decorated_stmt(&mut self, span: Span) -> FitzResult<Stmt> {
         let mut decorators: Vec<Decorator> = Vec::new();
         // Al menos uno: el llamador entró acá viendo `@`.
         loop {
@@ -2472,37 +2494,53 @@ impl Parser {
             }
         }
 
-        // El handler debe ser una FnDef (con `async` opcional). Si el
-        // usuario pone otra cosa, error claro y temprano.
-        if !matches!(self.peek(), Token::Fn | Token::Async) {
-            return Err(self.error(
+        match self.peek() {
+            Token::Fn | Token::Async => {
+                let fndef = self.parse_fndef(span)?;
+                match fndef {
+                    Stmt::FnDef {
+                        name,
+                        params,
+                        return_type,
+                        body,
+                        is_async,
+                        decorators: _,
+                        span,
+                    } => Ok(Stmt::FnDef {
+                        name,
+                        params,
+                        return_type,
+                        body,
+                        is_async,
+                        decorators,
+                        span,
+                    }),
+                    other => Ok(other),
+                }
+            }
+            Token::Type => {
+                let typedef = self.parse_typedef(span)?;
+                match typedef {
+                    Stmt::TypeDef {
+                        name,
+                        fields,
+                        methods,
+                        decorators: _,
+                        span,
+                    } => Ok(Stmt::TypeDef {
+                        name,
+                        decorators,
+                        fields,
+                        methods,
+                        span,
+                    }),
+                    other => Ok(other),
+                }
+            }
+            _ => Err(self.error(
                 ErrorKind::UnexpectedToken,
-                "después de un decorador debe venir una definición de función",
-            ));
-        }
-        let fndef = self.parse_fndef(span)?;
-        // `parse_fndef` siempre devuelve un `Stmt::FnDef`; le pegamos los
-        // decoradores acumulados.
-        match fndef {
-            Stmt::FnDef {
-                name,
-                params,
-                return_type,
-                body,
-                is_async,
-                decorators: _,
-                span,
-            } => Ok(Stmt::FnDef {
-                name,
-                params,
-                return_type,
-                body,
-                is_async,
-                decorators,
-                span,
-            }),
-            // Inalcanzable: parse_fndef es total.
-            other => Ok(other),
+                "después de un decorador debe venir `fn`, `async fn` o `type`",
+            )),
         }
     }
 
@@ -3351,6 +3389,14 @@ mod tests {
     fn parser(src: &str) -> Parser {
         let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
         Parser::new(tokens)
+    }
+
+    /// Helper Fase 10.3.a: parsea el source completo a un
+    /// `Program`, asumiendo que es válido. Útil para tests de
+    /// decoradores que necesitan ver el AST entero.
+    fn parse_ok(src: &str) -> Program {
+        let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
+        parse(tokens).expect("la fuente debe parsear sin error")
     }
 
     #[test]
@@ -8729,6 +8775,106 @@ mod tests {
             }
         } else {
             panic!("esperaba Match");
+        }
+    }
+
+    // ===== Fase 10.3.a — decoradores sobre `type` y fields =====
+
+    #[test]
+    fn type_acepta_decorator_table_con_string() {
+        let stmts = parse_ok("@table(\"users\") type User { id: Int, name: Str }");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::TypeDef {
+                name, decorators, ..
+            } => {
+                assert_eq!(name, "User");
+                assert_eq!(decorators.len(), 1);
+                assert_eq!(decorators[0].name, "table");
+                assert_eq!(decorators[0].args.len(), 1);
+                match &decorators[0].args[0] {
+                    Expr::Str(s, _) => assert_eq!(s, "users"),
+                    other => panic!("esperaba Expr::Str, fue {:?}", other),
+                }
+            }
+            other => panic!("esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_acepta_decorator_table_sin_args() {
+        let stmts = parse_ok("@table type Post { id: Int }");
+        match &stmts[0] {
+            Stmt::TypeDef { decorators, .. } => {
+                assert_eq!(decorators.len(), 1);
+                assert_eq!(decorators[0].name, "table");
+                assert!(decorators[0].args.is_empty());
+            }
+            other => panic!("esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_acepta_decorators_apilados() {
+        let stmts = parse_ok("@table(\"posts\") @soft_delete type Post { id: Int }");
+        match &stmts[0] {
+            Stmt::TypeDef { decorators, .. } => {
+                assert_eq!(decorators.len(), 2);
+                assert_eq!(decorators[0].name, "table");
+                assert_eq!(decorators[1].name, "soft_delete");
+            }
+            other => panic!("esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn field_acepta_decorator_primary() {
+        let stmts =
+            parse_ok("@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}");
+        match &stmts[0] {
+            Stmt::TypeDef { fields, .. } => {
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].name, "id");
+                assert_eq!(fields[0].decorators.len(), 1);
+                assert_eq!(fields[0].decorators[0].name, "primary");
+                assert_eq!(fields[1].name, "name");
+                assert!(fields[1].decorators.is_empty());
+            }
+            other => panic!("esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn field_acepta_decorator_column_con_kwargs() {
+        // NOTA: kwarg `sql_type` (no `type`) — keyword collision.
+        let stmts = parse_ok(
+            "@table(\"users\") type User {\n  @column(name=\"user_id\", sql_type=\"bigint\")\n  id: Int\n}",
+        );
+        match &stmts[0] {
+            Stmt::TypeDef { fields, .. } => {
+                assert_eq!(fields[0].decorators.len(), 1);
+                let d = &fields[0].decorators[0];
+                assert_eq!(d.name, "column");
+                assert_eq!(d.kwargs.len(), 2);
+                let names: Vec<&str> = d.kwargs.iter().map(|(k, _)| k.as_str()).collect();
+                assert!(names.contains(&"name"));
+                assert!(names.contains(&"sql_type"));
+            }
+            other => panic!("esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn field_acepta_decorators_apilados() {
+        let stmts = parse_ok("@table type T {\n  @primary @unique @index\n  id: Int\n}");
+        match &stmts[0] {
+            Stmt::TypeDef { fields, .. } => {
+                assert_eq!(fields[0].decorators.len(), 3);
+                assert_eq!(fields[0].decorators[0].name, "primary");
+                assert_eq!(fields[0].decorators[1].name, "unique");
+                assert_eq!(fields[0].decorators[2].name, "index");
+            }
+            other => panic!("esperaba TypeDef, fue {:?}", other),
         }
     }
 }

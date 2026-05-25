@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Decorator, Expr, Param, Program, Span, Stmt, TypeExpr};
+use crate::ast::{Decorator, Expr, Field, Param, Program, Span, Stmt, TypeExpr};
 use crate::error::{ErrorKind, FitzError};
 
 /// Identidad única para los tipos nominales (los declarados con
@@ -335,6 +335,49 @@ pub struct ResolvedField {
     pub type_: Type,
 }
 
+/// Fase 10.3.a — Metadata extraída de los decoradores ORM sobre
+/// un `type Foo { ... }`. Si el type NO tiene `@table`, queda
+/// `None` en `TypeEnv.tables`. Si lo tiene, registramos el nombre
+/// de tabla SQL + el field primary + overrides por columna.
+///
+/// El runtime (10.3.b) consume esta metadata para emitir SQL
+/// correcto al traducir `User.where(...).all().await?`.
+#[derive(Debug, Clone)]
+pub struct TableMetadata {
+    /// Nombre SQL de la tabla (`@table("nombre")`). Si el
+    /// decorator no pasa string, default = nombre Fitz del type
+    /// en lowercase (`User` → `user`). Pluralización automática
+    /// queda como deuda menor — el user puede especificar
+    /// explícitamente.
+    pub sql_name: String,
+    /// Nombre Fitz del field marcado con `@primary`. `None` si
+    /// no se marcó ningún field — el ORM en 10.3.b debe rechazar
+    /// queries sobre tipos sin primary key declarada (por ahora;
+    /// composite PK queda como deuda).
+    pub primary_field: Option<String>,
+    /// Overrides por columna. Indexed por nombre Fitz del field
+    /// (no por nombre SQL — la mapping vive en este struct).
+    /// Solo entries para fields con `@column`/`@unique`/`@index`;
+    /// fields sin decorators mapean directamente (nombre Fitz =
+    /// nombre SQL, tipo SQL derivado del tipo Fitz).
+    pub columns: std::collections::HashMap<String, ColumnMetadata>,
+}
+
+/// Fase 10.3.a — Configuración por columna del ORM. Se popula
+/// desde `@column(name=..., type=...)`, `@unique`, `@index`.
+#[derive(Debug, Clone, Default)]
+pub struct ColumnMetadata {
+    /// Nombre SQL si distinto del nombre Fitz. `None` = mismo
+    /// nombre (mapeo directo).
+    pub sql_name: Option<String>,
+    /// Tipo SQL custom si el default no aplica. `None` = el ORM
+    /// deriva del tipo Fitz (`Int` → `bigint`, `Str` → `text`,
+    /// etc.).
+    pub sql_type: Option<String>,
+    pub unique: bool,
+    pub indexed: bool,
+}
+
 /// Entorno de tipos del programa. Lleva:
 ///  - Built-ins (primitivos y genéricos), implícitos vía
 ///    `resolve_named`.
@@ -356,6 +399,13 @@ pub struct TypeEnv {
     /// destraba field access tipado (`foo.fetch_user(uid)` resuelve a
     /// `Result<User>` en lugar de `Result<Any>`).
     pyi_modules: HashMap<String, TypeId>,
+    /// Fase 10.3.a — metadata ORM por `TypeId`. Solo types con
+    /// `@table(...)` aparecen acá. El runtime (10.3.b) consulta
+    /// `env.table_metadata(id)` para saber el nombre SQL, primary
+    /// key, y overrides por columna. Para types sin `@table`,
+    /// `table_metadata` devuelve `None` y los queries del ORM
+    /// fallan con error claro.
+    tables: HashMap<TypeId, TableMetadata>,
 }
 
 impl TypeEnv {
@@ -378,6 +428,22 @@ impl TypeEnv {
     /// gradual).
     pub fn pyi_module(&self, name: &str) -> Option<TypeId> {
         self.pyi_modules.get(name).copied()
+    }
+
+    /// Fase 10.3.a — Registra metadata ORM para un tipo nominal.
+    /// Llamado por `resolve_program` cuando un `type` lleva
+    /// decoradores `@table`/`@primary`/etc. Sin `@table` el type
+    /// NO aparece en `tables` y `table_metadata` devuelve `None`.
+    pub fn set_table_metadata(&mut self, id: TypeId, meta: TableMetadata) {
+        self.tables.insert(id, meta);
+    }
+
+    /// Fase 10.3.a — Devuelve la metadata ORM del tipo si está
+    /// declarada con `@table(...)`. El runtime (10.3.b) llama a
+    /// esto cuando ve `User.where(...)` para saber el nombre SQL
+    /// de la tabla y la primary key.
+    pub fn table_metadata(&self, id: TypeId) -> Option<&TableMetadata> {
+        self.tables.get(&id)
     }
 
     /// Registra un tipo nominal por nombre, devolviendo su id.
@@ -1014,6 +1080,32 @@ pub fn resolve_program_with_env(
         }
     }
 
+    // Vuelta 2.6 (Fase 10.3.a): procesar decoradores ORM sobre
+    // los `type Foo { ... }`. Solo los types con `@table(...)`
+    // generan metadata; los demás se ignoran silenciosamente.
+    // Decoradores no reconocidos a nivel type → error; a nivel
+    // field también. La metadata se guarda en `env.tables`.
+    for stmt in program {
+        if let Stmt::TypeDef {
+            name,
+            decorators,
+            fields,
+            span,
+            ..
+        } = stmt
+        {
+            let id = match env.lookup(name) {
+                Some(id) => id,
+                None => continue,
+            };
+            match process_table_decorators(name, decorators, fields, *span) {
+                Ok(Some(meta)) => env.set_table_metadata(id, meta),
+                Ok(None) => {}
+                Err(errs) => errors.extend(errs),
+            }
+        }
+    }
+
     // Vuelta 3: anotaciones de FnDef / Assign / let internos.
     for stmt in program {
         resolve_stmt_annotations(stmt, &env, &mut errors);
@@ -1082,6 +1174,261 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
 ///     criterio que el evaluator usa en runtime).
 ///   - El resto: igualdad estructural sobre la base (pelando un
 ///     `Nullable` si lo hay).
+//
+// Fase 10.3.a — procesa los decoradores ORM sobre un `type`.
+// Devuelve:
+//   - `Ok(Some(meta))`: el type tiene `@table(...)`, hay metadata.
+//   - `Ok(None)`: sin `@table` ni decoradores de fields ORM; el
+//     type no participa del ORM, queda como tipo Fitz normal.
+//   - `Err(errs)`: decoradores inválidos (nombre no reconocido,
+//     args mal-tipados, `@primary` en más de un field, etc.).
+//
+// Decoradores reconocidos:
+//   * Sobre el `type`:
+//     - `@table("nombre")` o `@table` — nombre SQL de la tabla
+//       (default: lowercase del nombre Fitz). String literal
+//       en el arg (no expresiones).
+//   * Sobre cada `Field`:
+//     - `@primary` — marca primary key. Solo 1 por type.
+//     - `@column(name="X", sql_type="Y")` — overrides de nombre/
+//       tipo SQL. Ambos kwargs opcionales.
+//     - `@unique` — emite `UNIQUE` constraint.
+//     - `@index` — emite `CREATE INDEX` en la migration.
+fn process_table_decorators(
+    type_name: &str,
+    type_decorators: &[Decorator],
+    fields: &[Field],
+    type_span: Span,
+) -> Result<Option<TableMetadata>, Vec<FitzError>> {
+    use std::collections::HashMap;
+
+    let mut errors: Vec<FitzError> = Vec::new();
+
+    // ¿Hay @table sobre el type?
+    let mut sql_name: Option<String> = None;
+    let mut has_table = false;
+    for d in type_decorators {
+        match d.name.as_str() {
+            "table" => {
+                if has_table {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        format!("el tipo `{type_name}` tiene más de un decorador `@table`"),
+                    ));
+                    continue;
+                }
+                has_table = true;
+                // `@table("nombre")` con arg Str opcional.
+                if !d.kwargs.is_empty() {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        format!(
+                            "`@table` no acepta kwargs; recibió: {:?}",
+                            d.kwargs.iter().map(|(k, _)| k).collect::<Vec<_>>()
+                        ),
+                    ));
+                }
+                if d.args.is_empty() {
+                    // `@table` sin args → nombre default
+                    sql_name = Some(type_name.to_lowercase());
+                } else if d.args.len() == 1 {
+                    match &d.args[0] {
+                        Expr::Str(s, _) => sql_name = Some(s.clone()),
+                        other => errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            format!(
+                                "`@table` espera un string literal como argumento, recibió `{:?}`",
+                                other
+                            ),
+                        )),
+                    }
+                } else {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        format!(
+                            "`@table` espera 0 o 1 argumento (nombre SQL), recibió {}",
+                            d.args.len()
+                        ),
+                    ));
+                }
+            }
+            other => {
+                errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    type_span.line,
+                    type_span.column,
+                    format!(
+                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`."
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Procesar decoradores de cada field (incluso si no hay @table —
+    // esos decoradores sin @table son "error" porque solo tienen
+    // sentido en contexto ORM).
+    let mut primary_field: Option<String> = None;
+    let mut columns: HashMap<String, ColumnMetadata> = HashMap::new();
+    let mut any_field_decorator = false;
+
+    for f in fields {
+        if f.decorators.is_empty() {
+            continue;
+        }
+        any_field_decorator = true;
+        let mut col_meta = ColumnMetadata::default();
+        let mut has_meta = false;
+        for d in &f.decorators {
+            match d.name.as_str() {
+                "primary" => {
+                    if !d.args.is_empty() || !d.kwargs.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@primary` no acepta args ni kwargs".to_string(),
+                        ));
+                    }
+                    if let Some(prev) = &primary_field {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            format!(
+                                "el tipo `{type_name}` tiene `@primary` en más de un field (`{}` y `{}`); composite primary keys no se soportan en 10.3",
+                                prev, f.name
+                            ),
+                        ));
+                    } else {
+                        primary_field = Some(f.name.clone());
+                    }
+                }
+                "column" => {
+                    has_meta = true;
+                    if !d.args.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@column` solo acepta kwargs (`name=`, `sql_type=`), no positionals"
+                                .to_string(),
+                        ));
+                    }
+                    // NOTA: el kwarg se llama `sql_type` (no `type`)
+                    // porque `type` es keyword reservada del lenguaje
+                    // y el parser de decorator args no acepta
+                    // keywords como key. Si entra demanda real,
+                    // refinable en el parser; por ahora API explícita.
+                    for (k, v) in &d.kwargs {
+                        match k.as_str() {
+                            "name" => match v {
+                                Expr::Str(s, _) => col_meta.sql_name = Some(s.clone()),
+                                _ => errors.push(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    type_span.line,
+                                    type_span.column,
+                                    "`@column(name=...)` espera string literal".to_string(),
+                                )),
+                            },
+                            "sql_type" => match v {
+                                Expr::Str(s, _) => col_meta.sql_type = Some(s.clone()),
+                                _ => errors.push(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    type_span.line,
+                                    type_span.column,
+                                    "`@column(sql_type=...)` espera string literal".to_string(),
+                                )),
+                            },
+                            other_k => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                format!(
+                                    "`@column` no reconoce el kwarg `{other_k}`. Soportados: `name`, `sql_type`."
+                                ),
+                            )),
+                        }
+                    }
+                }
+                "unique" => {
+                    has_meta = true;
+                    if !d.args.is_empty() || !d.kwargs.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@unique` no acepta args ni kwargs".to_string(),
+                        ));
+                    }
+                    col_meta.unique = true;
+                }
+                "index" => {
+                    has_meta = true;
+                    if !d.args.is_empty() || !d.kwargs.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@index` no acepta args ni kwargs".to_string(),
+                        ));
+                    }
+                    col_meta.indexed = true;
+                }
+                other => {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        format!(
+                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`."
+                        ),
+                    ));
+                }
+            }
+        }
+        if has_meta {
+            columns.insert(f.name.clone(), col_meta);
+        }
+    }
+
+    // Validación cross: si hay decoradores de field ORM pero no
+    // hay @table, el user probablemente olvidó el @table. Error
+    // claro.
+    if !has_table && (primary_field.is_some() || any_field_decorator) {
+        errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            type_span.line,
+            type_span.column,
+            format!(
+                "el tipo `{type_name}` tiene decoradores ORM sobre fields (`@primary`/`@column`/`@unique`/`@index`) pero falta `@table(...)` sobre el `type`"
+            ),
+        ));
+    }
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
+    if !has_table {
+        return Ok(None);
+    }
+
+    Ok(Some(TableMetadata {
+        sql_name: sql_name.unwrap(), // garantizado por has_table check
+        primary_field,
+        columns,
+    }))
+}
+
 fn check_field_default(
     type_name: &str,
     field_name: &str,
@@ -7881,8 +8228,10 @@ mod tests {
                     name: "n".into(),
                     type_: TE::named("Int"),
                     default: None,
+                    decorators: vec![],
                 }],
                 methods: vec![],
+                decorators: vec![],
                 span: Span::ZERO,
             },
             Stmt::FnDef {
@@ -12505,5 +12854,140 @@ print(total)
                    fn main() -> Int { return spawn(42) }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    // ===== Fase 10.3.a — checker de decoradores ORM =====
+
+    #[test]
+    fn checker_table_decorator_registra_metadata() {
+        let src = "@table(\"users\") type User { id: Int, name: Str }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("User").expect("User debería estar registrado");
+        let meta = env.table_metadata(id).expect("debería haber TableMetadata");
+        assert_eq!(meta.sql_name, "users");
+        assert_eq!(meta.primary_field, None);
+        assert!(meta.columns.is_empty());
+    }
+
+    #[test]
+    fn checker_table_sin_args_usa_lowercase_default() {
+        let src = "@table type Post { id: Int }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("Post").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        assert_eq!(meta.sql_name, "post");
+    }
+
+    #[test]
+    fn checker_primary_decorator_registra_primary_field() {
+        let src = "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("User").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        assert_eq!(meta.primary_field.as_deref(), Some("id"));
+    }
+
+    #[test]
+    fn checker_column_decorator_registra_overrides() {
+        let src = "@table(\"users\") type User {\n  @column(name=\"user_id\", sql_type=\"bigserial\")\n  id: Int\n}";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("User").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        let col = meta.columns.get("id").expect("columna `id` con metadata");
+        assert_eq!(col.sql_name.as_deref(), Some("user_id"));
+        assert_eq!(col.sql_type.as_deref(), Some("bigserial"));
+    }
+
+    #[test]
+    fn checker_unique_e_index_se_registran() {
+        let src = "@table type T {\n  @unique @index\n  email: Str\n}";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("T").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        let col = meta.columns.get("email").unwrap();
+        assert!(col.unique);
+        assert!(col.indexed);
+    }
+
+    #[test]
+    fn checker_type_sin_table_no_tiene_metadata() {
+        let src = "type Plain { x: Int }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("Plain").unwrap();
+        assert!(env.table_metadata(id).is_none());
+    }
+
+    #[test]
+    fn checker_decorador_de_field_sin_table_es_error() {
+        // `@primary` sobre un field necesita que el type tenga `@table`.
+        let src = "type X {\n  @primary\n  id: Int\n}";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("falta `@table")),
+            "esperaba error sobre @table faltante: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_dos_primary_son_error() {
+        let src = "@table type T {\n  @primary\n  a: Int\n  @primary\n  b: Int\n}";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("@primary")),
+            "esperaba error sobre @primary duplicado: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_decorator_no_reconocido_sobre_type_es_error() {
+        let src = "@bogus type X { id: Int }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("@bogus")),
+            "esperaba error sobre @bogus: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_decorator_no_reconocido_sobre_field_es_error() {
+        let src = "@table type T {\n  @bogus\n  x: Int\n}";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("@bogus")),
+            "esperaba error sobre @bogus: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_table_con_arg_no_string_es_error() {
+        let src = "@table(42) type T { id: Int }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("@table")),
+            "esperaba error sobre arg no string: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_dos_table_decorators_es_error() {
+        let src = "@table(\"a\") @table(\"b\") type T { id: Int }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("más de un decorador `@table`")),
+            "esperaba error sobre @table duplicado: {:?}",
+            errs
+        );
     }
 }

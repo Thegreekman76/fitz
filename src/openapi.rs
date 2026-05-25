@@ -1349,11 +1349,13 @@ mod tests {
                 name: "id".into(),
                 type_: named("Int"),
                 default: None,
+                decorators: vec![],
             },
             Field {
                 name: "name".into(),
                 type_: named("Str"),
                 default: None,
+                decorators: vec![],
             },
         ];
         let s = type_def_to_schema(&fields);
@@ -1373,18 +1375,21 @@ mod tests {
                 name: "id".into(),
                 type_: named("Int"),
                 default: None,
+                decorators: vec![],
             },
             // Nullable: opcional, no aparece en required.
             Field {
                 name: "nickname".into(),
                 type_: nullable(named("Str")),
                 default: None,
+                decorators: vec![],
             },
             // Con default: opcional, no aparece en required.
             Field {
                 name: "active".into(),
                 type_: named("Bool"),
                 default: Some(crate::ast::Expr::Bool(true, crate::ast::Span::ZERO)),
+                decorators: vec![],
             },
         ];
         let s = type_def_to_schema(&fields);

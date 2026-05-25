@@ -596,8 +596,15 @@ pub enum Stmt {
     /// R.3 (mini-fase R) suma `methods: Vec<MethodDef>` — métodos
     /// custom sobre el tipo. Fields y métodos se mezclan en cualquier
     /// orden adentro del `{}` del `type`.
+    ///
+    /// Fase 10.3.a suma `decorators` al type (`@table("users")` para
+    /// el ORM) y `decorators` por field (`@primary`, `@column(...)`,
+    /// `@unique`, `@index`). Los decoradores se parsean siempre — el
+    /// checker decide cuáles son válidos según el contexto. Programas
+    /// sin ORM no usan ningún decorator y el campo queda vacío.
     TypeDef {
         name: String,
+        decorators: Vec<Decorator>,
         fields: Vec<Field>,
         methods: Vec<MethodDef>,
         span: Span,
@@ -784,11 +791,15 @@ pub struct Param {
 /// Campo de un `type`. El tipo es obligatorio dentro de un struct.
 /// La nullabilidad (`T?`) se modela adentro del `TypeExpr` como
 /// `TypeExpr::Nullable(...)`, no como un flag aparte.
+///
+/// Fase 10.3.a — `decorators` permite `@primary`, `@column(name=...)`,
+/// `@unique`, `@index` por field. Para tipos no-ORM, queda vacío.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
     pub type_: TypeExpr,
     pub default: Option<Expr>,
+    pub decorators: Vec<Decorator>,
 }
 
 /// Método custom adentro de un `type` (R.3, mini-fase R).

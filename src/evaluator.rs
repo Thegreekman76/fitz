@@ -2379,7 +2379,13 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // `type Name { campo1: T1, ... }`. Por ahora solo registramos el
         // tipo en el env como un valor inerte. La instanciación (`User { id: 1 }`)
         // y el field access requieren extensiones del AST (Fase 3).
-        Stmt::TypeDef { name, fields, methods, span: _ } => {
+        Stmt::TypeDef {
+            name,
+            fields,
+            methods,
+            decorators: _,
+            span: _,
+        } => {
             // PreF8.3: tipos locales arrancan con `resolved_defaults` vacío.
             // Sus `Field.default` se siguen evaluando lazy en cada struct
             // lit con el env del call site. Solo los tipos cargados desde
@@ -13669,6 +13675,7 @@ print(_)\n";
             name: name.into(),
             type_: t,
             default: None,
+            decorators: vec![],
         }
     }
 
@@ -13683,6 +13690,7 @@ print(_)\n";
                 make_field("name", "Str", false),
             ],
             methods: vec![],
+            decorators: vec![],
             span: Span::ZERO,
         };
         eval_stmt(&stmt, env.clone()).await.unwrap();
@@ -13719,6 +13727,7 @@ print(_)\n";
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
                 methods: vec![],
+                decorators: vec![],
                 span: Span::ZERO,
             },
             env.clone(),
@@ -13742,6 +13751,7 @@ print(_)\n";
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
                 methods: vec![],
+                decorators: vec![],
                 span: Span::ZERO,
             },
             env.clone(),

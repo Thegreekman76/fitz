@@ -4998,6 +4998,7 @@ mod tests {
                         name: n.into(),
                         type_,
                         default,
+                        decorators: vec![],
                     }
                 })
                 .collect(),
