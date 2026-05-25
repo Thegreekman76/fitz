@@ -2,24 +2,26 @@
 
 ---
 
-## Estado actual del proyecto (v0.9.56 — 2026-05-24)
+## Estado actual del proyecto (v0.9.57 — 2026-05-24)
 
-**Hito de consolidación**. Tras 14 releases consecutivos cerrando deudas (v0.9.43 → v0.9.55) + 1 release de re-investigación (v0.9.56), el proyecto está en estado **production-ready** para los patrones canónicos del lenguaje:
+**Hito**: tras 15 releases consecutivos cerrando deudas (v0.9.43 → v0.9.57), el inventario activo queda **vacío**. El proyecto está en estado **production-ready** para todos los patrones canónicos del lenguaje:
 
 - **Fases 1-9 entera CERRADAS**: lexer + parser + AST + checker estático + evaluador async + HTTP nativo + middleware + Result/match + módulos + interop Python con bundling distroless + LSP MVP completo + package manager + DX (fmt/test/dev/repl/lint) + stack web first-class (auth/WS/jobs).
 - **Cierre Bundle B/I (Python interop codegen)**: 3 deudas residuales cerradas (8.7-ok-propagation, 8.7-await-binding-split, dict→Map<K,V> primitivo). Codegen Python production-ready para el caso 90%+.
+- **8-pyi-stubs CERRADO entero** (v0.9.57): auto-pickup loader detecta `.pyi` adyacente al `.fitz` raíz, registra nominales en TypeEnv (pase 1) + crea nominal sintético por módulo con field tipado por cada fn/var (pase 2). Field access `api.fetch_user(42)` ahora tipa estáticamente como `Result<User>` con arity + type check de args. Cubre el `Type::PyModule` que faltaba sin tocar la signature de `check_program` (vía `TypeEnv.pyi_modules`).
 - **6 boilerplates Dockerizados validados end-to-end**, los 2 con Postgres+Python en variante distroless real (imagen ~136 MB).
 - **CI strict reactivado**: `cargo fmt --check` + `cargo clippy --all-targets -D warnings` en los 3 modos (default, `python`, `lsp`).
-- **R.bug-pyo3-abi3-portable-link Linux/macOS RECLASIFICADO** (v0.9.56) como constraint arquitectural permanente tras verificación empírica de que `libpython3.so` en `python:3.X-slim` es un dummy de 13 KB que no exporta el API Python — en Linux NO existe equivalente al `python3.dll` shim de Windows. El workaround "match builder=runtime Python version" es la solución permanente, no temporal. Ver `docs/deudas_lenguaje.md`.
-- **2290 unit (default) / 2381 (python) / 2395 (lsp)** + 90+ E2E + 79+ compile_e2e.
+- **R.bug-pyo3-abi3-portable-link Linux/macOS RECLASIFICADO** (v0.9.56) como constraint arquitectural permanente.
+- **Race condition Windows en compile_e2e fixeado** (v0.9.57): helpers usan stem único per test → cero choque de file handles entre runs secuenciales.
+- **2304 unit (default) / 2395 lsp** + 90+ E2E + 79+ compile_e2e.
 
-**Deudas reales restantes** (sin presión, mantener documentadas):
+**Deudas activas cerrables**: **ninguna**. El inventario está vacío después de v0.9.57.
 
-| ID | Categoría | Esfuerzo |
-|----|-----------|----------|
-| 8-pyi-stubs | Stubs Python | 1-2 días, post-Fase 9 |
+**Constraints arquitecturales documentados** (no cerrables):
 
-Sola UNA deuda activa cerrable. La otra que figuraba antes (R.bug-pyo3-abi3-portable-link) salió a constraint arquitectural documentado.
+- R.bug-pyo3-abi3-portable-link Linux/macOS — bundling Python requiere builder con versión específica de Python (PyO3 + Linux/glibc constraint).
+- Métodos custom dentro de `class` del stub (`def method(self, ...)`) — el parser MVP los ignora; refinable si entra demanda real.
+- Lookup `.pyi` solo adyacente — decisión consciente (NO PYTHONPATH/site-packages) por reproducibilidad. Opt-in futuro si entra demanda.
 
 **Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. Norte estratégico que destraba el reemplazo de la layer Python en los boilerplates 5/6 con un driver Postgres puro en Fitz + ORM sobre `type` con anotaciones + migraciones autogeneradas. Sesión de diseño primero (sin código), después implementación incremental.
 

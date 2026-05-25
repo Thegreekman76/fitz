@@ -61,6 +61,130 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.57] — 2026-05-24 — Cierre 8-pyi-stubs: auto-pickup loader + field access tipado + race fix compile_e2e
+
+### Added
+
+Cierre de la última deuda activa del proyecto: **8-pyi-stubs**.
+Auto-pickup loader de archivos `.pyi` adyacentes al `.fitz` raíz
++ field access tipado sobre los stubs cargados. Después de
+v0.9.57, queda **cero deudas activas cerrables** — el inventario
+post-boilerplates está vacío.
+
+- **`src/pyi_loader.rs`** (módulo nuevo, ~400 LoC):
+  - `load_stubs(program, base_dir, env)` — **pase 1 (8-pyi.B)**:
+    walkea el programa buscando `Stmt::FromImport { path:
+    ["python"], names }`, intenta cargar `<base_dir>/<name>.pyi`
+    por cada nombre, parsea con `pyi_stub::parse_stub`, y
+    registra solo las `class` declarations en el `TypeEnv`.
+    Skipea classes con nombre en pre-scan del programa
+    (`type X { ... }`) y built-ins HTTP (`Request`, `Response`,
+    `File`) — política "el .fitz gana sobre el .pyi". Fns/vars
+    del stub se posponen a pase 2 (8-pyi.C).
+  - `load_callables(stubs, env)` — **pase 2 (8-pyi.C)**: procesa
+    fns/vars top-level de cada stub cargado y crea un nominal
+    sintético `__pyi_module_<binding>` con un field por
+    callable/var. Fns se materializan como `Type::Function {
+    params, ret: Result<ret, Str> }` (auto-wrap a Result
+    paralelo al runtime 8.3 donde toda call Python se envuelve).
+    Vars se materializan con su tipo directo (sin wrap). Registra
+    mapping `binding → synth_id` en `env.pyi_modules`.
+
+- **`src/pyi_stub.rs`**: nuevas APIs públicas
+  `register_stub_items_into_env(items, env) -> Vec<ResolvedStubItem>`
+  y `nominal_fields(env, id)`. Política "el .fitz gana":
+  `register_stub_items_into_env` solo setea fields si el nominal
+  todavía no tiene fields (no sobreescribe declaraciones del
+  programa Fitz).
+
+- **`src/types.rs`**:
+  - `TypeEnv.pyi_modules: HashMap<String, TypeId>` + métodos
+    `set_pyi_module(name, id)` / `pyi_module(name) -> Option<TypeId>`
+    para mapear binding name → nominal sintético.
+  - Nuevas APIs públicas `resolve_program_with_env(program,
+    initial_env, errors_init)` y `check_with_env(program, env,
+    errors)` que permiten partir de un env pre-llenado (típicamente
+    por el loader). `resolve_program(program)` y `check_program(program)`
+    quedan como wrappers para backward compat de los 11+ call sites
+    sin contexto de archivo.
+  - `Stmt::FromImport` from_python: si hay stub cargado (lookup
+    en `pyi_modules`), bindea el nombre con `Type::Nominal(id)`
+    sintético; sino fallback a `Type::PyAny` opaco.
+  - `infer_method_call` para `Type::Nominal(id)`: **8-pyi.C
+    field-as-callable** — antes del lookup de métodos custom
+    (R.3), busca en `info.fields` un field con `type_:
+    Type::Function`. Si matchea, valida arity + tipos de args
+    y devuelve el ret. Mensajes de error recortan el prefijo
+    `__pyi_module_` para mostrar el binding original (e.g.
+    `api.fetch_user espera 1 argumento(s), recibió 3`).
+
+- **`src/main.rs`**:
+  - `base_dir_for_stub_lookup(path) -> PathBuf` — calcula el
+    base dir del lookup (parent del path, fallback a cwd).
+  - `check_program_with_pyi_stubs(program, path)` — wrapper
+    que orquesta los dos pases del loader alrededor de
+    `resolve_program_with_env` + `check_with_env`. Llamado por
+    todos los call sites con path (`run`, `build`, `check`,
+    `openapi`, `bundle_python`, `test`).
+
+### Fixed
+
+**Race condition Windows preexistente en `compile_e2e`**: pre-fix
+todos los tests del harness escribían `prog.fitz` → compartían
+`target/fitz-build/prog/` (cache global per-stem). Bajo
+`SERIAL`, los tests corrían secuenciales, pero Windows mantenía
+file handles del `.exe` un instante después de `Child.wait()`;
+el siguiente test sobreescribía el mismo path y `fitz build`
+fallaba con `OS error 32 — being used by another process`. Flake
+real intermitente, no puro.
+
+Fix: helper `sanitize_stem(test_name)` (lowercase + chars
+no-`[a-z0-9_-]` → `_`) usado por `build_and_run`,
+`build_expect_fail` y `build_and_run_with_env`. Cada test escribe
+`<sanitized>.fitz` → cada uno va a `target/fitz-build/<sanitized>/`.
+Cero choque de handles entre runs. Tests inline que no usan
+helpers (~31 sitios) siguen vulnerables como deuda menor.
+
+### Notes
+
+- **8-pyi.D (codegen paridad)**: cierra "gratis". El codegen
+  consume el `TypeInfo` del checker, y el checker ya usa los
+  stubs vía B/C. Programas sin `from python import` siguen
+  idénticos (validado smoke con `buildtest.fitz`).
+- **Cap 21.8b** de `docs/guide.md` reescrito: documenta los dos
+  modos (manual `fitz py-stubs` + auto-pickup), tabla de cuándo
+  usar cada uno, sub-set cubierto incluyendo callables y vars
+  del stub (no solo classes como pre-v0.9.57).
+- **Ejemplo runnable nuevo**: `examples/guide/21c-pyi-autopickup/`
+  con `users.pyi` adyacente + `app.fitz` que demuestra el
+  pipeline tipado end-to-end via auto-pickup (valida con
+  `fitz check`).
+- **Decisiones técnicas**: lookup local-only (adyacente al
+  `.fitz`, NO PYTHONPATH/site-packages) — máxima reproducibilidad
+  + cero magia ambiente, diferencial vs typecheckers Python que
+  dependen del venv. Silent fallback en parse error (warning a
+  stderr, binding cae a PyAny). Política "el .fitz gana sobre
+  el .pyi" via skip set en pase 1. Nominal sintético prefijado
+  `__pyi_module_<binding>` para evitar colisiones con tipos del
+  programa; prefix se recorta en mensajes de error.
+- **14 unit tests nuevos en `pyi_loader::tests`** (4 del pase 1
+  ya existían en v0.9.57.B + 4 nuevos del pase 2 8-pyi.C +
+  regresiones). Suite total: **2304 unit (default) / 2395 lsp**.
+- **Smoke E2E manual VERDE**: programa con `from python import
+  api` + `api.pyi` adyacente valida tipado completo de classes,
+  fns con auto-wrap a Result, vars top-level, arity check, y
+  type check de args (todos producen errores precisos del
+  checker con mensajes user-friendly).
+- **Próximo norte**: **Fase 10 — Stack DB nativo + ORM
+  declarativo**. Driver Postgres en Fitz puro + ORM sobre `type`
+  + migraciones autogeneradas. Sesión de diseño primero (sin
+  código), después implementación incremental. **El inventario
+  de deudas activas queda vacío después de v0.9.57** — el
+  proyecto entra a fase "todo lo prometido implementado" antes
+  de la próxima fase grande.
+
+---
+
 ## [v0.9.56] — 2026-05-24 — Re-investigación R.bug-pyo3-abi3-portable-link Linux: reclasificado como constraint arquitectural permanente
 
 ### Changed

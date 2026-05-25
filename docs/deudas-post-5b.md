@@ -1367,7 +1367,7 @@ estado real).
 | ~~UTF-16 position strict~~ | ✓ **CERRADO v0.9.51** | LSP capability `positionEncoding: utf-8` declarada explícita |
 | ~~F15 recovery sub-stmt~~ | ✓ **CERRADO v0.9.51** | `parse_postfix` preserva `Expr::Field { field: "" }` en lugar de descartar el stmt entero |
 | ~~R.bug-pyo3-abi3-portable-link Linux/macOS~~ | ✓ **RECLASIFICADO v0.9.56** | Verificado empíricamente 2026-05-24 que NO es cerrable: `libpython3.so` (13 KB) en `python:3.X-slim` exporta solo 4 símbolos glibc (no exporta API Python). En Linux NO existe equivalente al `python3.dll` shim de Windows. Movido a constraint arquitectural permanente; ver `docs/deudas_lenguaje.md` |
-| 8-pyi-stubs | Stubs Python | 1-2 días |
+| ~~8-pyi-stubs~~ | ✓ **CERRADO v0.9.57** | `src/pyi_loader.rs` nuevo con auto-pickup en 2 pases: pase 1 carga classes adyacentes al `.fitz` raíz, pase 2 procesa fns/vars del stub como fields tipados de un nominal sintético `__pyi_module_<binding>`. `infer_method_call` para Nominal busca primero en fields-as-callable (Function type). Binding `from python import foo` tipa como `Type::Nominal(synth_id)` si hay stub, sino fallback a `PyAny`. 14 unit tests + smoke E2E + cap 21.8b reescrito + ejemplo `examples/guide/21c-pyi-autopickup/`. **Inventario activo queda vacío después de este cierre.** |
 | ~~Smoke real Docker boilerplate 5~~ | ✓ **CERRADO v0.9.50** | smoke end-to-end con Postgres VERDE, imagen 136 MB |
 | ~~Smoke real Docker boilerplate 6~~ | ✓ **CERRADO v0.9.52** | smoke end-to-end con Postgres + nginx + CORS preflight VERDE, imagen 136 MB |
 

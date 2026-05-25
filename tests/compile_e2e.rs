@@ -24,15 +24,45 @@ fn fitz_bin() -> &'static str {
     env!("CARGO_BIN_EXE_fitz")
 }
 
+/// 8-pyi.B cleanup (v0.9.57): pre-fix los helpers escribían siempre
+/// `prog.fitz` → todos los tests compartían `target/fitz-build/prog/`
+/// (cache global de fitz build con cargo project per-stem). Bajo
+/// SERIAL los tests corren secuenciales, pero en Windows el `.exe`
+/// generado mantiene un file handle abierto un instante después de
+/// `Child.wait()`; si el siguiente test sobreescribe el mismo path,
+/// `fitz build` falla con `OS error 32 — being used by another
+/// process`. Race intermitente real (no flake puro).
+///
+/// Fix: cada test usa un stem único derivado de su `test_name`. Cada
+/// uno va a su propio `target/fitz-build/<sanitized>/`. Cero choque
+/// de handles entre runs.
+///
+/// Sanitización: lowercase + chars no-`[a-z0-9_-]` → `_`. Cargo exige
+/// `[a-z][a-z0-9_-]{0,63}` para nombres de paquete; los test_names
+/// hoy ya empiezan con letra, así que no necesitamos prefix defensivo.
+fn sanitize_stem(test_name: &str) -> String {
+    test_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Crea un directorio temporal único para el test, escribe el
 /// .fitz, compila con `fitz build`, ejecuta el binario y devuelve
 /// (stdout, exit_code).
 fn build_and_run(test_name: &str, src: &str) -> (String, i32) {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     // Build.
@@ -49,8 +79,12 @@ fn build_and_run(test_name: &str, src: &str) -> (String, i32) {
     );
 
     // Path del binario generado: adyacente al .fitz.
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     let run = Command::new(&bin).output().expect("invocar binario");
@@ -64,10 +98,11 @@ fn build_and_run(test_name: &str, src: &str) -> (String, i32) {
 /// Devuelve el stderr del fitz build.
 fn build_expect_fail(test_name: &str, src: &str) -> String {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -89,10 +124,11 @@ fn build_expect_fail(test_name: &str, src: &str) -> String {
 /// `Command::env` queda visible. Mini-fase env builtin (2026-05-22).
 fn build_and_run_with_env(test_name: &str, src: &str, env_vars: &[(&str, &str)]) -> (String, i32) {
     let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -107,8 +143,12 @@ fn build_and_run_with_env(test_name: &str, src: &str, env_vars: &[(&str, &str)])
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     let mut cmd = Command::new(&bin);

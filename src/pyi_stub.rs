@@ -27,7 +27,7 @@
 // ~50× el código de este módulo) ni dependemos de tree-sitter — el
 // scope es chico y este enfoque acotado mantiene el control.
 
-use crate::types::{Type, TypeEnv, TypeId};
+use crate::types::{ResolvedField, Type, TypeEnv, TypeId};
 
 // ---------------------------------------------------------------------------
 // AST de stubs
@@ -696,6 +696,120 @@ fn register_unknown_nominal(env: &mut TypeEnv, name: &str) -> TypeId {
     // secuencialmente).
     env.declare_nominal(name.to_string())
         .unwrap_or_else(|_| panic!("declare_nominal falló inesperadamente"))
+}
+
+// ---------------------------------------------------------------------------
+// API pública: registrar items de un stub al TypeEnv
+// ---------------------------------------------------------------------------
+
+/// Item resuelto del stub listo para consumo del checker. Mapea cada
+/// `StubItem` a su contraparte tipada Fitz. Las fns y vars top-level
+/// se exponen como bindings del módulo Python tipado; las classes ya
+/// quedan en el TypeEnv como nominales.
+///
+/// 8-pyi.B: lo construye `register_stub_items_into_env` y lo consume
+/// el checker (a través de `LoadedStub` en `pyi_loader.rs`) para
+/// refinar bindings de `from python import foo` con `foo.pyi` adyacente.
+#[derive(Debug, Clone)]
+pub enum ResolvedStubItem {
+    /// `def name(args...) -> ret` — refleja firma como `Type::Function`.
+    Fn {
+        name: String,
+        params: Vec<Type>,
+        ret: Type,
+    },
+    /// `class Name: <fields>` — ya registrada como Nominal en env. Llevamos el id
+    /// para consumo posterior (e.g. field access tipado en 8-pyi.C).
+    Class { name: String, id: TypeId },
+    /// `name: type` top-level del stub — bindea con el tipo declarado.
+    Var { name: String, ty: Type },
+}
+
+/// Registra todos los items de un `.pyi` parseado al TypeEnv:
+///
+/// 1. Pre-scan de classes: declara cada nominal vacío (sin fields)
+///    para que el resto de los items pueda referirlos forward.
+/// 2. Procesa cada class: setea los fields resolviendo cada `StubType`
+///    al `Type` Fitz correspondiente.
+/// 3. Procesa fns y vars: las resuelve a `ResolvedStubItem` para que
+///    el checker pueda bindear el módulo Python tipado.
+///
+/// **Política de errores**: si una clase intenta redeclarar un nominal
+/// ya existente con el mismo nombre (e.g. el programa Fitz declara
+/// `type Foo` y el stub también declara `class Foo`), reusamos el
+/// nominal existente sin reemplazar sus fields — el programa Fitz
+/// gana. Esto preserva la compatibilidad con el patrón
+/// `fitz py-stubs requests.pyi --out requests.fitz` + `from python
+/// import requests` (los tipos ya están registrados desde el .fitz).
+///
+/// Devuelve el listado resuelto en el mismo orden que `items`.
+pub fn register_stub_items_into_env(
+    items: &[StubItem],
+    env: &mut TypeEnv,
+) -> Vec<ResolvedStubItem> {
+    // Pre-scan: registrar todas las classes como nominales vacíos
+    // para destrabar forward refs (class A refencia B en field, B
+    // declarado después).
+    for item in items {
+        if let StubItem::Class(c) = item {
+            register_unknown_nominal(env, &c.name);
+        }
+    }
+
+    // Procesar items en orden.
+    let mut resolved = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            StubItem::Class(c) => {
+                let id = register_unknown_nominal(env, &c.name);
+                // Solo setear fields si el nominal NO tiene fields ya
+                // (preserva clases declaradas por el programa Fitz —
+                // política "el .fitz gana sobre el .pyi").
+                if env.info(id).fields.is_none() {
+                    let fields: Vec<ResolvedField> = c
+                        .fields
+                        .iter()
+                        .map(|f| ResolvedField {
+                            name: f.name.clone(),
+                            type_: stub_type_to_fitz_type(&f.ty, env),
+                        })
+                        .collect();
+                    env.set_fields(id, fields);
+                }
+                resolved.push(ResolvedStubItem::Class {
+                    name: c.name.clone(),
+                    id,
+                });
+            }
+            StubItem::Fn(f) => {
+                let params: Vec<Type> = f
+                    .params
+                    .iter()
+                    .map(|p| stub_type_to_fitz_type(&p.ty, env))
+                    .collect();
+                let ret = stub_type_to_fitz_type(&f.ret, env);
+                resolved.push(ResolvedStubItem::Fn {
+                    name: f.name.clone(),
+                    params,
+                    ret,
+                });
+            }
+            StubItem::Var(v) => {
+                let ty = stub_type_to_fitz_type(&v.ty, env);
+                resolved.push(ResolvedStubItem::Var {
+                    name: v.name.clone(),
+                    ty,
+                });
+            }
+        }
+    }
+    resolved
+}
+
+/// Devuelve el `ResolvedField` declarado de un nominal en el TypeEnv,
+/// si tiene fields seteados.
+pub fn nominal_fields(env: &TypeEnv, id: TypeId) -> Option<&[ResolvedField]> {
+    env.info(id).fields.as_deref()
 }
 
 // ---------------------------------------------------------------------------

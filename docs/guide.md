@@ -8364,51 +8364,119 @@ Después de generar, podés usar `from models import User, Order`
 en tus archivos Fitz y los tipos están listos para combinar con
 el patrón `let row: User = py_call(...)?` del cap 21.7.
 
-### 21.8b `fitz py-stubs` — tipos Fitz desde `.pyi` (PEP 484/561)
+### 21.8b Stubs `.pyi` — dos modos: manual (`fitz py-stubs`) y auto-pickup
 
-Variante de `py-types` para librerías Python con stubs `.pyi`
-(typeshed, paquetes `types-<package>` del PyPI, stubs adjuntos
-al proyecto). Útil para integrar libs comunes (`requests`,
-`numpy`, etc.) sin escribir `type` Fitz a mano.
+Para librerías Python con stubs `.pyi` (typeshed, paquetes
+`types-<package>` del PyPI, stubs adjuntos al proyecto, o
+escritos a mano), Fitz ofrece dos modalidades complementarias.
+Útil para integrar libs comunes (`requests`, `numpy`, etc.) sin
+escribir `type` Fitz a mano y con tipado estático real en lugar
+de `PyAny` opaco.
+
+**Modo 1 — Manual (`fitz py-stubs`)**: comando que parsea el
+`.pyi` y emite un archivo `.fitz` commiteable con los `type`
+correspondientes. Útil cuando querés tener los tipos versionados
+explícitamente en tu repo y poder editarlos a mano.
 
 ```bash
 fitz py-stubs http_client.pyi --out http_types.fitz
 ```
 
-Parsea el `.pyi`, mapea las `class` top-level a `type` Fitz, y
-emite el archivo `.fitz` listo para commitear. Sub-set cubierto:
+**Modo 2 — Auto-pickup** (8-pyi.B/C, v0.9.57): si el archivo
+`.fitz` tiene `from python import foo` y existe `foo.pyi`
+adyacente (mismo directorio), el loader del checker lo detecta
+automáticamente, parsea, y registra los tipos al TypeEnv sin
+intervención. El user solo tiene que dropear el `.pyi` al lado
+del `.fitz` raíz.
 
-- **`class Foo: ...`** con fields anotados → `type Foo { ... }`.
+```fitz
+# main.fitz — sin imports extra, sin sub-comandos manuales
+from python import requests
+
+fn fetch_user(id: Int) -> Result<User> {
+    return Ok(requests.get_user(id)?)
+    # `requests.get_user` resuelve a `fn(Int) -> Result<User>`
+    # leído del `requests.pyi` adyacente.
+    # `User` resuelve a un nominal real con sus fields del stub.
+}
+```
+
+Beneficios sobre el modo manual:
+- **Cero archivos intermedios**. No genera ni commitea un `.fitz`.
+  El `.pyi` es la única fuente de verdad.
+- **Lookup automático**. El loader busca `<base_dir>/<name>.pyi`
+  para cada `from python import <name>`. `base_dir` = dir del
+  `.fitz` que arranca `fitz run`/`fitz build`/`fitz check`.
+- **Field access tipado**. Después del auto-pickup,
+  `requests.get_user(42)` tipa estáticamente como
+  `Result<User>` — el `?` desempaca a `User` y el match exhaustivo
+  funciona. Pre-fix tipaba como `Result<Any>` gradual.
+- **Silent fallback**. Si el `.pyi` no existe o está malformado,
+  el binding vuelve a `PyAny` opaco (comportamiento previo).
+  Nunca rompe el build por un stub problemático — emite warning
+  a stderr y sigue.
+- **Política "el `.fitz` gana"**. Si el programa declara
+  `type User { ... }` Y el stub también declara `class User`,
+  los fields del `.fitz` ganan (el stub se ignora para ese
+  nombre). Permite refinar stubs upstream sin perder control.
+
+Lookup local-only por diseño: el loader solo mira el dir
+adyacente al `.fitz` raíz. **No** recorre `PYTHONPATH` ni
+`site-packages`. Si querés tipar libs de PyPI, copiá el `.pyi`
+al repo (o usá `pip show -f <package> | grep .pyi` para
+encontrarlos en el venv). Paridad reproducible entre máquinas;
+cero magia ambiente.
+
+Sub-set cubierto (compartido por ambos modos):
+
+- **`class Foo: ...`** con fields anotados → `type Foo { ... }`
+  (manual) o nominal en TypeEnv (auto).
 - **Tipos primitivos**: `int`, `float`, `str`, `bool`, `bytes`,
   `None` → `Int`, `Float`, `Str`, `Bool`, `Bytes`, `Null`.
 - **Generics**: `list[T]`, `dict[K, V]` → `List<T>`, `Map<K, V>`.
 - **Nullable**: `Optional[T]` y PEP 604 `T | None` → `T?`.
 - **Forward refs**: `"Foo"` (string) → `Foo` nominal.
+- **`def name(args) -> ret`** (solo modo auto, 8-pyi.C): se
+  registra como callable tipado adentro del módulo. El call
+  `foo.name(args)` tipa estáticamente con la firma del stub.
+  Auto-wrap: el ret se envuelve en `Result<ret, Str>`
+  reflejando el modelo runtime (toda call Python wrappea en
+  Result automático, ver §21.5).
+- **`var name: type`** top-level (solo modo auto, 8-pyi.C): se
+  registra como field directo del módulo. `foo.var` tipa con el
+  tipo declarado, sin wrap.
 
-Restricciones del MVP (deuda menor):
+Restricciones (deuda menor compartida):
 
-- **`def` top-level y `var` top-level del stub se ignoran** — el
-  evaluator runtime los expone via `module.fn(args)` con `PyAny`
-  opaco. Las clases sí se materializan porque son lo que necesita
-  el patrón `let row: ClassName = py_call(...)?` de coerción
-  `Map → Instance` (8.4.3).
 - **Métodos de class se ignoran**. Hoy solo fields. Métodos
   custom de tipos importados quedan PyAny.
-- **Sin sync automático**: regenerar el `.fitz` si el `.pyi`
-  upstream cambia.
+- **Sin sync upstream automático**: regenerar el `.fitz` manual
+  o re-dropear el `.pyi` actualizado si la lib cambia.
 - **Built-ins de Fitz colisionan** (`Response`, `Request`,
   `File`, etc.). Si el stub tiene un class con esos nombres,
-  renombrar manualmente el `.fitz` generado (ej. `Response` →
-  `ApiResponse`).
+  el loader auto los skipea silenciosamente; con `fitz py-stubs`,
+  renombrar manualmente en el `.fitz` generado (ej. `Response`
+  → `ApiResponse`).
 
-**Integración automática del checker** (deuda residual): cuando el
-checker vea `from python import foo` y exista `<base>/foo.pyi`
-adyacente, podría hidratar el TypeEnv con los stubs sin pasar por
-el `.fitz` intermedio. Requiere agregar `Type::PyModule` + refactor
-de la signature de `check_program`. Sin presión real hoy — el
-`.fitz` generado funciona bien con el checker existente.
+**¿Cuándo usar cada modo?**
 
-Ejemplo runnable: [`examples/guide/21b-pyi-stubs.fitz`](../examples/guide/21b-pyi-stubs.fitz).
+| Caso | Modo |
+|---|---|
+| Lib estable, quiero versionar los tipos | `fitz py-stubs` (manual) |
+| Lib en desarrollo, refresh frecuente | Auto-pickup |
+| Querés EDITAR los tipos para refinarlos | `fitz py-stubs` |
+| Stub generado por terceros, leés-only | Auto-pickup |
+| Quiero `type` Fitz para usar también desde otros `.fitz` | `fitz py-stubs` |
+| Solo querés tipado dentro del mismo archivo | Auto-pickup |
+
+Los dos modos son compatibles: podés usar `fitz py-stubs` para
+generar un `.fitz` versionado de `requests.pyi`, e independiente
+tener un `local_helpers.pyi` adyacente al main.fitz para tipado
+de helpers Python rápidos.
+
+Ejemplos runnable:
+- Modo manual: [`examples/guide/21b-pyi-stubs.fitz`](../examples/guide/21b-pyi-stubs.fitz).
+- Modo auto-pickup: [`examples/guide/21c-pyi-autopickup/`](../examples/guide/21c-pyi-autopickup/) (programa Fitz + `.pyi` adyacente).
 
 ### 21.9 Async — `await` sobre corutinas Python
 

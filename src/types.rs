@@ -327,11 +327,37 @@ pub struct ResolvedField {
 pub struct TypeEnv {
     nominals: Vec<NominalInfo>,
     by_name: HashMap<String, TypeId>,
+    /// 8-pyi.C (v0.9.57): mapeo `module_name → nominal_id sintético`
+    /// para stubs `.pyi` adyacentes cargados por `pyi_loader`. Cada
+    /// stub se materializa como un nominal sintético con un field por
+    /// cada fn/var top-level del stub. El checker consulta esta tabla
+    /// en `Stmt::FromImport` para bindear `from python import foo`
+    /// con `Type::Nominal(id)` en lugar de `Type::PyAny` opaco —
+    /// destraba field access tipado (`foo.fetch_user(uid)` resuelve a
+    /// `Result<User>` en lugar de `Result<Any>`).
+    pyi_modules: HashMap<String, TypeId>,
 }
 
 impl TypeEnv {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// 8-pyi.C: registra el `id` del nominal sintético asociado al
+    /// stub `name`. Llamado por `pyi_loader::load_callables` después
+    /// de `resolve_program` (los nominales declarados por el .fitz
+    /// ya están disponibles, los fns del stub pueden referirlos en
+    /// su ret type).
+    pub fn set_pyi_module(&mut self, name: String, id: TypeId) {
+        self.pyi_modules.insert(name, id);
+    }
+
+    /// 8-pyi.C: lookup del nominal sintético para un stub. Usado por
+    /// el checker en `Stmt::FromImport` from_python. Devuelve `None`
+    /// si no hay `.pyi` adyacente (binding cae a `Type::PyAny`
+    /// gradual).
+    pub fn pyi_module(&self, name: &str) -> Option<TypeId> {
+        self.pyi_modules.get(name).copied()
     }
 
     /// Registra un tipo nominal por nombre, devolviendo su id.
@@ -817,8 +843,29 @@ fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
 /// errores acumulados. Devolvemos ambos siempre: el caller decide
 /// si abortar (modo strict) o reportar como warnings (modo run).
 pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
-    let mut env = TypeEnv::new();
-    let mut errors = Vec::new();
+    resolve_program_with_env(program, TypeEnv::new(), Vec::new())
+}
+
+/// Variante de `resolve_program` que parte de un `TypeEnv` ya pre-
+/// llenado (típicamente por `pyi_loader::load_stubs` que registra
+/// nominales declarados en `.pyi` adyacentes al `.fitz` raíz —
+/// 8-pyi.B, v0.9.57).
+///
+/// El `errors_init` se preserva (típicamente vacío del caller; el
+/// loader silent-fallback no produce errores de tipo).
+///
+/// **Política sobre redeclaraciones**: si el env pre-llenado ya tiene
+/// un nominal `Foo` y el programa también declara `type Foo { ... }`,
+/// la vuelta 1 emite el error de redeclaración estándar — el caller
+/// (loader) es responsable de skipear classes del stub que el
+/// programa ya declara, vía el pre-scan en `pyi_loader::load_stubs`.
+pub fn resolve_program_with_env(
+    program: &Program,
+    initial_env: TypeEnv,
+    errors_init: Vec<FitzError>,
+) -> (TypeEnv, Vec<FitzError>) {
+    let mut env = initial_env;
+    let mut errors = errors_init;
 
     // Vuelta 0 (mini-fase MW.1): registrar tipos built-in del runtime HTTP.
     // `Request` lo construye el dispatcher antes de invocar middlewares
@@ -2932,11 +2979,61 @@ fn infer_method_call(
             // genérico que asume Any).
             _ => None,
         },
-        // R.3 — métodos custom sobre nominal. Buscamos en
-        // `NominalInfo.methods`. Si existe: validamos aridad + tipos
-        // de args, devolvemos el ret type (o `Future<T>` si async).
-        // Si no existe: gradual (None), igual que Any.
+        // R.3 — métodos custom sobre nominal. Buscamos primero en
+        // los fields que sean `Type::Function` (8-pyi.C: el loader
+        // de `.pyi` registra cada fn del stub como un field
+        // `Function { params, ret }` adentro del nominal sintético
+        // del módulo). Después en `NominalInfo.methods` (R.3 — métodos
+        // custom declarados con `fn name(self, ...)` adentro del
+        // `type`). Si nada matchea: gradual (None), igual que Any.
         Type::Nominal(id) => {
+            let info = ctx.types.info(*id);
+            // 8-pyi.C: field-as-callable (Function type registrado
+            // como field por el loader de stubs `.pyi`).
+            if let Some(fields) = info.fields.as_ref() {
+                if let Some(f) = fields.iter().find(|f| f.name == method).cloned() {
+                    if let Type::Function { params, ret } = &f.type_ {
+                        // 8-pyi.C: para nominales sintéticos del
+                        // loader (`__pyi_module_<binding>`), mostramos
+                        // solo el binding en mensajes de error — el
+                        // prefijo es detalle interno.
+                        let nominal_name = info
+                            .name
+                            .strip_prefix("__pyi_module_")
+                            .unwrap_or(&info.name)
+                            .to_string();
+                        if args_ty.len() != params.len() {
+                            ctx.error_at(
+                                span,
+                                format!(
+                                    "`{}.{}` espera {} argumento(s), recibió {}",
+                                    nominal_name,
+                                    method,
+                                    params.len(),
+                                    args_ty.len()
+                                ),
+                            );
+                            return Some((**ret).clone());
+                        }
+                        for (i, (got, expected)) in args_ty.iter().zip(params.iter()).enumerate() {
+                            if !is_compatible(got, expected) {
+                                ctx.error_at(
+                                    span,
+                                    format!(
+                                        "`{}.{}` arg #{}: esperaba `{}`, recibió `{}`",
+                                        nominal_name,
+                                        method,
+                                        i,
+                                        expected.display(ctx.types),
+                                        got.display(ctx.types)
+                                    ),
+                                );
+                            }
+                        }
+                        return Some((**ret).clone());
+                    }
+                }
+            }
             let info = ctx.types.info(*id);
             if let Some(nm) = info.methods.iter().find(|m| m.name == method).cloned() {
                 // Mini-tanda Vm — métodos privados (`_method`) solo
@@ -5775,10 +5872,27 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // `infer_call`. Submódulos `from python.X import Y` también
             // tipan como `PyAny` — todo lo que viene de Python es
             // opaco para el checker.
+            //
+            // 8-pyi.C (v0.9.57): si hay un stub `.pyi` adyacente
+            // cargado por `pyi_loader::load_callables`, bindeamos el
+            // nombre con `Type::Nominal(synth_id)` donde synth es el
+            // nominal sintético que tiene un field por cada fn/var
+            // del stub. Field access (`X.fn`) entonces resuelve a la
+            // signature declarada en el .pyi en lugar de devolver
+            // `PyAny`. Sin stub, fallback al PyAny gradual.
             let from_python = path.first().map(|s| s.as_str()) == Some("python");
             for (n, alias) in names {
                 let binding = alias.clone().unwrap_or_else(|| n.clone());
-                let ty = if from_python { Type::PyAny } else { Type::Any };
+                let ty = if from_python {
+                    // El stub se cargó bajo el `binding` (alias si
+                    // está, sino name) — ver `pyi_loader::load_callables`.
+                    match ctx.types.pyi_module(&binding) {
+                        Some(id) => Type::Nominal(id),
+                        None => Type::PyAny,
+                    }
+                } else {
+                    Type::Any
+                };
                 // go-to-def sobre el binding salta a la línea del
                 // `from foo import ...` — cross-module def remoto
                 // queda como deuda visible del MVP.
@@ -5891,7 +6005,31 @@ fn callee_has_varargs(ctx: &CheckCtx, callee: &Expr) -> bool {
 /// en `DefinitionInfo`. La CLI (`fitz run`/`build`/`check`) descarta
 /// ambos; el LSP (Fase 9.x) los consume para hover y go-to-definition.
 pub fn check_program(program: &Program) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
-    let (env, mut errors) = resolve_program(program);
+    let (env, errors) = resolve_program(program);
+    check_with_env(program, env, errors)
+}
+
+/// Variante de `check_program` que recibe un `TypeEnv` ya pre-llenado
+/// (típicamente por `resolve_program` + side effects del loader de
+/// stubs `.pyi` adyacentes — ver `pyi_loader`). El `errors` acumulado
+/// del resolve se preserva y se extiende con los errores del check.
+///
+/// **Uso esperado** (8-pyi.B, v0.9.57):
+///
+/// ```ignore
+/// let (mut env, errors) = types::resolve_program(&program);
+/// let _stubs = pyi_loader::load_stubs(&program, base_dir, &mut env);
+/// let (env, info, defs, errors) =
+///     types::check_with_env(&program, env, errors);
+/// ```
+///
+/// Los call sites internos sin contexto de `.pyi` deben seguir usando
+/// `check_program(program)` que invoca `resolve_program` interno.
+pub fn check_with_env(
+    program: &Program,
+    env: TypeEnv,
+    mut errors: Vec<FitzError>,
+) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
     // Encapsulamos `ctx` en un bloque para que su préstamo sobre `env`
     // termine antes del return: queremos mover `env`, `ctx.type_info`
     // y `ctx.def_info` por separado al caller.

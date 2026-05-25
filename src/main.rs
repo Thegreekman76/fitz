@@ -5,8 +5,8 @@
 // duplicada). Acá solo importamos lo que el CLI consume.
 
 use fitz::{
-    codegen, cron_jobs, evaluator, fmt, http, launcher_template, lexer, lint, lockfile, manifest,
-    openapi, parser, pbs, testing, types,
+    ast, codegen, cron_jobs, error, evaluator, fmt, http, launcher_template, lexer, lint, lockfile,
+    manifest, openapi, parser, pbs, pyi_loader, testing, types,
 };
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
@@ -705,6 +705,55 @@ fn render_stub_type_as_fitz(ty: &fitz::pyi_stub::StubType) -> String {
     }
 }
 
+/// 8-pyi.B (v0.9.57) — Computa el `base_dir` para el lookup de stubs
+/// `.pyi` adyacentes. Es el directorio padre del `path` del `.fitz`;
+/// si el path no tiene padre claro (e.g. archivo en cwd sin prefix),
+/// fallback a `current_dir()`.
+fn base_dir_for_stub_lookup(path: &std::path::Path) -> PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+/// 8-pyi.B (v0.9.57) — Wrapper de `check_program` que ANTES de invocar
+/// al checker carga stubs `.pyi` adyacentes al `path` y registra sus
+/// nominales en el TypeEnv. Política silent fallback: si el `.pyi` no
+/// existe o falla al parsear, sigue como si no estuviera (el binding
+/// del `from python import` queda como `Type::PyAny` opaco).
+///
+/// **Por qué main.rs y no types.rs**: el checker no conoce el
+/// filesystem; el `path` solo lo tiene el caller que arrancó el
+/// pipeline. Mantenemos `types::check_program(program)` puro para los
+/// call sites sin contexto de archivo (tests, REPL, openapi de
+/// programas sin path conocido).
+fn check_program_with_pyi_stubs(
+    program: &ast::Program,
+    path: &std::path::Path,
+) -> (
+    types::TypeEnv,
+    types::TypeInfo,
+    types::DefinitionInfo,
+    Vec<error::FitzError>,
+) {
+    let base_dir = base_dir_for_stub_lookup(path);
+    // 8-pyi.B/C: dos pases del loader.
+    // - Pase 1 (`load_stubs`): registra solo classes en el TypeEnv.
+    //   Corre ANTES de resolve_program para que las anotaciones (`->
+    //   User`) del .fitz que referencien tipos del stub no fallen.
+    // - Pase 2 (`load_callables`): procesa fns/vars top-level del
+    //   stub, crea un nominal sintético `__pyi_module_<n>` con un
+    //   field por callable, y guarda mapping en `env.pyi_modules`.
+    //   Corre DESPUÉS de resolve_program para que los nominales
+    //   declarados por el .fitz (que las fns del stub pueden
+    //   referenciar en su ret) ya estén disponibles.
+    let mut env = types::TypeEnv::new();
+    let stubs = pyi_loader::load_stubs(program, &base_dir, &mut env);
+    let (mut env, errors) = types::resolve_program_with_env(program, env, Vec::new());
+    pyi_loader::load_callables(&stubs, &mut env);
+    types::check_with_env(program, env, errors)
+}
+
 /// `fitz openapi <archivo>` — Fase 7.1. Lex + parse + check + eval
 /// con un `HttpRegistry` activo para que los decoradores HTTP registren
 /// sus rutas; después escupe el schema OpenAPI 3.1 a stdout
@@ -739,8 +788,8 @@ fn openapi_file(path: &PathBuf) {
 
     // Checker estricto: no tiene sentido emitir un schema de un programa
     // con errores de tipo (el handler quizá ni siquiera tipa). Mismo
-    // criterio que `fitz build`.
-    let (_env, _types, _defs, type_errors) = types::check_program(&program);
+    // criterio que `fitz build`. 8-pyi.B: carga stubs .pyi adyacentes.
+    let (_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} error(es) de tipo:",
@@ -753,11 +802,7 @@ fn openapi_file(path: &PathBuf) {
         std::process::exit(1);
     }
 
-    let base_dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let base_dir = base_dir_for_stub_lookup(path);
 
     let (eval_result, registry) =
         http::with_active_registry(|| evaluator::eval_with_base_sync(program.clone(), base_dir));
@@ -804,7 +849,8 @@ fn check_file(path: &PathBuf) {
             std::process::exit(1);
         }
     };
-    let (_env, _types, _defs, errors) = types::check_program(&program);
+    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    let (_env, _types, _defs, errors) = check_program_with_pyi_stubs(&program, path);
     if errors.is_empty() {
         println!("✓ {} — sin errores de tipo", path.display());
     } else {
@@ -862,7 +908,8 @@ fn build_file(
     };
 
     // Checker en modo strict — no hay `--no-typecheck` en build.
-    let (env, types, _defs, type_errors) = types::check_program(&program);
+    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} error(es) de tipo:",
@@ -886,7 +933,8 @@ fn build_file(
     // programas con unannotated fns; gratis para programas anotados.
     let (env, types) = if codegen::has_unannotated_fn_params(&program) {
         codegen::fill_inferred_param_types(&mut program, &types, &env);
-        let (env2, types2, _defs2, errs2) = types::check_program(&program);
+        // 8-pyi.B: re-check también carga stubs (idempotente).
+        let (env2, types2, _defs2, errs2) = check_program_with_pyi_stubs(&program, path);
         if !errs2.is_empty() {
             // Si el re-check genera nuevos errores con los tipos
             // inferidos, surfacearlos.
@@ -1174,7 +1222,8 @@ fn build_file_with_bundle(
     }
 
     // --- Checker strict (sin `--no-typecheck` en build) ---
-    let (env, types, _defs, type_errors) = types::check_program(&program);
+    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} error(es) de tipo:",
@@ -1190,7 +1239,8 @@ fn build_file_with_bundle(
 
     let (env, types) = if codegen::has_unannotated_fn_params(&program) {
         codegen::fill_inferred_param_types(&mut program, &types, &env);
-        let (env2, types2, _defs2, errs2) = types::check_program(&program);
+        // 8-pyi.B: re-check también carga stubs (idempotente).
+        let (env2, types2, _defs2, errs2) = check_program_with_pyi_stubs(&program, path);
         if !errs2.is_empty() {
             eprintln!(
                 "✗ {} — {} error(es) de tipo tras inferencia de params:",
@@ -1738,7 +1788,8 @@ fn run_file(path: &PathBuf, no_typecheck: bool, dep_registry: manifest::DepRegis
     // evaluator. La flag `--no-typecheck` cambia el comportamiento
     // a warning (los reporta pero sigue ejecutando), pensada para
     // legacy code o para diagnosticar bugs del checker.
-    let (_type_env, _types, _defs, type_errors) = types::check_program(&program);
+    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    let (_type_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         if no_typecheck {
             eprintln!(
@@ -2625,7 +2676,10 @@ async fn eval_test_source(
     let tokens = lexer::tokenize(&source).map_err(|e| format!("{e}"))?;
     let program = parser::parse(tokens).map_err(|e| format!("{e}"))?;
 
-    let (_env, _types, _defs, type_errors) = types::check_program(&program);
+    // 8-pyi.B: carga stubs .pyi adyacentes antes del check (también en
+    // tests — los `tests/*.fitz` que usan `from python import foo` ven
+    // los tipos del `foo.pyi` adyacente).
+    let (_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         let mut msg = format!("{} error(es) de tipo:", type_errors.len());
         for e in &type_errors {
@@ -2634,11 +2688,7 @@ async fn eval_test_source(
         return Err(msg);
     }
 
-    let base_dir = path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let base_dir = base_dir_for_stub_lookup(path);
 
     evaluator::eval_with_base_and_deps(program, base_dir, dep_registry.clone())
         .await

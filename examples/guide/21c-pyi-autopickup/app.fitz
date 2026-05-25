@@ -1,0 +1,46 @@
+// Ejemplo del modo auto-pickup de stubs `.pyi` (8-pyi, v0.9.57).
+//
+// Cuando el archivo `users.pyi` adyacente existe, el loader del
+// checker Fitz:
+//
+// 1. Lee `users.pyi`, parsea las `class` y registra `User` y `Order`
+//    como nominales en el TypeEnv.
+// 2. Procesa las fns y vars top-level del stub, crea un nominal
+//    sintético del módulo, y registra cada fn como un field tipado
+//    `Function { params, ret: Result<ret, Str> }` (el wrap a Result
+//    refleja el modelo runtime de §21.5).
+// 3. Cambia el binding de `users` (del `from python import users`)
+//    a `Type::Nominal(__pyi_module_users)` en lugar del `PyAny`
+//    opaco — destraba field access tipado.
+//
+// Después, `users.make_user(1, "Ada")` tipa estáticamente como
+// `Result<User>`, `?` desempaca a `User`, y el checker valida
+// arity + tipos de args + return.
+//
+// Este archivo está pensado para `fitz check` (no necesita la
+// feature `python` ni `users.py` real al runtime — solo demuestra
+// el tipado estático del stub). Para correrlo end-to-end con
+// `fitz run --features python`, el user tendría que proveer un
+// `users.py` real con las funciones implementadas.
+
+from python import users
+
+fn pipeline(id: Int, items: List<Str>) -> Result<Str> {
+    let u: User = users.make_user(id, "Ada")?
+    let o: Order = users.make_order(u.id, items)?
+    let summary: Str = users.user_summary(u)?
+    return Ok("user={summary} total={o.total}")
+}
+
+fn default_user() -> Result<User> {
+    // `users.DEFAULT_USER_NAME` tipa como `Str` directo (vars del
+    // stub se exponen sin wrap a Result).
+    let name: Str = users.DEFAULT_USER_NAME
+    return Ok(users.make_user(0, name)?)
+}
+
+// `fitz check` valida todo lo de arriba sin correr nada Python.
+// Sin el `users.pyi` adyacente, `users.make_user` tiparía como
+// `Result<Any>` opaco y el assign `let u: User = ...` no tendría
+// los fields de User concretos.
+print("ejemplo de auto-pickup pyi compilando OK")
