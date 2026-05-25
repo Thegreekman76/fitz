@@ -1782,3 +1782,598 @@ async fn orm_where_filters_completos_e2e() {
     let _ = seed.exec("DROP TABLE fitz_orm_filters", &[]).await;
     seed.close().await.unwrap();
 }
+
+// =============================================================
+// Fase 10.5.b — Arrays nativos (List<T> ↔ T[])
+// =============================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_arrays_int_e2e() {
+    // Tabla con columna `tags bigint[]`. El field Fitz `tags: List<Int>`
+    // se mapea automático: INSERT serializa a `{1,2,3}::int8[]`,
+    // SELECT parsea el text de vuelta a Value::List.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_arr_int", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_arr_int (id bigint PRIMARY KEY, name text, tags bigint[])",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_arr_int\") type Item {{\n  \
+             @primary\n  \
+             id: Int\n  \
+             name: Str\n  \
+             tags: List<Int>\n\
+         }}\n\
+         async fn run() -> Result<Item> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let inserted = Item.insert(db, Item {{ id: 1, name: \"alpha\", tags: [10, 20, 30] }}).await?\n  \
+             let fetched = Item.where(fn(i) => i.id == 1).first(db).await?\n  \
+             return Ok(fetched)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let item = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let inst_shared = match item {
+        Value::Instance { fields, .. } => fields,
+        other => panic!("esperaba Instance, fue {:?}", other),
+    };
+    {
+        let inst = inst_shared.lock();
+        let tags = inst
+            .iter()
+            .find(|(n, _)| n == "tags")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let items_shared = match tags {
+            Value::List(s) => s,
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        let items = items_shared.lock();
+        assert_eq!(items.len(), 3);
+        assert!(matches!(items[0], Value::Int(10)));
+        assert!(matches!(items[1], Value::Int(20)));
+        assert!(matches!(items[2], Value::Int(30)));
+    }
+
+    let _ = seed.exec("DROP TABLE fitz_orm_arr_int", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_arrays_text_e2e() {
+    // Tabla con columna `tags text[]`. Strings con caracteres
+    // especiales (commas, quotes) round-trip OK.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_arr_text", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_arr_text (id bigint PRIMARY KEY, tags text[])",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_arr_text\") type Item {{\n  \
+             @primary\n  \
+             id: Int\n  \
+             tags: List<Str>\n\
+         }}\n\
+         async fn run() -> Result<Item> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let inserted = Item.insert(db, Item {{ id: 1, tags: [\"hello\", \"a,b,c\", \"con espacios\"] }}).await?\n  \
+             let fetched = Item.where(fn(i) => i.id == 1).first(db).await?\n  \
+             return Ok(fetched)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let inst = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::Instance { fields, .. } => fields,
+            other => panic!("esperaba Instance, fue {:?}", other),
+        },
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let strs: Vec<String> = {
+        let inst = inst.lock();
+        let tags = inst
+            .iter()
+            .find(|(n, _)| n == "tags")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let items_shared = match tags {
+            Value::List(s) => s,
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        let items = items_shared.lock();
+        items
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                other => panic!("esperaba Str, fue {:?}", other),
+            })
+            .collect()
+    };
+    assert_eq!(strs, vec!["hello", "a,b,c", "con espacios"]);
+
+    let _ = seed.exec("DROP TABLE fitz_orm_arr_text", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_arrays_vacio_y_nullable_e2e() {
+    // (a) Array vacío `[]` round-trip OK como `{}`.
+    // (b) Nullable `List<Int>?` con `null` → NULL real en Postgres.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_arr_null", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_arr_null (id bigint PRIMARY KEY, ints bigint[], opt_ints bigint[])",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_arr_null\") type Row {{\n  \
+             @primary\n  \
+             id: Int\n  \
+             ints: List<Int>\n  \
+             opt_ints: List<Int>?\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let _ = Row.insert(db, Row {{ id: 1, ints: [], opt_ints: null }}).await?\n  \
+             let r = Row.where(fn(x) => x.id == 1).first(db).await?\n  \
+             return Ok({{ \"ints\": r.ints, \"opt_ints\": r.opt_ints }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let m = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        },
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let (ints, opt_ints) = {
+        let m = m.lock();
+        let ints = m
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "ints"))
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let opt_ints = m
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "opt_ints"))
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        (ints, opt_ints)
+    };
+
+    // ints = [] vacío
+    match ints {
+        Value::List(s) => {
+            let items = s.lock();
+            assert!(items.is_empty(), "esperaba lista vacía");
+        }
+        other => panic!("esperaba List, fue {:?}", other),
+    }
+    // opt_ints = null (NULL real)
+    assert!(matches!(opt_ints, Value::Null));
+
+    let _ = seed.exec("DROP TABLE fitz_orm_arr_null", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_arrays_update_e2e() {
+    // UPDATE con un campo array reemplaza el array completo.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_arr_upd", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_arr_upd (id bigint PRIMARY KEY, tags text[])",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_arr_upd\") type Item {{\n  \
+             @primary\n  \
+             id: Int\n  \
+             tags: List<Str>\n\
+         }}\n\
+         async fn run() -> Result<Item> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let _ = Item.insert(db, Item {{ id: 1, tags: [\"a\", \"b\"] }}).await?\n  \
+             let _ = Item.where(fn(i) => i.id == 1).update(db, {{ \"tags\": [\"c\", \"d\", \"e\"] }}).await?\n  \
+             let updated = Item.where(fn(i) => i.id == 1).first(db).await?\n  \
+             return Ok(updated)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let inst = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::Instance { fields, .. } => fields,
+            other => panic!("esperaba Instance, fue {:?}", other),
+        },
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let strs: Vec<String> = {
+        let inst = inst.lock();
+        let tags = inst
+            .iter()
+            .find(|(n, _)| n == "tags")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let items_shared = match tags {
+            Value::List(s) => s,
+            _ => panic!(),
+        };
+        let items = items_shared.lock();
+        items
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                _ => panic!(),
+            })
+            .collect()
+    };
+    assert_eq!(strs, vec!["c", "d", "e"]);
+
+    let _ = seed.exec("DROP TABLE fitz_orm_arr_upd", &[]).await;
+    seed.close().await.unwrap();
+}
+
+// =============================================================
+// Fase 10.5.c — Date/Time/Timestamp/UUID (round-trip como Str)
+// =============================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_date_time_timestamp_e2e() {
+    // Tabla con columnas date, time, timestamp, timestamptz. Fitz no
+    // tiene tipos nativos para fechas — el ORM las round-trip como
+    // `Str` con el formato ISO 8601 que Postgres emite y acepta.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_dt", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_dt (\
+            id bigint PRIMARY KEY,\
+            d date,\
+            t time,\
+            ts timestamp,\
+            tsz timestamptz\
+        )",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_dt\") type Event {{\n  \
+             @primary\n  \
+             id: Int\n  \
+             d: Str\n  \
+             t: Str\n  \
+             ts: Str\n  \
+             tsz: Str\n\
+         }}\n\
+         async fn run() -> Result<Event> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let _ = Event.insert(db, Event {{\n    \
+                 id: 1,\n    \
+                 d: \"2026-05-25\",\n    \
+                 t: \"14:30:00\",\n    \
+                 ts: \"2026-05-25 14:30:00\",\n    \
+                 tsz: \"2026-05-25 14:30:00+00\"\n  \
+             }}).await?\n  \
+             let r = Event.where(fn(e) => e.id == 1).first(db).await?\n  \
+             return Ok(r)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let inst = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::Instance { fields, .. } => fields,
+            other => panic!("esperaba Instance, fue {:?}", other),
+        },
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let (d, t, ts, tsz) = {
+        let inst = inst.lock();
+        let get_str = |name: &str| -> String {
+            inst.iter()
+                .find(|(n, _)| n == name)
+                .and_then(|(_, v)| match v {
+                    Value::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("esperaba field `{}` como Str", name))
+        };
+        (get_str("d"), get_str("t"), get_str("ts"), get_str("tsz"))
+    };
+
+    // Date — Postgres emite `YYYY-MM-DD` siempre.
+    assert_eq!(d, "2026-05-25");
+    // Time — Postgres emite `HH:MM:SS` (sin microseconds si son 0).
+    assert_eq!(t, "14:30:00");
+    // Timestamp — Postgres emite `YYYY-MM-DD HH:MM:SS`.
+    assert_eq!(ts, "2026-05-25 14:30:00");
+    // Timestamptz — Postgres emite con timezone resuelto. El formato
+    // exacto depende del session timezone; aceptamos cualquier valor
+    // que comience con la fecha base.
+    assert!(
+        tsz.starts_with("2026-05-25"),
+        "esperaba que tsz arranque con la fecha, fue '{}'",
+        tsz
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_orm_dt", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_uuid_e2e() {
+    // Tabla con columna uuid. Fitz la trata como Str con el formato
+    // canonical de UUID (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`).
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_uuid", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_uuid (id uuid PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let uuid_canonical = "550e8400-e29b-41d4-a716-446655440000";
+    let src = format!(
+        "@table(\"fitz_orm_uuid\") type Item {{\n  \
+             @primary\n  \
+             id: Str\n  \
+             name: Str\n\
+         }}\n\
+         async fn run() -> Result<Item> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let _ = db.exec(\"INSERT INTO fitz_orm_uuid (id, name) VALUES ($1::uuid, $2)\", [\"{}\", \"alpha\"]).await?\n  \
+             let r = Item.where(fn(i) => i.id == \"{}\").first(db).await?\n  \
+             return Ok(r)\n\
+         }}\n\
+         let result = run().await",
+        url, uuid_canonical, uuid_canonical
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let inst = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::Instance { fields, .. } => fields,
+            other => panic!("esperaba Instance, fue {:?}", other),
+        },
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let (id_val, name_val) = {
+        let inst = inst.lock();
+        let id_val = inst
+            .iter()
+            .find(|(n, _)| n == "id")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        let name_val = inst
+            .iter()
+            .find(|(n, _)| n == "name")
+            .map(|(_, v)| v.clone())
+            .unwrap();
+        (id_val, name_val)
+    };
+    match id_val {
+        Value::Str(s) => assert_eq!(s, uuid_canonical),
+        other => panic!("esperaba Str(UUID), fue {:?}", other),
+    }
+    match name_val {
+        Value::Str(s) => assert_eq!(s, "alpha"),
+        other => panic!("esperaba Str(alpha), fue {:?}", other),
+    }
+
+    let _ = seed.exec("DROP TABLE fitz_orm_uuid", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_uuid_array_e2e() {
+    // Combina 10.5.b (arrays) + 10.5.c (UUID): columna `uuid[]`.
+    // El driver parsea como `Array { elem_oid: UUID, values: [Text, ...] }`
+    // y el ORM lo round-trip como `List<Str>` Fitz.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_uuid_arr", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_uuid_arr (id bigint PRIMARY KEY, ids uuid[])",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let u1 = "550e8400-e29b-41d4-a716-446655440000";
+    let u2 = "550e8400-e29b-41d4-a716-446655440001";
+    let src = format!(
+        "async fn run() -> Result<List<Str>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let _ = db.exec(\"INSERT INTO fitz_orm_uuid_arr (id, ids) VALUES ($1, ARRAY[$2, $3]::uuid[])\", [1, \"{}\", \"{}\"]).await?\n  \
+             let rows = db.query(\"SELECT ids FROM fitz_orm_uuid_arr WHERE id = $1\", [1]).await?\n  \
+             // rows: List<Map<Str, Any>>. Tomamos rows[0][\"ids\"].\n  \
+             let first = rows[0]\n  \
+             let ids = first[\"ids\"]\n  \
+             return Ok(ids)\n\
+         }}\n\
+         let result = run().await",
+        url, u1, u2
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let items = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => match *boxed {
+            Value::List(s) => s,
+            other => panic!("esperaba List, fue {:?}", other),
+        },
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let strs: Vec<String> = {
+        let items = items.lock();
+        items
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                other => panic!("esperaba Str(UUID), fue {:?}", other),
+            })
+            .collect()
+    };
+    assert_eq!(strs, vec![u1.to_string(), u2.to_string()]);
+
+    let _ = seed.exec("DROP TABLE fitz_orm_uuid_arr", &[]).await;
+    seed.close().await.unwrap();
+}

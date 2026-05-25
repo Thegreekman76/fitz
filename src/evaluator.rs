@@ -10164,6 +10164,14 @@ fn pg_value_to_fitz(v: &crate::db::PgValue) -> Value {
         crate::db::PgValue::Text(s) => Value::Str(s.clone()),
         crate::db::PgValue::Bool(b) => Value::Bool(*b),
         crate::db::PgValue::Bytes(b) => Value::Bytes(b.clone()),
+        // Fase 10.5.b — array Postgres → List Fitz. Cada elemento se
+        // convierte recursivamente. `elem_oid` se descarta acá porque
+        // Value::List es homogéneo solo nominalmente — el tipo viene
+        // de la anotación del field (List<Int>, List<Str>, ...).
+        crate::db::PgValue::Array { values, .. } => {
+            let items: Vec<Value> = values.iter().map(pg_value_to_fitz).collect();
+            Value::new_list(items)
+        }
     }
 }
 
@@ -10979,6 +10987,78 @@ fn is_map_type(t: &crate::ast::TypeExpr) -> bool {
     }
 }
 
+/// Fase 10.5.b — devuelve `Some(elem_oid)` si el TypeExpr es
+/// `List<T>` (o `List<T>?`) con T mapeable a un OID escalar
+/// soportado por arrays. Devuelve `None` para otros tipos.
+///
+/// Tipos T soportados:
+///   - `Int`  → `INT8` (Fitz Int es i64)
+///   - `Float`→ `FLOAT8` (Fitz Float es f64)
+///   - `Str`  → `TEXT`
+///   - `Bool` → `BOOL`
+///
+/// Otros (List<List<T>>, List<Map<...>>, List<Custom>) no son
+/// arrays escalares — el ORM los rechaza con error claro.
+fn list_elem_pg_oid(t: &crate::ast::TypeExpr) -> Option<u32> {
+    match t {
+        crate::ast::TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => {
+            match &args[0] {
+                crate::ast::TypeExpr::Named(elem) => match elem.as_str() {
+                    "Int" => Some(crate::db::oid::INT8),
+                    "Float" => Some(crate::db::oid::FLOAT8),
+                    "Str" => Some(crate::db::oid::TEXT),
+                    "Bool" => Some(crate::db::oid::BOOL),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        crate::ast::TypeExpr::Nullable(inner) => list_elem_pg_oid(inner),
+        _ => None,
+    }
+}
+
+/// Fase 10.5.b — convierte un `Value::List` Fitz a `PgValue::Array`
+/// con el `elem_oid` dado. Cada elemento se coerciona con
+/// `fitz_value_to_pg`. `Value::Null` (top-level) → `PgValue::Null`
+/// para soportar nullables `List<T>?`.
+fn fitz_list_to_pg_array(v: &Value, elem_oid: u32) -> Result<crate::db::PgValue, String> {
+    if matches!(v, Value::Null) {
+        return Ok(crate::db::PgValue::Null);
+    }
+    let list = match v {
+        Value::List(items) => items.lock().clone(),
+        other => {
+            return Err(format!(
+                "esperaba List<T> para columna array, recibió {}",
+                other.type_name()
+            ));
+        }
+    };
+    let mut values = Vec::with_capacity(list.len());
+    for item in &list {
+        values.push(fitz_value_to_pg(item)?);
+    }
+    Ok(crate::db::PgValue::Array { elem_oid, values })
+}
+
+/// Mapea un OID escalar al nombre SQL de su tipo array para emitir
+/// el cast en INSERT. Devuelve `None` si el OID no tiene tipo array
+/// mapeado (no debería pasar — el caller solo invoca con OIDs que
+/// `list_elem_pg_oid` reportó).
+fn array_sql_cast_for(elem_oid: u32) -> Option<&'static str> {
+    match elem_oid {
+        crate::db::oid::INT8 => Some("::int8[]"),
+        crate::db::oid::INT4 => Some("::int4[]"),
+        crate::db::oid::FLOAT8 => Some("::float8[]"),
+        crate::db::oid::FLOAT4 => Some("::float4[]"),
+        crate::db::oid::TEXT => Some("::text[]"),
+        crate::db::oid::VARCHAR => Some("::varchar[]"),
+        crate::db::oid::BOOL => Some("::bool[]"),
+        _ => None,
+    }
+}
+
 /// Fase 10.5.f1 — extrae el nombre del field accedido desde un
 /// closure `fn(u) => u.field`. Devuelve el nombre Fitz del field
 /// (sin override SQL aplicado todavía). Errores: closure de
@@ -11422,7 +11502,12 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
         // a JSON string y emitimos `$N::jsonb` para que Postgres lo
         // reciba como columna jsonb. Sin el cast, $N::text no se
         // asigna a una columna jsonb sin coerción explícita.
+        //
+        // Fase 10.5.b — si es List<T> con T mapeable a un OID
+        // escalar (Int/Float/Str/Bool), serializamos como array
+        // Postgres con el cast correspondiente (`::int8[]`, etc.).
         let field_is_map = is_map_type(&f.type_);
+        let field_list_elem = list_elem_pg_oid(&f.type_);
         let (pg, placeholder_suffix) = if field_is_map {
             let pg = fitz_value_to_jsonb(&value).map_err(|msg| {
                 FitzError::new(
@@ -11433,6 +11518,17 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
                 )
             })?;
             (pg, "::jsonb")
+        } else if let Some(elem_oid) = field_list_elem {
+            let pg = fitz_list_to_pg_array(&value, elem_oid).map_err(|msg| {
+                FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!("`Type.insert`: field `{}` (array): {}", f.name, msg),
+                )
+            })?;
+            let cast = array_sql_cast_for(elem_oid).unwrap_or("");
+            (pg, cast)
         } else {
             let pg = match fitz_value_to_pg(&value) {
                 Ok(v) => v,
@@ -11646,8 +11742,11 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             .unwrap_or(key_str.as_str());
         // Fase 10.5.a — si el field destino es Map<...>, marshall
         // a JSON + cast `::jsonb`.
+        // Fase 10.5.b — si es List<T>, marshall a array + cast
+        // `::int8[]`/`::text[]`/etc.
         let field_def = state.fields.iter().find(|f| f.name == key_str);
         let field_is_map = field_def.map(|f| is_map_type(&f.type_)).unwrap_or(false);
+        let field_list_elem = field_def.and_then(|f| list_elem_pg_oid(&f.type_));
         let (pg, placeholder_suffix) = if field_is_map {
             let pg = fitz_value_to_jsonb(value).map_err(|msg| {
                 FitzError::new(
@@ -11658,6 +11757,17 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
                 )
             })?;
             (pg, "::jsonb")
+        } else if let Some(elem_oid) = field_list_elem {
+            let pg = fitz_list_to_pg_array(value, elem_oid).map_err(|msg| {
+                FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!("`.update`: field `{}` (array): {}", key_str, msg),
+                )
+            })?;
+            let cast = array_sql_cast_for(elem_oid).unwrap_or("");
+            (pg, cast)
         } else {
             let pg = match fitz_value_to_pg(value) {
                 Ok(v) => v,
@@ -25733,6 +25843,177 @@ let r = match n {
         let mut args = Vec::new();
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
         assert_eq!(sql, "(\"display_name\" = $1)");
+    }
+
+    // ----- Fase 10.5.b — helpers de arrays nativos -----
+
+    #[test]
+    fn list_elem_pg_oid_basicos() {
+        use crate::ast::TypeExpr;
+        // List<Int> → INT8
+        let t = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Int".into())],
+        };
+        assert_eq!(list_elem_pg_oid(&t), Some(crate::db::oid::INT8));
+        // List<Str> → TEXT
+        let t = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        assert_eq!(list_elem_pg_oid(&t), Some(crate::db::oid::TEXT));
+        // List<Bool> → BOOL
+        let t = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Bool".into())],
+        };
+        assert_eq!(list_elem_pg_oid(&t), Some(crate::db::oid::BOOL));
+        // List<Float> → FLOAT8
+        let t = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Float".into())],
+        };
+        assert_eq!(list_elem_pg_oid(&t), Some(crate::db::oid::FLOAT8));
+    }
+
+    #[test]
+    fn list_elem_pg_oid_nullable_wrapper() {
+        use crate::ast::TypeExpr;
+        // List<Int>? → INT8 (recursa al inner)
+        let t = TypeExpr::Nullable(Box::new(TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("Int".into())],
+        }));
+        assert_eq!(list_elem_pg_oid(&t), Some(crate::db::oid::INT8));
+    }
+
+    #[test]
+    fn list_elem_pg_oid_rechaza_no_lista() {
+        use crate::ast::TypeExpr;
+        // Map<Str, Int> NO es lista
+        let t = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![
+                TypeExpr::Named("Str".into()),
+                TypeExpr::Named("Int".into()),
+            ],
+        };
+        assert_eq!(list_elem_pg_oid(&t), None);
+        // Int suelto tampoco
+        assert_eq!(
+            list_elem_pg_oid(&TypeExpr::Named("Int".into())),
+            None
+        );
+    }
+
+    #[test]
+    fn list_elem_pg_oid_rechaza_list_de_compuestos() {
+        use crate::ast::TypeExpr;
+        // List<List<Int>> → no soportado por MVP (anidados)
+        let t = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![TypeExpr::Named("Int".into())],
+            }],
+        };
+        assert_eq!(list_elem_pg_oid(&t), None);
+        // List<User> → no es array escalar
+        let t = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Named("User".into())],
+        };
+        assert_eq!(list_elem_pg_oid(&t), None);
+    }
+
+    #[test]
+    fn fitz_list_to_pg_array_int() {
+        let v = Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let pg = fitz_list_to_pg_array(&v, crate::db::oid::INT8).unwrap();
+        match pg {
+            crate::db::PgValue::Array { elem_oid, values } => {
+                assert_eq!(elem_oid, crate::db::oid::INT8);
+                assert_eq!(
+                    values,
+                    vec![
+                        crate::db::PgValue::Int(1),
+                        crate::db::PgValue::Int(2),
+                        crate::db::PgValue::Int(3),
+                    ]
+                );
+            }
+            _ => panic!("esperaba Array"),
+        }
+    }
+
+    #[test]
+    fn fitz_list_to_pg_array_str() {
+        let v = Value::new_list(vec![Value::Str("a".into()), Value::Str("b".into())]);
+        let pg = fitz_list_to_pg_array(&v, crate::db::oid::TEXT).unwrap();
+        match pg {
+            crate::db::PgValue::Array { values, .. } => {
+                assert_eq!(
+                    values,
+                    vec![
+                        crate::db::PgValue::Text("a".into()),
+                        crate::db::PgValue::Text("b".into()),
+                    ]
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn fitz_list_to_pg_array_null_es_pgvalue_null() {
+        // Value::Null (típico nullable `List<T>?` con valor null)
+        // → PgValue::Null (no un array vacío). Esto preserva la
+        // semántica de nullable a nivel columna.
+        let v = Value::Null;
+        let pg = fitz_list_to_pg_array(&v, crate::db::oid::INT8).unwrap();
+        assert!(matches!(pg, crate::db::PgValue::Null));
+    }
+
+    #[test]
+    fn fitz_list_to_pg_array_no_es_lista() {
+        // Pasar un Int suelto donde se espera List → error claro.
+        let v = Value::Int(42);
+        let err = fitz_list_to_pg_array(&v, crate::db::oid::INT8).unwrap_err();
+        assert!(err.contains("esperaba List<T>"));
+    }
+
+    #[test]
+    fn array_sql_cast_for_basicos() {
+        assert_eq!(array_sql_cast_for(crate::db::oid::INT8), Some("::int8[]"));
+        assert_eq!(array_sql_cast_for(crate::db::oid::TEXT), Some("::text[]"));
+        assert_eq!(array_sql_cast_for(crate::db::oid::BOOL), Some("::bool[]"));
+        assert_eq!(
+            array_sql_cast_for(crate::db::oid::FLOAT8),
+            Some("::float8[]")
+        );
+        assert_eq!(array_sql_cast_for(9999), None);
+    }
+
+    #[test]
+    fn pg_value_to_fitz_array_devuelve_value_list() {
+        let pg = crate::db::PgValue::Array {
+            elem_oid: crate::db::oid::INT8,
+            values: vec![
+                crate::db::PgValue::Int(1),
+                crate::db::PgValue::Int(2),
+                crate::db::PgValue::Int(3),
+            ],
+        };
+        let v = pg_value_to_fitz(&pg);
+        match v {
+            Value::List(items) => {
+                let items = items.lock();
+                assert_eq!(items.len(), 3);
+                assert!(matches!(items[0], Value::Int(1)));
+                assert!(matches!(items[2], Value::Int(3)));
+            }
+            _ => panic!("esperaba Value::List"),
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

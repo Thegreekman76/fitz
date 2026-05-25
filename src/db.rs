@@ -1203,6 +1203,62 @@ pub mod oid {
     /// Mapeamos a `PgValue::Null` para que SELECT sobre fns void
     /// no falle con `UnsupportedType`.
     pub const VOID: u32 = 2278;
+
+    // Fase 10.5.b — arrays nativos. Cada tipo escalar tiene su OID
+    // de array hardcoded en `pg_type` del catálogo de Postgres.
+    pub const BOOL_ARRAY: u32 = 1000;
+    pub const INT2_ARRAY: u32 = 1005;
+    pub const INT4_ARRAY: u32 = 1007;
+    pub const TEXT_ARRAY: u32 = 1009;
+    pub const VARCHAR_ARRAY: u32 = 1015;
+    pub const INT8_ARRAY: u32 = 1016;
+    pub const FLOAT4_ARRAY: u32 = 1021;
+    pub const FLOAT8_ARRAY: u32 = 1022;
+    pub const DATE_ARRAY: u32 = 1182;
+    pub const TIMESTAMP_ARRAY: u32 = 1115;
+    pub const TIMESTAMPTZ_ARRAY: u32 = 1185;
+    pub const UUID_ARRAY: u32 = 2951;
+
+    /// Mapea un OID de array a su OID escalar de elemento.
+    /// Devuelve `None` si `oid` no es un array soportado.
+    pub fn array_elem_oid(array_oid: u32) -> Option<u32> {
+        match array_oid {
+            BOOL_ARRAY => Some(BOOL),
+            INT2_ARRAY => Some(INT2),
+            INT4_ARRAY => Some(INT4),
+            TEXT_ARRAY => Some(TEXT),
+            VARCHAR_ARRAY => Some(VARCHAR),
+            INT8_ARRAY => Some(INT8),
+            FLOAT4_ARRAY => Some(FLOAT4),
+            FLOAT8_ARRAY => Some(FLOAT8),
+            DATE_ARRAY => Some(DATE),
+            TIMESTAMP_ARRAY => Some(TIMESTAMP),
+            TIMESTAMPTZ_ARRAY => Some(TIMESTAMPTZ),
+            UUID_ARRAY => Some(UUID),
+            _ => None,
+        }
+    }
+
+    /// Inverso: dado un OID escalar, devuelve el OID del array
+    /// correspondiente. Usado al emitir casts `::int8[]` en INSERTs
+    /// con columnas array.
+    pub fn elem_to_array_oid(elem_oid: u32) -> Option<u32> {
+        match elem_oid {
+            BOOL => Some(BOOL_ARRAY),
+            INT2 => Some(INT2_ARRAY),
+            INT4 => Some(INT4_ARRAY),
+            TEXT => Some(TEXT_ARRAY),
+            VARCHAR => Some(VARCHAR_ARRAY),
+            INT8 => Some(INT8_ARRAY),
+            FLOAT4 => Some(FLOAT4_ARRAY),
+            FLOAT8 => Some(FLOAT8_ARRAY),
+            DATE => Some(DATE_ARRAY),
+            TIMESTAMP => Some(TIMESTAMP_ARRAY),
+            TIMESTAMPTZ => Some(TIMESTAMPTZ_ARRAY),
+            UUID => Some(UUID_ARRAY),
+            _ => None,
+        }
+    }
 }
 
 /// Valor escalar Postgres parseado del wire. La representación
@@ -1217,6 +1273,13 @@ pub enum PgValue {
     Text(String),
     Bool(bool),
     Bytes(Vec<u8>),
+    /// Fase 10.5.b — array Postgres. `elem_oid` indica el tipo de
+    /// los elementos (INT4, TEXT, etc.) para que el encoder sepa
+    /// qué cast emitir (`$N::int4[]`) y cómo formatear cada item.
+    /// Los elementos pueden ser `PgValue::Null` (Postgres soporta
+    /// `{1,NULL,3}`). Anidamiento no soportado en MVP — los elem
+    /// son escalares.
+    Array { elem_oid: u32, values: Vec<PgValue> },
 }
 
 impl fmt::Display for PgValue {
@@ -1228,6 +1291,16 @@ impl fmt::Display for PgValue {
             PgValue::Text(s) => write!(f, "{s}"),
             PgValue::Bool(b) => write!(f, "{}", if *b { "t" } else { "f" }),
             PgValue::Bytes(b) => write!(f, "<{} bytes>", b.len()),
+            PgValue::Array { values, .. } => {
+                write!(f, "{{")?;
+                for (i, v) in values.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, "{v}")?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -1289,10 +1362,141 @@ pub fn parse_text_value(oid: u32, bytes: Option<&[u8]>) -> DbResult<PgValue> {
             }
         }
         _ => {
+            // Fase 10.5.b — arrays nativos. Detectamos por OID y
+            // delegamos a parse_array_text que parsea el formato
+            // `{a,b,c}` de Postgres.
+            if let Some(elem_oid) = oid::array_elem_oid(oid) {
+                let values = parse_array_text(s, elem_oid)?;
+                return Ok(PgValue::Array { elem_oid, values });
+            }
             // Tipos no soportados en 10.1: devolvemos UnsupportedType
             // con el OID concreto. El user ve qué tipo agregar.
             Err(DbError::UnsupportedType(oid))
         }
+    }
+}
+
+/// Fase 10.5.b — parser del formato text de arrays de Postgres.
+///
+/// Gramática (simplificada, MVP — sin anidamiento, sin dimensiones
+/// custom):
+///
+/// ```text
+/// array     = '{' [ element (',' element)* ] '}'
+/// element   = unquoted | quoted | NULL
+/// quoted    = '"' (char | '\\' char | '\\"' )* '"'
+/// unquoted  = chars sin ',', '{', '}', '"', '\\', whitespace
+/// ```
+///
+/// `NULL` sin comillas → `PgValue::Null`; `"NULL"` con comillas →
+/// `PgValue::Text("NULL")` (literal). Whitespace alrededor de los
+/// elementos no quoted se trimea (consistente con Postgres).
+fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
+    let bytes = s.as_bytes();
+    let mut idx = 0;
+    // Trim whitespace inicial.
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    if idx >= bytes.len() || bytes[idx] != b'{' {
+        return Err(DbError::Protocol(format!(
+            "array OID {elem_oid}[]: esperaba '{{' al inicio, recibió '{s}'"
+        )));
+    }
+    idx += 1;
+    // Trim whitespace.
+    while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+        idx += 1;
+    }
+    let mut out = Vec::new();
+    // Array vacío: '{}'.
+    if idx < bytes.len() && bytes[idx] == b'}' {
+        return Ok(out);
+    }
+    loop {
+        // Parsear un elemento.
+        let (elem_raw, was_quoted, new_idx) = parse_array_element(bytes, idx)?;
+        let value = if !was_quoted && elem_raw.eq_ignore_ascii_case("NULL") {
+            PgValue::Null
+        } else {
+            // Parseamos el elemento como un valor escalar usando
+            // parse_text_value con el OID del elemento.
+            parse_text_value(elem_oid, Some(elem_raw.as_bytes()))?
+        };
+        out.push(value);
+        idx = new_idx;
+        // Skip whitespace.
+        while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+            idx += 1;
+        }
+        if idx >= bytes.len() {
+            return Err(DbError::Protocol(format!(
+                "array OID {elem_oid}[]: fin inesperado, esperaba ',' o '}}'"
+            )));
+        }
+        match bytes[idx] {
+            b',' => {
+                idx += 1;
+                // Skip whitespace antes del próximo elemento.
+                while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
+                    idx += 1;
+                }
+            }
+            b'}' => return Ok(out),
+            other => {
+                return Err(DbError::Protocol(format!(
+                    "array OID {elem_oid}[]: esperaba ',' o '}}', recibió '{}'",
+                    other as char
+                )));
+            }
+        }
+    }
+}
+
+/// Lee un elemento de un array text. Devuelve `(content, was_quoted, new_idx)`.
+/// Se llama con `idx` apuntando al primer caracter del elemento.
+fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, usize)> {
+    if start >= bytes.len() {
+        return Err(DbError::Protocol(
+            "array element: fin de string inesperado".into(),
+        ));
+    }
+    if bytes[start] == b'"' {
+        // Quoted element. Leemos hasta el cierre, deshaciendo escapes
+        // `\\` → `\` y `\"` → `"`.
+        let mut out = String::new();
+        let mut idx = start + 1;
+        while idx < bytes.len() {
+            match bytes[idx] {
+                b'\\' if idx + 1 < bytes.len() => {
+                    out.push(bytes[idx + 1] as char);
+                    idx += 2;
+                }
+                b'"' => return Ok((out, true, idx + 1)),
+                c => {
+                    out.push(c as char);
+                    idx += 1;
+                }
+            }
+        }
+        Err(DbError::Protocol(
+            "array element: quoted no cerrado".into(),
+        ))
+    } else {
+        // Unquoted: leemos hasta ',' o '}'.
+        let mut idx = start;
+        while idx < bytes.len() && bytes[idx] != b',' && bytes[idx] != b'}' {
+            idx += 1;
+        }
+        let raw = &bytes[start..idx];
+        // Trim trailing whitespace.
+        let mut end = raw.len();
+        while end > 0 && raw[end - 1].is_ascii_whitespace() {
+            end -= 1;
+        }
+        let content = std::str::from_utf8(&raw[..end])
+            .map_err(|_| DbError::Protocol("array element: no es UTF-8".into()))?;
+        Ok((content.to_string(), false, idx))
     }
 }
 
@@ -1315,6 +1519,60 @@ pub fn encode_text_value(v: &PgValue) -> Option<Vec<u8>> {
                 let _ = write!(out, "{:02x}", byte);
             }
             Some(out.into_bytes())
+        }
+        PgValue::Array { values, .. } => Some(encode_array_text(values).into_bytes()),
+    }
+}
+
+/// Fase 10.5.b — codifica un Vec<PgValue> al text format de arrays
+/// Postgres: `{elem1,elem2,...}`. Los elementos quoted llevan `"`
+/// alrededor y escapes `\\` para `\` y `"`. Null sin quotes.
+fn encode_array_text(values: &[PgValue]) -> String {
+    let mut out = String::from("{");
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        encode_array_element(&mut out, v);
+    }
+    out.push('}');
+    out
+}
+
+fn encode_array_element(out: &mut String, v: &PgValue) {
+    match v {
+        PgValue::Null => out.push_str("NULL"),
+        PgValue::Int(n) => out.push_str(&n.to_string()),
+        PgValue::Float(x) => out.push_str(&x.to_string()),
+        PgValue::Bool(b) => out.push(if *b { 't' } else { 'f' }),
+        PgValue::Text(s) => {
+            // Strings siempre quoted en arrays (safe default).
+            out.push('"');
+            for ch in s.chars() {
+                if ch == '"' || ch == '\\' {
+                    out.push('\\');
+                }
+                out.push(ch);
+            }
+            out.push('"');
+        }
+        PgValue::Bytes(b) => {
+            // bytea en arrays: hex con escape `\\x...`. Lo serializamos
+            // como string quoted para que el parser del server lo
+            // reciba como `\x...`.
+            out.push('"');
+            out.push_str("\\\\x");
+            for byte in b {
+                use std::fmt::Write as _;
+                let _ = write!(out, "{:02x}", byte);
+            }
+            out.push('"');
+        }
+        PgValue::Array { values, .. } => {
+            // Anidamiento: emitimos el sub-array recursivo. Postgres
+            // soporta multi-dimensional pero el MVP no lo expone como
+            // shape Fitz — esto solo entra si se construye a mano.
+            out.push_str(&encode_array_text(values));
         }
     }
 }
@@ -2720,6 +2978,229 @@ mod tests {
             encode_text_value(&PgValue::Bytes(vec![0xde, 0xad])),
             Some(b"\\xdead".to_vec())
         );
+    }
+
+    // ----- Fase 10.5.b — arrays nativos -----
+
+    #[test]
+    fn parse_array_int4_basico() {
+        let v = parse_text_value(oid::INT4_ARRAY, Some(b"{1,2,3}")).unwrap();
+        match v {
+            PgValue::Array { elem_oid, values } => {
+                assert_eq!(elem_oid, oid::INT4);
+                assert_eq!(
+                    values,
+                    vec![PgValue::Int(1), PgValue::Int(2), PgValue::Int(3)]
+                );
+            }
+            other => panic!("esperaba Array, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_array_vacio() {
+        let v = parse_text_value(oid::INT8_ARRAY, Some(b"{}")).unwrap();
+        match v {
+            PgValue::Array { values, .. } => assert!(values.is_empty()),
+            _ => panic!("esperaba Array vacío"),
+        }
+    }
+
+    #[test]
+    fn parse_array_text_con_quoted_strings() {
+        let v = parse_text_value(oid::TEXT_ARRAY, Some(b"{\"hola\",\"chau\"}")).unwrap();
+        match v {
+            PgValue::Array { elem_oid, values } => {
+                assert_eq!(elem_oid, oid::TEXT);
+                assert_eq!(
+                    values,
+                    vec![
+                        PgValue::Text("hola".into()),
+                        PgValue::Text("chau".into())
+                    ]
+                );
+            }
+            _ => panic!("esperaba Array text"),
+        }
+    }
+
+    #[test]
+    fn parse_array_text_con_escapes() {
+        // {"a,b","c\"d","e\\f"} → ["a,b", "c\"d", "e\\f"]
+        let raw = b"{\"a,b\",\"c\\\"d\",\"e\\\\f\"}";
+        let v = parse_text_value(oid::TEXT_ARRAY, Some(raw)).unwrap();
+        match v {
+            PgValue::Array { values, .. } => {
+                assert_eq!(
+                    values,
+                    vec![
+                        PgValue::Text("a,b".into()),
+                        PgValue::Text("c\"d".into()),
+                        PgValue::Text("e\\f".into()),
+                    ]
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_array_con_null_sin_quotes() {
+        // {1,NULL,3} → [1, null, 3]
+        let v = parse_text_value(oid::INT4_ARRAY, Some(b"{1,NULL,3}")).unwrap();
+        match v {
+            PgValue::Array { values, .. } => {
+                assert_eq!(
+                    values,
+                    vec![PgValue::Int(1), PgValue::Null, PgValue::Int(3)]
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_array_null_quoted_es_literal() {
+        // {"NULL"} → ["NULL"] como texto, no null.
+        let v = parse_text_value(oid::TEXT_ARRAY, Some(b"{\"NULL\"}")).unwrap();
+        match v {
+            PgValue::Array { values, .. } => {
+                assert_eq!(values, vec![PgValue::Text("NULL".into())]);
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_array_bool() {
+        let v = parse_text_value(oid::BOOL_ARRAY, Some(b"{t,f,t}")).unwrap();
+        match v {
+            PgValue::Array { values, .. } => {
+                assert_eq!(
+                    values,
+                    vec![PgValue::Bool(true), PgValue::Bool(false), PgValue::Bool(true)]
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_array_float8() {
+        let v = parse_text_value(oid::FLOAT8_ARRAY, Some(b"{1.5,2.5,-3.0}")).unwrap();
+        match v {
+            PgValue::Array { values, .. } => {
+                assert_eq!(
+                    values,
+                    vec![PgValue::Float(1.5), PgValue::Float(2.5), PgValue::Float(-3.0)]
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn parse_array_uuid_via_text_array() {
+        // UUIDs llegan como TEXT_ARRAY[uuid-strings]; el ORM acepta
+        // UUID por su OID escalar, pero también via list<Str> con
+        // el cast `::uuid[]` explícito.
+        let v = parse_text_value(
+            oid::UUID_ARRAY,
+            Some(b"{550e8400-e29b-41d4-a716-446655440000}"),
+        )
+        .unwrap();
+        match v {
+            PgValue::Array { elem_oid, values } => {
+                assert_eq!(elem_oid, oid::UUID);
+                assert_eq!(
+                    values,
+                    vec![PgValue::Text("550e8400-e29b-41d4-a716-446655440000".into())]
+                );
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn encode_array_int4() {
+        let v = PgValue::Array {
+            elem_oid: oid::INT4,
+            values: vec![PgValue::Int(1), PgValue::Int(2), PgValue::Int(3)],
+        };
+        assert_eq!(encode_text_value(&v), Some(b"{1,2,3}".to_vec()));
+    }
+
+    #[test]
+    fn encode_array_vacio() {
+        let v = PgValue::Array {
+            elem_oid: oid::INT4,
+            values: vec![],
+        };
+        assert_eq!(encode_text_value(&v), Some(b"{}".to_vec()));
+    }
+
+    #[test]
+    fn encode_array_text_quotea_strings() {
+        let v = PgValue::Array {
+            elem_oid: oid::TEXT,
+            values: vec![
+                PgValue::Text("hola".into()),
+                PgValue::Text("chau".into()),
+            ],
+        };
+        assert_eq!(
+            encode_text_value(&v),
+            Some(b"{\"hola\",\"chau\"}".to_vec())
+        );
+    }
+
+    #[test]
+    fn encode_array_text_escapa_comillas_y_backslash() {
+        let v = PgValue::Array {
+            elem_oid: oid::TEXT,
+            values: vec![
+                PgValue::Text("c\"d".into()),
+                PgValue::Text("e\\f".into()),
+            ],
+        };
+        // "c\"d" → "c\\\"d"  (escape para Postgres)
+        // "e\\f" → "e\\\\f"
+        assert_eq!(
+            encode_text_value(&v),
+            Some(b"{\"c\\\"d\",\"e\\\\f\"}".to_vec())
+        );
+    }
+
+    #[test]
+    fn encode_array_con_null() {
+        let v = PgValue::Array {
+            elem_oid: oid::INT4,
+            values: vec![PgValue::Int(1), PgValue::Null, PgValue::Int(3)],
+        };
+        assert_eq!(encode_text_value(&v), Some(b"{1,NULL,3}".to_vec()));
+    }
+
+    #[test]
+    fn array_elem_oid_mapeo() {
+        assert_eq!(oid::array_elem_oid(oid::INT4_ARRAY), Some(oid::INT4));
+        assert_eq!(oid::array_elem_oid(oid::TEXT_ARRAY), Some(oid::TEXT));
+        assert_eq!(oid::array_elem_oid(oid::BOOL_ARRAY), Some(oid::BOOL));
+        assert_eq!(oid::array_elem_oid(9999), None);
+    }
+
+    #[test]
+    fn elem_to_array_oid_mapeo() {
+        assert_eq!(oid::elem_to_array_oid(oid::INT4), Some(oid::INT4_ARRAY));
+        assert_eq!(oid::elem_to_array_oid(oid::TEXT), Some(oid::TEXT_ARRAY));
+        assert_eq!(oid::elem_to_array_oid(9999), None);
+    }
+
+    #[test]
+    fn array_roundtrip_via_parse_encode() {
+        // {1,2,3} → Array → encode → "{1,2,3}"
+        let parsed = parse_text_value(oid::INT4_ARRAY, Some(b"{1,2,3}")).unwrap();
+        let encoded = encode_text_value(&parsed).unwrap();
+        assert_eq!(encoded, b"{1,2,3}".to_vec());
     }
 
     // ----- Row API -----
