@@ -10544,12 +10544,19 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
 /// state (el SQL builder no agrega nuevos args — LIMIT/OFFSET se
 /// emiten inline como literales numéricos seguros, son `i64`).
 fn build_select_sql(state: &QueryBuilderState, override_limit: Option<i64>) -> String {
-    // Columnas explícitas en orden de declaración.
+    // Columnas explícitas en orden de declaración. Fase 10.4.a:
+    // los fields virtuales (`@has_one`/`@has_many`) NO aparecen
+    // en el SELECT — solo se acceden vía navigation methods (10.4.b).
     let mut col_list = String::new();
-    for (i, f) in state.fields.iter().enumerate() {
-        if i > 0 {
+    let mut first = true;
+    for f in state.fields.iter() {
+        if state.meta.is_virtual_field(&f.name) {
+            continue;
+        }
+        if !first {
             col_list.push_str(", ");
         }
+        first = false;
         let sql_col = state
             .meta
             .columns
@@ -10981,7 +10988,12 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
     let mut col_list = String::new();
     let mut placeholders = String::new();
     let mut pg_args: Vec<crate::db::PgValue> = Vec::with_capacity(state.fields.len());
-    for (i, f) in state.fields.iter().enumerate() {
+    let mut placeholder_idx = 0;
+    for f in state.fields.iter() {
+        // Fase 10.4.a — skip de fields virtuales (@has_one/@has_many)
+        if state.meta.is_virtual_field(&f.name) {
+            continue;
+        }
         let sql_col = state
             .meta
             .columns
@@ -11004,21 +11016,27 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
                 ));
             }
         };
-        if i > 0 {
+        if placeholder_idx > 0 {
             col_list.push_str(", ");
             placeholders.push_str(", ");
         }
         col_list.push('"');
         col_list.push_str(sql_col);
         col_list.push('"');
-        placeholders.push_str(&format!("${}", i + 1));
+        placeholder_idx += 1;
+        placeholders.push_str(&format!("${}", placeholder_idx));
         pg_args.push(pg);
     }
     let mut returning_list = String::new();
-    for (i, f) in state.fields.iter().enumerate() {
-        if i > 0 {
+    let mut first_ret = true;
+    for f in state.fields.iter() {
+        if state.meta.is_virtual_field(&f.name) {
+            continue;
+        }
+        if !first_ret {
             returning_list.push_str(", ");
         }
+        first_ret = false;
         let sql_col = state
             .meta
             .columns
@@ -11448,6 +11466,18 @@ fn pg_row_to_instance(
 ) -> Result<Value, String> {
     let mut field_values: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for f in fields {
+        // Fase 10.4.a — fields virtuales no aparecen en el row;
+        // se inicializan con default sentinel (Null para opcionales,
+        // List vacía para has_many). El user accederá via navigation
+        // methods cuando llegue 10.4.b.
+        if meta.is_virtual_field(&f.name) {
+            let default_v = match meta.relations.get(&f.name).map(|r| r.kind) {
+                Some(crate::types::RelationKind::HasMany) => Value::new_list(vec![]),
+                _ => Value::Null,
+            };
+            field_values.push((f.name.clone(), default_v));
+            continue;
+        }
         let sql_col = meta
             .columns
             .get(&f.name)
@@ -24615,6 +24645,7 @@ let r = match n {
             sql_name: "users".into(),
             primary_field: Some("id".into()),
             columns: std::collections::HashMap::new(),
+            relations: std::collections::HashMap::new(),
         };
         (fields, meta)
     }
@@ -24783,6 +24814,7 @@ let r = match n {
                 sql_name: "users".into(),
                 primary_field: Some("id".into()),
                 columns: std::collections::HashMap::new(),
+                relations: std::collections::HashMap::new(),
             },
             where_sql: None,
             where_args: Vec::new(),
@@ -24844,6 +24876,60 @@ let r = match n {
             sql.ends_with("LIMIT 0"),
             "esperaba LIMIT 0 (clamp), fue: {sql}"
         );
+    }
+
+    #[test]
+    fn build_sql_skipea_fields_virtuales() {
+        // Fase 10.4.a — fields con @has_many / @has_one NO van
+        // en SELECT. Insertamos un field virtual `posts` y
+        // verificamos que las columnas reales se emitan en orden.
+        let mut s = empty_state();
+        s.fields.push(crate::ast::Field {
+            name: "posts".into(),
+            type_: crate::ast::TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![crate::ast::TypeExpr::named("Post")],
+            },
+            default: None,
+            decorators: vec![],
+        });
+        s.meta.relations.insert(
+            "posts".into(),
+            crate::types::RelationMetadata {
+                kind: crate::types::RelationKind::HasMany,
+                target_type: "Post".into(),
+                fk_field: "user_id".into(),
+                on_delete: crate::types::CascadeAction::Restrict,
+                on_update: crate::types::CascadeAction::Restrict,
+            },
+        );
+        let sql = build_select_sql(&s, None);
+        assert!(
+            !sql.contains("\"posts\""),
+            "el field virtual `posts` no debería estar en el SQL: {sql}"
+        );
+        assert!(sql.contains("\"id\""));
+        assert!(sql.contains("\"name\""));
+        assert!(sql.contains("\"age\""));
+    }
+
+    #[test]
+    fn build_sql_belongs_to_field_no_es_virtual() {
+        // El field con @belongs_to ES real (es el FK column).
+        // Debe aparecer en el SELECT normal.
+        let mut s = empty_state();
+        s.meta.relations.insert(
+            "age".into(),
+            crate::types::RelationMetadata {
+                kind: crate::types::RelationKind::BelongsTo,
+                target_type: "Profile".into(),
+                fk_field: "age".into(),
+                on_delete: crate::types::CascadeAction::Restrict,
+                on_update: crate::types::CascadeAction::Restrict,
+            },
+        );
+        let sql = build_select_sql(&s, None);
+        assert!(sql.contains("\"age\""));
     }
 
     #[tokio::test(flavor = "current_thread")]

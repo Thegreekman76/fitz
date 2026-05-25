@@ -338,7 +338,8 @@ pub struct ResolvedField {
 /// Fase 10.3.a — Metadata extraída de los decoradores ORM sobre
 /// un `type Foo { ... }`. Si el type NO tiene `@table`, queda
 /// `None` en `TypeEnv.tables`. Si lo tiene, registramos el nombre
-/// de tabla SQL + el field primary + overrides por columna.
+/// de tabla SQL + el field primary + overrides por columna +
+/// relaciones (Fase 10.4.a).
 ///
 /// El runtime (10.3.b) consume esta metadata para emitir SQL
 /// correcto al traducir `User.where(...).all().await?`.
@@ -361,6 +362,12 @@ pub struct TableMetadata {
     /// fields sin decorators mapean directamente (nombre Fitz =
     /// nombre SQL, tipo SQL derivado del tipo Fitz).
     pub columns: std::collections::HashMap<String, ColumnMetadata>,
+    /// Fase 10.4.a — Relaciones declaradas con `@belongs_to`,
+    /// `@has_one`, `@has_many`. Indexed por nombre Fitz del field.
+    /// `BelongsTo` mapea un FK real del row; `HasOne`/`HasMany`
+    /// son virtuales (no aparecen en SELECT/INSERT, se navegan
+    /// con métodos en runtime — 10.4.b).
+    pub relations: std::collections::HashMap<String, RelationMetadata>,
 }
 
 /// Fase 10.3.a — Configuración por columna del ORM. Se popula
@@ -376,6 +383,93 @@ pub struct ColumnMetadata {
     pub sql_type: Option<String>,
     pub unique: bool,
     pub indexed: bool,
+}
+
+/// Fase 10.4.a — Tipo de relación declarada sobre un field.
+///
+/// `BelongsTo` y `HasOne` se diferencian en quién hospeda el FK:
+/// `BelongsTo` significa "este field es un FK column que apunta
+/// al otro type"; `HasOne` significa "el otro type tiene un FK
+/// apuntando a éste". El primero es REAL (aparece en SELECT/
+/// INSERT/UPDATE); los otros dos son VIRTUALES (solo
+/// navegables).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationKind {
+    /// `@belongs_to("User")` sobre `author_id: Int`. Este field
+    /// almacena el FK que apunta al primary key de la otra tabla.
+    /// Es real (columna en el SELECT) y participa del SQL normal.
+    BelongsTo,
+    /// `@has_one("Profile")` sobre `profile: Profile?`. Field
+    /// virtual: la tabla del otro type tiene un FK apuntando
+    /// a este. No aparece en SELECT/INSERT/UPDATE del builder.
+    HasOne,
+    /// `@has_many("Post", via="author_id")` sobre
+    /// `posts: List<Post>`. Virtual, igual que HasOne, pero
+    /// devuelve múltiples instancias del otro type.
+    HasMany,
+}
+
+/// Fase 10.4.a — Acción cascade para `on_delete`/`on_update`.
+/// Default es `Restrict` (Postgres default, conservativo).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CascadeAction {
+    /// Si la row referenciada se borra, también se borra ésta.
+    Cascade,
+    /// Si la row referenciada se borra, este FK se setea a NULL.
+    /// Requiere que el field sea nullable (`Int?`).
+    SetNull,
+    /// Default. Borrar la row referenciada falla si hay rows
+    /// que la referencian.
+    #[default]
+    Restrict,
+    /// Como `Restrict` pero la verificación se difiere al fin
+    /// de la transaction (raramente usado).
+    NoAction,
+}
+
+impl CascadeAction {
+    /// SQL clause para `ON DELETE`/`ON UPDATE`. La emite la
+    /// migration en 10.7.
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            CascadeAction::Cascade => "CASCADE",
+            CascadeAction::SetNull => "SET NULL",
+            CascadeAction::Restrict => "RESTRICT",
+            CascadeAction::NoAction => "NO ACTION",
+        }
+    }
+}
+
+/// Fase 10.4.a — Metadata por relación declarada con
+/// `@belongs_to` / `@has_one` / `@has_many`.
+#[derive(Debug, Clone)]
+pub struct RelationMetadata {
+    pub kind: RelationKind,
+    /// Nombre Fitz del type referenciado (e.g. "User").
+    pub target_type: String,
+    /// Nombre Fitz del field que actúa como FK:
+    ///   - Para `BelongsTo`: el field local que lleva el FK
+    ///     (e.g. en `Post.@belongs_to("User") author_id`, fk_field
+    ///     = "author_id"; default = el field decorado).
+    ///   - Para `HasOne` / `HasMany`: el field FK EN EL OTRO type
+    ///     (e.g. `User.@has_many("Post", via="author_id") posts`,
+    ///     fk_field = "author_id" pero refiere al field de `Post`).
+    pub fk_field: String,
+    pub on_delete: CascadeAction,
+    pub on_update: CascadeAction,
+}
+
+impl TableMetadata {
+    /// Fase 10.4.a — `true` si el field es virtual del ORM
+    /// (declarado con `@has_one`/`@has_many`). El SQL builder
+    /// salta estos fields en SELECT/INSERT/UPDATE. `BelongsTo`
+    /// NO es virtual — el FK column es real.
+    pub fn is_virtual_field(&self, field_name: &str) -> bool {
+        matches!(
+            self.relations.get(field_name).map(|r| r.kind),
+            Some(RelationKind::HasOne) | Some(RelationKind::HasMany)
+        )
+    }
 }
 
 /// Entorno de tipos del programa. Lleva:
@@ -1278,6 +1372,7 @@ pub fn process_table_decorators(
     // sentido en contexto ORM).
     let mut primary_field: Option<String> = None;
     let mut columns: HashMap<String, ColumnMetadata> = HashMap::new();
+    let mut relations: HashMap<String, RelationMetadata> = HashMap::new();
     let mut any_field_decorator = false;
 
     for f in fields {
@@ -1383,13 +1478,43 @@ pub fn process_table_decorators(
                     }
                     col_meta.indexed = true;
                 }
+                "belongs_to" | "has_one" | "has_many" => {
+                    let kind = match d.name.as_str() {
+                        "belongs_to" => RelationKind::BelongsTo,
+                        "has_one" => RelationKind::HasOne,
+                        "has_many" => RelationKind::HasMany,
+                        _ => unreachable!(),
+                    };
+                    if let Some(meta) = parse_relation_decorator(
+                        d,
+                        kind,
+                        &f.name,
+                        type_name,
+                        type_span,
+                        &mut errors,
+                    ) {
+                        if relations.contains_key(&f.name) {
+                            errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                format!(
+                                    "el field `{}` tiene más de un decorador de relación",
+                                    f.name
+                                ),
+                            ));
+                        } else {
+                            relations.insert(f.name.clone(), meta);
+                        }
+                    }
+                }
                 other => {
                     errors.push(FitzError::new(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
                         format!(
-                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`."
+                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@belongs_to`, `@has_one`, `@has_many`."
                         ),
                     ));
                 }
@@ -1426,7 +1551,155 @@ pub fn process_table_decorators(
         sql_name: sql_name.unwrap(), // garantizado por has_table check
         primary_field,
         columns,
+        relations,
     }))
+}
+
+/// Fase 10.4.a — Parsea un decorator de relación
+/// (`@belongs_to`/`@has_one`/`@has_many`). Devuelve
+/// `Some(meta)` si el decorator es válido; `None` y pushea
+/// errors al vec si hay problemas. Validaciones:
+///   - 1 arg posicional Str (nombre del type referenciado).
+///   - Kwargs reconocidos: `on_delete`, `on_update`, `fk` (para
+///     belongs_to) o `via` (para has_one/has_many).
+///   - Valores de `on_delete`/`on_update`: "cascade" | "set_null"
+///     | "restrict" | "no_action".
+fn parse_relation_decorator(
+    d: &Decorator,
+    kind: RelationKind,
+    field_name: &str,
+    type_name: &str,
+    span: Span,
+    errors: &mut Vec<FitzError>,
+) -> Option<RelationMetadata> {
+    let dec_name = match kind {
+        RelationKind::BelongsTo => "@belongs_to",
+        RelationKind::HasOne => "@has_one",
+        RelationKind::HasMany => "@has_many",
+    };
+    // Arg posicional 1: nombre del type referenciado.
+    if d.args.len() != 1 {
+        errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            span.line,
+            span.column,
+            format!(
+                "`{dec_name}` espera 1 arg posicional (nombre del type referenciado), recibió {}",
+                d.args.len()
+            ),
+        ));
+        return None;
+    }
+    let target_type = match &d.args[0] {
+        Expr::Str(s, _) => s.clone(),
+        other => {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                span.line,
+                span.column,
+                format!(
+                    "`{dec_name}`: el primer arg debe ser un string literal con el nombre del type, recibió `{:?}`",
+                    other
+                ),
+            ));
+            return None;
+        }
+    };
+
+    // Default fk_field: depende del kind.
+    //   - BelongsTo: el field decorado ES el FK (por convención),
+    //     a menos que el user lo override con `fk="other_col"`.
+    //   - HasOne/HasMany: convención `<lowercase(this_type)>_id`,
+    //     a menos que `via="X"` lo override.
+    let mut fk_field: String = match kind {
+        RelationKind::BelongsTo => field_name.to_string(),
+        RelationKind::HasOne | RelationKind::HasMany => format!("{}_id", type_name.to_lowercase()),
+    };
+    let mut on_delete = CascadeAction::default();
+    let mut on_update = CascadeAction::default();
+
+    for (k, v) in &d.kwargs {
+        match k.as_str() {
+            "on_delete" => match parse_cascade_value(v) {
+                Some(c) => on_delete = c,
+                None => errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!(
+                        "`{dec_name}(on_delete=...)` valor desconocido. Soportados: `cascade`, `set_null`, `restrict`, `no_action`."
+                    ),
+                )),
+            },
+            "on_update" => match parse_cascade_value(v) {
+                Some(c) => on_update = c,
+                None => errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!(
+                        "`{dec_name}(on_update=...)` valor desconocido. Soportados: `cascade`, `set_null`, `restrict`, `no_action`."
+                    ),
+                )),
+            },
+            "fk" if matches!(kind, RelationKind::BelongsTo) => match v {
+                Expr::Str(s, _) => fk_field = s.clone(),
+                _ => errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!("`{dec_name}(fk=...)` espera string literal"),
+                )),
+            },
+            "via" if matches!(kind, RelationKind::HasOne | RelationKind::HasMany) => match v {
+                Expr::Str(s, _) => fk_field = s.clone(),
+                _ => errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!("`{dec_name}(via=...)` espera string literal"),
+                )),
+            },
+            other => {
+                let valid = match kind {
+                    RelationKind::BelongsTo => "`on_delete`, `on_update`, `fk`",
+                    _ => "`on_delete`, `on_update`, `via`",
+                };
+                errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!(
+                        "`{dec_name}` no reconoce el kwarg `{other}`. Soportados: {valid}."
+                    ),
+                ));
+            }
+        }
+    }
+
+    Some(RelationMetadata {
+        kind,
+        target_type,
+        fk_field,
+        on_delete,
+        on_update,
+    })
+}
+
+/// Fase 10.4.a — Parsea un valor de `on_delete`/`on_update`.
+/// Soportado: literales Str con valores canónicos.
+fn parse_cascade_value(v: &Expr) -> Option<CascadeAction> {
+    if let Expr::Str(s, _) = v {
+        match s.as_str() {
+            "cascade" => Some(CascadeAction::Cascade),
+            "set_null" => Some(CascadeAction::SetNull),
+            "restrict" => Some(CascadeAction::Restrict),
+            "no_action" => Some(CascadeAction::NoAction),
+            _ => None,
+        }
+    } else {
+        None
+    }
 }
 
 fn check_field_default(
@@ -12989,5 +13262,152 @@ print(total)
             "esperaba error sobre @table duplicado: {:?}",
             errs
         );
+    }
+
+    // ===== Fase 10.4.a — relaciones =====
+
+    #[test]
+    fn checker_belongs_to_basico() {
+        let src = "@table type User { id: Int }\n\
+                   @table type Post {\n  \
+                     id: Int\n  \
+                     @belongs_to(\"User\")\n  \
+                     author_id: Int\n\
+                   }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("Post").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        let rel = meta.relations.get("author_id").expect("relación bindeada");
+        assert_eq!(rel.kind, RelationKind::BelongsTo);
+        assert_eq!(rel.target_type, "User");
+        assert_eq!(rel.fk_field, "author_id");
+        assert_eq!(rel.on_delete, CascadeAction::Restrict);
+    }
+
+    #[test]
+    fn checker_belongs_to_con_kwargs() {
+        let src = "@table type User { id: Int }\n\
+                   @table type Post {\n  \
+                     id: Int\n  \
+                     @belongs_to(\"User\", on_delete=\"cascade\", fk=\"author_user_id\")\n  \
+                     author_id: Int\n\
+                   }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("Post").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        let rel = meta.relations.get("author_id").unwrap();
+        assert_eq!(rel.on_delete, CascadeAction::Cascade);
+        assert_eq!(rel.fk_field, "author_user_id");
+    }
+
+    #[test]
+    fn checker_has_many_marca_field_virtual() {
+        let src = "@table type Post { id: Int, author_id: Int }\n\
+                   @table type User {\n  \
+                     id: Int\n  \
+                     @has_many(\"Post\")\n  \
+                     posts: List<Post>\n\
+                   }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("User").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        assert!(meta.is_virtual_field("posts"));
+        assert!(!meta.is_virtual_field("id"));
+        let rel = meta.relations.get("posts").unwrap();
+        assert_eq!(rel.kind, RelationKind::HasMany);
+        assert_eq!(rel.target_type, "Post");
+        // Default `via` para has_many sobre `User` = "user_id".
+        assert_eq!(rel.fk_field, "user_id");
+    }
+
+    #[test]
+    fn checker_has_many_con_via_explicito() {
+        let src = "@table type Post { id: Int, author_id: Int }\n\
+                   @table type User {\n  \
+                     id: Int\n  \
+                     @has_many(\"Post\", via=\"author_id\")\n  \
+                     posts: List<Post>\n\
+                   }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("User").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        let rel = meta.relations.get("posts").unwrap();
+        assert_eq!(rel.fk_field, "author_id");
+    }
+
+    #[test]
+    fn checker_has_one_marca_field_virtual() {
+        let src = "@table type Profile { id: Int, user_id: Int }\n\
+                   @table type User {\n  \
+                     id: Int\n  \
+                     @has_one(\"Profile\")\n  \
+                     profile: Profile?\n\
+                   }";
+        let (env, errs) = resolve_str(src);
+        assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
+        let id = env.lookup("User").unwrap();
+        let meta = env.table_metadata(id).unwrap();
+        assert!(meta.is_virtual_field("profile"));
+        let rel = meta.relations.get("profile").unwrap();
+        assert_eq!(rel.kind, RelationKind::HasOne);
+    }
+
+    #[test]
+    fn checker_relation_sin_args_es_error() {
+        let src = "@table type T {\n  \
+                     @belongs_to\n  \
+                     other_id: Int\n\
+                   }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("@belongs_to")),
+            "esperaba error de aridad: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_relation_on_delete_invalido_es_error() {
+        let src = "@table type User { id: Int }\n\
+                   @table type Post {\n  \
+                     id: Int\n  \
+                     @belongs_to(\"User\", on_delete=\"explode\")\n  \
+                     author_id: Int\n\
+                   }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("on_delete")),
+            "esperaba error sobre on_delete: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_dos_relations_en_un_field_es_error() {
+        let src = "@table type User { id: Int }\n\
+                   @table type Post {\n  \
+                     id: Int\n  \
+                     @belongs_to(\"User\") @has_one(\"User\")\n  \
+                     author_id: Int\n\
+                   }";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("más de un decorador de relación")),
+            "esperaba error sobre duplicado: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn cascade_action_as_sql() {
+        assert_eq!(CascadeAction::Cascade.as_sql(), "CASCADE");
+        assert_eq!(CascadeAction::SetNull.as_sql(), "SET NULL");
+        assert_eq!(CascadeAction::Restrict.as_sql(), "RESTRICT");
+        assert_eq!(CascadeAction::NoAction.as_sql(), "NO ACTION");
     }
 }
