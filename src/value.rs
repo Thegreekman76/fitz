@@ -600,6 +600,24 @@ pub enum Value {
     /// no un valor). Display: `<db-conn user@host/db>` con el URL
     /// redacted (sin password).
     DbConn(Arc<crate::db::DbConnHandle>),
+
+    /// Fase 10.3.b2 — builder de queries ORM acumulando state.
+    /// Producido por `User.where(closure)` y consumido por
+    /// `.all(db)`/`.first(db)`/`.count(db)`. Inmutable: cada call
+    /// al chain devuelve un QueryBuilder NUEVO con el state
+    /// acumulado (semántica functional).
+    ///
+    /// El struct concreto (`QueryBuilderState`) vive en
+    /// `evaluator.rs`. Lo envolvemos en `Arc<dyn Any + Send + Sync>`
+    /// para evitar `evaluator → value → evaluator` ciclo en los
+    /// imports (`evaluator` ya depende de `value`; no podemos
+    /// referenciar `evaluator::QueryBuilderState` desde acá). El
+    /// downcast vive en `dispatch_method` cuando recibe el value
+    /// como receiver.
+    ///
+    /// Igualdad por identidad del `Arc`. Opaco para el user; sin
+    /// Display ni serialización a JSON.
+    QueryBuilder(Arc<dyn std::any::Any + Send + Sync>),
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -668,6 +686,7 @@ impl Value {
             Value::Future(_) => "Future",
             Value::WsConn(_) => "WsConn",
             Value::DbConn(_) => "DbConn",
+            Value::QueryBuilder(_) => "QueryBuilder",
             #[cfg(feature = "python")]
             Value::PyObject(_) => "PyObject",
         }
@@ -801,6 +820,7 @@ impl std::fmt::Display for Value {
             Value::Future(_) => write!(f, "<future>"),
             Value::WsConn(_) => write!(f, "<ws-conn>"),
             Value::DbConn(h) => write!(f, "<db-conn {}>", h.url_redacted),
+            Value::QueryBuilder(_) => write!(f, "<query-builder>"),
             Value::NativeFn(_) => write!(f, "<native function>"),
             #[cfg(feature = "python")]
             Value::PyObject(_) => write!(f, "<python object>"),
@@ -892,6 +912,8 @@ impl PartialEq for Value {
             (Value::WsConn(a), Value::WsConn(b)) => Arc::ptr_eq(a, b),
             // Igualdad por identidad del Arc — paralelo a WsConn.
             (Value::DbConn(a), Value::DbConn(b)) => Arc::ptr_eq(a, b),
+            // Mismo criterio para QueryBuilder.
+            (Value::QueryBuilder(a), Value::QueryBuilder(b)) => Arc::ptr_eq(a, b),
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }

@@ -4525,6 +4525,22 @@ async fn dispatch_method(
             ),
         )));
     }
+    // Fase 10.3.b2 — dispatch sobre `Value::QueryBuilder`.
+    // Permite cadenas: `User.where(f).where(g).all(db).await?`.
+    if matches!(&receiver, Value::QueryBuilder(_)) {
+        if let Some(result) = orm_dispatch_qb_method(&receiver, method, args, span)? {
+            return Ok(result);
+        }
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`QueryBuilder` no tiene el método `{}` (soportados: where, all)",
+                method,
+            ),
+        )));
+    }
     match (&receiver, method) {
         // List
         (Value::List(_), "push") => list_push(receiver, args, span),
@@ -10280,10 +10296,29 @@ fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> Fi
 // `SELECT col1, col2, ... FROM <table>` y deserializa rows a
 // `Value::Instance`. Sin where/order/limit todavía.
 
+/// Fase 10.3.b2 — state acumulado del query builder. Cada call a
+/// `where(closure)` / `order_by(...)` / `limit(n)` produce un
+/// NUEVO `QueryBuilderState` (clonando + mutando — semántica
+/// functional). El estado vive adentro de un `Value::QueryBuilder
+/// (Arc<dyn Any>)`; el dispatch sobre el receiver hace downcast.
+#[derive(Clone)]
+pub struct QueryBuilderState {
+    pub type_name: String,
+    pub fields: Vec<crate::ast::Field>,
+    pub meta: crate::types::TableMetadata,
+    /// SQL fragment del WHERE (sin la palabra `WHERE`). `None` si
+    /// no se llamó `.where(...)`. Si hay múltiples `.where()` en
+    /// cadena, se combinan con AND.
+    pub where_sql: Option<String>,
+    /// Args parametrizados acumulados ($1, $2, ...) en orden de
+    /// aparición en `where_sql`.
+    pub where_args: Vec<crate::db::PgValue>,
+}
+
 /// Despacha métodos ORM sobre un `Value::Type` con `@table(...)`.
 /// Devuelve:
 ///   - `Ok(Some(v))`: el método existe en el ORM, devolvemos el
-///     Value (típicamente un `Future`).
+///     Value (típicamente un `Future` o un `QueryBuilder`).
 ///   - `Ok(None)`: el método NO es un built-in del ORM; el caller
 ///     continúa con su flujo (error "método no encontrado").
 fn orm_dispatch_type_method(
@@ -10296,16 +10331,91 @@ fn orm_dispatch_type_method(
         "all" => orm_type_all(type_value.clone(), args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        "where" => orm_type_where(type_value.clone(), args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
         _ => Ok(None),
     }
 }
 
-/// `Type.all(db) -> Future<Result<List<Instance>>>`. Ejecuta
-/// `SELECT <cols> FROM <table>` y deserializa cada row a
-/// `Value::Instance` del type. Las columnas se piden explícitas
-/// (no `SELECT *`) en orden de declaración del `type` para que el
-/// mapping sea estable independiente del orden físico de la tabla.
+/// Fase 10.3.b2 — Despacha métodos sobre un `Value::QueryBuilder`
+/// existente. Permite encadenar: `User.where(f).where(g).all(db)`.
+/// Devuelve `Some` si el método matchea, `None` si el caller
+/// debe continuar el dispatch (error genérico).
+pub fn orm_dispatch_qb_method(
+    qb_value: &Value,
+    method: &str,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<Option<Value>> {
+    let state = match qb_value {
+        Value::QueryBuilder(arc) => {
+            let qb = arc.clone().downcast::<QueryBuilderState>().map_err(|_| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    "downcast del QueryBuilder falló (bug del runtime)".to_string(),
+                ))
+            })?;
+            (*qb).clone()
+        }
+        _ => return Ok(None),
+    };
+    match method {
+        "all" => orm_qb_all(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        "where" => orm_qb_where(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
+        _ => Ok(None),
+    }
+}
+
+/// Helper: extrae los metadatos del `Value::Type` (asume que es
+/// un type con `@table(...)` — el caller ya validó).
+fn type_value_to_state(type_value: Value, span: Span) -> FitzResult<QueryBuilderState> {
+    match type_value {
+        Value::Type {
+            name,
+            fields,
+            table_metadata: Some(m),
+            ..
+        } => Ok(QueryBuilderState {
+            type_name: name,
+            fields,
+            meta: *m,
+            where_sql: None,
+            where_args: Vec::new(),
+        }),
+        _ => Err(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            "se esperaba un `type` con `@table(...)`".to_string(),
+        )),
+    }
+}
+
+/// `Type.all(db)` — equivalente a `.where(_ => true).all(db)`.
+/// Construye un QueryBuilder vacío y ejecuta `.all(db)` sobre él.
 fn orm_type_all(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    let state = type_value_to_state(type_value, span)?;
+    orm_qb_all(state, args, span)
+}
+
+/// `Type.where(closure)` — punto de entrada del builder. Traduce
+/// el closure a SQL + args parametrizados y devuelve un nuevo
+/// QueryBuilder.
+fn orm_type_where(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    let state = type_value_to_state(type_value, span)?;
+    orm_qb_where(state, args, span)
+}
+
+/// `qb.where(closure)` — agrega un AND al WHERE existente. Si no
+/// había WHERE previo, el nuevo se vuelve el WHERE inicial.
+fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
             ErrorKind::WrongArgCount {
@@ -10315,7 +10425,94 @@ fn orm_type_all(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<V
             span.line,
             span.column,
             format!(
-                "`Type.all(db)` espera 1 argumento (db: DbConn), recibió {}",
+                "`.where(closure)` espera 1 argumento (fn(<param>) => <bool>), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let (params, body) = match &args[0] {
+        Value::Function { params, body, .. } => (params.clone(), body.clone()),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Function".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.where(closure)` espera una función `fn(u) => <bool>`, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    if params.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`.where(closure)` espera una closure con 1 parámetro (el row), recibió {}",
+                params.len()
+            ),
+        ));
+    }
+    let param_name = params[0].name.clone();
+    // El body de `fn(u) => expr` es `[Stmt::Return(expr, ...)]`.
+    // Para closures más complejos (con statements adentro), el
+    // translator MVP no los soporta — error claro.
+    let body_expr = match body.as_slice() {
+        [crate::ast::Stmt::Return(e, _)] => e.clone(),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                "`.where(closure)` MVP: el body del closure debe ser una sola expresión (sin let/if/etc.)".to_string(),
+            ));
+        }
+    };
+
+    let mut args_acc = state.where_args.clone();
+    let sql_fragment = translate_expr_to_sql(
+        &body_expr,
+        &param_name,
+        &state.fields,
+        &state.meta,
+        &mut args_acc,
+    )
+    .map_err(|msg| {
+        FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!("`.where(closure)`: {msg}"),
+        )
+    })?;
+
+    let combined_sql = match state.where_sql.take() {
+        Some(prev) => format!("({prev}) AND ({sql_fragment})"),
+        None => sql_fragment,
+    };
+    state.where_sql = Some(combined_sql);
+    state.where_args = args_acc;
+    Ok(Value::QueryBuilder(Arc::new(state)))
+}
+
+/// `qb.all(db)` — ejecuta el SELECT con el WHERE acumulado y
+/// devuelve `Future<Result<List<Instance>>>`.
+fn orm_qb_all(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.all(db)` espera 1 argumento (db: DbConn), recibió {}",
                 args.len()
             ),
         ));
@@ -10331,39 +10528,21 @@ fn orm_type_all(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<V
                 span.line,
                 span.column,
                 format!(
-                    "`Type.all(db)` espera DbConn como primer arg, recibió `{}`",
+                    "`.all(db)` espera DbConn como primer arg, recibió `{}`",
                     other.type_name()
                 ),
             ));
         }
     };
-    let (type_name, fields, meta) = match type_value {
-        Value::Type {
-            name,
-            fields,
-            table_metadata: Some(m),
-            ..
-        } => (name, fields, *m),
-        _ => {
-            return Err(FitzError::new(
-                ErrorKind::InvalidSyntax,
-                span.line,
-                span.column,
-                "`.all(db)` solo se puede invocar sobre un `type` con `@table(...)`".to_string(),
-            ));
-        }
-    };
 
-    // Construir SQL: `SELECT col1, col2, ... FROM <table>`. Si un
-    // field tiene `@column(name="X")`, usamos `X`; si no, el nombre
-    // Fitz directo. Quoteamos identificadores con `"` para
-    // permitir mayúsculas y nombres reservados.
+    // Construir SQL: `SELECT col1, col2, ... FROM <table> [WHERE ...]`.
     let mut col_list = String::new();
-    for (i, f) in fields.iter().enumerate() {
+    for (i, f) in state.fields.iter().enumerate() {
         if i > 0 {
             col_list.push_str(", ");
         }
-        let sql_col = meta
+        let sql_col = state
+            .meta
             .columns
             .get(&f.name)
             .and_then(|c| c.sql_name.as_deref())
@@ -10372,15 +10551,19 @@ fn orm_type_all(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<V
         col_list.push_str(sql_col);
         col_list.push('"');
     }
-    let sql = format!("SELECT {} FROM \"{}\"", col_list, meta.sql_name);
+    let mut sql = format!("SELECT {} FROM \"{}\"", col_list, state.meta.sql_name);
+    if let Some(w) = &state.where_sql {
+        sql.push_str(" WHERE ");
+        sql.push_str(w);
+    }
 
-    // Capturar todo lo necesario para el async block.
-    let fields_owned = fields.clone();
-    let meta_owned = meta.clone();
-    let type_name_owned = type_name.clone();
+    let fields_owned = state.fields.clone();
+    let meta_owned = state.meta.clone();
+    let type_name_owned = state.type_name.clone();
+    let where_args = state.where_args.clone();
 
     let fut: crate::value::FitzFuture = Box::pin(async move {
-        match db_handle.query(&sql, &[]).await {
+        match db_handle.query(&sql, &where_args).await {
             Ok(qr) => {
                 let mut instances = Vec::with_capacity(qr.rows.len());
                 for row in &qr.rows {
@@ -10403,6 +10586,137 @@ fn orm_type_all(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<V
         }
     });
     Ok(Value::new_future(fut))
+}
+
+/// Fase 10.3.b2 — translator Expr Fitz → SQL parametrizado.
+/// Walkea el AST del closure body y genera SQL emitiendo `$N`
+/// placeholders para literales (apendeados a `args_acc`).
+///
+/// `param_name` es el nombre del parámetro del closure (e.g. "u"
+/// en `fn (u) => u.age > 18`). Accesos a `<param_name>.field` se
+/// traducen a `"sql_column"` quoteado. Otros idents (sin field
+/// access) o accesos sobre otros nombres → error.
+///
+/// Cobertura MVP:
+///   - BinOp comparison: `== != < <= > >=` → `= <> < <= > >=`
+///   - BinOp logical: `&& ||` → `AND OR`
+///   - UnaryOp: `!` → `NOT (...)`
+///   - Field access: `u.field` → `"sql_col"`
+///   - Literales: Int/Float/Str/Bool/Null → arg parametrizado
+///
+/// Fuera de scope (deuda para 10.3.b3+): function calls
+/// (`u.name.like(...)`), índices, expresiones anidadas complejas.
+pub fn translate_expr_to_sql(
+    expr: &crate::ast::Expr,
+    param_name: &str,
+    fields: &[crate::ast::Field],
+    meta: &crate::types::TableMetadata,
+    args_acc: &mut Vec<crate::db::PgValue>,
+) -> Result<String, String> {
+    use crate::ast::{BinOpKind, Expr, UnaryOpKind};
+    match expr {
+        Expr::BinOp {
+            op, left, right, ..
+        } => {
+            let l = translate_expr_to_sql(left, param_name, fields, meta, args_acc)?;
+            let r = translate_expr_to_sql(right, param_name, fields, meta, args_acc)?;
+            let op_sql = match op {
+                BinOpKind::Eq => "=",
+                BinOpKind::NotEq => "<>",
+                BinOpKind::Lt => "<",
+                BinOpKind::LtEq => "<=",
+                BinOpKind::Gt => ">",
+                BinOpKind::GtEq => ">=",
+                BinOpKind::And => "AND",
+                BinOpKind::Or => "OR",
+                BinOpKind::Add => "+",
+                BinOpKind::Sub => "-",
+                BinOpKind::Mul => "*",
+                BinOpKind::Div => "/",
+                other => {
+                    return Err(format!(
+                        "operador `{:?}` no soportado en `.where(...)` MVP",
+                        other
+                    ));
+                }
+            };
+            Ok(format!("({} {} {})", l, op_sql, r))
+        }
+        Expr::UnaryOp { op, operand, .. } => {
+            let inner = translate_expr_to_sql(operand, param_name, fields, meta, args_acc)?;
+            match op {
+                UnaryOpKind::Not => Ok(format!("(NOT {})", inner)),
+                UnaryOpKind::Neg => Ok(format!("(-{})", inner)),
+                UnaryOpKind::BitNot => {
+                    Err("operador `~` (bitwise NOT) no soportado en `.where(...)`".to_string())
+                }
+            }
+        }
+        Expr::Field { object, field, .. } => {
+            // Solo aceptamos `<param>.<field>` — accesos sobre otros
+            // valores (vars locales, etc.) NO se soportan en MVP.
+            match object.as_ref() {
+                Expr::Ident(name, _) if name == param_name => {
+                    // Validar que el field existe en el type.
+                    if !fields.iter().any(|f| f.name == *field) {
+                        return Err(format!(
+                            "field `{field}` no existe en el type (fields disponibles: {})",
+                            fields
+                                .iter()
+                                .map(|f| f.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+                    let sql_col = meta
+                        .columns
+                        .get(field)
+                        .and_then(|c| c.sql_name.as_deref())
+                        .unwrap_or(field.as_str());
+                    Ok(format!("\"{}\"", sql_col))
+                }
+                _ => Err(format!(
+                    "`.where(...)` solo admite field access sobre el parámetro `{param_name}` (e.g. `{param_name}.field`)"
+                )),
+            }
+        }
+        Expr::Int(n, _) => {
+            args_acc.push(crate::db::PgValue::Int(*n));
+            Ok(format!("${}", args_acc.len()))
+        }
+        Expr::Float(x, _) => {
+            args_acc.push(crate::db::PgValue::Float(*x));
+            Ok(format!("${}", args_acc.len()))
+        }
+        Expr::Str(s, _) => {
+            args_acc.push(crate::db::PgValue::Text(s.clone()));
+            Ok(format!("${}", args_acc.len()))
+        }
+        Expr::Bool(b, _) => {
+            args_acc.push(crate::db::PgValue::Bool(*b));
+            Ok(format!("${}", args_acc.len()))
+        }
+        Expr::Null(_) => Ok("NULL".to_string()),
+        Expr::Ident(name, _) => {
+            // Permitido SOLO si `name == param_name` y aparece en
+            // un context que tenga sentido (e.g. `u == ...` que
+            // no tiene). Por ahora rechazamos: el user debe acceder
+            // a un field específico, no al receiver entero.
+            if name == param_name {
+                Err(format!(
+                    "no podés comparar el row entero (`{name}`); accedé a un field específico"
+                ))
+            } else {
+                Err(format!(
+                    "variable `{name}` no soportada en `.where(...)` MVP — usá literales o `<param>.<field>`"
+                ))
+            }
+        }
+        other => Err(format!(
+            "expresión `{:?}` no soportada en `.where(...)` MVP",
+            std::mem::discriminant(other)
+        )),
+    }
 }
 
 /// Deserializa una fila Postgres a una `Value::Instance` del type
@@ -23552,6 +23866,171 @@ let r = match n {
             err.message.contains("DbConn"),
             "mensaje sobre tipo DbConn: {}",
             err.message,
+        );
+    }
+
+    // ---- Fase 10.3.b2 — translator Expr → SQL + where builder ----
+
+    /// Helper para construir fields + meta para tests del translator.
+    fn make_test_meta() -> (Vec<crate::ast::Field>, crate::types::TableMetadata) {
+        use crate::ast::TypeExpr;
+        let fields = vec![
+            crate::ast::Field {
+                name: "id".into(),
+                type_: TypeExpr::named("Int"),
+                default: None,
+                decorators: vec![],
+            },
+            crate::ast::Field {
+                name: "name".into(),
+                type_: TypeExpr::named("Str"),
+                default: None,
+                decorators: vec![],
+            },
+            crate::ast::Field {
+                name: "age".into(),
+                type_: TypeExpr::named("Int"),
+                default: None,
+                decorators: vec![],
+            },
+        ];
+        let meta = crate::types::TableMetadata {
+            sql_name: "users".into(),
+            primary_field: Some("id".into()),
+            columns: std::collections::HashMap::new(),
+        };
+        (fields, meta)
+    }
+
+    /// Helper: parsea `let _ = fn (u) => <expr>` y devuelve el
+    /// inner expr del closure. El wrap con `let` evita que el parser
+    /// trate `fn` top-level como declaración de fn nombrada.
+    fn parse_closure_body(src: &str) -> crate::ast::Expr {
+        let wrapped = format!("let __closure = {}", src);
+        let tokens = crate::lexer::tokenize(&wrapped).expect("tokenize OK");
+        let program = crate::parser::parse(tokens).expect("parse OK");
+        let last = program.last().expect("non-empty program");
+        let value = match last {
+            crate::ast::Stmt::Assign { value, .. } => value,
+            other => panic!("se esperaba Stmt::Assign, fue {:?}", other),
+        };
+        let body = match value {
+            crate::ast::Expr::FnExpr { body, .. } => body,
+            other => panic!("se esperaba FnExpr, fue {:?}", other),
+        };
+        match body.as_slice() {
+            [crate::ast::Stmt::Return(e, _)] => e.clone(),
+            other => panic!("body inesperado: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translate_eq_int_literal() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age == 18");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "(\"age\" = $1)");
+        assert_eq!(args, vec![crate::db::PgValue::Int(18)]);
+    }
+
+    #[test]
+    fn translate_gt_and_lt_combinados() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.age > 18 and u.age < 65");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "((\"age\" > $1) AND (\"age\" < $2))");
+        assert_eq!(
+            args,
+            vec![crate::db::PgValue::Int(18), crate::db::PgValue::Int(65)]
+        );
+    }
+
+    #[test]
+    fn translate_str_literal() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name == \"ada\"");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "(\"name\" = $1)");
+        assert_eq!(args, vec![crate::db::PgValue::Text("ada".into())]);
+    }
+
+    #[test]
+    fn translate_not_unary() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => not (u.age > 18)");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "(NOT (\"age\" > $1))");
+    }
+
+    #[test]
+    fn translate_field_inexistente_es_error() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.does_not_exist == 1");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("does_not_exist"));
+    }
+
+    #[test]
+    fn translate_acceso_a_otra_var_es_error() {
+        let (fields, meta) = make_test_meta();
+        // El closure intenta acceder a `other.x` (no el parámetro).
+        let expr = parse_closure_body("fn (u) => other.age == 18");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args);
+        assert!(r.is_err());
+    }
+
+    #[test]
+    fn translate_column_override_usa_sql_name() {
+        // Si el field tiene @column(name="X"), el SQL usa X.
+        let (fields, mut meta) = make_test_meta();
+        meta.columns.insert(
+            "name".into(),
+            crate::types::ColumnMetadata {
+                sql_name: Some("display_name".into()),
+                sql_type: None,
+                unique: false,
+                indexed: false,
+            },
+        );
+        let expr = parse_closure_body("fn (u) => u.name == \"ada\"");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "(\"display_name\" = $1)");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_where_devuelve_query_builder() {
+        // `User.where(...)` sin .all() debe devolver un QueryBuilder.
+        let (env, res) = parse_eval_into_env(
+            "@table(\"users\") type User {\n  id: Int\n  name: Str\n  age: Int\n}\n\
+             let qb = User.where(fn(u) => u.age > 18)",
+        )
+        .await;
+        res.expect("evaluación OK");
+        let qb = env.lock().get("qb").unwrap();
+        assert!(matches!(qb, Value::QueryBuilder(_)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn orm_where_con_closure_invalida_es_error() {
+        // El parámetro del closure no existe como field del type.
+        let (_env, res) = parse_eval_into_env(
+            "@table(\"users\") type User {\n  id: Int\n}\n\
+             let qb = User.where(fn(u) => u.does_not_exist == 1)",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("does_not_exist"),
+            "mensaje sobre field inexistente: {}",
+            err.message
         );
     }
 }

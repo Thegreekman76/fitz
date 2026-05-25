@@ -1246,6 +1246,12 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 "DbConn no es serializable a JSON — los handlers consumen el conn vía `query()`/`exec()`, no lo retornan".to_string(),
             );
         }
+        // Fase 10.3.b2 — `QueryBuilder` opaco no serializable.
+        Value::QueryBuilder(_) => {
+            return Err(
+                "QueryBuilder no es serializable a JSON — terminá la cadena con `.all(db)` / `.first(db)` para obtener el resultado".to_string(),
+            );
+        }
         // Mini-tanda Mw-Wrap — `Value::NativeFn` es el callable
         // `next` que se pasa a wrap-style middlewares. Si llega al
         // serializer, el handler lo devolvió por error.

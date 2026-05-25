@@ -421,3 +421,181 @@ async fn orm_user_all_db_devuelve_instancias_reales() {
     let _ = seed_conn.exec("DROP TABLE fitz_orm_test_users", &[]).await;
     seed_conn.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_where_filtra_por_age() {
+    // Setup: tabla con 3 rows de edades distintas.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_where_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_where_test (id bigint, name text, age int)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_where_test VALUES (1, 'kid', 10), (2, 'ada', 30), (3, 'alan', 42)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Programa Fitz que filtra adultos (age > 18).
+    let src = format!(
+        "@table(\"fitz_orm_where_test\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<List<User>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let adults = User.where(fn(u) => u.age > 18).all(db).await?\n  \
+             return Ok(adults)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let users_list = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let users_shared = match users_list {
+        Value::List(s) => s,
+        other => panic!("esperaba List, fue {:?}", other),
+    };
+    let names: Vec<String> = {
+        let users = users_shared.lock();
+        // Solo 2 rows con age > 18 (ada=30, alan=42); kid=10 queda fuera.
+        assert_eq!(users.len(), 2, "esperaba 2 users adultos");
+        users
+            .iter()
+            .filter_map(|u| match u {
+                Value::Instance { fields, .. } => fields
+                    .lock()
+                    .iter()
+                    .find(|(n, _)| n == "name")
+                    .and_then(|(_, v)| match v {
+                        Value::Str(s) => Some(s.clone()),
+                        _ => None,
+                    }),
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(names.contains(&"ada".to_string()));
+    assert!(names.contains(&"alan".to_string()));
+    assert!(
+        !names.contains(&"kid".to_string()),
+        "kid no debería estar (age=10)"
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_orm_where_test", &[]).await;
+    seed.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_where_chain_combina_con_and() {
+    // `.where(f).where(g)` combina con AND. Filtramos por
+    // age > 18 AND name == 'ada'.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_chain_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_chain_test (id bigint, name text, age int)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_chain_test VALUES (1, 'kid', 10), (2, 'ada', 30), (3, 'alan', 42)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_chain_test\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<List<User>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let q = User.where(fn(u) => u.age > 18).where(fn(u) => u.name == \"ada\")\n  \
+             let result = q.all(db).await?\n  \
+             return Ok(result)\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let users_list = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        other => panic!("esperaba Ok, fue {:?}", other),
+    };
+    let users_shared = match users_list {
+        Value::List(s) => s,
+        other => panic!("esperaba List, fue {:?}", other),
+    };
+    let name = {
+        let users = users_shared.lock();
+        assert_eq!(
+            users.len(),
+            1,
+            "esperaba 1 user matching age>18 AND name=ada"
+        );
+        let n = if let Value::Instance { fields, .. } = &users[0] {
+            fields
+                .lock()
+                .iter()
+                .find(|(n, _)| n == "name")
+                .and_then(|(_, v)| match v {
+                    Value::Str(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .unwrap()
+        } else {
+            panic!("esperaba Instance");
+        };
+        n
+    };
+    assert_eq!(name, "ada");
+
+    let _ = seed.exec("DROP TABLE fitz_orm_chain_test", &[]).await;
+    seed.close().await.unwrap();
+}
