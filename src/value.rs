@@ -572,6 +572,18 @@ pub enum Value {
     /// No serializable a JSON (ver `value_to_json` en `http.rs` —
     /// rechaza con mensaje claro). Display: `<ws-conn>`.
     WsConn(Arc<WsConnHandle>),
+
+    /// Fase 10.1.b — Conexión Postgres abierta. Producida por el
+    /// builtin `db.connect(url).await` y consumida vía los métodos
+    /// `query/exec/close` despachados por `dispatch_method`. Opaco
+    /// para el usuario: igual que WsConn, solo se accede vía métodos
+    /// específicos del driver (`src/db.rs`).
+    ///
+    /// Igualdad por identidad del `Arc` — paralelo a WsConn. No
+    /// serializable a JSON (es un handle a un recurso del sistema,
+    /// no un valor). Display: `<db-conn user@host/db>` con el URL
+    /// redacted (sin password).
+    DbConn(Arc<crate::db::DbConnHandle>),
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -639,6 +651,7 @@ impl Value {
             Value::CorsConfig(_) => "CorsConfig",
             Value::Future(_) => "Future",
             Value::WsConn(_) => "WsConn",
+            Value::DbConn(_) => "DbConn",
             #[cfg(feature = "python")]
             Value::PyObject(_) => "PyObject",
         }
@@ -771,6 +784,7 @@ impl std::fmt::Display for Value {
             Value::CorsConfig(_) => write!(f, "<cors-config>"),
             Value::Future(_) => write!(f, "<future>"),
             Value::WsConn(_) => write!(f, "<ws-conn>"),
+            Value::DbConn(h) => write!(f, "<db-conn {}>", h.url_redacted),
             Value::NativeFn(_) => write!(f, "<native function>"),
             #[cfg(feature = "python")]
             Value::PyObject(_) => write!(f, "<python object>"),
@@ -860,6 +874,8 @@ impl PartialEq for Value {
             // iguales estructuralmente (sockets distintos, broadcaster
             // entries distintas).
             (Value::WsConn(a), Value::WsConn(b)) => Arc::ptr_eq(a, b),
+            // Igualdad por identidad del Arc — paralelo a WsConn.
+            (Value::DbConn(a), Value::DbConn(b)) => Arc::ptr_eq(a, b),
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }

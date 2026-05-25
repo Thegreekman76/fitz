@@ -1884,6 +1884,152 @@ fn md5_compute(input: &[u8]) -> [u8; 16] {
 }
 
 // =============================================================
+// DbConnHandle — wrapper Send + Sync para el evaluator
+// =============================================================
+//
+// `Connection` (definida arriba) es la abstracción interna del
+// driver: contiene el `TcpStream` y el estado del protocolo. NO la
+// exponemos directo al evaluator porque el evaluator necesita un
+// handle que pueda compartirse entre múltiples tasks (vía Arc) y
+// que serialice las operaciones I/O (vía Mutex).
+//
+// El patrón es paralelo a `WsConnHandle` de Fase 9.w.2:
+//
+//   - El evaluator pasa `Value::DbConn(Arc<DbConnHandle>)` entre
+//     scopes, returns de fns, args, etc. — clone barato del Arc.
+//   - Una sola query a la vez por conexión (sin pipelining en
+//     MVP): `tokio::sync::Mutex` serializa.
+//   - `MutexGuard` de `tokio::sync::Mutex` es `Send`, así que
+//     podemos mantenerlo a través de `.await` adentro de
+//     `db_conn_query` sin perder la guard.
+//   - El handle expone los métodos que el evaluator necesita:
+//     `query`, `exec`, `close`, más getters informativos.
+//
+// El `Option<Connection>` permite "consumir" la conexión al
+// `close()` sin invalidar el Arc (el handle queda vivo pero las
+// próximas queries fallan con error claro).
+
+/// Handle opaco a una conexión Postgres viva. Construido por
+/// `connect()` (la API pública del módulo, ver `connect_url`) y
+/// pasado al evaluator como `Value::DbConn(Arc<DbConnHandle>)`.
+///
+/// El struct NO implementa `Clone` directamente — el evaluator
+/// usa el `Arc` externo para sharing. Los métodos toman `&self`
+/// (el Mutex resuelve la mutabilidad interior).
+pub struct DbConnHandle {
+    /// La conexión real. `None` después de `close()` para que
+    /// queries futuras fallen con error claro en vez de panic.
+    inner: tokio::sync::Mutex<Option<Connection>>,
+    /// URL original (sin password — la borramos al construir el
+    /// handle). Útil para Display y mensajes de error.
+    pub url_redacted: String,
+}
+
+impl std::fmt::Debug for DbConnHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "DbConnHandle({})", self.url_redacted)
+    }
+}
+
+impl DbConnHandle {
+    pub fn new(conn: Connection, url_redacted: String) -> Self {
+        DbConnHandle {
+            inner: tokio::sync::Mutex::new(Some(conn)),
+            url_redacted,
+        }
+    }
+
+    /// Constructor para tests del evaluator: produce un handle con
+    /// `inner = None` (estado "cerrado"). Las queries fallan con
+    /// `Protocol("la conexión fue cerrada con .close()")` pero el
+    /// dispatch_method funciona — útil para validar la integración
+    /// sin necesitar un Postgres real.
+    #[cfg(any(test, debug_assertions))]
+    pub fn new_for_test_closed(url_redacted: String) -> Self {
+        DbConnHandle {
+            inner: tokio::sync::Mutex::new(None),
+            url_redacted,
+        }
+    }
+
+    /// Ejecuta una query con args, devuelve filas como pares
+    /// `(nombre, valor)` por columna. Si la conn fue cerrada,
+    /// error claro.
+    pub async fn query(&self, sql: &str, args: &[PgValue]) -> DbResult<QueryResult> {
+        let mut guard = self.inner.lock().await;
+        let conn = guard
+            .as_mut()
+            .ok_or_else(|| DbError::Protocol("la conexión fue cerrada con .close()".into()))?;
+        if args.is_empty() {
+            conn.simple_query(sql).await
+        } else {
+            conn.extended_query(sql, args).await
+        }
+    }
+
+    /// Ejecuta un statement que no espera rows (INSERT/UPDATE/
+    /// DELETE/DDL sin RETURNING). Devuelve el número de rows
+    /// afectadas inferido del `CommandComplete` tag.
+    pub async fn exec(&self, sql: &str, args: &[PgValue]) -> DbResult<u64> {
+        let result = self.query(sql, args).await?;
+        Ok(result.rows_affected())
+    }
+
+    /// Cierra la conexión cooperativamente. Después de esto, las
+    /// próximas queries devuelven error. Idempotente — múltiples
+    /// `close()` no son error.
+    pub async fn close(&self) -> DbResult<()> {
+        let mut guard = self.inner.lock().await;
+        if let Some(conn) = guard.take() {
+            conn.close().await?;
+        }
+        Ok(())
+    }
+
+    /// `true` si la conn ya fue cerrada con `close()`.
+    pub async fn is_closed(&self) -> bool {
+        let guard = self.inner.lock().await;
+        guard.is_none()
+    }
+}
+
+/// Abre una conexión Postgres desde un URL estándar. Punto de
+/// entrada principal para integración con el evaluator: el
+/// builtin `db.connect(url)` lo invoca y envuelve el resultado en
+/// `Value::DbConn(Arc::new(handle))`.
+///
+/// Devuelve `DbConnHandle` (no `Connection`) porque el handle es
+/// lo que el evaluator necesita poder compartir entre tasks.
+pub async fn connect_url(url: &str) -> DbResult<DbConnHandle> {
+    let config = ConnectionConfig::parse(url)?;
+    let url_redacted = redact_url(url);
+    let conn = Connection::connect(&config).await?;
+    Ok(DbConnHandle::new(conn, url_redacted))
+}
+
+/// Elimina la password del URL para diagnostics seguros. Reemplaza
+/// `user:pass@host` por `user:***@host`. No-op si no hay password.
+fn redact_url(url: &str) -> String {
+    let prefix_len = if let Some(p) = url.strip_prefix("postgres://") {
+        url.len() - p.len()
+    } else if let Some(p) = url.strip_prefix("postgresql://") {
+        url.len() - p.len()
+    } else {
+        return url.to_string();
+    };
+    let (prefix, rest) = url.split_at(prefix_len);
+    let (auth, tail) = match rest.rfind('@') {
+        Some(idx) => (&rest[..idx], &rest[idx..]),
+        None => return url.to_string(),
+    };
+    let redacted_auth = match auth.split_once(':') {
+        Some((user, _)) => format!("{user}:***"),
+        None => auth.to_string(),
+    };
+    format!("{prefix}{redacted_auth}{tail}")
+}
+
+// =============================================================
 // Tests
 // =============================================================
 
@@ -2386,5 +2532,62 @@ mod tests {
             command_tag: "DELETE 0".into(),
         };
         assert_eq!(qr.rows_affected(), 0);
+    }
+
+    // ----- redact_url -----
+
+    #[test]
+    fn redact_url_oculta_password() {
+        assert_eq!(
+            redact_url("postgres://alice:secret@host/db"),
+            "postgres://alice:***@host/db"
+        );
+        assert_eq!(
+            redact_url("postgresql://alice:secret@host:5432/db?sslmode=disable"),
+            "postgresql://alice:***@host:5432/db?sslmode=disable"
+        );
+    }
+
+    #[test]
+    fn redact_url_sin_password_no_cambia() {
+        assert_eq!(
+            redact_url("postgres://alice@host/db"),
+            "postgres://alice@host/db"
+        );
+    }
+
+    #[test]
+    fn redact_url_otros_schemes_passthrough() {
+        // Si el URL no es postgres://, devolvemos tal cual (el
+        // caller ya falló al parsear; redact es solo defensa).
+        assert_eq!(redact_url("mysql://x:y@h/d"), "mysql://x:y@h/d");
+    }
+
+    // ----- DbConnHandle lifecycle (sin Postgres real) -----
+    //
+    // No podemos testear `query/exec` sin un Postgres real, pero
+    // sí el ciclo "closed → operations fail". Construimos un
+    // handle con `Option<Connection>` = None directo.
+
+    #[tokio::test]
+    async fn db_conn_handle_closed_falla_query() {
+        let handle = DbConnHandle {
+            inner: tokio::sync::Mutex::new(None),
+            url_redacted: "postgres://test@host/db".into(),
+        };
+        assert!(handle.is_closed().await);
+        let r = handle.query("SELECT 1", &[]).await;
+        assert!(matches!(r, Err(DbError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn db_conn_handle_close_idempotente() {
+        let handle = DbConnHandle {
+            inner: tokio::sync::Mutex::new(None),
+            url_redacted: "postgres://test@host/db".into(),
+        };
+        // close() sobre un handle ya cerrado es no-op (no error).
+        handle.close().await.unwrap();
+        handle.close().await.unwrap();
     }
 }

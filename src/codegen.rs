@@ -121,6 +121,11 @@ pub fn generate_project(
     // mensaje claro citando el sub-paso futuro.
     let python_imports = collect_python_imports(program);
     validate_python_imports_for_codegen(program)?;
+    // Fase 10.1.b — el guard para `db.X` vive in-band en
+    // `gen_field_access` (helper `db_usage_error_for_field`), no
+    // como pase pre-codegen. Detecta cuando el codegen visita un
+    // `Field { object: Ident("db"), .. }` y aborta con mensaje
+    // claro citando 10.1.c como sub-paso futuro.
 
     // PASS 1 — Cargar recursivamente todos los módulos Fitz importados
     // desde el main, generar su código Rust y registrarlos. Los
@@ -294,6 +299,31 @@ fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzErro
         }
     }
     Ok(())
+}
+
+/// Fase 10.1.b — guard que aborta `fitz build` si el programa usa
+/// el módulo built-in `db` (driver Postgres puro). El codegen para
+/// el driver llega en sub-paso futuro 10.1.c (paralelo a la deuda
+/// 8.7 que cerró codegen Python). Hasta entonces, `fitz run` es el
+/// único camino para programas que tocan DB.
+///
+/// El check vive en el path crítico de `gen_expr` (función
+/// `db_usage_error_for_field`, invocada por `gen_field_access`):
+/// no requiere walker explícito del AST porque el propio codegen
+/// recorre todo. Esa función intercepta la expresión `db.X` antes
+/// de emitir cualquier Rust, así que el error sale en build-time
+/// del primer `db.connect(...)` que aparezca.
+fn db_usage_error_for_field(field_name: &str, span: crate::ast::Span) -> FitzError {
+    FitzError::new(
+        ErrorKind::InvalidSyntax,
+        span.line,
+        span.column,
+        format!(
+            "el módulo `db.{field_name}(...)` solo se soporta en `fitz run` en 10.1; \
+             el codegen para `fitz build` llega en 10.1.c. \
+             Usá `fitz run` para programas con acceso a base de datos."
+        ),
+    )
 }
 
 /// True si el programa tiene al menos una `Stmt::FnDef` con un
@@ -8553,7 +8583,22 @@ where
         // 5b.5: caso especial — si el object es `Ident(ns)` con `ns`
         // siendo namespace de módulo, traducimos `foo.greet(args)` →
         // `foo::greet(args)` Rust con la firma del módulo.
-        if let Expr::Field { object, field, .. } = callee {
+        if let Expr::Field {
+            object,
+            field,
+            span: field_span,
+        } = callee
+        {
+            // Fase 10.1.b — bloqueamos `db.X(...)` en codegen ANTES
+            // de cualquier otro dispatch. El módulo `db` está
+            // disponible en el evaluator (10.1.b) pero el codegen
+            // para `fitz build` llega en 10.1.c.
+            if let Expr::Ident(recv, _) = object.as_ref() {
+                if recv == "db" {
+                    return Err(db_usage_error_for_field(field, *field_span));
+                }
+            }
+
             // Fase 9.w.1.d — built-ins `jwt`/`hash`. Dispatch antes de
             // cualquier otra cosa: el receiver es un Ident con nombre
             // exacto `jwt`/`hash`, y los helpers del preludio aterrizan
@@ -13595,6 +13640,16 @@ where
         field: &str,
         field_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
+        // Fase 10.1.b — bloqueamos cualquier `db.X` en codegen. El
+        // módulo `db` está pre-registrado en el evaluator + TypeEnv,
+        // pero el codegen para 10.1.c todavía no llegó. Cualquier
+        // programa que use DB compila solo con `fitz run` por ahora.
+        if let Expr::Ident(ns, _) = object {
+            if ns == "db" {
+                return Err(db_usage_error_for_field(field, field_span));
+            }
+        }
+
         // 5b.5: si el objeto es `Ident(ns)` con `ns` siendo un namespace
         // de módulo importado (`import foo`), traducimos `foo.bar` a
         // path Rust `foo::bar`. Lo hacemos ANTES de evaluar el objeto,
@@ -24915,5 +24970,26 @@ mod tests {
             TypeExpr::Named(n) => assert_eq!(n, "User"),
             other => panic!("esperaba TypeExpr::Named(\"User\"), fue {:?}", other),
         }
+    }
+
+    // ---- Fase 10.1.b — guard del módulo `db` en codegen ----
+
+    #[test]
+    fn codegen_aborta_si_programa_usa_db_connect() {
+        // `db.connect(...)` adentro de un statement de codegen
+        // dispara `db_usage_error_for_field` en `gen_field_access`.
+        // El mensaje cita 10.1.c como sub-paso futuro.
+        assert_err_contains(
+            "let f = db.connect(\"postgres://x@h/d\")",
+            &["db.connect", "10.1.c", "fitz run"],
+        );
+    }
+
+    #[test]
+    fn codegen_aborta_si_programa_usa_db_field_arbitrario() {
+        // Cualquier `db.X` (no solo connect) debe abortar. Coverage
+        // defensivo — el módulo `db` no tiene otros builtins hoy, pero
+        // si el user escribe `db.foo()` debe ver el mismo mensaje.
+        assert_err_contains("let x = db.connect", &["db.connect", "10.1.c"]);
     }
 }

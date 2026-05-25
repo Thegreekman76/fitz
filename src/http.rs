@@ -1237,6 +1237,15 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 "WsConn no es serializable a JSON — los handlers `@ws` consumen el conn vía `recv()`/`send()`/`broadcast()`, no lo retornan".to_string(),
             );
         }
+        // Fase 10.1.b — `DbConn` es un handle a una conexión TCP
+        // con Postgres. Mismo criterio que WsConn: si llega al
+        // serializer, el handler devolvió el handle en lugar del
+        // resultset.
+        Value::DbConn(_) => {
+            return Err(
+                "DbConn no es serializable a JSON — los handlers consumen el conn vía `query()`/`exec()`, no lo retornan".to_string(),
+            );
+        }
         // Mini-tanda Mw-Wrap — `Value::NativeFn` es el callable
         // `next` que se pasa a wrap-style middlewares. Si llega al
         // serializer, el handler lo devolvió por error.

@@ -22,6 +22,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_recursion::async_recursion;
 
@@ -4827,6 +4828,34 @@ async fn dispatch_method(
                 other,
             ),
         ))),
+        // Fase 10.1.b — DbConn métodos. Cada uno devuelve un
+        // `Value::Future` que el caller hace `.await?` para
+        // desempacar al `Result<T>` (paralelo a `WsConn.recv()`).
+        //   `query(sql, args) -> Future<Result<List<Map<Str, Any>>>>`
+        //   `exec(sql, args)  -> Future<Result<Int>>` (rows affected)
+        //   `close()          -> Future<Null>` (idempotente)
+        //   `is_closed()      -> Future<Bool>` (diagnóstico)
+        (Value::DbConn(handle), "query") => {
+            db_conn_query(Arc::clone(handle), &args).map_err(EvalSignal::Error)
+        }
+        (Value::DbConn(handle), "exec") => {
+            db_conn_exec(Arc::clone(handle), &args).map_err(EvalSignal::Error)
+        }
+        (Value::DbConn(handle), "close") => {
+            db_conn_close(Arc::clone(handle), &args).map_err(EvalSignal::Error)
+        }
+        (Value::DbConn(handle), "is_closed") => {
+            db_conn_is_closed(Arc::clone(handle), &args).map_err(EvalSignal::Error)
+        }
+        (Value::DbConn(_), other) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`DbConn` no tiene el método `{}` (soportados: query, exec, close, is_closed)",
+                other,
+            ),
+        ))),
         _ => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
@@ -9333,6 +9362,29 @@ fn register_builtins(env: &EnvRef) {
             env: hash_env,
         },
     );
+
+    // Fase 10.1.b — módulo `db`: driver Postgres nativo. Solo expone
+    // `connect(url)` que devuelve un `Future<Result<DbConn>>`. Los
+    // métodos sobre la conexión (`query`/`exec`/`close`) se despachan
+    // vía `dispatch_method` sobre `Value::DbConn`, paralelo a WsConn
+    // de 9.w.2 (las fns built-in del módulo son sync wrappers que
+    // arman un Value::Future; el work async vive adentro del block
+    // que el `.await` desempaca).
+    let db_env = Environment::new();
+    db_env.lock().define(
+        "connect",
+        Value::Builtin {
+            name: "connect",
+            func: builtin_db_connect,
+        },
+    );
+    env.lock().define(
+        "db",
+        Value::Module {
+            name: "db".into(),
+            env: db_env,
+        },
+    );
 }
 
 /// Mini-tanda Bits-extras — `popcount(n: Int) -> Int`: cantidad de
@@ -9913,6 +9965,271 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
         tokio::time::sleep(std::time::Duration::from_millis(ms_u64)).await;
         Ok(Value::Null)
     });
+    Ok(Value::new_future(fut))
+}
+
+// =============================================================
+// Fase 10.1.b — Builtins del módulo `db`
+// =============================================================
+//
+// `db.connect(url)` es el único entry point del módulo. Devuelve
+// `Future<Result<DbConn>>`: en código Fitz se usa como
+//
+//     let db = db.connect("postgres://...").await?
+//     let rows = db.query("SELECT 1 AS n", []).await?
+//
+// El `.await` postfix de Fase 6 desempaca el Future, y el `?`
+// propaga el Err si la conexión falló (Auth, Io, Url, etc.).
+//
+// Los métodos sobre la conexión (`query`/`exec`/`close`) NO son
+// builtins del módulo `db` — se despachan vía `dispatch_method`
+// sobre `Value::DbConn`, igual que `ws_conn.recv()`/`send()` en
+// 9.w.2. El user los invoca como métodos:
+// `conn.query(sql, args).await?`.
+
+/// `db.connect(url: Str) -> Future<Result<DbConn>>`. Sync wrapper
+/// que valida args y arma un Future async (mismo patrón que
+/// `sleep`).
+fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`db.connect` espera 1 argumento (url: Str), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let url = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`db.connect` espera Str (URL Postgres), recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match crate::db::connect_url(&url).await {
+            Ok(handle) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::DbConn(Arc::new(handle)),
+            )))),
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// Convierte un `Value` Fitz a `PgValue` para enviar al servidor
+/// como arg de query. Solo primitivos en 10.1 — composites
+/// (List, Map, Instance → JSONB / arrays) llegan en 10.5.
+fn fitz_value_to_pg(v: &Value) -> Result<crate::db::PgValue, String> {
+    match v {
+        Value::Null => Ok(crate::db::PgValue::Null),
+        Value::Int(n) => Ok(crate::db::PgValue::Int(*n)),
+        Value::Float(x) => Ok(crate::db::PgValue::Float(*x)),
+        Value::Str(s) => Ok(crate::db::PgValue::Text(s.clone())),
+        Value::Bool(b) => Ok(crate::db::PgValue::Bool(*b)),
+        Value::Bytes(b) => Ok(crate::db::PgValue::Bytes(b.clone())),
+        other => Err(format!(
+            "{} no se puede pasar como arg de query — solo Int/Float/Str/Bool/Bytes/Null en 10.1 (composites en 10.5)",
+            other.type_name()
+        )),
+    }
+}
+
+/// Convierte un `PgValue` recibido del servidor a `Value` Fitz.
+fn pg_value_to_fitz(v: &crate::db::PgValue) -> Value {
+    match v {
+        crate::db::PgValue::Null => Value::Null,
+        crate::db::PgValue::Int(n) => Value::Int(*n),
+        crate::db::PgValue::Float(x) => Value::Float(*x),
+        crate::db::PgValue::Text(s) => Value::Str(s.clone()),
+        crate::db::PgValue::Bool(b) => Value::Bool(*b),
+        crate::db::PgValue::Bytes(b) => Value::Bytes(b.clone()),
+    }
+}
+
+/// Mapea una fila Postgres a un `Value::Map` Fitz con pares
+/// (Str column_name, Value). El orden de columnas se preserva
+/// (Map adentro es Vec<(K, V)>).
+fn pg_row_to_fitz_map(row: &crate::db::Row) -> Value {
+    let pairs: Vec<(Value, Value)> = row
+        .columns()
+        .iter()
+        .zip(row.values().iter())
+        .map(|((name, _oid), val)| (Value::Str(name.clone()), pg_value_to_fitz(val)))
+        .collect();
+    Value::new_map(pairs)
+}
+
+/// Builder común para los args de `query`/`exec`: valida que sea
+/// `(sql: Str, args: List<Any>)` y convierte los args a `PgValue`.
+fn parse_db_query_args(
+    method: &str,
+    args: &[Value],
+) -> Result<(String, Vec<crate::db::PgValue>), FitzError> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`DbConn.{method}` espera 2 argumentos (sql: Str, args: List), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let sql = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`DbConn.{method}` primer arg debe ser Str (SQL), recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let args_list = match &args[1] {
+        Value::List(items) => items.lock().clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`DbConn.{method}` segundo arg debe ser List (args del query), recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let pg_args: Vec<crate::db::PgValue> = args_list
+        .iter()
+        .map(fitz_value_to_pg)
+        .collect::<Result<_, _>>()
+        .map_err(|msg| {
+            FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "primitive".into(),
+                    found: "complex".into(),
+                },
+                0,
+                0,
+                format!("`DbConn.{method}`: {msg}"),
+            )
+        })?;
+    Ok((sql, pg_args))
+}
+
+/// `conn.query(sql, args) -> Future<Result<List<Map<Str, Any>>>>`.
+/// Envuelve `DbConnHandle::query` y mapea cada Row a un Map Fitz.
+fn db_conn_query(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
+    let (sql, pg_args) = parse_db_query_args("query", args)?;
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match handle.query(&sql, &pg_args).await {
+            Ok(qr) => {
+                let rows: Vec<Value> = qr.rows.iter().map(pg_row_to_fitz_map).collect();
+                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                    Value::new_list(rows),
+                ))))
+            }
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// `conn.exec(sql, args) -> Future<Result<Int>>` — devuelve
+/// rows_affected (INSERT/UPDATE/DELETE/DDL).
+fn db_conn_exec(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
+    let (sql, pg_args) = parse_db_query_args("exec", args)?;
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match handle.exec(&sql, &pg_args).await {
+            Ok(n) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::Int(n as i64),
+            )))),
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// `conn.close() -> Future<Null>` — cierra cooperativamente.
+fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`DbConn.close` no espera argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        let _ = handle.close().await;
+        Ok(Value::Null)
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// `conn.is_closed() -> Future<Bool>` — útil para asserts /
+/// branching. No async cara (un Mutex lock + Option check), pero
+/// devolvemos Future por uniformidad con el resto de la API.
+fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`DbConn.is_closed` no espera argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let fut: crate::value::FitzFuture =
+        Box::pin(async move { Ok(Value::Bool(handle.is_closed().await)) });
     Ok(Value::new_future(fut))
 }
 
@@ -22802,5 +23119,149 @@ let r = match n {
         .await;
         res.expect("evaluación OK");
         assert_eq!(env.lock().get("result"), Some(Value::Int(42)));
+    }
+
+    // ---- Fase 10.1.b — módulo `db` (sin Postgres real) ----
+    //
+    // Estos tests cubren el dispatch del evaluator: registro del
+    // módulo, lookup vía field access, return shape de connect, y
+    // mensajes de error con args inválidos. NO conectan a un
+    // Postgres real — eso entraría como E2E opt-in con feature
+    // flag (`postgres-tests`) en sub-paso futuro 10.1.d, cuando
+    // tengamos un Postgres en docker en el setup de CI.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_modulo_registrado_como_value_module() {
+        // El módulo `db` queda en el env como `Value::Module`
+        // después de `register_builtins`. Field access sobre él
+        // devuelve `Value::Builtin` para `connect`.
+        let env = Environment::new();
+        register_builtins(&env);
+        let db_value = env.lock().get("db").expect("módulo db registrado");
+        match db_value {
+            Value::Module { name, env: db_env } => {
+                assert_eq!(name, "db");
+                let connect_value = db_env.lock().get("connect");
+                match connect_value {
+                    Some(Value::Builtin { name: bname, .. }) => assert_eq!(bname, "connect"),
+                    other => panic!("`db.connect` debería ser Builtin, fue {:?}", other),
+                }
+            }
+            other => panic!("`db` debería ser Module, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_connect_devuelve_future() {
+        // `db.connect("...")` sin .await debe devolver un
+        // Value::Future. El error de conexión real solo aparece al
+        // hacer el .await — acá testeamos el shape inmediato.
+        let (env, res) =
+            parse_eval_into_env("let f = db.connect(\"postgres://nadie@127.0.0.1:1/x\")").await;
+        res.expect("evaluación sin .await debe ser OK");
+        let f = env.lock().get("f").expect("f bindeado");
+        match f {
+            Value::Future(_) => {}
+            other => panic!("esperaba Future, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_connect_arg_no_str_es_error_de_tipo() {
+        let (_env, res) = parse_eval_into_env("let f = db.connect(42)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("`db.connect`") && err.message.contains("Str"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_connect_url_invalida_devuelve_err_via_await() {
+        // El .await del future resuelve a `Result::Err(...)` con el
+        // mensaje del parse de URL. Sin Postgres real, no necesitamos
+        // conexión TCP — el parse de URL falla antes.
+        let (env, res) = parse_eval_into_env("let r = db.connect(\"mysql://x@h/d\").await").await;
+        res.expect("evaluación + await OK");
+        let r = env.lock().get("r").expect("r bindeado");
+        match r {
+            Value::Result(crate::value::ResultVariant::Err(boxed)) => {
+                if let Value::Str(msg) = boxed.as_ref() {
+                    assert!(
+                        msg.contains("URL inválida") || msg.contains("postgres://"),
+                        "mensaje inesperado: {msg}"
+                    );
+                } else {
+                    panic!("esperaba Err(Str), fue Err({:?})", boxed);
+                }
+            }
+            other => panic!("esperaba Result::Err, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_connect_url_con_sslmode_require_es_err() {
+        // sslmode=require todavía no llega en 10.1 — el connect
+        // devuelve Err con NotImplemented. El user lee el mensaje
+        // y sabe usar sslmode=disable o esperar el sub-paso futuro.
+        let (env, res) =
+            parse_eval_into_env("let r = db.connect(\"postgres://x@h/d?sslmode=require\").await")
+                .await;
+        res.expect("evaluación + await OK");
+        let r = env.lock().get("r").expect("r bindeado");
+        match r {
+            Value::Result(crate::value::ResultVariant::Err(boxed)) => {
+                if let Value::Str(msg) = boxed.as_ref() {
+                    assert!(
+                        msg.contains("sslmode=require") || msg.contains("TLS"),
+                        "mensaje inesperado: {msg}"
+                    );
+                } else {
+                    panic!("esperaba Err(Str), fue Err({:?})", boxed);
+                }
+            }
+            other => panic!("esperaba Result::Err, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn db_conn_metodo_desconocido_da_error_claro() {
+        // Si construimos un DbConn opaco a mano y le llamamos un
+        // método inexistente, el dispatch_method devuelve mensaje
+        // claro listando los métodos soportados.
+        use std::sync::Arc;
+        let env = Environment::new();
+        register_builtins(&env);
+        // Handle "fake" con conn = None — el dispatch nos importa,
+        // no la conn real.
+        let handle = Arc::new(crate::db::DbConnHandle::new_for_test_closed(
+            "postgres://x@h/d".into(),
+        ));
+        env.lock().define("conn", Value::DbConn(handle));
+        let (_env, res) =
+            parse_eval_into_env_with_extra("let r = conn.does_not_exist()", env.clone()).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("does_not_exist") && err.message.contains("DbConn"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    /// Helper paralelo a `parse_eval_into_env` pero acepta un env
+    /// pre-poblado (con bindings extras). Útil para tests que
+    /// inyectan handles construidos a mano (DbConn, WsConn, etc.).
+    async fn parse_eval_into_env_with_extra(src: &str, env: EnvRef) -> (EnvRef, FitzResult<()>) {
+        let tokens = crate::lexer::tokenize(src).expect("la fuente debe tokenizar");
+        let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
+        let mut result: FitzResult<()> = Ok(());
+        for stmt in &program {
+            if let Err(signal) = eval_stmt(stmt, env.clone()).await {
+                result = Err(signal_to_error(signal));
+                break;
+            }
+        }
+        (env, result)
     }
 }

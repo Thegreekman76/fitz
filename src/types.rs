@@ -1434,6 +1434,22 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Fase 10.1.b — módulo `db` siempre disponible en el env
+        // global. Tipado como `Type::Any` (mismo patrón que jwt/hash):
+        // la signature exacta de `db.connect(url: Str) -> Future<Result<DbConn>>`
+        // tiene Future + Result + tipo opaco DbConn que el sistema
+        // actual no modela; refinar a `Type::Function` paramétrica
+        // viene como deuda menor cuando llegue el ORM en 10.3+.
+        self.scopes[0].insert(
+            "db".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
         // 3 builtins para leer variables de entorno desde Fitz.
         // `env(key) -> Result<Str>` fuerza al usuario a manejar el caso
