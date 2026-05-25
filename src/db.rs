@@ -1884,44 +1884,158 @@ fn md5_compute(input: &[u8]) -> [u8; 16] {
 }
 
 // =============================================================
+// DbPool — pool de conexiones con reconnect + health check
+// =============================================================
+//
+// Fase 10.2: `DbConnHandle` ahora envuelve un pool de N conexiones
+// (default 10) en lugar de una sola. Múltiples tareas pueden
+// invocar `query()` en paralelo y cada una agarra una conexión
+// libre del pool sin bloquearse entre sí — esencial para que el
+// throughput HTTP no se serialice por la DB.
+//
+// Modelo:
+//   - `DbPool` mantiene un vector de conexiones idle bajo `Mutex`
+//     std (sin parking_lot — `src/db.rs` es self-contained para
+//     ser embebido vía `include_str!` en el codegen de 10.1.c).
+//   - `tokio::sync::Semaphore` limita el número máximo de conns
+//     en uso simultáneo. Si N tareas hacen `query` y el pool
+//     ya emitió N conns, la N+1 espera hasta que una se libere.
+//   - `PooledConn` mantiene la conexión + un `OwnedSemaphorePermit`.
+//     Al hacer `Drop`, la conn vuelve al pool idle y el permit
+//     se libera automáticamente.
+//   - El `acquire` lazy crece el pool on-demand: si no hay idle,
+//     abre una conn TCP nueva (hasta `max_conns`).
+//   - Health check spawneado en background hace `SELECT 1` sobre
+//     todas las conns idle cada 30s y descarta las que fallan.
+//
+// `connect_url(url)` es eager — abre la primera conn al boot
+// para validar credentials y URL antes de devolver el handle.
+// Las conns adicionales se abren lazy en `acquire()`.
+
+const DEFAULT_MAX_CONNS: usize = 10;
+const HEALTH_CHECK_INTERVAL_SECS: u64 = 30;
+
+/// Pool interno del `DbConnHandle`. NO se expone al evaluator
+/// directamente — el handle delega aquí. Compartido por
+/// `Arc<DbPool>` para que el spawned health check task pueda
+/// mantener un weak reference sin extender la vida del pool.
+pub struct DbPool {
+    config: ConnectionConfig,
+    /// Cola de conexiones libres listas para usar. `parking_lot`
+    /// no se usa porque `src/db.rs` se embebe en el output de
+    /// `fitz build` y queremos mantener el archivo self-contained
+    /// sin sumar deps al crate generado. `std::sync::Mutex` con
+    /// scope corto (push/pop) — sin riesgo de poison porque los
+    /// guards no cruzan `.await`.
+    idle: std::sync::Mutex<Vec<Connection>>,
+    /// Limitador de concurrencia: el pool no entrega más de
+    /// `max_conns` conns a la vez. Tareas extra esperan en
+    /// `acquire`.
+    permits: std::sync::Arc<tokio::sync::Semaphore>,
+    /// Marca cooperativa de cierre. Las próximas `acquire()`
+    /// fallan con `Protocol("...cerrado")` después de `close()`.
+    closed: std::sync::atomic::AtomicBool,
+}
+
+impl DbPool {
+    /// Intenta agarrar una conn libre del pool. Si no hay,
+    /// abre una nueva (lazy growth). Si el pool ya alcanzó
+    /// `max_conns` conns vivas, espera en el semaphore.
+    async fn acquire(self: &std::sync::Arc<Self>) -> DbResult<PooledConn> {
+        use std::sync::atomic::Ordering;
+        if self.closed.load(Ordering::Acquire) {
+            return Err(DbError::Protocol(
+                "la conexión fue cerrada con .close()".into(),
+            ));
+        }
+        // Esperar permit primero (limita concurrencia). El
+        // OwnedSemaphorePermit se libera automáticamente cuando
+        // PooledConn se dropea.
+        let permit = self
+            .permits
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| DbError::Protocol("pool: semaphore cerrado".into()))?;
+        // Intentar agarrar una conn idle (fast path).
+        let maybe_idle = self.idle.lock().expect("pool mutex poisoned").pop();
+        let conn = match maybe_idle {
+            Some(c) => c,
+            None => {
+                // Slow path: abrir conn nueva.
+                Connection::connect(&self.config).await?
+            }
+        };
+        Ok(PooledConn {
+            pool: std::sync::Arc::clone(self),
+            conn: Some(conn),
+            _permit: permit,
+        })
+    }
+
+    /// Devuelve una conn al pool idle. Llamada solo por
+    /// `PooledConn::drop`.
+    fn release(&self, conn: Connection) {
+        if self.closed.load(std::sync::atomic::Ordering::Acquire) {
+            // Pool cerrado — descartamos la conn (su Drop
+            // eventualmente cerrará el TcpStream).
+            return;
+        }
+        self.idle.lock().expect("pool mutex poisoned").push(conn);
+    }
+}
+
+/// RAII wrapper sobre una conn del pool. Mientras vive, la conn
+/// está fuera del pool. Al hacer `Drop`, vuelve al idle queue
+/// (si el pool no está cerrado).
+pub struct PooledConn {
+    pool: std::sync::Arc<DbPool>,
+    /// `Option` para poder hacer `take()` desde `Drop` (que
+    /// solo recibe `&mut self`, no `self`).
+    conn: Option<Connection>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
+impl PooledConn {
+    fn as_mut(&mut self) -> &mut Connection {
+        self.conn
+            .as_mut()
+            .expect("PooledConn::conn None mid-lifetime (bug)")
+    }
+}
+
+impl Drop for PooledConn {
+    fn drop(&mut self) {
+        if let Some(conn) = self.conn.take() {
+            self.pool.release(conn);
+        }
+        // El `_permit` se libera automático en el drop del field.
+    }
+}
+
+// =============================================================
 // DbConnHandle — wrapper Send + Sync para el evaluator
 // =============================================================
 //
 // `Connection` (definida arriba) es la abstracción interna del
-// driver: contiene el `TcpStream` y el estado del protocolo. NO la
-// exponemos directo al evaluator porque el evaluator necesita un
-// handle que pueda compartirse entre múltiples tasks (vía Arc) y
-// que serialice las operaciones I/O (vía Mutex).
+// driver: contiene el `TcpStream` y el estado del protocolo. NO
+// la exponemos directo al evaluator porque el evaluator necesita
+// un handle que pueda compartirse entre múltiples tasks (vía Arc)
+// y que serialice las operaciones I/O (vía Mutex).
 //
-// El patrón es paralelo a `WsConnHandle` de Fase 9.w.2:
-//
-//   - El evaluator pasa `Value::DbConn(Arc<DbConnHandle>)` entre
-//     scopes, returns de fns, args, etc. — clone barato del Arc.
-//   - Una sola query a la vez por conexión (sin pipelining en
-//     MVP): `tokio::sync::Mutex` serializa.
-//   - `MutexGuard` de `tokio::sync::Mutex` es `Send`, así que
-//     podemos mantenerlo a través de `.await` adentro de
-//     `db_conn_query` sin perder la guard.
-//   - El handle expone los métodos que el evaluator necesita:
-//     `query`, `exec`, `close`, más getters informativos.
-//
-// El `Option<Connection>` permite "consumir" la conexión al
-// `close()` sin invalidar el Arc (el handle queda vivo pero las
-// próximas queries fallan con error claro).
+// 10.2: el handle ahora envuelve un `Arc<DbPool>` en lugar de una
+// `Mutex<Option<Connection>>`. La API pública (`query`/`exec`/
+// `close`/`is_closed`) se mantiene idéntica.
 
-/// Handle opaco a una conexión Postgres viva. Construido por
-/// `connect()` (la API pública del módulo, ver `connect_url`) y
-/// pasado al evaluator como `Value::DbConn(Arc<DbConnHandle>)`.
+/// Handle opaco a un pool de conexiones Postgres. Construido por
+/// `connect_url()` y pasado al evaluator como
+/// `Value::DbConn(Arc<DbConnHandle>)`.
 ///
 /// El struct NO implementa `Clone` directamente — el evaluator
-/// usa el `Arc` externo para sharing. Los métodos toman `&self`
-/// (el Mutex resuelve la mutabilidad interior).
+/// usa el `Arc` externo para sharing.
 pub struct DbConnHandle {
-    /// La conexión real. `None` después de `close()` para que
-    /// queries futuras fallen con error claro en vez de panic.
-    inner: tokio::sync::Mutex<Option<Connection>>,
-    /// URL original (sin password — la borramos al construir el
-    /// handle). Útil para Display y mensajes de error.
+    pool: std::sync::Arc<DbPool>,
+    /// URL original sin password — útil para Display y errores.
     pub url_redacted: String,
 }
 
@@ -1932,34 +2046,50 @@ impl std::fmt::Debug for DbConnHandle {
 }
 
 impl DbConnHandle {
-    pub fn new(conn: Connection, url_redacted: String) -> Self {
-        DbConnHandle {
-            inner: tokio::sync::Mutex::new(Some(conn)),
-            url_redacted,
-        }
+    /// Construye un handle a partir de una conexión inicial. El
+    /// pool empieza con esa conn en `idle` y crece on-demand
+    /// hasta `max_conns`.
+    pub fn new(initial_conn: Connection, url_redacted: String, config: ConnectionConfig) -> Self {
+        let pool = std::sync::Arc::new(DbPool {
+            config,
+            idle: std::sync::Mutex::new(vec![initial_conn]),
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONNS)),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        });
+        DbConnHandle { pool, url_redacted }
     }
 
-    /// Constructor para tests del evaluator: produce un handle con
-    /// `inner = None` (estado "cerrado"). Las queries fallan con
-    /// `Protocol("la conexión fue cerrada con .close()")` pero el
-    /// dispatch_method funciona — útil para validar la integración
-    /// sin necesitar un Postgres real.
+    /// Constructor para tests del evaluator: produce un handle
+    /// con pool en estado "cerrado". Las queries fallan con
+    /// `Protocol("...cerrado")` pero el dispatch_method funciona
+    /// — útil para validar la integración sin Postgres real.
     #[cfg(any(test, debug_assertions))]
     pub fn new_for_test_closed(url_redacted: String) -> Self {
-        DbConnHandle {
-            inner: tokio::sync::Mutex::new(None),
-            url_redacted,
-        }
+        // Config dummy — nunca se usa porque el pool arranca cerrado.
+        let dummy_config = ConnectionConfig {
+            host: "test-host".into(),
+            port: 5432,
+            user: "test-user".into(),
+            password: None,
+            dbname: "test-db".into(),
+            sslmode: SslMode::Disable,
+        };
+        let pool = std::sync::Arc::new(DbPool {
+            config: dummy_config,
+            idle: std::sync::Mutex::new(Vec::new()),
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONNS)),
+            closed: std::sync::atomic::AtomicBool::new(true),
+        });
+        DbConnHandle { pool, url_redacted }
     }
 
-    /// Ejecuta una query con args, devuelve filas como pares
-    /// `(nombre, valor)` por columna. Si la conn fue cerrada,
-    /// error claro.
+    /// Ejecuta una query con args. Agarra una conn del pool,
+    /// ejecuta, la devuelve al pool al terminar (vía Drop del
+    /// PooledConn). Si el pool está cerrado o no puede abrir
+    /// conn nueva, error claro.
     pub async fn query(&self, sql: &str, args: &[PgValue]) -> DbResult<QueryResult> {
-        let mut guard = self.inner.lock().await;
-        let conn = guard
-            .as_mut()
-            .ok_or_else(|| DbError::Protocol("la conexión fue cerrada con .close()".into()))?;
+        let mut pooled = self.pool.acquire().await?;
+        let conn = pooled.as_mut();
         if args.is_empty() {
             conn.simple_query(sql).await
         } else {
@@ -1975,36 +2105,112 @@ impl DbConnHandle {
         Ok(result.rows_affected())
     }
 
-    /// Cierra la conexión cooperativamente. Después de esto, las
-    /// próximas queries devuelven error. Idempotente — múltiples
-    /// `close()` no son error.
+    /// Cierra el pool cooperativamente. Marca como cerrado y
+    /// drainea las conns idle (envía Terminate a cada una).
+    /// Idempotente — múltiples `close()` no son error.
+    /// Conns checked-out al momento del close se descartan al
+    /// devolverse (release ve `closed=true` y skipea push).
     pub async fn close(&self) -> DbResult<()> {
-        let mut guard = self.inner.lock().await;
-        if let Some(conn) = guard.take() {
-            conn.close().await?;
+        use std::sync::atomic::Ordering;
+        if self.pool.closed.swap(true, Ordering::AcqRel) {
+            return Ok(()); // ya estaba cerrado
         }
+        // Drain idle queue + cerrar cada conn.
+        let drained = {
+            let mut idle = self.pool.idle.lock().expect("pool mutex poisoned");
+            std::mem::take(&mut *idle)
+        };
+        for conn in drained {
+            let _ = conn.close().await;
+        }
+        // Cerrar el semaphore para que `acquire_owned` en
+        // tareas pendientes despierten con error.
+        self.pool.permits.close();
         Ok(())
     }
 
-    /// `true` si la conn ya fue cerrada con `close()`.
+    /// `true` si el pool fue cerrado con `close()`.
     pub async fn is_closed(&self) -> bool {
-        let guard = self.inner.lock().await;
-        guard.is_none()
+        self.pool.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// 10.2: número máximo de conns concurrentes que el pool
+    /// puede emitir. Hoy fijo en `DEFAULT_MAX_CONNS = 10`;
+    /// configurable como kwarg `db.connect(url, max_conns=N)`
+    /// queda como deuda menor para 10.2.b.
+    pub fn max_conns(&self) -> usize {
+        DEFAULT_MAX_CONNS
+    }
+
+    /// 10.2 — diagnostics: número de conns idle en este instante.
+    /// Útil para tests del pool. NO sirve para concurrency
+    /// (race entre `idle()` y la próxima query).
+    pub fn idle_count(&self) -> usize {
+        self.pool.idle.lock().expect("pool mutex poisoned").len()
+    }
+}
+
+/// Health check: cada `HEALTH_CHECK_INTERVAL_SECS` segundos,
+/// itera las conns idle y manda `SELECT 1`. Las conns que fallan
+/// se descartan silenciosamente — el próximo `acquire` abrirá
+/// una nueva. El task usa un `Weak<DbPool>` para que el pool
+/// pueda ser garbage-collected cuando el handle se dropea, y el
+/// task se autodescarte al ver que el upgrade del Weak falla.
+async fn health_check_task(weak_pool: std::sync::Weak<DbPool>) {
+    let interval = std::time::Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS);
+    loop {
+        tokio::time::sleep(interval).await;
+        let pool = match weak_pool.upgrade() {
+            Some(p) => p,
+            None => return, // pool dropeado, task se autotermina
+        };
+        if pool.closed.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
+        // Drenar el idle queue, validar cada conn, devolver las vivas.
+        let mut to_check = {
+            let mut idle = pool.idle.lock().expect("pool mutex poisoned");
+            std::mem::take(&mut *idle)
+        };
+        let mut alive = Vec::with_capacity(to_check.len());
+        while let Some(mut conn) = to_check.pop() {
+            // SELECT 1 ligero — si falla, descartamos.
+            match conn.simple_query("SELECT 1").await {
+                Ok(_) => alive.push(conn),
+                Err(_) => {
+                    // Conn dead — el Drop del Connection cierra el TcpStream.
+                }
+            }
+        }
+        // Re-poblar idle con las vivas.
+        if !alive.is_empty() {
+            let mut idle = pool.idle.lock().expect("pool mutex poisoned");
+            idle.append(&mut alive);
+        }
     }
 }
 
 /// Abre una conexión Postgres desde un URL estándar. Punto de
 /// entrada principal para integración con el evaluator: el
-/// builtin `db.connect(url)` lo invoca y envuelve el resultado en
-/// `Value::DbConn(Arc::new(handle))`.
+/// builtin `db.connect(url)` lo invoca y envuelve el resultado
+/// en `Value::DbConn(Arc::new(handle))`.
 ///
-/// Devuelve `DbConnHandle` (no `Connection`) porque el handle es
-/// lo que el evaluator necesita poder compartir entre tasks.
+/// Eager: la primera conn TCP + handshake + auth sucede acá para
+/// validar credentials + URL antes de devolver el handle. Si
+/// falla, el handle no se crea y el caller ve el error directo.
+/// Conns adicionales se abren lazy en `acquire()` cuando el pool
+/// las necesita.
 pub async fn connect_url(url: &str) -> DbResult<DbConnHandle> {
     let config = ConnectionConfig::parse(url)?;
     let url_redacted = redact_url(url);
-    let conn = Connection::connect(&config).await?;
-    Ok(DbConnHandle::new(conn, url_redacted))
+    let initial_conn = Connection::connect(&config).await?;
+    let handle = DbConnHandle::new(initial_conn, url_redacted, config);
+    // Spawn health check en background. El task mantiene solo
+    // un Weak, así que cuando el último Arc<DbConnHandle> se
+    // dropee, el pool muere y el task se autodescarte.
+    let weak = std::sync::Arc::downgrade(&handle.pool);
+    tokio::spawn(health_check_task(weak));
+    Ok(handle)
 }
 
 /// Elimina la password del URL para diagnostics seguros. Reemplaza
@@ -2565,16 +2771,14 @@ mod tests {
 
     // ----- DbConnHandle lifecycle (sin Postgres real) -----
     //
-    // No podemos testear `query/exec` sin un Postgres real, pero
-    // sí el ciclo "closed → operations fail". Construimos un
-    // handle con `Option<Connection>` = None directo.
+    // No podemos testear `query/exec` end-to-end sin un Postgres
+    // real, pero sí el ciclo "closed → operations fail". Usamos
+    // `new_for_test_closed` que construye un pool en estado
+    // closed sin abrir TCP.
 
     #[tokio::test]
     async fn db_conn_handle_closed_falla_query() {
-        let handle = DbConnHandle {
-            inner: tokio::sync::Mutex::new(None),
-            url_redacted: "postgres://test@host/db".into(),
-        };
+        let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
         assert!(handle.is_closed().await);
         let r = handle.query("SELECT 1", &[]).await;
         assert!(matches!(r, Err(DbError::Protocol(_))));
@@ -2582,12 +2786,58 @@ mod tests {
 
     #[tokio::test]
     async fn db_conn_handle_close_idempotente() {
-        let handle = DbConnHandle {
-            inner: tokio::sync::Mutex::new(None),
-            url_redacted: "postgres://test@host/db".into(),
-        };
+        let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
         // close() sobre un handle ya cerrado es no-op (no error).
         handle.close().await.unwrap();
         handle.close().await.unwrap();
+    }
+
+    // ----- 10.2 — pool de conexiones -----
+
+    #[tokio::test]
+    async fn db_pool_max_conns_default() {
+        // El pool default expone DEFAULT_MAX_CONNS conns
+        // concurrentes. La API pública del handle lo expone vía
+        // `max_conns()`.
+        let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
+        assert_eq!(handle.max_conns(), DEFAULT_MAX_CONNS);
+    }
+
+    #[tokio::test]
+    async fn db_pool_idle_count_inicia_en_cero_cuando_closed() {
+        // El handle de test arranca en estado closed, pool vacío.
+        let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
+        assert_eq!(handle.idle_count(), 0);
+    }
+
+    #[test]
+    fn db_pool_struct_es_send_sync() {
+        // DbPool tiene que ser Send + Sync para que el handle
+        // pueda compartirse entre tasks. Esto valida que toda la
+        // composición (Mutex<Vec>/Arc<Semaphore>/AtomicBool) sigue
+        // marcando los traits que `Value::DbConn(Arc<...>)` necesita.
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<DbPool>();
+        assert_send_sync::<DbConnHandle>();
+    }
+
+    #[tokio::test]
+    async fn db_pool_acquire_falla_cuando_closed() {
+        // acquire() sobre pool closed debe devolver Protocol
+        // error claro (no panic, no hang).
+        let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
+        let r = handle.pool.acquire().await;
+        assert!(matches!(r, Err(DbError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn db_pool_close_idempotente_y_marca_closed_flag() {
+        let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
+        assert!(handle.is_closed().await);
+        // Primera close — no-op porque ya está closed; sin errores.
+        handle.close().await.unwrap();
+        // Segunda close — tampoco error.
+        handle.close().await.unwrap();
+        assert!(handle.is_closed().await);
     }
 }
