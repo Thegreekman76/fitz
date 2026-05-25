@@ -1161,3 +1161,152 @@ async fn orm_aggregate_sobre_set_vacio_devuelve_null() {
     let _ = seed.exec("DROP TABLE fitz_orm_empty_agg", &[]).await;
     seed.close().await.unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_group_by_count_y_sum_e2e() {
+    // E2E del GROUP BY: tabla con users de varios países, group_by
+    // country + count → cuántos users por país; group_by country +
+    // sum(age) → suma de edades por país.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_groupby_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_groupby_test (id bigint, name text, country text, age int)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_groupby_test VALUES \
+         (1, 'ada', 'UK', 30), \
+         (2, 'alan', 'UK', 42), \
+         (3, 'grace', 'US', 55), \
+         (4, 'admin', 'US', 99), \
+         (5, 'edsger', 'NL', 60)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    let src = format!(
+        "@table(\"fitz_orm_groupby_test\") type User {{\n  \
+             id: Int\n  \
+             name: Str\n  \
+             country: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // Count por país.\n  \
+             let counts = User.where(fn(u) => u.id > 0)\n    \
+                 .group_by(fn(u) => u.country)\n    \
+                 .count(db).await?\n  \
+             // Sum de edades por país.\n  \
+             let sums = User.where(fn(u) => u.id > 0)\n    \
+                 .group_by(fn(u) => u.country)\n    \
+                 .sum(fn(u) => u.age, db).await?\n  \
+             return Ok({{ \"counts\": counts, \"sums\": sums }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+
+    // counts: [{country: "UK", count: 2}, {country: "US", count: 2}, {country: "NL", count: 1}]
+    let (counts_by_country, sums_by_country) = {
+        let m = match outer_map {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        let map = m.lock();
+        let get_list = |key: &str| -> Vec<(String, i64)> {
+            let list_val = map
+                .iter()
+                .find(|(k, _)| matches!(k, Value::Str(s) if s == key))
+                .map(|(_, v)| v.clone())
+                .unwrap();
+            let list = match list_val {
+                Value::List(s) => s,
+                other => panic!("esperaba List, fue {:?}", other),
+            };
+            let items = list.lock();
+            items
+                .iter()
+                .map(|item| {
+                    let mm = match item {
+                        Value::Map(s) => s,
+                        other => panic!("esperaba Map (row), fue {:?}", other),
+                    };
+                    let map = mm.lock();
+                    let country = map
+                        .iter()
+                        .find(|(k, _)| matches!(k, Value::Str(s) if s == "country"))
+                        .and_then(|(_, v)| match v {
+                            Value::Str(s) => Some(s.clone()),
+                            _ => None,
+                        })
+                        .unwrap();
+                    let agg = map
+                        .iter()
+                        .find(|(k, _)| matches!(k, Value::Str(s) if s == "count" || s == "sum"))
+                        .and_then(|(_, v)| match v {
+                            Value::Int(n) => Some(*n),
+                            _ => None,
+                        })
+                        .unwrap();
+                    (country, agg)
+                })
+                .collect()
+        };
+        (get_list("counts"), get_list("sums"))
+    };
+
+    // Verificamos sin asumir orden (Postgres no garantiza orden sin
+    // ORDER BY explícito).
+    let mut counts_sorted = counts_by_country.clone();
+    counts_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        counts_sorted,
+        vec![
+            ("NL".to_string(), 1),
+            ("UK".to_string(), 2),
+            ("US".to_string(), 2)
+        ]
+    );
+
+    let mut sums_sorted = sums_by_country.clone();
+    sums_sorted.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        sums_sorted,
+        vec![
+            ("NL".to_string(), 60),
+            ("UK".to_string(), 72),  // 30+42
+            ("US".to_string(), 154), // 55+99
+        ]
+    );
+
+    let _ = seed.exec("DROP TABLE fitz_orm_groupby_test", &[]).await;
+    seed.close().await.unwrap();
+}

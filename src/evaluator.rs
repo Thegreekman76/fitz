@@ -4558,7 +4558,7 @@ async fn dispatch_method(
             span.line,
             span.column,
             format!(
-                "`QueryBuilder` no tiene el método `{}` (soportados: where, order_by, limit, offset, all, first, count, sum, avg, min, max, update, delete)",
+                "`QueryBuilder` no tiene el método `{}` (soportados: where, order_by, limit, offset, all, first, count, sum, avg, min, max, group_by, update, delete)",
                 method,
             ),
         )));
@@ -10346,6 +10346,13 @@ pub struct QueryBuilderState {
     pub limit: Option<i64>,
     /// Fase 10.3.b3 — `OFFSET N`. Mismo criterio que `limit`.
     pub offset: Option<i64>,
+    /// Fase 10.5.f2 — clauses GROUP BY acumuladas. Cada
+    /// `.group_by(closure)` agrega un `(field_fitz, sql_col)`.
+    /// Cuando hay GROUP BY presente, los agregados (count/sum/
+    /// avg/min/max) cambian su shape de retorno de scalar a
+    /// `List<Map<Str, Any>>` con keys = group cols + el nombre
+    /// del agregado.
+    pub group_by_clauses: Vec<(String, String)>,
 }
 
 /// Despacha métodos ORM sobre un `Value::Type` con `@table(...)`.
@@ -10426,6 +10433,9 @@ pub fn orm_dispatch_qb_method(
         "delete" => orm_qb_delete(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        "group_by" => orm_qb_group_by(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
         "sum" => orm_qb_aggregate(state, args, span, "SUM")
             .map(Some)
             .map_err(EvalSignal::Error),
@@ -10460,6 +10470,7 @@ fn type_value_to_state(type_value: Value, span: Span) -> FitzResult<QueryBuilder
             order_by_clauses: Vec::new(),
             limit: None,
             offset: None,
+            group_by_clauses: Vec::new(),
         }),
         _ => Err(FitzError::new(
             ErrorKind::InvalidSyntax,
@@ -10908,38 +10919,16 @@ fn orm_qb_first(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzR
 /// igual, pero los omitimos para SQL más limpio).
 fn orm_qb_count(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let db_handle = extract_db_handle_arg(&args, "count", span)?;
-    // Solo necesitamos WHERE; el resto del state se ignora.
-    let mut sql = format!(
-        "SELECT COUNT(*) AS \"__count\" FROM \"{}\"",
-        state.meta.sql_name
+    // Fase 10.5.f2 — delega al helper común `build_aggregate_future`.
+    // Sin GROUP BY: devuelve `Result<Int>` (path scalar).
+    // Con GROUP BY: devuelve `Result<List<Map>>` con cada grupo +
+    // su count.
+    let fut = build_aggregate_future(
+        state,
+        db_handle,
+        "COUNT(*)".to_string(),
+        "count".to_string(),
     );
-    if let Some(w) = &state.where_sql {
-        sql.push_str(" WHERE ");
-        sql.push_str(w);
-    }
-    let where_args = state.where_args.clone();
-
-    let fut: crate::value::FitzFuture = Box::pin(async move {
-        match db_handle.query(&sql, &where_args).await {
-            Ok(qr) => {
-                let count = qr
-                    .rows
-                    .first()
-                    .and_then(|r| r.get("__count"))
-                    .and_then(|v| match v {
-                        crate::db::PgValue::Int(n) => Some(*n),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
-                    Value::Int(count),
-                ))))
-            }
-            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
-                Value::Str(e.to_string()),
-            )))),
-        }
-    });
     Ok(Value::new_future(fut))
 }
 
@@ -11047,6 +11036,10 @@ fn field_from_closure(
 /// Para resultset vacío (e.g. SUM sobre WHERE que no matchea
 /// nada), Postgres devuelve NULL → `Result::Ok(Value::Null)`.
 /// El user matchea Null si querría tratarlo como cero.
+///
+/// Fase 10.5.f2 — Si `state.group_by_clauses` NO está vacío, el
+/// agregado emite GROUP BY query y devuelve `List<Map<Str, Any>>`
+/// con cada row = un grupo (keys = group cols + nombre del agg).
 fn orm_qb_aggregate(
     state: QueryBuilderState,
     args: Vec<Value>,
@@ -11093,35 +11086,108 @@ fn orm_qb_aggregate(
         .get(&field_name)
         .and_then(|c| c.sql_name.as_deref())
         .unwrap_or(field_name.as_str());
-    let mut sql = format!(
-        "SELECT {}(\"{}\") AS \"__agg\" FROM \"{}\"",
-        sql_func, sql_col, state.meta.sql_name
-    );
-    if let Some(w) = &state.where_sql {
-        sql.push_str(" WHERE ");
-        sql.push_str(w);
-    }
-    let where_args = state.where_args.clone();
-    let fut: crate::value::FitzFuture = Box::pin(async move {
-        match db_handle.query(&sql, &where_args).await {
-            Ok(qr) => {
-                let pg = qr
-                    .rows
-                    .first()
-                    .and_then(|r| r.get("__agg"))
-                    .cloned()
-                    .unwrap_or(crate::db::PgValue::Null);
-                let value = pg_value_to_fitz(&pg);
-                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
-                    value,
-                ))))
-            }
-            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
-                Value::Str(e.to_string()),
-            )))),
-        }
-    });
+    let agg_expr = format!("{}(\"{}\")", sql_func, sql_col);
+    let agg_name = sql_func.to_lowercase();
+    let fut = build_aggregate_future(state, db_handle, agg_expr, agg_name);
     Ok(Value::new_future(fut))
+}
+
+/// Fase 10.5.f1 + .f2 — helper común para los 4 agregados +
+/// count. Construye el Future que ejecuta:
+///   - Path scalar (sin GROUP BY): `SELECT <agg_expr> AS "__agg"
+///     FROM table [WHERE ...]`. Devuelve `Result<scalar>`.
+///   - Path GROUP BY: `SELECT col1, col2, ..., <agg_expr> AS
+///     "<agg_name>" FROM table [WHERE ...] GROUP BY col1, col2`.
+///     Devuelve `Result<List<Map<Str, Any>>>`.
+fn build_aggregate_future(
+    state: QueryBuilderState,
+    db_handle: Arc<crate::db::DbConnHandle>,
+    agg_expr: String,
+    agg_name: String,
+) -> crate::value::FitzFuture {
+    let where_args = state.where_args.clone();
+    let where_sql = state.where_sql.clone();
+    let group_by = state.group_by_clauses.clone();
+    let sql_name = state.meta.sql_name.clone();
+
+    Box::pin(async move {
+        if group_by.is_empty() {
+            // Path scalar: igual al pre-10.5.f2.
+            let mut sql = format!("SELECT {} AS \"__agg\" FROM \"{}\"", agg_expr, sql_name);
+            if let Some(w) = &where_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(w);
+            }
+            match db_handle.query(&sql, &where_args).await {
+                Ok(qr) => {
+                    let pg = qr
+                        .rows
+                        .first()
+                        .and_then(|r| r.get("__agg"))
+                        .cloned()
+                        .unwrap_or(crate::db::PgValue::Null);
+                    let value = pg_value_to_fitz(&pg);
+                    Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                        value,
+                    ))))
+                }
+                Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                    Value::Str(e.to_string()),
+                )))),
+            }
+        } else {
+            // Path GROUP BY: emit `SELECT col1, col2, <agg> AS
+            // <agg_name> FROM ... [WHERE ...] GROUP BY col1, col2`
+            // y devuelve List<Map>.
+            let mut select_list = String::new();
+            let mut group_by_sql = String::new();
+            for (i, (_fitz, sql_col)) in group_by.iter().enumerate() {
+                if i > 0 {
+                    select_list.push_str(", ");
+                    group_by_sql.push_str(", ");
+                }
+                select_list.push_str(&format!("\"{}\"", sql_col));
+                group_by_sql.push_str(&format!("\"{}\"", sql_col));
+            }
+            let mut sql = format!(
+                "SELECT {}, {} AS \"{}\" FROM \"{}\"",
+                select_list, agg_expr, agg_name, sql_name
+            );
+            if let Some(w) = &where_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(w);
+            }
+            sql.push_str(" GROUP BY ");
+            sql.push_str(&group_by_sql);
+            match db_handle.query(&sql, &where_args).await {
+                Ok(qr) => {
+                    let mut out_rows: Vec<Value> = Vec::with_capacity(qr.rows.len());
+                    for row in &qr.rows {
+                        let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(group_by.len() + 1);
+                        for (fitz_name, sql_col) in group_by.iter() {
+                            let pg = row
+                                .get(sql_col)
+                                .cloned()
+                                .unwrap_or(crate::db::PgValue::Null);
+                            pairs.push((Value::Str(fitz_name.clone()), pg_value_to_fitz(&pg)));
+                        }
+                        let agg_pg = row
+                            .get(&agg_name)
+                            .cloned()
+                            .unwrap_or(crate::db::PgValue::Null);
+                        pairs.push((Value::Str(agg_name.clone()), pg_value_to_fitz(&agg_pg)));
+                        out_rows.push(Value::new_map(pairs));
+                    }
+                    Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                        Value::new_list(out_rows),
+                    ))))
+                }
+                Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                    Value::Str(e.to_string()),
+                )))),
+            }
+        }
+    })
 }
 
 /// Fase 10.5.f1 — `.avg(closure, db)` con cast a float8.
@@ -11168,35 +11234,45 @@ fn orm_qb_avg(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzRes
         .get(&field_name)
         .and_then(|c| c.sql_name.as_deref())
         .unwrap_or(field_name.as_str());
-    let mut sql = format!(
-        "SELECT AVG(\"{}\")::float8 AS \"__agg\" FROM \"{}\"",
-        sql_col, state.meta.sql_name
-    );
-    if let Some(w) = &state.where_sql {
-        sql.push_str(" WHERE ");
-        sql.push_str(w);
-    }
-    let where_args = state.where_args.clone();
-    let fut: crate::value::FitzFuture = Box::pin(async move {
-        match db_handle.query(&sql, &where_args).await {
-            Ok(qr) => {
-                let pg = qr
-                    .rows
-                    .first()
-                    .and_then(|r| r.get("__agg"))
-                    .cloned()
-                    .unwrap_or(crate::db::PgValue::Null);
-                let value = pg_value_to_fitz(&pg);
-                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
-                    value,
-                ))))
-            }
-            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
-                Value::Str(e.to_string()),
-            )))),
-        }
-    });
+    let agg_expr = format!("AVG(\"{}\")::float8", sql_col);
+    let fut = build_aggregate_future(state, db_handle, agg_expr, "avg".to_string());
     Ok(Value::new_future(fut))
+}
+
+/// Fase 10.5.f2 — `.group_by(closure) -> QueryBuilder`. Agrega una
+/// clause GROUP BY al state acumulado. El closure es
+/// `fn(u) => u.field` (igual que `order_by` y los agregados).
+/// El user encadena con count/sum/avg/min/max para obtener la
+/// agrupación.
+fn orm_qb_group_by(
+    mut state: QueryBuilderState,
+    args: Vec<Value>,
+    span: Span,
+) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.group_by(closure)` espera 1 argumento, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let field_name = field_from_closure(&args[0], span, &state.fields)?;
+    let sql_col = state
+        .meta
+        .columns
+        .get(&field_name)
+        .and_then(|c| c.sql_name.as_deref())
+        .unwrap_or(field_name.as_str())
+        .to_string();
+    state.group_by_clauses.push((field_name, sql_col));
+    Ok(Value::QueryBuilder(Arc::new(state)))
 }
 
 /// Fase 10.3.c — `Type.insert(db, instance) -> Future<Result<Instance>>`.
@@ -11638,6 +11714,7 @@ async fn orm_instance_navigate(
                 order_by_clauses: Vec::new(),
                 limit: None,
                 offset: None,
+                group_by_clauses: Vec::new(),
             },
             Some(Value::Type { .. }) => {
                 return Err(EvalSignal::Error(FitzError::new(
@@ -25299,6 +25376,7 @@ let r = match n {
             order_by_clauses: Vec::new(),
             limit: None,
             offset: None,
+            group_by_clauses: Vec::new(),
         }
     }
 
