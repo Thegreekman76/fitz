@@ -29,10 +29,12 @@
 protocol + integración evaluator + codegen guard) → 10.2 (pool de
 conexiones + reconnect + health check) → 10.3 (ORM declarativo MVP
 con @table/@primary/@column, builder where/order_by/limit/offset/
-first/count, insert/update/delete con guard de seguridad)
-**CERRADOS**. Validados contra Postgres real con **13 tests E2E**
-(driver core + ORM CRUD + ORM builder completo). Próximo:
-**10.4 — Relaciones + cascades + lazy loading**.
+first/count, insert/update/delete con guard de seguridad) → 10.4
+(relations: @belongs_to/@has_one/@has_many + navigation methods
+lazy) **CERRADOS**. Validados contra Postgres real con **13
+tests E2E** (driver core + ORM CRUD + ORM builder completo +
+navigation cross-table). Próximo: **10.5 — Tipos avanzados**
+(JSONB, arrays, Date/Time/Timestamp, UUID).
 
 Detalle exhaustivo de cada cierre en [`CHANGELOG.md`](../CHANGELOG.md) y deudas residuales en [`docs/deudas-post-5b.md`](deudas-post-5b.md).
 
@@ -7997,6 +7999,57 @@ del MVP.
 **Criterio de éxito**: dado `post: Post`, `post.author().await?`
 devuelve `Result<User>` con UN query SELECT. DELETE de un User
 cascadea a sus Posts via FK constraint.
+
+**Cierre formal 10.4 (sesiones del 2026-05-26)**: ejecutada en
+2 sub-pasos:
+- **10.4.a — checker + persistencia + skip virtual fields**:
+  `RelationKind` (BelongsTo/HasOne/HasMany) + `CascadeAction`
+  (Cascade/SetNull/Restrict default/NoAction con `.as_sql()`) +
+  `RelationMetadata { kind, target_type, fk_field, on_delete,
+  on_update }`. `TableMetadata.relations: HashMap<String,
+  RelationMetadata>` + helper `is_virtual_field(name)`.
+  `process_table_decorators` extendido con
+  `parse_relation_decorator`. Defaults convencionales
+  (`<lowercase(type)>_id` para `via`/`fk`). SQL builder
+  (`build_select_sql`, `orm_type_insert`, `pg_row_to_instance`)
+  respeta fields virtuales: skip en SELECT cols + INSERT cols +
+  RETURNING; deserialización inicializa con default sentinel
+  (`Value::Null` para HasOne, `Value::new_list(vec![])` para
+  HasMany). +11 unit (9 checker + 2 SQL builder).
+- **10.4.b — navigation methods runtime**: `dispatch_method`
+  sobre `Value::Instance` ahora chequea `meta.relations` ANTES
+  de los métodos custom. Helper `orm_instance_navigate`:
+  resuelve THIS/TARGET TableMetadata desde el env, construye un
+  `QueryBuilderState` con el WHERE apropiado según kind, delega a
+  `orm_qb_first` (BelongsTo/HasOne) o `orm_qb_all` (HasMany).
+  Para BelongsTo: target.primary = this.fk_field. Para HasOne/
+  HasMany: target.fk_field = this.primary. El user invoca como
+  `post.author_id(db).await?` (BelongsTo) o `user.posts(db).await?`
+  (HasMany). +1 E2E real (tablas relacionadas con FK constraint).
+
+**Estado al cierre 10.4**: navegación entre tablas funciona
+end-to-end contra Postgres real con 1 query por método. Total
+acumulado de E2E reales: **13 tests** (7 del driver core +
+6 del ORM SELECT/CRUD/navigation). Validación cross-type del
+target (el target_type DEBE estar en el env con `@table`) sucede
+en runtime al invocar la navegación — error claro si falta.
+
+**Deuda residual de 10.4** (NO bloquea 10.5):
+- Eager loading con `.include("author")`: diferido a 10.6 según
+  roadmap original. Por ahora cada call dispara 1 query (lazy
+  pure) — el user es responsable de evitar N+1.
+- Cascade en migrations: el `CascadeAction.as_sql()` está listo
+  para emisión cuando llegue `fitz db diff` en 10.7. El runtime
+  NO genera las constraints automáticamente; el user las
+  declara en el `CREATE TABLE` manual hoy.
+- Validación cross-type en check time: hoy solo en runtime. Si
+  `@belongs_to("Nonexistent")` apunta a un type que no existe,
+  el checker NO falla; falla en runtime con mensaje claro al
+  invocar. Refinable post-MVP.
+- Method name collisions: si un type tiene un field con relación
+  + un método custom con el mismo nombre, la relación gana
+  (chequea ANTES). Documentado en código; refinable con
+  detección explícita si entra demanda.
 
 #### 10.5 — Tipos avanzados (~600 LoC)
 

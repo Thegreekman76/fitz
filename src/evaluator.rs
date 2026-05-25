@@ -4447,6 +4447,28 @@ async fn dispatch_method(
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
+    // Fase 10.4.b — navigation method sobre Value::Instance.
+    // Si el receiver es Instance + el method matchea una relación
+    // declarada en el TableMetadata del type, despachamos al ORM
+    // ANTES de buscar methods custom (las relations tienen
+    // prioridad — si el user nombrara un método igual, podría
+    // sombrearlo, pero típicamente no hay colisión).
+    if let Value::Instance { type_name, .. } = &receiver {
+        let rel_opt: Option<crate::types::RelationMetadata> = {
+            let env_guard = env.lock();
+            match env_guard.get(type_name) {
+                Some(Value::Type {
+                    table_metadata: Some(meta),
+                    ..
+                }) => meta.relations.get(method).cloned(),
+                _ => None,
+            }
+        };
+        if let Some(rel) = rel_opt {
+            return orm_instance_navigate(receiver, rel, args, env, span).await;
+        }
+    }
+
     // R.3 — método custom sobre Value::Instance. Buscamos en el
     // Value::Type asociado (resolución por type_name en el env).
     // El lookup se hace ANTES del .await para no mantener el lock
@@ -11288,6 +11310,194 @@ fn orm_qb_delete(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
         }
     });
     Ok(Value::new_future(fut))
+}
+
+/// Fase 10.4.b — navega una relación desde una `Value::Instance`.
+/// Soporta los 3 kinds (BelongsTo / HasOne / HasMany). Construye
+/// un `QueryBuilderState` adecuado y delega a `orm_qb_first` o
+/// `orm_qb_all` según corresponda.
+///
+/// Args en MVP: `[DbConn]` solo. El where viene IMPLÍCITO de la
+/// relación (no del user). Cualquier args extra → error.
+async fn orm_instance_navigate(
+    receiver: Value,
+    rel: crate::types::RelationMetadata,
+    args: Vec<Value>,
+    env: EnvRef,
+    span: Span,
+) -> EvalResult<Value> {
+    // 1. Args validation: solo db.
+    let _ = extract_db_handle_arg(&args, &rel.target_type, span).map_err(EvalSignal::Error)?;
+
+    // 2. Extraer fields de la Instance receiver.
+    let (instance_type_name, instance_fields_snapshot) = match &receiver {
+        Value::Instance { type_name, fields } => (type_name.clone(), fields.lock().clone()),
+        _ => unreachable!("orm_instance_navigate solo recibe Value::Instance"),
+    };
+
+    // 3. Resolver THIS_type y TARGET_type metadata desde el env.
+    //    Hacemos el lookup ANTES del .await para no mantener el lock.
+    let (this_meta, target_state) = {
+        let env_guard = env.lock();
+        let this_meta = match env_guard.get(&instance_type_name) {
+            Some(Value::Type {
+                table_metadata: Some(m),
+                ..
+            }) => *m,
+            _ => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    format!(
+                        "navigation: el type `{}` no tiene `@table(...)`",
+                        instance_type_name
+                    ),
+                )));
+            }
+        };
+        let target_state = match env_guard.get(&rel.target_type) {
+            Some(Value::Type {
+                fields,
+                table_metadata: Some(m),
+                ..
+            }) => QueryBuilderState {
+                type_name: rel.target_type.clone(),
+                fields: fields.clone(),
+                meta: *m,
+                where_sql: None,
+                where_args: Vec::new(),
+                order_by_clauses: Vec::new(),
+                limit: None,
+                offset: None,
+            },
+            Some(Value::Type { .. }) => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    format!(
+                        "navigation: el type `{}` referenciado por la relación no tiene `@table(...)`",
+                        rel.target_type
+                    ),
+                )));
+            }
+            _ => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    format!(
+                        "navigation: el type `{}` referenciado por la relación no está definido",
+                        rel.target_type
+                    ),
+                )));
+            }
+        };
+        (this_meta, target_state)
+    };
+
+    // 4. Construir WHERE según el kind.
+    //
+    //    BelongsTo: target.<primary> = this.<fk_field>
+    //      (busca el row del target cuya PK matchea el FK de this)
+    //    HasOne / HasMany: target.<rel.fk_field> = this.<primary>
+    //      (busca rows del target cuyo FK apunta a la PK de this)
+    let (where_col_fitz, where_value) = match rel.kind {
+        crate::types::RelationKind::BelongsTo => {
+            let primary_target = target_state.meta.primary_field.as_ref().ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    format!(
+                        "navigation BelongsTo: el type `{}` no declara `@primary` en ningún field",
+                        rel.target_type
+                    ),
+                ))
+            })?;
+            let fk_value = instance_fields_snapshot
+                .iter()
+                .find(|(n, _)| n == &rel.fk_field)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| {
+                    EvalSignal::Error(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        span.line,
+                        span.column,
+                        format!(
+                            "navigation BelongsTo: la instancia de `{}` no tiene el field `{}` (FK)",
+                            instance_type_name, rel.fk_field
+                        ),
+                    ))
+                })?;
+            (primary_target.clone(), fk_value)
+        }
+        crate::types::RelationKind::HasOne | crate::types::RelationKind::HasMany => {
+            let primary_this = this_meta.primary_field.as_ref().ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    format!(
+                        "navigation Has*: el type `{}` no declara `@primary` en ningún field",
+                        instance_type_name
+                    ),
+                ))
+            })?;
+            let primary_value = instance_fields_snapshot
+                .iter()
+                .find(|(n, _)| n == primary_this)
+                .map(|(_, v)| v.clone())
+                .ok_or_else(|| {
+                    EvalSignal::Error(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        span.line,
+                        span.column,
+                        format!(
+                            "navigation Has*: la instancia de `{}` no tiene el field primary `{}`",
+                            instance_type_name, primary_this
+                        ),
+                    ))
+                })?;
+            (rel.fk_field.clone(), primary_value)
+        }
+    };
+
+    // Resolver el nombre SQL de la columna (puede tener override
+    // via @column(name=...) en target).
+    let where_col_sql = target_state
+        .meta
+        .columns
+        .get(&where_col_fitz)
+        .and_then(|c| c.sql_name.as_deref())
+        .unwrap_or(where_col_fitz.as_str())
+        .to_string();
+
+    // Convertir el valor al PgValue.
+    let pg_value = fitz_value_to_pg(&where_value).map_err(|msg| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeError,
+            span.line,
+            span.column,
+            format!("navigation: {msg}"),
+        ))
+    })?;
+
+    let mut state = target_state;
+    state.where_sql = Some(format!("\"{}\" = $1", where_col_sql));
+    state.where_args = vec![pg_value];
+
+    // 5. Delegar a orm_qb_first (BelongsTo / HasOne) o orm_qb_all (HasMany).
+    let db_arg = args; // re-use args (contiene solo el DbConn validado arriba)
+    match rel.kind {
+        crate::types::RelationKind::BelongsTo | crate::types::RelationKind::HasOne => {
+            orm_qb_first(state, db_arg, span).map_err(EvalSignal::Error)
+        }
+        crate::types::RelationKind::HasMany => {
+            orm_qb_all(state, db_arg, span).map_err(EvalSignal::Error)
+        }
+    }
 }
 
 /// Helper para `qb.update`: renumera los placeholders `$N` del

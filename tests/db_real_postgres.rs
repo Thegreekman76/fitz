@@ -869,3 +869,129 @@ async fn orm_insert_update_delete_e2e() {
     let _ = seed.exec("DROP TABLE fitz_orm_crud_test", &[]).await;
     seed.close().await.unwrap();
 }
+
+// =============================================================
+// Fase 10.4.b — Navigation methods (belongs_to / has_many)
+// =============================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn orm_belongs_to_y_has_many_e2e() {
+    // Setup: 2 tablas relacionadas. users + posts con FK author_id.
+    let url = pg_url();
+    let seed = connect_url(&url).await.unwrap();
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_posts_test", &[])
+        .await;
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_orm_users_test", &[])
+        .await;
+    seed.exec(
+        "CREATE TABLE fitz_orm_users_test (id bigint PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "CREATE TABLE fitz_orm_posts_test (id bigint PRIMARY KEY, title text, author_id bigint REFERENCES fitz_orm_users_test(id))",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_users_test VALUES (1, 'ada'), (2, 'alan')",
+        &[],
+    )
+    .await
+    .unwrap();
+    seed.exec(
+        "INSERT INTO fitz_orm_posts_test VALUES (10, 'about algorithms', 1), (11, 'on math', 1), (12, 'turing machines', 2)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Programa Fitz que define los types con relations y navega.
+    let src = format!(
+        "@table(\"fitz_orm_posts_test\") type Post {{\n  \
+             @primary\n  \
+             id: Int = 0\n  \
+             title: Str\n  \
+             @belongs_to(\"User\")\n  \
+             author_id: Int\n\
+         }}\n\
+         @table(\"fitz_orm_users_test\") type User {{\n  \
+             @primary\n  \
+             id: Int = 0\n  \
+             name: Str\n  \
+             @has_many(\"Post\", via=\"author_id\")\n  \
+             posts: List<Post>\n\
+         }}\n\
+         async fn run() -> Result<Map<Str, Any>> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // 1. BelongsTo: post.author(db) → User.\n  \
+             let p10 = Post.where(fn(p) => p.id == 10).first(db).await?\n  \
+             let author = p10.author_id(db).await?\n  \
+             // 2. HasMany: user.posts(db) → List<Post>.\n  \
+             let u1 = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+             let ada_posts = u1.posts(db).await?\n  \
+             return Ok({{ \"author_name\": author.name, \"ada_post_count\": len(ada_posts) }})\n\
+         }}\n\
+         let result = run().await",
+        url
+    );
+    let tokens = tokenize(&src).expect("tokenize OK");
+    let program = parse(tokens).expect("parse OK");
+    let env = new_repl_env();
+    eval_program_with_env(
+        program,
+        std::env::current_dir().unwrap(),
+        env.clone(),
+        Default::default(),
+    )
+    .await
+    .expect("eval OK");
+
+    let result_val = env.lock().get("result").unwrap();
+    let outer_map = match result_val {
+        Value::Result(fitz::value::ResultVariant::Ok(boxed)) => *boxed,
+        Value::Result(fitz::value::ResultVariant::Err(boxed)) => {
+            panic!("esperaba Ok, fue Err({:?})", boxed)
+        }
+        other => panic!("esperaba Result, fue {:?}", other),
+    };
+    let (author_name, ada_post_count) = {
+        let m = match outer_map {
+            Value::Map(s) => s,
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        let map = m.lock();
+        let an = map
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "author_name"))
+            .and_then(|(_, v)| match v {
+                Value::Str(s) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let pc = map
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == "ada_post_count"))
+            .and_then(|(_, v)| match v {
+                Value::Int(n) => Some(*n),
+                _ => None,
+            })
+            .unwrap();
+        (an, pc)
+    };
+
+    // post id=10 tiene author_id=1 (ada).
+    assert_eq!(author_name, "ada");
+    // ada (id=1) tiene 2 posts (id=10, 11).
+    assert_eq!(ada_post_count, 2);
+
+    // Cleanup respetando el orden (posts depende de users por FK).
+    let _ = seed.exec("DROP TABLE fitz_orm_posts_test", &[]).await;
+    let _ = seed.exec("DROP TABLE fitz_orm_users_test", &[]).await;
+    seed.close().await.unwrap();
+}
