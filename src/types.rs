@@ -95,6 +95,24 @@ pub enum Type {
         send: Box<Type>,
     },
 
+    /// Fase 10.1.c — handle opaco a una conexión Postgres viva.
+    /// Producido por `db.connect(url).await?` y consumido por los
+    /// métodos `query/exec/close/is_closed`. Opaco: el user no
+    /// construye instancias directamente.
+    ///
+    /// Sin parámetros de tipo (a diferencia de WsConn que es
+    /// genérico sobre RECV/SEND). El row type es siempre
+    /// `Map<Str, Any>` en MVP — composites tipados (ORM con
+    /// `@table type User { ... }`) llegan en 10.3.
+    DbConn,
+
+    /// Fase 10.1.c — una fila del resultset de un query Postgres.
+    /// Producida por `conn.query(...).await?` (como `List<DbRow>`)
+    /// y consumida con `row.get("col")` / `row.get_at(idx)` que
+    /// devuelven el valor primitivo (Int/Float/Str/Bool/Bytes/Null).
+    /// Opaca: el user no construye instancias.
+    DbRow,
+
     /// Tipo declarado por el usuario (`type User { ... }`) o
     /// importado. La identidad va por `TypeId`.
     Nominal(TypeId),
@@ -256,6 +274,8 @@ impl Type {
                     format!("WsConn<{}, {}>", recv.display(env), send.display(env))
                 }
             }
+            Type::DbConn => "DbConn".into(),
+            Type::DbRow => "DbRow".into(),
             Type::Nominal(id) => env.info(*id).name.clone(),
             Type::Nullable(t) => format!("{}?", t.display(env)),
             Type::Function { params, ret } => {

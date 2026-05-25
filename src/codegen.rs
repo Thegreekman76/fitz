@@ -50,6 +50,17 @@ use crate::types::{
     check_program, is_compatible, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId,
 };
 
+/// Fase 10.1.c — source completo del driver Postgres puro (`src/db.rs`)
+/// embebido como string-literal en el binario `fitz`. Cuando un programa
+/// usa `db.X`, el codegen lo escribe a `__fitz_db_runtime.rs` adentro
+/// del crate generado y lo declara como `mod __fitz_db_runtime;` en el
+/// main.rs. Self-contained: el driver no usa `crate::*` ni `super::*`
+/// (verificado en sub-paso 10.1.c), así que se compila independiente
+/// en cualquier crate. Los tests inline (`#[cfg(test)] mod tests {}`)
+/// del archivo no se compilan en `cargo build --release` que es lo
+/// que `fitz build` invoca.
+const DB_RUNTIME_SRC: &str = include_str!("db.rs");
+
 // ---------------------------------------------------------------------------
 // API pública del codegen
 // ---------------------------------------------------------------------------
@@ -121,11 +132,6 @@ pub fn generate_project(
     // mensaje claro citando el sub-paso futuro.
     let python_imports = collect_python_imports(program);
     validate_python_imports_for_codegen(program)?;
-    // Fase 10.1.b — el guard para `db.X` vive in-band en
-    // `gen_field_access` (helper `db_usage_error_for_field`), no
-    // como pase pre-codegen. Detecta cuando el codegen visita un
-    // `Field { object: Ident("db"), .. }` y aborta con mensaje
-    // claro citando 10.1.c como sub-paso futuro.
 
     // PASS 1 — Cargar recursivamente todos los módulos Fitz importados
     // desde el main, generar su código Rust y registrarlos. Los
@@ -172,6 +178,12 @@ pub fn generate_project(
     // `__fitz_run_cron_scheduler` en el preludio, y dispara el modo
     // "cron-only main" cuando no hay HTTP pero sí cron jobs.
     let uses_jobs = program_uses_jobs(program);
+    // Fase 10.1.c — detección del módulo `db` (driver Postgres).
+    // Suma `sha2`/`hmac`/`base64` + `tokio` con feature `net` al
+    // Cargo.toml, emite el módulo `__fitz_db_runtime` (vía
+    // `include_str!` desde `src/db.rs`) + el preludio de helpers
+    // `__fitz_db_*`. Programas sin acceso a DB no pagan nada.
+    let uses_db = program_uses_db(program);
 
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
@@ -190,9 +202,24 @@ pub fn generate_project(
             uses_auth,
             uses_ws,
             uses_jobs,
+            uses_db,
         ),
         main_rs,
-        mod_files: loader.into_mod_files(),
+        mod_files: {
+            let mut files = loader.into_mod_files();
+            if uses_db {
+                // Fase 10.1.c — embeber el driver Postgres puro como
+                // módulo del crate generado. Source embebido en el
+                // binario `fitz` vía `include_str!("db.rs")` (ver
+                // `DB_RUNTIME_SRC` arriba). Self-contained: no usa
+                // `crate::*` ni `super::*`.
+                files.push(ModFile {
+                    rel_path: PathBuf::from("__fitz_db_runtime.rs"),
+                    content: DB_RUNTIME_SRC.to_string(),
+                });
+            }
+            files
+        },
     })
 }
 
@@ -301,30 +328,9 @@ fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzErro
     Ok(())
 }
 
-/// Fase 10.1.b — guard que aborta `fitz build` si el programa usa
-/// el módulo built-in `db` (driver Postgres puro). El codegen para
-/// el driver llega en sub-paso futuro 10.1.c (paralelo a la deuda
-/// 8.7 que cerró codegen Python). Hasta entonces, `fitz run` es el
-/// único camino para programas que tocan DB.
-///
-/// El check vive en el path crítico de `gen_expr` (función
-/// `db_usage_error_for_field`, invocada por `gen_field_access`):
-/// no requiere walker explícito del AST porque el propio codegen
-/// recorre todo. Esa función intercepta la expresión `db.X` antes
-/// de emitir cualquier Rust, así que el error sale en build-time
-/// del primer `db.connect(...)` que aparezca.
-fn db_usage_error_for_field(field_name: &str, span: crate::ast::Span) -> FitzError {
-    FitzError::new(
-        ErrorKind::InvalidSyntax,
-        span.line,
-        span.column,
-        format!(
-            "el módulo `db.{field_name}(...)` solo se soporta en `fitz run` en 10.1; \
-             el codegen para `fitz build` llega en 10.1.c. \
-             Usá `fitz run` para programas con acceso a base de datos."
-        ),
-    )
-}
+// Fase 10.1.c — el guard `db_usage_error_for_field` de 10.1.b se
+// retiró: el codegen del módulo `db` está vivo (`gen_db_module_call`
+// + `gen_db_conn_method_call` en `gen_call`).
 
 /// True si el programa tiene al menos una `Stmt::FnDef` con un
 /// decorador HTTP (`@get`/`@post`/`@put`/`@delete`/`@server`). El
@@ -611,6 +617,137 @@ fn program_uses_auth(program: &Program) -> bool {
         }
     }
     program.iter().any(stmt_uses_auth)
+}
+
+/// Fase 10.1.c — detecta si el programa usa el módulo built-in `db`
+/// (driver Postgres puro). Disparado por cualquier `db.X(...)`
+/// (típicamente `db.connect(...)`) o cualquier método sobre lo
+/// que parece un DbConn (`<expr>.query(...)`, `<expr>.exec(...)`,
+/// `<expr>.close()`, `<expr>.is_closed()`).
+///
+/// Si `true`: el preludio emite `__fitz_db_*` helpers + el módulo
+/// `__fitz_db_runtime` (driver entero embebido vía `include_str!`),
+/// y el Cargo.toml condicional suma `sha2`/`hmac`/`base64` + tokio
+/// con feature `net` para TCP. Sin `db` en el programa, ninguna de
+/// esas deps se baja ni compila.
+///
+/// Method-name matching es heurístico (`query`/`exec`/`close`/
+/// `is_closed`): si el user nombra una fn user-defined igual, el
+/// detector dispara igual pero el codegen del callsite chequea
+/// que el receiver sea efectivamente un DbConn antes de emitir
+/// el helper; si no es DbConn, cae al dispatch normal. False
+/// positive aceptable — la única penalty es que se emite preludio
+/// no usado (eliminado por LTO).
+fn program_uses_db(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_db(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                // db.X(...) o <expr>.{query,exec,close,is_closed}(...)
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
+                    if let Expr::Ident(recv, _) = object.as_ref() {
+                        if recv == "db" {
+                            return true;
+                        }
+                    }
+                    if matches!(field.as_str(), "query" | "exec" | "close" | "is_closed") {
+                        // Heurística: asumimos que es un DbConn.
+                        // El codegen del callsite valida con el tipo.
+                        return true;
+                    }
+                }
+                expr_uses_db(callee) || args.iter().any(expr_uses_db)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_db(left) || expr_uses_db(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_db(operand),
+            Expr::Field { object, .. } => expr_uses_db(object),
+            Expr::Index { object, index, .. } => expr_uses_db(object) || expr_uses_db(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_db(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_db(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_db(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_db(start) || expr_uses_db(end),
+            Expr::List(items, _) => items.iter().any(expr_uses_db),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_db(expr)
+                    || expr_uses_db(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_db(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_db(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_db(key)
+                    || expr_uses_db(value)
+                    || expr_uses_db(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_db(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_db(f))
+            }
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_db(k) || expr_uses_db(v)),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_db(v)),
+            Expr::Tuple(items, _) => items.iter().any(expr_uses_db),
+            Expr::TupleField { tuple, .. } => expr_uses_db(tuple),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_db(condition)
+                    || then.iter().any(stmt_uses_db)
+                    || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses_db))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_db(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_db))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_db),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Lit(_) => false,
+                StrPart::Expr(inner, _) => expr_uses_db(inner),
+            }),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_db),
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_db(inner),
+            Expr::NamedArg { value, .. } => expr_uses_db(value),
+            _ => false,
+        }
+    }
+    fn stmt_uses_db(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_db),
+            Stmt::Assign { value, .. } => expr_uses_db(value),
+            Stmt::Expr(e, _) => expr_uses_db(e),
+            Stmt::Return(e, _) => expr_uses_db(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_db(status) || body.as_ref().is_some_and(expr_uses_db)
+            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_db(condition) || body.iter().any(stmt_uses_db),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_db),
+            Stmt::For { iter, body, .. } => expr_uses_db(iter) || body.iter().any(stmt_uses_db),
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_db)
 }
 
 /// Fase 6.6: True si el programa usa async — cualquier `async fn`
@@ -1618,6 +1755,7 @@ fn sanitize_crate_name(raw: &str) -> String {
 /// Cargo.toml para el project generado. Si `has_http` es true,
 /// suma axum + tokio + serde + serde_json (necesarios para 5b.6).
 /// Si no, queda sin `[dependencies]` y la compilación es rápida.
+#[allow(clippy::too_many_arguments)] // 8 flags semánticos uno-por-feature
 fn cargo_toml_for(
     stem: &str,
     has_http: bool,
@@ -1626,6 +1764,7 @@ fn cargo_toml_for(
     uses_auth: bool,
     uses_ws: bool,
     uses_jobs: bool,
+    uses_db: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -1643,9 +1782,13 @@ fn cargo_toml_for(
     // emitir dos entries.
     // Fase 9.w.3.c — jobs (cron/spawn) también necesitan tokio con
     // `time` (sleep_until) y `signal` (ctrl_c en cron-only mode).
-    let needs_tokio = has_http || uses_async || uses_jobs;
+    // Fase 10.1.c — `uses_db` también necesita tokio (TCP +
+    // async-mutex para la conexión). El driver no usa cron/signal,
+    // así que las features puntuales no cambian.
+    let needs_tokio = has_http || uses_async || uses_jobs || uses_db;
     let needs_time = uses_async || uses_jobs;
     let needs_signal = uses_jobs && !has_http; // cron-only mode
+    let needs_net = uses_db; // TcpStream del driver
     let tokio_features: Vec<&str> = {
         let mut feats: Vec<&str> = Vec::new();
         if needs_tokio {
@@ -1657,6 +1800,11 @@ fn cargo_toml_for(
         }
         if needs_signal {
             feats.push("signal");
+        }
+        if needs_net {
+            feats.push("net");
+            feats.push("io-util");
+            feats.push("sync"); // tokio::sync::Mutex
         }
         feats
     };
@@ -1693,7 +1841,8 @@ fn cargo_toml_for(
     } else {
         ""
     };
-    let needs_deps_section = has_http || uses_async || uses_python || uses_auth || uses_jobs;
+    let needs_deps_section =
+        has_http || uses_async || uses_python || uses_auth || uses_jobs || uses_db;
     if !needs_deps_section {
         return header;
     }
@@ -1717,6 +1866,28 @@ fn cargo_toml_for(
          chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n"
     } else {
         ""
+    };
+    // Fase 10.1.c — crypto deps del driver Postgres puro: `sha2`
+    // (StoredKey hash), `hmac` (HMAC-SHA-256 para SCRAM + PBKDF2),
+    // `base64` (encoding del wire SCRAM), `rand_core` (`OsRng` para
+    // nonces SCRAM client_nonce). RustCrypto puro, sin deps nativas.
+    // Pin a la misma versión que el binario `fitz` del workspace
+    // para evitar divergencia. Si `uses_auth` también está activo,
+    // `rand_core` ya está — `auth_lines_final` lo emite. Para evitar
+    // duplicación, este bloque NO emite `rand_core` cuando uses_auth
+    // está en true.
+    let db_lines = if uses_db {
+        let mut s = String::from(
+            "sha2 = \"0.10\"\n\
+             hmac = \"0.12\"\n\
+             base64 = \"0.22\"\n",
+        );
+        if !uses_auth {
+            s.push_str("rand_core = { version = \"0.6\", features = [\"getrandom\"] }\n");
+        }
+        s
+    } else {
+        String::new()
     };
     // `serde_json` ya está en http_lines cuando hay HTTP; si solo hay
     // auth (sin HTTP), `auth_lines` lo trae. Evitar duplicación: si
@@ -1753,8 +1924,8 @@ fn cargo_toml_for(
         ""
     };
     format!(
-        "{}\n[dependencies]\n{}{}{}{}{}",
-        header, http_lines, tokio_line, pyo3_line, auth_lines_final, jobs_lines
+        "{}\n[dependencies]\n{}{}{}{}{}{}",
+        header, http_lines, tokio_line, pyo3_line, auth_lines_final, jobs_lines, db_lines
     )
 }
 
@@ -2875,6 +3046,7 @@ fn generate_main_rs(
     let uses_auth = program_uses_auth(program);
     let uses_ws = program_uses_ws(program);
     let uses_jobs = program_uses_jobs(program);
+    let uses_db = program_uses_db(program);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -2892,6 +3064,7 @@ fn generate_main_rs(
     ctx.uses_auth = uses_auth;
     ctx.uses_ws = uses_ws;
     ctx.uses_jobs = uses_jobs;
+    ctx.uses_db = uses_db;
     // Fase 9.w.1.d — pre-scan del `@auth_provider`. Singleton; el checker
     // (9.w.1.a) ya validó. Lo guardamos por nombre + is_async para que
     // cada handler con `@authenticated`/`@admin` emita la invocación
@@ -3222,6 +3395,11 @@ fn emit_main_rs_body(
     // usa cron jobs o spawn. Va después del preludio base y antes de
     // los mod/use decls.
     ctx.emit_jobs_prelude();
+    // Fase 10.1.c — preludio del módulo `db`: tipos opacos
+    // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
+    // `__IntoPgValue` + helpers async para connect/query/exec/close.
+    // Solo se emite si el programa usa `db.*`.
+    ctx.emit_db_prelude();
     // Fase 8.7.2: bindings Python globales (static + getter) emitidos
     // al top-level del crate para que cualquier fn los pueda referenciar.
     let py_imports = std::mem::take(&mut ctx.python_imports_ordered);
@@ -3780,6 +3958,11 @@ struct CodegenCtx<'a> {
     /// `__fitz_run_cron_scheduler`, registro de jobs en main, y el
     /// modo "cron-only main" cuando no hay HTTP.
     uses_jobs: bool,
+    /// Fase 10.1.c: `true` si el programa usa el módulo `db` (driver
+    /// Postgres puro). Habilita emisión del `mod __fitz_db_runtime;`
+    /// + preludio `__FitzDbConn`/`__FitzPgValue`/`__IntoPgValue`
+    /// + helpers async `__fitz_db_*`.
+    uses_db: bool,
     /// Fase 9.w.3.c: info de cada cron job pre-recolectada. Cada entry
     /// tiene el nombre Rust de la fn target, el cron expression Str,
     /// y un flag `is_async`. `gen_main`/`gen_http_main` lo usan para
@@ -3957,6 +4140,7 @@ impl<'a> CodegenCtx<'a> {
             auth_provider_is_async: false,
             uses_ws: false,
             uses_jobs: false,
+            uses_db: false,
             cron_jobs_info: Vec::new(),
             ws_heartbeat_secs: 30,
             python_bindings: HashMap::new(),
@@ -5051,6 +5235,126 @@ where
         tokio::time::sleep(delay).await;
         handler().await;
     }
+}
+
+",
+        );
+    }
+
+    /// Fase 10.1.c — preludio del driver Postgres. Emite el módulo
+    /// `__fitz_db_runtime` (declarado como `mod ... ;`) + alias
+    /// `__FitzDbConn`/`__FitzPgValue` + trait `__IntoPgValue` con
+    /// impls para los primitivos Fitz + helpers async para los 5
+    /// puntos de entrada del módulo `db` (connect/query/exec/close/
+    /// is_closed). Solo se emite cuando `program_uses_db` dispara.
+    ///
+    /// El alias `__FitzPgValue = __fitz_db_runtime::PgValue` permite
+    /// que el codegen del callsite emita `__fitz_db_runtime::PgValue::Int(n)`
+    /// vía el trait `__IntoPgValue::into_pg(n)` sin pull-in del path
+    /// completo en cada línea generada.
+    fn emit_db_prelude(&mut self) {
+        if !self.uses_db {
+            return;
+        }
+        self.emit(
+            "\
+// --- 10.1.c: runtime del módulo `db` (driver Postgres puro) ---
+
+/// Driver Postgres entero embebido como módulo del crate generado.
+/// Source idéntico a `src/db.rs` del compilador `fitz`, copiado
+/// vía `include_str!` cuando el programa usa `db.*`. Self-contained
+/// (no usa `crate::*` ni `super::*`).
+mod __fitz_db_runtime;
+
+/// Handle compartido a una conexión Postgres viva. `Arc` para que
+/// el clone sea barato (paralelo a `__FitzWsConn<T>`).
+type __FitzDbConn = std::sync::Arc<__fitz_db_runtime::DbConnHandle>;
+
+/// Re-export del tipo `PgValue` del runtime con nombre prefijado para
+/// que no choque con tipos del usuario.
+type __FitzPgValue = __fitz_db_runtime::PgValue;
+
+/// Una fila del resultset. El runtime ya expone `Row` con
+/// `get(name)` y `get_at(idx)`; la usamos directo (sin wrap).
+type __FitzDbRow = __fitz_db_runtime::Row;
+
+/// Coerción de tipos primitivos Fitz → `PgValue` para args de query.
+/// El codegen emite `__IntoPgValue::into_pg(<expr>)` por cada arg
+/// del array literal `[..]` que el user pasa como segundo arg de
+/// `query`/`exec`. Cubre los 6 tipos primitivos del MVP; composites
+/// (List/Map/Instance → JSONB/arrays) llegan en 10.5.
+trait __IntoPgValue {
+    fn into_pg(self) -> __FitzPgValue;
+}
+
+impl __IntoPgValue for i64 {
+    fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Int(self) }
+}
+impl __IntoPgValue for f64 {
+    fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Float(self) }
+}
+impl __IntoPgValue for bool {
+    fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Bool(self) }
+}
+impl __IntoPgValue for String {
+    fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Text(self) }
+}
+impl<'a> __IntoPgValue for &'a str {
+    fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Text(self.to_string()) }
+}
+impl __IntoPgValue for Vec<u8> {
+    fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Bytes(self) }
+}
+
+/// `db.connect(url) -> Future<Result<DbConn>>`. Mapea el `DbError`
+/// del runtime a `String` para que se desempaque idéntico a otros
+/// `Result<T, String>` Fitz (paralelo a `Result<T, String>` de
+/// `jwt.decode`, etc.).
+async fn __fitz_db_connect(url: String) -> Result<__FitzDbConn, String> {
+    match __fitz_db_runtime::connect_url(url.as_str()).await {
+        Ok(handle) => Ok(std::sync::Arc::new(handle)),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `conn.query(sql, args)` con args ya convertidos por
+/// `__IntoPgValue::into_pg(...)`. Devuelve `Result<List<Row>, String>`
+/// donde cada Row es opaca — el user accede con `row.get(\"col\")`
+/// o `row.get_at(idx)` para extraer `&__FitzPgValue`. El Vec se
+/// wrappea en `Arc<Mutex<>>` paralelo a cómo se representan las
+/// `List<T>` Fitz en el codegen (Shared semantics).
+async fn __fitz_db_query(
+    conn: &__FitzDbConn,
+    sql: String,
+    args: Vec<__FitzPgValue>,
+) -> Result<std::sync::Arc<std::sync::Mutex<Vec<__FitzDbRow>>>, String> {
+    match conn.query(sql.as_str(), &args).await {
+        Ok(qr) => Ok(std::sync::Arc::new(std::sync::Mutex::new(qr.rows))),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `conn.exec(sql, args)` para INSERT/UPDATE/DELETE/DDL — devuelve
+/// rows_affected como Int.
+async fn __fitz_db_exec(
+    conn: &__FitzDbConn,
+    sql: String,
+    args: Vec<__FitzPgValue>,
+) -> Result<i64, String> {
+    match conn.exec(sql.as_str(), &args).await {
+        Ok(n) => Ok(n as i64),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// `conn.close()` cooperativo + idempotente.
+async fn __fitz_db_close(conn: &__FitzDbConn) {
+    let _ = conn.close().await;
+}
+
+/// `conn.is_closed()` para diagnostics + branching.
+async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
+    conn.is_closed().await
 }
 
 ",
@@ -8589,13 +8893,32 @@ where
             span: field_span,
         } = callee
         {
-            // Fase 10.1.b — bloqueamos `db.X(...)` en codegen ANTES
-            // de cualquier otro dispatch. El módulo `db` está
-            // disponible en el evaluator (10.1.b) pero el codegen
-            // para `fitz build` llega en 10.1.c.
+            // Fase 10.1.c — built-in `db`: dispatch antes de
+            // cualquier otra cosa. `db.connect(url)` se traduce a
+            // `__fitz_db_connect(url)` (helper async del preludio).
+            // Si el codegen ve `db.X` con un X que el módulo no
+            // ofrece, emite un error claro citando los nombres
+            // válidos (igual que el evaluator).
             if let Expr::Ident(recv, _) = object.as_ref() {
                 if recv == "db" {
-                    return Err(db_usage_error_for_field(field, *field_span));
+                    return self.gen_db_module_call(field, args, *field_span);
+                }
+            }
+
+            // Fase 10.1.c — método sobre un `DbConn` (handle opaco).
+            // El checker tipa `db.connect(...)` como `Type::Any` en
+            // 10.1.c (sin Type::DbConn dedicado), así que detectamos
+            // el método por NOMBRE — si el programa `uses_db = true`
+            // y el método es `query`/`exec`/`close`/`is_closed`,
+            // emitimos el helper `__fitz_db_*`. Si el user shadowea
+            // un método (define una fn `query` propia), el checker
+            // habría rechazado el callsite por aridad — refinable
+            // si entra demanda real.
+            if self.uses_db {
+                if let Some(emitted) =
+                    self.gen_db_conn_method_call(object, field, args, *field_span, call_span)?
+                {
+                    return Ok(emitted);
                 }
             }
 
@@ -9530,6 +9853,157 @@ where
             format!("__fitz_hash_verify({}, {})", plain_c, hashed_c),
             Type::Bool,
         ))
+    }
+
+    // =========================================================
+    // Fase 10.1.c — codegen del módulo `db` y métodos de DbConn
+    // =========================================================
+
+    /// `db.connect(url) -> Future<Result<DbConn>>` y rechazo de
+    /// cualquier otro field. El `field_span` se usa para mensajes
+    /// de error con posición. El user hace `.await?` en el callsite
+    /// Fitz para desempacar.
+    fn gen_db_module_call(
+        &mut self,
+        field: &str,
+        args: &[Expr],
+        field_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        match field {
+            "connect" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        field_span,
+                        format!(
+                            "`db.connect` espera 1 argumento (url: Str), recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let (url_code, url_ty) = self.gen_expr(&args[0])?;
+                let url_c = coerce(&url_code, &url_ty, &Type::Str, self.env);
+                Ok((
+                    format!("__fitz_db_connect({})", url_c),
+                    Type::Future(Box::new(Type::Result {
+                        ok: Box::new(Type::DbConn),
+                        err: Box::new(Type::Str),
+                    })),
+                ))
+            }
+            other => Err(self.err_at(
+                field_span,
+                format!("el módulo `db` no tiene `{}` (soportado: connect)", other),
+            )),
+        }
+    }
+
+    /// Despacha métodos sobre un `DbConn` opaco. Devuelve `Some` si
+    /// el método matchea (query/exec/close/is_closed), `None` para
+    /// que el caller continúe con otro dispatch (jwt/hash/etc.).
+    /// La detección es solo por nombre del método porque el checker
+    /// tipa `DbConn` como `Type::Any` en 10.1.c (sin tipo dedicado).
+    fn gen_db_conn_method_call(
+        &mut self,
+        object: &Expr,
+        method: &str,
+        args: &[Expr],
+        _field_span: crate::ast::Span,
+        call_span: crate::ast::Span,
+    ) -> Result<Option<(String, Type)>, FitzError> {
+        if !matches!(method, "query" | "exec" | "close" | "is_closed") {
+            return Ok(None);
+        }
+        let (obj_code, _obj_ty) = self.gen_expr(object)?;
+        match method {
+            "query" | "exec" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`DbConn.{}` espera 2 argumentos (sql: Str, args: List), recibió {}",
+                            method,
+                            args.len()
+                        ),
+                    ));
+                }
+                let (sql_code, sql_ty) = self.gen_expr(&args[0])?;
+                let sql_c = coerce(&sql_code, &sql_ty, &Type::Str, self.env);
+                // El segundo arg debe ser una List literal (heterogénea
+                // soportada vía `__IntoPgValue::into_pg` por item).
+                // Variables o comprehensions de args quedan como deuda
+                // residual — requieren un walker sobre el item types
+                // del runtime Fitz. Refinable si entra demanda.
+                let pg_args_vec = match &args[1] {
+                    Expr::List(items, _) => {
+                        let mut parts = Vec::with_capacity(items.len());
+                        for it in items {
+                            let (it_code, _it_ty) = self.gen_expr(it)?;
+                            parts.push(format!("<_ as __IntoPgValue>::into_pg({})", it_code));
+                        }
+                        format!("vec![{}]", parts.join(", "))
+                    }
+                    _ => {
+                        return Err(self.err_at(
+                            args[1].span(),
+                            format!(
+                                "`DbConn.{}` en codegen MVP: el segundo arg debe ser una lista literal `[a, b, c]`. \
+                                 Variables como args llegan en un sub-paso futuro.",
+                                method
+                            ),
+                        ));
+                    }
+                };
+                let (helper, ok_ty) = if method == "query" {
+                    (
+                        "__fitz_db_query",
+                        // Cada row es opaco (`__FitzDbRow`) — el user
+                        // accede a fields con `row.get("col")`. El
+                        // tipo expuesto al checker es `List<DbRow>`.
+                        Type::List(Box::new(Type::DbRow)),
+                    )
+                } else {
+                    ("__fitz_db_exec", Type::Int)
+                };
+                Ok(Some((
+                    format!("{}(&{}, {}, {})", helper, obj_code, sql_c, pg_args_vec),
+                    Type::Future(Box::new(Type::Result {
+                        ok: Box::new(ok_ty),
+                        err: Box::new(Type::Str),
+                    })),
+                )))
+            }
+            "close" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`DbConn.close` no acepta argumentos, recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                Ok(Some((
+                    format!("__fitz_db_close(&{})", obj_code),
+                    Type::Future(Box::new(Type::Null)),
+                )))
+            }
+            "is_closed" => {
+                if !args.is_empty() {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`DbConn.is_closed` no acepta argumentos, recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                Ok(Some((
+                    format!("__fitz_db_is_closed(&{})", obj_code),
+                    Type::Future(Box::new(Type::Bool)),
+                )))
+            }
+            _ => unreachable!(),
+        }
     }
 
     fn gen_method_call(
@@ -13640,16 +14114,6 @@ where
         field: &str,
         field_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
-        // Fase 10.1.b — bloqueamos cualquier `db.X` en codegen. El
-        // módulo `db` está pre-registrado en el evaluator + TypeEnv,
-        // pero el codegen para 10.1.c todavía no llegó. Cualquier
-        // programa que use DB compila solo con `fitz run` por ahora.
-        if let Expr::Ident(ns, _) = object {
-            if ns == "db" {
-                return Err(db_usage_error_for_field(field, field_span));
-            }
-        }
-
         // 5b.5: si el objeto es `Ident(ns)` con `ns` siendo un namespace
         // de módulo importado (`import foo`), traducimos `foo.bar` a
         // path Rust `foo::bar`. Lo hacemos ANTES de evaluar el objeto,
@@ -18255,9 +18719,13 @@ fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<Stri
         // Fase 9.w.2: `WsConn<T>` tampoco es comparable — el conn lleva
         // handles a streams Mutex<>'eados, dos conns distintos jamás
         // son "iguales" estructuralmente.
-        Type::Function { .. } | Type::Future(_) | Type::WsConn { .. } | Type::Any | Type::PyAny => {
-            Ok("false".to_string())
-        }
+        Type::Function { .. }
+        | Type::Future(_)
+        | Type::WsConn { .. }
+        | Type::DbConn
+        | Type::DbRow
+        | Type::Any
+        | Type::PyAny => Ok("false".to_string()),
         // Tuples (mini-tanda T): comparación element-wise. Rust ya
         // implementa PartialEq para tuples si cada slot lo hace,
         // así que `lhs == rhs` funciona directamente para tipos
@@ -18554,6 +19022,15 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                 Ok(format!("__FitzWsConn<{}, {}>", recv_rs, send_rs))
             }
         }
+        // Fase 10.1.c — `DbConn` mapea al alias `__FitzDbConn`
+        // (= `Arc<__fitz_db_runtime::DbConnHandle>`) emitido en el
+        // preludio cuando `uses_db = true`.
+        Type::DbConn => Ok("__FitzDbConn".to_string()),
+        // Fase 10.1.c — `DbRow` mapea al alias `__FitzDbRow`
+        // (= `__fitz_db_runtime::Row`) emitido en el preludio.
+        // El user accede a campos con `row.get("col")` /
+        // `row.get_at(idx)` que devuelven `Option<&PgValue>`.
+        Type::DbRow => Ok("__FitzDbRow".to_string()),
         // Tuples (mini-tanda T) → Rust tuple type nativo.
         // `()` (vacía) → `()` (unit). `(T,)` (un slot) → `(T,)`.
         Type::Tuple(items) => {
@@ -18598,6 +19075,8 @@ fn type_name(t: &Type) -> &'static str {
         Type::Result { .. } => "Result<...>",
         Type::Future(_) => "Future<...>",
         Type::WsConn { .. } => "WsConn<...>",
+        Type::DbConn => "DbConn",
+        Type::DbRow => "DbRow",
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
         Type::Function { .. } => "fn(...)",
@@ -18634,6 +19113,8 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
                 )
             }
         }
+        Type::DbConn => "DbConn".into(),
+        Type::DbRow => "DbRow".into(),
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
         Type::Nominal(id) => env.info(*id).name.clone(),
         Type::Function { params, ret } => {
@@ -19396,7 +19877,7 @@ mod tests {
     fn cargo_toml_async_sin_http_incluye_tokio_time() {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
-        let toml = cargo_toml_for("foo", false, true, false, false, false, false);
+        let toml = cargo_toml_for("foo", false, true, false, false, false, false, false);
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
         assert!(!toml.contains("axum"), "no debería incluir axum");
@@ -19404,7 +19885,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
-        let toml = cargo_toml_for("foo", true, true, false, false, false, false);
+        let toml = cargo_toml_for("foo", true, true, false, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
         assert!(toml.contains("\"macros\""));
@@ -19412,7 +19893,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
-        let toml = cargo_toml_for("foo", false, false, false, false, false, false);
+        let toml = cargo_toml_for("foo", false, false, false, false, false, false, false);
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
     }
@@ -19425,7 +19906,7 @@ mod tests {
     fn cargo_toml_con_python_incluye_pyo3() {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
-        let toml = cargo_toml_for("foo", false, false, true, false, false, false);
+        let toml = cargo_toml_for("foo", false, false, true, false, false, false, false);
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
         assert!(
@@ -19442,7 +19923,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
-        let toml = cargo_toml_for("foo", true, false, true, false, false, false);
+        let toml = cargo_toml_for("foo", true, false, true, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
         assert!(toml.contains("tokio"));
@@ -19450,7 +19931,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
-        let toml = cargo_toml_for("foo", true, false, false, false, false, false);
+        let toml = cargo_toml_for("foo", true, false, false, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
     }
@@ -24422,7 +24903,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
-        let toml = cargo_toml_for("app", false, false, false, false, false, true);
+        let toml = cargo_toml_for("app", false, false, false, false, false, true, false);
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
         // Sin HTTP/async, tokio se incluye por uses_jobs con multi_thread.
@@ -24433,7 +24914,7 @@ mod tests {
     #[test]
     fn cargo_toml_jobs_sin_http_incluye_signal_feature() {
         // Cron-only mode necesita `signal` para ctrl_c.
-        let toml = cargo_toml_for("app", false, false, false, false, false, true);
+        let toml = cargo_toml_for("app", false, false, false, false, false, true, false);
         assert!(
             toml.contains("\"signal\""),
             "esperaba tokio feature `signal` para cron-only mode, got:\n{}",
@@ -24445,7 +24926,7 @@ mod tests {
     fn cargo_toml_jobs_con_http_no_incluye_signal_feature() {
         // HTTP + cron: ctrl_c lo maneja `serve()` con su propio
         // shutdown signal; el main generado no usa signal directo.
-        let toml = cargo_toml_for("app", true, false, false, false, false, true);
+        let toml = cargo_toml_for("app", true, false, false, false, false, true, false);
         assert!(toml.contains("cron"));
         assert!(!toml.contains("\"signal\""));
     }
@@ -24972,24 +25453,127 @@ mod tests {
         }
     }
 
-    // ---- Fase 10.1.b — guard del módulo `db` en codegen ----
+    // ---- Fase 10.1.c — codegen del módulo `db` ----
 
     #[test]
-    fn codegen_aborta_si_programa_usa_db_connect() {
-        // `db.connect(...)` adentro de un statement de codegen
-        // dispara `db_usage_error_for_field` en `gen_field_access`.
-        // El mensaje cita 10.1.c como sub-paso futuro.
-        assert_err_contains(
-            "let f = db.connect(\"postgres://x@h/d\")",
-            &["db.connect", "10.1.c", "fitz run"],
+    fn codegen_db_connect_emite_helper() {
+        // `db.connect(url)` se traduce a `__fitz_db_connect(url)`.
+        // El programa necesita `async fn main` porque el helper es
+        // async; lo wrappeamos.
+        let rust = gen("async fn run() -> Result<Bool> {\n  \
+                 let _conn = db.connect(\"postgres://x@h/d\").await?\n  \
+                 return Ok(true)\n\
+             }")
+        .expect("codegen OK");
+        assert!(
+            rust.contains("__fitz_db_connect"),
+            "esperaba `__fitz_db_connect` en el output, fue: {rust}",
+        );
+        assert!(
+            rust.contains("mod __fitz_db_runtime"),
+            "esperaba `mod __fitz_db_runtime` en el output",
         );
     }
 
     #[test]
-    fn codegen_aborta_si_programa_usa_db_field_arbitrario() {
-        // Cualquier `db.X` (no solo connect) debe abortar. Coverage
-        // defensivo — el módulo `db` no tiene otros builtins hoy, pero
-        // si el user escribe `db.foo()` debe ver el mismo mensaje.
-        assert_err_contains("let x = db.connect", &["db.connect", "10.1.c"]);
+    fn codegen_db_query_emite_helper() {
+        // `conn.query(sql, args).await?` → `__fitz_db_query(&conn, sql, args).await?`.
+        let rust = gen("async fn run() -> Result<Bool> {\n  \
+                 let conn = db.connect(\"postgres://x@h/d\").await?\n  \
+                 let _rows = conn.query(\"SELECT 1\", []).await?\n  \
+                 return Ok(true)\n\
+             }")
+        .expect("codegen OK");
+        assert!(
+            rust.contains("__fitz_db_query"),
+            "esperaba `__fitz_db_query` en el output",
+        );
+    }
+
+    #[test]
+    fn codegen_db_exec_emite_helper() {
+        let rust = gen("async fn run() -> Result<Bool> {\n  \
+                 let conn = db.connect(\"postgres://x@h/d\").await?\n  \
+                 let _n = conn.exec(\"INSERT INTO t VALUES (1)\", []).await?\n  \
+                 return Ok(true)\n\
+             }")
+        .expect("codegen OK");
+        assert!(
+            rust.contains("__fitz_db_exec"),
+            "esperaba `__fitz_db_exec` en el output",
+        );
+    }
+
+    #[test]
+    fn codegen_db_close_emite_helper() {
+        let rust = gen("async fn run() -> Null {\n  \
+                 let conn = db.connect(\"postgres://x@h/d\").await\n  \
+                 match conn {\n    \
+                     Ok(c) => c.close().await\n    \
+                     Err(_) => null\n  \
+                 }\n\
+             }")
+        .expect("codegen OK");
+        assert!(
+            rust.contains("__fitz_db_close"),
+            "esperaba `__fitz_db_close` en el output",
+        );
+    }
+
+    #[test]
+    fn codegen_db_no_usa_db_no_emite_prelude() {
+        // Programa sin `db` no debe emitir el preludio (ahorra LoC
+        // y evita compilación de deps crypto innecesarias).
+        let rust = gen("let x = 42\nprint(x)").expect("codegen OK");
+        assert!(
+            !rust.contains("__fitz_db_runtime"),
+            "el preludio db debería estar AUSENTE en programas sin db",
+        );
+        assert!(
+            !rust.contains("__fitz_db_connect"),
+            "los helpers db deberían estar AUSENTES",
+        );
+    }
+
+    #[test]
+    fn codegen_db_cargo_toml_suma_deps() {
+        // Programa con db debe ver sha2/hmac/base64 en el Cargo.toml.
+        // Usamos `cargo_toml_for` directo (paralelo a los tests
+        // existentes).
+        let toml = cargo_toml_for("foo", false, false, false, false, false, false, true);
+        assert!(
+            toml.contains("sha2 = \"0.10\""),
+            "esperaba sha2 en Cargo.toml: {toml}",
+        );
+        assert!(
+            toml.contains("hmac = \"0.12\""),
+            "esperaba hmac en Cargo.toml: {toml}",
+        );
+        assert!(
+            toml.contains("base64 = \"0.22\""),
+            "esperaba base64 en Cargo.toml: {toml}",
+        );
+        assert!(
+            toml.contains("tokio"),
+            "esperaba tokio en Cargo.toml (driver lo necesita): {toml}",
+        );
+        // tokio debe traer las features `net`, `io-util`, `sync` cuando
+        // hay db.
+        assert!(toml.contains("\"net\""), "tokio.features debe incluir net");
+        assert!(
+            toml.contains("\"io-util\""),
+            "tokio.features debe incluir io-util"
+        );
+        assert!(
+            toml.contains("\"sync\""),
+            "tokio.features debe incluir sync"
+        );
+    }
+
+    #[test]
+    fn codegen_db_cargo_toml_sin_db_no_suma_deps() {
+        let toml = cargo_toml_for("foo", false, false, false, false, false, false, false);
+        assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
+        assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
     }
 }

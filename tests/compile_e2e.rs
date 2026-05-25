@@ -6654,3 +6654,89 @@ fn loader_absoluto_data_sibling_import_compila_en_fitz_build() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// =============================================================
+// Fase 10.1.c — driver Postgres en `fitz build`
+// =============================================================
+//
+// Estos tests validan que el codegen del módulo `db` produce
+// Rust que rustc acepta y que el binario producido corre. NO
+// conectan a un Postgres real — usan URLs que el driver rechaza
+// inmediatamente (parse error o `sslmode=require`) para que el
+// programa termine rápido pero pase por todo el flow de `db.connect`
+// + `.await` + match sobre Result.
+
+#[test]
+fn db_connect_url_invalida_compila_y_corre() {
+    // Programa Fitz que llama a db.connect con URL no-postgres.
+    // El parse del URL falla y devuelve Result::Err(msg). El
+    // `return match` explícito evita el bug del codegen que no
+    // detecta el último expression como return value.
+    let (stdout, code) = build_and_run(
+        "db_connect_url_invalida_compila_y_corre",
+        "async fn run() -> Str {\n  \
+             let r = db.connect(\"mysql://x@h/d\").await\n  \
+             return match r {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(msg) => msg\n  \
+             }\n\
+         }\n\
+         print(run().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(
+        stdout.contains("URL") || stdout.contains("postgres"),
+        "esperaba mensaje de error de URL, fue: {}",
+        stdout,
+    );
+}
+
+#[test]
+fn db_connect_sslmode_require_compila_y_falla_con_mensaje() {
+    // sslmode=require todavía no llega (deuda TLS). El driver
+    // devuelve Err con mensaje claro citando el sub-paso futuro.
+    let (stdout, code) = build_and_run(
+        "db_connect_sslmode_require_compila_y_falla_con_mensaje",
+        "async fn run() -> Str {\n  \
+             let r = db.connect(\"postgres://x@127.0.0.1:1/d?sslmode=require\").await\n  \
+             return match r {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(msg) => msg\n  \
+             }\n\
+         }\n\
+         print(run().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(
+        stdout.contains("sslmode") || stdout.contains("TLS"),
+        "esperaba mensaje sobre sslmode, fue: {}",
+        stdout,
+    );
+}
+
+#[test]
+fn db_query_exec_close_compilan_emite_helpers() {
+    // Programa que NO conecta realmente. El connect falla con
+    // URL inválida, así que el cuerpo de `run` propaga el Err
+    // antes de ejecutar query/exec/close. Lo importante es que
+    // el codegen los emita y rustc compile el output.
+    let (stdout, code) = build_and_run(
+        "db_query_exec_close_compilan_emite_helpers",
+        "async fn run() -> Result<Bool> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _rows = conn.query(\"SELECT 1\", []).await?\n  \
+             let _n = conn.exec(\"UPDATE t SET x = 1\", [\"hola\"]).await?\n  \
+             conn.close().await\n  \
+             return Ok(true)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
