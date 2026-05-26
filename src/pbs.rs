@@ -266,6 +266,16 @@ impl std::error::Error for PbsError {}
 mod tests {
     use super::*;
 
+    /// Serializa los tests que mutan la env var global `FITZ_CACHE_DIR`.
+    /// `cargo test` corre por default en paralelo y el env es proceso-
+    /// global; sin lock, un test podía leer mientras otro hacía
+    /// `remove_var` y devolver el path default `~/.fitz/cache` en vez
+    /// del override del `tempdir`. El CI de Windows lo cazaba flake.
+    /// `parking_lot::Mutex` (vs `std::sync::Mutex`) no envenena en
+    /// panic — si un test `assert!` adentro del guard panic-ea, los
+    /// que esperan siguen adelante sin propagar el poison.
+    static ENV_VAR_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
     #[test]
     fn pbs_release_es_string_yyyymmdd() {
         // Sanity check sobre el formato del release pinned.
@@ -335,6 +345,7 @@ mod tests {
 
     #[test]
     fn cache_path_for_combina_root_y_tarball_name() {
+        let _guard = ENV_VAR_LOCK.lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var(CACHE_DIR_ENV).ok();
         std::env::set_var(CACHE_DIR_ENV, tmp.path());
@@ -356,6 +367,7 @@ mod tests {
 
     #[test]
     fn cache_root_usa_env_override() {
+        let _guard = ENV_VAR_LOCK.lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var(CACHE_DIR_ENV).ok();
         std::env::set_var(CACHE_DIR_ENV, tmp.path());

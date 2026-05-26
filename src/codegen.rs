@@ -5609,6 +5609,57 @@ impl<TData> __FitzQueryBuilder<TData> {
         );
         __fitz_db_exec(conn, sql, self.where_args).await
     }
+
+    /// Fase 10.b.6 — `.sum/.avg/.min/.max(closure, db) -> Future<Result<Float>>`.
+    /// El codegen ya resolvió `agg_expr` (e.g. `SUM(\"price\")` o
+    /// `AVG(\"price\")::float8`). Emite `SELECT <agg_expr> AS \"__agg\"
+    /// FROM table [WHERE ...]` y devuelve un f64.
+    ///
+    /// Path scalar únicamente. Si `group_by_clauses` no está vacío,
+    /// runtime Err claro citando 10.b.7 — el shape divergente
+    /// (List<Map>) no encaja con el tipo Future<Result<Float>> que
+    /// el checker asignó.
+    ///
+    /// Para resultset vacío (e.g. SUM sobre WHERE sin matches),
+    /// Postgres devuelve NULL → Err claro (coherente con
+    /// __fitz_pg_to_f64 sobre NULL non-nullable). El user puede
+    /// envolver con `.where(...)` que garantice al menos una row.
+    async fn aggregate_f64(
+        self,
+        conn: &__FitzDbConn,
+        agg_expr: &str,
+        agg_name: &str,
+    ) -> Result<f64, String> {
+        if !self.group_by_clauses.is_empty() {
+            return Err(format!(
+                \"`.{}(closure, db)` con `.group_by(...)` previo: el shape \
+                 retornado es List<Map> y diverge del tipo declarado por \
+                 el checker (Float); llega en 10.b.7\",
+                agg_name
+            ));
+        }
+        let mut sql = format!(
+            \"SELECT {} AS \\\"__agg\\\" FROM \\\"{}\\\"\",
+            agg_expr, self.table
+        );
+        if let Some(w) = &self.where_sql {
+            sql.push_str(\" WHERE \");
+            sql.push_str(w);
+        }
+        match __fitz_db_query(conn, sql, self.where_args).await {
+            Ok(rows) => {
+                let guard = rows.lock().unwrap();
+                match guard.first() {
+                    Some(r) => match r.get_at(0) {
+                        Some(v) => __fitz_pg_to_f64(v, \"__agg\"),
+                        None => Err(format!(\"`{}`: sin columna en la row\", agg_name)),
+                    },
+                    None => Err(format!(\"`{}`: sin row en el resultset\", agg_name)),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
 }
 
 impl<TData: __FromFitzDbRow> __FitzQueryBuilder<TData> {
@@ -10857,9 +10908,43 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
                     type_name, type_name
                 ),
             )),
+            // Fase 10.b.6 — Agregados scalares directos sobre el Type
+            // (sin chain previo). `Type.sum(closure, db)` construye un
+            // `__FitzQueryBuilder` nuevo (sin where/order/limit/etc) y
+            // delega al dispatch QB que arma el SELECT FUNC(...) AS __agg.
+            "sum" | "avg" | "min" | "max" => self
+                .gen_orm_type_aggregate(type_name, method, args, call_span)
+                .map(Some),
             // No es ORM built-in — devolvemos None para que el caller
             // siga con el dispatch de métodos custom.
             _ => Ok(None),
+        }
+    }
+
+    /// Fase 10.b.6 — `Type.<sum|avg|min|max>(closure, db)`. Construye
+    /// un QB inicial y delega al dispatch `gen_orm_qb_method` que ya
+    /// implementa la emisión scalar. Mismo patrón que `gen_orm_type_where`/
+    /// `gen_orm_type_order_by`/etc. pero el terminal devuelve
+    /// `Future<Result<Float>>`, no `QueryBuilder`.
+    fn gen_orm_type_aggregate(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
+        let row_ty = Type::Nominal(self.env.lookup(type_name).unwrap());
+        match self.gen_orm_qb_method(&new_expr, &row_ty, method, args, call_span)? {
+            Some(emitted) => Ok(emitted),
+            None => Err(self.err_at(
+                call_span,
+                format!(
+                    "internal: `gen_orm_qb_method` no despachó agregado `.{}` (bug del codegen)",
+                    method
+                ),
+            )),
         }
     }
 
@@ -11535,17 +11620,90 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
                 );
                 Ok(Some((code, ret_ty)))
             }
-            // Agregados (sum/avg/min/max) llegan en 10.b.6 — el checker
-            // los acepta sobre `QueryBuilder<Row>` con shape
-            // `(closure, db) -> Result<Number>`, pero el codegen los
-            // rechaza con error explícito mientras tanto.
-            "sum" | "avg" | "min" | "max" => Err(self.err_at(
-                call_span,
-                format!(
-                    "codegen ORM (10.b.5): agregado `.{}(...)` llega en 10.b.6",
-                    method
-                ),
-            )),
+            // Fase 10.b.6 — Agregados scalares sobre QueryBuilder.
+            // El checker los tipa como `Future<Result<Float>>` (sin
+            // distinguir el caso GROUP BY; ver `infer_query_builder_method`).
+            // Acá emitimos el path scalar: el helper `aggregate_f64`
+            // construye `SELECT FUNC("col") AS "__agg" FROM table
+            // [WHERE ...]` y devuelve `Result<f64>`. Si en runtime hay
+            // group_by acumulado, el helper devuelve Err claro citando
+            // 10.b.7 — coherente con la decisión de scope (group_by +
+            // aggregate diverge en tipo).
+            "sum" | "min" | "max" | "avg" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.{}(closure, db)` espera 2 argumentos, recibió {}",
+                            method,
+                            args.len()
+                        ),
+                    ));
+                }
+                let (param_name, body) = self.extract_closure_body(&args[0], method)?;
+                let col_name = match &body {
+                    Expr::Field { object, field, .. } => match object.as_ref() {
+                        Expr::Ident(name, _) if name == &param_name => {
+                            if !fields.iter().any(|f| f.name == *field) {
+                                return Err(self.err_at(
+                                    call_span,
+                                    format!(
+                                        "`.{}`: field `{}` no existe en el type",
+                                        method, field
+                                    ),
+                                ));
+                            }
+                            field.clone()
+                        }
+                        _ => {
+                            return Err(self.err_at(
+                                call_span,
+                                format!(
+                                    "`.{}(closure)` solo admite `{}.field`",
+                                    method, param_name
+                                ),
+                            ));
+                        }
+                    },
+                    _ => {
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "`.{}(closure)`: el body debe ser `{}.field`",
+                                method, param_name
+                            ),
+                        ));
+                    }
+                };
+                let sql_col = meta
+                    .columns
+                    .get(&col_name)
+                    .and_then(|c| c.sql_name.as_deref())
+                    .unwrap_or(col_name.as_str());
+                let (db_code, _) = self.gen_expr(&args[1])?;
+                // SQL function uppercase para coincidir con el evaluator
+                // y con cómo lo lee un humano que mira el query log.
+                // `avg` además castea a float8 para evitar que Postgres
+                // devuelva numeric (OID 1700) — paralelo a `orm_qb_avg`
+                // del evaluator (~11364).
+                let agg_expr = if method == "avg" {
+                    format!("AVG(\"{}\")::float8", sql_col)
+                } else {
+                    format!("{}(\"{}\")", method.to_uppercase(), sql_col)
+                };
+                let ret_ty = Type::Future(Box::new(Type::Result {
+                    ok: Box::new(Type::Float),
+                    err: Box::new(Type::Str),
+                }));
+                let code = format!(
+                    "(async {{ ({receiver}).aggregate_f64(&{db}, {agg}, {name}).await }})",
+                    receiver = receiver_code,
+                    db = db_code,
+                    agg = rust_str_literal(&agg_expr),
+                    name = rust_str_literal(method),
+                );
+                Ok(Some((code, ret_ty)))
+            }
             // Método desconocido — devolvemos None para que el caller
             // siga con su dispatch general (terminará en "método no
             // soportado").
@@ -28153,6 +28311,186 @@ mod tests {
         assert!(
             rust.contains(".delete_with_where(&db"),
             "esperaba terminal `.delete_with_where(&db)`, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.6 — Agregados scalares sobre QueryBuilder ----
+
+    #[test]
+    fn codegen_orm_sum_scalar_emite_aggregate_f64_con_sql_func_uppercase() {
+        // `Order.sum(fn(o) => o.price, db)` emite el helper
+        // `aggregate_f64` con `SUM("price")` como agg_expr literal.
+        let src = "@table(\"orders\") type Order {\n  \
+                       @primary id: Int = 0\n  \
+                       price: Float\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _t = Order.sum(fn(o) => o.price, db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".aggregate_f64(&db"),
+            "esperaba terminal `.aggregate_f64(&db, ...)`, fue: {rust}",
+        );
+        assert!(
+            rust.contains("\"SUM(\\\"price\\\")\""),
+            "esperaba agg_expr literal `SUM(\"price\")`, fue: {rust}",
+        );
+        assert!(
+            rust.contains("\"sum\""),
+            "esperaba agg_name literal `sum`, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_min_y_max_emiten_aggregate_f64_con_func_correcto() {
+        let src_min = "@table(\"orders\") type Order {\n  \
+                           @primary id: Int = 0\n  \
+                           price: Float\n\
+                       }\n\
+                       async fn boot() -> Result<Null> {\n  \
+                           let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                           let _m = Order.min(fn(o) => o.price, db).await?\n  \
+                           return Ok(null)\n\
+                       }\n";
+        let rust_min = gen(src_min).expect("codegen min OK");
+        assert!(
+            rust_min.contains("\"MIN(\\\"price\\\")\""),
+            "esperaba `MIN(\"price\")`, fue: {rust_min}",
+        );
+
+        let src_max = "@table(\"orders\") type Order {\n  \
+                           @primary id: Int = 0\n  \
+                           price: Float\n\
+                       }\n\
+                       async fn boot() -> Result<Null> {\n  \
+                           let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                           let _m = Order.max(fn(o) => o.price, db).await?\n  \
+                           return Ok(null)\n\
+                       }\n";
+        let rust_max = gen(src_max).expect("codegen max OK");
+        assert!(
+            rust_max.contains("\"MAX(\\\"price\\\")\""),
+            "esperaba `MAX(\"price\")`, fue: {rust_max}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_avg_emite_cast_float8_explicito() {
+        // AVG necesita `::float8` para evitar OID numeric (1700)
+        // que el driver no soporta. Paralelo al evaluator
+        // (orm_qb_avg ~11364).
+        let src = "@table(\"orders\") type Order {\n  \
+                       @primary id: Int = 0\n  \
+                       price: Float\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _a = Order.avg(fn(o) => o.price, db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\"AVG(\\\"price\\\")::float8\""),
+            "esperaba `AVG(\"price\")::float8` con cast, fue: {rust}",
+        );
+        assert!(
+            rust.contains("\"avg\""),
+            "esperaba agg_name literal `avg`, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_sum_respeta_column_override_via_meta() {
+        // Field `price` declarado con `@column(name="amount_cents")` →
+        // el SQL emitido usa el sql_name override, no el nombre Fitz.
+        let src = "@table(\"orders\") type Order {\n  \
+                       @primary id: Int = 0\n  \
+                       @column(name=\"amount_cents\") price: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _t = Order.sum(fn(o) => o.price, db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\"SUM(\\\"amount_cents\\\")\""),
+            "esperaba `SUM(\"amount_cents\")` (sql_name override), fue: {rust}",
+        );
+        assert!(
+            !rust.contains("\"SUM(\\\"price\\\")\""),
+            "no esperaba `SUM(\"price\")` (el nombre Fitz no debe filtrarse), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_sum_sobre_field_inexistente_aborta_con_mensaje_claro() {
+        let src = "@table(\"orders\") type Order {\n  \
+                       @primary id: Int = 0\n  \
+                       price: Float\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _t = Order.sum(fn(o) => o.missing, db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de codegen por field inexistente");
+        assert!(
+            err.message.contains("field `missing`") && err.message.contains("no existe"),
+            "esperaba mención de `missing` no existe, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_orm_sum_con_closure_no_field_aborta_con_mensaje_claro() {
+        // El body del closure debe ser `u.field`, no una expresión
+        // arbitraria. `o.price * 2` es válido en evaluator solo si
+        // bajáramos un mini-SQL — por ahora rechazamos.
+        let src = "@table(\"orders\") type Order {\n  \
+                       @primary id: Int = 0\n  \
+                       price: Float\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _t = Order.sum(fn(o) => o.price * 2, db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de codegen por body no-field");
+        assert!(
+            err.message.contains("body debe ser") || err.message.contains("solo admite"),
+            "esperaba mención de que el body solo admite u.field, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_orm_aggregate_emite_async_block_envolvente() {
+        // El terminal es async (devuelve Future<Result<Float>>) — el
+        // codegen lo envuelve en `(async { ... })` para que `.await?`
+        // del call site tipe correcto.
+        let src = "@table(\"orders\") type Order {\n  \
+                       @primary id: Int = 0\n  \
+                       price: Float\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _t = Order.where(fn(o) => o.price > 100.0).sum(fn(o) => o.price, db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("(async {") && rust.contains(".aggregate_f64(&db"),
+            "esperaba `(async {{ ... .aggregate_f64(&db, ...) }})`, fue: {rust}",
+        );
+        // El where previo se preserva en el chain (el helper runtime
+        // lo usa para construir `WHERE` antes del aggregate).
+        assert!(
+            rust.contains(".with_where("),
+            "esperaba `.with_where(...)` en el chain antes del aggregate, fue: {rust}",
         );
     }
 }

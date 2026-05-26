@@ -6969,3 +6969,101 @@ fn orm_chain_first_con_multiples_wheres_compila_a_binario() {
     assert_eq!(code, 0, "stdout: {}", stdout);
     assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
 }
+
+// ---------------------------------------------------------------------------
+// Fase 10.b.6 — Agregados scalares sobre QueryBuilder (sum/avg/min/max)
+//
+// Validan que el codegen emite código Rust que compila con `cargo build`
+// (incluye el preludio db con el helper `aggregate_f64`, dispatch sobre
+// QB, cast `::float8` para AVG, etc.). El runtime falla por URL inválida
+// (no hay Postgres en el test runner), pero el goal acá es probar el
+// pipeline del codegen end-to-end. La paridad real contra Postgres
+// queda para los E2E de DB (Fase 10.b.10).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orm_sum_directo_sobre_type_compila_a_binario() {
+    // `Sale.sum(fn(s) => s.amount, db).await?` compila a binario
+    // standalone — incluye el preludio con `aggregate_f64` y dispatch
+    // `Type.sum(...)` → QB nuevo + agregado scalar.
+    let (stdout, code) = build_and_run(
+        "orm_sum_directo_sobre_type_compila_a_binario",
+        "@table(\"sales\") type Sale {\n  \
+             @primary id: Int = 0\n  \
+             amount: Float\n\
+         }\n\
+         async fn run() -> Result<Float> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let t = Sale.sum(fn(s) => s.amount, conn).await?\n  \
+             return Ok(t)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_avg_chain_con_where_compila_a_binario() {
+    // `.where(...).avg(closure, db)` valida que (a) el chain QB
+    // preserva el where antes del aggregate, (b) avg emite el cast
+    // `::float8` que el helper espera, (c) el tipo Future<Result<Float>>
+    // tipa con `let a: Float = ...`.
+    let (stdout, code) = build_and_run(
+        "orm_avg_chain_con_where_compila_a_binario",
+        "@table(\"sales\") type Sale {\n  \
+             @primary id: Int = 0\n  \
+             amount: Float\n  \
+             region: Str\n\
+         }\n\
+         async fn run() -> Result<Float> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let a = Sale.where(fn(s) => s.region == \"PAT\").avg(fn(s) => s.amount, conn).await?\n  \
+             return Ok(a)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_min_y_max_combinados_compilan_a_binario() {
+    // Dos aggregates en el mismo programa — valida que el helper
+    // `aggregate_f64` se reusa entre llamadas con func distinta
+    // (MIN/MAX) y el preludio del QB se emite UNA sola vez.
+    let (stdout, code) = build_and_run(
+        "orm_min_y_max_combinados_compilan_a_binario",
+        "@table(\"sales\") type Sale {\n  \
+             @primary id: Int = 0\n  \
+             amount: Float\n\
+         }\n\
+         async fn run() -> Result<Float> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _mn = Sale.min(fn(s) => s.amount, conn).await?\n  \
+             let mx = Sale.max(fn(s) => s.amount, conn).await?\n  \
+             return Ok(mx)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
