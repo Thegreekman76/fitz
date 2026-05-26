@@ -5360,6 +5360,69 @@ async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
     conn.is_closed().await
 }
 
+// --- 10.b.3: trait `__FromFitzDbRow` para deserialización per-type ---
+//
+// El codegen ORM emite `impl __FromFitzDbRow for <Name>Data` por cada
+// `type Foo` con `@table`. El impl lee cada field del row por nombre
+// SQL (respetando `@column(name=...)`) y coerciona el `__FitzPgValue`
+// al tipo Rust concreto del field. Skipea fields virtuales
+// (`@has_one`/`@has_many`) — esos se navegan con métodos en 10.b.7.
+
+trait __FromFitzDbRow: Sized {
+    fn from_fitz_db_row(row: &__FitzDbRow) -> Result<Self, String>;
+}
+
+/// Helpers de coerción `__FitzPgValue` → tipo Rust concreto, usados
+/// por cada `impl __FromFitzDbRow for <Name>Data` emitido. Manejo de
+/// `NULL` queda a cargo del impl per-type (para `Option<T>` lo trata
+/// como `None`; para `T` non-nullable, error claro).
+fn __fitz_pg_to_i64(v: &__FitzPgValue, col: &str) -> Result<i64, String> {
+    match v {
+        __FitzPgValue::Int(n) => Ok(*n),
+        __FitzPgValue::Text(s) => s.parse::<i64>().map_err(|_| {
+            format!(\"columna `{}`: texto `{}` no parsea a Int\", col, s)
+        }),
+        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Int\", col, other)),
+    }
+}
+
+fn __fitz_pg_to_f64(v: &__FitzPgValue, col: &str) -> Result<f64, String> {
+    match v {
+        __FitzPgValue::Float(x) => Ok(*x),
+        __FitzPgValue::Int(n) => Ok(*n as f64),
+        __FitzPgValue::Text(s) => s.parse::<f64>().map_err(|_| {
+            format!(\"columna `{}`: texto `{}` no parsea a Float\", col, s)
+        }),
+        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Float\", col, other)),
+    }
+}
+
+fn __fitz_pg_to_string(v: &__FitzPgValue, col: &str) -> Result<String, String> {
+    match v {
+        __FitzPgValue::Text(s) => Ok(s.clone()),
+        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Str\", col, other)),
+    }
+}
+
+fn __fitz_pg_to_bool(v: &__FitzPgValue, col: &str) -> Result<bool, String> {
+    match v {
+        __FitzPgValue::Bool(b) => Ok(*b),
+        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Bool\", col, other)),
+    }
+}
+
+fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
+    match v {
+        __FitzPgValue::Bytes(b) => Ok(b.clone()),
+        __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
+        other => Err(format!(\"columna `{}`: PgValue {:?} no coerce a Bytes\", col, other)),
+    }
+}
+
 ",
         );
     }
@@ -6376,6 +6439,88 @@ async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
         if self.uses_python && matches!(self.mode, GenMode::Main) {
             self.gen_python_helpers_for_type(name, &sig)?;
         }
+        // Fase 10.b.3 — `impl __FromFitzDbRow for FooData` cuando el
+        // type lleva `@table`. Solo en mode Main (el preludio del
+        // trait vive ahí). Fields virtuales (`@has_one`/`@has_many`)
+        // se inicializan con sentinels (List vacía / Option None / id
+        // 0 según corresponde) — se hidratan en 10.b.7 con navigation
+        // methods.
+        if self.uses_db && matches!(self.mode, GenMode::Main) {
+            self.gen_from_fitz_db_row_for_type(name, &sig)?;
+        }
+        Ok(())
+    }
+
+    /// Fase 10.b.3 — emite `impl __FromFitzDbRow for <Name>Data` para
+    /// un type con `@table`. Lee cada field non-virtual del row por
+    /// nombre SQL (respetando `@column(name=...)`) y coerciona al
+    /// tipo Rust concreto del field. Si el type NO tiene `@table`
+    /// metadata en el env, no emite nada (el caller ya filtró por
+    /// `uses_db` pero podría haber types sin `@table` en programas
+    /// mixtos).
+    fn gen_from_fitz_db_row_for_type(
+        &mut self,
+        name: &str,
+        sig: &TypeSig,
+    ) -> Result<(), FitzError> {
+        let id = match self.env.lookup(name) {
+            Some(id) => id,
+            None => return Ok(()),
+        };
+        let meta = match self.env.table_metadata(id) {
+            Some(m) => m.clone(),
+            None => return Ok(()),
+        };
+        let data_name = format!("{}Data", name);
+        writeln!(
+            &mut self.output,
+            "impl __FromFitzDbRow for {} {{",
+            data_name
+        )
+        .unwrap();
+        self.emit(
+            "    fn from_fitz_db_row(__row: &__FitzDbRow) -> Result<Self, String> {\n",
+        );
+        // Por cada field non-virtual, generar `let <name>: T = ...;`.
+        // Para virtuales, sentinel: `List<T>` → vec![], otros → default
+        // del tipo (Option None, default Int=0, etc.).
+        for f in &sig.fields {
+            if meta.is_virtual_field(&f.name) {
+                let sentinel = orm_virtual_field_sentinel(&f.type_, self.env)?;
+                writeln!(
+                    &mut self.output,
+                    "        let {field}: {ty} = {init};",
+                    field = f.name,
+                    ty = rust_type_for(&f.type_, self.env)?,
+                    init = sentinel,
+                )
+                .unwrap();
+                continue;
+            }
+            let sql_col = meta
+                .columns
+                .get(&f.name)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(f.name.as_str())
+                .to_string();
+            let col_lit = rust_str_literal(&sql_col);
+            let coerce_block = orm_field_coerce_block(&f.type_, &col_lit, self.env, f.name.as_str())?;
+            writeln!(
+                &mut self.output,
+                "        let {field}: {ty} = {{\n            let __v = __row.get({col_lit}).ok_or_else(|| format!(\"columna `{{}}` (field `{field}`) no está en el resultset\", {col_lit}))?;\n            {coerce}\n        }};",
+                field = f.name,
+                ty = rust_type_for(&f.type_, self.env)?,
+                col_lit = col_lit,
+                coerce = coerce_block,
+            )
+            .unwrap();
+        }
+        // Construir el struct literal con los names.
+        self.emit("        Ok(Self {\n");
+        for f in &sig.fields {
+            writeln!(&mut self.output, "            {},", f.name).unwrap();
+        }
+        self.emit("        })\n    }\n}\n\n");
         Ok(())
     }
 
@@ -10381,6 +10526,282 @@ async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
         }
     }
 
+    // =========================================================
+    // Fase 10.b.3 — ORM read methods: `Type.all/first/count(db)`.
+    //
+    // Despachados desde `gen_method_call` cuando el receiver es un
+    // `Expr::Ident(name)` Y `name` resuelve a un nominal con
+    // `@table`. Devuelve `Ok(Some(...))` si el método matchea un
+    // ORM built-in, `Ok(None)` si NO matchea (el caller continúa
+    // con dispatch de métodos custom). Errores de aridad/tipos
+    // → `Err(...)` propagado.
+    //
+    // Métodos no soportados en 10.b.3 (where/insert/update/delete/
+    // order_by/limit/offset/sum/avg/etc.) → error de codegen
+    // específico citando el sub-paso futuro.
+    // =========================================================
+
+    fn gen_orm_type_method(
+        &mut self,
+        type_name: &str,
+        method: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<Option<(String, Type)>, FitzError> {
+        match method {
+            "all" => self.gen_orm_type_all(type_name, args, call_span).map(Some),
+            "first" => self
+                .gen_orm_type_first(type_name, args, call_span)
+                .map(Some),
+            "count" => self
+                .gen_orm_type_count(type_name, args, call_span)
+                .map(Some),
+            // Métodos del builder que aterrizan en sub-pasos
+            // posteriores. Error explícito con sub-paso target.
+            "where" => Err(self.err_at(
+                call_span,
+                format!(
+                    "codegen ORM (10.b.3): `{}.where(...)` llega en 10.b.5 (QueryBuilder chain)",
+                    type_name
+                ),
+            )),
+            "insert" => Err(self.err_at(
+                call_span,
+                format!(
+                    "codegen ORM (10.b.3): `{}.insert(...)` llega en 10.b.4 (write methods)",
+                    type_name
+                ),
+            )),
+            // No es ORM built-in — devolvemos None para que el caller
+            // siga con el dispatch de métodos custom.
+            _ => Ok(None),
+        }
+    }
+
+    /// Devuelve el `TableMetadata` clonado y la lista de fields (vía
+    /// `type_sigs`) para `type_name`. Asume que el caller ya validó
+    /// que el type existe + tiene `@table` (lo hace el dispatch en
+    /// `gen_method_call`).
+    fn orm_lookup_meta_and_fields(
+        &self,
+        type_name: &str,
+        call_span: crate::ast::Span,
+    ) -> Result<(crate::types::TableMetadata, Vec<TypeSigField>), FitzError> {
+        let id = self.env.lookup(type_name).ok_or_else(|| {
+            self.err_at(
+                call_span,
+                format!("type `{}` no registrado en el TypeEnv", type_name),
+            )
+        })?;
+        let meta = self
+            .env
+            .table_metadata(id)
+            .ok_or_else(|| {
+                self.err_at(
+                    call_span,
+                    format!("type `{}` no tiene `@table` metadata", type_name),
+                )
+            })?
+            .clone();
+        let sig = self.type_sigs.get(type_name).ok_or_else(|| {
+            self.err_at(
+                call_span,
+                format!("type `{}` no pre-registrado en codegen", type_name),
+            )
+        })?;
+        Ok((meta, sig.fields.clone()))
+    }
+
+    /// Construye el `SELECT col1, col2, ... FROM "tabla"` con quote
+    /// de cada col, respetando `@column(name=...)` y skipeando
+    /// fields virtuales (`@has_one`/`@has_many`). Paralelo a
+    /// `build_select_sql` del evaluator (sin WHERE/ORDER/LIMIT —
+    /// 10.b.3 cubre el caso sin filter).
+    fn orm_build_simple_select(
+        meta: &crate::types::TableMetadata,
+        fields: &[TypeSigField],
+    ) -> String {
+        let mut cols = String::new();
+        let mut first = true;
+        for f in fields {
+            if meta.is_virtual_field(&f.name) {
+                continue;
+            }
+            if !first {
+                cols.push_str(", ");
+            }
+            first = false;
+            let sql_col = meta
+                .columns
+                .get(&f.name)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(f.name.as_str());
+            cols.push('"');
+            cols.push_str(sql_col);
+            cols.push('"');
+        }
+        format!("SELECT {} FROM \"{}\"", cols, meta.sql_name)
+    }
+
+    /// `Type.all(db)` — emite SELECT cols + deserialización de cada
+    /// row a `Type` (alias de `Arc<Mutex<TypeData>>`). Retorna
+    /// `Future<Result<List<Type>, Str>>`.
+    fn gen_orm_type_all(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}.all(db)` espera 1 argumento (db: DbConn), recibió {}",
+                    type_name,
+                    args.len()
+                ),
+            ));
+        }
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let sql = Self::orm_build_simple_select(&meta, &fields);
+        let (db_code, _) = self.gen_expr(&args[0])?;
+        let data_name = format!("{}Data", type_name);
+        let row_ty = Type::Nominal(self.env.lookup(type_name).unwrap());
+        let ret_ty = Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::List(Box::new(row_ty))),
+            err: Box::new(Type::Str),
+        }));
+        // Bloque async que: ejecuta query, itera rows, deserializa
+        // cada uno a `<Type>Data` con `__FromFitzDbRow`, wrappea en
+        // `Arc::new(Mutex::new(...))` (el alias `Type`), y retorna
+        // la lista en un `Arc<Mutex<Vec<_>>>` (representación de
+        // `List<Type>` Fitz en codegen).
+        let code = format!(
+            "(async {{\n    \
+             match __fitz_db_query(&{db}, {sql_lit}.to_string(), vec![]).await {{\n        \
+             Ok(__rows) => {{\n            \
+             let __rows_guard = __rows.lock().unwrap();\n            \
+             let mut __instances: Vec<{type_name}> = Vec::with_capacity(__rows_guard.len());\n            \
+             for __r in __rows_guard.iter() {{\n                \
+             match <{data} as __FromFitzDbRow>::from_fitz_db_row(__r) {{\n                    \
+             Ok(__d) => __instances.push(Arc::new(Mutex::new(__d))),\n                    \
+             Err(__e) => return Err(__e),\n                \
+             }}\n            \
+             }}\n            \
+             Ok(Arc::new(Mutex::new(__instances)))\n        \
+             }}\n        \
+             Err(__e) => Err(__e),\n    \
+             }}\n\
+             }})",
+            db = db_code,
+            sql_lit = rust_str_literal(&sql),
+            type_name = type_name,
+            data = data_name,
+        );
+        Ok((code, ret_ty))
+    }
+
+    /// `Type.first(db)` — SELECT cols ... LIMIT 1 + fallback
+    /// `Err("no rows")` si vacío. Retorna `Future<Result<Type, Str>>`.
+    fn gen_orm_type_first(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}.first(db)` espera 1 argumento (db: DbConn), recibió {}",
+                    type_name,
+                    args.len()
+                ),
+            ));
+        }
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let base = Self::orm_build_simple_select(&meta, &fields);
+        let sql = format!("{} LIMIT 1", base);
+        let (db_code, _) = self.gen_expr(&args[0])?;
+        let data_name = format!("{}Data", type_name);
+        let row_ty = Type::Nominal(self.env.lookup(type_name).unwrap());
+        let ret_ty = Type::Future(Box::new(Type::Result {
+            ok: Box::new(row_ty),
+            err: Box::new(Type::Str),
+        }));
+        let code = format!(
+            "(async {{\n    \
+             match __fitz_db_query(&{db}, {sql_lit}.to_string(), vec![]).await {{\n        \
+             Ok(__rows) => {{\n            \
+             let __rows_guard = __rows.lock().unwrap();\n            \
+             match __rows_guard.first() {{\n                \
+             Some(__r) => match <{data} as __FromFitzDbRow>::from_fitz_db_row(__r) {{\n                    \
+             Ok(__d) => Ok(Arc::new(Mutex::new(__d))),\n                    \
+             Err(__e) => Err(__e),\n                \
+             }},\n                \
+             None => Err(\"no rows\".to_string()),\n            \
+             }}\n        \
+             }}\n        \
+             Err(__e) => Err(__e),\n    \
+             }}\n\
+             }})",
+            db = db_code,
+            sql_lit = rust_str_literal(&sql),
+            data = data_name,
+        );
+        Ok((code, ret_ty))
+    }
+
+    /// `Type.count(db)` — `SELECT COUNT(*) FROM "tabla"` + parse del
+    /// scalar Int. Retorna `Future<Result<Int, Str>>`.
+    fn gen_orm_type_count(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}.count(db)` espera 1 argumento (db: DbConn), recibió {}",
+                    type_name,
+                    args.len()
+                ),
+            ));
+        }
+        let (meta, _fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let sql = format!("SELECT COUNT(*) FROM \"{}\"", meta.sql_name);
+        let (db_code, _) = self.gen_expr(&args[0])?;
+        let ret_ty = Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Str),
+        }));
+        // `COUNT(*)` viene en la primera columna del primer row. La
+        // columna se llama "count" en Postgres, pero usamos `get_at(0)`
+        // para ser robustos al alias.
+        let code = format!(
+            "(async {{\n    \
+             match __fitz_db_query(&{db}, {sql_lit}.to_string(), vec![]).await {{\n        \
+             Ok(__rows) => {{\n            \
+             let __rows_guard = __rows.lock().unwrap();\n            \
+             match __rows_guard.first() {{\n                \
+             Some(__r) => match __r.get_at(0) {{\n                    \
+             Some(__v) => __fitz_pg_to_i64(__v, \"count\"),\n                    \
+             None => Err(\"COUNT(*) sin columna\".to_string()),\n                \
+             }},\n                \
+             None => Err(\"COUNT(*) sin row\".to_string()),\n            \
+             }}\n        \
+             }}\n        \
+             Err(__e) => Err(__e),\n    \
+             }}\n\
+             }})",
+            db = db_code,
+            sql_lit = rust_str_literal(&sql),
+        );
+        Ok((code, ret_ty))
+    }
+
     fn gen_method_call(
         &mut self,
         object: &Expr,
@@ -10460,6 +10881,26 @@ async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
                             method,
                         )));
                     }
+                }
+            }
+        }
+        // Fase 10.b.3 — dispatch ORM sobre `Type.method(args)` cuando
+        // `Type` tiene metadata `@table` en el env. Despachamos all/
+        // first/count/where/insert acá ANTES del dispatch general de
+        // métodos estáticos del usuario para que `User.all(db)` no
+        // termine en "variable desconocida en codegen: User" (el caller
+        // tampoco lo busca como ident porque atajamos acá).
+        if let Expr::Ident(name, _) = object {
+            if let Some(id) = self.env.lookup(name) {
+                if self.env.table_metadata(id).is_some() {
+                    if let Some(emitted) =
+                        self.gen_orm_type_method(name, method, args, call_span)?
+                    {
+                        return Ok(emitted);
+                    }
+                    // Si el método no es ORM-built-in, caemos al dispatch
+                    // de métodos custom estáticos abajo (el user puede
+                    // haber declarado `fn helper(...)` sobre el type).
                 }
             }
         }
@@ -19435,6 +19876,88 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
     }
 }
 
+/// Fase 10.b.3 — bloque Rust que coerciona `__v: &__FitzPgValue` al
+/// tipo Rust concreto del field, para usar adentro del
+/// `impl __FromFitzDbRow`. `col_lit` ya viene quoted (`"author_id"`).
+/// `field_name` es el nombre Fitz para mensajes de error.
+///
+/// Tipos cubiertos en 10.b.3:
+///   - Int/Float/Str/Bool/Bytes → helpers __fitz_pg_to_*.
+///   - Nullable<T> → Option<T> con None para PgValue::Null.
+///   - List<T>/Map<K,V>/Nominal → error de codegen citando el sub-paso
+///     futuro (10.b.7 nominal nav, 10.b.8 JSONB+arrays).
+fn orm_field_coerce_block(
+    t: &Type,
+    col_lit: &str,
+    env: &TypeEnv,
+    field_name: &str,
+) -> Result<String, FitzError> {
+    match t {
+        Type::Int => Ok(format!("__fitz_pg_to_i64(__v, {})?", col_lit)),
+        Type::Float => Ok(format!("__fitz_pg_to_f64(__v, {})?", col_lit)),
+        Type::Str => Ok(format!("__fitz_pg_to_string(__v, {})?", col_lit)),
+        Type::Bool => Ok(format!("__fitz_pg_to_bool(__v, {})?", col_lit)),
+        Type::Bytes => Ok(format!("__fitz_pg_to_bytes(__v, {})?", col_lit)),
+        Type::Nullable(inner) => {
+            let inner_block = orm_field_coerce_block(inner, col_lit, env, field_name)?;
+            Ok(format!(
+                "if matches!(__v, __FitzPgValue::Null) {{ None }} else {{ Some({}) }}",
+                inner_block
+            ))
+        }
+        Type::List(_) | Type::Map(_, _) => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.3): field `{}` con tipo `{}` no soportado todavía — arrays/JSONB llegan en 10.b.8",
+                field_name,
+                type_name(t)
+            ),
+        )),
+        Type::Nominal(_) => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.3): field `{}` con tipo nominal no soportado todavía — relations llegan en 10.b.7",
+                field_name
+            ),
+        )),
+        other => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.3): field `{}` con tipo `{}` no es deserializable desde un row",
+                field_name,
+                type_name(other)
+            ),
+        )),
+    }
+}
+
+/// Fase 10.b.3 — valor sentinel para fields virtuales (`@has_one` /
+/// `@has_many`) en el `impl __FromFitzDbRow`. El user los hidrata
+/// con navigation methods en 10.b.7. Para `List<T>` emitimos un
+/// `Arc<Mutex<vec![])>` vacío; para `Option<T>` (`@has_one`), `None`.
+fn orm_virtual_field_sentinel(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
+    match t {
+        Type::List(_) => Ok("Arc::new(Mutex::new(vec![]))".to_string()),
+        Type::Nullable(_) => Ok("None".to_string()),
+        other => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.3): field virtual con tipo `{}` no soportado (esperado: `List<T>` o `T?`); rust_type_for={}",
+                type_name(other),
+                rust_type_for(other, env).unwrap_or_else(|_| "??".into()),
+            ),
+        )),
+    }
+}
+
 fn type_name(t: &Type) -> &'static str {
     match t {
         Type::Int => "Int",
@@ -25972,5 +26495,158 @@ mod tests {
         let toml = cargo_toml_for("foo", false, false, false, false, false, false, false);
         assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
         assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
+    }
+
+    // ---- Fase 10.b.3 — ORM read methods en codegen ----
+
+    #[test]
+    fn codegen_orm_type_all_emite_select_con_cols_quoted() {
+        // `User.all(db)` emite `SELECT "id", "name", "age" FROM "users"`,
+        // wraps en `__fitz_db_query`, deserializa cada row a `UserData`
+        // con el trait `__FromFitzDbRow`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _users = User.all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("SELECT \\\"id\\\", \\\"name\\\", \\\"age\\\" FROM \\\"users\\\""),
+            "esperaba el SELECT con cols quoted, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__fitz_db_query"),
+            "esperaba __fitz_db_query en el output",
+        );
+        assert!(
+            rust.contains("<UserData as __FromFitzDbRow>::from_fitz_db_row"),
+            "esperaba deserialización a UserData",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_type_first_emite_limit_1_y_no_rows_fallback() {
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let r = User.first(db).await\n  \
+                       match r {\n    \
+                           Ok(u) => print(u.name),\n    \
+                           Err(_) => print(\"none\"),\n  \
+                       }\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("LIMIT 1"),
+            "esperaba LIMIT 1 para first(), fue: {rust}",
+        );
+        assert!(
+            rust.contains("\"no rows\".to_string()"),
+            "esperaba fallback Err(\"no rows\") cuando el resultset es vacío",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_type_count_emite_select_count_star() {
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _n = Item.count(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("SELECT COUNT(*) FROM \\\"items\\\""),
+            "esperaba SELECT COUNT(*) FROM \"items\", fue: {rust}",
+        );
+        assert!(
+            rust.contains("__fitz_pg_to_i64"),
+            "esperaba __fitz_pg_to_i64 para parsear el scalar count",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_respeta_column_name_override() {
+        // `@column(name="sql_name")` debe respetarse en el SELECT
+        // y en el deserializador (lookup por sql_name, no por field).
+        let src = "@table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       title: Str\n  \
+                       @column(name=\"author_id\") author: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _posts = Post.all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\\\"author_id\\\""),
+            "esperaba `\"author_id\"` como nombre SQL en el SELECT, fue: {rust}",
+        );
+        // El deserializer también consulta el row con el sql_name override
+        assert!(
+            rust.contains("__row.get(\"author_id\")"),
+            "esperaba lookup por sql_name override en __FromFitzDbRow",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_emite_impl_from_fitz_db_row_per_tipo() {
+        // El `impl __FromFitzDbRow for FooData` se emite por cada
+        // type con `@table` (y no se emite para types sin `@table`).
+        let src = "@table(\"a\") type Tagged {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   type Untagged { x: Int }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _r = Tagged.all(db).await?\n  \
+                       let _u = Untagged { x: 1 }\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("impl __FromFitzDbRow for TaggedData"),
+            "esperaba `impl __FromFitzDbRow for TaggedData`, fue: {rust}",
+        );
+        assert!(
+            !rust.contains("impl __FromFitzDbRow for UntaggedData"),
+            "NO esperaba impl __FromFitzDbRow for UntaggedData (sin @table)",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_where_aborta_citando_sub_paso_futuro() {
+        // En 10.b.3 el `.where(...)` aún no está wireado — error claro
+        // que cita 10.b.5 como sub-paso futuro.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.where(fn(u) => u.age > 18).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("10.b.5"),
+            "esperaba mención de 10.b.5 en el error, fue: {}",
+            err.message
+        );
     }
 }
