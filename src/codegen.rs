@@ -10749,6 +10749,149 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 let op = if method == "ilike" { "ILIKE" } else { "LIKE" };
                 Ok(format!("\"{}\" {} {}", sql_col, op, pat))
             }
+            // Fase 10.b.9.c — operadores sobre arrays Postgres.
+            // `u.tags.has(value)` → SQL `$1 = ANY("tags")`. El value
+            // debe tipar al elem del array (Int/Float/Str/Bool). El
+            // field debe ser `List<scalar>`.
+            "has" => {
+                let elem_info = fields
+                    .iter()
+                    .find(|f| f.name == col_name)
+                    .and_then(|f| orm_list_scalar_info_from_type_expr(&f.type_));
+                let (_, _, pg_variant) = elem_info.ok_or_else(|| {
+                    self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.has(value)` requiere que `{}` sea `List<Int|Float|Str|Bool>`, no lo es",
+                            param_name, col_name, col_name
+                        ),
+                    )
+                })?;
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.has(value)` espera 1 arg (value), recibió {}",
+                            param_name,
+                            col_name,
+                            args.len()
+                        ),
+                    ));
+                }
+                // Acepta literal del tipo escalar correspondiente. Para
+                // simplicidad MVP, validamos por kind de literal Fitz.
+                let (lit_code, expected_lit_ok) = match (&args[0], pg_variant) {
+                    (Expr::Int(n, _), "Int") => {
+                        (format!("__FitzPgValue::Int({}i64)", n), true)
+                    }
+                    (Expr::Float(x, _), "Float") => {
+                        (format!("__FitzPgValue::Float({}f64)", x), true)
+                    }
+                    (Expr::Str(s, _), "Text") => (
+                        format!(
+                            "__FitzPgValue::Text({}.to_string())",
+                            rust_str_literal(s)
+                        ),
+                        true,
+                    ),
+                    (Expr::Bool(b, _), "Bool") => {
+                        (format!("__FitzPgValue::Bool({})", b), true)
+                    }
+                    _ => (String::new(), false),
+                };
+                if !expected_lit_ok {
+                    return Err(self.err_at(
+                        args[0].span(),
+                        format!(
+                            "`{}.{}.has(value)` MVP: el value debe ser literal del tipo del array (esperado: {})",
+                            param_name, col_name, pg_variant
+                        ),
+                    ));
+                }
+                bindings.push(lit_code);
+                Ok(format!("${} = ANY(\"{}\")", bindings.len(), sql_col))
+            }
+            // `u.tags.contains_all([1, 2])` → SQL `"tags" @> $1::int8[]`.
+            // `u.tags.contained_in([1, 2, 3])` → SQL `"tags" <@ $1::int8[]`.
+            // Ambos toman List literal del mismo tipo escalar que el
+            // field. Se construye `PgValue::Array { elem_oid, values }`
+            // con cada item wrapped.
+            "contains_all" | "contained_in" => {
+                let field_sig = fields.iter().find(|f| f.name == col_name).ok_or_else(|| {
+                    self.err_at(
+                        callee_span,
+                        format!("field `{}` no existe en el type", col_name),
+                    )
+                })?;
+                let (oid_const, sql_cast, pg_variant) =
+                    orm_list_scalar_info_from_type_expr(&field_sig.type_).ok_or_else(|| {
+                        self.err_at(
+                            callee_span,
+                            format!(
+                                "`{}.{}.{}([...])` requiere que `{}` sea `List<Int|Float|Str|Bool>`",
+                                param_name, col_name, method, col_name
+                            ),
+                        )
+                    })?;
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.{}([...])` espera 1 arg (List literal del mismo tipo del array)",
+                            param_name, col_name, method
+                        ),
+                    ));
+                }
+                let items = match &args[0] {
+                    Expr::List(items, _) => items,
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            format!(
+                                "`.{}([...])` MVP: el arg debe ser List literal `[a, b, c]`",
+                                method
+                            ),
+                        ));
+                    }
+                };
+                // Build los items como Vec<__FitzPgValue> y envuelve
+                // en PgValue::Array con el OID del field.
+                let mut item_codes: Vec<String> = Vec::with_capacity(items.len());
+                for it in items {
+                    let item_code = match (it, pg_variant) {
+                        (Expr::Int(n, _), "Int") => format!("__FitzPgValue::Int({}i64)", n),
+                        (Expr::Float(x, _), "Float") => format!("__FitzPgValue::Float({}f64)", x),
+                        (Expr::Str(s, _), "Text") => format!(
+                            "__FitzPgValue::Text({}.to_string())",
+                            rust_str_literal(s)
+                        ),
+                        (Expr::Bool(b, _), "Bool") => format!("__FitzPgValue::Bool({})", b),
+                        _ => {
+                            return Err(self.err_at(
+                                it.span(),
+                                format!(
+                                    "`.{}([...])` MVP: cada item debe ser literal del tipo {} (igual al elem del array)",
+                                    method, pg_variant
+                                ),
+                            ));
+                        }
+                    };
+                    item_codes.push(item_code);
+                }
+                bindings.push(format!(
+                    "__FitzPgValue::Array {{ elem_oid: {oid}, values: vec![{items}] }}",
+                    oid = oid_const,
+                    items = item_codes.join(", ")
+                ));
+                let op = if method == "contains_all" { "@>" } else { "<@" };
+                Ok(format!(
+                    "\"{}\" {} ${}{}",
+                    sql_col,
+                    op,
+                    bindings.len(),
+                    sql_cast
+                ))
+            }
             // Fase 10.b.9.b — `u.field.between(low, high)` → SQL
             // `"field" BETWEEN $1 AND $2`. Equivalente a
             // `field >= low AND field <= high` (inclusive ambos
@@ -10812,7 +10955,7 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 callee_span,
                 format!(
                     "método `.{}(...)` no soportado sobre fields en `.where(...)`. \
-                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between.",
+                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in.",
                     other
                 ),
             )),
@@ -12075,14 +12218,18 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
         let (param_name, body) = self.extract_closure_body(&args[0], "where")?;
         // Convertir los TypeSigField a `crate::ast::Field` para el
         // translator (ya lo espera así por paridad con el evaluator).
-        // Solo necesita el `.name` — los demás campos no se inspeccionan
-        // por el translator. Usamos placeholders: `type_` con un Named
-        // dummy, `default` None, `decorators` vacío.
+        // Fase 10.b.9.c — reconstruimos el `TypeExpr` real desde el
+        // `Type` resuelto del TypeSigField para que el translator pueda
+        // detectar `List<Int>`/`List<Float>`/`List<Str>`/`List<Bool>` y
+        // emitir `has`/`contains_all`/`contained_in` correctos. Pre-
+        // 10.b.9.c bastaba con `TypeExpr::Named("Any")` placeholder
+        // porque ningún branch del translator inspeccionaba el tipo
+        // del field; los nuevos ops sobre arrays lo necesitan.
         let ast_fields: Vec<crate::ast::Field> = fields
             .iter()
             .map(|f| crate::ast::Field {
                 name: f.name.clone(),
-                type_: crate::ast::TypeExpr::Named("Any".to_string()),
+                type_: type_to_type_expr_for_translator(&f.type_),
                 default: None,
                 decorators: Vec::new(),
             })
@@ -21646,6 +21793,73 @@ fn orm_field_is_jsonb(t: &Type) -> bool {
     }
 }
 
+/// Fase 10.b.9.c — convierte un `Type` resuelto a un `TypeExpr` sintáctico
+/// suficiente para que el translator de `.where(...)` detecte arrays.
+/// No es una conversión completa — solo cubre los shapes que el
+/// translator inspecciona (List<scalar> + Nullable + primitivos +
+/// Named para nominales/desconocidos). Otros tipos caen a
+/// `Named("Any")` (escape gradual — equivalente al placeholder
+/// pre-10.b.9.c).
+fn type_to_type_expr_for_translator(t: &Type) -> crate::ast::TypeExpr {
+    use crate::ast::TypeExpr;
+    match t {
+        Type::Int => TypeExpr::Named("Int".to_string()),
+        Type::Float => TypeExpr::Named("Float".to_string()),
+        Type::Str => TypeExpr::Named("Str".to_string()),
+        Type::Bool => TypeExpr::Named("Bool".to_string()),
+        Type::Null => TypeExpr::Named("Null".to_string()),
+        Type::Bytes => TypeExpr::Named("Bytes".to_string()),
+        Type::List(inner) => TypeExpr::Generic {
+            name: "List".to_string(),
+            args: vec![type_to_type_expr_for_translator(inner)],
+        },
+        Type::Map(k, v) => TypeExpr::Generic {
+            name: "Map".to_string(),
+            args: vec![
+                type_to_type_expr_for_translator(k),
+                type_to_type_expr_for_translator(v),
+            ],
+        },
+        Type::Nullable(inner) => {
+            TypeExpr::Nullable(Box::new(type_to_type_expr_for_translator(inner)))
+        }
+        // Nominal/Any/PyAny/etc. — el translator no los inspecciona;
+        // dejarlos como Named("Any") preserva el comportamiento
+        // legacy (escape gradual).
+        _ => TypeExpr::Named("Any".to_string()),
+    }
+}
+
+/// Fase 10.b.9.c — versión sobre `TypeExpr` (sintaxis) de
+/// `orm_list_scalar_info` (sobre `Type` resuelto). El translator de
+/// `.where(...)` trabaja con AST `Field` que tiene `TypeExpr`, no
+/// `Type` (que requeriría un pass de resolución extra). Devuelve
+/// `(oid_const, sql_cast_suffix, pg_variant_for_scalar)` cuando el
+/// `TypeExpr` representa `List<Int|Float|Str|Bool>` (o Nullable de).
+/// Los 3 datos los necesitan los emitters de `has`/`contains_all`/
+/// `contained_in` para generar el cast SQL apropiado y el wrapping
+/// PgValue del valor escalar (para `has`).
+fn orm_list_scalar_info_from_type_expr(
+    t: &crate::ast::TypeExpr,
+) -> Option<(&'static str, &'static str, &'static str)> {
+    match t {
+        crate::ast::TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => {
+            match &args[0] {
+                crate::ast::TypeExpr::Named(elem) => match elem.as_str() {
+                    "Int" => Some(("__fitz_db_runtime::oid::INT8", "::int8[]", "Int")),
+                    "Float" => Some(("__fitz_db_runtime::oid::FLOAT8", "::float8[]", "Float")),
+                    "Str" => Some(("__fitz_db_runtime::oid::TEXT", "::text[]", "Text")),
+                    "Bool" => Some(("__fitz_db_runtime::oid::BOOL", "::bool[]", "Bool")),
+                    _ => None,
+                },
+                _ => None,
+            }
+        }
+        crate::ast::TypeExpr::Nullable(inner) => orm_list_scalar_info_from_type_expr(inner),
+        _ => None,
+    }
+}
+
 /// Fase 10.b.3 — valor sentinel para fields virtuales (`@has_one` /
 /// `@has_many`) en el `impl __FromFitzDbRow`. El user los hidrata
 /// con navigation methods en 10.b.7. Para `List<T>` emitimos un
@@ -29752,6 +29966,114 @@ mod tests {
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
             "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.9.c — operadores sobre arrays Postgres ----
+
+    fn where_sql_fragment_with_array(closure_body: &str) -> String {
+        // Variante del helper que declara un field `tags: List<Int>`.
+        let src = format!(
+            "@table(\"items\") type Item {{\n  \
+                 @primary id: Int = 0\n  \
+                 tags: List<Int>\n  \
+                 labels: List<Str>\n\
+             }}\n\
+             async fn boot() -> Result<Null> {{\n  \
+                 let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                 let _u = Item.where(fn(i) => {body}).all(db).await?\n  \
+                 return Ok(null)\n\
+             }}\n",
+            body = closure_body
+        );
+        gen(&src).expect("codegen OK")
+    }
+
+    #[test]
+    fn codegen_where_has_int_emite_any_postgres() {
+        // `i.tags.has(42)` → `$1 = ANY("tags")`.
+        let r = where_sql_fragment_with_array("i.tags.has(42)");
+        assert!(
+            r.contains("$1 = ANY(\\\"tags\\\")"),
+            "esperaba `$1 = ANY(\"tags\")`, fue: {r}",
+        );
+        assert!(
+            r.contains("__FitzPgValue::Int(42i64)"),
+            "esperaba binding Int(42), fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_has_str_emite_any_text() {
+        let r = where_sql_fragment_with_array("i.labels.has(\"rust\")");
+        assert!(
+            r.contains("$1 = ANY(\\\"labels\\\")"),
+            "esperaba ANY sobre labels, fue: {r}",
+        );
+        assert!(
+            r.contains("__FitzPgValue::Text"),
+            "esperaba binding Text, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_has_sobre_field_no_array_aborta() {
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = Item.where(fn(i) => i.name.has(\"foo\")).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por field no-array");
+        assert!(
+            err.message.contains("List<Int|Float|Str|Bool>"),
+            "esperaba mención del tipo requerido, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_where_contains_all_emite_op_y_cast_int8_array() {
+        // `i.tags.contains_all([1, 2])` → `"tags" @> $1::int8[]`.
+        let r = where_sql_fragment_with_array("i.tags.contains_all([1, 2])");
+        assert!(
+            r.contains("\\\"tags\\\" @> $1::int8[]"),
+            "esperaba `\"tags\" @> $1::int8[]`, fue: {r}",
+        );
+        assert!(
+            r.contains("__FitzPgValue::Array") && r.contains("__fitz_db_runtime::oid::INT8"),
+            "esperaba binding Array con elem_oid INT8, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_contained_in_emite_op_y_cast() {
+        let r = where_sql_fragment_with_array("i.tags.contained_in([1, 2, 3])");
+        assert!(
+            r.contains("\\\"tags\\\" <@ $1::int8[]"),
+            "esperaba `\"tags\" <@ $1::int8[]`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_contains_all_arg_no_lista_aborta() {
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       tags: List<Int>\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = Item.where(fn(i) => i.tags.contains_all(42)).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por arg no-List");
+        assert!(
+            err.message.contains("List literal"),
+            "esperaba mención de List literal, fue: {}",
+            err.message
         );
     }
 

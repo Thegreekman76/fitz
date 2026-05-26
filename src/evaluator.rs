@@ -12222,6 +12222,89 @@ fn translate_method_call_to_sql(
             let op = if method == "ilike" { "ILIKE" } else { "LIKE" };
             Ok(format!("\"{}\" {} {}", sql_col, op, pat))
         }
+        // Fase 10.b.9.c — operadores sobre arrays Postgres. Paralelo
+        // al codegen (~10785). `has(value)` emite `$N = ANY("col")`;
+        // `contains_all([...])` emite `"col" @> $N::<oid>[]`;
+        // `contained_in([...])` emite `"col" <@ $N::<oid>[]`.
+        "has" => {
+            let field = fields
+                .iter()
+                .find(|f| f.name == col_name)
+                .ok_or_else(|| format!("field `{col_name}` no existe en el type"))?;
+            let elem_oid = list_elem_pg_oid(&field.type_).ok_or_else(|| {
+                format!(
+                    "`{param_name}.{col_name}.has(value)` requiere que `{col_name}` sea `List<Int|Float|Str|Bool>`"
+                )
+            })?;
+            if args.len() != 1 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.has(value)` espera 1 arg, recibió {}",
+                    args.len()
+                ));
+            }
+            let pg = match (&args[0], elem_oid) {
+                (Expr::Int(n, _), crate::db::oid::INT8) => crate::db::PgValue::Int(*n),
+                (Expr::Float(x, _), crate::db::oid::FLOAT8) => crate::db::PgValue::Float(*x),
+                (Expr::Str(s, _), crate::db::oid::TEXT) => crate::db::PgValue::Text(s.clone()),
+                (Expr::Bool(b, _), crate::db::oid::BOOL) => crate::db::PgValue::Bool(*b),
+                _ => {
+                    return Err(format!(
+                        "`{param_name}.{col_name}.has(value)` MVP: el value debe ser literal del mismo tipo escalar del array"
+                    ));
+                }
+            };
+            args_acc.push(pg);
+            Ok(format!("${} = ANY(\"{}\")", args_acc.len(), sql_col))
+        }
+        "contains_all" | "contained_in" => {
+            let field = fields
+                .iter()
+                .find(|f| f.name == col_name)
+                .ok_or_else(|| format!("field `{col_name}` no existe en el type"))?;
+            let elem_oid = list_elem_pg_oid(&field.type_).ok_or_else(|| {
+                format!(
+                    "`{param_name}.{col_name}.{method}([...])` requiere que `{col_name}` sea `List<Int|Float|Str|Bool>`"
+                )
+            })?;
+            if args.len() != 1 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.{method}([...])` espera 1 arg (List literal)",
+                ));
+            }
+            let items = match &args[0] {
+                Expr::List(items, _) => items,
+                _ => {
+                    return Err(format!(
+                        "`.{method}([...])` MVP: el arg debe ser List literal"
+                    ));
+                }
+            };
+            let mut values: Vec<crate::db::PgValue> = Vec::with_capacity(items.len());
+            for it in items {
+                let pg = match (it, elem_oid) {
+                    (Expr::Int(n, _), crate::db::oid::INT8) => crate::db::PgValue::Int(*n),
+                    (Expr::Float(x, _), crate::db::oid::FLOAT8) => crate::db::PgValue::Float(*x),
+                    (Expr::Str(s, _), crate::db::oid::TEXT) => crate::db::PgValue::Text(s.clone()),
+                    (Expr::Bool(b, _), crate::db::oid::BOOL) => crate::db::PgValue::Bool(*b),
+                    _ => {
+                        return Err(format!(
+                            "`.{method}([...])` MVP: cada item debe ser literal del tipo escalar del array"
+                        ));
+                    }
+                };
+                values.push(pg);
+            }
+            args_acc.push(crate::db::PgValue::Array { elem_oid, values });
+            let cast = array_sql_cast_for(elem_oid).unwrap_or("");
+            let op = if method == "contains_all" { "@>" } else { "<@" };
+            Ok(format!(
+                "\"{}\" {} ${}{}",
+                sql_col,
+                op,
+                args_acc.len(),
+                cast
+            ))
+        }
         // Fase 10.b.9.b — `u.field.between(low, high)` → SQL
         // `"field" BETWEEN $1 AND $2`. Equivalente a
         // `field >= low AND field <= high` (inclusive ambos extremos).
@@ -12265,7 +12348,7 @@ fn translate_method_call_to_sql(
         }
         other => Err(format!(
             "método `.{other}(...)` no soportado sobre fields en `.where(...)`. \
-             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between."
+             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in."
         )),
     }
 }

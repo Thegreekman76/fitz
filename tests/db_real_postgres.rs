@@ -1409,6 +1409,128 @@ fn orm_where_between_mod_var_externa_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.9.c — Paridad fitz build sobre operadores de arrays
+// (has / contains_all / contained_in)
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_where_array_ops_paridad_codegen_e2e() {
+    use std::process::Command;
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w9c_codegen_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w9c_codegen_test (\
+                 id bigint PRIMARY KEY, \
+                 name text, \
+                 tags int8[])",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w9c_codegen_test VALUES \
+                 (1, 'alpha',   '{10,20,30}'), \
+                 (2, 'beta',    '{20,40,60}'), \
+                 (3, 'gamma',   '{10,30,50}'), \
+                 (4, 'delta',   '{40,50,60}')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w9c_codegen_test\") type Item {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             tags: List<Int>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let h = Item.where(fn(i) => i.tags.has(20)).all(db).await?\n  \
+             let ca = Item.where(fn(i) => i.tags.contains_all([10, 30])).all(db).await?\n  \
+             let ci = Item.where(fn(i) => i.tags.contained_in([40, 50, 60])).all(db).await?\n  \
+             return Ok(\"has={{len(h)}} contains_all={{len(ca)}} contained_in={{len(ci)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    let stem = "orm_where_array_ops_paridad_codegen";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, &src).expect("escribir .fitz");
+
+    let fitz_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "fitz.exe" } else { "fitz" });
+    let build = Command::new(&fitz_bin)
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+
+    // Cardinalidad esperada:
+    //   has(20)        : alpha={10,20,30}, beta={20,40,60} → 2
+    //   contains_all   : alpha (10+30), gamma (10+30) → 2
+    //   contained_in   : delta {40,50,60} ⊆ {40,50,60} → 1
+    assert!(
+        stdout.contains("has=2")
+            && stdout.contains("contains_all=2")
+            && stdout.contains("contained_in=1"),
+        "esperaba `has=2 contains_all=2 contained_in=1`, fue: {}",
+        stdout
+    );
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w9c_codegen_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.8 — Paridad fitz build sobre arrays + JSONB
 //
 // Programa con `tags: List<Int>` (array Postgres) y `meta: Map<Str,
