@@ -11970,7 +11970,11 @@ async fn orm_instance_navigate(
     //    HasOne / HasMany: target.<rel.fk_field> = this.<primary>
     //      (busca rows del target cuyo FK apunta a la PK de this)
     let (where_col_fitz, where_value) = match rel.kind {
-        crate::types::RelationKind::BelongsTo => {
+        // Deuda #2 (v0.10.5) — BelongsToCompanion comparte la lógica
+        // de BelongsTo (target.<primary> = this.<fk_field>): el FK
+        // sigue siendo el del sibling, y el target se busca por su
+        // PK matcheando el FK.
+        crate::types::RelationKind::BelongsTo | crate::types::RelationKind::BelongsToCompanion => {
             let primary_target = target_state.meta.primary_field.as_ref().ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -12063,7 +12067,9 @@ async fn orm_instance_navigate(
     // Path legacy: terminal directo según kind.
     let db_arg = args;
     match rel.kind {
-        crate::types::RelationKind::BelongsTo | crate::types::RelationKind::HasOne => {
+        crate::types::RelationKind::BelongsTo
+        | crate::types::RelationKind::HasOne
+        | crate::types::RelationKind::BelongsToCompanion => {
             orm_qb_first(state, db_arg, span).map_err(EvalSignal::Error)
         }
         crate::types::RelationKind::HasMany => {

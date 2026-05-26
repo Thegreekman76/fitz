@@ -11426,7 +11426,13 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             )
         })?;
         let (where_col_fitz, value_field_name) = match rel.kind {
-            crate::types::RelationKind::BelongsTo => {
+            crate::types::RelationKind::BelongsTo
+            | crate::types::RelationKind::BelongsToCompanion => {
+                // Deuda #2 (v0.10.5) — BelongsToCompanion comparte la
+                // semántica de navegación con BelongsTo: queremos
+                // recuperar el target via su PK matcheando el FK del
+                // parent. `rel.fk_field` apunta al FK column real en
+                // ambos casos (la companion reusa el FK del sibling).
                 let target_primary = target_meta.primary_field.clone().ok_or_else(|| {
                     self.err_at(
                         call_span,
@@ -12111,11 +12117,20 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 ),
             )
         })?;
-        if !matches!(rel.kind, crate::types::RelationKind::HasMany) {
+        // Deuda #2 (v0.10.5) — aceptar HasMany Y BelongsToCompanion.
+        // Otros kinds (BelongsTo FK directo, HasOne) quedan como deuda
+        // futura. BelongsTo "directo" (e.g. `.preload("user_id")` con
+        // el FK name) no tiene sentido porque la deserialización
+        // poblaría el field Int, no un target — el companion virtual
+        // es la forma correcta.
+        if !matches!(
+            rel.kind,
+            crate::types::RelationKind::HasMany | crate::types::RelationKind::BelongsToCompanion
+        ) {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.preload(\"{}\")` MVP: solo @has_many (recibido: {:?})",
+                    "`{}.preload(\"{}\")` MVP: solo @has_many o BelongsToCompanion (recibido: {:?}). Para BelongsTo eager, declará un sibling `field: Target?` adyacente al FK (e.g. `user: User?` junto a `@belongs_to(\"User\") user_id: Int`).",
                     type_name, name, rel.kind
                 ),
             ));
@@ -12272,11 +12287,16 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         ),
                     )
                 })?;
-                if !matches!(rel.kind, crate::types::RelationKind::HasMany) {
+                // Deuda #2 (v0.10.5) — aceptar HasMany Y BelongsToCompanion.
+                if !matches!(
+                    rel.kind,
+                    crate::types::RelationKind::HasMany
+                        | crate::types::RelationKind::BelongsToCompanion
+                ) {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.preload(\"{}\")` MVP: solo se soporta @has_many (recibido: {:?})",
+                            "`.preload(\"{}\")` MVP: solo @has_many o BelongsToCompanion (recibido: {:?})",
                             name, rel.kind
                         ),
                     ));
@@ -12899,6 +12919,20 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         let mut arms = String::new();
         let parent_pk = parent_meta.primary_field.clone().unwrap_or_default();
         for (rel_name, rel) in parent_meta.relations.iter() {
+            // Deuda #2 (v0.10.5) — incluir BelongsToCompanion además
+            // de HasMany. La companion se sirve con SQL inverso
+            // (target.<pk> IN (parent.<fk>) en lugar de target.<fk>
+            // IN (parent.<pk>)).
+            if matches!(rel.kind, crate::types::RelationKind::BelongsToCompanion) {
+                let arm = self.emit_belongs_to_companion_preload_arm(
+                    parent_meta,
+                    rel_name,
+                    rel,
+                    &parent_pk,
+                )?;
+                arms.push_str(&arm);
+                continue;
+            }
             if !matches!(rel.kind, crate::types::RelationKind::HasMany) {
                 continue;
             }
@@ -12977,6 +13011,92 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             }} ",
             arms = arms,
             parent = parent_type_name,
+        ))
+    }
+
+    /// Deuda #2 (v0.10.5) — branch del dispatch `.preload(name)` para
+    /// `BelongsToCompanion`. Diferencia del path HasMany:
+    ///   * HasMany: cargar children `WHERE child.<fk_field> IN
+    ///     (parent.<pk>...)`, agrupar por FK, asignar
+    ///     `parent.<virtual_field> = Vec<children>`.
+    ///   * BelongsToCompanion (esto): cargar targets `WHERE
+    ///     target.<pk> IN (parent.<fk_field>...)` (DISTINCT en SQL
+    ///     no es necesario porque `IN ANY` lo absorbe), buscar el
+    ///     ÚNICO target whose pk matches parent.<fk>, asignar
+    ///     `parent.<companion_field> = Some(target)`.
+    fn emit_belongs_to_companion_preload_arm(
+        &mut self,
+        _parent_meta: &crate::types::TableMetadata,
+        companion_field: &str,
+        rel: &crate::types::RelationMetadata,
+        _parent_pk: &str,
+    ) -> Result<String, FitzError> {
+        let target_name = &rel.target_type;
+        let (target_meta, target_fields) =
+            self.orm_lookup_meta_and_fields(target_name, crate::ast::Span::ZERO)?;
+        let target_data = format!("{}Data", target_name);
+        let target_table = &target_meta.sql_name;
+        let cols = Self::orm_build_qb_cols(&target_meta, &target_fields);
+        // PK del target (la columna que matchea contra los FKs del
+        // parent). Resolver sql_name override.
+        let target_pk_fitz = target_meta.primary_field.clone().ok_or_else(|| {
+            self.err_at(
+                crate::ast::Span::ZERO,
+                format!(
+                    "preload BelongsTo: el type `{}` no declara `@primary`",
+                    target_name
+                ),
+            )
+        })?;
+        let target_pk_sql = target_meta
+            .columns
+            .get(&target_pk_fitz)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(target_pk_fitz.as_str())
+            .to_string();
+        let fk_fitz = &rel.fk_field;
+        Ok(format!(
+            "{name_lit} => {{ \
+                let __ids: Vec<__FitzPgValue> = {{ \
+                    let __guard = __rows.lock().unwrap(); \
+                    __guard.iter().map(|__p| {{ let __g = __p.lock().unwrap(); __FitzPgValue::Int(__g.{fk_fitz}) }}).collect() \
+                }}; \
+                if !__ids.is_empty() {{ \
+                    let __placeholders = (1..=__ids.len()).map(|__i| format!(\"${{}}\", __i)).collect::<Vec<_>>().join(\", \"); \
+                    let __sql = format!(\"SELECT {cols_lit} FROM \\\"{table_lit}\\\" WHERE \\\"{pk_lit}\\\" IN ({{}})\", __placeholders); \
+                    match __fitz_db_query(&__conn_pl, __sql, __ids).await {{ \
+                        Ok(__target_rows) => {{ \
+                            let __tg = __target_rows.lock().unwrap(); \
+                            let mut __targets: Vec<std::sync::Arc<std::sync::Mutex<{target_data}>>> = Vec::with_capacity(__tg.len()); \
+                            for __r in __tg.iter() {{ \
+                                match <{target_data} as __FromFitzDbRow>::from_fitz_db_row(__r) {{ \
+                                    Ok(__d) => __targets.push(std::sync::Arc::new(std::sync::Mutex::new(__d))), \
+                                    Err(__e) => return Err(__e), \
+                                }} \
+                            }} \
+                            drop(__tg); \
+                            let __pg = __rows.lock().unwrap(); \
+                            for __p in __pg.iter() {{ \
+                                let __fk = {{ let __g = __p.lock().unwrap(); __g.{fk_fitz} }}; \
+                                let __matched: Option<std::sync::Arc<std::sync::Mutex<{target_data}>>> = __targets.iter().find(|__t| {{ \
+                                    let __tg2 = __t.lock().unwrap(); __tg2.{pk_fitz} == __fk \
+                                }}).cloned(); \
+                                let mut __pg2 = __p.lock().unwrap(); \
+                                __pg2.{companion_field} = __matched; \
+                            }} \
+                        }} \
+                        Err(__e) => return Err(__e), \
+                    }} \
+                }} \
+            }}, ",
+            name_lit = rust_str_literal(companion_field),
+            cols_lit = cols.replace('"', "\\\""),
+            table_lit = target_table,
+            pk_lit = target_pk_sql,
+            target_data = target_data,
+            fk_fitz = fk_fitz,
+            pk_fitz = target_pk_fitz,
+            companion_field = companion_field,
         ))
     }
 

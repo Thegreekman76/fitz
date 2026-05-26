@@ -1184,11 +1184,19 @@ let r2 = User.preload("posts").where(fn(u) => u.active).all(db).await?
 
 ### Limitaciones del .preload en MVP
 
-- **Solo HasMany**. BelongsTo eager (cargar el author de N posts en
-  2 queries) queda como refinamiento futuro. Workaround:
+- **BelongsTo eager via convention** (deuda #2 cerrada v0.10.5):
+  `Post.preload("user").all(db)` ahora funciona cuando el type
+  declara el companion field. Convención: `@belongs_to("User")
+  user_id: Int` + sibling field `user: User?` (mismo type, name
+  derivado stripping `_id`, tipo Nullable<Target>). El checker
+  registra el companion como `BelongsToCompanion`; el codegen
+  emite el batch SELECT inverso (`target.id IN parent.fk
+  DISTINCT`); el field `user` se inicializa `None` por default
+  y queda poblado post-preload. Sin el sibling declarado, sigue
+  el workaround manual con `is_in(...)`:
   ```fitz
   let posts = Post.all(db).await?
-  let user_ids = posts.map(fn(p) => p.user_id).unique()   // si existe
+  let user_ids = posts.map(fn(p) => p.user_id)
   let authors = User.where(fn(u) => u.id.is_in(user_ids)).all(db).await?
   ```
 - **Single-level**. `.preload("posts").preload("posts.comments")` no
@@ -2339,16 +2347,30 @@ Lo que NO está en el MVP, con plan de cierre y workaround:
   method calls: `e.data.get("key") == "value"` mapeado a
   `"data"->>'key' = $1`.
 
-### `BelongsTo` en `.preload(...)`
+### ✅ `BelongsTo` en `.preload(...)` — CERRADO v0.10.5 (via convention)
 
-- **Status**: solo HasMany soportado.
-- **Workaround**: query manual con `is_in([...])`:
+- **Status**: **CERRADO**. `Post.preload("user").all(db)` funciona
+  cuando el type declara el companion: `@belongs_to("User")
+  user_id: Int` + sibling `user: User?` adyacente. El checker
+  auto-detecta la convención (stripping `_id` del FK name, match
+  con sibling Nullable<Target>) y registra el companion como
+  `BelongsToCompanion` (variante nueva en `RelationKind`). El
+  codegen emite batch SELECT inverso (`target.id IN
+  parent.fk_distinct`) + asigna `Some(target)` a cada parent.
+- **Workaround alternativo** (sin declarar companion):
   ```fitz
   let posts = Post.all(db).await?
   let user_ids: List<Int> = posts.map(fn(p) => p.user_id)
   let authors = User.where(fn(u) => u.id.is_in(user_ids)).all(db).await?
   ```
-- **Cuándo**: refinamiento futuro del codegen.
+  Útil si no querés el companion field en el type (ahorra el
+  campo en el struct deserializado).
+- **Caveat conocido**: Fitz hoy NO refina nullable bindings en
+  match arms (deuda separada del sistema de tipos), así que
+  `match post.user { null => "x", u => u.name }` no compila
+  porque `u` queda como `User?`, no `User`. Workaround:
+  comparar con `null` adentro de un `if` para chequear que
+  está poblado, después acceder por otra ruta.
 
 ### ✅ `Map<Str, Any>` en HTTP returns — CERRADO v0.10.4
 

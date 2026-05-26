@@ -426,6 +426,16 @@ pub enum RelationKind {
     /// almacena el FK que apunta al primary key de la otra tabla.
     /// Es real (columna en el SELECT) y participa del SQL normal.
     BelongsTo,
+    /// Deuda residual #2 (v0.10.5) — `BelongsToCompanion` es la
+    /// contraparte virtual de un `BelongsTo`. Se registra
+    /// automáticamente cuando el user declara `@belongs_to("User")
+    /// user_id: Int` Y un sibling field `user: User?` en el mismo
+    /// type. La convención: stripping `_id` del FK + match con
+    /// sibling Nullable<Target>. El field es virtual (no aparece
+    /// en SELECT/INSERT) y se puebla via `.preload("user")` con
+    /// batch SELECT inverso (target table WHERE id IN (FK values)).
+    /// Sin preload, el field queda en Null.
+    BelongsToCompanion,
     /// `@has_one("Profile")` sobre `profile: Profile?`. Field
     /// virtual: la tabla del otro type tiene un FK apuntando
     /// a este. No aparece en SELECT/INSERT/UPDATE del builder.
@@ -488,13 +498,16 @@ pub struct RelationMetadata {
 
 impl TableMetadata {
     /// Fase 10.4.a — `true` si el field es virtual del ORM
-    /// (declarado con `@has_one`/`@has_many`). El SQL builder
+    /// (declarado con `@has_one`/`@has_many`, o auto-detectado
+    /// como BelongsToCompanion en v0.10.5). El SQL builder
     /// salta estos fields en SELECT/INSERT/UPDATE. `BelongsTo`
     /// NO es virtual — el FK column es real.
     pub fn is_virtual_field(&self, field_name: &str) -> bool {
         matches!(
             self.relations.get(field_name).map(|r| r.kind),
-            Some(RelationKind::HasOne) | Some(RelationKind::HasMany)
+            Some(RelationKind::HasOne)
+                | Some(RelationKind::HasMany)
+                | Some(RelationKind::BelongsToCompanion)
         )
     }
 }
@@ -1581,12 +1594,93 @@ pub fn process_table_decorators(
         return Ok(None);
     }
 
+    // Deuda residual #2 (v0.10.5) — post-process: registrar
+    // `BelongsToCompanion` para cada par `@belongs_to xxx_id: Int` +
+    // sibling field `xxx: Target?`. Sin esto, `.preload("xxx")` sobre
+    // BelongsTo no funciona (la API solo soportaba HasMany).
+    //
+    // Convención de detección:
+    //   1. El FK field (con `@belongs_to`) debe tener nombre que termine
+    //      en `_id` (e.g. `user_id`, `author_id`).
+    //   2. Existe un sibling field cuyo nombre es el FK sin el sufijo
+    //      `_id` (e.g. `user`, `author`).
+    //   3. El sibling es de tipo `Target?` (Nullable wrapping un
+    //      Named matching el target del @belongs_to).
+    //   4. El sibling no tiene su propio decorator de relación
+    //      (no es ya @has_one/@has_many/etc.).
+    //
+    // Si los 4 puntos se cumplen, registramos `BelongsToCompanion`
+    // bajo el nombre del sibling. El codegen lo trata como virtual
+    // (skip SELECT/INSERT), inicializa Null, y `.preload("xxx")` lo
+    // puebla con batch SELECT inverso.
+    register_belongs_to_companions(&mut relations, fields);
+
     Ok(Some(TableMetadata {
         sql_name: sql_name.unwrap(), // garantizado por has_table check
         primary_field,
         columns,
         relations,
     }))
+}
+
+/// Deuda residual #2 (v0.10.5) — registra automáticamente los
+/// `BelongsToCompanion` cuando se detecta el patrón canónico:
+/// `@belongs_to(...) xxx_id: Int` + sibling `xxx: Target?`.
+fn register_belongs_to_companions(
+    relations: &mut HashMap<String, RelationMetadata>,
+    fields: &[Field],
+) {
+    // Snapshot de las relations BelongsTo para iterarlas sin mutar.
+    let belongs_to_entries: Vec<(String, RelationMetadata)> = relations
+        .iter()
+        .filter(|(_, r)| r.kind == RelationKind::BelongsTo)
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    for (fk_field_name, rel) in belongs_to_entries.iter() {
+        // (1) FK debe terminar en `_id` para que el companion name sea
+        // derivable.
+        let companion_name = match fk_field_name.strip_suffix("_id") {
+            Some(n) if !n.is_empty() => n.to_string(),
+            _ => continue, // FK sin sufijo `_id` (e.g. usuario en es) → skip
+        };
+
+        // (2)+(4) Sibling field existe Y no tiene relation propia.
+        let sibling = fields.iter().find(|f| f.name == companion_name);
+        let sibling = match sibling {
+            Some(f) if !relations.contains_key(&f.name) => f,
+            _ => continue,
+        };
+
+        // (3) Sibling DEBE ser `Nullable<Named(target_type)>`, p.ej.
+        // `user: User?`. El field se inicializa con `None` antes de
+        // que `.preload(...)` lo pueble, así que no-nullable rompe
+        // la deserialización. Si el user quiere acceder al companion
+        // como no-null post-preload, hace `.unwrap()` / `match` al
+        // consumir.
+        let target_matches = match &sibling.type_ {
+            TypeExpr::Nullable(inner) => match inner.as_ref() {
+                TypeExpr::Named(name) => name == &rel.target_type,
+                _ => false,
+            },
+            _ => false,
+        };
+        if !target_matches {
+            continue;
+        }
+
+        // Registrar la companion.
+        relations.insert(
+            companion_name,
+            RelationMetadata {
+                kind: RelationKind::BelongsToCompanion,
+                target_type: rel.target_type.clone(),
+                fk_field: fk_field_name.clone(),
+                on_delete: CascadeAction::default(),
+                on_update: CascadeAction::default(),
+            },
+        );
+    }
 }
 
 /// Fase 10.4.a — Parsea un decorator de relación
@@ -1610,6 +1704,12 @@ fn parse_relation_decorator(
         RelationKind::BelongsTo => "@belongs_to",
         RelationKind::HasOne => "@has_one",
         RelationKind::HasMany => "@has_many",
+        // BelongsToCompanion no se llega aquí — solo se construye
+        // post-process en `register_belongs_to_companions`, jamás
+        // por el parser de decoradores user-facing.
+        RelationKind::BelongsToCompanion => unreachable!(
+            "BelongsToCompanion no es user-facing — parse_relation_decorator solo se llama con kinds parseables"
+        ),
     };
     // Arg posicional 1: nombre del type referenciado.
     if d.args.len() != 1 {
@@ -1648,6 +1748,9 @@ fn parse_relation_decorator(
     let mut fk_field: String = match kind {
         RelationKind::BelongsTo => field_name.to_string(),
         RelationKind::HasOne | RelationKind::HasMany => format!("{}_id", type_name.to_lowercase()),
+        RelationKind::BelongsToCompanion => {
+            unreachable!("BelongsToCompanion no se construye por parse_relation_decorator")
+        }
     };
     let mut on_delete = CascadeAction::default();
     let mut on_update = CascadeAction::default();
@@ -1697,7 +1800,10 @@ fn parse_relation_decorator(
             other => {
                 let valid = match kind {
                     RelationKind::BelongsTo => "`on_delete`, `on_update`, `fk`",
-                    _ => "`on_delete`, `on_update`, `via`",
+                    RelationKind::HasOne | RelationKind::HasMany => {
+                        "`on_delete`, `on_update`, `via`"
+                    }
+                    RelationKind::BelongsToCompanion => unreachable!(),
                 };
                 errors.push(FitzError::new(
                     ErrorKind::TypeError,
@@ -3791,7 +3897,9 @@ fn infer_method_call(
                     }
                     // Path legacy (con db) → terminal directo.
                     let ok_ty = match rel.kind {
-                        RelationKind::BelongsTo | RelationKind::HasOne => target_ty,
+                        RelationKind::BelongsTo
+                        | RelationKind::HasOne
+                        | RelationKind::BelongsToCompanion => target_ty,
                         RelationKind::HasMany => Type::List(Box::new(target_ty)),
                     };
                     return Some(Type::Future(Box::new(Type::Result {

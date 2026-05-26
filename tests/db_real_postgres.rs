@@ -1396,6 +1396,118 @@ fn orm_preload_has_many_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Deuda residual #2 (v0.10.5) — BelongsTo eager via convention.
+//
+// `@belongs_to("User") user_id: Int` + sibling `user: User?` → el
+// checker detecta el companion + `.preload("user")` hace batch
+// SELECT inverso (target.id IN parent.fk distincts). Cierra la
+// limitación heredada de Fase 10.b.15 que solo soportaba HasMany.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_preload_belongs_to_companion_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w2_posts_test", &[])
+            .await;
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w2_users_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w2_users_test (id bigint PRIMARY KEY, name text)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "CREATE TABLE fitz_orm_w2_posts_test (\
+                 id bigint PRIMARY KEY, \
+                 title text, \
+                 user_id bigint REFERENCES fitz_orm_w2_users_test(id))",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w2_users_test VALUES (1, 'ada'), (2, 'alan')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w2_posts_test VALUES (10, 'first', 1), (11, 'second', 2), (12, 'third', 1)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w2_users_test\") type User {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }}\n\
+         @table(\"fitz_orm_w2_posts_test\") type Post {{\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             @belongs_to(\"User\") user_id: Int\n  \
+             user: User?\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // Sin preload, p.user es None (sentinel del codegen).\n  \
+             // Con preload, p.user viene poblado del batch.\n  \
+             let posts = Post.preload(\"user\").order_by(fn(p) => p.id).all(db).await?\n  \
+             let n = len(posts)\n  \
+             // Smoke: el preload corre + el batch SELECT inverso\n  \
+             // poblá los companions sin errors. Como Fitz hoy no\n  \
+             // refina Nullable en match arms (deuda separada del\n  \
+             // sistema de tipos), comparamos por null vs no-null y\n  \
+             // contamos los non-null para verificar la hidratación.\n  \
+             let p0_has_user = if (posts[0].user == null) {{ 0 }} else {{ 1 }}\n  \
+             let p1_has_user = if (posts[1].user == null) {{ 0 }} else {{ 1 }}\n  \
+             let p2_has_user = if (posts[2].user == null) {{ 0 }} else {{ 1 }}\n  \
+             let total_loaded = p0_has_user + p1_has_user + p2_has_user\n  \
+             return Ok(\"posts={{n}} preloaded={{total_loaded}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_preload_belongs_to_companion_codegen", |stdout| {
+        // 3 posts cargados, los 3 deben tener user companion poblado
+        // (todos apuntan a users que existen — sin orphans).
+        assert!(
+            stdout.contains("posts=3 preloaded=3"),
+            "esperaba `posts=3 preloaded=3`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w2_posts_test", &[]).await;
+        let _ = seed.exec("DROP TABLE fitz_orm_w2_users_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.14 — Paridad GROUP BY + aggregate (Aggregated<Row>)
 //
 // `.group_by(...).count/sum/avg/min/max(...).await?` ahora compila a
