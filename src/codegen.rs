@@ -29411,4 +29411,268 @@ mod tests {
             "esperaba `::int8[]` para List<Int>? también, fue: {rust}",
         );
     }
+
+    // ---- Fase 10.b.9.a — Validación exhaustiva del translator de
+    // closures a SQL en `.where(...)`. La implementación está desde
+    // 10.b.5; estos tests fijan la cobertura de regresión y documentan
+    // qué operadores/métodos están garantizados. Paridad con el
+    // evaluator (src/evaluator.rs translate_expr_to_sql ~12264 +
+    // translate_method_call_to_sql ~12111).
+    //
+    // Helper: arma un src estándar y devuelve solo el SQL fragment
+    // del `.with_where(...)` para inspección.
+    // ----
+
+    fn where_sql_fragment(closure_body: &str) -> String {
+        let src = format!(
+            "@table(\"users\") type User {{\n  \
+                 @primary id: Int = 0\n  \
+                 name: Str\n  \
+                 age: Int\n  \
+                 score: Float\n  \
+                 active: Bool\n  \
+                 deleted_at: Str?\n\
+             }}\n\
+             async fn boot() -> Result<Null> {{\n  \
+                 let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                 let _u = User.where(fn(u) => {body}).all(db).await?\n  \
+                 return Ok(null)\n\
+             }}\n",
+            body = closure_body
+        );
+        gen(&src).expect("codegen OK")
+    }
+
+    #[test]
+    fn codegen_where_binop_comparaciones_emiten_sql_correcto() {
+        // == != < <= > >= sobre fields → operadores SQL.
+        let r = where_sql_fragment("u.age == 18");
+        assert!(
+            r.contains("(\\\"age\\\" = $1)"),
+            "esperaba `\"age\" = $1`, fue: {r}"
+        );
+
+        let r = where_sql_fragment("u.age != 18");
+        assert!(
+            r.contains("(\\\"age\\\" <> $1)"),
+            "esperaba `\"age\" <> $1`, fue: {r}"
+        );
+
+        let r = where_sql_fragment("u.age >= 18");
+        assert!(
+            r.contains("(\\\"age\\\" >= $1)"),
+            "esperaba `\"age\" >= $1`, fue: {r}"
+        );
+
+        let r = where_sql_fragment("u.age < 18");
+        assert!(
+            r.contains("(\\\"age\\\" < $1)"),
+            "esperaba `\"age\" < $1`, fue: {r}"
+        );
+    }
+
+    #[test]
+    fn codegen_where_binop_logicos_and_or_emiten_keywords_sql() {
+        // Fitz usa keywords `and`/`or`/`not` (no símbolos `&&`/`||`/`!`).
+        let r = where_sql_fragment("u.age > 18 and u.active == true");
+        assert!(r.contains(" AND "), "esperaba keyword `AND` SQL, fue: {r}",);
+        let r = where_sql_fragment("u.age > 65 or u.score < 0.5");
+        assert!(r.contains(" OR "), "esperaba keyword `OR` SQL, fue: {r}",);
+    }
+
+    #[test]
+    fn codegen_where_unaryop_not_emite_not_envolvente() {
+        let r = where_sql_fragment("not (u.age > 18)");
+        assert!(
+            r.contains("(NOT (\\\"age\\\" > $1))"),
+            "esperaba `(NOT (\"age\" > $1))`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_aritmetica_dentro_del_where() {
+        // Operaciones aritméticas adentro del where se emiten al SQL.
+        let r = where_sql_fragment("u.age + 5 > 25");
+        assert!(
+            r.contains("(\\\"age\\\" + $1)"),
+            "esperaba `(\"age\" + $1)`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_is_null_y_is_not_null_emiten_sql_estandar() {
+        let r = where_sql_fragment("u.deleted_at.is_null()");
+        assert!(
+            r.contains("\\\"deleted_at\\\" IS NULL"),
+            "esperaba `\"deleted_at\" IS NULL`, fue: {r}",
+        );
+        let r = where_sql_fragment("u.deleted_at.is_not_null()");
+        assert!(
+            r.contains("\\\"deleted_at\\\" IS NOT NULL"),
+            "esperaba `\"deleted_at\" IS NOT NULL`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_is_in_con_lista_de_literales_emite_in() {
+        let r = where_sql_fragment("u.age.is_in([18, 21, 65])");
+        // Debe emitir IN ($1, $2, $3) — 3 placeholders bindeados.
+        assert!(
+            r.contains("\\\"age\\\" IN ($1, $2, $3)"),
+            "esperaba `\"age\" IN ($1, $2, $3)`, fue: {r}",
+        );
+        // Cada item tiene su PgValue::Int bindeado.
+        let n = r.matches("__FitzPgValue::Int").count();
+        assert!(n >= 3, "esperaba al menos 3 bindings Int, fueron {n}: {r}",);
+    }
+
+    #[test]
+    fn codegen_where_is_in_lista_vacia_emite_false() {
+        let r = where_sql_fragment("u.age.is_in([])");
+        assert!(
+            r.contains("false"),
+            "esperaba predicado constante `false` para lista vacía, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_like_e_ilike_emiten_operadores_apropiados() {
+        let r = where_sql_fragment("u.name.like(\"a%\")");
+        assert!(
+            r.contains("\\\"name\\\" LIKE $1"),
+            "esperaba `\"name\" LIKE $1`, fue: {r}",
+        );
+        let r = where_sql_fragment("u.name.ilike(\"A%\")");
+        assert!(
+            r.contains("\\\"name\\\" ILIKE $1"),
+            "esperaba `\"name\" ILIKE $1`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_starts_with_ends_with_contains_wrapean_con_percent() {
+        // starts_with("ada") → LIKE 'ada%'
+        let r = where_sql_fragment("u.name.starts_with(\"ada\")");
+        assert!(
+            r.contains("\\\"name\\\" LIKE $1"),
+            "esperaba traducción a LIKE $1, fue: {r}",
+        );
+        // El pattern bindeado debería tener `ada%`.
+        assert!(
+            r.contains("\"ada%\".to_string()"),
+            "esperaba binding `\"ada%\"`, fue: {r}",
+        );
+        // ends_with("ada") → LIKE '%ada'
+        let r = where_sql_fragment("u.name.ends_with(\"ada\")");
+        assert!(
+            r.contains("\"%ada\".to_string()"),
+            "esperaba binding `\"%ada\"`, fue: {r}",
+        );
+        // contains("ad") → LIKE '%ad%'
+        let r = where_sql_fragment("u.name.contains(\"ad\")");
+        assert!(
+            r.contains("\"%ad%\".to_string()"),
+            "esperaba binding `\"%ad%\"`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_starts_with_escapea_caracteres_like_especiales() {
+        // `%` y `_` en el string del user deben escaparse con `\` para
+        // que el patrón resultante sea predecible. starts_with("a%b")
+        // → LIKE 'a\%b%' (no 'a%b%' que matchearía cualquier cosa).
+        let r = where_sql_fragment("u.name.starts_with(\"a%b\")");
+        assert!(
+            r.contains(r#""a\\%b%""#) || r.contains(r"a\%b%"),
+            "esperaba escape `a\\%b%`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_field_inexistente_aborta_con_mensaje_claro() {
+        // `u.does_not_exist` → error con lista de fields disponibles.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.where(fn(u) => u.bogus > 0).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("bogus") && err.message.contains("no existe"),
+            "esperaba mención del field inexistente, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_where_method_desconocido_aborta_con_lista_de_soportados() {
+        // `u.name.unknown(...)` → error claro listando los métodos
+        // soportados (is_null, is_not_null, is_in, like, ilike,
+        // starts_with, ends_with, contains).
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.where(fn(u) => u.name.bogus()).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("bogus") && err.message.contains("Soportados"),
+            "esperaba lista de métodos soportados, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_where_respeta_column_override_en_sql_emitido() {
+        // Field con @column(name="full_name") → el SQL debe usar
+        // "full_name", no "name".
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @column(name=\"full_name\") name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.where(fn(u) => u.name == \"ada\").all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("(\\\"full_name\\\" = $1)"),
+            "esperaba `\"full_name\" = $1` (sql_name override), fue: {rust}",
+        );
+        assert!(
+            !rust.contains("(\\\"name\\\" = $1)"),
+            "no esperaba `\"name\" = $1` (el nombre Fitz no debe filtrarse), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_combinacion_compleja_compila_y_combina_clauses() {
+        // Caso del mundo real: filtro multi-clause con AND/OR + is_in +
+        // is_null + comparación. Cubre el wireado completo del
+        // translator en una sola expresión.
+        let r = where_sql_fragment(
+            "u.age >= 18 and (u.score > 50.0 or u.deleted_at.is_null()) and u.age.is_in([21, 30, 65])",
+        );
+        // Las 4 piezas deben aparecer.
+        assert!(r.contains("\\\"age\\\" >= $1"), "falta age >= $1: {r}");
+        assert!(r.contains("\\\"score\\\" > "), "falta score >: {r}");
+        assert!(
+            r.contains("\\\"deleted_at\\\" IS NULL"),
+            "falta IS NULL: {r}"
+        );
+        assert!(r.contains("\\\"age\\\" IN ("), "falta IN: {r}");
+        assert!(
+            r.contains(" AND ") && r.contains(" OR "),
+            "faltan AND/OR: {r}"
+        );
+    }
 }

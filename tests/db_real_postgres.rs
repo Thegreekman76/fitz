@@ -1147,6 +1147,145 @@ fn orm_belongs_to_y_has_many_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.9.a — Paridad fitz build sobre operadores `.where`
+//
+// Programa con varios operadores combinados (==/>=/AND/OR/like/
+// is_null/is_in/NOT) sobre datos reales, validando que el binario
+// standalone produce el mismo resultset que el evaluator.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_where_combinatorio_paridad_codegen_e2e() {
+    use std::process::Command;
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_where_codegen_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_where_codegen_test (\
+                 id bigint PRIMARY KEY, \
+                 name text, \
+                 age bigint, \
+                 score double precision, \
+                 deleted_at text)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_where_codegen_test VALUES \
+                 (1, 'ada',    35, 85.0, NULL), \
+                 (2, 'alan',   42, 92.5, NULL), \
+                 (3, 'grace',  60, 78.0, NULL), \
+                 (4, 'donald', 17, 45.0, '2026-01-01'), \
+                 (5, 'edsger', 80, 95.0, NULL), \
+                 (6, 'bob',    21, 30.0, '2025-12-15')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_where_codegen_test\") type Person {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n  \
+             score: Float\n  \
+             deleted_at: Str?\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let activos = Person.where(fn(p) => \
+                 p.age >= 18 and p.deleted_at.is_null() and p.score > 80.0\
+             ).all(db).await?\n  \
+             let with_a = Person.where(fn(p) => p.name.starts_with(\"a\")).all(db).await?\n  \
+             let ids = Person.where(fn(p) => p.id.is_in([1, 3, 5])).all(db).await?\n  \
+             let menores = Person.where(fn(p) => not (p.age >= 18)).all(db).await?\n  \
+             return Ok(\"activos={{len(activos)}} a={{len(with_a)}} ids={{len(ids)}} menores={{len(menores)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    let stem = "orm_where_combinatorio_paridad_codegen";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, &src).expect("escribir .fitz");
+
+    let fitz_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "fitz.exe" } else { "fitz" });
+    let build = Command::new(&fitz_bin)
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+
+    // Cardinalidad esperada según los seeds:
+    //   - activos (age>=18 AND deleted_at IS NULL AND score>80):
+    //     ada(35,85), alan(42,92.5), edsger(80,95) → 3
+    //   - with_a (name starts_with 'a'): ada, alan → 2
+    //   - ids IN (1,3,5): ada, grace, edsger → 3
+    //   - menores (NOT age>=18): donald(17) → 1
+    assert!(
+        stdout.contains("activos=3")
+            && stdout.contains("a=2")
+            && stdout.contains("ids=3")
+            && stdout.contains("menores=1"),
+        "esperaba `activos=3 a=2 ids=3 menores=1`, fue: {}",
+        stdout
+    );
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE fitz_orm_where_codegen_test", &[])
+            .await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.8 — Paridad fitz build sobre arrays + JSONB
 //
 // Programa con `tags: List<Int>` (array Postgres) y `meta: Map<Str,

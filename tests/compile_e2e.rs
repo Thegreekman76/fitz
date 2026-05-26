@@ -7139,6 +7139,111 @@ fn orm_list_float_bool_arrays_combinados_compilan() {
 }
 
 // ---------------------------------------------------------------------------
+// Fase 10.b.9.a — Validación exhaustiva de operadores `.where(...)`
+//
+// El translator de closures a SQL ya soporta el set completo desde
+// 10.b.5; estos E2E validan que cada uno COMPILA a binario nativo.
+// Runtime falla por URL inválida.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orm_where_chain_combinatorio_compila_a_binario() {
+    // Chain con AND + OR + comparaciones + LIKE + IN + IS NULL —
+    // el caso del mundo real que combina varias clauses. Valida el
+    // wireado integral del translator + emit del SQL acumulado.
+    let (stdout, code) = build_and_run(
+        "orm_where_chain_combinatorio_compila",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n  \
+             score: Float\n  \
+             tags: List<Str>\n  \
+             deleted_at: Str?\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _u = User.where(fn(u) => \
+                 u.age >= 18 and (u.score > 50.0 or u.deleted_at.is_null()) and \
+                 u.name.starts_with(\"ada\") and u.id.is_in([1, 2, 3])\
+             ).all(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_where_like_ilike_starts_ends_contains_compilan() {
+    // Los 5 métodos de matching de strings — cada uno con su patrón
+    // emitido. starts_with/ends_with/contains usan LIKE con `%`
+    // wrapping, like e ilike pasan el patrón crudo.
+    let (stdout, code) = build_and_run(
+        "orm_where_like_ilike_starts_ends_contains",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _a = User.where(fn(u) => u.name.like(\"a%\")).all(conn).await?\n  \
+             let _b = User.where(fn(u) => u.name.ilike(\"A%\")).all(conn).await?\n  \
+             let _c = User.where(fn(u) => u.name.starts_with(\"ada\")).all(conn).await?\n  \
+             let _d = User.where(fn(u) => u.name.ends_with(\"ada\")).all(conn).await?\n  \
+             let _e = User.where(fn(u) => u.name.contains(\"da\")).all(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_where_is_null_is_in_with_not_compilan() {
+    // is_null/is_not_null + is_in con List literal + NOT envolvente.
+    let (stdout, code) = build_and_run(
+        "orm_where_is_null_is_in_with_not",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             age: Int\n  \
+             deleted_at: Str?\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _a = User.where(fn(u) => u.deleted_at.is_null()).all(conn).await?\n  \
+             let _b = User.where(fn(u) => u.deleted_at.is_not_null()).all(conn).await?\n  \
+             let _c = User.where(fn(u) => u.age.is_in([18, 21, 65])).all(conn).await?\n  \
+             let _d = User.where(fn(u) => not (u.age >= 18)).all(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+// ---------------------------------------------------------------------------
 // Fase 10.b.8.b — JSONB libre con Map<Str, Any>
 // ---------------------------------------------------------------------------
 
