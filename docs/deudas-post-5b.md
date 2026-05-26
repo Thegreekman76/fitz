@@ -1547,3 +1547,71 @@ abren como mini-fases dedicadas, cada una con plan corto + tests
     params (List, instancias); aliases de key (`?l={limit}`,
     rechazado hoy); query params via vector (`?ids=1&ids=2`);
     query params como una struct ad-hoc (Map<Str, Str> implícito).
+
+## Deuda residual de Fase 10.b (atacar antes del release v0.10.1)
+
+Política del autor (2026-05-26): "Fitz tiene que tener todo lo mejor;
+anotar toda la deuda residual para atacarla antes del release al
+terminar todo". Todo lo que está abajo tiene que cerrarse ANTES del
+release v0.10.1 (cierre formal de Fase 10.b entera).
+
+### De 10.b.6 (Agregados scalares ORM)
+
+- ☐ **GROUP BY + aggregate (sum/avg/min/max) + count**: hoy el helper
+  `aggregate_f64` aborta en runtime con Err claro citando 10.b.7. El
+  shape de retorno divergente (`List<Map<Str, Any>>` con GROUP BY vs
+  `Float`/`Int` sin) NO encaja con un Rust type estático. Cierre
+  requiere refactor del checker (`Type::QueryBuilder` con flag
+  `has_group_by` o `Type::Aggregated` separado). Evaluator ya lo
+  soporta — paridad pendiente solo en codegen.
+
+### De 10.b.7 (Navigation methods)
+
+- ☐ **`#[allow(clippy::only_used_in_recursion)]` en
+  `orm_field_coerce_block`** (src/codegen.rs ~21145). El `env` sigue
+  sin usarse. Decisión: o lo usamos (validación nominal extra) o lo
+  removemos del signature.
+- ☐ **Args extras a navigation**: hoy `instance.posts(db)` solo. Sin
+  chain `instance.posts(db).where(...).limit(10).all(db)` ni kwargs
+  `instance.posts(db, limit=10)`. Pre-req: navigation devuelve
+  QueryBuilder en vez de Future cuando no se le pasa solo `db`.
+- ☐ **Eager loading (preload)**: `User.where(...).preload("posts").
+  all(db)` para evitar N+1. Plan original era 10.b.9.
+- ☐ **Cross-type navigation con `@column(name=...)` en el FK source
+  field**: el codegen debería respetar el sql_name override del FK
+  local, no testeado E2E. Validación pendiente.
+
+### De 10.b.8.a (Arrays Postgres)
+
+- ☐ **`.update(db, {"tags": [1,2]})` con List literal**: el genérico
+  `<_ as __IntoPgValue>::into_pg(...)` NO produce `PgValue::Array`
+  desde un literal Fitz — necesita impl `__IntoPgValue` para
+  `Arc<Mutex<Vec<T>>>` por T scalar, o branch estructural en
+  `gen_qb_update_set_args`. Workaround actual: usar `.insert`.
+- ☐ **Arrays anidados (`List<List<T>>`)**: Postgres soporta arrays
+  multidimensionales nativamente. Rechazado hoy en codegen.
+- ☐ **`List<Nominal>`**: compartido con 10.b.7.
+- ☐ **NULL adentro de arrays (`{1, NULL, 3}` → `List<Int?>`)**:
+  Postgres lo soporta. Requiere `Option<T>` adentro del Vec elem
+  + path runtime que también limita.
+
+### De 10.b.8.b (JSONB libre)
+
+- ☐ **`.update(db, {"meta": {...}})` con Map literal**: idem arrays
+  — requiere impl `__IntoPgValue for Arc<Mutex<Vec<(__FitzValue,
+  __FitzValue)>>>` o branch estructural.
+- ☐ **`Map<Str, Str>`, `Map<Str, Int>` (Map concretos no-Any)**:
+  rechazado hoy con error claro citando "usá `Map<Str, Any>`".
+  Cierre: iterar JSON obj con tipo concreto del value via
+  serde_json + helper específico.
+- ☐ **Validación shape JSONB** (timestamps como strings ISO, etc.):
+  hoy el JSONB libre acepta cualquier shape; no hay schema.
+
+### Deudas viejas que siguen abiertas (impactan 10.b)
+
+- ☐ **Test paridad real `db_real_postgres` no corre en CI default**
+  (`#[ignore]`). Considerar docker-compose con Postgres en un job
+  opcional o gated by env var.
+- ☐ **Smoke GUIDE_EXAMPLES_COMPILE no incluye ejemplos ORM**: cuando
+  haya un ejemplo runnable del cap 31 de la guía (ORM), sumarlo al
+  smoke. Pre-req: cap 31 escrito (parte del cierre formal de Fase 10).
