@@ -60,6 +60,7 @@ $ ./server
 | **Auth nativa** | ❌ | ❌ | ❌ | ✅ |
 | **WS tipados + AsyncAPI auto** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Jobs sin Celery** | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **Postgres + ORM nativo** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | Interop Python | ✅ | ❌ | ❌ | ✅ |
 
 **Multiplataforma**: cada [release](https://github.com/Thegreekman76/fitz/releases/latest)
@@ -74,14 +75,19 @@ targets.
 ## Por dónde arrancar
 
 [Guía completa →](guide.md){ .md-button .md-button--primary }
+[DB y ORM →](db-orm.md){ .md-button }
 [Boilerplates →](https://github.com/Thegreekman76/fitz/tree/main/boilerplates){ .md-button }
 [Ver el roadmap →](roadmap.md){ .md-button }
 [GitHub →](https://github.com/Thegreekman76/fitz){ .md-button }
 
-La guía cubre 32 capítulos con ejemplos runnable en
+La guía cubre 34 capítulos con ejemplos runnable en
 [`examples/guide/`](https://github.com/Thegreekman76/fitz/tree/main/examples/guide):
 desde `print("hola")` hasta servidores HTTP con auth + WebSockets +
-cron jobs en menos de 100 líneas.
+cron jobs + Postgres + ORM nativo en menos de 100 líneas. Para el
+stack DB completo (driver puro + ORM declarativo + relations +
+JSONB/arrays + GROUP BY + eager loading + recetas), ver la
+[guía exhaustiva DB y ORM](db-orm.md) (~2500 LoC dedicados al
+diferencial con SQLAlchemy/Prisma/Diesel).
 
 Para ver el stack completo en acción, los **6 boilerplates
 Dockerizados** del repo cubren CLI puro, REST API, auth + frontend,

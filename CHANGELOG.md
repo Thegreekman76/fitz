@@ -17,6 +17,165 @@ boilerplate nuevo dedicado), benchmarks Fitz ORM vs SQLAlchemy,
 sub-fase opcional para serializar `Map<Str, Any>` a JSON en HTTP
 returns (gap del cap 31 / ejemplo `31b-orm-crud-http.fitz`).
 
+## [v0.10.3] — 2026-05-26 — Guía exhaustiva DB y ORM (docs/db-orm.md)
+
+**Hito de documentación**. Cierra la promesa hecha al diseñar
+v0.10.2: el cap 31 de la guía es el RESUMEN del stack DB; la
+guía exhaustiva vive aparte. Tab dedicado **"DB y ORM"** en el
+nav de MkDocs entre "Guía" y "Roadmap" — `docs/db-orm.md`
+nuevo con ~2600 LoC cubriendo cada operador, cada receta, cada
+limitación honesta del MVP.
+
+Decisión registrada en la memoria del proyecto (2026-05-25):
+"el ORM merece su propia entrada de navegación porque (a) es un
+dominio aparte del lenguaje base, (b) la gente que viene a
+aprender el ORM específicamente no quiere scrollear por 30 caps
+de la guía, (c) showcase del diferencial vs SQLAlchemy/Prisma/
+Diesel". Cierre formal de esa decisión con este release.
+
+### Added
+
+- **`docs/db-orm.md`** nuevo (~2600 LoC, 30 secciones):
+  - **1.** Panorama vecino (comparación side-by-side con stacks
+    Python/Ruby/Java/Node/Rust/Go) + 6 diferenciales únicos.
+  - **2.** Quickstart end-to-end (db.connect + @table + insert +
+    where + all).
+  - **3.** Driver `db`: query/exec/close/is_closed crudo +
+    auto-coerción de tipos params.
+  - **4.** `@table`, `@primary`, `@column(name=...)`, mapping de
+    tipos Fitz → Postgres por default.
+  - **5.** Read methods estáticos (`Type.all`/`first`/`count`/
+    `where`).
+  - **6.** QueryBuilder reference completo: chain (where /
+    order_by / limit / offset / group_by / preload) + terminales
+    (all / first / count / sum / avg / min / max / update /
+    delete).
+  - **7.** Operadores extendidos en `.where(...)` (comparators,
+    lógicos, aritméticos + mod, between, is_in, like/ilike,
+    starts_with/ends_with/contains, is_null/is_not_null, has/
+    contains_all/contained_in) + **tabla resumen de soporte de
+    variables externas por operador**.
+  - **8.** Write methods + guard `.where(...)` obligatorio.
+  - **9.** Aggregates scalar + GROUP BY (`Aggregated<Row>`
+    separado de `QueryBuilder<Row>`).
+  - **10.** Relations `@belongs_to`/`@has_one`/`@has_many` +
+    kwargs `on_delete`/`on_update`/`fk`/`via`.
+  - **11.** Navigation methods + chain (QueryBuilder<Target>
+    cuando args vacía, terminal directo con db).
+  - **12.** Eager loading `.preload(...)` con dispatch estático.
+  - **13.** JSONB (`Map<Str, Any>`) con shape heterogéneo +
+    JSON operators del lado SQL (workaround crudo).
+  - **14.** Arrays Postgres (12 OIDs).
+  - **15.** NULL en arrays (`List<scalar?>`).
+  - **16.** `Map<Str, T>` concreto homogéneo vs `Map<Str, Any>`.
+  - **17.** Array ops (`.has`/`.contains_all`/`.contained_in`)
+    + caveat literales requeridos.
+  - **18.** Date / Time / Timestamp / UUID como Str ISO 8601.
+  - **19-26.** **8 recetas** runnable: paginación (offset/limit
+    + cursor-based + paginado con total), búsqueda (prefijo +
+    full-text con tsvector + arrays + JSONB), search filters
+    combinatorios, **auth + ORM (queries scoped al user
+    autenticado)** end-to-end, HTTP CRUD completo, cron jobs
+    de limpieza, bulk operations (insert múltiple, update por
+    set de IDs), schema idempotente al boot + migraciones
+    manuales versionadas.
+  - **27.** Performance: arquitectura del driver puro + SQL
+    constante en codegen-time vs runtime construction (SQLAlchemy
+    comparison) + placeholder para benchmarks futuros.
+  - **28.** Limitaciones honestas y deuda explícita
+    (migraciones automáticas, transactions, composite PKs, TLS
+    strict, Date/UUID nativos, JSON operators en .where,
+    BelongsTo eager, `Map<Str, Any>` en HTTP returns, chain
+    dinámico, bulk insert eficiente, `db.copy_in`, `fitz db
+    inspect`).
+  - **29.** **CLI con DB: cómo cada subcomando interactúa** —
+    `fitz run`/`build`/`check`/`openapi`/`test`/`dev`/`repl`/
+    `fmt`/`lint` documentados con behavior específico sobre
+    programas que usan el módulo `db` y el ORM. Subcomandos
+    planeados `fitz db diff`/`migrate`/`inspect`/`seed`/`console`
+    documentados como roadmap.
+  - **30.** Ejemplos runnable (`31-orm.fitz` + `31b-orm-crud-
+    http.fitz`) + boilerplates planeados (6 convertido + 7 nuevo).
+- **`mkdocs.yml`** — entrada nueva `'DB y ORM': db-orm.md` en
+  el nav entre "Guía" y "Roadmap" (decisión 2026-05-25 en
+  memoria del proyecto formalizada).
+
+### Changed
+
+- **`docs/guide.md` cap 31** — sumada sección "Guía exhaustiva"
+  con link al nuevo `docs/db-orm.md` antes del cierre. El cap
+  31 sigue siendo el resumen del stack para lectores secuenciales
+  de la guía; el doc dedicado es la referencia para lectores
+  buscando ORM específico.
+- **`README.md`** — footnote ◈ Postgres+ORM extendido con link
+  al `docs/db-orm.md` ("guía exhaustiva ~2500 LoC con todos los
+  operadores, recetas, CLI integration y limitaciones").
+- **`docs/index.md`** — botón nuevo "DB y ORM →" al lado de
+  "Guía completa →" en la sección "Por dónde arrancar". Tabla
+  feature comparison suma row Postgres+ORM nativo. Texto
+  introductorio actualizado a "34 capítulos" + mención del
+  link a la guía exhaustiva.
+
+### Fixed (correcciones de drift entre código y docs)
+
+Auditoría exhaustiva durante la creación de `db-orm.md` reveló
+desfasajes entre los docs/memoria y la implementación real.
+Cerrados en este release:
+
+- **Sintaxis de `on_delete`/`on_update`**: el cap 31 de la guía
+  (v0.10.2) y los CHANGELOG entries de v0.10.0/v0.10.1
+  describían estos como **decoradores separados**
+  (`@on_delete=cascade`) con valores como **bare identifiers**.
+  La realidad: son **kwargs del MISMO decorator** de relation
+  (`@belongs_to`/`@has_one`/`@has_many`) con valores como
+  **string literals**: `"cascade"`/`"set_null"`/`"restrict"`/
+  `"no_action"`. Ejemplo correcto: `@belongs_to("User", on_delete="cascade") user_id: Int`.
+  Cap 31 corregido + `db-orm.md` documenta la sintaxis correcta
+  + sección 10 detalla los 4 valores válidos como string
+  literals.
+- **`.is_in([])` empty list**: docs decían "error claro en
+  compile-time". La realidad: emite predicado `false` literal
+  (no rompe el query, simplemente no matchea nada — `IN ()` no
+  es SQL válido, el translator lo evita). Cap 31 corregido +
+  `db-orm.md` documenta el comportamiento real.
+- **Var externa support por operador**: documentación previa
+  no clarificaba qué operadores aceptan vars externas vs solo
+  literales. `db-orm.md` suma tabla resumen explícita: comparators
+  + aritméticos + `.like(pat)` + `.ilike(pat)` + `.between(low,
+  high)` aceptan vars; `.is_in([...])` arg debe ser list literal
+  (items adentro pueden ser vars); `.has`/`.contains_all`/
+  `.contained_in` requieren literales escalares; `.starts_with`/
+  `.ends_with`/`.contains` requieren Str literal.
+- **`Aggregated<Row>` chain capabilities**: la sección original
+  de v0.10.2 solo mencionaba terminales (`count`/`sum`/`avg`/
+  `min`/`max`). En realidad también soporta chain methods
+  (`where`/`order_by`/`limit`/`offset`/`group_by`) que preservan
+  el tipo. `db-orm.md` documenta ambos sets.
+- **`db.is_closed()` faltante en docs**: el método existe en el
+  evaluator (`Value::DbConn` arm `is_closed`) pero no estaba
+  documentado. `db-orm.md` lo cubre en sección 3.
+
+### Dependencies
+
+Sin deps nuevas. Cambios 100% documentales.
+
+### Hito
+
+Con v0.10.3 el bloque DB+ORM tiene:
+
+- **Cap 31 de la guía** — resumen para lectores secuenciales.
+- **`docs/db-orm.md`** — referencia exhaustiva (~2600 LoC) con
+  todos los operadores, 8 recetas runnable, CLI integration,
+  limitaciones honestas, drift entre código y docs cerrado.
+- **Entrada propia en MkDocs nav** — visibilidad equivalente
+  a la guía principal del lenguaje.
+- **2 ejemplos runnable** en `examples/guide/` (pedagógico +
+  CRUD HTTP) sumados al smoke CI (292 ejemplos verdes).
+- **CI con Postgres real** corriendo 44 tests en cada push.
+
+Próximo norte: boilerplates ORM Dockerizados (convertir 6 +
+crear 7 nuevo dedicado) + benchmarks Fitz ORM vs SQLAlchemy.
+
 ## [v0.10.2] — 2026-05-26 — Cap 31 guía: "Postgres + ORM nativo" + hito stack server completo
 
 **Hito mayor del proyecto.** Cierra la documentación del bloque

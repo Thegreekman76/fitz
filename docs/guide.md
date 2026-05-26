@@ -11039,7 +11039,10 @@ nombre del field Fitz difiere del de la columna en la tabla
 
 **`@belongs_to("Target")`**, **`@has_many("Target")`**,
 **`@has_one("Target")`** — sobre fields para declarar relations
-cross-table:
+cross-table. Aceptan kwargs adicionales: `via="fk_column"` (para
+`has_many`/`has_one`), `fk="custom_fk_field"` (para `belongs_to`),
+`on_delete="cascade"` / `on_update="cascade"` (Postgres FK
+actions: `"cascade"` / `"set_null"` / `"restrict"` / `"no_action"`):
 
 ```fitz
 @table("posts") type Post {
@@ -11113,7 +11116,11 @@ let adults = User.where(fn(u) => u.age >= min).all(db).await?  // var externa
 Métodos sobre columns Str: `.is_null()`, `.is_not_null()`,
 `.is_in([...])`, `.like(pat)`, `.ilike(pat)`, `.starts_with(s)`,
 `.ends_with(s)`, `.contains(s)`. Patterns con `%`/`_` se
-escapan automáticamente. `is_in` con lista vacía → error claro.
+escapan automáticamente en `.starts_with`/`.ends_with`/
+`.contains`. `is_in([])` con lista vacía → predicado `false`
+(no rompe el query). Caveat MVP: `.is_in([...])` y los array
+ops requieren el **List como literal** (`.is_in(some_var)`
+falla); los items adentro de la lista pueden ser vars.
 
 ### Write methods + guard `.where(...)` obligatorio
 
@@ -11471,6 +11478,15 @@ post-Fase 10:
 
 Detalle completo en `docs/roadmap.md` → "Fase 10 — Stack DB
 nativo" y "Fase 10.b — Cierre del codegen ORM".
+
+### Guía exhaustiva
+
+Este capítulo es el **resumen** del stack DB + ORM. Para la
+referencia completa con todos los operadores, recetas (paginación,
+búsqueda, auth + ORM, cron jobs), CLI integration y limitaciones
+detalladas, ver el documento dedicado **[DB y ORM](db-orm.md)**
+(separado de la guía porque el ORM es un dominio aparte del
+lenguaje base — ~2500 LoC).
 
 ### Hito y cierre
 
