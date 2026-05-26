@@ -910,10 +910,13 @@ equivale a SQL `WHERE ... GROUP BY ...`).
 - **Aggregates múltiples en el mismo GROUP BY**: no soportado.
   Workaround: dos queries separadas o `db.query(...)` crudo con
   el SQL completo.
-- **`List<Map<Str, Any>>` en HTTP returns**: el codegen HTTP no
-  serializa automáticamente este tipo a JSON. Workaround: query
-  crudo con `db.query(...)` y formatear el JSON manual. Ver
-  limitaciones (sección 28).
+- **`List<Map<Str, Any>>` en HTTP returns** — **CERRADO v0.10.4**.
+  El codegen HTTP ahora serializa automáticamente este shape a
+  JSON via `impl __MapKey for __FitzValue` en el preludio HTTP.
+  Endpoints como `GET /stats` con `User.group_by(...).count(db).await`
+  funcionan end-to-end en `fitz build` con paridad bit-a-bit
+  contra `fitz run`. Ver `examples/guide/31b-orm-crud-http.fitz`
+  endpoint `/stats/by-email`.
 
 ---
 
@@ -2347,16 +2350,22 @@ Lo que NO está en el MVP, con plan de cierre y workaround:
   ```
 - **Cuándo**: refinamiento futuro del codegen.
 
-### `Map<Str, Any>` en HTTP returns (no serializa a JSON automático)
+### ✅ `Map<Str, Any>` en HTTP returns — CERRADO v0.10.4
 
-- **Status**: el codegen HTTP no tiene `__ToFitzJson` impl para
-  `Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>` (el shape de
-  `Map<Str, Any>` runtime).
-- **Workaround**: bajar a `db.query(...)` crudo y construir el
-  JSON manualmente (e.g. iterar el `List<Map<Str, Any>>` y
-  serializar). O usar un `type ConcreteShape { ... }` cuando el
-  shape es conocido.
-- **Cuándo**: sub-fase residual probable post-v0.10.2.
+- **Status**: **CERRADO**. El codegen HTTP ahora emite
+  `impl __MapKey for __FitzValue` en el preludio HTTP (cuando
+  `__FitzValue` está activo) — convierte `__FitzValue::Str(s)` a
+  `s.clone()` (caso típico de keys de JSONB y GROUP BY), y resto
+  via Display. Esto cierra la cadena de trait bounds:
+  `Arc<Mutex<Vec<Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>>>>`
+  → `Vec<(__FitzValue, __FitzValue)>: __ToFitzJson` ✅.
+- **Resultado**: endpoints HTTP que devuelven `Result<List<Map<Str,
+  Any>>>` desde GROUP BY (`User.group_by(...).count(db).await`)
+  ahora funcionan end-to-end con `fitz build`, paridad bit-a-bit
+  con `fitz run`.
+- **Ejemplo**: `examples/guide/31b-orm-crud-http.fitz` endpoint
+  `/stats/by-email` re-incluido — el GROUP BY count por email
+  serializa a JSON como `[{"email": "...", "count": N}, ...]`.
 
 ### Chain dinámico de `.where(...)` condicional
 

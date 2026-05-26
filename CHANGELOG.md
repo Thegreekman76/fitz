@@ -11,11 +11,77 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md`. Próximos pasos planeados — boilerplates
-ORM Dockerizados (convertir 5/6 SQLAlchemy → Fitz ORM nativo y/o
-boilerplate nuevo dedicado), benchmarks Fitz ORM vs SQLAlchemy,
-sub-fase opcional para serializar `Map<Str, Any>` a JSON en HTTP
-returns (gap del cap 31 / ejemplo `31b-orm-crud-http.fitz`).
+En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
+cerrar las deudas residuales restantes del ORM (BelongsTo en
+`.preload(...)`, JSON operators en `.where`, chain dinámico
+condicional), después boilerplates ORM Dockerizados (convertir
+5/6 SQLAlchemy → Fitz ORM nativo + boilerplate nuevo dedicado),
+benchmarks Fitz ORM vs SQLAlchemy.
+
+## [v0.10.4] — 2026-05-26 — Deuda residual #1 cerrada: Map<Str, Any> en HTTP returns
+
+**Primer cierre del bloque "deudas residuales del ORM"** (decidido
+post-v0.10.3). 4 deudas planeadas para atacar en orden de scope
+creciente: (1) Map<Str, Any> en HTTP, (2) BelongsTo eager loading,
+(3) JSON operators en `.where`, (4) chain dinámico condicional.
+
+### Added
+
+- **`impl __MapKey for __FitzValue`** en el preludio HTTP del
+  codegen (cuando `__FitzValue` está activo). Cierra la cadena
+  de trait bounds que hacía fallar la serialización de
+  `Map<Str, Any>` en HTTP returns:
+  - Pre-fix: `Arc<Mutex<Vec<Arc<Mutex<Vec<(__FitzValue,
+    __FitzValue)>>>>>>` → trait bound `Vec<(__FitzValue,
+    __FitzValue)>: __ToFitzJson` no satisfecho (porque exige
+    `K: __MapKey` y `__FitzValue` no lo implementaba).
+  - Post-fix: el impl convierte `__FitzValue::Str(s)` a
+    `s.clone()` (caso típico de keys de JSONB y GROUP BY),
+    resto via Display (matchea la lógica de
+    `__fitz_fv_to_json`). El chain de trait bounds queda
+    satisfecho y el codegen emite el handler correcto.
+- **`examples/guide/31b-orm-crud-http.fitz` ahora incluye
+  endpoint `/stats/by-email`** que llama `User.group_by(fn(u)
+  => u.email).count(db).await` y devuelve `Result<List<Map<Str,
+  Any>>>` serializado a JSON automáticamente. Pre-v0.10.4 este
+  endpoint era el caveat documentado del ejemplo; ahora forma
+  parte del showcase.
+
+### Changed
+
+- `examples/guide/31b-orm-crud-http.fitz` — comentario del
+  header refleja el cierre de la deuda (nota histórica vs
+  caveat activo).
+- `docs/guide.md` cap 31 — descripción del ejemplo HTTP CRUD
+  incluye el nuevo endpoint GROUP BY y la referencia a v0.10.4.
+- `docs/db-orm.md`:
+  - Sección 28 (limitaciones) marca la deuda
+    `Map<Str, Any>` en HTTP returns como **✅ CERRADO v0.10.4**
+    con explicación del fix.
+  - Sección 12 (eager loading) reescrita el caveat del
+    `List<Map<Str, Any>>` en HTTP returns para reflejar que
+    ahora funciona end-to-end.
+
+### Behavior
+
+- Handlers HTTP que retornan `Result<List<Map<Str, Any>>>`
+  (típicamente desde `Type.group_by(...).count/sum/avg/min/max(db)`)
+  ahora compilan y corren con paridad bit-a-bit `fitz run` ↔
+  `fitz build`.
+- Keys del Map: `__FitzValue::Str` (caso típico GROUP BY +
+  JSONB) → string original; otros variantes → Display formatted.
+- Empty list → array JSON vacío `[]` (sin cambios).
+- Smoke `GUIDE_EXAMPLES_COMPILE` valida 292 ejemplos verdes
+  (sin nuevos archivos; el ejemplo existente ahora compila
+  más endpoints).
+
+### Tests
+
+- Smoke `GUIDE_EXAMPLES_COMPILE` verde (292 ejemplos).
+- 2552 unit tests verdes (sin cambios en el count — el fix es
+  puramente codegen-side, no rompe ningún test existente).
+- Lint `cargo fmt --all --check` + `cargo clippy --all-targets
+  -D warnings` verdes.
 
 ## [v0.10.3] — 2026-05-26 — Guía exhaustiva DB y ORM (docs/db-orm.md)
 

@@ -6296,6 +6296,24 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                              }\n    \
                          }\n\
                      }\n\n\
+                     // Deuda #1 (v0.10.4) — __MapKey para __FitzValue:
+                     // habilita que `Vec<(__FitzValue, __FitzValue)>`
+                     // satisfaga el trait bound de `__ToFitzJson` (que
+                     // exige K: __MapKey). Sin esto, los handlers HTTP
+                     // que devuelven `List<Map<Str, Any>>` (caso típico
+                     // de `User.group_by(...).count(db)`) no compilaban.
+                     // Convención: Str → s.clone(); resto via Display
+                     // (matchea la lógica de `__fitz_fv_to_json` que
+                     // serializa Map keys del mismo modo).
+                     #[allow(dead_code)]\n\
+                     impl __MapKey for __FitzValue {\n    \
+                         fn __as_map_key(&self) -> String {\n        \
+                             match self {\n            \
+                                 __FitzValue::Str(s) => s.clone(),\n            \
+                                 other => format!(\"{}\", other),\n        \
+                             }\n    \
+                         }\n\
+                     }\n\n\
                      #[allow(dead_code)]\n\
                      fn __fv_b64_encode(bytes: &[u8]) -> String {\n    \
                          const T: &[u8; 64] = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";\n    \

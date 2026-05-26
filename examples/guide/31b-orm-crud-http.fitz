@@ -35,13 +35,13 @@
 //   POST   /posts                  — crea post (body: PostInput)
 //   GET    /users-with-posts       — preload (cierra N+1)
 //   GET    /user-count             — aggregate scalar
+//   GET    /stats/by-email         — GROUP BY aggregate (v0.10.4+)
 //
-// Nota: el endpoint GROUP BY (`User.group_by(...).count(db)`)
-// devuelve `List<Map<Str, Any>>` — el codegen HTTP no serializa
-// hoy `Map<Str, Any>` a JSON automáticamente (gap residual de
-// Fase 10.b). Workaround: query crudo con `db.query(...)` y
-// formatear manual. El cap 31 muestra el patrón GROUP BY en
-// `31-orm.fitz` (corre con `fitz run` sin esta limitación).
+// Nota histórica: el endpoint GROUP BY (`User.group_by(...).count(db)`)
+// devuelve `List<Map<Str, Any>>`. Pre-v0.10.4 el codegen HTTP no
+// serializaba ese shape automáticamente; con la deuda cerrada
+// (`impl __MapKey for __FitzValue`), el endpoint ahora funciona
+// end-to-end en `fitz build`.
 
 // --- 1. Tipos ORM con relations ----------------------------------------
 
@@ -138,4 +138,13 @@ async fn user_count() -> Result<Int> {
     // Aggregate scalar: count total de users.
     let conn = open_db().await?
     return User.count(conn).await
+}
+
+@get("/stats/by-email")
+async fn stats_by_email() -> Result<List<Map<Str, Any>>> {
+    // GROUP BY email + count → un row por email distinto.
+    // El codegen HTTP serializa Map<Str, Any> a JSON desde
+    // v0.10.4 (deuda #1 cerrada — impl __MapKey for __FitzValue).
+    let conn = open_db().await?
+    return User.group_by(fn(u) => u.email).count(conn).await
 }

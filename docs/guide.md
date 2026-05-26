@@ -11381,14 +11381,14 @@ canónicos:
   el cliente, `env_or(...)` para leer `DATABASE_URL` con default,
   y `@server(port)`. Endpoints: list/get/create/update/delete
   sobre users, relation queries (posts por user), eager loading
-  con `.preload(...)` cerrando N+1, aggregate scalar. Requiere
-  Postgres real para correr — el setup pre-condición está
-  documentado al inicio del archivo (createdb + CREATE TABLE).
-  Compila con `fitz build` aunque no haya Postgres local — el
-  codegen del ORM se valida en compile-time. Caveat: el endpoint
-  GROUP BY (return `List<Map<Str, Any>>`) no entra en este
-  ejemplo porque el codegen HTTP no serializa `Map<Str, Any>` a
-  JSON automáticamente todavía (gap residual de Fase 10.b).
+  con `.preload(...)` cerrando N+1, aggregate scalar, **GROUP BY
+  aggregate** (`/stats/by-email` con `User.group_by(...).count(db)`)
+  serializado a JSON desde v0.10.4 (deuda #1 cerrada con
+  `impl __MapKey for __FitzValue`). Requiere Postgres real para
+  correr — el setup pre-condición está documentado al inicio
+  del archivo (createdb + CREATE TABLE). Compila con `fitz build`
+  aunque no haya Postgres local — el codegen del ORM se valida
+  en compile-time.
 
 ### Por qué Fitz hace esto distinto
 
