@@ -1508,6 +1508,98 @@ fn orm_preload_belongs_to_companion_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Deuda residual #3 (v0.10.5) — JSON operators en .where(...).
+//
+// has_key / has_all_keys / has_any_keys / contains_json / get
+// sobre fields jsonb (Map<Str, Any>) mapeados a operadores
+// nativos Postgres (`?`, `?&`, `?|`, `@>`, `->>'k'`). Sin esto
+// el user tenía que bajar a `db.query(...)` crudo.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_jsonb_operators_in_where_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w3_events_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w3_events_test (id bigint PRIMARY KEY, name text, data jsonb)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w3_events_test\") type Event {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             data: Map<Str, Any>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // Heterogéneo en values fuerza Vec<(__FitzValue,\n  \
+             // __FitzValue)> en codegen → matchea el jsonb shape.\n  \
+             Event.insert(db, Event {{ id: 1, name: \"click\",  data: {{\"page\": \"/home\",  \"user\": \"ada\",   \"ts\": 100}} }}).await?\n  \
+             Event.insert(db, Event {{ id: 2, name: \"submit\", data: {{\"page\": \"/login\", \"user\": \"alan\",  \"ts\": 200}} }}).await?\n  \
+             Event.insert(db, Event {{ id: 3, name: \"view\",   data: {{\"page\": \"/home\",  \"user\": \"grace\", \"extra\": true}} }}).await?\n  \
+             Event.insert(db, Event {{ id: 4, name: \"error\",  data: {{\"code\": 500,      \"kind\": \"fatal\",  \"retry\": false}} }}).await?\n  \
+             // .has_key(\"page\") → 3 (todos menos error)\n  \
+             let with_page = Event.where(fn(e) => e.data.has_key(\"page\")).all(db).await?\n  \
+             // .has_all_keys([page, user]) → 3 (todos menos error)\n  \
+             let with_both = Event.where(fn(e) => e.data.has_all_keys([\"page\", \"user\"])).all(db).await?\n  \
+             // .has_any_keys([code, extra]) → 2 (view + error)\n  \
+             let either = Event.where(fn(e) => e.data.has_any_keys([\"code\", \"extra\"])).all(db).await?\n  \
+             // .contains_json({{\"page\": \"/home\"}}) → 2 (click + view)\n  \
+             let home = Event.where(fn(e) => e.data.contains_json({{\"page\": \"/home\"}})).all(db).await?\n  \
+             // .get(\"user\") == \"ada\" → 1 (click)\n  \
+             let ada = Event.where(fn(e) => e.data.get(\"user\") == \"ada\").all(db).await?\n  \
+             let n1 = len(with_page)\n  \
+             let n2 = len(with_both)\n  \
+             let n3 = len(either)\n  \
+             let n4 = len(home)\n  \
+             let n5 = len(ada)\n  \
+             return Ok(\"has_key={{n1}} has_all={{n2}} has_any={{n3}} contains={{n4}} get={{n5}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_jsonb_operators_in_where_codegen", |stdout| {
+        assert!(
+            stdout.contains("has_key=3")
+                && stdout.contains("has_all=3")
+                && stdout.contains("has_any=2")
+                && stdout.contains("contains=2")
+                && stdout.contains("get=1"),
+            "esperaba `has_key=3 has_all=3 has_any=2 contains=2 get=1`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w3_events_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.14 — Paridad GROUP BY + aggregate (Aggregated<Row>)
 //
 // `.group_by(...).count/sum/avg/min/max(...).await?` ahora compila a

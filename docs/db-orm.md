@@ -709,6 +709,10 @@ Post.where(fn(p) => p.tags.contained_in(["rust", "postgres", "go"]))  // tags <@
 | `.is_null()` / `.is_not_null()` | n/a (sin args) |
 | `.has(v)` | ❌ literal escalar REQUERIDO |
 | `.contains_all([...])` / `.contained_in([...])` | ❌ literal escalares REQUERIDOS |
+| `.has_key(s)` (JSONB) | ✅ var Str OK |
+| `.get(s)` (JSONB) | ✅ var Str OK |
+| `.has_all_keys([...])` / `.has_any_keys([...])` (JSONB) | ❌ List literal de Str |
+| `.contains_json({...})` (JSONB) | ❌ Map literal con values primitivos |
 
 Cuando algo del translator no alcanza, bajar a `db.query(...)`
 crudo con SQL escrito a mano.
@@ -1293,21 +1297,70 @@ let item = back.data["item"]
 print(item["name"])     // "T-shirt"
 ```
 
-### JSON operators del lado SQL (workaround crudo)
+### JSON operators integrados en `.where(...)` (v0.10.5)
 
-El translator no soporta `->`/`->>`/`@>`/`?`/`@@` adentro de
-`.where(closure)`. Para filtrar por una key del JSONB:
+Cinco method calls sobre fields jsonb (`Map<Str, ...>`) se
+mapean a operadores nativos Postgres:
+
+| Method                              | SQL emitido          | Postgres operator |
+|-------------------------------------|----------------------|-------------------|
+| `e.data.has_key("foo")`             | `"data" ? $1`        | key exists        |
+| `e.data.has_all_keys(["a", "b"])`   | `"data" ?& $1::text[]` | all keys exist  |
+| `e.data.has_any_keys(["a", "b"])`   | `"data" ?| $1::text[]` | any key exists  |
+| `e.data.contains_json({"k": "v"})`  | `"data" @> $1::jsonb`  | jsonb contains  |
+| `e.data.get("foo")`                 | `("data"->>$1)`       | text extract     |
+
+Ejemplos end-to-end:
 
 ```fitz
-// Workaround: db.query crudo
+// "todos los events que tengan la key 'page'"
+let with_page = Event.where(fn(e) => e.data.has_key("page")).all(db).await?
+
+// "todos los events que tengan TANTO 'page' como 'user'"
+let with_both = Event.where(fn(e) =>
+    e.data.has_all_keys(["page", "user"])
+).all(db).await?
+
+// "todos los events con CUALQUIERA de las keys 'code' o 'extra'"
+let either = Event.where(fn(e) =>
+    e.data.has_any_keys(["code", "extra"])
+).all(db).await?
+
+// "todos los events cuyo jsonb contenga AL MENOS {page: '/home'}"
+let from_home = Event.where(fn(e) =>
+    e.data.contains_json({"page": "/home"})
+).all(db).await?
+
+// .get(key) devuelve text — comparable contra Str literal:
+// "todos los events del usuario 'ada'"
+let ada_events = Event.where(fn(e) =>
+    e.data.get("user") == "ada"
+).all(db).await?
+```
+
+**Caveats MVP** (refinable):
+
+- `.has_key(s)` / `.get(s)` aceptan vars externas como arg
+  (passan por el translator general).
+- `.has_all_keys([...])` / `.has_any_keys([...])` / `.contains_json({...})`
+  requieren **literales** (List o Map literal directo, no var).
+- `.contains_json({...})` solo acepta values primitivos
+  (Int/Float/Str/Bool/Null). Maps/Lists nested adentro: workaround
+  con `db.query(...)` crudo.
+- `.get(key) == value` compara texto. Para comparar contra Int,
+  bajar a `db.query` con cast `(data->>'k')::int`. Refinamiento
+  futuro: `.get_int(key)` / `.get_float(key)` / etc.
+- Nested path access (`e.data.get("a").get("b")` → `data->'a'->>'b'`)
+  no implementado MVP. Workaround: `db.query` crudo.
+
+Para casos no cubiertos, sigue disponible el escape hatch crudo:
+
+```fitz
 let promos = db.query(
     "SELECT * FROM events WHERE data->>'tags' LIKE $1",
     ["%promo%"]
 ).await?
 ```
-
-Los JSON operators integrados en el translator quedan como deuda
-futura (sección 28).
 
 ### Null Fitz → NULL real (no la string "null")
 
@@ -2337,15 +2390,21 @@ Lo que NO está en el MVP, con plan de cierre y workaround:
 - **Cuándo**: mini-fase aparte. Decisión: implementar como tipos
   built-in `Date`/`DateTime`/`UUID` con métodos.
 
-### JSON operators (`->`, `->>`, `@>`, `?`, `@@`) en `.where(...)`
+### ✅ JSON operators (`->`, `->>`, `@>`, `?`) en `.where(...)` — CERRADO v0.10.5
 
-- **Status**: el translator no soporta operadores JSONB adentro
-  del closure.
-- **Workaround**: `db.query(...)` crudo con el operador (ver
-  ejemplos sección 13 y 20).
-- **Cuándo**: refinamiento del translator. Probablemente como
-  method calls: `e.data.get("key") == "value"` mapeado a
-  `"data"->>'key' = $1`.
+- **Status**: **CERRADO**. Cinco method calls sobre fields jsonb
+  mapeados a operadores Postgres nativos (`?`, `?&`, `?|`, `@>`,
+  `->>`). Ver detalle en sección 13.
+- **Caveats** que siguen como deuda menor:
+  - `.has_all_keys/has_any_keys/contains_json` requieren literales
+    (no vars del scope).
+  - `.contains_json({...})` solo acepta values primitivos.
+  - `.get(key)` devuelve text — comparación contra Int requiere
+    cast crudo o helper futuro (`.get_int(key)`).
+  - Nested path access (`e.data.get("a").get("b")`) no soportado;
+    workaround con `db.query` crudo.
+- **Operadores faltantes** (deuda menor): `@@` (text search),
+  `#>` / `#>>` (path access estructurado), `||` (concat jsonb).
 
 ### ✅ `BelongsTo` en `.preload(...)` — CERRADO v0.10.5 (via convention)
 

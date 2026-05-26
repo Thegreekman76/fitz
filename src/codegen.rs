@@ -11107,14 +11107,213 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 ));
                 Ok(format!("\"{}\" LIKE ${}", sql_col, bindings.len()))
             }
+            // Deuda residual #3 (v0.10.5) — JSON operators sobre
+            // fields jsonb (`Map<...>` columns). Paralelo a
+            // `translate_jsonb_method` del evaluator. Métodos:
+            //   .has_key("k")            → `"col" ? $N`
+            //   .has_all_keys([...])     → `"col" ?& $N::text[]`
+            //   .has_any_keys([...])     → `"col" ?| $N::text[]`
+            //   .contains_json({...})    → `"col" @> $N::jsonb`
+            //   .get("k")                → `("col"->>$N)` text
+            "has_key" | "has_all_keys" | "has_any_keys" | "contains_json" | "get" => {
+                let field = fields
+                    .iter()
+                    .find(|f| f.name == col_name)
+                    .ok_or_else(|| {
+                        self.err_at(
+                            callee_span,
+                            format!("field `{col_name}` no existe en el type"),
+                        )
+                    })?;
+                let is_jsonb_field = matches!(
+                    &field.type_,
+                    crate::ast::TypeExpr::Generic { name, .. } if name == "Map"
+                );
+                if !is_jsonb_field {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`.{method}(...)` requiere que `{col_name}` sea `Map<Str, ...>` (columna jsonb), pero es de otro tipo"
+                        ),
+                    ));
+                }
+                self.translate_closure_jsonb_method(
+                    method.as_str(),
+                    &sql_col,
+                    args,
+                    param_name,
+                    fields,
+                    table_meta,
+                    bindings,
+                    callee_span,
+                )
+            }
             other => Err(self.err_at(
                 callee_span,
                 format!(
                     "método `.{}(...)` no soportado sobre fields en `.where(...)`. \
-                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in.",
+                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get.",
                     other
                 ),
             )),
+        }
+    }
+
+    /// Deuda residual #3 (v0.10.5) — helper paralelo a
+    /// `translate_jsonb_method` del evaluator. Emite SQL fragments
+    /// con bindings Rust que serializan los args al `__FitzPgValue`
+    /// apropiado en runtime. Paridad bit-a-bit con el path intérprete.
+    #[allow(clippy::too_many_arguments)]
+    fn translate_closure_jsonb_method(
+        &mut self,
+        method: &str,
+        sql_col: &str,
+        args: &[Expr],
+        param_name: &str,
+        fields: &[crate::ast::Field],
+        table_meta: &crate::types::TableMetadata,
+        bindings: &mut Vec<String>,
+        callee_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        match method {
+            "has_key" | "get" => {
+                if args.len() != 1 {
+                    return Err(
+                        self.err_at(callee_span, format!("`.{method}(key)` espera 1 arg Str"))
+                    );
+                }
+                let key_frag = self
+                    .translate_closure_to_sql(&args[0], param_name, fields, table_meta, bindings)?;
+                if method == "has_key" {
+                    Ok(format!("\"{}\" ? {}", sql_col, key_frag))
+                } else {
+                    // .get(key) → text result. Envolver en () para
+                    // que BinOp posterior trate como operando único.
+                    Ok(format!("(\"{}\"->>{})", sql_col, key_frag))
+                }
+            }
+            "has_all_keys" | "has_any_keys" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!("`.{method}([keys...])` espera 1 arg (List literal Str)"),
+                    ));
+                }
+                let items = match &args[0] {
+                    Expr::List(items, _) => items,
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            format!("`.{method}([keys...])` MVP: el arg debe ser List literal"),
+                        ));
+                    }
+                };
+                if items.is_empty() {
+                    // Predicado degenerado: has_all_keys([]) true,
+                    // has_any_keys([]) false. Emitimos literal SQL.
+                    return Ok(if method == "has_all_keys" {
+                        "true".to_string()
+                    } else {
+                        "false".to_string()
+                    });
+                }
+                // Construir vector de PgValue::Text en runtime.
+                let mut elems_code = String::new();
+                for (i, it) in items.iter().enumerate() {
+                    let s = match it {
+                        Expr::Str(s, _) => s.clone(),
+                        _ => {
+                            return Err(self.err_at(
+                                it.span(),
+                                format!(
+                                    "`.{method}([keys...])` MVP: cada item debe ser string literal"
+                                ),
+                            ));
+                        }
+                    };
+                    if i > 0 {
+                        elems_code.push_str(", ");
+                    }
+                    elems_code.push_str(&format!(
+                        "__FitzPgValue::Text({}.to_string())",
+                        rust_str_literal(&s)
+                    ));
+                }
+                bindings.push(format!(
+                    "__FitzPgValue::Array {{ elem_oid: __fitz_db_runtime::oid::TEXT, values: vec![{}] }}",
+                    elems_code
+                ));
+                let op = if method == "has_all_keys" { "?&" } else { "?|" };
+                Ok(format!(
+                    "\"{}\" {} ${}::text[]",
+                    sql_col,
+                    op,
+                    bindings.len()
+                ))
+            }
+            "contains_json" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        "`.contains_json(map)` espera 1 arg Map (subset jsonb)",
+                    ));
+                }
+                let map_items = match &args[0] {
+                    Expr::Map(items, _) => items,
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            "`.contains_json(map)` MVP: el arg debe ser Map literal `{k: v, ...}`",
+                        ));
+                    }
+                };
+                // Construir JSON text en compile-time si todos los
+                // values son literales. Esto evita serializar en
+                // runtime (perf marginal, pero limpio).
+                let mut json_obj = serde_json::Map::with_capacity(map_items.len());
+                for (k_expr, v_expr) in map_items.iter() {
+                    let key = match k_expr {
+                        Expr::Str(s, _) => s.clone(),
+                        _ => {
+                            return Err(self.err_at(
+                                k_expr.span(),
+                                "`.contains_json(map)` MVP: cada key debe ser string literal",
+                            ));
+                        }
+                    };
+                    let val = match v_expr {
+                        Expr::Int(n, _) => serde_json::Value::from(*n),
+                        Expr::Float(x, _) => serde_json::Number::from_f64(*x)
+                            .map(serde_json::Value::Number)
+                            .unwrap_or(serde_json::Value::Null),
+                        Expr::Str(s, _) => serde_json::Value::String(s.clone()),
+                        Expr::Bool(b, _) => serde_json::Value::Bool(*b),
+                        Expr::Null(_) => serde_json::Value::Null,
+                        _ => {
+                            return Err(self.err_at(
+                                v_expr.span(),
+                                format!(
+                                    "`.contains_json(map)` MVP: value para `{key}` debe ser literal primitivo"
+                                ),
+                            ));
+                        }
+                    };
+                    json_obj.insert(key, val);
+                }
+                let json_text = serde_json::to_string(&serde_json::Value::Object(json_obj))
+                    .map_err(|e| {
+                        self.err_at(
+                            callee_span,
+                            format!(".contains_json: serialización JSON: {e}"),
+                        )
+                    })?;
+                bindings.push(format!(
+                    "__FitzPgValue::Text({}.to_string())",
+                    rust_str_literal(&json_text)
+                ));
+                Ok(format!("\"{}\" @> ${}::jsonb", sql_col, bindings.len()))
+            }
+            _ => unreachable!("translate_closure_jsonb_method recibió method no listado"),
         }
     }
 

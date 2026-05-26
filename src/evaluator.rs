@@ -12331,6 +12331,42 @@ fn translate_method_call_to_sql(
                 cast
             ))
         }
+        // Deuda residual #3 (v0.10.5) — JSON operators sobre fields
+        // jsonb (Map<Str, ...>). Sin estos, el user tenía que bajar a
+        // `db.query(...)` crudo. Métodos soportados:
+        //   .has_key("k")            → `"col" ? $N`
+        //   .has_all_keys([...])     → `"col" ?& $N::text[]`
+        //   .has_any_keys([...])     → `"col" ?| $N::text[]`
+        //   .contains_json({...})    → `"col" @> $N::jsonb`
+        //   .get("k")                → `("col"->>$N)` text result
+        //
+        // Validación: el field debe ser `Map<...>` (jsonb column).
+        // Si el user llama estos métodos sobre otro tipo, error claro.
+        "has_key" | "has_all_keys" | "has_any_keys" | "contains_json" | "get" => {
+            let field = fields
+                .iter()
+                .find(|f| f.name == col_name)
+                .ok_or_else(|| format!("field `{col_name}` no existe en el type"))?;
+            let is_jsonb_field = matches!(
+                &field.type_,
+                crate::ast::TypeExpr::Generic { name, .. } if name == "Map"
+            );
+            if !is_jsonb_field {
+                return Err(format!(
+                    "`.{method}(...)` requiere que `{col_name}` sea `Map<Str, ...>` (columna jsonb), pero es de otro tipo"
+                ));
+            }
+            translate_jsonb_method(
+                method.as_str(),
+                &sql_col,
+                args,
+                args_acc,
+                env,
+                param_name,
+                fields,
+                meta,
+            )
+        }
         // Fase 10.b.9.b — `u.field.between(low, high)` → SQL
         // `"field" BETWEEN $1 AND $2`. Equivalente a
         // `field >= low AND field <= high` (inclusive ambos extremos).
@@ -12374,8 +12410,161 @@ fn translate_method_call_to_sql(
         }
         other => Err(format!(
             "método `.{other}(...)` no soportado sobre fields en `.where(...)`. \
-             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in."
+             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get."
         )),
+    }
+}
+
+/// Deuda residual #3 (v0.10.5) — traduce method calls JSON sobre
+/// fields `Map<...>` (columnas jsonb) a SQL nativo Postgres.
+///
+/// Mapping:
+///   - `.has_key("foo")`           → `"col" ? $N`        (text key)
+///   - `.has_all_keys([a, b, c])`  → `"col" ?& $N::text[]`
+///   - `.has_any_keys([a, b, c])`  → `"col" ?| $N::text[]`
+///   - `.contains_json({"k":"v"})` → `"col" @> $N::jsonb`
+///   - `.get("foo")`               → `("col"->>$N)`     (text result)
+///
+/// `.get(...)` típicamente se usa en BinOp con string literal del lado
+/// derecho: `e.data.get("name") == "Alice"` → `("data"->>$1) = $2`.
+/// Para comparar contra Int/Float/Bool, el user puede usar
+/// `e.data.get("n") == "42"` (compare como string) o bajar a SQL
+/// crudo con cast `(data->>'n')::int`.
+#[allow(clippy::too_many_arguments)]
+fn translate_jsonb_method(
+    method: &str,
+    sql_col: &str,
+    args: &[crate::ast::Expr],
+    args_acc: &mut Vec<crate::db::PgValue>,
+    env: Option<&EnvRef>,
+    param_name: &str,
+    fields: &[crate::ast::Field],
+    meta: &crate::types::TableMetadata,
+) -> Result<String, String> {
+    use crate::ast::Expr;
+    match method {
+        "has_key" | "get" => {
+            // 1 arg: text key. Acepta literal Str o var externa Str.
+            if args.len() != 1 {
+                return Err(format!("`.{method}(key)` espera 1 arg Str (key del JSONB)"));
+            }
+            let key_frag =
+                translate_expr_to_sql_with_env(&args[0], param_name, fields, meta, args_acc, env)?;
+            if method == "has_key" {
+                Ok(format!("\"{}\" ? {}", sql_col, key_frag))
+            } else {
+                // .get(key) devuelve text via `->>'key'`. Lo
+                // envolvemos en paréntesis para que un BinOp posterior
+                // (e.g. `== "value"`) lo trate como un solo operando.
+                Ok(format!("(\"{}\"->>{})", sql_col, key_frag))
+            }
+        }
+        "has_all_keys" | "has_any_keys" => {
+            // 1 arg: List<Str> literal. Postgres ?&/?| esperan text[].
+            if args.len() != 1 {
+                return Err(format!(
+                    "`.{method}([keys...])` espera 1 arg (List literal de Str)"
+                ));
+            }
+            let items = match &args[0] {
+                Expr::List(items, _) => items,
+                _ => {
+                    return Err(format!(
+                        "`.{method}([keys...])` MVP: el arg debe ser List literal `[a, b, c]`"
+                    ));
+                }
+            };
+            if items.is_empty() {
+                // Postgres `?&`/`?|` con array vacío: has_all_keys es
+                // siempre true (predicado neutral); has_any_keys es
+                // siempre false. Emitimos literales SQL para evitar
+                // round-trip degenerado.
+                return Ok(if method == "has_all_keys" {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                });
+            }
+            let mut values: Vec<crate::db::PgValue> = Vec::with_capacity(items.len());
+            for it in items {
+                let s = match it {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        return Err(format!(
+                            "`.{method}([keys...])` MVP: cada item debe ser string literal"
+                        ));
+                    }
+                };
+                values.push(crate::db::PgValue::Text(s));
+            }
+            args_acc.push(crate::db::PgValue::Array {
+                elem_oid: crate::db::oid::TEXT,
+                values,
+            });
+            let op = if method == "has_all_keys" { "?&" } else { "?|" };
+            Ok(format!(
+                "\"{}\" {} ${}::text[]",
+                sql_col,
+                op,
+                args_acc.len()
+            ))
+        }
+        "contains_json" => {
+            // 1 arg: Map literal (jsonb subset que el column debe
+            // contener). Serializamos el Map a JSON text + cast
+            // `::jsonb` en SQL. Equivalente a `@>` operator.
+            if args.len() != 1 {
+                return Err(
+                    "`.contains_json(map)` espera 1 arg Map (subset jsonb a chequear)".to_string(),
+                );
+            }
+            let map_items = match &args[0] {
+                Expr::Map(items, _) => items,
+                _ => {
+                    return Err(
+                        "`.contains_json(map)` MVP: el arg debe ser Map literal `{k: v, ...}`"
+                            .to_string(),
+                    );
+                }
+            };
+            // Construir el JSON text del Map literal. Acepta keys Str
+            // literal + values primitivos literales (Int/Float/Str/Bool/
+            // Null). Maps nested + Lists: MVP no soporta, deuda menor.
+            let mut json_obj = serde_json::Map::with_capacity(map_items.len());
+            for (k_expr, v_expr) in map_items.iter() {
+                let key = match k_expr {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        return Err(
+                            "`.contains_json(map)` MVP: cada key del Map debe ser string literal"
+                                .to_string(),
+                        );
+                    }
+                };
+                let val = match v_expr {
+                    Expr::Int(n, _) => serde_json::Value::from(*n),
+                    Expr::Float(x, _) => serde_json::Number::from_f64(*x)
+                        .map(serde_json::Value::Number)
+                        .unwrap_or(serde_json::Value::Null),
+                    Expr::Str(s, _) => serde_json::Value::String(s.clone()),
+                    Expr::Bool(b, _) => serde_json::Value::Bool(*b),
+                    Expr::Null(_) => serde_json::Value::Null,
+                    _ => {
+                        return Err(format!(
+                            "`.contains_json(map)` MVP: value para key `{key}` debe ser literal primitivo (Int/Float/Str/Bool/Null)"
+                        ));
+                    }
+                };
+                json_obj.insert(key, val);
+            }
+            let json_text = serde_json::to_string(&serde_json::Value::Object(json_obj))
+                .map_err(|e| format!(".contains_json: serialización JSON falló: {e}"))?;
+            args_acc.push(crate::db::PgValue::Text(json_text));
+            Ok(format!("\"{}\" @> ${}::jsonb", sql_col, args_acc.len()))
+        }
+        _ => unreachable!(
+            "translate_jsonb_method recibió un method no listado en el dispatch caller"
+        ),
     }
 }
 
