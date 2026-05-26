@@ -1286,6 +1286,129 @@ fn orm_where_combinatorio_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.9.b — Paridad fitz build sobre between + Mod + var externa
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_where_between_mod_var_externa_paridad_codegen_e2e() {
+    use std::process::Command;
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w9b_codegen_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w9b_codegen_test (\
+                 id bigint PRIMARY KEY, \
+                 name text, \
+                 age bigint)",
+            &[],
+        )
+        .await
+        .unwrap();
+        // 10 rows con ages 10..=100 step 10 — ideal para verificar
+        // bandas y módulo.
+        seed.exec(
+            "INSERT INTO fitz_orm_w9b_codegen_test VALUES \
+                 (1, 'a', 10), (2, 'b', 20), (3, 'c', 30), (4, 'd', 40), (5, 'e', 50), \
+                 (6, 'f', 60), (7, 'g', 70), (8, 'h', 80), (9, 'i', 90), (10, 'j', 100)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w9b_codegen_test\") type Item {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // between (inclusive): age in [30, 60] → 30,40,50,60 → 4 rows.\n  \
+             let b = Item.where(fn(i) => i.age.between(30, 60)).all(db).await?\n  \
+             // mod: age % 20 == 0 → 20,40,60,80,100 → 5 rows.\n  \
+             let m = Item.where(fn(i) => i.age % 20 == 0).all(db).await?\n  \
+             // var externa capturada del scope outer.\n  \
+             let limit = 50\n  \
+             let v = Item.where(fn(i) => i.age >= limit).all(db).await?\n  \
+             return Ok(\"between={{len(b)}} mod={{len(m)}} vext={{len(v)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    let stem = "orm_where_b_mod_vext_paridad_codegen";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, &src).expect("escribir .fitz");
+
+    let fitz_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "fitz.exe" } else { "fitz" });
+    let build = Command::new(&fitz_bin)
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+
+    // Cardinalidad esperada:
+    //   between [30,60] → 30,40,50,60 → 4
+    //   mod 20 == 0 → 20,40,60,80,100 → 5
+    //   age >= 50 (var ext) → 50..100 step 10 → 6 rows
+    assert!(
+        stdout.contains("between=4") && stdout.contains("mod=5") && stdout.contains("vext=6"),
+        "esperaba `between=4 mod=5 vext=6`, fue: {}",
+        stdout
+    );
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w9b_codegen_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.8 — Paridad fitz build sobre arrays + JSONB
 //
 // Programa con `tags: List<Int>` (array Postgres) y `meta: Map<Str,

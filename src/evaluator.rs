@@ -10551,8 +10551,17 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
             ),
         ));
     }
-    let (params, body) = match &args[0] {
-        Value::Function { params, body, .. } => (params.clone(), body.clone()),
+    // Fase 10.b.9.b — capturamos el closure env para que el translator
+    // pueda resolver vars externas (e.g. `let limit = 18; .where(fn(u)
+    // => u.age >= limit)`). El env contiene los bindings del scope
+    // donde se definió la closure (clone barato — `Arc`).
+    let (params, body, closure_env) = match &args[0] {
+        Value::Function {
+            params,
+            body,
+            closure,
+            ..
+        } => (params.clone(), body.clone(), closure.clone()),
         other => {
             return Err(FitzError::new(
                 ErrorKind::TypeMismatch {
@@ -10596,12 +10605,13 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
     };
 
     let mut args_acc = state.where_args.clone();
-    let sql_fragment = translate_expr_to_sql(
+    let sql_fragment = translate_expr_to_sql_with_env(
         &body_expr,
         &param_name,
         &state.fields,
         &state.meta,
         &mut args_acc,
+        Some(&closure_env),
     )
     .map_err(|msg| {
         FitzError::new(
@@ -12115,6 +12125,7 @@ fn translate_method_call_to_sql(
     fields: &[crate::ast::Field],
     meta: &crate::types::TableMetadata,
     args_acc: &mut Vec<crate::db::PgValue>,
+    env: Option<&EnvRef>,
 ) -> Result<String, String> {
     use crate::ast::Expr;
     let (col_name, method) = match callee {
@@ -12194,7 +12205,8 @@ fn translate_method_call_to_sql(
             }
             let mut placeholders = Vec::with_capacity(items.len());
             for it in items {
-                let frag = translate_expr_to_sql(it, param_name, fields, meta, args_acc)?;
+                let frag =
+                    translate_expr_to_sql_with_env(it, param_name, fields, meta, args_acc, env)?;
                 placeholders.push(frag);
             }
             Ok(format!("\"{}\" IN ({})", sql_col, placeholders.join(", ")))
@@ -12205,9 +12217,25 @@ fn translate_method_call_to_sql(
                     "`{param_name}.{col_name}.{method}(pattern)` espera 1 arg",
                 ));
             }
-            let pat = translate_expr_to_sql(&args[0], param_name, fields, meta, args_acc)?;
+            let pat =
+                translate_expr_to_sql_with_env(&args[0], param_name, fields, meta, args_acc, env)?;
             let op = if method == "ilike" { "ILIKE" } else { "LIKE" };
             Ok(format!("\"{}\" {} {}", sql_col, op, pat))
+        }
+        // Fase 10.b.9.b — `u.field.between(low, high)` → SQL
+        // `"field" BETWEEN $1 AND $2`. Equivalente a
+        // `field >= low AND field <= high` (inclusive ambos extremos).
+        "between" => {
+            if args.len() != 2 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.between(low, high)` espera 2 args (low, high)"
+                ));
+            }
+            let low =
+                translate_expr_to_sql_with_env(&args[0], param_name, fields, meta, args_acc, env)?;
+            let high =
+                translate_expr_to_sql_with_env(&args[1], param_name, fields, meta, args_acc, env)?;
+            Ok(format!("\"{}\" BETWEEN {} AND {}", sql_col, low, high))
         }
         "starts_with" | "ends_with" | "contains" => {
             if args.len() != 1 {
@@ -12237,7 +12265,7 @@ fn translate_method_call_to_sql(
         }
         other => Err(format!(
             "método `.{other}(...)` no soportado sobre fields en `.where(...)`. \
-             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains."
+             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between."
         )),
     }
 }
@@ -12261,6 +12289,10 @@ fn escape_like(s: &str) -> String {
     out
 }
 
+/// Wrapper compatible para call sites sin `closure_env` (los tests
+/// unit que no construyen un env real). Cuando no hay env, las vars
+/// externas adentro de `.where(...)` siguen rechazadas con error
+/// claro — comportamiento histórico.
 pub fn translate_expr_to_sql(
     expr: &crate::ast::Expr,
     param_name: &str,
@@ -12268,13 +12300,28 @@ pub fn translate_expr_to_sql(
     meta: &crate::types::TableMetadata,
     args_acc: &mut Vec<crate::db::PgValue>,
 ) -> Result<String, String> {
+    translate_expr_to_sql_with_env(expr, param_name, fields, meta, args_acc, None)
+}
+
+/// Fase 10.b.9.b — variante que recibe el `closure_env` para
+/// resolver vars externas capturadas adentro del `.where(...)`. El
+/// caller real (`orm_qb_where`) lo pasa siempre; tests legacy usan
+/// el wrapper de arriba con `env=None`.
+pub fn translate_expr_to_sql_with_env(
+    expr: &crate::ast::Expr,
+    param_name: &str,
+    fields: &[crate::ast::Field],
+    meta: &crate::types::TableMetadata,
+    args_acc: &mut Vec<crate::db::PgValue>,
+    env: Option<&EnvRef>,
+) -> Result<String, String> {
     use crate::ast::{BinOpKind, Expr, UnaryOpKind};
     match expr {
         Expr::BinOp {
             op, left, right, ..
         } => {
-            let l = translate_expr_to_sql(left, param_name, fields, meta, args_acc)?;
-            let r = translate_expr_to_sql(right, param_name, fields, meta, args_acc)?;
+            let l = translate_expr_to_sql_with_env(left, param_name, fields, meta, args_acc, env)?;
+            let r = translate_expr_to_sql_with_env(right, param_name, fields, meta, args_acc, env)?;
             let op_sql = match op {
                 BinOpKind::Eq => "=",
                 BinOpKind::NotEq => "<>",
@@ -12288,6 +12335,13 @@ pub fn translate_expr_to_sql(
                 BinOpKind::Sub => "-",
                 BinOpKind::Mul => "*",
                 BinOpKind::Div => "/",
+                // Fase 10.b.9.b — módulo. Paralelo a codegen
+                // (translate_closure_to_sql ~10483). Postgres `%` es
+                // truncate-toward-zero; Fitz puro es euclidean; las
+                // dos semánticas coinciden cuando ambos operandos son
+                // positivos (caso típico). Divisores negativos en
+                // .where → divergencia menor (deuda).
+                BinOpKind::Mod => "%",
                 other => {
                     return Err(format!(
                         "operador `{:?}` no soportado en `.where(...)` MVP",
@@ -12298,7 +12352,8 @@ pub fn translate_expr_to_sql(
             Ok(format!("({} {} {})", l, op_sql, r))
         }
         Expr::UnaryOp { op, operand, .. } => {
-            let inner = translate_expr_to_sql(operand, param_name, fields, meta, args_acc)?;
+            let inner =
+                translate_expr_to_sql_with_env(operand, param_name, fields, meta, args_acc, env)?;
             match op {
                 UnaryOpKind::Not => Ok(format!("(NOT {})", inner)),
                 UnaryOpKind::Neg => Ok(format!("(-{})", inner)),
@@ -12341,7 +12396,7 @@ pub fn translate_expr_to_sql(
         // Field { object: Field { Ident(param), col }, method },
         // args }`.
         Expr::Call { callee, args, .. } => {
-            translate_method_call_to_sql(callee, args, param_name, fields, meta, args_acc)
+            translate_method_call_to_sql(callee, args, param_name, fields, meta, args_acc, env)
         }
         Expr::Int(n, _) => {
             args_acc.push(crate::db::PgValue::Int(*n));
@@ -12361,18 +12416,34 @@ pub fn translate_expr_to_sql(
         }
         Expr::Null(_) => Ok("NULL".to_string()),
         Expr::Ident(name, _) => {
-            // Permitido SOLO si `name == param_name` y aparece en
-            // un context que tenga sentido (e.g. `u == ...` que
-            // no tiene). Por ahora rechazamos: el user debe acceder
-            // a un field específico, no al receiver entero.
             if name == param_name {
                 Err(format!(
                     "no podés comparar el row entero (`{name}`); accedé a un field específico"
                 ))
             } else {
-                Err(format!(
-                    "variable `{name}` no soportada en `.where(...)` MVP — usá literales o `<param>.<field>`"
-                ))
+                // Fase 10.b.9.b — var externa capturada por el closure.
+                // Si tenemos acceso al closure env, hacemos lookup y
+                // serializamos al PgValue del primitivo. Sin env (call
+                // legacy desde tests), seguimos rechazando con error
+                // claro. Paralelo al codegen (~10581) que ya lo
+                // soportaba via gen_expr + __IntoPgValue::into_pg.
+                match env {
+                    Some(e) => {
+                        let v = e.lock().get(name).ok_or_else(|| {
+                            format!("variable `{name}` no está en scope del closure de `.where(...)`")
+                        })?;
+                        let pg = fitz_value_to_pg(&v).map_err(|msg| {
+                            format!(
+                                "variable `{name}` no se puede usar como arg de query: {msg}"
+                            )
+                        })?;
+                        args_acc.push(pg);
+                        Ok(format!("${}", args_acc.len()))
+                    }
+                    None => Err(format!(
+                        "variable `{name}` no soportada en `.where(...)` MVP — usá literales o `<param>.<field>`"
+                    )),
+                }
             }
         }
         other => Err(format!(

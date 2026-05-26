@@ -10481,6 +10481,14 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                     BinOpKind::Sub => "-",
                     BinOpKind::Mul => "*",
                     BinOpKind::Div => "/",
+                    // Fase 10.b.9.b — módulo. Postgres usa `%` igual
+                    // que Fitz. Semántica del lenguaje es euclidean
+                    // (signo del divisor); Postgres es truncate-
+                    // toward-zero. Para casos `n >= 0` y `divisor > 0`
+                    // (el 99% de los predicados ORM) los resultados
+                    // coinciden; divisores negativos divergen — deuda
+                    // documentada.
+                    BinOpKind::Mod => "%",
                     other => {
                         return Err(self.err_at(
                             body.span(),
@@ -10741,6 +10749,31 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 let op = if method == "ilike" { "ILIKE" } else { "LIKE" };
                 Ok(format!("\"{}\" {} {}", sql_col, op, pat))
             }
+            // Fase 10.b.9.b — `u.field.between(low, high)` → SQL
+            // `"field" BETWEEN $1 AND $2`. Equivalente a
+            // `field >= low AND field <= high` (inclusive ambos
+            // extremos, igual que SQL estándar y Python `low <= x <=
+            // high`). Args pueden ser literales o vars externas.
+            "between" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!(
+                            "`{}.{}.between(low, high)` espera 2 args (low, high), recibió {}",
+                            param_name,
+                            col_name,
+                            args.len()
+                        ),
+                    ));
+                }
+                let low = self.translate_closure_to_sql(
+                    &args[0], param_name, fields, table_meta, bindings,
+                )?;
+                let high = self.translate_closure_to_sql(
+                    &args[1], param_name, fields, table_meta, bindings,
+                )?;
+                Ok(format!("\"{}\" BETWEEN {} AND {}", sql_col, low, high))
+            }
             "starts_with" | "ends_with" | "contains" => {
                 if args.len() != 1 {
                     return Err(self.err_at(
@@ -10779,7 +10812,7 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 callee_span,
                 format!(
                     "método `.{}(...)` no soportado sobre fields en `.where(...)`. \
-                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains.",
+                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between.",
                     other
                 ),
             )),
@@ -29651,6 +29684,74 @@ mod tests {
         assert!(
             !rust.contains("(\\\"name\\\" = $1)"),
             "no esperaba `\"name\" = $1` (el nombre Fitz no debe filtrarse), fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.9.b — operadores nuevos: between, %, var externa ----
+
+    #[test]
+    fn codegen_where_between_emite_sql_between_inclusivo() {
+        let r = where_sql_fragment("u.age.between(18, 65)");
+        assert!(
+            r.contains("\\\"age\\\" BETWEEN $1 AND $2"),
+            "esperaba `\"age\" BETWEEN $1 AND $2`, fue: {r}",
+        );
+        // Ambos bounds bindeados como Int.
+        let n = r.matches("__FitzPgValue::Int").count();
+        assert!(
+            n >= 2,
+            "esperaba 2 bindings Int (low+high), fueron {n}: {r}"
+        );
+    }
+
+    #[test]
+    fn codegen_where_between_arity_invalida_aborta() {
+        // `between(low)` con 1 arg → error.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.where(fn(u) => u.age.between(18)).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de aridad");
+        assert!(
+            err.message.contains("between") && err.message.contains("2 args"),
+            "esperaba mención de `between` con `2 args`, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_where_modulo_emite_porcentaje_sql() {
+        // `u.age % 2 == 0` (par) → SQL `(("age" % $1) = $2)`.
+        let r = where_sql_fragment("u.age % 2 == 0");
+        assert!(
+            r.contains("(\\\"age\\\" % $1)"),
+            "esperaba `(\"age\" % $1)`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_var_externa_emite_into_pg_binding() {
+        // Var externa capturada del scope outer → debe emitir un
+        // binding via `__IntoPgValue::into_pg(...)` con la expr Rust
+        // del ident.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn run(min_age: Int) -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.where(fn(u) => u.age >= min_age).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__IntoPgValue>::into_pg"),
+            "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
         );
     }
 
