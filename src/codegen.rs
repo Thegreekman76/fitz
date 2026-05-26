@@ -5423,6 +5423,270 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
     }
 }
 
+// --- 10.b.5: `__FitzQueryBuilder<TData>` — state acumulado del builder ORM ---
+//
+// Paralelo a `QueryBuilderState` del evaluator (src/evaluator.rs ~10365).
+// `TData` es el `<Type>Data` (e.g. `UserData`) — el alias `<Type>` es
+// `Arc<Mutex<<Type>Data>>`. Los terminales `.all`/`.first` deserializan
+// las rows a `TData` con el trait `__FromFitzDbRow` y wrapean cada
+// instance en el alias. El `_phantom` mantiene `TData` en la firma para
+// que el compilador no se queje y para que el dispatch por tipo en el
+// codegen pueda resolver correctamente.
+
+#[derive(Clone)]
+struct __FitzQueryBuilder<TData> {
+    /// Nombre SQL de la tabla (sin quotes — se quotea al emitir el SELECT).
+    table: String,
+    /// Lista de columnas pre-emitidas (\"col1\", \"col2\", ...) — usado por
+    /// `.all`/`.first` para construir el SELECT. `.count` ignora esto y
+    /// emite `COUNT(*)`.
+    cols: String,
+    /// Fragmento WHERE acumulado (sin la palabra `WHERE`). `None` si nunca
+    /// se llamó `.where(...)`. Múltiples `.where(...)` se combinan con `AND`
+    /// y los placeholders se renumeran.
+    where_sql: Option<String>,
+    /// Args parametrizados acumulados en orden de aparición en `where_sql`.
+    where_args: Vec<__FitzPgValue>,
+    /// Fragmentos `ORDER BY` acumulados — cada `.order_by(...)` push una
+    /// clause `\"col\" ASC|DESC`. Se emiten separados por coma.
+    order_by_clauses: Vec<String>,
+    /// `LIMIT N`. Si hay múltiples `.limit()`, el último gana (overwrite).
+    limit: Option<i64>,
+    /// `OFFSET N`. Mismo criterio que `limit`.
+    offset: Option<i64>,
+    /// Clauses GROUP BY acumuladas. Paralelo al evaluator. En 10.b.5 el
+    /// state se guarda pero solo los agregados (10.b.6) lo consumen.
+    /// `.all`/`.first`/`.count` los ignoran (mismo comportamiento del
+    /// evaluator en `build_select_sql`).
+    group_by_clauses: Vec<(String, String)>,
+    _phantom: std::marker::PhantomData<TData>,
+}
+
+impl<TData> __FitzQueryBuilder<TData> {
+    fn new(table: &str, cols: &str) -> Self {
+        Self {
+            table: table.to_string(),
+            cols: cols.to_string(),
+            where_sql: None,
+            where_args: Vec::new(),
+            order_by_clauses: Vec::new(),
+            limit: None,
+            offset: None,
+            group_by_clauses: Vec::new(),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    /// Suma un fragment WHERE con AND y renumera los placeholders del
+    /// fragment para que arranquen después de los args previos.
+    fn with_where(mut self, sql: &str, mut args: Vec<__FitzPgValue>) -> Self {
+        let off = self.where_args.len();
+        let renumbered = if off == 0 {
+            sql.to_string()
+        } else {
+            __fitz_qb_renumber_placeholders(sql, off)
+        };
+        self.where_args.append(&mut args);
+        let combined = match self.where_sql.take() {
+            Some(prev) => format!(\"({}) AND ({})\", prev, renumbered),
+            None => renumbered,
+        };
+        self.where_sql = Some(combined);
+        self
+    }
+
+    fn with_order_by(mut self, sql_col: &str, descending: bool) -> Self {
+        let dir = if descending { \"DESC\" } else { \"ASC\" };
+        self.order_by_clauses.push(format!(\"\\\"{}\\\" {}\", sql_col, dir));
+        self
+    }
+
+    fn with_limit(mut self, n: i64) -> Self {
+        self.limit = Some(n);
+        self
+    }
+
+    fn with_offset(mut self, n: i64) -> Self {
+        self.offset = Some(n);
+        self
+    }
+
+    fn with_group_by(mut self, fitz_name: &str, sql_col: &str) -> Self {
+        self.group_by_clauses
+            .push((fitz_name.to_string(), sql_col.to_string()));
+        self
+    }
+
+    /// Construye el SELECT completo. `override_limit` se usa por `.first`
+    /// para forzar `LIMIT 1` sin tocar el `limit` que el user haya seteado.
+    /// Paralelo a `build_select_sql` del evaluator.
+    fn build_select_sql(&self, override_limit: Option<i64>) -> String {
+        let mut sql = format!(\"SELECT {} FROM \\\"{}\\\"\", self.cols, self.table);
+        if let Some(w) = &self.where_sql {
+            sql.push_str(\" WHERE \");
+            sql.push_str(w);
+        }
+        if !self.order_by_clauses.is_empty() {
+            sql.push_str(\" ORDER BY \");
+            sql.push_str(&self.order_by_clauses.join(\", \"));
+        }
+        let effective_limit = override_limit.or(self.limit);
+        if let Some(n) = effective_limit {
+            sql.push_str(&format!(\" LIMIT {}\", n.max(0)));
+        }
+        if let Some(n) = self.offset {
+            sql.push_str(&format!(\" OFFSET {}\", n.max(0)));
+        }
+        sql
+    }
+
+    /// `.count(db)` — `SELECT COUNT(*) FROM table [WHERE ...]`. Ignora
+    /// ORDER BY / LIMIT / OFFSET / GROUP BY (último por simplicidad —
+    /// el path GROUP BY de count llega con los agregados en 10.b.6).
+    async fn count(self, conn: &__FitzDbConn) -> Result<i64, String> {
+        let mut sql = format!(\"SELECT COUNT(*) FROM \\\"{}\\\"\", self.table);
+        if let Some(w) = &self.where_sql {
+            sql.push_str(\" WHERE \");
+            sql.push_str(w);
+        }
+        match __fitz_db_query(conn, sql, self.where_args).await {
+            Ok(rows) => {
+                let guard = rows.lock().unwrap();
+                match guard.first() {
+                    Some(r) => match r.get_at(0) {
+                        Some(v) => __fitz_pg_to_i64(v, \"count\"),
+                        None => Err(\"COUNT(*) sin columna\".to_string()),
+                    },
+                    None => Err(\"COUNT(*) sin row\".to_string()),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `.update(db, set_clauses, set_args)` — `UPDATE table SET col=$1,
+    /// col=$2 WHERE <where>` con args ya construidos en orden por el
+    /// codegen. Guard de seguridad: si NO hay WHERE previo, error claro.
+    async fn update_with_set(
+        self,
+        conn: &__FitzDbConn,
+        set_clauses: &str,
+        mut set_args: Vec<__FitzPgValue>,
+    ) -> Result<i64, String> {
+        if self.where_sql.is_none() {
+            return Err(
+                \"`.update(db, changes)` sin `.where(...)` previo no se permite \
+                 (afectaría toda la tabla); si querés update masivo, usá \
+                 `.where(fn(_) => true).update(...)` explícito\"
+                    .to_string(),
+            );
+        }
+        let set_count = set_args.len();
+        let where_sql_renum =
+            __fitz_qb_renumber_placeholders(self.where_sql.as_deref().unwrap_or(\"\"), set_count);
+        let sql = format!(
+            \"UPDATE \\\"{}\\\" SET {} WHERE {}\",
+            self.table, set_clauses, where_sql_renum
+        );
+        set_args.extend(self.where_args);
+        __fitz_db_exec(conn, sql, set_args).await
+    }
+
+    /// `.delete(db)` — `DELETE FROM table WHERE <where>`. Guard idem update.
+    async fn delete_with_where(self, conn: &__FitzDbConn) -> Result<i64, String> {
+        if self.where_sql.is_none() {
+            return Err(
+                \"`.delete(db)` sin `.where(...)` previo no se permite \
+                 (borraría toda la tabla); si querés delete masivo, usá \
+                 `.where(fn(_) => true).delete(db)` explícito\"
+                    .to_string(),
+            );
+        }
+        let sql = format!(
+            \"DELETE FROM \\\"{}\\\" WHERE {}\",
+            self.table,
+            self.where_sql.as_deref().unwrap()
+        );
+        __fitz_db_exec(conn, sql, self.where_args).await
+    }
+}
+
+impl<TData: __FromFitzDbRow> __FitzQueryBuilder<TData> {
+    /// `.all(db)` — ejecuta el SELECT acumulado y devuelve un
+    /// `List<Instance>` Fitz (Arc<Mutex<Vec<Arc<Mutex<TData>>>>>).
+    async fn all(
+        self,
+        conn: &__FitzDbConn,
+    ) -> Result<std::sync::Arc<std::sync::Mutex<Vec<std::sync::Arc<std::sync::Mutex<TData>>>>>, String>
+    {
+        let sql = self.build_select_sql(None);
+        match __fitz_db_query(conn, sql, self.where_args).await {
+            Ok(rows) => {
+                let guard = rows.lock().unwrap();
+                let mut out: Vec<std::sync::Arc<std::sync::Mutex<TData>>> =
+                    Vec::with_capacity(guard.len());
+                for r in guard.iter() {
+                    match <TData as __FromFitzDbRow>::from_fitz_db_row(r) {
+                        Ok(d) => out.push(std::sync::Arc::new(std::sync::Mutex::new(d))),
+                        Err(e) => return Err(e),
+                    }
+                }
+                Ok(std::sync::Arc::new(std::sync::Mutex::new(out)))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// `.first(db)` — `SELECT ... LIMIT 1` + fallback `Err(\"no rows\")`.
+    async fn first(
+        self,
+        conn: &__FitzDbConn,
+    ) -> Result<std::sync::Arc<std::sync::Mutex<TData>>, String> {
+        let sql = self.build_select_sql(Some(1));
+        match __fitz_db_query(conn, sql, self.where_args).await {
+            Ok(rows) => {
+                let guard = rows.lock().unwrap();
+                match guard.first() {
+                    Some(r) => match <TData as __FromFitzDbRow>::from_fitz_db_row(r) {
+                        Ok(d) => Ok(std::sync::Arc::new(std::sync::Mutex::new(d))),
+                        Err(e) => Err(e),
+                    },
+                    None => Err(\"no rows\".to_string()),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+/// Renumera los placeholders `$N` de un fragment SQL sumando `offset` a
+/// cada N. Paralelo a `renumber_placeholders` del evaluator. Lo usa
+/// `with_where` para combinar múltiples wheres y `update_with_set` para
+/// offsetear el where después de los args del SET.
+fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
+    let mut out = String::with_capacity(sql.len() + offset.to_string().len() * 4);
+    let bytes = sql.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() && bytes[i + 1].is_ascii_digit() {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_digit() {
+                j += 1;
+            }
+            let n: usize = std::str::from_utf8(&bytes[i + 1..j])
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            out.push_str(&format!(\"${}\", n + offset));
+            i = j;
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
+}
+
 ",
         );
     }
@@ -10030,10 +10294,10 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
     /// `u`). `fields` es la lista de fields del `type` decorado con
     /// `@table` (para validar referencias `u.field` contra los reales
     /// y resolver sql_name overrides).
-    // Fase 10.b.2 — emitido por adelantado para 10.b.5 (`.where`
-    // chain del QueryBuilder). El consumidor real aterriza ahí; el
-    // allow se quita cuando 10.b.5 cierre y wireemos el dispatch.
-    #[allow(dead_code)]
+    // Fase 10.b.5 — wireado vía `emit_qb_where_chain` (dispatch chain
+    // sobre `__FitzQueryBuilder<TData>.with_where(...)`). El translator
+    // se introdujo en 10.b.2 y quedó dormido hasta que llegara el
+    // consumer real.
     fn translate_closure_to_sql(
         &mut self,
         body: &Expr,
@@ -10179,9 +10443,7 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
     /// Helper de `translate_closure_to_sql` para method calls del
     /// shape `u.field.method(args)`. Soporta is_null/is_not_null,
     /// is_in([...]), like/ilike, starts_with/ends_with/contains.
-    // Fase 10.b.2 — ditto translate_closure_to_sql: dead_code hasta
-    // que 10.b.5 wiree el dispatch del `.where` chain.
-    #[allow(dead_code)]
+    // Fase 10.b.5 — wireado junto con `translate_closure_to_sql`.
     fn translate_closure_method_call_to_sql(
         &mut self,
         callee: &Expr,
@@ -10555,27 +10817,44 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
             "insert" => self
                 .gen_orm_type_insert(type_name, args, call_span)
                 .map(Some),
-            // Métodos del builder que aterrizan en sub-pasos
-            // posteriores. Error explícito con sub-paso target.
-            "where" => Err(self.err_at(
-                call_span,
-                format!(
-                    "codegen ORM (10.b.3): `{}.where(...)` llega en 10.b.5 (QueryBuilder chain)",
-                    type_name
-                ),
-            )),
+            // Fase 10.b.5 — chain methods sobre el Type construyen un
+            // `__FitzQueryBuilder<TData>` nuevo y aplican el primer
+            // fragmento del chain. La type del expresión devuelta es
+            // `Type::QueryBuilder<Nominal>` — chains posteriores
+            // (`qb.where(...).all(db)`) caen al dispatch sobre QB.
+            "where" => self
+                .gen_orm_type_where(type_name, args, call_span)
+                .map(Some),
+            "order_by" => self
+                .gen_orm_type_order_by(type_name, args, call_span)
+                .map(Some),
+            "limit" => self
+                .gen_orm_type_limit(type_name, args, call_span)
+                .map(Some),
+            "offset" => self
+                .gen_orm_type_offset(type_name, args, call_span)
+                .map(Some),
+            "group_by" => self
+                .gen_orm_type_group_by(type_name, args, call_span)
+                .map(Some),
+            // Fase 10.b.5 — update/delete sin `.where(...)` previo se
+            // rechazan en codegen con mensaje paralelo al guard runtime
+            // del evaluator. Para update masivo el usuario debe escribir
+            // `.where(fn(_) => true).update(...)` explícito.
             "update" => Err(self.err_at(
                 call_span,
                 format!(
-                    "codegen ORM (10.b.4): `{}.update(...)` necesita un `.where(...)` previo (QueryBuilder chain), que llega en 10.b.5",
-                    type_name
+                    "`{}.update(...)` requiere un `.where(...)` previo (afectaría toda la tabla). \
+                     Para update masivo, usá `{}.where(fn(_) => true).update(...)` explícito.",
+                    type_name, type_name
                 ),
             )),
             "delete" => Err(self.err_at(
                 call_span,
                 format!(
-                    "codegen ORM (10.b.4): `{}.delete(...)` necesita un `.where(...)` previo (QueryBuilder chain), que llega en 10.b.5",
-                    type_name
+                    "`{}.delete(...)` requiere un `.where(...)` previo (borraría toda la tabla). \
+                     Para delete masivo, usá `{}.where(fn(_) => true).delete(...)` explícito.",
+                    type_name, type_name
                 ),
             )),
             // No es ORM built-in — devolvemos None para que el caller
@@ -10935,6 +11214,675 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
         Ok((code, ret_ty))
     }
 
+    // =========================================================
+    // Fase 10.b.5 — QueryBuilder chain en codegen
+    //
+    // El chain inicial (User.where/.order_by/...) construye un
+    // `__FitzQueryBuilder<UserData>` con `new(table, cols)` y aplica
+    // el primer fragmento. Las chains subsiguientes (qb.where(...).
+    // limit(...).all(db)) caen al dispatch sobre receivers de tipo
+    // `Type::QueryBuilder(...)` en `gen_method_call` y delegan a
+    // `gen_orm_qb_method`.
+    // =========================================================
+
+    /// Construye `(\"col1\", \"col2\", ...)` (sin SELECT/FROM) — string
+    /// literal que se pasa al `__FitzQueryBuilder::new(table, cols)`
+    /// para que el builder arme el `SELECT <cols> FROM \"table\"` al
+    /// emitir el terminal. Respeta `@column(name=...)` y skipea
+    /// fields virtuales (paralelo a `orm_build_simple_select` y a
+    /// `build_select_sql` del evaluator).
+    fn orm_build_qb_cols(meta: &crate::types::TableMetadata, fields: &[TypeSigField]) -> String {
+        let mut cols = String::new();
+        let mut first = true;
+        for f in fields {
+            if meta.is_virtual_field(&f.name) {
+                continue;
+            }
+            if !first {
+                cols.push_str(", ");
+            }
+            first = false;
+            let sql_col = meta
+                .columns
+                .get(&f.name)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(f.name.as_str());
+            cols.push('"');
+            cols.push_str(sql_col);
+            cols.push('"');
+        }
+        cols
+    }
+
+    /// Emite la expresión Rust que construye el `__FitzQueryBuilder
+    /// <TypeData>::new(table, cols)` para `type_name`. Caller le
+    /// encadena `.with_<chain>(...)` para aplicar el primer fragmento.
+    fn emit_qb_new(
+        type_name: &str,
+        meta: &crate::types::TableMetadata,
+        fields: &[TypeSigField],
+    ) -> String {
+        let cols = Self::orm_build_qb_cols(meta, fields);
+        format!(
+            "__FitzQueryBuilder::<{type_name}Data>::new({table}, {cols})",
+            type_name = type_name,
+            table = rust_str_literal(&meta.sql_name),
+            cols = rust_str_literal(&cols),
+        )
+    }
+
+    fn qb_type(&self, type_name: &str) -> Type {
+        Type::QueryBuilder(Box::new(Type::Nominal(self.env.lookup(type_name).unwrap())))
+    }
+
+    /// `Type.where(closure)` — construye QB nuevo + aplica el primer WHERE.
+    fn gen_orm_type_where(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
+        let chain = self.emit_qb_where_chain(&new_expr, args, call_span, &meta, &fields)?;
+        Ok((chain, self.qb_type(type_name)))
+    }
+
+    fn gen_orm_type_order_by(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
+        let chain = self.emit_qb_order_by_chain(&new_expr, args, call_span, &meta, &fields)?;
+        Ok((chain, self.qb_type(type_name)))
+    }
+
+    fn gen_orm_type_limit(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
+        let chain = self.emit_qb_limit_chain(&new_expr, args, call_span)?;
+        Ok((chain, self.qb_type(type_name)))
+    }
+
+    fn gen_orm_type_offset(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
+        let chain = self.emit_qb_offset_chain(&new_expr, args, call_span)?;
+        Ok((chain, self.qb_type(type_name)))
+    }
+
+    fn gen_orm_type_group_by(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
+        let chain = self.emit_qb_group_by_chain(&new_expr, args, call_span, &meta, &fields)?;
+        Ok((chain, self.qb_type(type_name)))
+    }
+
+    /// Resuelve `meta + fields` del row type para un QueryBuilder receiver.
+    /// El row type viene como `Type::Nominal(TypeId)` (el checker tipa
+    /// `QueryBuilder<UserRow>` así).
+    fn orm_lookup_meta_and_fields_from_row(
+        &self,
+        row: &Type,
+        call_span: crate::ast::Span,
+    ) -> Result<(String, crate::types::TableMetadata, Vec<TypeSigField>), FitzError> {
+        let id = match row {
+            Type::Nominal(id) => *id,
+            other => {
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "QueryBuilder sobre tipo `{}` no soportado (esperaba un type con `@table`)",
+                        other.display(self.env)
+                    ),
+                ));
+            }
+        };
+        let info = self.env.info(id);
+        let type_name = info.name.clone();
+        let meta = self
+            .env
+            .table_metadata(id)
+            .ok_or_else(|| {
+                self.err_at(
+                    call_span,
+                    format!("type `{}` no tiene `@table` metadata", type_name),
+                )
+            })?
+            .clone();
+        let sig = self.type_sigs.get(&type_name).ok_or_else(|| {
+            self.err_at(
+                call_span,
+                format!("type `{}` no pre-registrado en codegen", type_name),
+            )
+        })?;
+        Ok((type_name, meta, sig.fields.clone()))
+    }
+
+    /// Dispatch de método sobre un receiver de tipo `Type::QueryBuilder<Row>`.
+    /// `receiver_code` es la expresión Rust que evalúa al QB existente —
+    /// los chain methods le concatenan `.with_<...>(...)`, los terminales
+    /// le concatenan `.<terminal>(...).await` adentro de un async block.
+    fn gen_orm_qb_method(
+        &mut self,
+        receiver_code: &str,
+        row: &Type,
+        method: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<Option<(String, Type)>, FitzError> {
+        let (type_name, meta, fields) = self.orm_lookup_meta_and_fields_from_row(row, call_span)?;
+        let qb_ty = || Type::QueryBuilder(Box::new(row.clone()));
+        let row_ty = row.clone();
+        let data_name = format!("{}Data", type_name);
+        match method {
+            // Chain methods — devuelven QueryBuilder<Row>.
+            "where" => {
+                let chain =
+                    self.emit_qb_where_chain(receiver_code, args, call_span, &meta, &fields)?;
+                Ok(Some((chain, qb_ty())))
+            }
+            "order_by" => {
+                let chain =
+                    self.emit_qb_order_by_chain(receiver_code, args, call_span, &meta, &fields)?;
+                Ok(Some((chain, qb_ty())))
+            }
+            "limit" => {
+                let chain = self.emit_qb_limit_chain(receiver_code, args, call_span)?;
+                Ok(Some((chain, qb_ty())))
+            }
+            "offset" => {
+                let chain = self.emit_qb_offset_chain(receiver_code, args, call_span)?;
+                Ok(Some((chain, qb_ty())))
+            }
+            "group_by" => {
+                let chain =
+                    self.emit_qb_group_by_chain(receiver_code, args, call_span, &meta, &fields)?;
+                Ok(Some((chain, qb_ty())))
+            }
+            // Terminales async — wrap en async block sobre el receiver.
+            "all" => {
+                let _ = data_name; // marcador — usado por las firmas async
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!("`.all(db)` espera 1 argumento (db), recibió {}", args.len()),
+                    ));
+                }
+                let (db_code, _) = self.gen_expr(&args[0])?;
+                let ret_ty = Type::Future(Box::new(Type::Result {
+                    ok: Box::new(Type::List(Box::new(row_ty))),
+                    err: Box::new(Type::Str),
+                }));
+                let code = format!(
+                    "(async {{ ({receiver}).all(&{db}).await }})",
+                    receiver = receiver_code,
+                    db = db_code,
+                );
+                Ok(Some((code, ret_ty)))
+            }
+            "first" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.first(db)` espera 1 argumento (db), recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let (db_code, _) = self.gen_expr(&args[0])?;
+                let ret_ty = Type::Future(Box::new(Type::Result {
+                    ok: Box::new(row_ty),
+                    err: Box::new(Type::Str),
+                }));
+                let code = format!(
+                    "(async {{ ({receiver}).first(&{db}).await }})",
+                    receiver = receiver_code,
+                    db = db_code,
+                );
+                Ok(Some((code, ret_ty)))
+            }
+            "count" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.count(db)` espera 1 argumento (db), recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let (db_code, _) = self.gen_expr(&args[0])?;
+                let ret_ty = Type::Future(Box::new(Type::Result {
+                    ok: Box::new(Type::Int),
+                    err: Box::new(Type::Str),
+                }));
+                let code = format!(
+                    "(async {{ ({receiver}).count(&{db}).await }})",
+                    receiver = receiver_code,
+                    db = db_code,
+                );
+                Ok(Some((code, ret_ty)))
+            }
+            "update" => {
+                if args.len() != 2 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.update(db, changes)` espera 2 argumentos, recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let (db_code, _) = self.gen_expr(&args[0])?;
+                let (set_clauses, set_args_init) =
+                    self.gen_qb_update_set_args(&args[1], call_span, &meta, &fields)?;
+                let ret_ty = Type::Future(Box::new(Type::Result {
+                    ok: Box::new(Type::Int),
+                    err: Box::new(Type::Str),
+                }));
+                let code = format!(
+                    "(async {{ \
+                        let __set_clauses: &str = {set_clauses_lit}; \
+                        let __set_args: Vec<__FitzPgValue> = vec![{set_args_init}]; \
+                        ({receiver}).update_with_set(&{db}, __set_clauses, __set_args).await \
+                    }})",
+                    set_clauses_lit = rust_str_literal(&set_clauses),
+                    set_args_init = set_args_init,
+                    receiver = receiver_code,
+                    db = db_code,
+                );
+                Ok(Some((code, ret_ty)))
+            }
+            "delete" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.delete(db)` espera 1 argumento (db), recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let (db_code, _) = self.gen_expr(&args[0])?;
+                let ret_ty = Type::Future(Box::new(Type::Result {
+                    ok: Box::new(Type::Int),
+                    err: Box::new(Type::Str),
+                }));
+                let code = format!(
+                    "(async {{ ({receiver}).delete_with_where(&{db}).await }})",
+                    receiver = receiver_code,
+                    db = db_code,
+                );
+                Ok(Some((code, ret_ty)))
+            }
+            // Agregados (sum/avg/min/max) llegan en 10.b.6 — el checker
+            // los acepta sobre `QueryBuilder<Row>` con shape
+            // `(closure, db) -> Result<Number>`, pero el codegen los
+            // rechaza con error explícito mientras tanto.
+            "sum" | "avg" | "min" | "max" => Err(self.err_at(
+                call_span,
+                format!(
+                    "codegen ORM (10.b.5): agregado `.{}(...)` llega en 10.b.6",
+                    method
+                ),
+            )),
+            // Método desconocido — devolvemos None para que el caller
+            // siga con su dispatch general (terminará en "método no
+            // soportado").
+            _ => Ok(None),
+        }
+    }
+
+    /// Helper que extrae el body Expr de la closure `fn(<param>) => <expr>`
+    /// y devuelve `(param_name, body_expr)`. Rechaza closures con body
+    /// multi-stmt — paralelo al MVP del evaluator (`orm_qb_where`).
+    fn extract_closure_body(&self, arg: &Expr, method: &str) -> Result<(String, Expr), FitzError> {
+        match arg {
+            Expr::FnExpr {
+                params, body, span, ..
+            } => {
+                if params.len() != 1 {
+                    return Err(self.err_at(
+                        *span,
+                        format!(
+                            "`.{}(closure)` espera una closure con 1 parámetro, recibió {}",
+                            method,
+                            params.len()
+                        ),
+                    ));
+                }
+                let param_name = params[0].name.clone();
+                let body_expr = match body.as_slice() {
+                    [crate::ast::Stmt::Return(e, _)] => e.clone(),
+                    [crate::ast::Stmt::Expr(e, _)] => e.clone(),
+                    _ => {
+                        return Err(self.err_at(
+                            *span,
+                            format!(
+                                "`.{}(closure)` MVP: el body del closure debe ser una sola expresión",
+                                method
+                            ),
+                        ));
+                    }
+                };
+                Ok((param_name, body_expr))
+            }
+            other => Err(self.err_at(
+                other.span(),
+                format!(
+                    "`.{}(closure)` espera una closure literal (fn(<param>) => <expr>)",
+                    method
+                ),
+            )),
+        }
+    }
+
+    fn emit_qb_where_chain(
+        &mut self,
+        receiver_code: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+        meta: &crate::types::TableMetadata,
+        fields: &[TypeSigField],
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`.where(closure)` espera 1 argumento (closure), recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (param_name, body) = self.extract_closure_body(&args[0], "where")?;
+        // Convertir los TypeSigField a `crate::ast::Field` para el
+        // translator (ya lo espera así por paridad con el evaluator).
+        // Solo necesita el `.name` — los demás campos no se inspeccionan
+        // por el translator. Usamos placeholders: `type_` con un Named
+        // dummy, `default` None, `decorators` vacío.
+        let ast_fields: Vec<crate::ast::Field> = fields
+            .iter()
+            .map(|f| crate::ast::Field {
+                name: f.name.clone(),
+                type_: crate::ast::TypeExpr::Named("Any".to_string()),
+                default: None,
+                decorators: Vec::new(),
+            })
+            .collect();
+        let mut bindings: Vec<String> = Vec::new();
+        let sql_fragment =
+            self.translate_closure_to_sql(&body, &param_name, &ast_fields, meta, &mut bindings)?;
+        let args_inits = bindings.join(", ");
+        Ok(format!(
+            "({recv}).with_where({sql_lit}, vec![{args}])",
+            recv = receiver_code,
+            sql_lit = rust_str_literal(&sql_fragment),
+            args = args_inits,
+        ))
+    }
+
+    fn emit_qb_order_by_chain(
+        &mut self,
+        receiver_code: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+        meta: &crate::types::TableMetadata,
+        fields: &[TypeSigField],
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`.order_by(closure)` espera 1 argumento, recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (param_name, body) = self.extract_closure_body(&args[0], "order_by")?;
+        // Detectar dirección: `-u.field` = DESC, `u.field` = ASC.
+        let (descending, field_expr) = match &body {
+            Expr::UnaryOp {
+                op: crate::ast::UnaryOpKind::Neg,
+                operand,
+                ..
+            } => (true, operand.as_ref().clone()),
+            other => (false, other.clone()),
+        };
+        let col_name = match &field_expr {
+            Expr::Field { object, field, .. } => match object.as_ref() {
+                Expr::Ident(name, _) if name == &param_name => {
+                    if !fields.iter().any(|f| f.name == *field) {
+                        return Err(self.err_at(
+                            call_span,
+                            format!("`.order_by`: field `{}` no existe en el type", field),
+                        ));
+                    }
+                    field.clone()
+                }
+                _ => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.order_by(closure)` solo admite `{}.field` (opcionalmente con `-`)",
+                            param_name
+                        ),
+                    ));
+                }
+            },
+            _ => {
+                return Err(self.err_at(
+                    call_span,
+                    "`.order_by(closure)`: el body debe ser `u.field` o `-u.field`",
+                ));
+            }
+        };
+        let sql_col = meta
+            .columns
+            .get(&col_name)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(col_name.as_str())
+            .to_string();
+        Ok(format!(
+            "({recv}).with_order_by({col}, {desc})",
+            recv = receiver_code,
+            col = rust_str_literal(&sql_col),
+            desc = if descending { "true" } else { "false" },
+        ))
+    }
+
+    fn emit_qb_limit_chain(
+        &mut self,
+        receiver_code: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`.limit(n)` espera 1 argumento (Int), recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (n_code, n_ty) = self.gen_expr(&args[0])?;
+        let coerced = coerce(&n_code, &n_ty, &Type::Int, self.env);
+        Ok(format!(
+            "({recv}).with_limit({n})",
+            recv = receiver_code,
+            n = coerced
+        ))
+    }
+
+    fn emit_qb_offset_chain(
+        &mut self,
+        receiver_code: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`.offset(n)` espera 1 argumento (Int), recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (n_code, n_ty) = self.gen_expr(&args[0])?;
+        let coerced = coerce(&n_code, &n_ty, &Type::Int, self.env);
+        Ok(format!(
+            "({recv}).with_offset({n})",
+            recv = receiver_code,
+            n = coerced
+        ))
+    }
+
+    fn emit_qb_group_by_chain(
+        &mut self,
+        receiver_code: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+        meta: &crate::types::TableMetadata,
+        fields: &[TypeSigField],
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`.group_by(closure)` espera 1 argumento, recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (param_name, body) = self.extract_closure_body(&args[0], "group_by")?;
+        let col_name = match &body {
+            Expr::Field { object, field, .. } => match object.as_ref() {
+                Expr::Ident(name, _) if name == &param_name => {
+                    if !fields.iter().any(|f| f.name == *field) {
+                        return Err(self.err_at(
+                            call_span,
+                            format!("`.group_by`: field `{}` no existe en el type", field),
+                        ));
+                    }
+                    field.clone()
+                }
+                _ => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!("`.group_by(closure)` solo admite `{}.field`", param_name),
+                    ));
+                }
+            },
+            _ => {
+                return Err(self.err_at(
+                    call_span,
+                    "`.group_by(closure)`: el body debe ser `u.field`",
+                ));
+            }
+        };
+        let sql_col = meta
+            .columns
+            .get(&col_name)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(col_name.as_str())
+            .to_string();
+        Ok(format!(
+            "({recv}).with_group_by({fitz}, {sql})",
+            recv = receiver_code,
+            fitz = rust_str_literal(&col_name),
+            sql = rust_str_literal(&sql_col),
+        ))
+    }
+
+    /// Construye `(set_clauses_string, set_args_init_rust)` para `.update`.
+    /// `set_clauses` es del shape `"col1" = $1, "col2" = $2[<cast>]`.
+    /// `set_args_init` es la inicialización Rust del `Vec<__FitzPgValue>`
+    /// con cada valor coercionado desde el Map. MVP: solo Map literal
+    /// `{"col": value}` — el closure-based path queda como deuda futura.
+    /// El value se emite via `<expr> as __IntoPgValue::into_pg(...)`.
+    fn gen_qb_update_set_args(
+        &mut self,
+        changes_arg: &Expr,
+        call_span: crate::ast::Span,
+        meta: &crate::types::TableMetadata,
+        fields: &[TypeSigField],
+    ) -> Result<(String, String), FitzError> {
+        let pairs: &[(Expr, Expr)] = match changes_arg {
+            Expr::Map(pairs, _) => pairs.as_slice(),
+            _ => {
+                return Err(self.err_at(
+                    call_span,
+                    "`.update(db, changes)` MVP en codegen: el segundo arg debe ser un Map literal {\"col\": value, ...}",
+                ));
+            }
+        };
+        if pairs.is_empty() {
+            return Err(self.err_at(
+                call_span,
+                "`.update(db, changes)`: el Map de changes está vacío",
+            ));
+        }
+        let mut set_clauses = String::new();
+        let mut set_args_init = String::new();
+        for (i, (key_expr, value_expr)) in pairs.iter().enumerate() {
+            let key_str = match key_expr {
+                Expr::Str(s, _) => s.clone(),
+                _ => {
+                    return Err(self.err_at(
+                        key_expr.span(),
+                        "`.update`: las keys del Map deben ser strings literales",
+                    ));
+                }
+            };
+            if !fields.iter().any(|f| f.name == key_str) {
+                return Err(self.err_at(
+                    key_expr.span(),
+                    format!("`.update`: field `{}` no existe en el type", key_str),
+                ));
+            }
+            let sql_col = meta
+                .columns
+                .get(&key_str)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(key_str.as_str());
+            if i > 0 {
+                set_clauses.push_str(", ");
+                set_args_init.push_str(", ");
+            }
+            // En 10.b.5 no soportamos JSONB/arrays en `.update` (esos
+            // llegan junto con coerciones extendidas en 10.b.8). El
+            // sufijo placeholder queda vacío — el SET emite solo el
+            // `$N` plano. Si el field es Map/List, el runtime lo
+            // empujaría como Text/Bytes y Postgres rechazaría la
+            // coerción — el error surge en runtime de DB.
+            set_clauses.push_str(&format!("\"{}\" = ${}", sql_col, i + 1));
+            let (val_code, _) = self.gen_expr(value_expr)?;
+            set_args_init.push_str(&format!("<_ as __IntoPgValue>::into_pg({})", val_code));
+        }
+        Ok((set_clauses, set_args_init))
+    }
+
     fn gen_method_call(
         &mut self,
         object: &Expr,
@@ -11122,6 +12070,19 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
         } else {
             self.gen_expr(object)?
         };
+        // Fase 10.b.5 — dispatch ORM sobre receivers de tipo
+        // `Type::QueryBuilder<Row>`. Cubre el caso "chain encadenado"
+        // (`User.where(f).limit(10).all(db)` o el guardado en var
+        // `let qb = User.where(f); qb.all(db)`). El primer fragmento
+        // del chain (`User.where(f)`) se dispatchea por el branch de
+        // Ident("User") + table_metadata en `gen_orm_type_method`.
+        if let Type::QueryBuilder(row) = &obj_ty {
+            if let Some(emitted) =
+                self.gen_orm_qb_method(&obj_code, row, method, args, call_span)?
+            {
+                return Ok(emitted);
+            }
+        }
         // Fase 8.7.2: method call sobre PyAny es realmente un call
         // Python (`math.sqrt(16.0)` = `math.sqrt` getattr + invocación).
         // Emitimos `__fitz_py_invoke(&__fitz_py_get_attr_obj(&obj, "name"), ...)`
@@ -20827,9 +21788,8 @@ fn rust_str_literal(s: &str) -> String {
 /// `.where(...)`. Paralelo a `escape_like` del evaluator (línea
 /// 12250 de src/evaluator.rs). Postgres usa `\` como escape char
 /// por default.
-// Dead_code hasta 10.b.5 — el consumidor (translate_closure_method_call_to_sql
-// → `.starts_with`/etc.) recién se wirea ahí.
-#[allow(dead_code)]
+// Fase 10.b.5 — consumido por `translate_closure_method_call_to_sql` que
+// finalmente se wirea en el chain del QueryBuilder.
 fn translate_escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -26837,9 +27797,10 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_where_aborta_citando_sub_paso_futuro() {
-        // En 10.b.3 el `.where(...)` aún no está wireado — error claro
-        // que cita 10.b.5 como sub-paso futuro.
+    fn codegen_orm_where_chain_emite_query_builder_y_terminal_all() {
+        // 10.b.5 — `User.where(...).all(db)` ahora SÍ compila: emite el
+        // constructor del QueryBuilder con el primer fragment WHERE +
+        // terminal `.all(&db)` adentro de async block.
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
                        age: Int\n\
@@ -26849,11 +27810,22 @@ mod tests {
                        let _u = User.where(fn(u) => u.age > 18).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("esperaba error de codegen");
+        let rust = gen(src).expect("codegen OK");
         assert!(
-            err.message.contains("10.b.5"),
-            "esperaba mención de 10.b.5 en el error, fue: {}",
-            err.message
+            rust.contains("__FitzQueryBuilder::<UserData>::new"),
+            "esperaba el constructor del QueryBuilder tipado, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".with_where(\"(\\\"age\\\" > $1)\""),
+            "esperaba el fragment WHERE traducido del closure, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__FitzPgValue::Int(18i64)"),
+            "esperaba el binding parametrizado del literal Int, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".all(&db"),
+            "esperaba terminal .all(&db) en async block, fue: {rust}",
         );
     }
 
@@ -26977,10 +27949,11 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_update_y_delete_abortan_citando_10_b_5() {
-        // Update y delete dependen del `.where(...)` previo que llega
-        // recién en 10.b.5. En 10.b.4 dispatch directo aborta con
-        // mensaje que cita el sub-paso target.
+    fn codegen_orm_update_y_delete_sin_where_aborta_con_mensaje_de_seguridad() {
+        // 10.b.5 — el dispatch sobre `Type.update(...)` / `Type.delete(...)`
+        // SIN `.where(...)` previo se rechaza en codegen con mensaje
+        // paralelo al guard de seguridad del evaluator (afectaría toda
+        // la tabla).
         let src_update = "@table(\"users\") type User {\n  \
                             @primary id: Int = 0\n  \
                             name: Str\n\
@@ -26992,8 +27965,9 @@ mod tests {
                         }\n";
         let err_u = gen(src_update).expect_err("esperaba error de codegen");
         assert!(
-            err_u.message.contains("10.b.5") && err_u.message.contains("update"),
-            "esperaba mención de 10.b.5 + `update` en el error, fue: {}",
+            err_u.message.contains("requiere un `.where(...)` previo")
+                && err_u.message.contains("User.update"),
+            "esperaba mención del guard de seguridad sobre `User.update`, fue: {}",
             err_u.message
         );
         let src_delete = "@table(\"users\") type User {\n  \
@@ -27007,9 +27981,178 @@ mod tests {
                         }\n";
         let err_d = gen(src_delete).expect_err("esperaba error de codegen");
         assert!(
-            err_d.message.contains("10.b.5") && err_d.message.contains("delete"),
-            "esperaba mención de 10.b.5 + `delete` en el error, fue: {}",
+            err_d.message.contains("requiere un `.where(...)` previo")
+                && err_d.message.contains("User.delete"),
+            "esperaba mención del guard de seguridad sobre `User.delete`, fue: {}",
             err_d.message
+        );
+    }
+
+    // ---- Fase 10.b.5 — QueryBuilder chain en codegen ----
+
+    #[test]
+    fn codegen_orm_chain_de_3_metodos_emite_with_chain_completo() {
+        // `User.where(f).limit(10).all(db)` emite tres calls
+        // encadenados sobre el QueryBuilder + terminal `.all(&db)`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.where(fn(u) => u.age > 18).limit(10).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__FitzQueryBuilder::<UserData>::new"),
+            "esperaba constructor del QB, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".with_where("),
+            "esperaba .with_where(...) en el chain, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".with_limit(10i64)"),
+            "esperaba .with_limit(10i64) en el chain, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".all(&db"),
+            "esperaba terminal .all(&db), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_multiples_wheres_combinan_con_and_y_renumeran() {
+        // Dos `.where(...)` consecutivos: el segundo se combina con
+        // AND vía `with_where`. El runtime renumera los placeholders
+        // del fragment para que sigan al primer where. El codegen NO
+        // pre-renumera — la sintaxis estática emite `$1` siempre, y
+        // el helper `with_where` los corrige en runtime.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.where(fn(u) => u.age > 18).where(fn(u) => u.name == \"ada\").all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Dos calls a with_where, en ese orden.
+        let n = rust.matches(".with_where(").count();
+        assert_eq!(
+            n, 2,
+            "esperaba 2 `.with_where(...)` en el chain, fue {n}: {rust}"
+        );
+        // El segundo fragment usa `$1` (relativo a su propio scope) —
+        // el renumerado a `$2` ocurre en runtime con
+        // `__fitz_qb_renumber_placeholders`.
+        assert!(
+            rust.contains("(\\\"name\\\" = $1)"),
+            "esperaba `\"name\" = $1` en el segundo fragment (sin renumerar en codegen), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_order_by_y_limit_emiten_with_order_by_y_with_limit() {
+        // `User.order_by(fn(u) => -u.age).limit(5).all(db)` emite
+        // `.with_order_by("age", true)` (DESC por el `-`) y
+        // `.with_limit(5i64)`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.order_by(fn(u) => -u.age).limit(5).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_order_by(\"age\", true)"),
+            "esperaba `.with_order_by(\"age\", true)` (DESC), fue: {rust}",
+        );
+        assert!(
+            rust.contains(".with_limit(5i64)"),
+            "esperaba `.with_limit(5i64)`, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_group_by_y_count_emiten_with_group_by_y_count() {
+        // `User.group_by(fn(u) => u.role).count(db)` emite
+        // `.with_group_by("role", "role")` + terminal `.count(&db)`.
+        // En 10.b.5 el GROUP BY se guarda en state pero `.count`
+        // emite scalar COUNT(*) (path GROUP BY + aggregate llega
+        // en 10.b.6).
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       role: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _n = User.group_by(fn(u) => u.role).count(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_group_by(\"role\", \"role\")"),
+            "esperaba `.with_group_by(\"role\", \"role\")` en el chain, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".count(&db"),
+            "esperaba terminal `.count(&db)` en async block, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_update_con_where_emite_set_clauses_y_args_init() {
+        // `User.where(...).update(db, {"name": "ada"})` emite el SET
+        // del UPDATE como string literal (`"name" = $1`) + Vec inicial
+        // de args con `<_ as __IntoPgValue>::into_pg("ada".to_string())`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _n = User.where(fn(u) => u.age > 18).update(db, {\"name\": \"ada\"}).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__set_clauses: &str = \"\\\"name\\\" = $1\""),
+            "esperaba set_clauses literal `\"name\" = $1`, fue: {rust}",
+        );
+        assert!(
+            rust.contains("<_ as __IntoPgValue>::into_pg"),
+            "esperaba marshalling via __IntoPgValue::into_pg, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".update_with_set(&db"),
+            "esperaba terminal `.update_with_set(&db, ...)`, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_delete_con_where_emite_delete_with_where() {
+        // `User.where(...).delete(db)` emite terminal `.delete_with_where(&db)`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _n = User.where(fn(u) => u.age < 13).delete(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".delete_with_where(&db"),
+            "esperaba terminal `.delete_with_where(&db)`, fue: {rust}",
         );
     }
 }

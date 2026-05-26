@@ -6808,12 +6808,12 @@ fn orm_insert_con_nullable_y_column_override_compila() {
 }
 
 #[test]
-fn orm_update_y_delete_aborta_build_citando_10_b_5() {
-    // Sin .where() previo, update/delete dependen del QueryBuilder
-    // chain que llega en 10.b.5. El codegen aborta con mensaje
-    // explícito.
+fn orm_update_y_delete_sin_where_aborta_build_con_guard_de_seguridad() {
+    // 10.b.5 — `User.update(...)` / `User.delete(...)` sin `.where(...)`
+    // previo se rechazan en codegen con mensaje paralelo al guard del
+    // evaluator (afectarían toda la tabla).
     let stderr_update = build_expect_fail(
-        "orm_update_aborta_build_citando_10_b_5",
+        "orm_update_sin_where_aborta_build_con_guard_de_seguridad",
         "@table(\"users\") type User {\n  \
              @primary id: Int = 0\n  \
              name: Str\n\
@@ -6826,12 +6826,12 @@ fn orm_update_y_delete_aborta_build_citando_10_b_5() {
          print(\"never\")\n",
     );
     assert!(
-        stderr_update.contains("10.b.5"),
-        "esperaba mención de 10.b.5 en el stderr del build, fue: {}",
+        stderr_update.contains("requiere un `.where(...)` previo"),
+        "esperaba mención del guard `.where(...)` previo en el stderr, fue: {}",
         stderr_update,
     );
     let stderr_delete = build_expect_fail(
-        "orm_delete_aborta_build_citando_10_b_5",
+        "orm_delete_sin_where_aborta_build_con_guard_de_seguridad",
         "@table(\"users\") type User {\n  \
              @primary id: Int = 0\n  \
              name: Str\n\
@@ -6844,8 +6844,128 @@ fn orm_update_y_delete_aborta_build_citando_10_b_5() {
          print(\"never\")\n",
     );
     assert!(
-        stderr_delete.contains("10.b.5"),
-        "esperaba mención de 10.b.5 en el stderr del build, fue: {}",
+        stderr_delete.contains("requiere un `.where(...)` previo"),
+        "esperaba mención del guard `.where(...)` previo en el stderr, fue: {}",
         stderr_delete,
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fase 10.b.5 — QueryBuilder chain en codegen
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orm_where_chain_con_order_y_limit_compila_a_binario() {
+    // `User.where(...).order_by(...).limit(N).all(db)` debe compilar a
+    // binario standalone. El connect a una URL inválida falla en runtime
+    // así que el chain nunca se ejecuta; verificamos que el rustc del
+    // proyecto generado no rechaza el código.
+    let (stdout, code) = build_and_run(
+        "orm_where_chain_con_order_y_limit_compila_a_binario",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _u = User.where(fn(u) => u.age > 18).order_by(fn(u) => -u.age).limit(10).all(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_qb_upd_con_where_compila_a_binario() {
+    // `User.where(...).update(db, {...})` compila a binario y emite el
+    // SET correctamente. Run-time falla por URL inválida. Nombre del
+    // test evita la cadena `update` para no disparar el handler UAC
+    // de Windows sobre `*update*.exe`.
+    let (stdout, code) = build_and_run(
+        "orm_qb_upd_con_where_compila_a_binario",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n\
+         }\n\
+         async fn run() -> Result<Int> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let n = User.where(fn(u) => u.age > 65).update(conn, {\"name\": \"retired\"}).await?\n  \
+             return Ok(n)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_delete_con_where_compila_a_binario() {
+    // `User.where(...).delete(db)` compila a binario. Run-time falla
+    // por URL inválida.
+    let (stdout, code) = build_and_run(
+        "orm_delete_con_where_compila_a_binario",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             age: Int\n\
+         }\n\
+         async fn run() -> Result<Int> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let n = User.where(fn(u) => u.age < 13).delete(conn).await?\n  \
+             return Ok(n)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_chain_first_con_multiples_wheres_compila_a_binario() {
+    // Caso pesado: dos wheres + order_by + first(db). Cubre el
+    // renumerado de placeholders en runtime + LIMIT 1 override en
+    // .first.
+    let (stdout, code) = build_and_run(
+        "orm_chain_first_con_multiples_wheres_compila_a_binario",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _u = User.where(fn(u) => u.age > 18).where(fn(u) => u.name == \"ada\").order_by(fn(u) => u.id).first(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
 }
