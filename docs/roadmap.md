@@ -8363,11 +8363,55 @@ Política `feedback_guide_emphasize_uniqueness` aplicada al diseño:
 
 ---
 
-## Fase 10.b — Cierre del codegen ORM (paridad `fitz run` ↔ `fitz build`) 🔧
+## Fase 10.b — Cierre del codegen ORM (paridad `fitz run` ↔ `fitz build`) ✅ CERRADA 2026-05-26
 
-**Estado**: en curso, arrancada 2026-05-25 post-release v0.10.0.
-**Scope**: 7-10 días focused. **Target version**: v0.10.1 (cierre
-formal de paridad bit-a-bit).
+**Estado**: **CERRADA 2026-05-26 (v0.10.1)**. Arrancada 2026-05-25
+post-release v0.10.0, cerrada en 2 días con 17 sub-pasos (10.b.0 →
+10.b.17) y 23 commits totales.
+
+### Estadísticas finales (v0.10.1)
+
+- **~9580 LoC netas** (19222 insertions / 9642 deletions) sobre 10
+  archivos del codegen, evaluator, types, http, db, tests y docs.
+- **2552 unit + 81 cli_e2e + 291 compile_e2e + 3 openapi** sin
+  feature (smoke `GUIDE_EXAMPLES_COMPILE` incluye `32-orm.fitz` —
+  291 ejemplos guía).
+- **44 db_real_postgres** (`#[ignore]` opt-in, 16 son paridad
+  codegen E2E nuevos vs evaluator) corriendo en cada push a `main`
+  via job nuevo `db-postgres` en `.github/workflows/ci.yml` con
+  service container `postgres:16`.
+- Clippy `--all-targets -D warnings` limpio, fmt `--all --check`
+  limpio.
+- **Paridad bit-a-bit cumplida**: todo lo que `fitz run` soporta
+  del ORM ahora compila a binario nativo con `fitz build`.
+
+### Diferencial logrado (post-10.b)
+
+**Único lenguaje moderno** con driver Postgres puro + ORM declarativo
++ paridad bit-a-bit `fitz run` ↔ `fitz build` + LSP completo
+**sin macros derive ni introspection runtime**. La paridad codegen
+cierra la última brecha que separaba el intérprete del binario.
+
+**Decisiones técnicas que se mantuvieron**: estrategia híbrida (SQL
+constante en codegen-time + rows tipadas concretas + `__FitzValue`
+sólo para JSONB libre y agregados con groupby). Cero overhead
+runtime para construir SQL — comparable a Diesel/sqlx, mejor que
+SQLAlchemy/ActiveRecord. Eager loading con dispatch estático: el
+relation name como Str literal en compile-time produce un match
+exhaustivo, typos detectados en compile-time.
+
+**Próximo norte tras v0.10.1**: cap nuevo "Postgres + ORM nativo"
+en `docs/guide.md` (cap 31), ejemplos del ORM en los boilerplates
+Dockerizados (5 y 6 SQLAlchemy → Fitz ORM o boilerplate nuevo
+dedicado), benchmarks Fitz ORM vs SQLAlchemy. Ver
+`docs/deudas-post-5b.md` para el detalle de deuda residual de
+Fase 10/10.b (cero residual del codegen ORM; refinements
+opcionales como migraciones automáticas, transactions, TLS
+strict, JSON operators del lado SQL).
+
+---
+
+### Detalle de sub-pasos (histórico)
 
 ### Motivación
 
@@ -8675,33 +8719,101 @@ misma DB, comparando outputs.
 JSONB, arrays, agregados, group_by) pasan también en `fitz build`
 con outputs idénticos.
 
-#### 10.b.11 — Cierre formal de Fase 10.b
+#### 10.b.11 — `.update` con List literal + Map literal
 
-- **CHANGELOG v0.10.1** con el detalle de 10.b.1 → 10.b.10 +
-  resumen del shape final.
-- **roadmap.md**: esta sección con status CERRADA + stats finales.
-- **deudas-post-5b.md**: nota de cierre paralela a 10.5 marcando
-  que el codegen ORM ya está al nivel del evaluator.
-- **CLAUDE.md**: actualizar contexto del proyecto reflejando
-  paridad bit-a-bit ORM.
-- **README.md**: refresh del marker Fase 10 (✅ con sub-bullet de
-  paridad codegen confirmada).
+Branches nuevos en `gen_qb_update_set_args` para que
+`.update(db, {"tags": ["a", "b"]})` y `.update(db, {"data": {"k":
+1}})` emitan los casts apropiados (`::text[]`/`::jsonb`) y
+serialicen los valores literales. Workaround Windows UAC: stem del
+helper renombrado a `orm_upd_list_map_codegen` (ERROR_ELEVATION_
+REQUIRED 740 con "update" en el nombre).
 
-Total esperado al cierre 10.b: **~3400 LoC nuevos** del codegen
-ORM + **~20 tests E2E** de paridad + zero deuda residual del
-codegen ORM.
+#### 10.b.12 — Tipos compuestos: NULL en arrays + Map<Str, T> concretos
 
-### Deuda residual derivada de 10.b (NO bloquea boilerplates / cap 31)
+- **12.a**: `List<Int?>` ↔ `int8[] NULL`. `__FitzPgValue::Array
+  { elem_oid, values }` codifica `NULL` sin quotes en el text format
+  `{a,NULL,c}`. Parser/encoder simétricos. Branches específicos en
+  `orm_field_coerce_block` y `orm_marshal_field_to_pg` para arrays
+  nullable inner.
+- **12.b**: `Map<Str, T>` con T concreto (Int/Float/Str/Bool) ↔
+  `jsonb` con shape homogéneo `HashMap<String, T>` Rust. Marshaling
+  directo sin pasar por `__FitzValue`. K se restringe a Str (Postgres
+  jsonb keys son strings); `Map<Int, Int>` rechazado con error claro.
+
+#### 10.b.13 — Navigation chain + JSONB shape (by design)
+
+Decisión: las navigations siempre devuelven `QueryBuilder<Target>`
+cuando `args.is_empty()`, permitiendo `user.posts().order_by(...).
+all(db)`. Terminales obligatorios para ejecutar. JSONB conserva el
+shape libre del Map<Str, Any> — no se valida shape (by design: el
+user opera el dict de retorno con `.get(...)?`).
+
+#### 10.b.14 — GROUP BY + aggregate (Type::Aggregated)
+
+Nueva variante `Type::Aggregated(Box<Type>)` separada de
+`Type::QueryBuilder(Box<Type>)` para el path GROUP BY. El checker
+refina `.group_by(closure)` a `Aggregated<Row>` y los métodos
+agregados (`.count(db)` / `.sum(closure, db)` / etc.) sobre
+`Aggregated` devuelven `Result<List<Map<Str, Any>>>` (vs scalar
+sobre `QueryBuilder`). Helper `aggregate_groups` paralelo al scalar.
+Por qué separado: el path scalar devuelve `Float` con cast `::float8`;
+el path grouped devuelve rows heterogéneos con shape `{group_field:
+value, count: N, sum_x: N, ...}`.
+
+#### 10.b.15 — Eager loading (.preload sobre HasMany)
+
+`User.preload("posts").all(db)` resuelve N+1 con 1 query batch
+(`SELECT * FROM posts WHERE user_id IN (1, 2, 3)`) + dispatch
+estático del relation name en compile-time vía `match`. Helper
+`emit_preload_dispatch` por type con `@has_many`. El relation name
+como Str literal queda hard-coded en el binario — typos detectados
+en compile-time, no runtime. Cierra la deuda "Eager loading
+(`.include(...)`)" que arrastraba desde Fase 10.5.
+
+#### 10.b.16 — Postgres en CI default (paridad real corre en cada push)
+
+Job nuevo `db-postgres` en `.github/workflows/ci.yml` que levanta
+`postgres:16` como service container, exporta
+`FITZ_TEST_PG_URL=postgres://postgres:postgres@localhost:5432/
+fitz_test`, y corre `cargo test --test db_real_postgres -- --ignored
+--test-threads=1`. Solo Linux (Docker service containers más
+estables en GHA Linux runners; los tests no dependen de plataforma
+— el binario standalone es x86_64-linux). Los 16 paridad codegen
+E2E + los 27 evaluator E2E ahora corren en cada push a `main`.
+`#[ignore]` se mantiene para que `cargo test` default sin env var
+siga rápido en local del autor.
+
+#### 10.b.17 — Ejemplo guía `32-orm.fitz` pedagógico + smoke GUIDE
+
+Nuevo `examples/guide/32-orm.fitz` (~100 LoC) que muestra el shape
+canónico del ORM end-to-end: `@table` con `@primary` + `@column` +
+`@belongs_to` + `@has_many`, insert, where + first, chain
+order_by/limit/offset, operadores starts_with/is_in/between,
+aggregates scalares count/avg, GROUP BY con `Aggregated<Row>`,
+navigation belongs_to/has_many, eager loading con preload, y
+update/delete con guard `.where(...)` obligatorio. Sumado al smoke
+`GUIDE_EXAMPLES_COMPILE` (291 ejemplos compilan en cada push).
+`fitz build` produce binario aunque no haya Postgres real — el
+`connect` runtime falla con `Err` clara si la URL es inválida, así
+el ejemplo es ejecutable como guía sin Postgres local.
+
+Cierre formal de Fase 10.b acompañando el sub-paso: CHANGELOG
+v0.10.1, esta sección con status CERRADA + stats finales,
+deudas-post-5b.md con la deuda smoke GUIDE marcada ✅, CLAUDE.md
+actualizado.
+
+### Deuda residual derivada de 10.b (NO bloquea v0.10.1)
 
 Estos items son refinements post-10.b. No bloquean la promesa de
-paridad bit-a-bit.
+paridad bit-a-bit cumplida en v0.10.1.
 
 - **Migraciones automáticas (`fitz db diff`/`migrate`)**: roadmap
   original de Fase 10.6+. NO entra a 10.b. Hoy el user crea las
   tablas con `db.exec("CREATE TABLE ...")` al boot.
-- **Eager loading (`.include(...)`)**: las navigations son lazy
-  (1 SELECT por call). N+1 manual con `is_in([...])` por ahora.
-  Refinable post-10.b.
+- ✅ **Eager loading (`.preload(...)`)** — CERRADO 2026-05-26
+  (10.b.15). HasMany cubierto con dispatch estático match en
+  compile-time. BelongsTo eager queda como refinamiento futuro
+  (caso menos común).
 - **Transactions** (`BEGIN`/`COMMIT`/`ROLLBACK`): cada query corre
   en auto-commit. Bloques transaccionales llegan en 10.7 separada.
 - **Composite primary keys**: hoy solo un `@primary` por type.
@@ -8709,10 +8821,12 @@ paridad bit-a-bit.
   modelan como `Str` ISO 8601. Tipos dedicados son mini-fase
   aparte.
 - **TLS strict (`sslmode=require`)**: driver MVP solo soporta
-  `disable`. TLS llega en sub-paso 10.1.b.
+  `disable`. TLS llega en sub-paso 10.1.b separado.
 - **JSON operators (`->`, `->>`, `@>`)**: el JSONB se trae completo
   como Map<Str, Any> y se opera del lado Fitz, o se baja a SQL
   crudo via `db.query(...)`.
+- **Async wave 1 chain methods**: refinable post-10.b si entra
+  presión real.
 
 ---
 

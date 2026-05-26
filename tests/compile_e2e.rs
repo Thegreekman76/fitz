@@ -3876,7 +3876,11 @@ fn up_map_update_compila() {
                let nochange: Map<Str, Int> = scores.update(\"missing\", fn(v: Int) => v + 999)\n\
                print(nochange.len())\n\
                print(nochange[\"ada\"])\n";
-    let (stdout, exit) = build_and_run("up_map_update", src);
+    // Stem "up_map_upd" (no "update"): el heurístico installer-
+    // detection de Windows UAC bloquea ejecutables con "update" en
+    // el nombre. Mismo workaround que aplicamos en 10.b.11
+    // (`orm_upd_list_map_codegen`).
+    let (stdout, exit) = build_and_run("up_map_upd", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "90\n45\n2\n80");
 }
