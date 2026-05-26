@@ -6478,9 +6478,7 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
             data_name
         )
         .unwrap();
-        self.emit(
-            "    fn from_fitz_db_row(__row: &__FitzDbRow) -> Result<Self, String> {\n",
-        );
+        self.emit("    fn from_fitz_db_row(__row: &__FitzDbRow) -> Result<Self, String> {\n");
         // Por cada field non-virtual, generar `let <name>: T = ...;`.
         // Para virtuales, sentinel: `List<T>` → vec![], otros → default
         // del tipo (Option None, default Int=0, etc.).
@@ -6504,7 +6502,8 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
                 .unwrap_or(f.name.as_str())
                 .to_string();
             let col_lit = rust_str_literal(&sql_col);
-            let coerce_block = orm_field_coerce_block(&f.type_, &col_lit, self.env, f.name.as_str())?;
+            let coerce_block =
+                orm_field_coerce_block(&f.type_, &col_lit, self.env, f.name.as_str())?;
             writeln!(
                 &mut self.output,
                 "        let {field}: {ty} = {{\n            let __v = __row.get({col_lit}).ok_or_else(|| format!(\"columna `{{}}` (field `{field}`) no está en el resultset\", {col_lit}))?;\n            {coerce}\n        }};",
@@ -10048,12 +10047,10 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
             Expr::BinOp {
                 op, left, right, ..
             } => {
-                let l = self.translate_closure_to_sql(
-                    left, param_name, fields, table_meta, bindings,
-                )?;
-                let r = self.translate_closure_to_sql(
-                    right, param_name, fields, table_meta, bindings,
-                )?;
+                let l =
+                    self.translate_closure_to_sql(left, param_name, fields, table_meta, bindings)?;
+                let r =
+                    self.translate_closure_to_sql(right, param_name, fields, table_meta, bindings)?;
                 let op_sql = match op {
                     BinOpKind::Eq => "=",
                     BinOpKind::NotEq => "<>",
@@ -10070,19 +10067,15 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
                     other => {
                         return Err(self.err_at(
                             body.span(),
-                            format!(
-                                "operador `{:?}` no soportado en `.where(...)` MVP",
-                                other
-                            ),
+                            format!("operador `{:?}` no soportado en `.where(...)` MVP", other),
                         ));
                     }
                 };
                 Ok(format!("({} {} {})", l, op_sql, r))
             }
             Expr::UnaryOp { op, operand, .. } => {
-                let inner = self.translate_closure_to_sql(
-                    operand, param_name, fields, table_meta, bindings,
-                )?;
+                let inner = self
+                    .translate_closure_to_sql(operand, param_name, fields, table_meta, bindings)?;
                 match op {
                     UnaryOpKind::Not => Ok(format!("(NOT {})", inner)),
                     UnaryOpKind::Neg => Ok(format!("(-{})", inner)),
@@ -10129,10 +10122,9 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
             }
             // Method call sobre `u.field.method(...)` — is_in, is_null,
             // is_not_null, like, ilike, starts_with, ends_with, contains.
-            Expr::Call { callee, args, .. } => self
-                .translate_closure_method_call_to_sql(
-                    callee, args, param_name, fields, table_meta, bindings,
-                ),
+            Expr::Call { callee, args, .. } => self.translate_closure_method_call_to_sql(
+                callee, args, param_name, fields, table_meta, bindings,
+            ),
             Expr::Int(n, _) => {
                 bindings.push(format!("__FitzPgValue::Int({}i64)", n));
                 Ok(format!("${}", bindings.len()))
@@ -10170,10 +10162,7 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
                     // runtime (i64/f64/String/&str/bool/Vec<u8> en
                     // 10.1.c; List<T>/Map<Str,Any> en 10.b.8).
                     let (code, _ty) = self.gen_expr(body)?;
-                    bindings.push(format!(
-                        "<_ as __IntoPgValue>::into_pg({})",
-                        code
-                    ));
+                    bindings.push(format!("<_ as __IntoPgValue>::into_pg({})", code));
                     Ok(format!("${}", bindings.len()))
                 }
             }
