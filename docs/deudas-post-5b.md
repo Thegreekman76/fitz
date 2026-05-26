@@ -1600,13 +1600,30 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   `orm_update_con_list_y_map_literal_paridad_codegen_e2e` valida
   round-trip insert + update + select con tags `int8[]` y meta
   `jsonb`.
-- ☐ **Arrays anidados (`List<List<T>>`)**: Postgres soporta arrays
-  multidimensionales nativamente. Rechazado hoy en codegen.
-  Pendiente para 10.b.12.
-- ☐ **`List<Nominal>`**: compartido con 10.b.7. Pendiente.
-- ☐ **NULL adentro de arrays (`{1, NULL, 3}` → `List<Int?>`)**:
-  Postgres lo soporta. Requiere `Option<T>` adentro del Vec elem
-  + path runtime que también limita. Pendiente para 10.b.12.
+- ⚠️ **Arrays anidados (`List<List<T>>`)**: Postgres soporta arrays
+  multidimensionales nativamente, pero el driver Fitz solo parsea
+  arrays planos (`parse_array_text` en `src/db.rs` ~1397). Cerrar
+  esto requiere refactor del driver (parse + encode + tipos del
+  wire) con beneficio marginal — los usuarios reales tienden a
+  modelar data 2D como JSONB o como `@has_many`. **No bloquea
+  v0.10.1**; queda como deuda menor abierta para v0.11+ si
+  aparece demanda. Workaround: usar `Map<Str, Any>` y guardar el
+  array anidado como JSON.
+- ⚠️ **`List<Nominal>`** (e.g. `tags: List<Tag>` con Tag tipo
+  custom): Postgres NO tiene "array of struct" nativo. Las dos
+  alternativas reales son (a) JSONB array (no es `List<T>` real,
+  solo similar shape) y (b) tabla relacionada con `@has_many`
+  (que YA está implementado en 10.b.7). **No bloquea v0.10.1**;
+  el patrón canónico para esto es `@has_many`, no array. La
+  deuda queda CERRADA con workaround documentado.
+- ✅ **NULL adentro de arrays (`{1, NULL, 3}` → `List<Int?>`)** —
+  CERRADO 2026-05-26 (10.b.12.a). `orm_list_scalar_info_with_null`
+  detecta `List<Int?>`/etc. y propaga `inner_nullable` flag.
+  Coerce emite `Vec<Option<T>>` con `matches!(__item, Null)
+  → None / Some(...)`. Marshal emite `match __it { Some(__v)
+  => PgValue::T(*__v), None => PgValue::Null }`. Test paridad
+  real: `orm_list_nullable_inner_paridad_codegen_e2e` valida
+  bit-a-bit `len1=5 len2=3` con NULLs en arrays Postgres.
 
 ### De 10.b.8.b (JSONB libre)
 
@@ -1618,9 +1635,19 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   `fitz_lit_to_fitz_value_code` wrappea recursivamente cualquier
   Fitz literal puro (Int/Float/Str/Bool/Null + List/Map anidados)
   a `__FitzValue`. Test paridad real valida JSONB anidado.
-- ☐ **`Map<Str, Str>`, `Map<Str, Int>` (Map concretos no-Any)**:
-  rechazado hoy con error claro citando "usá `Map<Str, Any>`".
-  Pendiente para 10.b.12.
+- ✅ **`Map<Str, Str>`, `Map<Str, Int>` (Map concretos no-Any)** —
+  CERRADO 2026-05-26 (10.b.12.b). `orm_map_str_concrete_info`
+  detecta `Map<Str, Int|Float|Str|Bool>` con T concreto y emite
+  deserialize via `serde_json::from_str` + iter + `as_i64/f64/str/
+  bool()` validando shape. Marshal serializa directo a
+  `serde_json::Value::Number/String/Bool` sin __FitzValue (más
+  eficiente). El cast SQL sigue siendo `::jsonb`. Bonus: el helper
+  `program_uses_fitz_value` ahora también activa serde_json cuando
+  hay Map en types @table (aunque no haya Any). Test paridad real:
+  `orm_map_str_concreto_paridad_codegen_e2e` valida bit-a-bit
+  insert + select con `Map<Str, Int>` y `Map<Str, Str>`. Otros
+  Map (`Map<Int, T>`, etc.) siguen rechazados — JSON objects solo
+  aceptan keys string.
 - ☐ **Validación shape JSONB** (timestamps como strings ISO, etc.):
   hoy el JSONB libre acepta cualquier shape; no hay schema.
   Pendiente para 10.b.13.

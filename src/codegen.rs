@@ -964,11 +964,42 @@ fn program_uses_fitz_value(program: &Program) -> bool {
             // JSONB en runtime. Sin esto, el preludio NO emite el
             // enum, y el deserialize/marshal genera código que
             // referencia `__FitzValue::Map(...)` inexistente.
-            Stmt::TypeDef { fields, .. } => fields.iter().any(|f| type_expr_has_any(&f.type_)),
+            //
+            // Fase 10.b.12.b — además, types con `@table` que tienen
+            // field Map (incluso Map<Str, T> concreto sin Any) también
+            // disparan uses_fitz_value=true porque el codegen del
+            // coerce/marshal usa `serde_json` directo, y el flag
+            // gobierna la inclusión de `serde_json` en Cargo.toml. El
+            // enum __FitzValue queda emitido pero unused (dead_code) —
+            // costo trivial vs. un flag aparte.
+            Stmt::TypeDef {
+                fields, decorators, ..
+            } => {
+                let has_table = decorators.iter().any(|d| d.name == "table");
+                fields.iter().any(|f| {
+                    type_expr_has_any(&f.type_) || (has_table && type_expr_has_map(&f.type_))
+                })
+            }
             _ => false,
         }
     }
     program.iter().any(stmt_uses_fv)
+}
+
+/// Fase 10.b.12.b — `true` si `t` (o cualquier inner recursivo)
+/// representa un `Map<...>`. Usado para detectar fields ORM Map sin
+/// Any que igual requieren `serde_json` en el binario generado.
+fn type_expr_has_map(t: &crate::ast::TypeExpr) -> bool {
+    use crate::ast::TypeExpr;
+    match t {
+        TypeExpr::Generic { name, args } => name == "Map" || args.iter().any(type_expr_has_map),
+        TypeExpr::Nullable(inner) => type_expr_has_map(inner),
+        TypeExpr::Function { params, ret } => {
+            params.iter().any(type_expr_has_map) || type_expr_has_map(ret)
+        }
+        TypeExpr::Tuple(items) => items.iter().any(type_expr_has_map),
+        _ => false,
+    }
 }
 
 fn program_uses_fmt_helpers(program: &Program) -> bool {
@@ -21694,17 +21725,18 @@ fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<S
                 inner_block
             ))
         }
-        // Fase 10.b.8.a — arrays Postgres bidireccionales para
-        // List<Int|Float|Str|Bool>. El PgValue::Array trae los
+        // Fase 10.b.8.a + 10.b.12.a — arrays Postgres bidireccionales
+        // para List<Int|Float|Str|Bool> y sus variantes nullables
+        // `List<Int?>`/`List<Float?>`/etc. El PgValue::Array trae los
         // elementos ya tipados; iteramos y coercionamos cada uno con
-        // el helper escalar correspondiente. NULL del array (e.g.
-        // `{1,NULL,3}`) NO se soporta hoy — paralelo al evaluator que
-        // tampoco lo materializa adentro de List<Int> (requiere
-        // List<Int?>, deuda chica).
-        Type::List(_) if orm_list_scalar_info(t).is_some() => {
-            // unwrap safe: la guarda matchea solo cuando es Some.
-            let (rust_inner, _pg_variant, _oid_const, _cast) =
-                orm_list_scalar_info(t).unwrap();
+        // el helper escalar correspondiente. Si el inner es nullable
+        // (10.b.12.a), cada item puede ser `PgValue::Null` → `None`
+        // adentro del `Vec<Option<T>>`. Si no es nullable, NULL en
+        // el array dispara Err (paralelo al sentinel actual de fields
+        // non-nullable).
+        Type::List(_) if orm_list_scalar_info_with_null(t).is_some() => {
+            let (rust_inner, _pg_variant, _oid_const, _cast, inner_nullable) =
+                orm_list_scalar_info_with_null(t).unwrap();
             let inner_coerce_helper = match rust_inner {
                 "i64" => "__fitz_pg_to_i64",
                 "f64" => "__fitz_pg_to_f64",
@@ -21712,12 +21744,28 @@ fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<S
                 "bool" => "__fitz_pg_to_bool",
                 _ => unreachable!("orm_list_scalar_info solo devuelve scalar"),
             };
+            let (vec_inner_ty, push_item) = if inner_nullable {
+                // Vec<Option<T>>: por item, si PgValue::Null → None,
+                // si no → Some(helper coerce).
+                (
+                    format!("Option<{}>", rust_inner),
+                    format!(
+                        "if matches!(__item, __FitzPgValue::Null) {{ None }} else {{ Some({helper}(__item, {col_lit})?) }}",
+                        helper = inner_coerce_helper,
+                        col_lit = col_lit,
+                    ),
+                )
+            } else {
+                // Vec<T>: helper directo. NULL adentro del array es
+                // error (col Fitz non-nullable).
+                (rust_inner.to_string(), format!("{helper}(__item, {col_lit})?", helper = inner_coerce_helper, col_lit = col_lit))
+            };
             Ok(format!(
                 "match {col_lit_match} {{ \
                     __FitzPgValue::Array {{ values: __vals, .. }} => {{ \
-                        let mut __out: Vec<{rust_inner}> = Vec::with_capacity(__vals.len()); \
+                        let mut __out: Vec<{vec_inner}> = Vec::with_capacity(__vals.len()); \
                         for __item in __vals.iter() {{ \
-                            __out.push({helper}(__item, {col_lit})?); \
+                            __out.push({push}); \
                         }} \
                         std::sync::Arc::new(std::sync::Mutex::new(__out)) \
                     }} \
@@ -21726,8 +21774,8 @@ fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<S
                 }}",
                 col_lit_match = "__v",
                 col_lit = col_lit,
-                rust_inner = rust_inner,
-                helper = inner_coerce_helper,
+                vec_inner = vec_inner_ty,
+                push = push_item,
             ))
         }
         // Fase 10.b.8.b — JSONB libre. `Map<K, V>` con `K=Any` o
@@ -21752,12 +21800,52 @@ fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<S
                 col_lit = col_lit,
             ))
         }
+        // Fase 10.b.12.b — `Map<Str, T>` concretos (T = Int/Float/
+        // Str/Bool). Parsea el JSONB como objeto y valida que cada
+        // value matchee T. Requiere serde_json (ya está cuando el
+        // programa usa cualquier Map con field @table → uses_fitz_value
+        // dispara serde_json en Cargo.toml). El caller debe asegurar
+        // ese flag (`program_uses_fitz_value` ya lo activa cuando hay
+        // fields Map en types con @table — Fase 10.b.8.b ext, debería
+        // cubrir también Map concretos).
+        Type::Map(k, v)
+            if matches!(**k, Type::Str)
+                && matches!(
+                    v.as_ref(),
+                    Type::Int | Type::Float | Type::Str | Type::Bool
+                )
+                && orm_map_str_concrete_info(t).is_some() =>
+        {
+            let (rust_v, extractor, _) = orm_map_str_concrete_info(t).unwrap();
+            Ok(format!(
+                "match __v {{ \
+                    __FitzPgValue::Text(__s) => {{ \
+                        let __json: serde_json::Value = serde_json::from_str(__s).map_err(|e| format!(\"columna `{{}}` JSONB inválido: {{}}\", {col_lit}, e))?; \
+                        let __obj = match &__json {{ \
+                            serde_json::Value::Object(o) => o, \
+                            _ => return Err(format!(\"columna `{{}}`: JSONB no es objeto\", {col_lit})), \
+                        }}; \
+                        let mut __pairs: Vec<(String, {rust_v})> = Vec::with_capacity(__obj.len()); \
+                        for (__k, __jv) in __obj.iter() {{ \
+                            let __coerced = __jv.{extractor}.ok_or_else(|| format!(\"columna `{{}}` key `{{}}`: value no es {rust_v}\", {col_lit}, __k))?; \
+                            __pairs.push((__k.clone(), __coerced)); \
+                        }} \
+                        std::sync::Arc::new(std::sync::Mutex::new(__pairs)) \
+                    }} \
+                    __FitzPgValue::Null => return Err(format!(\"columna `{{}}` es NULL pero el field no es nullable\", {col_lit})), \
+                    other => return Err(format!(\"columna `{{}}`: PgValue {{:?}} no coerce a Map\", {col_lit}, other)) \
+                }}",
+                col_lit = col_lit,
+                rust_v = rust_v,
+                extractor = extractor,
+            ))
+        }
         Type::Map(_, _) => Err(FitzError::new(
             crate::error::ErrorKind::InvalidSyntax,
             0,
             0,
             format!(
-                "codegen ORM (10.b.8.b): field `{}` con tipo `{}` no soportado todavía — usá `Map<Str, Any>` para columnas jsonb con shape heterogéneo",
+                "codegen ORM (10.b.8.b): field `{}` con tipo `{}` no soportado todavía — usá `Map<Str, Any>` (JSONB libre) o `Map<Str, Int|Float|Str|Bool>` (JSONB tipado, 10.b.12.b)",
                 field_name,
                 type_name(t)
             ),
@@ -21794,12 +21882,16 @@ fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<S
     }
 }
 
-/// Fase 10.b.8.a — info para emitir el marshalling de `List<scalar>` ↔
-/// `PgValue::Array`. Devuelve `(rust_inner_type, pg_variant, oid_const,
-/// sql_cast_suffix)`. `None` si `t` no es `List<Int|Float|Str|Bool>`
-/// (o `Nullable` envolviendo uno). Las 4 OIDs cubren el caso 99% real
-/// de columnas array Postgres; arrays de otros tipos (bytea[], json[],
-/// etc.) quedan como deuda menor.
+/// Fase 10.b.8.a + 10.b.12.a — info para emitir el marshalling de
+/// `List<scalar>` ↔ `PgValue::Array`. Devuelve `(rust_inner_type,
+/// pg_variant, oid_const, sql_cast_suffix)`. `None` si `t` no es
+/// `List<Int|Float|Str|Bool>` (o `Nullable` envolviendo uno).
+///
+/// 10.b.12.a: ahora también detecta `List<Int?>` / `List<Float?>` /
+/// etc. — el `rust_inner_type` se sufija con `?` cuando el item del
+/// array es nullable, y el caller lo usa para decidir si emitir
+/// `Vec<Option<T>>` (deserialize) o iterar con `match Some/None`
+/// (serialize). Postgres soporta NULL en arrays (`{1,NULL,3}`).
 ///
 /// Paralelo a `list_elem_pg_oid` + `array_sql_cast_for` del evaluator
 /// (src/evaluator.rs ~11002 + ~11049). Acá devolvemos los 4 datos
@@ -21807,20 +21899,56 @@ fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<S
 fn orm_list_scalar_info(
     t: &Type,
 ) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    orm_list_scalar_info_with_null(t).map(|info| (info.0, info.1, info.2, info.3))
+}
+
+/// Variante extendida que incluye `inner_nullable: bool`. El caller
+/// que necesita serializar/deserializar `Vec<Option<T>>` lo invoca
+/// directamente; los call sites legacy siguen con el wrapper de
+/// 4-tuple. Cubre `List<scalar>` y `List<scalar?>` (`Int?`/`Float?`/
+/// `Str?`/`Bool?`). Nullable externo (`List<...>?`) recursa.
+fn orm_list_scalar_info_with_null(
+    t: &Type,
+) -> Option<(&'static str, &'static str, &'static str, &'static str, bool)> {
     match t {
-        Type::List(inner) => match inner.as_ref() {
-            Type::Int => Some(("i64", "Int", "__fitz_db_runtime::oid::INT8", "::int8[]")),
-            Type::Float => Some((
-                "f64",
-                "Float",
-                "__fitz_db_runtime::oid::FLOAT8",
-                "::float8[]",
-            )),
-            Type::Str => Some(("String", "Text", "__fitz_db_runtime::oid::TEXT", "::text[]")),
-            Type::Bool => Some(("bool", "Bool", "__fitz_db_runtime::oid::BOOL", "::bool[]")),
-            _ => None,
-        },
-        Type::Nullable(inner) => orm_list_scalar_info(inner),
+        Type::List(inner) => {
+            let (actual_elem, inner_nullable) = match inner.as_ref() {
+                Type::Nullable(nt) => (nt.as_ref(), true),
+                other => (other, false),
+            };
+            match actual_elem {
+                Type::Int => Some((
+                    "i64",
+                    "Int",
+                    "__fitz_db_runtime::oid::INT8",
+                    "::int8[]",
+                    inner_nullable,
+                )),
+                Type::Float => Some((
+                    "f64",
+                    "Float",
+                    "__fitz_db_runtime::oid::FLOAT8",
+                    "::float8[]",
+                    inner_nullable,
+                )),
+                Type::Str => Some((
+                    "String",
+                    "Text",
+                    "__fitz_db_runtime::oid::TEXT",
+                    "::text[]",
+                    inner_nullable,
+                )),
+                Type::Bool => Some((
+                    "bool",
+                    "Bool",
+                    "__fitz_db_runtime::oid::BOOL",
+                    "::bool[]",
+                    inner_nullable,
+                )),
+                _ => None,
+            }
+        }
+        Type::Nullable(inner) => orm_list_scalar_info_with_null(inner),
         _ => None,
     }
 }
@@ -21834,9 +21962,54 @@ fn orm_list_scalar_info(
 /// podemos representar el value heterogéneo.
 fn orm_field_is_jsonb(t: &Type) -> bool {
     match t {
-        Type::Map(k, v) => matches!(**k, Type::Any) || matches!(**v, Type::Any),
+        // Cualquier Map<K,V> con K Str O Any → JSONB. Incluye:
+        //   - Map<Str, Any> (libre, 10.b.8.b) → cast ::jsonb.
+        //   - Map<Str, Int|Float|Str|Bool> (concreto, 10.b.12.b) → cast ::jsonb.
+        //   - Map<Any, V> → cast ::jsonb.
+        // El branching real (libre vs concreto) lo hace el caller
+        // según `orm_map_str_concrete_info`.
+        Type::Map(k, v) => matches!(**k, Type::Str | Type::Any) || matches!(**v, Type::Any),
         Type::Nullable(inner) => orm_field_is_jsonb(inner),
         _ => false,
+    }
+}
+
+/// Fase 10.b.12.b — info para `Map<Str, T>` concreto (T = Int/Float/
+/// Str/Bool). Devuelve `(rust_v_type, json_extractor_expr,
+/// json_construct_expr)` cuando matchea, `None` si no.
+///   - `json_extractor_expr`: expresión Rust que extrae `T` desde
+///     `serde_json::Value` (e.g. `__jv.as_i64()`). Devuelve
+///     `Option<T>`; el caller valida.
+///   - `json_construct_expr`: cómo construir `serde_json::Value`
+///     desde un value Rust (e.g. para serialize).
+///
+/// Estos Maps se almacenan en columnas `jsonb` Postgres pero
+/// validamos el shape en deserialize. Sin esta validación, un
+/// `Map<Str, Int>` recibiría strings/bools del JSON sin error.
+fn orm_map_str_concrete_info(t: &Type) -> Option<(&'static str, &'static str, &'static str)> {
+    match t {
+        Type::Map(k, v) => {
+            if !matches!(**k, Type::Str) {
+                return None;
+            }
+            match v.as_ref() {
+                Type::Int => Some(("i64", "as_i64()", "serde_json::Value::Number((*__v).into())")),
+                Type::Float => Some((
+                    "f64",
+                    "as_f64()",
+                    "serde_json::Number::from_f64(*__v).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)",
+                )),
+                Type::Str => Some((
+                    "String",
+                    "as_str().map(|__s| __s.to_string())",
+                    "serde_json::Value::String(__v.clone())",
+                )),
+                Type::Bool => Some(("bool", "as_bool()", "serde_json::Value::Bool(*__v)")),
+                _ => None,
+            }
+        }
+        Type::Nullable(inner) => orm_map_str_concrete_info(inner),
+        _ => None,
     }
 }
 
@@ -22049,17 +22222,35 @@ fn orm_marshal_field_to_pg(
         // por variante apropiada. Liberar el lock ANTES de devolver
         // (mismo patrón que el INSERT path: no cross-await con
         // std::sync::Mutex guard activo).
-        Type::List(_) if orm_list_scalar_info(t).is_some() => {
-            let (rust_inner, pg_variant, oid_const, _cast) =
-                orm_list_scalar_info(t).unwrap();
+        Type::List(_) if orm_list_scalar_info_with_null(t).is_some() => {
+            let (rust_inner, pg_variant, oid_const, _cast, inner_nullable) =
+                orm_list_scalar_info_with_null(t).unwrap();
             // Wrap del item: primitivos Copy se desreferencian con `*`,
             // String se clona (move-out de &String requeriría clone igual).
-            let item_wrap = match rust_inner {
-                "i64" | "f64" | "bool" => {
-                    format!("__FitzPgValue::{}(*__it)", pg_variant)
+            // Con inner_nullable (10.b.12.a), cada item es `Option<T>`;
+            // matcheamos Some/None y emitimos `PgValue::Null` para None.
+            let item_wrap = if inner_nullable {
+                // __it es &Option<T>; matcheamos Some(__v) bindea __v
+                // como &T. Para primitivos Copy (i64/f64/bool) deref
+                // con `*__v`. Para String, clone (move-out de &String
+                // requeriría clone igual).
+                let some_wrap = match rust_inner {
+                    "i64" | "f64" | "bool" => {
+                        format!("__FitzPgValue::{}(*__v)", pg_variant)
+                    }
+                    "String" => format!("__FitzPgValue::{}(__v.clone())", pg_variant),
+                    _ => unreachable!(),
+                };
+                format!(
+                    "match __it {{ Some(__v) => {}, None => __FitzPgValue::Null }}",
+                    some_wrap
+                )
+            } else {
+                match rust_inner {
+                    "i64" | "f64" | "bool" => format!("__FitzPgValue::{}(*__it)", pg_variant),
+                    "String" => format!("__FitzPgValue::{}(__it.clone())", pg_variant),
+                    _ => unreachable!(),
                 }
-                "String" => format!("__FitzPgValue::{}(__it.clone())", pg_variant),
-                _ => unreachable!(),
             };
             Ok(format!(
                 "{{ \
@@ -22095,12 +22286,42 @@ fn orm_marshal_field_to_pg(
                 accessor = accessor,
             ))
         }
+        // Fase 10.b.12.b — `Map<Str, T>` concretos en INSERT. Toma
+        // el lock, itera el `Vec<(String, T)>` y construye
+        // `serde_json::Map<String, Value>` con cada value wrapeado al
+        // serde_json::Value apropiado. Serializa con `serde_json::
+        // to_string` (no precisa __FitzValue, va directo). Resultado
+        // en PgValue::Text con cast `::jsonb` del lado SQL.
+        Type::Map(k, v)
+            if matches!(**k, Type::Str)
+                && matches!(
+                    v.as_ref(),
+                    Type::Int | Type::Float | Type::Str | Type::Bool
+                )
+                && orm_map_str_concrete_info(t).is_some() =>
+        {
+            let (_, _, construct) = orm_map_str_concrete_info(t).unwrap();
+            Ok(format!(
+                "{{ \
+                    let __map_arc = {accessor}; \
+                    let __map_g = __map_arc.lock().unwrap(); \
+                    let mut __obj = serde_json::Map::with_capacity(__map_g.len()); \
+                    for (__k, __v) in __map_g.iter() {{ \
+                        __obj.insert(__k.clone(), {construct}); \
+                    }} \
+                    let __s = serde_json::to_string(&serde_json::Value::Object(__obj)).expect(\"JSONB serialize falló\"); \
+                    __FitzPgValue::Text(__s) \
+                }}",
+                accessor = accessor,
+                construct = construct,
+            ))
+        }
         Type::Map(_, _) => Err(FitzError::new(
             crate::error::ErrorKind::InvalidSyntax,
             0,
             0,
             format!(
-                "codegen ORM (10.b.8.b): field `{}` con tipo `{}` no soportado en `.insert` — usá `Map<Str, Any>` para JSONB heterogéneo",
+                "codegen ORM (10.b.8.b): field `{}` con tipo `{}` no soportado en `.insert` — usá `Map<Str, Any>` (libre) o `Map<Str, Int|Float|Str|Bool>` (tipado, 10.b.12.b)",
                 field_name,
                 type_name(t)
             ),
@@ -29729,18 +29950,22 @@ mod tests {
         // homogéneo concreto no usa __FitzValue). Error claro citando
         // "usá Map<Str, Any>". Necesita un call ORM para que el codegen
         // intente emitir el coerce_block del field Map.
+        // Fase 10.b.12.b: `Map<Str, Int>` ahora SÍ se soporta (path
+        // concreto JSONB tipado). Cambiado el caso patológico a
+        // `Map<Int, Int>` (keys no-Str) que sigue rechazándose porque
+        // JSON objects solo aceptan keys string.
         let src = "@table(\"counts\") type Counts {\n  \
                        @primary id: Int = 0\n  \
-                       buckets: Map<Str, Int>\n\
+                       lookup: Map<Int, Int>\n\
                    }\n\
                    async fn boot() -> Result<List<Counts>> {\n  \
                        let db = db.connect(\"postgres://x@h/d\").await?\n  \
                        return Counts.all(db).await\n\
                    }\n";
-        let err = gen(src).expect_err("esperaba error de codegen por Map concreto");
+        let err = gen(src).expect_err("esperaba error de codegen por Map<Int, ...>");
         assert!(
-            err.message.contains("Map<Str, Any>"),
-            "esperaba mención de `Map<Str, Any>` como workaround, fue: {}",
+            err.message.contains("Map<Str, Any>") || err.message.contains("Map<Str,"),
+            "esperaba mención de `Map<Str, ...>` como workaround, fue: {}",
             err.message
         );
     }
@@ -30093,6 +30318,169 @@ mod tests {
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
             "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.12.b — Map<Str, T> concreto (JSONB tipado) ----
+
+    #[test]
+    fn codegen_orm_map_str_int_concreto_emite_deserialize_y_marshal() {
+        // Field `counts: Map<Str, Int>` debe emitir:
+        //   - struct field tipa Arc<Mutex<Vec<(String, i64)>>>.
+        //   - deserialize: serde_json::from_str del Text + iter sobre
+        //     Object + validar each value es as_i64().
+        //   - marshal: iter sobre el Vec + construir serde_json::Map
+        //     con Number((*v).into()) + to_string.
+        //   - SQL cast: ::jsonb.
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       counts: Map<Str, Int>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Doc>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Doc.all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Struct field type.
+        assert!(
+            rust.contains("Vec<(String, i64)>") || rust.contains("Vec < (String , i64) >"),
+            "esperaba Vec<(String, i64)> para counts, fue: {rust}",
+        );
+        // Deserialize: serde_json parse + as_i64.
+        assert!(
+            rust.contains("serde_json::from_str") && rust.contains("as_i64()"),
+            "esperaba deserialize via serde_json + as_i64, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_map_str_str_concreto_compila_e_insert_marshalea() {
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       attrs: Map<Str, Str>\n\
+                   }\n\
+                   async fn boot() -> Result<Doc> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let d = Doc.insert(db, Doc { id: 0, attrs: {\"k\": \"v\"} }).await?\n  \
+                       return Ok(d)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Marshal: construct con serde_json::Value::String.
+        assert!(
+            rust.contains("serde_json::Value::String"),
+            "esperaba construct String del marshal, fue: {rust}",
+        );
+        // SQL cast ::jsonb también para Map<Str, T> concreto.
+        assert!(
+            rust.contains("::jsonb"),
+            "esperaba ::jsonb cast para Map<Str, T> concreto, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_map_concreto_bool_y_float_compilan() {
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       flags: Map<Str, Bool>\n  \
+                       prices: Map<Str, Float>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Doc>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Doc.all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("as_bool()") && rust.contains("as_f64()"),
+            "esperaba ambos extractors (as_bool, as_f64), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_map_int_keys_no_soportado_aborta() {
+        // Map<Int, Int> NO se soporta — el JSON objeto solo permite
+        // keys string. Error claro.
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       lookup: Map<Int, Int>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Doc>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Doc.all(db).await\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por Map<Int, Int>");
+        assert!(
+            err.message.contains("Map<Str, Any>") || err.message.contains("Map<Str,"),
+            "esperaba mención de Map<Str, ...>, fue: {}",
+            err.message
+        );
+    }
+
+    // ---- Fase 10.b.12.a — NULL adentro de arrays (List<scalar?>) ----
+
+    #[test]
+    fn codegen_orm_list_int_nullable_inner_emite_vec_option() {
+        // Field `tags: List<Int?>` debe deserializar a
+        // `Arc<Mutex<Vec<Option<i64>>>>` (cada item puede ser None).
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       tags: List<Int?>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Item>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Item.all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // El struct field debe tipar Vec<Option<i64>>.
+        assert!(
+            rust.contains("Vec<Option<i64>>") || rust.contains("Vec < Option < i64 > >"),
+            "esperaba Vec<Option<i64>> para tags: List<Int?>, fue: {rust}",
+        );
+        // El deserialize debe usar matches!(__item, ::Null) → None / Some(...).
+        assert!(
+            rust.contains("matches!(__item, __FitzPgValue::Null)")
+                && rust.contains("Some(__fitz_pg_to_i64"),
+            "esperaba el branch nullable en deserialize, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_list_str_nullable_marshal_some_none() {
+        // Field `labels: List<Str?>` debe serializar matcheando
+        // Some(__v) → PgValue::Text(__v.clone()) y None → PgValue::Null.
+        let src = "@table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       labels: List<Str?>\n\
+                   }\n\
+                   async fn boot() -> Result<Post> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let p = Post.insert(db, Post { id: 0, labels: [\"a\", null, \"b\"] }).await?\n  \
+                       return Ok(p)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("match __it { Some(__v) =>")
+                && rust.contains("__FitzPgValue::Text(__v.clone())")
+                && rust.contains("None => __FitzPgValue::Null"),
+            "esperaba marshal Some/None → Text/Null, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_list_int_nullable_sigue_emitiendo_cast_sql() {
+        // `List<Int?>` también necesita `::int8[]` cast en INSERT —
+        // Postgres acepta NULL en arrays sin cambiar el tipo del cast.
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       tags: List<Int?>\n\
+                   }\n\
+                   async fn boot() -> Result<Item> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Item.insert(db, Item { id: 0, tags: [1, null, 3] }).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("::int8[]"),
+            "esperaba cast ::int8[] también para nullable inner, fue: {rust}",
         );
     }
 

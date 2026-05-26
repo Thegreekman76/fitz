@@ -1286,6 +1286,171 @@ fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.12.b — Paridad `Map<Str, T>` concreto (JSONB tipado)
+//
+// El codegen ahora soporta `Map<Str, Int|Float|Str|Bool>` mapeado a
+// columnas `jsonb` Postgres con validación de shape en deserialize
+// (rechaza JSON object donde algún value no matchee T) y serialize
+// directo a `serde_json::Value::Number/String/Bool` sin __FitzValue.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_map_str_concreto_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w12b_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w12b_test (\
+                 id bigint PRIMARY KEY, \
+                 counts jsonb, \
+                 attrs jsonb)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w12b_test VALUES \
+                 (1, '{\"a\": 10, \"b\": 20, \"c\": 30}', \
+                     '{\"name\": \"ada\", \"role\": \"admin\"}')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w12b_test\") type Doc {{\n  \
+             @primary id: Int = 0\n  \
+             counts: Map<Str, Int>\n  \
+             attrs: Map<Str, Str>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let d = Doc.where(fn(x) => x.id == 1).first(db).await?\n  \
+             // INSERT round-trip con Map<Str, Int> + Map<Str, Str> literales.\n  \
+             let _new = Doc.insert(db, Doc {{ \
+                 id: 2, \
+                 counts: {{\"x\": 100, \"y\": 200}}, \
+                 attrs: {{\"k\": \"v\"}} \
+             }}).await?\n  \
+             let d2 = Doc.where(fn(x) => x.id == 2).first(db).await?\n  \
+             return Ok(\"counts1={{len(d.counts)}} attrs1={{len(d.attrs)}} counts2={{len(d2.counts)}} attrs2={{len(d2.attrs)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_map_str_concreto_codegen", |stdout| {
+        // counts1: 3 keys, attrs1: 2 keys.
+        // counts2: 2 keys, attrs2: 1 key.
+        assert!(
+            stdout.contains("counts1=3")
+                && stdout.contains("attrs1=2")
+                && stdout.contains("counts2=2")
+                && stdout.contains("attrs2=1"),
+            "esperaba `counts1=3 attrs1=2 counts2=2 attrs2=1`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w12b_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
+// Fase 10.b.12.a — Paridad `List<scalar?>` (NULL adentro de arrays)
+//
+// Postgres permite arrays con NULL elements (`{1,NULL,3}`). El
+// codegen ahora soporta `List<Int?>`/`List<Str?>`/etc. y materializa
+// `Vec<Option<T>>` en el struct.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_list_nullable_inner_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w12a_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w12a_test (id bigint PRIMARY KEY, tags int8[])",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w12a_test VALUES (1, '{10, NULL, 30, NULL, 50}')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w12a_test\") type Item {{\n  \
+             @primary id: Int = 0\n  \
+             tags: List<Int?>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let it = Item.where(fn(i) => i.id == 1).first(db).await?\n  \
+             let _inserted = Item.insert(db, Item {{ id: 2, tags: [100, null, 300] }}).await?\n  \
+             let it2 = Item.where(fn(i) => i.id == 2).first(db).await?\n  \
+             return Ok(\"len1={{len(it.tags)}} len2={{len(it2.tags)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_list_nullable_inner_codegen", |stdout| {
+        assert!(
+            stdout.contains("len1=5") && stdout.contains("len2=3"),
+            "esperaba `len1=5 len2=3`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w12a_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.11 — Paridad `.update` con List literal + Map literal
 //
 // Cubre la deuda residual de 10.b.8.a/b: el `.update(db, {...})`
