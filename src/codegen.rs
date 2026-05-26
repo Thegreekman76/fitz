@@ -6919,8 +6919,7 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 .unwrap_or(f.name.as_str())
                 .to_string();
             let col_lit = rust_str_literal(&sql_col);
-            let coerce_block =
-                orm_field_coerce_block(&f.type_, &col_lit, self.env, f.name.as_str())?;
+            let coerce_block = orm_field_coerce_block(&f.type_, &col_lit, f.name.as_str())?;
             writeln!(
                 &mut self.output,
                 "        let {field}: {ty} = {{\n            let __v = __row.get({col_lit}).ok_or_else(|| format!(\"columna `{{}}` (field `{field}`) no está en el resultset\", {col_lit}))?;\n            {coerce}\n        }};",
@@ -21622,18 +21621,19 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
 /// Tipos cubiertos en 10.b.3:
 ///   - Int/Float/Str/Bool/Bytes → helpers __fitz_pg_to_*.
 ///   - Nullable<T> → Option<T> con None para PgValue::Null.
-///   - List<T>/Map<K,V>/Nominal → error de codegen citando el sub-paso
-///     futuro (10.b.7 nominal nav, 10.b.8 JSONB+arrays).
-// `env` se conserva en la firma para 10.b.7 (validación nominal del
-// target_type de @belongs_to + sql_name override del target type) —
-// hoy solo se propaga vía recursión por la rama Nullable.
-#[allow(clippy::only_used_in_recursion)]
-fn orm_field_coerce_block(
-    t: &Type,
-    col_lit: &str,
-    env: &TypeEnv,
-    field_name: &str,
-) -> Result<String, FitzError> {
+///   - List<scalar> → Vec<T> desde PgValue::Array (10.b.8.a).
+///   - Map<Str, Any> → __FitzValue::Map desde PgValue::Text (10.b.8.b).
+///   - Otros (Nominal, List<List>, Map concretos) → error de codegen
+///     citando el sub-paso futuro o la deuda.
+//
+// Fase 10.b.10: removido el param `env: &TypeEnv` y el
+// `#[allow(clippy::only_used_in_recursion)]`. El param se mantuvo
+// desde 10.b.3 anticipando que 10.b.7 lo necesitara para validación
+// nominal del target_type de @belongs_to, pero el cierre real de
+// navigation usa el lookup en el caller (`gen_orm_navigation` →
+// `orm_lookup_meta_and_fields`), no acá. Cleanup → signature más
+// chica + sin allow.
+fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<String, FitzError> {
     match t {
         Type::Int => Ok(format!("__fitz_pg_to_i64(__v, {})?", col_lit)),
         Type::Float => Ok(format!("__fitz_pg_to_f64(__v, {})?", col_lit)),
@@ -21641,7 +21641,7 @@ fn orm_field_coerce_block(
         Type::Bool => Ok(format!("__fitz_pg_to_bool(__v, {})?", col_lit)),
         Type::Bytes => Ok(format!("__fitz_pg_to_bytes(__v, {})?", col_lit)),
         Type::Nullable(inner) => {
-            let inner_block = orm_field_coerce_block(inner, col_lit, env, field_name)?;
+            let inner_block = orm_field_coerce_block(inner, col_lit, field_name)?;
             Ok(format!(
                 "if matches!(__v, __FitzPgValue::Null) {{ None }} else {{ Some({}) }}",
                 inner_block

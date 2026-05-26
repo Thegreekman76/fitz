@@ -1567,19 +1567,26 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
 
 ### De 10.b.7 (Navigation methods)
 
-- ☐ **`#[allow(clippy::only_used_in_recursion)]` en
-  `orm_field_coerce_block`** (src/codegen.rs ~21145). El `env` sigue
-  sin usarse. Decisión: o lo usamos (validación nominal extra) o lo
-  removemos del signature.
+- ✅ **`#[allow(clippy::only_used_in_recursion)]` en
+  `orm_field_coerce_block`** — CERRADO 2026-05-26 (10.b.10.1). El
+  `env` se removió del signature; el cleanup quedó porque el caller
+  (`gen_orm_navigation` → `orm_lookup_meta_and_fields`) ya hace las
+  validaciones nominales que originalmente habían motivado mantener
+  el param. Signature más chica + sin `#[allow]`.
 - ☐ **Args extras a navigation**: hoy `instance.posts(db)` solo. Sin
   chain `instance.posts(db).where(...).limit(10).all(db)` ni kwargs
   `instance.posts(db, limit=10)`. Pre-req: navigation devuelve
   QueryBuilder en vez de Future cuando no se le pasa solo `db`.
+  Pendiente para 10.b.13.
 - ☐ **Eager loading (preload)**: `User.where(...).preload("posts").
-  all(db)` para evitar N+1. Plan original era 10.b.9.
-- ☐ **Cross-type navigation con `@column(name=...)` en el FK source
-  field**: el codegen debería respetar el sql_name override del FK
-  local, no testeado E2E. Validación pendiente.
+  all(db)` para evitar N+1. Plan original era 10.b.9. Pendiente
+  para 10.b.15.
+- ✅ **Cross-type navigation con `@column(name=...)` en el FK source
+  field** — CERRADO 2026-05-26 (10.b.10.2). Test paridad real
+  `orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e`
+  con esquema donde el SQL column del FK se llama `author_uid` (≠
+  field Fitz `user_id`). Validado bit-a-bit: el SELECT del Post
+  usa el override, la navigation a User funciona correcto.
 
 ### De 10.b.8.a (Arrays Postgres)
 

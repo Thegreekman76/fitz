@@ -1147,6 +1147,497 @@ fn orm_belongs_to_y_has_many_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.10 — Paridad navigation con @column(name=) en FK source
+//
+// Cubre la deuda residual del 10.b.7: cross-type navigation cuando
+// el FK source field tiene un @column(name=) override. El SELECT
+// del row debe usar el sql_name (no el Fitz name), y la navigation
+// debe seguir bindeando el value del field Fitz correctamente.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
+    use std::process::Command;
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w10_posts_test", &[])
+            .await;
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w10_users_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w10_users_test (id bigint PRIMARY KEY, name text)",
+            &[],
+        )
+        .await
+        .unwrap();
+        // Schema con la columna FK en el SQL llamada `author_uid` —
+        // distinta del field Fitz `user_id`.
+        seed.exec(
+            "CREATE TABLE fitz_orm_w10_posts_test (\
+                 id bigint PRIMARY KEY, \
+                 title text, \
+                 author_uid bigint REFERENCES fitz_orm_w10_users_test(id))",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w10_users_test VALUES (1, 'ada'), (2, 'alan')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w10_posts_test VALUES \
+                 (10, 'on algorithms', 1), \
+                 (11, 'on math', 2)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w10_posts_test\") type Post {{\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             @column(name=\"author_uid\") @belongs_to(\"User\") user_id: Int\n\
+         }}\n\
+         @table(\"fitz_orm_w10_users_test\") type User {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let p10 = Post.where(fn(p) => p.id == 10).first(db).await?\n  \
+             let author = p10.user_id(db).await?\n  \
+             return Ok(\"author={{author.name}} title={{p10.title}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    let stem = "orm_nav_col_override_paridad_codegen";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, &src).expect("escribir .fitz");
+
+    let fitz_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "fitz.exe" } else { "fitz" });
+    let build = Command::new(&fitz_bin)
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+
+    assert!(
+        stdout.contains("author=ada") && stdout.contains("title=on algorithms"),
+        "esperaba `author=ada title=on algorithms`, fue: {}",
+        stdout
+    );
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w10_posts_test", &[]).await;
+        let _ = seed.exec("DROP TABLE fitz_orm_w10_users_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
+// Fase 10.b.10 — Tests paridad real Postgres exhaustivos
+//
+// Cobertura faltante de sub-pasos previos:
+//   - 10.b.3: Type.all / .first / .count basics
+//   - 10.b.4: insert con RETURNING preservando el id auto-asignado
+//   - 10.b.5: chain order_by + limit + offset + .update + .delete
+//   - 10.b.6: aggregates scalar (sum/avg/min/max) con valores conocidos
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_basics_all_first_count_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w10b_basics_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w10b_basics_test (id bigint PRIMARY KEY, name text)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w10b_basics_test VALUES (1, 'ada'), (2, 'alan'), (3, 'grace')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w10b_basics_test\") type User {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let all = User.all(db).await?\n  \
+             let first = User.first(db).await?\n  \
+             let n = User.count(db).await?\n  \
+             return Ok(\"all={{len(all)}} first={{first.name}} count={{n}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_basics_all_first_count_codegen", |stdout| {
+        assert!(
+            stdout.contains("all=3") && stdout.contains("count=3"),
+            "esperaba `all=3 count=3`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w10b_basics_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+#[test]
+#[ignore]
+fn orm_crud_lifecycle_insert_update_delete_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w10b_crud_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w10b_crud_test (\
+                 id bigserial PRIMARY KEY, \
+                 name text, \
+                 age bigint)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w10b_crud_test\") type Person {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // INSERT: el server asigna el id (bigserial).\n  \
+             let inserted = Person.insert(db, Person {{ id: 0, name: \"ada\", age: 35 }}).await?\n  \
+             // Extraemos el id a una var local — el closure de .where()\n  \
+             // solo admite `param.field` o vars externas simples (Ident).\n  \
+             let new_id = inserted.id\n  \
+             // UPDATE: age = 36.\n  \
+             let updated = Person.where(fn(p) => p.id == new_id).update(db, {{\"age\": 36}}).await?\n  \
+             // SELECT verify.\n  \
+             let post_update = Person.where(fn(p) => p.id == new_id).first(db).await?\n  \
+             let post_age = post_update.age\n  \
+             // DELETE.\n  \
+             let deleted = Person.where(fn(p) => p.id == new_id).delete(db).await?\n  \
+             // SELECT verify deleted.\n  \
+             let after = Person.count(db).await?\n  \
+             return Ok(\"updated={{updated}} age_after_update={{post_age}} deleted={{deleted}} count_after={{after}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_crud_lifecycle_codegen", |stdout| {
+        // Cada operación afecta 1 row; el SELECT post-update lee age=36;
+        // el count tras el DELETE es 0.
+        assert!(
+            stdout.contains("updated=1")
+                && stdout.contains("age_after_update=36")
+                && stdout.contains("deleted=1")
+                && stdout.contains("count_after=0"),
+            "esperaba lifecycle CRUD completo, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w10b_crud_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+#[test]
+#[ignore]
+fn orm_order_by_limit_offset_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w10b_order_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w10b_order_test (id bigint PRIMARY KEY, score bigint)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w10b_order_test VALUES \
+                 (1, 50), (2, 30), (3, 90), (4, 10), (5, 70)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w10b_order_test\") type Score {{\n  \
+             @primary id: Int = 0\n  \
+             score: Int\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // Top 2 scores DESC: 90 (id=3), 70 (id=5).\n  \
+             let top = Score.order_by(fn(s) => -s.score).limit(2).all(db).await?\n  \
+             let top0 = top[0]\n  \
+             let top1 = top[1]\n  \
+             // Skip 1 + take 2 ASC: id=2(30), id=1(50).\n  \
+             let mid = Score.order_by(fn(s) => s.score).limit(2).offset(1).all(db).await?\n  \
+             let mid0 = mid[0]\n  \
+             let mid1 = mid[1]\n  \
+             return Ok(\"top0={{top0.id}}:{{top0.score}} top1={{top1.id}}:{{top1.score}} mid0={{mid0.id}}:{{mid0.score}} mid1={{mid1.id}}:{{mid1.score}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_order_by_limit_offset_codegen", |stdout| {
+        // DESC: top0=3:90, top1=5:70. ASC offset 1: ranked 10,30,50,70,90;
+        // skip 1 → starts at 30 → mid0=2:30, mid1=1:50.
+        assert!(
+            stdout.contains("top0=3:90")
+                && stdout.contains("top1=5:70")
+                && stdout.contains("mid0=2:30")
+                && stdout.contains("mid1=1:50"),
+            "esperaba orden + paginación correcta, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w10b_order_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+#[test]
+#[ignore]
+fn orm_aggregates_scalar_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w10b_agg_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w10b_agg_test (\
+                 id bigint PRIMARY KEY, \
+                 price double precision)",
+            &[],
+        )
+        .await
+        .unwrap();
+        // Sum = 100, Avg = 25, Min = 10, Max = 40.
+        seed.exec(
+            "INSERT INTO fitz_orm_w10b_agg_test VALUES \
+                 (1, 10.0), (2, 20.0), (3, 30.0), (4, 40.0)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w10b_agg_test\") type Sale {{\n  \
+             @primary id: Int = 0\n  \
+             price: Float\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let sum_price = Sale.sum(fn(s) => s.price, db).await?\n  \
+             let avg_price = Sale.avg(fn(s) => s.price, db).await?\n  \
+             let min_price = Sale.min(fn(s) => s.price, db).await?\n  \
+             let max_price = Sale.max(fn(s) => s.price, db).await?\n  \
+             return Ok(\"sum={{sum_price}} avg={{avg_price}} min={{min_price}} max={{max_price}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_aggregates_scalar_codegen", |stdout| {
+        assert!(
+            stdout.contains("sum=100")
+                && stdout.contains("avg=25")
+                && stdout.contains("min=10")
+                && stdout.contains("max=40"),
+            "esperaba sum=100 avg=25 min=10 max=40, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w10b_agg_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+/// Helper común para los tests de 10.b.10: compila el programa Fitz
+/// con `fitz build`, ejecuta el binario, y le pasa el stdout al
+/// closure de assertion del caller. Reduce ~50 LoC duplicadas por
+/// test. Llamado desde los 4 tests E2E paridad de 10.b.10.
+fn run_paridad_program(src: &str, stem: &str, assert_stdout: impl FnOnce(&str)) {
+    use std::process::Command;
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let fitz_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "fitz.exe" } else { "fitz" });
+    let build = Command::new(&fitz_bin)
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+    assert_stdout(&stdout);
+}
+
+// =============================================================
 // Fase 10.b.9.a — Paridad fitz build sobre operadores `.where`
 //
 // Programa con varios operadores combinados (==/>=/AND/OR/like/
