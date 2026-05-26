@@ -2727,6 +2727,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "29c-ws-bidir.fitz",
     "30-cron-background.fitz",
     "31-env.fitz",
+    "32-orm.fitz",
 ];
 
 #[test]

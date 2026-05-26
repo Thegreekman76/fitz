@@ -1,0 +1,105 @@
+// cap 32 — ORM nativo (Fase 10.b).
+//
+// Postgres + Fitz: types con decoradores @table, @primary, @column,
+// @belongs_to, @has_many. Una sola fuente de verdad para schema +
+// queries tipadas + relations + aggregates. Sin lib externa: el
+// driver Postgres puro y el ORM están en el binario `fitz` mismo.
+//
+// Diferenciales vs SQLAlchemy / Active Record / Diesel:
+//   - `fitz build` produce binario standalone con el ORM linkeado.
+//   - paridad bit-a-bit `fitz run` ↔ `fitz build`.
+//   - validación estática: el checker tipa `Future<Result<User>>`
+//     vs `Future<Result<List<User>>>` según la chain — sin Any.
+//
+// Este ejemplo es PEDAGÓGICO — muestra el shape canónico. Para
+// ejecutarlo necesitás un Postgres real con el schema de abajo
+// (CREATE TABLE users + posts). Sin Postgres válido, el `connect`
+// final imprime una Err clara y el smoke `GUIDE_EXAMPLES_COMPILE`
+// solo verifica que compile a binario.
+
+// --- 1. Definición de types con @table ------------------------------
+
+@table("users") type User {
+    @primary id: Int = 0
+    name: Str
+    age: Int
+
+    // @has_many: el field virtual `posts` se hidrata vía navigation
+    // (`u.posts(db)`) o eager loading (`User.preload("posts").all(db)`).
+    // El SELECT/INSERT normal lo skipea (paralelo a backref de
+    // SQLAlchemy declarative).
+    @has_many("Post", via="user_id") posts: List<Post>
+}
+
+@table("posts") type Post {
+    @primary id: Int = 0
+    title: Str
+
+    // @belongs_to: el field `user_id` es FK real (entra al SELECT
+    // y al INSERT). El nav method `post.user_id(db)` resuelve al
+    // User correspondiente.
+    @belongs_to("User") user_id: Int
+}
+
+// --- 2. Patrones canónicos del ORM ----------------------------------
+
+async fn demo(db_url: Str) -> Result<Str> {
+    let db = db.connect(db_url).await?
+
+    // 2.1 — Insert: el server asigna el id (bigserial).
+    let inserted = User.insert(db, User { id: 0, name: "ada", age: 35, posts: [] }).await?
+    let new_id = inserted.id
+
+    // 2.2 — SELECT con WHERE chain + first.
+    let one = User.where(fn(u) => u.id == new_id).first(db).await?
+
+    // 2.3 — Chain con order_by + limit + offset (paginación).
+    let top = User.where(fn(u) => u.age >= 18)
+        .order_by(fn(u) => -u.age)
+        .limit(10)
+        .offset(0)
+        .all(db).await?
+
+    // 2.4 — Operadores extendidos en .where: like / is_in / between.
+    let pattern = User.where(fn(u) => u.name.starts_with("a")).all(db).await?
+    let bands = User.where(fn(u) => u.age.between(18, 65)).all(db).await?
+    let ids = User.where(fn(u) => u.id.is_in([1, 2, 3])).all(db).await?
+
+    // 2.5 — Aggregates scalares: sum / avg / min / max / count.
+    let total_users = User.count(db).await?
+    let avg_age = User.avg(fn(u) => u.age, db).await?
+
+    // 2.6 — Aggregates con GROUP BY (Aggregated<Row>): devuelve
+    // List<Map<Str, Any>> con un row por grupo.
+    let by_age = User.group_by(fn(u) => u.age).count(db).await?
+
+    // 2.7 — Navigation: belongs_to y has_many.
+    let post1 = Post.where(fn(p) => p.id == 1).first(db).await?
+    let author = post1.user_id(db).await?           // BelongsTo → User.
+    let ada_posts = inserted.posts(db).await?       // HasMany → List<Post>.
+
+    // 2.8 — Eager loading: 1 query batch en vez de N+1.
+    let with_posts = User.preload("posts").all(db).await?
+
+    // 2.9 — Update + delete con guard `.where(...)` obligatorio.
+    let updated_rows = User.where(fn(u) => u.id == new_id).update(db, {"age": 36}).await?
+    let deleted_rows = User.where(fn(u) => u.id == new_id).delete(db).await?
+
+    return Ok("ORM demo: {len(top)} top users, {total_users} total, {len(by_age)} grupos por edad")
+}
+
+// --- 3. Entry point -------------------------------------------------
+
+async fn driver() -> Str {
+    // `fitz build` con URL inválida → connect falla con Err clara.
+    // Para correr el demo real, sustituir por la URL de tu Postgres
+    // con el schema CREATE TABLE users (id bigserial PK, name text,
+    // age bigint) + CREATE TABLE posts (id bigserial PK, title text,
+    // user_id bigint REFERENCES users(id)).
+    return match demo("postgres://demo:demo@localhost/fitz_demo").await {
+        Ok(s) => s
+        Err(e) => "ejemplo ORM listo (sin Postgres real: {e})"
+    }
+}
+
+print(driver().await)

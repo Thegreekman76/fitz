@@ -1713,6 +1713,18 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   override en FK source + .update con List/Map literal + agg
   scalar) ahora corren en cada push a main. `#[ignore]` se mantiene
   para que `cargo test` default sin env var siga rápido.
-- ☐ **Smoke GUIDE_EXAMPLES_COMPILE no incluye ejemplos ORM**: cuando
-  haya un ejemplo runnable del cap 31 de la guía (ORM), sumarlo al
-  smoke. Pre-req: cap 31 escrito (parte del cierre formal de Fase 10).
+- ✅ **Smoke GUIDE_EXAMPLES_COMPILE no incluye ejemplos ORM** —
+  CERRADO 2026-05-26 (10.b.17). Nuevo `examples/guide/32-orm.fitz`
+  pedagógico (~100 LoC) que muestra el shape canónico del ORM
+  end-to-end: `@table` con `@primary` + `@column` + `@belongs_to`
+  + `@has_many`, insert, where + first, chain
+  `order_by`/`limit`/`offset`, operadores `starts_with`/`is_in`/
+  `between`, aggregates scalares `count`/`avg`, GROUP BY con
+  `Aggregated<Row>`, navigation `belongs_to`/`has_many`, eager
+  loading con `preload`, y `update`/`delete` con guard `.where(...)`
+  obligatorio. Sumado al smoke `GUIDE_EXAMPLES_COMPILE` —
+  `fitz build` produce binario que NO requiere Postgres real al
+  compilar; el `connect` runtime falla con `Err` clara cuando la
+  URL inválida, así el ejemplo es ejecutable como guía aunque no
+  haya Postgres local. Cierra la última deuda residual de Fase
+  10.b antes del release v0.10.1.
