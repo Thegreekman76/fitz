@@ -1286,6 +1286,122 @@ fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.13 — Paridad navigation chain (sin db = QueryBuilder)
+//
+// `instance.posts()` ahora devuelve un QueryBuilder<Post> que admite
+// chain: `.where(...).order_by(...).limit(N).all(db).await?`.
+// Backward compat: `instance.posts(db)` sigue funcionando como
+// terminal directo (`.all` para HasMany).
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_navigation_chain_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w13_posts_test", &[])
+            .await;
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w13_users_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w13_users_test (id bigint PRIMARY KEY, name text)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "CREATE TABLE fitz_orm_w13_posts_test (\
+                 id bigint PRIMARY KEY, \
+                 title text, \
+                 views bigint, \
+                 user_id bigint REFERENCES fitz_orm_w13_users_test(id))",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec("INSERT INTO fitz_orm_w13_users_test VALUES (1, 'ada')", &[])
+            .await
+            .unwrap();
+        // 6 posts para user 1, con views variadas, para que el chain
+        // discrimine: .where(views > 10).order_by(-views).limit(2).
+        seed.exec(
+            "INSERT INTO fitz_orm_w13_posts_test VALUES \
+                 (10, 'a',  5,  1), \
+                 (11, 'b', 50,  1), \
+                 (12, 'c', 30,  1), \
+                 (13, 'd',  8,  1), \
+                 (14, 'e', 90,  1), \
+                 (15, 'f', 20,  1)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w13_posts_test\") type Post {{\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             views: Int\n  \
+             user_id: Int\n\
+         }}\n\
+         @table(\"fitz_orm_w13_users_test\") type User {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             @has_many(\"Post\") posts: List<Post>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let u = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+             // Path nuevo (chain): top 2 posts del user por views DESC, filtrando views>10.\n  \
+             let top = u.posts().where(fn(p) => p.views > 10).order_by(fn(p) => -p.views).limit(2).all(db).await?\n  \
+             let t0 = top[0]\n  \
+             let t1 = top[1]\n  \
+             // Path legacy: traer todos los posts del user (sin filtro).\n  \
+             let all_posts = u.posts(db).await?\n  \
+             return Ok(\"chain_count={{len(top)}} t0={{t0.id}}:{{t0.views}} t1={{t1.id}}:{{t1.views}} all_count={{len(all_posts)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_nav_chain_codegen", |stdout| {
+        // chain top 2 DESC views>10: id=14 (90), id=11 (50).
+        // all_posts: 6 rows.
+        assert!(
+            stdout.contains("chain_count=2")
+                && stdout.contains("t0=14:90")
+                && stdout.contains("t1=11:50")
+                && stdout.contains("all_count=6"),
+            "esperaba chain_count=2 t0=14:90 t1=11:50 all_count=6, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w13_posts_test", &[]).await;
+        let _ = seed.exec("DROP TABLE fitz_orm_w13_users_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.12.b — Paridad `Map<Str, T>` concreto (JSONB tipado)
 //
 // El codegen ahora soporta `Map<Str, Int|Float|Str|Bool>` mapeado a

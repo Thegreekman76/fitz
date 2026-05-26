@@ -11877,8 +11877,22 @@ async fn orm_instance_navigate(
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
-    // 1. Args validation: solo db.
-    let _ = extract_db_handle_arg(&args, &rel.target_type, span).map_err(EvalSignal::Error)?;
+    // Fase 10.b.13 — args: 0 (QueryBuilder chain) o 1 (DbConn, terminal).
+    if args.len() > 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "navigation `<instance>.<rel>(db?)` espera 0 args (QueryBuilder chain) o 1 arg (db, terminal), recibió {}",
+                args.len()
+            ),
+        )));
+    }
+    let returns_qb = args.is_empty();
 
     // 2. Extraer fields de la Instance receiver.
     let (instance_type_name, instance_fields_snapshot) = match &receiver {
@@ -12040,8 +12054,14 @@ async fn orm_instance_navigate(
     state.where_sql = Some(format!("\"{}\" = $1", where_col_sql));
     state.where_args = vec![pg_value];
 
-    // 5. Delegar a orm_qb_first (BelongsTo / HasOne) o orm_qb_all (HasMany).
-    let db_arg = args; // re-use args (contiene solo el DbConn validado arriba)
+    // Fase 10.b.13 — path nuevo: sin db, devolvemos QueryBuilder
+    // para que el user encadene `.where/.limit/.all/.first/etc.`.
+    if returns_qb {
+        return Ok(Value::QueryBuilder(Arc::new(state)));
+    }
+
+    // Path legacy: terminal directo según kind.
+    let db_arg = args;
     match rel.kind {
         crate::types::RelationKind::BelongsTo | crate::types::RelationKind::HasOne => {
             orm_qb_first(state, db_arg, span).map_err(EvalSignal::Error)

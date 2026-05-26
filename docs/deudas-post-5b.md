@@ -1573,11 +1573,17 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   (`gen_orm_navigation` → `orm_lookup_meta_and_fields`) ya hace las
   validaciones nominales que originalmente habían motivado mantener
   el param. Signature más chica + sin `#[allow]`.
-- ☐ **Args extras a navigation**: hoy `instance.posts(db)` solo. Sin
-  chain `instance.posts(db).where(...).limit(10).all(db)` ni kwargs
-  `instance.posts(db, limit=10)`. Pre-req: navigation devuelve
-  QueryBuilder en vez de Future cuando no se le pasa solo `db`.
-  Pendiente para 10.b.13.
+- ✅ **Args extras a navigation (chain)** — CERRADO 2026-05-26
+  (10.b.13). `instance.posts()` (sin args) ahora devuelve
+  `QueryBuilder<Post>` para encadenar `.where(...).order_by(...).
+  limit(N).all(db).await?` igual que `Type.where(...)`. Backward
+  compat: `instance.posts(db)` (con db) sigue siendo terminal
+  directo (`.all` para HasMany, `.first` para BelongsTo/HasOne).
+  Checker, evaluator y codegen actualizados en paridad. Test
+  paridad real: `orm_navigation_chain_paridad_codegen_e2e` valida
+  bit-a-bit chain de 4 ops sobre nav + path legacy en el mismo
+  programa. Kwargs (`instance.posts(limit=10)`) NO en MVP — usar
+  el chain explícito. Más expressivo y consistente.
 - ☐ **Eager loading (preload)**: `User.where(...).preload("posts").
   all(db)` para evitar N+1. Plan original era 10.b.9. Pendiente
   para 10.b.15.
@@ -1648,9 +1654,17 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   insert + select con `Map<Str, Int>` y `Map<Str, Str>`. Otros
   Map (`Map<Int, T>`, etc.) siguen rechazados — JSON objects solo
   aceptan keys string.
-- ☐ **Validación shape JSONB** (timestamps como strings ISO, etc.):
-  hoy el JSONB libre acepta cualquier shape; no hay schema.
-  Pendiente para 10.b.13.
+- ✅ **Validación shape JSONB** — CERRADO 2026-05-26 (10.b.13.b)
+  por DECISIÓN DE DISEÑO. `Map<Str, Any>` significa "cualquier
+  shape JSON válido"; validación de shape específico (timestamps
+  ISO, emails, UUIDs) es responsabilidad del user via `match`/
+  `is_in([...])`/parsing manual. Para schemas conocidos a priori,
+  el patrón recomendado es `Map<Str, T>` concreto (10.b.12.b)
+  con T = Int/Float/Str/Bool, que valida el shape automáticamente.
+  Schema annotations (`@shape({"created_at": "iso8601"})`) quedan
+  como deuda menor abierta para v0.11+ si aparece demanda real —
+  diseño grande (decorator + parser + validation engine) sin
+  beneficio claro vs. validación manual en handlers.
 
 ### Deudas viejas que siguen abiertas (impactan 10.b)
 

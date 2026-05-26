@@ -3743,17 +3743,33 @@ fn infer_method_call(
             // insert/etc.) no pueden ser names de field del type.
             if let Some(meta) = ctx.types.table_metadata(*id) {
                 if let Some(rel) = meta.relations.get(method).cloned() {
-                    // Args: solo `db` en MVP (igual que evaluator).
-                    check_method_arity(ctx, method, args_ty, 1, span);
+                    // Fase 10.b.13 — 2 paths:
+                    //   - args.is_empty() → QueryBuilder<Target> para
+                    //     chain (recomendado). User encadena .where/.
+                    //     limit/.all/.first/etc.
+                    //   - args.len() == 1 (DbConn) → terminal directo
+                    //     (backward compat con 10.b.7).
+                    if args_ty.len() > 1 {
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "navigation `<instance>.{}(db?)` espera 0 args (QueryBuilder chain) o 1 arg (db, terminal), recibió {}",
+                                method,
+                                args_ty.len()
+                            ),
+                        );
+                    }
                     // Resolver el target type del env por nombre Fitz.
-                    // Si no existe (raro: el checker debería haber
-                    // validado al parsear @belongs_to), fall back a
-                    // Any para no abortar acá.
                     let target_id_opt = ctx.types.lookup(&rel.target_type);
                     let target_ty = match target_id_opt {
                         Some(tid) => Type::Nominal(tid),
                         None => Type::Any,
                     };
+                    // Path nuevo (sin db) → QueryBuilder<Target>.
+                    if args_ty.is_empty() {
+                        return Some(Type::QueryBuilder(Box::new(target_ty)));
+                    }
+                    // Path legacy (con db) → terminal directo.
                     let ok_ty = match rel.kind {
                         RelationKind::BelongsTo | RelationKind::HasOne => target_ty,
                         RelationKind::HasMany => Type::List(Box::new(target_ty)),

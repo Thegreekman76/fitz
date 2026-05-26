@@ -11252,17 +11252,32 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
         args: &[Expr],
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
-        if args.len() != 1 {
+        // Fase 10.b.13 — dos paths:
+        //   - args.is_empty(): emit QueryBuilder<Target> con el WHERE
+        //     implícito ya aplicado. User encadena `.where/.limit/.all/
+        //     .first/...` igual que `Type.where(...)`.
+        //   - args.len() == 1 (DbConn): backward compat. Emit terminal
+        //     directo (`.all` para HasMany, `.first` para BelongsTo/
+        //     HasOne). Equivalente a `instance.rel().all(db)` o
+        //     `.first(db)` segun kind. Recomendamos el chain expr para
+        //     uso nuevo.
+        if args.len() > 1 {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`<{}>.<rel>(db)` espera 1 argumento (db), recibió {}",
+                    "`<{}>.<rel>(db?)` espera 0 args (QueryBuilder chain) o 1 arg (db, terminal directo), recibió {}",
                     this_type_name,
                     args.len()
                 ),
             ));
         }
-        let (db_code, _) = self.gen_expr(&args[0])?;
+        let returns_qb = args.is_empty();
+        let db_code = if returns_qb {
+            String::new()
+        } else {
+            let (code, _) = self.gen_expr(&args[0])?;
+            code
+        };
 
         let (this_meta, this_fields) =
             self.orm_lookup_meta_and_fields(this_type_name, call_span)?;
@@ -11345,6 +11360,26 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
         })?;
         let target_ty = Type::Nominal(target_id);
 
+        if returns_qb {
+            // Path nuevo (10.b.13): devolver QueryBuilder<Target>
+            // para encadenar. Sin terminal ni async block — el caller
+            // hace `.where(...).limit(N).all(db).await?` como con
+            // `Type.where(...)`. Tipo: Type::QueryBuilder<Nominal(target)>.
+            let code = format!(
+                "{{ \
+                    let __nav_fk = {fk_accessor}; \
+                    let __nav_pg: __FitzPgValue = {pg_marshal}; \
+                    ({qb_new}).with_where({where_lit}, vec![__nav_pg]) \
+                }}",
+                fk_accessor = fk_accessor,
+                pg_marshal = pg_marshal,
+                qb_new = qb_new,
+                where_lit = rust_str_literal(&where_sql),
+            );
+            return Ok((code, Type::QueryBuilder(Box::new(target_ty))));
+        }
+
+        // Backward compat: args.len() == 1 con DbConn. Terminal directo.
         let (terminal, ret_ty) = match rel.kind {
             crate::types::RelationKind::HasMany => (
                 ".all",
@@ -30318,6 +30353,126 @@ mod tests {
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
             "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.13.a — Navigation chain (sin db = QueryBuilder) ----
+
+    #[test]
+    fn codegen_navigation_sin_db_devuelve_query_builder() {
+        // `user.posts()` (sin args) debe emitir un QueryBuilder<Post>
+        // con el WHERE implícito ya aplicado. Tipo: QueryBuilder<Post>,
+        // no Future<...>. Sin async block envolvente.
+        let src = "@table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       user_id: Int\n\
+                   }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_many(\"Post\") posts: List<Post>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Post>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+                       let xs = u.posts().all(db).await?\n  \
+                       return Ok(xs)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // El branch del QB tiene el `__nav_fk`/`__nav_pg` + with_where
+        // sin async block ni terminal automático.
+        assert!(
+            rust.contains("__nav_fk") && rust.contains("__nav_pg") && rust.contains(".with_where("),
+            "esperaba helpers __nav_* + .with_where, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_navigation_chain_completo_compila() {
+        // `u.posts().where(...).limit(5).all(db).await?` cadena de
+        // 4 ops sobre el QB devuelto por navigation.
+        let src = "@table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       title: Str\n  \
+                       user_id: Int\n\
+                   }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_many(\"Post\") posts: List<Post>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Post>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+                       let xs = u.posts().where(fn(p) => p.title.starts_with(\"a\")).limit(5).all(db).await?\n  \
+                       return Ok(xs)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Múltiples with_where (uno implícito de nav + uno explícito
+        // de chain) + with_limit.
+        assert!(
+            rust.matches(".with_where(").count() >= 2,
+            "esperaba 2+ with_where (nav implícito + chain explícito), fue: {rust}",
+        );
+        assert!(
+            rust.contains(".with_limit(5i64)"),
+            "esperaba .with_limit(5i64), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_navigation_con_db_sigue_funcionando_compat() {
+        // Backward compat: `instance.posts(db)` sigue emitiendo el
+        // terminal directo (.all para HasMany).
+        let src = "@table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       user_id: Int\n\
+                   }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_many(\"Post\") posts: List<Post>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Post>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+                       let xs = u.posts(db).await?\n  \
+                       return Ok(xs)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Con db: terminal `.all(&db)` automático + async block.
+        assert!(
+            rust.contains("(async {") && rust.contains(".all(&db"),
+            "esperaba async block con terminal .all(&db) automático, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_navigation_mas_de_un_arg_aborta() {
+        // El checker rechaza ANTES que el codegen (chequeo de aridad
+        // en infer_method_call ~3745). Usamos `gen_no_check` para
+        // saltar el checker y testear el error del codegen mismo.
+        let src = "@table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       user_id: Int\n\
+                   }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_many(\"Post\") posts: List<Post>\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+                       let _ = u.posts(db, db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        // Buscamos el error del checker (que dispara primero).
+        let tokens = crate::lexer::tokenize(src).expect("lex OK");
+        let program = crate::parser::parse(tokens).expect("parse OK");
+        let (_env, _types, _defs, errors) = crate::types::check_program(&program);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("posts(db?)") && e.message.contains("recibió 2")),
+            "esperaba error del checker sobre aridad de navigation, errores: {:?}",
+            errors
         );
     }
 
