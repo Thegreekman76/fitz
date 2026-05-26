@@ -6740,3 +6740,112 @@ fn db_query_exec_close_compilan_emite_helpers() {
     assert_eq!(code, 0, "stdout: {}", stdout);
     assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
 }
+
+// ---------------------------------------------------------------------------
+// Fase 10.b.4 — ORM write methods en codegen
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orm_insert_compila_emite_insert_returning_sin_postgres() {
+    // Programa con `User.insert(db, user)` debe COMPILAR a binario
+    // standalone. El connect a una URL inválida falla en runtime, así
+    // que el insert nunca se ejecuta — verificamos que el rustc del
+    // proyecto generado no rechaza el código, que es el criterio
+    // formal de "10.b.4 destraba el primer write method en codegen".
+    let (stdout, code) = build_and_run(
+        "orm_insert_compila_emite_insert_returning_sin_postgres",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let u = User { id: 1, name: \"ada\", age: 30 }\n  \
+             let _inserted = User.insert(conn, u).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_insert_con_nullable_y_column_override_compila() {
+    // Marshalling de `Str?` + override `@column(name=...)` deben
+    // compilar limpio. Mismo patrón: el connect falla, el insert no
+    // se ejecuta, lo que verificamos es el output Rust.
+    let (stdout, code) = build_and_run(
+        "orm_insert_con_nullable_y_column_override_compila",
+        "@table(\"posts\") type Post {\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             @column(name=\"sub_title\") subtitle: Str?\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let p = Post { id: 1, title: \"hola\", subtitle: null }\n  \
+             let _r = Post.insert(conn, p).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_update_y_delete_aborta_build_citando_10_b_5() {
+    // Sin .where() previo, update/delete dependen del QueryBuilder
+    // chain que llega en 10.b.5. El codegen aborta con mensaje
+    // explícito.
+    let stderr_update = build_expect_fail(
+        "orm_update_aborta_build_citando_10_b_5",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _n = User.update(conn, {\"name\": \"ada\"}).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         print(\"never\")\n",
+    );
+    assert!(
+        stderr_update.contains("10.b.5"),
+        "esperaba mención de 10.b.5 en el stderr del build, fue: {}",
+        stderr_update,
+    );
+    let stderr_delete = build_expect_fail(
+        "orm_delete_aborta_build_citando_10_b_5",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }\n\
+         async fn run() -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _n = User.delete(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         print(\"never\")\n",
+    );
+    assert!(
+        stderr_delete.contains("10.b.5"),
+        "esperaba mención de 10.b.5 en el stderr del build, fue: {}",
+        stderr_delete,
+    );
+}

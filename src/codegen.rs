@@ -10556,6 +10556,9 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
             "count" => self
                 .gen_orm_type_count(type_name, args, call_span)
                 .map(Some),
+            "insert" => self
+                .gen_orm_type_insert(type_name, args, call_span)
+                .map(Some),
             // Métodos del builder que aterrizan en sub-pasos
             // posteriores. Error explícito con sub-paso target.
             "where" => Err(self.err_at(
@@ -10565,10 +10568,17 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
                     type_name
                 ),
             )),
-            "insert" => Err(self.err_at(
+            "update" => Err(self.err_at(
                 call_span,
                 format!(
-                    "codegen ORM (10.b.3): `{}.insert(...)` llega en 10.b.4 (write methods)",
+                    "codegen ORM (10.b.4): `{}.update(...)` necesita un `.where(...)` previo (QueryBuilder chain), que llega en 10.b.5",
+                    type_name
+                ),
+            )),
+            "delete" => Err(self.err_at(
+                call_span,
+                format!(
+                    "codegen ORM (10.b.4): `{}.delete(...)` necesita un `.where(...)` previo (QueryBuilder chain), que llega en 10.b.5",
                     type_name
                 ),
             )),
@@ -10798,6 +10808,133 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
              }})",
             db = db_code,
             sql_lit = rust_str_literal(&sql),
+        );
+        Ok((code, ret_ty))
+    }
+
+    /// Fase 10.b.4 — `Type.insert(db, record)`. Emite
+    /// `INSERT INTO "tabla" (col1, ...) VALUES ($1, ...) RETURNING col1, ...`
+    /// con args parametrizados que se leen del record (Arc<Mutex<TypeData>>)
+    /// antes del `.await`. La row devuelta se deserializa al mismo type
+    /// con `__FromFitzDbRow` (la id auto-generada/secuencial queda
+    /// reflejada en la instance retornada). Retorna
+    /// `Future<Result<Type, Str>>`.
+    ///
+    /// Paridad estricta con `orm_type_insert` del evaluator: incluye
+    /// TODOS los fields non-virtual en el INSERT, con el valor que el
+    /// record tiene (el user pasa el `id` explícito si lo necesita).
+    /// La convención BIGSERIAL (skip PK con default 0) queda como
+    /// refinamiento futuro coordinado evaluator+codegen.
+    fn gen_orm_type_insert(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 2 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}.insert(db, record)` espera 2 argumentos (db, record), recibió {}",
+                    type_name,
+                    args.len()
+                ),
+            ));
+        }
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+
+        // Construir SQL + marshallers de cada field non-virtual en
+        // orden de declaración. Mismo orden que el evaluator → mismo
+        // SQL parametrizado bit-a-bit.
+        let mut col_list = String::new();
+        let mut placeholders = String::new();
+        let mut returning_list = String::new();
+        let mut placeholder_idx: usize = 0;
+        let mut field_pg_codes: Vec<String> = Vec::new();
+        for f in &fields {
+            if meta.is_virtual_field(&f.name) {
+                continue;
+            }
+            let sql_col = meta
+                .columns
+                .get(&f.name)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(f.name.as_str());
+            // Accessor del field sobre el guard del Arc<Mutex<TypeData>>.
+            // Clonamos cuando el tipo no es Copy para que el move al
+            // `vec![]` no consuma el guard. needs_clone cubre Str/
+            // Bytes/Option/List/Map/Nominal; primitivos quedan por
+            // valor sin clone.
+            let accessor = if needs_clone(&f.type_) {
+                format!("__g.{}.clone()", f.name)
+            } else {
+                format!("__g.{}", f.name)
+            };
+            let pg_code = orm_marshal_field_to_pg(&f.type_, &accessor, &f.name)?;
+            if placeholder_idx > 0 {
+                col_list.push_str(", ");
+                placeholders.push_str(", ");
+                returning_list.push_str(", ");
+            }
+            col_list.push('"');
+            col_list.push_str(sql_col);
+            col_list.push('"');
+            returning_list.push('"');
+            returning_list.push_str(sql_col);
+            returning_list.push('"');
+            placeholder_idx += 1;
+            placeholders.push_str(&format!("${}", placeholder_idx));
+            field_pg_codes.push(pg_code);
+        }
+        let sql = format!(
+            "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
+            meta.sql_name, col_list, placeholders, returning_list
+        );
+
+        let (db_code, _) = self.gen_expr(&args[0])?;
+        let (rec_code, _) = self.gen_expr(&args[1])?;
+        let data_name = format!("{}Data", type_name);
+        let row_ty = Type::Nominal(self.env.lookup(type_name).unwrap());
+        let ret_ty = Type::Future(Box::new(Type::Result {
+            ok: Box::new(row_ty),
+            err: Box::new(Type::Str),
+        }));
+
+        // Construcción del Vec<__FitzPgValue> dentro de un bloque
+        // acotado: el guard `__g` se libera al cerrar el bloque, ANTES
+        // del .await del query — std::sync::Mutex no es Send across
+        // .await y mantener el guard cruzaría el await point.
+        let args_inits = if field_pg_codes.is_empty() {
+            String::new()
+        } else {
+            field_pg_codes.join(",\n                ")
+        };
+        let code = format!(
+            "(async {{\n    \
+             let __args: Vec<__FitzPgValue> = {{\n        \
+             let __rec = {rec};\n        \
+             let __g = __rec.lock().unwrap();\n        \
+             vec![\n                {args_inits}\n        ]\n    \
+             }};\n    \
+             match __fitz_db_query(&{db}, {sql_lit}.to_string(), __args).await {{\n        \
+             Ok(__rows) => {{\n            \
+             let __rows_g = __rows.lock().unwrap();\n            \
+             match __rows_g.first() {{\n                \
+             Some(__r) => match <{data} as __FromFitzDbRow>::from_fitz_db_row(__r) {{\n                    \
+             Ok(__d) => Ok(Arc::new(Mutex::new(__d))),\n                    \
+             Err(__e) => Err(__e),\n                \
+             }},\n                \
+             None => Err(\"INSERT ... RETURNING no devolvió rows (inesperado)\".to_string()),\n            \
+             }}\n        \
+             }}\n        \
+             Err(__e) => Err(__e),\n    \
+             }}\n\
+             }})",
+            rec = rec_code,
+            db = db_code,
+            sql_lit = rust_str_literal(&sql),
+            data = data_name,
+            args_inits = args_inits,
         );
         Ok((code, ret_ty))
     }
@@ -19958,6 +20095,73 @@ fn orm_virtual_field_sentinel(t: &Type, env: &TypeEnv) -> Result<String, FitzErr
     }
 }
 
+/// Fase 10.b.4 — bloque Rust que convierte el VALOR de un field del
+/// record a `__FitzPgValue` para emitir el INSERT. `accessor` es la
+/// expresión Rust que produce el valor (e.g. `__g.name.clone()`,
+/// `__g.id`, etc.); ya viene clonado por el caller cuando el tipo lo
+/// requiere (Str/Bytes/Option/etc.).
+///
+/// Recursivo: `Nullable<T>` se traduce a `match` con `Some(v) => <T
+/// marshal de v>` y `None => __FitzPgValue::Null`. List<T>/Map<K,V>/
+/// Nominal devuelven error citando 10.b.7/10.b.8.
+///
+/// Paralelo conceptual a `fitz_value_to_pg` del evaluator
+/// (src/evaluator.rs), pero compile-time y por-tipo en lugar de
+/// dynamic dispatch sobre `Value`.
+fn orm_marshal_field_to_pg(
+    t: &Type,
+    accessor: &str,
+    field_name: &str,
+) -> Result<String, FitzError> {
+    match t {
+        Type::Int => Ok(format!("__FitzPgValue::Int({})", accessor)),
+        Type::Float => Ok(format!("__FitzPgValue::Float({})", accessor)),
+        Type::Bool => Ok(format!("__FitzPgValue::Bool({})", accessor)),
+        Type::Str => Ok(format!("__FitzPgValue::Text({})", accessor)),
+        Type::Bytes => Ok(format!("__FitzPgValue::Bytes({})", accessor)),
+        Type::Nullable(inner) => {
+            // `accessor` produce un `Option<T>` por valor (clonado por el
+            // caller). Adentro del Some, `__some_v` queda como `T` por
+            // valor para que primitivos no requieran deref y Str/Bytes
+            // se muevan directo sin nuevo clone.
+            let inner_code = orm_marshal_field_to_pg(inner, "__some_v", field_name)?;
+            Ok(format!(
+                "match {} {{ Some(__some_v) => {}, None => __FitzPgValue::Null }}",
+                accessor, inner_code
+            ))
+        }
+        Type::List(_) | Type::Map(_, _) => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.4): field `{}` con tipo `{}` no soportado en `.insert` todavía — arrays/JSONB llegan en 10.b.8",
+                field_name,
+                type_name(t)
+            ),
+        )),
+        Type::Nominal(_) => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.4): field `{}` con tipo nominal anidado no soportado en `.insert` todavía — relations llegan en 10.b.7",
+                field_name
+            ),
+        )),
+        other => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.4): field `{}` con tipo `{}` no es marshalleable a PgValue",
+                field_name,
+                type_name(other)
+            ),
+        )),
+    }
+}
+
 fn type_name(t: &Type) -> &'static str {
     match t {
         Type::Int => "Int",
@@ -26647,6 +26851,162 @@ mod tests {
             err.message.contains("10.b.5"),
             "esperaba mención de 10.b.5 en el error, fue: {}",
             err.message
+        );
+    }
+
+    // ---- Fase 10.b.4 — ORM write methods en codegen ----
+
+    #[test]
+    fn codegen_orm_insert_emite_insert_returning_con_cols_quoted() {
+        // `User.insert(db, user)` emite `INSERT INTO "users"
+        // ("id", "name", "age") VALUES ($1, $2, $3) RETURNING "id",
+        // "name", "age"` con args parametrizados leídos del record.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = User { id: 1, name: \"ada\", age: 30 }\n  \
+                       let _inserted = User.insert(db, u).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // SQL shape — INSERT INTO con cols y placeholders en orden de
+        // declaración del type. El r###...###  raw literal usa `\"` que
+        // termina como `\"` literal en el output Rust generado.
+        assert!(
+            rust.contains("INSERT INTO \\\"users\\\" (\\\"id\\\", \\\"name\\\", \\\"age\\\") VALUES ($1, $2, $3) RETURNING \\\"id\\\", \\\"name\\\", \\\"age\\\""),
+            "esperaba el INSERT con cols + placeholders + RETURNING quoted, fue: {rust}",
+        );
+        // Marshalling: __FitzPgValue::Int para id/age, ::Text para name.
+        assert!(
+            rust.contains("__FitzPgValue::Int(__g.id)"),
+            "esperaba marshalling Int del field id, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__FitzPgValue::Text(__g.name.clone())"),
+            "esperaba marshalling Text del field name (con clone), fue: {rust}",
+        );
+        assert!(
+            rust.contains("__FitzPgValue::Int(__g.age)"),
+            "esperaba marshalling Int del field age, fue: {rust}",
+        );
+        // Deserialización con __FromFitzDbRow.
+        assert!(
+            rust.contains("<UserData as __FromFitzDbRow>::from_fitz_db_row"),
+            "esperaba deserialización del row de RETURNING via __FromFitzDbRow",
+        );
+        // Fallback no-rows con mensaje específico de insert.
+        assert!(
+            rust.contains("INSERT ... RETURNING no devolvió rows"),
+            "esperaba fallback claro cuando RETURNING devuelve vacío",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_insert_respeta_column_name_override() {
+        // `@column(name="sql_name")` debe usarse en col_list, RETURNING,
+        // y NO en el field accessor (`__g.<fitz_name>`).
+        let src = "@table(\"events\") type Event {\n  \
+                       @primary id: Int = 0\n  \
+                       @column(name=\"event_kind\") kind: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let e = Event { id: 1, kind: \"login\" }\n  \
+                       let _r = Event.insert(db, e).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Col list y RETURNING usan el nombre SQL override.
+        assert!(
+            rust.contains("INSERT INTO \\\"events\\\" (\\\"id\\\", \\\"event_kind\\\")"),
+            "esperaba col list con `event_kind` override, fue: {rust}",
+        );
+        assert!(
+            rust.contains("RETURNING \\\"id\\\", \\\"event_kind\\\""),
+            "esperaba RETURNING con `event_kind` override, fue: {rust}",
+        );
+        // Pero el accessor del field sigue siendo el nombre Fitz (`kind`),
+        // no el SQL (`event_kind`).
+        assert!(
+            rust.contains("__g.kind.clone()"),
+            "esperaba accessor `__g.kind.clone()` (nombre Fitz), fue: {rust}",
+        );
+        assert!(
+            !rust.contains("__g.event_kind"),
+            "NO esperaba accessor por nombre SQL `__g.event_kind`",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_insert_marshalla_nullable_como_option_match() {
+        // `Nullable<T>` se emite como `match field { Some(v) => ...,
+        // None => __FitzPgValue::Null }` paralelo a `Value::Null` del
+        // evaluator.
+        let src = "@table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       title: Str\n  \
+                       subtitle: Str?\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let p = Post { id: 1, title: \"hola\", subtitle: null }\n  \
+                       let _r = Post.insert(db, p).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // El field nullable se emite con match Some/None.
+        assert!(
+            rust.contains("match __g.subtitle.clone()"),
+            "esperaba `match __g.subtitle.clone()` para field nullable, fue: {rust}",
+        );
+        assert!(
+            rust.contains("Some(__some_v) => __FitzPgValue::Text(__some_v)"),
+            "esperaba arm Some que envuelve el inner en Text, fue: {rust}",
+        );
+        assert!(
+            rust.contains("None => __FitzPgValue::Null"),
+            "esperaba arm None mapeando a __FitzPgValue::Null, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_update_y_delete_abortan_citando_10_b_5() {
+        // Update y delete dependen del `.where(...)` previo que llega
+        // recién en 10.b.5. En 10.b.4 dispatch directo aborta con
+        // mensaje que cita el sub-paso target.
+        let src_update = "@table(\"users\") type User {\n  \
+                            @primary id: Int = 0\n  \
+                            name: Str\n\
+                        }\n\
+                        async fn boot() -> Result<Null> {\n  \
+                            let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                            let _n = User.update(db, {\"name\": \"ada\"}).await?\n  \
+                            return Ok(null)\n\
+                        }\n";
+        let err_u = gen(src_update).expect_err("esperaba error de codegen");
+        assert!(
+            err_u.message.contains("10.b.5") && err_u.message.contains("update"),
+            "esperaba mención de 10.b.5 + `update` en el error, fue: {}",
+            err_u.message
+        );
+        let src_delete = "@table(\"users\") type User {\n  \
+                            @primary id: Int = 0\n  \
+                            name: Str\n\
+                        }\n\
+                        async fn boot() -> Result<Null> {\n  \
+                            let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                            let _n = User.delete(db).await?\n  \
+                            return Ok(null)\n\
+                        }\n";
+        let err_d = gen(src_delete).expect_err("esperaba error de codegen");
+        assert!(
+            err_d.message.contains("10.b.5") && err_d.message.contains("delete"),
+            "esperaba mención de 10.b.5 + `delete` en el error, fue: {}",
+            err_d.message
         );
     }
 }
