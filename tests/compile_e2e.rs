@@ -7039,6 +7039,118 @@ fn orm_avg_chain_con_where_compila_a_binario() {
     assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
 }
 
+// ---------------------------------------------------------------------------
+// Fase 10.b.7 — Navigation methods (belongs_to / has_one / has_many)
+//
+// Compile-to-binary tests sin Postgres real. Validan que el codegen
+// emite código Rust que compila con cargo (incluye el helper de
+// navigation, dispatch sobre Instance.<rel>(db), marshalling del FK,
+// etc.). El runtime falla por URL inválida (no hay Postgres en CI),
+// pero el goal acá es probar el pipeline del codegen end-to-end.
+// La paridad real contra Postgres se valida en db_real_postgres.rs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orm_belongs_to_navigation_compila_a_binario() {
+    // `post.user_id(db).await?` con @belongs_to debe compilar a
+    // binario standalone. Runtime falla por URL inválida → driver
+    // imprime "err".
+    let (stdout, code) = build_and_run(
+        "orm_belongs_to_navigation_compila_a_binario",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }\n\
+         @table(\"posts\") type Post {\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             @belongs_to(\"User\") user_id: Int\n\
+         }\n\
+         async fn run(post: Post) -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _u = post.user_id(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             let p = Post { id: 1, title: \"hello\", user_id: 42 }\n  \
+             return match run(p).await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_has_many_navigation_compila_a_binario() {
+    // `user.posts(conn).await?` con @has_many debe compilar. La
+    // navigation devuelve `List<Post>` adentro del Result.
+    let (stdout, code) = build_and_run(
+        "orm_has_many_navigation_compila_a_binario",
+        "@table(\"posts\") type Post {\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             author_id: Int\n\
+         }\n\
+         @table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             @has_many(\"Post\", via=\"author_id\") posts: List<Post>\n\
+         }\n\
+         async fn run(user: User) -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _xs = user.posts(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             let u = User { id: 1, name: \"ada\", posts: [] }\n  \
+             return match run(u).await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_has_one_navigation_compila_a_binario() {
+    // `user.profile(conn).await?` con @has_one debe compilar.
+    let (stdout, code) = build_and_run(
+        "orm_has_one_navigation_compila_a_binario",
+        "@table(\"profiles\") type Profile {\n  \
+             @primary id: Int = 0\n  \
+             bio: Str\n  \
+             user_id: Int\n\
+         }\n\
+         @table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             @has_one(\"Profile\") profile: Profile?\n\
+         }\n\
+         async fn run(user: User) -> Result<Null> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _p = user.profile(conn).await?\n  \
+             return Ok(null)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             let u = User { id: 1, name: \"ada\", profile: null }\n  \
+             return match run(u).await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
 #[test]
 fn orm_min_y_max_combinados_compilan_a_binario() {
     // Dos aggregates en el mismo programa — valida que el helper

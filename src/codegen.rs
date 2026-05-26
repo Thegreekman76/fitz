@@ -10921,6 +10921,157 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
         }
     }
 
+    /// Fase 10.b.7 — Navigation method sobre Instance con @table.
+    /// Paralelo a `orm_instance_navigate` del evaluator (~11863). Emite
+    /// un async block que:
+    ///   1. Extrae el valor del FK del receiver (vía lock + clone del field).
+    ///   2. Lo marshallea a `__FitzPgValue` con el tipo del field.
+    ///   3. Construye un `__FitzQueryBuilder<TargetData>` y aplica
+    ///      el WHERE implícito (`"col" = $1`).
+    ///   4. Llama al terminal `.first(&db).await` (BelongsTo/HasOne)
+    ///      o `.all(&db).await` (HasMany).
+    ///
+    /// Convención del WHERE según `rel.kind`:
+    ///   - BelongsTo: `target.<primary> = this.<rel.fk_field>`
+    ///   - HasOne / HasMany: `target.<rel.fk_field> = this.<this.primary>`
+    ///
+    /// Args MVP: solo `db` (paralelo al evaluator).
+    fn gen_orm_navigation(
+        &mut self,
+        obj_code: &str,
+        this_type_name: &str,
+        rel: &crate::types::RelationMetadata,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`<{}>.<rel>(db)` espera 1 argumento (db), recibió {}",
+                    this_type_name,
+                    args.len()
+                ),
+            ));
+        }
+        let (db_code, _) = self.gen_expr(&args[0])?;
+
+        let (this_meta, this_fields) =
+            self.orm_lookup_meta_and_fields(this_type_name, call_span)?;
+        let (target_meta, target_fields) =
+            self.orm_lookup_meta_and_fields(&rel.target_type, call_span)?;
+
+        // Resolver where_col_fitz + value_field_name según kind.
+        let this_primary = this_meta.primary_field.clone().ok_or_else(|| {
+            self.err_at(
+                call_span,
+                format!(
+                    "navigation: el type `{}` no declara `@primary` en ningún field",
+                    this_type_name
+                ),
+            )
+        })?;
+        let (where_col_fitz, value_field_name) = match rel.kind {
+            crate::types::RelationKind::BelongsTo => {
+                let target_primary = target_meta.primary_field.clone().ok_or_else(|| {
+                    self.err_at(
+                        call_span,
+                        format!(
+                            "navigation BelongsTo: el type `{}` no declara `@primary`",
+                            rel.target_type
+                        ),
+                    )
+                })?;
+                (target_primary, rel.fk_field.clone())
+            }
+            crate::types::RelationKind::HasOne | crate::types::RelationKind::HasMany => {
+                (rel.fk_field.clone(), this_primary)
+            }
+        };
+
+        // sql_name override del target.
+        let where_col_sql = target_meta
+            .columns
+            .get(&where_col_fitz)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(where_col_fitz.as_str())
+            .to_string();
+
+        // Buscar el field source en `this` para conocer su tipo Rust +
+        // emitir el marshalling al __FitzPgValue.
+        let value_field = this_fields
+            .iter()
+            .find(|f| f.name == value_field_name)
+            .ok_or_else(|| {
+                self.err_at(
+                    call_span,
+                    format!(
+                        "navigation: el type `{}` no tiene el field `{}` (esperado para extraer el FK)",
+                        this_type_name, value_field_name
+                    ),
+                )
+            })?;
+
+        // Accessor del FK: bloque acotado que toma el lock, clona el
+        // field, libera el lock. Convención F17 — minimizar el scope
+        // del MutexGuard para evitar re-lock dentro del format!.
+        let fk_accessor = format!(
+            "{{ let __nav_obj = {obj}; let __nav_g = __nav_obj.lock().unwrap(); __nav_g.{field}.clone() }}",
+            obj = obj_code,
+            field = value_field_name,
+        );
+        let pg_marshal =
+            orm_marshal_field_to_pg(&value_field.type_, "__nav_fk", &value_field_name)?;
+
+        let qb_new = Self::emit_qb_new(&rel.target_type, &target_meta, &target_fields);
+        let where_sql = format!("\"{}\" = $1", where_col_sql);
+
+        let target_id = self.env.lookup(&rel.target_type).ok_or_else(|| {
+            self.err_at(
+                call_span,
+                format!(
+                    "navigation: el type `{}` no está registrado",
+                    rel.target_type
+                ),
+            )
+        })?;
+        let target_ty = Type::Nominal(target_id);
+
+        let (terminal, ret_ty) = match rel.kind {
+            crate::types::RelationKind::HasMany => (
+                ".all",
+                Type::Future(Box::new(Type::Result {
+                    ok: Box::new(Type::List(Box::new(target_ty))),
+                    err: Box::new(Type::Str),
+                })),
+            ),
+            _ => (
+                ".first",
+                Type::Future(Box::new(Type::Result {
+                    ok: Box::new(target_ty),
+                    err: Box::new(Type::Str),
+                })),
+            ),
+        };
+
+        let code = format!(
+            "(async {{ \
+                let __nav_fk = {fk_accessor}; \
+                let __nav_pg: __FitzPgValue = {pg_marshal}; \
+                let __nav_qb = ({qb_new}).with_where({where_lit}, vec![__nav_pg]); \
+                __nav_qb{terminal}(&{db}).await \
+            }})",
+            fk_accessor = fk_accessor,
+            pg_marshal = pg_marshal,
+            qb_new = qb_new,
+            where_lit = rust_str_literal(&where_sql),
+            terminal = terminal,
+            db = db_code,
+        );
+
+        Ok((code, ret_ty))
+    }
+
     /// Fase 10.b.6 — `Type.<sum|avg|min|max>(closure, db)`. Construye
     /// un QB inicial y delega al dispatch `gen_orm_qb_method` que ya
     /// implementa la emisión scalar. Mismo patrón que `gen_orm_type_where`/
@@ -12159,6 +12310,29 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
                     }
                     return self.gen_static_method_call(name, &m, args, call_span);
                 }
+            }
+        }
+
+        // Fase 10.b.7 — Navigation methods sobre Instance con @table.
+        // Si el receiver es una expresión que tipa Nominal con @table,
+        // y el `method` matchea el name de una relation declarada
+        // (@belongs_to / @has_one / @has_many), emitimos el SQL
+        // implícito + delegación al QueryBuilder. Paralelo a
+        // `orm_instance_navigate` del evaluator (~11863) y al
+        // refinement del checker en `infer_method_call`.
+        //
+        // Hacemos un dry-run de `gen_expr(object)`; si tipa Nominal-
+        // con-table y el method matchea una relation, dispatchamos.
+        // Si no, descartamos el resultado y los siguientes flujos
+        // re-evalúan el receiver normalmente.
+        if let Ok((obj_code, Type::Nominal(id))) = self.gen_expr(object) {
+            let rel_opt = self
+                .env
+                .table_metadata(id)
+                .and_then(|meta| meta.relations.get(method).cloned());
+            if let Some(rel) = rel_opt {
+                let type_name = self.env.info(id).name.clone();
+                return self.gen_orm_navigation(&obj_code, &type_name, &rel, args, call_span);
             }
         }
 
@@ -21862,11 +22036,44 @@ fn inline_display_stmt(code: &str, ty: &Type) -> String {
                     "                { let __t = (*__v).lock().unwrap(); write!(__f, \"{}\", &*__t)?; }\n"
                         .to_string()
                 }
+                // List/Map/Tuple/Any adentro de Option: delegamos al
+                // show_expr (devuelve String) y escribimos. Necesario
+                // para `field: List<T>?` y similares sin romper Display.
+                Type::List(_) | Type::Map(_, _) | Type::Tuple(_) | Type::Any => {
+                    let s = show_expr("__v", inner);
+                    format!(
+                        "                {{ let __nested = {}; write!(__f, \"{{}}\", __nested)?; }}\n",
+                        s,
+                    )
+                }
                 _ => "                write!(__f, \"{:?}\", __v)?;\n".to_string(),
             };
             format!(
                 "        match &({}) {{\n            Some(__v) => {{\n{}            }}\n            None => write!(__f, \"null\")?,\n        }}\n",
                 code, inner_body
+            )
+        }
+        // Fase 10.b.7 (fix latente del Display) — List/Map de Nominal
+        // sin este branch caían al `{:?}` fallback que requiere Debug
+        // en el inner, y el codegen de Nominal NO deriva Debug
+        // (Arc<Mutex<...>> no es Debug-able cross-thread sin trait
+        // bounds que NominalData no garantiza). Delegamos a show_expr
+        // que YA sabe formatear List<Nominal>/Map<...>/Tuple inline
+        // y produce un String — emitimos un write!("{}", __nested).
+        // Cubre el caso `User { id, posts: List<Post> }` con `posts`
+        // virtual (@has_many) que llegaba intacto al Display porque
+        // is_virtual_field skipea SELECT/INSERT pero NO Display.
+        //
+        // CLONE: show_expr genera `let __list = <code>; ...` que mueve
+        // de `code`. Si code es `self.posts` (campo behind shared ref),
+        // el move no compila. Clonamos primero — para Arc<Mutex<...>>
+        // (List/Map/Nominal) es bumpear refcount; barato.
+        Type::List(_) | Type::Map(_, _) | Type::Tuple(_) | Type::Any => {
+            let cloned = format!("({}).clone()", code);
+            let s = show_expr(&cloned, ty);
+            format!(
+                "        {{ let __nested = {}; write!(__f, \"{{}}\", __nested)?; }}\n",
+                s,
             )
         }
         _ => format!("        write!(__f, \"{{:?}}\", {})?;\n", code),
@@ -28464,6 +28671,171 @@ mod tests {
             err.message.contains("body debe ser") || err.message.contains("solo admite"),
             "esperaba mención de que el body solo admite u.field, fue: {}",
             err.message
+        );
+    }
+
+    // ---- Fase 10.b.7 — Navigation methods sobre Instance con @table ----
+
+    #[test]
+    fn codegen_orm_belongs_to_navigation_emite_where_primary_eq_fk() {
+        // `post.user_id(db)` con `@belongs_to("User") user_id: Int` debe
+        // emitir: WHERE "id" = $1, value = post.user_id (el FK del side
+        // local). Terminal: .first (BelongsTo → 1 row).
+        let src = "@table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   @table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       @belongs_to(\"User\") user_id: Int\n\
+                   }\n\
+                   async fn fetch_user(post: Post) -> Result<User> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = post.user_id(db).await?\n  \
+                       return Ok(u)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // El WHERE usa la primary key del TARGET (User.id) = $1.
+        assert!(
+            rust.contains("\\\"id\\\" = $1"),
+            "esperaba WHERE sobre \"id\" = $1 (primary del target), fue: {rust}",
+        );
+        // Marshalling del FK del SIDE local (post.user_id): Int → PgValue::Int.
+        assert!(
+            rust.contains("__FitzPgValue::Int"),
+            "esperaba marshalling __FitzPgValue::Int del FK, fue: {rust}",
+        );
+        // Terminal .first para BelongsTo.
+        assert!(
+            rust.contains(".first(&db"),
+            "esperaba terminal .first(&db) para BelongsTo, fue: {rust}",
+        );
+        // QB construido sobre UserData (target).
+        assert!(
+            rust.contains("__FitzQueryBuilder::<UserData>::new"),
+            "esperaba QB sobre UserData (target), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_has_many_navigation_emite_where_fk_eq_primary_y_terminal_all() {
+        // `user.posts(db)` con `@has_many("Post", via="author_id")` debe
+        // emitir: WHERE "author_id" = $1, value = user.id (primary local).
+        // Terminal: .all (HasMany → List).
+        let src = "@table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       author_id: Int\n\
+                   }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_many(\"Post\", via=\"author_id\") posts: List<Post>\n\
+                   }\n\
+                   async fn fetch_posts(user: User) -> Result<List<Post>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let xs = user.posts(db).await?\n  \
+                       return Ok(xs)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\\\"author_id\\\" = $1"),
+            "esperaba WHERE sobre \"author_id\" = $1, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".all(&db"),
+            "esperaba terminal .all(&db) para HasMany, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__FitzQueryBuilder::<PostData>::new"),
+            "esperaba QB sobre PostData (target), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_has_one_navigation_emite_terminal_first() {
+        // `user.profile(db)` con `@has_one("Profile")` debe emitir
+        // WHERE sobre el FK del target (user_id por default) y terminal
+        // `.first`. Default `via` para HasOne sobre User = "user_id".
+        let src = "@table type Profile {\n  \
+                       @primary id: Int = 0\n  \
+                       user_id: Int\n\
+                   }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_one(\"Profile\") profile: Profile?\n\
+                   }\n\
+                   async fn fetch_profile(user: User) -> Result<Profile> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let p = user.profile(db).await?\n  \
+                       return Ok(p)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\\\"user_id\\\" = $1"),
+            "esperaba WHERE sobre \"user_id\" = $1 (FK default), fue: {rust}",
+        );
+        assert!(
+            rust.contains(".first(&db"),
+            "esperaba terminal .first(&db) para HasOne, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__FitzQueryBuilder::<ProfileData>::new"),
+            "esperaba QB sobre ProfileData (target), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_navigation_respeta_column_override_del_target() {
+        // El sql_name override del target type debe aparecer en el WHERE.
+        // Acá `User.id` tiene `@column(name="user_pk")` → WHERE "user_pk" = $1.
+        let src = "@table type User {\n  \
+                       @primary @column(name=\"user_pk\") id: Int = 0\n\
+                   }\n\
+                   @table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       @belongs_to(\"User\") user_id: Int\n\
+                   }\n\
+                   async fn fetch_user(post: Post) -> Result<User> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = post.user_id(db).await?\n  \
+                       return Ok(u)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\\\"user_pk\\\" = $1"),
+            "esperaba WHERE sobre \"user_pk\" (sql_name override), fue: {rust}",
+        );
+        assert!(
+            !rust.contains("\\\"id\\\" = $1"),
+            "no esperaba `\"id\" = $1` (el Fitz name no debe filtrarse), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_navigation_async_block_envolvente() {
+        // El terminal navigation es async (devuelve Future<Result<Target>>).
+        // El call site `.await?` requiere que el codegen emita un
+        // `(async { ... })` para que el chain tipe Rust-side.
+        let src = "@table type User {\n  \
+                       @primary id: Int = 0\n\
+                   }\n\
+                   @table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       @belongs_to(\"User\") user_id: Int\n\
+                   }\n\
+                   async fn fetch_user(post: Post) -> Result<User> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = post.user_id(db).await?\n  \
+                       return Ok(u)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("(async {"),
+            "esperaba async block envolvente, fue: {rust}",
+        );
+        // Patron específico del helper navigation: __nav_fk, __nav_pg, __nav_qb.
+        assert!(
+            rust.contains("__nav_fk") && rust.contains("__nav_pg") && rust.contains("__nav_qb"),
+            "esperaba bindings __nav_fk/__nav_pg/__nav_qb del helper, fue: {rust}",
         );
     }
 

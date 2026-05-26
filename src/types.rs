@@ -3725,6 +3725,45 @@ fn infer_method_call(
                     }
                 }
             }
+            // Fase 10.b.7 — navigation methods sobre Nominal con
+            // @table. Si el method matchea el nombre Fitz de un field
+            // con `@belongs_to`/`@has_one`/`@has_many`, lo tipamos como
+            // el Future apropiado (paralelo a `orm_instance_navigate`
+            // del evaluator). Esto cubre `post.user(db).await?` con
+            // tipo concreto `User` adentro del Ok, sin requerir
+            // anotación destino.
+            //
+            // Limitación del checker: no distingue receiver-type
+            // (Type::Nominal del Ident estático `User`) de receiver-
+            // instance (Type::Nominal de una Instance). Si el user
+            // hace `User.profile(db)` estático con un name que matchea
+            // una relation, el checker dice OK pero el runtime/codegen
+            // lo rechaza porque navigation requiere Instance. Caso
+            // patológico — los names de static ORM methods (all/where/
+            // insert/etc.) no pueden ser names de field del type.
+            if let Some(meta) = ctx.types.table_metadata(*id) {
+                if let Some(rel) = meta.relations.get(method).cloned() {
+                    // Args: solo `db` en MVP (igual que evaluator).
+                    check_method_arity(ctx, method, args_ty, 1, span);
+                    // Resolver el target type del env por nombre Fitz.
+                    // Si no existe (raro: el checker debería haber
+                    // validado al parsear @belongs_to), fall back a
+                    // Any para no abortar acá.
+                    let target_id_opt = ctx.types.lookup(&rel.target_type);
+                    let target_ty = match target_id_opt {
+                        Some(tid) => Type::Nominal(tid),
+                        None => Type::Any,
+                    };
+                    let ok_ty = match rel.kind {
+                        RelationKind::BelongsTo | RelationKind::HasOne => target_ty,
+                        RelationKind::HasMany => Type::List(Box::new(target_ty)),
+                    };
+                    return Some(Type::Future(Box::new(Type::Result {
+                        ok: Box::new(ok_ty),
+                        err: Box::new(Type::Str),
+                    })));
+                }
+            }
             let info = ctx.types.info(*id);
             // 8-pyi.C: field-as-callable (Function type registrado
             // como field por el loader de stubs `.pyi`).
@@ -13606,5 +13645,127 @@ print(total)
         assert_eq!(CascadeAction::SetNull.as_sql(), "SET NULL");
         assert_eq!(CascadeAction::Restrict.as_sql(), "RESTRICT");
         assert_eq!(CascadeAction::NoAction.as_sql(), "NO ACTION");
+    }
+
+    // ===== Fase 10.b.7 — navigation methods sobre Instance con @table =====
+    //
+    // El checker refina `instance.<rel>(db)` a `Future<Result<Target>>`
+    // (BelongsTo/HasOne) o `Future<Result<List<Target>>>` (HasMany) en
+    // vez de Any. Validamos que la divergencia con un tipo anotado
+    // incompatible dispara error — eso prueba que el tipo concreto se
+    // sintetizó (Any nunca dispararía).
+
+    #[test]
+    fn checker_belongs_to_navigation_devuelve_future_result_target() {
+        // CONVENCIÓN: navigation usa el NAME del field decorado, NO el
+        // name del target type. `@belongs_to("User") user_id: Int` se
+        // navega con `post.user_id(db)`. Paralelo a evaluator (~4463:
+        // `meta.relations.get(method)` — key = field name).
+        //
+        // `let n: Int = post.user_id(db).await?` debe ser ERROR
+        // (User no es Int). Sin refinement el call tipaba Any → Int OK.
+        let src = "@table type User { id: Int }\n\
+                   @table type Post {\n  \
+                     id: Int\n  \
+                     @belongs_to(\"User\") user_id: Int\n\
+                   }\n\
+                   async fn boot(post: Post, db: Any) -> Result<Null> {\n  \
+                     let n: Int = post.user_id(db).await?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("User")
+                && (e.message.contains("Int") || e.message.contains("incompatible"))),
+            "esperaba error de tipo (User no es Int): {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_belongs_to_navigation_con_anotacion_correcta_compila_limpio() {
+        // `let u: User = post.user_id(db).await?` debe compilar OK
+        // — el refinement devuelve Future<Result<User>>, await? extrae
+        // User, asignación a User OK.
+        let src = "@table type User { id: Int }\n\
+                   @table type Post {\n  \
+                     id: Int\n  \
+                     @belongs_to(\"User\") user_id: Int\n\
+                   }\n\
+                   async fn boot(post: Post, db: Any) -> Result<Null> {\n  \
+                     let u: User = post.user_id(db).await?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.is_empty(),
+            "esperaba 0 errores con anotación correcta: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_has_many_navigation_devuelve_future_result_list_target() {
+        // `let p: Post = user.posts(db).await?` debe ser ERROR
+        // (List<Post> no es compatible con Post — la relation es plural).
+        // El field virtual `posts` es la key en meta.relations.
+        let src = "@table type Post { id: Int, user_id: Int }\n\
+                   @table type User {\n  \
+                     id: Int\n  \
+                     @has_many(\"Post\") posts: List<Post>\n\
+                   }\n\
+                   async fn boot(user: User, db: Any) -> Result<Null> {\n  \
+                     let p: Post = user.posts(db).await?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("List")
+                && (e.message.contains("Post") || e.message.contains("incompatible"))),
+            "esperaba error de tipo (List<Post> no es Post): {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_has_one_navigation_devuelve_future_result_target() {
+        // `let n: Int = user.profile(db).await?` debe ser ERROR
+        // (Profile no es Int). Field virtual `profile`.
+        let src = "@table type Profile { id: Int, user_id: Int }\n\
+                   @table type User {\n  \
+                     id: Int\n  \
+                     @has_one(\"Profile\") profile: Profile?\n\
+                   }\n\
+                   async fn boot(user: User, db: Any) -> Result<Null> {\n  \
+                     let n: Int = user.profile(db).await?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("Profile")
+                && (e.message.contains("Int") || e.message.contains("incompatible"))),
+            "esperaba error de tipo (Profile no es Int): {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_navigation_no_colisiona_con_static_orm_methods() {
+        // `User.where(...).all(db)` sigue tipando como `Future<Result<List<User>>>`,
+        // NO como navigation method. Los names de static ORM methods
+        // (where/all/insert/etc.) no pueden ser names de field/relation.
+        // Test defensivo: el refinement de navigation no rompe el dispatch
+        // ORM existente.
+        let src = "@table type User { id: Int }\n\
+                   async fn boot(db: Any) -> Result<Null> {\n  \
+                     let xs: List<User> = User.where(fn(u) => u.id > 0).all(db).await?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.is_empty(),
+            "esperaba 0 errores (static ORM sigue tipando): {:?}",
+            errs
+        );
     }
 }

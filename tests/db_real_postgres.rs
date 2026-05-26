@@ -997,6 +997,156 @@ async fn orm_belongs_to_y_has_many_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.7 — Paridad fitz build ↔ fitz run sobre navigation
+//
+// El test de arriba (orm_belongs_to_y_has_many_e2e) valida el
+// path del intérprete (`fitz run`). Este test paralelo compila el
+// MISMO programa con `fitz build` y ejecuta el binario standalone,
+// confirmando que las navigation queries SQL emitidas son
+// equivalentes.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_belongs_to_y_has_many_paridad_codegen_e2e() {
+    use std::process::Command;
+    let url = pg_url();
+
+    // Setup idéntico al test del evaluator.
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_posts_codegen_test", &[])
+            .await;
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_users_codegen_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_users_codegen_test (id bigint PRIMARY KEY, name text)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "CREATE TABLE fitz_orm_posts_codegen_test (id bigint PRIMARY KEY, title text, author_id bigint REFERENCES fitz_orm_users_codegen_test(id))",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_users_codegen_test VALUES (1, 'ada'), (2, 'alan')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_posts_codegen_test VALUES (10, 'about algorithms', 1), (11, 'on math', 1), (12, 'turing machines', 2)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    // Programa Fitz paralelo al test del evaluator pero con
+    // `print(...)` final para que el binario emita el resultado a
+    // stdout — así verificamos contra el output sin reconstruir un
+    // env Fitz del lado Rust.
+    let src = format!(
+        "@table(\"fitz_orm_posts_codegen_test\") type Post {{\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             @belongs_to(\"User\") author_id: Int\n\
+         }}\n\
+         @table(\"fitz_orm_users_codegen_test\") type User {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             @has_many(\"Post\", via=\"author_id\") posts: List<Post>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let p10 = Post.where(fn(p) => p.id == 10).first(db).await?\n  \
+             let author = p10.author_id(db).await?\n  \
+             let u1 = User.where(fn(u) => u.id == 1).first(db).await?\n  \
+             let ada_posts = u1.posts(db).await?\n  \
+             return Ok(\"author={{author.name}} ada_count={{len(ada_posts)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    // Build + run inline (sin reusar build_and_run de compile_e2e.rs
+    // — ese vive en otra crate de tests; el helper acá es minimal).
+    let stem = "orm_nav_paridad_codegen";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, &src).expect("escribir .fitz");
+
+    let fitz_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "fitz.exe" } else { "fitz" });
+    let build = Command::new(&fitz_bin)
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+
+    // El test del evaluator valida author_name=ada y ada_post_count=2.
+    // Acá validamos el mismo invariante via stdout serializado.
+    assert!(
+        stdout.contains("author=ada") && stdout.contains("ada_count=2"),
+        "esperaba `author=ada ada_count=2`, fue: {}",
+        stdout
+    );
+
+    // Cleanup.
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE fitz_orm_posts_codegen_test", &[])
+            .await;
+        let _ = seed
+            .exec("DROP TABLE fitz_orm_users_codegen_test", &[])
+            .await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.5.f1 — Agregados (sum / avg / min / max)
 // =============================================================
 
