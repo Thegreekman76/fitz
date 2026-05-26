@@ -11394,7 +11394,14 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
             returning_list.push_str(sql_col);
             returning_list.push('"');
             placeholder_idx += 1;
-            placeholders.push_str(&format!("${}", placeholder_idx));
+            // Fase 10.b.8.a — sufijo SQL cast cuando el field es
+            // List<scalar>. Sin el cast, $N::text default no asigna
+            // a una columna int8[] (Postgres exige coerción explícita).
+            // Paralelo a `placeholder_suffix` del evaluator (~11521).
+            let cast_suffix = orm_list_scalar_info(&f.type_)
+                .map(|(_, _, _, cast)| cast)
+                .unwrap_or("");
+            placeholders.push_str(&format!("${}{}", placeholder_idx, cast_suffix));
             field_pg_codes.push(pg_code);
         }
         let sql = format!(
@@ -12164,12 +12171,12 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
                     ));
                 }
             };
-            if !fields.iter().any(|f| f.name == key_str) {
-                return Err(self.err_at(
+            let field_sig = fields.iter().find(|f| f.name == key_str).ok_or_else(|| {
+                self.err_at(
                     key_expr.span(),
                     format!("`.update`: field `{}` no existe en el type", key_str),
-                ));
-            }
+                )
+            })?;
             let sql_col = meta
                 .columns
                 .get(&key_str)
@@ -12179,13 +12186,24 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
                 set_clauses.push_str(", ");
                 set_args_init.push_str(", ");
             }
-            // En 10.b.5 no soportamos JSONB/arrays en `.update` (esos
-            // llegan junto con coerciones extendidas en 10.b.8). El
-            // sufijo placeholder queda vacío — el SET emite solo el
-            // `$N` plano. Si el field es Map/List, el runtime lo
-            // empujaría como Text/Bytes y Postgres rechazaría la
-            // coerción — el error surge en runtime de DB.
-            set_clauses.push_str(&format!("\"{}\" = ${}", sql_col, i + 1));
+            // Fase 10.b.8.a — sufijo SQL cast cuando el field es
+            // List<scalar> (`::int8[]`/`::text[]`/etc.). Sin cast,
+            // Postgres rechazaría asignar text plano a una columna
+            // array. Para `.update`, el value del Map literal viene
+            // como expresión Fitz (típicamente List literal); para que
+            // el cast SQL sea efectivo necesitamos también que el
+            // `into_pg` produzca un `PgValue::Array`, lo cual hoy SÓLO
+            // hace el path estructural sobre Arc<Mutex<Vec<T>>>. Si
+            // el value en el Map literal es una List Fitz (que tipa
+            // como Arc<Mutex<Vec<T>>>), el `<_ as __IntoPgValue>::into_pg`
+            // genérico no funciona — necesitaría impl __IntoPgValue
+            // para Arc<Mutex<Vec<T>>>. Para mantener scope, el .update
+            // con array fields queda como deuda residual menor del MVP
+            // — el user usa `.insert` que sí lo soporta.
+            let cast_suffix = orm_list_scalar_info(&field_sig.type_)
+                .map(|(_, _, _, cast)| cast)
+                .unwrap_or("");
+            set_clauses.push_str(&format!("\"{}\" = ${}{}", sql_col, i + 1, cast_suffix));
             let (val_code, _) = self.gen_expr(value_expr)?;
             set_args_init.push_str(&format!("<_ as __IntoPgValue>::into_pg({})", val_code));
         }
@@ -21335,6 +21353,42 @@ fn orm_field_coerce_block(
                 inner_block
             ))
         }
+        // Fase 10.b.8.a — arrays Postgres bidireccionales para
+        // List<Int|Float|Str|Bool>. El PgValue::Array trae los
+        // elementos ya tipados; iteramos y coercionamos cada uno con
+        // el helper escalar correspondiente. NULL del array (e.g.
+        // `{1,NULL,3}`) NO se soporta hoy — paralelo al evaluator que
+        // tampoco lo materializa adentro de List<Int> (requiere
+        // List<Int?>, deuda chica).
+        Type::List(_) if orm_list_scalar_info(t).is_some() => {
+            // unwrap safe: la guarda matchea solo cuando es Some.
+            let (rust_inner, _pg_variant, _oid_const, _cast) =
+                orm_list_scalar_info(t).unwrap();
+            let inner_coerce_helper = match rust_inner {
+                "i64" => "__fitz_pg_to_i64",
+                "f64" => "__fitz_pg_to_f64",
+                "String" => "__fitz_pg_to_string",
+                "bool" => "__fitz_pg_to_bool",
+                _ => unreachable!("orm_list_scalar_info solo devuelve scalar"),
+            };
+            Ok(format!(
+                "match {col_lit_match} {{ \
+                    __FitzPgValue::Array {{ values: __vals, .. }} => {{ \
+                        let mut __out: Vec<{rust_inner}> = Vec::with_capacity(__vals.len()); \
+                        for __item in __vals.iter() {{ \
+                            __out.push({helper}(__item, {col_lit})?); \
+                        }} \
+                        std::sync::Arc::new(std::sync::Mutex::new(__out)) \
+                    }} \
+                    __FitzPgValue::Null => return Err(format!(\"columna `{{}}` es NULL pero el field no es nullable\", {col_lit})), \
+                    other => return Err(format!(\"columna `{{}}`: PgValue {{:?}} no coerce a array\", {col_lit}, other)) \
+                }}",
+                col_lit_match = "__v",
+                col_lit = col_lit,
+                rust_inner = rust_inner,
+                helper = inner_coerce_helper,
+            ))
+        }
         Type::List(_) | Type::Map(_, _) => Err(FitzError::new(
             crate::error::ErrorKind::InvalidSyntax,
             0,
@@ -21364,6 +21418,37 @@ fn orm_field_coerce_block(
                 type_name(other)
             ),
         )),
+    }
+}
+
+/// Fase 10.b.8.a — info para emitir el marshalling de `List<scalar>` ↔
+/// `PgValue::Array`. Devuelve `(rust_inner_type, pg_variant, oid_const,
+/// sql_cast_suffix)`. `None` si `t` no es `List<Int|Float|Str|Bool>`
+/// (o `Nullable` envolviendo uno). Las 4 OIDs cubren el caso 99% real
+/// de columnas array Postgres; arrays de otros tipos (bytea[], json[],
+/// etc.) quedan como deuda menor.
+///
+/// Paralelo a `list_elem_pg_oid` + `array_sql_cast_for` del evaluator
+/// (src/evaluator.rs ~11002 + ~11049). Acá devolvemos los 4 datos
+/// juntos para evitar 4 calls en el caller.
+fn orm_list_scalar_info(
+    t: &Type,
+) -> Option<(&'static str, &'static str, &'static str, &'static str)> {
+    match t {
+        Type::List(inner) => match inner.as_ref() {
+            Type::Int => Some(("i64", "Int", "__fitz_db_runtime::oid::INT8", "::int8[]")),
+            Type::Float => Some((
+                "f64",
+                "Float",
+                "__fitz_db_runtime::oid::FLOAT8",
+                "::float8[]",
+            )),
+            Type::Str => Some(("String", "Text", "__fitz_db_runtime::oid::TEXT", "::text[]")),
+            Type::Bool => Some(("bool", "Bool", "__fitz_db_runtime::oid::BOOL", "::bool[]")),
+            _ => None,
+        },
+        Type::Nullable(inner) => orm_list_scalar_info(inner),
+        _ => None,
     }
 }
 
@@ -21421,6 +21506,36 @@ fn orm_marshal_field_to_pg(
             Ok(format!(
                 "match {} {{ Some(__some_v) => {}, None => __FitzPgValue::Null }}",
                 accessor, inner_code
+            ))
+        }
+        // Fase 10.b.8.a — `List<scalar>` → `PgValue::Array { elem_oid,
+        // values }`. El accessor ya viene clonado (Arc bump), tomamos
+        // el lock, iteramos el Vec interno y construimos Vec<PgValue>
+        // por variante apropiada. Liberar el lock ANTES de devolver
+        // (mismo patrón que el INSERT path: no cross-await con
+        // std::sync::Mutex guard activo).
+        Type::List(_) if orm_list_scalar_info(t).is_some() => {
+            let (rust_inner, pg_variant, oid_const, _cast) =
+                orm_list_scalar_info(t).unwrap();
+            // Wrap del item: primitivos Copy se desreferencian con `*`,
+            // String se clona (move-out de &String requeriría clone igual).
+            let item_wrap = match rust_inner {
+                "i64" | "f64" | "bool" => {
+                    format!("__FitzPgValue::{}(*__it)", pg_variant)
+                }
+                "String" => format!("__FitzPgValue::{}(__it.clone())", pg_variant),
+                _ => unreachable!(),
+            };
+            Ok(format!(
+                "{{ \
+                    let __vec_arc = {accessor}; \
+                    let __vec_g = __vec_arc.lock().unwrap(); \
+                    let __values: Vec<__FitzPgValue> = __vec_g.iter().map(|__it| {item_wrap}).collect(); \
+                    __FitzPgValue::Array {{ elem_oid: {oid_const}, values: __values }} \
+                }}",
+                accessor = accessor,
+                item_wrap = item_wrap,
+                oid_const = oid_const,
             ))
         }
         Type::List(_) | Type::Map(_, _) => Err(FitzError::new(
@@ -28863,6 +28978,137 @@ mod tests {
         assert!(
             rust.contains(".with_where("),
             "esperaba `.with_where(...)` en el chain antes del aggregate, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.8.a — Arrays Postgres (List<scalar>) ----
+
+    #[test]
+    fn codegen_orm_list_int_field_emite_array_int8_en_insert() {
+        // Field `tags: List<Int>` debe emitir:
+        //   - deserialize: match sobre __FitzPgValue::Array, iterar y
+        //     coercer cada item con __fitz_pg_to_i64.
+        //   - insert: SQL placeholder `$N::int8[]` + accessor que
+        //     construye __FitzPgValue::Array { elem_oid: INT8, ... }.
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       tags: List<Int>\n\
+                   }\n\
+                   async fn boot() -> Result<Item> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let it = Item.insert(db, Item { id: 0, tags: [1, 2, 3] }).await?\n  \
+                       return Ok(it)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // SQL cast en INSERT placeholders.
+        assert!(
+            rust.contains("::int8[]"),
+            "esperaba sufijo `::int8[]` en placeholder INSERT, fue: {rust}",
+        );
+        // Array construction en marshal.
+        assert!(
+            rust.contains("__fitz_db_runtime::oid::INT8"),
+            "esperaba referencia a oid::INT8, fue: {rust}",
+        );
+        // Deserialize iterator (en __FromFitzDbRow del item).
+        assert!(
+            rust.contains("__fitz_pg_to_i64"),
+            "esperaba uso de __fitz_pg_to_i64 para coercer items del array, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_list_str_field_emite_text_array() {
+        let src = "@table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       labels: List<Str>\n\
+                   }\n\
+                   async fn boot() -> Result<Post> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let p = Post.insert(db, Post { id: 0, labels: [\"rust\", \"fitz\"] }).await?\n  \
+                       return Ok(p)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("::text[]"),
+            "esperaba sufijo `::text[]` en placeholder, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__fitz_db_runtime::oid::TEXT"),
+            "esperaba referencia a oid::TEXT, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__fitz_pg_to_string"),
+            "esperaba uso de __fitz_pg_to_string al coercer items, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_list_float_y_bool_arrays() {
+        let src = "@table(\"signals\") type Signal {\n  \
+                       @primary id: Int = 0\n  \
+                       weights: List<Float>\n  \
+                       flags: List<Bool>\n\
+                   }\n\
+                   async fn boot() -> Result<Signal> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let s = Signal.insert(db, Signal { id: 0, weights: [1.5, 2.0], flags: [true, false] }).await?\n  \
+                       return Ok(s)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("::float8[]") && rust.contains("::bool[]"),
+            "esperaba ambos sufijos `::float8[]` y `::bool[]`, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__fitz_pg_to_f64") && rust.contains("__fitz_pg_to_bool"),
+            "esperaba ambos helpers de coerción, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_list_nominal_o_unsupported_aborta() {
+        // List<User> NO se soporta (List<Nominal> es deuda).
+        let src = "@table type User { id: Int }\n\
+                   @table(\"groups\") type Group {\n  \
+                       @primary id: Int = 0\n  \
+                       members: List<User>\n\
+                   }\n\
+                   async fn boot() -> Result<Group> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let g = Group { id: 0, members: [] }\n  \
+                       return Group.insert(db, g).await\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por List<Nominal> no soportado");
+        assert!(
+            err.message.contains("10.b")
+                || err.message.contains("no soportado")
+                || err.message.contains("array"),
+            "esperaba mención de falta de soporte para List<Nominal>, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_orm_list_int_nullable_emite_option_envolvente() {
+        // `tags: List<Int>?` (nullable). El deserialize en
+        // orm_field_coerce_block tiene rama Nullable que recursa al
+        // inner; el SQL cast debe seguir aplicando (`::int8[]`).
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       tags: List<Int>?\n\
+                   }\n\
+                   async fn boot() -> Result<Item> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let it = Item { id: 0, tags: null }\n  \
+                       return Item.insert(db, it).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // El cast SQL aplica también para nullables (orm_list_scalar_info
+        // recursa).
+        assert!(
+            rust.contains("::int8[]"),
+            "esperaba `::int8[]` para List<Int>? también, fue: {rust}",
         );
     }
 }

@@ -7050,6 +7050,94 @@ fn orm_avg_chain_con_where_compila_a_binario() {
 // La paridad real contra Postgres se valida en db_real_postgres.rs.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Fase 10.b.8.a — Arrays Postgres (List<Int|Float|Str|Bool>)
+//
+// Compile-to-binary tests sin Postgres real. Validan que el codegen
+// emite Rust que compila incluyendo el marshalling bidireccional
+// (Vec<T> ↔ PgValue::Array). Runtime falla por URL inválida.
+// La paridad real con Postgres se valida en db_real_postgres.rs.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orm_list_int_array_field_compila_a_binario() {
+    // Field `tags: List<Int>` debe compilar (SELECT + INSERT + Display).
+    let (stdout, code) = build_and_run(
+        "orm_list_int_array_field_compila",
+        "@table(\"items\") type Item {\n  \
+             @primary id: Int = 0\n  \
+             tags: List<Int>\n\
+         }\n\
+         async fn run() -> Result<Item> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let it = Item.insert(conn, Item { id: 0, tags: [10, 20, 30] }).await?\n  \
+             return Ok(it)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_list_str_array_field_compila_a_binario() {
+    let (stdout, code) = build_and_run(
+        "orm_list_str_array_field_compila",
+        "@table(\"posts\") type Post {\n  \
+             @primary id: Int = 0\n  \
+             labels: List<Str>\n\
+         }\n\
+         async fn run() -> Result<Post> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let p = Post.insert(conn, Post { id: 0, labels: [\"rust\", \"fitz\"] }).await?\n  \
+             return Ok(p)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_list_float_bool_arrays_combinados_compilan() {
+    // Múltiples array fields en el mismo type. Valida que el helper
+    // `orm_list_scalar_info` resuelve los 4 tipos sin colisiones.
+    let (stdout, code) = build_and_run(
+        "orm_list_float_bool_arrays_combinados",
+        "@table(\"sigs\") type Sig {\n  \
+             @primary id: Int = 0\n  \
+             weights: List<Float>\n  \
+             flags: List<Bool>\n\
+         }\n\
+         async fn run() -> Result<Sig> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let s = Sig.insert(conn, Sig { id: 0, weights: [1.5, 2.5], flags: [true, false] }).await?\n  \
+             return Ok(s)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
 #[test]
 fn orm_belongs_to_navigation_compila_a_binario() {
     // `post.user_id(db).await?` con @belongs_to debe compilar a
