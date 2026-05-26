@@ -1286,6 +1286,90 @@ fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.14 — Paridad GROUP BY + aggregate (Aggregated<Row>)
+//
+// `.group_by(...).count/sum/avg/min/max(...).await?` ahora compila a
+// binario y devuelve `List<Map<Str, Any>>` con cada row = un grupo
+// + el aggregate name. Cierre de la deuda más grande de Fase 10.b.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_group_by_aggregate_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w14_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w14_test (\
+                 id bigint PRIMARY KEY, \
+                 region text, \
+                 amount double precision)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w14_test VALUES \
+                 (1, 'PAT', 100.0), \
+                 (2, 'BUE',  50.0), \
+                 (3, 'PAT', 200.0), \
+                 (4, 'BUE', 150.0), \
+                 (5, 'CBA',  80.0), \
+                 (6, 'BUE', 250.0)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w14_test\") type Sale {{\n  \
+             @primary id: Int = 0\n  \
+             region: Str\n  \
+             amount: Float\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let counts = Sale.group_by(fn(s) => s.region).count(db).await?\n  \
+             let sums = Sale.group_by(fn(s) => s.region).sum(fn(s) => s.amount, db).await?\n  \
+             return Ok(\"counts_groups={{len(counts)}} sums_groups={{len(sums)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_group_by_agg_codegen", |stdout| {
+        // 3 grupos distintos (PAT, BUE, CBA).
+        assert!(
+            stdout.contains("counts_groups=3") && stdout.contains("sums_groups=3"),
+            "esperaba `counts_groups=3 sums_groups=3`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w14_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.13 — Paridad navigation chain (sin db = QueryBuilder)
 //
 // `instance.posts()` ahora devuelve un QueryBuilder<Post> que admite

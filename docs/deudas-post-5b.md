@@ -1557,13 +1557,24 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
 
 ### De 10.b.6 (Agregados scalares ORM)
 
-- ☐ **GROUP BY + aggregate (sum/avg/min/max) + count**: hoy el helper
-  `aggregate_f64` aborta en runtime con Err claro citando 10.b.7. El
-  shape de retorno divergente (`List<Map<Str, Any>>` con GROUP BY vs
-  `Float`/`Int` sin) NO encaja con un Rust type estático. Cierre
-  requiere refactor del checker (`Type::QueryBuilder` con flag
-  `has_group_by` o `Type::Aggregated` separado). Evaluator ya lo
-  soporta — paridad pendiente solo en codegen.
+- ✅ **GROUP BY + aggregate (sum/avg/min/max) + count** — CERRADO
+  2026-05-26 (10.b.14). Refactor con `Type::Aggregated<Row>` nuevo:
+  `.group_by(...)` muta de `QueryBuilder<Row>` a `Aggregated<Row>`,
+  y sobre Aggregated los aggregates devuelven
+  `Future<Result<List<Map<Str, Any>>>>` (path GROUP BY) en vez de
+  `Float`/`Int` (path scalar). Helper de preludio db nuevo
+  `aggregate_groups(conn, agg_expr, agg_name)` emite el SELECT con
+  GROUP BY y materializa cada row como `Vec<(__FitzValue,
+  __FitzValue)>`. `.all/.first/.update/.delete` se rechazan sobre
+  Aggregated (no tiene sentido sobre GROUP BY) con error claro del
+  checker. `program_uses_fitz_value` extendido para detectar
+  `.group_by(...)` y forzar emisión del enum `__FitzValue` +
+  helpers. Test paridad real:
+  `orm_group_by_aggregate_paridad_codegen_e2e` valida bit-a-bit
+  count + sum agrupados por region (3 grupos PAT/BUE/CBA).
+  Cambios: types.rs (variant nuevo + infer_aggregated_method),
+  codegen.rs (gen_orm_qb_method con `is_aggregated` flag + helper
+  preludio db). Paridad estricta evaluator ↔ codegen restaurada.
 
 ### De 10.b.7 (Navigation methods)
 

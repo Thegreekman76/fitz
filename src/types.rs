@@ -127,6 +127,17 @@ pub enum Type {
     /// inspecciona el row a este nivel.
     QueryBuilder(Box<Type>),
 
+    /// Fase 10.b.14 — `Aggregated<Row>`. QueryBuilder post-`.group_by(...)`.
+    /// Conserva todos los chain methods (where/order_by/limit/offset/
+    /// group_by) que devuelven `Aggregated<Row>`. Los aggregates
+    /// terminales (`sum/avg/min/max/count`) cambian shape: devuelven
+    /// `Future<Result<List<Map<Str, Any>>>>` con cada row = un grupo
+    /// más su aggregate. `.all/.first/.update/.delete` se rechazan
+    /// (no tiene sentido sobre un GROUP BY). El refactor desbloquea
+    /// la deuda residual de 10.b.6 que solo soportaba aggregates
+    /// scalares (path sin group_by).
+    Aggregated(Box<Type>),
+
     /// Tipo declarado por el usuario (`type User { ... }`) o
     /// importado. La identidad va por `TypeId`.
     Nominal(TypeId),
@@ -291,6 +302,7 @@ impl Type {
             Type::DbConn => "DbConn".into(),
             Type::DbRow => "DbRow".into(),
             Type::QueryBuilder(row) => format!("QueryBuilder<{}>", row.display(env)),
+            Type::Aggregated(row) => format!("Aggregated<{}>", row.display(env)),
             Type::Nominal(id) => env.info(*id).name.clone(),
             Type::Nullable(t) => format!("{}?", t.display(env)),
             Type::Function { params, ret } => {
@@ -3711,6 +3723,14 @@ fn infer_method_call(
                         // el evaluator valida en runtime.
                         return Some(Type::QueryBuilder(Box::new(row_ty)));
                     }
+                    "group_by" => {
+                        // Fase 10.b.14 — `User.group_by(...)` directo
+                        // (sin .where previo) devuelve Aggregated<User>.
+                        // Mismo shape que `User.where(...).group_by(...)`
+                        // pero saltea el QueryBuilder intermedio.
+                        check_method_arity(ctx, method, args_ty, 1, span);
+                        return Some(Type::Aggregated(Box::new(row_ty)));
+                    }
                     "insert" => {
                         check_method_arity(ctx, method, args_ty, 2, span);
                         // Fase 10.b: ditto — evaluator devuelve Future.
@@ -3917,6 +3937,16 @@ fn infer_method_call(
                 ctx, &row_ty, method, args_ty, span,
             ))
         }
+        // Fase 10.b.14 — `Aggregated<Row>`: QueryBuilder post-group_by.
+        // Los aggregates (sum/avg/min/max/count) cambian shape a
+        // `Future<Result<List<Map<Str, Any>>>>` con cada row = un
+        // grupo + su aggregate. Chain methods (where/order_by/limit/
+        // offset/group_by) continúan como Aggregated. all/first/
+        // update/delete se rechazan (no tiene sentido sobre GROUP BY).
+        Type::Aggregated(row) => {
+            let row_ty = (**row).clone();
+            Some(infer_aggregated_method(ctx, &row_ty, method, args_ty, span))
+        }
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
@@ -3976,11 +4006,17 @@ fn infer_query_builder_method(
         }))
     };
     let qb = || Type::QueryBuilder(Box::new(row.clone()));
+    let aggregated = || Type::Aggregated(Box::new(row.clone()));
     match method {
-        // Chain methods — todas preservan QueryBuilder<Row>.
-        "where" | "order_by" | "group_by" => {
+        // Chain methods — preservan QueryBuilder<Row>, EXCEPTO
+        // `.group_by(...)` que muta a Aggregated<Row> (10.b.14).
+        "where" | "order_by" => {
             check_method_arity(ctx, method, args_ty, 1, span);
             qb()
+        }
+        "group_by" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            aggregated()
         }
         "limit" | "offset" => {
             check_method_arity(ctx, method, args_ty, 1, span);
@@ -4027,6 +4063,86 @@ fn infer_query_builder_method(
                 span,
                 format!(
                     "el método `QueryBuilder<{}>.{}` no existe (chain: where/order_by/limit/offset/group_by; terminales: all/first/count/sum/avg/min/max/update/delete)",
+                    row.display(ctx.types),
+                    other
+                ),
+            );
+            Type::Any
+        }
+    }
+}
+
+/// Fase 10.b.14 — signatures de los métodos sobre `Aggregated<Row>`
+/// (QueryBuilder post-`.group_by(...)`).
+///
+/// Chain methods que se mantienen como `Aggregated<Row>`:
+///   - `where(closure)`, `order_by(closure)`, `limit(n)`, `offset(n)`
+///   - `group_by(closure)` (acumular más cols al GROUP BY)
+///
+/// Terminales aggregate (devuelven `Future<Result<List<Map<Str, Any>>>>`):
+///   - `count(db)`, `sum/avg/min/max(closure, db)`.
+///
+/// Cada item del List es un Map con keys = group_by cols más nombre
+/// del aggregate ("count", "sum", "avg", "min", "max"), values = los
+/// datos del grupo.
+///
+/// Rechazados sobre Aggregated (no tienen sentido sobre GROUP BY):
+///   - `all/first/update/delete` → error claro.
+fn infer_aggregated_method(
+    ctx: &mut CheckCtx,
+    row: &Type,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
+    let aggregated = || Type::Aggregated(Box::new(row.clone()));
+    // Shape común de los aggregates con group_by: List<Map<Str, Any>>.
+    // Cada item del List es un row {group_col: value, agg_name: value}.
+    let future_result_list_map = || {
+        Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::List(Box::new(Type::Map(
+                Box::new(Type::Str),
+                Box::new(Type::Any),
+            )))),
+            err: Box::new(Type::Str),
+        }))
+    };
+    match method {
+        // Chain methods — preservan Aggregated<Row>.
+        "where" | "order_by" | "group_by" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            aggregated()
+        }
+        "limit" | "offset" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            aggregated()
+        }
+        // Terminales aggregate: shape List<Map<Str, Any>>.
+        "count" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            future_result_list_map()
+        }
+        "sum" | "avg" | "min" | "max" => {
+            check_method_arity(ctx, method, args_ty, 2, span);
+            future_result_list_map()
+        }
+        // Sin sentido sobre Aggregated.
+        "all" | "first" | "update" | "delete" => {
+            ctx.error_at(
+                span,
+                format!(
+                    "`Aggregated<{}>.{}` no es válido sobre un GROUP BY — usá un aggregate (count/sum/avg/min/max) para colapsar los grupos",
+                    row.display(ctx.types),
+                    method
+                ),
+            );
+            Type::Any
+        }
+        other => {
+            ctx.error_at(
+                span,
+                format!(
+                    "el método `Aggregated<{}>.{}` no existe (chain: where/order_by/limit/offset/group_by; terminales: count/sum/avg/min/max)",
                     row.display(ctx.types),
                     other
                 ),
@@ -6257,6 +6373,7 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
         // Fase 10.3+ — QueryBuilder<Row> compatible si el row type
         // es compatible. Useful para retornar QB de fns helper.
         (Type::QueryBuilder(a), Type::QueryBuilder(b)) => is_compatible(a, b),
+        (Type::Aggregated(a), Type::Aggregated(b)) => is_compatible(a, b),
         _ => actual == expected,
     }
 }

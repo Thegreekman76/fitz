@@ -842,6 +842,16 @@ fn program_uses_fitz_value(program: &Program) -> bool {
             Expr::BinOp { left, right, .. } => expr_uses_fv(left) || expr_uses_fv(right),
             Expr::UnaryOp { operand, .. } => expr_uses_fv(operand),
             Expr::Call { callee, args, .. } => {
+                // Fase 10.b.14 — `.group_by(...)` ORM activa el path
+                // GROUP BY que devuelve `List<Map<Str, Any>>` (helper
+                // `aggregate_groups`) y referencia __FitzValue. Sin
+                // este flag, el helper del preludio db no se emite y
+                // el codegen referencia variantes inexistentes.
+                if let Expr::Field { field, .. } = callee.as_ref() {
+                    if field == "group_by" {
+                        return true;
+                    }
+                }
                 expr_uses_fv(callee) || args.iter().any(expr_uses_fv)
             }
             Expr::Field { object, .. } => expr_uses_fv(object),
@@ -5720,6 +5730,10 @@ impl<TData> __FitzQueryBuilder<TData> {
     }
 }
 
+// (10.b.14 aggregate_groups + __pg_to_fv viven en el emit
+// condicional `if uses_fitz_value` más abajo — referencian
+// __FitzValue que solo se emite cuando ese flag está activo.)
+
 impl<TData: __FromFitzDbRow> __FitzQueryBuilder<TData> {
     /// `.all(db)` — ejecuta el SELECT acumulado y devuelve un
     /// `List<Instance>` Fitz (Arc<Mutex<Vec<Arc<Mutex<TData>>>>>).
@@ -5868,6 +5882,85 @@ fn __fitz_jsonb_to_fitz_value(s: &str) -> Result<__FitzValue, String> {
 fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
     let json = __fitz_fv_to_json(v);
     serde_json::to_string(&json).map_err(|e| format!(\"JSON serialize: {}\", e))
+}
+
+// Fase 10.b.14 — terminal aggregate sobre GROUP BY.
+// Devuelve cada row como `Vec<(__FitzValue, __FitzValue)>` con keys
+// = group_by cols (fitz names) + agg_name. Paralelo a
+// `build_aggregate_future` del evaluator (~11229).
+#[allow(dead_code)]
+impl<TData> __FitzQueryBuilder<TData> {
+    async fn aggregate_groups(
+        self,
+        conn: &__FitzDbConn,
+        agg_expr: &str,
+        agg_name: &str,
+    ) -> Result<
+        std::sync::Arc<std::sync::Mutex<
+            Vec<std::sync::Arc<std::sync::Mutex<Vec<(__FitzValue, __FitzValue)>>>>
+        >>,
+        String,
+    > {
+        if self.group_by_clauses.is_empty() {
+            return Err(format!(
+                \"`.{}(...)` con path GROUP BY pero el QueryBuilder no tiene `.group_by(...)` acumulado\",
+                agg_name
+            ));
+        }
+        let mut select_list = String::new();
+        let mut group_by_sql = String::new();
+        for (i, (_fitz, sql_col)) in self.group_by_clauses.iter().enumerate() {
+            if i > 0 {
+                select_list.push_str(\", \");
+                group_by_sql.push_str(\", \");
+            }
+            select_list.push_str(&format!(\"\\\"{}\\\"\", sql_col));
+            group_by_sql.push_str(&format!(\"\\\"{}\\\"\", sql_col));
+        }
+        let mut sql = format!(
+            \"SELECT {}, {} AS \\\"{}\\\" FROM \\\"{}\\\"\",
+            select_list, agg_expr, agg_name, self.table
+        );
+        if let Some(w) = &self.where_sql {
+            sql.push_str(\" WHERE \");
+            sql.push_str(w);
+        }
+        sql.push_str(\" GROUP BY \");
+        sql.push_str(&group_by_sql);
+        let group_by_clauses = self.group_by_clauses.clone();
+        let agg_name_owned = agg_name.to_string();
+        match __fitz_db_query(conn, sql, self.where_args).await {
+            Ok(rows) => {
+                let guard = rows.lock().unwrap();
+                let mut out: Vec<std::sync::Arc<std::sync::Mutex<Vec<(__FitzValue, __FitzValue)>>>> = Vec::with_capacity(guard.len());
+                for r in guard.iter() {
+                    let mut pairs: Vec<(__FitzValue, __FitzValue)> = Vec::with_capacity(group_by_clauses.len() + 1);
+                    for (fitz_name, sql_col) in group_by_clauses.iter() {
+                        let v = r.get(sql_col).cloned().unwrap_or(__FitzPgValue::Null);
+                        pairs.push((__FitzValue::Str(fitz_name.clone()), __pg_to_fv(&v)));
+                    }
+                    let agg_v = r.get(&agg_name_owned).cloned().unwrap_or(__FitzPgValue::Null);
+                    pairs.push((__FitzValue::Str(agg_name_owned.clone()), __pg_to_fv(&agg_v)));
+                    out.push(std::sync::Arc::new(std::sync::Mutex::new(pairs)));
+                }
+                Ok(std::sync::Arc::new(std::sync::Mutex::new(out)))
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
+    match v {
+        __FitzPgValue::Null => __FitzValue::Null,
+        __FitzPgValue::Int(n) => __FitzValue::Int(*n),
+        __FitzPgValue::Float(x) => __FitzValue::Float(*x),
+        __FitzPgValue::Text(s) => __FitzValue::Str(s.clone()),
+        __FitzPgValue::Bool(b) => __FitzValue::Bool(*b),
+        __FitzPgValue::Bytes(b) => __FitzValue::Bytes(b.clone()),
+        __FitzPgValue::Array { .. } => __FitzValue::Null,
+    }
 }
 
 ",
@@ -11430,7 +11523,7 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
         let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
         let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
         let row_ty = Type::Nominal(self.env.lookup(type_name).unwrap());
-        match self.gen_orm_qb_method(&new_expr, &row_ty, method, args, call_span)? {
+        match self.gen_orm_qb_method(&new_expr, &row_ty, method, args, call_span, false)? {
             Some(emitted) => Ok(emitted),
             None => Err(self.err_at(
                 call_span,
@@ -11926,7 +12019,12 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
         let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
         let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
         let chain = self.emit_qb_group_by_chain(&new_expr, args, call_span, &meta, &fields)?;
-        Ok((chain, self.qb_type(type_name)))
+        // Fase 10.b.14 — `User.group_by(...)` devuelve Aggregated<User>
+        // para que el siguiente terminal (count/sum/avg/min/max) dispatchee
+        // al path GROUP BY (helper `aggregate_groups`). Pre-10.b.14 devolvía
+        // QueryBuilder y el aggregate caía al path scalar — bug latente.
+        let id = self.env.lookup(type_name).expect("type registered");
+        Ok((chain, Type::Aggregated(Box::new(Type::Nominal(id)))))
     }
 
     /// Resuelve `meta + fields` del row type para un QueryBuilder receiver.
@@ -11981,13 +12079,29 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
         method: &str,
         args: &[Expr],
         call_span: crate::ast::Span,
+        // Fase 10.b.14 — `is_aggregated=true` cuando el receiver es
+        // `Type::Aggregated<Row>` (post-`.group_by(...)`). Chain methods
+        // preservan Aggregated (en vez de QueryBuilder); aggregates
+        // (sum/avg/min/max/count) emiten path GROUP BY que devuelve
+        // `List<Map<Str, Any>>` en vez de scalar.
+        is_aggregated: bool,
     ) -> Result<Option<(String, Type)>, FitzError> {
         let (type_name, meta, fields) = self.orm_lookup_meta_and_fields_from_row(row, call_span)?;
-        let qb_ty = || Type::QueryBuilder(Box::new(row.clone()));
+        // Tipo del chain output: si venimos aggregated, lo seguimos;
+        // si no, QueryBuilder normal.
+        let chain_ty = || {
+            if is_aggregated {
+                Type::Aggregated(Box::new(row.clone()))
+            } else {
+                Type::QueryBuilder(Box::new(row.clone()))
+            }
+        };
+        let qb_ty = chain_ty;
         let row_ty = row.clone();
         let data_name = format!("{}Data", type_name);
         match method {
-            // Chain methods — devuelven QueryBuilder<Row>.
+            // Chain methods — preservan el tipo del receiver
+            // (QueryBuilder o Aggregated según contexto).
             "where" => {
                 let chain =
                     self.emit_qb_where_chain(receiver_code, args, call_span, &meta, &fields)?;
@@ -12007,13 +12121,24 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 Ok(Some((chain, qb_ty())))
             }
             "group_by" => {
+                // Fase 10.b.14 — `.group_by(...)` SIEMPRE devuelve
+                // Aggregated<Row>, sin importar si el receiver fue
+                // QueryBuilder o Aggregated. El siguiente call cambia
+                // semántica de los aggregates terminales.
                 let chain =
                     self.emit_qb_group_by_chain(receiver_code, args, call_span, &meta, &fields)?;
-                Ok(Some((chain, qb_ty())))
+                Ok(Some((chain, Type::Aggregated(Box::new(row.clone())))))
             }
             // Terminales async — wrap en async block sobre el receiver.
             "all" => {
                 let _ = data_name; // marcador — usado por las firmas async
+                                   // Fase 10.b.14 — rechazar `.all` sobre Aggregated.
+                if is_aggregated {
+                    return Err(self.err_at(
+                        call_span,
+                        "`.all(db)` no es válido sobre un GROUP BY (Aggregated); usá un aggregate (count/sum/avg/min/max) para colapsar los grupos".to_string(),
+                    ));
+                }
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
@@ -12033,6 +12158,12 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 Ok(Some((code, ret_ty)))
             }
             "first" => {
+                if is_aggregated {
+                    return Err(self.err_at(
+                        call_span,
+                        "`.first(db)` no es válido sobre un GROUP BY (Aggregated)".to_string(),
+                    ));
+                }
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
@@ -12065,6 +12196,25 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                     ));
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
+                if is_aggregated {
+                    // Fase 10.b.14 — `.count(db)` sobre Aggregated
+                    // devuelve List<Map<Str, Any>> con cada row = un
+                    // grupo + count(*). El helper `aggregate_groups`
+                    // emite la query GROUP BY apropiada.
+                    let ret_ty = Type::Future(Box::new(Type::Result {
+                        ok: Box::new(Type::List(Box::new(Type::Map(
+                            Box::new(Type::Str),
+                            Box::new(Type::Any),
+                        )))),
+                        err: Box::new(Type::Str),
+                    }));
+                    let code = format!(
+                        "(async {{ ({receiver}).aggregate_groups(&{db}, \"COUNT(*)\", \"count\").await }})",
+                        receiver = receiver_code,
+                        db = db_code,
+                    );
+                    return Ok(Some((code, ret_ty)));
+                }
                 let ret_ty = Type::Future(Box::new(Type::Result {
                     ok: Box::new(Type::Int),
                     err: Box::new(Type::Str),
@@ -12077,6 +12227,13 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 Ok(Some((code, ret_ty)))
             }
             "update" => {
+                if is_aggregated {
+                    return Err(self.err_at(
+                        call_span,
+                        "`.update(db, ...)` no es válido sobre un GROUP BY (Aggregated)"
+                            .to_string(),
+                    ));
+                }
                 if args.len() != 2 {
                     return Err(self.err_at(
                         call_span,
@@ -12107,6 +12264,12 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 Ok(Some((code, ret_ty)))
             }
             "delete" => {
+                if is_aggregated {
+                    return Err(self.err_at(
+                        call_span,
+                        "`.delete(db)` no es válido sobre un GROUP BY (Aggregated)".to_string(),
+                    ));
+                }
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
@@ -12199,6 +12362,27 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 } else {
                     format!("{}(\"{}\")", method.to_uppercase(), sql_col)
                 };
+                // Fase 10.b.14 — Aggregated → path GROUP BY que
+                // devuelve `List<Map<Str, Any>>` con cada row = un
+                // grupo + el aggregate.
+                if is_aggregated {
+                    let ret_ty = Type::Future(Box::new(Type::Result {
+                        ok: Box::new(Type::List(Box::new(Type::Map(
+                            Box::new(Type::Str),
+                            Box::new(Type::Any),
+                        )))),
+                        err: Box::new(Type::Str),
+                    }));
+                    let code = format!(
+                        "(async {{ ({receiver}).aggregate_groups(&{db}, {agg}, {name}).await }})",
+                        receiver = receiver_code,
+                        db = db_code,
+                        agg = rust_str_literal(&agg_expr),
+                        name = rust_str_literal(method),
+                    );
+                    return Ok(Some((code, ret_ty)));
+                }
+                // Path scalar (sin group_by).
                 let ret_ty = Type::Future(Box::new(Type::Result {
                     ok: Box::new(Type::Float),
                     err: Box::new(Type::Str),
@@ -12834,7 +13018,18 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
         // Ident("User") + table_metadata en `gen_orm_type_method`.
         if let Type::QueryBuilder(row) = &obj_ty {
             if let Some(emitted) =
-                self.gen_orm_qb_method(&obj_code, row, method, args, call_span)?
+                self.gen_orm_qb_method(&obj_code, row, method, args, call_span, false)?
+            {
+                return Ok(emitted);
+            }
+        }
+        // Fase 10.b.14 — dispatch ORM sobre `Type::Aggregated<Row>`.
+        // Mismo dispatch que QueryBuilder pero pasa `is_aggregated=true`
+        // para que los aggregates (sum/avg/min/max/count) emitan el
+        // path GROUP BY (List<Map<Str, Any>>) en vez del scalar.
+        if let Type::Aggregated(row) = &obj_ty {
+            if let Some(emitted) =
+                self.gen_orm_qb_method(&obj_code, row, method, args, call_span, true)?
             {
                 return Ok(emitted);
             }
@@ -21391,6 +21586,7 @@ fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<Stri
         | Type::DbConn
         | Type::DbRow
         | Type::QueryBuilder(_)
+        | Type::Aggregated(_)
         | Type::Any
         | Type::PyAny => Ok("false".to_string()),
         // Tuples (mini-tanda T): comparación element-wise. Rust ya
@@ -21698,6 +21894,27 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         // El user accede a campos con `row.get("col")` /
         // `row.get_at(idx)` que devuelven `Option<&PgValue>`.
         Type::DbRow => Ok("__FitzDbRow".to_string()),
+        // Fase 10.b.14 — `Aggregated<Row>` mapea al MISMO struct que
+        // `QueryBuilder<Row>`: `__FitzQueryBuilder<RowData>`. Sólo
+        // cambia el shape estático del terminal aggregate (verbose
+        // explícito en el codegen del aggregate). El runtime es
+        // idéntico — el state acumula `group_by_clauses` y el helper
+        // de aggregate branchea según `!group_by_clauses.is_empty()`.
+        Type::Aggregated(inner) | Type::QueryBuilder(inner) => {
+            let row_rs = match inner.as_ref() {
+                Type::Nominal(id) => {
+                    let name = &env.info(*id).name;
+                    format!("{}Data", name)
+                }
+                _ => return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    "QueryBuilder/Aggregated solo soporta Nominal como row type".to_string(),
+                )),
+            };
+            Ok(format!("__FitzQueryBuilder<{row_rs}>"))
+        }
         // Tuples (mini-tanda T) → Rust tuple type nativo.
         // `()` (vacía) → `()` (unit). `(T,)` (un slot) → `(T,)`.
         Type::Tuple(items) => {
@@ -22412,6 +22629,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::DbConn => "DbConn",
         Type::DbRow => "DbRow",
         Type::QueryBuilder(_) => "QueryBuilder<...>",
+        Type::Aggregated(_) => "Aggregated<...>",
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
         Type::Function { .. } => "fn(...)",
@@ -22451,6 +22669,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::DbConn => "DbConn".into(),
         Type::DbRow => "DbRow".into(),
         Type::QueryBuilder(row) => format!("QueryBuilder<{}>", display_type(row, env)),
+        Type::Aggregated(row) => format!("Aggregated<{}>", display_type(row, env)),
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
         Type::Nominal(id) => env.info(*id).name.clone(),
         Type::Function { params, ret } => {
@@ -29408,9 +29627,14 @@ mod tests {
             rust.contains(".with_group_by(\"role\", \"role\")"),
             "esperaba `.with_group_by(\"role\", \"role\")` en el chain, fue: {rust}",
         );
+        // Fase 10.b.14: count tras group_by ya NO emite `.count(&db)`
+        // (path scalar) — emite `.aggregate_groups(&db, "COUNT(*)",
+        // "count")` que devuelve `List<Map<Str, Any>>` con un row
+        // por grupo. El path scalar quedó solo para `User.count(db)`
+        // directo (sin group_by previo).
         assert!(
-            rust.contains(".count(&db"),
-            "esperaba terminal `.count(&db)` en async block, fue: {rust}",
+            rust.contains(".aggregate_groups(&db") && rust.contains("\"COUNT(*)\""),
+            "esperaba terminal `.aggregate_groups(&db, \"COUNT(*)\", \"count\")` post-10.b.14, fue: {rust}",
         );
     }
 
@@ -30353,6 +30577,100 @@ mod tests {
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
             "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.14 — GROUP BY + aggregate (Aggregated<Row>) ----
+
+    #[test]
+    fn codegen_group_by_count_emite_aggregate_groups_y_list_map() {
+        // `User.group_by(fn(u) => u.role).count(db)` debe emitir el
+        // helper `aggregate_groups` con `COUNT(*)` como agg_expr y
+        // devolver `Future<Result<List<Map<Str, Any>>>>`.
+        let src = "@table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       role: Str\n\
+                   }\n\
+                   async fn boot() -> Result<List<Map<Str, Any>>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return User.group_by(fn(u) => u.role).count(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".aggregate_groups(&db") && rust.contains("\"COUNT(*)\", \"count\""),
+            "esperaba uso del helper aggregate_groups con COUNT(*), fue: {rust}",
+        );
+        // El preludio db debe emitir el helper aggregate_groups
+        // (que requiere __FitzValue por estar en el `if uses_fitz_value`).
+        assert!(
+            rust.contains("async fn aggregate_groups"),
+            "esperaba el helper aggregate_groups en el preludio, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_group_by_sum_emite_aggregate_groups_y_func_uppercase() {
+        let src = "@table type Sale {\n  \
+                       @primary id: Int = 0\n  \
+                       region: Str\n  \
+                       amount: Float\n\
+                   }\n\
+                   async fn boot() -> Result<List<Map<Str, Any>>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Sale.group_by(fn(s) => s.region).sum(fn(s) => s.amount, db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // SUM("amount") como agg_expr, agg_name "sum".
+        assert!(
+            rust.contains(".aggregate_groups(&db")
+                && rust.contains("\"SUM(\\\"amount\\\")\", \"sum\""),
+            "esperaba aggregate_groups con SUM(\"amount\")/sum, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_group_by_all_aborta_con_mensaje_claro() {
+        // `.all(db)` sobre Aggregated → error claro del checker
+        // (rechaza ANTES del codegen).
+        let src = "@table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       role: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.group_by(fn(u) => u.role).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let tokens = crate::lexer::tokenize(src).expect("lex OK");
+        let program = crate::parser::parse(tokens).expect("parse OK");
+        let (_env, _types, _defs, errors) = crate::types::check_program(&program);
+        assert!(
+            errors.iter().any(|e| e.message.contains("Aggregated")
+                && (e.message.contains(".all") || e.message.contains("no es válido"))),
+            "esperaba error del checker rechazando .all sobre Aggregated, fue: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn codegen_group_by_chain_completo_compila() {
+        // .where + .group_by + .order_by + .limit + aggregate.
+        let src = "@table type Sale {\n  \
+                       @primary id: Int = 0\n  \
+                       region: Str\n  \
+                       amount: Float\n  \
+                       year: Int\n\
+                   }\n\
+                   async fn boot() -> Result<List<Map<Str, Any>>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Sale.where(fn(s) => s.year == 2026).group_by(fn(s) => s.region).sum(fn(s) => s.amount, db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_where(")
+                && rust.contains(".with_group_by(")
+                && rust.contains(".aggregate_groups("),
+            "esperaba chain completo, fue: {rust}",
         );
     }
 
