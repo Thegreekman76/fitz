@@ -1508,6 +1508,105 @@ fn orm_preload_belongs_to_companion_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Deuda residual #4 (v0.10.5) — chain dinámico condicional de
+// .where(), .order_by(), .limit(), .offset().
+//
+// Originalmente planteado como "no funciona" en la doc (drift),
+// pero el codegen YA soportaba este patrón: `qb = qb.where(...)`
+// adentro de un `if` compila y corre con paridad bit-a-bit. Este
+// test es el regression guard para que no rompa en el futuro.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_dynamic_chain_conditional_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w4_users_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w4_users_test (id bigint PRIMARY KEY, name text, age bigint, active boolean)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w4_users_test\") type User {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n  \
+             active: Bool\n\
+         }}\n\
+         async fn search(min_age: Int, active_only: Bool, name_like: Str, db: DbConn) -> Result<List<User>> {{\n  \
+             let qb = User.where(fn(u) => u.age >= min_age)\n  \
+             if (active_only) {{\n    \
+                 qb = qb.where(fn(u) => u.active)\n  \
+             }}\n  \
+             if (name_like != \"\") {{\n    \
+                 qb = qb.where(fn(u) => u.name.like(name_like))\n  \
+             }}\n  \
+             return qb.order_by(fn(u) => u.id).all(db).await\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             User.insert(db, User {{ id: 1, name: \"ada\",   age: 35, active: true  }}).await?\n  \
+             User.insert(db, User {{ id: 2, name: \"alan\",  age: 17, active: true  }}).await?\n  \
+             User.insert(db, User {{ id: 3, name: \"abe\",   age: 42, active: false }}).await?\n  \
+             User.insert(db, User {{ id: 4, name: \"grace\", age: 28, active: true  }}).await?\n  \
+             User.insert(db, User {{ id: 5, name: \"bob\",   age: 50, active: true  }}).await?\n  \
+             let r1 = search(18, false, \"\", db).await?\n  \
+             let r2 = search(18, true,  \"\", db).await?\n  \
+             let r3 = search(18, true,  \"a%\", db).await?\n  \
+             let r4 = search(0,  true,  \"b%\", db).await?\n  \
+             let n1 = len(r1)\n  \
+             let n2 = len(r2)\n  \
+             let n3 = len(r3)\n  \
+             let n4 = len(r4)\n  \
+             return Ok(\"n1={{n1}} n2={{n2}} n3={{n3}} n4={{n4}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_dynamic_chain_conditional_codegen", |stdout| {
+        // n1: age>=18 → ada, abe, grace, bob = 4
+        // n2: + active → ada, grace, bob = 3
+        // n3: + name LIKE "a%" → ada = 1
+        // n4: age>=0 + active + LIKE "b%" → bob = 1
+        assert!(
+            stdout.contains("n1=4")
+                && stdout.contains("n2=3")
+                && stdout.contains("n3=1")
+                && stdout.contains("n4=1"),
+            "esperaba `n1=4 n2=3 n3=1 n4=1`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w4_users_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Deuda residual #3 (v0.10.5) — JSON operators en .where(...).
 //
 // has_key / has_all_keys / has_any_keys / contains_json / get

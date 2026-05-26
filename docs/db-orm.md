@@ -1866,9 +1866,64 @@ async fn search_dynamic(f: UserFilters) -> Result<List<User>> {
 }
 ```
 
-### Patrón más simple: filters fijos con casos
+### Chain dinámico condicional (v0.10.5)
 
-Si los filtros son pocos y combinaciones bounded:
+A pesar de que el SQL se construye en compile-time, **el receiver
+del chain puede ser una variable mutable** — el codegen emite cada
+chain method como `(receiver).with_<x>(...)` y el `QueryBuilder<T>`
+runtime es cloneable. Esto habilita el patrón "armar filters
+condicionalmente" sin bajar a `db.query` crudo:
+
+```fitz
+async fn search(min_age: Int, active_only: Bool, name_like: Str, db: DbConn)
+    -> Result<List<User>>
+{
+    let qb = User.where(fn(u) => u.age >= min_age)
+
+    if (active_only) {
+        qb = qb.where(fn(u) => u.active)
+    }
+
+    if (name_like != "") {
+        qb = qb.where(fn(u) => u.name.like(name_like))
+    }
+
+    return qb.order_by(fn(u) => u.id).all(db).await
+}
+```
+
+Funciona también con `.order_by(...)`, `.limit(n)`, `.offset(n)`:
+
+```fitz
+async fn paginated(page: Int, page_size: Int, sort_desc: Bool, db: DbConn)
+    -> Result<List<User>>
+{
+    let qb = User.where(fn(u) => u.age > 0)
+
+    if (sort_desc) {
+        qb = qb.order_by(fn(u) => -u.age)
+    } else {
+        qb = qb.order_by(fn(u) => u.age)
+    }
+
+    if (page_size > 0) {
+        qb = qb.limit(page_size).offset((page - 1) * page_size)
+    }
+
+    return qb.all(db).await
+}
+```
+
+Caveat: cada chain method genera un fragmento SQL constante (que
+respeta las restricciones del closure, ver sec 7). El SHAPE del
+chain es dinámico (se decide en runtime cuáles branches del `if`
+toman), pero cada fragmento individual sigue siendo compile-time.
+
+### Patrón alternativo: filters fijos con `match`
+
+Si los filtros son pocos y las combinaciones bounded, también
+funciona el approach de branches separados sin construir un `qb`
+mutable:
 
 ```fitz
 @get("/users/by-status/{status}")
@@ -1882,14 +1937,9 @@ async fn by_status(status: Str) -> Result<List<User>> {
 }
 ```
 
-### Deuda explícita: chain dinámico
-
-Construir un `QueryBuilder` condicionalmente (sumar `.where()`
-dentro de un `if`) no está soportado en MVP — el codegen necesita
-saber el shape del builder en compile-time para emitir el SQL
-constante. Refinamiento futuro: builder con `Vec<Filter>`
-mutable + terminales que compongan al final. Por ahora, el
-workaround es `db.query` crudo con SQL construido programáticamente.
+Esta forma es más declarativa cuando las combinaciones se conocen
+de antemano. La forma dinámica con `qb = qb.where(...)` brilla
+cuando hay N filtros opcionales independientes.
 
 ---
 
@@ -2448,17 +2498,20 @@ Lo que NO está en el MVP, con plan de cierre y workaround:
   `/stats/by-email` re-incluido — el GROUP BY count por email
   serializa a JSON como `[{"email": "...", "count": N}, ...]`.
 
-### Chain dinámico de `.where(...)` condicional
+### ✅ Chain dinámico de `.where(...)` condicional — CERRADO v0.10.5 (era drift)
 
-- **Status**: el codegen necesita saber el shape del builder en
-  compile-time para emitir SQL constante. Por eso `qb = qb.where
-  (...)` adentro de un `if` no compila.
-- **Workaround**: branches con match o `db.query(...)` crudo con
-  SQL construido programáticamente.
-- **Cuándo**: refinamiento futuro. Probablemente builder con
-  `Vec<Filter>` runtime + compose en el terminal. Trade-off:
-  mover construcción de SQL a runtime parcial vs preservar el
-  SQL constante en compile-time.
+- **Status**: **CERRADO**. La documentación previa decía "no
+  compila" pero el codegen YA soportaba este patrón desde antes.
+  El `__FitzQueryBuilder<TData>` runtime es cloneable y cada
+  chain method emite `(receiver).with_<x>(...)`. El receiver
+  puede ser una var mutable.
+- **Validado** en `tests/db_real_postgres.rs` →
+  `orm_dynamic_chain_conditional_paridad_codegen_e2e` (4
+  combinaciones de filtros condicionales sobre 5 users con
+  conteos esperados verde).
+- **Cierre**: este item fue 100% drift documental — no requirió
+  cambio de código. La sec 21 ahora documenta el patrón con
+  ejemplos correctos.
 
 ### Composite indexes, partial indexes, expression indexes
 
