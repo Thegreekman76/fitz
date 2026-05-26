@@ -185,6 +185,15 @@ pub fn generate_project(
     // `__fitz_db_*`. Programas sin acceso a DB no pagan nada.
     let uses_db = program_uses_db(program);
 
+    // Fase 10.b.8.b — detección de uso del enum `__FitzValue`.
+    // Programas con `Map<Str, Any>` / `List<Any>` (incluso adentro
+    // de un `type` con `@table`) requieren el enum para el JSONB
+    // marshalling bidireccional. Cuando `uses_db && uses_fitz_value`,
+    // el preludio db emite también los helpers JSON
+    // `__fitz_jsonb_to_fitz_value`/`__fitz_fitz_value_to_jsonb` y
+    // Cargo.toml suma `serde_json` con `preserve_order`.
+    let uses_fitz_value = program_uses_fitz_value(program);
+
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
@@ -203,6 +212,7 @@ pub fn generate_project(
             uses_ws,
             uses_jobs,
             uses_db,
+            uses_fitz_value,
         ),
         main_rs,
         mod_files: {
@@ -948,6 +958,13 @@ fn program_uses_fitz_value(program: &Program) -> bool {
                     || return_type.as_ref().is_some_and(type_expr_has_any)
                     || body.iter().any(stmt_uses_fv)
             }
+            // Fase 10.b.8.b — un `type` con field `Map<Str, Any>` o
+            // `List<Any>` (o `Map<Any, V>`, etc.) requiere el enum
+            // `__FitzValue` para representar el value heterogéneo del
+            // JSONB en runtime. Sin esto, el preludio NO emite el
+            // enum, y el deserialize/marshal genera código que
+            // referencia `__FitzValue::Map(...)` inexistente.
+            Stmt::TypeDef { fields, .. } => fields.iter().any(|f| type_expr_has_any(&f.type_)),
             _ => false,
         }
     }
@@ -1755,7 +1772,7 @@ fn sanitize_crate_name(raw: &str) -> String {
 /// Cargo.toml para el project generado. Si `has_http` es true,
 /// suma axum + tokio + serde + serde_json (necesarios para 5b.6).
 /// Si no, queda sin `[dependencies]` y la compilación es rápida.
-#[allow(clippy::too_many_arguments)] // 8 flags semánticos uno-por-feature
+#[allow(clippy::too_many_arguments)] // 9 flags semánticos uno-por-feature
 fn cargo_toml_for(
     stem: &str,
     has_http: bool,
@@ -1765,6 +1782,7 @@ fn cargo_toml_for(
     uses_ws: bool,
     uses_jobs: bool,
     uses_db: bool,
+    uses_fitz_value: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -1887,6 +1905,15 @@ fn cargo_toml_for(
         );
         if !uses_auth {
             s.push_str("rand_core = { version = \"0.6\", features = [\"getrandom\"] }\n");
+        }
+        // Fase 10.b.8.b — JSONB libre (Map<Str, Any>) requiere
+        // serde_json para parse/stringify. Si HTTP también está
+        // activo, ya se incluye en http_lines (preserve_order); para
+        // evitar duplicación, solo emitimos cuando NO hay HTTP ni
+        // auth (que también lo trae). El feature `preserve_order`
+        // matchea el orden de inserción del JSONB Postgres.
+        if uses_fitz_value && !has_http && !uses_auth {
+            s.push_str("serde_json = { version = \"1\", features = [\"preserve_order\"] }\n");
         }
         s
     } else {
@@ -5740,6 +5767,81 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
 
 ",
         );
+
+        // Fase 10.b.8.b — Helpers JSONB ↔ __FitzValue.
+        // Solo se emiten cuando el programa usa `__FitzValue` (programa
+        // con fields Map<Str, Any>/List<Any> en types @table, o
+        // literales heterogéneos en otro lado). Si no hay __FitzValue,
+        // estos helpers no compilan (referencian variantes inexistentes).
+        // Paralelo a `fitz_value_to_jsonb` / `jsonb_text_to_fitz_value`
+        // del evaluator (src/evaluator.rs ~10137 + ~10151).
+        if self.uses_fitz_value {
+            self.emit(
+                "\
+// Fase 10.b.8.b — JSONB libre vía __FitzValue.
+
+fn __fitz_json_to_fv(v: &serde_json::Value) -> __FitzValue {
+    match v {
+        serde_json::Value::Null => __FitzValue::Null,
+        serde_json::Value::Bool(b) => __FitzValue::Bool(*b),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() { __FitzValue::Int(i) }
+            else if let Some(f) = n.as_f64() { __FitzValue::Float(f) }
+            else { __FitzValue::Null }
+        }
+        serde_json::Value::String(s) => __FitzValue::Str(s.clone()),
+        serde_json::Value::Array(arr) => __FitzValue::List(arr.iter().map(__fitz_json_to_fv).collect()),
+        serde_json::Value::Object(obj) => __FitzValue::Map(
+            obj.iter().map(|(k, v)| (__FitzValue::Str(k.clone()), __fitz_json_to_fv(v))).collect()
+        ),
+    }
+}
+
+fn __fitz_fv_to_json(v: &__FitzValue) -> serde_json::Value {
+    match v {
+        __FitzValue::Null => serde_json::Value::Null,
+        __FitzValue::Bool(b) => serde_json::Value::Bool(*b),
+        __FitzValue::Int(n) => serde_json::Value::Number((*n).into()),
+        __FitzValue::Float(x) => serde_json::Number::from_f64(*x)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        __FitzValue::Str(s) => serde_json::Value::String(s.clone()),
+        __FitzValue::Bytes(_) => serde_json::Value::Null,
+        __FitzValue::Nominal(repr) => serde_json::Value::String(repr.clone()),
+        __FitzValue::List(items) => serde_json::Value::Array(
+            items.iter().map(__fitz_fv_to_json).collect()
+        ),
+        __FitzValue::Map(pairs) => {
+            let mut obj = serde_json::Map::new();
+            for (k, v) in pairs.iter() {
+                let key_str = match k {
+                    __FitzValue::Str(s) => s.clone(),
+                    other => format!(\"{}\", other),
+                };
+                obj.insert(key_str, __fitz_fv_to_json(v));
+            }
+            serde_json::Value::Object(obj)
+        }
+    }
+}
+
+/// Parsea un text de columna JSONB a `__FitzValue::Map(...)`.
+fn __fitz_jsonb_to_fitz_value(s: &str) -> Result<__FitzValue, String> {
+    let json: serde_json::Value = serde_json::from_str(s)
+        .map_err(|e| format!(\"JSONB inválido: {}\", e))?;
+    Ok(__fitz_json_to_fv(&json))
+}
+
+/// Serializa un `__FitzValue` a texto JSON para insertarlo en una
+/// columna jsonb (cast `::jsonb` en el SQL).
+fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
+    let json = __fitz_fv_to_json(v);
+    serde_json::to_string(&json).map_err(|e| format!(\"JSON serialize: {}\", e))
+}
+
+",
+            );
+        }
     }
 
     /// Fase 8.7.1 transitiva — emite las `use crate::__fitz_py_*` que
@@ -11394,13 +11496,20 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
             returning_list.push_str(sql_col);
             returning_list.push('"');
             placeholder_idx += 1;
-            // Fase 10.b.8.a — sufijo SQL cast cuando el field es
-            // List<scalar>. Sin el cast, $N::text default no asigna
-            // a una columna int8[] (Postgres exige coerción explícita).
-            // Paralelo a `placeholder_suffix` del evaluator (~11521).
-            let cast_suffix = orm_list_scalar_info(&f.type_)
-                .map(|(_, _, _, cast)| cast)
-                .unwrap_or("");
+            // Fase 10.b.8.a + b — sufijo SQL cast. Para List<scalar>
+            // usamos `::int8[]`/`::text[]`/etc. (orm_list_scalar_info).
+            // Para Map<Str, Any> usamos `::jsonb` para que Postgres
+            // sepa cómo recibir el text JSON serializado. Sin cast,
+            // $N llega como text plano y Postgres rechaza la
+            // asignación a una columna jsonb. Paralelo a
+            // `placeholder_suffix` del evaluator (~11521).
+            let cast_suffix = if let Some((_, _, _, cast)) = orm_list_scalar_info(&f.type_) {
+                cast
+            } else if orm_field_is_jsonb(&f.type_) {
+                "::jsonb"
+            } else {
+                ""
+            };
             placeholders.push_str(&format!("${}{}", placeholder_idx, cast_suffix));
             field_pg_codes.push(pg_code);
         }
@@ -12200,9 +12309,14 @@ fn __fitz_qb_renumber_placeholders(sql: &str, offset: usize) -> String {
             // para Arc<Mutex<Vec<T>>>. Para mantener scope, el .update
             // con array fields queda como deuda residual menor del MVP
             // — el user usa `.insert` que sí lo soporta.
-            let cast_suffix = orm_list_scalar_info(&field_sig.type_)
-                .map(|(_, _, _, cast)| cast)
-                .unwrap_or("");
+            let cast_suffix = if let Some((_, _, _, cast)) = orm_list_scalar_info(&field_sig.type_)
+            {
+                cast
+            } else if orm_field_is_jsonb(&field_sig.type_) {
+                "::jsonb"
+            } else {
+                ""
+            };
             set_clauses.push_str(&format!("\"{}\" = ${}{}", sql_col, i + 1, cast_suffix));
             let (val_code, _) = self.gen_expr(value_expr)?;
             set_args_init.push_str(&format!("<_ as __IntoPgValue>::into_pg({})", val_code));
@@ -21389,12 +21503,44 @@ fn orm_field_coerce_block(
                 helper = inner_coerce_helper,
             ))
         }
-        Type::List(_) | Type::Map(_, _) => Err(FitzError::new(
+        // Fase 10.b.8.b — JSONB libre. `Map<K, V>` con `K=Any` o
+        // `V=Any` (típicamente `Map<Str, Any>`) se deserializa
+        // parseando el texto JSONB con serde_json y materializándolo
+        // como `__FitzValue::Map(Vec<(__FitzValue, __FitzValue)>)`.
+        // Otros Map (con K/V concretos no-Any) NO se soportan hoy
+        // — error claro citando "usá Map<Str, Any>".
+        Type::Map(k, v) if matches!(**k, Type::Any) || matches!(**v, Type::Any) => {
+            Ok(format!(
+                "match __v {{ \
+                    __FitzPgValue::Text(__s) => {{ \
+                        let __fv = __fitz_jsonb_to_fitz_value(__s)?; \
+                        match __fv {{ \
+                            __FitzValue::Map(__pairs) => std::sync::Arc::new(std::sync::Mutex::new(__pairs)), \
+                            other => return Err(format!(\"columna `{{}}`: JSONB no es objeto, fue: {{}}\", {col_lit}, __fv_type_name(&other))) \
+                        }} \
+                    }} \
+                    __FitzPgValue::Null => return Err(format!(\"columna `{{}}` es NULL pero el field no es nullable\", {col_lit})), \
+                    other => return Err(format!(\"columna `{{}}`: PgValue {{:?}} no coerce a Map\", {col_lit}, other)) \
+                }}",
+                col_lit = col_lit,
+            ))
+        }
+        Type::Map(_, _) => Err(FitzError::new(
             crate::error::ErrorKind::InvalidSyntax,
             0,
             0,
             format!(
-                "codegen ORM (10.b.3): field `{}` con tipo `{}` no soportado todavía — arrays/JSONB llegan en 10.b.8",
+                "codegen ORM (10.b.8.b): field `{}` con tipo `{}` no soportado todavía — usá `Map<Str, Any>` para columnas jsonb con shape heterogéneo",
+                field_name,
+                type_name(t)
+            ),
+        )),
+        Type::List(_) => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.8.a): field `{}` con tipo `{}` no soportado todavía (List<scalar> sí está disponible — List<List<T>>/List<Nominal>/etc. quedan como deuda)",
                 field_name,
                 type_name(t)
             ),
@@ -21449,6 +21595,21 @@ fn orm_list_scalar_info(
         },
         Type::Nullable(inner) => orm_list_scalar_info(inner),
         _ => None,
+    }
+}
+
+/// Fase 10.b.8.b — `true` si `t` es un `Map<K, V>` con `K` o `V` `Any`
+/// (típicamente `Map<Str, Any>`), incluyendo `Nullable` recursivo. Esos
+/// fields se almacenan en columnas jsonb Postgres y requieren el cast
+/// `::jsonb` en placeholders SQL. Paralelo a `is_map_type` del
+/// evaluator (~10982); allá el chequeo es genérico (cualquier Map),
+/// acá restringimos al subset con Any porque sin __FitzValue no
+/// podemos representar el value heterogéneo.
+fn orm_field_is_jsonb(t: &Type) -> bool {
+    match t {
+        Type::Map(k, v) => matches!(**k, Type::Any) || matches!(**v, Type::Any),
+        Type::Nullable(inner) => orm_field_is_jsonb(inner),
+        _ => false,
     }
 }
 
@@ -21538,12 +21699,44 @@ fn orm_marshal_field_to_pg(
                 oid_const = oid_const,
             ))
         }
-        Type::List(_) | Type::Map(_, _) => Err(FitzError::new(
+        // Fase 10.b.8.b — `Map<Str, Any>` (o cualquier Map con Any en
+        // K/V) → JSONB serializado. Toma el lock del
+        // `Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>`, lo envuelve
+        // en `__FitzValue::Map(...)` (clone barato), serializa a
+        // string JSON con `__fitz_fitz_value_to_jsonb` y mete en
+        // `__FitzPgValue::Text`. El SQL del INSERT castea con
+        // `::jsonb`. Si el serialize falla, usamos `expect` — el
+        // path de error de serde_json::to_string son casos exóticos
+        // (NaN/Inf custom serialize) que en MVP propagamos como panic.
+        Type::Map(k, v) if matches!(**k, Type::Any) || matches!(**v, Type::Any) => {
+            Ok(format!(
+                "{{ \
+                    let __map_arc = {accessor}; \
+                    let __map_g = __map_arc.lock().unwrap(); \
+                    let __fv = __FitzValue::Map(__map_g.clone()); \
+                    drop(__map_g); \
+                    let __s = __fitz_fitz_value_to_jsonb(&__fv).expect(\"JSONB serialize falló\"); \
+                    __FitzPgValue::Text(__s) \
+                }}",
+                accessor = accessor,
+            ))
+        }
+        Type::Map(_, _) => Err(FitzError::new(
             crate::error::ErrorKind::InvalidSyntax,
             0,
             0,
             format!(
-                "codegen ORM (10.b.4): field `{}` con tipo `{}` no soportado en `.insert` todavía — arrays/JSONB llegan en 10.b.8",
+                "codegen ORM (10.b.8.b): field `{}` con tipo `{}` no soportado en `.insert` — usá `Map<Str, Any>` para JSONB heterogéneo",
+                field_name,
+                type_name(t)
+            ),
+        )),
+        Type::List(_) => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "codegen ORM (10.b.8.a): field `{}` con tipo `{}` no soportado en `.insert` (List<scalar> sí; List<List<T>>/List<Nominal>/etc. quedan como deuda)",
                 field_name,
                 type_name(t)
             ),
@@ -22444,7 +22637,7 @@ mod tests {
     fn cargo_toml_async_sin_http_incluye_tokio_time() {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
-        let toml = cargo_toml_for("foo", false, true, false, false, false, false, false);
+        let toml = cargo_toml_for("foo", false, true, false, false, false, false, false, false);
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
         assert!(!toml.contains("axum"), "no debería incluir axum");
@@ -22452,7 +22645,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
-        let toml = cargo_toml_for("foo", true, true, false, false, false, false, false);
+        let toml = cargo_toml_for("foo", true, true, false, false, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
         assert!(toml.contains("\"macros\""));
@@ -22460,7 +22653,9 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
-        let toml = cargo_toml_for("foo", false, false, false, false, false, false, false);
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false,
+        );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
     }
@@ -22473,7 +22668,7 @@ mod tests {
     fn cargo_toml_con_python_incluye_pyo3() {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
-        let toml = cargo_toml_for("foo", false, false, true, false, false, false, false);
+        let toml = cargo_toml_for("foo", false, false, true, false, false, false, false, false);
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
         assert!(
@@ -22490,7 +22685,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
-        let toml = cargo_toml_for("foo", true, false, true, false, false, false, false);
+        let toml = cargo_toml_for("foo", true, false, true, false, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
         assert!(toml.contains("tokio"));
@@ -22498,7 +22693,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
-        let toml = cargo_toml_for("foo", true, false, false, false, false, false, false);
+        let toml = cargo_toml_for("foo", true, false, false, false, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
     }
@@ -27470,7 +27665,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
-        let toml = cargo_toml_for("app", false, false, false, false, false, true, false);
+        let toml = cargo_toml_for("app", false, false, false, false, false, true, false, false);
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
         // Sin HTTP/async, tokio se incluye por uses_jobs con multi_thread.
@@ -27481,7 +27676,7 @@ mod tests {
     #[test]
     fn cargo_toml_jobs_sin_http_incluye_signal_feature() {
         // Cron-only mode necesita `signal` para ctrl_c.
-        let toml = cargo_toml_for("app", false, false, false, false, false, true, false);
+        let toml = cargo_toml_for("app", false, false, false, false, false, true, false, false);
         assert!(
             toml.contains("\"signal\""),
             "esperaba tokio feature `signal` para cron-only mode, got:\n{}",
@@ -27493,7 +27688,7 @@ mod tests {
     fn cargo_toml_jobs_con_http_no_incluye_signal_feature() {
         // HTTP + cron: ctrl_c lo maneja `serve()` con su propio
         // shutdown signal; el main generado no usa signal directo.
-        let toml = cargo_toml_for("app", true, false, false, false, false, true, false);
+        let toml = cargo_toml_for("app", true, false, false, false, false, true, false, false);
         assert!(toml.contains("cron"));
         assert!(!toml.contains("\"signal\""));
     }
@@ -28107,7 +28302,7 @@ mod tests {
         // Programa con db debe ver sha2/hmac/base64 en el Cargo.toml.
         // Usamos `cargo_toml_for` directo (paralelo a los tests
         // existentes).
-        let toml = cargo_toml_for("foo", false, false, false, false, false, false, true);
+        let toml = cargo_toml_for("foo", false, false, false, false, false, false, true, false);
         assert!(
             toml.contains("sha2 = \"0.10\""),
             "esperaba sha2 en Cargo.toml: {toml}",
@@ -28139,7 +28334,9 @@ mod tests {
 
     #[test]
     fn codegen_db_cargo_toml_sin_db_no_suma_deps() {
-        let toml = cargo_toml_for("foo", false, false, false, false, false, false, false);
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false,
+        );
         assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
         assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
     }
@@ -29086,6 +29283,109 @@ mod tests {
                 || err.message.contains("array"),
             "esperaba mención de falta de soporte para List<Nominal>, fue: {}",
             err.message
+        );
+    }
+
+    // ---- Fase 10.b.8.b — JSONB libre (Map<Str, Any>) ----
+
+    #[test]
+    fn codegen_orm_map_any_emite_jsonb_helpers_y_cast() {
+        // Field `meta: Map<Str, Any>` debe emitir:
+        //   - preludio db con helpers __fitz_jsonb_to_fitz_value y
+        //     __fitz_fitz_value_to_jsonb.
+        //   - INSERT placeholder con sufijo `::jsonb`.
+        //   - Marshal usando __FitzValue::Map(__map_g.clone()).
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       meta: Map<Str, Any>\n\
+                   }\n\
+                   async fn boot() -> Result<Doc> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let d = Doc.insert(db, Doc { id: 0, meta: {\"k\": 1} }).await?\n  \
+                       return Ok(d)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Helpers JSON en el preludio db.
+        assert!(
+            rust.contains("fn __fitz_jsonb_to_fitz_value") && rust.contains("fn __fitz_fitz_value_to_jsonb"),
+            "esperaba helpers __fitz_jsonb_to_fitz_value y __fitz_fitz_value_to_jsonb en preludio, fue: {rust}",
+        );
+        // SQL cast `::jsonb` en INSERT.
+        assert!(
+            rust.contains("::jsonb"),
+            "esperaba sufijo `::jsonb` en placeholder INSERT, fue: {rust}",
+        );
+        // Marshal usa __FitzValue::Map.
+        assert!(
+            rust.contains("__FitzValue::Map(__map_g.clone())"),
+            "esperaba marshal vía __FitzValue::Map(__map_g.clone()), fue: {rust}",
+        );
+        // Cargo.toml suma serde_json.
+        // (no testeamos cargo_toml acá; va en otro test puntual.)
+    }
+
+    #[test]
+    fn codegen_orm_map_any_deserialize_via_jsonb_text() {
+        // El deserialize en __FromFitzDbRow debe matchear sobre
+        // PgValue::Text y delegar a __fitz_jsonb_to_fitz_value. Necesita
+        // un call al ORM que dispare el path de SELECT (`.all`/`.first`)
+        // para que el codegen emita `impl __FromFitzDbRow for DocData`.
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       meta: Map<Str, Any>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Doc>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Doc.all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__fitz_jsonb_to_fitz_value(__s)"),
+            "esperaba uso del helper de parse JSON al deserializar, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__FitzValue::Map(__pairs)"),
+            "esperaba `__FitzValue::Map(__pairs)` para extraer el JSONB, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_map_concreto_no_jsonb_aborta_con_mensaje_claro() {
+        // Map<Str, Int> NO se soporta (no es JSONB libre — el value
+        // homogéneo concreto no usa __FitzValue). Error claro citando
+        // "usá Map<Str, Any>". Necesita un call ORM para que el codegen
+        // intente emitir el coerce_block del field Map.
+        let src = "@table(\"counts\") type Counts {\n  \
+                       @primary id: Int = 0\n  \
+                       buckets: Map<Str, Int>\n\
+                   }\n\
+                   async fn boot() -> Result<List<Counts>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Counts.all(db).await\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de codegen por Map concreto");
+        assert!(
+            err.message.contains("Map<Str, Any>"),
+            "esperaba mención de `Map<Str, Any>` como workaround, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_orm_cargo_toml_con_db_y_fitz_value_suma_serde_json() {
+        // Programa con field Map<Str, Any> en type @table dispara
+        // tanto uses_db como uses_fitz_value. Cargo.toml debe incluir
+        // serde_json con preserve_order.
+        let toml = cargo_toml_for("app", false, false, false, false, false, false, true, true);
+        assert!(
+            toml.contains("serde_json"),
+            "esperaba serde_json en Cargo.toml cuando uses_db+uses_fitz_value, fue: {}",
+            toml
+        );
+        assert!(
+            toml.contains("preserve_order"),
+            "esperaba feature `preserve_order` para mantener orden JSONB, fue: {}",
+            toml
         );
     }
 

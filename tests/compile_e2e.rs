@@ -7138,6 +7138,65 @@ fn orm_list_float_bool_arrays_combinados_compilan() {
     assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
 }
 
+// ---------------------------------------------------------------------------
+// Fase 10.b.8.b — JSONB libre con Map<Str, Any>
+// ---------------------------------------------------------------------------
+
+#[test]
+fn orm_map_str_any_jsonb_field_compila_a_binario() {
+    // Field `meta: Map<Str, Any>` con field heterogéneo (Int, Str, Bool).
+    // Valida que el codegen emite helpers JSON + cast `::jsonb` + el
+    // marshalling completo round-trip compila bajo cargo build.
+    let (stdout, code) = build_and_run(
+        "orm_map_str_any_jsonb_field_compila",
+        "@table(\"docs\") type Doc {\n  \
+             @primary id: Int = 0\n  \
+             meta: Map<Str, Any>\n\
+         }\n\
+         async fn run() -> Result<Doc> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let d = Doc.insert(conn, Doc { id: 0, meta: {\"k1\": 1, \"k2\": \"hola\", \"k3\": true} }).await?\n  \
+             return Ok(d)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn orm_map_str_any_jsonb_nullable_compila() {
+    // `Map<Str, Any>?` nullable también debe compilar. El cast `::jsonb`
+    // se aplica al placeholder; el value None se marshalea como NULL.
+    let (stdout, code) = build_and_run(
+        "orm_map_str_any_jsonb_nullable_compila",
+        "@table(\"docs\") type Doc {\n  \
+             @primary id: Int = 0\n  \
+             tags: Map<Str, Any>?\n\
+         }\n\
+         async fn run() -> Result<Doc> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let d = Doc.insert(conn, Doc { id: 0, tags: null }).await?\n  \
+             return Ok(d)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
 #[test]
 fn orm_belongs_to_navigation_compila_a_binario() {
     // `post.user_id(db).await?` con @belongs_to debe compilar a

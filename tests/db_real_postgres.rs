@@ -1147,6 +1147,134 @@ fn orm_belongs_to_y_has_many_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.8 — Paridad fitz build sobre arrays + JSONB
+//
+// Programa con `tags: List<Int>` (array Postgres) y `meta: Map<Str,
+// Any>` (JSONB libre). Inserta una row, lee de vuelta, valida que el
+// round-trip preserva los valores. Solo valida `fitz build` (el
+// evaluator ya tiene cobertura propia desde 10.5.a/b).
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_arrays_y_jsonb_paridad_codegen_e2e() {
+    use std::process::Command;
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_docs_codegen_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_docs_codegen_test (\
+                 id bigint PRIMARY KEY, \
+                 title text, \
+                 tags int8[], \
+                 meta jsonb)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    // Programa Fitz: insert + select + print resumen. Usamos
+    // `print` para emitir el resultado a stdout y validamos contra
+    // el output del binario standalone.
+    let src = format!(
+        "@table(\"fitz_orm_docs_codegen_test\") type Doc {{\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             tags: List<Int>\n  \
+             meta: Map<Str, Any>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let d = Doc.insert(db, Doc {{ \
+                 id: 1, \
+                 title: \"hello\", \
+                 tags: [10, 20, 30], \
+                 meta: {{\"author\": \"ada\", \"version\": 7, \"draft\": false}} \
+             }}).await?\n  \
+             let xs = Doc.where(fn(x) => x.id == 1).all(db).await?\n  \
+             let first = xs[0]\n  \
+             return Ok(\"id={{first.id}} title={{first.title}} tags_len={{len(first.tags)}} meta_keys={{len(first.meta)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    let stem = "orm_arrays_jsonb_paridad_codegen";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, &src).expect("escribir .fitz");
+
+    let fitz_bin = std::env::current_exe()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(if cfg!(windows) { "fitz.exe" } else { "fitz" });
+    let build = Command::new(&fitz_bin)
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&build.stdout),
+        String::from_utf8_lossy(&build.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+
+    // tags se insertó como [10, 20, 30] → len = 3.
+    // meta se insertó con 3 keys → len = 3.
+    assert!(
+        stdout.contains("id=1")
+            && stdout.contains("title=hello")
+            && stdout.contains("tags_len=3")
+            && stdout.contains("meta_keys=3"),
+        "esperaba `id=1 title=hello tags_len=3 meta_keys=3`, fue: {}",
+        stdout
+    );
+
+    // Cleanup.
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE fitz_orm_docs_codegen_test", &[])
+            .await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.5.f1 — Agregados (sum / avg / min / max)
 // =============================================================
 
