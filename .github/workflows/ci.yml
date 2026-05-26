@@ -157,3 +157,45 @@ jobs:
         run: cargo build --release --features python
       - name: "cargo test --features python --lib py_interop"
         run: "cargo test --release --features python --lib py_interop::"
+
+  # Fase 10.b.16 — E2E paridad real contra Postgres. Levanta el
+  # service container `postgres:16` y corre los tests
+  # `db_real_postgres` (todos `#[ignore]` por default; el flag
+  # `--ignored` los activa). Cada test crea/dropea sus tablas con
+  # prefijo `fitz_orm_w*_test` para evitar colisiones. `--test-
+  # threads=1` serializa por seguridad (varios tests comparten
+  # tablas con mismo prefijo en runs paralelos potencialmente).
+  #
+  # Solo Linux — Docker service containers GHA andan estable ahí.
+  # Si falla el job NO bloquea releases (al menos en MVP), pero el
+  # PR debería revisitar la regresión. Pre-10.b.16 estos E2E solo
+  # corrían en local del autor; ahora son parte del pipeline.
+  db-postgres:
+    name: DB paridad (Postgres)
+    needs: lint
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: fitz_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-db-postgres
+      - name: cargo test --test db_real_postgres -- --ignored
+        env:
+          FITZ_TEST_PG_URL: "postgres://postgres:postgres@localhost:5432/fitz_test?sslmode=disable"
+        run: cargo test --release --test db_real_postgres -- --ignored --test-threads=1
+        timeout-minutes: 15

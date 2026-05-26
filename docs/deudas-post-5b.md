@@ -1698,9 +1698,21 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
 
 ### Deudas viejas que siguen abiertas (impactan 10.b)
 
-- ☐ **Test paridad real `db_real_postgres` no corre en CI default**
-  (`#[ignore]`). Considerar docker-compose con Postgres en un job
-  opcional o gated by env var.
+- ✅ **Test paridad real `db_real_postgres` no corre en CI default** —
+  CERRADO 2026-05-26 (10.b.16). Job nuevo `db-postgres` en
+  `.github/workflows/ci.yml` que levanta `postgres:16` como service
+  container, exporta `FITZ_TEST_PG_URL=postgres://postgres:postgres@
+  localhost:5432/fitz_test`, y corre `cargo test --test db_real_postgres
+  -- --ignored --test-threads=1`. Solo Linux (Docker service
+  containers más estables en GHA Linux runners; los tests no
+  dependen de plataforma — el binario standalone es x86_64-linux).
+  Los 14 E2E paridad real (belongs_to + has_many + arrays + JSONB
+  + where combinatorio + between/mod/var_ext + array ops + nav
+  chain + group_by aggregate + Map<Str,T> concreto + List<scalar?>
+  + preload + CRUD lifecycle + order_by/limit + basics + col
+  override en FK source + .update con List/Map literal + agg
+  scalar) ahora corren en cada push a main. `#[ignore]` se mantiene
+  para que `cargo test` default sin env var siga rápido.
 - ☐ **Smoke GUIDE_EXAMPLES_COMPILE no incluye ejemplos ORM**: cuando
   haya un ejemplo runnable del cap 31 de la guía (ORM), sumarlo al
   smoke. Pre-req: cap 31 escrito (parte del cierre formal de Fase 10).
