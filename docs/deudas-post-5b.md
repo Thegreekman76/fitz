@@ -1590,29 +1590,40 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
 
 ### De 10.b.8.a (Arrays Postgres)
 
-- ☐ **`.update(db, {"tags": [1,2]})` con List literal**: el genérico
-  `<_ as __IntoPgValue>::into_pg(...)` NO produce `PgValue::Array`
-  desde un literal Fitz — necesita impl `__IntoPgValue` para
-  `Arc<Mutex<Vec<T>>>` por T scalar, o branch estructural en
-  `gen_qb_update_set_args`. Workaround actual: usar `.insert`.
+- ✅ **`.update(db, {"tags": [1,2]})` con List literal** — CERRADO
+  2026-05-26 (10.b.11.a). `gen_qb_update_set_args` ahora detecta
+  field `List<scalar>` + value `Expr::List` literal y emite
+  `__FitzPgValue::Array { elem_oid, values: vec![...] }` directo
+  (sin pasar por el genérico `__IntoPgValue::into_pg`). Helper
+  nuevo `fitz_scalar_lit_to_pg_value_code` wrappea cada item al
+  variant esperado. Test paridad real:
+  `orm_update_con_list_y_map_literal_paridad_codegen_e2e` valida
+  round-trip insert + update + select con tags `int8[]` y meta
+  `jsonb`.
 - ☐ **Arrays anidados (`List<List<T>>`)**: Postgres soporta arrays
   multidimensionales nativamente. Rechazado hoy en codegen.
-- ☐ **`List<Nominal>`**: compartido con 10.b.7.
+  Pendiente para 10.b.12.
+- ☐ **`List<Nominal>`**: compartido con 10.b.7. Pendiente.
 - ☐ **NULL adentro de arrays (`{1, NULL, 3}` → `List<Int?>`)**:
   Postgres lo soporta. Requiere `Option<T>` adentro del Vec elem
-  + path runtime que también limita.
+  + path runtime que también limita. Pendiente para 10.b.12.
 
 ### De 10.b.8.b (JSONB libre)
 
-- ☐ **`.update(db, {"meta": {...}})` con Map literal**: idem arrays
-  — requiere impl `__IntoPgValue for Arc<Mutex<Vec<(__FitzValue,
-  __FitzValue)>>>` o branch estructural.
+- ✅ **`.update(db, {"meta": {...}})` con Map literal** — CERRADO
+  2026-05-26 (10.b.11.b). `gen_qb_update_set_args` detecta field
+  `Map<Str, Any>` + value `Expr::Map` literal y emite
+  `__FitzPgValue::Text(__fitz_fitz_value_to_jsonb(&__FitzValue::
+  Map(...)).expect(...))`. Helper nuevo
+  `fitz_lit_to_fitz_value_code` wrappea recursivamente cualquier
+  Fitz literal puro (Int/Float/Str/Bool/Null + List/Map anidados)
+  a `__FitzValue`. Test paridad real valida JSONB anidado.
 - ☐ **`Map<Str, Str>`, `Map<Str, Int>` (Map concretos no-Any)**:
   rechazado hoy con error claro citando "usá `Map<Str, Any>`".
-  Cierre: iterar JSON obj con tipo concreto del value via
-  serde_json + helper específico.
+  Pendiente para 10.b.12.
 - ☐ **Validación shape JSONB** (timestamps como strings ISO, etc.):
   hoy el JSONB libre acepta cualquier shape; no hay schema.
+  Pendiente para 10.b.13.
 
 ### Deudas viejas que siguen abiertas (impactan 10.b)
 

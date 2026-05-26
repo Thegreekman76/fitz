@@ -12474,31 +12474,78 @@ fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
                 set_clauses.push_str(", ");
                 set_args_init.push_str(", ");
             }
-            // Fase 10.b.8.a — sufijo SQL cast cuando el field es
-            // List<scalar> (`::int8[]`/`::text[]`/etc.). Sin cast,
-            // Postgres rechazaría asignar text plano a una columna
-            // array. Para `.update`, el value del Map literal viene
-            // como expresión Fitz (típicamente List literal); para que
-            // el cast SQL sea efectivo necesitamos también que el
-            // `into_pg` produzca un `PgValue::Array`, lo cual hoy SÓLO
-            // hace el path estructural sobre Arc<Mutex<Vec<T>>>. Si
-            // el value en el Map literal es una List Fitz (que tipa
-            // como Arc<Mutex<Vec<T>>>), el `<_ as __IntoPgValue>::into_pg`
-            // genérico no funciona — necesitaría impl __IntoPgValue
-            // para Arc<Mutex<Vec<T>>>. Para mantener scope, el .update
-            // con array fields queda como deuda residual menor del MVP
-            // — el user usa `.insert` que sí lo soporta.
-            let cast_suffix = if let Some((_, _, _, cast)) = orm_list_scalar_info(&field_sig.type_)
-            {
+            // Fase 10.b.11 — el value del Map literal del `.update`
+            // tiene 3 paths según el tipo del field:
+            //
+            //   - List<scalar>: detectamos `Expr::List` literal y
+            //     emitimos `__FitzPgValue::Array { elem_oid, values }`
+            //     directo, paralelo al path del INSERT. Cast SQL
+            //     `::int8[]`/etc. obligatorio para que Postgres
+            //     coercione el text a array.
+            //
+            //   - Map<Str, Any> (JSONB libre): detectamos `Expr::Map`
+            //     literal y emitimos
+            //     `__FitzPgValue::Text(__fitz_fitz_value_to_jsonb(
+            //          &<__FitzValue>).expect(...))` con el __FitzValue
+            //     construido recursivo. Cast SQL `::jsonb`.
+            //
+            //   - Primitivos (Int/Float/Str/Bool): caen al binding
+            //     genérico `<_ as __IntoPgValue>::into_pg(...)` que ya
+            //     funciona para los 6 tipos del trait.
+            //
+            // Cierre de deuda 10.b.8.a/b: pre-10.b.11, arrays y
+            // JSONB en .update fallaban con error de runtime de
+            // Postgres ("invalid input syntax for type") porque el
+            // binding genérico producía Text en vez de Array/JSONB.
+            let array_info = orm_list_scalar_info(&field_sig.type_);
+            let is_jsonb = orm_field_is_jsonb(&field_sig.type_);
+            let cast_suffix = if let Some((_, _, _, cast)) = array_info {
                 cast
-            } else if orm_field_is_jsonb(&field_sig.type_) {
+            } else if is_jsonb {
                 "::jsonb"
             } else {
                 ""
             };
             set_clauses.push_str(&format!("\"{}\" = ${}{}", sql_col, i + 1, cast_suffix));
-            let (val_code, _) = self.gen_expr(value_expr)?;
-            set_args_init.push_str(&format!("<_ as __IntoPgValue>::into_pg({})", val_code));
+
+            let arg_code = if let Some((_, pg_variant, _, _)) = array_info {
+                // Field es List<scalar>. El value debe ser List literal.
+                let items = match value_expr {
+                    Expr::List(items, _) => items,
+                    _ => {
+                        return Err(self.err_at(
+                            value_expr.span(),
+                            format!(
+                                "`.update`: field `{}` es array (`List<{}>`); el value debe ser List literal `[a, b, ...]`",
+                                key_str, pg_variant
+                            ),
+                        ));
+                    }
+                };
+                let mut item_codes = Vec::with_capacity(items.len());
+                for it in items {
+                    item_codes.push(fitz_scalar_lit_to_pg_value_code(it, pg_variant)?);
+                }
+                format!(
+                    "__FitzPgValue::Array {{ elem_oid: {oid}, values: vec![{items}] }}",
+                    oid = array_info.unwrap().2,
+                    items = item_codes.join(", ")
+                )
+            } else if is_jsonb {
+                // Field es Map<Str, Any> (JSONB libre). El value
+                // debe ser literal Fitz arbitrario (Map, List,
+                // primitivo). Wrappemos a __FitzValue y serializamos
+                // con el helper de preludio db.
+                let fv_code = fitz_lit_to_fitz_value_code(value_expr)?;
+                format!(
+                    "__FitzPgValue::Text(__fitz_fitz_value_to_jsonb(&{}).expect(\"JSONB serialize falló en .update\"))",
+                    fv_code
+                )
+            } else {
+                let (val_code, _) = self.gen_expr(value_expr)?;
+                format!("<_ as __IntoPgValue>::into_pg({})", val_code)
+            };
+            set_args_init.push_str(&arg_code);
         }
         Ok((set_clauses, set_args_init))
     }
@@ -21793,6 +21840,86 @@ fn orm_field_is_jsonb(t: &Type) -> bool {
     }
 }
 
+/// Fase 10.b.11.b — emite el código Rust que construye un
+/// `__FitzValue` desde un Fitz literal recursivo. Cubre Int/Float/
+/// Str/Bool/Null + List literal + Map literal (con keys Str). Otros
+/// shapes (var ext, call, expresión compuesta) → error claro.
+/// Requiere `uses_fitz_value=true` en el CodegenCtx (caller debe
+/// validarlo antes — típicamente ya está activo si el field type
+/// declara `Map<Str, Any>`/`List<Any>`).
+fn fitz_lit_to_fitz_value_code(expr: &Expr) -> Result<String, FitzError> {
+    match expr {
+        Expr::Int(n, _) => Ok(format!("__FitzValue::Int({}i64)", n)),
+        Expr::Float(x, _) => Ok(format!("__FitzValue::Float({}f64)", x)),
+        Expr::Str(s, _) => Ok(format!(
+            "__FitzValue::Str({}.to_string())",
+            rust_str_literal(s)
+        )),
+        Expr::Bool(b, _) => Ok(format!("__FitzValue::Bool({})", b)),
+        Expr::Null(_) => Ok("__FitzValue::Null".to_string()),
+        Expr::List(items, _) => {
+            let inner: Vec<String> = items
+                .iter()
+                .map(fitz_lit_to_fitz_value_code)
+                .collect::<Result<_, _>>()?;
+            Ok(format!("__FitzValue::List(vec![{}])", inner.join(", ")))
+        }
+        Expr::Map(pairs, _) => {
+            let mut entries = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                let k_code = match k {
+                    Expr::Str(s, _) => format!(
+                        "__FitzValue::Str({}.to_string())",
+                        rust_str_literal(s)
+                    ),
+                    other => {
+                        return Err(FitzError::new(
+                            crate::error::ErrorKind::InvalidSyntax,
+                            other.span().line,
+                            other.span().column,
+                            "JSONB literal: las keys del Map deben ser strings".to_string(),
+                        ));
+                    }
+                };
+                let v_code = fitz_lit_to_fitz_value_code(v)?;
+                entries.push(format!("({}, {})", k_code, v_code));
+            }
+            Ok(format!("__FitzValue::Map(vec![{}])", entries.join(", ")))
+        }
+        other => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            other.span().line,
+            other.span().column,
+            "JSONB literal MVP: solo soportamos literales puros (Int/Float/Str/Bool/Null/Map/List); vars/calls no".to_string(),
+        )),
+    }
+}
+
+/// Fase 10.b.11.a — emite el código Rust que wrappea un Fitz literal
+/// escalar a `__FitzPgValue::<Variant>(...)`. Usado por arrays para
+/// emitir cada item del `Vec<__FitzPgValue>`. `pg_variant` es el
+/// variante esperada según el field type (Int/Float/Text/Bool). Si
+/// el literal no matchea el variant esperado → Err con mensaje claro.
+fn fitz_scalar_lit_to_pg_value_code(expr: &Expr, pg_variant: &str) -> Result<String, FitzError> {
+    match (expr, pg_variant) {
+        (Expr::Int(n, _), "Int") => Ok(format!("__FitzPgValue::Int({}i64)", n)),
+        (Expr::Float(x, _), "Float") => Ok(format!("__FitzPgValue::Float({}f64)", x)),
+        (Expr::Str(s, _), "Text") => Ok(format!(
+            "__FitzPgValue::Text({}.to_string())",
+            rust_str_literal(s)
+        )),
+        (Expr::Bool(b, _), "Bool") => Ok(format!("__FitzPgValue::Bool({})", b)),
+        _ => Err(FitzError::new(
+            crate::error::ErrorKind::InvalidSyntax,
+            expr.span().line,
+            expr.span().column,
+            format!(
+                "se esperaba literal escalar tipo {pg_variant}; otros shapes (var, call, etc.) no soportados en MVP"
+            ),
+        )),
+    }
+}
+
 /// Fase 10.b.9.c — convierte un `Type` resuelto a un `TypeExpr` sintáctico
 /// suficiente para que el translator de `.where(...)` detecte arrays.
 /// No es una conversión completa — solo cubre los shapes que el
@@ -29966,6 +30093,125 @@ mod tests {
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
             "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.11 — `.update` con List literal / Map literal ----
+
+    #[test]
+    fn codegen_update_con_list_literal_emite_pgvalue_array_directo() {
+        // `.update(db, {"tags": [1, 2, 3]})` con tags: List<Int>
+        // debe emitir __FitzPgValue::Array { elem_oid: INT8, ... } y
+        // el SET con cast ::int8[].
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       tags: List<Int>\n\
+                   }\n\
+                   async fn boot() -> Result<Int> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let n = Item.where(fn(i) => i.id == 1).update(db, {\"tags\": [10, 20, 30]}).await?\n  \
+                       return Ok(n)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\\\"tags\\\" = $1::int8[]"),
+            "esperaba SET con cast ::int8[], fue: {rust}",
+        );
+        assert!(
+            rust.contains("__FitzPgValue::Array") && rust.contains("__fitz_db_runtime::oid::INT8"),
+            "esperaba binding directo a __FitzPgValue::Array INT8, fue: {rust}",
+        );
+        // NO debe haber binding via __IntoPgValue::into_pg para el array.
+        assert!(
+            !rust.contains("__IntoPgValue>::into_pg(std :: sync :: Arc :: new")
+                && !rust.contains("__IntoPgValue>::into_pg(Arc :: new"),
+            "no debe pasar el List literal por __IntoPgValue (path roto), fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_update_con_map_literal_emite_jsonb_via_fitzvalue() {
+        // `.update(db, {"meta": {"k": 1, "active": true}})` con
+        // meta: Map<Str, Any> debe emitir __FitzPgValue::Text(...)
+        // con stringify del __FitzValue::Map. El SET lleva ::jsonb.
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       meta: Map<Str, Any>\n\
+                   }\n\
+                   async fn boot() -> Result<Int> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let n = Doc.where(fn(d) => d.id == 1).update(db, {\"meta\": {\"k\": 1, \"active\": true}}).await?\n  \
+                       return Ok(n)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\\\"meta\\\" = $1::jsonb"),
+            "esperaba SET con cast ::jsonb, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__fitz_fitz_value_to_jsonb") && rust.contains("__FitzValue::Map"),
+            "esperaba binding via __fitz_fitz_value_to_jsonb + __FitzValue::Map, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_update_array_value_no_lista_literal_aborta() {
+        // Si el field es List<Int> pero el value no es Expr::List
+        // (e.g. var externa), error claro citando "List literal".
+        let src = "@table(\"items\") type Item {\n  \
+                       @primary id: Int = 0\n  \
+                       tags: List<Int>\n\
+                   }\n\
+                   async fn boot(new_tags: List<Int>) -> Result<Int> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let n = Item.where(fn(i) => i.id == 1).update(db, {\"tags\": new_tags}).await?\n  \
+                       return Ok(n)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por value no-List");
+        assert!(
+            err.message.contains("List literal"),
+            "esperaba mención de `List literal`, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_update_jsonb_value_var_externa_aborta_claro() {
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       meta: Map<Str, Any>\n\
+                   }\n\
+                   async fn boot(new_meta: Map<Str, Any>) -> Result<Int> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let n = Doc.where(fn(d) => d.id == 1).update(db, {\"meta\": new_meta}).await?\n  \
+                       return Ok(n)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por JSONB con var ext");
+        assert!(
+            err.message.contains("JSONB literal MVP") || err.message.contains("literales puros"),
+            "esperaba mención de JSONB literal MVP, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_update_jsonb_anidado_compila() {
+        // Map literal con List/Map anidados → debe compilar (recursión
+        // del helper fitz_lit_to_fitz_value_code).
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       meta: Map<Str, Any>\n\
+                   }\n\
+                   async fn boot() -> Result<Int> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let n = Doc.where(fn(d) => d.id == 1).update(db, \
+                           {\"meta\": {\"items\": [1, 2, 3], \"by\": {\"author\": \"ada\"}}}).await?\n  \
+                       return Ok(n)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("__FitzValue::List") && rust.contains("__FitzValue::Map"),
+            "esperaba __FitzValue::List y __FitzValue::Map (recursión), fue: {rust}",
         );
     }
 

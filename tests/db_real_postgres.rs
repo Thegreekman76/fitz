@@ -1286,6 +1286,89 @@ fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.11 — Paridad `.update` con List literal + Map literal
+//
+// Cubre la deuda residual de 10.b.8.a/b: el `.update(db, {...})`
+// con fields array/JSONB ahora emite el binding directo
+// (PgValue::Array para List<scalar>, JSONB serializado via
+// __FitzValue::Map para Map<Str, Any>), no el genérico
+// __IntoPgValue::into_pg que solo servía para primitivos.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_update_con_list_y_map_literal_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w11_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w11_test (\
+                 id bigint PRIMARY KEY, \
+                 tags int8[], \
+                 meta jsonb)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w11_test VALUES (1, '{1,2,3}', '{\"v\": 0}')",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w11_test\") type Item {{\n  \
+             @primary id: Int = 0\n  \
+             tags: List<Int>\n  \
+             meta: Map<Str, Any>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             let n = Item.where(fn(i) => i.id == 1).update(db, \
+                 {{\"tags\": [10, 20, 30], \"meta\": {{\"author\": \"ada\", \"version\": 7}}}}\
+             ).await?\n  \
+             let it = Item.where(fn(i) => i.id == 1).first(db).await?\n  \
+             return Ok(\"n={{n}} tags_len={{len(it.tags)}} meta_keys={{len(it.meta)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_upd_list_map_codegen", |stdout| {
+        assert!(
+            stdout.contains("n=1")
+                && stdout.contains("tags_len=3")
+                && stdout.contains("meta_keys=2"),
+            "esperaba `n=1 tags_len=3 meta_keys=2`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w11_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.10 — Tests paridad real Postgres exhaustivos
 //
 // Cobertura faltante de sub-pasos previos:
