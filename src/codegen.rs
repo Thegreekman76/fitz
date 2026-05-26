@@ -10031,6 +10031,10 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
     /// `u`). `fields` es la lista de fields del `type` decorado con
     /// `@table` (para validar referencias `u.field` contra los reales
     /// y resolver sql_name overrides).
+    // Fase 10.b.2 — emitido por adelantado para 10.b.5 (`.where`
+    // chain del QueryBuilder). El consumidor real aterriza ahí; el
+    // allow se quita cuando 10.b.5 cierre y wireemos el dispatch.
+    #[allow(dead_code)]
     fn translate_closure_to_sql(
         &mut self,
         body: &Expr,
@@ -10186,6 +10190,9 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
     /// Helper de `translate_closure_to_sql` para method calls del
     /// shape `u.field.method(args)`. Soporta is_null/is_not_null,
     /// is_in([...]), like/ilike, starts_with/ends_with/contains.
+    // Fase 10.b.2 — ditto translate_closure_to_sql: dead_code hasta
+    // que 10.b.5 wiree el dispatch del `.where` chain.
+    #[allow(dead_code)]
     fn translate_closure_method_call_to_sql(
         &mut self,
         callee: &Expr,
@@ -20023,6 +20030,10 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
 ///   - Nullable<T> → Option<T> con None para PgValue::Null.
 ///   - List<T>/Map<K,V>/Nominal → error de codegen citando el sub-paso
 ///     futuro (10.b.7 nominal nav, 10.b.8 JSONB+arrays).
+// `env` se conserva en la firma para 10.b.7 (validación nominal del
+// target_type de @belongs_to + sql_name override del target type) —
+// hoy solo se propaga vía recursión por la rama Nullable.
+#[allow(clippy::only_used_in_recursion)]
 fn orm_field_coerce_block(
     t: &Type,
     col_lit: &str,
@@ -20827,6 +20838,9 @@ fn rust_str_literal(s: &str) -> String {
 /// `.where(...)`. Paralelo a `escape_like` del evaluator (línea
 /// 12250 de src/evaluator.rs). Postgres usa `\` como escape char
 /// por default.
+// Dead_code hasta 10.b.5 — el consumidor (translate_closure_method_call_to_sql
+// → `.starts_with`/etc.) recién se wirea ahí.
+#[allow(dead_code)]
 fn translate_escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
