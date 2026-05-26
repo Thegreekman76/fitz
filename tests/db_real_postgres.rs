@@ -1286,6 +1286,116 @@ fn orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// Fase 10.b.15 — Paridad eager loading (.preload) sobre HasMany
+//
+// `User.where(...).preload("posts").all(db).await?` ejecuta el query
+// principal + 1 query batch al target con `WHERE fk IN (...)` y
+// poblua cada parent con su slice de children. Reduce N+1.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_preload_has_many_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w15_posts_test", &[])
+            .await;
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_w15_users_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_w15_users_test (id bigint PRIMARY KEY, name text)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "CREATE TABLE fitz_orm_w15_posts_test (\
+                 id bigint PRIMARY KEY, \
+                 title text, \
+                 user_id bigint REFERENCES fitz_orm_w15_users_test(id))",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.exec(
+            "INSERT INTO fitz_orm_w15_users_test VALUES (1, 'ada'), (2, 'alan'), (3, 'grace')",
+            &[],
+        )
+        .await
+        .unwrap();
+        // ada: 3 posts, alan: 1 post, grace: 0 posts.
+        seed.exec(
+            "INSERT INTO fitz_orm_w15_posts_test VALUES \
+                 (10, 'a',  1), \
+                 (11, 'b',  1), \
+                 (12, 'c',  1), \
+                 (13, 'd',  2)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_w15_posts_test\") type Post {{\n  \
+             @primary id: Int = 0\n  \
+             title: Str\n  \
+             user_id: Int\n\
+         }}\n\
+         @table(\"fitz_orm_w15_users_test\") type User {{\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             @has_many(\"Post\") posts: List<Post>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // Sin preload, u.posts es vacío (sentinel del codegen).\n  \
+             // Con preload, u.posts viene poblado del batch.\n  \
+             let users = User.preload(\"posts\").all(db).await?\n  \
+             let u0 = users[0]\n  \
+             let u1 = users[1]\n  \
+             let u2 = users[2]\n  \
+             return Ok(\"u0={{u0.name}}:{{len(u0.posts)}} u1={{u1.name}}:{{len(u1.posts)}} u2={{u2.name}}:{{len(u2.posts)}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(&src, "orm_preload_has_many_codegen", |stdout| {
+        // ada (id 1): 3 posts, alan (id 2): 1, grace (id 3): 0.
+        assert!(
+            stdout.contains("u0=ada:3")
+                && stdout.contains("u1=alan:1")
+                && stdout.contains("u2=grace:0"),
+            "esperaba `u0=ada:3 u1=alan:1 u2=grace:0`, fue: {}",
+            stdout
+        );
+    });
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed.exec("DROP TABLE fitz_orm_w15_posts_test", &[]).await;
+        let _ = seed.exec("DROP TABLE fitz_orm_w15_users_test", &[]).await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.14 — Paridad GROUP BY + aggregate (Aggregated<Row>)
 //
 // `.group_by(...).count/sum/avg/min/max(...).await?` ahora compila a

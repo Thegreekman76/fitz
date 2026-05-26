@@ -1595,9 +1595,28 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   bit-a-bit chain de 4 ops sobre nav + path legacy en el mismo
   programa. Kwargs (`instance.posts(limit=10)`) NO en MVP — usar
   el chain explícito. Más expressivo y consistente.
-- ☐ **Eager loading (preload)**: `User.where(...).preload("posts").
-  all(db)` para evitar N+1. Plan original era 10.b.9. Pendiente
-  para 10.b.15.
+- ✅ **Eager loading (preload)** — CERRADO 2026-05-26 (10.b.15).
+  `User.where(...).preload("posts").all(db).await?` evita N+1
+  ejecutando 1 query batch al target type con `WHERE fk IN
+  (parent_pks)` y poblando los fields virtuales de cada parent.
+  Implementación: state nuevo `preloads: Vec<String>` en el
+  `__FitzQueryBuilder<TData>` + método `with_preload(name)`. El
+  codegen de `.all`/`.first` envuelve el query base con un loop
+  que itera los preloads y, por cada uno, hace match estático
+  contra las HasMany relations conocidas del row type en
+  compile-time (cero overhead cuando no se usa). Helper
+  `emit_preload_dispatch(meta)` genera el bloque inline con el
+  SQL batch, deserialize a `Vec<Arc<Mutex<TargetData>>>`,
+  particionado por FK, y mutación del field virtual del parent.
+  Branch `.preload(name)` valida en codegen que name corresponda
+  a una relation @has_many declarada. `User.preload(...)`
+  directo + `User.where(...).preload(...)` chain ambos soportados.
+  Test paridad real: `orm_preload_has_many_paridad_codegen_e2e`
+  valida bit-a-bit `u0=ada:3 u1=alan:1 u2=grace:0` con 1 query
+  para users + 1 batch para posts (en vez de N+1). MVP solo
+  HasMany — BelongsTo y HasOne quedan como deuda menor abierta
+  para v0.11 si entra demanda (sus casos típicos los cubren
+  navigation methods directos sin riesgo de N+1).
 - ✅ **Cross-type navigation con `@column(name=...)` en el FK source
   field** — CERRADO 2026-05-26 (10.b.10.2). Test paridad real
   `orm_navigation_con_column_override_en_fk_source_paridad_codegen_e2e`

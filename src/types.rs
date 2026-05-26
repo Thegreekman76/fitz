@@ -4022,6 +4022,15 @@ fn infer_query_builder_method(
             check_method_arity(ctx, method, args_ty, 1, span);
             qb()
         }
+        // Fase 10.b.15 — `.preload("name")`: chain method que registra
+        // una relation a precargar. Preserva el row type del
+        // QueryBuilder. Args: 1 string literal (validado en codegen
+        // contra meta.relations del row). El runtime ejecuta el batch
+        // post-deserialize en `.all`/`.first`.
+        "preload" => {
+            check_method_arity(ctx, method, args_ty, 1, span);
+            qb()
+        }
         // Terminales async — envueltos en Future para que `.await?`
         // tipe correcto.
         "all" => {

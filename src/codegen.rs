@@ -5527,6 +5527,13 @@ struct __FitzQueryBuilder<TData> {
     /// `.all`/`.first`/`.count` los ignoran (mismo comportamiento del
     /// evaluator en `build_select_sql`).
     group_by_clauses: Vec<(String, String)>,
+    /// Fase 10.b.15 — nombres de relations a precargar (eager loading).
+    /// Solo HasMany en MVP. El codegen del `.all`/`.first` lee este
+    /// vec post-deserialize y ejecuta 1 query batch por preload
+    /// (`SELECT ... WHERE fk IN (parent_pks)`), particiona los
+    /// children por FK y poblua los fields virtuales del parent.
+    /// Default `Vec::new()` — programs sin .preload no pagan overhead.
+    preloads: Vec<String>,
     _phantom: std::marker::PhantomData<TData>,
 }
 
@@ -5541,8 +5548,16 @@ impl<TData> __FitzQueryBuilder<TData> {
             limit: None,
             offset: None,
             group_by_clauses: Vec::new(),
+            preloads: Vec::new(),
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Fase 10.b.15 — registra una relation a precargar (eager load).
+    /// Sólo HasMany en MVP. `name` es el Fitz field name (e.g. \"posts\").
+    fn with_preload(mut self, name: &str) -> Self {
+        self.preloads.push(name.to_string());
+        self
     }
 
     /// Suma un fragment WHERE con AND y renumera los placeholders del
@@ -11289,6 +11304,11 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             "group_by" => self
                 .gen_orm_type_group_by(type_name, args, call_span)
                 .map(Some),
+            // Fase 10.b.15 — `User.preload("posts")` directo (sin
+            // .where previo). Construye QB nuevo + aplica with_preload.
+            "preload" => self
+                .gen_orm_type_preload(type_name, args, call_span)
+                .map(Some),
             // Fase 10.b.5 — update/delete sin `.where(...)` previo se
             // rechazan en codegen con mensaje paralelo al guard runtime
             // del evaluator. Para update masivo el usuario debe escribir
@@ -12027,6 +12047,66 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         Ok((chain, Type::Aggregated(Box::new(Type::Nominal(id)))))
     }
 
+    /// Fase 10.b.15 — `Type.preload("name")` directo (sin `.where`
+    /// previo). Construye QB nuevo + aplica `with_preload(name)`.
+    /// Devuelve `QueryBuilder<Type>` para encadenar
+    /// `.where/.order_by/.limit/.all/.first`.
+    fn gen_orm_type_preload(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}.preload(name)` espera 1 argumento (Str), recibió {}",
+                    type_name,
+                    args.len()
+                ),
+            ));
+        }
+        let name = match &args[0] {
+            Expr::Str(s, _) => s.clone(),
+            _ => {
+                return Err(self.err_at(
+                    args[0].span(),
+                    "`.preload(name)` MVP: el arg debe ser string literal",
+                ));
+            }
+        };
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        // Validar que `name` es una relation HasMany del type.
+        let rel = meta.relations.get(&name).ok_or_else(|| {
+            self.err_at(
+                call_span,
+                format!(
+                    "`{}.preload(\"{}\")`: no es una relation declarada (relations: {})",
+                    type_name,
+                    name,
+                    meta.relations
+                        .keys()
+                        .map(|k| k.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            )
+        })?;
+        if !matches!(rel.kind, crate::types::RelationKind::HasMany) {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}.preload(\"{}\")` MVP: solo @has_many (recibido: {:?})",
+                    type_name, name, rel.kind
+                ),
+            ));
+        }
+        let new_expr = Self::emit_qb_new(type_name, &meta, &fields);
+        let chain = format!("({}).with_preload({})", new_expr, rust_str_literal(&name));
+        Ok((chain, self.qb_type(type_name)))
+    }
+
     /// Resuelve `meta + fields` del row type para un QueryBuilder receiver.
     /// El row type viene como `Type::Nominal(TypeId)` (el checker tipa
     /// `QueryBuilder<UserRow>` así).
@@ -12129,6 +12209,69 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     self.emit_qb_group_by_chain(receiver_code, args, call_span, &meta, &fields)?;
                 Ok(Some((chain, Type::Aggregated(Box::new(row.clone())))))
             }
+            // Fase 10.b.15 — `.preload("name")`: registra una relation
+            // HasMany para eager loading. Valida que `name` corresponda
+            // a un field virtual @has_many del row type. El .all/.first
+            // posterior emite el batch + populate.
+            "preload" => {
+                if is_aggregated {
+                    return Err(self.err_at(
+                        call_span,
+                        "`.preload(...)` no es válido sobre un GROUP BY (Aggregated)".to_string(),
+                    ));
+                }
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.preload(name)` espera 1 arg (nombre de relation @has_many), recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let name = match &args[0] {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            "`.preload(name)` MVP: el arg debe ser string literal",
+                        ));
+                    }
+                };
+                // Validar que `name` es una relation HasMany del row.
+                let rel = meta.relations.get(&name).ok_or_else(|| {
+                    self.err_at(
+                        call_span,
+                        format!(
+                            "`.preload(\"{}\")`: el type `{}` no declara una relation con ese name (relations disponibles: {})",
+                            name,
+                            type_name,
+                            meta.relations
+                                .keys()
+                                .map(|k| k.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                    )
+                })?;
+                if !matches!(rel.kind, crate::types::RelationKind::HasMany) {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.preload(\"{}\")` MVP: solo se soporta @has_many (recibido: {:?})",
+                            name, rel.kind
+                        ),
+                    ));
+                }
+                Ok(Some((
+                    format!(
+                        "({receiver}).with_preload({name_lit})",
+                        receiver = receiver_code,
+                        name_lit = rust_str_literal(&name),
+                    ),
+                    qb_ty(),
+                )))
+            }
             // Terminales async — wrap en async block sobre el receiver.
             "all" => {
                 let _ = data_name; // marcador — usado por las firmas async
@@ -12147,14 +12290,36 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
                 let ret_ty = Type::Future(Box::new(Type::Result {
-                    ok: Box::new(Type::List(Box::new(row_ty))),
+                    ok: Box::new(Type::List(Box::new(row_ty.clone()))),
                     err: Box::new(Type::Str),
                 }));
-                let code = format!(
-                    "(async {{ ({receiver}).all(&{db}).await }})",
-                    receiver = receiver_code,
-                    db = db_code,
-                );
+                // Fase 10.b.15 — emit el wrapper con preload dispatch
+                // si el row type tiene relations HasMany. Sin HasMany
+                // (la mayoría de los types), emite el path simple del
+                // pre-10.b.15 sin overhead.
+                let preload_dispatch = self.emit_preload_dispatch(&type_name, &meta)?;
+                let code = if preload_dispatch.is_empty() {
+                    format!(
+                        "(async {{ ({receiver}).all(&{db}).await }})",
+                        receiver = receiver_code,
+                        db = db_code,
+                    )
+                } else {
+                    format!(
+                        "(async {{ \
+                            let __qb = ({receiver}); \
+                            let __preloads = __qb.preloads.clone(); \
+                            let __conn_pl = ({db}).clone(); \
+                            match __qb.all(&__conn_pl).await {{ \
+                                Ok(__rows) => {{ {dispatch} Ok(__rows) }} \
+                                Err(__e) => Err(__e), \
+                            }} \
+                        }})",
+                        receiver = receiver_code,
+                        db = db_code,
+                        dispatch = preload_dispatch,
+                    )
+                };
                 Ok(Some((code, ret_ty)))
             }
             "first" => {
@@ -12175,14 +12340,40 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
                 let ret_ty = Type::Future(Box::new(Type::Result {
-                    ok: Box::new(row_ty),
+                    ok: Box::new(row_ty.clone()),
                     err: Box::new(Type::Str),
                 }));
-                let code = format!(
-                    "(async {{ ({receiver}).first(&{db}).await }})",
-                    receiver = receiver_code,
-                    db = db_code,
-                );
+                // Fase 10.b.15 — `.first` con preloads: ejecuta el
+                // query base, envuelve el single row en un Vec
+                // temporario para reusar el preload dispatch, y
+                // devuelve el row al final.
+                let preload_dispatch = self.emit_preload_dispatch(&type_name, &meta)?;
+                let code = if preload_dispatch.is_empty() {
+                    format!(
+                        "(async {{ ({receiver}).first(&{db}).await }})",
+                        receiver = receiver_code,
+                        db = db_code,
+                    )
+                } else {
+                    format!(
+                        "(async {{ \
+                            let __qb = ({receiver}); \
+                            let __preloads = __qb.preloads.clone(); \
+                            let __conn_pl = ({db}).clone(); \
+                            match __qb.first(&__conn_pl).await {{ \
+                                Ok(__one) => {{ \
+                                    let __rows = std::sync::Arc::new(std::sync::Mutex::new(vec![__one.clone()])); \
+                                    {dispatch} \
+                                    Ok(__one) \
+                                }} \
+                                Err(__e) => Err(__e), \
+                            }} \
+                        }})",
+                        receiver = receiver_code,
+                        db = db_code,
+                        dispatch = preload_dispatch,
+                    )
+                };
                 Ok(Some((code, ret_ty)))
             }
             "count" => {
@@ -12666,6 +12857,108 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             recv = receiver_code,
             fitz = rust_str_literal(&col_name),
             sql = rust_str_literal(&sql_col),
+        ))
+    }
+
+    /// Fase 10.b.15 — emite el bloque Rust que itera los preloads
+    /// registrados en el state del QB y, por cada uno, ejecuta un
+    /// batch query al target type y poblua el field virtual del
+    /// parent. Match estático con un arm por cada relation HasMany
+    /// declarada en el `parent_meta`. Otros kinds (BelongsTo/HasOne)
+    /// quedan rechazados en compile-time por el branch `.preload`
+    /// en gen_orm_qb_method (MVP); si igual llega, el `_` arm del
+    /// match runtime devuelve Err.
+    ///
+    /// El bloque emitido se inserta DESPUÉS del `.all/.first` con
+    /// `__rows` (Vec<Arc<Mutex<TData>>>) en scope. Conn = `__conn`.
+    /// Si NO hay relations HasMany, el bloque solo emite el default
+    /// arm — los .all/.first sin preloads no entran al for loop.
+    fn emit_preload_dispatch(
+        &mut self,
+        parent_type_name: &str,
+        parent_meta: &crate::types::TableMetadata,
+    ) -> Result<String, FitzError> {
+        let mut arms = String::new();
+        let parent_pk = parent_meta.primary_field.clone().unwrap_or_default();
+        for (rel_name, rel) in parent_meta.relations.iter() {
+            if !matches!(rel.kind, crate::types::RelationKind::HasMany) {
+                continue;
+            }
+            let target_name = &rel.target_type;
+            let (target_meta, target_fields) =
+                self.orm_lookup_meta_and_fields(target_name, crate::ast::Span::ZERO)?;
+            let target_data = format!("{}Data", target_name);
+            let target_table = &target_meta.sql_name;
+            let cols = Self::orm_build_qb_cols(&target_meta, &target_fields);
+            let fk_sql = target_meta
+                .columns
+                .get(&rel.fk_field)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(rel.fk_field.as_str())
+                .to_string();
+            // El parent_field es el Fitz name de la relation declarada
+            // en el parent (e.g. "posts"). El fk_field es el name del
+            // FK en el target (e.g. "user_id").
+            let parent_field = rel_name;
+            let fk_fitz = &rel.fk_field;
+            arms.push_str(&format!(
+                "{name_lit} => {{ \
+                    let __ids: Vec<__FitzPgValue> = {{ \
+                        let __guard = __rows.lock().unwrap(); \
+                        __guard.iter().map(|__p| {{ let __g = __p.lock().unwrap(); __FitzPgValue::Int(__g.{parent_pk}) }}).collect() \
+                    }}; \
+                    if !__ids.is_empty() {{ \
+                        let __placeholders = (1..=__ids.len()).map(|__i| format!(\"${{}}\", __i)).collect::<Vec<_>>().join(\", \"); \
+                        let __sql = format!(\"SELECT {cols_lit} FROM \\\"{table_lit}\\\" WHERE \\\"{fk_lit}\\\" IN ({{}})\", __placeholders); \
+                        match __fitz_db_query(&__conn_pl, __sql, __ids).await {{ \
+                            Ok(__child_rows) => {{ \
+                                let __cg = __child_rows.lock().unwrap(); \
+                                let mut __children: Vec<std::sync::Arc<std::sync::Mutex<{target_data}>>> = Vec::with_capacity(__cg.len()); \
+                                for __r in __cg.iter() {{ \
+                                    match <{target_data} as __FromFitzDbRow>::from_fitz_db_row(__r) {{ \
+                                        Ok(__d) => __children.push(std::sync::Arc::new(std::sync::Mutex::new(__d))), \
+                                        Err(__e) => return Err(__e), \
+                                    }} \
+                                }} \
+                                drop(__cg); \
+                                let __pg = __rows.lock().unwrap(); \
+                                for __p in __pg.iter() {{ \
+                                    let __pid = {{ let __g = __p.lock().unwrap(); __g.{parent_pk} }}; \
+                                    let __matching: Vec<std::sync::Arc<std::sync::Mutex<{target_data}>>> = __children.iter().filter(|__c| {{ \
+                                        let __cg2 = __c.lock().unwrap(); __cg2.{fk_fitz} == __pid \
+                                    }}).cloned().collect(); \
+                                    let mut __pg2 = __p.lock().unwrap(); \
+                                    __pg2.{parent_field} = std::sync::Arc::new(std::sync::Mutex::new(__matching)); \
+                                }} \
+                            }} \
+                            Err(__e) => return Err(__e), \
+                        }} \
+                    }} \
+                }}, ",
+                name_lit = rust_str_literal(rel_name),
+                parent_pk = parent_pk,
+                cols_lit = cols.replace('"', "\\\""),
+                table_lit = target_table,
+                fk_lit = fk_sql,
+                target_data = target_data,
+                fk_fitz = fk_fitz,
+                parent_field = parent_field,
+            ));
+        }
+        // Si no hay HasMany relations en el parent, el for loop no
+        // tiene branches útiles. Devolvemos un bloque vacío para
+        // simplificar — `.preload()` en gen_orm_qb_method ya rechaza
+        // names sin HasMany en el row, así que no llegamos acá con
+        // preloads esperando ser procesados.
+        if arms.is_empty() {
+            return Ok(String::new());
+        }
+        Ok(format!(
+            "for __name in __preloads.iter() {{ \
+                match __name.as_str() {{ {arms} _ => return Err(format!(\"preload `{{}}`: relation no soportada en {parent}\", __name)), }} \
+            }} ",
+            arms = arms,
+            parent = parent_type_name,
         ))
     }
 
@@ -30577,6 +30870,83 @@ mod tests {
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
             "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+        );
+    }
+
+    // ---- Fase 10.b.15 — Eager loading (.preload sobre HasMany) ----
+
+    #[test]
+    fn codegen_preload_emite_with_preload_y_dispatch_estatico() {
+        // `User.preload("posts").all(db)` debe emitir el wrapper
+        // con .with_preload("posts") + el dispatch estático que
+        // ejecuta el batch + populate.
+        let src = "@table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       user_id: Int\n\
+                   }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_many(\"Post\") posts: List<Post>\n\
+                   }\n\
+                   async fn boot() -> Result<List<User>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return User.preload(\"posts\").all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains(".with_preload(\"posts\")"),
+            "esperaba .with_preload(\"posts\") en el chain, fue: {rust}",
+        );
+        // El dispatch estático debe estar presente con el branch para "posts".
+        assert!(
+            rust.contains("\"posts\" =>") && rust.contains("__preloads.iter()"),
+            "esperaba el dispatch estático con branch para `posts`, fue: {rust}",
+        );
+        // Query batch del target (Post) con `WHERE \"user_id\" IN (...)`.
+        assert!(
+            rust.contains("FROM \\\"post\\\"") && rust.contains("\\\"user_id\\\" IN"),
+            "esperaba batch query con FROM post + WHERE user_id IN, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_preload_belongs_to_aborta_solo_has_many() {
+        // `.preload(name)` solo acepta @has_many. BelongsTo → error.
+        let src = "@table type User { @primary id: Int = 0 }\n\
+                   @table type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       @belongs_to(\"User\") user_id: Int\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = Post.preload(\"user_id\").all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por BelongsTo en preload");
+        assert!(
+            err.message.contains("@has_many"),
+            "esperaba mención de @has_many como restricción MVP, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_preload_nombre_inexistente_aborta() {
+        let src = "@table type Post { @primary id: Int = 0, user_id: Int }\n\
+                   @table type User {\n  \
+                       @primary id: Int = 0\n  \
+                       @has_many(\"Post\") posts: List<Post>\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.preload(\"bogus\").all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error por relation inexistente");
+        assert!(
+            err.message.contains("bogus") && err.message.contains("relation"),
+            "esperaba mención de relation no declarada, fue: {}",
+            err.message
         );
     }
 
