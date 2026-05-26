@@ -1,0 +1,141 @@
+// cap 31 (avanzado) — CRUD HTTP completo con ORM nativo + Postgres.
+//
+// Showcase del stack web first-class del lado server:
+//   HTTP nativo (cap 17) + body deserialization +
+//   ORM declarativo (cap 31) + relations + preload +
+//   env vars (cap 32) + @server config.
+//
+// Cero deps externas: el driver Postgres + el ORM viven en el
+// binario `fitz`. `fitz build` produce un .exe/ELF/Mach-O
+// standalone que habla wire protocol v3.0 sin libpq.
+//
+// Setup pre-condición para correr el binario:
+//
+//   1. Postgres real corriendo (default: localhost:5432, db `fitz_demo`).
+//   2. Var de entorno DATABASE_URL (opcional — default abajo).
+//
+//   $ createdb fitz_demo
+//   $ export DATABASE_URL="postgres://postgres:postgres@localhost/fitz_demo?sslmode=disable"
+//   $ fitz build examples/guide/31b-orm-crud-http.fitz
+//   $ ./31b-orm-crud-http
+//
+// Si NO hay Postgres real, el binario falla al boot con error de
+// conexión claro. La compilación con `fitz build` es independiente
+// — el codegen del ORM se valida en compile-time sin tocar DB.
+//
+// Endpoints expuestos:
+//
+//   GET    /                       — health check
+//   GET    /users                  — lista todos
+//   GET    /users/{id}             — uno por id
+//   POST   /users                  — crea (body: UserInput)
+//   PUT    /users/{id}             — actualiza (body: UserInput)
+//   DELETE /users/{id}             — borra
+//   GET    /users/{id}/posts       — posts del user (relation query)
+//   POST   /posts                  — crea post (body: PostInput)
+//   GET    /users-with-posts       — preload (cierra N+1)
+//   GET    /user-count             — aggregate scalar
+//
+// Nota: el endpoint GROUP BY (`User.group_by(...).count(db)`)
+// devuelve `List<Map<Str, Any>>` — el codegen HTTP no serializa
+// hoy `Map<Str, Any>` a JSON automáticamente (gap residual de
+// Fase 10.b). Workaround: query crudo con `db.query(...)` y
+// formatear manual. El cap 31 muestra el patrón GROUP BY en
+// `31-orm.fitz` (corre con `fitz run` sin esta limitación).
+
+// --- 1. Tipos ORM con relations ----------------------------------------
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    name: Str
+    @has_many("Post", via="user_id") posts: List<Post>
+}
+
+@table("posts") type Post {
+    @primary id: Int = 0
+    title: Str
+    body: Str
+    @belongs_to("User") user_id: Int
+}
+
+// --- 2. Body shapes (entradas HTTP separadas del shape DB) -----------
+
+type UserInput { email: Str, name: Str }
+type PostInput { title: Str, body: Str, user_id: Int }
+
+// --- 3. Helper de conexión: lee DATABASE_URL con default ------------
+
+async fn open_db() -> Result<DbConn> {
+    let url = env_or("DATABASE_URL", "postgres://postgres:postgres@localhost/fitz_demo?sslmode=disable")
+    return db.connect(url).await
+}
+
+// --- 4. Handlers HTTP --------------------------------------------------
+
+@server(31980)
+fn main() => 0
+
+@get("/")
+fn index() -> Str => "Fitz CRUD ORM corriendo 🏔️"
+
+@get("/users")
+async fn list_users() -> Result<List<User>> {
+    let conn = open_db().await?
+    return User.all(conn).await
+}
+
+@get("/users/{id}")
+async fn get_user(id: Int) -> Result<User> {
+    let conn = open_db().await?
+    return User.where(fn(u) => u.id == id).first(conn).await
+}
+
+@post("/users")
+async fn create_user(body: UserInput) -> Result<User> {
+    let conn = open_db().await?
+    let u = User { id: 0, email: body.email, name: body.name, posts: [] }
+    return User.insert(conn, u).await
+}
+
+@put("/users/{id}")
+async fn update_user(id: Int, body: UserInput) -> Result<Int> {
+    let conn = open_db().await?
+    return User.where(fn(u) => u.id == id)
+        .update(conn, {"email": body.email, "name": body.name})
+        .await
+}
+
+@delete("/users/{id}")
+async fn delete_user(id: Int) -> Result<Int> {
+    let conn = open_db().await?
+    return User.where(fn(u) => u.id == id).delete(conn).await
+}
+
+@get("/users/{id}/posts")
+async fn list_user_posts(id: Int) -> Result<List<Post>> {
+    let conn = open_db().await?
+    return Post.where(fn(p) => p.user_id == id).all(conn).await
+}
+
+@post("/posts")
+async fn create_post(body: PostInput) -> Result<Post> {
+    let conn = open_db().await?
+    let p = Post { id: 0, title: body.title, body: body.body, user_id: body.user_id }
+    return Post.insert(conn, p).await
+}
+
+@get("/users-with-posts")
+async fn users_with_posts() -> Result<List<User>> {
+    // Eager loading: 1 query batch para users + 1 query batch para
+    // TODOS los posts (WHERE user_id IN (...)). Cierra el N+1.
+    let conn = open_db().await?
+    return User.preload("posts").all(conn).await
+}
+
+@get("/user-count")
+async fn user_count() -> Result<Int> {
+    // Aggregate scalar: count total de users.
+    let conn = open_db().await?
+    return User.count(conn).await
+}

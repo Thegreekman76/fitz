@@ -1,4 +1,4 @@
-// cap 32 — ORM nativo (Fase 10.b).
+// cap 31 — ORM nativo (Fase 10.b).
 //
 // Postgres + Fitz: types con decoradores @table, @primary, @column,
 // @belongs_to, @has_many. Una sola fuente de verdad para schema +

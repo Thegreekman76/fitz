@@ -71,13 +71,14 @@ abrí un issue.
 28. [Auth nativa](#28-auth-nativa)
 29. [WebSockets tipados](#29-websockets-tipados)
 30. [Jobs sin Celery](#30-jobs-sin-celery)
+31. [Postgres + ORM nativo](#31-postgres--orm-nativo)
 
 **Parte 12 — Operacional**
-31. [Variables de entorno](#31-variables-de-entorno)
+32. [Variables de entorno](#32-variables-de-entorno)
 
 **Parte 13 — Cerrando**
-32. [Plantillas y boilerplates](#32-plantillas-y-boilerplates)
-33. [Qué sigue](#33-qué-sigue)
+33. [Plantillas y boilerplates](#33-plantillas-y-boilerplates)
+34. [Qué sigue](#34-qué-sigue)
 
 ---
 
@@ -10943,7 +10944,555 @@ endurecimiento para servicios críticos".
 
 ---
 
-## 31. Variables de entorno
+## 31. Postgres + ORM nativo
+
+> **Hito del proyecto (v0.10.0 + v0.10.1)** — este capítulo cierra
+> **Fase 10 entera + Fase 10.b**: driver Postgres puro escrito en
+> Fitz (sin libpq) + ORM declarativo sobre `type` + paridad
+> bit-a-bit `fitz run` ↔ `fitz build`. La promesa del proyecto de
+> "stack web first-class del lado server" está completa: HTTP nativo
+> (cap 17) + auth (28) + WebSockets (29) + jobs (30) + DB +
+> ORM (este). Todo en el binario `fitz`, cero deps externas para
+> features intrínsecas.
+
+En SQLAlchemy/Django ORM/ActiveRecord/Hibernate/Prisma la
+combinación DB driver + ORM se construye sumando librerías al
+proyecto: `pip install sqlalchemy psycopg2`, `pip install
+django + django.db`, gem `pg + activerecord`, JDBC driver +
+Hibernate JARs, `npm install prisma + @prisma/client`. Cinco
+dependencias mínimo, configuración manual, decoradores
+"mágicos" que se resuelven en runtime con reflection
+(`@Entity`/`@OneToMany` de JPA), generación de schema separada
+(Prisma exige `prisma generate` antes de cada build), tipado
+opcional que no respeta el shape real de la tabla. Y a la hora
+de compilar a binario nativo: imposible para Python/Ruby, parche
+para Node (con `pkg`/`nexe` y limitaciones), funciona en Go
+(`pgx` + `gorm`) pero arrastra un ORM separado del compilador.
+
+En Fitz, **DB + ORM son parte del lenguaje**. El módulo `db`
+viene con un driver Postgres puro escrito en Fitz/Rust (~2400
+LoC en `src/db.rs`, sin link a libpq) que habla wire protocol
+v3.0 + SCRAM-SHA-256 + parser de 11 OIDs core. Encima del
+driver, cinco decoradores nativos (`@table`, `@primary`,
+`@column`, `@belongs_to`, `@has_many`, `@has_one`) declaran el
+mapping `type` Fitz ↔ tabla Postgres. El type checker valida
+estáticamente que `@primary` exista, que `@belongs_to` apunte
+a un type existente, que los métodos del `QueryBuilder<Row>`
+preserven el tipo del row a lo largo de toda la chain. Y el
+codegen produce un binario nativo que ejecuta queries SQL
+**constantes en compile-time** (cada `.where(fn(u) => u.age >
+18)` se traduce al fragmento `"age" > $1` durante el codegen,
+zero overhead runtime para construir SQL). Paridad bit-a-bit
+entre `fitz run` y `fitz build` — el mismo programa corre
+idéntico en intérprete y binario nativo.
+
+### Las piezas
+
+**Driver `db`** — módulo built-in. Siempre disponible, sin import.
+
+```fitz
+let db = db.connect("postgres://user:pass@host:5432/dbname?sslmode=disable").await?
+
+let rows = db.query("SELECT id, email FROM users WHERE active = $1", [true]).await?
+// rows: List<Map<Str, Any>>
+
+let affected = db.exec("UPDATE users SET last_seen = NOW() WHERE id = $1", [42]).await?
+// affected: Int
+
+db.close().await?
+```
+
+URL formato estándar Postgres (`postgres://[user[:pass]@]host[:port]/dbname[?params]`).
+`sslmode=disable` requerido en MVP (TLS strict viene como
+sub-paso futuro). El driver mantiene un pool de conexiones
+internamente con reconnect automático cuando una conn muere
+(health check via `Weak<DbPool>` + cleanup automático).
+
+**`@table("nombre")`** — sobre un `type`. Lo marca como una
+tabla. Implica que el ORM puede emitir SELECT/INSERT/UPDATE/
+DELETE sobre el `type`.
+
+```fitz
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    age: Int
+    role: Str = "user"
+}
+```
+
+**`@primary`** — sobre un field. Debe haber exactamente uno por
+`type` con `@table`. Tipo Int (auto-asignado por bigserial) o
+Str (UUID generado por el cliente). El checker exige unicidad.
+
+**`@column(name="snake_case_col")`** — sobre un field cuando el
+nombre del field Fitz difiere del de la columna en la tabla
+(camelCase ↔ snake_case típico):
+
+```fitz
+@table("orders") type Order {
+    @primary id: Int = 0
+    @column(name="user_id") user_id_fk: Int
+    @column(name="created_at") created: Str  // ISO 8601
+}
+```
+
+**`@belongs_to("Target")`**, **`@has_many("Target")`**,
+**`@has_one("Target")`** — sobre fields para declarar relations
+cross-table:
+
+```fitz
+@table("posts") type Post {
+    @primary id: Int = 0
+    title: Str
+    @belongs_to("User") user_id: Int   // FK real en la tabla
+}
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    @has_many("Post", via="user_id") posts: List<Post>
+    // ↑ field virtual: NO entra al SELECT/INSERT normal,
+    //   hidrata vía .preload(...) o post.user_id(db).
+}
+```
+
+### Read methods + QueryBuilder chain
+
+**`Type.all(db)`** — devuelve todas las rows como `List<Type>`:
+
+```fitz
+let users: List<User> = User.all(db).await?
+```
+
+**`Type.where(closure) -> QueryBuilder<Type>`** — empieza una
+chain de filtros. El closure recibe un nominal del row y
+devuelve un Bool. El checker valida estáticamente que el closure
+referencie fields que existen en el `type`. El translator
+DURANTE EL CODEGEN walka el AST del closure y emite SQL
+parametrizado:
+
+```fitz
+// `(age > 18 AND role = 'admin') OR id = 1`
+let admins = User.where(fn(u) => (u.age > 18 and u.role == "admin") or u.id == 1)
+    .all(db).await?
+```
+
+**Chain methods**: `.order_by(closure, ascending: Bool)`,
+`.limit(n)`, `.offset(n)`, `.group_by(closure)`. Todos preservan
+el tipo del row:
+
+```fitz
+let top = User.where(fn(u) => u.age >= 18)
+    .order_by(fn(u) => u.age, ascending: false)
+    .limit(10)
+    .offset(0)
+    .all(db).await?
+```
+
+**Terminales**: `.all(db) -> Result<List<Row>>`,
+`.first(db) -> Result<Row>` (error si no hay match),
+`.count(db) -> Result<Int>`.
+
+**Operadores soportados en `.where(...)`**: comparators (`==`,
+`!=`, `<`, `<=`, `>`, `>=`), lógicos (`and`/`or`/`not`),
+aritméticos (`+`/`-`/`*`/`/`/`%`), `between(a, b)` sobre fields
+numéricos, vars externas al closure (lookup en el scope), y
+method calls sobre columns que se mapean a SQL nativo:
+
+```fitz
+let active = User.where(fn(u) => u.email.is_not_null()).all(db).await?
+let bands = User.where(fn(u) => u.age.between(18, 65)).all(db).await?
+let pattern = User.where(fn(u) => u.email.starts_with("ada")).all(db).await?
+let one_of = User.where(fn(u) => u.id.is_in([1, 2, 3])).all(db).await?
+
+let min = 18
+let adults = User.where(fn(u) => u.age >= min).all(db).await?  // var externa
+```
+
+Métodos sobre columns Str: `.is_null()`, `.is_not_null()`,
+`.is_in([...])`, `.like(pat)`, `.ilike(pat)`, `.starts_with(s)`,
+`.ends_with(s)`, `.contains(s)`. Patterns con `%`/`_` se
+escapan automáticamente. `is_in` con lista vacía → error claro.
+
+### Write methods + guard `.where(...)` obligatorio
+
+**`Type.insert(db, row)`** — inserta un row. Si el `@primary`
+es Int con default `= 0`, Postgres lo auto-asigna (`bigserial`)
+y el resultado tiene el id real:
+
+```fitz
+let inserted = User.insert(db, User { id: 0, email: "ada@x.com", age: 35 }).await?
+print(inserted.id)  // 42 (auto-asignado por Postgres)
+```
+
+**`.update(db, changes)`** y **`.delete(db)`** — sobre un
+`QueryBuilder<Row>` con `.where(...)` previo **obligatorio**.
+El ORM rechaza estáticamente updates/deletes sin guard
+(`Type.update(db, {...})` directo sin `.where(...)` → error
+de codegen). Esto previene el accidente clásico de "olvidé
+el WHERE":
+
+```fitz
+let updated_rows = User.where(fn(u) => u.id == 42)
+    .update(db, {"age": 36, "role": "admin"})
+    .await?
+
+let deleted_rows = User.where(fn(u) => u.role == "trial" and u.age < 18)
+    .delete(db).await?
+```
+
+`.update` acepta tanto Map literal heterogéneo (`{"key": val,
+...}`) como literales List/Map nativos (10.b.11 los habilita
+con casts `::text[]`/`::jsonb` apropiados).
+
+### Aggregates scalar + GROUP BY
+
+Sobre `QueryBuilder<Row>` los agregados scalar devuelven `Float`:
+
+```fitz
+let total: Int = User.count(db).await?
+let avg_age: Float = User.avg(fn(u) => u.age, db).await?
+let max_id: Float = User.max(fn(u) => u.id, db).await?
+let sum_logins: Float = User.where(fn(u) => u.active).sum(fn(u) => u.login_count, db).await?
+```
+
+(Cast `::float8` automático en `avg` para evitar el OID Numeric
+del driver — el wire protocol se simplifica.)
+
+**`.group_by(closure)`** devuelve un `Aggregated<Row>`, NO un
+`QueryBuilder<Row>`. La diferencia: `Aggregated.count(db)`/
+`.sum(...)`/etc devuelven `List<Map<Str, Any>>` con un row por
+grupo, no un scalar:
+
+```fitz
+let by_role: List<Map<Str, Any>> = User.group_by(fn(u) => u.role).count(db).await?
+// by_role[0] → {"role": "admin", "count": 3}
+// by_role[1] → {"role": "user", "count": 47}
+```
+
+El checker distingue estáticamente `QueryBuilder<Row>` de
+`Aggregated<Row>` con la variante `Type::Aggregated(Box<Type>)`
+(refactor de 10.b.14) — typos de método se detectan en compile-
+time, no runtime.
+
+### Relations + navigation methods
+
+Después de declarar `@belongs_to`/`@has_many`/`@has_one`, cada
+field genera un **método de navegación** sobre la instancia:
+
+```fitz
+@table("posts") type Post {
+    @primary id: Int = 0
+    title: Str
+    @belongs_to("User") user_id: Int
+}
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    @has_many("Post", via="user_id") posts: List<Post>
+}
+
+let post = Post.where(fn(p) => p.id == 1).first(db).await?
+
+// BelongsTo: el método se llama como el field FK.
+let author: User = post.user_id(db).await?
+
+// HasMany: el método se llama como el field virtual declarado.
+let user_posts: List<Post> = author.posts(db).await?
+```
+
+Cada navigation hace **un SELECT por call** (lazy). Para
+evitar el clásico N+1 (1 SELECT del User + N SELECTs por cada
+post), Fitz tiene eager loading.
+
+**Navigation chain**: cuando se llama una navigation `belongs_
+to`/`has_many` SIN el `db` (`args.is_empty()`), devuelve un
+`QueryBuilder<Target>` que se puede seguir encadenando:
+
+```fitz
+// Equivale a SELECT * FROM posts WHERE user_id = author.id LIMIT 5 ORDER BY id DESC
+let latest_5 = author.posts()
+    .order_by(fn(p) => p.id, ascending: false)
+    .limit(5)
+    .all(db).await?
+```
+
+Por diseño: `user.posts(db)` es el terminal directo,
+`user.posts()` empieza chain. Los terminales (`.all`/`.first`/
+`.count`/etc.) son obligatorios para ejecutar.
+
+### Eager loading: `.preload(...)`
+
+Cierra el N+1 con **dispatch estático en compile-time**. El
+relation name viaja como Str literal en `.preload(...)`; el
+codegen emite un `match` exhaustivo por type con la rama
+correspondiente. **Typos detectados en compile-time, no
+runtime**:
+
+```fitz
+// 1 query batch para los users + 1 query batch para
+// TODOS los posts WHERE user_id IN (id_user_1, id_user_2, ...)
+let with_posts: List<User> = User.preload("posts").all(db).await?
+for u in with_posts {
+    print("{u.email}: {len(u.posts)} posts")
+    // u.posts ya está hidratado — cero queries adicionales.
+}
+```
+
+En el MVP solo `HasMany`. `BelongsTo` eager (cargar el author
+de N posts en 2 queries) queda como refinamiento.
+
+### Tipos avanzados: JSONB, arrays, Map<Str, T>
+
+**JSONB** — un field `data: Map<Str, Any>` se mapea a columna
+`jsonb`. INSERT serializa con `serde_json` (`preserve_order`)
+y cast `::jsonb`. SELECT parsea el text JSON con `__FitzValue`
+(enum tagged que preserva shape heterogéneo). Null Fitz → NULL
+real (no la string `"null"`):
+
+```fitz
+@table("events") type Event {
+    @primary id: Int = 0
+    name: Str
+    data: Map<Str, Any>   // jsonb column
+}
+
+let e = Event.insert(db, Event { id: 0, name: "click",
+    data: {"page": "/home", "ts": 1700000000, "user": null}
+}).await?
+// SELECT round-trip preserva el shape:
+let back = Event.where(fn(e) => e.id == e.id).first(db).await?
+print(back.data["page"])  // "/home"
+```
+
+**Arrays Postgres** — `List<scalar>` ↔ `T[]`:
+`List<Int>`/`Str`/`Float`/`Bool` se mapean a `int8[]`/`text[]`/
+`float8[]`/`bool[]` respectivamente. INSERT/UPDATE emiten el
+cast apropiado (`::int8[]`/etc.). SELECT round-trip preserva
+el orden:
+
+```fitz
+@table("posts") type Post {
+    @primary id: Int = 0
+    title: Str
+    tags: List<Str>     // text[] column
+    scores: List<Int>   // int8[] column
+}
+
+let p = Post.insert(db, Post { id: 0, title: "Hola",
+    tags: ["rust", "postgres"], scores: [10, 20, 30]
+}).await?
+print(p.tags[0])  // "rust"
+```
+
+**NULL en arrays** (10.b.12.a): `List<Int?>` ↔ `int8[]` con
+elementos nullable. El text format Postgres `{a,NULL,c}` se
+parsea/encodea simétricamente:
+
+```fitz
+@table("readings") type Reading {
+    @primary id: Int = 0
+    samples: List<Int?>   // int8[] con NULL aceptable
+}
+```
+
+**Map<Str, T> concreto** (10.b.12.b) — alternativa a `Map<Str,
+Any>` cuando todos los values son del mismo tipo primitivo
+(Int/Float/Str/Bool). El marshaling es directo (HashMap<String,
+T>), sin overhead de enum dispatch:
+
+```fitz
+@table("metrics") type MetricSnapshot {
+    @primary id: Int = 0
+    counters: Map<Str, Int>   // jsonb con shape homogéneo
+}
+```
+
+K se restringe a Str (Postgres jsonb keys son strings). `Map<Int,
+Int>` → error claro.
+
+**Array ops en `.where(...)`** (10.b.9.c): operadores Postgres
+sobre arrays se mapean a method calls Fitz:
+
+```fitz
+// "rust" = ANY(tags)
+let rusty = Post.where(fn(p) => p.tags.has("rust")).all(db).await?
+
+// tags @> ARRAY['rust', 'postgres']
+let both = Post.where(fn(p) => p.tags.contains_all(["rust", "postgres"])).all(db).await?
+
+// scores <@ ARRAY[1, 2, ..., 100]
+let small = Post.where(fn(p) => p.scores.contained_in([1, 2, 3, 4, 5])).all(db).await?
+```
+
+### Escape hatch: `db.query`/`db.exec` crudo
+
+Cuando el ORM no alcanza (CTEs complejas, window functions,
+`COPY`, extensiones específicas como pgvector, JSON operators
+`->`/`->>`/`@>`), el driver crudo sigue disponible:
+
+```fitz
+let rows = db.query("
+    WITH ranked AS (
+        SELECT id, name, ROW_NUMBER() OVER (PARTITION BY group_id ORDER BY score DESC) AS rn
+        FROM items
+    )
+    SELECT * FROM ranked WHERE rn = 1
+", []).await?
+// rows: List<Map<Str, Any>>
+
+let affected = db.exec("UPDATE counters SET value = value + 1 WHERE key = $1", ["clicks"]).await?
+```
+
+Las dos APIs coexisten — usá el ORM para el 90% del código de
+todos los días, bajá a SQL crudo para los casos especiales.
+
+### Ejemplos del cap
+
+Dos ejemplos en `examples/guide/` cubren los dos casos
+canónicos:
+
+- **`31-orm.fitz`** (~100 LoC, pedagógico) — muestra el shape
+  canónico del ORM end-to-end: `@table` con todos los
+  decoradores, insert, where + first, chain
+  `order_by`/`limit`/`offset`, operadores extendidos
+  (`starts_with`/`is_in`/`between`), aggregates scalar
+  (`count`/`avg`), GROUP BY con `Aggregated<Row>`, navigation
+  belongs_to/has_many, eager loading con `.preload`, y
+  update/delete con guard. `fitz build` produce binario que NO
+  requiere Postgres real al compilar; el `connect` runtime
+  falla con `Err` clara si la URL es inválida.
+- **`31b-orm-crud-http.fitz`** (CRUD HTTP real end-to-end) —
+  combina **todo el stack Fitz**: types `User`/`Post` con
+  decoradores ORM completos (`@table`/`@primary`/`@belongs_to`/
+  `@has_many`), HTTP nativo (`@get`/`@post`/`@put`/`@delete`
+  + path params), body deserialization a types custom dedicados
+  (`UserInput`/`PostInput` separan el shape DB del shape HTTP
+  entrada), `Result<T>` con `?` propagando errores ORM hasta
+  el cliente, `env_or(...)` para leer `DATABASE_URL` con default,
+  y `@server(port)`. Endpoints: list/get/create/update/delete
+  sobre users, relation queries (posts por user), eager loading
+  con `.preload(...)` cerrando N+1, aggregate scalar. Requiere
+  Postgres real para correr — el setup pre-condición está
+  documentado al inicio del archivo (createdb + CREATE TABLE).
+  Compila con `fitz build` aunque no haya Postgres local — el
+  codegen del ORM se valida en compile-time. Caveat: el endpoint
+  GROUP BY (return `List<Map<Str, Any>>`) no entra en este
+  ejemplo porque el codegen HTTP no serializa `Map<Str, Any>` a
+  JSON automáticamente todavía (gap residual de Fase 10.b).
+
+### Por qué Fitz hace esto distinto
+
+- **DB nativa, no librería**: el driver Postgres (~2400 LoC en
+  `src/db.rs`) y el ORM viven en el binario `fitz`. **Cero
+  `pip install psycopg2`, cero `gem install pg`, cero `cargo
+  add tokio-postgres`, cero `npm install pg`.** Cuando hacés
+  `fitz build` el binario nativo embebe el driver — un
+  `.exe`/ELF/Mach-O standalone que habla wire protocol v3.0 +
+  SCRAM-SHA-256 sin link a libpq.
+- **SQL constante en codegen-time**: cada `.where(closure)`
+  se walka del AST DURANTE EL CODEGEN, el fragmento SQL queda
+  hard-coded en el binario. Zero overhead runtime para
+  construir SQL. Comparable a Diesel/sqlx, **mejor que
+  SQLAlchemy/ActiveRecord** que construyen SQL via objetos en
+  runtime cada vez.
+- **Paridad bit-a-bit `fitz run` ↔ `fitz build`**: lo que ves
+  funcionar en el intérprete (rapid feedback) funciona idéntico
+  en el binario nativo (deploy a prod). Cero "anda en local
+  pero no en server". 16 tests E2E de paridad codegen corren
+  contra `postgres:16` en cada push a `main`.
+- **Decorators del lenguaje**: `@table`/`@primary`/`@column`/
+  `@belongs_to`/`@has_many`/`@has_one` son **parte del
+  compilador** (lexer + parser + type checker + codegen),
+  no anotaciones procesadas por una lib opcional. El checker
+  exige `@primary` único, valida que `@belongs_to("X")`
+  apunte a un type existente, infiere los signatures de los
+  navigation methods. Spring `@Entity`/JPA + Hibernate
+  resuelven esto en runtime con reflection — Fitz lo hace
+  en compile-time.
+- **Eager loading con dispatch estático**: `.preload("posts")`
+  con el relation name como Str literal en compile-time
+  produce un match exhaustivo emitido por el codegen. Typos
+  (`.preload("post")` sin la "s" final) detectados en
+  compile-time, no runtime. Comparable a Diesel's `belonging_
+  to` macros, mejor que SQLAlchemy `joinedload(User.posts)`
+  donde el typo recién aparece como `AttributeError` al
+  evaluar.
+- **Integrado con el resto del lenguaje**: tipos custom +
+  `Result<T>` + `?` + `match` + decoradores apilables
+  (`@authenticated` + `@get` + handler que llama `Type.where(...)
+  .all(db).await?`) + middleware/CORS + body deserialization.
+  El ORM no es una "isla" con sus propias reglas, encaja
+  exactamente con HTTP nativo + auth + jobs + WebSockets.
+
+**Ningún otro lenguaje moderno** combina driver Postgres puro
++ ORM declarativo sobre `type` + paridad bit-a-bit
+intérprete↔binario nativo + LSP completo (autocomplete del
+ORM end-to-end con tipos refinados en cada chain method) **sin
+macros derive ni introspection runtime**. Diesel cubre 4/5
+pero requiere derives + runs Rust crudo. SQLAlchemy/ActiveRecord
+cubren ORM ergonómico pero pagan reflection runtime. Prisma
+genera schemas separados que viven aparte del lenguaje.
+
+### Qué no está en el MVP
+
+Estos items están comprometidos como deuda explícita
+post-Fase 10:
+
+- **Migraciones automáticas (`fitz db diff` / `fitz db
+  migrate`)**: hoy el user crea las tablas con `db.exec(
+  "CREATE TABLE ...")` al boot o con `psql` aparte. Las
+  migraciones autogeneradas a partir del diff entre el shape
+  declarado en `type` y el real en Postgres llegan en sub-paso
+  futuro (Fase 10.6+).
+- **Transactions** (`BEGIN`/`COMMIT`/`ROLLBACK`): cada query
+  corre en auto-commit. Bloques transaccionales con
+  `db.transaction(fn(tx) => ...)` llegan en sub-paso 10.7
+  separado.
+- **Composite primary keys**: hoy un `@primary` único por
+  `type`. Tables con `PRIMARY KEY (a, b)` requieren refactor
+  del checker — refinable post-MVP.
+- **TLS strict (`sslmode=require`)**: MVP del driver soporta
+  solo `sslmode=disable`. TLS llega como sub-paso 10.1.b
+  separado (StartTLS + cert validation).
+- **Date / Time / UUID nativos** como tipos del lenguaje: hoy
+  se modelan como `Str` ISO 8601 / formato canonical UUID. El
+  driver hace el round-trip correctamente, pero el `type` Fitz
+  no tiene primitivos dedicados. Tipos `Date`/`DateTime`/`UUID`
+  como built-ins son mini-fase aparte.
+- **JSON operators (`->`, `->>`, `@>`)** del lado SQL: el
+  JSONB se trae completo como `Map<Str, Any>` y se opera del
+  lado Fitz, o se baja a `db.query(...)` crudo con el operador.
+- **`BelongsTo` en `.preload(...)`**: hoy solo `HasMany` con
+  dispatch estático. Eager loading de BelongsTo (cargar el
+  author de N posts en 2 queries) queda como refinamiento.
+
+Detalle completo en `docs/roadmap.md` → "Fase 10 — Stack DB
+nativo" y "Fase 10.b — Cierre del codegen ORM".
+
+### Hito y cierre
+
+Este capítulo cierra el bloque "stack web first-class" del
+lado server: HTTP nativo (cap 17), middleware + CORS (17b),
+docs automáticas (18), async (19), build (20), interop Python
+(21), auth (28), WebSockets (29), jobs (30), y ahora **DB + ORM
+(31)**. Todo en el binario `fitz`, todo con paridad bit-a-bit
+intérprete↔binario, todo validado en CI multi-plataforma con
+Postgres real en cada push.
+
+Lo que queda es Fase 11+ — frontend, deployment ciudadano de
+primera, CLI builder — la apuesta a largo plazo. Pero el
+**stack server completo** ya está vivo. Si tu objetivo es
+"escribir una API tipada con auth + DB + jobs + WebSockets que
+deploye como un binario standalone": Fitz lo hace hoy, en un
+solo lenguaje, con cero `requirements.txt`/`Cargo.toml`/
+`package.json` que mantener.
+
+---
+
+## 32. Variables de entorno
 
 Para hablar con secrets, ports configurables y rutas dependientes del
 deploy, Fitz tiene 3 builtins dedicados desde la mini-fase env (2026-05-22):
@@ -11069,7 +11618,7 @@ proceso, que es lo que cualquier herramienta de testing modifica.
 
 ---
 
-## 32. Plantillas y boilerplates
+## 33. Plantillas y boilerplates
 
 Si llegaste hasta acá leyendo, ya viste cada feature de Fitz por
 separado: HTTP nativo, auth, WebSockets, jobs, interop Python,
@@ -11132,7 +11681,7 @@ escribir desde cero.
 
 ---
 
-## 33. Qué sigue
+## 34. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
@@ -11291,7 +11840,7 @@ del lenguaje + ecosistema:
 - **Fase 9 entera CERRADA**: LSP MVP completo (9.x.1 → 9.x.5,
   ver cap 22), package manager (9.y, ver cap 16b), DX (9.z —
   fmt/test/dev/repl/lint, caps 23-27), stack web first-class
-  (9.w — auth/WS/jobs, caps 28-30), env builtin (cap 31).
+  (9.w — auth/WS/jobs, caps 28-30), env builtin (cap 32).
 
 **Lo que viene** (post-Fase 9, post-bundling Python):
 

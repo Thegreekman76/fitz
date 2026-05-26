@@ -11,10 +11,151 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md`. Próximos pasos planeados — cap nuevo
-"Postgres + ORM nativo" en `docs/guide.md` (cap 31), ejemplos del ORM
-en los boilerplates Dockerizados (5 y 6 SQLAlchemy → Fitz ORM o
-boilerplate nuevo dedicado), benchmarks Fitz ORM vs SQLAlchemy.
+En curso: ver `docs/roadmap.md`. Próximos pasos planeados — boilerplates
+ORM Dockerizados (convertir 5/6 SQLAlchemy → Fitz ORM nativo y/o
+boilerplate nuevo dedicado), benchmarks Fitz ORM vs SQLAlchemy,
+sub-fase opcional para serializar `Map<Str, Any>` a JSON en HTTP
+returns (gap del cap 31 / ejemplo `31b-orm-crud-http.fitz`).
+
+## [v0.10.2] — 2026-05-26 — Cap 31 guía: "Postgres + ORM nativo" + hito stack server completo
+
+**Hito mayor del proyecto.** Cierra la documentación del bloque
+"stack web first-class" del lado server con cap nuevo en
+`docs/guide.md` ("Postgres + ORM nativo", cap 31) + dos ejemplos
+runnable end-to-end. Con este release, las features ciudadanas
+de primera clase del stack server quedan documentadas, ejemplificadas,
+y vivas en CI:
+
+| Feature           | Cap | Ejemplo                          | Status      |
+| ----------------- | --- | -------------------------------- | ----------- |
+| HTTP nativo       | 17  | `17-http.fitz`                   | ✅          |
+| Middleware + CORS | 17  | `17b-middleware.fitz`            | ✅          |
+| OpenAPI auto      | 18  | `18-docs.fitz`                   | ✅          |
+| Async             | 19  | `19-async.fitz`                  | ✅          |
+| `fitz build`      | 20  | `20-build.fitz`                  | ✅          |
+| Interop Python    | 21  | `21-python-crud/`                | ✅          |
+| Auth nativa       | 28  | `28-auth.fitz`                   | ✅          |
+| WebSockets        | 29  | `29-ws.fitz`                     | ✅          |
+| Jobs sin Celery   | 30  | `30-cron-background.fitz`        | ✅          |
+| **Postgres + ORM** | **31** | **`31-orm.fitz` + `31b-orm-crud-http.fitz`** | **✅ NUEVO** |
+
+Todo en el binario `fitz`, todo con paridad bit-a-bit
+`fitz run` ↔ `fitz build`, todo validado en CI multi-plataforma
+con Postgres real en cada push.
+
+### Added
+
+- **Cap 31 nuevo en `docs/guide.md`** — "Postgres + ORM nativo"
+  (~550 LoC de markdown). Cubre las piezas (`db`, `@table`,
+  `@primary`, `@column`, relations), read methods + QueryBuilder
+  chain, write methods + guard `.where(...)` obligatorio,
+  aggregates scalar + GROUP BY (`Aggregated<Row>` separado de
+  `QueryBuilder<Row>`), relations + navigation methods, eager
+  loading con `.preload(...)` y dispatch estático en compile-
+  time, tipos avanzados (JSONB, arrays, `List<scalar?>`,
+  `Map<Str, T>` concreto), operadores extendidos en `.where(...)`
+  (`between`/`is_in`/`like`/`starts_with`/array ops), escape
+  hatch `db.query`/`db.exec` para CTEs/window functions/JSON
+  operators crudos. Sección "Por qué Fitz hace esto distinto" con
+  5 diferenciales (DB nativa no lib, SQL constante codegen-time,
+  paridad bit-a-bit, decorators del lenguaje no anotaciones,
+  eager loading con dispatch estático). Sección "Qué no está
+  en el MVP" con deuda explícita (migraciones, transactions,
+  composite PKs, TLS strict, Date/Time/UUID nativos, JSON ops
+  Postgres, BelongsTo en `.preload`). Cierre con callout de
+  hito.
+- **`examples/guide/31-orm.fitz`** (renombrado de `32-orm.fitz`)
+  — el ejemplo pedagógico de 10.b.17, cap reference actualizada
+  de "cap 32" a "cap 31".
+- **`examples/guide/31b-orm-crud-http.fitz`** nuevo (~135 LoC)
+  — showcase del stack completo: CRUD HTTP real (GET/POST/PUT/
+  DELETE sobre users + posts), body deserialization con types
+  custom dedicados (`UserInput`/`PostInput` separan el shape DB
+  del shape HTTP), relations queries (`GET /users/{id}/posts`),
+  eager loading (`GET /users-with-posts` con `.preload(...)`),
+  aggregate scalar (`GET /user-count`), `env_or(...)` para leer
+  `DATABASE_URL` con default, `@server(port)`. Requiere Postgres
+  real para correr; compila con `fitz build` aunque no haya DB
+  local. Documenta el setup pre-condición (`createdb` + `CREATE
+  TABLE`) al inicio del archivo.
+- **Smoke `GUIDE_EXAMPLES_COMPILE`** ahora valida 292 ejemplos
+  (291 + `31b-orm-crud-http.fitz`). Garantiza que el ejemplo
+  CRUD HTTP + ORM no regresione.
+
+### Changed
+
+- **Renumeración cap 31 → 32 / 32 → 33 / 33 → 34** en
+  `docs/guide.md`:
+  - Cap 31 anterior "Variables de entorno" → cap 32
+  - Cap 32 anterior "Plantillas y boilerplates" → cap 33
+  - Cap 33 anterior "Qué sigue" → cap 34
+  - TOC actualizado, cross-refs internos al cap 31 viejo (env
+    builtin) reapuntados a cap 32.
+- **Rename de archivos de ejemplos** con `git mv` (preserva
+  history):
+  - `examples/guide/32-orm.fitz` → `examples/guide/31-orm.fitz`
+  - `examples/guide/31-env.fitz` → `examples/guide/32-env.fitz`
+- **`docs/index.md`** — link stale a `guide.md#31-plantillas-y-
+  boilerplates` (que ya estaba roto pre-v0.10.2 — cap 31 era
+  "Variables de entorno", no "Plantillas") reapuntado a
+  `guide.md#33-plantillas-y-boilerplates` post-renumeración.
+
+### Fixed
+
+- **`up_map_update_compila` pre-existente** (regresión Windows
+  UAC heredada de Mini-tanda Up): stem `up_map_update`
+  gatillaba el heurístico installer-detection de Windows que
+  exige elevación (`ERROR_ELEVATION_REQUIRED` 740). Renombrado
+  a `up_map_upd`. Mismo workaround que aplicamos en 10.b.11
+  (`orm_upd_list_map_codegen`). El test corría OK en Linux CI
+  pero fallaba en local de Windows en parallel.
+
+### Diferenciales únicos (reforzados con cap 31)
+
+**Ningún otro lenguaje moderno** combina lo siguiente en el
+binario base + cero deps externas:
+
+- **HTTP nativo + auth + WebSockets + jobs + ORM + DB nativa**
+  todo en el compilador. FastAPI/Spring/Express requieren
+  ~5-10 librerías opcionales por cada uno.
+- **Paridad bit-a-bit `fitz run` ↔ `fitz build`** para todas
+  estas features (verificado en CI con Postgres real en cada
+  push via job `db-postgres` con service container).
+- **SQL constante en codegen-time**: cada `.where(closure)` se
+  walka del AST DURANTE EL CODEGEN, el fragmento SQL queda
+  hard-coded en el binario. Comparable a Diesel/sqlx, mejor
+  que SQLAlchemy/ActiveRecord (runtime SQL construction).
+- **Decorators del lenguaje**: `@table`/`@primary`/`@column`/
+  `@belongs_to`/`@has_many`/`@has_one`/`@on_delete`/`@on_update`
+  son parte del compilador (lexer + parser + checker + codegen),
+  no anotaciones procesadas por libs en runtime (vs Spring
+  `@Entity` + JPA reflection / SQLAlchemy declarative meta).
+- **Eager loading con dispatch estático**: `.preload("posts")`
+  con el relation name como Str literal en compile-time produce
+  un `match` exhaustivo emitido por el codegen. Typos
+  (`.preload("post")` sin la "s") detectados en compile-time,
+  no runtime.
+- **Binario standalone deployable**: `fitz build` produce un
+  `.exe`/ELF/Mach-O ~5-10 MB con todo embebido — driver
+  Postgres, JWT signing, Argon2 hashing, ORM, axum, tokio.
+  Cero `requirements.txt`/`Cargo.toml`/`package.json` que
+  mantener en el destino.
+
+### Hito del proyecto
+
+Con v0.10.2 cierra el bloque **"stack web first-class del lado
+server"** entero, documentado y ejemplificado en la guía. La
+promesa del proyecto — "escribir una API tipada con auth + DB
++ jobs + WebSockets que deploye como un binario standalone" —
+está viva en un solo lenguaje, con cero deps externas para
+features intrínsecas, en `fitz run` (rapid feedback) y en
+`fitz build` (deploy a prod) idénticamente.
+
+Próximo norte: Fase 11+ (frontend en `.fitz`, deployment
+ciudadano primera clase, CLI builder) y refinamientos
+opcionales sobre el stack ya vivo (migraciones automáticas,
+transactions, TLS strict, JSON operators del lado SQL,
+`Map<Str, Any>` en HTTP returns para GROUP BY).
 
 ## [v0.10.1] — 2026-05-26 — Fase 10.b: paridad bit-a-bit codegen del ORM
 
