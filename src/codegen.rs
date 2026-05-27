@@ -3795,6 +3795,21 @@ enum GenMode {
     Module,
 }
 
+/// W7 (v0.10.6) — resultado de codegen del SET fragment de `.update`.
+/// `Static` viene de un Map literal `{"col": v, ...}` (todo decidido en
+/// compile-time, paridad bit-a-bit con pre-v0.10.6). `Dynamic` viene de
+/// un Map var/expr — el `dispatch_block` Rust evalúa a
+/// `Result<(String, Vec<__FitzPgValue>), String>` runtime.
+enum UpdateSetEmission {
+    Static {
+        set_clauses: String,
+        set_args_init: String,
+    },
+    Dynamic {
+        dispatch_block: String,
+    },
+}
+
 /// Copia portable de las firmas exportadas de un módulo. Se llena en
 /// `install_loader_bindings` y vive adentro del CodegenCtx.
 #[derive(Debug, Clone)]
@@ -12800,23 +12815,40 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     ));
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
-                let (set_clauses, set_args_init) =
-                    self.gen_qb_update_set_args(&args[1], call_span, &meta, &fields)?;
+                let emission = self.gen_qb_update_set_args(&args[1], call_span, &meta, &fields)?;
                 let ret_ty = Type::Future(Box::new(Type::Result {
                     ok: Box::new(Type::Int),
                     err: Box::new(Type::Str),
                 }));
-                let code = format!(
-                    "(async {{ \
-                        let __set_clauses: &str = {set_clauses_lit}; \
-                        let __set_args: Vec<__FitzPgValue> = vec![{set_args_init}]; \
-                        ({receiver}).update_with_set(&{db}, __set_clauses, __set_args).await \
-                    }})",
-                    set_clauses_lit = rust_str_literal(&set_clauses),
-                    set_args_init = set_args_init,
-                    receiver = receiver_code,
-                    db = db_code,
-                );
+                let code = match emission {
+                    UpdateSetEmission::Static {
+                        set_clauses,
+                        set_args_init,
+                    } => format!(
+                        "(async {{ \
+                            let __set_clauses: &str = {set_clauses_lit}; \
+                            let __set_args: Vec<__FitzPgValue> = vec![{set_args_init}]; \
+                            ({receiver}).update_with_set(&{db}, __set_clauses, __set_args).await \
+                        }})",
+                        set_clauses_lit = rust_str_literal(&set_clauses),
+                        set_args_init = set_args_init,
+                        receiver = receiver_code,
+                        db = db_code,
+                    ),
+                    UpdateSetEmission::Dynamic { dispatch_block } => format!(
+                        "(async {{ \
+                            let (__set_clauses_owned, __set_args) = match {dispatch} {{ \
+                                Ok(__pair) => __pair, \
+                                Err(__e) => return Err(__e), \
+                            }}; \
+                            let __set_clauses: &str = &__set_clauses_owned; \
+                            ({receiver}).update_with_set(&{db}, __set_clauses, __set_args).await \
+                        }})",
+                        dispatch = dispatch_block,
+                        receiver = receiver_code,
+                        db = db_code,
+                    ),
+                };
                 Ok(Some((code, ret_ty)))
             }
             "delete" => {
@@ -13427,26 +13459,46 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         ))
     }
 
-    /// Construye `(set_clauses_string, set_args_init_rust)` para `.update`.
-    /// `set_clauses` es del shape `"col1" = $1, "col2" = $2[<cast>]`.
-    /// `set_args_init` es la inicialización Rust del `Vec<__FitzPgValue>`
-    /// con cada valor coercionado desde el Map. MVP: solo Map literal
-    /// `{"col": value}` — el closure-based path queda como deuda futura.
-    /// El value se emite via `<expr> as __IntoPgValue::into_pg(...)`.
+    /// Construye el emission del SET fragment de `.update`. Cuando el
+    /// arg es un Map literal `{"col": v, ...}`, devuelve
+    /// `UpdateSetEmission::Static` con set_clauses + set_args literales.
+    /// Cuando es cualquier otra expresión que tipe como `Map<Str, Any>`
+    /// (var/field-access/call-result), devuelve `UpdateSetEmission::
+    /// Dynamic` con un bloque Rust que evalúa a
+    /// `Result<(String, Vec<__FitzPgValue>), String>` — el caller lo
+    /// destruye con `?` adentro del async block del update.
+    ///
+    /// W7 (v0.10.6) cerró el limit a Map literal. Antes: error
+    /// `MVP en codegen: el segundo arg debe ser un Map literal`.
     fn gen_qb_update_set_args(
         &mut self,
         changes_arg: &Expr,
         call_span: crate::ast::Span,
         meta: &crate::types::TableMetadata,
         fields: &[TypeSigField],
-    ) -> Result<(String, String), FitzError> {
+    ) -> Result<UpdateSetEmission, FitzError> {
         let pairs: &[(Expr, Expr)] = match changes_arg {
             Expr::Map(pairs, _) => pairs.as_slice(),
             _ => {
-                return Err(self.err_at(
-                    call_span,
-                    "`.update(db, changes)` MVP en codegen: el segundo arg debe ser un Map literal {\"col\": value, ...}",
-                ));
+                // W7 (v0.10.6) — fallback dinámico. El arg debe tipar
+                // como `Map<Str, Any>` (heterogéneo) en el checker —
+                // típicamente `body.changes`/var/field. El runtime
+                // valida keys + tipos contra el type estático.
+                let (changes_code, changes_ty) = self.gen_expr(changes_arg)?;
+                if !matches!(changes_ty, Type::Map(_, _) | Type::Any) {
+                    return Err(self.err_at(
+                        changes_arg.span(),
+                        format!(
+                            "`.update(db, changes)`: el segundo arg debe ser un Map literal `{{\"col\": v, ...}}` o una var `Map<Str, Any>`, recibió `{}`",
+                            changes_ty.display(self.env),
+                        ),
+                    ));
+                }
+                self.uses_fitz_value = true;
+                let dispatch = self.gen_qb_update_dynamic_dispatch(&changes_code, meta, fields)?;
+                return Ok(UpdateSetEmission::Dynamic {
+                    dispatch_block: dispatch,
+                });
             }
         };
         if pairs.is_empty() {
@@ -13555,7 +13607,200 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             };
             set_args_init.push_str(&arg_code);
         }
-        Ok((set_clauses, set_args_init))
+        Ok(UpdateSetEmission::Static {
+            set_clauses,
+            set_args_init,
+        })
+    }
+
+    /// W7 (v0.10.6) — dispatch dinámico de `.update(db, changes)` cuando
+    /// `changes` es una var/expr que tipa `Map<Str, Any>`. El Rust
+    /// emitido evalúa a `Result<(String, Vec<__FitzPgValue>), String>`
+    /// — el caller lo destruye con `?` adentro del async block. Itera
+    /// el `Vec<(__FitzValue, __FitzValue)>` runtime, valida cada key
+    /// contra los fields del type estático, y construye SET fragments
+    /// + args con el cast SQL apropiado (`::jsonb` para fields Map,
+    ///   `::int8[]`/etc. para List<scalar>).
+    ///
+    /// Errores en runtime:
+    /// - Map vacío.
+    /// - Key no-Str.
+    /// - Field desconocido.
+    /// - Tipo del value incompatible con el field declarado.
+    fn gen_qb_update_dynamic_dispatch(
+        &mut self,
+        changes_code: &str,
+        meta: &crate::types::TableMetadata,
+        fields: &[TypeSigField],
+    ) -> Result<String, FitzError> {
+        // Construimos el match `<key> => (sql_col, cast, conversión
+        // __FitzValue → __FitzPgValue)` ramificado por field. Solo
+        // fields non-virtual son target de update.
+        let type_name = meta.sql_name.clone(); // para mensajes
+        let mut arms = String::new();
+        for f in fields {
+            if meta.is_virtual_field(&f.name) {
+                continue;
+            }
+            let sql_col = meta
+                .columns
+                .get(&f.name)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(f.name.as_str())
+                .to_string();
+            let array_info = orm_list_scalar_info(&f.type_);
+            let is_jsonb = orm_field_is_jsonb(&f.type_);
+            let cast_suffix = if let Some((_, _, _, cast)) = array_info {
+                cast
+            } else if is_jsonb {
+                "::jsonb"
+            } else {
+                ""
+            };
+            // Conversion __FitzValue → __FitzPgValue por field type. Los
+            // tipos compuestos (List<scalar>, Map<...>) reciben tratamiento
+            // especial — paralelo a `gen_qb_update_set_args` literal.
+            let conv = if is_jsonb {
+                // Field es Map<...> (JSONB). Cualquier __FitzValue se
+                // serializa a JSON. NULL → SQL NULL.
+                "match __v { \
+                     __FitzValue::Null => __FitzPgValue::Null, \
+                     other => match __fitz_fitz_value_to_jsonb(other) { \
+                         Ok(s) => __FitzPgValue::Text(s), \
+                         Err(e) => return Err(format!(\"`.update`: field `{f}` (jsonb): {{}}\", e)), \
+                     } \
+                 }"
+                .replace("{f}", &f.name)
+            } else if let Some((_, pg_variant, elem_oid, _)) = array_info {
+                // Field es List<scalar>. __FitzValue::List(items) →
+                // Array { elem_oid, values }. Cada item se mapea al
+                // variant primitivo correspondiente; null queda como Null.
+                // (Validación estricta a un solo tipo; usuario debe
+                // construir el list con el tipo correcto.)
+                let item_arm = match pg_variant {
+                    "int8" => "__FitzValue::Int(n) => __FitzPgValue::Int(*n), __FitzValue::Null => __FitzPgValue::Null,",
+                    "float8" => "__FitzValue::Float(x) => __FitzPgValue::Float(*x), __FitzValue::Int(n) => __FitzPgValue::Float(*n as f64), __FitzValue::Null => __FitzPgValue::Null,",
+                    "text" => "__FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null,",
+                    "bool" => "__FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null,",
+                    _ => "__FitzValue::Null => __FitzPgValue::Null,",
+                };
+                format!(
+                    "match __v {{ \
+                         __FitzValue::List(items) => {{ \
+                             let mut __vs: Vec<__FitzPgValue> = Vec::with_capacity(items.len()); \
+                             for __it in items.iter() {{ \
+                                 __vs.push(match __it {{ \
+                                     {item_arm} \
+                                     _ => return Err(format!(\"`.update`: field `{f}` (array): item con tipo inesperado\")), \
+                                 }}); \
+                             }} \
+                             __FitzPgValue::Array {{ elem_oid: {oid}, values: __vs }} \
+                         }} \
+                         __FitzValue::Null => __FitzPgValue::Null, \
+                         _ => return Err(format!(\"`.update`: field `{f}` espera List, recibió otro tipo\")), \
+                     }}",
+                    item_arm = item_arm,
+                    oid = elem_oid,
+                    f = f.name,
+                )
+            } else {
+                match &f.type_ {
+                    Type::Int => format!(
+                        "match __v {{ __FitzValue::Int(n) => __FitzPgValue::Int(*n), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Int, recibió otro tipo\")), }}",
+                        f = f.name,
+                    ),
+                    Type::Float => format!(
+                        "match __v {{ __FitzValue::Float(x) => __FitzPgValue::Float(*x), __FitzValue::Int(n) => __FitzPgValue::Float(*n as f64), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Float, recibió otro tipo\")), }}",
+                        f = f.name,
+                    ),
+                    Type::Str => format!(
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Str, recibió otro tipo\")), }}",
+                        f = f.name,
+                    ),
+                    Type::Bool => format!(
+                        "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Bool, recibió otro tipo\")), }}",
+                        f = f.name,
+                    ),
+                    Type::Nullable(inner) => {
+                        // Mismo dispatch que el inner type, pero acepta Null.
+                        match inner.as_ref() {
+                            Type::Int => format!(
+                                "match __v {{ __FitzValue::Int(n) => __FitzPgValue::Int(*n), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Int?, recibió otro tipo\")), }}",
+                                f = f.name,
+                            ),
+                            Type::Float => format!(
+                                "match __v {{ __FitzValue::Float(x) => __FitzPgValue::Float(*x), __FitzValue::Int(n) => __FitzPgValue::Float(*n as f64), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Float?, recibió otro tipo\")), }}",
+                                f = f.name,
+                            ),
+                            Type::Str => format!(
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Str?, recibió otro tipo\")), }}",
+                                f = f.name,
+                            ),
+                            Type::Bool => format!(
+                                "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Bool?, recibió otro tipo\")), }}",
+                                f = f.name,
+                            ),
+                            _ => return Err(self.err(format!(
+                                "`.update(db, Map var)` con field `{}: {}` no soportado todavía — usá Map literal o convertí a tipo escalar",
+                                f.name,
+                                f.type_.display(self.env),
+                            ))),
+                        }
+                    }
+                    other => {
+                        return Err(self.err(format!(
+                            "`.update(db, Map var)` con field `{}: {}` no soportado todavía — usá Map literal",
+                            f.name,
+                            other.display(self.env),
+                        )));
+                    }
+                }
+            };
+            arms.push_str(&format!(
+                "                    \"{name}\" => (\"{sql_col}\", \"{cast}\", {{ {conv} }}),\n",
+                name = f.name,
+                sql_col = sql_col,
+                cast = cast_suffix,
+                conv = conv,
+            ));
+        }
+        // El bloque emitido es un closure IIFE que devuelve
+        // `Result<(String, Vec<__FitzPgValue>), String>`. El caller lo
+        // destruye con `?`.
+        let block = format!(
+            "(|| -> Result<(String, Vec<__FitzPgValue>), String> {{\n        \
+                 let __changes_arc = {changes_code};\n        \
+                 let __pairs: Vec<(__FitzValue, __FitzValue)> = {{\n            \
+                 let __g = __changes_arc.lock().unwrap();\n            \
+                 __g.clone()\n        \
+                 }};\n        \
+                 if __pairs.is_empty() {{\n            \
+                 return Err(\"`.update(db, changes)`: el Map de changes está vacío\".to_string());\n        \
+                 }}\n        \
+                 let mut __set_clauses = String::new();\n        \
+                 let mut __set_args: Vec<__FitzPgValue> = Vec::with_capacity(__pairs.len());\n        \
+                 for (__idx, (__k, __v)) in __pairs.iter().enumerate() {{\n            \
+                 let __key = match __k {{ \
+                 __FitzValue::Str(s) => s.clone(), \
+                 _ => return Err(format!(\"`.update`: las keys del Map deben ser Str (en `{tname}`)\")), \
+                 }};\n            \
+                 if __idx > 0 {{ __set_clauses.push_str(\", \"); }}\n            \
+                 let __num = __idx + 1;\n            \
+                 let (__col, __cast, __pg): (&str, &str, __FitzPgValue) = match __key.as_str() {{\n\
+                 {arms}\
+                 \
+                 _ => return Err(format!(\"`.update`: field `{{}}` no existe en `{tname}`\", __key)),\n                \
+                 }};\n            \
+                 __set_clauses.push_str(&format!(\"\\\"{{}}\\\" = ${{}}{{}}\", __col, __num, __cast));\n            \
+                 __set_args.push(__pg);\n        \
+                 }}\n        \
+                 Ok((__set_clauses, __set_args))\n    \
+                 }})()",
+            changes_code = changes_code,
+            arms = arms,
+            tname = type_name,
+        );
+        Ok(block)
     }
 
     fn gen_method_call(
@@ -30522,6 +30767,74 @@ mod tests {
         assert!(
             rust.contains(".update_with_set(&db"),
             "esperaba terminal `.update_with_set(&db, ...)`, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_update_con_map_var_emite_dispatch_dinamico_w7() {
+        // W7 (v0.10.6) — `.update(db, changes)` con `changes: Map<Str, Any>`
+        // (var, no literal) ahora compila. El codegen emite un dispatch
+        // dinámico IIFE que valida keys + tipos runtime contra los fields
+        // del type estático, y construye SET clauses + args.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n  \
+                       age: Int\n\
+                   }\n\
+                   async fn boot(changes: Map<Str, Any>) -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _n = User.where(fn(u) => u.id == 1).update(db, changes).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK con Map var en .update");
+        // El dispatch IIFE devuelve Result<(String, Vec<__FitzPgValue>), String>.
+        assert!(
+            rust.contains("|| -> Result<(String, Vec<__FitzPgValue>), String>"),
+            "esperaba closure IIFE para dispatch dinámico, fue: {rust}",
+        );
+        // Match runtime sobre key.as_str() con arms por field.
+        assert!(
+            rust.contains("\"name\" => (\"name\", \"\""),
+            "esperaba arm `\"name\" => (\"name\", \"\", ...)` para Str field, fue: {rust}",
+        );
+        assert!(
+            rust.contains("\"age\" => (\"age\", \"\""),
+            "esperaba arm `\"age\" => (\"age\", \"\", ...)` para Int field, fue: {rust}",
+        );
+        // Fallback: field desconocido devuelve Err.
+        assert!(
+            rust.contains("no existe en `users`"),
+            "esperaba mensaje de error sobre field desconocido, fue: {rust}",
+        );
+        // El receptor sigue siendo update_with_set.
+        assert!(
+            rust.contains(".update_with_set(&db"),
+            "esperaba terminal .update_with_set, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_update_con_map_var_jsonb_field_serializa_via_helper_w7() {
+        // W7 — para field `Map<Str, Any>` (jsonb), el dispatch dinámico
+        // serializa el value runtime via `__fitz_fitz_value_to_jsonb`
+        // y emite el cast `::jsonb`.
+        let src = "@table(\"docs\") type Doc {\n  \
+                       @primary id: Int = 0\n  \
+                       meta: Map<Str, Any>\n\
+                   }\n\
+                   async fn boot(changes: Map<Str, Any>) -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _n = Doc.where(fn(d) => d.id == 1).update(db, changes).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            rust.contains("\"meta\" => (\"meta\", \"::jsonb\""),
+            "esperaba cast `::jsonb` en arm de field jsonb, fue: {rust}",
+        );
+        assert!(
+            rust.contains("__fitz_fitz_value_to_jsonb"),
+            "esperaba helper de serialización JSONB, fue: {rust}",
         );
     }
 

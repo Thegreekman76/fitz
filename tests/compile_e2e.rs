@@ -6732,11 +6732,43 @@ fn db_query_exec_close_compilan_emite_helpers() {
              let conn = db.connect(\"mysql://x@h/d\").await?\n  \
              let _rows = conn.query(\"SELECT 1\", []).await?\n  \
              let _n = conn.exec(\"UPDATE t SET x = 1\", [\"hola\"]).await?\n  \
-             conn.close().await\n  \
+             conn.close().await?\n  \
              return Ok(true)\n\
          }\n\
          async fn driver() -> Str {\n  \
              return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+#[test]
+fn db_upd_con_map_var_compila_a_binario_w7() {
+    // W7 (v0.10.6) — `.update(db, changes)` con `changes` como var
+    // `Map<Str, Any>` (no Map literal) compila a binario nativo.
+    // Programa connect inválido — el cuerpo nunca ejecuta el update.
+    // (Stem `update` dispara Windows UAC installer detection — usamos
+    //  `upd` para evitarlo, igual que `up_map_upd` existente.)
+    let (stdout, code) = build_and_run(
+        "db_upd_con_map_var_compila_w7",
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             age: Int\n\
+         }\n\
+         async fn run(changes: Map<Str, Any>) -> Result<Bool> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             let _n = User.where(fn(u) => u.id == 1).update(conn, changes).await?\n  \
+             return Ok(true)\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             let body = {\"name\": \"ada\", \"age\": 36}\n  \
+             return match run(body).await {\n    \
                  Ok(_) => \"OK\"\n    \
                  Err(_) => \"err\"\n  \
              }\n\
