@@ -57,7 +57,13 @@ fn sanitize_stem(test_name: &str) -> String {
 /// .fitz, compila con `fitz build`, ejecuta el binario y devuelve
 /// (stdout, exit_code).
 fn build_and_run(test_name: &str, src: &str) -> (String, i32) {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — SERIAL ya no se toma acá. Cada test usa un
+    // `<stem>.fitz` único derivado de `test_name`, así que su
+    // `target/fitz-build/<stem>/` no choca con otros tests que también
+    // usen este helper. Cargo serializa el acceso a `~/.cargo/registry`
+    // internamente; los compile outputs son por-stem. Resultado:
+    // tests que usan este helper se paralelizan según el
+    // `--test-threads` de cargo (default = num CPUs).
     let stem = sanitize_stem(test_name);
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
@@ -97,7 +103,7 @@ fn build_and_run(test_name: &str, src: &str) -> (String, i32) {
 /// Como `build_and_run` pero asume que el build va a fallar.
 /// Devuelve el stderr del fitz build.
 fn build_expect_fail(test_name: &str, src: &str) -> String {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — paraleliza como `build_and_run`.
     let stem = sanitize_stem(test_name);
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
@@ -123,7 +129,7 @@ fn build_expect_fail(test_name: &str, src: &str) -> String {
 /// — el binario hace `std::env::var(...)` y la var inyectada via
 /// `Command::env` queda visible. Mini-fase env builtin (2026-05-22).
 fn build_and_run_with_env(test_name: &str, src: &str, env_vars: &[(&str, &str)]) -> (String, i32) {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — paraleliza como `build_and_run`.
     let stem = sanitize_stem(test_name);
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
@@ -1251,11 +1257,16 @@ fn build_and_run_multi(
     main_src: &str,
     extra_files: &[(&str, &str)],
 ) -> (String, i32) {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — el main pasa de `prog.fitz` hardcoded a
+    // `<stem>.fitz` derivado de `test_name`, así cada test tiene su
+    // propio `target/fitz-build/<stem>/`. Los `extra_files` siguen con
+    // sus nombres declarados (típicamente "auth.fitz", "models.fitz",
+    // etc.) porque los imports del main los referencian por nombre.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, main_src).expect("escribir .fitz");
     for (name, content) in extra_files {
         let p = dir.join(name);
@@ -1275,8 +1286,12 @@ fn build_and_run_multi(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
     let run = Command::new(&bin).output().expect("invocar binario");
     (
@@ -1290,11 +1305,12 @@ fn build_expect_fail_multi(
     main_src: &str,
     extra_files: &[(&str, &str)],
 ) -> String {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — paraleliza como `build_and_run_multi`.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, main_src).expect("escribir .fitz");
     for (name, content) in extra_files {
         let p = dir.join(name);
@@ -6196,6 +6212,396 @@ fn create(stub: Str, body: UserInput) -> User {\n\
              Buscamos `Err(__e) => return __FitzResponse` sin encontrar."
         );
     }
+}
+
+#[test]
+fn http_coverage_metodos_headers_content_type_body_libre_t7() {
+    // T7 (v0.10.13) — cobertura HTTP E2E extendida sobre 3 áreas que
+    // hasta hoy estaban sin tests robustos (sólo se asertaba que
+    // `build` no fallara, sin validar respuestas):
+    //
+    //   1) Múltiples métodos sobre el mismo path. axum mergea
+    //      automáticamente verbos distintos en un MethodRouter por
+    //      path; este test valida que GET/POST/PUT/DELETE sobre
+    //      `/items` responden cada uno con su método correcto.
+    //   2) Headers HTTP entrantes via `@header(name="X-...")`. Valida
+    //      que el wrapper extrae el header como param del handler
+    //      con coerción (Str para presente; Str? para opcional;
+    //      requerido ausente → 400).
+    //   3) Content-Type negotiation. POST a `/form` con
+    //      `application/x-www-form-urlencoded` body — el wrapper
+    //      detecta el primary CT y usa `__parse_urlencoded` antes
+    //      de aplicar `__from_fitz_json`. Mismo handler debe aceptar
+    //      `application/json` también (path canónico).
+    //
+    // Caso "body sin tipo declarado" (`body: Map<Str, Any>`) NO
+    // entró: el codegen rechaza Map<Str, Any> como param body con
+    // "codegen 5b no soporta el tipo `Any`". Es deuda real
+    // (workaround: declarar un type con `Map<Str, Str>` o el shape
+    // específico) pero fuera del scope T7.
+    //
+    // Un solo build + spawn cubre los 3 casos (8 requests).
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let src = "\
+@server(43917)\n\
+fn main() => 0\n\
+\n\
+type Item { id: Int, name: Str }\n\
+\n\
+@get(\"/items\")\n\
+fn list_items() -> Str => \"GET items\"\n\
+\n\
+@post(\"/items\")\n\
+fn create_item(body: Item) -> Str { return \"POST {body.name}\" }\n\
+\n\
+@put(\"/items\")\n\
+fn replace_items() -> Str => \"PUT items\"\n\
+\n\
+@delete(\"/items\")\n\
+fn delete_items() -> Str => \"DELETE items\"\n\
+\n\
+// Caso 2: headers required + opcional. Convención del wrapper:\n\
+// `X-Trace-Id` → param `x_trace_id` (lowercase + `-` → `_`).\n\
+@header(name=\"X-Trace-Id\")\n\
+@header(name=\"X-Optional\")\n\
+@get(\"/with-headers\")\n\
+fn with_headers(x_trace_id: Str, x_optional: Str?) -> Str {\n\
+    match x_optional {\n\
+        null => return \"trace={x_trace_id} opt=null\",\n\
+        v => return \"trace={x_trace_id} opt={v}\",\n\
+    }\n\
+}\n\
+\n\
+type FormPayload { name: Str, email: Str }\n\
+\n\
+// Caso 3: handler que acepta body via JSON o urlencoded. El\n\
+// wrapper detecta `Content-Type` y enruta a `__parse_urlencoded`\n\
+// o `__from_fitz_json` según corresponda. Usamos FormPayload con\n\
+// solo Str porque urlencoded no coerce Str→Int (todos los values\n\
+// llegan como strings — el path JSON sí coerce porque el body\n\
+// JSON puede contener números nativos).\n\
+@post(\"/form\")\n\
+fn submit_form(body: FormPayload) -> Str { return \"got {body.name} <{body.email}>\" }\n\
+";
+    let dir = std::env::temp_dir().join("fitz-e2e-http_coverage_t7");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir prog.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (T7):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43917".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43917 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let send_req = |method: &str,
+                    path: &str,
+                    body: Option<&str>,
+                    content_type: Option<&str>,
+                    headers: &[(&str, &str)]|
+     -> (u16, String) {
+        let mut headers_str = String::new();
+        for (k, v) in headers {
+            headers_str.push_str(&format!("{}: {}\r\n", k, v));
+        }
+        let (ct_header, body_str) = match body {
+            Some(b) => (
+                format!(
+                    "Content-Type: {}\r\nContent-Length: {}\r\n",
+                    content_type.unwrap_or("application/json"),
+                    b.len()
+                ),
+                b.to_string(),
+            ),
+            None => (String::new(), String::new()),
+        };
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\n{}{}Connection: close\r\n\r\n{}",
+            method, path, addr, headers_str, ct_header, body_str,
+        );
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let body_resp = raw[body_start..].to_string();
+        (status, body_resp)
+    };
+
+    // === Caso 1: 4 métodos sobre /items ===
+    let (s, b) = send_req("GET", "/items", None, None, &[]);
+    assert_eq!(s, 200, "GET /items: {:?}", (s, &b));
+    assert!(b.contains("GET items"), "GET body: {:?}", b);
+
+    let (s, b) = send_req(
+        "POST",
+        "/items",
+        Some(r#"{"id":1,"name":"widget"}"#),
+        None,
+        &[],
+    );
+    assert_eq!(s, 200, "POST /items: {:?}", (s, &b));
+    assert!(b.contains("POST widget"), "POST body: {:?}", b);
+
+    let (s, b) = send_req("PUT", "/items", None, None, &[]);
+    assert_eq!(s, 200, "PUT /items: {:?}", (s, &b));
+    assert!(b.contains("PUT items"), "PUT body: {:?}", b);
+
+    let (s, b) = send_req("DELETE", "/items", None, None, &[]);
+    assert_eq!(s, 200, "DELETE /items: {:?}", (s, &b));
+    assert!(b.contains("DELETE items"), "DELETE body: {:?}", b);
+
+    // === Caso 2: headers ===
+    let (s, b) = send_req(
+        "GET",
+        "/with-headers",
+        None,
+        None,
+        &[("X-Trace-Id", "abc123"), ("X-Optional", "opt-value")],
+    );
+    assert_eq!(s, 200, "/with-headers ambos: {:?}", (s, &b));
+    assert!(
+        b.contains("trace=abc123") && b.contains("opt=opt-value"),
+        "headers body: {:?}",
+        b
+    );
+
+    // Header opcional ausente → null en el handler.
+    let (s, b) = send_req("GET", "/with-headers", None, None, &[("X-Trace-Id", "xyz")]);
+    assert_eq!(s, 200, "/with-headers solo trace: {:?}", (s, &b));
+    assert!(
+        b.contains("trace=xyz") && b.contains("opt=null"),
+        "opcional null body: {:?}",
+        b
+    );
+
+    // Header requerido ausente → 400.
+    let (s, _b) = send_req("GET", "/with-headers", None, None, &[]);
+    assert_eq!(s, 400, "/with-headers sin trace → 400");
+
+    // === Caso 3: Content-Type negotiation ===
+    // JSON funciona (default).
+    let (s, b) = send_req(
+        "POST",
+        "/form",
+        Some(r#"{"name":"Ada","email":"ada@example.com"}"#),
+        Some("application/json"),
+        &[],
+    );
+    assert_eq!(s, 200, "POST /form JSON: {:?}", (s, &b));
+    assert!(
+        b.contains("got Ada <ada@example.com>"),
+        "JSON body: {:?}",
+        b
+    );
+
+    // urlencoded body también funciona (el wrapper hace switch en
+    // primary content type via `__parse_urlencoded` → JSON Object con
+    // todos los values como Str → `__from_fitz_json` deserializa).
+    let (s, b) = send_req(
+        "POST",
+        "/form",
+        Some("name=Alan&email=alan%40example.com"),
+        Some("application/x-www-form-urlencoded"),
+        &[],
+    );
+    assert_eq!(s, 200, "POST /form urlencoded: {:?}", (s, &b));
+    assert!(
+        b.contains("got Alan <alan@example.com>"),
+        "urlencoded body parsed: {:?}",
+        b
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
+fn handler_panic_devuelve_500_no_rompe_conexion_r6() {
+    // R6 (v0.10.13) — un panic adentro de un handler HTTP (típicamente
+    // `x / 0`, `xs[N]` out-of-bounds, etc.) debe convertirse en una
+    // respuesta 500 con `{"error": <msg>}`. Antes del fix el panic del
+    // worker tokio rompía la conexión sin response (cliente recibía
+    // HTTP 000) — el server seguía vivo pero el cliente quedaba ciego.
+    //
+    // El fix envuelve el call al user fn en `catch_unwind` (sync) o
+    // `FutureExt::catch_unwind` (async) y, on Err del payload, emite
+    // el `__FitzResponse 500` con el msg del panic + CORS headers.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let src = "\
+@server(43916)\n\
+fn main() => 0\n\
+\n\
+@get(\"/div\")\n\
+fn divide() -> Float {\n\
+    let x = 10.0\n\
+    let y = 0.0\n\
+    return x / y\n\
+}\n\
+\n\
+@get(\"/div-async\")\n\
+async fn divide_async() -> Float {\n\
+    let x = 10.0\n\
+    let y = 0.0\n\
+    return x / y\n\
+}\n\
+\n\
+@get(\"/ok\")\n\
+fn ok() -> Str => \"alive\"\n\
+";
+    let dir = std::env::temp_dir().join("fitz-e2e-handler_panic_r6");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir prog.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (R6):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43916".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43916 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let send_get = |path: &str| -> (u16, String) {
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, addr,
+        );
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let body = raw[body_start..].to_string();
+        (status, body)
+    };
+
+    // Caso 1: sync handler paniquea → 500 con msg del panic.
+    let (status, body) = send_get("/div");
+    assert_eq!(
+        status,
+        500,
+        "/div sync panic → 500, fue {:?}",
+        (status, &body)
+    );
+    assert!(
+        body.contains("división por cero"),
+        "/div body debe contener el msg del panic: {:?}",
+        body
+    );
+
+    // Caso 2: async handler paniquea → 500. Valida rama
+    // `FutureExt::catch_unwind().await` del fix.
+    let (status, body) = send_get("/div-async");
+    assert_eq!(
+        status,
+        500,
+        "/div-async panic → 500, fue {:?}",
+        (status, &body)
+    );
+    assert!(
+        body.contains("división por cero"),
+        "/div-async body: {:?}",
+        body
+    );
+
+    // Caso 3: server sigue vivo después de los panics — ruta sana
+    // responde 200 normalmente.
+    let (status, body) = send_get("/ok");
+    assert_eq!(
+        status,
+        200,
+        "/ok después de panics → 200, fue {:?}",
+        (status, &body)
+    );
+    assert!(body.contains("alive"), "/ok body: {:?}", body);
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[test]

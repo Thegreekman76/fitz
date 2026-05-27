@@ -2120,6 +2120,12 @@ fn cargo_toml_for(
     // `dep:base64` transitivamente — el codegen no las menciona por
     // separado, axum las arrastra. `futures-util` para los
     // combinadores Sink/Stream que usa el wrapper WS generado.
+    // R6 (v0.10.13) — `futures-util` también necesario sin WS porque el
+    // wrapper de cada handler HTTP usa `FutureExt::catch_unwind` para
+    // convertir panics del user code en respuestas 500 limpias en lugar
+    // de connection-reset silencioso (caso típico: `x / 0` que paniquea
+    // el worker tokio). Antes solo se sumaba con WS; ahora unconditional
+    // bajo `has_http`.
     let http_lines = if has_http {
         if uses_ws {
             "axum = { version = \"0.8\", features = [\"ws\"] }\n\
@@ -2128,6 +2134,7 @@ fn cargo_toml_for(
              serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
         } else {
             "axum = \"0.8\"\n\
+             futures-util = { version = \"0.3\", default-features = false, features = [\"std\"] }\n\
              serde = { version = \"1\", features = [\"derive\"] }\n\
              serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
         }
@@ -3158,6 +3165,8 @@ fn generate_module_rs_with_bindings(
              use crate::{__ToFitzJson, __FromFitzJson};\n\
              #[allow(unused_imports)]\n\
              use crate::__apply_cors_and_respond;\n\
+             #[allow(unused_imports)]\n\
+             use crate::__panic_payload_msg;\n\
              #[allow(unused_imports)]\n\
              use crate::{__parse_urlencoded, __extract_multipart_boundary, __parse_multipart};\n\n",
         );
@@ -20608,16 +20617,68 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // su firma Rust (`pub async fn`) devuelve un `Future`; el
         // wrapper await-ea sobre la marcha para obtener el `T` interno
         // y procesarlo igual que un handler sync.
+        //
+        // R6 (v0.10.13) — envolvemos la llamada en `catch_unwind` para
+        // convertir cualquier panic del user code (`x / 0`, `xs[N]`
+        // out-of-bounds, etc.) en una respuesta HTTP 500 con
+        // `{"error": <msg>}` en lugar del connection-reset silencioso
+        // que axum hace por default cuando el future del handler
+        // paniquea (el server sigue vivo pero el cliente recibe
+        // HTTP 000). Sync handler usa `std::panic::catch_unwind`;
+        // async usa `futures_util::FutureExt::catch_unwind` (gated
+        // por la dep `futures-util` que `cargo_toml_for` ahora suma
+        // siempre con HTTP).
         let call_args: Vec<String> = sig.resolved_params.iter().map(|(n, _)| n.clone()).collect();
-        let await_suffix = if sig.is_async { ".await" } else { "" };
+        let cors_arg_for_panic = if sig.has_cors {
+            format!(
+                "Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok())))",
+                self.cors_resolve_fn_for(sig)
+            )
+        } else {
+            "None".to_string()
+        };
+        if sig.is_async {
+            // Async handler: `FutureExt::catch_unwind().await` sobre
+            // la future devuelta por la llamada. `AssertUnwindSafe`
+            // bypassea el bound `UnwindSafe` que los futures Fitz no
+            // implementan (capturan tipos con interior mutability via
+            // Arc<Mutex>).
+            self.emit("    use futures_util::FutureExt as _;\n");
+            writeln!(
+                &mut self.output,
+                "    let __result = match std::panic::AssertUnwindSafe({}({})).catch_unwind().await {{",
+                sig.name,
+                call_args.join(", "),
+            )
+            .unwrap();
+        } else {
+            // Sync handler: `std::panic::catch_unwind` sobre una
+            // closure que invoca la fn. `AssertUnwindSafe` paralelo
+            // al async (los valores Fitz también capturan interior
+            // mutability vía Arc<Mutex>).
+            writeln!(
+                &mut self.output,
+                "    let __result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {}({}))) {{",
+                sig.name,
+                call_args.join(", "),
+            )
+            .unwrap();
+        }
+        self.emit("        Ok(__v) => __v,\n");
+        self.emit("        Err(__payload) => {\n");
+        self.emit("            let __msg = __panic_payload_msg(&__payload);\n");
+        self.emit("            let __built = (\n");
+        self.emit("                axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
+        self.emit("                axum::Json(serde_json::json!({\"error\": __msg})),\n");
+        self.emit("            ).into_response();\n");
         writeln!(
             &mut self.output,
-            "    let __result = {}({}){};",
-            sig.name,
-            call_args.join(", "),
-            await_suffix,
+            "            return __apply_cors_and_respond(__built, {});",
+            cors_arg_for_panic,
         )
         .unwrap();
+        self.emit("        }\n");
+        self.emit("    };\n");
 
         // MW.3: si la ruta declara cors, envolvemos el resultado en
         // `__apply_cors_and_respond(...)` para inyectar headers.
@@ -21965,6 +22026,22 @@ fn b64_decode_for_file(s: &str) -> Result<Vec<u8>, String> {
 /// `__cors_resolve_<NAME>(origin)` emitido por el codegen. Si es `None`,
 /// devuelve la response sin cambios. Header inválido → se omite (no
 /// panic).
+// R6 (v0.10.13) — Extrae el mensaje legible de un payload de panic
+// (devuelto por `std::panic::catch_unwind` / `FutureExt::catch_unwind`).
+// El wrapper de cada handler HTTP lo usa para convertir un panic del
+// user code (típicamente `x / 0`, `xs[N]` fuera de rango, etc.) en una
+// respuesta 500 con `{"error": <msg>}` en lugar de un connection-reset
+// silencioso por worker tokio panic.
+pub(crate) fn __panic_payload_msg(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        s.to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "panic interno del handler".to_string()
+    }
+}
+
 // W16 (v0.10.12) — `pub(crate)` para que módulos con handlers HTTP
 // cross-module puedan referenciarlo via `use crate::__apply_cors_and_respond;`.
 pub(crate) fn __apply_cors_and_respond(
