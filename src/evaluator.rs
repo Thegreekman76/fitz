@@ -10313,9 +10313,21 @@ fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRe
             ),
         ));
     }
+    // W5 (v0.10.6) — `db.close()` devuelve `Future<Result<Null>>` por
+    // consistencia con `db.query`/`db.exec`. Los errores de cierre
+    // (conn ya envenenada, semaphore roto, etc.) son raros pero
+    // posibles — el usuario debe poder manejarlos con `match` o `?`.
+    // Antes de v0.10.6 devolvía `Future<Null>` y el `?` daba error
+    // de runtime "el operador `?` requiere un Result".
     let fut: crate::value::FitzFuture = Box::pin(async move {
-        let _ = handle.close().await;
-        Ok(Value::Null)
+        match handle.close().await {
+            Ok(()) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::Null,
+            )))),
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
     });
     Ok(Value::new_future(fut))
 }

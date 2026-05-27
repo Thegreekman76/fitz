@@ -5418,9 +5418,11 @@ async fn __fitz_db_exec(
     }
 }
 
-/// `conn.close()` cooperativo + idempotente.
-async fn __fitz_db_close(conn: &__FitzDbConn) {
-    let _ = conn.close().await;
+/// `conn.close()` cooperativo + idempotente. W5 (v0.10.6) — devuelve
+/// `Result<(), String>` para que el patrón `db.close().await?` propague
+/// errores raros de cierre (semaphore roto, pool envenenado).
+async fn __fitz_db_close(conn: &__FitzDbConn) -> Result<(), String> {
+    conn.close().await.map_err(|e| e.to_string())
 }
 
 /// `conn.is_closed()` para diagnostics + branching.
@@ -11467,9 +11469,15 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         ),
                     ));
                 }
+                // W5 (v0.10.6) — close devuelve Future<Result<Null>>
+                // para que `db.close().await?` propague errores raros
+                // (paridad con evaluator).
                 Ok(Some((
                     format!("__fitz_db_close(&{})", obj_code),
-                    Type::Future(Box::new(Type::Null)),
+                    Type::Future(Box::new(Type::Result {
+                        ok: Box::new(Type::Null),
+                        err: Box::new(Type::Str),
+                    })),
                 )))
             }
             "is_closed" => {
@@ -29878,6 +29886,36 @@ mod tests {
         assert!(
             rust.contains("__fitz_db_close"),
             "esperaba `__fitz_db_close` en el output",
+        );
+    }
+
+    #[test]
+    fn codegen_db_close_devuelve_result_w5() {
+        // W5 (v0.10.6) — `db.close().await?` ahora compila porque
+        // `close()` devuelve `Future<Result<Null>>` (antes era
+        // `Future<Null>` y el `?` daba error de runtime).
+        let rust = gen("async fn run() -> Result<Null> {\n  \
+                 let conn = db.connect(\"postgres://x@h/d\").await?\n  \
+                 conn.close().await?\n  \
+                 return Ok(null)\n\
+             }\n\
+             async fn driver() -> Str {\n  \
+                 return match run().await {\n    \
+                     Ok(_) => \"OK\"\n    \
+                     Err(_) => \"err\"\n  \
+                 }\n\
+             }\n\
+             print(driver().await)\n")
+        .expect("codegen OK con `db.close().await?`");
+        // El helper preludio retorna Result<(), String> para propagar
+        // errores de cierre via ?.
+        assert!(
+            rust.contains("async fn __fitz_db_close(conn: &__FitzDbConn) -> Result<(), String>"),
+            "esperaba helper preludio con signature Result<(), String>, fue: {rust}",
+        );
+        assert!(
+            rust.contains(".map_err(|e| e.to_string())"),
+            "esperaba conversion .map_err sobre el cierre, fue: {rust}",
         );
     }
 
