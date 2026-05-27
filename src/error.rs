@@ -62,6 +62,78 @@ impl FitzError {
         self.hint = Some(hint.into());
         self
     }
+
+    // ---- U1 (v0.10.13) — constructores helper para los 3 patterns
+    //                    de error más frecuentes ----
+    //
+    // Antes los call sites del evaluator/checker/codegen formateaban
+    // mensajes inconsistentes ("no tiene método X" vs "el tipo X no
+    // soporta" vs "espera N args" vs "espera N argumentos"). Estos
+    // helpers fijan el wording canónico y reducen duplicación.
+    //
+    // Migración: en cada nuevo error, preferir uno de estos
+    // constructores. Migración de call sites existentes es
+    // incremental — los mensajes que ya estaban no cambian de shape
+    // (asegurando que tests que matchean substrings sigan verdes).
+
+    /// "el tipo `<type_name>` no tiene un método llamado `<method>`".
+    /// Para el receptor `xs.foo()` donde `foo` no existe en el tipo
+    /// del receptor (List/Map/Str/Nominal). Ejemplo: dispatch_method
+    /// en el evaluator cuando llega un nombre desconocido.
+    pub fn method_not_found(line: usize, column: usize, type_name: &str, method: &str) -> Self {
+        FitzError::new(
+            ErrorKind::TypeError,
+            line,
+            column,
+            format!(
+                "el tipo `{}` no tiene un método llamado `{}`",
+                type_name, method
+            ),
+        )
+    }
+
+    /// "la función `<name>` espera <expected> argumento(s), recibió
+    /// <found>". Pluralización implícita por el `(s)`.
+    pub fn wrong_arity(
+        line: usize,
+        column: usize,
+        name: &str,
+        expected: usize,
+        found: usize,
+    ) -> Self {
+        FitzError::new(
+            ErrorKind::WrongArgCount { expected, found },
+            line,
+            column,
+            format!(
+                "la función `{}` espera {} argumento(s), recibió {}",
+                name, expected, found
+            ),
+        )
+    }
+
+    /// "<context>: esperaba `<expected>`, recibió `<found>`". `context`
+    /// es una etiqueta corta del lugar donde el mismatch ocurrió
+    /// (ej. "el arg 1 de `add`", "el campo `email` del struct lit",
+    /// "el return de `me`"). Wording uniforme con backticks alrededor
+    /// de los tipos.
+    pub fn type_mismatch(
+        line: usize,
+        column: usize,
+        context: &str,
+        expected: &str,
+        found: &str,
+    ) -> Self {
+        FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: expected.to_string(),
+                found: found.to_string(),
+            },
+            line,
+            column,
+            format!("{}: esperaba `{}`, recibió `{}`", context, expected, found),
+        )
+    }
 }
 
 impl std::fmt::Display for FitzError {

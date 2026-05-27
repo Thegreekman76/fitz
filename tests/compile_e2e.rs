@@ -9,14 +9,6 @@
 // build`. Son más lentos que los unitarios; cada uno toma ~2s.
 
 use std::process::Command;
-use std::sync::Mutex;
-
-/// Mutex global: los tests de este archivo corren serializados.
-/// `fitz build` invoca rustc, y múltiples rustc en paralelo sobre
-/// el mismo target dir pueden chocar (los runs paralelos
-/// observados producían cross-talk entre binarios). Cada test
-/// toma el lock antes de buildear/ejecutar.
-static SERIAL: Mutex<()> = Mutex::new(());
 
 /// Path al binario de `fitz` que cargo construye para los
 /// integration tests (depende de CARGO_BIN_EXE_<bin>).
@@ -24,18 +16,19 @@ fn fitz_bin() -> &'static str {
     env!("CARGO_BIN_EXE_fitz")
 }
 
-/// 8-pyi.B cleanup (v0.9.57): pre-fix los helpers escribían siempre
-/// `prog.fitz` → todos los tests compartían `target/fitz-build/prog/`
-/// (cache global de fitz build con cargo project per-stem). Bajo
-/// SERIAL los tests corren secuenciales, pero en Windows el `.exe`
-/// generado mantiene un file handle abierto un instante después de
-/// `Child.wait()`; si el siguiente test sobreescribe el mismo path,
-/// `fitz build` falla con `OS error 32 — being used by another
-/// process`. Race intermitente real (no flake puro).
+/// 8-pyi.B cleanup (v0.9.57) + T2 (v0.10.13): cada test usa un stem
+/// único — sus archivos (`<stem>.fitz`, `<stem>.exe`) y su build dir
+/// (`target/fitz-build/<stem>/`) son por-test. No hay shared mutable
+/// resources entre tests, así que **corren en paralelo según el
+/// `--test-threads` default de cargo**.
 ///
-/// Fix: cada test usa un stem único derivado de su `test_name`. Cada
-/// uno va a su propio `target/fitz-build/<sanitized>/`. Cero choque
-/// de handles entre runs.
+/// Origen del fix: pre-fix los helpers escribían siempre `prog.fitz`
+/// → todos compartían `target/fitz-build/prog/`. El `SERIAL` mutex
+/// global serializaba para evitar el choque. T2 (v0.10.13) elimina
+/// el mutex después de convertir helpers + inline tests a stems
+/// únicos. En Windows el `.exe` generado mantenía un file handle
+/// abierto un instante después de `Child.wait()`; con stems únicos
+/// distintos tests no comparten ese archivo.
 ///
 /// Sanitización: lowercase + chars no-`[a-z0-9_-]` → `_`. Cargo exige
 /// `[a-z][a-z0-9_-]{0,63}` para nombres de paquete; los test_names
@@ -935,11 +928,12 @@ fn build_spawn_request_raw_with_headers(
     path: &str,
     headers: &[(&str, &str)],
 ) -> (u16, String) {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name; SERIAL ya no necesario.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -954,8 +948,12 @@ fn build_spawn_request_raw_with_headers(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -1043,11 +1041,12 @@ fn build_spawn_request_raw(
     method: &str,
     path: &str,
 ) -> (u16, String) {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -1062,8 +1061,12 @@ fn build_spawn_request_raw(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -1663,11 +1666,12 @@ fn build_spawn_request(
     path: &str,
     body: Option<&str>,
 ) -> (u16, String) {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -1682,8 +1686,12 @@ fn build_spawn_request(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     // Spawn del server en background. Le damos tiempo a abrir el
@@ -1886,11 +1894,12 @@ fn build_spawn_request_with_ct(
     body: Option<&str>,
     content_type: Option<&str>,
 ) -> (u16, String) {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -1905,8 +1914,12 @@ fn build_spawn_request_with_ct(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -2074,10 +2087,12 @@ fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
     // Pre-DZ: `print(10 / 0)` rechaza rustc con `unconditional_panic`.
     // Post-DZ: compila y panica en runtime con el mismo msg que el
     // intérprete ("división por cero").
-    let dir = std::env::temp_dir().join("fitz-e2e-dz-int");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "dz_int";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     std::fs::write(&src_path, "print(10 / 0)\n").expect("write");
     let out = Command::new(fitz_bin())
         .args(["build"])
@@ -2089,7 +2104,11 @@ fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
         "esperaba que `fitz build` con `10/0` compile (no const-eval reject), stderr: {}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
     assert!(bin.exists(), "binario no existe: {}", bin.display());
     let run = Command::new(&bin).output().expect("run prog");
     assert!(
@@ -2107,10 +2126,12 @@ fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
 
 #[test]
 fn dz_division_float_por_cero_compila_y_panica_con_msg_alineado() {
-    let dir = std::env::temp_dir().join("fitz-e2e-dz-float");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "dz_float";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     std::fs::write(&src_path, "print(3.14 / 0.0)\n").expect("write");
     let out = Command::new(fitz_bin())
         .args(["build"])
@@ -2118,7 +2139,11 @@ fn dz_division_float_por_cero_compila_y_panica_con_msg_alineado() {
         .output()
         .expect("fitz build");
     assert!(out.status.success());
-    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
     let run = Command::new(&bin).output().expect("run");
     assert!(!run.status.success(), "esperaba panic");
     let stderr = String::from_utf8_lossy(&run.stderr);
@@ -2142,10 +2167,12 @@ fn ct_comparar_int_vs_str_compila_y_devuelve_false() {
 fn ct_paridad_bit_a_bit_run_vs_build_comparaciones_incompatibles() {
     // Paridad bit-a-bit `fitz run` ↔ `fitz build` para `==`/`!=`
     // entre tipos primitivos incompatibles.
-    let dir = std::env::temp_dir().join("fitz-e2e-ct-parity");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "ct_parity";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     let src = "\
 print(1 == \"1\")
 print(\"x\" != 1.5)
@@ -2168,7 +2195,11 @@ print(false != \"f\")
         .output()
         .expect("fitz build");
     assert!(out_build.status.success());
-    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
     let exec = Command::new(&bin).output().expect("run prog");
     assert!(exec.status.success());
     let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
@@ -2263,10 +2294,12 @@ fn f13_spike_lista_heterogenea_compila_y_paridad_bit_a_bit() {
     // Listas heterogéneas (`[1, "dos", true]`) ya compilan a binario
     // nativo y producen output bit-a-bit idéntico a `fitz run`.
     // Antes del SPIKE el codegen rechazaba con "homogénea requerida".
-    let dir = std::env::temp_dir().join("fitz-e2e-f13-spike");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "f13_spike";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     let src = "\
 let xs = [1, \"dos\", true]
 let ys = [42, 3.14, null, false, \"hola\"]
@@ -2299,7 +2332,11 @@ print(len(ys))
         "fitz build falló (F13 SPIKE no aplicó): {}",
         String::from_utf8_lossy(&out_build.stderr)
     );
-    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
     let exec = Command::new(&bin).output().expect("ejecutar binario");
     assert!(exec.status.success(), "binario fallló al ejecutar");
     let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
@@ -2317,10 +2354,12 @@ print(len(ys))
 fn f13_a_bytes_y_nominal_en_lista_heterogenea_paridad_run_vs_build() {
     // F13.A + F13.B — Bytes y Nominales adentro de listas
     // heterogéneas. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
-    let dir = std::env::temp_dir().join("fitz-e2e-f13-a-b");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "f13_a_b";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     let src = "\
 type User { id: Int, name: Str }
 let u = User { id: 1, name: \"ana\" }
@@ -2347,7 +2386,11 @@ print(xs)
         "build falló: {}",
         String::from_utf8_lossy(&out_build.stderr)
     );
-    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
     let exec = Command::new(&bin).output().expect("run prog");
     assert!(exec.status.success());
     let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
@@ -2364,10 +2407,12 @@ print(xs)
 #[test]
 fn f13_a_map_heterogeneo_paridad_run_vs_build() {
     // F13.A — Map heterogéneo (values mixtos) paridad bit-a-bit.
-    let dir = std::env::temp_dir().join("fitz-e2e-f13-a-map");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "f13_a_map";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     let src = "let cfg = {\"name\": \"fitz\", \"count\": 7, \"on\": true}\nprint(cfg)\n";
     std::fs::write(&src_path, src).expect("write");
 
@@ -2385,7 +2430,11 @@ fn f13_a_map_heterogeneo_paridad_run_vs_build() {
         .output()
         .expect("fitz build");
     assert!(out_build.status.success());
-    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
     let exec = Command::new(&bin).output().expect("run prog");
     assert!(exec.status.success());
     let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
@@ -2424,10 +2473,12 @@ fn mw_wrap_codegen_rechaza_con_msg_que_cita_fitz_run() {
     // Mini-tanda Mw-Wrap — el codegen rechaza wrap-style mws con
     // un mensaje claro citando `fitz run` como workaround.
     // El intérprete sí los soporta (deuda residual del codegen).
-    let dir = std::env::temp_dir().join("fitz-e2e-mw-wrap-codegen");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "mw_wrap_codegen";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     let src = "\
 @server(43500)
 fn main() => 0
@@ -2464,10 +2515,12 @@ fn bytes_paridad_bit_a_bit_run_vs_build() {
     // Mini-tanda Bytes — el output de `fitz run` y `fitz build`
     // deben coincidir bit-a-bit para todos los casos canónicos:
     // literal con escapes, len, is_empty, to_str Ok/Err.
-    let dir = std::env::temp_dir().join("fitz-e2e-bytes-paridad");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "bytes_paridad";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     let src = "\
 let a = b\"hola\"
 let b = b\"\\x00\\xff\"
@@ -2507,7 +2560,11 @@ print(len(s))
         "fitz build falló: {}",
         String::from_utf8_lossy(&out_build.stderr)
     );
-    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
     let exec = Command::new(&bin).output().expect("ejecutar binario");
     assert!(exec.status.success());
     let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
@@ -2529,10 +2586,12 @@ print(len(s))
 fn oapi_return_ident_a_const_top_level_compila_y_emite_schema() {
     // `return NOT_FOUND { ... }` con NOT_FOUND const top-level
     // ahora parsea, compila a binario, y entra al schema OpenAPI.
-    let dir = std::env::temp_dir().join("fitz-e2e-oapi-ident-build");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "oapi_ident_build";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    let src_path = dir.join(format!("{}.fitz", stem));
     let src = "\
 let NOT_FOUND = 404
 @server(43250)
@@ -2750,10 +2809,10 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
 #[test]
 fn smoke_ejemplos_guia_compilables_compilan() {
     // Smoke test del cap 18: cada ejemplo de la lista compila a binario
-    // con `fitz build`. Costoso (cada ejemplo invoca cargo + rustc),
-    // pero corre serializado por el `SERIAL` mutex y vale para
-    // prevenir regresiones futuras del codegen sobre la guía.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // con `fitz build`. Costoso (cada ejemplo invoca cargo + rustc).
+    // T2 (v0.10.13) — SERIAL removido: cada ejemplo se buildea en su
+    // propio `target/fitz-build/<stem>/` (stem = filename del .fitz),
+    // así no choca con otros tests que paralelicen via helpers.
     let project_root = std::env::current_dir().expect("cwd");
     let guide_dir = project_root.join("examples").join("guide");
 
@@ -2813,11 +2872,12 @@ fn build_spawn_requests(
     port: u16,
     sequence: &[(&str, &str, Option<&str>)],
 ) -> Vec<(u16, String)> {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -2832,8 +2892,12 @@ fn build_spawn_requests(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -5641,11 +5705,12 @@ fn build_spawn_auth_requests(
     port: u16,
     requests: &[(&str, &str, Option<&str>)], // (method, path, optional bearer token)
 ) -> Vec<(u16, String)> {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -5660,8 +5725,12 @@ fn build_spawn_auth_requests(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -5849,8 +5918,9 @@ fn auth_codegen_cross_module_provider_w12() {
     // Mismo set de 6 requests que `auth_codegen_flujo_completo_end_to_end`,
     // pero el provider vive aparte — assertions paralelas garantizan
     // paridad bit-a-bit single-file ↔ cross-module.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join("fitz-e2e-auth_codegen_cross_module_w12");
+    // T2 (v0.10.13) — unique stem (test name como stem).
+    let stem = "auth_codegen_cross_module_w12";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
 
@@ -5892,7 +5962,7 @@ fn me(user: User) -> Str => user.name\n\
 @get(\"/admin\")\n\
 fn admin_route(user: User) -> Str => \"hola admin\"\n\
 ";
-    let main_path = dir.join("prog.fitz");
+    let main_path = dir.join(format!("{}.fitz", stem));
     std::fs::write(&main_path, main_src).expect("escribir prog.fitz");
 
     let output = Command::new(fitz_bin())
@@ -5907,8 +5977,12 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     // Spawn server.
@@ -6038,7 +6112,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     // `fitz build` escribe a `target/fitz-build/<stem>/src/main.rs`
     // relativo al CWD del proceso (raíz del repo cuando lo invoca cargo
     // test). El stem es `prog` (nombre del .fitz).
-    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
     if main_rs.exists() {
         let content = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
         assert!(
@@ -6065,7 +6139,8 @@ fn try_operator_mixed_with_return_status_w13() {
     // `__FitzResponse` y `?` se desazucare a un match que produce
     // `__FitzResponse { status: 500, ... }` (no `?` Rust nativo,
     // que requeriría `Result<_, _>` como return type).
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — unique stem.
+    let stem = "try_mixed_return_status_w13";
     let src = "\
 @server(43912)\n\
 fn main() => 0\n\
@@ -6091,10 +6166,10 @@ fn create(stub: Str, body: UserInput) -> User {\n\
     // El helper `build_spawn_auth_requests` no acepta body JSON, así
     // que armamos build + spawn + requests manuales inline (paralelo
     // al patrón del test cross-module W12).
-    let dir = std::env::temp_dir().join("fitz-e2e-try_mixed_return_status_w13");
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -6108,8 +6183,12 @@ fn create(stub: Str, body: UserInput) -> User {\n\
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -6203,7 +6282,7 @@ fn create(stub: Str, body: UserInput) -> User {\n\
     // `match (...) { Ok(__v) => __v, Err(__e) => return __FitzResponse
     // { status: 500, ... } }` (no como `?` Rust nativo, que rompería
     // la compilación de un fn declarado `-> User`).
-    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
     if main_rs.exists() {
         let content = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
         assert!(
@@ -6216,7 +6295,7 @@ fn create(stub: Str, body: UserInput) -> User {\n\
 
 #[test]
 fn http_coverage_metodos_headers_content_type_body_libre_t7() {
-    // T7 (v0.10.13) — cobertura HTTP E2E extendida sobre 3 áreas que
+    // T7 (v0.10.13) — cobertura HTTP E2E extendida sobre 4 áreas que
     // hasta hoy estaban sin tests robustos (sólo se asertaba que
     // `build` no fallara, sin validar respuestas):
     //
@@ -6233,15 +6312,17 @@ fn http_coverage_metodos_headers_content_type_body_libre_t7() {
     //      detecta el primary CT y usa `__parse_urlencoded` antes
     //      de aplicar `__from_fitz_json`. Mismo handler debe aceptar
     //      `application/json` también (path canónico).
+    //   4) Body sin tipo declarado (`body: Map<Str, Any>`). El
+    //      codegen reifica a `Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>`
+    //      y `body.get("k")` wrappea el key en `__FitzValue::Str` para
+    //      comparar contra los keys del Vec. Útil para webhooks y
+    //      endpoints proxy donde el shape del body no es fijo. (Antes
+    //      el codegen rechazaba con "no soporta el tipo `Any`" en
+    //      gen_map_get; fix en v0.10.13.)
     //
-    // Caso "body sin tipo declarado" (`body: Map<Str, Any>`) NO
-    // entró: el codegen rechaza Map<Str, Any> como param body con
-    // "codegen 5b no soporta el tipo `Any`". Es deuda real
-    // (workaround: declarar un type con `Map<Str, Str>` o el shape
-    // específico) pero fuera del scope T7.
-    //
-    // Un solo build + spawn cubre los 3 casos (8 requests).
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // Un solo build + spawn cubre los 4 casos (10 requests).
+    // T2 (v0.10.13) — unique stem.
+    let stem = "http_coverage_t7";
     let src = "\
 @server(43917)\n\
 fn main() => 0\n\
@@ -6282,11 +6363,23 @@ type FormPayload { name: Str, email: Str }\n\
 // JSON puede contener números nativos).\n\
 @post(\"/form\")\n\
 fn submit_form(body: FormPayload) -> Str { return \"got {body.name} <{body.email}>\" }\n\
+\n\
+// Caso 4 (v0.10.13): body sin schema fijo via `Map<Str, Any>`. El\n\
+// JSON entrante se deserializa en un Vec<(FitzValue, FitzValue)>\n\
+// y `body.get(\"k\")` devuelve Result<FitzValue>. Útil para\n\
+// webhooks/endpoints proxy donde el shape no es fijo.\n\
+@post(\"/webhook\")\n\
+fn webhook(body: Map<Str, Any>) -> Str {\n\
+    match body.get(\"event\") {\n\
+        Ok(_) => return \"event recibido\",\n\
+        Err(_) => return \"sin event\",\n\
+    }\n\
+}\n\
 ";
-    let dir = std::env::temp_dir().join("fitz-e2e-http_coverage_t7");
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir prog.fitz");
 
     let output = Command::new(fitz_bin())
@@ -6300,8 +6393,12 @@ fn submit_form(body: FormPayload) -> Str { return \"got {body.name} <{body.email
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -6455,6 +6552,25 @@ fn submit_form(body: FormPayload) -> Str { return \"got {body.name} <{body.email
         b
     );
 
+    // === Caso 4: body sin tipo declarado (Map<Str, Any>) ===
+    let (s, b) = send_req(
+        "POST",
+        "/webhook",
+        Some(r#"{"event":"user.created","data":{"id":7}}"#),
+        None,
+        &[],
+    );
+    assert_eq!(s, 200, "POST /webhook con event: {:?}", (s, &b));
+    assert!(
+        b.contains("event recibido"),
+        "webhook body con event: {:?}",
+        b
+    );
+
+    let (s, b) = send_req("POST", "/webhook", Some(r#"{"foo":"bar"}"#), None, &[]);
+    assert_eq!(s, 200, "POST /webhook sin event: {:?}", (s, &b));
+    assert!(b.contains("sin event"), "webhook sin event: {:?}", b);
+
     let _ = child.kill();
     let _ = child.wait();
 }
@@ -6470,7 +6586,8 @@ fn handler_panic_devuelve_500_no_rompe_conexion_r6() {
     // El fix envuelve el call al user fn en `catch_unwind` (sync) o
     // `FutureExt::catch_unwind` (async) y, on Err del payload, emite
     // el `__FitzResponse 500` con el msg del panic + CORS headers.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — unique stem.
+    let stem = "handler_panic_r6";
     let src = "\
 @server(43916)\n\
 fn main() => 0\n\
@@ -6492,10 +6609,10 @@ async fn divide_async() -> Float {\n\
 @get(\"/ok\")\n\
 fn ok() -> Str => \"alive\"\n\
 ";
-    let dir = std::env::temp_dir().join("fitz-e2e-handler_panic_r6");
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir prog.fitz");
 
     let output = Command::new(fitz_bin())
@@ -6509,8 +6626,12 @@ fn ok() -> Str => \"alive\"\n\
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -6627,8 +6748,9 @@ fn cross_module_http_handler_w16() {
     //   - W13: `?` operator dentro del handler (Err → 500).
     //   - W14: handler con body + user juntos.
     //   - W16: handler entero en módulo, route registrada por main.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join("fitz-e2e-cross_module_http_w16");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "cross_module_http_w16";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
 
@@ -6696,7 +6818,7 @@ import posts\n\
 @server(43915)\n\
 fn main() => 0\n\
 ";
-    let main_path = dir.join("prog.fitz");
+    let main_path = dir.join(format!("{}.fitz", stem));
     std::fs::write(&main_path, main_src).expect("escribir prog.fitz");
 
     let output = Command::new(fitz_bin())
@@ -6711,8 +6833,12 @@ fn main() => 0\n\
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -6873,7 +6999,7 @@ fn main() => 0\n\
     // Sanity check del Rust generado:
     //   - posts.rs DEBE tener `pub(crate) async fn __handler_*`.
     //   - main.rs DEBE registrar `crate::posts::__handler_*`.
-    let posts_rs = std::path::PathBuf::from("target/fitz-build/prog/src/posts.rs");
+    let posts_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/posts.rs", stem));
     if posts_rs.exists() {
         let content = std::fs::read_to_string(&posts_rs).expect("leer posts.rs");
         // En modo Module el pub_prefix es `pub ` (no `pub(crate) `);
@@ -6885,7 +7011,7 @@ fn main() => 0\n\
             "posts.rs debe emitir wrappers pub async fn __handler_* (W16.2)"
         );
     }
-    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
     if main_rs.exists() {
         let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
         assert!(
@@ -6913,8 +7039,9 @@ fn cross_module_body_type_serializa_w15() {
     // loader. El wrapper en main referencia `<PostInput as
     // __FromFitzJson>::__from_fitz_json(...)` sin necesidad de impls
     // duplicados ni `use` adicionales del módulo origen.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join("fitz-e2e-cross_module_body_w15");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "cross_module_body_w15";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
 
@@ -6939,7 +7066,7 @@ fn create(input: PostInput) -> Post {\n\
     return Post { id: 1, title: input.title, length: len(input.body) }\n\
 }\n\
 ";
-    let main_path = dir.join("prog.fitz");
+    let main_path = dir.join(format!("{}.fitz", stem));
     std::fs::write(&main_path, main_src).expect("escribir prog.fitz");
 
     let output = Command::new(fitz_bin())
@@ -6954,8 +7081,12 @@ fn create(input: PostInput) -> Post {\n\
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -7025,7 +7156,7 @@ fn create(input: PostInput) -> Post {\n\
     // un futuro refactor mueve los impls a los módulos, esta
     // assertion habrá que adaptarla; mientras tanto candea el
     // approach actual.
-    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
     if main_rs.exists() {
         let content = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
         assert!(
@@ -7051,7 +7182,8 @@ fn auth_codegen_handler_con_body_y_user_w14() {
     // PostInput, user: User) -> Post`. El wrapper deserializa el body
     // como PostInput, autentica via provider, inyecta user, y llama
     // al handler con (input, user).
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — unique stem.
+    let stem = "auth_body_user_w14";
     let src = "\
 @server(43913)\n\
 fn main() => 0\n\
@@ -7079,10 +7211,10 @@ fn create(input: PostInput, user: User) -> Post {\n\
     return Post { id: 42, author_email: user.email, title: input.title }\n\
 }\n\
 ";
-    let dir = std::env::temp_dir().join("fitz-e2e-auth_body_user_w14");
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -7096,8 +7228,12 @@ fn create(input: PostInput, user: User) -> Post {\n\
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -7246,11 +7382,12 @@ async fn ws_build_send_recv(
     path: &str,
     payload: &str,
 ) -> String {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -7265,8 +7402,12 @@ async fn ws_build_send_recv(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -7399,11 +7540,12 @@ async fn ws_build_send_recv_binary(
     path: &str,
     payload: Vec<u8>,
 ) -> Vec<u8> {
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    // T2 (v0.10.13) — unique stem por test_name.
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("crear tempdir");
-    let fitz_src = dir.join("prog.fitz");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
     std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
     let output = Command::new(fitz_bin())
@@ -7418,8 +7560,12 @@ async fn ws_build_send_recv_binary(
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-    let bin = dir.join(bin_name);
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
     assert!(bin.exists(), "binario {} no existe", bin.display());
 
     use std::process::{Child, Stdio};
@@ -7540,11 +7686,12 @@ fn ws_codegen_auth_via_subprotocol_acepta_token() {
         .build()
         .unwrap();
     let (status_proto_echoed, msg) = rt.block_on(async move {
-        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-        let dir = std::env::temp_dir().join("fitz-e2e-ws-auth-subproto");
+        // T2 (v0.10.13) — unique stem.
+        let stem = "ws_auth_subproto";
+        let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("crear tempdir");
-        let fitz_src = dir.join("prog.fitz");
+        let fitz_src = dir.join(format!("{}.fitz", stem));
         std::fs::write(&fitz_src, src).expect("escribir .fitz");
 
         let output = Command::new(fitz_bin())
@@ -7558,8 +7705,12 @@ fn ws_codegen_auth_via_subprotocol_acepta_token() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
-        let bin = dir.join(bin_name);
+        let bin_name = if cfg!(windows) {
+            format!("{}.exe", stem)
+        } else {
+            stem.to_string()
+        };
+        let bin = dir.join(&bin_name);
         use std::process::{Child, Stdio};
         let mut child: Child = Command::new(&bin)
             .stdout(Stdio::null())
@@ -7973,8 +8124,9 @@ fn loader_absoluto_data_sibling_import_compila_en_fitz_build() {
     //   src/main.fitz       — usa data/users (que importa types/user)
     //   src/types/user.fitz — define type User
     //   src/data/users.fitz — `from types.user import User` (resuelve via import_root)
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
-    let dir = std::env::temp_dir().join("fitz-e2e-loader-absoluto");
+    // T2 (v0.10.13) — unique stem.
+    let stem = "loader_absoluto";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
     let src = dir.join("src");
     std::fs::create_dir_all(src.join("types")).unwrap();
@@ -8196,7 +8348,7 @@ fn db_orm_cross_module_at_table_compila_w8() {
     // Ahora: el `LoadedModule` propaga el metadata al importer, y
     // el módulo emite `impl __FromFitzDbRow for UserData` localmente
     // con los helpers `use crate::__From...` necesarios.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — unique stem ya estaba; SERIAL removido.
     let stem = sanitize_stem("db_orm_cross_module_at_table_w8");
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
@@ -8274,7 +8426,7 @@ fn jsonb_cross_module_compila_w11() {
     // porque `uses_fitz_value` solo miraba el main. Ahora: transitivo
     // (idem uses_ws/uses_jobs/uses_auth post-W10), y `__fv_type_name`
     // se emite como `pub(crate)`.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — SERIAL removido.
     let stem = sanitize_stem("jsonb_cross_module_w11");
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);
@@ -8343,7 +8495,7 @@ fn ws_jobs_cross_module_compila_w10() {
     // transitivos (idem `uses_db` post-W8), y los preludios WS/jobs
     // tienen los items `pub(crate)` para que los `use crate::__Fitz*`
     // de los módulos resuelvan.
-    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    // T2 (v0.10.13) — SERIAL removido.
     let stem = sanitize_stem("ws_jobs_cross_module_w10");
     let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
     let _ = std::fs::remove_dir_all(&dir);

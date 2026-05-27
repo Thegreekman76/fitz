@@ -5002,15 +5002,12 @@ async fn dispatch_method(
                 other,
             ),
         ))),
-        _ => Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::InvalidSyntax,
+        // U1 (v0.10.13) — migrado al constructor helper.
+        _ => Err(EvalSignal::Error(FitzError::method_not_found(
             span.line,
             span.column,
-            format!(
-                "el tipo `{}` no tiene un método llamado `{}`",
-                receiver.type_name(),
-                method,
-            ),
+            receiver.type_name(),
+            method,
         ))),
     }
 }

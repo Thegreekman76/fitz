@@ -17141,19 +17141,54 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // `show_expr_inline` (modo "adentro de lista/mapa", que sí mete
         // comillas).
         let key_show = show_expr("__k", key_ty);
-        let val_rs = rust_type_for(val_ty, self.env)?;
+        // U1/Map-Any (v0.10.13) — `Map<K, Any>.get(...)` devuelve un
+        // `Result<__FitzValue, String>` porque V=Any se reifica como
+        // `__FitzValue` (tagged union) en el storage de la map. Sin
+        // este cast, `rust_type_for(Type::Any)` caería al fallback de
+        // "no soporta Any". El caller que use el get sobre Map<_, Any>
+        // recibirá un Result<__FitzValue> y puede pattern-matchear con
+        // los métodos `.as_int()`/`.as_str()`/etc. del enum.
+        let val_rs = if matches!(val_ty, Type::Any) {
+            "__FitzValue".to_string()
+        } else {
+            rust_type_for(val_ty, self.env)?
+        };
+        // Map-Any (v0.10.13) — cuando la map es heterogénea (K=Any o
+        // V=Any), `rust_type_for(Map<K, V>)` la reifica como
+        // `Vec<(__FitzValue, __FitzValue)>`. Las keys del Vec son
+        // `__FitzValue`, pero el `__k` coercionado del arg sigue siendo
+        // primitivo (`String` cuando K=Str, `i64` cuando K=Int, etc.).
+        // Wrap el `__k` en la variante __FitzValue correcta para que
+        // el `==` compare apples-to-apples. Caso típico: `body.get("k")`
+        // sobre body de `Map<Str, Any>` body de un handler HTTP.
+        let map_is_heterogeneous = matches!(key_ty, Type::Any) || matches!(val_ty, Type::Any);
+        let key_lhs = if map_is_heterogeneous {
+            match key_ty {
+                Type::Str => "__FitzValue::Str(__k.clone())".to_string(),
+                Type::Int => "__FitzValue::Int(__k)".to_string(),
+                Type::Float => "__FitzValue::Float(__k)".to_string(),
+                Type::Bool => "__FitzValue::Bool(__k)".to_string(),
+                // K=Any: el arg ya viene como __FitzValue (sin wrap).
+                Type::Any => "__k.clone()".to_string(),
+                // Otros tipos como key — raro en JSON pero defensivo.
+                _ => "__k.clone()".to_string(),
+            }
+        } else {
+            "__k".to_string()
+        };
         let code = format!(
             "{{ \
                 let __map = {}; \
                 let __k = {}; \
                 let __pairs = __map.lock().unwrap(); \
                 let mut __result: Result<{}, String> = Err(format!(\"clave no encontrada: {{}}\", {})); \
+                let __key_lhs = {}; \
                 for (__k2, __v) in __pairs.iter() {{ \
-                    if __k2 == &__k {{ __result = Ok(__v.clone()); break; }} \
+                    if __k2 == &__key_lhs {{ __result = Ok(__v.clone()); break; }} \
                 }} \
                 __result \
             }}",
-            obj_code, coerced_key, val_rs, key_show
+            obj_code, coerced_key, val_rs, key_show, key_lhs
         );
         Ok((
             code,
