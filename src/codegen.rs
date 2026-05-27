@@ -12033,11 +12033,13 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
     /// reflejada en la instance retornada). Retorna
     /// `Future<Result<Type, Str>>`.
     ///
-    /// Paridad estricta con `orm_type_insert` del evaluator: incluye
+    /// Paridad estricta con `orm_type_insert` del evaluator. Incluye
     /// TODOS los fields non-virtual en el INSERT, con el valor que el
-    /// record tiene (el user pasa el `id` explícito si lo necesita).
-    /// La convención BIGSERIAL (skip PK con default 0) queda como
-    /// refinamiento futuro coordinado evaluator+codegen.
+    /// record tiene. W4 (v0.10.6) — si el `@primary` es `Int` y el
+    /// valor runtime es el sentinel 0, el field se skipea para que
+    /// Postgres asigne el id via `bigserial`/`IDENTITY DEFAULT`. El
+    /// SQL queda condicional: dos shapes (con/sin PK), elegidos
+    /// runtime. Cualquier otro id explícito se inserta literal.
     fn gen_orm_type_insert(
         &mut self,
         type_name: &str,
@@ -12056,14 +12058,40 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         }
         let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
 
+        // W4 (v0.10.6) — detectamos si hay un field `@primary` declarado
+        // como `Int` (no nullable, no genérico). Si sí, capturamos su
+        // nombre Fitz para emitir un check runtime `__g.<pk> == 0` que
+        // skipea el field del INSERT cuando el valor es el sentinel 0
+        // (paridad con `orm_type_insert` del evaluator). El SQL queda
+        // condicional: dos shapes (con/sin PK), elegidos en runtime.
+        let pk_int_field_name: Option<String> = if let Some(pk_name) = meta.primary_field.as_deref()
+        {
+            fields
+                .iter()
+                .find(|f| f.name == pk_name && matches!(&f.type_, Type::Int))
+                .map(|f| f.name.clone())
+        } else {
+            None
+        };
+
         // Construir SQL + marshallers de cada field non-virtual en
         // orden de declaración. Mismo orden que el evaluator → mismo
         // SQL parametrizado bit-a-bit.
-        let mut col_list = String::new();
-        let mut placeholders = String::new();
+        //
+        // Si hay PK Int sentinel, mantenemos dos pistas paralelas: la
+        // versión completa (PK incluido) y la versión sin PK. Si no,
+        // solo la completa (paridad con el shape original).
+        let mut col_list_with = String::new();
+        let mut placeholders_with = String::new();
         let mut returning_list = String::new();
-        let mut placeholder_idx: usize = 0;
-        let mut field_pg_codes: Vec<String> = Vec::new();
+        let mut placeholder_idx_with: usize = 0;
+        let mut field_pg_codes_with: Vec<String> = Vec::new();
+
+        let mut col_list_no = String::new();
+        let mut placeholders_no = String::new();
+        let mut placeholder_idx_no: usize = 0;
+        let mut field_pg_codes_no: Vec<String> = Vec::new();
+
         for f in &fields {
             if meta.is_virtual_field(&f.name) {
                 continue;
@@ -12084,18 +12112,6 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 format!("__g.{}", f.name)
             };
             let pg_code = orm_marshal_field_to_pg(&f.type_, &accessor, &f.name)?;
-            if placeholder_idx > 0 {
-                col_list.push_str(", ");
-                placeholders.push_str(", ");
-                returning_list.push_str(", ");
-            }
-            col_list.push('"');
-            col_list.push_str(sql_col);
-            col_list.push('"');
-            returning_list.push('"');
-            returning_list.push_str(sql_col);
-            returning_list.push('"');
-            placeholder_idx += 1;
             // Fase 10.b.8.a + b — sufijo SQL cast. Para List<scalar>
             // usamos `::int8[]`/`::text[]`/etc. (orm_list_scalar_info).
             // Para Map<Str, Any> usamos `::jsonb` para que Postgres
@@ -12110,12 +12126,50 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             } else {
                 ""
             };
-            placeholders.push_str(&format!("${}{}", placeholder_idx, cast_suffix));
-            field_pg_codes.push(pg_code);
+
+            // RETURNING incluye TODOS los fields (siempre) — no depende
+            // del path runtime.
+            if placeholder_idx_with > 0 {
+                returning_list.push_str(", ");
+            }
+            returning_list.push('"');
+            returning_list.push_str(sql_col);
+            returning_list.push('"');
+
+            // Pista "con PK": siempre acumulamos.
+            if placeholder_idx_with > 0 {
+                col_list_with.push_str(", ");
+                placeholders_with.push_str(", ");
+            }
+            col_list_with.push('"');
+            col_list_with.push_str(sql_col);
+            col_list_with.push('"');
+            placeholder_idx_with += 1;
+            placeholders_with.push_str(&format!("${}{}", placeholder_idx_with, cast_suffix));
+            field_pg_codes_with.push(pg_code.clone());
+
+            // Pista "sin PK": skipea el field cuando es el PK Int.
+            let is_pk_int = pk_int_field_name.as_deref() == Some(f.name.as_str());
+            if !is_pk_int {
+                if placeholder_idx_no > 0 {
+                    col_list_no.push_str(", ");
+                    placeholders_no.push_str(", ");
+                }
+                col_list_no.push('"');
+                col_list_no.push_str(sql_col);
+                col_list_no.push('"');
+                placeholder_idx_no += 1;
+                placeholders_no.push_str(&format!("${}{}", placeholder_idx_no, cast_suffix));
+                field_pg_codes_no.push(pg_code);
+            }
         }
-        let sql = format!(
+        let sql_with = format!(
             "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
-            meta.sql_name, col_list, placeholders, returning_list
+            meta.sql_name, col_list_with, placeholders_with, returning_list
+        );
+        let sql_no = format!(
+            "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
+            meta.sql_name, col_list_no, placeholders_no, returning_list
         );
 
         let (db_code, _) = self.gen_expr(&args[0])?;
@@ -12131,19 +12185,65 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // acotado: el guard `__g` se libera al cerrar el bloque, ANTES
         // del .await del query — std::sync::Mutex no es Send across
         // .await y mantener el guard cruzaría el await point.
-        let args_inits = if field_pg_codes.is_empty() {
+        let args_inits_with = if field_pg_codes_with.is_empty() {
             String::new()
         } else {
-            field_pg_codes.join(",\n                ")
+            field_pg_codes_with.join(",\n                    ")
+        };
+
+        let prelude_and_match = match &pk_int_field_name {
+            // W4 — hay PK Int: emitimos branch runtime. Si __g.<pk>
+            // es 0, usamos sql_no/args_no (Postgres asigna bigserial);
+            // si no, sql_with/args_with literal.
+            Some(pk_name) => {
+                let args_inits_no = if field_pg_codes_no.is_empty() {
+                    String::new()
+                } else {
+                    field_pg_codes_no.join(",\n                    ")
+                };
+                format!(
+                    "    let (__sql, __args): (&str, Vec<__FitzPgValue>) = {{\n        \
+                     let __rec = {rec};\n        \
+                     let __g = __rec.lock().unwrap();\n        \
+                     if __g.{pk} == 0 {{\n            \
+                     (\n                \
+                     {sql_no_lit},\n                \
+                     vec![\n                    {args_inits_no}\n                ]\n            \
+                     )\n        \
+                     }} else {{\n            \
+                     (\n                \
+                     {sql_with_lit},\n                \
+                     vec![\n                    {args_inits_with}\n                ]\n            \
+                     )\n        \
+                     }}\n    \
+                     }};\n    \
+                     match __fitz_db_query(&{db}, __sql.to_string(), __args).await {{\n",
+                    rec = rec_code,
+                    pk = pk_name,
+                    sql_no_lit = rust_str_literal(&sql_no),
+                    sql_with_lit = rust_str_literal(&sql_with),
+                    args_inits_no = args_inits_no,
+                    args_inits_with = args_inits_with,
+                    db = db_code,
+                )
+            }
+            // Sin PK Int: shape original, un solo SQL.
+            None => format!(
+                "    let __args: Vec<__FitzPgValue> = {{\n        \
+                 let __rec = {rec};\n        \
+                 let __g = __rec.lock().unwrap();\n        \
+                 vec![\n                {args_inits_with}\n        ]\n    \
+                 }};\n    \
+                 match __fitz_db_query(&{db}, {sql_lit}.to_string(), __args).await {{\n",
+                rec = rec_code,
+                sql_lit = rust_str_literal(&sql_with),
+                args_inits_with = args_inits_with,
+                db = db_code,
+            ),
         };
         let code = format!(
-            "(async {{\n    \
-             let __args: Vec<__FitzPgValue> = {{\n        \
-             let __rec = {rec};\n        \
-             let __g = __rec.lock().unwrap();\n        \
-             vec![\n                {args_inits}\n        ]\n    \
-             }};\n    \
-             match __fitz_db_query(&{db}, {sql_lit}.to_string(), __args).await {{\n        \
+            "(async {{\n\
+             {prelude_and_match}        \
              Ok(__rows) => {{\n            \
              let __rows_g = __rows.lock().unwrap();\n            \
              match __rows_g.first() {{\n                \
@@ -12157,11 +12257,8 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
              Err(__e) => Err(__e),\n    \
              }}\n\
              }})",
-            rec = rec_code,
-            db = db_code,
-            sql_lit = rust_str_literal(&sql),
+            prelude_and_match = prelude_and_match,
             data = data_name,
-            args_inits = args_inits,
         );
         Ok((code, ret_ty))
     }
@@ -30056,6 +30153,75 @@ mod tests {
         assert!(
             rust.contains("INSERT ... RETURNING no devolvió rows"),
             "esperaba fallback claro cuando RETURNING devuelve vacío",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_insert_pk_int_sentinel_zero_emite_branch_runtime() {
+        // W4 (v0.10.6) — cuando hay `@primary id: Int`, el codegen emite
+        // un branch runtime `if __g.id == 0 { SQL_NO_PK } else { SQL_WITH_PK }`
+        // para que Postgres asigne el id via bigserial cuando el user pasa
+        // `id: 0` como sentinel.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let u = User { id: 0, name: \"ada\" }\n  \
+                       let _inserted = User.insert(db, u).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        // Branch runtime presente: chequea __g.id == 0 para decidir SQL.
+        assert!(
+            rust.contains("if __g.id == 0"),
+            "esperaba branch `if __g.id == 0` para sentinel skip, fue: {rust}",
+        );
+        // SQL sin PK (rama del sentinel) — solo (name) y placeholder $1.
+        assert!(
+            rust.contains("INSERT INTO \\\"users\\\" (\\\"name\\\") VALUES ($1) RETURNING"),
+            "esperaba SQL sin PK para rama sentinel, fue: {rust}",
+        );
+        // SQL con PK (rama explícita) — (id, name) y placeholders $1, $2.
+        assert!(
+            rust.contains(
+                "INSERT INTO \\\"users\\\" (\\\"id\\\", \\\"name\\\") VALUES ($1, $2) RETURNING"
+            ),
+            "esperaba SQL con PK para rama explícita, fue: {rust}",
+        );
+        // RETURNING siempre incluye todos los fields (no depende del branch).
+        assert!(
+            rust.contains("RETURNING \\\"id\\\", \\\"name\\\""),
+            "esperaba RETURNING con id+name siempre, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_orm_insert_sin_primary_int_no_emite_branch_runtime() {
+        // W4 — type sin `@primary id: Int` (e.g. primary Str, o sin
+        // primary): el shape NO emite branch — usa el SQL único como
+        // antes. Garantiza que no se rompe el path no-bigserial.
+        let src = "@table(\"slugs\") type Slug {\n  \
+                       @primary key: Str\n  \
+                       value: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let s = Slug { key: \"a\", value: \"b\" }\n  \
+                       let _r = Slug.insert(db, s).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK");
+        assert!(
+            !rust.contains("if __g.key == 0"),
+            "NO esperaba branch sobre key Str — solo aplica a primary Int",
+        );
+        assert!(
+            rust.contains(
+                "INSERT INTO \\\"slugs\\\" (\\\"key\\\", \\\"value\\\") VALUES ($1, $2) RETURNING"
+            ),
+            "esperaba SQL único sin branch, fue: {rust}",
         );
     }
 

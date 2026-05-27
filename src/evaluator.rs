@@ -11508,6 +11508,17 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
             .find(|(n, _)| n == &f.name)
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Null);
+        // W4 (v0.10.6) — sentinel @primary Int = 0. Si el field es el
+        // primary key, está declarado como `Int` (no nullable, no genérico)
+        // y el valor runtime es `Int(0)`, lo skipeamos del INSERT para
+        // que Postgres asigne el id via `bigserial`/`IDENTITY DEFAULT`.
+        // Cualquier otro `id` explícito (1, 7, etc.) se inserta literal.
+        let is_pk_int_sentinel = state.meta.primary_field.as_deref() == Some(f.name.as_str())
+            && matches!(&f.type_, crate::ast::TypeExpr::Named(n) if n == "Int")
+            && matches!(&value, Value::Int(0));
+        if is_pk_int_sentinel {
+            continue;
+        }
         // Fase 10.5.a — si el field Fitz es Map<...>, serializamos
         // a JSON string y emitimos `$N::jsonb` para que Postgres lo
         // reciba como columna jsonb. Sin el cast, $N::text no se
