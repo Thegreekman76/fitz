@@ -17158,13 +17158,29 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             Pattern::Null => {
                 if matches!(scrut_ty, Type::Null) {
                     Ok(("()".to_string(), None))
+                } else if matches!(scrut_ty, Type::Nullable(_)) {
+                    // W2 (v0.10.6) — scrut es `Option<T>` en Rust;
+                    // `null` matchea `None`. Antes emitía `_` (bug
+                    // silencioso: matcheaba TODO, no solo null).
+                    Ok(("None".to_string(), None))
                 } else {
                     Ok(("_".to_string(), None))
                 }
             }
             Pattern::Ident(name) => {
-                self.declare_var(name.clone(), scrut_ty.clone());
-                Ok((name.clone(), None))
+                // W2 (v0.10.6) — Nullable refinement. Si el scrutinee
+                // es `T?` (`Option<T>` en Rust), el binding desnulla:
+                // pattern `Some(name)` y `name` se declara como `T`
+                // (no Option). Esto destraba `match obj { null => x,
+                // u => u.field }` que antes fallaba con rustc porque
+                // `u` quedaba como `Option<T>` y `u.field` no compila.
+                if let Type::Nullable(inner) = scrut_ty {
+                    self.declare_var(name.clone(), (**inner).clone());
+                    Ok((format!("Some({})", name), None))
+                } else {
+                    self.declare_var(name.clone(), scrut_ty.clone());
+                    Ok((name.clone(), None))
+                }
             }
             Pattern::Wildcard => Ok(("_".to_string(), None)),
             Pattern::OkBinding(name) => {

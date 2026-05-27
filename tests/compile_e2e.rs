@@ -6776,6 +6776,46 @@ fn db_map_lit_homogeneo_a_field_any_compila_w1() {
 }
 
 #[test]
+fn db_match_nullable_refinement_w2() {
+    // W2 (v0.10.6) — `match obj { null => ..., u => u.field }` compila
+    // a binario nativo. Antes el codegen emitía el binding `u` como
+    // `Option<UserData>` y `u.name` fallaba rustc con type error.
+    // Ahora el codegen detecta scrut `Nullable<T>` y emite `Some(name)`
+    // refinando `name` a `T`. Paridad con el evaluator (que ya
+    // matcheaba Value::Null vs Value::Instance correctamente).
+    //
+    // Bonus: corrige bug silencioso anterior donde Pattern::Null sobre
+    // Nullable emitía `_` (matcheaba TODO, no solo null) — ahora
+    // emite `None` específico.
+    let (stdout, code) = build_and_run(
+        "db_match_nullable_refinement_w2",
+        "type User { name: Str }\n\
+         type Profile { user: User? }\n\
+         fn show(p: Profile) -> Str {\n  \
+             return match p.user {\n    \
+                 null => \"sin usuario\"\n    \
+                 u    => u.name\n  \
+             }\n\
+         }\n\
+         let con_user = Profile { user: User { name: \"ada\" } }\n\
+         let sin_user = Profile { user: null }\n\
+         print(show(con_user))\n\
+         print(show(sin_user))\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(
+        stdout.contains("ada"),
+        "esperaba `ada` en output, fue: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("sin usuario"),
+        "esperaba `sin usuario` en output, fue: {}",
+        stdout,
+    );
+}
+
+#[test]
 fn db_upd_con_map_var_compila_a_binario_w7() {
     // W7 (v0.10.6) — `.update(db, changes)` con `changes` como var
     // `Map<Str, Any>` (no Map literal) compila a binario nativo.

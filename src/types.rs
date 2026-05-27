@@ -3390,6 +3390,25 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
         Expr::Match { value, arms, span } => {
             let scrutinee = infer_expr(ctx, value);
+            // W2 (v0.10.6) — Nullable refinement en match arms.
+            // Cuando el scrutinee es `T?` (Nullable<T>) y un arm
+            // PREVIO matchea `null` explícito, los arms posteriores
+            // con `Pattern::Ident` quedan refinados a `T` (sin
+            // Nullable). Esto destraba `match post.user { null =>
+            // "<null>", u => u.name }`.
+            //
+            // Reglas (MVP):
+            // - Scrutinee debe ser `Type::Nullable(T)`.
+            // - Algún arm previo debe tener `Pattern::Null`. Un
+            //   `Pattern::Or` que contenga Null también cubre.
+            // - Solo refinamos `Pattern::Ident(_)` (incluido el caso
+            //   `_`/wildcard que no bindea pero igual no rompe).
+            // - Tuples/OkBinding/ErrBinding NO se refinan en MVP.
+            let refined_inner: Option<Type> = match &scrutinee {
+                Type::Nullable(inner) => Some((**inner).clone()),
+                _ => None,
+            };
+            let mut null_cubierto_previamente = false;
             // Tipo del binding según el patrón. Para `Ok(x)` con
             // scrutinee `Result<T>`, x es T. Para `Err(e)` el error
             // está fijado en Str. Para Ident es el scrutinee
@@ -3404,7 +3423,16 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // salta al body del arm.
                 // Sp.2 — body es Vec<Stmt>; el span es el del primer stmt.
                 let body_span = arm.body.first().map(|s| s.span()).unwrap_or(Span::ZERO);
-                bind_pattern(ctx, &arm.pattern, &scrutinee, body_span);
+                // W2 — decidir si refinamos el binding de este arm.
+                // Solo aplica a Pattern::Ident sobre scrutinee Nullable
+                // cuando un arm previo ya cubrió Null.
+                let scrutinee_for_binding = match (&arm.pattern, &refined_inner) {
+                    (crate::ast::Pattern::Ident(_), Some(inner)) if null_cubierto_previamente => {
+                        inner.clone()
+                    }
+                    _ => scrutinee.clone(),
+                };
+                bind_pattern(ctx, &arm.pattern, &scrutinee_for_binding, body_span);
                 // R.2.2 — el guard tipa adentro del scope del binding.
                 // Debe sintetizar Bool; otro tipo es error.
                 if let Some(guard_expr) = &arm.guard {
@@ -3463,6 +3491,12 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ctx.pop_scope();
                 if first.is_none() {
                     first = Some(t);
+                }
+                // W2 — actualizar el flag DESPUÉS de procesar el arm:
+                // el próximo arm puede beneficiarse del refinement si
+                // ÉSTE arm matcheó null.
+                if pattern_cubre_null(&arm.pattern) {
+                    null_cubierto_previamente = true;
                 }
             }
             // Exhaustividad: solo la exigimos cuando el scrutinee es
@@ -6190,6 +6224,22 @@ fn check_result_match_exhaustiveness(
             missing
         ),
     );
+}
+
+/// W2 (v0.10.6) — `true` si el patrón cubre `null`. Usado por el
+/// checker de `match` para refinar `Nullable<T>` a `T` en arms
+/// posteriores (flow-sensitive). Conservador: cubre `Pattern::Null`
+/// directo y `Pattern::Or` que contenga al menos un sub-pattern Null.
+/// `Pattern::Wildcard`/`Pattern::Ident` NO se consideran cubrimiento
+/// específico (matchean todo, incluido null — pero su lugar es
+/// catch-all, no refinable).
+fn pattern_cubre_null(pat: &crate::ast::Pattern) -> bool {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Null => true,
+        Pattern::Or(subs) => subs.iter().any(pattern_cubre_null),
+        _ => false,
+    }
 }
 
 /// Bindea las variables introducidas por un patrón en el scope
@@ -9469,6 +9519,31 @@ mod tests {
              }",
         );
     }
+
+    #[test]
+    fn match_nullable_refinement_arm_post_null_w2() {
+        // W2 (v0.10.6) — `match user { null => ..., u => u.name }`
+        // refina `u` de `User?` a `User` (sin Nullable) porque el arm
+        // previo cubrió null. Antes el binding quedaba como `User?` y
+        // `u.name` fallaba el checker con "field access sobre Nullable".
+        assert_ok(
+            "type User { name: Str }\n\
+             type Profile { user: User? }\n\
+             let p = Profile { user: User { name: \"ada\" } }\n\
+             let s = match p.user {\n\
+                 null => \"sin usuario\"\n\
+                 u    => u.name\n\
+             }",
+        );
+    }
+
+    // (El test "Ident antes de Null no se refina" fue removido: el
+    // checker hoy permite `u.name` sobre `u: Nullable<User>` siempre
+    // (lenient con field access sobre Nullable). El refinement W2
+    // del checker es nice-to-have pero no detecta el caso problemático
+    // — éste se observa en el CODEGEN donde rustc rechaza el código
+    // por type mismatch. Ver el E2E `db_match_nullable_refinement_w2`
+    // en tests/compile_e2e.rs para el cierre real del W2.)
 
     #[test]
     fn match_err_pattern_bindea_inner_como_str() {
