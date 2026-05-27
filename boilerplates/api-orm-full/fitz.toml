@@ -1,0 +1,8 @@
+[package]
+name = "fitz-api-orm-full"
+version = "0.1.0"
+edition = "2026"
+description = "Blog/CMS mini showcase: ORM nativo + relations + JSONB + arrays + auth + WebSockets + cron"
+
+[bin]
+main = "src/main.fitz"

@@ -1,15 +1,38 @@
 // PLACEHOLDER — boilerplate api-orm-full
 //
 // Proyecto del showcase ORM full (blog/CMS con relations + JSONB +
-// arrays + auth + WebSockets + cron) en construcción. La estructura
-// definitiva multi-archivo (models/auth/posts/comments/realtime/jobs)
-// requiere cerrar refinamientos del codegen multi-file con ORM
-// relations que están en curso (W10 + W11 — ver
-// docs/db-orm.md).
+// arrays + auth + WebSockets + cron) en construcción.
 //
-// Por ahora este placeholder es un stub. Para ver el ORM nativo
-// funcionando hoy, mirá el boilerplate `api-postgres-fitz` (mismo
-// dominio que `api-postgres-python` pero con ORM nativo en lugar
-// de SQLAlchemy).
+// **Estado a v0.10.7 (2026-05-27)**:
+//
+// La estructura multi-archivo (models/auth/posts/comments/realtime/
+// jobs/schema/config/main) requiere cerrar varios refinamientos del
+// codegen cross-module:
+//
+//   - W8/W9 ✓ CERRADOS — @table types + TypeId remapping cross-module.
+//   - W10 ✓ CERRADO    — WS/jobs/auth transitivos (preludios + deps).
+//   - W11 ✓ CERRADO    — pub(crate) en helpers JSONB/HTTP + uses_db /
+//                        uses_fitz_value / has_http transitivos +
+//                        emit_helpers_for_imported_types refinado para
+//                        no descartar Map<Str, Any> legítimo.
+//   - W12 — PENDIENTE  — cross-module @auth_provider (el checker lo
+//                        exige en el mismo program, no via import).
+//   - W13 — PENDIENTE  — mixing `?` operator con `return <status>{...}`
+//                        en el mismo handler (codegen emite el wrapper
+//                        con tipo `__FitzResponse` y `?` falla).
+//   - W14 — PENDIENTE  — handlers @authenticated con body + user juntos
+//                        (MVP solo admite user como único param sobrante).
+//   - W15 — PENDIENTE  — `impl __FromFitzJson for FooData` emitido en
+//                        modo Module cuando el módulo declara HTTP
+//                        handlers que serializan Foo (hoy se emite
+//                        solo en main vía emit_helpers_for_imported_types).
+//
+// **Para ver el ORM nativo funcionando hoy**, mirá el boilerplate
+// `api-postgres-fitz` (single-file con CRUD HTTP + JWT auth + ORM
+// completo). Es el mismo dominio que `api-postgres-python` pero con
+// ORM nativo en lugar de SQLAlchemy + interop Python.
+//
+// Cuando W12-W15 cierren, este boilerplate se completa con la
+// estructura multi-archivo planificada.
 
 print("api-orm-full — boilerplate en construcción")

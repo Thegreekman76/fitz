@@ -6894,6 +6894,144 @@ fn db_orm_cross_module_at_table_compila_w8() {
 }
 
 #[test]
+fn jsonb_cross_module_compila_w11() {
+    // W11 (v0.10.7) — `@table` types con `Map<Str, Any>` o `List<Any>`
+    // (JSONB / arrays heterogéneos) declarados en un módulo se usan
+    // desde otro vía `from X import Y` y compilan a binario nativo.
+    // Antes: unresolved imports `crate::__FitzValue` y `crate::__fv_type_name`
+    // porque `uses_fitz_value` solo miraba el main. Ahora: transitivo
+    // (idem uses_ws/uses_jobs/uses_auth post-W10), y `__fv_type_name`
+    // se emite como `pub(crate)`.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let stem = sanitize_stem("jsonb_cross_module_w11");
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // Módulo con `@table` + JSONB (Map<Str, Any>).
+    let models_path = dir.join("models.fitz");
+    std::fs::write(
+        &models_path,
+        "@table(\"docs\") type Doc {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n  \
+             meta: Map<Str, Any>\n\
+         }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // Main importa el type y dispatcha el ORM.
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(
+        &main_path,
+        "from models import Doc\n\
+         \n\
+         async fn run() -> Result<List<Doc>> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             return Doc.all(conn).await\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    )
+    .expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló cross-module JSONB:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+}
+
+#[test]
+fn ws_jobs_cross_module_compila_w10() {
+    // W10 (v0.10.7) — `@ws("/path")` y `@background`/`@cron` declarados
+    // adentro de módulos importados (no en el main) compilan a binario
+    // nativo. Antes: el Cargo.toml del crate generado no incluía
+    // `futures_util`/`chrono`/feature `ws` de axum porque el `uses_ws`/
+    // `uses_jobs` solo miraba el main. Ahora: ambos flags son
+    // transitivos (idem `uses_db` post-W8), y los preludios WS/jobs
+    // tienen los items `pub(crate)` para que los `use crate::__Fitz*`
+    // de los módulos resuelvan.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let stem = sanitize_stem("ws_jobs_cross_module_w10");
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // Módulo con `@ws` + `@background` (jobs).
+    let realtime_path = dir.join("realtime.fitz");
+    std::fs::write(
+        &realtime_path,
+        "type Msg {\n  \
+             text: Str\n\
+         }\n\
+         \n\
+         @ws(\"/chat\")\n\
+         async fn chat(conn: WsConn<Msg>) -> Null {\n  \
+             return null\n\
+         }\n\
+         \n\
+         @background\n\
+         async fn ping() -> Null {\n  \
+             return null\n\
+         }\n",
+    )
+    .expect("escribir realtime.fitz");
+
+    // Main solo importa el módulo y declara @server (sin @ws ni @background propio).
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(
+        &main_path,
+        "from realtime import chat\n\
+         \n\
+         @server(43910)\n\
+         fn main() => 0\n\
+         \n\
+         print(\"main ok\")\n",
+    )
+    .expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló cross-module WS+jobs:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+}
+
+#[test]
 fn db_upd_con_map_var_compila_a_binario_w7() {
     // W7 (v0.10.6) — `.update(db, changes)` con `changes` como var
     // `Map<Str, Any>` (no Map literal) compila a binario nativo.

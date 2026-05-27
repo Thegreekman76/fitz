@@ -144,7 +144,12 @@ pub fn generate_project(
     // decoradores HTTP/`@server`. Si sí, el Cargo.toml suma axum +
     // tokio + serde + serde_json. Si no, queda minimalista — los
     // ejemplos no-HTTP no pagan el costo de bajar/compilar axum.
-    let has_http = has_http_routes(program);
+    // W11 (v0.10.7) — has_http transitivo: si CUALQUIER módulo cargado
+    // declara handlers HTTP, el main emite el preludio HTTP entero
+    // (traits + impls cross-module + struct __FitzResponse) para que
+    // los modules referencien `crate::__ToFitzJson` y demás. Paralelo
+    // a uses_db / uses_ws / uses_jobs / uses_auth transitivos.
+    let has_http = has_http_routes(program) || loader.modules.iter().any(|m| m.has_http);
 
     // Fase 6.6: idem para async. Habilita `__fitz_sleep`, `tokio::main`
     // sobre CLI, feature `time` en Cargo.toml.
@@ -167,17 +172,24 @@ pub fn generate_project(
     // + `rand_core` al Cargo.toml cuando el programa usa el módulo
     // built-in `jwt`/`hash` o cualquier decorator de auth
     // (`@auth_provider`/`@authenticated`/`@admin`).
-    let uses_auth = program_uses_auth(program);
+    //
+    // W10 (v0.10.7) — transitivo: el preludio auth del crate root debe
+    // estar si CUALQUIER módulo cargado usa auth, no solo el main.
+    let uses_auth = program_uses_auth(program) || loader.modules.iter().any(|m| m.uses_auth);
     // Fase 9.w.2.c — detección de uso de WebSockets. Habilita el
     // preludio `__FitzWsConn<T>` + broadcaster global, suma la feature
     // `ws` de axum + `futures-util` + `tokio-tungstenite` (transitivo
     // de la feature ws) al Cargo.toml generado.
-    let uses_ws = program_uses_ws(program);
+    //
+    // W10 (v0.10.7) — transitivo igual que uses_auth.
+    let uses_ws = program_uses_ws(program) || loader.modules.iter().any(|m| m.uses_ws);
     // Fase 9.w.3.c — detección de jobs (`@cron`/`@background`/`spawn`).
     // Suma el crate `cron` + `chrono` al Cargo.toml, emite el helper
     // `__fitz_run_cron_scheduler` en el preludio, y dispara el modo
     // "cron-only main" cuando no hay HTTP pero sí cron jobs.
-    let uses_jobs = program_uses_jobs(program);
+    //
+    // W10 (v0.10.7) — transitivo igual que uses_auth.
+    let uses_jobs = program_uses_jobs(program) || loader.modules.iter().any(|m| m.uses_jobs);
     // Fase 10.1.c — detección del módulo `db` (driver Postgres).
     // Suma `sha2`/`hmac`/`base64` + `tokio` con feature `net` al
     // Cargo.toml, emite el módulo `__fitz_db_runtime` (vía
@@ -190,8 +202,17 @@ pub fn generate_project(
     // llame `db.X(...)` directamente). El preludio db del crate root
     // tiene que estar disponible para que `use crate::__fitz_db_*`
     // de los módulos resuelva.
-    let uses_db =
-        program_uses_db(program) || loader.modules.iter().any(|m| !m.table_metadata.is_empty());
+    //
+    // W11 (v0.10.7) — la chequeo `!m.table_metadata.is_empty()` se
+    // quedaba corta para módulos que solo llaman `db.connect/query/
+    // exec` sin declarar @table types (caso típico schema/migrations).
+    // Sumamos `m.uses_db` que invoca `program_uses_db` sobre el
+    // module_program completo.
+    let uses_db = program_uses_db(program)
+        || loader
+            .modules
+            .iter()
+            .any(|m| !m.table_metadata.is_empty() || m.uses_db);
 
     // Fase 10.b.8.b — detección de uso del enum `__FitzValue`.
     // Programas con `Map<Str, Any>` / `List<Any>` (incluso adentro
@@ -200,7 +221,11 @@ pub fn generate_project(
     // el preludio db emite también los helpers JSON
     // `__fitz_jsonb_to_fitz_value`/`__fitz_fitz_value_to_jsonb` y
     // Cargo.toml suma `serde_json` con `preserve_order`.
-    let uses_fitz_value = program_uses_fitz_value(program);
+    //
+    // W11 (v0.10.7) — transitivo: el main suma deps si CUALQUIER
+    // módulo cargado tiene Map<Str, Any> / List<Any>.
+    let uses_fitz_value =
+        program_uses_fitz_value(program) || loader.modules.iter().any(|m| m.uses_fitz_value);
 
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
@@ -2070,6 +2095,32 @@ struct LoadedModule {
     /// nominal nudo (sin metadata `@table`). El importer copia este
     /// HashMap a su `imported_table_metadata` (CodegenCtx).
     table_metadata: HashMap<String, crate::types::TableMetadata>,
+    /// W10 (v0.10.7) — flags transitivos del módulo. El main los usa
+    /// para emitir preludios WS/jobs/auth aún cuando el archivo entry
+    /// no contenga `@ws`/`@cron`/`@auth_provider`, porque los módulos
+    /// cargados sí los emiten y referencian items del crate root
+    /// (`use crate::__FitzWsConn`, `use crate::__fitz_run_cron_job`).
+    uses_ws: bool,
+    uses_jobs: bool,
+    uses_auth: bool,
+    /// W11 (v0.10.7) — `program_uses_fitz_value(module_program)`. El
+    /// main lo OR-ea con su propio flag para decidir si emite el enum
+    /// `__FitzValue` + helpers JSONB en el crate root, garantizando
+    /// que los `use crate::__FitzValue` / `use crate::__fv_type_name`
+    /// de los módulos resuelvan.
+    uses_fitz_value: bool,
+    /// W11 (v0.10.7) — `program_uses_db(module_program)`. El main
+    /// lo OR-ea con su propio flag (en lugar de mirar solo
+    /// `!table_metadata.is_empty()`, que se quedaba corto cuando un
+    /// módulo solo llamaba `db.connect/query/exec` sin declarar
+    /// `@table` types — caso típico de un módulo schema/migrations).
+    uses_db: bool,
+    /// W11 (v0.10.7) — `has_http_routes(module_program)`. El main lo
+    /// OR-ea para decidir si emitir el preludio HTTP (traits
+    /// `__ToFitzJson`/`__FromFitzJson` + struct `__FitzResponse` +
+    /// emit_helpers_for_imported_types) — necesario cuando los
+    /// handlers HTTP viven en módulos pero main solo orquesta.
+    has_http: bool,
     /// Fase 8.7.1 transitiva — imports Python que el módulo declaró
     /// (`from python import math`, `import python.os.path`, etc.).
     /// El codegen del módulo emite sus propios statics + getters
@@ -2405,6 +2456,15 @@ impl ModuleLoader {
             }
         }
 
+        // W10 (v0.10.7) — flags transitivos del módulo (uses_ws/jobs/auth).
+        let module_uses_ws = program_uses_ws(&module_program);
+        let module_uses_jobs = program_uses_jobs(&module_program);
+        let module_uses_auth = program_uses_auth(&module_program);
+        // W11 (v0.10.7) — flags transitivos del módulo (uses_fitz_value, uses_db, has_http).
+        let module_uses_fitz_value = program_uses_fitz_value(&module_program);
+        let module_uses_db = program_uses_db(&module_program);
+        let module_has_http = has_http_routes(&module_program);
+
         let idx = self.modules.len();
         self.modules.push(LoadedModule {
             mod_name,
@@ -2417,6 +2477,12 @@ impl ModuleLoader {
             local_bindings,
             type_methods,
             table_metadata,
+            uses_ws: module_uses_ws,
+            uses_jobs: module_uses_jobs,
+            uses_auth: module_uses_auth,
+            uses_fitz_value: module_uses_fitz_value,
+            uses_db: module_uses_db,
+            has_http: module_has_http,
             python_imports: module_python_imports,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
@@ -2670,6 +2736,8 @@ fn generate_module_rs_with_bindings(
             accessor_consts: m.accessor_consts.clone(),
             type_methods: m.type_methods.clone(),
             table_metadata: m.table_metadata.clone(),
+            uses_fitz_value: m.uses_fitz_value,
+            uses_db: m.uses_db,
         });
     }
     for (name, binding) in local_bindings {
@@ -2739,21 +2807,90 @@ fn generate_module_rs_with_bindings(
              #[allow(unused_imports)]\n\
              use crate::{__fitz_db_connect, __fitz_db_query, __fitz_db_exec, __fitz_db_close, __fitz_db_is_closed};\n\
              #[allow(unused_imports)]\n\
-             use crate::{__fitz_pg_to_i64, __fitz_pg_to_f64, __fitz_pg_to_string, __fitz_pg_to_bool, __fitz_pg_to_bytes};\n\n",
+             use crate::{__fitz_pg_to_i64, __fitz_pg_to_f64, __fitz_pg_to_string, __fitz_pg_to_bool, __fitz_pg_to_bytes};\n\
+             // W11 (v0.10.7) — el driver Postgres puro vive como `mod\n\
+             // __fitz_db_runtime` en el crate root. El codegen emite\n\
+             // referencias raw a `__fitz_db_runtime::oid::INT8` (arrays\n\
+             // typed) y demás; el `use crate::__fitz_db_runtime;` las\n\
+             // resuelve desde módulos.\n\
+             #[allow(unused_imports)]\n\
+             use crate::__fitz_db_runtime;\n\n",
         );
         // W11 (v0.10.7) — el módulo importa `__FitzValue` + helpers
-        // JSONB SOLO si los necesita (programa-uses-fitz-value detectado
-        // en el módulo, NO globalmente). Sin esta guard, módulos con
-        // @table primitivos importaban un item del main que el main no
-        // emitía (uses_fitz_value=false).
-        if program_uses_fitz_value(program) {
+        // JSONB cuando: (a) el program local declara Map<Str, Any> /
+        // List<Any>, o (b) importa un @table type que tiene fields
+        // jsonb/array-heterogéneos. El caso (b) es típico cuando
+        // `models.fitz` declara `meta: Map<Str, Any>` y `posts.fitz`
+        // emite `Post.insert(...)` que referencia `__FitzValue`.
+        let module_imports_fitz_value_table = ctx
+            .loaded_modules
+            .iter()
+            .any(|m| m.uses_fitz_value && !m.table_metadata.is_empty());
+        if program_uses_fitz_value(program) || module_imports_fitz_value_table {
+            ctx.uses_fitz_value = true;
             ctx.emit(
                 "#[allow(unused_imports)]\n\
                  use crate::__FitzValue;\n\
                  #[allow(unused_imports)]\n\
-                 use crate::{__fitz_jsonb_to_fitz_value, __fitz_fitz_value_to_jsonb};\n\n",
+                 use crate::{__fitz_jsonb_to_fitz_value, __fitz_fitz_value_to_jsonb};\n\
+                 #[allow(unused_imports)]\n\
+                 use crate::__fv_type_name;\n\n",
             );
         }
+    }
+
+    // W11 (v0.10.7) — si el módulo declara `@auth_provider` o usa
+    // `jwt.*`/`hash.*`, importar los helpers del preludio auth del
+    // crate root. Paralelo a uses_db/uses_ws del módulo.
+    let module_uses_auth_local = program_uses_auth(program);
+    if module_uses_auth_local {
+        ctx.uses_auth = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__fitz_jwt_encode, __fitz_jwt_decode, __fitz_hash_password, __fitz_hash_verify};\n\n",
+        );
+    }
+    // W11 (v0.10.7) — el módulo emite handlers HTTP (return de
+    // tipos del lenguaje + decoradores `@get`/`@post`/etc + `return
+    // <status> { ... }`) necesita `__FitzResponse` y los traits
+    // `__ToFitzJson`/`__FromFitzJson` del preludio HTTP del main.
+    let module_has_http = has_http_routes(program);
+    if module_has_http {
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::__FitzResponse;\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__ToFitzJson, __FromFitzJson};\n\n",
+        );
+    }
+
+    // W10 (v0.10.7) — si el módulo declara `@ws("/path")`, importar
+    // el preludio WS del crate root (`__FitzWsConn<T>` + broadcaster
+    // + helpers de setup/register/etc). Paralelo a uses_db del módulo.
+    let module_uses_ws_local = program_uses_ws(program);
+    if module_uses_ws_local {
+        ctx.uses_ws = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__FitzWsConn, __FitzWsConnBytes, __FitzWsMessage, __FitzWsOutMsg, __FitzWsConnList};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__FITZ_WS_BROADCASTER, __FITZ_WS_NEXT_ID};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_ws_broadcaster, __fitz_ws_register, __fitz_ws_unregister, __fitz_ws_broadcast_payload, __fitz_ws_broadcast_binary, __fitz_ws_extract_bearer_subprotocol, __fitz_ws_setup, __fitz_ws_setup_bytes};\n\n",
+        );
+    }
+
+    // W10 — si el módulo declara `@cron("expr")`, importar el helper
+    // del scheduler del crate root.
+    let module_uses_jobs_local = program_uses_jobs(program);
+    if module_uses_jobs_local {
+        ctx.uses_jobs = true;
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::__fitz_run_cron_job;\n\
+             #[allow(unused_imports)]\n\
+             use crate::__fitz_normalize_cron;\n\n",
+        );
     }
 
     // Particionar stmts top-level. Para módulos: type / fn / let.
@@ -3182,7 +3319,8 @@ fn generate_main_rs(
     // en `generate_project`; los llamados directos a `generate_main_rs`
     // (tests unit) lo reinvocan para no perder cobertura.
     validate_python_imports_for_codegen(program)?;
-    let has_http = has_http_routes(program);
+    // W11 (v0.10.7) — has_http transitivo (paralelo a uses_db/uses_ws).
+    let has_http = has_http_routes(program) || loader.modules.iter().any(|m| m.has_http);
     let uses_async = program_uses_async(program);
     // Fase 8.7.1 transitiva — `uses_python` global = main OR cualquier
     // módulo cargado. Si solo módulos transitivos usan Python, el main
@@ -3191,25 +3329,33 @@ fn generate_main_rs(
     let uses_python =
         !python_imports.is_empty() || loader.modules.iter().any(|m| !m.python_imports.is_empty());
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
-    // W9 (v0.10.7) — `uses_fitz_value` transitivo: el main emite el
-    // enum `__FitzValue` + helpers JSONB si cualquier módulo cargado
+    // W11 (v0.10.7) — `uses_fitz_value` transitivo: el main emite el
+    // enum `__FitzValue` + helpers JSONB si CUALQUIER módulo cargado
     // tiene `Map<Str, Any>` / `List<Any>` en sus types/handlers. Los
-    // módulos solo importan `__FitzValue` cuando realmente lo usan,
-    // así que la condición acá es "algún módulo necesita el enum".
-    let uses_fitz_value = program_uses_fitz_value(program);
-    // (No agregamos la condición transitiva acá — un proyecto con
-    // múltiples módulos donde uno usa Map<Str, Any> y otro no, el
-    // main debe emitir __FitzValue para el que sí. Esto se calcula
-    // más abajo cuando recorremos los loaded_modules.)
-    let uses_auth = program_uses_auth(program);
-    let uses_ws = program_uses_ws(program);
-    let uses_jobs = program_uses_jobs(program);
+    // módulos solo importan `__FitzValue` cuando realmente lo usan;
+    // sin transitividad, el `use crate::__FitzValue` del módulo
+    // fallaría con E0432 unresolved import porque el main no emitió
+    // el enum.
+    let uses_fitz_value =
+        program_uses_fitz_value(program) || loader.modules.iter().any(|m| m.uses_fitz_value);
+    // W10 (v0.10.7) — auth/ws/jobs transitivos. Paralelo a uses_db
+    // transitivo (W8): si CUALQUIER módulo cargado declara handlers
+    // de esos tipos, el main emite los preludios correspondientes
+    // para que los `use crate::__Fitz*` de los módulos resuelvan.
+    let uses_auth = program_uses_auth(program) || loader.modules.iter().any(|m| m.uses_auth);
+    let uses_ws = program_uses_ws(program) || loader.modules.iter().any(|m| m.uses_ws);
+    let uses_jobs = program_uses_jobs(program) || loader.modules.iter().any(|m| m.uses_jobs);
     // W8 (v0.10.7) — uses_db transitivo: si algún módulo cargado
     // declara `@table` types o usa db, el main emite el preludio db
     // entero para que los `use crate::__fitz_db_*` de los módulos
     // resuelvan. Paralelo a `uses_python` transitivo (8.7.1).
-    let uses_db =
-        program_uses_db(program) || loader.modules.iter().any(|m| !m.table_metadata.is_empty());
+    // W11 (v0.10.7) — además de table_metadata, considerar
+    // `m.uses_db` (db.connect/query/exec sin @table).
+    let uses_db = program_uses_db(program)
+        || loader
+            .modules
+            .iter()
+            .any(|m| !m.table_metadata.is_empty() || m.uses_db);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -3891,6 +4037,12 @@ enum GenMode {
 /// que vino del remap de un nominal no resoluble. Usado por
 /// `emit_helpers_for_imported_types` para skipear types con relations
 /// a targets no importados (evita "codegen 5b no soporta Any").
+///
+/// W11 (v0.10.7) — reemplazado en el call site por `field_is_degraded_any`
+/// que distingue degradación (W9 Nominal sin importer match) de Any
+/// legítimo (Map<Str, Any> JSONB, List<Any>). Lo mantenemos en el árbol
+/// para tests/futuras revisiones.
+#[allow(dead_code)]
 fn field_type_has_unresolved_any(ty: &Type) -> bool {
     match ty {
         Type::Any => true,
@@ -3907,6 +4059,21 @@ fn field_type_has_unresolved_any(ty: &Type) -> bool {
         }
         _ => false,
     }
+}
+
+/// W11 (v0.10.7) — versión refinada de `field_type_has_unresolved_any`
+/// que distingue Any "degradado" (W9: target de relation no importada)
+/// de Any "legítimo" (Map<Str, Any> = JSONB, List<Any> = array hetero).
+/// El segundo caso es soportado por `__FitzValue`; el primero no, así
+/// que el emit de helpers HTTP/Python para tipos con campos degradados
+/// debe skipearse para evitar errores de compilación Rust.
+///
+/// Heurística pragmática: skipea solo si el field es `Type::Any` PELADO
+/// o `Nullable(Any)`. `Map<_, Any>` / `List<Any>` se procesan normal —
+/// el codegen los rutea a `__FitzValue` y emite el JSONB marshaling.
+fn field_is_degraded_any(ty: &Type) -> bool {
+    matches!(ty, Type::Any)
+        || matches!(ty, Type::Nullable(inner) if matches!(inner.as_ref(), Type::Any))
 }
 
 /// W7 (v0.10.6) — resultado de codegen del SET fragment de `.update`.
@@ -3952,6 +4119,19 @@ struct LoadedModuleSigs {
     /// `install_loader_bindings` para que el dispatch ORM
     /// (`User.where(...)`) resuelva sobre tipos importados.
     table_metadata: HashMap<String, crate::types::TableMetadata>,
+    /// W11 (v0.10.7) — flag transitivo del módulo: `true` si el
+    /// program del módulo usa `Map<Str, Any>` / `List<Any>` adentro
+    /// de un `type` o expresión. El importer lo consume para decidir
+    /// si emitir `use crate::__FitzValue` en su propio prelude.
+    uses_fitz_value: bool,
+    /// W11 (v0.10.7) — flag transitivo del módulo: `true` si el
+    /// program del módulo llama `db.connect/query/exec/close`. Sin
+    /// esto, módulos schema-only no disparaban el preludio db.
+    /// (Hoy lo consume `generate_main_rs` desde `loader.modules`
+    /// directo; el field acá queda como cache para que el ctx
+    /// pueda enriquecerlo después sin re-iterar el loader.)
+    #[allow(dead_code)]
+    uses_db: bool,
 }
 
 struct CodegenCtx<'a> {
@@ -4408,6 +4588,8 @@ impl<'a> CodegenCtx<'a> {
                 accessor_consts: m.accessor_consts.clone(),
                 type_methods: m.type_methods.clone(),
                 table_metadata: m.table_metadata.clone(),
+                uses_fitz_value: m.uses_fitz_value,
+                uses_db: m.uses_db,
             });
         }
         for (name, binding) in &loader.bindings {
@@ -5236,7 +5418,7 @@ impl<'a> CodegenCtx<'a> {
             "/// 9.w.1.d — `jwt.encode(payload, secret, alg)` codegen helper.\n\
              /// payload restringido a `Map<Str, Str>` en MVP — heterogéneos\n\
              /// requieren `__FitzValue` integration, post-MVP.\n\
-             fn __fitz_jwt_encode(\n    \
+             pub(crate) fn __fitz_jwt_encode(\n    \
                  payload: Arc<Mutex<Vec<(String, String)>>>,\n    \
                  secret: String,\n    \
                  alg: Option<String>,\n\
@@ -5268,7 +5450,7 @@ impl<'a> CodegenCtx<'a> {
             "/// 9.w.1.d — `jwt.decode(token, secret, alg)` codegen helper.\n\
              /// Devuelve `Result<Map<Str, Str>, String>` con claims como Str.\n\
              /// Cualquier falla → `Err` con mensaje del crate jsonwebtoken.\n\
-             fn __fitz_jwt_decode(\n    \
+             pub(crate) fn __fitz_jwt_decode(\n    \
                  token: String,\n    \
                  secret: String,\n    \
                  alg: Option<String>,\n\
@@ -5305,7 +5487,7 @@ impl<'a> CodegenCtx<'a> {
         self.emit(
             "/// 9.w.1.d — `hash.password(plain)` codegen helper. Argon2id\n\
              /// con salt random + params default (OWASP). Output PHC string.\n\
-             fn __fitz_hash_password(plain: String) -> String {\n    \
+             pub(crate) fn __fitz_hash_password(plain: String) -> String {\n    \
                  use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};\n    \
                  let salt = SaltString::generate(&mut OsRng);\n    \
                  let argon2 = argon2::Argon2::default();\n    \
@@ -5318,7 +5500,7 @@ impl<'a> CodegenCtx<'a> {
         self.emit(
             "/// 9.w.1.d — `hash.verify(plain, hashed)` codegen helper.\n\
              /// Hash malformado o mismatch → false (no panic) por seguridad.\n\
-             fn __fitz_hash_verify(plain: String, hashed: String) -> bool {\n    \
+             pub(crate) fn __fitz_hash_verify(plain: String, hashed: String) -> bool {\n    \
                  use argon2::password_hash::{PasswordHash, PasswordVerifier};\n    \
                  let parsed = match PasswordHash::new(&hashed) {\n        \
                      Ok(p) => p,\n        \
@@ -5423,7 +5605,7 @@ impl<'a> CodegenCtx<'a> {
 
 /// Normaliza una cron expression de 5 fields (Unix clásico) a 6 fields
 /// (con seconds al inicio = 0). El crate `cron` exige 6 o 7 fields.
-fn __fitz_normalize_cron(expr: &str) -> String {
+pub(crate) fn __fitz_normalize_cron(expr: &str) -> String {
     let trimmed = expr.trim();
     if trimmed.split_whitespace().count() == 5 {
         format!(\"0 {}\", trimmed)
@@ -5435,7 +5617,7 @@ fn __fitz_normalize_cron(expr: &str) -> String {
 /// Loop principal de un cron job: calcula el próximo tick, duerme,
 /// invoca el handler, repite. El handler es una closure async que
 /// invoca la fn target del usuario; el wrapper se construye en main.
-async fn __fitz_run_cron_job<F, Fut>(name: String, schedule: cron::Schedule, mut handler: F)
+pub(crate) async fn __fitz_run_cron_job<F, Fut>(name: String, schedule: cron::Schedule, mut handler: F)
 where
     F: FnMut() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send,
@@ -6358,7 +6540,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                      }\n\
                  }\n\n\
                  #[allow(dead_code)]\n\
-                 fn __fv_type_name(v: &__FitzValue) -> &'static str {\n    \
+                 pub(crate) fn __fv_type_name(v: &__FitzValue) -> &'static str {\n    \
                      match v {\n        \
                          __FitzValue::Int(_) => \"Int\",\n        \
                          __FitzValue::Float(_) => \"Float\",\n        \
@@ -7539,17 +7721,21 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         })
                         .collect(),
                 };
-                // W9 — si algún field quedó como `Type::Any` (target
+                // W9 — si algún field quedó como `Type::Any` PURO (target
                 // de relation no importado), skip emit de helpers HTTP/
                 // Python para este type. El binario sigue funcionando
                 // para los types con todos sus targets importados; los
                 // demás quedan como "opaque" sin marshaling automático.
-                // El user que necesite el marshaling completo importa
-                // todos los types relacionados explícitamente.
+                //
+                // W11 (v0.10.7) — refinamiento: NO skipear si el Any está
+                // adentro de `Map<Str, Any>` o `List<Any>` legítimo
+                // (JSONB / heterogéneos), porque ese caso lo cubre
+                // `__FitzValue`. Solo skipeamos cuando el field es Any
+                // pelado o Nullable(Any) — los casos de degradación W9.
                 let has_opaque_field = remapped_sig
                     .fields
                     .iter()
-                    .any(|f| field_type_has_unresolved_any(&f.type_));
+                    .any(|f| field_is_degraded_any(&f.type_));
                 if has_opaque_field {
                     emitted.insert(type_name.clone());
                     continue;
@@ -21000,11 +21186,11 @@ fn parse_build_str_list(expr: &Expr, key: &str) -> Result<Vec<String>, FitzError
 /// por cada `type Foo` los emite `gen_type_http_impls`.
 const HTTP_RUNTIME_PRELUDE: &str = r#"// --- 5b.6: runtime HTTP (serialización JSON) ---
 
-trait __ToFitzJson {
+pub(crate) trait __ToFitzJson {
     fn __to_fitz_json(&self) -> serde_json::Value;
 }
 
-trait __FromFitzJson: Sized {
+pub(crate) trait __FromFitzJson: Sized {
     fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String>;
 }
 
@@ -21012,9 +21198,9 @@ trait __FromFitzJson: Sized {
 /// Producido por `return <status> { ... }` adentro de un handler.
 /// El wrapper de cada handler que lo retorna emite `(StatusCode,
 /// Json(body))` directo, en vez del path normal Ok/Err.
-struct __FitzResponse {
-    status: u16,
-    body: serde_json::Value,
+pub(crate) struct __FitzResponse {
+    pub status: u16,
+    pub body: serde_json::Value,
 }
 
 /// Mini-fase MW.3: tipo built-in `Request` que se pasa a cada middleware.
@@ -21625,7 +21811,7 @@ use std::sync::atomic::{AtomicU64, AtomicBool, Ordering as __FitzOrdering};
 /// Outbox message. Lo emiten `send`/`broadcast` desde el handler; lo
 /// drena el writer task del conn y lo empuja al sink WebSocket.
 #[derive(Clone, Debug)]
-enum __FitzWsOutMsg {
+pub(crate) enum __FitzWsOutMsg {
     Text(String),
     /// 9.w.2-binary-frames — frame binario raw. Lo emite
     /// `__FitzWsConnBytes::send/broadcast`. El writer task lo traduce a
@@ -21642,13 +21828,13 @@ enum __FitzWsOutMsg {
 /// Tipo del map interno del broadcaster. Por endpoint, una lista de
 /// `(conn_id, outbox_tx)`. Cleanup lazy: retain elimina txs cerrados
 /// al broadcast.
-type __FitzWsConnList = Vec<(u64, tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>)>;
+pub(crate) type __FitzWsConnList = Vec<(u64, tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>)>;
 
-static __FITZ_WS_BROADCASTER: OnceLock<
+pub(crate) static __FITZ_WS_BROADCASTER: OnceLock<
     std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, __FitzWsConnList>>>,
 > = OnceLock::new();
 
-fn __fitz_ws_broadcaster() -> &'static std::sync::Arc<
+pub(crate) fn __fitz_ws_broadcaster() -> &'static std::sync::Arc<
     std::sync::Mutex<std::collections::HashMap<String, __FitzWsConnList>>,
 > {
     __FITZ_WS_BROADCASTER.get_or_init(|| {
@@ -21656,9 +21842,9 @@ fn __fitz_ws_broadcaster() -> &'static std::sync::Arc<
     })
 }
 
-static __FITZ_WS_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+pub(crate) static __FITZ_WS_NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn __fitz_ws_register(
+pub(crate) fn __fitz_ws_register(
     endpoint: String,
     tx: tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>,
 ) -> u64 {
@@ -21669,7 +21855,7 @@ fn __fitz_ws_register(
     conn_id
 }
 
-fn __fitz_ws_unregister(endpoint: &str, conn_id: u64) {
+pub(crate) fn __fitz_ws_unregister(endpoint: &str, conn_id: u64) {
     let b = __fitz_ws_broadcaster();
     let mut conns = b.lock().unwrap();
     if let Some(list) = conns.get_mut(endpoint) {
@@ -21680,7 +21866,7 @@ fn __fitz_ws_unregister(endpoint: &str, conn_id: u64) {
     }
 }
 
-fn __fitz_ws_broadcast_payload(endpoint: &str, payload: String) {
+pub(crate) fn __fitz_ws_broadcast_payload(endpoint: &str, payload: String) {
     let b = __fitz_ws_broadcaster();
     let mut conns = b.lock().unwrap();
     if let Some(list) = conns.get_mut(endpoint) {
@@ -21694,7 +21880,7 @@ fn __fitz_ws_broadcast_payload(endpoint: &str, payload: String) {
 /// 9.w.2-binary-frames — broadcaster variante binaria. Mismo modelo
 /// "broadcast a todos del endpoint incluyendo sender" que
 /// `__fitz_ws_broadcast_payload` pero empuja `Binary(Vec<u8>)`.
-fn __fitz_ws_broadcast_binary(endpoint: &str, payload: Vec<u8>) {
+pub(crate) fn __fitz_ws_broadcast_binary(endpoint: &str, payload: Vec<u8>) {
     let b = __fitz_ws_broadcaster();
     let mut conns = b.lock().unwrap();
     if let Some(list) = conns.get_mut(endpoint) {
@@ -21708,7 +21894,7 @@ fn __fitz_ws_broadcast_binary(endpoint: &str, payload: Vec<u8>) {
 /// 9.w.2-ws-auth-browser — extrae bearer token del header
 /// `Sec-WebSocket-Protocol` del handshake WS. Paralelo al runtime
 /// (`extract_ws_bearer_subprotocol` en src/http.rs).
-fn __fitz_ws_extract_bearer_subprotocol(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
+pub(crate) fn __fitz_ws_extract_bearer_subprotocol(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
     let raw = headers
         .get("sec-websocket-protocol")
         .or_else(|| headers.get("Sec-WebSocket-Protocol"))?
@@ -21729,7 +21915,7 @@ fn __fitz_ws_extract_bearer_subprotocol(headers: &axum::http::HeaderMap) -> Opti
 /// `WsConn<T>`. Blanket impl sobre `__ToFitzJson + __FromFitzJson`
 /// (que ya emitimos para todos los `type` Fitz custom + primitivos)
 /// asegura que el usuario no tiene que escribir impls manuales.
-trait __FitzWsMessage: Sized {
+pub(crate) trait __FitzWsMessage: Sized {
     fn __ws_to_payload(&self) -> Result<String, String>;
     fn __ws_from_payload(payload: &str) -> Result<Self, String>;
 }
@@ -21756,7 +21942,7 @@ where
 /// recv() y `SEND` para send/broadcast. Cuando son el mismo
 /// (`WsConn<T>` simétrico), el monomorfismo de Rust produce un
 /// binario idéntico al pre-bidir.
-struct __FitzWsConn<RECV: __FitzWsMessage, SEND: __FitzWsMessage> {
+pub(crate) struct __FitzWsConn<RECV: __FitzWsMessage, SEND: __FitzWsMessage> {
     endpoint: String,
     conn_id: u64,
     rx: std::sync::Arc<
@@ -21848,7 +22034,7 @@ impl<RECV: __FitzWsMessage, SEND: __FitzWsMessage> __FitzWsConn<RECV, SEND> {
 /// Construye un `__FitzWsConn<RECV, SEND>` a partir del axum WebSocket
 /// + el endpoint, y lanza el writer task + heartbeat task (este último
 /// gated por `heartbeat_secs > 0`).
-fn __fitz_ws_setup<RECV: __FitzWsMessage + Send + 'static, SEND: __FitzWsMessage + Send + 'static>(
+pub(crate) fn __fitz_ws_setup<RECV: __FitzWsMessage + Send + 'static, SEND: __FitzWsMessage + Send + 'static>(
     socket: axum::extract::ws::WebSocket,
     endpoint: String,
     heartbeat_secs: u64,
@@ -21941,7 +22127,7 @@ fn __fitz_ws_setup<RECV: __FitzWsMessage + Send + 'static, SEND: __FitzWsMessage
 // JSON, que es exactamente lo opuesto a "raw bytes en el wire"). El
 // camino simple: un struct dedicado que opera con `Vec<u8>` directo y
 // emite `Message::Binary` en el sink.
-struct __FitzWsConnBytes {
+pub(crate) struct __FitzWsConnBytes {
     endpoint: String,
     conn_id: u64,
     rx: std::sync::Arc<
@@ -22029,7 +22215,7 @@ impl __FitzWsConnBytes {
 /// `__FitzWsConnBytes`. Mismo writer task + heartbeat que el genérico
 /// (el writer task ya sabe drenar `Binary` además de `Text`); cambia
 /// solo el tipo del conn devuelto.
-fn __fitz_ws_setup_bytes(
+pub(crate) fn __fitz_ws_setup_bytes(
     socket: axum::extract::ws::WebSocket,
     endpoint: String,
     heartbeat_secs: u64,
