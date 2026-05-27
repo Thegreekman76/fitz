@@ -566,6 +566,24 @@ thread_local! {
 /// retorna `Err`, el registry se descarta junto con el resto del
 /// estado. Pensado para `main.rs`: arma, evalúa, recibe el registry,
 /// decide si arrancar el server.
+///
+/// **Invariantes de reentrancia (R5 audit, 2026-05-27)**: el patrón
+/// `take()` + `replace()` + `take()` final + restore evita compartir
+/// préstamos vivos del `RefCell` durante la ejecución del closure `f`.
+/// La secuencia es:
+///   1. `take()` saca el registry previo (típicamente `None`; `Some` solo
+///      en tests anidados que reusan este helper).
+///   2. Se inserta un `HttpRegistry::new()` fresco.
+///   3. Se ejecuta `f()` SIN un borrow vivo — el closure puede invocar
+///      `register_http_route`/`register_server_config`/etc. que también
+///      hacen `cell.borrow_mut()` sin chocar (no hay préstamos vivos).
+///   4. Al volver, `take()` saca el registry poblado y `replace()` repone
+///      el previo. El registry capturado se retorna junto con el output
+///      de `f`.
+///
+/// Esto significa que el closure puede llamar funciones que internamente
+/// hagan `with_borrow_mut` o `with_borrow` sobre `HTTP_REGISTRY` sin
+/// deadlock por re-entrancia.
 pub fn with_active_registry<F, T>(f: F) -> (T, HttpRegistry)
 where
     F: FnOnce() -> T,
