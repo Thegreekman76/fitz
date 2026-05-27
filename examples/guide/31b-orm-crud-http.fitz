@@ -2,8 +2,8 @@
 //
 // Showcase del stack web first-class del lado server:
 //   HTTP nativo (cap 17) + body deserialization +
-//   ORM declarativo (cap 31) + relations + preload +
-//   env vars (cap 32) + @server config.
+//   ORM declarativo (cap 31) + relations + preload + JSONB +
+//   chain dinámico + env vars (cap 32) + @server config.
 //
 // Cero deps externas: el driver Postgres + el ORM viven en el
 // binario `fitz`. `fitz build` produce un .exe/ELF/Mach-O
@@ -13,6 +13,20 @@
 //
 //   1. Postgres real corriendo (default: localhost:5432, db `fitz_demo`).
 //   2. Var de entorno DATABASE_URL (opcional — default abajo).
+//   3. Crear las tablas con el schema de abajo:
+//
+//      CREATE TABLE users (
+//        id bigserial PRIMARY KEY,
+//        email text NOT NULL UNIQUE,
+//        name text NOT NULL
+//      );
+//      CREATE TABLE posts (
+//        id bigserial PRIMARY KEY,
+//        title text NOT NULL,
+//        body text NOT NULL,
+//        user_id bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+//        metadata jsonb NOT NULL DEFAULT '{}'::jsonb
+//      );
 //
 //   $ createdb fitz_demo
 //   $ export DATABASE_URL="postgres://postgres:postgres@localhost/fitz_demo?sslmode=disable"
@@ -25,25 +39,23 @@
 //
 // Endpoints expuestos:
 //
-//   GET    /                       — health check
-//   GET    /users                  — lista todos
-//   GET    /users/{id}             — uno por id
-//   POST   /users                  — crea (body: UserInput)
-//   PUT    /users/{id}             — actualiza (body: UserInput)
-//   DELETE /users/{id}             — borra
-//   GET    /users/{id}/posts       — posts del user (relation query)
-//   POST   /posts                  — crea post (body: PostInput)
-//   GET    /users-with-posts       — preload (cierra N+1)
-//   GET    /user-count             — aggregate scalar
-//   GET    /stats/by-email         — GROUP BY aggregate (v0.10.4+)
-//
-// Nota histórica: el endpoint GROUP BY (`User.group_by(...).count(db)`)
-// devuelve `List<Map<Str, Any>>`. Pre-v0.10.4 el codegen HTTP no
-// serializaba ese shape automáticamente; con la deuda cerrada
-// (`impl __MapKey for __FitzValue`), el endpoint ahora funciona
-// end-to-end en `fitz build`.
+//   GET    /                          — health check
+//   GET    /users                     — lista todos
+//   GET    /users/{id}                — uno por id
+//   POST   /users                     — crea (body: UserInput)
+//   PUT    /users/{id}                — actualiza (body: UserInput)
+//   DELETE /users/{id}                — borra
+//   GET    /users/{id}/posts          — posts del user (relation query)
+//   POST   /posts                     — crea post (body: PostInput)
+//   GET    /users-with-posts          — preload HasMany (cierra N+1)
+//   GET    /posts-with-author         — preload BelongsTo (v0.10.5)
+//   GET    /posts/drafts              — JSON op .has_key (v0.10.5)
+//   GET    /posts/by-lang/{lang}      — JSON op .get(...)=var (v0.10.5)
+//   POST   /posts/search              — chain dinámico (v0.10.5)
+//   GET    /user-count                — aggregate scalar
+//   GET    /stats/by-email            — GROUP BY aggregate
 
-// --- 1. Tipos ORM con relations ----------------------------------------
+// --- 1. Tipos ORM con relations + companion + JSONB ----------------
 
 @table("users") type User {
     @primary id: Int = 0
@@ -57,12 +69,22 @@
     title: Str
     body: Str
     @belongs_to("User") user_id: Int
+
+    // Deuda #2 (v0.10.5) — companion field auto-detectado por el
+    // checker (strip `_id` del FK + match con sibling Nullable<Target>).
+    // Habilita `Post.preload("user")` con batch SELECT inverso.
+    user: User?
+
+    // Deuda #3 (v0.10.5) — JSONB field. Habilita .has_key/.get/etc
+    // adentro de `.where(...)`. Mapeado a `jsonb` column.
+    metadata: Map<Str, Any>
 }
 
 // --- 2. Body shapes (entradas HTTP separadas del shape DB) -----------
 
 type UserInput { email: Str, name: Str }
-type PostInput { title: Str, body: Str, user_id: Int }
+type PostInput { title: Str, body: Str, user_id: Int, metadata: Map<Str, Any> }
+type SearchInput { lang: Str, min_id: Int, drafts_only: Bool }
 
 // --- 3. Helper de conexión: lee DATABASE_URL con default ------------
 
@@ -121,16 +143,75 @@ async fn list_user_posts(id: Int) -> Result<List<Post>> {
 @post("/posts")
 async fn create_post(body: PostInput) -> Result<Post> {
     let conn = open_db().await?
-    let p = Post { id: 0, title: body.title, body: body.body, user_id: body.user_id }
+    let p = Post {
+        id: 0,
+        title: body.title,
+        body: body.body,
+        user_id: body.user_id,
+        user: null,
+        metadata: body.metadata
+    }
     return Post.insert(conn, p).await
 }
 
 @get("/users-with-posts")
 async fn users_with_posts() -> Result<List<User>> {
-    // Eager loading: 1 query batch para users + 1 query batch para
-    // TODOS los posts (WHERE user_id IN (...)). Cierra el N+1.
+    // Eager loading HasMany: 1 query batch para users + 1 query
+    // batch para TODOS los posts (WHERE user_id IN (...)).
     let conn = open_db().await?
     return User.preload("posts").all(conn).await
+}
+
+@get("/posts-with-author")
+async fn posts_with_author() -> Result<List<Post>> {
+    // Deuda #2 (v0.10.5) — Eager loading BelongsTo via companion.
+    // 1 query batch para posts + 1 query batch inversa para users
+    // (WHERE id IN (DISTINCT user_id from posts)). Cierra N+1 sin
+    // workaround manual con is_in([...]).
+    let conn = open_db().await?
+    return Post.preload("user").all(conn).await
+}
+
+@get("/posts/drafts")
+async fn list_drafts() -> Result<List<Post>> {
+    // Deuda #3 (v0.10.5) — .has_key sobre JSONB. Emite SQL:
+    //   SELECT ... FROM posts WHERE "metadata" ? $1
+    let conn = open_db().await?
+    return Post.where(fn(p) => p.metadata.has_key("draft")).all(conn).await
+}
+
+@get("/posts/by-lang/{lang}")
+async fn list_by_lang(lang: Str) -> Result<List<Post>> {
+    // Deuda #3 (v0.10.5) — .get(key) con var externa + comparator.
+    // Emite SQL: SELECT ... WHERE ("metadata"->>$1) = $2
+    let conn = open_db().await?
+    return Post.where(fn(p) => p.metadata.get("lang") == lang).all(conn).await
+}
+
+@post("/posts/search")
+async fn search_posts(body: SearchInput) -> Result<List<Post>> {
+    // Deuda #4 (v0.10.5) — chain dinámico condicional. El receiver
+    // `qb` es var mutable; cada `.where()` adicional se agrega solo
+    // si su branch ejecuta en runtime. SQL de cada fragmento queda
+    // constante en compile-time.
+    //
+    // Nota: el translator de .where(...) solo acepta vars externas
+    // como `Ident` plano, no field access (`body.lang` no anda
+    // directo). Workaround: extraer a local antes del closure.
+    let conn = open_db().await?
+    let min_id = body.min_id
+    let lang = body.lang
+    let qb = Post.where(fn(p) => p.id >= min_id)
+
+    if (lang != "") {
+        qb = qb.where(fn(p) => p.metadata.get("lang") == lang)
+    }
+
+    if (body.drafts_only) {
+        qb = qb.where(fn(p) => p.metadata.has_key("draft"))
+    }
+
+    return qb.order_by(fn(p) => p.id).all(conn).await
 }
 
 @get("/user-count")

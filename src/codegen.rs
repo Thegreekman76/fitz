@@ -6296,6 +6296,29 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                              }\n    \
                          }\n\
                      }\n\n\
+                     // Deuda #2 (v0.10.5 cosecha) — __FromFitzJson para
+                     // Vec<(__FitzValue, __FitzValue)>. Habilita body
+                     // deserialization de fields `Map<Str, Any>` en
+                     // handlers HTTP: cuando body.metadata es jsonb
+                     // libre, el codegen emite el lookup via Arc<Mutex
+                     // <Vec<(FV,FV)>> que necesita esta impl.
+                     #[allow(dead_code)]\n\
+                     impl __FromFitzJson for Vec<(__FitzValue, __FitzValue)> {\n    \
+                         fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {\n        \
+                             match json {\n            \
+                                 serde_json::Value::Object(obj) => {\n                \
+                                     let mut pairs = Vec::with_capacity(obj.len());\n                \
+                                     for (k, v) in obj.iter() {\n                    \
+                                         let k_fv = __FitzValue::Str(k.clone());\n                    \
+                                         let v_fv = <__FitzValue as __FromFitzJson>::__from_fitz_json(v)?;\n                    \
+                                         pairs.push((k_fv, v_fv));\n                \
+                                     }\n                \
+                                     Ok(pairs)\n            \
+                                 }\n            \
+                                 other => Err(format!(\"esperaba un JSON object para Map<Str, Any>, recibió: {}\", other)),\n        \
+                             }\n    \
+                         }\n\
+                     }\n\n\
                      // Deuda #1 (v0.10.4) — __MapKey para __FitzValue:
                      // habilita que `Vec<(__FitzValue, __FitzValue)>`
                      // satisfaga el trait bound de `__ToFitzJson` (que

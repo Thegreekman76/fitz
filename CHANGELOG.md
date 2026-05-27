@@ -12,11 +12,152 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-cerrar las deudas residuales restantes del ORM (BelongsTo en
-`.preload(...)`, JSON operators en `.where`, chain dinámico
-condicional), después boilerplates ORM Dockerizados (convertir
-5/6 SQLAlchemy → Fitz ORM nativo + boilerplate nuevo dedicado),
-benchmarks Fitz ORM vs SQLAlchemy.
+boilerplates ORM Dockerizados (convertir 5/6 SQLAlchemy → Fitz
+ORM nativo + boilerplate nuevo dedicado), benchmarks Fitz ORM
+vs SQLAlchemy, cierre opcional de los 7 workarounds residuales
+W1-W7 documentados en `docs/db-orm.md` sec 28 (refinamientos
+menores del codegen ORM).
+
+## [v0.10.5] — 2026-05-26 — Bundle deudas residuales ORM #2/#3/#4 + cosecha BodyJson + workarounds documentados
+
+**Cierre del bloque "deudas residuales del ORM"** iniciado
+post-v0.10.4. 3 deudas más cerradas en commits intermedios
+bundleadas en un único release + cosecha menor descubierta
+durante la actualización de ejemplos:
+
+| Deuda | Status | Sub-paso |
+|-------|--------|----------|
+| #1 — Map<Str, Any> en HTTP returns | Cerrada | v0.10.4 |
+| #2 — BelongsTo en .preload(...) | Cerrada | v0.10.5 |
+| #3 — JSON operators en .where | Cerrada | v0.10.5 |
+| #4 — Chain dinámico condicional | Cerrada (drift docs) | v0.10.5 |
+
+Total v0.10.5: ~970 LoC netas (+770 código + tests, +200 docs)
++ 3 paridad real tests + actualización completa de los 2
+ejemplos guía (`31-orm.fitz` + `31b-orm-crud-http.fitz`) con
+los patterns de las 4 deudas.
+
+### Added
+
+- **Deuda #2 — BelongsTo eager via convention** (`src/types.rs`
+  +120 LoC, `src/codegen.rs` +135 LoC, `src/evaluator.rs` +10
+  LoC, paridad test +112 LoC):
+  - Nueva variante `RelationKind::BelongsToCompanion`. El checker
+    auto-detecta el patrón canónico: `@belongs_to("User")
+    user_id: Int` + sibling field `user: User?` (name derivado
+    stripping `_id`, type Nullable<Target>). Registra companion
+    como virtual. Sin sibling declarado, comportamiento previo
+    (FK navigation directa).
+  - `emit_belongs_to_companion_preload_arm` en `codegen.rs`
+    paralelo a HasMany pero con SQL inverso: `WHERE target.pk IN
+    (parent.fk DISTINCT)`. Asigna `Some(target)` a cada parent.
+  - `.preload("user")` (companion name) ahora funciona end-to-end
+    en `fitz build`. Validado con `orm_preload_belongs_to_
+    companion_paridad_codegen_e2e` (3 posts + 3 preloaded users
+    en 2 queries).
+- **Deuda #3 — JSON operators en `.where(...)`** (`src/evaluator.rs`
+  +191 LoC, `src/codegen.rs` +204 LoC, paridad test +92 LoC).
+  5 method calls sobre fields jsonb (`Map<Str, ...>`) mapeados a
+  operadores Postgres nativos:
+  - `.has_key("k")` → `"data" ? $1`
+  - `.has_all_keys([...])` → `"data" ?& $1::text[]`
+  - `.has_any_keys([...])` → `"data" ?| $1::text[]`
+  - `.contains_json({...})` → `"data" @> $1::jsonb`
+  - `.get("k")` → `("data"->>$1)` (text result, comparable con
+    `==` contra Str literal)
+
+  Validado con `orm_jsonb_operators_in_where_paridad_codegen_e2e`
+  (4 events shapes distintos → conteos esperados: 3/3/2/2/1).
+- **Deuda #4 — Chain dinámico condicional** (regression test +99
+  LoC, sin código Rust nuevo): el codegen YA soportaba `qb =
+  qb.where(...)` adentro de un `if`. La doc previa decía "no
+  compila" — drift documental. Validado con
+  `orm_dynamic_chain_conditional_paridad_codegen_e2e` (4
+  combinaciones de filtros condicionales sobre 5 users).
+- **Cosecha BodyJson** (`src/codegen.rs` +20 LoC): nueva
+  `impl __FromFitzJson for Vec<(__FitzValue, __FitzValue)>`
+  en el preludio HTTP. Habilita body deserialization de fields
+  `Map<Str, Any>` cuando aparecen en types HTTP entrada (e.g.
+  `PostInput.metadata: Map<Str, Any>`). Encontrado al sumar
+  endpoints nuevos a `31b-orm-crud-http.fitz` que aceptaban
+  metadata libre del body.
+
+### Changed
+
+- **`examples/guide/31-orm.fitz` re-escrito** (~150 LoC) con
+  todos los patterns de las 4 deudas demostrados:
+  - Sec 2.7 ampliada con companion field auto-detectado.
+  - Sec 2.8 ampliada con `.preload("user")` BelongsTo eager.
+  - Nueva sec con JSON operators (`.has_key`/`.contains_json`/`.get`).
+  - Nueva sec con chain dinámico condicional (`qb = qb.where(...)`).
+  - `Post` ahora declara `metadata: Map<Str, Any>` y `user: User?`
+    como ejemplos canónicos de los nuevos features.
+- **`examples/guide/31b-orm-crud-http.fitz`** sumó 4 endpoints
+  nuevos:
+  - `GET /posts-with-author` — BelongsTo eager (deuda #2)
+  - `GET /posts/drafts` — `.has_key` (deuda #3)
+  - `GET /posts/by-lang/{lang}` — `.get` con var externa (deuda #3)
+  - `POST /posts/search` — chain dinámico con body (deuda #4)
+
+  Type `Post` extendido con companion `user: User?` y `metadata:
+  Map<Str, Any>`. Type `PostInput` extendido con `metadata` para
+  HTTP body. Nuevo type `SearchInput` para el endpoint dinámico.
+- **`docs/db-orm.md`**:
+  - Sec 12 (eager loading): caveat reescrito reflejando BelongsTo
+    via companion como CERRADO.
+  - Sec 13 (JSONB): tabla nueva de operadores + ejemplos completos.
+  - Sec 21 (search filters): chain dinámico documentado con
+    ejemplos correctos (no más workaround search_dynamic).
+  - Sec 28 (limitaciones): 4 entradas marcadas CERRADO + nueva
+    sub-sección **W1-W7 workarounds residuales documentados**
+    encontrados durante el cierre del bloque (Map literal
+    homogéneo no matchea Map<Str,Any>, Nullable refinement en
+    match, `.starts_with` solo Str literal, `id: 0` no
+    auto-asigna con bigserial, `db.close` no devuelve Result,
+    `body.field` no soportado en closures, `.update` solo
+    acepta Map literal). Cada uno con síntoma + workaround +
+    fix futuro propuesto.
+
+### Fixed
+
+- Codegen format string bug en `impl __FromFitzJson for Vec<...>`
+  (descubierto + arreglado en la misma sesión): el codegen
+  emitía `{{}}` literal donde debía emitir `{}` (format spec
+  para el `other` arg).
+
+### Tests
+
+- **3 paridad real tests nuevos** en `tests/db_real_postgres.rs`:
+  - `orm_preload_belongs_to_companion_paridad_codegen_e2e`
+  - `orm_jsonb_operators_in_where_paridad_codegen_e2e`
+  - `orm_dynamic_chain_conditional_paridad_codegen_e2e`
+- Total `db_real_postgres`: **46 tests** (was 43, +3).
+- Smoke `GUIDE_EXAMPLES_COMPILE` (292 ejemplos) verde.
+- `cargo fmt --all --check` + `cargo clippy --all-targets -D
+  warnings` limpio.
+
+### Diferenciales reforzados con v0.10.5
+
+Sumadas a las features del MVP de Fase 10/10.b/v0.10.4, ahora
+el stack DB+ORM cubre **todos los patterns canónicos** que un
+ORM moderno debería tener:
+
+- **Eager loading bidireccional**: HasMany (`.preload("posts")`)
+  + BelongsTo (`.preload("user")` via companion). Cierre N+1
+  en cualquier dirección de la relation, dispatch estático
+  compile-time, paridad bit-a-bit run↔build.
+- **JSONB queries first-class**: 5 operadores Postgres nativos
+  mapeados a method calls Fitz ergonómicos. Sin bajar a SQL
+  crudo para casos comunes (key exists, contains subset,
+  text extract).
+- **Dynamic search filters**: chain condicional con `qb =
+  qb.where(...)` funciona sin compromisos de perf — el SQL
+  por fragmento sigue siendo constante en compile-time, solo
+  el SHAPE del chain es dinámico.
+- **Workarounds documentados**: cuando un patron requiere
+  workaround conocido (W1-W7), está documentado con síntoma
+  reproducible + plan de fix. Sin "magia" — el user sabe
+  exactamente qué funciona y qué no.
 
 ## [v0.10.4] — 2026-05-26 — Deuda residual #1 cerrada: Map<Str, Any> en HTTP returns
 

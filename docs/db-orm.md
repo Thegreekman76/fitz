@@ -2513,6 +2513,116 @@ Lo que NO está en el MVP, con plan de cierre y workaround:
   cambio de código. La sec 21 ahora documenta el patrón con
   ejemplos correctos.
 
+---
+
+### Workarounds residuales encontrados al cerrar las deudas #1-#4
+
+Mientras cerrábamos las 4 deudas grandes (v0.10.4 + v0.10.5),
+encontramos workarounds menores que el user va a tropezar al
+escribir código ORM real. Cada uno tiene un caso reproducible
+documentado abajo. **Ninguno bloquea el uso del stack DB+ORM**,
+pero todos suman scope a refinamientos futuros.
+
+#### W1 — Map literal homogéneo no satisface field `Map<Str, Any>`
+
+- **Síntoma**: `Event { metadata: {"code": 500} }` con field
+  type `metadata: Map<Str, Any>` falla compilación con
+  `E0308 mismatched types`. El codegen infiere el Map literal
+  como `Map<Str, Int>` concreto (todos los values son Int)
+  pero el field espera `Map<Str, Any>` (representación
+  `Vec<(__FitzValue, __FitzValue)>`).
+- **Workaround**: mezclar tipos en el literal o agregar al
+  menos un value de otro tipo (`{"code": 500, "kind": "fatal"}`
+  → heterogéneo → emite shape jsonb). Workaround silencioso
+  pero confuso si el user no sabe la razón.
+- **Fix futuro**: `gen_map_lit` debería usar el tipo del
+  contexto destino (anotación del field, anotación del let,
+  etc.) antes de inferir desde los values del literal.
+
+#### W2 — Nullable refinement en match arms no funciona
+
+- **Síntoma**:
+  ```fitz
+  match post.user { null => "<null>", u => u.name }
+  ```
+  El binding `u` queda como `User?` (Nullable), no `User`. El
+  acceso `u.name` falla compilación.
+- **Workaround**:
+  ```fitz
+  if (post.user == null) { ... } else { /* sigue sin acceso refinado */ }
+  ```
+  Para acceder al field interno, el user tiene que mantener un
+  flag (`bool`) y dispatchear separadamente.
+- **Fix futuro**: refinement de tipo en branches de `match`/
+  `if` cuando el discriminante es `null` vs binding. Sistema
+  de tipos requiere flow-sensitive analysis.
+
+#### W3 — `.starts_with` / `.ends_with` / `.contains` requieren Str literal
+
+- **Síntoma**: `.where(fn(p) => p.name.starts_with(some_var))`
+  falla con "MVP: el arg debe ser string literal".
+- **Workaround**: usar `.like(some_var)` que sí acepta vars
+  (el user pasa el pattern con `%` manualmente: `"ada%"`).
+- **Fix futuro**: extender los 3 wrappers para aceptar vars
+  envolviéndolas con `%` en runtime via SQL `CONCAT(...)`.
+
+#### W4 — `id: 0` con bigserial NO auto-asigna
+
+- **Síntoma**: `User.insert(db, User { id: 0, ... })` con
+  schema `id bigserial PRIMARY KEY` inserta literal `0`, no
+  deja a Postgres auto-generar. Múltiples inserts con
+  `id: 0` rompen con "violates unique constraint".
+- **Workaround**: pasar ids explícitos únicos en cada insert.
+  Para tests, usar IDs distintos manualmente.
+- **Fix futuro**: el codegen debería skipear el field
+  `@primary` cuando su value runtime es el sentinel `0` (Int)
+  para Postgres bigserial — para que la inserción sea
+  `INSERT (cols sin id) VALUES (...) RETURNING id`. Hoy
+  siempre emite el id.
+
+#### W5 — `db.close()` no retorna `Result`
+
+- **Síntoma**: `db.close().await?` falla con "operador `?`
+  sobre `Null`: el operando debe ser `Result<T>`".
+- **Workaround**: usar `db.close().await` sin `?`.
+- **Fix futuro**: hacer que `db.close` devuelva `Future<Result<Null>>`
+  por consistencia con `db.query`/`db.exec`. Los errores de
+  cierre (conn ya cerrada, conn rota, etc.) son raros pero
+  posibles — el user debería poder manejarlos.
+
+#### W6 — `body.lang` field access no soportado en closures de `.where`
+
+- **Síntoma**:
+  ```fitz
+  @post("/search")
+  async fn search(body: SearchInput) -> Result<List<X>> {
+      return X.where(fn(x) => x.lang == body.lang).all(db).await
+  }
+  ```
+  El translator rechaza `body.lang` con "`.where(...)` solo
+  admite field access sobre el parámetro `<x>` ...".
+- **Workaround**: extraer a local antes del closure:
+  ```fitz
+  let lang = body.lang
+  return X.where(fn(x) => x.lang == lang).all(db).await
+  ```
+- **Fix futuro**: extender el translator para aceptar field
+  access sobre vars externas via lookup adicional al
+  `closure_env`. Hoy solo acepta `Ident` plano.
+
+#### W7 — Solo Map literal directo en `.update(db, {...})`
+
+- **Síntoma**: `.update(db, body.changes)` con `body.changes:
+  Map<Str, Any>` no funciona si pasa la var. Solo acepta
+  literal `{"k": v, ...}`.
+- **Workaround**: bajar a `db.exec(...)` crudo con SQL UPDATE
+  + params explícitos.
+- **Fix futuro**: soportar Map var como changes argument.
+
+---
+
+### Lista de futuras refinamientos del stack DB (no bloquean v0.10.5)
+
 ### Composite indexes, partial indexes, expression indexes
 
 - **Status**: no se generan auto desde el `type`. El user los

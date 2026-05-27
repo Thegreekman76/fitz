@@ -1,9 +1,9 @@
-// cap 31 — ORM nativo (Fase 10.b).
+// cap 31 — ORM nativo (Fase 10.b + deudas residuales v0.10.5).
 //
 // Postgres + Fitz: types con decoradores @table, @primary, @column,
 // @belongs_to, @has_many. Una sola fuente de verdad para schema +
-// queries tipadas + relations + aggregates. Sin lib externa: el
-// driver Postgres puro y el ORM están en el binario `fitz` mismo.
+// queries tipadas + relations + aggregates + JSONB. Sin lib externa:
+// el driver Postgres puro y el ORM están en el binario `fitz` mismo.
 //
 // Diferenciales vs SQLAlchemy / Active Record / Diesel:
 //   - `fitz build` produce binario standalone con el ORM linkeado.
@@ -39,6 +39,19 @@
     // y al INSERT). El nav method `post.user_id(db)` resuelve al
     // User correspondiente.
     @belongs_to("User") user_id: Int
+
+    // Deuda #2 (v0.10.5) — BelongsTo companion via convention.
+    // Sibling field `user` (stripping `_id` del FK) auto-detectado
+    // por el checker. Habilita `Post.preload("user").all(db)` para
+    // cerrar el N+1 con 1 query batch inversa (target.id IN parent.fk).
+    // Sin preload, el field queda en null.
+    user: User?
+
+    // Deuda #3 (v0.10.5) — JSONB field. Map<Str, Any> ↔ jsonb.
+    // Habilita JSON operators en .where: .has_key/.has_all_keys/
+    // .has_any_keys/.contains_json/.get mapeados a Postgres nativo
+    // (`?`, `?&`, `?|`, `@>`, `->>`).
+    metadata: Map<Str, Any>
 }
 
 // --- 2. Patrones canónicos del ORM ----------------------------------
@@ -47,7 +60,11 @@ async fn demo(db_url: Str) -> Result<Str> {
     let db = db.connect(db_url).await?
 
     // 2.1 — Insert: el server asigna el id (bigserial).
-    let inserted = User.insert(db, User { id: 0, name: "ada", age: 35, posts: [] }).await?
+    // Maps heterogéneos (Str/Int/Bool mix) → codegen emite shape jsonb
+    // (Vec<(__FitzValue, __FitzValue)>) que matchea Map<Str, Any>.
+    let inserted = User.insert(db, User {
+        id: 0, name: "ada", age: 35, posts: []
+    }).await?
     let new_id = inserted.id
 
     // 2.2 — SELECT con WHERE chain + first.
@@ -81,11 +98,39 @@ async fn demo(db_url: Str) -> Result<Str> {
     // 2.8 — Eager loading: 1 query batch en vez de N+1.
     let with_posts = User.preload("posts").all(db).await?
 
+    // Deuda #2 (v0.10.5) — BelongsTo eager via companion field.
+    // `.preload("user")` (companion auto-detectado) carga todos los
+    // users referenciados en 1 query batch inversa. Post.user queda
+    // poblado en cada row sin más round-trips.
+    let posts_with_authors = Post.preload("user").all(db).await?
+
+    // Deuda #3 (v0.10.5) — JSON operators en .where(...).
+    // Mapean a operadores Postgres nativos:
+    //   .has_key("k")            → "metadata" ? $N
+    //   .has_all_keys([...])     → "metadata" ?& $N::text[]
+    //   .has_any_keys([...])     → "metadata" ?| $N::text[]
+    //   .contains_json({...})    → "metadata" @> $N::jsonb
+    //   .get("k")                → ("metadata"->>$N) text result
+    let drafts = Post.where(fn(p) => p.metadata.has_key("draft")).all(db).await?
+    let promo = Post.where(fn(p) => p.metadata.contains_json({"campaign": "summer"})).all(db).await?
+    let by_lang = Post.where(fn(p) => p.metadata.get("lang") == "es").all(db).await?
+
+    // Deuda #4 (v0.10.5) — chain dinámico condicional. El receiver
+    // de cada chain method puede ser var mutable. El SQL final es
+    // constante por branch (cada fragmento se construye en
+    // compile-time), pero el SHAPE del chain se decide en runtime.
+    let qb = User.where(fn(u) => u.age >= 0)
+    let want_adults = true
+    if (want_adults) {
+        qb = qb.where(fn(u) => u.age >= 18)
+    }
+    let dynamic = qb.order_by(fn(u) => u.id).all(db).await?
+
     // 2.9 — Update + delete con guard `.where(...)` obligatorio.
     let updated_rows = User.where(fn(u) => u.id == new_id).update(db, {"age": 36}).await?
     let deleted_rows = User.where(fn(u) => u.id == new_id).delete(db).await?
 
-    return Ok("ORM demo: {len(top)} top users, {total_users} total, {len(by_age)} grupos por edad")
+    return Ok("ORM demo: {len(top)} top users, {total_users} total, {len(by_age)} grupos por edad, {len(dynamic)} dynamic")
 }
 
 // --- 3. Entry point -------------------------------------------------
@@ -93,9 +138,13 @@ async fn demo(db_url: Str) -> Result<Str> {
 async fn driver() -> Str {
     // `fitz build` con URL inválida → connect falla con Err clara.
     // Para correr el demo real, sustituir por la URL de tu Postgres
-    // con el schema CREATE TABLE users (id bigserial PK, name text,
-    // age bigint) + CREATE TABLE posts (id bigserial PK, title text,
-    // user_id bigint REFERENCES users(id)).
+    // con el schema:
+    //   CREATE TABLE users (id bigserial PK, name text, age bigint);
+    //   CREATE TABLE posts (
+    //     id bigserial PK, title text,
+    //     user_id bigint REFERENCES users(id),
+    //     metadata jsonb
+    //   );
     return match demo("postgres://demo:demo@localhost/fitz_demo").await {
         Ok(s) => s
         Err(e) => "ejemplo ORM listo (sin Postgres real: {e})"
