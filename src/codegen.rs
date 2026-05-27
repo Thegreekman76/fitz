@@ -1443,6 +1443,115 @@ fn contains_return_status_expr(expr: &Expr) -> bool {
     }
 }
 
+/// W13 (v0.10.9) — `true` si el slice de stmts contiene un `Expr::Try`
+/// en cualquier sub-expresión. A diferencia de `Stmt::ReturnStatus` que
+/// solo aparece en stmt position, `Try` puede estar profundo en
+/// expresiones (`let x = parse(s)?`, `f(g(h(s)?))`, etc.). Por eso
+/// requiere un walker exhaustivo de expressions.
+///
+/// `gen_top_fn` lo OR-ea con `contains_return_status_stmts` para
+/// decidir si un handler HTTP entra a `response_mode`. El `?` propaga
+/// errores que el wrapper convierte a 500 (paralelo al runtime); para
+/// que el codegen pueda emitir esa semántica, el fn debe retornar
+/// `__FitzResponse`. FnExpr inline no propaga porque tiene su propio
+/// scope (igual que en `contains_return_status_expr`).
+fn body_uses_try(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_uses_try)
+}
+
+fn stmt_uses_try(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Expr(e, _) | Stmt::Return(e, _) => expr_uses_try(e),
+        Stmt::Assign { value, .. } => expr_uses_try(value),
+        Stmt::ReturnStatus { status, body, .. } => {
+            expr_uses_try(status) || body.as_ref().is_some_and(expr_uses_try)
+        }
+        Stmt::While {
+            condition, body, ..
+        } => expr_uses_try(condition) || body_uses_try(body),
+        Stmt::Loop { body, .. } => body_uses_try(body),
+        Stmt::For { iter, body, .. } => expr_uses_try(iter) || body_uses_try(body),
+        // FnDef adentro de fn body: tiene su propio scope. NO descendemos.
+        // Stmt::FnDef y Stmt::TypeDef tampoco.
+        _ => false,
+    }
+}
+
+fn expr_uses_try(expr: &Expr) -> bool {
+    match expr {
+        Expr::Try(_, _) => true,
+        Expr::BinOp { left, right, .. } => expr_uses_try(left) || expr_uses_try(right),
+        Expr::UnaryOp { operand, .. } => expr_uses_try(operand),
+        Expr::Call { callee, args, .. } => expr_uses_try(callee) || args.iter().any(expr_uses_try),
+        Expr::Field { object, .. } => expr_uses_try(object),
+        Expr::Index { object, index, .. } => expr_uses_try(object) || expr_uses_try(index),
+        Expr::Slice {
+            object, start, end, ..
+        } => {
+            expr_uses_try(object)
+                || start.as_ref().is_some_and(|s| expr_uses_try(s))
+                || end.as_ref().is_some_and(|x| expr_uses_try(x))
+        }
+        Expr::Range { start, end, .. } => expr_uses_try(start) || expr_uses_try(end),
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            expr_uses_try(condition)
+                || body_uses_try(then)
+                || else_.as_deref().is_some_and(body_uses_try)
+        }
+        Expr::Match { value, arms, .. } => {
+            expr_uses_try(value) || arms.iter().any(|a| body_uses_try(&a.body))
+        }
+        Expr::Loop { body, .. } => body_uses_try(body),
+        Expr::List(items, _) => items.iter().any(expr_uses_try),
+        Expr::Tuple(items, _) => items.iter().any(expr_uses_try),
+        Expr::Map(pairs, _) => pairs
+            .iter()
+            .any(|(k, v)| expr_uses_try(k) || expr_uses_try(v)),
+        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_try(v)),
+        Expr::NamedArg { value, .. } => expr_uses_try(value),
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Await(inner, _) => expr_uses_try(inner),
+        Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+            crate::ast::StrPart::Expr(e, _) => expr_uses_try(e),
+            _ => false,
+        }),
+        Expr::ListComp {
+            expr,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
+            expr_uses_try(expr)
+                || expr_uses_try(iter)
+                || extra_clauses.iter().any(|(_, it)| expr_uses_try(it))
+                || filter.as_ref().is_some_and(|f| expr_uses_try(f))
+        }
+        Expr::MapComp {
+            key,
+            value,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
+            expr_uses_try(key)
+                || expr_uses_try(value)
+                || expr_uses_try(iter)
+                || extra_clauses.iter().any(|(_, it)| expr_uses_try(it))
+                || filter.as_ref().is_some_and(|f| expr_uses_try(f))
+        }
+        // FnExpr es otra fn — su body tiene su propio scope, no propaga
+        // `?` hacia el outer. Mirror de la regla de `expr_uses_spawn`.
+        Expr::FnExpr { .. } => false,
+        _ => false,
+    }
+}
+
 /// Mini-tanda Md — extrae todos los `Ident` de un Pattern. Usado por
 /// los walkers de codegen y el codegen del `for` con tuple destructuring.
 /// Solo cubre los patterns aceptados en `Stmt::For` (Ident, Wildcard,
@@ -8264,20 +8373,23 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // termina en `Stmt::ReturnStatus` (devuelve Response).
         let is_middleware_post = self.middleware_post_fn_names.contains(name);
         let has_return_status_inner = contains_return_status_stmts(body);
-
-        // Status codes custom: si la fn HTTP contiene al menos un
-        // `Stmt::ReturnStatus`, su return type Rust pasa a ser
-        // `__FitzResponse` (en vez del declarado) y todos los returns
-        // se envuelven. El handler wrapper lo detecta vía la tabla
-        // `http_handlers_returning_response` para emitir el destructuring
-        // apropiado. Para middlewares Pre (MW.3) reusamos el mismo flag
-        // `response_mode` para envolver `Stmt::ReturnStatus`, pero la
-        // emisión final difiere — los middlewares Pre retornan
-        // `Option<__FitzResponse>`, no `__FitzResponse`. Para Post mws
-        // (P1) el wrapping también aplica, pero la return type emitida
-        // es __FitzResponse directo.
-        let has_return_status =
-            (is_http_handler || is_middleware || is_middleware_post) && has_return_status_inner;
+        // W13 (v0.10.9) — handler HTTP que usa `?` en cualquier
+        // sub-expresión del body también entra a response_mode. El
+        // runtime ya convierte `Err` propagado en 500 (paridad con
+        // `value_to_outcome`); para mantener paridad bit-a-bit en el
+        // binario nativo, el codegen también necesita que el handler
+        // retorne `__FitzResponse` y que `gen_try` emita la conversión
+        // explícita (no se puede usar el `?` Rust nativo porque
+        // requeriría que la fn devuelva `Result<_, _>`, lo cual no
+        // es el caso cuando la firma declarada es `-> User`).
+        //
+        // El flag aplica SOLO a handlers HTTP. Middlewares con `?` no
+        // están en scope (su return type es Option<__FitzResponse>;
+        // el `?` necesita una mecánica diferente; deuda visible si
+        // aparece presión).
+        let body_has_try = body_uses_try(body);
+        let has_return_status = (is_http_handler || is_middleware || is_middleware_post)
+            && (has_return_status_inner || (is_http_handler && body_has_try));
         if has_return_status && is_http_handler {
             self.http_handlers_returning_response.insert(name.clone());
         }
@@ -17589,6 +17701,29 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 ));
             }
         };
+        // W13 (v0.10.9) — en response_mode (HTTP handler que produce
+        // `__FitzResponse`), `?` no puede emitirse como `?` Rust nativo
+        // porque Rust exige que el contenedor retorne `Result<_, _>`.
+        // En su lugar emitimos un match inline que convierte
+        // `Err(__e) → return __FitzResponse { status: 500, body: {"error": __e} }`,
+        // paralelo a `value_to_outcome` del runtime. La paridad bit-a-bit
+        // con `fitz run` queda preservada.
+        if self.response_mode {
+            // El receptor del Err es String (paridad con el shape
+            // existente del Result<T, String> de los handlers). Si el
+            // tipo Err llega como Any (gradual), serializamos con
+            // serde_json::Value::String al render del body.
+            let snippet = format!(
+                "match ({code}) {{\n\
+                 \x20    Ok(__v) => __v,\n\
+                 \x20    Err(__e) => return __FitzResponse {{\n\
+                 \x20        status: 500,\n\
+                 \x20        body: serde_json::json!({{\"error\": __e}}),\n\
+                 \x20    }},\n\
+                 \x20}}"
+            );
+            return Ok((format!("({snippet})"), inner_ty));
+        }
         let ret = self.ret_stack.last().cloned().unwrap_or(Type::Null);
         match &ret {
             Type::Result { .. } => {}

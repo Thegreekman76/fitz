@@ -21,9 +21,15 @@
 //                        el codegen emite `crate::<mod>::<fn>(...)`
 //                        module-qualified en los wrappers HTTP/WS.
 //                        Ejemplo runnable: examples/guide/multi-module-auth/.
-//   - W13 — PENDIENTE  — mixing `?` operator con `return <status>{...}`
-//                        en el mismo handler (codegen emite el wrapper
-//                        con tipo `__FitzResponse` y `?` falla).
+//   - W13 ✓ CERRADO    — `?` operator en handlers HTTP no exige
+//                        `-> Result<T>`. Checker relaja la regla
+//                        cuando estamos `in_http_handler` y codegen
+//                        detecta `body_uses_try`, fuerza response_mode
+//                        y emite `?` como match → `__FitzResponse 500`
+//                        en lugar del `?` Rust nativo. Mix con
+//                        `return <status>{...}` funciona en el mismo
+//                        body. Paridad bit-a-bit con runtime
+//                        (`value_to_outcome` ya convertía Err→500).
 //   - W14 — PENDIENTE  — handlers @authenticated con body + user juntos
 //                        (MVP solo admite user como único param sobrante).
 //   - W15 — PENDIENTE  — `impl __FromFitzJson for FooData` emitido en

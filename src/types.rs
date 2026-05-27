@@ -3637,9 +3637,21 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // el `?` propaga un `Err(_)` vía `return`, así que
                     // la fn contenedora tiene que poder recibirlo.
                     // Fn sin return_type (Any) o top-level no chequea.
+                    //
+                    // W13 (v0.10.9) — Excepción: si estamos adentro de
+                    // un HTTP handler (`@get`/`@post`/`@put`/`@delete`),
+                    // el `?` se permite incluso con return_type concreto
+                    // distinto de Result. El runtime/codegen wrappea
+                    // el handler en `__FitzResponse`: el Err propagado
+                    // por `?` se convierte automáticamente en una
+                    // respuesta 500 (paridad con `value_to_outcome` y
+                    // con el match Ok/Err del wrapper). El usuario no
+                    // tiene que reescribir su fn como `-> Result<T>`
+                    // solo para usar `?` en su body.
+                    let in_handler = ctx.in_http_handler.last().copied().unwrap_or(false);
                     if let Some(expected) = ctx.return_stack.last().cloned() {
                         let is_ok = matches!(expected, Type::Any | Type::Result { .. });
-                        if !is_ok {
+                        if !is_ok && !in_handler {
                             ctx.error_at(*span, format!(
                                 "el operador `?` solo puede usarse adentro de una función que retorne `Result<...>`; esta retorna `{}`",
                                 expected.display(ctx.types)
@@ -10160,6 +10172,42 @@ mod tests {
         // disparamos la regla "fn debe retornar Result". El operando
         // sí se chequea: Result<Int> → desempaca a Int.
         assert_ok("let r: Result<Int> = Ok(1)\nlet v: Int = r?");
+    }
+
+    #[test]
+    fn w13_try_adentro_de_http_handler_no_result_pasa() {
+        // W13 (v0.10.9) — handler HTTP que retorna `User` (no Result)
+        // y usa `?` adentro. Antes del fix el checker rechazaba con
+        // "el operador `?` solo puede usarse adentro de una función
+        // que retorne `Result<...>`". Ahora pasa: el wrapper del
+        // runtime/codegen convierte el Err propagado por `?` en una
+        // respuesta 500 automática, así que el checker confía en esa
+        // semántica cuando estamos `in_http_handler`.
+        assert_ok(
+            "type User { id: Int }\n\
+             fn parse(s: Str) -> Result<Int> { return Ok(1) }\n\
+             @get(\"/u/{stub}\")\n\
+             fn handler(stub: Str) -> User {\n\
+                 let id = parse(stub)?\n\
+                 return User { id: id }\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn w13_try_fuera_de_http_handler_sigue_siendo_error() {
+        // W13 negative — la relajación SOLO aplica adentro de un
+        // handler HTTP (`@get/@post/etc`). Una fn normal que retorna
+        // un tipo no-Result y usa `?` sigue siendo error (paralelo a
+        // `try_adentro_de_fn_no_result_es_error`). Esto evita que la
+        // ergonomía gradual del W13 contamine código no-HTTP.
+        assert_error_with(
+            "fn helper(r: Result<Int>) -> Int {\n\
+                 let v = r?\n\
+                 return v\n\
+             }",
+            &["?", "Result"],
+        );
     }
 
     #[test]

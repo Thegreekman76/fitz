@@ -6034,6 +6034,171 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 }
 
 #[test]
+fn try_operator_mixed_with_return_status_w13() {
+    // W13 (v0.10.9) — handler HTTP que mezcla `?` (propagación de
+    // `Result::Err`), `return <status> { ... }` (status code custom)
+    // y return normal de un type custom en el mismo body. Antes de
+    // W13 el checker abortaba con "el operador `?` solo puede usarse
+    // adentro de una función que retorne `Result<...>`" porque el
+    // declared ret type era `User`, no `Result<User>`.
+    //
+    // W13 cierra esto en dos puntos: (1) checker relaja la regla
+    // cuando estamos en HTTP handler — el wrapper convierte
+    // Err propagado a 500 automáticamente; (2) codegen detecta
+    // body_uses_try y entra a response_mode para que el fn emita
+    // `__FitzResponse` y `?` se desazucare a un match que produce
+    // `__FitzResponse { status: 500, ... }` (no `?` Rust nativo,
+    // que requeriría `Result<_, _>` como return type).
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let src = "\
+@server(43912)\n\
+fn main() => 0\n\
+\n\
+type UserInput { email: Str }\n\
+type User { id: Int, email: Str }\n\
+\n\
+fn parse_id(s: Str) -> Result<Int> {\n\
+    if (s == \"ada\") { return Ok(1) }\n\
+    if (s == \"alan\") { return Ok(2) }\n\
+    return Err(\"usuario desconocido\")\n\
+}\n\
+\n\
+@post(\"/users/{stub}\")\n\
+fn create(stub: Str, body: UserInput) -> User {\n\
+    if (body.email == \"\") {\n\
+        return 400 { \"error\": \"email vacío\" }\n\
+    }\n\
+    let id = parse_id(stub)?\n\
+    return User { id: id, email: body.email }\n\
+}\n\
+";
+    // El helper `build_spawn_auth_requests` no acepta body JSON, así
+    // que armamos build + spawn + requests manuales inline (paralelo
+    // al patrón del test cross-module W12).
+    let dir = std::env::temp_dir().join("fitz-e2e-try_mixed_return_status_w13");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (W13):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43912".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43912 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let send_post = |path: &str, body: &str| -> (u16, String) {
+        let request = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path,
+            addr,
+            body.len(),
+            body,
+        );
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let body_resp = raw[body_start..].to_string();
+        (status, body_resp)
+    };
+
+    // Caso 1: happy path — Ok del parse_id + return normal de User.
+    let (status, body) = send_post("/users/ada", r#"{"email":"a@b.com"}"#);
+    assert_eq!(status, 200, "happy path 200, fue {:?}", (status, &body));
+    assert!(
+        body.contains("\"id\":1") && body.contains("a@b.com"),
+        "happy path body: {:?}",
+        body
+    );
+
+    // Caso 2: `?` propaga Err — el wrapper convierte a 500 +
+    // {"error": <msg>}. Este es el caso central del W13.
+    let (status, body) = send_post("/users/zzz", r#"{"email":"a@b.com"}"#);
+    assert_eq!(
+        status,
+        500,
+        "? propaga Err → 500, fue {:?}",
+        (status, &body)
+    );
+    assert!(
+        body.contains("usuario desconocido"),
+        "? Err body: {:?}",
+        body
+    );
+
+    // Caso 3: `return <status> { ... }` — produce 400 con body custom.
+    let (status, body) = send_post("/users/ada", r#"{"email":""}"#);
+    assert_eq!(
+        status,
+        400,
+        "return 400 produce 400, fue {:?}",
+        (status, &body)
+    );
+    assert!(body.contains("email vacío"), "return 400 body: {:?}", body);
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Sanity check del Rust generado: `?` se debe expandir como
+    // `match (...) { Ok(__v) => __v, Err(__e) => return __FitzResponse
+    // { status: 500, ... } }` (no como `?` Rust nativo, que rompería
+    // la compilación de un fn declarado `-> User`).
+    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
+        assert!(
+            content.contains("Err(__e) => return __FitzResponse"),
+            "main.rs generado debe expandir `?` a match → __FitzResponse 500 (W13). \
+             Buscamos `Err(__e) => return __FitzResponse` sin encontrar."
+        );
+    }
+}
+
+#[test]
 fn auth_codegen_jwt_y_hash_builtins_cli() {
     // CLI puro: usa `jwt.encode`/`jwt.decode` + `hash.password`/
     // `hash.verify` sin handlers HTTP. Verifica que las deps se sumen
