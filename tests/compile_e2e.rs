@@ -6576,6 +6576,36 @@ fn webhook(body: Map<Str, Any>) -> Str {\n\
 }
 
 #[test]
+fn float_arithmetic_overflow_devuelve_error_r6() {
+    // R6 (v0.10.14) — overflow aritmético Float produce `inf`/`NaN`.
+    // Antes: el codegen emitía la op cruda (Rust no panica en
+    // overflow Float), el `inf` se propagaba hasta serialización JSON
+    // donde `serde_json::Number::from_f64(inf) → None` y el response
+    // body terminaba como `null` con status 200 (cliente recibía dato
+    // incorrecto sin enterarse).
+    //
+    // Ahora: paridad bit-a-bit `fitz run` ↔ `fitz build`. El evaluator
+    // (`arith` en evaluator.rs) detecta `!is_finite()` y devuelve
+    // FitzError con msg claro. El codegen (`gen_binop` Add/Sub/Mul/Div)
+    // emite `if !__r.is_finite() { panic!("...") }` después de cada op
+    // Float. El catch_unwind del wrapper R6 (prior session) captura
+    // el panic en handlers HTTP y devuelve 500 con `{"error": "..."}`.
+    let (stdout, exit) = build_and_run(
+        "r6-float-overflow",
+        "\
+let x = 1.0e300\n\
+let y = x * x\n\
+print(y)\n\
+",
+    );
+    assert_ne!(
+        exit, 0,
+        "overflow Float debe abortar con exit code != 0, fue {} (stdout: {})",
+        exit, stdout
+    );
+}
+
+#[test]
 fn handler_panic_devuelve_500_no_rompe_conexion_r6() {
     // R6 (v0.10.13) — un panic adentro de un handler HTTP (típicamente
     // `x / 0`, `xs[N]` out-of-bounds, etc.) debe convertirse en una

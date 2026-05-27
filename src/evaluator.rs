@@ -8597,11 +8597,34 @@ where
     I: Fn(i64, i64) -> i64,
     F: Fn(f64, f64) -> f64,
 {
+    // R6 (v0.10.14) — detectar overflow/NaN al momento de generar el
+    // Float, en lugar de propagar el valor inválido hasta serialización
+    // JSON donde produce `null` silencioso. `arith` envuelve cada
+    // resultado Float con `check_finite` que devuelve `FitzError` claro
+    // citando el operador. Paralelo a la check `eval_div`/`eval_mod`
+    // sobre divisor 0. Casos típicos: `1.0e300 * 1.0e300` → +inf;
+    // `(-0.0_f64).sqrt()` → NaN (cubierto a través de los builtins);
+    // `Float::NAN op cualquier_cosa` → NaN propaga.
+    let to_float = |v: f64| -> EvalResult<Value> {
+        if v.is_finite() {
+            Ok(Value::Float(v))
+        } else {
+            Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "operador `{}` produjo Float no finito ({}). Posible overflow o NaN.",
+                    op_name, v,
+                ),
+            )))
+        }
+    };
     match (l, r) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(int_op(a, b))),
-        (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(a as f64, b))),
-        (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_op(a, b as f64))),
-        (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(a, b))),
+        (Value::Int(a), Value::Float(b)) => to_float(float_op(a as f64, b)),
+        (Value::Float(a), Value::Int(b)) => to_float(float_op(a, b as f64)),
+        (Value::Float(a), Value::Float(b)) => to_float(float_op(a, b)),
         (l, r) => type_error(op_name, &l, &r, span),
     }
 }

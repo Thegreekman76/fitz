@@ -5172,6 +5172,33 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
+    /// R3 (v0.10.14) — emite contenido formateado al `self.output`
+    /// (String) sin necesidad del `.unwrap()` que adornaba cada call
+    /// site de `writeln!(&mut self.output, ...).unwrap()`.
+    ///
+    /// El audit (`docs/deudas-post-5b.md`, R3) marca ~46 sitios con el
+    /// patrón `write!`/`writeln!` + `.unwrap()`. El `unwrap` es seguro
+    /// en la práctica (writes a `String` vía `std::fmt::Write` no
+    /// fallan — no hay I/O), pero acopla los call sites a la
+    /// representación interna del output y dificulta refactors
+    /// futuros (e.g. si pasamos a `BufWriter<File>` algún día, esos
+    /// unwraps se vuelven hidden bugs).
+    ///
+    /// Uso: `self.emit_fmt(format_args!("    let x: {} = {};", ty, val));`
+    /// — `format_args!` arma un `std::fmt::Arguments` zero-copy; no
+    /// hay allocations extra vs el `writeln!` directo.
+    ///
+    /// **Convención**: para emisiones que no son const strings ni
+    /// dependen de formatting (solo literales sin args), seguir
+    /// usando `self.emit("texto")`. Para emisiones con args, preferir
+    /// `self.emit_fmt(format_args!(...))` sobre `writeln!(...).unwrap()`.
+    fn emit_fmt(&mut self, args: std::fmt::Arguments<'_>) {
+        use std::fmt::Write;
+        // write_fmt sobre String es infalible (la doc lo garantiza); el
+        // `let _ =` documenta la intención sin agregar overhead.
+        let _ = self.output.write_fmt(args);
+    }
+
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
     }
@@ -7359,6 +7386,16 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             if !methods.is_empty() {
                 self.type_methods.insert(name.clone(), methods.clone());
             }
+            // R2 (v0.10.14) — defense-in-depth: validar nombre del
+            // tipo como ident Rust antes de inyectarlo en `pub struct
+            // <name>Data { ... }`. Parser ya filtra; este check
+            // atrapa nombres reservados de Rust (`type`, `loop`,
+            // `fn`, etc.) que el parser de Fitz acepta como ident
+            // pero Rust rechaza. También valida cada field name.
+            validate_rust_ident(name, "type def")?;
+            for f in ast_fields {
+                validate_rust_ident(&f.name, &format!("type `{}`: field", name))?;
+            }
             let id = self.env.lookup(name).ok_or_else(|| {
                 self.err(format!(
                     "tipo `{}` no registrado en el TypeEnv (¿checker no corrió?)",
@@ -7652,6 +7689,14 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             } = stmt
             {
                 let fn_span = stmt.span();
+                // R2 (v0.10.14) — validar nombre de fn + nombres de
+                // params como idents Rust. Defense-in-depth contra
+                // keywords reservadas Rust que Fitz acepta como
+                // identificadores válidos (e.g., `loop`/`type`/`fn`).
+                validate_rust_ident(name, "fn def")?;
+                for p in params {
+                    validate_rust_ident(&p.name, &format!("fn `{}`: param", name))?;
+                }
                 let params_tys: Vec<Type> = params
                     .iter()
                     .enumerate()
@@ -7848,7 +7893,8 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 let lhs = format!("self.{}", f.name);
                 let rhs = format!("__other.{}", f.name);
                 let expr = field_eq_expr(&f.type_, &lhs, &rhs, self.env)?;
-                writeln!(&mut self.output, "\n            && {}", expr).unwrap();
+                // R3 (v0.10.14) — migrado a `emit_fmt` (1 de ~46 sitios).
+                self.emit_fmt(format_args!("\n            && {}\n", expr));
             }
         }
         self.emit("    }\n}\n\n");
@@ -10351,7 +10397,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         type_name(&lt),
                         type_name(&rt)
                     )))?;
-                Ok((format!("({} + {})", l, r), t))
+                Ok((float_arith_with_finite_check(&l, "+", &r, &t), t))
             }
             BinOpKind::Sub | BinOpKind::Mul => {
                 let sym = match op {
@@ -10364,7 +10410,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         "operador `{}` no aplicable a `{}` y `{}` en codegen",
                         sym, type_name(&lt), type_name(&rt)
                     )))?;
-                Ok((format!("({} {} {})", l, sym, r), t))
+                Ok((float_arith_with_finite_check(&l, sym, &r, &t), t))
             }
             // Mini-tanda DZ — chequeo explícito de divisor 0 para
             // emitir el mismo mensaje `"división por cero"` del
@@ -10385,12 +10431,22 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     Type::Float => ("f64", "0.0"),
                     _ => unreachable!(),
                 };
+                // R6 (v0.10.14) — Float Div también suma el check finite
+                // sobre el resultado (paridad con `eval_div` + `arith`
+                // del evaluator). Int Div solo mantiene el check de
+                // división por cero (no produce inf en Int).
+                let finite_check = if matches!(t, Type::Float) {
+                    " if !__r.is_finite() { panic!(\"operador `/` produjo Float no finito ({}). Posible overflow o NaN.\", __r); }"
+                } else {
+                    ""
+                };
                 Ok((
                     format!(
                         "{{ let __a: {ty} = {l}; let __b: {ty} = {r}; \
                          if __b == {z} {{ panic!(\"división por cero\"); }} \
-                         (__a / __b) }}",
-                        ty = ty_rs, z = zero_lit, l = l, r = r
+                         let __r = __a / __b;{check} __r }}",
+                        ty = ty_rs, z = zero_lit, l = l, r = r,
+                        check = finite_check
                     ),
                     t,
                 ))
@@ -22269,9 +22325,20 @@ impl __ToFitzJson for i64 {
 }
 impl __ToFitzJson for f64 {
     fn __to_fitz_json(&self) -> serde_json::Value {
-        serde_json::Number::from_f64(*self)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null)
+        // R6 (v0.10.14) — paridad con el runtime (http.rs::value_to_json):
+        // serde_json NO admite NaN/Inf. Antes el codegen los convertía
+        // a `Value::Null` silencio (cliente recibía data incorrecta sin
+        // enterarse). Ahora lo último mejor que podemos hacer en este
+        // path es serializar el valor como String con el mismo formato
+        // del runtime ("inf", "-inf", "NaN") — el cliente ve la
+        // representación textual y puede detectar la anomalía, en lugar
+        // del null mudo. Para una validación más fuerte, R6 también
+        // suma checks en la aritmética Float del evaluator (`/`/`*`)
+        // que detectan overflow/NaN al momento de generarlos.
+        match serde_json::Number::from_f64(*self) {
+            Some(n) => serde_json::Value::Number(n),
+            None => serde_json::Value::String(format!("{}", self)),
+        }
     }
 }
 impl __ToFitzJson for String {
@@ -25059,6 +25126,78 @@ fn numeric_coerce(lc: &str, lt: &Type, rc: &str, rt: &Type) -> Option<(String, S
         (Type::Int, Type::Float) => Some((format!("({} as f64)", lc), rc.into(), Type::Float)),
         (Type::Float, Type::Int) => Some((lc.into(), format!("({} as f64)", rc), Type::Float)),
         _ => None,
+    }
+}
+
+/// R2 (v0.10.14) — defense-in-depth: valida que un nombre user-provided
+/// no sea una keyword reservada de Rust antes de inyectarlo en el
+/// output del codegen. El parser de Fitz acepta identificadores
+/// Unicode (`is_alphabetic()`) y Rust 2021+ también soporta Unicode
+/// identifiers (e.g., `área_círculo`, `δ`), así que un check sobre
+/// caracteres no es necesario.
+///
+/// Lo que SÍ atrapa: nombres que el parser de Fitz acepta como
+/// identificadores válidos pero son **keywords reservadas de Rust**
+/// (`loop`, `type`, `fn`, `match`, etc.). Sin este check, el binario
+/// nativo emite Rust inválido y `cargo build` falla con errores
+/// crudos del compilador de Rust (E0001-style) en lugar de un
+/// mensaje específico a Fitz.
+///
+/// Devuelve `Ok(())` si el name es seguro; `Err(FitzError)` con
+/// mensaje claro si es una keyword reservada o vacío.
+///
+/// Uso: en sitios del codegen donde un nombre user-provided se
+/// inyecta en una posición Rust significativa (declaración de
+/// struct/fn/var, field name de struct lit, etc.). NO necesario
+/// en sitios donde el nombre va a literal de string (`format!(...)`
+/// para emitir como mensaje, etc.) porque esos no afectan
+/// compilación.
+#[allow(dead_code)]
+fn validate_rust_ident(name: &str, context: &str) -> Result<(), FitzError> {
+    let err = |msg: String| FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg);
+    if name.is_empty() {
+        return Err(err(format!(
+            "{}: nombre vacío no es un identificador Rust válido",
+            context
+        )));
+    }
+    // Subset de Rust keywords + Fitz-allowed que podrían colisionar.
+    // El parser de Fitz no rechaza todas; este check defensivo atrapa
+    // la colisión antes que `cargo build` con un mensaje específico
+    // a Fitz (en lugar del error críptico de rustc).
+    const RUST_RESERVED: &[&str] = &[
+        "as", "break", "const", "continue", "crate", "else", "enum", "extern", "false", "fn",
+        "for", "if", "impl", "in", "let", "loop", "match", "mod", "move", "mut", "pub", "ref",
+        "return", "self", "Self", "static", "struct", "super", "trait", "true", "type", "unsafe",
+        "use", "where", "while", "async", "await", "dyn", "abstract", "become", "box", "do",
+        "final", "macro", "override", "priv", "typeof", "unsized", "virtual", "yield", "try",
+        "union",
+    ];
+    if RUST_RESERVED.contains(&name) {
+        return Err(err(format!(
+            "{}: nombre `{}` es una keyword reservada de Rust — no se puede usar como identificador en el binario nativo (renombrá en Fitz)",
+            context, name
+        )));
+    }
+    Ok(())
+}
+
+/// R6 (v0.10.14) — emite `a <op> b` con check de finitud al final
+/// para tipos Float. Paridad con el evaluator (`arith` en evaluator.rs)
+/// que rechaza overflow/NaN en arithmética Float. Para Int, emite la
+/// operación directa (Int wrap-around es semántica explícita; no hay
+/// inf/NaN). El catch_unwind del wrapper R6 (emit_handler_dispatch_and_response)
+/// captura el panic y devuelve 500 al cliente.
+fn float_arith_with_finite_check(l: &str, op: &str, r: &str, t: &Type) -> String {
+    if matches!(t, Type::Float) {
+        format!(
+            "{{ let __r = ({} {} {}); if !__r.is_finite() {{ \
+             panic!(\"operador `{}` produjo Float no finito ({{}}). Posible overflow o NaN.\", __r); \
+             }} __r }}",
+            l, op, r, op
+        )
+    } else {
+        format!("({} {} {})", l, op, r)
     }
 }
 
