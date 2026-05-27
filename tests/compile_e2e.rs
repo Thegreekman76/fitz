@@ -6199,6 +6199,161 @@ fn create(stub: Str, body: UserInput) -> User {\n\
 }
 
 #[test]
+fn auth_codegen_handler_con_body_y_user_w14() {
+    // W14 (v0.10.10) — handler protegido por auth que recibe ADEMÁS
+    // un body JSON. Antes del fix el dispatcher rechazaba con
+    // "En MVP, un handler protegido por auth admite solo el param
+    // `user` y NO body separado". Ahora identifica el user param por
+    // TIPO (matchea contra `user_type_name` extraído del
+    // `Result<T>` declarado en el `@auth_provider`), permitiendo que
+    // los demás leftovers sean body.
+    //
+    // Caso canónico: `@post("/posts") @authenticated fn create(input:
+    // PostInput, user: User) -> Post`. El wrapper deserializa el body
+    // como PostInput, autentica via provider, inyecta user, y llama
+    // al handler con (input, user).
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let src = "\
+@server(43913)\n\
+fn main() => 0\n\
+\n\
+type User { id: Int, email: Str, role: Str }\n\
+type PostInput { title: Str, body: Str }\n\
+type Post { id: Int, author_email: Str, title: Str }\n\
+\n\
+@auth_provider\n\
+fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+    match headers.get(\"authorization\") {\n\
+        Ok(token) => {\n\
+            if (token == \"Bearer admin\") {\n\
+                return Ok(User { id: 1, email: \"ada@example.com\", role: \"admin\" })\n\
+            }\n\
+            return Err(\"token inválido\")\n\
+        }\n\
+        Err(_) => return Err(\"falta Authorization\")\n\
+    }\n\
+}\n\
+\n\
+@authenticated\n\
+@post(\"/posts\")\n\
+fn create(input: PostInput, user: User) -> Post {\n\
+    return Post { id: 42, author_email: user.email, title: input.title }\n\
+}\n\
+";
+    let dir = std::env::temp_dir().join("fitz-e2e-auth_body_user_w14");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (W14):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43913".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43913 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let send_post = |path: &str, body: &str, bearer: Option<&str>| -> (u16, String) {
+        let auth_header = match bearer {
+            Some(t) => format!("Authorization: Bearer {}\r\n", t),
+            None => String::new(),
+        };
+        let request = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path,
+            addr,
+            auth_header,
+            body.len(),
+            body,
+        );
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let body_resp = raw[body_start..].to_string();
+        (status, body_resp)
+    };
+
+    // Caso 1: token válido + body válido → 200 con Post serializado.
+    // El wrapper deserializa input como PostInput Y inyecta user como
+    // User (W14 — body + user juntos).
+    let (status, body) = send_post(
+        "/posts",
+        r#"{"title":"hola","body":"mundo"}"#,
+        Some("admin"),
+    );
+    assert_eq!(status, 200, "happy path 200, fue {:?}", (status, &body));
+    assert!(
+        body.contains("\"author_email\":\"ada@example.com\"")
+            && body.contains("\"title\":\"hola\""),
+        "happy path body: {:?}",
+        body
+    );
+
+    // Caso 2: sin token → 401 (auth check antes de body parsing).
+    let (status, body) = send_post("/posts", r#"{"title":"hola","body":"mundo"}"#, None);
+    assert_eq!(status, 401, "sin token → 401, fue {:?}", (status, &body));
+
+    // Caso 3: token inválido → 401.
+    let (status, body) = send_post(
+        "/posts",
+        r#"{"title":"hola","body":"mundo"}"#,
+        Some("wrong"),
+    );
+    assert_eq!(
+        status,
+        401,
+        "token inválido → 401, fue {:?}",
+        (status, &body)
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
 fn auth_codegen_jwt_y_hash_builtins_cli() {
     // CLI puro: usa `jwt.encode`/`jwt.decode` + `hash.password`/
     // `hash.verify` sin handlers HTTP. Verifica que las deps se sumen

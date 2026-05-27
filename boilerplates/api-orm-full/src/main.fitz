@@ -30,8 +30,15 @@
 //                        `return <status>{...}` funciona en el mismo
 //                        body. Paridad bit-a-bit con runtime
 //                        (`value_to_outcome` ya convertía Err→500).
-//   - W14 — PENDIENTE  — handlers @authenticated con body + user juntos
-//                        (MVP solo admite user como único param sobrante).
+//   - W14 ✓ CERRADO    — handlers @authenticated con body + user
+//                        juntos. AuthProviderHandle suma
+//                        user_type_name extraído del `Result<T>` del
+//                        provider; el dispatcher de handlers
+//                        protegidos identifica el user param por TIPO
+//                        (`: User`) en vez de la regla del primer
+//                        leftover. Cualquier otro leftover queda como
+//                        body. Paridad bit-a-bit `fitz run` ↔ `fitz
+//                        build` incluyendo cross-module (W12 + W14).
 //   - W15 — PENDIENTE  — `impl __FromFitzJson for FooData` emitido en
 //                        modo Module cuando el módulo declara HTTP
 //                        handlers que serializan Foo (hoy se emite

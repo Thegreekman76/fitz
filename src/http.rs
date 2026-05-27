@@ -483,6 +483,15 @@ pub struct AuthProviderHandle {
     /// await-ear el `Value::Future` resultante; sync → llamar y usar
     /// el `Value` retornado directo.
     pub is_async: bool,
+    /// W14 (v0.10.10) — nombre del tipo `T` del `Result<T>` que
+    /// retorna el provider. Lo extrae `register_auth_provider` al
+    /// momento de procesar el `@auth_provider`, parseando el
+    /// `return_type` del FnDef. Lo consulta el dispatcher de
+    /// handlers para identificar el param "user" por TIPO en vez de
+    /// la regla del primer leftover, así un handler protegido puede
+    /// recibir además un body separado (`fn create(body: PostInput,
+    /// user: User) -> Post`).
+    pub user_type_name: String,
 }
 
 /// Acumulador de rutas registradas durante `eval`. Construido por
@@ -630,6 +639,21 @@ pub fn has_auth_provider() -> bool {
             .as_ref()
             .map(|reg| reg.auth_provider.is_some())
             .unwrap_or(false)
+    })
+}
+
+/// W14 (v0.10.10) — Devuelve el `user_type_name` del provider
+/// registrado (string vacío si no hay provider o si el provider se
+/// registró sin extraer el tipo). Lo consulta el dispatcher de
+/// handlers protegidos para identificar el param "user" por tipo en
+/// vez de la regla del primer leftover, así un handler protegido
+/// puede recibir body + user juntos.
+pub fn get_auth_provider_user_type_name() -> String {
+    HTTP_REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|reg| reg.auth_provider.as_ref().map(|h| h.user_type_name.clone()))
+            .unwrap_or_default()
     })
 }
 

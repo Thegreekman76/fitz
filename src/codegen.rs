@@ -2239,11 +2239,14 @@ struct LoadedModule {
     /// sin imports Python.
     python_imports: Vec<PythonImport>,
     /// W12 (v0.10.8) — si el módulo declara una fn `@auth_provider`,
-    /// `Some((fn_name, is_async))`. El main consume esto en
-    /// `generate_main_rs` para resolver `auth_provider_module` +
-    /// `auth_provider_name` cuando el provider vive en un módulo
-    /// importado en lugar del program local.
-    auth_provider_fn: Option<(String, bool)>,
+    /// `Some((fn_name, is_async, user_type_name))`. El main consume
+    /// esto en `generate_main_rs` para resolver
+    /// `auth_provider_module`, `auth_provider_name` y
+    /// `auth_provider_user_type_name` cuando el provider vive en un
+    /// módulo importado en lugar del program local. `user_type_name`
+    /// (W14, v0.10.10) es el `T` del `Result<T>` declarado; string
+    /// vacío si la extracción falla.
+    auth_provider_fn: Option<(String, bool, String)>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -2601,21 +2604,25 @@ impl ModuleLoader {
         let module_uses_db = program_uses_db(&module_program);
         let module_has_http = has_http_routes(&module_program);
         // W12 (v0.10.8) — detectar `@auth_provider` declarado EN este
-        // módulo. Si el módulo lo tiene, exponemos `(fn_name, is_async)`
-        // al main para que `generate_main_rs` resuelva
-        // `auth_provider_module` + `auth_provider_name` cuando el
-        // provider vive cross-module.
-        let mut module_auth_provider_fn: Option<(String, bool)> = None;
+        // módulo. Si el módulo lo tiene, exponemos
+        // `(fn_name, is_async, user_type_name)` al main para que
+        // `generate_main_rs` resuelva `auth_provider_module` +
+        // `auth_provider_name` + (W14, v0.10.10)
+        // `auth_provider_user_type_name` cuando el provider vive
+        // cross-module.
+        let mut module_auth_provider_fn: Option<(String, bool, String)> = None;
         for stmt in &module_program {
             if let Stmt::FnDef {
                 name,
                 decorators,
                 is_async,
+                return_type,
                 ..
             } = stmt
             {
                 if decorators.iter().any(|d| d.name == "auth_provider") {
-                    module_auth_provider_fn = Some((name.clone(), *is_async));
+                    let user_type_name = extract_user_type_name_from_return(return_type.as_ref());
+                    module_auth_provider_fn = Some((name.clone(), *is_async, user_type_name));
                     break;
                 }
             }
@@ -2843,6 +2850,27 @@ fn mod_qualifier_of(rel_path: &Path) -> String {
         }
     }
     parts.join("::")
+}
+
+/// W14 (v0.10.10) — extrae el nombre del tipo `T` del `Result<T>`
+/// declarado como return de una fn `@auth_provider`. Lo consumen el
+/// pre-scan local de `generate_main_rs` y el pre-scan del loader
+/// (`load_module_inner`) para guardarlo en
+/// `auth_provider_user_type_name` y en `LoadedModule.auth_provider_fn`
+/// respectivamente. Devuelve string vacío si la return type no tiene
+/// shape `Result<T>` o si T no es un Named simple (caso edge — el
+/// checker rechaza esa shape para el provider en 9.w.1.a, pero el
+/// codegen replica defensivamente).
+fn extract_user_type_name_from_return(return_type: Option<&TypeExpr>) -> String {
+    match return_type {
+        Some(TypeExpr::Generic { name, args }) if name == "Result" && args.len() == 1 => {
+            match &args[0] {
+                TypeExpr::Named(t) => t.clone(),
+                _ => String::new(),
+            }
+        }
+        _ => String::new(),
+    }
 }
 
 /// W12 (v0.10.8) — Helper privado del loader. Espejo de
@@ -3620,12 +3648,20 @@ fn generate_main_rs(
             name,
             decorators,
             is_async,
+            return_type,
             ..
         } = stmt
         {
             if decorators.iter().any(|d| d.name == "auth_provider") {
                 ctx.auth_provider_name = Some(name.clone());
                 ctx.auth_provider_is_async = *is_async;
+                // W14 (v0.10.10) — extraer T del `Result<T>` del
+                // return_type para identificar el param user por
+                // tipo en `resolve_handler_signature`. Sin annotation
+                // o shape distinto → string vacío (fallback al
+                // comportamiento pre-W14).
+                ctx.auth_provider_user_type_name =
+                    extract_user_type_name_from_return(return_type.as_ref());
                 break;
             }
         }
@@ -3643,12 +3679,20 @@ fn generate_main_rs(
     // (típicamente último segmento del path Fitz: `from auth import X`
     // → `mod_name = "auth"`). El wrapper emite `crate::<mod>::<fn>(...)`
     // en `emit_auth_check` y en el WS wrapper.
+    //
+    // W14 (v0.10.10) — el `user_type_name` del provider cross-module
+    // viene del scanner del loader (`LoadedModule.auth_provider_fn`
+    // ya capturó el shape; pero solo guardó nombre + is_async). Para
+    // no agregar otro campo, re-parseamos el módulo y extraemos T del
+    // Result<T> de la fn. Es cheap porque solo corre una vez por
+    // build. Si falla → fallback string vacío (pre-W14).
     if ctx.auth_provider_name.is_none() {
         for m in &loader.modules {
-            if let Some((fn_name, is_async)) = &m.auth_provider_fn {
+            if let Some((fn_name, is_async, user_type_name)) = &m.auth_provider_fn {
                 ctx.auth_provider_name = Some(fn_name.clone());
                 ctx.auth_provider_is_async = *is_async;
                 ctx.auth_provider_module = Some(m.mod_name.clone());
+                ctx.auth_provider_user_type_name = user_type_name.clone();
                 break;
             }
         }
@@ -4642,6 +4686,15 @@ struct CodegenCtx<'a> {
     /// (`crate::<module>::<fn>(...)`) en lugar del nombre pelado.
     /// `None` cuando el provider es local o cuando no hay provider.
     auth_provider_module: Option<String>,
+    /// W14 (v0.10.10) — nombre del tipo `T` del `Result<T>` que
+    /// retorna el provider (`User`, `Account`, etc.). Lo usa el
+    /// dispatcher de handlers protegidos para identificar el param
+    /// "user" por TIPO en vez de la regla del primer leftover, así
+    /// un handler protegido puede recibir body + user juntos
+    /// (`fn create(body: PostInput, user: User) -> Post`). String
+    /// vacío si no hay provider o si la extracción falló (fallback
+    /// al comportamiento pre-W14).
+    auth_provider_user_type_name: String,
     /// Fase 8.7.1: bindings Python detectados en el programa. Cada
     /// entry mapea `binding_name` → `dotted_path` Python. Se consulta
     /// desde `gen_expr` (Ident) para tipar el ident como
@@ -4799,6 +4852,7 @@ impl<'a> CodegenCtx<'a> {
             auth_provider_name: None,
             auth_provider_is_async: false,
             auth_provider_module: None,
+            auth_provider_user_type_name: String::new(),
             uses_ws: false,
             uses_jobs: false,
             uses_db: false,
@@ -19955,15 +20009,27 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 ),
             ));
         }
+        // W14 (v0.10.10) — identificar el user param por TIPO en vez
+        // de por la regla del primer leftover. Esto destraba handlers
+        // protegidos que reciben body + user juntos (caso canónico:
+        // `@post("/posts") @authenticated fn create(body: PostInput,
+        // user: User) -> Post`). El `user_type_name` viene del
+        // `@auth_provider` (extraído del `Result<T>` declarado).
+        //
+        // Política: match por anotación del param (head_name == user_type_name).
+        // Si hay un solo candidato leftover y no matchea por tipo,
+        // fallback al pre-W14 (lo tomamos como user). Si hay varios y
+        // ninguno matchea por tipo → error con sugerencia clara.
         let auth_user_param_name: Option<String> = if auth != crate::http::AuthSpec::None {
-            let candidates: Vec<&str> = resolved_params
+            let candidates: Vec<(&String, Option<&crate::ast::TypeExpr>)> = resolved_params
                 .iter()
-                .filter(|(n, _)| {
+                .zip(params.iter())
+                .filter(|((n, _), _)| {
                     !template_params.iter().any(|tp| tp == n)
                         && !query_template_params.iter().any(|q| q == n)
                         && !header_specs.iter().any(|(_, fp, _)| fp == n)
                 })
-                .map(|(n, _)| n.as_str())
+                .map(|((n, _), p)| (n, p.type_.as_ref()))
                 .collect();
             if candidates.is_empty() {
                 return Err(self.err_at(
@@ -19974,19 +20040,57 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     ),
                 ));
             }
-            if candidates.len() > 1 {
-                return Err(self.err_at(
-                    fn_span,
-                    format!(
-                        "fn `{}`: hay {} params que no son path/query/header. \
-                         En MVP, un handler protegido por auth admite solo el \
-                         param `user` y NO body separado.",
-                        name,
-                        candidates.len(),
-                    ),
-                ));
+            let user_ty_name = &self.auth_provider_user_type_name;
+            let by_type: Vec<&(&String, Option<&crate::ast::TypeExpr>)> = if user_ty_name.is_empty()
+            {
+                Vec::new()
+            } else {
+                candidates
+                    .iter()
+                    .filter(|(_, ty)| {
+                        ty.map(|t| t.head_name() == user_ty_name.as_str())
+                            .unwrap_or(false)
+                    })
+                    .collect()
+            };
+            match by_type.len() {
+                0 => {
+                    if candidates.len() == 1 {
+                        Some(candidates[0].0.clone())
+                    } else {
+                        return Err(self.err_at(
+                            fn_span,
+                            format!(
+                                "fn `{}`: hay {} params que no son path/query/header \
+                                 y ninguno tiene anotación `: {}` (return del `@auth_provider`). \
+                                 Anotá el param que recibe el user con su tipo o reducí los \
+                                 params no asignados.",
+                                name,
+                                candidates.len(),
+                                if user_ty_name.is_empty() {
+                                    "User"
+                                } else {
+                                    user_ty_name.as_str()
+                                },
+                            ),
+                        ));
+                    }
+                }
+                1 => Some(by_type[0].0.clone()),
+                _ => {
+                    return Err(self.err_at(
+                        fn_span,
+                        format!(
+                            "fn `{}`: hay {} params anotados como `: {}`. \
+                             Un handler protegido admite a lo sumo un param del tipo User \
+                             (inyectado tras autenticación exitosa).",
+                            name,
+                            by_type.len(),
+                            user_ty_name,
+                        ),
+                    ));
+                }
             }
-            Some(candidates[0].to_string())
         } else {
             None
         };

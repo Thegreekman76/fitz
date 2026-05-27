@@ -406,7 +406,7 @@ fn process_decorator(
     // validó signature (`fn(Map<Str,Str>) -> Result<User>`) y unicidad
     // estáticamente; replicamos defensivamente acá.
     if deco.name == "auth_provider" {
-        return register_auth_provider(deco, fn_name, handler, fn_def_span);
+        return register_auth_provider(deco, fn_name, return_type, handler, fn_def_span);
     }
 
     // Fase 9.w.3 — `@cron("expr")`: registra la fn como cron job en el
@@ -456,6 +456,7 @@ fn process_decorator(
 fn register_auth_provider(
     deco: &Decorator,
     fn_name: &str,
+    return_type: &Option<TypeExpr>,
     handler: &Value,
     fn_def_span: Span,
 ) -> Result<(), EvalSignal> {
@@ -482,11 +483,31 @@ fn register_auth_provider(
             fn_name,
         )));
     }
+    // W14 (v0.10.10) — extraer el nombre del tipo `T` del `Result<T>`
+    // para que el dispatcher de handlers protegidos pueda identificar
+    // el param "user" por tipo (no por posición). El checker (9.w.1.a)
+    // ya garantiza shape `Result<T>` con T nominal; acá replicamos el
+    // parsing defensivamente. Sin annotation o shape inválido →
+    // fallback "User" string vacío que dispara la regla del primer
+    // leftover (comportamiento pre-W14, conservador).
+    let user_type_name = return_type
+        .as_ref()
+        .and_then(|t| match t {
+            TypeExpr::Generic { name, args } if name == "Result" && args.len() == 1 => {
+                match &args[0] {
+                    TypeExpr::Named(t_name) => Some(t_name.clone()),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .unwrap_or_default();
     let is_async = matches!(handler, Value::Function { is_async: true, .. });
     let handle = crate::http::AuthProviderHandle {
         name: fn_name.to_string(),
         handler: handler.clone(),
         is_async,
+        user_type_name,
     };
     if let Err(existing) = crate::http::set_auth_provider(handle) {
         return Err(err(format!(
@@ -1234,9 +1255,21 @@ fn register_http_route(
     // que el `@auth_provider` esté ya registrado (orden de declaración
     // requerido: provider antes que cualquier handler que lo use).
     // El checker (9.w.1.a) ya validó signatures estáticamente; acá
-    // identificamos el slot del user usando la regla del "leftover":
-    // el primer param que no sea path/query/header. El body se excluye
-    // abajo (el user gana sobre body para evitar la ambigüedad).
+    // identificamos el slot del user.
+    //
+    // W14 (v0.10.10) — identificación por TIPO: comparamos la
+    // anotación del param contra el `user_type_name` registrado por
+    // el `@auth_provider` (extraído de su `Result<T>` al momento de
+    // registrar). Esto destraba handlers protegidos con body +
+    // user juntos (`fn create(body: PostInput, user: User) -> Post`).
+    // Si hay anotación matcheable → user param. El resto de los
+    // leftovers pueden ser body (limitado a uno por el chequeo de
+    // body_param más abajo).
+    //
+    // Fallback (sin user_type_name registrado, o múltiples params del
+    // mismo type) → regla del primer leftover (comportamiento pre-W14,
+    // conservador). El caso "varios params del tipo User" lo rechaza
+    // el chequeo de unicidad abajo.
     let auth_user_param_name: Option<String> = if auth_spec != crate::http::AuthSpec::None {
         if !crate::http::has_auth_provider() {
             return Err(err(format!(
@@ -1261,19 +1294,60 @@ fn register_http_route(
                 deco.name, fn_name,
             )));
         }
-        if candidates.len() > 1 {
-            return Err(err(format!(
-                "@{} sobre fn '{}': hay {} params que no son path/query/header. \
-                 En el MVP de auth nativa, un handler protegido admite solo un param \
-                 inyectado por auth y NO acepta body separado. Considerá usar headers \
-                 (`@header(name=\"...\")`) para los datos extra, o split en \
-                 múltiples handlers.",
-                deco.name,
-                fn_name,
-                candidates.len(),
-            )));
+        let user_type_name = crate::http::get_auth_provider_user_type_name();
+        // Match por tipo: el param cuya anotación.head_name() == user_type_name
+        // gana como user. Skip si user_type_name está vacío (fallback).
+        let by_type: Vec<&&Param> = if user_type_name.is_empty() {
+            Vec::new()
+        } else {
+            candidates
+                .iter()
+                .filter(|p| {
+                    p.type_
+                        .as_ref()
+                        .map(|t| t.head_name() == user_type_name.as_str())
+                        .unwrap_or(false)
+                })
+                .collect()
+        };
+        match by_type.len() {
+            0 => {
+                // Sin match por tipo. Si hay un solo candidato, lo
+                // tomamos como user (comportamiento pre-W14 — útil
+                // cuando el param no tiene anotación o el provider no
+                // registró user_type_name). Si hay >1, error claro.
+                if candidates.len() == 1 {
+                    Some(candidates[0].name.clone())
+                } else {
+                    return Err(err(format!(
+                        "@{} sobre fn '{}': hay {} params que no son path/query/header \
+                         y ninguno tiene anotación `: {}` (return del `@auth_provider`). \
+                         Anotá el param que recibe el user con su tipo o reducí los params \
+                         no asignados.",
+                        deco.name,
+                        fn_name,
+                        candidates.len(),
+                        if user_type_name.is_empty() {
+                            "User"
+                        } else {
+                            user_type_name.as_str()
+                        },
+                    )));
+                }
+            }
+            1 => Some(by_type[0].name.clone()),
+            _ => {
+                return Err(err(format!(
+                    "@{} sobre fn '{}': hay {} params anotados como `: {}`. \
+                     Un handler protegido admite a lo sumo un param del tipo User \
+                     (inyectado tras autenticación exitosa).",
+                    deco.name,
+                    fn_name,
+                    by_type.len(),
+                    user_type_name,
+                )));
+            }
         }
-        Some(candidates[0].name.clone())
     } else {
         None
     };
