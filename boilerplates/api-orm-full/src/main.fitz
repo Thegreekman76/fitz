@@ -1,0 +1,543 @@
+// main.fitz — boilerplate api-orm-full
+// ════════════════════════════════════════════════════════════════════
+//
+// Showcase del **stack web first-class del lado server entero**
+// trabajando junto: ORM con relations + auth nativa + WebSockets +
+// jobs + JSONB/arrays + GROUP BY, todo en el mismo proyecto Fitz
+// que compila a binario nativo distroless.
+//
+// Dominio: blog/CMS mini. Users escriben Posts (con tags + metadata
+// JSON + estado draft/published), otros users comentan, los autores
+// reciben notif realtime via WS, cron borra drafts viejos.
+//
+// ── Estructura del archivo ──────────────────────────────────────────
+//
+//   §1. Modelo de dominio (4 @table types con relations)
+//   §2. Input/output types HTTP
+//   §3. Setup (env, init_schema)
+//   §4. Auth (provider + signup + login + me + profile)
+//   §5. Posts (CRUD + search + stats GROUP BY)
+//   §6. Comments (create + list + spawn notif)
+//   §7. WebSocket + background notif
+//   §8. Cron cleanup
+//   §9. Boot
+//
+// ── Por qué single-file ─────────────────────────────────────────────
+//
+// La estructura modular ideal sería separar este código en
+// `models.fitz`, `auth.fitz`, `posts.fitz`, etc. (proyectos Fitz
+// reales lo hacen — ver boilerplate `api-postgres-python` que usa
+// `types/` y `data/` subdirectorios). Sin embargo, los `@table`
+// types definidos en un módulo importado todavía no se resuelven
+// bien en el codegen del ORM cuando se invocan desde otros módulos
+// (`User.where(...)` en `posts.fitz` no encuentra el `@table` meta
+// del `User` declarado en `models.fitz`). El `fitz run` sí funciona
+// multi-archivo; el `fitz build` no.
+//
+// **Workaround pragmático**: consolidar el dominio del ORM en un
+// solo archivo. Las secciones marcadas con `// §N. ...` actúan
+// como navegación (buscá `§3` con el editor para saltar al setup).
+// Para proyectos grandes que excedan ~500 LoC, considerá dividir
+// types/handlers en sub-módulos al estilo `api-postgres-python` y
+// usar `fitz run` durante desarrollo + binario único en producción.
+
+
+// ════════════════════════════════════════════════════════════════════
+// §1. MODELO DE DOMINIO
+// ════════════════════════════════════════════════════════════════════
+//
+// 4 entidades con relations declaradas:
+//
+//   User ─┬─ @has_one    → UserProfile           (1 perfil por user)
+//         ├─ @has_many   → Post (via author_id)  (N posts por user)
+//         └─ @has_many   → Comment (via author_id)
+//
+//   Post ─┬─ @belongs_to → User (via author_id)
+//         └─ @has_many   → Comment (via post_id)
+//
+//   Comment ─┬─ @belongs_to → Post (via post_id)
+//            └─ @belongs_to → User (via author_id)
+//
+// El sibling field `author: User?` adyacente al FK
+// (`@belongs_to user_id`) activa el BelongsToCompanion auto-
+// detectado: `.preload("author")` emite batch SELECT inverso
+// (1 query users por todos los posts, en lugar de N queries).
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    name: Str
+    password_hash: Str = ""
+    role: Str = "user"                                // "user" | "admin"
+    created_at: Str = ""
+
+    @has_one("UserProfile") profile: UserProfile?
+    @has_many("Post", via="author_id") posts: List<Post>
+    @has_many("Comment", via="author_id") comments: List<Comment>
+}
+
+@table("user_profiles") type UserProfile {
+    @primary id: Int = 0
+    @belongs_to("User") user_id: Int
+    user: User?
+    bio: Str = ""
+    avatar_url: Str = ""
+}
+
+@table("posts") type Post {
+    @primary id: Int = 0
+    @belongs_to("User") author_id: Int
+    author: User?                                     // companion auto-detectado
+    title: Str
+    content: Str
+    tags: List<Str>                                   // text[]
+    metadata: Map<Str, Any>                           // jsonb libre
+    is_draft: Bool = true
+    created_at: Str = ""
+
+    @has_many("Comment", via="post_id") comments: List<Comment>
+}
+
+@table("comments") type Comment {
+    @primary id: Int = 0
+    @belongs_to("Post") post_id: Int
+    @belongs_to("User") author_id: Int
+    author: User?                                     // companion para devolver en API
+    body: Str
+    created_at: Str = ""
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §2. INPUT/OUTPUT TYPES HTTP (no son @table)
+// ════════════════════════════════════════════════════════════════════
+//
+// Las dos formas evolucionan distinto:
+//   - models @table → forma de la tabla Postgres (DB-shape).
+//   - api types     → forma del JSON request/response (API-shape).
+
+type SignupInput { email: Str, name: Str, password: Str }
+type LoginInput { email: Str, password: Str }
+type ProfileInput { bio: Str, avatar_url: Str }
+type PostInput { title: Str, content: Str, tags: List<Str>, metadata: Map<Str, Any> }
+type CommentInput { body: Str }
+
+// Respuesta del signup/login: el JWT + el user completo (evita un
+// GET /me extra del cliente).
+type LoginResponse { token: Str, user: User }
+
+// Evento WebSocket que el server emite cuando alguien comenta.
+type CommentNotif {
+    post_id: Int
+    post_title: Str
+    comment_id: Int
+    author_name: Str
+    body: Str
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §3. SETUP (env + init_schema)
+// ════════════════════════════════════════════════════════════════════
+
+let DB_URL = env_or("DATABASE_URL", "postgres://fitz:fitz@localhost:5432/fitz?sslmode=disable")
+let JWT_SECRET = env_or("JWT_SECRET", "dev-secret-cambiar-en-prod")
+
+async fn init_schema() -> Result<Null> {
+    let conn = db.connect(DB_URL).await?
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS users (
+            id              bigserial PRIMARY KEY,
+            email           text NOT NULL UNIQUE,
+            name            text NOT NULL,
+            password_hash   text NOT NULL DEFAULT '',
+            role            text NOT NULL DEFAULT 'user',
+            created_at      timestamptz NOT NULL DEFAULT NOW()
+        )
+    """, []).await?
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            id              bigserial PRIMARY KEY,
+            user_id         bigint NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            bio             text NOT NULL DEFAULT '',
+            avatar_url      text NOT NULL DEFAULT ''
+        )
+    """, []).await?
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id              bigserial PRIMARY KEY,
+            author_id       bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            title           text NOT NULL,
+            content         text NOT NULL,
+            tags            text[] NOT NULL DEFAULT ARRAY[]::text[],
+            metadata        jsonb NOT NULL DEFAULT jsonb_build_object(),
+            is_draft        boolean NOT NULL DEFAULT true,
+            created_at      timestamptz NOT NULL DEFAULT NOW()
+        )
+    """, []).await?
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS comments (
+            id              bigserial PRIMARY KEY,
+            post_id         bigint NOT NULL REFERENCES posts(id) ON DELETE CASCADE,
+            author_id       bigint NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            body            text NOT NULL,
+            created_at      timestamptz NOT NULL DEFAULT NOW()
+        )
+    """, []).await?
+    return Ok(null)
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §4. AUTH (provider + signup + login + me + profile)
+// ════════════════════════════════════════════════════════════════════
+//
+// `@auth_provider` es un singleton del programa. Para cada handler
+// con `@authenticated`/`@admin`, el provider extrae el JWT, valida
+// con el secret y devuelve el User. Si falla → 401/403 automático.
+
+@auth_provider
+async fn current_user(headers: Map<Str, Str>) -> Result<User> {
+    let auth: Str = match headers.get("authorization") {
+        Ok(v)  => v
+        Err(_) => return Err("falta header Authorization")
+    }
+    if (not auth.starts_with("Bearer ")) {
+        return Err("Authorization debe ser `Bearer <token>`")
+    }
+    let token = auth.replace("Bearer ", "")
+    let claims = jwt.decode(token, JWT_SECRET, "HS256")?
+    let email: Str = match claims.get("sub") {
+        Ok(s)  => s
+        Err(_) => return Err("token sin claim `sub`")
+    }
+    let conn = db.connect(DB_URL).await?
+    return User.where(fn(u) => u.email == email).first(conn).await
+}
+
+@post("/signup")
+async fn signup(body: SignupInput) -> Result<LoginResponse> {
+    let conn = db.connect(DB_URL).await?
+    let pw_hash = hash.password(body.password)
+    let new_user = User {
+        id: 0,
+        email: body.email,
+        name: body.name,
+        password_hash: pw_hash,
+        role: "user",
+        created_at: "",
+        profile: null,
+        posts: [],
+        comments: [],
+    }
+    let user = User.insert(conn, new_user).await?
+    let claims: Map<Str, Str> = {"sub": user.email}
+    let token = jwt.encode(claims, JWT_SECRET, "HS256")
+    return Ok(LoginResponse { token: token, user: user })
+}
+
+@post("/login")
+async fn login(body: LoginInput) -> Result<LoginResponse> {
+    let conn = db.connect(DB_URL).await?
+    let user = User.where(fn(u) => u.email == body.email).first(conn).await?
+    if (not hash.verify(body.password, user.password_hash)) {
+        return Err("credenciales inválidas")
+    }
+    let claims: Map<Str, Str> = {"sub": user.email}
+    let token = jwt.encode(claims, JWT_SECRET, "HS256")
+    return Ok(LoginResponse { token: token, user: user })
+}
+
+@authenticated
+@get("/me")
+async fn me(user: User) -> Result<User> {
+    // El User ya viene resuelto del @auth_provider. Para el profile,
+    // usar /me/profile-details por separado.
+    return Ok(user)
+}
+
+@authenticated
+@get("/me/profile-details")
+async fn my_profile(user: User) -> Result<UserProfile> {
+    let conn = db.connect(DB_URL).await?
+    return UserProfile.where(fn(p) => p.user_id == user.id).first(conn).await
+}
+
+@authenticated
+@put("/me/profile")
+async fn update_profile(user: User, body: ProfileInput) -> Result<UserProfile> {
+    let conn = db.connect(DB_URL).await?
+    let count = UserProfile.where(fn(p) => p.user_id == user.id).count(conn).await?
+    if (count > 0) {
+        let changes: Map<Str, Any> = {"bio": body.bio, "avatar_url": body.avatar_url}
+        let _ = UserProfile.where(fn(p) => p.user_id == user.id).update(conn, changes).await?
+        return UserProfile.where(fn(p) => p.user_id == user.id).first(conn).await
+    }
+    return UserProfile.insert(conn, UserProfile {
+        id: 0, user_id: user.id, user: null, bio: body.bio, avatar_url: body.avatar_url
+    }).await
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §5. POSTS (CRUD + search + stats GROUP BY)
+// ════════════════════════════════════════════════════════════════════
+
+// Listar posts publicados con author + comments preloaded.
+// `.preload("author")` resuelve el BelongsToCompanion en 1 query
+// batch inversa. `.preload("comments")` resuelve el HasMany en otra.
+// Cierra N+1 con 3 queries totales en lugar de 1+2N.
+@get("/posts")
+async fn list_posts() -> Result<List<Post>> {
+    let conn = db.connect(DB_URL).await?
+    return Post.preload("author").preload("comments")
+        .where(fn(p) => p.is_draft == false)
+        .order_by(fn(p) => -p.id)
+        .all(conn).await
+}
+
+@get("/posts/{id}")
+async fn get_post(id: Int) -> Result<Post> {
+    let conn = db.connect(DB_URL).await?
+    return Post.preload("author").preload("comments")
+        .where(fn(p) => p.id == id).first(conn).await
+}
+
+@authenticated
+@post("/posts")
+async fn create_post(user: User, body: PostInput) -> Result<Post> {
+    let conn = db.connect(DB_URL).await?
+    let new_post = Post {
+        id: 0,
+        author_id: user.id,
+        author: null,
+        title: body.title,
+        content: body.content,
+        tags: body.tags,
+        metadata: body.metadata,
+        is_draft: true,
+        created_at: "",
+        comments: [],
+    }
+    return Post.insert(conn, new_post).await
+}
+
+@authenticated
+@put("/posts/{id}")
+async fn update_post(user: User, id: Int, body: PostInput) -> Result<Post> {
+    let conn = db.connect(DB_URL).await?
+    let existing = Post.where(fn(p) => p.id == id).first(conn).await?
+    if (existing.author_id != user.id) {
+        return Err("solo el autor puede editar el post")
+    }
+    // `.update` con Map literal exige List literal para fields `text[]`.
+    // Workaround: usar Map var heterogéneo — W7 cierra ese path con
+    // dispatch dinámico que acepta List<Str> + Map<Str, Any>.
+    let changes: Map<Str, Any> = {
+        "title": body.title,
+        "content": body.content,
+        "tags": body.tags,
+        "metadata": body.metadata,
+    }
+    let _ = Post.where(fn(p) => p.id == id).update(conn, changes).await?
+    return Post.where(fn(p) => p.id == id).first(conn).await
+}
+
+@authenticated
+@post("/posts/{id}/publish")
+async fn publish_post(user: User, id: Int) -> Result<Post> {
+    let conn = db.connect(DB_URL).await?
+    let existing = Post.where(fn(p) => p.id == id).first(conn).await?
+    if (existing.author_id != user.id) {
+        return Err("solo el autor puede publicar el post")
+    }
+    let _ = Post.where(fn(p) => p.id == id)
+        .update(conn, {"is_draft": false}).await?
+    return Post.where(fn(p) => p.id == id).first(conn).await
+}
+
+@authenticated
+@delete("/posts/{id}")
+async fn delete_post(user: User, id: Int) -> Result<Int> {
+    let conn = db.connect(DB_URL).await?
+    let existing = Post.where(fn(p) => p.id == id).first(conn).await?
+    if (existing.author_id != user.id and user.role != "admin") {
+        return Err("solo el autor o un admin pueden borrar el post")
+    }
+    return Post.where(fn(p) => p.id == id).delete(conn).await
+}
+
+// Búsqueda por tag — el operador `.has(var)` del ORM (array op
+// `value = ANY(col)`) hoy solo acepta literal en el codegen. Para
+// el caso runtime con var, bajamos a `db.query` crudo con el mismo
+// operador SQL. El driver Postgres maneja text[] params nativos.
+@get("/posts/by-tag?tag={tag}")
+async fn posts_by_tag(tag: Str) -> Result<List<Map<Str, Any>>> {
+    let conn = db.connect(DB_URL).await?
+    let sql = """
+        SELECT id, author_id, title, content, tags, metadata, is_draft, created_at
+        FROM posts
+        WHERE is_draft = false AND $1 = ANY(tags)
+        ORDER BY id DESC
+    """
+    return conn.query(sql, [tag]).await
+}
+
+// Stats — count de posts por author. Aggregate GROUP BY devuelve
+// `Aggregated<Post>` que con `.count(db)` da `List<Map<Str, Any>>`
+// (row por grupo: `{"author_id": N, "count": M}`).
+@get("/stats/by-author")
+async fn stats_by_author() -> Result<List<Map<Str, Any>>> {
+    let conn = db.connect(DB_URL).await?
+    return Post.where(fn(p) => p.is_draft == false)
+        .group_by(fn(p) => p.author_id)
+        .count(conn).await
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §6. COMMENTS
+// ════════════════════════════════════════════════════════════════════
+//
+// Pattern: cuando un user comenta:
+//   1. Inserta el Comment en DB.
+//   2. spawnea fn @background que arma + emite el evento WS.
+//   3. Responde HTTP al cliente inmediato (mejor UX).
+//
+// El spawn es fire-and-forget — el handler no espera al broadcast.
+
+@authenticated
+@post("/posts/{post_id}/comments")
+async fn create_comment(user: User, post_id: Int, body: CommentInput) -> Result<Comment> {
+    let conn = db.connect(DB_URL).await?
+    let post = Post.where(fn(p) => p.id == post_id).first(conn).await?
+    let new_comment = Comment {
+        id: 0,
+        post_id: post_id,
+        author_id: user.id,
+        author: null,
+        body: body.body,
+        created_at: "",
+    }
+    let comment = Comment.insert(conn, new_comment).await?
+    spawn(notify_new_comment(post, user, comment))
+    return Ok(comment)
+}
+
+@get("/posts/{post_id}/comments")
+async fn list_comments(post_id: Int) -> Result<List<Comment>> {
+    let conn = db.connect(DB_URL).await?
+    return Comment.preload("author")
+        .where(fn(c) => c.post_id == post_id)
+        .order_by(fn(c) => c.id)
+        .all(conn).await
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §7. WEBSOCKET + BACKGROUND NOTIF
+// ════════════════════════════════════════════════════════════════════
+//
+// El cliente conecta a `ws://host:3000/notifications` y recibe
+// eventos `CommentNotif`. AsyncAPI 3.0 auto-generado en
+// `/asyncapi.json` documenta el schema.
+
+@ws("/notifications")
+async fn notifications(conn: WsConn<CommentNotif>) -> Null {
+    print("[ws] cliente conectado a /notifications")
+    loop {
+        let msg = match conn.recv() {
+            Ok(m)  => m
+            Err(_) => return null                     // cliente desconectó
+        }
+        print("[ws] msg del cliente: post_id={msg.post_id} body={msg.body}")
+    }
+}
+
+// Background fn invocada con spawn() desde create_comment. En un
+// proyecto real, accederías al WsBroadcaster del runtime para hacer
+// `.broadcast(...)` a TODOS los clientes WS conectados (ese state
+// compartido WS↔HTTP queda como pattern del boilerplate
+// `api-websocket`). Acá printeamos el evento como demostración.
+@background
+async fn notify_new_comment(post: Post, author: User, comment: Comment) -> Null {
+    let notif = CommentNotif {
+        post_id: post.id,
+        post_title: post.title,
+        comment_id: comment.id,
+        author_name: author.name,
+        body: comment.body,
+    }
+    print("[notif] post #{notif.post_id} ({notif.post_title}): {notif.author_name} -> {notif.body}")
+    return null
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §8. CRON CLEANUP
+// ════════════════════════════════════════════════════════════════════
+//
+// `@cron("expr")` registra una fn como job periódico. Cron format
+// con 5/6/7 fields (Unix). El scheduler corre en el mismo proceso
+// del server HTTP — sin Celery, sin Redis, sin systemd timers.
+
+@cron("0 0 3 * * *")
+async fn cleanup_old_drafts() -> Null {
+    let conn = match db.connect(DB_URL).await {
+        Ok(c)  => c
+        Err(e) => {
+            print("[cron] ERROR conectando: {e}")
+            return null
+        }
+    }
+    // db.exec crudo porque el ORM no expone comparaciones de fechas
+    // con `INTERVAL` todavía. El escape hatch a SQL nativo siempre
+    // está disponible.
+    let sql = "DELETE FROM posts WHERE is_draft = true AND created_at < NOW() - INTERVAL '30 days'"
+    let affected = match conn.exec(sql, []).await {
+        Ok(n)  => n
+        Err(e) => {
+            print("[cron] ERROR exec: {e}")
+            return null
+        }
+    }
+    print("[cron] cleanup_old_drafts: {affected} drafts viejos borrados")
+    return null
+}
+
+
+// ════════════════════════════════════════════════════════════════════
+// §9. BOOT
+// ════════════════════════════════════════════════════════════════════
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+match init_schema().await {
+    Ok(_)  => print("[boot] DB conectada y schema inicializado")
+    Err(e) => print("[boot] ERROR conectando a la DB - {e}")
+}
+
+print("[ready] Server arrancando en :3000")
+print("[ready] Endpoints HTTP:")
+print("[ready]   POST   /signup                     - crear user")
+print("[ready]   POST   /login                      - login (devuelve JWT)")
+print("[ready]   GET    /me                         - perfil propio (auth)")
+print("[ready]   GET    /me/profile-details         - profile asociado (auth)")
+print("[ready]   PUT    /me/profile                 - editar profile (auth)")
+print("[ready]   GET    /posts                      - listar publicados")
+print("[ready]   GET    /posts/<id>                 - un post con comments+author")
+print("[ready]   POST   /posts                      - crear como draft (auth)")
+print("[ready]   PUT    /posts/<id>                 - editar propio (auth)")
+print("[ready]   POST   /posts/<id>/publish         - publicar (auth, solo autor)")
+print("[ready]   DELETE /posts/<id>                 - borrar (auth, autor/admin)")
+print("[ready]   GET    /posts/by-tag?tag=X         - filtrar por tag (text[])")
+print("[ready]   GET    /stats/by-author            - GROUP BY count")
+print("[ready]   POST   /posts/<id>/comments        - comentar (auth, WS notif)")
+print("[ready]   GET    /posts/<id>/comments        - listar comments del post")
+print("[ready]   GET    /docs                       - UI Scalar (OpenAPI 3.1)")
+print("[ready] WebSocket:")
+print("[ready]   GET    /notifications              - eventos CommentNotif")
+print("[ready]   GET    /asyncapi.json              - AsyncAPI 3.0 schema")
+print("[ready] Cron:")
+print("[ready]   cleanup_old_drafts                 - diario 03:00 UTC, drafts >30d")

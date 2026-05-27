@@ -1,0 +1,113 @@
+// main.fitz — entry point del boilerplate api-postgres-fitz.
+//
+// Versión side-by-side de `api-postgres-python` usando el ORM nativo
+// de Fitz en lugar de SQLAlchemy + interop Python. Mismo dominio
+// (CRUD de users), mismos endpoints, mismo Docker Compose, mismo
+// Postgres — diferente stack de datos:
+//
+//   api-postgres-python              api-postgres-fitz (este)
+//   ───────────────────              ─────────────────────────
+//   Fitz API                         Fitz API
+//      ↓ from python import db          ↓ direct
+//   python/db.py (SQLAlchemy)        ORM nativo (@table)
+//      ↓ psycopg2                       ↓ driver Postgres Fitz puro
+//   Postgres 16                      Postgres 16
+//
+// El ORM nativo (cap 31 de la guía) emite SQL constante en
+// codegen-time directo contra el wire protocol de Postgres v3.0,
+// sin pasar por libpq ni ORMs externos. Comparable a Diesel/sqlx,
+// mejor que SQLAlchemy/ActiveRecord que construyen SQL via objetos
+// en runtime.
+//
+// Resultado: **240 LoC → ~60 LoC**, cero `pip install`, cero archivos
+// Python, binario Docker ~30-50 MB en lugar de ~250 MB.
+
+// ---- Modelo ---------------------------------------------------------
+
+// @table marca el type como una tabla Postgres. El @primary Int = 0
+// sentinel deja a Postgres asignar el id via bigserial al insertar
+// con id=0. El default `""` de los Str hace que sean opcionales en
+// el body POST (el cliente puede omitirlos sin error 400 — caso
+// poco común para `name`/`email` pero útil para `created_at` que
+// Postgres setea con DEFAULT NOW()).
+@table("users") type User {
+    @primary id: Int = 0
+    name: Str = ""
+    email: Str = ""
+    created_at: Str = ""
+}
+
+// Body input para POST /users. Separar `NewUser` (entrada HTTP) de
+// `User` (row DB) evita que el cliente pueda pasar `id` o
+// `created_at` — esos los asigna Postgres.
+type NewUser {
+    name: Str
+    email: Str
+}
+
+// ---- Setup ----------------------------------------------------------
+
+// Connection string desde DATABASE_URL (lo setea docker-compose).
+// Fallback útil para correr local sin Docker (`fitz run src/main.fitz`).
+let DB_URL = env_or("DATABASE_URL", "postgres://fitz:fitz@localhost:5432/fitz?sslmode=disable")
+
+// init_schema crea la tabla si no existe. Idempotente. Llamado al
+// boot — paralelo a `Base.metadata.create_all(engine)` de SQLAlchemy.
+async fn init_schema() -> Result<Null> {
+    let conn = db.connect(DB_URL).await?
+    let sql = """
+        CREATE TABLE IF NOT EXISTS users (
+            id          bigserial PRIMARY KEY,
+            name        text NOT NULL,
+            email       text NOT NULL UNIQUE,
+            created_at  timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(sql, []).await?
+    return Ok(null)
+}
+
+// ---- Handlers HTTP --------------------------------------------------
+
+// POST /users — crea un user. Postgres asigna `id` y `created_at`.
+// El sentinel `id: 0` skipea el field del INSERT — Postgres usa el
+// default bigserial. `created_at` queda "" en el insert pero el
+// SELECT del RETURNING * trae el timestamp real.
+@post("/users")
+async fn create_user(body: NewUser) -> Result<User> {
+    let conn = db.connect(DB_URL).await?
+    return User.insert(conn, User { id: 0, name: body.name, email: body.email, created_at: "" }).await
+}
+
+// GET /users/{id} — buscar por id. .first(db) devuelve `Result<User>`
+// — si no existe, propaga error con detalle del driver.
+@get("/users/{id}")
+async fn get_user(id: Int) -> Result<User> {
+    let conn = db.connect(DB_URL).await?
+    return User.where(fn(u) => u.id == id).first(conn).await
+}
+
+// GET /users — listar todos. SQL ordenado por id ASC para output
+// predecible (paralelo a `order_by(User.id.asc())` de SQLAlchemy).
+@get("/users")
+async fn list_users() -> Result<List<User>> {
+    let conn = db.connect(DB_URL).await?
+    return User.order_by(fn(u) => u.id).all(conn).await
+}
+
+// ---- Boot -----------------------------------------------------------
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+match init_schema().await {
+    Ok(_)  => print("[boot] DB conectada y schema inicializado"),
+    Err(e) => print("[boot] ERROR conectando a la DB — {e}"),
+}
+
+print("[ready] Server arrancando en :3000")
+print("[ready] Endpoints:")
+print("[ready]   POST /users       — crear (body JSON: name, email)")
+print("[ready]   GET  /users       — listar (List<User> tipado)")
+print("[ready]   GET  /users/<id>  — buscar por id (User tipado)")
+print("[ready]   GET  /docs        — UI Scalar (OpenAPI 3.1)")

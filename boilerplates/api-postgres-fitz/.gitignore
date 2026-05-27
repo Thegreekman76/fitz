@@ -1,0 +1,20 @@
+# Build outputs de Fitz
+target/
+
+# Binarios
+*.exe
+*.pdb
+src/main
+
+# Lockfile (regenerable; lo opt-in según preferencia del proyecto)
+fitz.lock
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+
+# Secrets nunca al repo
+.env

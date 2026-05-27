@@ -1,0 +1,8 @@
+[package]
+name = "fitz-api-postgres-fitz"
+version = "0.1.0"
+edition = "2026"
+description = "CRUD HTTP API con Postgres + ORM nativo Fitz — sin Python, sin SQLAlchemy"
+
+[bin]
+main = "src/main.fitz"

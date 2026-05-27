@@ -6816,6 +6816,84 @@ fn db_match_nullable_refinement_w2() {
 }
 
 #[test]
+fn db_orm_cross_module_at_table_compila_w8() {
+    // W8 (v0.10.7) — `@table` types definidos en un módulo y usados
+    // desde otro vía `from X import Y` compilan a binario nativo.
+    // Antes: error "variable desconocida en codegen: `User`" cuando
+    // el dispatch ORM no encontraba `TableMetadata` cross-module.
+    // Ahora: el `LoadedModule` propaga el metadata al importer, y
+    // el módulo emite `impl __FromFitzDbRow for UserData` localmente
+    // con los helpers `use crate::__From...` necesarios.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let stem = sanitize_stem("db_orm_cross_module_at_table_w8");
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // Módulo con el @table type.
+    let models_path = dir.join("models.fitz");
+    std::fs::write(
+        &models_path,
+        "@table(\"users\") type User {\n  \
+             @primary id: Int = 0\n  \
+             name: Str\n\
+         }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // Main que importa el type y lo usa con dispatch ORM.
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(
+        &main_path,
+        "from models import User\n\
+         \n\
+         async fn run() -> Result<List<User>> {\n  \
+             let conn = db.connect(\"mysql://x@h/d\").await?\n  \
+             return User.where(fn(u) => u.id == 1).all(conn).await\n\
+         }\n\
+         async fn driver() -> Str {\n  \
+             return match run().await {\n    \
+                 Ok(_) => \"OK\"\n    \
+                 Err(_) => \"err\"\n  \
+             }\n\
+         }\n\
+         print(driver().await)\n",
+    )
+    .expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló cross-module:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+    let code = run.status.code().unwrap_or(-1);
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    // URL inválida → run().await devuelve Err → driver imprime "err".
+    assert!(
+        stdout.contains("err"),
+        "esperaba `err` en stdout, fue: {}",
+        stdout,
+    );
+}
+
+#[test]
 fn db_upd_con_map_var_compila_a_binario_w7() {
     // W7 (v0.10.6) — `.update(db, changes)` con `changes` como var
     // `Map<Str, Any>` (no Map literal) compila a binario nativo.

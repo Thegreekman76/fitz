@@ -4,7 +4,7 @@ Plantillas listas para arrancar proyectos reales con Fitz. Todas
 están **Dockerizadas** — no necesitás instalar Rust, Python ni
 Postgres en tu máquina. Solo Docker y `docker compose`.
 
-## Los 6 boilerplates
+## Los 7 boilerplates
 
 | Boilerplate | Qué demuestra | Stack | Dockerfile | Compose |
 |-------------|---------------|-------|------------|---------|
@@ -12,7 +12,8 @@ Postgres en tu máquina. Solo Docker y `docker compose`.
 | [`api-simple`](./api-simple/)                   | REST API tipada + OpenAPI auto + Scalar UI             | Fitz standalone (binario nativo)                       | distroless    | —       |
 | [`api-middleware-cors`](./api-middleware-cors/) | Auth nativa (JWT + Argon2) + middleware + CORS cross-origin + frontend | Fitz standalone + frontend nginx     | distroless    | 2 svcs  |
 | [`api-websocket`](./api-websocket/)             | WebSockets tipados (broadcast) + frontend chat         | Fitz standalone + frontend nginx                       | distroless    | 2 svcs  |
-| [`api-postgres-python`](./api-postgres-python/) | CRUD multi-archivo con SQLAlchemy + Postgres (API + curl) | Fitz + `--features python` + Postgres               | python:3.12   | 2 svcs  |
+| [`api-postgres-fitz`](./api-postgres-fitz/) ⭐  | **CRUD con ORM nativo Fitz** + Postgres — sin Python   | Fitz standalone + Postgres                             | distroless    | 2 svcs  |
+| [`api-postgres-python`](./api-postgres-python/) | CRUD multi-archivo con SQLAlchemy + Postgres (interop) | Fitz + `--features python` + Postgres                  | python:3.12   | 2 svcs  |
 | [`api-fullstack-postgres`](./api-fullstack-postgres/) | **CRUD fullstack** — API + frontend vanilla rico + Postgres | Fitz + `--features python` + Postgres + nginx  | python:3.12   | 3 svcs  |
 
 Cada directorio tiene su **README exhaustivo** con paso a paso,
@@ -65,10 +66,18 @@ clientes generados).
 
 ### Necesito DB persistente (Postgres)
 
-Si solo te interesa ver el patrón API + DB, leé
-**[`api-postgres-python`](./api-postgres-python/)** — usa
-`fitz run --features python` para llamar a SQLAlchemy + psycopg2
-desde Fitz. Está pensado para probarlo con `curl`.
+Dos opciones según el stack que prefieras:
+
+- **[`api-postgres-fitz`](./api-postgres-fitz/) ⭐ (recomendado para
+  proyectos nuevos)** — usa el **ORM nativo del lenguaje** (cap 31
+  de la guía). Sin Python, sin SQLAlchemy. Driver Postgres puro
+  embebido en el binario. **~60 LoC total**, imagen distroless de
+  **~15 MB**. Mismo dominio que el de Python, side-by-side.
+- **[`api-postgres-python`](./api-postgres-python/)** — usa
+  `fitz run --features python` para llamar a SQLAlchemy + psycopg2
+  desde Fitz. Útil si tenés código SQLAlchemy existente que querés
+  migrar gradualmente, o si necesitás librerías Python específicas
+  (numpy/pandas/scipy/ML) en el mismo proceso.
 
 ### Quiero el stack web completo (API + DB + frontend)
 
@@ -98,13 +107,17 @@ del default branch que el repo público tenga.
 ### Tamaño de imagen final
 
 Los boilerplates que no necesitan Python (`cli-tool`, `api-simple`,
-`api-middleware-cors`, `api-websocket`) buildean a **binario nativo
-standalone con `fitz build`** y usan **distroless** como runtime
-→ imágenes finales de ~30-40 MB.
+`api-middleware-cors`, `api-websocket`, **`api-postgres-fitz`**)
+buildean a **binario nativo standalone con `fitz build`** y usan
+**distroless** como runtime → imágenes finales de ~15-40 MB. El
+ORM nativo (cap 31) habilita usar Postgres sin necesidad de Python
+en el container.
 
 Los que necesitan interop Python (`api-postgres-python`,
 `api-fullstack-postgres`) usan `python:3.12-slim` en runtime
-(Python + libpq + el binario fitz) → imágenes de ~250 MB.
+(Python + libpq + el binario fitz) → imágenes de ~250 MB. Útil
+cuando querés librerías Python específicas (SQLAlchemy con queries
+complejas heredadas, numpy/pandas/scipy, ML inference).
 
 ### Persistencia
 
@@ -127,6 +140,12 @@ al dominio real del frontend.
 
 Posibles si aparece demanda real:
 
+- **`api-orm-full`** (en planificación): showcase del ORM nativo
+  completo — User ↔ Post (HasMany) + Post ↔ Comment + User ↔ Profile
+  (HasOne) + JSONB metadata + arrays tags + aggregates + GROUP BY
+  + auth nativa + WebSockets para notif realtime + cron cleanup.
+  Dominio rico (blog/CMS o e-commerce básico) que ejercita el stack
+  Fitz entero.
 - **`api-cron-jobs`**: `@cron` + `@background` + `spawn(...)`
   showcase. Hoy cubierto parcialmente en el cap 30 de la guía.
 - **`fullstack-spa`**: el de Postgres + un SPA Vue/React/Svelte

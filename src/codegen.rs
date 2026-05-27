@@ -2054,6 +2054,14 @@ struct LoadedModule {
     /// `from foo import User` + `u.greet()` falla en `fitz build` con
     /// "el tipo `User` no tiene un método llamado `greet`".
     type_methods: HashMap<String, Vec<crate::ast::MethodDef>>,
+    /// W8 (v0.10.7) — `TableMetadata` de cada `@table type` del módulo.
+    /// Sin esto, `from models import User` + `User.where(...)` en el
+    /// importer dispara "variable desconocida en codegen: `User`"
+    /// porque el dispatch ORM busca `TableMetadata` en `self.env` y
+    /// el TypeEnv del importer solo tiene el `User` registrado como
+    /// nominal nudo (sin metadata `@table`). El importer copia este
+    /// HashMap a su `imported_table_metadata` (CodegenCtx).
+    table_metadata: HashMap<String, crate::types::TableMetadata>,
     /// Fase 8.7.1 transitiva — imports Python que el módulo declaró
     /// (`from python import math`, `import python.os.path`, etc.).
     /// El codegen del módulo emite sus propios statics + getters
@@ -2372,10 +2380,19 @@ impl ModuleLoader {
         // exportado. El importer los necesita para dispatch
         // `instance.method()` sobre tipos importados.
         let mut type_methods: HashMap<String, Vec<crate::ast::MethodDef>> = HashMap::new();
+        // W8 (v0.10.7) — recolectar TableMetadata de cada `@table type`
+        // del módulo. El importer lo necesita para resolver `User.where(...)`
+        // sobre tipos importados (dispatch ORM cross-module).
+        let mut table_metadata: HashMap<String, crate::types::TableMetadata> = HashMap::new();
         for stmt in &module_program {
             if let Stmt::TypeDef { name, methods, .. } = stmt {
                 if !methods.is_empty() {
                     type_methods.insert(name.clone(), methods.clone());
+                }
+                if let Some(id) = module_env.lookup(name) {
+                    if let Some(meta) = module_env.table_metadata(id) {
+                        table_metadata.insert(name.clone(), meta.clone());
+                    }
                 }
             }
         }
@@ -2391,6 +2408,7 @@ impl ModuleLoader {
             accessor_consts,
             local_bindings,
             type_methods,
+            table_metadata,
             python_imports: module_python_imports,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
@@ -2643,6 +2661,7 @@ fn generate_module_rs_with_bindings(
             const_sigs: m.const_sigs.clone(),
             accessor_consts: m.accessor_consts.clone(),
             type_methods: m.type_methods.clone(),
+            table_metadata: m.table_metadata.clone(),
         });
     }
     for (name, binding) in local_bindings {
@@ -2677,6 +2696,30 @@ fn generate_module_rs_with_bindings(
     // como `crate::foo`. Las referencias se emiten con prefix
     // `crate::` en módulos (ver `mod_path_prefix`).
     ctx.emit_module_use_decls(local_bindings, loaded_modules);
+
+    // W8 (v0.10.7) — si el módulo declara `@table` types, necesita
+    // `use crate::__FromFitzDbRow` para el `impl __FromFitzDbRow for
+    // <Name>Data` que `gen_type_def` emite por cada `@table`. También
+    // importa los helpers de coerción que ese impl usa
+    // (`__fitz_pg_to_*`) + tipos del row (`__FitzPgValue`).
+    let module_has_at_table = program.iter().any(|s| {
+        if let Stmt::TypeDef { name, .. } = s {
+            ctx.env
+                .lookup(name)
+                .and_then(|id| ctx.env.table_metadata(id))
+                .is_some()
+        } else {
+            false
+        }
+    });
+    if module_has_at_table {
+        ctx.emit(
+            "#[allow(unused_imports)]\n\
+             use crate::{__FromFitzDbRow, __FitzPgValue, __FitzDbRow};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_pg_to_i64, __fitz_pg_to_f64, __fitz_pg_to_string, __fitz_pg_to_bool, __fitz_pg_to_bytes};\n\n",
+        );
+    }
 
     // Particionar stmts top-level. Para módulos: type / fn / let.
     // F15: `Stmt::Import` / `Stmt::FromImport` se ignoran acá — el
@@ -3833,6 +3876,11 @@ struct LoadedModuleSigs {
     /// exportado. Copiados al importer en `install_loader_bindings`
     /// y enriquecidos en `type_methods` al procesar imports.
     type_methods: HashMap<String, Vec<crate::ast::MethodDef>>,
+    /// W8 (v0.10.7) — `TableMetadata` de cada `@table type` del
+    /// módulo. Copiado al `imported_table_metadata` del importer en
+    /// `install_loader_bindings` para que el dispatch ORM
+    /// (`User.where(...)`) resuelva sobre tipos importados.
+    table_metadata: HashMap<String, crate::types::TableMetadata>,
 }
 
 struct CodegenCtx<'a> {
@@ -3864,6 +3912,14 @@ struct CodegenCtx<'a> {
     /// importado (su TypeEnv del checker tiene el id pero sin
     /// fields — el codegen los enriquece desde el módulo cargado).
     fields_by_id: HashMap<TypeId, Vec<ResolvedField>>,
+    /// W8 (v0.10.7) — `TableMetadata` de tipos importados,
+    /// indexado por el `TypeId` del importer. El TypeEnv del
+    /// importer NO conoce el `@table` decorator de tipos
+    /// importados (el checker solo copia fields, no metadata),
+    /// así que necesitamos un override local. Helper
+    /// `table_metadata(id)` consulta primero acá, después
+    /// `self.env.table_metadata(id)`.
+    imported_table_metadata: HashMap<TypeId, crate::types::TableMetadata>,
     /// R.3 — métodos custom declarados por tipo (key = type name).
     /// Pre-registrado durante el walk inicial de typedefs; consumido
     /// por `gen_method_call` para resolver `instance.metodo(args)` y
@@ -4202,6 +4258,7 @@ impl<'a> CodegenCtx<'a> {
             fn_sigs: HashMap::new(),
             type_sigs: HashMap::new(),
             fields_by_id: HashMap::new(),
+            imported_table_metadata: HashMap::new(),
             type_methods: HashMap::new(),
             own_consts: HashMap::new(),
             module_bindings: HashMap::new(),
@@ -4279,6 +4336,7 @@ impl<'a> CodegenCtx<'a> {
                 const_sigs: m.const_sigs.clone(),
                 accessor_consts: m.accessor_consts.clone(),
                 type_methods: m.type_methods.clone(),
+                table_metadata: m.table_metadata.clone(),
             });
         }
         for (name, binding) in &loader.bindings {
@@ -6704,8 +6762,32 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             if let Some(methods) = module_type_methods {
                 self.type_methods.insert(name.clone(), methods);
             }
+            // W8 (v0.10.7) — copiar TableMetadata del tipo importado
+            // al `imported_table_metadata` del importer, indexado por
+            // el `importer_id`. Sin esto, `User.where(...)` sobre un
+            // type importado caería en "variable desconocida en
+            // codegen: `User`" porque el dispatch ORM
+            // (~13946 `gen_method_call`) busca metadata en `self.env`
+            // que no la tiene para types cross-module.
+            if let Some(m) = self.loaded_modules.get(module_index) {
+                if let Some(meta) = m.table_metadata.get(&item).cloned() {
+                    self.imported_table_metadata.insert(importer_id, meta);
+                }
+            }
         }
         Ok(())
+    }
+
+    /// W8 (v0.10.7) — busca el `TableMetadata` para un `TypeId`
+    /// considerando primero los types importados (cross-module) y
+    /// después el TypeEnv local. Reemplaza el patrón
+    /// `self.env.table_metadata(id)` en el dispatch ORM para que
+    /// `from models import User` + `User.where(...)` funcione.
+    fn table_metadata_for(&self, id: TypeId) -> Option<&crate::types::TableMetadata> {
+        if let Some(meta) = self.imported_table_metadata.get(&id) {
+            return Some(meta);
+        }
+        self.env.table_metadata(id)
     }
 
     /// Devuelve los fields de un tipo nominal por TypeId. Mira primero
@@ -7054,12 +7136,23 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             self.gen_python_helpers_for_type(name, &sig)?;
         }
         // Fase 10.b.3 — `impl __FromFitzDbRow for FooData` cuando el
-        // type lleva `@table`. Solo en mode Main (el preludio del
-        // trait vive ahí). Fields virtuales (`@has_one`/`@has_many`)
+        // type lleva `@table`. Fields virtuales (`@has_one`/`@has_many`)
         // se inicializan con sentinels (List vacía / Option None / id
         // 0 según corresponde) — se hidratan en 10.b.7 con navigation
         // methods.
-        if self.uses_db && matches!(self.mode, GenMode::Main) {
+        //
+        // W8 (v0.10.7) — el impl se emite tanto en Main como en Module
+        // cuando el type tiene `@table`. Antes solo Main, lo que rompía
+        // el cross-module `User.where(...)` sobre types definidos en
+        // módulos. En Module, los imports `use crate::__FromFitzDbRow;`
+        // ya se emiten cuando el módulo declara `@table` types
+        // (`emit_module_db_use_decls`).
+        let type_has_table = self
+            .env
+            .lookup(name)
+            .and_then(|id| self.table_metadata_for(id))
+            .is_some();
+        if (self.uses_db && matches!(self.mode, GenMode::Main)) || type_has_table {
             self.gen_from_fitz_db_row_for_type(name, &sig)?;
         }
         Ok(())
@@ -7081,7 +7174,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             Some(id) => id,
             None => return Ok(()),
         };
-        let meta = match self.env.table_metadata(id) {
+        let meta = match self.table_metadata_for(id) {
             Some(m) => m.clone(),
             None => return Ok(()),
         };
@@ -11890,8 +11983,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             )
         })?;
         let meta = self
-            .env
-            .table_metadata(id)
+            .table_metadata_for(id)
             .ok_or_else(|| {
                 self.err_at(
                     call_span,
@@ -12555,8 +12647,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         let info = self.env.info(id);
         let type_name = info.name.clone();
         let meta = self
-            .env
-            .table_metadata(id)
+            .table_metadata_for(id)
             .ok_or_else(|| {
                 self.err_at(
                     call_span,
@@ -13943,7 +14034,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // tampoco lo busca como ident porque atajamos acá).
         if let Expr::Ident(name, _) = object {
             if let Some(id) = self.env.lookup(name) {
-                if self.env.table_metadata(id).is_some() {
+                if self.table_metadata_for(id).is_some() {
                     if let Some(emitted) =
                         self.gen_orm_type_method(name, method, args, call_span)?
                     {
@@ -13988,8 +14079,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // re-evalúan el receiver normalmente.
         if let Ok((obj_code, Type::Nominal(id))) = self.gen_expr(object) {
             let rel_opt = self
-                .env
-                .table_metadata(id)
+                .table_metadata_for(id)
                 .and_then(|meta| meta.relations.get(method).cloned());
             if let Some(rel) = rel_opt {
                 let type_name = self.env.info(id).name.clone();
