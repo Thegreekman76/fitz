@@ -2247,6 +2247,13 @@ struct LoadedModule {
     /// (W14, v0.10.10) es el `T` del `Result<T>` declarado; string
     /// vacío si la extracción falla.
     auth_provider_fn: Option<(String, bool, String)>,
+    /// W16 (v0.10.12) — handler stmts HTTP (`@get/@post/@put/@delete`)
+    /// declarados en el módulo. Main usa estos para registrar las
+    /// rutas como `.route("/path", crate::<mod>::__handler_<name>)`.
+    /// El módulo emite los wrappers `__handler_<name>` en su propio
+    /// `.rs` (en `generate_module_rs_with_bindings`), main solo
+    /// referencia. Vacío para módulos sin HTTP.
+    http_fn_stmts: Vec<Stmt>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -2628,6 +2635,23 @@ impl ModuleLoader {
             }
         }
 
+        // W16 (v0.10.12) — capturar las FnDef stmts con decorators HTTP
+        // (`@get/@post/@put/@delete`) del módulo. Main las usa para
+        // emitir `.route("/path", crate::<mod>::__handler_<name>)` en
+        // `gen_http_main`. El módulo emite los wrappers `__handler_<name>`
+        // en su propio `.rs` (en `generate_module_rs_with_bindings`).
+        let mut module_http_fn_stmts: Vec<Stmt> = Vec::new();
+        for stmt in &module_program {
+            if let Stmt::FnDef { decorators, .. } = stmt {
+                let is_http = decorators
+                    .iter()
+                    .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete"));
+                if is_http {
+                    module_http_fn_stmts.push(stmt.clone());
+                }
+            }
+        }
+
         let idx = self.modules.len();
         self.modules.push(LoadedModule {
             mod_name,
@@ -2648,6 +2672,7 @@ impl ModuleLoader {
             has_http: module_has_http,
             python_imports: module_python_imports,
             auth_provider_fn: module_auth_provider_fn,
+            http_fn_stmts: module_http_fn_stmts,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -3119,13 +3144,22 @@ fn generate_module_rs_with_bindings(
     // tipos del lenguaje + decoradores `@get`/`@post`/etc + `return
     // <status> { ... }`) necesita `__FitzResponse` y los traits
     // `__ToFitzJson`/`__FromFitzJson` del preludio HTTP del main.
+    //
+    // W16 (v0.10.12) — sumamos `__apply_cors_and_respond` (helper del
+    // preludio HTTP) porque el wrapper `__handler_<name>` que ahora
+    // emitimos en módulo lo invoca para inyectar headers CORS y
+    // construir la response axum final.
     let module_has_http = has_http_routes(program);
     if module_has_http {
         ctx.emit(
             "#[allow(unused_imports)]\n\
              use crate::__FitzResponse;\n\
              #[allow(unused_imports)]\n\
-             use crate::{__ToFitzJson, __FromFitzJson};\n\n",
+             use crate::{__ToFitzJson, __FromFitzJson};\n\
+             #[allow(unused_imports)]\n\
+             use crate::__apply_cors_and_respond;\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__parse_urlencoded, __extract_multipart_boundary, __parse_multipart};\n\n",
         );
     }
 
@@ -3187,6 +3221,21 @@ fn generate_module_rs_with_bindings(
     for stmt in &type_defs {
         ctx.gen_type_def(stmt)?;
     }
+    // W16 (v0.10.12) — identificar HTTP fns del módulo para emitir
+    // sus wrappers `__handler_<name>` después de `gen_top_fn`. Los
+    // wrappers viven en el módulo (mismo scope que la fn original);
+    // main solo registra las rutas con
+    // `.route("/path", crate::<mod>::__handler_<name>)`.
+    let http_fns_in_module: Vec<&Stmt> = top_fns
+        .iter()
+        .copied()
+        .filter(|s| match s {
+            Stmt::FnDef { decorators, .. } => decorators
+                .iter()
+                .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete")),
+            _ => false,
+        })
+        .collect();
     for stmt in top_fns {
         ctx.gen_top_fn(stmt)?;
     }
@@ -3199,6 +3248,52 @@ fn generate_module_rs_with_bindings(
     // por consistencia con el patrón de declaración del módulo.
     for stmt in &type_defs {
         ctx.gen_type_default_helpers(stmt)?;
+    }
+
+    // W16 (v0.10.12) — wrappers `__handler_<name>` para handlers HTTP
+    // del módulo. Setup previo:
+    //   1) Propagar auth_provider info al ctx del módulo. El env tiene
+    //      `imported_auth_provider` poblado por el pre-scan W12 del
+    //      loader. También chequeamos si el módulo declara el provider
+    //      localmente.
+    //   2) Pre-computar el merge de CORS sobre los http_fns del módulo
+    //      (para que `gen_http_handler_wrapper` lo lea).
+    //   3) Emitir wrappers.
+    if !http_fns_in_module.is_empty() {
+        // Auth provider: prioridad al local; fallback al importado.
+        let mut local_provider: Option<(String, bool, String)> = None;
+        for stmt in program {
+            if let Stmt::FnDef {
+                name,
+                decorators,
+                is_async,
+                return_type,
+                ..
+            } = stmt
+            {
+                if decorators.iter().any(|d| d.name == "auth_provider") {
+                    let user_type_name = extract_user_type_name_from_return(return_type.as_ref());
+                    local_provider = Some((name.clone(), *is_async, user_type_name));
+                    break;
+                }
+            }
+        }
+        if let Some((name, is_async, user_type_name)) = local_provider {
+            ctx.auth_provider_name = Some(name);
+            ctx.auth_provider_is_async = is_async;
+            ctx.auth_provider_module = None;
+            ctx.auth_provider_user_type_name = user_type_name;
+        } else if let Some(imp) = env.imported_auth_provider() {
+            ctx.auth_provider_name = Some(imp.fn_name.clone());
+            ctx.auth_provider_is_async = imp.is_async;
+            ctx.auth_provider_module = Some(imp.module_name.clone());
+            ctx.auth_provider_user_type_name = imp.user_type_name.clone();
+        }
+        // Precompute CORS merge sobre los http_fns del módulo.
+        ctx.precompute_cors_merge(&http_fns_in_module)?;
+        for stmt in &http_fns_in_module {
+            ctx.gen_http_handler_wrapper(stmt)?;
+        }
     }
 
     // Fase 8.7.1 transitiva-bis (v0.9.44) — post-procesar el output
@@ -4126,6 +4221,7 @@ fn emit_main_rs_body(
             &p.server_config,
             &p.main_stmts,
             program,
+            loader,
         )?;
     } else {
         // Modo CLI: cuerpo de `fn main()` con el resto de stmts.
@@ -20167,7 +20263,18 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
     /// usuario: path tuple primero, body al final. HeaderMap se extrae
     /// solo cuando hace falta (headers declarados, middlewares, o CORS).
     fn emit_axum_extractors(&mut self, sig: &HandlerSig) -> Result<(), FitzError> {
-        writeln!(&mut self.output, "async fn __handler_{}(", sig.name).unwrap();
+        // W16 (v0.10.12) — `pub(crate)` cuando estamos en modo Module
+        // así main puede referenciar `crate::<mod>::__handler_<name>`
+        // en `gen_http_main`. En modo Main el wrapper es privado al
+        // archivo (`pub_prefix()` retorna "") — mantiene backward
+        // compat con tests que asertan emisión sin `pub`.
+        let pub_kw = self.pub_prefix();
+        writeln!(
+            &mut self.output,
+            "{}async fn __handler_{}(",
+            pub_kw, sig.name
+        )
+        .unwrap();
         if !sig.path_params.is_empty() {
             if sig.path_params.len() == 1 {
                 let (pn, pt) = &sig.path_params[0];
@@ -20875,6 +20982,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         server_config: &Option<ServerConfigArgs>,
         main_stmts: &[&Stmt],
         program: &Program,
+        loader: &ModuleLoader,
     ) -> Result<(), FitzError> {
         // F11 + F17.4b: emitir un `static LazyLock<Arc<Mutex<T>>>` por
         // cada state var detectado. El init es la expresión RHS del
@@ -21096,6 +21204,48 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 }
             }
         }
+        // W16 (v0.10.12) — registrar rutas para handlers HTTP que viven
+        // en MÓDULOS importados (no en el program local). El módulo
+        // emite su propio wrapper `__handler_<name>` en su `.rs`; main
+        // referencia el path absoluto `crate::<mod>::__handler_<name>`.
+        // No emitimos `.options(__preflight_*)` cross-module — los
+        // preflights de CORS quedan auto-resueltos por el wrapper del
+        // módulo si declara CORS (deuda residual: si el path tiene
+        // CORS declarado en main + handler en módulo, el preflight no
+        // se mergea — caso raro que no aparece en el MVP).
+        for m in &loader.modules {
+            let mod_qualifier = mod_qualifier_of(&m.rel_path);
+            for stmt in &m.http_fn_stmts {
+                let Stmt::FnDef {
+                    name, decorators, ..
+                } = stmt
+                else {
+                    continue;
+                };
+                for d in decorators {
+                    let method = match d.name.as_str() {
+                        "get" => "get",
+                        "post" => "post",
+                        "put" => "put",
+                        "delete" => "delete",
+                        _ => continue,
+                    };
+                    let path_arg = match d.args.first() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let (path, _q) = parse_http_path(path_arg)?;
+                    self.emit_indent();
+                    writeln!(
+                        &mut self.output,
+                        "    .route(\"{}\", axum::routing::{}(crate::{}::__handler_{}))",
+                        path, method, mod_qualifier, name,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
         // Fase 9.w.2.c — registrar rutas WS. Cada `@ws("/path")` se
         // monta como axum GET (el handshake HTTP es GET) que internamente
         // hace el upgrade.
@@ -21815,7 +21965,9 @@ fn b64_decode_for_file(s: &str) -> Result<Vec<u8>, String> {
 /// `__cors_resolve_<NAME>(origin)` emitido por el codegen. Si es `None`,
 /// devuelve la response sin cambios. Header inválido → se omite (no
 /// panic).
-fn __apply_cors_and_respond(
+// W16 (v0.10.12) — `pub(crate)` para que módulos con handlers HTTP
+// cross-module puedan referenciarlo via `use crate::__apply_cors_and_respond;`.
+pub(crate) fn __apply_cors_and_respond(
     mut resp: axum::response::Response,
     cors_headers: Option<Vec<(&'static str, String)>>,
 ) -> axum::response::Response {
@@ -21837,7 +21989,9 @@ fn __apply_cors_and_respond(
 /// deserializar a tipos Fitz (`Map<Str, Str>` o structs con fields
 /// todos `Str`). URL-decoding: `+` → espacio, `%XX` → byte hex.
 /// Duplicados: last-wins. Body vacío → Object vacío.
-fn __parse_urlencoded(bytes: &[u8]) -> Result<serde_json::Value, String> {
+// W16 (v0.10.12) — `pub(crate)` para que wrappers HTTP en módulos
+// transitivos puedan importarlo.
+pub(crate) fn __parse_urlencoded(bytes: &[u8]) -> Result<serde_json::Value, String> {
     let s = std::str::from_utf8(bytes).map_err(|e| {
         format!("body urlencoded inválido (UTF-8): {}", e)
     })?;
@@ -21878,7 +22032,8 @@ fn __url_decode(s: &str) -> Result<String, String> {
 /// Mini-tanda MP-Build — extracta el `boundary=<token>` del
 /// Content-Type para `multipart/form-data`. Paralelo a
 /// `extract_multipart_boundary` del intérprete.
-fn __extract_multipart_boundary(content_type: &str) -> Option<String> {
+// W16 (v0.10.12) — `pub(crate)` paralelo a `__parse_urlencoded`.
+pub(crate) fn __extract_multipart_boundary(content_type: &str) -> Option<String> {
     for part in content_type.split(';').skip(1) {
         let part = part.trim();
         let lower = part.to_ascii_lowercase();
@@ -21900,7 +22055,8 @@ fn __extract_multipart_boundary(content_type: &str) -> Option<String> {
 /// `serde_json::Value::Object` con cada entry como text field
 /// (Value::String) o file field (Value::Object con name/content_type/
 /// content). Files binarios no-UTF8 → Err.
-fn __parse_multipart(bytes: &[u8], boundary: &str) -> Result<serde_json::Value, String> {
+// W16 (v0.10.12) — `pub(crate)` paralelo a `__parse_urlencoded`.
+pub(crate) fn __parse_multipart(bytes: &[u8], boundary: &str) -> Result<serde_json::Value, String> {
     let delimiter = format!("--{}", boundary);
     let s = std::str::from_utf8(bytes)
         .map_err(|e| format!("multipart: body no es UTF-8 válido: {}", e))?;

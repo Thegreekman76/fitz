@@ -50,23 +50,36 @@
 //                        `cross_module_body_type_serializa_w15`
 //                        candea el caso: type en módulo + body en
 //                        handler de main → 200 + JSON correcto.
-//   - W16 — PENDIENTE  — cross-module HTTP route registration: handlers
-//                        @get/@post/@put/@delete que viven en un módulo
-//                        importado compilan pero NO se enchufan al
-//                        axum::Router del main. Descubierto al armar
-//                        el ejemplo del W12: aislamos W12 dejando los
-//                        handlers en main; W16 los habilita en módulos
-//                        también. Requiere emitir `__handler_<name>`
-//                        wrappers en cada módulo HTTP + registrar
-//                        `.route("/path", crate::<mod>::__handler_<name>)`
-//                        en main.
+//   - W16 ✓ CERRADO    — cross-module HTTP route registration.
+//                        Handlers @get/@post/@put/@delete en módulos
+//                        importados ahora compilan + se enchufan al
+//                        axum::Router del main. Cierre en 3 piezas:
+//                        (1) LoadedModule.http_fn_stmts captura
+//                        durante el load; (2) generate_module_rs
+//                        emite wrappers pub `__handler_<name>` con
+//                        auth_provider state propagado desde
+//                        env.imported_auth_provider() (W12); (3)
+//                        gen_http_main registra rutas con
+//                        `crate::<mod>::__handler_<name>`. Helpers
+//                        `__apply_cors_and_respond` +
+//                        `__parse_urlencoded` + `__extract_multipart_boundary`
+//                        + `__parse_multipart` ahora `pub(crate)`.
 //
-// **Para ver el ORM nativo funcionando hoy**, mirá el boilerplate
-// `api-postgres-fitz` (single-file con CRUD HTTP + JWT auth + ORM
-// completo). Es el mismo dominio que `api-postgres-python` pero con
-// ORM nativo en lugar de SQLAlchemy + interop Python.
+// **TODAS LAS W CERRADAS (W8-W16)**. La estructura multi-archivo
+// planificada ya es viable. Este placeholder queda como TODO de
+// implementación del boilerplate real (convertir `api-orm-full` a
+// un proyecto blog/CMS con models/auth/posts/comments/realtime/jobs
+// usando lo que cerraron los W).
 //
-// Cuando W12-W15 cierren, este boilerplate se completa con la
-// estructura multi-archivo planificada.
+// **Para ver el ORM nativo + multi-módulo funcionando hoy**:
+//   - `api-postgres-fitz` (single-file): CRUD HTTP + JWT auth + ORM
+//     completo en un solo archivo. Mismo dominio que
+//     `api-postgres-python` pero con ORM nativo en lugar de
+//     SQLAlchemy + interop Python.
+//   - `examples/guide/multi-module-auth/` (W12): demo del
+//     `@auth_provider` cross-module en dos archivos.
+//   - E2E `cross_module_http_handler_w16` en tests/compile_e2e.rs:
+//     handler entero (con `@authenticated`/`@admin` + body + `?` +
+//     `return <status>`) declarado en un módulo, registrado por main.
 
-print("api-orm-full — boilerplate en construcción")
+print("api-orm-full — boilerplate en construcción (W8-W16 ✓ cerrados, pendiente impl)")

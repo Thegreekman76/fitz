@@ -6199,6 +6199,298 @@ fn create(stub: Str, body: UserInput) -> User {\n\
 }
 
 #[test]
+fn cross_module_http_handler_w16() {
+    // W16 (v0.10.12) — handler `@get`/`@post` declarado en un módulo
+    // importado se registra como ruta en el `axum::Router` del main y
+    // responde correctamente. Antes de W16 el codegen emitía la fn
+    // `pub fn create(...)` en el módulo pero NO emitía el wrapper
+    // `__handler_create`, NI registraba la ruta en main — el binario
+    // compilaba pero todos los requests respondían 404.
+    //
+    // W16 cierra el gap en 3 piezas coordinadas:
+    //   1) Loader captura `LoadedModule.http_fn_stmts` (FnDef stmts
+    //      con `@get/@post/@put/@delete`).
+    //   2) `generate_module_rs_with_bindings` emite `__handler_<name>`
+    //      como `pub(crate)` en el `.rs` del módulo, con auth_provider
+    //      state propagado desde `env.imported_auth_provider()` (W12).
+    //   3) `gen_http_main` itera `loader.modules` y registra cada ruta
+    //      con `.route(path, crate::<mod>::__handler_<name>)`.
+    //
+    // Este test combina los 4 W previos:
+    //   - W12: `@auth_provider` en módulo distinto al handler.
+    //   - W13: `?` operator dentro del handler (Err → 500).
+    //   - W14: handler con body + user juntos.
+    //   - W16: handler entero en módulo, route registrada por main.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join("fitz-e2e-cross_module_http_w16");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // Módulo `auth.fitz`: type User + @auth_provider.
+    std::fs::write(
+        dir.join("auth.fitz"),
+        "type User { id: Int, email: Str, role: Str }\n\
+         \n\
+         @auth_provider\n\
+         fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+             match headers.get(\"authorization\") {\n\
+                 Ok(token) => {\n\
+                     if (token == \"Bearer admin\") {\n\
+                         return Ok(User { id: 1, email: \"ada@example.com\", role: \"admin\" })\n\
+                     }\n\
+                     if (token == \"Bearer user\") {\n\
+                         return Ok(User { id: 2, email: \"alan@example.com\", role: \"user\" })\n\
+                     }\n\
+                     return Err(\"token inválido\")\n\
+                 }\n\
+                 Err(_) => return Err(\"falta Authorization\")\n\
+             }\n\
+         }\n",
+    )
+    .expect("escribir auth.fitz");
+
+    // Módulo `posts.fitz`: handlers HTTP que combinan los W previos.
+    std::fs::write(
+        dir.join("posts.fitz"),
+        "from auth import User\n\
+         \n\
+         type PostInput { title: Str, body: Str }\n\
+         type Post { id: Int, title: Str, author_email: Str }\n\
+         \n\
+         fn parse_priority(s: Str) -> Result<Int> {\n\
+             if (s == \"low\") { return Ok(1) }\n\
+             if (s == \"high\") { return Ok(2) }\n\
+             return Err(\"prioridad desconocida\")\n\
+         }\n\
+         \n\
+         @authenticated\n\
+         @get(\"/me\")\n\
+         fn me(user: User) -> User => user\n\
+         \n\
+         @authenticated\n\
+         @post(\"/posts/{prio}\")\n\
+         fn create(prio: Str, input: PostInput, user: User) -> Post {\n\
+             if (input.title == \"\") {\n\
+                 return 400 { \"error\": \"título vacío\" }\n\
+             }\n\
+             let _p = parse_priority(prio)?\n\
+             return Post { id: 42, title: input.title, author_email: user.email }\n\
+         }\n\
+         \n\
+         @admin\n\
+         @get(\"/admin/posts\")\n\
+         fn admin_list(user: User) -> List<Str> => [\"post1\", \"post2\"]\n",
+    )
+    .expect("escribir posts.fitz");
+
+    // Main: solo importa el módulo y configura el server.
+    let main_src = "\
+import posts\n\
+\n\
+@server(43915)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join("prog.fitz");
+    std::fs::write(&main_path, main_src).expect("escribir prog.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (W16):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43915".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43915 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let send_req =
+        |method: &str, path: &str, body: Option<&str>, bearer: Option<&str>| -> (u16, String) {
+            let auth_header = match bearer {
+                Some(t) => format!("Authorization: Bearer {}\r\n", t),
+                None => String::new(),
+            };
+            let (content_header, body_str) = match body {
+                Some(b) => (
+                    format!(
+                        "Content-Type: application/json\r\nContent-Length: {}\r\n",
+                        b.len()
+                    ),
+                    b.to_string(),
+                ),
+                None => (String::new(), String::new()),
+            };
+            let request = format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\n{}{}Connection: close\r\n\r\n{}",
+                method, path, addr, auth_header, content_header, body_str,
+            );
+            let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .ok();
+            stream.write_all(request.as_bytes()).expect("send request");
+            let mut buf = Vec::new();
+            stream.read_to_end(&mut buf).ok();
+            let raw = String::from_utf8_lossy(&buf).into_owned();
+            let status_line = raw.lines().next().unwrap_or("").to_string();
+            let status: u16 = status_line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+            let body_resp = raw[body_start..].to_string();
+            (status, body_resp)
+        };
+
+    // Caso 1: GET /me con admin token → 200 con user serializado.
+    let (status, body) = send_req("GET", "/me", None, Some("admin"));
+    assert_eq!(status, 200, "/me admin → 200, fue {:?}", (status, &body));
+    assert!(
+        body.contains("\"email\":\"ada@example.com\""),
+        "/me body: {:?}",
+        body
+    );
+
+    // Caso 2: GET /me sin token → 401.
+    let (status, body) = send_req("GET", "/me", None, None);
+    assert_eq!(
+        status,
+        401,
+        "/me sin token → 401, fue {:?}",
+        (status, &body)
+    );
+
+    // Caso 3: POST /posts/low (W13 + W14) con body + user → 200.
+    let (status, body) = send_req(
+        "POST",
+        "/posts/low",
+        Some(r#"{"title":"hola","body":"mundo"}"#),
+        Some("user"),
+    );
+    assert_eq!(
+        status,
+        200,
+        "POST /posts/low → 200, fue {:?}",
+        (status, &body)
+    );
+    assert!(
+        body.contains("\"author_email\":\"alan@example.com\"")
+            && body.contains("\"title\":\"hola\""),
+        "POST body: {:?}",
+        body
+    );
+
+    // Caso 4: POST con prioridad desconocida → 500 vía `?` (W13).
+    let (status, body) = send_req(
+        "POST",
+        "/posts/medium",
+        Some(r#"{"title":"x","body":"y"}"#),
+        Some("user"),
+    );
+    assert_eq!(
+        status,
+        500,
+        "POST /posts/medium (? Err) → 500, fue {:?}",
+        (status, &body)
+    );
+    assert!(
+        body.contains("prioridad desconocida"),
+        "W13 ? body: {:?}",
+        body
+    );
+
+    // Caso 5: POST con título vacío → 400 vía `return <status>`.
+    let (status, body) = send_req(
+        "POST",
+        "/posts/low",
+        Some(r#"{"title":"","body":"y"}"#),
+        Some("user"),
+    );
+    assert_eq!(
+        status,
+        400,
+        "POST título vacío → 400, fue {:?}",
+        (status, &body)
+    );
+    assert!(body.contains("título vacío"), "return 400 body: {:?}", body);
+
+    // Caso 6: GET /admin/posts con admin → 200.
+    let (status, body) = send_req("GET", "/admin/posts", None, Some("admin"));
+    assert_eq!(
+        status,
+        200,
+        "/admin/posts admin → 200, fue {:?}",
+        (status, &body)
+    );
+
+    // Caso 7: GET /admin/posts con user (no admin) → 403.
+    let (status, body) = send_req("GET", "/admin/posts", None, Some("user"));
+    assert_eq!(
+        status,
+        403,
+        "/admin/posts user → 403, fue {:?}",
+        (status, &body)
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Sanity check del Rust generado:
+    //   - posts.rs DEBE tener `pub(crate) async fn __handler_*`.
+    //   - main.rs DEBE registrar `crate::posts::__handler_*`.
+    let posts_rs = std::path::PathBuf::from("target/fitz-build/prog/src/posts.rs");
+    if posts_rs.exists() {
+        let content = std::fs::read_to_string(&posts_rs).expect("leer posts.rs");
+        // En modo Module el pub_prefix es `pub ` (no `pub(crate) `);
+        // alcanza con `pub` para que main referencie cross-module.
+        assert!(
+            content.contains("pub async fn __handler_me")
+                && content.contains("pub async fn __handler_create")
+                && content.contains("pub async fn __handler_admin_list"),
+            "posts.rs debe emitir wrappers pub async fn __handler_* (W16.2)"
+        );
+    }
+    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        assert!(
+            content.contains("crate::posts::__handler_me")
+                && content.contains("crate::posts::__handler_create"),
+            "main.rs debe registrar rutas con `crate::posts::__handler_*` (W16.3)"
+        );
+    }
+}
+
+#[test]
 fn cross_module_body_type_serializa_w15() {
     // W15 (v0.10.11) — type declarado en un módulo importado y usado
     // como body en un handler del main. Antes de revisar W15 se asumía
