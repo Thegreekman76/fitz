@@ -2330,8 +2330,13 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // hace `define` son el MISMO Rc, el body de la función "ve" su
         // propia definición — puede llamarse a sí misma sin hacer nada extra.
         //
-        // `return_type` y `is_async` se ignoran en runtime (deuda explícita
-        // para type-checker estático en Fase 5 y async real en Fase 4.x).
+        // `return_type` se ignora en runtime: el checker estático (Fase
+        // 5a) lo valida y el evaluator no re-chequea. `is_async` SÍ
+        // viaja con la fn (captura en `Value::Function { is_async }`
+        // abajo) — Fase 6 (Async nativo) lo consume al despachar
+        // calls a fns async, decidiendo si esperar el Future
+        // resultante. F5 audit (2026-05-27) ratifica el cierre: el
+        // comentario original "se ignora" quedó stale post-Fase 6.
         //
         // `decorators`: si los hay, los procesamos antes de definir la
         // función. Los decoradores HTTP (`@get`/`@post`/`@put`/`@delete`)
