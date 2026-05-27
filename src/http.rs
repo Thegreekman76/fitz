@@ -2568,7 +2568,16 @@ fn run_wrap_chain(
             // Caso base: invocar handler + post chain.
             let outcome = match call_handler(handler, handler_args, &handler_name).await {
                 Ok(value) => value_to_outcome(&value),
-                Err(err) => HandlerOutcome::internal_error(err.message),
+                Err(err) => {
+                    // U3 (v0.10.15) — log al stderr con contexto del
+                    // handler (nombre + posición del error). Antes el
+                    // mensaje se incluía solo en el response body, lo
+                    // que ocultaba el error en los logs del server.
+                    // Ahora aparece en ambos lados: response (cliente)
+                    // + stderr (dev/ops).
+                    eprintln!("[fitz HTTP] handler `{}` falló: {}", handler_name, err);
+                    HandlerOutcome::internal_error(err.message)
+                }
             };
             return run_post_middlewares(&post_mws, &request, outcome).await;
         }

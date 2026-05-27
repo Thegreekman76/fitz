@@ -1280,11 +1280,11 @@ estado real).
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| P1 | `evaluator.rs:2040+` | Map es `Vec<(K,V)>` — lookup O(n). Documentado como deuda explícita; bloqueante para maps grandes. | Baja | Alta |
-| P2 | `codegen.rs:1911+` | `.clone()` recursivos de `Type` en hot path (~20 sitios). Cada `gen_expr` puede hacer 2-3 clones. | Media | Media |
-| P3 | `codegen.rs:636+` | Pre-registro de tipos/fns clona estructuras enteras. Alternativa `Rc<TypeSig>` reduciría allocaciones, requiere refactor. | Baja | Alta |
-| P4 | `evaluator.rs:805` | Snapshot pattern (`items.borrow().clone()`) en cada llamada a `.map`/`.filter`. Necesario para evitar re-entrancia pero costoso. | Baja | Alta |
-| P5 | `codegen.rs` field access | `u.field` → `(u).borrow().field.clone()`. Optimizable a borrow sin clone en casos seguros, pero requiere análisis. | Baja | Alta |
+| P1 | `evaluator.rs:2040+` | Map es `Vec<(K,V)>` — lookup O(n). Documentado como deuda explícita; bloqueante para maps grandes. **DEFER 2026-05-27** — cambiar a HashMap/BTreeMap rompe la garantía de insertion order que `serde_json::preserve_order` depende. Refactor requiere mantener orden con `LinkedHashMap` (dep nueva) o `Vec<(K, V)>` + índice secundario. Sin benchmarks que muestren un cuello real, defer. | Baja | Alta |
+| P2 | `codegen.rs:1911+` | `.clone()` recursivos de `Type` en hot path (~20 sitios). Cada `gen_expr` puede hacer 2-3 clones. **DEFER 2026-05-27** — audit empírico contó 114 `.clone()` sobre Type/ty (no 20). Muchos son por ownership (return value, store en struct) — eliminarlos requiere lifetime annotations en signatures, refactor cascada masivo. Sin benchmarks proving hot path, defer. | Media | Media |
+| P3 | `codegen.rs:636+` | Pre-registro de tipos/fns clona estructuras enteras. Alternativa `Rc<TypeSig>` reduciría allocaciones, requiere refactor. **DEFER 2026-05-27** — `Rc<TypeSig>` cascadea a TypeId lookups, fn_sigs HashMap, type_sigs HashMap. Sin benchmarks proving the cost, defer. | Baja | Alta |
+| P4 | `evaluator.rs:805` | Snapshot pattern (`items.borrow().clone()`) en cada llamada a `.map`/`.filter`. Necesario para evitar re-entrancia pero costoso. **DEFER 2026-05-27** — snapshot es CORRECTNESS (sin ella, mutar la lista DURANTE map/filter rompe iteración). Cualquier optimización debe preservar la semántica re-entrante. Sin benchmarks proving the cost en el caso común (listas chicas), defer. | Baja | Alta |
+| P5 | ~~`codegen.rs` field access~~ **VERIFICADO 2026-05-27** — el `gen_field_access` ya skipea `.clone()` para tipos Copy via el helper `needs_clone(&f.type_)` (línea 25022). Int/Float/Bool/Null se acceden sin clone; Str/Nominal/List/Map/Result/Function/Nullable sí clonan (necesario por interior mutability via Arc<Mutex>). El audit original asumía clone universal — sin medirlo. La optimización ya está en su lugar más natural. | — | — |
 
 ### Mantenibilidad
 

@@ -2423,6 +2423,25 @@ impl<'a> CheckCtx<'a> {
         self.scopes.pop();
     }
 
+    /// M4 (v0.10.15) — helper para ejecutar un bloque de checks dentro
+    /// de un scope nuevo (push + work + pop), reduciendo la
+    /// repetición del patrón `push_scope(); ...; pop_scope();` que
+    /// aparece ~10 veces en `check_block` / `infer_expr`.
+    ///
+    /// **Limitación**: el closure recibe `&mut self`, así que early
+    /// returns con `?` adentro de él no fugan scope (porque cuando
+    /// retornan, ya están saliendo de `with_scope` que ya pasó por
+    /// el push). Sin embargo, si el closure paniquea, el pop_scope
+    /// no corre — para tests/REPL recovery con catch_unwind queda
+    /// como deuda menor. En práctica el checker no paniquea (los
+    /// errores van a `ctx.errors`, no via panic).
+    fn with_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
+        self.push_scope();
+        let r = f(self);
+        self.pop_scope();
+        r
+    }
+
     /// Declara una variable sin anotación de tipo (inferida o
     /// gradual). Permite que reasignaciones futuras cambien el
     /// tipo libremente. `def_span` es la posición de la declaración
@@ -2755,13 +2774,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // Cada rama es un bloque; el "tipo" de un if-stmt es el
             // de su última expresión-stmt. Para 5.3.1 nos alcanza con
             // walkear los bloques (con scope) y devolver Any.
-            ctx.push_scope();
-            check_block(ctx, then);
-            ctx.pop_scope();
+            // M4 (v0.10.15) — usar with_scope helper para auto-pop.
+            ctx.with_scope(|ctx| check_block(ctx, then));
             if let Some(else_body) = else_ {
-                ctx.push_scope();
-                check_block(ctx, else_body);
-                ctx.pop_scope();
+                ctx.with_scope(|ctx| check_block(ctx, else_body));
             }
             Type::Any
         }
@@ -4019,17 +4035,16 @@ fn infer_method_call(
                         }
                         for (i, (got, expected)) in args_ty.iter().zip(params.iter()).enumerate() {
                             if !is_compatible(got, expected) {
-                                ctx.error_at(
-                                    span,
-                                    format!(
-                                        "`{}.{}` arg #{}: esperaba `{}`, recibió `{}`",
-                                        nominal_name,
-                                        method,
-                                        i,
-                                        expected.display(ctx.types),
-                                        got.display(ctx.types)
-                                    ),
-                                );
+                                // U2 (v0.10.15) — usar el helper canónico
+                                // FitzError::type_mismatch (U1) en lugar
+                                // del format!() ad-hoc.
+                                ctx.errors.push(FitzError::type_mismatch(
+                                    span.line,
+                                    span.column,
+                                    &format!("`{}.{}` arg #{}", nominal_name, method, i),
+                                    &expected.display(ctx.types),
+                                    &got.display(ctx.types),
+                                ));
                             }
                         }
                         return Some((**ret).clone());
@@ -4067,19 +4082,16 @@ fn infer_method_call(
                     return Some(ret);
                 }
                 // Tipos de args (compatible_with semánticamente).
+                // U2 (v0.10.15) — usar FitzError::type_mismatch (U1).
                 for (i, (got, expected)) in args_ty.iter().zip(nm.params.iter()).enumerate() {
                     if !is_compatible(got, expected) {
-                        ctx.error_at(
-                            span,
-                            format!(
-                                "el método `{}.{}` arg #{}: esperaba `{}`, recibió `{}`",
-                                info.name,
-                                method,
-                                i,
-                                expected.display(ctx.types),
-                                got.display(ctx.types)
-                            ),
-                        );
+                        ctx.errors.push(FitzError::type_mismatch(
+                            span.line,
+                            span.column,
+                            &format!("el método `{}.{}` arg #{}", info.name, method, i),
+                            &expected.display(ctx.types),
+                            &got.display(ctx.types),
+                        ));
                     }
                 }
                 let ret = if nm.is_async {
