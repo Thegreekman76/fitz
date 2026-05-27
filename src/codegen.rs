@@ -17613,6 +17613,35 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         pairs: &[(Expr, Expr)],
         map_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
+        self.gen_map_lit_with_hint(pairs, map_span, None)
+    }
+
+    /// W1 (v0.10.6) — variante context-aware de `gen_map_lit`. Cuando
+    /// el caller (field assign de struct lit, var con anotación)
+    /// conoce el tipo destino, lo pasa como `hint`. Si el hint es
+    /// `Map<_, Any>`, forzamos el shape heterogéneo
+    /// `Vec<(__FitzValue, __FitzValue)>` aunque los values del literal
+    /// sean homogéneos (paralelo al `Value::Map` del intérprete que
+    /// guarda los values como `Value` boxed sin info de tipo
+    /// concreto). Sin hint, comportamiento original — el lub decide.
+    fn gen_map_lit_with_hint(
+        &mut self,
+        pairs: &[(Expr, Expr)],
+        map_span: crate::ast::Span,
+        hint: Option<&Type>,
+    ) -> Result<(String, Type), FitzError> {
+        // Pelamos un Nullable del hint para que `let x: Map<Str, Any>? = {...}`
+        // también dispare.
+        let unwrapped_hint: Option<&Type> = match hint {
+            Some(Type::Nullable(inner)) => Some(inner.as_ref()),
+            Some(t) => Some(t),
+            None => None,
+        };
+        // ¿El hint pide value heterogéneo (`Any`)?
+        let hint_is_heterogeneous_v = match unwrapped_hint {
+            Some(Type::Map(_, v)) => matches!(v.as_ref(), Type::Any),
+            _ => false,
+        };
         if pairs.is_empty() {
             return Ok((
                 "Arc::new(Mutex::new(Vec::new()))".to_string(),
@@ -17632,7 +17661,10 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         let mut common_k = entries[0].0 .1.clone();
         let mut common_v = entries[0].1 .1.clone();
         let mut heterogeneous_k = false;
-        let mut heterogeneous_v = false;
+        let mut heterogeneous_v = hint_is_heterogeneous_v; // W1 — forzar
+        if heterogeneous_v {
+            common_v = Type::Any;
+        }
         for ((_, kt), (_, vt)) in &entries[1..] {
             if !heterogeneous_k {
                 match lub(&common_k, kt) {
@@ -17957,7 +17989,20 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         for f in &sig.fields {
             let supplied = provided.iter().find(|(n, _)| n == &f.name);
             let value_code = if let Some((_, expr)) = supplied {
-                let (code, ty) = self.gen_expr(expr)?;
+                // W1 (v0.10.6) — si el field es `Map<_, Any>` y el value
+                // es Map literal, propagamos el hint para que el codegen
+                // emita el shape heterogéneo `Vec<(FV, FV)>` aunque los
+                // values del literal sean homogéneos. Sin hint, gen_map_lit
+                // infiere por contenido y emite `Vec<(K, V_concreto)>`,
+                // incompatible con el field type.
+                let (code, ty) = match (expr, &f.type_) {
+                    (Expr::Map(pairs, span), Type::Map(_, hv))
+                        if matches!(hv.as_ref(), Type::Any) =>
+                    {
+                        self.gen_map_lit_with_hint(pairs, *span, Some(&f.type_))?
+                    }
+                    _ => self.gen_expr(expr)?,
+                };
                 coerce(&code, &ty, &f.type_, self.env)
             } else if let Some(default_expr) = &f.default {
                 if let Some((mod_name, item)) = &imported_mod_and_item {

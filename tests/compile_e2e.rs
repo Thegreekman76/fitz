@@ -6748,6 +6748,34 @@ fn db_query_exec_close_compilan_emite_helpers() {
 }
 
 #[test]
+fn db_map_lit_homogeneo_a_field_any_compila_w1() {
+    // W1 (v0.10.6) — `Event { metadata: {"code": 500} }` con field
+    // `metadata: Map<Str, Any>` compila a binario nativo. Antes el
+    // codegen inferia `Map<Str, Int>` del literal y fallaba con E0308
+    // contra el field heterogéneo. El context-aware gen_map_lit_with_hint
+    // ahora detecta el hint `Map<_, Any>` y emite el shape `Vec<(FV, FV)>`
+    // directamente.
+    let (stdout, code) = build_and_run(
+        "db_map_lit_homogeneo_a_field_any_w1",
+        "type Event {\n  \
+             id: Int\n  \
+             metadata: Map<Str, Any>\n\
+         }\n\
+         fn show(e: Event) -> Str {\n  \
+             return \"event {e.id}\"\n\
+         }\n\
+         let e = Event { id: 1, metadata: {\"code\": 500} }\n\
+         print(show(e))\n",
+    );
+    assert_eq!(code, 0, "stdout: {}", stdout);
+    assert!(
+        stdout.contains("event 1"),
+        "esperaba `event 1`, fue: {}",
+        stdout
+    );
+}
+
+#[test]
 fn db_upd_con_map_var_compila_a_binario_w7() {
     // W7 (v0.10.6) — `.update(db, changes)` con `changes` como var
     // `Map<Str, Any>` (no Map literal) compila a binario nativo.
