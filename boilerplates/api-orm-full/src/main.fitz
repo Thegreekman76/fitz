@@ -15,8 +15,12 @@
 //                        uses_fitz_value / has_http transitivos +
 //                        emit_helpers_for_imported_types refinado para
 //                        no descartar Map<Str, Any> legítimo.
-//   - W12 — PENDIENTE  — cross-module @auth_provider (el checker lo
-//                        exige en el mismo program, no via import).
+//   - W12 ✓ CERRADO    — cross-module @auth_provider: checker hace
+//                        fallback al provider importado (TypeEnv slot
+//                        nuevo + extract_auth_provider_signature) y
+//                        el codegen emite `crate::<mod>::<fn>(...)`
+//                        module-qualified en los wrappers HTTP/WS.
+//                        Ejemplo runnable: examples/guide/multi-module-auth/.
 //   - W13 — PENDIENTE  — mixing `?` operator con `return <status>{...}`
 //                        en el mismo handler (codegen emite el wrapper
 //                        con tipo `__FitzResponse` y `?` falla).
@@ -26,6 +30,16 @@
 //                        modo Module cuando el módulo declara HTTP
 //                        handlers que serializan Foo (hoy se emite
 //                        solo en main vía emit_helpers_for_imported_types).
+//   - W16 — PENDIENTE  — cross-module HTTP route registration: handlers
+//                        @get/@post/@put/@delete que viven en un módulo
+//                        importado compilan pero NO se enchufan al
+//                        axum::Router del main. Descubierto al armar
+//                        el ejemplo del W12: aislamos W12 dejando los
+//                        handlers en main; W16 los habilita en módulos
+//                        también. Requiere emitir `__handler_<name>`
+//                        wrappers en cada módulo HTTP + registrar
+//                        `.route("/path", crate::<mod>::__handler_<name>)`
+//                        en main.
 //
 // **Para ver el ORM nativo funcionando hoy**, mirá el boilerplate
 // `api-postgres-fitz` (single-file con CRUD HTTP + JWT auth + ORM

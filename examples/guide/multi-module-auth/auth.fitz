@@ -1,0 +1,64 @@
+// W12 — Módulo de autenticación reusable.
+//
+// Tipo `User`, secret del JWT, helper `find_user`, y el
+// `@auth_provider` que valida el bearer token de cada request.
+//
+// Este módulo se importa desde `main.fitz` (orquestador del server)
+// y desde `posts.fitz` (handlers protegidos). El `@auth_provider`
+// declarado acá lo encuentran los `@authenticated`/`@admin` de
+// `posts.fitz` cross-module — eso es lo que W12 cierra.
+
+type User { id: Int, email: Str, name: Str, role: Str }
+
+// Secret del HMAC del JWT. En producción vendría de env var o secret
+// store; acá hardcoded para que el ejemplo arranque sin setup extra.
+let SECRET = "demo-w12-secret-cambiame-en-prod-aaaaa"
+
+// "Base de datos" del demo. En producción sería una query SQL.
+fn find_user(email: Str) -> Result<User> {
+    if (email == "ada@example.com") {
+        return Ok(User { id: 1, email: email, name: "Ada", role: "admin" })
+    }
+    if (email == "alan@example.com") {
+        return Ok(User { id: 2, email: email, name: "Alan", role: "user" })
+    }
+    return Err("usuario no encontrado")
+}
+
+// Mapping email → password en texto plano. El demo no usa Argon2id
+// porque `let X = hash.password(...)` top-level requeriría inicializar
+// en run-time y el codegen sub-paso 5b.5 lo restringe en módulos.
+// El cap 28 de la guía muestra el camino completo con Argon2id en
+// un programa single-file. Acá priorizamos la demo de W12.
+fn check_password(email: Str, password: Str) -> Bool {
+    if (email == "ada@example.com" and password == "secret-ada-123") {
+        return true
+    }
+    if (email == "alan@example.com" and password == "secret-alan-456") {
+        return true
+    }
+    return false
+}
+
+// Provider singleton — corre antes de cada handler `@authenticated`/
+// `@admin`. Decodea el JWT del header `Authorization: Bearer <token>`
+// y resuelve el User completo. Cualquier `Err` se mapea a 401.
+@auth_provider
+fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let auth: Str = match headers.get("authorization") {
+        Ok(v) => v,
+        Err(_) => return Err("falta header Authorization"),
+    }
+    let parts = auth.split(" ")
+    if (parts.len() != 2) {
+        return Err("Authorization debe ser 'Bearer <token>'")
+    }
+    let scheme = parts[0]
+    let token = parts[1]
+    if (scheme != "Bearer") {
+        return Err("scheme debe ser Bearer, fue: {scheme}")
+    }
+    let claims = jwt.decode(token, SECRET)?
+    let email = claims["email"]
+    return find_user(email)
+}

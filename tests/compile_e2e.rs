@@ -5821,6 +5821,219 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 }
 
 #[test]
+fn auth_codegen_cross_module_provider_w12() {
+    // W12 (v0.10.8) — `@auth_provider` declarado en un módulo
+    // importado (`auth.fitz`) y handlers `@authenticated`/`@admin`
+    // en el main. El checker debe hacer fallback al provider importado
+    // vía `TypeEnv::imported_auth_provider` (Paso 1 W12), el codegen
+    // debe detectar cross-module vía `loader.modules` (Paso 3 W12),
+    // y la invocación al provider en el wrapper auth debe emitirse
+    // module-qualified (`crate::auth::check_token(...)`).
+    //
+    // Mismo set de 6 requests que `auth_codegen_flujo_completo_end_to_end`,
+    // pero el provider vive aparte — assertions paralelas garantizan
+    // paridad bit-a-bit single-file ↔ cross-module.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join("fitz-e2e-auth_codegen_cross_module_w12");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let auth_src = "\
+type User { id: Int, name: Str, role: Str }\n\
+\n\
+@auth_provider\n\
+fn check_token(headers: Map<Str, Str>) -> Result<User> {\n\
+    match headers.get(\"authorization\") {\n\
+        Ok(token) => {\n\
+            if (token == \"Bearer admin-token\") {\n\
+                return Ok(User { id: 1, name: \"Admin\", role: \"admin\" })\n\
+            }\n\
+            if (token == \"Bearer user-token\") {\n\
+                return Ok(User { id: 2, name: \"Alice\", role: \"user\" })\n\
+            }\n\
+            return Err(\"token inválido\")\n\
+        }\n\
+        Err(_) => return Err(\"falta Authorization\")\n\
+    }\n\
+}\n\
+";
+    std::fs::write(dir.join("auth.fitz"), auth_src).expect("escribir auth.fitz");
+
+    let main_src = "\
+from auth import User\n\
+\n\
+@server(43902)\n\
+fn main() => 0\n\
+\n\
+@get(\"/public\")\n\
+fn public_route() -> Str => \"sin auth\"\n\
+\n\
+@authenticated\n\
+@get(\"/me\")\n\
+fn me(user: User) -> Str => user.name\n\
+\n\
+@admin\n\
+@get(\"/admin\")\n\
+fn admin_route(user: User) -> Str => \"hola admin\"\n\
+";
+    let main_path = dir.join("prog.fitz");
+    std::fs::write(&main_path, main_src).expect("escribir prog.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (cross-module W12):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    // Spawn server.
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43902".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43902 en 3s");
+    }
+
+    // Request runner inline (paralelo a build_spawn_auth_requests).
+    use std::io::{Read, Write};
+    let send_req = |method: &str, path: &str, token: Option<&str>| -> (u16, String) {
+        let auth_header = match token {
+            Some(t) => format!("Authorization: Bearer {}\r\n", t),
+            None => String::new(),
+        };
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+            method, path, addr, auth_header,
+        );
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let body = raw[body_start..].to_string();
+        (status, body)
+    };
+
+    let results = [
+        send_req("GET", "/public", None),
+        send_req("GET", "/me", None),
+        send_req("GET", "/me", Some("wrong-token")),
+        send_req("GET", "/me", Some("user-token")),
+        send_req("GET", "/admin", Some("user-token")),
+        send_req("GET", "/admin", Some("admin-token")),
+    ];
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Mismas assertions que el test single-file — paridad bit-a-bit.
+    assert_eq!(results[0].0, 200, "/public 200, fue {:?}", results[0]);
+    assert!(
+        results[0].1.contains("sin auth"),
+        "body /public: {:?}",
+        results[0].1
+    );
+
+    assert_eq!(results[1].0, 401, "/me sin auth 401, fue {:?}", results[1]);
+    assert!(
+        results[1].1.contains("falta Authorization"),
+        "/me sin header body: {:?}",
+        results[1].1
+    );
+
+    assert_eq!(
+        results[2].0, 401,
+        "/me token inválido 401, fue {:?}",
+        results[2]
+    );
+    assert!(
+        results[2].1.contains("token inválido"),
+        "/me con token wrong body: {:?}",
+        results[2].1
+    );
+
+    assert_eq!(
+        results[3].0, 200,
+        "/me user válido 200, fue {:?}",
+        results[3]
+    );
+    assert!(
+        results[3].1.contains("Alice"),
+        "/me user body: {:?}",
+        results[3].1
+    );
+
+    assert_eq!(results[4].0, 403, "/admin user → 403, fue {:?}", results[4]);
+    assert!(
+        results[4].1.contains("admin"),
+        "/admin con rol user body: {:?}",
+        results[4].1
+    );
+
+    assert_eq!(
+        results[5].0, 200,
+        "/admin admin → 200, fue {:?}",
+        results[5]
+    );
+    assert!(
+        results[5].1.contains("hola admin"),
+        "/admin admin body: {:?}",
+        results[5].1
+    );
+
+    // W12 — Sanity check del Rust generado: la invocación al provider
+    // debe ser `crate::auth::check_token` (module-qualified), no
+    // `check_token` (bare). Sin este path, el binario habría compilado
+    // pero el bare name no resolvería desde el wrapper en main.rs.
+    // `fitz build` escribe a `target/fitz-build/<stem>/src/main.rs`
+    // relativo al CWD del proceso (raíz del repo cuando lo invoca cargo
+    // test). El stem es `prog` (nombre del .fitz).
+    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
+        assert!(
+            content.contains("crate::auth::check_token"),
+            "main.rs generado debe invocar `crate::auth::check_token` (path qualified W12) — primeros 2000 chars:\n{}",
+            &content[..content.len().min(2000)],
+        );
+    }
+}
+
+#[test]
 fn auth_codegen_jwt_y_hash_builtins_cli() {
     // CLI puro: usa `jwt.encode`/`jwt.decode` + `hash.password`/
     // `hash.verify` sin handlers HTTP. Verifica que las deps se sumen

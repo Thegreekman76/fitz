@@ -1,0 +1,85 @@
+// W12 — Cross-module `@auth_provider`.
+//
+// El provider (validación del bearer token) vive en `auth.fitz`. Los
+// handlers protegidos (`@authenticated`, `@admin`) viven en este main
+// e importan `User`, `SECRET`, `find_user`, `check_password` desde el
+// módulo `auth`. El loader del runtime / del codegen carga `auth.fitz`
+// antes de procesar los handlers, así el `@auth_provider` está
+// registrado cuando el wrapper de `@authenticated`/`@admin` necesita
+// invocarlo.
+//
+// Hasta v0.10.7, el checker estático rechazaba este patrón con
+// "no hay `@auth_provider` registrado en el programa" y el codegen
+// emitía la invocación al provider sin path qualified. W12 (v0.10.8)
+// cierra ambas: el checker hace fallback al provider importado vía
+// `TypeEnv::imported_auth_provider`; el codegen detecta cross-module
+// vía `loader.modules` y emite `crate::auth::check_token(...)` con
+// path absoluto desde el crate root.
+//
+// NOTA: el caso "handlers HTTP en un módulo importado, no en main"
+// queda como deuda derivada (W16) — el codegen del router solo
+// registra handlers locales del program del main; los handlers
+// cross-module compilan sin error pero no se enchufan al axum::Router.
+
+from auth import User, SECRET, find_user, check_password
+
+@server(43931)
+fn main() => 0
+
+type Credentials { email: Str, password: Str }
+type LoginResponse { token: Str }
+
+// POST /login — público, sin auth. Devuelve JWT firmado con HS256
+// sobre el `SECRET` importado de `auth.fitz`.
+@post("/login")
+fn login(creds: Credentials) -> LoginResponse {
+    let user: User = match find_user(creds.email) {
+        Ok(u) => u,
+        Err(_) => return 401 { "error": "credenciales inválidas" },
+    }
+    if (not check_password(creds.email, creds.password)) {
+        return 401 { "error": "credenciales inválidas" }
+    }
+    let claims = { "email": user.email, "role": user.role }
+    let token = jwt.encode(claims, SECRET)
+    return LoginResponse { token: token }
+}
+
+// GET /me — `@authenticated` cross-module. El wrapper invoca
+// `crate::auth::check_token(headers)` (emitido por W12) y, si el
+// `Result<User>` es Ok, inyecta `user: User` antes del handler.
+@authenticated
+@get("/me")
+fn me(user: User) -> User => user
+
+// GET /admin/users — `@admin` exige `role: Str` en el `User`. El
+// scanner W12 lee el AST de `auth.fitz` y reporta `has_role_field`
+// para que esta validación pase estática cross-module.
+@admin
+@get("/admin/users")
+fn admin_list(user: User) -> List<User> {
+    return [
+        User { id: 1, email: "ada@example.com", name: "Ada", role: "admin" },
+        User { id: 2, email: "alan@example.com", name: "Alan", role: "user" },
+    ]
+}
+
+// Cómo probarlo (con el server corriendo en :43931):
+//
+//   # 1. Login para obtener un token.
+//   curl -X POST localhost:43931/login \
+//        -H 'Content-Type: application/json' \
+//        -d '{"email":"ada@example.com","password":"secret-ada-123"}'
+//   # → {"token":"eyJ0eXAiOi..."}
+//
+//   # 2. /me con el token — handler en main, provider en auth.fitz.
+//   curl localhost:43931/me -H 'Authorization: Bearer <TOKEN>'
+//
+//   # 3. /admin/users con token de Ada (admin) → 200 + lista.
+//   curl localhost:43931/admin/users -H 'Authorization: Bearer <TOKEN_ADA>'
+//
+//   # 4. /admin/users con token de Alan (user) → 403.
+//   curl localhost:43931/admin/users -H 'Authorization: Bearer <TOKEN_ALAN>'
+//
+//   # 5. /me sin token → 401 + {"error":"falta header Authorization"}.
+//   curl localhost:43931/me

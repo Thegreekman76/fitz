@@ -540,6 +540,18 @@ pub struct TypeEnv {
     /// `table_metadata` devuelve `None` y los queries del ORM
     /// fallan con error claro.
     tables: HashMap<TypeId, TableMetadata>,
+    /// W12 (v0.10.8) — `@auth_provider` declarado en un módulo
+    /// importado por el program local. El caller (típicamente
+    /// `main.rs::check_program_with_pyi_stubs_and_imports`) lo
+    /// pre-escanea sobre cada módulo importado vía
+    /// `extract_auth_provider_signature` y lo registra en el env del
+    /// importer con `set_imported_auth_provider`. El checker
+    /// (`collect_auth_provider`) hace fallback a este slot cuando no
+    /// encuentra provider local, así los handlers `@authenticated`/
+    /// `@admin` del importer pueden compilar contra un provider
+    /// cross-module. El codegen también lo consulta para emitir las
+    /// invocaciones del wrapper con path qualified (`<module>::<fn>`).
+    imported_auth_provider: Option<ImportedAuthProvider>,
 }
 
 impl TypeEnv {
@@ -623,6 +635,29 @@ impl TypeEnv {
     #[allow(dead_code)]
     pub fn nominal_count(&self) -> usize {
         self.nominals.len()
+    }
+
+    /// W12 (v0.10.8) — Registra info de un `@auth_provider` que vive en
+    /// un módulo importado. El caller invoca esto DESPUÉS de
+    /// `resolve_program` (para que el nominal `User` ya esté registrado
+    /// en el TypeEnv del importer vía vuelta 1b), pero ANTES de
+    /// `check_with_env` (para que `collect_auth_provider` lo vea en su
+    /// fallback). Es idempotente: si ya hay un provider importado y se
+    /// llama de nuevo, gana el último (caso poco probable — solo un
+    /// `@auth_provider` se admite en todo el árbol de imports; la
+    /// validación de "más de uno" la hace el caller que orquesta el
+    /// pre-scan).
+    pub fn set_imported_auth_provider(&mut self, provider: ImportedAuthProvider) {
+        self.imported_auth_provider = Some(provider);
+    }
+
+    /// W12 (v0.10.8) — Devuelve `Some(provider)` si el caller registró
+    /// un `@auth_provider` cross-module vía
+    /// `set_imported_auth_provider`. Lo consultan
+    /// `collect_auth_provider` (fallback cuando no hay provider local) y
+    /// el codegen (para emitir invocaciones module-qualified).
+    pub fn imported_auth_provider(&self) -> Option<&ImportedAuthProvider> {
+        self.imported_auth_provider.as_ref()
     }
 }
 
@@ -7321,6 +7356,131 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
     }
 }
 
+/// W12 (v0.10.8) — Información de un `@auth_provider` declarado en un
+/// módulo importado (no en el program local). El caller (main.rs)
+/// extrae esto del AST de cada módulo importado con
+/// `extract_auth_provider_signature` y lo registra en el TypeEnv del
+/// importer con `set_imported_auth_provider`.
+///
+/// Cuando `collect_auth_provider` no encuentra provider local, hace
+/// fallback a este slot. El `user_type_name` se matchea por NOMBRE
+/// contra el nominal del importer (registrado vía `from <mod> import
+/// <T>` en la vuelta 1b de `resolve_program`).
+///
+/// **`has_role_field` viene del módulo de origen**: extraído por
+/// `extract_auth_provider_signature` mirando los fields declarados en
+/// `type <T> { role: Str ... }` del AST del módulo. Esto permite que
+/// `@admin` cross-module valide estáticamente la presencia de `role`
+/// sin necesidad de copiar fields nominales (que arrastrarían TypeIds
+/// del módulo de origen).
+#[derive(Debug, Clone)]
+pub struct ImportedAuthProvider {
+    /// Nombre del módulo donde vive el provider. El codegen lo usa
+    /// para emitir `<module>::<fn>(...)` cuando invoca al provider
+    /// desde el wrapper de un handler protegido. Debe coincidir con el
+    /// nombre de mod del crate Rust generado (típicamente derivado
+    /// del stem del archivo: `auth.fitz` → `auth`).
+    pub module_name: String,
+    /// Nombre de la fn marcada con `@auth_provider`.
+    pub fn_name: String,
+    /// `true` si la fn es `async fn`. El codegen lo consulta para
+    /// emitir `.await` después del call.
+    pub is_async: bool,
+    /// Nombre del tipo `T` del `Result<T>` que retorna el provider.
+    /// El checker lo matchea por nombre con el nominal del importer
+    /// (registrado por `from <module> import <T>`).
+    pub user_type_name: String,
+    /// `true` si `T` tiene un campo `role: Str` (no nullable) en el
+    /// módulo de origen. Exigido por `@admin`. Lo determina el scanner
+    /// mirando el AST del módulo.
+    pub has_role_field: bool,
+}
+
+/// W12 (v0.10.8) — Scanner público que extrae el `@auth_provider`
+/// declarado en `program` (el AST de un módulo importado, ya
+/// parseado). Devuelve `None` si el módulo no declara provider.
+///
+/// El caller (main.rs) invoca esto sobre cada módulo importado, antes
+/// del check del importer. Si hay provider, lo registra en el TypeEnv
+/// del importer con `set_imported_auth_provider`.
+///
+/// **No valida shape exhaustivamente**: el chequeo completo del
+/// provider (signature, return type, fields) lo hace el checker
+/// del propio módulo cuando se chequea ese módulo aparte. Acá solo
+/// extraemos lo justo para que el importer pueda validar
+/// `@authenticated`/`@admin` contra el provider.
+///
+/// `module_name` lo provee el caller — típicamente el stem del
+/// archivo importado (`auth.fitz` → `"auth"`), para que el codegen
+/// pueda emitir invocaciones module-qualified.
+pub fn extract_auth_provider_signature(
+    program: &Program,
+    module_name: &str,
+) -> Option<ImportedAuthProvider> {
+    let mut user_type_name: Option<String> = None;
+    let mut fn_name: Option<String> = None;
+    let mut is_async = false;
+    // 1) Encontrar la fn con `@auth_provider`.
+    for stmt in program {
+        let Stmt::FnDef {
+            name,
+            return_type,
+            decorators,
+            is_async: fn_is_async,
+            ..
+        } = stmt
+        else {
+            continue;
+        };
+        if !decorators.iter().any(|d| d.name == "auth_provider") {
+            continue;
+        }
+        // Extraer el nombre del tipo `T` del `Result<T>`. Sin return
+        // type declarado o con shape distinto, abortamos — el checker
+        // del módulo lo reportará con un error claro.
+        let Some(ret) = return_type else { return None };
+        let TypeExpr::Generic { name: head, args } = ret else {
+            return None;
+        };
+        if head != "Result" || args.len() != 1 {
+            return None;
+        }
+        let TypeExpr::Named(t_name) = &args[0] else {
+            return None;
+        };
+        user_type_name = Some(t_name.clone());
+        fn_name = Some(name.clone());
+        is_async = *fn_is_async;
+        break;
+    }
+    let user_type_name = user_type_name?;
+    let fn_name = fn_name?;
+    // 2) Determinar `has_role_field` mirando el `type <T> { ... }` del
+    // mismo módulo. Si T no está declarado localmente (improbable —
+    // significaría que el provider retorna un tipo importado a su vez,
+    // caso fuera del MVP), `has_role_field = false`.
+    let has_role_field = program.iter().any(|stmt| {
+        let Stmt::TypeDef { name, fields, .. } = stmt else {
+            return false;
+        };
+        if name != &user_type_name {
+            return false;
+        }
+        fields.iter().any(|f| {
+            // `role` no nullable de tipo `Str`. Nullable Str no basta
+            // (paralelo a la validación local de `collect_auth_provider`).
+            f.name == "role" && matches!(&f.type_, TypeExpr::Named(n) if n == "Str")
+        })
+    });
+    Some(ImportedAuthProvider {
+        module_name: module_name.to_string(),
+        fn_name,
+        is_async,
+        user_type_name,
+        has_role_field,
+    })
+}
+
 /// Fase 9.w.1 — Información del `@auth_provider` registrado en el
 /// programa. Lo construye `collect_auth_provider` al pre-scanear el
 /// programa antes del walk del checker. Si hay más de un
@@ -7514,6 +7674,58 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                 user_type_name,
                 has_role_field,
             });
+        }
+    }
+
+    // W12 (v0.10.8) — Fallback cross-module. Si no se encontró
+    // `@auth_provider` local pero el caller registró uno desde un
+    // módulo importado (`TypeEnv::set_imported_auth_provider`), lo
+    // promovemos a `ctx.auth_provider` para que `check_auth_decorators`
+    // valide handlers `@authenticated`/`@admin` contra él. El
+    // `user_type_id` se resuelve por NOMBRE en el TypeEnv del
+    // importer: `from auth import User` ya registró un nominal con ese
+    // nombre en la vuelta 1b de `resolve_program`, así que `lookup`
+    // devuelve un TypeId válido.
+    //
+    // Si el importer NO importó el `User` (caso de programación
+    // común: olvidó `from auth import User` en el archivo que tiene
+    // los handlers), `lookup` devuelve `None` y dejamos
+    // `ctx.auth_provider = None`. Los handlers fallan con el mismo
+    // mensaje "no hay `@auth_provider`" — pero el mensaje real útil
+    // ("falta param de tipo `User`") va a aparecer también en
+    // `check_auth_decorators` cuando el handler declare param User
+    // sin importarlo. Aceptable como diagnóstico actual.
+    if ctx.auth_provider.is_none() {
+        if let Some(imported) = ctx.types.imported_auth_provider() {
+            if let Some(user_id) = ctx.types.lookup(&imported.user_type_name) {
+                // Si el importer también declara fields para `User`
+                // (caso: tiene su propio `type User { ... }` local que
+                // shadowea el importado — improbable pero válido),
+                // preferimos los fields del importer. Si no, usamos
+                // `has_role_field` del módulo de origen.
+                let has_role_field = ctx
+                    .types
+                    .info(user_id)
+                    .fields
+                    .as_ref()
+                    .map(|fs| {
+                        fs.iter()
+                            .any(|f| f.name == "role" && matches!(f.type_, Type::Str))
+                    })
+                    .unwrap_or(imported.has_role_field);
+                ctx.auth_provider = Some(AuthProviderInfo {
+                    name: imported.fn_name.clone(),
+                    // Span sintético — el provider vive en otro
+                    // archivo. Si hay error de duplicación (caso
+                    // imposible hoy porque el caller exige unicidad
+                    // global pre-check), mostraríamos línea 0; el
+                    // mensaje cita el nombre y eso ya orienta.
+                    span: Span::default(),
+                    user_type_id: user_id,
+                    user_type_name: imported.user_type_name.clone(),
+                    has_role_field,
+                });
+            }
         }
     }
 }

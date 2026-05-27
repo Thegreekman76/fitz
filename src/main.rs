@@ -736,22 +736,170 @@ fn check_program_with_pyi_stubs(
     types::DefinitionInfo,
     Vec<error::FitzError>,
 ) {
+    check_program_with_pyi_stubs_and_deps(program, path, &manifest::DepRegistry::new())
+}
+
+/// W12 (v0.10.8) — variante de `check_program_with_pyi_stubs` que
+/// además recibe el `dep_registry` resuelto del `fitz.toml` (cuando
+/// `fitz check`/`build`/`run` corre adentro de un proyecto Fitz con
+/// `[dependencies]`). Lo usa el pre-scan de `@auth_provider`
+/// cross-module para resolver `from <dep-name> import` al `lib_entry`
+/// absoluto de la dep en lugar de fallback a path relativo al
+/// importer.
+///
+/// **Pasos coordinados** (orden importa):
+/// 1. `pyi_loader::load_stubs` — pre-llena el TypeEnv con nominales
+///    declarados en `.pyi` adyacentes (los call sites posteriores
+///    pueden referenciar `User` del stub).
+/// 2. `resolve_program_with_env` — registra nominales locales del
+///    `.fitz` + nominales traídos por `from <mod> import <T>` (vuelta
+///    1b) en el TypeEnv del importer.
+/// 3. `pyi_loader::load_callables` — pre-llena callables de stubs
+///    (depende de tipos resueltos en paso 2 para los rets).
+/// 4. **`pre_scan_imported_auth_provider`** — escanea cada
+///    `Stmt::Import` / `Stmt::FromImport`, resuelve el archivo .fitz,
+///    parsea, extrae `@auth_provider` con
+///    `types::extract_auth_provider_signature`. El primero que
+///    aparezca gana (el caller, no el orden de imports). Si hay
+///    provider, se registra en el TypeEnv con
+///    `set_imported_auth_provider`. Errores de lectura/parse del
+///    módulo se silencian — el loader real del runtime/codegen
+///    reportará los suyos cuando corra de verdad.
+/// 5. `check_with_env` — el checker corre con el env enriquecido;
+///    `collect_auth_provider` hace fallback al provider importado
+///    cuando no encuentra uno local.
+fn check_program_with_pyi_stubs_and_deps(
+    program: &ast::Program,
+    path: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> (
+    types::TypeEnv,
+    types::TypeInfo,
+    types::DefinitionInfo,
+    Vec<error::FitzError>,
+) {
     let base_dir = base_dir_for_stub_lookup(path);
-    // 8-pyi.B/C: dos pases del loader.
-    // - Pase 1 (`load_stubs`): registra solo classes en el TypeEnv.
-    //   Corre ANTES de resolve_program para que las anotaciones (`->
-    //   User`) del .fitz que referencien tipos del stub no fallen.
-    // - Pase 2 (`load_callables`): procesa fns/vars top-level del
-    //   stub, crea un nominal sintético `__pyi_module_<n>` con un
-    //   field por callable, y guarda mapping en `env.pyi_modules`.
-    //   Corre DESPUÉS de resolve_program para que los nominales
-    //   declarados por el .fitz (que las fns del stub pueden
-    //   referenciar en su ret) ya estén disponibles.
     let mut env = types::TypeEnv::new();
     let stubs = pyi_loader::load_stubs(program, &base_dir, &mut env);
     let (mut env, errors) = types::resolve_program_with_env(program, env, Vec::new());
     pyi_loader::load_callables(&stubs, &mut env);
+    // W12 — pre-scan de `@auth_provider` cross-module.
+    if let Some(provider) = pre_scan_imported_auth_provider(program, &base_dir, dep_registry) {
+        env.set_imported_auth_provider(provider);
+    }
     types::check_with_env(program, env, errors)
+}
+
+/// W12 (v0.10.8) — Escanea los `Stmt::Import` / `Stmt::FromImport` del
+/// importer. Por cada módulo importado, resuelve su archivo `.fitz`,
+/// lo lee + lexea + parsea, e invoca
+/// `types::extract_auth_provider_signature` sobre el AST. Devuelve el
+/// primer provider encontrado (siguiendo el orden top-down de los
+/// imports en el archivo).
+///
+/// **Política de errores**: errores de lectura/parse del módulo se
+/// silencian (silent fallback — paralelo a la política del
+/// `pyi_loader::load_stubs`). El loader real del runtime
+/// (`evaluator::eval_with_base_and_deps`) y del codegen
+/// (`ModuleLoader` en `codegen.rs`) cargan los módulos por su cuenta
+/// y reportan errores claros si fallan. Acá NO queremos doble-reporte
+/// — el objetivo es enriquecer el TypeEnv con info estática, no
+/// validar imports.
+///
+/// **Alcance MVP**: un solo nivel de profundidad. El importer ve
+/// `@auth_provider` de sus imports directos; no recursa transitivos.
+/// Caso típico cubierto: `main.fitz` importa `auth.fitz`+`posts.fitz`
+/// (provider en `auth.fitz`) — funciona. Caso fuera del MVP:
+/// `posts.fitz` importa `lib.fitz` que a su vez importa el provider
+/// desde `auth.fitz` — requeriría recursión. Si aparece presión,
+/// extender en sub-paso futuro.
+fn pre_scan_imported_auth_provider(
+    program: &ast::Program,
+    base_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> Option<types::ImportedAuthProvider> {
+    for stmt in program {
+        let (path_segments, module_binding_name) = match stmt {
+            ast::Stmt::Import { path, alias, .. } => {
+                // Skip Python imports — no tienen archivo .fitz en disk.
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                let binding = alias
+                    .clone()
+                    .or_else(|| path.last().cloned())
+                    .unwrap_or_default();
+                (path.clone(), binding)
+            }
+            ast::Stmt::FromImport { path, .. } => {
+                // Skip Python imports.
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                // El "module_binding_name" para `from auth import User` es
+                // `auth` (el último segmento del path). Codegen lo usa
+                // como nombre de mod en el crate generado.
+                let binding = path.last().cloned().unwrap_or_default();
+                (path.clone(), binding)
+            }
+            _ => continue,
+        };
+        let Some(file_path) = resolve_import_file_path(&path_segments, base_dir, dep_registry)
+        else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(tokens) = lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = parser::parse(tokens) else {
+            continue;
+        };
+        if let Some(provider) =
+            types::extract_auth_provider_signature(&module_program, &module_binding_name)
+        {
+            return Some(provider);
+        }
+    }
+    None
+}
+
+/// W12 (v0.10.8) — resuelve `path` de un `Stmt::Import` /
+/// `Stmt::FromImport` al archivo `.fitz` correspondiente. Mirror
+/// liviano de `evaluator::resolve_module_path`:
+/// 1. Single-segment matchea key del `dep_registry` → `lib_entry` de
+///    la dep.
+/// 2. Fallback a path relativo a `base_dir`: `["foo"]` →
+///    `<base>/foo.fitz`; `["sub", "foo"]` → `<base>/sub/foo.fitz`.
+///
+/// Devuelve `None` si el archivo no existe (verificamos con `exists()`
+/// para que el silent fallback funcione sin tirar warnings espurios).
+fn resolve_import_file_path(
+    segments: &[String],
+    base_dir: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> Option<PathBuf> {
+    if segments.len() == 1 {
+        if let Some(lib_entry) = dep_registry.get(&segments[0]) {
+            if lib_entry.exists() {
+                return Some(lib_entry.clone());
+            }
+        }
+    }
+    let mut candidate = base_dir.to_path_buf();
+    for seg in &segments[..segments.len().saturating_sub(1)] {
+        candidate.push(seg);
+    }
+    if let Some(last) = segments.last() {
+        candidate.push(format!("{}.fitz", last));
+    }
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 /// `fitz openapi <archivo>` — Fase 7.1. Lex + parse + check + eval

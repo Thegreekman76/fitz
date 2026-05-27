@@ -46,9 +46,7 @@ use crate::ast::{
     AssignTarget, BinOpKind, Decorator, Expr, Field, Program, Stmt, StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError};
-use crate::types::{
-    check_program, is_compatible, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId,
-};
+use crate::types::{is_compatible, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
 
 /// Fase 10.1.c — source completo del driver Postgres puro (`src/db.rs`)
 /// embebido como string-literal en el binario `fitz`. Cuando un programa
@@ -2131,6 +2129,12 @@ struct LoadedModule {
     /// y se importan vía `use crate::{...}`. Vacío para módulos
     /// sin imports Python.
     python_imports: Vec<PythonImport>,
+    /// W12 (v0.10.8) — si el módulo declara una fn `@auth_provider`,
+    /// `Some((fn_name, is_async))`. El main consume esto en
+    /// `generate_main_rs` para resolver `auth_provider_module` +
+    /// `auth_provider_name` cuando el provider vive en un módulo
+    /// importado en lugar del program local.
+    auth_provider_fn: Option<(String, bool)>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -2340,7 +2344,30 @@ impl ModuleLoader {
         let tokens = crate::lexer::tokenize(&source).map_err(|e| loader_err(e.message.clone()))?;
         let module_program =
             crate::parser::parse(tokens).map_err(|e| loader_err(e.message.clone()))?;
-        let (module_env, _types, _defs, type_errors) = check_program(&module_program);
+        // W12 (v0.10.8) — pre-scan de `@auth_provider` cross-module al
+        // chequear el módulo. Si `posts.fitz` declara `@authenticated`
+        // pero el `@auth_provider` vive en `auth.fitz` (importado), el
+        // checker del módulo falla sin este pre-scan. Mirror del
+        // wiring en `main.rs::check_program_with_pyi_stubs_and_deps`:
+        // resolve_program → set_imported_auth_provider → check_with_env.
+        let module_base_dir = canonical
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| self.base_dir.clone());
+        let (mut module_env, module_errors) = crate::types::resolve_program_with_env(
+            &module_program,
+            crate::types::TypeEnv::new(),
+            Vec::new(),
+        );
+        if let Some(provider) = pre_scan_imported_auth_provider_for_loader(
+            &module_program,
+            &module_base_dir,
+            &self.dep_registry,
+        ) {
+            module_env.set_imported_auth_provider(provider);
+        }
+        let (module_env, _types, _defs, type_errors) =
+            crate::types::check_with_env(&module_program, module_env, module_errors);
         if !type_errors.is_empty() {
             return Err(loader_err(format!(
                 "el módulo `{}` tiene errores de tipo: {}",
@@ -2464,6 +2491,26 @@ impl ModuleLoader {
         let module_uses_fitz_value = program_uses_fitz_value(&module_program);
         let module_uses_db = program_uses_db(&module_program);
         let module_has_http = has_http_routes(&module_program);
+        // W12 (v0.10.8) — detectar `@auth_provider` declarado EN este
+        // módulo. Si el módulo lo tiene, exponemos `(fn_name, is_async)`
+        // al main para que `generate_main_rs` resuelva
+        // `auth_provider_module` + `auth_provider_name` cuando el
+        // provider vive cross-module.
+        let mut module_auth_provider_fn: Option<(String, bool)> = None;
+        for stmt in &module_program {
+            if let Stmt::FnDef {
+                name,
+                decorators,
+                is_async,
+                ..
+            } = stmt
+            {
+                if decorators.iter().any(|d| d.name == "auth_provider") {
+                    module_auth_provider_fn = Some((name.clone(), *is_async));
+                    break;
+                }
+            }
+        }
 
         let idx = self.modules.len();
         self.modules.push(LoadedModule {
@@ -2484,6 +2531,7 @@ impl ModuleLoader {
             uses_db: module_uses_db,
             has_http: module_has_http,
             python_imports: module_python_imports,
+            auth_provider_fn: module_auth_provider_fn,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -2686,6 +2734,86 @@ fn mod_qualifier_of(rel_path: &Path) -> String {
         }
     }
     parts.join("::")
+}
+
+/// W12 (v0.10.8) — Helper privado del loader. Espejo de
+/// `pre_scan_imported_auth_provider` en main.rs pero para el contexto
+/// del codegen (ModuleLoader chequea cada módulo importado y necesita
+/// la misma información para que `posts.fitz` con `@authenticated` +
+/// `from auth import User` pase su propio check). Resolve paths
+/// relativos al `base_dir` del módulo + dep_registry para single-segment.
+fn pre_scan_imported_auth_provider_for_loader(
+    program: &Program,
+    base_dir: &Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> Option<crate::types::ImportedAuthProvider> {
+    for stmt in program {
+        let (path_segments, module_binding_name) = match stmt {
+            Stmt::Import { path, alias, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                let binding = alias
+                    .clone()
+                    .or_else(|| path.last().cloned())
+                    .unwrap_or_default();
+                (path.clone(), binding)
+            }
+            Stmt::FromImport { path, .. } => {
+                if path.first().map(String::as_str) == Some("python") {
+                    continue;
+                }
+                let binding = path.last().cloned().unwrap_or_default();
+                (path.clone(), binding)
+            }
+            _ => continue,
+        };
+        let file_path = resolve_loader_import_file_path(&path_segments, base_dir, dep_registry)?;
+        let Ok(source) = std::fs::read_to_string(&file_path) else {
+            continue;
+        };
+        let Ok(tokens) = crate::lexer::tokenize(&source) else {
+            continue;
+        };
+        let Ok(module_program) = crate::parser::parse(tokens) else {
+            continue;
+        };
+        if let Some(provider) =
+            crate::types::extract_auth_provider_signature(&module_program, &module_binding_name)
+        {
+            return Some(provider);
+        }
+    }
+    None
+}
+
+/// W12 (v0.10.8) — Resolución de archivo `.fitz` para un path de
+/// import. Paralelo a `main.rs::resolve_import_file_path`. Single
+/// segment matchea `dep_registry`; resto fallback a path relativo.
+fn resolve_loader_import_file_path(
+    segments: &[String],
+    base_dir: &Path,
+    dep_registry: &crate::manifest::DepRegistry,
+) -> Option<PathBuf> {
+    if segments.len() == 1 {
+        if let Some(lib_entry) = dep_registry.get(&segments[0]) {
+            if lib_entry.exists() {
+                return Some(lib_entry.clone());
+            }
+        }
+    }
+    let mut candidate = base_dir.to_path_buf();
+    for seg in &segments[..segments.len().saturating_sub(1)] {
+        candidate.push(seg);
+    }
+    if let Some(last) = segments.last() {
+        candidate.push(format!("{}.fitz", last));
+    }
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 /// Genera `src/<mod>.rs` para un módulo importado. Modo: `Module`
@@ -3389,6 +3517,29 @@ fn generate_main_rs(
             if decorators.iter().any(|d| d.name == "auth_provider") {
                 ctx.auth_provider_name = Some(name.clone());
                 ctx.auth_provider_is_async = *is_async;
+                break;
+            }
+        }
+    }
+    // W12 (v0.10.8) — Fallback cross-module. Si el program local no
+    // declara `@auth_provider`, escanear `loader.modules` (módulos
+    // importados directos). El loader ya pobló
+    // `LoadedModule.auth_provider_fn` durante `load_module_inner`. El
+    // primer módulo con provider gana — política paralela a la
+    // singleton del checker (la duplicación cross-module la atrapa el
+    // caller al pre-scanear los imports del importer, pero el codegen
+    // toma defensivamente el primero).
+    //
+    // `ctx.auth_provider_module` queda con `mod_name` del módulo
+    // (típicamente último segmento del path Fitz: `from auth import X`
+    // → `mod_name = "auth"`). El wrapper emite `crate::<mod>::<fn>(...)`
+    // en `emit_auth_check` y en el WS wrapper.
+    if ctx.auth_provider_name.is_none() {
+        for m in &loader.modules {
+            if let Some((fn_name, is_async)) = &m.auth_provider_fn {
+                ctx.auth_provider_name = Some(fn_name.clone());
+                ctx.auth_provider_is_async = *is_async;
+                ctx.auth_provider_module = Some(m.mod_name.clone());
                 break;
             }
         }
@@ -4376,6 +4527,12 @@ struct CodegenCtx<'a> {
     /// El wrapper la invoca con `.await` si es así, sync caller-side
     /// si no.
     auth_provider_is_async: bool,
+    /// W12 (v0.10.8) — `Some(module_name)` cuando el `@auth_provider`
+    /// vive en un módulo importado (no en el program local). El
+    /// wrapper emite la invocación module-qualified
+    /// (`crate::<module>::<fn>(...)`) en lugar del nombre pelado.
+    /// `None` cuando el provider es local o cuando no hay provider.
+    auth_provider_module: Option<String>,
     /// Fase 8.7.1: bindings Python detectados en el programa. Cada
     /// entry mapea `binding_name` → `dotted_path` Python. Se consulta
     /// desde `gen_expr` (Ident) para tipar el ident como
@@ -4532,6 +4689,7 @@ impl<'a> CodegenCtx<'a> {
             uses_auth: false,
             auth_provider_name: None,
             auth_provider_is_async: false,
+            auth_provider_module: None,
             uses_ws: false,
             uses_jobs: false,
             uses_db: false,
@@ -4557,6 +4715,29 @@ impl<'a> CodegenCtx<'a> {
         match self.mode {
             GenMode::Main => "",
             GenMode::Module => "pub ",
+        }
+    }
+
+    /// W12 (v0.10.8) — Devuelve el path Rust que invoca al
+    /// `@auth_provider` desde el wrapper de un handler protegido.
+    ///
+    /// - Provider local (mismo program que el wrapper) →
+    ///   `<fn_name>` (binding directo, sin path).
+    /// - Provider cross-module (vive en `auth.fitz` importado por el
+    ///   main) → `crate::<mod_name>::<fn_name>` (path absoluto desde
+    ///   el crate root, funciona desde cualquier módulo).
+    ///
+    /// Panics si no hay provider registrado — el caller debe haber
+    /// chequeado antes (`emit_auth_check` retorna early si `auth ==
+    /// None`; el WS wrapper retorna error explícito si falta).
+    fn auth_provider_call_path(&self) -> String {
+        let fn_name = self
+            .auth_provider_name
+            .clone()
+            .expect("auth_provider_name pre-scaneado en generate_main_rs");
+        match &self.auth_provider_module {
+            Some(module) => format!("crate::{}::{}", module, fn_name),
+            None => fn_name,
         }
     }
 
@@ -19243,12 +19424,13 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // Auth pre-upgrade. Paralelo a `emit_auth_check` pero adaptado
         // para el contexto WS (return Response directo si falla).
         if auth != crate::http::AuthSpec::None {
-            let provider = self.auth_provider_name.clone().ok_or_else(|| {
-                self.err_at(stmt.span(), format!(
+            if self.auth_provider_name.is_none() {
+                return Err(self.err_at(stmt.span(), format!(
                     "@ws fn `{}` con `@authenticated`/`@admin`: falta `@auth_provider` (validado por checker, defensivo)",
                     name,
-                ))
-            })?;
+                )));
+            }
+            let provider = self.auth_provider_call_path();
             let provider_await = if self.auth_provider_is_async {
                 ".await"
             } else {
@@ -19426,10 +19608,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             .auth_user_param_name
             .clone()
             .expect("auth_user_param_name siempre Some cuando auth != None");
-        let provider = self
-            .auth_provider_name
-            .clone()
-            .expect("auth_provider_name pre-scaneado en generate_main_rs");
+        let provider = self.auth_provider_call_path();
         let provider_await = if self.auth_provider_is_async {
             ".await"
         } else {
