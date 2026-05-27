@@ -6199,6 +6199,147 @@ fn create(stub: Str, body: UserInput) -> User {\n\
 }
 
 #[test]
+fn cross_module_body_type_serializa_w15() {
+    // W15 (v0.10.11) — type declarado en un módulo importado y usado
+    // como body en un handler del main. Antes de revisar W15 se asumía
+    // que los módulos necesitarían emitir sus propios
+    // `impl __ToFitzJson`/`__FromFitzJson` para tipos exportados; la
+    // verificación mostró que NO hace falta: las reglas de orphan de
+    // Rust hacen que el impl emitido en main.rs (via
+    // `emit_helpers_for_imported_types`) sea crate-visible.
+    //
+    // Este test candea el caso para que no regresemos cuando llegue
+    // W16 (handler wrappers en módulos): la trait `__FromFitzJson` /
+    // `__ToFitzJson` se importa en main y los impls se generan ahí
+    // para CADA type declarado en cualquier módulo cargado por el
+    // loader. El wrapper en main referencia `<PostInput as
+    // __FromFitzJson>::__from_fitz_json(...)` sin necesidad de impls
+    // duplicados ni `use` adicionales del módulo origen.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join("fitz-e2e-cross_module_body_w15");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // Módulo `models.fitz` exporta los types del dominio. Sin
+    // decorators HTTP propios — los types son data structures puras.
+    std::fs::write(
+        dir.join("models.fitz"),
+        "type PostInput { title: Str, body: Str }\n\
+         type Post { id: Int, title: Str, length: Int }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // Main importa los types y los usa como body + return del handler.
+    let main_src = "\
+from models import PostInput, Post\n\
+\n\
+@server(43914)\n\
+fn main() => 0\n\
+\n\
+@post(\"/posts\")\n\
+fn create(input: PostInput) -> Post {\n\
+    return Post { id: 1, title: input.title, length: len(input.body) }\n\
+}\n\
+";
+    let main_path = dir.join("prog.fitz");
+    std::fs::write(&main_path, main_src).expect("escribir prog.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (W15 cross-module body):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43914".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43914 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let body = r#"{"title":"cross-module","body":"works end to end"}"#;
+    let request = format!(
+        "POST /posts HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        addr,
+        body.len(),
+        body,
+    );
+    let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok();
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok();
+    let raw = String::from_utf8_lossy(&buf).into_owned();
+    let status_line = raw.lines().next().unwrap_or("").to_string();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+    let body_resp = raw[body_start..].to_string();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    assert_eq!(
+        status,
+        200,
+        "cross-module body → 200, fue {:?}",
+        (status, &body_resp)
+    );
+    assert!(
+        body_resp.contains("\"title\":\"cross-module\"") && body_resp.contains("\"length\":16"),
+        "cross-module body response: {:?}",
+        body_resp
+    );
+
+    // W15 — sanity check sobre el Rust generado: los impls de los
+    // types del módulo deben estar en main.rs (no en models.rs). Si
+    // un futuro refactor mueve los impls a los módulos, esta
+    // assertion habrá que adaptarla; mientras tanto candea el
+    // approach actual.
+    let main_rs = std::path::PathBuf::from("target/fitz-build/prog/src/main.rs");
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs generado");
+        assert!(
+            content.contains("impl __FromFitzJson for PostInputData")
+                && content.contains("impl __ToFitzJson for PostData"),
+            "main.rs debe emitir impls __FromFitzJson/__ToFitzJson para types \
+             importados de módulos (W15)"
+        );
+    }
+}
+
+#[test]
 fn auth_codegen_handler_con_body_y_user_w14() {
     // W14 (v0.10.10) — handler protegido por auth que recibe ADEMÁS
     // un body JSON. Antes del fix el dispatcher rechazaba con

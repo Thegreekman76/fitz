@@ -39,10 +39,17 @@
 //                        leftover. Cualquier otro leftover queda como
 //                        body. Paridad bit-a-bit `fitz run` ↔ `fitz
 //                        build` incluyendo cross-module (W12 + W14).
-//   - W15 — PENDIENTE  — `impl __FromFitzJson for FooData` emitido en
-//                        modo Module cuando el módulo declara HTTP
-//                        handlers que serializan Foo (hoy se emite
-//                        solo en main vía emit_helpers_for_imported_types).
+//   - W15 ✓ CERRADO    — verificado como no-fix-necesario: las
+//                        reglas de orphan de Rust hacen que el `impl
+//                        __ToFitzJson`/`__FromFitzJson for FooData`
+//                        emitido en main.rs (vía
+//                        `emit_helpers_for_imported_types`) sea
+//                        crate-visible — el wrapper en módulo
+//                        (cuando W16 cierre) puede llamar la trait
+//                        method sin impls duplicados. E2E
+//                        `cross_module_body_type_serializa_w15`
+//                        candea el caso: type en módulo + body en
+//                        handler de main → 200 + JSON correcto.
 //   - W16 — PENDIENTE  — cross-module HTTP route registration: handlers
 //                        @get/@post/@put/@delete que viven en un módulo
 //                        importado compilan pero NO se enchufan al
