@@ -183,7 +183,15 @@ pub fn generate_project(
     // Cargo.toml, emite el módulo `__fitz_db_runtime` (vía
     // `include_str!` desde `src/db.rs`) + el preludio de helpers
     // `__fitz_db_*`. Programas sin acceso a DB no pagan nada.
-    let uses_db = program_uses_db(program);
+    //
+    // W8 (v0.10.7) — además del main, también detectamos uso de DB
+    // en cualquier módulo cargado (caso típico: types `@table` en
+    // `models.fitz` + handlers ORM en `posts.fitz`, sin que el main
+    // llame `db.X(...)` directamente). El preludio db del crate root
+    // tiene que estar disponible para que `use crate::__fitz_db_*`
+    // de los módulos resuelva.
+    let uses_db =
+        program_uses_db(program) || loader.modules.iter().any(|m| !m.table_metadata.is_empty());
 
     // Fase 10.b.8.b — detección de uso del enum `__FitzValue`.
     // Programas con `Map<Str, Any>` / `List<Any>` (incluso adentro
@@ -2697,11 +2705,12 @@ fn generate_module_rs_with_bindings(
     // `crate::` en módulos (ver `mod_path_prefix`).
     ctx.emit_module_use_decls(local_bindings, loaded_modules);
 
-    // W8 (v0.10.7) — si el módulo declara `@table` types, necesita
-    // `use crate::__FromFitzDbRow` para el `impl __FromFitzDbRow for
-    // <Name>Data` que `gen_type_def` emite por cada `@table`. También
-    // importa los helpers de coerción que ese impl usa
-    // (`__fitz_pg_to_*`) + tipos del row (`__FitzPgValue`).
+    // W8 (v0.10.7) — el módulo necesita el preludio DB cuando:
+    //   (a) declara `@table` types (emite `impl __FromFitzDbRow`)
+    //   (b) importa types con `@table` (uses `User.where(...)` etc.)
+    //   (c) llama `db.connect/query/exec/close` directamente
+    // En cualquiera de los 3 casos, se emiten los `use crate::__fitz_*`
+    // del preludio DB del crate root.
     let module_has_at_table = program.iter().any(|s| {
         if let Stmt::TypeDef { name, .. } = s {
             ctx.env
@@ -2712,13 +2721,39 @@ fn generate_module_rs_with_bindings(
             false
         }
     });
-    if module_has_at_table {
+    let module_imports_at_table = ctx
+        .loaded_modules
+        .iter()
+        .any(|m| !m.table_metadata.is_empty());
+    let module_uses_db = program_uses_db(program);
+    let module_needs_db_prelude = module_has_at_table || module_imports_at_table || module_uses_db;
+    if module_needs_db_prelude {
+        // Propagar al ctx para que gen_type_def también emita impls
+        // db-relacionados (paralelo a Main donde ctx.uses_db = true
+        // controla esto). Sin este flag, los módulos con @table no
+        // emitían el `impl __FromFitzDbRow` antes del fix.
+        ctx.uses_db = true;
         ctx.emit(
             "#[allow(unused_imports)]\n\
-             use crate::{__FromFitzDbRow, __FitzPgValue, __FitzDbRow};\n\
+             use crate::{__FromFitzDbRow, __FitzPgValue, __FitzDbRow, __FitzDbConn, __FitzQueryBuilder, __IntoPgValue};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_db_connect, __fitz_db_query, __fitz_db_exec, __fitz_db_close, __fitz_db_is_closed};\n\
              #[allow(unused_imports)]\n\
              use crate::{__fitz_pg_to_i64, __fitz_pg_to_f64, __fitz_pg_to_string, __fitz_pg_to_bool, __fitz_pg_to_bytes};\n\n",
         );
+        // W11 (v0.10.7) — el módulo importa `__FitzValue` + helpers
+        // JSONB SOLO si los necesita (programa-uses-fitz-value detectado
+        // en el módulo, NO globalmente). Sin esta guard, módulos con
+        // @table primitivos importaban un item del main que el main no
+        // emitía (uses_fitz_value=false).
+        if program_uses_fitz_value(program) {
+            ctx.emit(
+                "#[allow(unused_imports)]\n\
+                 use crate::__FitzValue;\n\
+                 #[allow(unused_imports)]\n\
+                 use crate::{__fitz_jsonb_to_fitz_value, __fitz_fitz_value_to_jsonb};\n\n",
+            );
+        }
     }
 
     // Particionar stmts top-level. Para módulos: type / fn / let.
@@ -3156,11 +3191,25 @@ fn generate_main_rs(
     let uses_python =
         !python_imports.is_empty() || loader.modules.iter().any(|m| !m.python_imports.is_empty());
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
+    // W9 (v0.10.7) — `uses_fitz_value` transitivo: el main emite el
+    // enum `__FitzValue` + helpers JSONB si cualquier módulo cargado
+    // tiene `Map<Str, Any>` / `List<Any>` en sus types/handlers. Los
+    // módulos solo importan `__FitzValue` cuando realmente lo usan,
+    // así que la condición acá es "algún módulo necesita el enum".
     let uses_fitz_value = program_uses_fitz_value(program);
+    // (No agregamos la condición transitiva acá — un proyecto con
+    // múltiples módulos donde uno usa Map<Str, Any> y otro no, el
+    // main debe emitir __FitzValue para el que sí. Esto se calcula
+    // más abajo cuando recorremos los loaded_modules.)
     let uses_auth = program_uses_auth(program);
     let uses_ws = program_uses_ws(program);
     let uses_jobs = program_uses_jobs(program);
-    let uses_db = program_uses_db(program);
+    // W8 (v0.10.7) — uses_db transitivo: si algún módulo cargado
+    // declara `@table` types o usa db, el main emite el preludio db
+    // entero para que los `use crate::__fitz_db_*` de los módulos
+    // resuelvan. Paralelo a `uses_python` transitivo (8.7.1).
+    let uses_db =
+        program_uses_db(program) || loader.modules.iter().any(|m| !m.table_metadata.is_empty());
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -3836,6 +3885,28 @@ fn parse_server_decorator(
 enum GenMode {
     Main,
     Module,
+}
+
+/// W9 (v0.10.7) — `true` si el `Type` contiene un `Type::Any` no-top-level
+/// que vino del remap de un nominal no resoluble. Usado por
+/// `emit_helpers_for_imported_types` para skipear types con relations
+/// a targets no importados (evita "codegen 5b no soporta Any").
+fn field_type_has_unresolved_any(ty: &Type) -> bool {
+    match ty {
+        Type::Any => true,
+        Type::Nullable(inner) | Type::List(inner) | Type::Future(inner) => {
+            field_type_has_unresolved_any(inner)
+        }
+        Type::Map(k, v) => field_type_has_unresolved_any(k) || field_type_has_unresolved_any(v),
+        Type::Tuple(items) => items.iter().any(field_type_has_unresolved_any),
+        Type::Result { ok, err } => {
+            field_type_has_unresolved_any(ok) || field_type_has_unresolved_any(err)
+        }
+        Type::Function { params, ret } => {
+            params.iter().any(field_type_has_unresolved_any) || field_type_has_unresolved_any(ret)
+        }
+        _ => false,
+    }
 }
 
 /// W7 (v0.10.6) — resultado de codegen del SET fragment de `.update`.
@@ -5412,22 +5483,22 @@ mod __fitz_db_runtime;
 
 /// Handle compartido a una conexión Postgres viva. `Arc` para que
 /// el clone sea barato (paralelo a `__FitzWsConn<T>`).
-type __FitzDbConn = std::sync::Arc<__fitz_db_runtime::DbConnHandle>;
+pub(crate) type __FitzDbConn = std::sync::Arc<__fitz_db_runtime::DbConnHandle>;
 
 /// Re-export del tipo `PgValue` del runtime con nombre prefijado para
 /// que no choque con tipos del usuario.
-type __FitzPgValue = __fitz_db_runtime::PgValue;
+pub(crate) type __FitzPgValue = __fitz_db_runtime::PgValue;
 
 /// Una fila del resultset. El runtime ya expone `Row` con
 /// `get(name)` y `get_at(idx)`; la usamos directo (sin wrap).
-type __FitzDbRow = __fitz_db_runtime::Row;
+pub(crate) type __FitzDbRow = __fitz_db_runtime::Row;
 
 /// Coerción de tipos primitivos Fitz → `PgValue` para args de query.
 /// El codegen emite `__IntoPgValue::into_pg(<expr>)` por cada arg
 /// del array literal `[..]` que el user pasa como segundo arg de
 /// `query`/`exec`. Cubre los 6 tipos primitivos del MVP; composites
 /// (List/Map/Instance → JSONB/arrays) llegan en 10.5.
-trait __IntoPgValue {
+pub(crate) trait __IntoPgValue {
     fn into_pg(self) -> __FitzPgValue;
 }
 
@@ -5454,7 +5525,7 @@ impl __IntoPgValue for Vec<u8> {
 /// del runtime a `String` para que se desempaque idéntico a otros
 /// `Result<T, String>` Fitz (paralelo a `Result<T, String>` de
 /// `jwt.decode`, etc.).
-async fn __fitz_db_connect(url: String) -> Result<__FitzDbConn, String> {
+pub(crate) async fn __fitz_db_connect(url: String) -> Result<__FitzDbConn, String> {
     match __fitz_db_runtime::connect_url(url.as_str()).await {
         Ok(handle) => Ok(std::sync::Arc::new(handle)),
         Err(e) => Err(e.to_string()),
@@ -5467,7 +5538,7 @@ async fn __fitz_db_connect(url: String) -> Result<__FitzDbConn, String> {
 /// o `row.get_at(idx)` para extraer `&__FitzPgValue`. El Vec se
 /// wrappea en `Arc<Mutex<>>` paralelo a cómo se representan las
 /// `List<T>` Fitz en el codegen (Shared semantics).
-async fn __fitz_db_query(
+pub(crate) async fn __fitz_db_query(
     conn: &__FitzDbConn,
     sql: String,
     args: Vec<__FitzPgValue>,
@@ -5480,7 +5551,7 @@ async fn __fitz_db_query(
 
 /// `conn.exec(sql, args)` para INSERT/UPDATE/DELETE/DDL — devuelve
 /// rows_affected como Int.
-async fn __fitz_db_exec(
+pub(crate) async fn __fitz_db_exec(
     conn: &__FitzDbConn,
     sql: String,
     args: Vec<__FitzPgValue>,
@@ -5494,12 +5565,12 @@ async fn __fitz_db_exec(
 /// `conn.close()` cooperativo + idempotente. W5 (v0.10.6) — devuelve
 /// `Result<(), String>` para que el patrón `db.close().await?` propague
 /// errores raros de cierre (semaphore roto, pool envenenado).
-async fn __fitz_db_close(conn: &__FitzDbConn) -> Result<(), String> {
+pub(crate) async fn __fitz_db_close(conn: &__FitzDbConn) -> Result<(), String> {
     conn.close().await.map_err(|e| e.to_string())
 }
 
 /// `conn.is_closed()` para diagnostics + branching.
-async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
+pub(crate) async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
     conn.is_closed().await
 }
 
@@ -5511,7 +5582,7 @@ async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
 // al tipo Rust concreto del field. Skipea fields virtuales
 // (`@has_one`/`@has_many`) — esos se navegan con métodos en 10.b.7.
 
-trait __FromFitzDbRow: Sized {
+pub(crate) trait __FromFitzDbRow: Sized {
     fn from_fitz_db_row(row: &__FitzDbRow) -> Result<Self, String>;
 }
 
@@ -5519,7 +5590,7 @@ trait __FromFitzDbRow: Sized {
 /// por cada `impl __FromFitzDbRow for <Name>Data` emitido. Manejo de
 /// `NULL` queda a cargo del impl per-type (para `Option<T>` lo trata
 /// como `None`; para `T` non-nullable, error claro).
-fn __fitz_pg_to_i64(v: &__FitzPgValue, col: &str) -> Result<i64, String> {
+pub(crate) fn __fitz_pg_to_i64(v: &__FitzPgValue, col: &str) -> Result<i64, String> {
     match v {
         __FitzPgValue::Int(n) => Ok(*n),
         __FitzPgValue::Text(s) => s.parse::<i64>().map_err(|_| {
@@ -5530,7 +5601,7 @@ fn __fitz_pg_to_i64(v: &__FitzPgValue, col: &str) -> Result<i64, String> {
     }
 }
 
-fn __fitz_pg_to_f64(v: &__FitzPgValue, col: &str) -> Result<f64, String> {
+pub(crate) fn __fitz_pg_to_f64(v: &__FitzPgValue, col: &str) -> Result<f64, String> {
     match v {
         __FitzPgValue::Float(x) => Ok(*x),
         __FitzPgValue::Int(n) => Ok(*n as f64),
@@ -5542,7 +5613,7 @@ fn __fitz_pg_to_f64(v: &__FitzPgValue, col: &str) -> Result<f64, String> {
     }
 }
 
-fn __fitz_pg_to_string(v: &__FitzPgValue, col: &str) -> Result<String, String> {
+pub(crate) fn __fitz_pg_to_string(v: &__FitzPgValue, col: &str) -> Result<String, String> {
     match v {
         __FitzPgValue::Text(s) => Ok(s.clone()),
         __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
@@ -5550,7 +5621,7 @@ fn __fitz_pg_to_string(v: &__FitzPgValue, col: &str) -> Result<String, String> {
     }
 }
 
-fn __fitz_pg_to_bool(v: &__FitzPgValue, col: &str) -> Result<bool, String> {
+pub(crate) fn __fitz_pg_to_bool(v: &__FitzPgValue, col: &str) -> Result<bool, String> {
     match v {
         __FitzPgValue::Bool(b) => Ok(*b),
         __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
@@ -5558,7 +5629,7 @@ fn __fitz_pg_to_bool(v: &__FitzPgValue, col: &str) -> Result<bool, String> {
     }
 }
 
-fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
     match v {
         __FitzPgValue::Bytes(b) => Ok(b.clone()),
         __FitzPgValue::Null => Err(format!(\"columna `{}` es NULL pero el field no es nullable\", col)),
@@ -5577,7 +5648,7 @@ fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>, String> {
 // codegen pueda resolver correctamente.
 
 #[derive(Clone)]
-struct __FitzQueryBuilder<TData> {
+pub(crate) struct __FitzQueryBuilder<TData> {
     /// Nombre SQL de la tabla (sin quotes — se quotea al emitir el SELECT).
     table: String,
     /// Lista de columnas pre-emitidas (\"col1\", \"col2\", ...) — usado por
@@ -5961,7 +6032,7 @@ fn __fitz_fv_to_json(v: &__FitzValue) -> serde_json::Value {
 }
 
 /// Parsea un text de columna JSONB a `__FitzValue::Map(...)`.
-fn __fitz_jsonb_to_fitz_value(s: &str) -> Result<__FitzValue, String> {
+pub(crate) fn __fitz_jsonb_to_fitz_value(s: &str) -> Result<__FitzValue, String> {
     let json: serde_json::Value = serde_json::from_str(s)
         .map_err(|e| format!(\"JSONB inválido: {}\", e))?;
     Ok(__fitz_json_to_fv(&json))
@@ -5969,7 +6040,7 @@ fn __fitz_jsonb_to_fitz_value(s: &str) -> Result<__FitzValue, String> {
 
 /// Serializa un `__FitzValue` a texto JSON para insertarlo en una
 /// columna jsonb (cast `::jsonb` en el SQL).
-fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
+pub(crate) fn __fitz_fitz_value_to_jsonb(v: &__FitzValue) -> Result<String, String> {
     let json = __fitz_fv_to_json(v);
     serde_json::to_string(&json).map_err(|e| format!(\"JSON serialize: {}\", e))
 }
@@ -6228,7 +6299,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             self.emit(
                 "#[derive(Clone, Debug)]\n\
                  #[allow(dead_code)]\n\
-                 enum __FitzValue {\n    \
+                 pub(crate) enum __FitzValue {\n    \
                      Int(i64),\n    \
                      Float(f64),\n    \
                      Str(String),\n    \
@@ -6737,16 +6808,28 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 let methods = m.type_methods.get(&item).cloned();
                 (sig, methods)
             };
-            let resolved: Vec<ResolvedField> = module_sig
-                .fields
+            // Reasignamos el id del módulo al del importer al copiar.
+            // W9 (v0.10.7) — los `Type::Nominal(module_id)` adentro de
+            // los fields tienen IDs del módulo que NO existen en el
+            // TypeEnv del importer. Sin remap, `rust_type_for` panica
+            // con "TypeEnv::info out of bounds" al emitir el tipo Rust
+            // del field (caso: `User.posts: List<Post>` cuando solo
+            // se importa User al main). Caminamos el Type y para cada
+            // Nominal(id) lookup el nombre en el módulo + remapeamos al
+            // id del importer si está, o degradamos a Type::Any si no.
+            let mut combined = module_sig.fields.clone();
+            for f in combined.iter_mut() {
+                f.type_ = self.remap_imported_nominals(&f.type_, module_index);
+            }
+            // Actualizar también los ResolvedField (otra cache del codegen
+            // que usa `gen_field_access` y demás).
+            let resolved: Vec<ResolvedField> = combined
                 .iter()
                 .map(|f| ResolvedField {
                     name: f.name.clone(),
                     type_: f.type_.clone(),
                 })
                 .collect();
-            // Reasignamos el id del módulo al del importer al copiar.
-            let combined = module_sig.fields.clone();
             self.fields_by_id.insert(importer_id, resolved);
             self.type_sigs.insert(
                 name.clone(),
@@ -6788,6 +6871,68 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             return Some(meta);
         }
         self.env.table_metadata(id)
+    }
+
+    /// W9 (v0.10.7) — walka un `Type` y remappea los `Nominal(id)` con
+    /// `id` del módulo origen al `id` correspondiente en el TypeEnv
+    /// del importer. Si el nombre del nominal no está importado al
+    /// importer, degrade a `Type::Any` (gradual) en lugar de panic.
+    /// Recursa en List/Map/Nullable/Tuple/Result/Function/Future.
+    ///
+    /// `module_index` permite resolver el `id` del módulo al nombre
+    /// del tipo (via `loaded_modules[module_index].type_sigs`).
+    fn remap_imported_nominals(&self, ty: &Type, module_index: usize) -> Type {
+        match ty {
+            Type::Nominal(id) => {
+                let m = match self.loaded_modules.get(module_index) {
+                    Some(m) => m,
+                    None => return Type::Any,
+                };
+                let name_opt = m
+                    .type_sigs
+                    .iter()
+                    .find(|(_, sig)| sig.id == *id)
+                    .map(|(name, _)| name.clone());
+                let Some(name) = name_opt else {
+                    return Type::Any;
+                };
+                match self.env.lookup(&name) {
+                    Some(importer_id) => Type::Nominal(importer_id),
+                    None => Type::Any,
+                }
+            }
+            Type::Nullable(inner) => {
+                Type::Nullable(Box::new(self.remap_imported_nominals(inner, module_index)))
+            }
+            Type::List(inner) => {
+                Type::List(Box::new(self.remap_imported_nominals(inner, module_index)))
+            }
+            Type::Map(k, v) => Type::Map(
+                Box::new(self.remap_imported_nominals(k, module_index)),
+                Box::new(self.remap_imported_nominals(v, module_index)),
+            ),
+            Type::Tuple(items) => Type::Tuple(
+                items
+                    .iter()
+                    .map(|t| self.remap_imported_nominals(t, module_index))
+                    .collect(),
+            ),
+            Type::Result { ok, err } => Type::Result {
+                ok: Box::new(self.remap_imported_nominals(ok, module_index)),
+                err: Box::new(self.remap_imported_nominals(err, module_index)),
+            },
+            Type::Function { params, ret } => Type::Function {
+                params: params
+                    .iter()
+                    .map(|t| self.remap_imported_nominals(t, module_index))
+                    .collect(),
+                ret: Box::new(self.remap_imported_nominals(ret, module_index)),
+            },
+            Type::Future(inner) => {
+                Type::Future(Box::new(self.remap_imported_nominals(inner, module_index)))
+            }
+            other => other.clone(),
+        }
     }
 
     /// Devuelve los fields de un tipo nominal por TypeId. Mira primero
@@ -7351,7 +7496,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // posible), emitimos los helpers UNA vez. Caso típico: nombres
         // únicos en el proyecto.
         let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for m in &loader.modules {
+        for (module_index, m) in loader.modules.iter().enumerate() {
             let qualifier = mod_qualifier_of(&m.rel_path);
             // Orden determinista para que el output sea estable entre
             // builds.
@@ -7377,11 +7522,43 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     )
                     .unwrap();
                 }
+                // W9 (v0.10.7) — remap los `Type::Nominal(id)` de los
+                // fields del sig del módulo a IDs del importer (o
+                // degrade a Any cuando el target type no se importa
+                // explícitamente al main). Sin esto, `rust_type_for`
+                // panica con TypeEnv::info out of bounds.
+                let remapped_sig = TypeSig {
+                    id: sig.id,
+                    fields: sig
+                        .fields
+                        .iter()
+                        .map(|f| TypeSigField {
+                            name: f.name.clone(),
+                            type_: self.remap_imported_nominals(&f.type_, module_index),
+                            default: f.default.clone(),
+                        })
+                        .collect(),
+                };
+                // W9 — si algún field quedó como `Type::Any` (target
+                // de relation no importado), skip emit de helpers HTTP/
+                // Python para este type. El binario sigue funcionando
+                // para los types con todos sus targets importados; los
+                // demás quedan como "opaque" sin marshaling automático.
+                // El user que necesite el marshaling completo importa
+                // todos los types relacionados explícitamente.
+                let has_opaque_field = remapped_sig
+                    .fields
+                    .iter()
+                    .any(|f| field_type_has_unresolved_any(&f.type_));
+                if has_opaque_field {
+                    emitted.insert(type_name.clone());
+                    continue;
+                }
                 if do_http {
-                    self.gen_type_http_impls_for_sig(type_name, sig)?;
+                    self.gen_type_http_impls_for_sig(type_name, &remapped_sig)?;
                 }
                 if do_python {
-                    self.gen_python_helpers_for_type(type_name, sig)?;
+                    self.gen_python_helpers_for_type(type_name, &remapped_sig)?;
                 }
                 emitted.insert(type_name.clone());
             }
