@@ -1836,6 +1836,19 @@ impl Parser {
                 }
                 None
             };
+            // T3 — chequeo de nombres duplicados. `fn f(a: Int, a: Int)` es
+            // bug típico copy-paste; el evaluator daría un error confuso
+            // ("variable redefinida") al bindear el segundo `a`. Mejor
+            // capturarlo en el parser con mensaje claro citando el nombre.
+            if params.iter().any(|p| p.name == name) {
+                return Err(self.error(
+                    ErrorKind::UnexpectedToken,
+                    format!(
+                        "el parámetro `{}` está duplicado en la lista de parámetros",
+                        name
+                    ),
+                ));
+            }
             params.push(Param {
                 name,
                 type_,
@@ -8876,5 +8889,119 @@ mod tests {
             }
             other => panic!("esperaba TypeDef, fue {:?}", other),
         }
+    }
+
+    // ===== T3 — caminos de error del parser (deuda residual auditoría) =====
+
+    #[test]
+    fn fn_def_con_params_duplicados_es_error() {
+        let tokens = tokenize("fn f(a: Int, a: Int) => a").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar params duplicados");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicado") && msg.contains('a'),
+            "esperaba mensaje que cite duplicado y nombre del param, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn fn_def_con_params_duplicados_sin_tipo_es_error() {
+        // Sin anotación de tipo también debe captarse.
+        let tokens = tokenize("fn g(x, y, x) => 0").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar params duplicados");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("duplicado"),
+            "esperaba mensaje sobre duplicado, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn decorator_sobre_let_es_error() {
+        // El parser solo acepta decoradores sobre `fn`, `async fn` o `type`.
+        // `@x(1)\nlet y = 2` debe fallar con mensaje claro.
+        let tokens = tokenize("@get(\"/x\")\nlet y = 2").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar decorator sobre let");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("decorador") || msg.contains("`fn`") || msg.contains("`type`"),
+            "esperaba mensaje sobre destino del decorador, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn decorator_sobre_expresion_suelta_es_error() {
+        let tokens = tokenize("@table(\"x\")\n42").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar decorator sobre expresión");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("decorador") || msg.contains("`fn`") || msg.contains("`type`"),
+            "esperaba mensaje sobre destino del decorador, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn string_con_escape_invalido_es_error_del_lexer() {
+        // El lexer rechaza escapes desconocidos como `\q`. Se reporta en
+        // tokenize, no en parse, pero igual cuenta como error path del
+        // pipeline lex-parse.
+        let res = tokenize("let x = \"\\q\"");
+        assert!(res.is_err(), "esperaba error de escape inválido");
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("escape") || msg.contains("\\q"),
+            "esperaba mensaje sobre escape inválido, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn parens_sin_cerrar_en_expresion_es_error() {
+        let tokens = tokenize("let x = (1 + 2").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar paréntesis sin cerrar");
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "esperaba mensaje no vacío para paréntesis sin cerrar"
+        );
+    }
+
+    #[test]
+    fn llave_sin_cerrar_en_bloque_es_error() {
+        let tokens = tokenize("fn f() {\n  let x = 1").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar llave sin cerrar");
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "esperaba mensaje no vacío para llave sin cerrar"
+        );
+    }
+
+    #[test]
+    fn corchete_sin_cerrar_en_list_literal_es_error() {
+        let tokens = tokenize("let xs = [1, 2, 3").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar corchete sin cerrar");
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "esperaba mensaje no vacío para corchete sin cerrar"
+        );
+    }
+
+    #[test]
+    fn corchetes_anidados_mal_balanceados_es_error() {
+        // `[1, [2, 3]` — un corchete adentro y otro afuera, falta cerrar
+        // el exterior.
+        let tokens = tokenize("let xs = [1, [2, 3]").expect("debe tokenizar");
+        let err = parse(tokens).expect_err("debe rechazar anidación mal balanceada");
+        let msg = err.to_string();
+        assert!(
+            !msg.is_empty(),
+            "esperaba mensaje no vacío para anidación mal balanceada"
+        );
     }
 }

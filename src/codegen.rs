@@ -10529,16 +10529,35 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 // recursea campo a campo (incluyendo nominales
                 // anidados como `Arc<Mutex<T>>`, que comparan por
                 // contenido, no identidad).
+                //
+                // T5 (post-W12-W16): el lock-and-compare crudo
+                // deadlockea si lhs y rhs son el MISMO Arc (caso
+                // típico: `let alias = u; ...; u == alias` — un
+                // patrón canónico cuando se trabaja con identidad
+                // compartida). `std::sync::Mutex` no es reentrante:
+                // dos `lock()` en el mismo thread sobre el mismo
+                // Mutex se bloquean mutuamente. Solución: shortcut
+                // `Arc::ptr_eq` al frente, idéntico al patrón ya
+                // usado en el PartialEq de campos nominales
+                // (líneas 23833+ del preludio).
                 if let (Type::Nominal(id_l), Type::Nominal(id_r)) = (&lt, &rt) {
                     if id_l != id_r {
                         return Err(self.err(
                             "igualdad entre instancias de tipos distintos: el checker debería haberlo cazado",
                         ));
                     }
-                    return Ok((
-                        format!("(*({}).lock().unwrap() {} *({}).lock().unwrap())", lc, sym, rc),
-                        Type::Bool,
-                    ));
+                    let code = if is_eq {
+                        format!(
+                            "(Arc::ptr_eq(&{lhs}, &{rhs}) || *({lhs}).lock().unwrap() == *({rhs}).lock().unwrap())",
+                            lhs = lc, rhs = rc
+                        )
+                    } else {
+                        format!(
+                            "(!Arc::ptr_eq(&{lhs}, &{rhs}) && *({lhs}).lock().unwrap() != *({rhs}).lock().unwrap())",
+                            lhs = lc, rhs = rc
+                        )
+                    };
+                    return Ok((code, Type::Bool));
                 }
                 if matches!(lt, Type::Str) && matches!(rt, Type::Str) {
                     return Ok((format!("({} {} {})", lc, sym, rc), Type::Bool));

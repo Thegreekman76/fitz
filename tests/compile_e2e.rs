@@ -117,6 +117,46 @@ fn build_expect_fail(test_name: &str, src: &str) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Como `build_and_run` pero devuelve stderr además del stdout y el
+/// exit code. Útil para tests T4 que necesitan inspeccionar el mensaje
+/// de panic / overflow (no solo el exit code != 0). Mini-tanda T4
+/// (post-W12-W16) — refuerza asserts E2E que antes solo miraban exit.
+fn build_and_run_with_stderr(test_name: &str, src: &str) -> (String, String, i32) {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    (
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+        String::from_utf8_lossy(&run.stderr).into_owned(),
+        run.status.code().unwrap_or(-1),
+    )
+}
+
 /// Como `build_and_run` pero permite setear env vars sobre el child
 /// que ejecuta el binario. Útil para tests de la mini-fase env builtin
 /// — el binario hace `std::env::var(...)` y la var inyectada via
@@ -4530,9 +4570,20 @@ fn lt_let_ok_binding_extrae_resultado() {
 fn lt_let_panic_si_no_matchea() {
     // `let (1, x) = (2, 42)`: el 2 NO matchea el 1 → panic en runtime.
     // El binario debe terminar con exit code != 0.
+    // T4 (post-W12-W16) — además del exit code, validamos que el panic
+    // emite mensaje claro citando que el patrón no matcheó (vía stderr).
     let src = "let (1, x) = (2, 42)\nprint(x)\n";
-    let (_stdout, exit) = build_and_run("lt_let_panic", src);
+    let (stdout, stderr, exit) = build_and_run_with_stderr("lt_let_panic", src);
     assert_ne!(exit, 0, "esperaba exit code != 0 por panic, fue: 0");
+    // El binario produce "el `let` no matcheó el patrón" o similar
+    // (panic message del codegen). Aceptamos cualquier mención al `let`
+    // o al patrón.
+    assert!(
+        stderr.contains("let") || stderr.contains("patrón") || stderr.contains("matche"),
+        "esperaba stderr que cite el let/patrón fallido, fue:\nstdout={}\nstderr={}",
+        stdout,
+        stderr
+    );
 }
 
 // ---- Mini-tanda F9 — escapes extendidos en strings ----
@@ -6590,7 +6641,9 @@ fn float_arithmetic_overflow_devuelve_error_r6() {
     // emite `if !__r.is_finite() { panic!("...") }` después de cada op
     // Float. El catch_unwind del wrapper R6 (prior session) captura
     // el panic en handlers HTTP y devuelve 500 con `{"error": "..."}`.
-    let (stdout, exit) = build_and_run(
+    // T4 (post-W12-W16) — además del exit code, validamos que el panic
+    // del binario emite mensaje claro citando overflow/inf/no finito.
+    let (stdout, stderr, exit) = build_and_run_with_stderr(
         "r6-float-overflow",
         "\
 let x = 1.0e300\n\
@@ -6602,6 +6655,16 @@ print(y)\n\
         exit, 0,
         "overflow Float debe abortar con exit code != 0, fue {} (stdout: {})",
         exit, stdout
+    );
+    let combined = format!("{}{}", stdout, stderr);
+    assert!(
+        combined.contains("inf")
+            || combined.contains("overflow")
+            || combined.contains("finito")
+            || combined.contains("Float"),
+        "esperaba mensaje sobre overflow/inf, fue:\nstdout={}\nstderr={}",
+        stdout,
+        stderr
     );
 }
 
@@ -9306,4 +9369,217 @@ fn orm_min_y_max_combinados_compilan_a_binario() {
     );
     assert_eq!(code, 0, "stdout: {}", stdout);
     assert!(stdout.contains("err"), "esperaba `err`, fue: {}", stdout);
+}
+
+// ===== T5 — tipos custom compilados con cobertura más profunda =====
+// Auditoría T5 (post-W12-W16) — los tests pre-existentes
+// (instancia_basica_round_trip_compilado, igualdad_estructural_*,
+// tipos_anidados_round_trip_compilado) cubren el caso 1-2 niveles. T5
+// extiende a 3 niveles, comparación post-mutación, field chain sobre
+// nullables, y display recursivo de instancias con campos colección.
+
+#[test]
+fn t5_triple_nivel_field_access_y_mutation_compilado() {
+    // 3 niveles de anidación + mutación profunda visible vía alias del
+    // nivel superior. Valida que Rc<RefCell<>> recursea como el
+    // intérprete adentro de la jerarquía.
+    let src = "\
+type City { name: Str }
+type Address { city: City }
+type User { id: Int, addr: Address }
+let u = User { id: 1, addr: Address { city: City { name: \"El Chaltén\" } } }
+let alias = u
+alias.addr.city.name = \"Buenos Aires\"
+print(u.addr.city.name)
+print(alias.addr.city.name)
+print(u == alias)
+";
+    let (stdout, exit) = build_and_run("t5-triple-nivel", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["Buenos Aires", "Buenos Aires", "true"]);
+}
+
+#[test]
+fn t5_igualdad_difiere_tras_mutacion_de_un_solo_field_compilado() {
+    // Dos instancias estructuralmente iguales se vuelven distintas tras
+    // mutar UN campo de UNA. PartialEq recursivo se sensibiliza a
+    // cambios profundos.
+    let src = "\
+type Addr { city: Str }
+type User { id: Int, addr: Addr }
+let a = User { id: 1, addr: Addr { city: \"X\" } }
+let b = User { id: 1, addr: Addr { city: \"X\" } }
+print(a == b)
+b.addr.city = \"Y\"
+print(a == b)
+print(a.addr.city)
+print(b.addr.city)
+";
+    let (stdout, exit) = build_and_run("t5-eq-diff-tras-mutacion", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["true", "false", "X", "Y"]);
+}
+
+#[test]
+fn t5_field_chain_sobre_nullable_anidado_compilado() {
+    // Caso típico: `match` con pattern `null => ...` y ident binding
+    // que refina al inner. Cap 14 de la guía documenta este patrón
+    // como canónico para Nullable. El binding `u` post-`null =>`
+    // queda con tipo `User` (no `User?`), accediendo a .addr y .city
+    // sin glue.
+    let src = "\
+type Addr { city: Str }
+type User { id: Int, addr: Addr? }
+type Order { id: Int, user: User? }
+fn city_of(o: Order) -> Str {
+    return match o.user {
+        null => \"sin user\"
+        u => match u.addr {
+            null => \"sin addr\"
+            a => a.city
+        }
+    }
+}
+let full = Order { id: 9, user: User { id: 1, addr: Addr { city: \"El Chaltén\" } } }
+let no_addr = Order { id: 10, user: User { id: 2 } }
+let no_user = Order { id: 11 }
+print(city_of(full))
+print(city_of(no_addr))
+print(city_of(no_user))
+";
+    let (stdout, exit) = build_and_run("t5-field-chain-nullable", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["El Chaltén", "sin addr", "sin user"]);
+}
+
+#[test]
+fn t5_display_recursivo_con_field_lista_y_mapa_compilado() {
+    // Instancia con campos `List<Int>` y `Map<Str, Int>` debe imprimir
+    // el formato canónico recursivo del intérprete (sin perder ningún
+    // bracket o coma).
+    let src = "\
+type Stats { name: Str, values: List<Int>, by_tag: Map<Str, Int> }
+let s = Stats { name: \"foo\", values: [1, 2, 3], by_tag: {\"a\": 10, \"b\": 20} }
+print(s)
+";
+    let (stdout, exit) = build_and_run("t5-display-recursivo", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &["Stats { name: \"foo\", values: [1, 2, 3], by_tag: {\"a\": 10, \"b\": 20} }"],
+    );
+}
+
+// ===== T6 — combinatorias profundas List/Map con tipos custom =====
+// Auditoría T6 (post-W12-W16) — los tests pre-existentes cubren
+// List<Int>, Map<Str,Int>, List<Custom>. T6 valida composiciones:
+// List<List<Int>>, Map<Str, List<Int>>, List<Custom?>, Map<Str, Custom>.
+
+#[test]
+fn t6_list_de_listas_int_compilado() {
+    // Matriz: list de lists. Indexing doble + iteración anidada.
+    // Fitz no tiene `let mut` — reasignación pura es OK.
+    let src = "\
+let matrix: List<List<Int>> = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+print(matrix[0])
+print(matrix[1][2])
+print(matrix.len())
+let row = matrix[2]
+print(row.len())
+let total = 0
+for row in matrix {
+    for v in row {
+        total = total + v
+    }
+}
+print(total)
+";
+    let (stdout, exit) = build_and_run("t6-list-de-listas", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["[1, 2, 3]", "6", "3", "3", "45"]);
+}
+
+#[test]
+fn t6_map_str_a_list_int_compilado() {
+    // Map de Str → List<Int>. Lookup + iter sobre el inner. Match
+    // arms multi-stmt con trailing `print(...)` colapsan en
+    // expression position — el codegen lo rechaza. Workaround
+    // canónico: extraer via fn helper que retorna `Int` y se
+    // imprime afuera. Valida el chain `map.get -> Result<List> ->
+    // .len()` end-to-end.
+    let src = "\
+fn show_a(buckets: Map<Str, List<Int>>) -> Int {
+    return match buckets.get(\"a\") {
+        Ok(xs) => xs.len()
+        Err(_) => 0
+    }
+}
+fn show_b(buckets: Map<Str, List<Int>>) -> Int {
+    return match buckets.get(\"b\") {
+        Ok(xs) => xs.len()
+        Err(_) => 0
+    }
+}
+let buckets: Map<Str, List<Int>> = {\"a\": [1, 2, 3], \"b\": [10, 20]}
+print(buckets.len())
+print(show_a(buckets))
+print(show_b(buckets))
+match buckets.get(\"a\") {
+    Ok(xs) => { print(xs) }
+    Err(e) => { print(e) }
+}
+";
+    let (stdout, exit) = build_and_run("t6-map-str-a-list-int", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["2", "3", "2", "[1, 2, 3]"]);
+}
+
+#[test]
+fn t6_list_de_custom_nullable_compilado() {
+    // List<User?> con mezcla de Some + null. Display + iter + chequeo
+    // de cada elemento via match (Fitz no tiene `let mut` — reasignación
+    // pura del binding existente).
+    let src = "\
+type User { id: Int, name: Str }
+let users: List<User?> = [User { id: 1, name: \"a\" }, null, User { id: 3, name: \"c\" }]
+print(users.len())
+let nulls = 0
+let presentes = 0
+for u in users {
+    match u {
+        null => { nulls = nulls + 1 }
+        _ => { presentes = presentes + 1 }
+    }
+}
+print(nulls)
+print(presentes)
+print(users[1])
+";
+    let (stdout, exit) = build_and_run("t6-list-custom-nullable", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["3", "1", "2", "null"]);
+}
+
+#[test]
+fn t6_map_str_a_custom_compilado() {
+    // Map<Str, User> — value es nominal. get() devuelve Result<User>.
+    // El error del get tiene formato `"clave no encontrada: <k>"`
+    // (sin comillas alrededor del key, sin "en mapa") según
+    // src/codegen.rs:17259.
+    let src = "\
+type User { id: Int, name: Str }
+let dir: Map<Str, User> = {\"a\": User { id: 1, name: \"Ana\" }, \"b\": User { id: 2, name: \"Ben\" }}
+print(dir.len())
+match dir.get(\"a\") {
+    Ok(u) => { print(u.name) }
+    Err(e) => { print(e) }
+}
+match dir.get(\"missing\") {
+    Ok(u) => { print(u.name) }
+    Err(e) => { print(e) }
+}
+";
+    let (stdout, exit) = build_and_run("t6-map-str-a-custom", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["2", "Ana", "clave no encontrada: missing"]);
 }
