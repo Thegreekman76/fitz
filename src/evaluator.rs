@@ -12411,25 +12411,43 @@ fn translate_method_call_to_sql(
                     "`{param_name}.{col_name}.{method}(s)` espera 1 arg Str"
                 ));
             }
-            // Sólo aceptamos Str literal acá — necesitamos manipular
-            // la string para envolverla con `%`. Si el arg es una
-            // expresión arbitraria, lo rechazamos (deuda menor).
-            let raw = match &args[0] {
-                Expr::Str(s, _) => s.clone(),
-                _ => {
-                    return Err(format!(
-                        "`.{method}(s)` MVP: el arg debe ser string literal"
-                    ));
+            // W3 (v0.10.6) — dos paths:
+            //
+            // 1. Str literal: escape Rust-side de `%`/`_`, push como
+            //    Text con `%` ya envuelto. SQL `LIKE $N`. El user
+            //    espera "hola%a" → match literal de "hola%a".
+            //
+            // 2. Otra expresión (var, field, etc.): traducir como arg
+            //    general (binding $N) y envolver SQL-side con `||`
+            //    Postgres. SIN escape runtime: `name.starts_with(prefix)`
+            //    con `prefix = "a%b"` matchea como `LIKE 'a%b' || '%'`
+            //    → "a*b*" (% del var sigue siendo wildcard). Misma
+            //    semántica que `.like(var)` — el user controla el
+            //    pattern.
+            match &args[0] {
+                Expr::Str(s, _) => {
+                    let pattern = match method.as_str() {
+                        "starts_with" => format!("{}%", escape_like(s)),
+                        "ends_with" => format!("%{}", escape_like(s)),
+                        "contains" => format!("%{}%", escape_like(s)),
+                        _ => unreachable!(),
+                    };
+                    args_acc.push(crate::db::PgValue::Text(pattern));
+                    Ok(format!("\"{}\" LIKE ${}", sql_col, args_acc.len()))
                 }
-            };
-            let pattern = match method.as_str() {
-                "starts_with" => format!("{}%", escape_like(&raw)),
-                "ends_with" => format!("%{}", escape_like(&raw)),
-                "contains" => format!("%{}%", escape_like(&raw)),
-                _ => unreachable!(),
-            };
-            args_acc.push(crate::db::PgValue::Text(pattern));
-            Ok(format!("\"{}\" LIKE ${}", sql_col, args_acc.len()))
+                _ => {
+                    let arg_sql = translate_expr_to_sql_with_env(
+                        &args[0], param_name, fields, meta, args_acc, env,
+                    )?;
+                    let pattern_sql = match method.as_str() {
+                        "starts_with" => format!("{} || '%'", arg_sql),
+                        "ends_with" => format!("'%' || {}", arg_sql),
+                        "contains" => format!("'%' || {} || '%'", arg_sql),
+                        _ => unreachable!(),
+                    };
+                    Ok(format!("\"{}\" LIKE {}", sql_col, pattern_sql))
+                }
+            }
         }
         other => Err(format!(
             "método `.{other}(...)` no soportado sobre fields en `.where(...)`. \

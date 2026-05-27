@@ -11123,29 +11123,42 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         ),
                     ));
                 }
-                let raw = match &args[0] {
-                    Expr::Str(s, _) => s.clone(),
-                    _ => {
-                        return Err(self.err_at(
-                            args[0].span(),
-                            format!(
-                                "`.{}(s)` MVP: el arg debe ser string literal",
-                                method
-                            ),
+                // W3 (v0.10.6) — paridad con evaluator. Str literal:
+                // escape `%`/`_` build-time + envolver. Otra expr (var,
+                // field, etc.): bind como $N text + envolver SQL-side
+                // con `||` Postgres, sin escape runtime (el user
+                // controla el pattern, igual que `.like(var)`).
+                match &args[0] {
+                    Expr::Str(s, _) => {
+                        let pattern = match method.as_str() {
+                            "starts_with" => format!("{}%", translate_escape_like(s)),
+                            "ends_with" => format!("%{}", translate_escape_like(s)),
+                            "contains" => format!("%{}%", translate_escape_like(s)),
+                            _ => unreachable!(),
+                        };
+                        bindings.push(format!(
+                            "__FitzPgValue::Text({}.to_string())",
+                            rust_str_literal(&pattern)
                         ));
+                        Ok(format!("\"{}\" LIKE ${}", sql_col, bindings.len()))
                     }
-                };
-                let pattern = match method.as_str() {
-                    "starts_with" => format!("{}%", translate_escape_like(&raw)),
-                    "ends_with" => format!("%{}", translate_escape_like(&raw)),
-                    "contains" => format!("%{}%", translate_escape_like(&raw)),
-                    _ => unreachable!(),
-                };
-                bindings.push(format!(
-                    "__FitzPgValue::Text({}.to_string())",
-                    rust_str_literal(&pattern)
-                ));
-                Ok(format!("\"{}\" LIKE ${}", sql_col, bindings.len()))
+                    _ => {
+                        let arg_sql = self.translate_closure_to_sql(
+                            &args[0],
+                            param_name,
+                            fields,
+                            table_meta,
+                            bindings,
+                        )?;
+                        let pattern_sql = match method.as_str() {
+                            "starts_with" => format!("{} || '%'", arg_sql),
+                            "ends_with" => format!("'%' || {}", arg_sql),
+                            "contains" => format!("'%' || {} || '%'", arg_sql),
+                            _ => unreachable!(),
+                        };
+                        Ok(format!("\"{}\" LIKE {}", sql_col, pattern_sql))
+                    }
+                }
             }
             // Deuda residual #3 (v0.10.5) — JSON operators sobre
             // fields jsonb (`Map<...>` columns). Paralelo a
@@ -31601,6 +31614,58 @@ mod tests {
         assert!(
             r.contains("\"%ad%\".to_string()"),
             "esperaba binding `\"%ad%\"`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_starts_with_acepta_var_externa_w3() {
+        // W3 (v0.10.6) — `.starts_with(<var>)` ahora compila. El SQL
+        // queda `LIKE $N || '%'` y la var se bindea como Text. Sin
+        // escape runtime — paralelo a `.like(var)`.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot(prefix: Str) -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _u = User.where(fn(u) => u.name.starts_with(prefix)).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK con starts_with(var)");
+        // SQL emitted con `$N || '%'`.
+        assert!(
+            rust.contains("\\\"name\\\" LIKE $1 || '%'"),
+            "esperaba SQL `\"name\" LIKE $1 || '%'`, fue: {rust}",
+        );
+        // El binding viene del path expr genérico (no .to_string()
+        // hardcoded del literal).
+        assert!(
+            !rust.contains("\"%\".to_string()"),
+            "no esperaba binding hardcoded del literal, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_ends_with_y_contains_aceptan_var_externa_w3() {
+        // W3 — ends_with y contains también aceptan vars.
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot(suffix: Str, needle: Str) -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _a = User.where(fn(u) => u.name.ends_with(suffix)).all(db).await?\n  \
+                       let _b = User.where(fn(u) => u.name.contains(needle)).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK con ends_with/contains(var)");
+        assert!(
+            rust.contains("\\\"name\\\" LIKE '%' || $1"),
+            "esperaba SQL `\"name\" LIKE '%' || $1` para ends_with, fue: {rust}",
+        );
+        assert!(
+            rust.contains("\\\"name\\\" LIKE '%' || $1 || '%'"),
+            "esperaba SQL `\"name\" LIKE '%' || $1 || '%'` para contains, fue: {rust}",
         );
     }
 
