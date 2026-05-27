@@ -10706,11 +10706,23 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     )),
                 }
             }
-            Expr::Field { object, field, .. } => {
-                // Solo aceptamos `<param>.<field>` — accesos sobre
-                // otros valores (vars locales, etc.) NO soportados.
+            Expr::Field { object, .. } => {
+                // Dos paths:
+                // 1. `<param>.<col>` → SQL column del row (sin binding).
+                // 2. W6 (v0.10.6) — `<var>.<field>` (`body.lang`, etc.):
+                //    delegar a `gen_expr(body)` que resuelve field
+                //    access sobre Instance en el outer scope, y
+                //    bindear como $N via __IntoPgValue.
                 match object.as_ref() {
                     Expr::Ident(name, _) if name == param_name => {
+                        // Caso típico: el field debe ser uno declarado
+                        // en el type. Validamos contra `fields`.
+                        // (Path interno: re-extrae el field literal del
+                        // body por el match arm.)
+                        let field = match body {
+                            Expr::Field { field, .. } => field,
+                            _ => unreachable!("matched Expr::Field above"),
+                        };
                         if !fields.iter().any(|f| f.name == *field) {
                             return Err(self.err_at(
                                 body.span(),
@@ -10732,13 +10744,17 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                             .unwrap_or(field.as_str());
                         Ok(format!("\"{}\"", sql_col))
                     }
-                    _ => Err(self.err_at(
-                        body.span(),
-                        format!(
-                            "`.where(...)` solo admite field access sobre el parámetro `{}` (e.g. `{}.field`)",
-                            param_name, param_name
-                        ),
-                    )),
+                    _ => {
+                        // W6 — field access externo. `gen_expr(body)`
+                        // resuelve la expr entera (incluido el
+                        // borrow/clone del field del Instance), y
+                        // `__IntoPgValue::into_pg` la serializa.
+                        // Funciona para chains `body.changes.name`,
+                        // `user.profile.email`, etc.
+                        let (code, _ty) = self.gen_expr(body)?;
+                        bindings.push(format!("<_ as __IntoPgValue>::into_pg({})", code));
+                        Ok(format!("${}", bindings.len()))
+                    }
                 }
             }
             // Method call sobre `u.field.method(...)` — is_in, is_null,
@@ -31614,6 +31630,58 @@ mod tests {
         assert!(
             r.contains("\"%ad%\".to_string()"),
             "esperaba binding `\"%ad%\"`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_field_access_externo_emite_into_pg_binding_w6() {
+        // W6 (v0.10.6) — `.where(fn(p) => p.lang == body.lang)` compila.
+        // Antes solo aceptaba `<param>.<field>`; ahora delega a gen_expr
+        // sobre el body completo, lo que resuelve field access sobre
+        // vars externas (Instance del body deserializado).
+        let src = "type Filter {\n  \
+                       lang: Str\n\
+                   }\n\
+                   @table(\"posts\") type Post {\n  \
+                       @primary id: Int = 0\n  \
+                       lang: Str\n\
+                   }\n\
+                   async fn search(body: Filter) -> Result<List<Post>> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return Post.where(fn(p) => p.lang == body.lang).all(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK con body.lang");
+        // SQL emitted con `"lang" = $1` (el field del row al izq,
+        // el binding del body.lang al der).
+        assert!(
+            rust.contains("\\\"lang\\\" = $1"),
+            "esperaba SQL `\"lang\" = $1`, fue: {rust}",
+        );
+        // El binding viene del path __IntoPgValue (path expr externo).
+        assert!(
+            rust.contains("<_ as __IntoPgValue>::into_pg"),
+            "esperaba binding via __IntoPgValue::into_pg, fue: {rust}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_field_access_externo_chain_compila_w6() {
+        // W6 — chain más larga: `req.body.email`. El gen_expr recurse
+        // sobre el body entero y emite el field access nested.
+        let src = "type Inner { email: Str }\n\
+                   type Outer { inner: Inner }\n\
+                   @table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       email: Str\n\
+                   }\n\
+                   async fn find(req: Outer) -> Result<User> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       return User.where(fn(u) => u.email == req.inner.email).first(db).await\n\
+                   }\n";
+        let rust = gen(src).expect("codegen OK con req.inner.email");
+        assert!(
+            rust.contains("<_ as __IntoPgValue>::into_pg"),
+            "esperaba binding via __IntoPgValue, fue: {rust}",
         );
     }
 

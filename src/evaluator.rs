@@ -12702,8 +12702,12 @@ pub fn translate_expr_to_sql_with_env(
             }
         }
         Expr::Field { object, field, .. } => {
-            // Solo aceptamos `<param>.<field>` — accesos sobre otros
-            // valores (vars locales, etc.) NO se soportan en MVP.
+            // Dos paths:
+            // 1. `<param>.<col>` → SQL column del row (sin binding).
+            // 2. W6 (v0.10.6) — `<var>.<field>` con var externa al
+            //    closure (Instance): lookup en closure_env, accedemos
+            //    al field, serializamos como $N binding. Caso típico
+            //    `body.lang` en `@post` handler.
             match object.as_ref() {
                 Expr::Ident(name, _) if name == param_name => {
                     // Validar que el field existe en el type.
@@ -12724,8 +12728,49 @@ pub fn translate_expr_to_sql_with_env(
                         .unwrap_or(field.as_str());
                     Ok(format!("\"{}\"", sql_col))
                 }
+                Expr::Ident(var_name, _) => {
+                    // W6 — field access sobre var externa. Solo si
+                    // tenemos closure_env (env=None viene de tests
+                    // legacy que no resuelven vars).
+                    let e = env.ok_or_else(|| {
+                        format!(
+                            "`{var_name}.{field}` no soportado en `.where(...)` sin closure env"
+                        )
+                    })?;
+                    let v = e.lock().get(var_name).ok_or_else(|| {
+                        format!(
+                            "variable `{var_name}` no está en scope del closure de `.where(...)`"
+                        )
+                    })?;
+                    let inner = match &v {
+                        Value::Instance { fields: inst, .. } => inst
+                            .lock()
+                            .iter()
+                            .find(|(n, _)| n == field)
+                            .map(|(_, val)| val.clone())
+                            .ok_or_else(|| {
+                                format!(
+                                    "field `{field}` no existe en `{var_name}`: {} en `.where(...)`",
+                                    v.type_name()
+                                )
+                            })?,
+                        _ => {
+                            return Err(format!(
+                                "`{var_name}.{field}` en `.where(...)`: `{var_name}` debe ser una instancia de un type, recibió `{}`",
+                                v.type_name()
+                            ));
+                        }
+                    };
+                    let pg = fitz_value_to_pg(&inner).map_err(|msg| {
+                        format!(
+                            "`{var_name}.{field}` no se puede usar como arg de query: {msg}"
+                        )
+                    })?;
+                    args_acc.push(pg);
+                    Ok(format!("${}", args_acc.len()))
+                }
                 _ => Err(format!(
-                    "`.where(...)` solo admite field access sobre el parámetro `{param_name}` (e.g. `{param_name}.field`)"
+                    "`.where(...)` solo admite field access sobre el parámetro `{param_name}.<col>` o sobre vars externas `<var>.<field>` (recibió expresión más compleja)"
                 )),
             }
         }
