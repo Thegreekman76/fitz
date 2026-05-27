@@ -2666,66 +2666,100 @@ impl Parser {
         Ok((args, kwargs))
     }
 
-    /// Parsea los argumentos de una llamada, ya con '(' consumido.
-    /// Termina consumiendo el ')'. Acepta lista vacía, coma trailing,
-    /// y newlines entre elementos (útil para llamadas multilínea).
-    fn parse_call_args(&mut self) -> FitzResult<Vec<Expr>> {
-        let mut args = Vec::new();
-        let mut saw_named = false;
+    /// M5 helper (post-audit 2026-05-27) — parsea una secuencia de
+    /// items separados por coma, terminada por `terminator`. Maneja
+    /// trailing comma (`[1, 2, 3,]`) y newlines entre items. El
+    /// caller pasa el parser per-item como closure; el helper se
+    /// encarga del scaffold (skip_newlines, comma, trailing comma,
+    /// expect del terminator).
+    ///
+    /// `terminator` debe ser una variante unit (`RParen`/`RBracket`/
+    /// `RBrace`) — los comparamos con `matches!` exhaustivo en el
+    /// dispatch interno.
+    ///
+    /// **NO aplica a** `parse_struct_lit_fields` (separador puede
+    /// ser newline además de coma) ni a `parse_list_literal_items`
+    /// (necesita detección de comprehension tras el primer item).
+    /// Esos siguen con su propio loop por razones documentadas en
+    /// sus doc-comments.
+    fn parse_comma_separated<T, F>(
+        &mut self,
+        terminator: &Token,
+        close_msg: &str,
+        mut parse_item: F,
+    ) -> FitzResult<Vec<T>>
+    where
+        F: FnMut(&mut Self) -> FitzResult<T>,
+    {
+        let mut items: Vec<T> = Vec::new();
         self.skip_newlines();
-        // Caso vacío: f()
-        if matches!(self.peek(), Token::RParen) {
+        if std::mem::discriminant(self.peek()) == std::mem::discriminant(terminator) {
             self.advance();
-            return Ok(args);
+            return Ok(items);
         }
         loop {
             self.skip_newlines();
-            // Fp.3 — `name: value` con lookahead Ident + Colon. Mismo
-            // patrón que kwargs de decoradores (eval ya lo hace para
-            // `@server(port=3000)`). El parser no chequea aquí si el
-            // name corresponde a un param real — eso lo hace el checker
-            // y el evaluator/codegen al despachar la call.
-            let (start_line, start_col) = self.current_pos();
-            let is_named =
-                matches!(self.peek(), Token::Ident(_)) && matches!(self.peek_at(1), Token::Colon);
-            let arg = if is_named {
-                let name = self
-                    .expect_ident("se esperaba nombre de argumento")
-                    .unwrap();
-                self.advance(); // consume `:`
-                let value = self.expression()?;
-                saw_named = true;
-                Expr::NamedArg {
-                    name,
-                    value: Box::new(value),
-                    span: Span::new(start_line, start_col),
-                }
-            } else {
-                if saw_named {
-                    return Err(self.error(
-                        ErrorKind::UnexpectedToken,
-                        "no se pueden mezclar args posicionales después de args nombrados — \
-                         los nombrados van al final",
-                    ));
-                }
-                self.expression()?
-            };
-            args.push(arg);
+            items.push(parse_item(self)?);
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
                 self.skip_newlines();
-                // Trailing comma: f(1, 2,)
-                if matches!(self.peek(), Token::RParen) {
+                if std::mem::discriminant(self.peek()) == std::mem::discriminant(terminator) {
                     self.advance();
-                    return Ok(args);
+                    return Ok(items);
                 }
             } else {
                 break;
             }
         }
-        self.expect(&Token::RParen, "se esperaba ')' para cerrar la llamada")?;
-        Ok(args)
+        self.expect(terminator, close_msg)?;
+        Ok(items)
+    }
+
+    /// Parsea los argumentos de una llamada, ya con '(' consumido.
+    /// Termina consumiendo el ')'. Acepta lista vacía, coma trailing,
+    /// y newlines entre elementos (útil para llamadas multilínea).
+    fn parse_call_args(&mut self) -> FitzResult<Vec<Expr>> {
+        // M5 (post-audit) — el scaffold de "coma + trailing comma +
+        // newlines + RParen" lo provee `parse_comma_separated`. La
+        // lógica per-item (Fp.3: named arg vs positional + flag
+        // `saw_named` para orden) queda en el closure.
+        let mut saw_named = false;
+        self.parse_comma_separated(
+            &Token::RParen,
+            "se esperaba ')' para cerrar la llamada",
+            |p| {
+                // Fp.3 — `name: value` con lookahead Ident + Colon.
+                // Mismo patrón que kwargs de decoradores (eval ya lo
+                // hace para `@server(port=3000)`). El parser no
+                // chequea aquí si el name corresponde a un param real
+                // — eso lo hace el checker y el evaluator/codegen al
+                // despachar la call.
+                let (start_line, start_col) = p.current_pos();
+                let is_named =
+                    matches!(p.peek(), Token::Ident(_)) && matches!(p.peek_at(1), Token::Colon);
+                if is_named {
+                    let name = p.expect_ident("se esperaba nombre de argumento").unwrap();
+                    p.advance(); // consume `:`
+                    let value = p.expression()?;
+                    saw_named = true;
+                    Ok(Expr::NamedArg {
+                        name,
+                        value: Box::new(value),
+                        span: Span::new(start_line, start_col),
+                    })
+                } else {
+                    if saw_named {
+                        return Err(p.error(
+                            ErrorKind::UnexpectedToken,
+                            "no se pueden mezclar args posicionales después de args nombrados — \
+                             los nombrados van al final",
+                        ));
+                    }
+                    p.expression()
+                }
+            },
+        )
     }
 
     /// Expresión "hoja": literal, identificador, paréntesis, `if`,
@@ -3021,27 +3055,36 @@ impl Parser {
         }
 
         pairs.push((key, value));
-        // Resto de pares del map literal normal.
-        loop {
-            if matches!(self.peek(), Token::Comma) {
-                self.advance();
-                self.skip_newlines();
-                if matches!(self.peek(), Token::RBrace) {
-                    self.advance();
-                    return Ok(Expr::Map(pairs, span));
-                }
-            } else {
-                break;
-            }
-            self.skip_newlines();
-            let key = self.expression()?;
-            self.expect(&Token::Colon, "se esperaba ':' entre clave y valor en mapa")?;
-            self.skip_newlines();
-            let value = self.expression()?;
-            pairs.push((key, value));
-            self.skip_newlines();
+        // M5 (post-audit) — el resto de pares se parsea con el
+        // helper `parse_comma_separated`. El primer par ya está en
+        // `pairs`; para reusar el helper, simulamos un terminador
+        // alternativo a través de una rama dedicada: si después del
+        // primer par ya viene `}`, salimos sin invocarlo. Si viene
+        // `,` lo consumimos y dejamos que el helper itere desde el
+        // próximo par.
+        self.skip_newlines();
+        if matches!(self.peek(), Token::RBrace) {
+            self.advance();
+            return Ok(Expr::Map(pairs, span));
         }
-        self.expect(&Token::RBrace, "se esperaba '}' para cerrar el mapa")?;
+        // Próximo char debería ser `,`. El helper lo espera fuera
+        // del primer item, así que lo consumimos manualmente acá.
+        self.expect(
+            &Token::Comma,
+            "se esperaba ',' o '}' después del primer par del mapa",
+        )?;
+        let rest = self.parse_comma_separated(
+            &Token::RBrace,
+            "se esperaba '}' para cerrar el mapa",
+            |p| {
+                let k = p.expression()?;
+                p.expect(&Token::Colon, "se esperaba ':' entre clave y valor en mapa")?;
+                p.skip_newlines();
+                let v = p.expression()?;
+                Ok((k, v))
+            },
+        )?;
+        pairs.extend(rest);
         Ok(Expr::Map(pairs, span))
     }
 }
