@@ -8802,6 +8802,63 @@ v0.10.1, esta sección con status CERRADA + stats finales,
 deudas-post-5b.md con la deuda smoke GUIDE marcada ✅, CLAUDE.md
 actualizado.
 
+### v0.10.6 — Bloque W1-W7: workarounds residuales del ORM cerrados (2026-05-27)
+
+Tras cerrar las 4 deudas grandes del ORM en v0.10.4/v0.10.5,
+durante la actualización de ejemplos y boilerplates encontramos
+7 workarounds menores que el user tropezaría al escribir código
+real. Los 7 cerrados en bloque en v0.10.6, uno por commit:
+
+- **W4** — `id: 0` con `@primary Int` skipea el field del INSERT
+  para que Postgres asigne via `bigserial`/`IDENTITY DEFAULT`.
+  Branch runtime `if __g.<pk> == 0` con dos SQLs alternativos
+  (con/sin PK) en `gen_orm_type_insert`. Paralelo bit-a-bit al
+  evaluator.
+- **W5** — `db.close()` devuelve `Future<Result<Null>>` (antes
+  `Future<Null>`). Helper preludio `__fitz_db_close` retorna
+  `Result<(), String>`. Los docs ya prometían esta semántica
+  desde v0.10.5 — ahora el código se alineó.
+- **W7** — `.update(db, Map var)` además del literal. Nuevo
+  `UpdateSetEmission { Static, Dynamic }`. Dynamic emite un
+  closure IIFE con match runtime sobre `key.as_str()` ramificado
+  por field del type, soporta primitivos + Map<...> (jsonb) +
+  List<scalar> (arrays).
+- **W3** — `.starts_with`/`.ends_with`/`.contains` aceptan var Str.
+  Str literal mantiene escape Rust-side de `%`/`_`; var/expr
+  envuelve SQL-side con `||` Postgres. Sin escape runtime para
+  vars (igual que `.like(var)`).
+- **W6** — `body.field` en closures de `.where`. Translator
+  (evaluator + codegen) detecta field access sobre vars externas
+  al `param_name` del closure y bindea como `$N`. Soporta chains
+  arbitrarios (`req.inner.email`).
+- **W1** — Map literal homogéneo context-aware. Nuevo wrapper
+  `gen_map_lit_with_hint(pairs, span, hint)`. Si hint es
+  `Map<_, Any>` (peleamos `Nullable` outer), force shape
+  heterogéneo. Aplica en struct literals y `let` con anotación.
+- **W2** — Nullable refinement en match arms. Dos correcciones:
+  `Pattern::Null` sobre Nullable emite `None` (antes `_` —
+  bug silencioso que matcheaba TODO); `Pattern::Ident` sobre
+  Nullable emite `Some(name)` con `name: T` refinado. Checker
+  estático también gana refinement flow-sensitive.
+
+**Tests al cierre del bloque**: 2562 unit + 295 compile_e2e + 81
+cli_e2e + 3 openapi + 46+ db_real_postgres. Smoke
+`GUIDE_EXAMPLES_COMPILE` (292 ejemplos) verde. Clippy
+`--all-targets -D warnings` limpio.
+
+**Barrida de documentación**: workarounds removidos del prose de
+`docs/db-orm.md` (sec 28 ahora marca los 7 como CERRADOS),
+ejemplos pedagógicos (`examples/guide/31-orm.fitz` +
+`31b-orm-crud-http.fitz`) actualizados con la sintaxis canónica.
+
+**Próximo norte tras v0.10.6**: boilerplates ORM Dockerizados —
+convertir `api-postgres-python` (SQLAlchemy) a Fitz ORM nativo
+side-by-side, crear boilerplate nuevo dedicado al ORM full
+(relations + JSONB + arrays + auth + ws + cron), benchmarks
+Fitz ORM vs SQLAlchemy.
+
+---
+
 ### Deuda residual derivada de 10.b (NO bloquea v0.10.1)
 
 Estos items son refinements post-10.b. No bloquean la promesa de

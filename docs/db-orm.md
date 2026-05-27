@@ -2396,15 +2396,16 @@ post-Fase 10".
 
 ## 28. Limitaciones honestas y deuda explícita
 
-Lo que NO está en el MVP, con plan de cierre y workaround:
+Lo que NO está en el MVP, con plan de cierre y workaround
+recomendado:
 
 ### Migraciones automáticas (`fitz db diff` / `fitz db migrate`)
 
 - **Status**: deuda comprometida. Fase 10.6+ separada.
 - **Workaround**: `db.exec("CREATE TABLE IF NOT EXISTS ...", [])`
   al boot, o sistema manual versionado (sección 26).
-- **Cuándo**: post-v0.10.2. Requiere diseñar el formato de migration
-  files + comparador AST `type` vs schema real Postgres.
+- **Cuándo**: requiere diseñar el formato de migration files +
+  comparador AST `type` vs schema real Postgres.
 
 ### Transactions (`BEGIN` / `COMMIT` / `ROLLBACK`)
 
@@ -2440,216 +2441,51 @@ Lo que NO está en el MVP, con plan de cierre y workaround:
 - **Cuándo**: mini-fase aparte. Decisión: implementar como tipos
   built-in `Date`/`DateTime`/`UUID` con métodos.
 
-### ✅ JSON operators (`->`, `->>`, `@>`, `?`) en `.where(...)` — CERRADO v0.10.5
+### JSON operators avanzados
 
-- **Status**: **CERRADO**. Cinco method calls sobre fields jsonb
-  mapeados a operadores Postgres nativos (`?`, `?&`, `?|`, `@>`,
-  `->>`). Ver detalle en sección 13.
-- **Caveats** que siguen como deuda menor:
-  - `.has_all_keys/has_any_keys/contains_json` requieren literales
-    (no vars del scope).
-  - `.contains_json({...})` solo acepta values primitivos.
-  - `.get(key)` devuelve text — comparación contra Int requiere
-    cast crudo o helper futuro (`.get_int(key)`).
-  - Nested path access (`e.data.get("a").get("b")`) no soportado;
-    workaround con `db.query` crudo.
-- **Operadores faltantes** (deuda menor): `@@` (text search),
-  `#>` / `#>>` (path access estructurado), `||` (concat jsonb).
+Los operadores principales (`?`, `?&`, `?|`, `@>`, `->>`) están
+disponibles como method calls sobre fields jsonb (ver sección 13).
+Lo que queda como deuda menor:
 
-### ✅ `BelongsTo` en `.preload(...)` — CERRADO v0.10.5 (via convention)
+- `.has_all_keys/has_any_keys/contains_json` requieren args
+  literales (no vars del scope outer).
+- `.contains_json({...})` solo acepta values primitivos (no Maps
+  anidados).
+- `.get(key)` devuelve text — comparación contra Int requiere
+  cast crudo (`db.query(...)`) o helper futuro (`.get_int(key)`).
+- Nested path access (`e.data.get("a").get("b")`) no soportado;
+  workaround con `db.query` crudo.
+- **Operadores faltantes**: `@@` (text search), `#>` / `#>>`
+  (path access estructurado), `||` (concat jsonb).
 
-- **Status**: **CERRADO**. `Post.preload("user").all(db)` funciona
-  cuando el type declara el companion: `@belongs_to("User")
-  user_id: Int` + sibling `user: User?` adyacente. El checker
-  auto-detecta la convención (stripping `_id` del FK name, match
-  con sibling Nullable<Target>) y registra el companion como
-  `BelongsToCompanion` (variante nueva en `RelationKind`). El
-  codegen emite batch SELECT inverso (`target.id IN
-  parent.fk_distinct`) + asigna `Some(target)` a cada parent.
-- **Workaround alternativo** (sin declarar companion):
-  ```fitz
-  let posts = Post.all(db).await?
-  let user_ids: List<Int> = posts.map(fn(p) => p.user_id)
-  let authors = User.where(fn(u) => u.id.is_in(user_ids)).all(db).await?
-  ```
-  Útil si no querés el companion field en el type (ahorra el
-  campo en el struct deserializado).
-- **Caveat conocido**: Fitz hoy NO refina nullable bindings en
-  match arms (deuda separada del sistema de tipos), así que
-  `match post.user { null => "x", u => u.name }` no compila
-  porque `u` queda como `User?`, no `User`. Workaround:
-  comparar con `null` adentro de un `if` para chequear que
-  está poblado, después acceder por otra ruta.
+### Refinamientos pendientes del query builder
 
-### ✅ `Map<Str, Any>` en HTTP returns — CERRADO v0.10.4
+- **Composite indexes, partial indexes, expression indexes**: no
+  se generan auto desde el `type`. El user los crea con
+  `db.exec("CREATE INDEX ...")` al boot. Relacionado con
+  migraciones automáticas.
+- **Bulk insert eficiente**: no hay `.bulk_insert([...])`. Loop
+  con `.insert(db, row)` es O(N) round-trips. Workaround:
+  `db.exec("INSERT INTO ... VALUES ...", [...])` con VALUES
+  multi-row construido a mano.
+- **`db.copy_in(...)` para inserts masivos**: Postgres
+  `COPY FROM STDIN` (millones de rows en segundos) no está en el
+  driver. Workaround: subprocess `psql` o `pg_dump`/`pg_restore`.
+  Mini-fase aparte si entra presión real.
+- **`fitz db inspect` / introspection del schema real**: no
+  existe. Probablemente entra junto con `fitz db diff/migrate`.
 
-- **Status**: **CERRADO**. El codegen HTTP ahora emite
-  `impl __MapKey for __FitzValue` en el preludio HTTP (cuando
-  `__FitzValue` está activo) — convierte `__FitzValue::Str(s)` a
-  `s.clone()` (caso típico de keys de JSONB y GROUP BY), y resto
-  via Display. Esto cierra la cadena de trait bounds:
-  `Arc<Mutex<Vec<Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>>>>`
-  → `Vec<(__FitzValue, __FitzValue)>: __ToFitzJson` ✅.
-- **Resultado**: endpoints HTTP que devuelven `Result<List<Map<Str,
-  Any>>>` desde GROUP BY (`User.group_by(...).count(db).await`)
-  ahora funcionan end-to-end con `fitz build`, paridad bit-a-bit
-  con `fitz run`.
-- **Ejemplo**: `examples/guide/31b-orm-crud-http.fitz` endpoint
-  `/stats/by-email` re-incluido — el GROUP BY count por email
-  serializa a JSON como `[{"email": "...", "count": N}, ...]`.
+### Refinamientos menores del sistema de tipos / codegen
 
-### ✅ Chain dinámico de `.where(...)` condicional — CERRADO v0.10.5 (era drift)
-
-- **Status**: **CERRADO**. La documentación previa decía "no
-  compila" pero el codegen YA soportaba este patrón desde antes.
-  El `__FitzQueryBuilder<TData>` runtime es cloneable y cada
-  chain method emite `(receiver).with_<x>(...)`. El receiver
-  puede ser una var mutable.
-- **Validado** en `tests/db_real_postgres.rs` →
-  `orm_dynamic_chain_conditional_paridad_codegen_e2e` (4
-  combinaciones de filtros condicionales sobre 5 users con
-  conteos esperados verde).
-- **Cierre**: este item fue 100% drift documental — no requirió
-  cambio de código. La sec 21 ahora documenta el patrón con
-  ejemplos correctos.
-
----
-
-### Workarounds residuales encontrados al cerrar las deudas #1-#4
-
-Mientras cerrábamos las 4 deudas grandes (v0.10.4 + v0.10.5),
-encontramos workarounds menores que el user va a tropezar al
-escribir código ORM real. Cada uno tiene un caso reproducible
-documentado abajo. **Ninguno bloquea el uso del stack DB+ORM**,
-pero todos suman scope a refinamientos futuros.
-
-#### W1 — Map literal homogéneo no satisface field `Map<Str, Any>`
-
-- **Síntoma**: `Event { metadata: {"code": 500} }` con field
-  type `metadata: Map<Str, Any>` falla compilación con
-  `E0308 mismatched types`. El codegen infiere el Map literal
-  como `Map<Str, Int>` concreto (todos los values son Int)
-  pero el field espera `Map<Str, Any>` (representación
-  `Vec<(__FitzValue, __FitzValue)>`).
-- **Workaround**: mezclar tipos en el literal o agregar al
-  menos un value de otro tipo (`{"code": 500, "kind": "fatal"}`
-  → heterogéneo → emite shape jsonb). Workaround silencioso
-  pero confuso si el user no sabe la razón.
-- **Fix futuro**: `gen_map_lit` debería usar el tipo del
-  contexto destino (anotación del field, anotación del let,
-  etc.) antes de inferir desde los values del literal.
-
-#### W2 — Nullable refinement en match arms no funciona
-
-- **Síntoma**:
-  ```fitz
-  match post.user { null => "<null>", u => u.name }
-  ```
-  El binding `u` queda como `User?` (Nullable), no `User`. El
-  acceso `u.name` falla compilación.
-- **Workaround**:
-  ```fitz
-  if (post.user == null) { ... } else { /* sigue sin acceso refinado */ }
-  ```
-  Para acceder al field interno, el user tiene que mantener un
-  flag (`bool`) y dispatchear separadamente.
-- **Fix futuro**: refinement de tipo en branches de `match`/
-  `if` cuando el discriminante es `null` vs binding. Sistema
-  de tipos requiere flow-sensitive analysis.
-
-#### W3 — `.starts_with` / `.ends_with` / `.contains` requieren Str literal
-
-- **Síntoma**: `.where(fn(p) => p.name.starts_with(some_var))`
-  falla con "MVP: el arg debe ser string literal".
-- **Workaround**: usar `.like(some_var)` que sí acepta vars
-  (el user pasa el pattern con `%` manualmente: `"ada%"`).
-- **Fix futuro**: extender los 3 wrappers para aceptar vars
-  envolviéndolas con `%` en runtime via SQL `CONCAT(...)`.
-
-#### W4 — `id: 0` con bigserial NO auto-asigna
-
-- **Síntoma**: `User.insert(db, User { id: 0, ... })` con
-  schema `id bigserial PRIMARY KEY` inserta literal `0`, no
-  deja a Postgres auto-generar. Múltiples inserts con
-  `id: 0` rompen con "violates unique constraint".
-- **Workaround**: pasar ids explícitos únicos en cada insert.
-  Para tests, usar IDs distintos manualmente.
-- **Fix futuro**: el codegen debería skipear el field
-  `@primary` cuando su value runtime es el sentinel `0` (Int)
-  para Postgres bigserial — para que la inserción sea
-  `INSERT (cols sin id) VALUES (...) RETURNING id`. Hoy
-  siempre emite el id.
-
-#### W5 — `db.close()` no retorna `Result`
-
-- **Síntoma**: `db.close().await?` falla con "operador `?`
-  sobre `Null`: el operando debe ser `Result<T>`".
-- **Workaround**: usar `db.close().await` sin `?`.
-- **Fix futuro**: hacer que `db.close` devuelva `Future<Result<Null>>`
-  por consistencia con `db.query`/`db.exec`. Los errores de
-  cierre (conn ya cerrada, conn rota, etc.) son raros pero
-  posibles — el user debería poder manejarlos.
-
-#### W6 — `body.lang` field access no soportado en closures de `.where`
-
-- **Síntoma**:
-  ```fitz
-  @post("/search")
-  async fn search(body: SearchInput) -> Result<List<X>> {
-      return X.where(fn(x) => x.lang == body.lang).all(db).await
-  }
-  ```
-  El translator rechaza `body.lang` con "`.where(...)` solo
-  admite field access sobre el parámetro `<x>` ...".
-- **Workaround**: extraer a local antes del closure:
-  ```fitz
-  let lang = body.lang
-  return X.where(fn(x) => x.lang == lang).all(db).await
-  ```
-- **Fix futuro**: extender el translator para aceptar field
-  access sobre vars externas via lookup adicional al
-  `closure_env`. Hoy solo acepta `Ident` plano.
-
-#### W7 — Solo Map literal directo en `.update(db, {...})`
-
-- **Síntoma**: `.update(db, body.changes)` con `body.changes:
-  Map<Str, Any>` no funciona si pasa la var. Solo acepta
-  literal `{"k": v, ...}`.
-- **Workaround**: bajar a `db.exec(...)` crudo con SQL UPDATE
-  + params explícitos.
-- **Fix futuro**: soportar Map var como changes argument.
-
----
-
-### Lista de futuras refinamientos del stack DB (no bloquean v0.10.5)
-
-### Composite indexes, partial indexes, expression indexes
-
-- **Status**: no se generan auto desde el `type`. El user los
-  crea con `db.exec("CREATE INDEX ...")` al boot.
-- **Cuándo**: relacionado con migraciones automáticas (Fase
-  10.6+).
-
-### Bulk insert eficiente
-
-- **Status**: no hay `.bulk_insert([...])`. Loop con `.insert(db,
-  row)` es O(N) round-trips.
-- **Workaround**: `db.exec("INSERT INTO ... VALUES ...", [...])`
-  con VALUES multi-row construido a mano.
-- **Cuándo**: refinamiento útil para data import / ETL jobs.
-
-### `db.copy_in(...)` para inserts masivos
-
-- **Status**: no soportado. Postgres `COPY FROM STDIN` para
-  cargar millones de rows en segundos no está en el driver.
-- **Workaround**: subprocess `psql` o `pg_dump`/`pg_restore` para
-  bulk loads grandes.
-- **Cuándo**: mini-fase aparte si entra presión real.
-
-### `fitz db inspect` / introspection del schema real
-
-- **Status**: no existe.
-- **Cuándo**: probablemente entra junto con `fitz db diff/migrate`.
+- **Nullable refinement en patterns complejos**: `match obj
+  { null => x, u => u.field }` con `obj: T?` refina `u` a `T`
+  desde v0.10.6. Refinement aplica solo a `Pattern::Ident`
+  directo — Tuples / OkBinding / ErrBinding sobre Nullable
+  quedan como deuda menor.
+- **Escape runtime en LIKE patterns con vars**: `.starts_with(
+  var)` no escapa `%`/`_` del input runtime. Si la var tiene
+  esos caracteres, se interpretan como wildcards SQL.
+  Consistente con `.like(var)` — el user controla el pattern.
 
 ---
 

@@ -8055,16 +8055,37 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             }
         };
 
-        let (rhs_code, rhs_ty) = self.gen_expr(value)?;
-        let declared_ty = match type_ {
-            Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
+        // W1 (v0.10.6) — context-aware para Map literal: si tenemos
+        // anotación `Map<_, Any>` y el value es Map literal, propagamos
+        // el hint para forzar el shape heterogéneo `Vec<(FV, FV)>` antes
+        // del coerce (que no convertiría `Vec<(K, V_concreto)>` a `Vec<
+        // (FV, FV)>`). Paralelo a `gen_struct_lit`.
+        let declared_ty_opt: Option<Type> = match type_ {
+            Some(t) => Some(resolve_type_expr(t, self.env).map_err(|e| {
                 self.err_at(
                     value.span(),
                     format!("anotación de `{}` no resuelve: {}", name, e.message),
                 )
-            })?,
-            None => rhs_ty.clone(),
+            })?),
+            None => None,
         };
+        let (rhs_code, rhs_ty) = match (value, &declared_ty_opt) {
+            (Expr::Map(pairs, span), Some(Type::Map(_, hv)))
+                if matches!(hv.as_ref(), Type::Any) =>
+            {
+                self.gen_map_lit_with_hint(pairs, *span, declared_ty_opt.as_ref())?
+            }
+            (Expr::Map(pairs, span), Some(Type::Nullable(inner)))
+                if matches!(
+                    inner.as_ref(),
+                    Type::Map(_, ref v) if matches!(v.as_ref(), Type::Any)
+                ) =>
+            {
+                self.gen_map_lit_with_hint(pairs, *span, declared_ty_opt.as_ref())?
+            }
+            _ => self.gen_expr(value)?,
+        };
+        let declared_ty = declared_ty_opt.unwrap_or_else(|| rhs_ty.clone());
 
         let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
         self.emit_indent();

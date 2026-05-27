@@ -14,9 +14,75 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
 boilerplates ORM Dockerizados (convertir 5/6 SQLAlchemy → Fitz
 ORM nativo + boilerplate nuevo dedicado), benchmarks Fitz ORM
-vs SQLAlchemy, cierre opcional de los 7 workarounds residuales
-W1-W7 documentados en `docs/db-orm.md` sec 28 (refinamientos
-menores del codegen ORM).
+vs SQLAlchemy.
+
+## [v0.10.6] — 2026-05-27 — Bloque W1-W7: workarounds residuales del ORM cerrados
+
+**Cierre del bloque "workarounds residuales del ORM"** identificados
+durante v0.10.4 + v0.10.5. Los 7 workarounds menores documentados
+en `docs/db-orm.md` sec 28 quedan cerrados con commits dedicados
++ tests E2E. **El stack DB+ORM ya no tiene fricciones residuales
+conocidas para los patrones canonicales del language guide / boilerplates.**
+
+| Workaround | Sub-commit | Tests nuevos |
+|------------|------------|--------------|
+| W4 — `id: 0` sentinel auto-asigna bigserial | commit dedicado | 2 unit codegen |
+| W5 — `db.close()` devuelve `Future<Result<Null>>` | commit dedicado | 1 unit codegen |
+| W7 — `.update(db, Map var)` además del literal | commit dedicado | 2 unit + 1 E2E |
+| W3 — `.starts_with`/`.ends_with`/`.contains` aceptan var Str | commit dedicado | 2 unit codegen |
+| W6 — `body.field` en closures de `.where` | commit dedicado | 2 unit codegen |
+| W1 — Map literal homogéneo a field `Map<Str, Any>` | commit dedicado | 1 E2E |
+| W2 — Nullable refinement en match arms | commit dedicado | 1 unit + 1 E2E |
+
+**Cambios técnicos clave**:
+
+- **W4**: nuevo branch runtime `if __g.<pk> == 0` en `gen_orm_type_insert`
+  con dos SQLs alternativos (con/sin PK) elegidos según el value runtime
+  del primary. Paralelo bit-a-bit al evaluator (skip del field cuando
+  `Value::Int(0)`).
+- **W5**: `db.close()` devuelve `Future<Result<Null>>` (antes `Future<Null>`).
+  El helper preludio `__fitz_db_close` ahora retorna `Result<(), String>`
+  con `.map_err(|e| e.to_string())`. Los docs ya prometían esta semántica
+  desde v0.10.5 — ahora el código se alineó.
+- **W7**: nuevo `UpdateSetEmission { Static, Dynamic }`. Static (Map
+  literal) mantiene el shape anterior. Dynamic (Map var/expr) emite un
+  closure IIFE con match runtime sobre `key.as_str()` ramificado por
+  field del type, con conversión `__FitzValue → __FitzPgValue` per-tipo.
+  Soporta Int/Float/Str/Bool/Nullable<primitivo> + Map<...> (jsonb) +
+  List<scalar> (arrays).
+- **W3**: dos paths en `starts_with`/`ends_with`/`contains` (tanto en
+  evaluator como codegen). Str literal mantiene el escape Rust-side de
+  `%`/`_`. Var/expr se traduce como arg general y envuelve SQL-side con
+  `||` Postgres (`$N || '%'`, `'%' || $N`, etc.).
+- **W6**: el translator (evaluator + codegen) acepta `<var>.<field>` cuando
+  la var no es el `param_name` del closure. Hace lookup en el closure_env
+  (evaluator) o delega a `gen_expr` recursivo (codegen) y bindea como
+  `$N` via `__IntoPgValue`. Soporta chains arbitrarios (`req.inner.email`).
+- **W1**: nuevo wrapper `gen_map_lit_with_hint(pairs, span, hint)`. Cuando
+  el hint es `Map<_, Any>`, fuerza `heterogeneous_v = true` antes del
+  loop de `lub`, lo que hace que el shape emitido sea `Vec<(FV, FV)>`.
+  `gen_struct_lit` propaga el hint del field destino. `gen_map_lit`
+  original queda como wrapper sin hint (paridad pre-v0.10.6).
+- **W2**: dos correcciones coordinadas en `gen_pattern`. **Bug fix**:
+  `Pattern::Null` sobre Nullable emitía `_` (matcheaba TODO, no solo
+  null) — ahora emite `None` específico. **Refinement**: `Pattern::Ident`
+  sobre Nullable emite `Some(name)` y declara `name` como inner `T` (no
+  Option). Checker estático también gana refinement flow-sensitive
+  (Ident posterior a un arm Null-covering se bindea al inner T).
+
+**Barrida de documentación**: workarounds removidos del prose de
+`docs/db-orm.md` (sec 28 ahora marca los 7 como CERRADOS), ejemplos
+y boilerplates de la guía. Tests existentes que usaban los workarounds
+(`let lang = body.lang` antes de `.where(...)`, `id: 1` explícito en
+inserts demo, etc.) actualizados a la sintaxis canónica.
+
+**Tests** al cierre del bloque: 2562 unit + 81 cli_e2e + 295 compile_e2e
++ 3 openapi + 46+ db_real_postgres. Clippy `--all-targets -D warnings`
+limpio, fmt `--all --check` limpio, smoke `GUIDE_EXAMPLES_COMPILE` verde.
+
+**Próximo norte**: boilerplates ORM Dockerizados (convertir 5/6
+SQLAlchemy → Fitz ORM nativo + boilerplate nuevo dedicado al ORM full),
+benchmarks Fitz ORM vs SQLAlchemy.
 
 ## [v0.10.5] — 2026-05-26 — Bundle deudas residuales ORM #2/#3/#4 + cosecha BodyJson + workarounds documentados
 

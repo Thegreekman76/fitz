@@ -193,18 +193,14 @@ async fn search_posts(body: SearchInput) -> Result<List<Post>> {
     // Deuda #4 (v0.10.5) — chain dinámico condicional. El receiver
     // `qb` es var mutable; cada `.where()` adicional se agrega solo
     // si su branch ejecuta en runtime. SQL de cada fragmento queda
-    // constante en compile-time.
-    //
-    // Nota: el translator de .where(...) solo acepta vars externas
-    // como `Ident` plano, no field access (`body.lang` no anda
-    // directo). Workaround: extraer a local antes del closure.
+    // constante en compile-time. Desde v0.10.6 los closures de
+    // .where(...) aceptan field access sobre vars externas
+    // (`body.lang`, etc.) directamente, sin extraer a local.
     let conn = open_db().await?
-    let min_id = body.min_id
-    let lang = body.lang
-    let qb = Post.where(fn(p) => p.id >= min_id)
+    let qb = Post.where(fn(p) => p.id >= body.min_id)
 
-    if (lang != "") {
-        qb = qb.where(fn(p) => p.metadata.get("lang") == lang)
+    if (body.lang != "") {
+        qb = qb.where(fn(p) => p.metadata.get("lang") == body.lang)
     }
 
     if (body.drafts_only) {

@@ -130,7 +130,20 @@ async fn demo(db_url: Str) -> Result<Str> {
     let updated_rows = User.where(fn(u) => u.id == new_id).update(db, {"age": 36}).await?
     let deleted_rows = User.where(fn(u) => u.id == new_id).delete(db).await?
 
-    return Ok("ORM demo: {len(top)} top users, {total_users} total, {len(by_age)} grupos por edad, {len(dynamic)} dynamic")
+    // 2.10 — v0.10.6 — fricciones residuales cerradas (W1-W7).
+    //
+    // W3: .starts_with / .ends_with / .contains aceptan vars Str.
+    // El SQL se envuelve con `||` Postgres (`$N || '%'`, etc.).
+    let prefix = "a"
+    let by_prefix = User.where(fn(u) => u.name.starts_with(prefix)).all(db).await?
+    // W6: field access sobre vars externas en closures de .where.
+    let want = User { id: 0, name: "ada", age: 35, posts: [] }
+    let same_age = User.where(fn(u) => u.age == want.age).all(db).await?
+    // W7: .update(db, changes) acepta Map var (no solo literal).
+    let changes: Map<Str, Any> = {"age": 37}
+    let upd_again = User.where(fn(u) => u.id == new_id).update(db, changes).await?
+
+    return Ok("ORM demo: {len(top)} top users, {total_users} total, {len(by_age)} grupos por edad, {len(dynamic)} dynamic, {len(by_prefix)} by_prefix, {len(same_age)} same_age")
 }
 
 // --- 3. Entry point -------------------------------------------------

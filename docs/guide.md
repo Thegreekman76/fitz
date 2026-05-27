@@ -2,9 +2,6 @@
 
 > Estado: viva — cubre lo que el intérprete ejecuta hoy y lo que el
 > compilador (`fitz build`) produce como binario nativo.
-> Última actualización: 2026-05-16 (Fase 9.z.1 cerrada — `fitz fmt`
-> production-ready con preservación de comments + blank lines.
-> 1333 unit + 55 cli_e2e + 79 compile_e2e + 3 openapi).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -408,7 +405,7 @@ Algunas notas:
 - `Bytes` es paralelo a `Str` pero para datos binarios (sin asumir
   UTF-8). Detalle completo en el cap. 5 sub-sección "Bytes".
 
-### Números legibles (mini-tanda Núm)
+### Números legibles
 
 Los literales numéricos aceptan **separadores `_`** entre dígitos y
 **notación científica** `e`/`E`. Ambas formas son azúcar sintáctica
@@ -439,7 +436,7 @@ Reglas:
 Ver [examples/guide/03b-numeros-legibles.fitz](../examples/guide/03b-numeros-legibles.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
-### Literales en otras bases (mini-tanda Lit)
+### Literales en otras bases
 
 Los `Int` aceptan tres prefijos para expresarse en distintas bases:
 
@@ -570,7 +567,7 @@ Rust. Las funciones sí crean su propio scope (cap. 11).
 Esto puede sorprender — lo dejamos marcado y, si en algún momento trae
 problemas reales, lo reconsideramos.
 
-### Identificadores con Unicode (mini-tanda F8)
+### Identificadores con Unicode
 
 Los identificadores aceptan cualquier carácter Unicode de la categoría
 "Letter" (L*) o "Number" (N*) — letras griegas, acentos, ñ, CJK,
@@ -870,7 +867,7 @@ for i in 1..=5 {
 print(suma)           // 15
 ```
 
-### Operadores bit-a-bit (mini-tanda Bits)
+### Operadores bit-a-bit
 
 Seis operadores bit-a-bit sobre `Int`. Combinan natural con
 literales hex/binario/octal (mini-tanda Lit) para máscaras de bits,
@@ -928,7 +925,7 @@ para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 > `&=`/`|=`/`^=`/`<<=`/`>>=` y **prefijos mayúscula** `0X`/`0B`/
 > `0O` (mini-tanda Cmp — ver sub-sección de abajo).
 
-### Asignación compuesta bit-a-bit (mini-tanda Cmp)
+### Asignación compuesta bit-a-bit
 
 Simetría natural con `+=`/`-=`/etc. Cinco ops compuestos:
 
@@ -1214,7 +1211,7 @@ Características:
   recortar el indent común usá `.replace(...)` o construilo sin
   indent.
 
-### Format specifiers (mini-tanda Fm)
+### Format specifiers
 
 Los `{...}` de interpolación aceptan un `:spec` opcional después del
 expr, con la misma sintaxis que Python:
@@ -1336,7 +1333,7 @@ config: { port: 3000 }
 
 ---
 
-### Bytes — datos binarios (mini-tanda Bytes)
+### Bytes — datos binarios
 
 `Bytes` es un primitivo paralelo a `Str` pero para datos binarios:
 secuencias de bytes crudos, sin asumir UTF-8. Útil para protocolos
@@ -1947,7 +1944,7 @@ while fila < 5 and done == false {
 (Cerrado: ahora podés usar **labels** para romper varios niveles —
 ver la sub-sección "Labels en break/continue" abajo.)
 
-### Loop como expresión con valor (mini-tanda L)
+### Loop como expresión con valor
 
 `loop { ... }` también funciona como expresión: el valor del primer
 `break <v>` que dispara es el valor de la expresión. Útil para
@@ -1970,7 +1967,7 @@ let nothing = loop { break }
 `loop` sigue funcionando como statement (sin retorno) para
 compatibilidad con código existente.
 
-### Labels en break / continue (mini-tanda L.2)
+### Labels en break / continue
 
 Para escapar de un loop externo desde un loop anidado, declarás
 un label `'name:` antes del loop y lo referenciás en break o
@@ -2289,7 +2286,7 @@ for i in 0..3 {
 print(total)   // → 9
 ```
 
-### Iterar Maps con destructuring (mini-tanda Md)
+### Iterar Maps con destructuring
 
 `for` también itera sobre `Map<K, V>`, produciendo un par `(k, v)`
 por cada iteración. El patrón canónico es destructurar en el binding:
@@ -2405,7 +2402,7 @@ while (i < 3) {
 print(nums)          // [10, 20, 30]
 ```
 
-### Indexing y slicing (mini-tanda I)
+### Indexing y slicing
 
 Listas y strings soportan **índices negativos** y **slicing**
 (post-mini-tanda I).
@@ -2469,7 +2466,7 @@ Ver [examples/guide/09b-indexing-slicing.fitz](../examples/guide/09b-indexing-sl
 - **Comprehensions** (`[x * 2 for x in xs]`).
 - **Slicing con paso** (`xs[::2]`) — sin demanda concreta.
 
-### Tuples (mini-tanda T)
+### Tuples
 
 Tipos compuestos heterogéneos de tamaño fijo, similares a Rust.
 Útil para retornos múltiples y agrupar valores ad-hoc sin
@@ -2516,7 +2513,7 @@ fn clasif(p: (Int, Int)) -> Str {
 Ver [examples/guide/09c-tuples.fitz](../examples/guide/09c-tuples.fitz)
 para el ejemplo completo.
 
-### `let` con sub-patterns ricos (mini-tanda Lt)
+### `let` con sub-patterns ricos
 
 Desde Lt, los `let`-tuple aceptan los mismos sub-patterns que los
 `match`-arms: literales (`Int`/`Float`/`Str`/`Bool`/`Null`), rangos
@@ -2557,7 +2554,7 @@ Ver [examples/guide/09f-let-destructure-rico.fitz](../examples/guide/09f-let-des
 para el ejemplo completo y validado bit-a-bit `fitz run` ↔
 `fitz build`.
 
-### List comprehensions (mini-tanda C)
+### List comprehensions
 
 Sintaxis compacta para construir listas derivadas. Azúcar sobre
 los patrones `.map()` y `.filter().map()` — útil cuando el dato
@@ -2813,8 +2810,8 @@ Si ningún brazo coincide, el intérprete corta:
 Error en línea 0:0 — el `match` no matcheó ningún brazo
 ```
 
-Desde la Fase 5.3.3, **`fitz check` exige exhaustividad cuando el
-valor matcheado tipa como `Result<T>`** — vas a ver un error si te
+**`fitz check` exige exhaustividad cuando el valor matcheado tipa
+como `Result<T>`** — vas a ver un error si te
 falta el caso `Ok` o el caso `Err` (a menos que tengas un `_` o un
 binding final que actúe como catch-all). Para los demás tipos
 (`Int`, `Str`, etc.), la exhaustividad todavía es tu
@@ -3007,10 +3004,9 @@ para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 - **Listas como patrón** — `[head, ...rest]`, etc. Sin demanda
   concreta.
-- **Exhaustividad para tipos no-Result** — desde Fase 5.3.3
-  `fitz check` exige exhaustividad sobre `Result<T>`. Para Int,
-  Str y otros tipos no acotados sigue siendo responsabilidad
-  tuya cerrar con `_`.
+- **Exhaustividad para tipos no-Result** — `fitz check` exige
+  exhaustividad sobre `Result<T>`. Para Int, Str y otros tipos
+  no acotados sigue siendo responsabilidad tuya cerrar con `_`.
 
 > Lo que **sí anda** y antes era deuda: or-patterns (R.2.1),
 > guards (R.2.2), tuple patterns (mini-tanda T), y **tuple
@@ -3479,13 +3475,13 @@ print(abs(-5))
 
 > **Sobre las anotaciones**: con `fitz run` son opcionales — el
 > intérprete infiere desde el body. Con `fitz build` el codegen
-> infiere param + return desde call sites + body (v0.9.35 cierra
-> la deuda 5b.1 — cubre Int/Float/Str/Bool/Bytes/Nominal/List/
-> Map/Result/Nullable). El ejemplo lleva anotaciones porque hacen
-> el contrato explícito (mejor doc + diagnostics). El tipo
-> `Fn(Int) -> Int` describe una función que toma un `Int` y
-> devuelve un `Int` — es el tipo que tienen `square`,
-> `make_adder(5)`, etc.
+> también infiere param + return desde call sites + body para los
+> tipos primitivos y los compuestos comunes (Int/Float/Str/Bool/
+> Bytes/Nominal/List/Map/Result/Nullable). El ejemplo lleva
+> anotaciones porque hacen el contrato explícito (mejor doc +
+> diagnostics). El tipo `Fn(Int) -> Int` describe una función que
+> toma un `Int` y devuelve un `Int` — es el tipo que tienen
+> `square`, `make_adder(5)`, etc.
 
 Salida:
 
@@ -3781,8 +3777,8 @@ print("Hola, {u.name}!")    // Hola, Fitz!
 > chequeo estático de anotaciones contra valores (Fase 5a — `let
 > x: Int = "hola"` ahora falla en `fitz check`), genéricos
 > compuestos en campos (`List<Str>`, `Map<Str, User>`, etc.,
-> validados por el checker desde Fase 5.1), defaults que
-> referencian otros símbolos del módulo de origen (PreF8.3).
+> validados por el checker), defaults que referencian otros
+> símbolos del módulo de origen.
 
 ### Ejemplo completo
 
@@ -3872,8 +3868,8 @@ claro:
 // Error — el tipo `List` no tiene un método llamado `volar`
 ```
 
-Desde la Fase 5.3.4, **`fitz check` también valida los métodos
-built-in estáticamente**: tipos de argumentos, aridad, tipo del
+**`fitz check` también valida los métodos built-in estáticamente**:
+tipos de argumentos, aridad, tipo del
 receptor del callback en `map`/`filter`/`find`, y typos sobre
 métodos inexistentes (`xs.lenght()`) los detectás sin tener que
 ejecutar el programa.
@@ -5665,8 +5661,8 @@ para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda
 
-- **Chequeo estático de `?`** — desde Fase 5.3.3, `fitz check`
-  exige que el operando de `?` sea `Result<T>` y que la función
+- **Chequeo estático de `?`** — `fitz check` exige que el operando
+  de `?` sea `Result<T>` y que la función
   contenedora declare `-> Result<...>` (a menos que la función
   esté sin anotación de retorno, donde queda en modo gradual).
 - **`Err` con bindings tipados en codegen** — el binding `e` del
@@ -5799,9 +5795,9 @@ mejore.
 
 ### Modo strict y `--no-typecheck`
 
-Desde la Fase 5.4, `fitz run` aborta cuando el checker estático
-encuentra errores. Eso quiere decir que un programa con errores de
-tipo **no llega a ejecutarse**:
+`fitz run` aborta cuando el checker estático encuentra errores.
+Eso quiere decir que un programa con errores de tipo **no llega
+a ejecutarse**:
 
 ```
 ✗ archivo.fitz — 1 error(es) de tipo:
@@ -5863,7 +5859,7 @@ Error en línea 1:8 — Se esperaba una expresión, se encontró 'Newline'
 ### Errores típicos del checker estático
 
 Estos los detectás con `fitz check` o aparecen al correr `fitz run`
-(que aborta en modo strict desde Fase 5.4):
+(que aborta en modo strict por default):
 
 | Mensaje | Cuándo aparece |
 |---------|----------------|
@@ -6460,9 +6456,9 @@ HTTP nativo, que es donde Fitz se diferencia.
 Hasta acá los ejemplos vivieron en archivos sueltos: `fitz run
 mi_archivo.fitz`. Para proyectos reales (varios archivos,
 dependencias compartidas, binarios distribuibles), Fitz tiene un
-**package manager built-in** desde la Fase 9.y. Patrón Cargo:
-manifest `fitz.toml`, lockfile `fitz.lock`, sub-comandos para
-crear/agregar/quitar/actualizar deps.
+**package manager built-in**. Patrón Cargo: manifest `fitz.toml`,
+lockfile `fitz.lock`, sub-comandos para crear/agregar/quitar/
+actualizar deps.
 
 ### El manifest `fitz.toml`
 
@@ -7026,55 +7022,43 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
 - **Streaming de respuestas** — hoy las respuestas se serializan
   completas antes de mandarse. Server-sent events y descargas
   grandes están en el roadmap.
-- **WebSockets** — `@ws("/chat")` está diseñado pero no
-  implementado (Fase 9.w).
+- **WebSockets** — disponibles vía `@ws("/path")` + `WsConn<T>`
+  (ver cap 29), no como parte de los decoradores HTTP del cap 17.
 - **Multipart bodies** — `multipart/form-data` (típicamente uploads
   con files) queda como sub-paso futuro cuando aparezca presión
   real. Cualquier otro Content-Type que no sea JSON o urlencoded
-  recibe 415 con mensaje claro (mini-tanda Hpx.1 + HA).
+  recibe 415 con mensaje claro.
 - **Middleware wrap-style con `next` callable** — el modelo donde
   el middleware controla la invocación del handler (`fn mw(req,
   next) -> Response`) queda como sub-paso futuro. Sí está
-  soportado el modelo **post-process** desde mini-tanda Mw.next +
-  P1: un middleware con 2 args `(Request, Response)` corre DESPUÉS
-  del handler y puede modificar el body, agregar headers, etc.
-  Funciona end-to-end en `fitz run` y `fitz build` (P1 cerró el
-  codegen). **Limitación**: handlers `-> Result<T>` + post mws no
-  compila en `fitz build` todavía (sub-paso futuro adicional).
+  soportado el modelo **post-process**: un middleware con 2 args
+  `(Request, Response)` corre DESPUÉS del handler y puede modificar
+  el body, agregar headers, etc. Funciona end-to-end en `fitz run`
+  y `fitz build`. **Limitación**: handlers `-> Result<T>` + post
+  mws no compila en `fitz build` todavía (sub-paso futuro adicional).
 
-> Lo que **sí anda** y antes era deuda residual: **status codes
-> custom fuera de 100..1000** ya no caen silenciosamente a 500 —
-> emiten 500 + body con mensaje claro citando el valor inválido
-> (HC.1). **Status codes específicos de cada `Err`** aparecen en
-> el schema OpenAPI cuando el handler hace `return Err(X { status:
-> 404, ... })` con un literal Int O con un Ident que apunta a una
-> const top-level Int (`let NOT_FOUND = 404; ...status: NOT_FOUND...`)
-> — el schema incluye una entrada por cada code detectado (HC.2 +
-> OAPI). El mismo Ident funciona también como status directo de
-> `Stmt::ReturnStatus`: `return NOT_FOUND {"error": "..."}` parsea,
-> ejecuta y aparece en el schema (mini-tanda OAPI). **Validación de Content-Type
-> estricta** — body no-JSON ni urlencoded recibe 415 con msg claro
-> (Hpx.1 + HA, paridad bit-a-bit `fitz run` ↔ `fitz build`).
+> **Features completas del cap HTTP**: async/await reales en
+> handlers, paralelismo HTTP real (multi-threaded), status codes
+> custom (`return 401 { ... }`), query params (`?page=1&size=10`),
+> headers de request con `@header(name="X")`, kwargs en
+> decoradores (`@server(docs=false)`), middleware (`@middleware(fn)`)
+> + CORS con preflight automático, state HTTP compartido. **Status
+> codes específicos de cada `Err`** aparecen en el schema OpenAPI
+> cuando el handler hace `return Err(X { status: 404, ... })` con
+> un literal Int o con un Ident que apunta a una const top-level
+> Int. **Validación de Content-Type estricta** — body no-JSON ni
+> urlencoded recibe 415 con msg claro.
 > **`application/x-www-form-urlencoded`** — bodies tipo
 > `name=Fitz&age=25` se parsean como `Map<Str, Str>` automáticamente
-> (URL-decoding `+` → espacio y `%XX` → byte hex aplicado a keys
-> y valores), tanto en `fitz run` como en `fitz build` (mini-tandas
-> MP + UC). **Return type inference en handlers para `fitz build`**
-> — `fn create(u: User) { ... return User { ... } }` ya no exige
+> (URL-decoding aplicado a keys y valores).
+> **Return type inference en handlers para `fitz build`** —
+> `fn create(u: User) { ... return User { ... } }` no exige
 > `-> User` explícito; el codegen infiere del body usando el
-> TypeInfo del checker (Hpx.2).
-
-> Lo que **sí anda** y antes era deuda (cerrado fase tras fase):
-> async/await reales en handlers (Fase 6), paralelismo HTTP real
-> (F17), status codes custom `return 401 { ... }` (post-F7),
-> query params `?page=1&size=10` (post-F7), headers de request
-> con `@header(name="X")` (Fase 7.6), kwargs en decoradores
-> `@server(docs=false)` (Fase 7.0), middleware `@middleware(fn)`
-> + CORS con preflight automático (mini-fase MW), state HTTP
-> compartido en `fitz build` (F11). El cap incluye sub-secciones
-> propias para [Status codes custom](#status-codes-custom),
-> [Query params](#query-params) y [Middleware y CORS](#middleware-y-cors)
-> más abajo.
+> TypeInfo del checker.
+> El cap incluye sub-secciones propias para
+> [Status codes custom](#status-codes-custom),
+> [Query params](#query-params) y
+> [Middleware y CORS](#middleware-y-cors) más abajo.
 
 ### Ejemplo completo
 
@@ -7949,15 +7933,14 @@ misma instancia.
 
 Cosas que sí corren con `fitz run` pero todavía no compilan:
 
-- ~~**Funciones sin anotar params (con limitaciones)**~~ — actualizado
-  v0.9.35: `fn greet(name)` y `fn double(n) { return n * 2 }`
-  ahora compilan sin anotaciones. El codegen infiere desde el primer
-  call site (`greet("Fitz")` → `name: Str`; `double(21)` → `n: Int`)
-  y deriva el return type de los `return`/tail-expr del body. Cubre
-  Int/Float/Str/Bool/Null/Bytes/Nullable/List/Map/Result + Nominal
-  (con el nombre canónico del `TypeEnv`). Casos sin cubrir (raros):
-  fns sin call site, Function/Range/Future como tipo de param.
-  Cuando la inferencia falla, el codegen lo dice claro con
+- **Funciones sin anotar params**: `fn greet(name)` y
+  `fn double(n) { return n * 2 }` compilan sin anotaciones. El
+  codegen infiere desde el primer call site (`greet("Fitz")` →
+  `name: Str`; `double(21)` → `n: Int`) y deriva el return type
+  de los `return`/tail-expr del body. Cubre Int/Float/Str/Bool/
+  Null/Bytes/Nullable/List/Map/Result + Nominal. Casos sin cubrir
+  (raros): fns sin call site, Function/Range/Future como tipo de
+  param. Cuando la inferencia falla, el codegen lo dice claro con
   sugerencia de anotar.
 - **Heterogéneos con Functions/Tuples** — F13 SPIKE + F13.A + F13.B
   + F13.C + F13.D + F13.E cubren primitivos, Bytes, Nominales,
@@ -8007,13 +7990,12 @@ cita explícitamente. La salida tiene la forma:
    (Fase 5b soporta un subset progresivo; los mensajes citan el sub-paso correspondiente.)
 ```
 
-> Lo que **sí anda** y antes era deuda: state HTTP compartido
-> (cualquier `let users = [...]` top-level que un handler
-> referencia, cerrado en F11), **paralelismo HTTP real** entre
-> requests con el binario compilado (post-F17, runtime tokio
-> multi-thread default), interop Python en `fitz build`
-> (Fase 8.7 cerrada — `from python import X` produce binarios
-> nativos con PyO3 linkeado). Ver
+> Lo que **sí soporta**: state HTTP compartido (cualquier
+> `let users = [...]` top-level que un handler referencia),
+> **paralelismo HTTP real** entre requests con el binario compilado
+> (runtime tokio multi-thread default), interop Python en
+> `fitz build` (`from python import X` produce binarios nativos
+> con PyO3 linkeado). Ver
 > [cap 19 sub-sección "Paralelismo HTTP real"](#paralelismo-http-real).
 
 ### Ejemplo: programa CLI primitivo
@@ -8302,7 +8284,7 @@ capítulo cubre cómo recuperar el tipo Fitz con anotaciones.
 
 Cuando una fn Python te devuelve un `dict` que querés tratar como
 una instancia Fitz, **anotá el binding destino** y el runtime hace
-la coerción automática (paralelo a Fase 8.4):
+la coerción automática:
 
 ```fitz
 from python import json
@@ -8383,9 +8365,9 @@ explícitamente en tu repo y poder editarlos a mano.
 fitz py-stubs http_client.pyi --out http_types.fitz
 ```
 
-**Modo 2 — Auto-pickup** (8-pyi.B/C, v0.9.57): si el archivo
-`.fitz` tiene `from python import foo` y existe `foo.pyi`
-adyacente (mismo directorio), el loader del checker lo detecta
+**Modo 2 — Auto-pickup**: si el archivo `.fitz` tiene
+`from python import foo` y existe `foo.pyi` adyacente (mismo
+directorio), el loader del checker lo detecta
 automáticamente, parsea, y registra los tipos al TypeEnv sin
 intervención. El user solo tiene que dropear el `.pyi` al lado
 del `.fitz` raíz.
@@ -8503,8 +8485,8 @@ el `Result` del call (el wrap automático del cap 21.4); el `.await`
 ejecuta la corutina. Excepciones asyncio aparecen como `Err`,
 igual que con calls sync.
 
-**Binding intermedio** (paridad bit-a-bit `fitz run` ↔ `fitz build`
-desde v0.9.35): también funciona separar el call y el await en dos
+**Binding intermedio** (paridad bit-a-bit `fitz run` ↔ `fitz
+build`): también funciona separar el call y el await en dos
 statements, lo cual es útil cuando hay lógica entre los dos
 (logging, agregar metadata al future, decidir si esperarlo o no):
 
@@ -8519,10 +8501,8 @@ async fn run() -> Result<Null> {
 }
 ```
 
-Antes de v0.9.35, `fitz build` con este patrón fallaba con un
-error de Rust ("`__FitzPyObject` is not a future"). Ahora el
-codegen detecta `inner_ty == PyAny` en el `.await` y despacha al
-helper dedicado `__fitz_py_await_obj` (paralelo al
+El codegen detecta `inner_ty == PyAny` en el `.await` y despacha
+al helper dedicado `__fitz_py_await_obj` (paralelo al
 `__fitz_py_invoke_await` del patrón inmediato).
 
 **Implementación**: el bridge usa `tokio::task::spawn_blocking` +
@@ -8556,7 +8536,7 @@ soportada por `fitz build`:
   `__fitz_py_to_instance_<T>` para tipos custom de módulos
   transitivos; cada módulo los referencia con `crate::__fitz_py_*`.
 
-Lo que **falta** vs `fitz run` (deuda residual menor de 8.7):
+Lo que **falta** vs `fitz run` (deuda residual menor):
 
 - Coerción Python `dict` → Fitz `Map<K,V>` con K/V no primitivos
   (queda como PyObject opaco; raro en práctica).
@@ -9004,16 +8984,14 @@ VSCode** que lo aprovecha.
   (`@get`, `@server`, `@middleware`...), comentarios (`//` y
   `/* */`), constantes (`true`/`false`/`null`/`Ok`/`Err`),
   built-ins (`print`/`len`/`sleep`/`cors`/`assert`/`assert_eq`/
-  `assert_ne`/`assert_throws`), labels de loops
-  (`'outer` — mini-tanda L), operadores compuestos (`+=`/`-=`/...)
-  y rangos inclusivos (`..=`).
+  `assert_ne`/`assert_throws`), labels de loops (`'outer`),
+  operadores compuestos (`+=`/`-=`/...) y rangos inclusivos (`..=`).
 - **Diagnostics en vivo** — los errores del lexer, parser y type
   checker aparecen subrayados en rojo al tipear, con el mismo
   mensaje + sugerencia que `fitz check` muestra en la terminal.
-  Pipeline: tokenize → `parse_with_recovery` (parser tolerante a
-  buffer en construcción, Fase 9.0 — F15) → `check_program` (Fase
-  5a + F16). Severity `ERROR`, source `"fitz"` (visible en el
-  Problems panel de VSCode).
+  Pipeline: tokenize → parser tolerante a buffer en construcción
+  → type checker. Severity `ERROR`, source `"fitz"` (visible en
+  el Problems panel de VSCode).
 - **Hover con tipos** — pasás el mouse sobre una variable o
   expresión y aparece su tipo en un tooltip (renderizado como
   bloque de código Fitz, con syntax highlighting). El símbolo bajo
@@ -10946,14 +10924,10 @@ endurecimiento para servicios críticos".
 
 ## 31. Postgres + ORM nativo
 
-> **Hito del proyecto (v0.10.0 + v0.10.1)** — este capítulo cierra
-> **Fase 10 entera + Fase 10.b**: driver Postgres puro escrito en
-> Fitz (sin libpq) + ORM declarativo sobre `type` + paridad
-> bit-a-bit `fitz run` ↔ `fitz build`. La promesa del proyecto de
-> "stack web first-class del lado server" está completa: HTTP nativo
-> (cap 17) + auth (28) + WebSockets (29) + jobs (30) + DB +
-> ORM (este). Todo en el binario `fitz`, cero deps externas para
-> features intrínsecas.
+> Este capítulo cierra la promesa del proyecto de "stack web
+> first-class del lado server": HTTP nativo (cap 17) + auth (28)
+> + WebSockets (29) + jobs (30) + DB + ORM (este). Todo en el
+> binario `fitz`, cero deps externas para features intrínsecas.
 
 En SQLAlchemy/Django ORM/ActiveRecord/Hibernate/Prisma la
 combinación DB driver + ORM se construye sumando librerías al
@@ -11150,8 +11124,11 @@ let deleted_rows = User.where(fn(u) => u.role == "trial" and u.age < 18)
 ```
 
 `.update` acepta tanto Map literal heterogéneo (`{"key": val,
-...}`) como literales List/Map nativos (10.b.11 los habilita
-con casts `::text[]`/`::jsonb` apropiados).
+...}`) como una var `Map<Str, Any>` (caso típico:
+`.update(db, body.changes)` con `body` deserializado de JSON
+request). Los values de tipos compuestos (List<scalar>, Map para
+JSONB) se marshallean con los casts SQL apropiados
+(`::text[]`/`::jsonb`).
 
 ### Aggregates scalar + GROUP BY
 
@@ -11179,9 +11156,8 @@ let by_role: List<Map<Str, Any>> = User.group_by(fn(u) => u.role).count(db).awai
 ```
 
 El checker distingue estáticamente `QueryBuilder<Row>` de
-`Aggregated<Row>` con la variante `Type::Aggregated(Box<Type>)`
-(refactor de 10.b.14) — typos de método se detectan en compile-
-time, no runtime.
+`Aggregated<Row>` — typos de método se detectan en compile-time,
+no runtime.
 
 ### Relations + navigation methods
 
@@ -11294,9 +11270,9 @@ let p = Post.insert(db, Post { id: 0, title: "Hola",
 print(p.tags[0])  // "rust"
 ```
 
-**NULL en arrays** (10.b.12.a): `List<Int?>` ↔ `int8[]` con
-elementos nullable. El text format Postgres `{a,NULL,c}` se
-parsea/encodea simétricamente:
+**NULL en arrays**: `List<Int?>` ↔ `int8[]` con elementos
+nullable. El text format Postgres `{a,NULL,c}` se parsea/encodea
+simétricamente:
 
 ```fitz
 @table("readings") type Reading {
@@ -11305,10 +11281,10 @@ parsea/encodea simétricamente:
 }
 ```
 
-**Map<Str, T> concreto** (10.b.12.b) — alternativa a `Map<Str,
-Any>` cuando todos los values son del mismo tipo primitivo
-(Int/Float/Str/Bool). El marshaling es directo (HashMap<String,
-T>), sin overhead de enum dispatch:
+**Map<Str, T> concreto** — alternativa a `Map<Str, Any>` cuando
+todos los values son del mismo tipo primitivo (Int/Float/Str/
+Bool). El marshaling es directo (HashMap<String, T>), sin
+overhead de enum dispatch:
 
 ```fitz
 @table("metrics") type MetricSnapshot {
@@ -11320,8 +11296,8 @@ T>), sin overhead de enum dispatch:
 K se restringe a Str (Postgres jsonb keys son strings). `Map<Int,
 Int>` → error claro.
 
-**Array ops en `.where(...)`** (10.b.9.c): operadores Postgres
-sobre arrays se mapean a method calls Fitz:
+**Array ops en `.where(...)`**: operadores Postgres sobre arrays
+se mapean a method calls Fitz:
 
 ```fitz
 // "rust" = ANY(tags)
@@ -11383,8 +11359,7 @@ canónicos:
   sobre users, relation queries (posts por user), eager loading
   con `.preload(...)` cerrando N+1, aggregate scalar, **GROUP BY
   aggregate** (`/stats/by-email` con `User.group_by(...).count(db)`)
-  serializado a JSON desde v0.10.4 (deuda #1 cerrada con
-  `impl __MapKey for __FitzValue`). Requiere Postgres real para
+  serializado a JSON. Requiere Postgres real para
   correr — el setup pre-condición está documentado al inicio
   del archivo (createdb + CREATE TABLE). Compila con `fitz build`
   aunque no haya Postgres local — el codegen del ORM se valida
@@ -11445,39 +11420,34 @@ genera schemas separados que viven aparte del lenguaje.
 
 ### Qué no está en el MVP
 
-Estos items están comprometidos como deuda explícita
-post-Fase 10:
+Items comprometidos como deuda explícita:
 
 - **Migraciones automáticas (`fitz db diff` / `fitz db
   migrate`)**: hoy el user crea las tablas con `db.exec(
   "CREATE TABLE ...")` al boot o con `psql` aparte. Las
   migraciones autogeneradas a partir del diff entre el shape
-  declarado en `type` y el real en Postgres llegan en sub-paso
-  futuro (Fase 10.6+).
+  declarado en `type` y el real en Postgres llegan como sub-paso
+  futuro.
 - **Transactions** (`BEGIN`/`COMMIT`/`ROLLBACK`): cada query
   corre en auto-commit. Bloques transaccionales con
-  `db.transaction(fn(tx) => ...)` llegan en sub-paso 10.7
-  separado.
-- **Composite primary keys**: hoy un `@primary` único por
-  `type`. Tables con `PRIMARY KEY (a, b)` requieren refactor
-  del checker — refinable post-MVP.
-- **TLS strict (`sslmode=require`)**: MVP del driver soporta
-  solo `sslmode=disable`. TLS llega como sub-paso 10.1.b
-  separado (StartTLS + cert validation).
+  `db.transaction(fn(tx) => ...)` llegan como sub-paso separado.
+- **Composite primary keys**: un `@primary` único por `type`.
+  Tables con `PRIMARY KEY (a, b)` requieren refactor del checker
+  — refinable si aparece presión.
+- **TLS strict (`sslmode=require`)**: el driver soporta
+  `sslmode=disable`. TLS llega como sub-paso separado (StartTLS
+  + cert validation).
 - **Date / Time / UUID nativos** como tipos del lenguaje: hoy
   se modelan como `Str` ISO 8601 / formato canonical UUID. El
   driver hace el round-trip correctamente, pero el `type` Fitz
   no tiene primitivos dedicados. Tipos `Date`/`DateTime`/`UUID`
   como built-ins son mini-fase aparte.
-- **JSON operators (`->`, `->>`, `@>`)** del lado SQL: el
-  JSONB se trae completo como `Map<Str, Any>` y se opera del
-  lado Fitz, o se baja a `db.query(...)` crudo con el operador.
-- **`BelongsTo` en `.preload(...)`**: hoy solo `HasMany` con
-  dispatch estático. Eager loading de BelongsTo (cargar el
-  author de N posts en 2 queries) queda como refinamiento.
+- **JSON operators avanzados** (`@@`/`#>`/`#>>`/`||`): los
+  cinco básicos (`?`/`?&`/`?|`/`@>`/`->>`) están mapeados como
+  method calls. Los avanzados se bajan a `db.query(...)` crudo.
 
-Detalle completo en `docs/roadmap.md` → "Fase 10 — Stack DB
-nativo" y "Fase 10.b — Cierre del codegen ORM".
+Ver [DB y ORM](db-orm.md) sección 28 para el listado completo
+de limitaciones y refinamientos pendientes.
 
 ### Guía exhaustiva
 
@@ -11488,13 +11458,13 @@ detalladas, ver el documento dedicado **[DB y ORM](db-orm.md)**
 (separado de la guía porque el ORM es un dominio aparte del
 lenguaje base — ~2500 LoC).
 
-### Hito y cierre
+### Cierre
 
 Este capítulo cierra el bloque "stack web first-class" del
 lado server: HTTP nativo (cap 17), middleware + CORS (17b),
 docs automáticas (18), async (19), build (20), interop Python
-(21), auth (28), WebSockets (29), jobs (30), y ahora **DB + ORM
-(31)**. Todo en el binario `fitz`, todo con paridad bit-a-bit
+(21), auth (28), WebSockets (29), jobs (30), y **DB + ORM (31)**.
+Todo en el binario `fitz`, todo con paridad bit-a-bit
 intérprete↔binario, todo validado en CI multi-plataforma con
 Postgres real en cada push.
 
