@@ -277,6 +277,8 @@ pub fn builtin_names() -> &'static [&'static str] {
         "env",
         "env_or",
         "load_env",
+        // 10.8.7 (v0.10.8) — broadcast HTTP → WS cross-handler.
+        "ws_broadcast",
     ]
 }
 
@@ -9301,6 +9303,18 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_sleep,
         },
     );
+    // 10.8.7 (v0.10.8) — `ws_broadcast(endpoint: Str, msg) -> Null`:
+    // broadcast cross-handler de un mensaje JSON a TODOS los
+    // clientes WS conectados al endpoint. Habilita el patrón
+    // canónico SaaS "handler HTTP triggerea notification realtime".
+    // Si no hay registry HTTP activo, no-op silencioso.
+    env.lock().define(
+        "ws_broadcast",
+        Value::Builtin {
+            name: "ws_broadcast",
+            func: builtin_ws_broadcast,
+        },
+    );
     // Fase 9.w.3 — `spawn(fn_call)` sentinel. El dispatch real vive en
     // `eval_call` (eval_spawn_call) que intercepta antes de evaluar
     // args (necesita capturar el inner call sin eager-evaluation).
@@ -10077,6 +10091,66 @@ fn builtin_math_clamp(args: &[Value]) -> FitzResult<Value> {
 fn builtin_print(args: &[Value]) -> FitzResult<Value> {
     let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
     println!("{}", parts.join(" "));
+    Ok(Value::Null)
+}
+
+/// 10.8.7 (v0.10.8) — `ws_broadcast(endpoint: Str, msg) -> Null`.
+/// Serializa `msg` a JSON y lo envía a TODOS los clientes WS
+/// conectados al endpoint. Delega a `http::ws_broadcast_to_endpoint`
+/// que accede al `WsBroadcaster` global del registry activo.
+///
+/// Si no hay registry HTTP activo (programa CLI sin server), el
+/// broadcast es no-op silencioso. El usuario que llama
+/// `ws_broadcast` desde un script sin `@server` no recibe error.
+fn builtin_ws_broadcast(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`ws_broadcast(endpoint: Str, msg)` espera 2 argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let endpoint = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!(
+                    "`ws_broadcast`: el primer argumento debe ser `Str` (endpoint), recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let payload_json = crate::http::value_to_json(&args[1]).map_err(|e| {
+        FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            format!(
+                "`ws_broadcast`: error serializando el mensaje a JSON: {}",
+                e
+            ),
+        )
+    })?;
+    let payload = serde_json::to_string(&payload_json).map_err(|e| {
+        FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            format!("`ws_broadcast`: error serializando JSON: {}", e),
+        )
+    })?;
+    crate::http::ws_broadcast_to_endpoint(&endpoint, payload);
     Ok(Value::Null)
 }
 

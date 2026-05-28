@@ -9784,6 +9784,149 @@ print(m.has(\"missing\"))
 }
 
 #[test]
+fn ws_broadcast_builtin_cross_handler() {
+    // 10.8.7 (v0.10.8) — fix #2: builtin `ws_broadcast(endpoint, msg)`
+    // permite que un handler HTTP triggeree broadcast a TODOS los
+    // clientes WS conectados al endpoint. Caso canónico SaaS:
+    // comentario nuevo → notification realtime a clientes
+    // viendo el feed.
+    let stem = "ws_broadcast_builtin";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let src = "\
+type Event { kind: Str, text: Str }\n\
+\n\
+@get(\"/notify\")\n\
+fn notify() -> Str {\n\
+    let evt = Event { kind: \"system\", text: \"hola\" }\n\
+    ws_broadcast(\"/feed\", evt)\n\
+    return \"broadcasted\"\n\
+}\n\
+\n\
+@server(43920)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspección estática del Rust generado.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        // El call debe traducirse a `crate::__fitz_ws_broadcast(...)`.
+        assert!(
+            content.contains("crate::__fitz_ws_broadcast("),
+            "main.rs debe emitir call a `crate::__fitz_ws_broadcast(...)` (#2 fix)"
+        );
+        // El helper debe estar emitido en el crate root.
+        assert!(
+            content.contains(
+                "pub(crate) fn __fitz_ws_broadcast(endpoint: &str, msg: serde_json::Value)"
+            ),
+            "main.rs debe emitir el helper `__fitz_ws_broadcast` (#2 fix)"
+        );
+        // El delegate a `__fitz_ws_broadcast_payload` (preludio WS).
+        assert!(
+            content.contains("__fitz_ws_broadcast_payload(endpoint, payload)"),
+            "main.rs debe delegar a `__fitz_ws_broadcast_payload` (#2 fix)"
+        );
+    }
+}
+
+#[test]
+fn ws_router_y_asyncapi_cross_module() {
+    // 10.8.6 (v0.10.8) — fix #4: handlers `@ws` que viven en
+    // módulos importados ahora se enchufan al Router axum del main
+    // (paralelo a W16 para HTTP). Además, el schema AsyncAPI 3.0 y
+    // el endpoint `/asyncapi.json` se emiten cuando hay WS
+    // cross-module (no solo cuando el main tiene WS local).
+    //
+    // Pre-fix: WS handshake al `/feed` cross-module → 404 (la ruta
+    // no existía en el Router). `/asyncapi.json` → 404 también.
+    let stem = "ws_cross_module";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("ws_mod.fitz"),
+        "type Msg { text: Str }\n\
+         \n\
+         @ws(\"/chat\")\n\
+         async fn chat_handler(conn: WsConn<Msg>) -> Null {\n\
+             return null\n\
+         }\n",
+    )
+    .expect("escribir ws_mod.fitz");
+
+    let main_src = "\
+import ws_mod\n\
+\n\
+@server(43915)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspección estática del Rust generado.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        // El Router debe registrar la ruta WS cross-module.
+        assert!(
+            content.contains(".route(\"/chat\", axum::routing::get(crate::ws_mod::__ws_handler_chat_handler))"),
+            "main.rs debe registrar `.route(\"/chat\", crate::ws_mod::__ws_handler_chat_handler)` (#4 fix)"
+        );
+        // El schema AsyncAPI debe incluir el canal `/chat`.
+        assert!(
+            content.contains("\"/chat\":{"),
+            "main.rs debe incluir canal `/chat` en schema AsyncAPI (#4 fix)"
+        );
+        // El endpoint `/asyncapi.json` debe estar registrado.
+        assert!(
+            content.contains(".route(\"/asyncapi.json\""),
+            "main.rs debe registrar el endpoint `/asyncapi.json` (#4 fix)"
+        );
+    }
+
+    // El wrapper `__ws_handler_chat_handler` debe ser `pub` en el módulo.
+    let mod_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/ws_mod.rs", stem));
+    if mod_rs.exists() {
+        let content = std::fs::read_to_string(&mod_rs).expect("leer ws_mod.rs");
+        assert!(
+            content.contains("pub async fn __ws_handler_chat_handler"),
+            "ws_mod.rs debe emitir `pub async fn __ws_handler_chat_handler` (#4 fix)"
+        );
+    }
+}
+
+#[test]
 fn openapi_cross_module_incluye_handlers_de_modulos() {
     // 10.8.5 (v0.10.8) — fix #3: el schema OpenAPI 3.1 emitido por
     // `fitz build` ahora incluye los handlers HTTP de módulos

@@ -180,7 +180,15 @@ pub fn generate_project(
     // de la feature ws) al Cargo.toml generado.
     //
     // W10 (v0.10.7) — transitivo igual que uses_auth.
-    let uses_ws = program_uses_ws(program) || loader.modules.iter().any(|m| m.uses_ws);
+    //
+    // 10.8.7 (v0.10.8) — `ws_broadcast(...)` también activa
+    // `uses_ws` para que las deps `axum.ws` + `futures-util` se
+    // sumen al Cargo.toml y el preludio WS se emita (con
+    // `__FITZ_WS_BROADCASTER` que el helper `__fitz_ws_broadcast`
+    // referencia).
+    let uses_ws = program_uses_ws(program)
+        || program_uses_ws_broadcast(program)
+        || loader.modules.iter().any(|m| m.uses_ws);
     // Fase 9.w.3.c — detección de jobs (`@cron`/`@background`/`spawn`).
     // Suma el crate `cron` + `chrono` al Cargo.toml, emite el helper
     // `__fitz_run_cron_scheduler` en el preludio, y dispara el modo
@@ -418,6 +426,84 @@ fn program_uses_ws(program: &Program) -> bool {
                 if decorators.iter().any(|d| d.name == "ws")
         )
     })
+}
+
+/// 10.8.7 (v0.10.8) — detecta si el programa llama al builtin
+/// `ws_broadcast(endpoint, msg)` en cualquier lugar. Pre-scan
+/// necesario para que `emit_http_runtime_prelude` emita el helper
+/// `__fitz_ws_broadcast` antes de procesar los handlers (caller
+/// del `ws_broadcast`).
+///
+/// Walk recursivo paralelo a `program_uses_jobs`. El walk pierde
+/// shadowing de `ws_broadcast` user-defined — el codegen del
+/// callsite chequea eso al emitir (vía `is_user_callable`).
+fn program_uses_ws_broadcast(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_wsb(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                let is_call = matches!(callee.as_ref(), Expr::Ident(n, _) if n == "ws_broadcast");
+                is_call || expr_uses_wsb(callee) || args.iter().any(expr_uses_wsb)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_wsb(left) || expr_uses_wsb(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_wsb(operand),
+            Expr::Field { object, .. } => expr_uses_wsb(object),
+            Expr::Index { object, index, .. } => expr_uses_wsb(object) || expr_uses_wsb(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_wsb(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_wsb(s))
+                    || end.as_ref().is_some_and(|e| expr_uses_wsb(e))
+            }
+            Expr::List(items, _) | Expr::Tuple(items, _) => items.iter().any(expr_uses_wsb),
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_wsb(k) || expr_uses_wsb(v)),
+            Expr::Range { start, end, .. } => expr_uses_wsb(start) || expr_uses_wsb(end),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_wsb(condition)
+                    || then.iter().any(stmt_uses_wsb)
+                    || else_.as_ref().is_some_and(|e| e.iter().any(stmt_uses_wsb))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_wsb(value)
+                    || arms.iter().any(|a| {
+                        a.guard.as_ref().is_some_and(expr_uses_wsb)
+                            || a.body.iter().any(stmt_uses_wsb)
+                    })
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_wsb),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_wsb),
+            Expr::Await(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Ok(inner, _)
+            | Expr::Err(inner, _) => expr_uses_wsb(inner),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Expr(inner, _) => expr_uses_wsb(inner),
+                StrPart::Lit(_) => false,
+            }),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_wsb(v)),
+            _ => false,
+        }
+    }
+    fn stmt_uses_wsb(s: &Stmt) -> bool {
+        match s {
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => expr_uses_wsb(e),
+            Stmt::Assign { value, .. } => expr_uses_wsb(value),
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_wsb),
+            Stmt::ReturnStatus { body, .. } => body.as_ref().is_some_and(expr_uses_wsb),
+            Stmt::While { body, .. } | Stmt::Loop { body, .. } => body.iter().any(stmt_uses_wsb),
+            Stmt::For { body, .. } => body.iter().any(stmt_uses_wsb),
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_wsb)
 }
 
 /// Fase 9.w.3 — detecta si el programa usa jobs (`@cron`/`@background`
@@ -2217,6 +2303,11 @@ struct LoadedModule {
     uses_ws: bool,
     uses_jobs: bool,
     uses_auth: bool,
+    /// 10.8.7 (v0.10.8) — `program_uses_ws_broadcast(module_program)`.
+    /// El main lo OR-ea con su propio flag para decidir si emite el
+    /// helper `__fitz_ws_broadcast` (que los módulos referencian via
+    /// `crate::__fitz_ws_broadcast`).
+    uses_ws_broadcast: bool,
     /// W11 (v0.10.7) — `program_uses_fitz_value(module_program)`. El
     /// main lo OR-ea con su propio flag para decidir si emite el enum
     /// `__FitzValue` + helpers JSONB en el crate root, garantizando
@@ -2261,6 +2352,12 @@ struct LoadedModule {
     /// `.rs` (en `generate_module_rs_with_bindings`), main solo
     /// referencia. Vacío para módulos sin HTTP.
     http_fn_stmts: Vec<Stmt>,
+    /// 10.8.6 (v0.10.8) — paralelo a `http_fn_stmts`: las FnDef stmts
+    /// con decorator `@ws` declaradas en el módulo. Main las usa
+    /// para registrar las rutas WS como `.route("/path",
+    /// axum::routing::any(crate::<mod>::__ws_handler_<name>))` y
+    /// para alimentar el AsyncAPI schema cross-module.
+    ws_fn_stmts: Vec<Stmt>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -2610,9 +2707,12 @@ impl ModuleLoader {
         }
 
         // W10 (v0.10.7) — flags transitivos del módulo (uses_ws/jobs/auth).
-        let module_uses_ws = program_uses_ws(&module_program);
+        // 10.8.7 (v0.10.8) — sumar uses_ws_broadcast paralelo.
+        let module_uses_ws =
+            program_uses_ws(&module_program) || program_uses_ws_broadcast(&module_program);
         let module_uses_jobs = program_uses_jobs(&module_program);
         let module_uses_auth = program_uses_auth(&module_program);
+        let module_uses_ws_broadcast = program_uses_ws_broadcast(&module_program);
         // W11 (v0.10.7) — flags transitivos del módulo (uses_fitz_value, uses_db, has_http).
         let module_uses_fitz_value = program_uses_fitz_value(&module_program);
         let module_uses_db = program_uses_db(&module_program);
@@ -2648,6 +2748,12 @@ impl ModuleLoader {
         // `gen_http_main`. El módulo emite los wrappers `__handler_<name>`
         // en su propio `.rs` (en `generate_module_rs_with_bindings`).
         let mut module_http_fn_stmts: Vec<Stmt> = Vec::new();
+        // 10.8.6 (v0.10.8) — paralelo a W16 pero para `@ws`: capturar
+        // las FnDef stmts con decorator @ws del módulo. Main las usa
+        // para enchufarlas al Router axum (`.route("/ws-path",
+        // axum::routing::any(crate::<mod>::__ws_handler_<name>))`)
+        // y para alimentar el AsyncAPI schema cross-module.
+        let mut module_ws_fn_stmts: Vec<Stmt> = Vec::new();
         for stmt in &module_program {
             if let Stmt::FnDef { decorators, .. } = stmt {
                 let is_http = decorators
@@ -2655,6 +2761,10 @@ impl ModuleLoader {
                     .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete"));
                 if is_http {
                     module_http_fn_stmts.push(stmt.clone());
+                }
+                let is_ws = decorators.iter().any(|d| d.name == "ws");
+                if is_ws {
+                    module_ws_fn_stmts.push(stmt.clone());
                 }
             }
         }
@@ -2672,6 +2782,7 @@ impl ModuleLoader {
             type_methods,
             table_metadata,
             uses_ws: module_uses_ws,
+            uses_ws_broadcast: module_uses_ws_broadcast,
             uses_jobs: module_uses_jobs,
             uses_auth: module_uses_auth,
             uses_fitz_value: module_uses_fitz_value,
@@ -2680,6 +2791,7 @@ impl ModuleLoader {
             python_imports: module_python_imports,
             auth_provider_fn: module_auth_provider_fn,
             http_fn_stmts: module_http_fn_stmts,
+            ws_fn_stmts: module_ws_fn_stmts,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -3245,6 +3357,19 @@ fn generate_module_rs_with_bindings(
             _ => false,
         })
         .collect();
+    // 10.8.6 (v0.10.8) — paralelo a W16 pero para `@ws`: identificar
+    // WS fns del módulo. Sus wrappers `__ws_handler_<name>` se emiten
+    // después de `gen_top_fn` (mismo scope que la fn original); main
+    // registra las rutas con `.route("/path",
+    // crate::<mod>::__ws_handler_<name>)`.
+    let ws_fns_in_module: Vec<&Stmt> = top_fns
+        .iter()
+        .copied()
+        .filter(|s| match s {
+            Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| d.name == "ws"),
+            _ => false,
+        })
+        .collect();
     for stmt in top_fns {
         ctx.gen_top_fn(stmt)?;
     }
@@ -3268,7 +3393,12 @@ fn generate_module_rs_with_bindings(
     //   2) Pre-computar el merge de CORS sobre los http_fns del módulo
     //      (para que `gen_http_handler_wrapper` lo lea).
     //   3) Emitir wrappers.
-    if !http_fns_in_module.is_empty() {
+    //
+    // 10.8.6 (v0.10.8) — el setup del auth_provider ahora aplica
+    // también a wrappers WS cross-module (`gen_ws_handler_wrapper`
+    // los necesita igual que el HTTP). Se ejecuta cuando el módulo
+    // tiene HTTP o WS handlers.
+    if !http_fns_in_module.is_empty() || !ws_fns_in_module.is_empty() {
         // Auth provider: prioridad al local; fallback al importado.
         let mut local_provider: Option<(String, bool, String)> = None;
         for stmt in program {
@@ -3298,10 +3428,49 @@ fn generate_module_rs_with_bindings(
             ctx.auth_provider_module = Some(imp.module_name.clone());
             ctx.auth_provider_user_type_name = imp.user_type_name.clone();
         }
+    }
+    if !http_fns_in_module.is_empty() {
         // Precompute CORS merge sobre los http_fns del módulo.
         ctx.precompute_cors_merge(&http_fns_in_module)?;
         for stmt in &http_fns_in_module {
             ctx.gen_http_handler_wrapper(stmt)?;
+        }
+    }
+
+    // 10.8.6 (v0.10.8) — wrappers `__ws_handler_<name>` para
+    // handlers `@ws` del módulo (paralelo a W16 para HTTP). Setup:
+    //   1) Mismo auth provider info ya propagado al ctx arriba (los
+    //      handlers @ws cross-module pueden usar @authenticated
+    //      apilado, igual que HTTP).
+    //   2) Capturar `ws_heartbeat_secs` del @server config si el
+    //      módulo lo declara. Si no (caso típico — el @server vive
+    //      en el main), default 30s (fallback de
+    //      gen_ws_handler_wrapper).
+    //   3) Emitir wrappers.
+    if !ws_fns_in_module.is_empty() {
+        // Detectar @server local en el módulo y propagar
+        // ws_heartbeat_secs si está. (Caso común: @server en main,
+        // no en módulo — usar default del ctx, que ya viene de
+        // `CodegenCtx::new_for_module`.)
+        for stmt in program {
+            if let Stmt::FnDef { decorators, .. } = stmt {
+                for d in decorators {
+                    if d.name == "server" {
+                        for (k, v) in &d.kwargs {
+                            if k == "ws_heartbeat_secs" {
+                                if let Expr::Int(n, _) = v {
+                                    if *n >= 0 {
+                                        ctx.ws_heartbeat_secs = *n as u64;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for stmt in &ws_fns_in_module {
+            ctx.gen_ws_handler_wrapper(stmt)?;
         }
     }
 
@@ -3743,6 +3912,15 @@ fn generate_main_rs(
     ctx.uses_ws = uses_ws;
     ctx.uses_jobs = uses_jobs;
     ctx.uses_db = uses_db;
+    // 10.8.7 (v0.10.8) — pre-scan del builtin `ws_broadcast(endpoint, msg)`
+    // en el main. Setear ANTES de emit_prelude para que
+    // `emit_http_runtime_prelude` emita el helper
+    // `__fitz_ws_broadcast`. Módulos cross-module que llamen
+    // `ws_broadcast` deben emitir `crate::__fitz_ws_broadcast(...)`
+    // — deuda menor de v0.10.8: hoy solo soporta `ws_broadcast`
+    // desde handlers del main local.
+    ctx.uses_ws_broadcast =
+        program_uses_ws_broadcast(program) || loader.modules.iter().any(|m| m.uses_ws_broadcast);
     // Fase 9.w.1.d — pre-scan del `@auth_provider`. Singleton; el checker
     // (9.w.1.a) ya validó. Lo guardamos por nombre + is_async para que
     // cada handler con `@authenticated`/`@admin` emita la invocación
@@ -4755,6 +4933,12 @@ struct CodegenCtx<'a> {
     /// handler. Cuando es `false`, programas HTTP regulares no pagan
     /// el costo del bloque WS adicional en el binario.
     uses_ws: bool,
+    /// 10.8.7 (v0.10.8): `true` si el programa llama al builtin
+    /// `ws_broadcast(endpoint, msg)`. Habilita la emisión del helper
+    /// `__fitz_ws_broadcast` en el preludio HTTP. Independiente de
+    /// `uses_ws`: el programa puede broadcast-ear desde HTTP a un
+    /// endpoint cuyos `@ws` handlers vivan cross-module.
+    uses_ws_broadcast: bool,
     /// Fase 9.w.3.c: `true` si el programa tiene jobs (`@cron`/
     /// `@background`) o usa `spawn(...)`. Habilita emisión del helper
     /// `__fitz_run_cron_scheduler`, registro de jobs en main, y el
@@ -4959,6 +5143,7 @@ impl<'a> CodegenCtx<'a> {
             auth_provider_module: None,
             auth_provider_user_type_name: String::new(),
             uses_ws: false,
+            uses_ws_broadcast: false,
             uses_jobs: false,
             uses_db: false,
             cron_jobs_info: Vec::new(),
@@ -11171,6 +11356,43 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             return Ok((
                 format!("__fitz_sleep({})", coerced),
                 Type::Future(Box::new(Type::Null)),
+            ));
+        }
+        // 10.8.7 (v0.10.8) — builtin `ws_broadcast(endpoint: Str, msg)
+        // -> Null`. Broadcast cross-handler de un mensaje JSON a
+        // TODOS los clientes WS conectados al endpoint. El codegen
+        // emite `__fitz_ws_broadcast(endpoint, &msg)` que serializa
+        // `msg` via `__ToFitzJson` y llama al `WsBroadcaster` global.
+        // Para `fitz build` sin HTTP (programa CLI puro), el helper
+        // no-op silencioso.
+        if name == "ws_broadcast" && !self.is_user_callable(name) {
+            if args.len() != 2 {
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`ws_broadcast(endpoint: Str, msg)` espera 2 argumentos, recibió {}",
+                        args.len()
+                    ),
+                ));
+            }
+            let (ep_code, ep_ty) = self.gen_expr(&args[0])?;
+            let ep_coerced = coerce(&ep_code, &ep_ty, &Type::Str, self.env);
+            let (msg_code, msg_ty) = self.gen_expr(&args[1])?;
+            // El JSON serializer requiere `__ToFitzJson` para `msg`.
+            // Marcamos el flag para que el preludio HTTP emita el
+            // helper `__fitz_ws_broadcast`.
+            self.uses_ws_broadcast = true;
+            let msg_ty_str = rust_type_for(&msg_ty, self.env)?;
+            // 10.8.7 (v0.10.8) — `crate::__fitz_ws_broadcast` para
+            // que funcione desde módulos (el helper vive en main.rs
+            // como `pub(crate)`). En main resuelve igual via crate
+            // root.
+            return Ok((
+                format!(
+                    "crate::__fitz_ws_broadcast(&{}, <{} as __ToFitzJson>::__to_fitz_json(&{}))",
+                    ep_coerced, msg_ty_str, msg_code
+                ),
+                Type::Null,
             ));
         }
         // Builtin global `len(x)`: despacha por tipo del argumento a la
@@ -19567,8 +19789,41 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // Vive separado de HTTP_RUNTIME_PRELUDE para que programas
         // HTTP sin WS no paguen el costo del bloque extra (~150 LoC
         // generados).
-        if self.uses_ws {
+        //
+        // 10.8.7 (v0.10.8) — `uses_ws_broadcast` también dispara el
+        // preludio WS (necesario para `__FITZ_WS_BROADCASTER` que
+        // el helper `__fitz_ws_broadcast` referencia). Caso típico:
+        // handler HTTP que llama `ws_broadcast(...)` en un programa
+        // cuyos `@ws` viven cross-module — el flag `uses_ws` local
+        // del main no se setea, pero el del loader sí, y este check
+        // adicional cubre el caso "ws_broadcast desde HTTP puro
+        // sin handlers WS en ningún lado" (improbable pero
+        // defensivo).
+        if self.uses_ws || self.uses_ws_broadcast {
             self.emit(WS_RUNTIME_PRELUDE);
+        }
+        // 10.8.7 (v0.10.8) — helper `__fitz_ws_broadcast` para el
+        // built-in `ws_broadcast(endpoint, msg)`. Se emite si el
+        // programa lo usa (cualquier handler HTTP que dispare
+        // broadcast a clientes WS). Si NO hay WS broadcaster en el
+        // registry (programa CLI sin server), el helper es no-op
+        // silencioso (mismo behavior que el evaluator).
+        if self.uses_ws_broadcast {
+            self.emit(
+                "/// 10.8.7 (v0.10.8) — helper para `ws_broadcast(endpoint, msg)`.\n\
+                 /// Serializa el msg JSON y lo broadcastea a TODOS los clientes WS\n\
+                 /// conectados al endpoint via `__fitz_ws_broadcast_payload` (que\n\
+                 /// vive en el preludio WS). No-op si nadie está conectado.\n\
+                 /// `pub(crate)` para que módulos puedan llamarlo via\n\
+                 /// `crate::__fitz_ws_broadcast`.\n\
+                 pub(crate) fn __fitz_ws_broadcast(endpoint: &str, msg: serde_json::Value) {\n    \
+                     let payload = match serde_json::to_string(&msg) {\n        \
+                         Ok(s) => s,\n        \
+                         Err(_) => return,\n    \
+                     };\n    \
+                     __fitz_ws_broadcast_payload(endpoint, payload);\n\
+                 }\n\n",
+            );
         }
     }
 
@@ -20108,7 +20363,11 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         let conn_ty_rs = rust_type_for(&conn_ty, self.env)?;
 
         // Emitir signature del wrapper.
-        writeln!(&mut self.output, "async fn __ws_handler_{}(", name).unwrap();
+        // 10.8.6 (v0.10.8) — `pub` para que main pueda referenciar el
+        // wrapper cross-module (`crate::<mod>::__ws_handler_<name>`).
+        // En main estándar (handler local) el `pub` es harmless — los
+        // wrappers no son llamados desde fuera del crate.
+        writeln!(&mut self.output, "pub async fn __ws_handler_{}(", name).unwrap();
         self.emit("    ws: axum::extract::ws::WebSocketUpgrade,\n");
         self.emit("    __hmap: axum::http::HeaderMap,\n");
         self.emit(") -> axum::response::Response {\n");
@@ -21569,10 +21828,28 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // Fase 9.w.2.d — schema AsyncAPI 3.0 embebido cuando hay
         // handlers @ws. Mismo patrón que OpenAPI: pre-compute desde
         // AST, embebe como `static &str`, serve handler `__serve_asyncapi_json`.
+        //
+        // 10.8.6 (v0.10.8) — fix #4: el flag `has_ws_anywhere` ahora
+        // considera también los WS de módulos importados
+        // (`loader.modules[i].ws_fn_stmts`). Antes el flag solo
+        // miraba `ws_fns` local → endpoint `/asyncapi.json` no se
+        // emitía cuando los `@ws` vivían cross-module (404).
+        let has_ws_anywhere =
+            !ws_fns.is_empty() || loader.modules.iter().any(|m| !m.ws_fn_stmts.is_empty());
         let auto_asyncapi =
-            cfg.enable_docs && !user_paths.contains("/asyncapi.json") && !ws_fns.is_empty();
+            cfg.enable_docs && !user_paths.contains("/asyncapi.json") && has_ws_anywhere;
         if auto_asyncapi {
-            let channels = crate::asyncapi::pseudo_channels_from_ast(program)?;
+            // 10.8.6 — combinar canales del main + de módulos
+            // importados para el schema AsyncAPI cross-module.
+            let module_ws_stmts: Vec<&[Stmt]> = loader
+                .modules
+                .iter()
+                .map(|m| m.ws_fn_stmts.as_slice())
+                .collect();
+            let channels = crate::asyncapi::pseudo_channels_from_program_and_modules(
+                program,
+                &module_ws_stmts,
+            )?;
             let schema = crate::asyncapi::generate_asyncapi_with_version(
                 &channels,
                 program,
@@ -21751,6 +22028,40 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     path, name,
                 )
                 .unwrap();
+            }
+        }
+        // 10.8.6 (v0.10.8) — fix #4: registrar rutas WS para handlers
+        // que viven en MÓDULOS importados (paralelo a W16 para HTTP).
+        // El módulo emite su propio wrapper `__ws_handler_<name>` en
+        // su `.rs`; main referencia el path absoluto qualified.
+        // Antes del fix, el `WS /feed` cross-module devolvía 404 en
+        // el handshake — la ruta no existía en el Router.
+        for m in &loader.modules {
+            let mod_qualifier = mod_qualifier_of(&m.rel_path);
+            for stmt in &m.ws_fn_stmts {
+                let Stmt::FnDef {
+                    name, decorators, ..
+                } = stmt
+                else {
+                    continue;
+                };
+                for d in decorators {
+                    if d.name != "ws" {
+                        continue;
+                    }
+                    let path_arg = match d.args.first() {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    let (path, _q) = parse_http_path(path_arg)?;
+                    self.emit_indent();
+                    writeln!(
+                        &mut self.output,
+                        "    .route(\"{}\", axum::routing::get(crate::{}::__ws_handler_{}))",
+                        path, mod_qualifier, name,
+                    )
+                    .unwrap();
+                }
             }
         }
         // Fase 7.5: rutas auto-registradas. Mismo orden que el runtime

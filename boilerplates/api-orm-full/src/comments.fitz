@@ -6,21 +6,16 @@
 //     (`import comments`).
 //
 // **Features ORM ejercitadas**:
-//   - Verificar existencia del Post antes de insertar el Comment
-//     (404 implícito vía `Err`).
+//   - Verificar existencia del Post antes de insertar el Comment.
 //   - `Comment.insert(db, row)` con FKs `author_id` + `post_id`.
 //   - `Comment.where(...).all(db)` para listar comentarios de un
 //     post (relation query — paralelo a `post.comments` con
 //     `.preload`).
 //
-// **Deuda residual del lenguaje (gap)**: el patrón "handler HTTP
-// triggerea broadcast a clientes WS conectados" (caso canónico
-// SaaS: comentario nuevo → otros usuarios viendo el feed reciben
-// notification real-time) requiere una API global tipo
-// `ws_broadcast(endpoint, message)` que Fitz hoy no tiene. El
-// `conn.broadcast(...)` actual solo funciona DESDE un handler `@ws`,
-// no desde un HTTP. Por ahora el realtime.fitz lo modela como
-// "chat simétrico" — clientes WS se broadcastean entre sí.
+// **`ws_broadcast(endpoint, msg)`** (10.8.7 v0.10.8) — broadcast
+// cross-handler a clientes WS conectados al endpoint. Patrón
+// canónico SaaS: comentario nuevo → otros usuarios viendo el
+// feed reciben notification real-time sin pollear.
 
 from config import db_url
 from models import User, Profile, Post, Comment
@@ -87,5 +82,10 @@ async fn create_comment(user: User, id: Int, body: CommentInput) -> Result<Comme
         created_at: "",
     }).await?
 
-    return Ok(to_response(new_comment))
+    // Broadcast cross-handler al feed WS (10.8.7 v0.10.8 — gap
+    // cerrado). Los clientes conectados al `/feed` reciben la
+    // novedad en tiempo real sin pollear.
+    let resp = to_response(new_comment)
+    ws_broadcast("/feed", resp)
+    return Ok(resp)
 }

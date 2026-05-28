@@ -107,8 +107,34 @@ fn channel_info_from_spec(s: &RouteSpec) -> AsyncApiChannelInfo {
 pub fn pseudo_channels_from_ast(
     program: &Program,
 ) -> Result<Vec<AsyncApiChannelInfo>, crate::error::FitzError> {
+    pseudo_channels_from_program_and_modules(program, &[])
+}
+
+/// 10.8.6 (v0.10.8) — variante cross-module aware de
+/// `pseudo_channels_from_ast`. Combina los handlers `@ws` del
+/// `program` (main) y de los `module_ws_stmts` (slices capturados
+/// por 10.8.6 en `LoadedModule.ws_fn_stmts`, paralelo a W16).
+/// Resultado: el schema AsyncAPI 3.0 emitido contiene TODOS los
+/// canales WS, incluyendo los de módulos importados.
+///
+/// Antes del fix #4 v0.10.8, `pseudo_channels_from_ast` solo
+/// miraba el main → schema vacío y `/asyncapi.json` no se
+/// emitía cuando los `@ws` vivían cross-module (404 en
+/// handshake).
+pub fn pseudo_channels_from_program_and_modules(
+    program: &Program,
+    module_ws_stmts: &[&[Stmt]],
+) -> Result<Vec<AsyncApiChannelInfo>, crate::error::FitzError> {
+    // Concatenar todos los stmts: main primero, después los
+    // módulos en orden de carga.
+    let mut all_stmts: Vec<&Stmt> = program.iter().collect();
+    for module_stmts in module_ws_stmts {
+        for s in *module_stmts {
+            all_stmts.push(s);
+        }
+    }
     let mut out = Vec::new();
-    for s in program {
+    for s in all_stmts {
         let Stmt::FnDef {
             name,
             params,

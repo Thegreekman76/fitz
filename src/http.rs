@@ -647,6 +647,25 @@ pub fn has_active_registry() -> bool {
     HTTP_REGISTRY.with(|cell| cell.borrow().is_some())
 }
 
+/// 10.8.7 (v0.10.8) — broadcast cross-handler de un mensaje JSON a
+/// TODOS los clientes WS conectados al `endpoint`. Habilita el
+/// patrón canónico SaaS "handler HTTP triggerea notification
+/// realtime a clientes WS suscritos" — el built-in
+/// `ws_broadcast(endpoint, msg)` del lenguaje delega acá.
+///
+/// Si no hay registry HTTP activo (programa CLI sin server), el
+/// broadcast es no-op silencioso. El usuario que llama
+/// `ws_broadcast` desde un script sin `@server` no recibe error —
+/// el comportamiento se reduce a un no-op pedagógicamente
+/// aceptable: el endpoint no existe, no hay clientes.
+pub fn ws_broadcast_to_endpoint(endpoint: &str, payload: String) {
+    HTTP_REGISTRY.with(|cell| {
+        if let Some(reg) = cell.borrow().as_ref() {
+            reg.ws_broadcaster.broadcast_text(endpoint, payload);
+        }
+    });
+}
+
 /// Fase 9.w.1.c — `true` si el registry activo tiene un `@auth_provider`
 /// registrado. `register_http_route` lo consulta al ver un handler con
 /// `@authenticated`/`@admin` para validar orden de declaración (el

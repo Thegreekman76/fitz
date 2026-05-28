@@ -2229,6 +2229,23 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // 10.8.7 (v0.10.8) — `ws_broadcast(endpoint: Str, msg) -> Null`
+        // broadcast cross-handler de un mensaje JSON a clientes WS
+        // conectados al `endpoint`. Tipa msg como `Any` para aceptar
+        // cualquier shape — el runtime serializa via JSON.
+        self.scopes[0].insert(
+            "ws_broadcast".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Str, Type::Any],
+                    ret: Box::new(Type::Null),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // Fase 9.z.2.a — assertion builtins. `assert` queda como `Any`
         // porque tiene aridad variable (1 o 2 args, msg opcional); el
         // runtime valida tipos y aridad. `assert_eq`/`assert_ne` tienen
