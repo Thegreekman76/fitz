@@ -1,0 +1,84 @@
+# docker-compose para api-orm-full.
+#
+# Showcase del stack web first-class entero: HTTP + auth + WS +
+# cron + ORM Postgres en un binario standalone. Sin Python, sin
+# SQLAlchemy, sin Celery/Redis.
+#
+# Setup (una vez):
+#   cp .env.example .env
+#   # editar .env si querés credenciales custom o cambiar JWT_SECRET.
+#
+# Uso:
+#   docker compose up --build
+#   # esperar "[boot] schema DB inicializado" + "[ready] server arrancando"
+#
+# Test con curl en otra terminal:
+#
+#   # 1. Crear cuenta:
+#   curl -X POST localhost:3000/auth/register \
+#        -H 'Content-Type: application/json' \
+#        -d '{"email":"ada@example.com","name":"Ada","password":"secret-ada-123"}'
+#
+#   # 2. Login → obtener JWT:
+#   TOKEN=$(curl -sX POST localhost:3000/auth/login \
+#        -H 'Content-Type: application/json' \
+#        -d '{"email":"ada@example.com","password":"secret-ada-123"}' \
+#        | jq -r .token)
+#
+#   # 3. Crear post con tags + jsonb:
+#   curl -X POST localhost:3000/posts \
+#        -H "Authorization: Bearer $TOKEN" \
+#        -H 'Content-Type: application/json' \
+#        -d '{"title":"Hola","slug":"hola","content":"prueba","status":"published","tags":["rust","fitz"],"metadata":{"lang":"es"}}'
+#
+#   # 4. Listar con filtro por tag (ejercita .has(var) sobre text[]):
+#   curl 'localhost:3000/posts?tag=rust'
+#
+#   # 5. Aggregate (GROUP BY author_id):
+#   curl localhost:3000/stats/posts-per-user
+#
+#   # 6. WS feed (auth required, broadcast simétrico):
+#   wscat -c "ws://localhost:3000/feed" -H "Authorization: Bearer $TOKEN"
+#
+#   # 7. UI docs:
+#   open localhost:3000/docs           # OpenAPI 3.1 (HTTP endpoints)
+#   curl localhost:3000/asyncapi.json  # AsyncAPI 3.0 (WS schema)
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fitz-pg-orm-full
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fitz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fitz}
+      POSTGRES_DB: ${POSTGRES_DB:-fitz}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fitz} -d ${POSTGRES_DB:-fitz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: fitz-api-orm-full
+    environment:
+      # Connection string Postgres nativo (sin `postgresql+psycopg2://`
+      # de SQLAlchemy — el driver Fitz habla wire protocol directo).
+      DATABASE_URL: "postgres://${POSTGRES_USER:-fitz}:${POSTGRES_PASSWORD:-fitz}@db:5432/${POSTGRES_DB:-fitz}?sslmode=disable"
+      # JWT secret. **Cambiar en producción** — el default es solo
+      # para que el ejemplo arranque sin setup extra.
+      JWT_SECRET: ${JWT_SECRET:-demo-orm-full-secret-cambiame-en-prod}
+      # Edad máxima de drafts antes de que el @cron los borre.
+      MAX_DRAFTS_AGE_DAYS: ${MAX_DRAFTS_AGE_DAYS:-30}
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

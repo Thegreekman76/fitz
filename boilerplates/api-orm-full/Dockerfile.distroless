@@ -1,0 +1,47 @@
+# Dockerfile.distroless — variante ultra-minimalista de api-orm-full.
+# Imagen final ~15-20 MB (vs ~80 MB del Dockerfile regular con
+# debian:bookworm-slim).
+#
+# Usa `gcr.io/distroless/cc-debian12` como runtime (binarios C
+# dinámicos compilados contra glibc, sin shell, sin coreutils, sin
+# package manager). El binario fitz-app es self-contained.
+#
+# Build:
+#   docker build -f Dockerfile.distroless -t api-orm-full:distroless .
+
+# ---- Stage 1: builder ----------------------------------------------
+FROM rust:1.95-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git ca-certificates pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+ARG FITZ_BRANCH=
+ARG FITZ_TAG=
+ARG FITZ_REV=
+
+RUN if [ -n "$FITZ_REV" ]; then \
+        cargo install --git https://github.com/Thegreekman76/fitz --rev "$FITZ_REV" --bin fitz --locked; \
+    elif [ -n "$FITZ_TAG" ]; then \
+        cargo install --git https://github.com/Thegreekman76/fitz --tag "$FITZ_TAG" --bin fitz --locked; \
+    elif [ -n "$FITZ_BRANCH" ]; then \
+        cargo install --git https://github.com/Thegreekman76/fitz --branch "$FITZ_BRANCH" --bin fitz --locked; \
+    else \
+        cargo install --git https://github.com/Thegreekman76/fitz --bin fitz --locked; \
+    fi
+
+WORKDIR /app
+COPY fitz.toml ./
+COPY src/ ./src/
+
+RUN /root/.cargo/bin/fitz build src/main.fitz
+
+# ---- Stage 2: runtime distroless -----------------------------------
+FROM gcr.io/distroless/cc-debian12
+
+COPY --from=builder /app/src/main /app
+
+EXPOSE 3000
+
+ENTRYPOINT ["/app"]

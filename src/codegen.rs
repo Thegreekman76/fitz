@@ -8227,10 +8227,29 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 // (JSONB / heterogéneos), porque ese caso lo cubre
                 // `__FitzValue`. Solo skipeamos cuando el field es Any
                 // pelado o Nullable(Any) — los casos de degradación W9.
-                let has_opaque_field = remapped_sig
-                    .fields
-                    .iter()
-                    .any(|f| field_is_degraded_any(&f.type_));
+                // W18 (v0.10.8) — el chequeo de "degraded Any" debe
+                // IGNORAR los virtual fields del ORM
+                // (`@has_many`/`@has_one`/BelongsToCompanion). W17
+                // skipea esos fields al emitir los impls
+                // `__ToFitzJson`/`__FromFitzJson`, pero este check
+                // previo los miraba igual. Para `@table type Post {
+                // @has_many comments: List<Comment> }` cuando Comment
+                // no está importado al main, el remap degrade
+                // `List<Comment>` a `List<Any>`. Sin filtrar virtuales
+                // acá, todo el type se skipea (impls de __ToFitzJson
+                // jamás se emiten), y rustc rompe con
+                // `PostData: __ToFitzJson is not satisfied`.
+                // Gap descubierto al escribir boilerplate
+                // api-orm-full multi-archivo.
+                let table_meta = m.table_metadata.get(type_name);
+                let has_opaque_field = remapped_sig.fields.iter().any(|f| {
+                    if let Some(meta) = table_meta {
+                        if meta.is_virtual_field(&f.name) {
+                            return false;
+                        }
+                    }
+                    field_is_degraded_any(&f.type_)
+                });
                 if has_opaque_field {
                     emitted.insert(type_name.clone());
                     continue;
@@ -9303,7 +9322,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         value: &Expr,
     ) -> Result<(), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
-        let (idx_code, _idx_ty) = self.gen_expr(index)?;
+        let (idx_code, idx_ty) = self.gen_expr(index)?;
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
 
         match &obj_ty {
@@ -9336,8 +9355,27 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 .unwrap();
                 Ok(())
             }
-            Type::Map(_k_ty, v_ty) => {
-                let coerced = coerce(&rhs_code, &rhs_ty, v_ty, self.env);
+            Type::Map(k_ty, v_ty) => {
+                // R.1.3 — Detectar storage heterogéneo (`Map<Any, _>`
+                // o `Map<_, Any>`): el storage Rust es
+                // `Vec<(__FitzValue, __FitzValue)>` (rust_type_for),
+                // así que key/value del assignment deben envolverse
+                // como `__FitzValue` antes del push. Sin esto, el
+                // codegen emite `String`/`<T>` crudo y rustc rompe
+                // con `expected __FitzValue, found String`. Gap
+                // descubierto al escribir partial updates en
+                // boilerplate api-orm-full (v0.10.8).
+                let storage_is_heterogeneous =
+                    matches!(**k_ty, Type::Any) || matches!(**v_ty, Type::Any);
+                let (k_expr, v_expr) = if storage_is_heterogeneous {
+                    self.uses_fitz_value = true;
+                    let k_wrap = wrap_as_fitz_value_with_env(&idx_code, &idx_ty, self.env)?;
+                    let v_wrap = wrap_as_fitz_value_with_env(&rhs_code, &rhs_ty, self.env)?;
+                    (k_wrap, v_wrap)
+                } else {
+                    let coerced = coerce(&rhs_code, &rhs_ty, v_ty, self.env);
+                    (idx_code.clone(), coerced)
+                };
                 // Mismo patrón compute-first, lock-last que List.
                 self.emit_indent();
                 writeln!(
@@ -9353,7 +9391,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                      }} \
                      if !__found {{ __g.push((__k, __v)); }} \
                      }}",
-                    obj_code, idx_code, coerced
+                    obj_code, k_expr, v_expr
                 )
                 .unwrap();
                 Ok(())
@@ -12003,37 +12041,41 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         ),
                     ));
                 }
-                // Acepta literal del tipo escalar correspondiente. Para
-                // simplicidad MVP, validamos por kind de literal Fitz.
-                let (lit_code, expected_lit_ok) = match (&args[0], pg_variant) {
-                    (Expr::Int(n, _), "Int") => {
-                        (format!("__FitzPgValue::Int({}i64)", n), true)
-                    }
-                    (Expr::Float(x, _), "Float") => {
-                        (format!("__FitzPgValue::Float({}f64)", x), true)
-                    }
-                    (Expr::Str(s, _), "Text") => (
-                        format!(
-                            "__FitzPgValue::Text({}.to_string())",
-                            rust_str_literal(s)
-                        ),
-                        true,
-                    ),
-                    (Expr::Bool(b, _), "Bool") => {
-                        (format!("__FitzPgValue::Bool({})", b), true)
-                    }
-                    _ => (String::new(), false),
+                // Literal del tipo escalar correspondiente → bindea
+                // con el variant tipado directamente (fast path,
+                // strict-typed en compile-time).
+                let lit_code = match (&args[0], pg_variant) {
+                    (Expr::Int(n, _), "Int") => Some(format!("__FitzPgValue::Int({}i64)", n)),
+                    (Expr::Float(x, _), "Float") => Some(format!("__FitzPgValue::Float({}f64)", x)),
+                    (Expr::Str(s, _), "Text") => Some(format!(
+                        "__FitzPgValue::Text({}.to_string())",
+                        rust_str_literal(s)
+                    )),
+                    (Expr::Bool(b, _), "Bool") => Some(format!("__FitzPgValue::Bool({})", b)),
+                    _ => None,
                 };
-                if !expected_lit_ok {
-                    return Err(self.err_at(
-                        args[0].span(),
-                        format!(
-                            "`{}.{}.has(value)` MVP: el value debe ser literal del tipo del array (esperado: {})",
-                            param_name, col_name, pg_variant
-                        ),
-                    ));
+                if let Some(code) = lit_code {
+                    bindings.push(code);
+                } else {
+                    // v0.10.8 — gap cerrado: vars externas (`tag`,
+                    // `body.tag`, etc.) sobre `.has(...)`. Antes solo
+                    // se aceptaba literal Fitz. Ahora delegamos a
+                    // `translate_closure_to_sql` que reusa la
+                    // máquina W3 (`.like(var)`) y W6 (`body.field`)
+                    // — el value llega como `$N` con
+                    // `__IntoPgValue::into_pg(...)` y rustc valida en
+                    // compile-time que el tipo del var implementa el
+                    // trait correspondiente. Caso típico:
+                    // `Post.where(fn(p) => p.tags.has(tag_param))`.
+                    let frag = self.translate_closure_to_sql(
+                        &args[0], param_name, fields, table_meta, bindings,
+                    )?;
+                    // `translate_closure_to_sql` para Ident/Field ya
+                    // hace `bindings.push(...)` y devuelve `$N` —
+                    // necesitamos solo el placeholder.
+                    let _ = pg_variant; // tipo validado en runtime via __IntoPgValue
+                    return Ok(format!("{} = ANY(\"{}\")", frag, sql_col));
                 }
-                bindings.push(lit_code);
                 Ok(format!("${} = ANY(\"{}\")", bindings.len(), sql_col))
             }
             // `u.tags.contains_all([1, 2])` → SQL `"tags" @> $1::int8[]`.
@@ -14702,12 +14744,17 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             // especial — paralelo a `gen_qb_update_set_args` literal.
             let conv = if is_jsonb {
                 // Field es Map<...> (JSONB). Cualquier __FitzValue se
-                // serializa a JSON. NULL → SQL NULL.
+                // serializa a JSON. NULL → SQL NULL. La string se
+                // produce por `.replace`, no por `format!` — usar `{}`
+                // pelado para que el format! Rust del runtime
+                // interpole `e`. (Bug detectado en v0.10.8: el código
+                // antes tenía `{{}}` escapado que dejaba `e` sin usar
+                // y rustc lo rechazaba como "argument never used".)
                 "match __v { \
                      __FitzValue::Null => __FitzPgValue::Null, \
                      other => match __fitz_fitz_value_to_jsonb(other) { \
                          Ok(s) => __FitzPgValue::Text(s), \
-                         Err(e) => return Err(format!(\"`.update`: field `{f}` (jsonb): {{}}\", e)), \
+                         Err(e) => return Err(format!(\"`.update`: field `{f}` (jsonb): {}\", e)), \
                      } \
                  }"
                 .replace("{f}", &f.name)
@@ -16345,7 +16392,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             ))),
 
             // ---- Map ----
-            (Type::Map(k, _), "has") => self.gen_map_has(&obj_code, k, args),
+            (Type::Map(k, v), "has") => self.gen_map_has(&obj_code, k, v, args),
             (Type::Map(k, _), "keys") => {
                 check_method_arity(method, args, 0)?;
                 let code = format!(
@@ -17288,14 +17335,26 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         &mut self,
         obj_code: &str,
         key_ty: &Type,
+        value_ty: &Type,
         args: &[Expr],
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("has", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-        let coerced = coerce(&arg_code, &arg_ty, key_ty, self.env);
+        // R.1.3-bis (v0.10.8) — Map heterogéneo: si cualquiera de k/v
+        // es Any, el storage es `Vec<(__FitzValue, __FitzValue)>`, así
+        // que la key del argumento debe envolverse como `__FitzValue`
+        // antes de comparar. Sin esto, `__k2: &__FitzValue` se
+        // comparaba contra `__k: &String` y rustc rompía.
+        let storage_is_heterogeneous = matches!(key_ty, Type::Any) || matches!(value_ty, Type::Any);
+        let key_expr = if storage_is_heterogeneous {
+            self.uses_fitz_value = true;
+            wrap_as_fitz_value_with_env(&arg_code, &arg_ty, self.env)?
+        } else {
+            coerce(&arg_code, &arg_ty, key_ty, self.env)
+        };
         let code = format!(
             "{{ let __k = {}; ({}).lock().unwrap().iter().any(|(__k2, _)| __k2 == &__k) }}",
-            coerced, obj_code
+            key_expr, obj_code
         );
         Ok((code, Type::Bool))
     }

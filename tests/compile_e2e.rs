@@ -9752,3 +9752,197 @@ match dir.get(\"missing\") {
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["2", "Ana", "clave no encontrada: missing"]);
 }
+
+#[test]
+fn map_str_any_indexing_assign_compilado() {
+    // R.1.3 (v0.10.8) — `Map<Str, Any>` con indexing assignment
+    // dinámico (`m["k"] = v`) ahora envuelve key/value como
+    // `__FitzValue` cuando el storage es heterogéneo.
+    //
+    // **Bug que cierra**: el codegen del indexing assignment para
+    // Map siempre emitía `__g.push((__k, __v))` con tipos crudos
+    // (String/T), pero `rust_type_for(Map<Str, Any>)` mapea a
+    // `Vec<(__FitzValue, __FitzValue)>`. Rustc rompía con
+    // "expected __FitzValue, found String".
+    //
+    // **Caso canónico**: partial updates en APIs CRUD (un Map<Str,
+    // Any> construido condicionalmente con solo los fields que el
+    // cliente quiere updatear) que es patrón estándar en cualquier
+    // API REST. Descubierto al escribir boilerplate api-orm-full.
+    let src = "\
+let m: Map<Str, Any> = {}
+m[\"name\"] = \"Ada\"
+m[\"age\"] = 42
+m[\"active\"] = true
+print(m.len())
+print(m.has(\"name\"))
+print(m.has(\"missing\"))
+";
+    let (stdout, exit) = build_and_run("map-str-any-index-assign", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["3", "true", "false"]);
+}
+
+#[test]
+fn orm_array_has_acepta_var_externa() {
+    // v0.10.8 — gap cerrado: `.has(var)` sobre `text[]`/`int8[]`/etc.
+    // ahora acepta variables externas al closure, no solo literales.
+    // Antes el codegen rechazaba con "el value debe ser literal del
+    // tipo del array". Ahora delega a `translate_closure_to_sql`
+    // (mismo path que W3/W6) que bindea el var via
+    // `__IntoPgValue::into_pg(...)`.
+    //
+    // Este test NO usa Postgres real (no podemos garantizar la
+    // disponibilidad en CI). Valida que el `fitz build` compile
+    // exitoso — el SQL emitido (`$N = ANY("tags")`) es trivial de
+    // inspeccionar en el .rs generado.
+    let stem = "orm_array_has_var";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let src = "\
+@table(\"posts\") type Post {\n\
+    @primary id: Int = 0\n\
+    title: Str = \"\"\n\
+    tags: List<Str> = []\n\
+}\n\
+\n\
+@get(\"/posts?tag={tag}\")\n\
+async fn list_by_tag(tag: Str) -> Result<List<Post>> {\n\
+    let conn = db.connect(\"postgres://x:y@127.0.0.1/x\").await?\n\
+    return Post.where(fn(p) => p.tags.has(tag)).all(conn).await\n\
+}\n\
+\n\
+@server(43919)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (`.has(var)` sobre array):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspección estática: el SQL emitido contiene `$1 = ANY("tags")`
+    // (placeholder bindeado, no constante).
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        assert!(
+            content.contains("= ANY(\\\"tags\\\")"),
+            "main.rs debe emitir SQL `= ANY(\"tags\")` con placeholder bindeado"
+        );
+    }
+}
+
+#[test]
+fn cross_module_table_virtual_w18_remap_any() {
+    // W18 (v0.10.8) — el chequeo `has_opaque_field` de
+    // `emit_helpers_for_imported_types` ahora ignora los virtual
+    // fields del ORM. Antes, un `@table type` con `@has_many` o
+    // `@has_one` cuyo target no estaba importado al main hacía
+    // que el remap degradara el field virtual a `List<Any>` /
+    // `Nullable<Any>`, lo cual disparaba el filtro y el codegen
+    // skipeaba TODO el impl `__ToFitzJson` / `__FromFitzJson`.
+    // Rustc luego rompía con
+    // `<T>Data: __ToFitzJson is not satisfied`.
+    //
+    // **Diferencia con cross_module_orm_virtual_fields_skip_w17**:
+    // ese test importa Post directamente desde main vía la cadena
+    // transitiva, dejando Post en el env del importer (no se
+    // degrade). Acá el main hace solo `import ops` (namespace) y
+    // NO trae Post al scope local — el remap SÍ degrade los
+    // virtuales y queda visible si el filtro mira virtuales.
+    let stem = "cross_module_orm_virtual_w18";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // models.fitz — User tiene @has_many Post; Post tiene
+    // BelongsToCompanion User. Ambos virtuales degradan a Any en
+    // el remap del main porque main no importa Post.
+    std::fs::write(
+        dir.join("models.fitz"),
+        "@table(\"users\") type User {\n\
+             @primary id: Int = 0\n\
+             name: Str = \"\"\n\
+             @has_many(\"Post\", via=\"author_id\") posts: List<Post> = []\n\
+         }\n\
+         \n\
+         @table(\"posts\") type Post {\n\
+             @primary id: Int = 0\n\
+             @belongs_to(\"User\") author_id: Int = 0\n\
+             author: User?\n\
+             title: Str = \"\"\n\
+         }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // ops.fitz — handler @get devuelve User (cross-module).
+    std::fs::write(
+        dir.join("ops.fitz"),
+        "from models import User, Post\n\
+         \n\
+         @get(\"/users/{id}\")\n\
+         fn get_user(id: Int) -> User {\n\
+             return User { id: id, name: \"Ada\" }\n\
+         }\n",
+    )
+    .expect("escribir ops.fitz");
+
+    let main_src = "\
+import ops\n\
+\n\
+@server(43918)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (W18):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    assert!(
+        dir.join(&bin_name).exists(),
+        "binario {} no existe",
+        bin_name
+    );
+
+    // Inspección estática del Rust generado: los impls de
+    // `__ToFitzJson` para los types cross-module deben emitirse
+    // (W18) aunque su remap haya degradado virtuales a Any.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        assert!(
+            content.contains("impl __ToFitzJson for UserData"),
+            "main.rs debe emitir `impl __ToFitzJson for UserData` (W18)"
+        );
+        assert!(
+            content.contains("impl __ToFitzJson for PostData"),
+            "main.rs debe emitir `impl __ToFitzJson for PostData` (W18)"
+        );
+    }
+}

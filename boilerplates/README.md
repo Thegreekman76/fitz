@@ -4,7 +4,7 @@ Plantillas listas para arrancar proyectos reales con Fitz. Todas
 están **Dockerizadas** — no necesitás instalar Rust, Python ni
 Postgres en tu máquina. Solo Docker y `docker compose`.
 
-## Los 7 boilerplates
+## Los 8 boilerplates
 
 | Boilerplate | Qué demuestra | Stack | Dockerfile | Compose |
 |-------------|---------------|-------|------------|---------|
@@ -13,6 +13,7 @@ Postgres en tu máquina. Solo Docker y `docker compose`.
 | [`api-middleware-cors`](./api-middleware-cors/) | Auth nativa (JWT + Argon2) + middleware + CORS cross-origin + frontend | Fitz standalone + frontend nginx     | distroless    | 2 svcs  |
 | [`api-websocket`](./api-websocket/)             | WebSockets tipados (broadcast) + frontend chat         | Fitz standalone + frontend nginx                       | distroless    | 2 svcs  |
 | [`api-postgres-fitz`](./api-postgres-fitz/) ⭐  | **CRUD con ORM nativo Fitz** + Postgres — sin Python   | Fitz standalone + Postgres                             | distroless    | 2 svcs  |
+| [`api-orm-full`](./api-orm-full/) ⭐⭐          | **Stack web first-class entero** (HTTP + auth + WS + cron + ORM) multi-archivo | Fitz standalone + Postgres                     | distroless    | 2 svcs  |
 | [`api-postgres-python`](./api-postgres-python/) | CRUD multi-archivo con SQLAlchemy + Postgres (interop) | Fitz + `--features python` + Postgres                  | python:3.12   | 2 svcs  |
 | [`api-fullstack-postgres`](./api-fullstack-postgres/) | **CRUD fullstack** — API + frontend vanilla rico + Postgres | Fitz + `--features python` + Postgres + nginx  | python:3.12   | 3 svcs  |
 
@@ -66,13 +67,19 @@ clientes generados).
 
 ### Necesito DB persistente (Postgres)
 
-Dos opciones según el stack que prefieras:
+Tres opciones según el stack que prefieras:
 
 - **[`api-postgres-fitz`](./api-postgres-fitz/) ⭐ (recomendado para
-  proyectos nuevos)** — usa el **ORM nativo del lenguaje** (cap 31
-  de la guía). Sin Python, sin SQLAlchemy. Driver Postgres puro
-  embebido en el binario. **~60 LoC total**, imagen distroless de
-  **~15 MB**. Mismo dominio que el de Python, side-by-side.
+  proyectos nuevos simples)** — usa el **ORM nativo del lenguaje**
+  (cap 31 de la guía). Sin Python, sin SQLAlchemy. Driver Postgres
+  puro embebido en el binario. **~60 LoC total**, imagen distroless
+  de **~15 MB**. Mismo dominio que el de Python, side-by-side.
+- **[`api-orm-full`](./api-orm-full/) ⭐⭐ (recomendado para apps
+  reales)** — showcase del **stack web first-class entero**: HTTP +
+  auth (JWT/Argon2) + WebSockets tipados + cron jobs + ORM con
+  relations + JSONB + arrays + aggregates, todo cross-module en
+  **9 archivos** que coordinan. Sin Python, sin SQLAlchemy, sin
+  Celery, sin Redis, sin broker — un solo binario standalone.
 - **[`api-postgres-python`](./api-postgres-python/)** — usa
   `fitz run --features python` para llamar a SQLAlchemy + psycopg2
   desde Fitz. Útil si tenés código SQLAlchemy existente que querés

@@ -5,29 +5,30 @@
 // con ORM declarativo. Sin Python, sin libs externas — todo en el
 // binario `fitz` mismo, paridad bit-a-bit `fitz run` ↔ `fitz build`.
 //
-// **Patrón cross-module (W12 + W16, v0.10.7)**:
-//   - Los handlers HTTP viven en módulos por feature (auth/posts/
-//     comments/realtime/jobs).
+// **Patrón cross-module (W12 + W16 + W17 + W18, v0.10.7/.8)**:
+//   - Los handlers HTTP y WS viven en módulos por feature
+//     (auth/posts/comments/realtime).
+//   - Los cron jobs viven en `jobs.fitz`.
 //   - `import <modulo>` arriba del main alcanza para que el codegen
-//     enchufe los handlers al `axum::Router`.
+//     enchufe handlers + jobs al `axum::Router` + scheduler.
 //   - El `@auth_provider` declarado en `auth.fitz` se encuentra
 //     cross-module por los `@authenticated`/`@admin` de los otros
-//     módulos.
+//     módulos vía W12 (los módulos lo importan también).
 //
 // **Cuándo modificar este archivo**:
-//   - Cambiar el puerto del server (`@server(3000)`).
+//   - Cambiar puerto del server o `ws_heartbeat_secs`.
 //   - Importar un módulo nuevo de feature (`import billing`, etc.).
 //   - Tocar el bootstrap del schema.
 
 import auth
-// import posts       — TODO: handlers posts (próximo sub-paso, post-W17)
-// import comments    — TODO: handlers comments (próximo sub-paso)
-// import realtime    — TODO: @ws /feed (próximo sub-paso)
-// import jobs        — TODO: @cron cleanup (próximo sub-paso)
+import posts
+import comments
+import realtime
+import jobs
 
 from schema import init_schema
 
-@server(3000, "0.0.0.0")
+@server(3000, "0.0.0.0", ws_heartbeat_secs=30)
 fn main() => 0
 
 match init_schema().await {
@@ -40,15 +41,15 @@ print("[ready] endpoints:")
 print("[ready]   POST   /auth/register      crear cuenta")
 print("[ready]   POST   /auth/login         JWT (Bearer)")
 print("[ready]   GET    /me                 (auth)")
-print("[ready]   PUT    /me/profile         (auth)")
-print("[ready]   GET    /posts              listar (filtros opcionales)")
-print("[ready]   GET    /posts/\{id\}         con eager loading")
+print("[ready]   GET    /posts              listar (filtros: ?status&tag)")
+print("[ready]   GET    /posts/\{id\}         con eager loading author + comments")
 print("[ready]   POST   /posts              (auth)")
-print("[ready]   PUT    /posts/\{id\}         (auth + owner)")
+print("[ready]   PUT    /posts/\{id\}         (auth + owner) partial update")
 print("[ready]   DELETE /posts/\{id\}         (auth + owner)")
-print("[ready]   POST   /posts/\{id\}/comments (auth) + broadcast WS")
-print("[ready]   GET    /stats/posts-per-user")
-print("[ready]   WS     /feed               broadcast realtime")
+print("[ready]   GET    /posts/\{id\}/comments")
+print("[ready]   POST   /posts/\{id\}/comments (auth)")
+print("[ready]   GET    /stats/posts-per-user  GROUP BY aggregate")
+print("[ready]   WS     /feed               broadcast realtime (auth)")
 print("[ready]   cron @00:00 cleanup_old_drafts")
 print("[ready]   GET    /docs               UI Scalar (OpenAPI 3.1)")
 print("[ready]   GET    /asyncapi.json      schema WebSockets")

@@ -1,0 +1,91 @@
+// comments.fitz — comentarios sobre posts (auth required).
+//
+// **Patrón cross-module (W12 + W16)**:
+//   - `@authenticated` resuelve al provider de `auth.fitz` via W12.
+//   - Los handlers se enchufan al Router del main via W16
+//     (`import comments`).
+//
+// **Features ORM ejercitadas**:
+//   - Verificar existencia del Post antes de insertar el Comment
+//     (404 implícito vía `Err`).
+//   - `Comment.insert(db, row)` con FKs `author_id` + `post_id`.
+//   - `Comment.where(...).all(db)` para listar comentarios de un
+//     post (relation query — paralelo a `post.comments` con
+//     `.preload`).
+//
+// **Deuda residual del lenguaje (gap)**: el patrón "handler HTTP
+// triggerea broadcast a clientes WS conectados" (caso canónico
+// SaaS: comentario nuevo → otros usuarios viendo el feed reciben
+// notification real-time) requiere una API global tipo
+// `ws_broadcast(endpoint, message)` que Fitz hoy no tiene. El
+// `conn.broadcast(...)` actual solo funciona DESDE un handler `@ws`,
+// no desde un HTTP. Por ahora el realtime.fitz lo modela como
+// "chat simétrico" — clientes WS se broadcastean entre sí.
+
+from config import db_url
+from models import User, Profile, Post, Comment
+import auth
+
+type CommentInput {
+    content: Str
+}
+
+type CommentResponse {
+    id: Int
+    post_id: Int
+    author_id: Int
+    content: Str
+    created_at: Str
+}
+
+fn to_response(c: Comment) -> CommentResponse {
+    return CommentResponse {
+        id: c.id,
+        post_id: c.post_id,
+        author_id: c.author_id,
+        content: c.content,
+        created_at: c.created_at,
+    }
+}
+
+// --- GET /posts/{id}/comments — listar comentarios de un post ---
+//
+// Relation query — paralelo a `post.preload("comments")` pero
+// invocada como endpoint independiente. SQL emitido:
+// `SELECT * FROM comments WHERE post_id = $1 ORDER BY created_at`.
+@get("/posts/{id}/comments")
+async fn list_post_comments(id: Int) -> Result<List<CommentResponse>> {
+    let conn = db.connect(db_url()).await?
+    let rows = Comment.where(fn(c) => c.post_id == id)
+        .order_by(fn(c) => c.created_at)
+        .all(conn)
+        .await?
+    return Ok(rows.map(fn(c) => to_response(c)))
+}
+
+// --- POST /posts/{id}/comments — crear comentario (auth) --------
+//
+// 1. Verifica que el post exista — sino el comment huérfano
+//    rompe el FK constraint.
+// 2. Inserta el comment con el user autenticado como author.
+@authenticated
+@post("/posts/{id}/comments")
+async fn create_comment(user: User, id: Int, body: CommentInput) -> Result<CommentResponse> {
+    if (body.content == "") {
+        return Err("el comentario no puede estar vacío")
+    }
+    let conn = db.connect(db_url()).await?
+
+    // Validar que el post existe (sino el comment huérfano).
+    let _ = Post.where(fn(p) => p.id == id).first(conn).await?
+
+    let new_comment = Comment.insert(conn, Comment {
+        id: 0,
+        post_id: id,
+        author_id: user.id,
+        content: body.content,
+        created_at: "",
+    }).await?
+
+    return Ok(to_response(new_comment))
+}

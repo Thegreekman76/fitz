@@ -12,8 +12,93 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-reanudar boilerplate `api-orm-full` (multi-archivo viable ahora
-post-W17), benchmarks Fitz ORM vs SQLAlchemy.
+benchmarks Fitz ORM vs SQLAlchemy, decidir scope del próximo
+norte técnico (curso "Fitz de 0 a experto" / registry 9.y.5 /
+bug del checker Option<String>).
+
+## [v0.10.8] — 2026-05-28 — `api-orm-full` boilerplate + 5 gaps cerrados
+
+**8va plantilla del directorio `boilerplates/`** y **bloque de
+cierre de gaps del codegen** descubiertos durante su construcción.
+La política "cerrar gaps que aparezcan al construir el boilerplate
+ANTES del release" se aplicó estricto — todo lo que ahora corre
+el showcase es paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+### Boilerplate `api-orm-full`
+
+Multi-archivo (9 módulos Fitz) showcase del **stack web first-class
+entero** en un solo binario standalone:
+
+- **HTTP + auth nativa** (`@auth_provider`/`@authenticated` cross-
+  module) + **OpenAPI 3.1 auto** en `/docs`.
+- **WebSockets tipados** (`@ws("/feed")` con `WsConn<FeedEvent>`)
+  + **AsyncAPI 3.0 auto** en `/asyncapi.json` + heartbeat 30s.
+- **Cron jobs sin Celery/broker** (`@cron("0 0 * * *") cleanup_old_drafts`).
+- **ORM nativo declarativo** con 4 `@table` types coordinados
+  (User/Profile/Post/Comment), relations completas (`@has_many`/
+  `@has_one`/`@belongs_to` + companion fields), eager loading
+  (`.preload("author")`/`.preload("comments")`), JSONB
+  (`metadata: Map<Str, Any>`), arrays (`tags: List<Str>` con
+  `.has(var)`), aggregates (GROUP BY `count(db)`).
+- **Sin Python, sin SQLAlchemy, sin Celery, sin Redis, sin broker**
+  — un solo binario `fitz build`. Imagen distroless ~15-20 MB.
+
+Patrón cross-module W12 + W16 + W17 + W18: handlers HTTP/WS,
+cron jobs, `@auth_provider` y `@table` types viven en módulos
+por feature; el main solo hace `import auth, posts, comments,
+realtime, jobs`.
+
+### 5 gaps/bugs del codegen cerrados
+
+Política: cerrar TODO gap descubierto durante el boilerplate
+ANTES de declarar el sub-paso completo (memoria
+`feedback_post_changes_smoke_examples_boilerplates`).
+
+- **R.1.3 — `Map<Str, Any>` con indexing assignment dinámico**
+  (`m["k"] = v`). El storage Rust de `Map<_, Any>` es
+  `Vec<(__FitzValue, __FitzValue)>`; el codegen del indexing
+  assignment NO envolvía key/value como `__FitzValue`. Fix en
+  `gen_index_assign`. Caso canónico: partial updates en APIs REST.
+- **R.1.3-bis — `.has(var)` sobre `Map<Str, Any>`** (paralelo).
+  Fix en `gen_map_has`.
+- **W18 — `has_opaque_field` ignora virtuales del ORM** en
+  `emit_helpers_for_imported_types`. El filtro previo a emitir
+  `__ToFitzJson`/`__FromFitzJson` para types cross-module miraba
+  los virtuales (`@has_many`/`@has_one`/BelongsToCompanion) que
+  degradan a `Any` post-remap cuando el target no está importado
+  al main. Resultado: impl jamás se emite, rustc rompe con
+  "trait bound not satisfied". Fix: filtrar virtuales antes del
+  check usando el `TableMetadata`.
+- **Bug del format string en jsonb dynamic update**. El dispatch
+  `Dynamic` de `.update(db, map_var)` para fields jsonb tenía
+  `{{}}` (escaped braces) donde debería tener `{}` para interpolar
+  el error message. Fix trivial cambio de string.
+- **`.has(var)` sobre arrays Postgres** (`text[]`/`int8[]`/etc.).
+  El codegen rechazaba con "el value debe ser literal". Fix:
+  delegar a `translate_closure_to_sql` (reusa máquina W3/W6) que
+  bindea via `__IntoPgValue::into_pg(...)`. Caso canónico: filtros
+  por tag en endpoints listables.
+
+### Tests
+
+- 3 tests E2E nuevos en `tests/compile_e2e.rs`:
+  `map_str_any_indexing_assign_compilado`,
+  `cross_module_table_virtual_w18_remap_any`,
+  `orm_array_has_acepta_var_externa`.
+- Smoke `GUIDE_EXAMPLES_COMPILE` 292 ejemplos verde con los 5 fixes
+  integrados.
+
+### Gaps abiertos derivados (NO bloquean el release)
+
+Detalle en `docs/deudas-post-5b.md` sección "Mini-fase W18+".
+
+- Narrowing flow-sensitive de `Nullable<T>` → `T` post-`if (x !=
+  null)`. Workaround idiomático: match arm.
+- Broadcast HTTP → WS cross-handler. Sin API global
+  `ws_broadcast(endpoint, msg)` hoy. El boilerplate modela
+  `/feed` como broadcast simétrico entre clientes WS.
+
+## [v0.10.7] — 2026-05-28 — W17: virtual fields skip en impls cross-module
 
 ## [v0.10.7] — 2026-05-28 — W17: virtual fields skip en impls cross-module
 

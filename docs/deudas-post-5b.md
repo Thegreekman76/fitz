@@ -1823,3 +1823,82 @@ con relations virtuales declarados en módulos.
   documentado para single-file). Refinement futuro: replicar la
   Decisión W17 (skip lookup local, usar Default::default) para
   Vec<__FitzValue> en módulos. No bloquea casos actuales.
+
+### Mini-fase W18+ (2026-05-28) — Gaps cerrados durante api-orm-full multi-archivo
+
+Bloque cerrado al construir el boilerplate
+[`api-orm-full`](../boilerplates/api-orm-full/) (8va plantilla,
+showcase del stack web first-class entero multi-archivo). Cada gap
+descubierto durante la escritura del boilerplate se cerró en bloque
+ANTES de declarar el boilerplate completo. **5 fixes del codegen
+en una sesión**:
+
+- ✅ **R.1.3 — `Map<Str, Any>` con indexing assignment dinámico
+  (`m["k"] = v`)**. El storage Rust de `Map<_, Any>` es
+  `Vec<(__FitzValue, __FitzValue)>`. El codegen del indexing
+  assignment SIEMPRE emitía `__g.push((__k, __v))` con tipos
+  crudos (String/T), generando "expected __FitzValue, found String".
+  Fix en `gen_index_assign`: detectar `storage_is_heterogeneous`
+  (k o v es Any) y envolver key/value con `wrap_as_fitz_value_with_env`.
+  Caso canónico: partial updates en APIs REST. Test E2E
+  `map_str_any_indexing_assign_compilado`.
+
+- ✅ **R.1.3-bis — `.has(var)` sobre `Map<Str, Any>`**. Paralelo
+  al anterior: `gen_map_has` no envolvía el arg como __FitzValue
+  cuando el storage es heterogéneo. Fix: nuevo param `value_ty` +
+  check `storage_is_heterogeneous` con wrap igual.
+
+- ✅ **W18 — `has_opaque_field` ignora virtuales del ORM en
+  cross-module**. El check previo a `gen_type_http_impls_for_sig_with_meta`
+  miraba TODOS los fields del `remapped_sig`, incluso los virtuales
+  (`@has_many`/`@has_one`/BelongsToCompanion). Cuando un virtual
+  apuntaba a un target no importado al main, el remap lo degradaba
+  a `Nullable(Any)` o `List(Any)` y el filtro skipeaba TODO el
+  impl. Sin impl `__ToFitzJson`, rustc rompía con
+  "trait bound not satisfied". Fix: filtrar virtuales antes del
+  check usando el `TableMetadata` ya disponible. Caso canónico:
+  cross-module ORM 4-archivos (`models` + `auth` + `posts` + `main`)
+  donde main solo `import posts` sin traer Post al scope local.
+  Test E2E `cross_module_table_virtual_w18_remap_any`.
+
+- ✅ **Bug del format string en jsonb dynamic update**. En el
+  dispatch `Dynamic` de `.update(db, map_var)` para fields jsonb,
+  la string del `Err(e)` arm tenía `{{}}` (escaped braces) donde
+  debería tener `{}` (placeholder de format). Como la string se
+  produce vía `.replace("{f}", ...)` y NO via `format!`, las
+  llaves quedan literales en el código Rust generado. Resultado:
+  rustc rejecta con "argument never used" porque el `e` jamás
+  se interpola. Fix trivial: cambiar `{{}}` → `{}`. Cubierto por
+  el boilerplate.
+
+- ✅ **`.has(var)` sobre arrays Postgres (`text[]`/`int8[]`/etc.)**.
+  El codegen rechazaba con "el value debe ser literal del tipo del
+  array". Fix: delegar a `translate_closure_to_sql` cuando no hay
+  match con literal Fitz; reusa la máquina de W3 (`.like(var)`) y
+  W6 (`body.field`) que bindean via `__IntoPgValue::into_pg(...)`.
+  Caso canónico: filtros por tag en endpoints listables. Test E2E
+  `orm_array_has_acepta_var_externa`.
+
+**Tests al cierre del bloque W18+**: smoke `GUIDE_EXAMPLES_COMPILE`
+292 ejemplos verde con los 5 fixes integrados. 3 tests E2E nuevos
+en `tests/compile_e2e.rs`.
+
+**Gaps descubiertos en la sesión y NO cerrados** (NO bloquean el
+boilerplate, documentados para fases futuras):
+
+- ⚠️ **Narrowing flow-sensitive de `Nullable<T>` → `T` post-`if
+  (x != null)`**. El checker no refina `Str?` a `Str` después del
+  check. `let s: Str = x` falla. **Workaround idiomático**: match
+  arm con `Pattern::Ident` (W2 ya cubre el refinement adentro de
+  match). Refinement flow-sensitive en `if` es propio del checker
+  y queda como deuda residual.
+
+- ⚠️ **Broadcast HTTP → WS cross-handler**. `conn.broadcast(msg)`
+  solo funciona DESDE un handler `@ws`. No hay primitiva para
+  "handler HTTP triggerea broadcast a clientes WS conectados".
+  Caso canónico SaaS (comment nuevo → notification realtime).
+  Requiere API global tipo `ws_broadcast(endpoint, msg: T)` o un
+  `WsBroadcaster` capturable en el scope del handler HTTP. Scope
+  grande, queda como deuda visible. El boilerplate api-orm-full
+  modela `/feed` como broadcast simétrico entre clientes WS para
+  showcasear el WS sin pelear este gap.
