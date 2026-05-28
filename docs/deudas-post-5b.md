@@ -1951,6 +1951,27 @@ levanta el server contra una DB real y se le pegan requests HTTP.
   exponer una API tipo `db.now()` built-in que emita el ISO 8601
   actual desde Fitz al insertar.
 
+- ⚠️ **W17 skipea virtuales del JSON aunque vengan poblados por
+  `.preload(...)`**. Caso canónico: `Post.where(...).preload("author")
+  .preload("comments").first(db)` carga los virtuales en memoria,
+  pero `impl __ToFitzJson for PostData` (emitido con W17) los
+  skipea al serializar — el response JSON nunca muestra el
+  eager-loaded data. El feature `.preload(...)` queda
+  parcialmente roto: ejecuta las queries adicionales pero el
+  cliente no ve los resultados.
+  **Workaround actual**: ninguno limpio — el cliente puede
+  hacer un segundo request a `GET /posts/{id}/comments` y
+  `GET /users/{author_id}` para obtener los datos. Pierde el
+  beneficio principal del eager loading (1 round-trip vs N+1).
+  **Fix futuro v0.10.8**: W17 debe distinguir entre "skip
+  virtuales en `__FromFitzJson`" (correcto — no van como body
+  input) y "skip virtuales en `__ToFitzJson`" (incorrecto cuando
+  están poblados — sí van en el response). Posible diseño:
+  flag runtime "is_loaded" sobre el field virtual que el
+  serializer chequea, o emitir el field en JSON solo cuando no
+  es default (`null` para HasOne/BelongsToCompanion, `[]` para
+  HasMany).
+
 - ⚠️ **HTTP wrapper no desempaca `Result<T>` tail sin `Ok(...)`
   explícito**. Cuando un handler `async fn handler(...) -> Result<T>`
   termina con `return <expr_que_devuelve_Result<T>>` (típicamente
