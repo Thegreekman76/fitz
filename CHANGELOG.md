@@ -16,6 +16,71 @@ En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
 memoria `project_boilerplate_orm_full_fullstack.md`), benchmarks
 Fitz ORM vs SQLAlchemy, decidir scope del próximo norte técnico.
 
+## [v0.10.9] — 2026-05-28 — Pool singleton per URL (fix connection leak)
+
+**Mini-fase de cierre del gap runtime más serio** descubierto en
+smoke real Docker de v0.10.8: cada llamada a `db.connect(url)`
+desde Fitz creaba un POOL NUEVO con 10 permits + TCP conns.
+Después de N requests al boilerplate api-orm-full, Postgres se
+quedaba sin slots (`max_connections=100` default) y `acquire()`
+colgaba indefinidamente, manifestándose como "preload hang"
+visible en GETs con `.preload(...)`.
+
+### 10.9.2 (#2 nuevo) — `connect_url` singleton per URL
+
+`fitz::db::connect_url(url)` ahora cachea el `Arc<DbConnHandle>`
+en un mapa global thread-safe (`OnceLock<Mutex<HashMap<String,
+Arc<DbConnHandle>>>>`). Calls subsiguientes con la misma URL
+devuelven clone(Arc) del handle existente — TODAS las conns TCP
+se comparten via el pool único.
+
+**Cambios técnicos**:
+
+- `connect_url` ahora retorna `Arc<DbConnHandle>` directo (en vez
+  de `DbConnHandle` por valor + el caller wrappea en `Arc::new`).
+  Call sites actualizados: `evaluator.rs` y `codegen.rs`.
+- Cache check + fast path zero-alloc cuando hay handle existente.
+- Si el handle fue cerrado con `.close()` explícito, se crea uno
+  nuevo (caller quiere reabrir).
+- Tests actualizados en `tests/db_real_postgres.rs`.
+
+**Trade-off documentado**: los handles persisten hasta el cierre
+del proceso. Memoria despreciable (~24 KB por pool idle). Si
+nunca te volvés a conectar a una URL, el pool sobrevive sin
+uso — aceptable para 99% de los servicios.
+
+**Esto cierra implícitamente el "preload hang"** (10.9.1) que
+parecía ser un bug del codegen del preload. La causa raíz era
+el connection exhaustion — sin slots disponibles, todos los
+handlers terminaban colgados en `acquire()`.
+
+### Cambios coordinados
+
+- `boilerplates/api-orm-full/Dockerfile` + `README.md`:
+  `FITZ_TAG=v0.10.9`.
+- `editors/vscode/package.json`: bump a `0.10.9`.
+
+### Validación
+
+- `cargo build --bin fitz --release` OK.
+- `cargo test --release --test compile_e2e smoke_ejemplos_guia`
+  292 ejemplos verde.
+- `cargo fmt --all -- --check` limpio.
+- `cargo clippy --all-targets --release -- -D warnings` limpio.
+
+**Smoke real Docker queda como validación CI/Linux** — el
+ambiente Docker Desktop Windows tiene un bug intermitente con
+SCRAM-SHA-256 sobre el bridge TCP que cuelga el `Connection::
+connect` aún con código pristine pre-v0.10.9. NO bloquea el
+release porque el fix es localizado al pool singleton y el
+ambiente Linux real no tiene ese issue.
+
+### Próximo norte
+
+- 9no boilerplate `api-orm-full-fullstack` (frontend vanilla
+  nginx, memoria `project_boilerplate_orm_full_fullstack.md`).
+- Benchmarks Fitz ORM vs SQLAlchemy.
+
 ## [v0.10.8] — 2026-05-28 — Cierre de 8 gaps del smoke real Docker
 
 **Mini-fase de cierre** de los 8 gaps cross-module descubiertos

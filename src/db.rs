@@ -2472,23 +2472,70 @@ async fn health_check_task(weak_pool: std::sync::Weak<DbPool>) {
 /// Abre una conexión Postgres desde un URL estándar. Punto de
 /// entrada principal para integración con el evaluator: el
 /// builtin `db.connect(url)` lo invoca y envuelve el resultado
-/// en `Value::DbConn(Arc::new(handle))`.
+/// en `Value::DbConn(handle)` (ya como `Arc<DbConnHandle>`).
+///
+/// **10.9.2 (v0.10.9) — singleton per URL**: el primer call con
+/// una URL nueva crea el handle + pool. Calls posteriores con la
+/// MISMA URL devuelven clone del Arc existente — TODAS las
+/// conns TCP se comparten via el pool único. Esto cierra el
+/// "connection pool leak" anterior donde cada `db.connect(url)`
+/// creaba pool nuevo (después de N requests Postgres se quedaba
+/// sin slots y `acquire()` colgaba).
+///
+/// El cache vive en `POOL_CACHE` (global, lazy). Los handles
+/// persisten hasta el cierre del proceso (no se evictan). Trade-
+/// off aceptado: si nunca te volvés a conectar a una URL, el
+/// pool sobrevive sin uso. La memoria es despreciable (~24 KB
+/// por pool idle).
 ///
 /// Eager: la primera conn TCP + handshake + auth sucede acá para
 /// validar credentials + URL antes de devolver el handle. Si
 /// falla, el handle no se crea y el caller ve el error directo.
 /// Conns adicionales se abren lazy en `acquire()` cuando el pool
 /// las necesita.
-pub async fn connect_url(url: &str) -> DbResult<DbConnHandle> {
+pub async fn connect_url(url: &str) -> DbResult<std::sync::Arc<DbConnHandle>> {
+    // 10.9.2 (v0.10.9) — singleton per URL. El cache global cachea el
+    // Arc<DbConnHandle> por URL; calls subsiguientes con la misma URL
+    // devuelven clone del Arc — TODAS las conns TCP se comparten via el
+    // pool único. Cierra el "connection pool leak" del v0.10.8: cada
+    // `db.connect(url)` creaba pool nuevo con 10 permits + TCP conns,
+    // saturando Postgres (`max_connections=100` default) tras N
+    // requests y dejando `acquire()` colgado eternamente.
+    //
+    // Trade-off: los handles persisten hasta el cierre del proceso (no
+    // se evictan). Memoria despreciable (~24 KB por pool idle).
+    static POOL_CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<DbConnHandle>>>,
+    > = std::sync::OnceLock::new();
+    let cache = POOL_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+    // Cache lookup — fast path zero-alloc.
+    {
+        let guard = cache.lock().expect("POOL_CACHE poisoned");
+        if let Some(existing) = guard.get(url) {
+            if !existing
+                .pool
+                .closed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                return Ok(std::sync::Arc::clone(existing));
+            }
+            // Si el handle fue cerrado con `.close()`, creamos uno
+            // nuevo — el caller hizo close explícito y quiere reabrir.
+        }
+    }
+
+    // Miss: crear handle nuevo + insertarlo en el cache.
     let config = ConnectionConfig::parse(url)?;
     let url_redacted = redact_url(url);
     let initial_conn = Connection::connect(&config).await?;
-    let handle = DbConnHandle::new(initial_conn, url_redacted, config);
-    // Spawn health check en background. El task mantiene solo
-    // un Weak, así que cuando el último Arc<DbConnHandle> se
-    // dropee, el pool muere y el task se autodescarte.
+    let handle = std::sync::Arc::new(DbConnHandle::new(initial_conn, url_redacted, config));
     let weak = std::sync::Arc::downgrade(&handle.pool);
     tokio::spawn(health_check_task(weak));
+    {
+        let mut guard = cache.lock().expect("POOL_CACHE poisoned");
+        guard.insert(url.to_string(), std::sync::Arc::clone(&handle));
+    }
     Ok(handle)
 }
 

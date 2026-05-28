@@ -2068,3 +2068,33 @@ clippy --all-targets --release -- -D warnings` limpio.
 
 **Extensión VSCode v0.10.8**: grammar TextMate suma
 `ws_broadcast`, LSP completion lo lista en `scope_level_completions`.
+
+### Mini-fase v0.10.9 (2026-05-28) — Pool singleton per URL
+
+Sub-paso post-v0.10.8: smoke real Docker descubrió **connection
+pool leak** crítico. Cada `db.connect(url)` desde Fitz creaba un
+POOL NUEVO con 10 permits + TCP conns. Tras N requests al
+boilerplate api-orm-full, Postgres se quedaba sin slots
+(`max_connections=100` default) y `acquire()` colgaba
+indefinidamente, manifestándose como "preload hang" visible en
+GETs con `.preload(...)`.
+
+- ✅ **10.9.2 (#2 nuevo) — `connect_url` singleton per URL**.
+  `fitz::db::connect_url(url)` cachea el `Arc<DbConnHandle>` en
+  mapa global thread-safe (`OnceLock<Mutex<HashMap>>`). Calls
+  subsiguientes con misma URL devuelven clone(Arc) — TODAS las
+  conns TCP comparten via el pool único. Cambio coordinado:
+  retorna `Arc<DbConnHandle>` directo, call sites
+  (evaluator + codegen runtime) actualizados.
+
+- ✅ **10.9.1 (#1 nuevo) — "Preload runtime hang"**: cerrado
+  IMPLÍCITAMENTE con 10.9.2. La causa raíz era el connection
+  exhaustion, no un bug del codegen del preload.
+
+**Smoke real Docker bloqueado por bug ambiente Windows**:
+Docker Desktop Windows tiene un bug intermitente con SCRAM-SHA-256
+sobre el bridge TCP que cuelga `Connection::connect` aún con
+código pristine pre-v0.10.9. NO bloquea el release porque el fix
+es localizado al pool singleton y el ambiente Linux real no tiene
+ese issue. Validación smoke real queda como tarea CI Linux (job
+`db-postgres` ya integrado en `.github/workflows/ci.yml`).

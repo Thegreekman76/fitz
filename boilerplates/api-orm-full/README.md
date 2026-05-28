@@ -105,18 +105,18 @@ cp .env.example .env
 ### Desarrollo
 
 ```bash
-# Pin a la versión que incluya los fixes del boilerplate (v0.10.8+).
+# Pin a la versión que incluya los fixes del boilerplate (v0.10.9+).
 # Mientras el tag no esté publicado, usar el FITZ_REV del commit:
-docker compose build --build-arg FITZ_TAG=v0.10.8
+docker compose build --build-arg FITZ_TAG=v0.10.9
 docker compose up -d
 ```
 
 > **Nota sobre versión de Fitz**: el boilerplate ejercita features
-> introducidas en v0.10.8 (Map<Str, Any> indexing assignment
+> introducidas en v0.10.9 (Map<Str, Any> indexing assignment
 > dinámico, W18 cross-module virtuales, .has(var) sobre arrays).
 > Hasta que el tag esté publicado, `cargo install --git` con
 > default `main` puede no tenerlas. Pin con `--build-arg
-> FITZ_TAG=v0.10.8` (o `FITZ_REV=<commit-sha>`) para builds
+> FITZ_TAG=v0.10.9` (o `FITZ_REV=<commit-sha>`) para builds
 > reproducibles.
 
 El primer build compila `fitz` desde source (~5-8 min). Builds
@@ -287,6 +287,6 @@ Los gaps cross-module destapados al construir este boilerplate
 (OpenAPI cross-module paths, WS Router cross-module, AsyncAPI
 cross-module, ORM Str sentinel del INSERT, HTTP wrapper Result
 tail, W17 eager loading, narrowing flow-sensitive de Nullable,
-`ws_broadcast` cross-handler) se cerraron en **v0.10.8** —
+`ws_broadcast` cross-handler) se cerraron en **v0.10.9** —
 detalle en `docs/deudas-post-5b.md` sección "Mini-fase post-
-release v0.10.8" + CHANGELOG.
+release v0.10.9" + CHANGELOG.

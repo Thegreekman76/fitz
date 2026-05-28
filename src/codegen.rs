@@ -6369,8 +6369,10 @@ impl __IntoPgValue for Vec<u8> {
 /// `Result<T, String>` Fitz (paralelo a `Result<T, String>` de
 /// `jwt.decode`, etc.).
 pub(crate) async fn __fitz_db_connect(url: String) -> Result<__FitzDbConn, String> {
+    // 10.9.2 — `connect_url` ahora devuelve `Arc<DbConnHandle>` directo
+    // (cacheado per URL via singleton).
     match __fitz_db_runtime::connect_url(url.as_str()).await {
-        Ok(handle) => Ok(std::sync::Arc::new(handle)),
+        Ok(handle) => Ok(handle),
         Err(e) => Err(e.to_string()),
     }
 }

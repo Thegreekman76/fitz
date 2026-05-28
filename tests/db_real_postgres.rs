@@ -238,7 +238,8 @@ async fn pool_queries_concurrentes_no_se_serializan() {
     // Cada query hace pg_sleep(0.1) para forzar I/O wait.
     use std::sync::Arc;
     let url = pg_url();
-    let conn = Arc::new(connect_url(&url).await.unwrap());
+    // 10.9.2 — connect_url ya devuelve Arc<DbConnHandle>.
+    let conn = connect_url(&url).await.unwrap();
 
     let n_queries = 5;
     let started = std::time::Instant::now();
@@ -308,7 +309,7 @@ async fn close_idempotente_y_queries_post_close_fallan() {
 
 /// Pre-setup: crea una tabla `fitz_orm_test_users` con 2 rows.
 /// Devuelve la conn (para que el test la cierre o reutilice).
-async fn seed_orm_test_table(url: &str) -> fitz::db::DbConnHandle {
+async fn seed_orm_test_table(url: &str) -> std::sync::Arc<fitz::db::DbConnHandle> {
     let conn = connect_url(url).await.unwrap();
     // Drop si existe (de runs previos), luego recrea + insert.
     let _ = conn

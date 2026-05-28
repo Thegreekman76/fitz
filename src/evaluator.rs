@@ -10269,8 +10269,10 @@ fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
     };
     let fut: crate::value::FitzFuture = Box::pin(async move {
         match crate::db::connect_url(&url).await {
+            // 10.9.2 — `connect_url` ahora devuelve Arc<DbConnHandle>
+            // directo (cacheado per URL).
             Ok(handle) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
-                Value::DbConn(Arc::new(handle)),
+                Value::DbConn(handle),
             )))),
             Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
                 Value::Str(e.to_string()),
