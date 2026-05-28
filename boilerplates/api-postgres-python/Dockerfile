@@ -99,7 +99,7 @@ RUN apt-get update && \
 
 # Binario fitz del stage builder (lincado contra libpython3.12 del
 # builder, que es la misma que el runtime tiene).
-COPY --from=builder /root/.cargo/bin/fitz /usr/local/bin/fitz
+COPY --from=builder /usr/local/cargo/bin/fitz /usr/local/bin/fitz
 
 WORKDIR /app
 

@@ -68,7 +68,7 @@ RUN apt-get update && \
         libpq5 ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /root/.cargo/bin/fitz /usr/local/bin/fitz
+COPY --from=builder /usr/local/cargo/bin/fitz /usr/local/bin/fitz
 
 WORKDIR /app
 

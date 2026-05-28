@@ -49,7 +49,7 @@ COPY src/ ./src/
 # Compilación al binario nativo. El binario embebe TODO: driver
 # Postgres + ORM + axum + tokio + axum WS + auth (JWT/Argon2id) +
 # cron scheduler. Sin runtime de Fitz en producción.
-RUN /root/.cargo/bin/fitz build src/main.fitz
+RUN fitz build src/main.fitz
 
 # ---- Stage 2: runtime ----------------------------------------------
 FROM debian:bookworm-slim

@@ -45,7 +45,7 @@ WORKDIR /app
 COPY fitz.toml ./
 COPY src/ ./src/
 
-RUN /root/.cargo/bin/fitz build src/main.fitz
+RUN fitz build src/main.fitz
 
 # ---- Stage 2: runtime ----------------------------------------------
 # Imagen minimalista — solo el binario fitz-app + ca-certificates
