@@ -1728,3 +1728,98 @@ release v0.10.1 (cierre formal de Fase 10.b entera).
   URL inválida, así el ejemplo es ejecutable como guía aunque no
   haya Postgres local. Cierra la última deuda residual de Fase
   10.b antes del release v0.10.1.
+
+### Mini-fase W17 (2026-05-27) — Virtual fields skip en impls cross-module
+
+Descubierta durante el primer intento de implementar el boilerplate
+`api-orm-full` (showcase del ORM + stack web first-class
+multi-archivo). Cierra el último gap conocido del codegen cross-
+module ORM. **Ningún cambio user-facing**: sin sintaxis nueva, sin
+keyword nueva, sin decorator nuevo — solo el codegen ahora emite
+impls `__ToFitzJson`/`__FromFitzJson` correctos para `@table types`
+con relations virtuales declarados en módulos.
+
+- ✅ **W17 — `@table` type con relations virtuales (`@has_many`/
+  `@has_one`/BelongsToCompanion) declarado en módulo A + handler que
+  lo retorna en módulo B**. Antes del fix, el codegen al emitir
+  `impl __FromFitzJson for UserData` en main.rs hacía remap de los
+  fields virtuales (`posts: List<Post>`) → `List<Any>` (porque
+  el target type `Post` no estaba en el env del importer) → emitía
+  `Vec<__FitzValue>`. Pero `__FitzValue` no se activaba por el
+  programa (sin `Map<Str, Any>` ni `List<Any>` legítimo en el
+  source Fitz), entonces rustc rompía con
+  `cannot find type __FitzValue in this scope` y el binario
+  fallaba al linkear. **Fix**: skipear los virtual fields
+  (HasMany/HasOne/BelongsToCompanion via
+  `TableMetadata.is_virtual_field`) en los impls
+  `__ToFitzJson`/`__FromFitzJson`. Esos fields no van a la DB ni
+  deben aparecer en JSON I/O — el cliente no debe poder enviarlos
+  como body, y la response no los serializa. En el struct literal
+  del `__from_fitz_json`, los virtuales se inicializan inline con
+  `Default::default()` para evitar nombrar el tipo
+  remap-degradado. Cambios: nueva variante
+  `gen_type_http_impls_for_sig_with_meta(name, sig, meta:
+  Option<&TableMetadata>)` que filtra virtuales; ambos call sites
+  (uno local en `gen_type_http_impls`, otro cross-module en
+  `emit_helpers_for_imported_types`) actualizados para pasar el
+  meta. Test E2E nuevo
+  `cross_module_orm_virtual_fields_skip_w17` candea el caso con 3
+  archivos (models.fitz + posts.fitz + main.fitz). Smoke
+  `GUIDE_EXAMPLES_COMPILE` verde — el ejemplo `31-orm.fitz`
+  sigue compilando bit-a-bit; otros 6 tests cross-module
+  (W8/W10/W11/W12/W15/W16) sin regresiones. Validado runtime:
+  `GET /users` devuelve `[{"id":7,"name":"ada"}]` SIN incluir
+  el virtual `posts` (skip correcto).
+
+### Deuda derivada de la sesión W17
+
+- ⚠️ **Inferencia del checker post-match Result con early-return Err
+  → Option<String>**. Caso: `let x = match Result { Ok(v) => v,
+  Err(_) => return Err("..."), }`. El checker infiere `x` como
+  `Option<String>` cuando debería ser `String` (el `Err` branch
+  termina en `return`, no produce valor). El codegen emite
+  `let mut x: Option<String> = (match ...)` que rustc rompe con
+  "expected Option<String>, found String". **Workaround**:
+  anotar el tipo explícitamente — `let x: Str = match ...`.
+  Detectado al implementar `auth.fitz` del boilerplate
+  `api-orm-full`. **No bloquea** ningún ejemplo de la guía (los
+  patterns con Result + match exhaustivo NO usan bindings de la
+  fork de Err en el caller). Refinement del checker queda como
+  deuda menor abierta — no es urgente porque el workaround es
+  trivial y descubrible.
+
+- ⚠️ **Cross-module ORM 3 archivos — patrón
+  `<table types en módulo + handlers en otro módulo + main solo
+  imports>`** (probado por W17 fix). Aunque W17 cierra el bug
+  del trait bound `__ToFitzJson`, hay deudas residuales menores
+  derivadas de esa exploración:
+  - **Forward refs en `@has_many("Target")` con Target declarado
+    después en el mismo módulo**: rompen el codegen ORM cuando
+    el codegen emite navigation method al procesar el type.
+    El ejemplo `31-orm.fitz` evita el caso porque no invoca
+    navigation directamente — solo declara las relations. Caso
+    confirmado en mi exploración: `type User { ... @has_many
+    Post ... } type Post { ... }` falla con "type Post no
+    registrado en TypeEnv" si el codegen intenta resolver el
+    target. **Workaround**: declarar Target ANTES de User, y
+    los companion fields (`user: User?`) backward-ref a User.
+  - **Importar TODOS los `@table` types al módulo que usa
+    cualquier uno**: el codegen valida ALL los targets de
+    relations de un type al procesarlo. Si User declara
+    `@has_many("Post", ...)` pero el módulo solo hace
+    `from models import User`, el codegen falla con "type Post
+    no registrado". **Workaround**: `from models import User,
+    Post, ...` (todos los referenciados). Refinement futuro:
+    el codegen podría auto-resolver los target types desde el
+    loader sin requerirlos en el `from import`.
+
+- ⚠️ **`Map<Str, Any>` en HTTP response de handlers cross-module**.
+  El handler que retorna `Map<Str, Any>` (caso típico GROUP BY +
+  db.query crudo) funciona OK en single-file. En cross-module,
+  cuando el handler vive en módulo B y el `Map<Str, Any>` arrastra
+  Vec<__FitzValue> al codegen del módulo, los impls
+  `__ToFitzJson`/`__FromFitzJson` necesarios se buscan en main.rs.
+  W17 no toca este caso (es un workaround del cap 31 sec 28 ya
+  documentado para single-file). Refinement futuro: replicar la
+  Decisión W17 (skip lookup local, usar Default::default) para
+  Vec<__FitzValue> en módulos. No bloquea casos actuales.

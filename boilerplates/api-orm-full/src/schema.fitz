@@ -1,0 +1,93 @@
+// schema.fitz — bootstrap idempotente del schema Postgres.
+//
+// El ORM nativo (cap 31 de la guía) **NO** auto-crea tablas a
+// partir de los `@table type` — eso es deuda explícita 10.6
+// (migraciones automáticas: `fitz db diff` / `fitz db migrate`).
+// Mientras esa deuda no cierre, este módulo lanza el DDL crudo
+// con `db.exec(...)` al boot, idempotente vía `CREATE TABLE IF
+// NOT EXISTS`. Paralelo a `Base.metadata.create_all(engine)` de
+// SQLAlchemy.
+//
+// El SQL es el contrato real con Postgres — cualquier cambio acá
+// debe sincronizarse con los `@table type X { ... }` de
+// `models.fitz`. El checker estático NO valida que ambos
+// coincidan (deuda derivada).
+//
+// Llamado desde `main.fitz::main_init()` antes de arrancar el
+// server.
+
+from config import db_url
+
+async fn init_schema() -> Result<Null> {
+    let conn = db.connect(db_url()).await?
+
+    // --- users -------------------------------------------------------
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS users (
+            id              bigserial PRIMARY KEY,
+            email           text NOT NULL UNIQUE,
+            name            text NOT NULL,
+            password_hash   text NOT NULL,
+            role            text NOT NULL DEFAULT 'user',
+            created_at      timestamptz NOT NULL DEFAULT NOW()
+        )
+    """, []).await?
+
+    // --- profiles (1:1 con users) ------------------------------------
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS profiles (
+            id          bigserial PRIMARY KEY,
+            user_id     bigint NOT NULL UNIQUE
+                            REFERENCES users(id) ON DELETE CASCADE,
+            bio         text NOT NULL DEFAULT '',
+            avatar_url  text NOT NULL DEFAULT '',
+            website     text NOT NULL DEFAULT ''
+        )
+    """, []).await?
+
+    // --- posts (con tags text[] + metadata jsonb) -------------------
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS posts (
+            id              bigserial PRIMARY KEY,
+            author_id       bigint NOT NULL
+                                REFERENCES users(id) ON DELETE CASCADE,
+            title           text NOT NULL,
+            slug            text NOT NULL UNIQUE,
+            content         text NOT NULL DEFAULT '',
+            status          text NOT NULL DEFAULT 'draft',
+            tags            text[] NOT NULL DEFAULT '\{\}',
+            metadata        jsonb NOT NULL DEFAULT '\{\}',
+            created_at      timestamptz NOT NULL DEFAULT NOW(),
+            published_at    timestamptz
+        )
+    """, []).await?
+
+    // --- comments ----------------------------------------------------
+    let _ = conn.exec("""
+        CREATE TABLE IF NOT EXISTS comments (
+            id          bigserial PRIMARY KEY,
+            post_id     bigint NOT NULL
+                            REFERENCES posts(id) ON DELETE CASCADE,
+            author_id   bigint NOT NULL
+                            REFERENCES users(id) ON DELETE CASCADE,
+            content     text NOT NULL,
+            created_at  timestamptz NOT NULL DEFAULT NOW()
+        )
+    """, []).await?
+
+    // --- índices (lookups frecuentes) -------------------------------
+    let _ = conn.exec(
+        "CREATE INDEX IF NOT EXISTS idx_posts_status ON posts(status)",
+        [],
+    ).await?
+    let _ = conn.exec(
+        "CREATE INDEX IF NOT EXISTS idx_posts_author ON posts(author_id)",
+        [],
+    ).await?
+    let _ = conn.exec(
+        "CREATE INDEX IF NOT EXISTS idx_comments_post ON comments(post_id)",
+        [],
+    ).await?
+
+    return Ok(null)
+}

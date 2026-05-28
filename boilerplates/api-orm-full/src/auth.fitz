@@ -1,0 +1,166 @@
+// auth.fitz — @auth_provider + registro y login.
+//
+// **Patrón cross-module (W12 + W16)**:
+//   - El `@auth_provider` vive en este módulo. Cuando un handler en
+//     otro módulo (posts/comments) usa `@authenticated`/`@admin`,
+//     el checker hace fallback al provider importado vía
+//     `TypeEnv::imported_auth_provider`, y el codegen emite la
+//     invocación con `crate::auth::check_token(...)` qualified.
+//   - Los handlers `@post("/auth/...")` declarados acá se enchufan
+//     automáticamente al `axum::Router` del main vía W16 — el main
+//     solo necesita `import auth` (sin nombrar handlers).
+//
+// **Flujo de login** (no sessions, JWT stateless):
+//   1. POST /auth/register → password hash con Argon2id +
+//      User.insert + Profile.insert con user_id.
+//   2. POST /auth/login → `hash.verify` contra el hash guardado,
+//      devuelve JWT con `email` + `role` en los claims.
+//   3. Handlers `@authenticated` reciben `Authorization: Bearer X`,
+//      el `@auth_provider` decodea el JWT, lookup en DB por email
+//      (único — usa el UNIQUE index), devuelve `User`.
+//
+// **Por qué `email` (no `user_id`) en los claims del JWT**: el
+// payload de `jwt.encode` está limitado a `Map<Str, Str>` en el MVP
+// (heterogéneos requieren `__FitzValue` en codegen, deuda 9.w.1).
+// Stringificar y parsear `user_id` cada request agrega complejidad
+// sin ganancia — el email es único en el schema y la query usa el
+// UNIQUE index de la columna.
+
+from config import db_url, jwt_secret
+// Importar TODOS los @table types — el codegen del ORM valida las
+// relations de cada type referenciado, y rompe si algún target
+// (Post/Comment a través de `@has_many` de User) falta del scope.
+from models import User, Profile, Post, Comment
+
+// --- Helpers privados ---------------------------------------------
+
+async fn find_by_email(email: Str) -> Result<User> {
+    let conn = db.connect(db_url()).await?
+    return User.where(fn(u) => u.email == email).first(conn).await
+}
+
+// --- Provider singleton (cross-module W12) ------------------------
+
+@auth_provider
+async fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let auth: Str = match headers.get("authorization") {
+        Ok(v) => v,
+        Err(_) => return Err("falta header Authorization"),
+    }
+    let parts = auth.split(" ")
+    if (parts.len() != 2) {
+        return Err("Authorization debe ser 'Bearer <token>'")
+    }
+    let scheme = parts[0]
+    let token = parts[1]
+    if (scheme != "Bearer") {
+        return Err("scheme debe ser Bearer, fue: {scheme}")
+    }
+    let claims = jwt.decode(token, jwt_secret())?
+    let email: Str = match claims.get("email") {
+        Ok(v) => v,
+        Err(_) => return Err("token sin claim email"),
+    }
+    return find_by_email(email).await
+}
+
+// --- Tipos de input/output del registro y login -------------------
+
+type RegisterInput {
+    email: Str
+    name: Str
+    password: Str
+}
+
+type Credentials {
+    email: Str
+    password: Str
+}
+
+type LoginResponse {
+    token: Str
+}
+
+// Response del registro y `/me` — User sin password_hash expuesto.
+type UserPublic {
+    id: Int
+    email: Str
+    name: Str
+    role: Str
+    created_at: Str
+}
+
+fn to_public(u: User) -> UserPublic {
+    return UserPublic {
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        role: u.role,
+        created_at: u.created_at,
+    }
+}
+
+// --- POST /auth/register ------------------------------------------
+
+@post("/auth/register")
+async fn register(input: RegisterInput) -> Result<UserPublic> {
+    if (input.email == "" or input.password == "" or input.name == "") {
+        return Err("email, name y password son obligatorios")
+    }
+    if (input.password.len() < 8) {
+        return Err("password debe tener al menos 8 caracteres")
+    }
+
+    let conn = db.connect(db_url()).await?
+
+    // Check email único antes de insertar (mensaje user-friendly
+    // en lugar del UNIQUE violation crudo del driver).
+    let existing = User.where(fn(u) => u.email == input.email).first(conn).await
+    match existing {
+        Ok(_)  => return Err("email ya registrado: {input.email}"),
+        Err(_) => 0,
+    }
+
+    let pw_hash = hash.password(input.password)
+    let new_user = User.insert(conn, User {
+        id: 0,
+        email: input.email,
+        name: input.name,
+        password_hash: pw_hash,
+        role: "user",
+        created_at: "",
+    }).await?
+
+    // Bootstrap del profile asociado (1:1 con users).
+    let _ = Profile.insert(conn, Profile {
+        id: 0,
+        user_id: new_user.id,
+        bio: "",
+        avatar_url: "",
+        website: "",
+    }).await?
+
+    return Ok(to_public(new_user))
+}
+
+// --- POST /auth/login ---------------------------------------------
+
+@post("/auth/login")
+async fn login(creds: Credentials) -> Result<LoginResponse> {
+    let user: User = match find_by_email(creds.email).await {
+        Ok(u) => u,
+        Err(_) => return Err("credenciales inválidas"),
+    }
+    if (not hash.verify(creds.password, user.password_hash)) {
+        return Err("credenciales inválidas")
+    }
+    let claims = { "email": user.email, "role": user.role }
+    let token = jwt.encode(claims, jwt_secret())
+    return Ok(LoginResponse { token: token })
+}
+
+// --- GET /me ------------------------------------------------------
+
+@authenticated
+@get("/me")
+fn me(user: User) -> UserPublic => to_public(user)

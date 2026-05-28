@@ -12,9 +12,83 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-boilerplates ORM Dockerizados (convertir 5/6 SQLAlchemy → Fitz
-ORM nativo + boilerplate nuevo dedicado), benchmarks Fitz ORM
-vs SQLAlchemy.
+reanudar boilerplate `api-orm-full` (multi-archivo viable ahora
+post-W17), benchmarks Fitz ORM vs SQLAlchemy.
+
+## [v0.10.7] — 2026-05-28 — W17: virtual fields skip en impls cross-module
+
+**Cierre del último gap conocido del codegen cross-module ORM**
+descubierto durante el primer intento de implementar el boilerplate
+`api-orm-full` (showcase multi-archivo del stack DB+ORM+HTTP+WS+
+cron). **Sin sintaxis nueva**: cambio interno del codegen — los
+programas existentes siguen compilando bit-a-bit, sin cambios en
+grammar TextMate, LSP completions ni docs prosa.
+
+**El bug**: `@table type` con `@has_many`/`@has_one` declarado en
+un módulo importado + handler que lo retorna como response, vivos
+en módulos distintos al main. Caso canónico:
+
+```
+src/models.fitz   →  type User { ... @has_many("Post", ...) posts }
+src/posts.fitz    →  from models import User, Post
+                     @get("/users") fn list() -> List<User> { ... }
+src/main.fitz     →  import posts
+                     @server(3000)
+                     fn main() => 0
+```
+
+El codegen al emitir `impl __FromFitzJson for UserData` en main.rs
+hacía remap del field virtual `posts: List<Post>` → `List<Any>`
+(porque `Post` no estaba en el env del importer main) → emitía
+`Vec<__FitzValue>`. Pero `__FitzValue` no se activaba para el
+programa, así que rustc rompía con `cannot find type __FitzValue
+in this scope`.
+
+**El fix**: skipear los virtual fields (HasMany/HasOne/
+BelongsToCompanion via `TableMetadata.is_virtual_field`) en los
+impls `__ToFitzJson`/`__FromFitzJson`. Esos fields no van a la
+DB ni deben aparecer en JSON I/O — el cliente no debe enviarlos
+como body, la response no los serializa. En el struct literal
+del `__from_fitz_json`, los virtuales se inicializan inline con
+`Default::default()` para evitar nombrar el tipo remap-degradado.
+
+**Cambios técnicos**:
+
+- Nueva variante `gen_type_http_impls_for_sig_with_meta(name, sig,
+  meta: Option<&TableMetadata>)` en `src/codegen.rs` que filtra
+  virtuales según el meta del type.
+- Ambos call sites actualizados: `gen_type_http_impls` (types
+  locales) hace lookup vía `table_metadata_for(id)`;
+  `emit_helpers_for_imported_types` (cross-module) hace lookup en
+  `m.table_metadata.get(type_name)` del módulo origen.
+- Test E2E nuevo `cross_module_orm_virtual_fields_skip_w17` en
+  `tests/compile_e2e.rs` candea el caso 3-archivos. Validado
+  runtime: `GET /users` devuelve `{"id":7,"name":"ada"}` SIN
+  incluir el virtual `posts`.
+
+**Validación al cierre**:
+
+- 314/314 tests `compile_e2e` pasan (no-regresión sobre los 6 tests
+  cross-module existentes: W8/W10/W11/W12/W15/W16).
+- Smoke `GUIDE_EXAMPLES_COMPILE` (292 ejemplos) verde.
+- `cargo fmt --all -- --check` limpio.
+- `cargo clippy --all-targets --release -- -D warnings` limpio.
+
+**Deudas derivadas documentadas** (en `docs/deudas-post-5b.md` sec
+nueva):
+
+- ⚠️ Bug del checker: inferencia `Option<String>` en `let x = match
+  Result { Ok(v) => v, Err(_) => return ... }`. Workaround
+  trivial: anotar `let x: Str = ...`.
+- ⚠️ Forward refs en `@has_many("Target", ...)` con Target después
+  en el mismo módulo: rompe si el codegen procesa navigation.
+  Workaround: declarar Target antes.
+- ⚠️ Importar TODOS los `@table` types al módulo que use cualquier
+  uno (el codegen valida ALL targets). Workaround: `from models
+  import User, Post, ...` (todos los referenciados).
+
+Próximo norte: reanudar boilerplate `api-orm-full` multi-archivo
+(ahora viable con W17 cerrado).
 
 ## [v0.10.6] — 2026-05-27 — Bloque W1-W7: workarounds residuales del ORM cerrados
 

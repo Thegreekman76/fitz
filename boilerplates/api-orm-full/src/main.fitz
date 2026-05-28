@@ -1,85 +1,54 @@
-// PLACEHOLDER — boilerplate api-orm-full
+// main.fitz — orquestador del boilerplate api-orm-full.
 //
-// Proyecto del showcase ORM full (blog/CMS con relations + JSONB +
-// arrays + auth + WebSockets + cron) en construcción.
+// **Showcase del ORM nativo + stack web first-class** completo:
+// HTTP + auth nativa + WebSockets tipados + cron jobs + Postgres
+// con ORM declarativo. Sin Python, sin libs externas — todo en el
+// binario `fitz` mismo, paridad bit-a-bit `fitz run` ↔ `fitz build`.
 //
-// **Estado a v0.10.7 (2026-05-27)**:
+// **Patrón cross-module (W12 + W16, v0.10.7)**:
+//   - Los handlers HTTP viven en módulos por feature (auth/posts/
+//     comments/realtime/jobs).
+//   - `import <modulo>` arriba del main alcanza para que el codegen
+//     enchufe los handlers al `axum::Router`.
+//   - El `@auth_provider` declarado en `auth.fitz` se encuentra
+//     cross-module por los `@authenticated`/`@admin` de los otros
+//     módulos.
 //
-// La estructura multi-archivo (models/auth/posts/comments/realtime/
-// jobs/schema/config/main) requiere cerrar varios refinamientos del
-// codegen cross-module:
-//
-//   - W8/W9 ✓ CERRADOS — @table types + TypeId remapping cross-module.
-//   - W10 ✓ CERRADO    — WS/jobs/auth transitivos (preludios + deps).
-//   - W11 ✓ CERRADO    — pub(crate) en helpers JSONB/HTTP + uses_db /
-//                        uses_fitz_value / has_http transitivos +
-//                        emit_helpers_for_imported_types refinado para
-//                        no descartar Map<Str, Any> legítimo.
-//   - W12 ✓ CERRADO    — cross-module @auth_provider: checker hace
-//                        fallback al provider importado (TypeEnv slot
-//                        nuevo + extract_auth_provider_signature) y
-//                        el codegen emite `crate::<mod>::<fn>(...)`
-//                        module-qualified en los wrappers HTTP/WS.
-//                        Ejemplo runnable: examples/guide/multi-module-auth/.
-//   - W13 ✓ CERRADO    — `?` operator en handlers HTTP no exige
-//                        `-> Result<T>`. Checker relaja la regla
-//                        cuando estamos `in_http_handler` y codegen
-//                        detecta `body_uses_try`, fuerza response_mode
-//                        y emite `?` como match → `__FitzResponse 500`
-//                        en lugar del `?` Rust nativo. Mix con
-//                        `return <status>{...}` funciona en el mismo
-//                        body. Paridad bit-a-bit con runtime
-//                        (`value_to_outcome` ya convertía Err→500).
-//   - W14 ✓ CERRADO    — handlers @authenticated con body + user
-//                        juntos. AuthProviderHandle suma
-//                        user_type_name extraído del `Result<T>` del
-//                        provider; el dispatcher de handlers
-//                        protegidos identifica el user param por TIPO
-//                        (`: User`) en vez de la regla del primer
-//                        leftover. Cualquier otro leftover queda como
-//                        body. Paridad bit-a-bit `fitz run` ↔ `fitz
-//                        build` incluyendo cross-module (W12 + W14).
-//   - W15 ✓ CERRADO    — verificado como no-fix-necesario: las
-//                        reglas de orphan de Rust hacen que el `impl
-//                        __ToFitzJson`/`__FromFitzJson for FooData`
-//                        emitido en main.rs (vía
-//                        `emit_helpers_for_imported_types`) sea
-//                        crate-visible — el wrapper en módulo
-//                        (cuando W16 cierre) puede llamar la trait
-//                        method sin impls duplicados. E2E
-//                        `cross_module_body_type_serializa_w15`
-//                        candea el caso: type en módulo + body en
-//                        handler de main → 200 + JSON correcto.
-//   - W16 ✓ CERRADO    — cross-module HTTP route registration.
-//                        Handlers @get/@post/@put/@delete en módulos
-//                        importados ahora compilan + se enchufan al
-//                        axum::Router del main. Cierre en 3 piezas:
-//                        (1) LoadedModule.http_fn_stmts captura
-//                        durante el load; (2) generate_module_rs
-//                        emite wrappers pub `__handler_<name>` con
-//                        auth_provider state propagado desde
-//                        env.imported_auth_provider() (W12); (3)
-//                        gen_http_main registra rutas con
-//                        `crate::<mod>::__handler_<name>`. Helpers
-//                        `__apply_cors_and_respond` +
-//                        `__parse_urlencoded` + `__extract_multipart_boundary`
-//                        + `__parse_multipart` ahora `pub(crate)`.
-//
-// **TODAS LAS W CERRADAS (W8-W16)**. La estructura multi-archivo
-// planificada ya es viable. Este placeholder queda como TODO de
-// implementación del boilerplate real (convertir `api-orm-full` a
-// un proyecto blog/CMS con models/auth/posts/comments/realtime/jobs
-// usando lo que cerraron los W).
-//
-// **Para ver el ORM nativo + multi-módulo funcionando hoy**:
-//   - `api-postgres-fitz` (single-file): CRUD HTTP + JWT auth + ORM
-//     completo en un solo archivo. Mismo dominio que
-//     `api-postgres-python` pero con ORM nativo en lugar de
-//     SQLAlchemy + interop Python.
-//   - `examples/guide/multi-module-auth/` (W12): demo del
-//     `@auth_provider` cross-module en dos archivos.
-//   - E2E `cross_module_http_handler_w16` en tests/compile_e2e.rs:
-//     handler entero (con `@authenticated`/`@admin` + body + `?` +
-//     `return <status>`) declarado en un módulo, registrado por main.
+// **Cuándo modificar este archivo**:
+//   - Cambiar el puerto del server (`@server(3000)`).
+//   - Importar un módulo nuevo de feature (`import billing`, etc.).
+//   - Tocar el bootstrap del schema.
 
-print("api-orm-full — boilerplate en construcción (W8-W16 ✓ cerrados, pendiente impl)")
+import auth
+// import posts       — TODO: handlers posts (próximo sub-paso, post-W17)
+// import comments    — TODO: handlers comments (próximo sub-paso)
+// import realtime    — TODO: @ws /feed (próximo sub-paso)
+// import jobs        — TODO: @cron cleanup (próximo sub-paso)
+
+from schema import init_schema
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+match init_schema().await {
+    Ok(_)  => print("[boot] schema DB inicializado"),
+    Err(e) => print("[boot] ERROR schema — {e}"),
+}
+
+print("[ready] server arrancando en :3000")
+print("[ready] endpoints:")
+print("[ready]   POST   /auth/register      crear cuenta")
+print("[ready]   POST   /auth/login         JWT (Bearer)")
+print("[ready]   GET    /me                 (auth)")
+print("[ready]   PUT    /me/profile         (auth)")
+print("[ready]   GET    /posts              listar (filtros opcionales)")
+print("[ready]   GET    /posts/\{id\}         con eager loading")
+print("[ready]   POST   /posts              (auth)")
+print("[ready]   PUT    /posts/\{id\}         (auth + owner)")
+print("[ready]   DELETE /posts/\{id\}         (auth + owner)")
+print("[ready]   POST   /posts/\{id\}/comments (auth) + broadcast WS")
+print("[ready]   GET    /stats/posts-per-user")
+print("[ready]   WS     /feed               broadcast realtime")
+print("[ready]   cron @00:00 cleanup_old_drafts")
+print("[ready]   GET    /docs               UI Scalar (OpenAPI 3.1)")
+print("[ready]   GET    /asyncapi.json      schema WebSockets")

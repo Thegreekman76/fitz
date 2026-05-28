@@ -7116,6 +7116,175 @@ fn main() => 0\n\
 }
 
 #[test]
+fn cross_module_orm_virtual_fields_skip_w17() {
+    // W17 (v0.10.7) — @table type con relations virtuales
+    // (`@has_many`/`@has_one`/BelongsToCompanion) declarado en un
+    // módulo importado y usado como response de un handler en OTRO
+    // módulo importado al main (caso 3-archivos: models + posts +
+    // main).
+    //
+    // **Bug que cierra**: el codegen al emitir `impl __FromFitzJson
+    // for UserData` en main.rs hacía remap del field
+    // `posts: List<Post>` → `List<Any>` (porque Post no estaba en
+    // env del main) → emitía `Vec<__FitzValue>`. Pero
+    // `__FitzValue` no se activaba por el programa, así que rustc
+    // rompía con "cannot find type __FitzValue".
+    //
+    // **Fix**: skipear los virtual fields (relations no-FK) en los
+    // impls `__ToFitzJson`/`__FromFitzJson`. Esos fields no van a
+    // la DB ni deberían aparecer en JSON I/O. En el struct literal
+    // del `__from_fitz_json`, los virtuales se inicializan inline
+    // con `Default::default()` para evitar nombrar el tipo
+    // remap-degradado.
+    let stem = "cross_module_orm_virtual_w17";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // models.fitz — @table types con @has_many (virtual) +
+    // @belongs_to (real). User.posts es el field problemático
+    // pre-W17 porque Post no se importa al main.
+    std::fs::write(
+        dir.join("models.fitz"),
+        "@table(\"users\") type User {\n\
+             @primary id: Int = 0\n\
+             name: Str = \"\"\n\
+             @has_many(\"Post\", via=\"author_id\", on_delete=\"cascade\") posts: List<Post> = []\n\
+         }\n\
+         \n\
+         @table(\"posts\") type Post {\n\
+             @primary id: Int = 0\n\
+             @belongs_to(\"User\", on_delete=\"cascade\") author_id: Int = 0\n\
+             title: Str = \"\"\n\
+         }\n",
+    )
+    .expect("escribir models.fitz");
+
+    // posts.fitz — handler que devuelve List<Post> cross-module.
+    std::fs::write(
+        dir.join("posts.fitz"),
+        "from models import User, Post\n\
+         \n\
+         @get(\"/posts\")\n\
+         fn list_posts() -> List<Post> {\n\
+             return [Post { id: 1, author_id: 1, title: \"hello\" }]\n\
+         }\n\
+         \n\
+         @get(\"/users\")\n\
+         fn list_users() -> List<User> {\n\
+             return [User { id: 7, name: \"ada\" }]\n\
+         }\n",
+    )
+    .expect("escribir posts.fitz");
+
+    // Main: solo `import posts` (W16) + @server.
+    let main_src = "\
+import posts\n\
+\n\
+@server(43916)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (W17):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43916".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43916 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let send_get = |path: &str| -> (u16, String) {
+        let request = format!(
+            "GET {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            path, addr
+        );
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let body = raw[body_start..].to_string();
+        (status, body)
+    };
+
+    // Caso 1: GET /posts → 200 con [{id, author_id, title}].
+    // Post NO tiene virtual fields, todo el shape se serializa.
+    let (status, body) = send_get("/posts");
+    assert_eq!(status, 200, "/posts → 200, fue {:?}", (status, &body));
+    assert!(
+        body.contains("\"id\":1") && body.contains("\"title\":\"hello\""),
+        "/posts body: {:?}",
+        body
+    );
+
+    // Caso 2: GET /users → 200 con [{id, name}] — SIN el virtual
+    // `posts` en el JSON output. Si W17 no aplicara, este endpoint
+    // ni compilaría (rompía con __FitzValue undefined).
+    let (status, body) = send_get("/users");
+    assert_eq!(status, 200, "/users → 200, fue {:?}", (status, &body));
+    assert!(
+        body.contains("\"id\":7") && body.contains("\"name\":\"ada\""),
+        "/users body: {:?}",
+        body
+    );
+    assert!(
+        !body.contains("\"posts\""),
+        "/users body NO debe incluir el virtual `posts`: {:?}",
+        body
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
 fn cross_module_body_type_serializa_w15() {
     // W15 (v0.10.11) — type declarado en un módulo importado y usado
     // como body en un handler del main. Antes de revisar W15 se asumía

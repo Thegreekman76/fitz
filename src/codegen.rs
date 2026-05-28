@@ -8236,7 +8236,16 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     continue;
                 }
                 if do_http {
-                    self.gen_type_http_impls_for_sig(type_name, &remapped_sig)?;
+                    // W17 (v0.10.7) — pasar el `TableMetadata` cuando el
+                    // type tiene `@table`, para que los impls
+                    // `__ToFitzJson`/`__FromFitzJson` skipean los
+                    // fields virtuales (`@has_many`/`@has_one`/
+                    // BelongsToCompanion). Sin esto, un `@has_many`
+                    // con target no importado al main degrade a
+                    // `List<Any>` → `Vec<__FitzValue>` que falla rustc
+                    // cuando `__FitzValue` no está activado.
+                    let meta = m.table_metadata.get(type_name);
+                    self.gen_type_http_impls_for_sig_with_meta(type_name, &remapped_sig, meta)?;
                 }
                 if do_python {
                     self.gen_python_helpers_for_type(type_name, &remapped_sig)?;
@@ -19406,7 +19415,15 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             .get(name)
             .cloned()
             .ok_or_else(|| self.err(format!("tipo `{}` no pre-registrado", name)))?;
-        self.gen_type_http_impls_for_sig(name, &sig)
+        // W17 (v0.10.7) — lookup del TableMetadata local cuando el
+        // type tiene `@table`. `table_metadata_for(id)` consulta
+        // primero los imported_table_metadata y luego el env local.
+        let meta_opt = self
+            .env
+            .lookup(name)
+            .and_then(|id| self.table_metadata_for(id))
+            .cloned();
+        self.gen_type_http_impls_for_sig_with_meta(name, &sig, meta_opt.as_ref())
     }
 
     /// Fase 8.7.1 transitiva-bis (v0.9.44) — extraído de
@@ -19414,14 +19431,48 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
     /// `impl __FromFitzJson` para un tipo nominal, dado el `name` y la
     /// `TypeSig`. Reusable para tipos del main Y para tipos importados
     /// de módulos transitivos (`emit_http_impls_for_imported_types`).
+    #[allow(dead_code)]
     fn gen_type_http_impls_for_sig(&mut self, name: &str, sig: &TypeSig) -> Result<(), FitzError> {
+        self.gen_type_http_impls_for_sig_with_meta(name, sig, None)
+    }
+
+    /// W17 (v0.10.7) — variante de `gen_type_http_impls_for_sig` que
+    /// recibe el `TableMetadata` opcional para skipear los virtual
+    /// fields (`@has_many`, `@has_one`, BelongsToCompanion) en los
+    /// impls de `__ToFitzJson`/`__FromFitzJson`.
+    ///
+    /// **Por qué importa**: cuando un `@table type` declarado en un
+    /// módulo importado tiene `@has_many("Target", ...)` y el target
+    /// no está en el env del importer, el remap del codegen degrade
+    /// el field a `List<Any>` → `Vec<__FitzValue>`. Si el `__FitzValue`
+    /// no está activado en el programa, rustc rompe con
+    /// `__FitzValue` undefined. Skipear los virtuales evita el
+    /// problema: el field se inicializa con el default y queda
+    /// invisible del JSON I/O, que es lo correcto semánticamente —
+    /// los fields virtuales NO están en la DB ni deben llegar al
+    /// cliente como input.
+    ///
+    /// Para llamadas SIN meta (types sin `@table`), el behavior es
+    /// idéntico al original — todos los fields se serializan.
+    fn gen_type_http_impls_for_sig_with_meta(
+        &mut self,
+        name: &str,
+        sig: &TypeSig,
+        meta: Option<&crate::types::TableMetadata>,
+    ) -> Result<(), FitzError> {
         let data_name = format!("{}Data", name);
+
+        // W17 — helper local para decidir si un field es virtual.
+        let is_virtual = |fname: &str| -> bool { meta.is_some_and(|m| m.is_virtual_field(fname)) };
 
         // impl __ToFitzJson for <Foo>Data
         writeln!(&mut self.output, "impl __ToFitzJson for {} {{", data_name).unwrap();
         self.emit("    fn __to_fitz_json(&self) -> serde_json::Value {\n");
         self.emit("        let mut __obj = serde_json::Map::new();\n");
         for f in &sig.fields {
+            if is_virtual(&f.name) {
+                continue;
+            }
             writeln!(
                 &mut self.output,
                 "        __obj.insert(\"{}\".to_string(), self.{}.__to_fitz_json());",
@@ -19441,12 +19492,17 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             name
         )
         .unwrap();
-        // Validar extras
+        // Validar extras — solo cuenta real fields, no virtuales.
         self.emit("        let __allowed = [");
-        for (i, f) in sig.fields.iter().enumerate() {
-            if i > 0 {
+        let mut first = true;
+        for f in sig.fields.iter() {
+            if is_virtual(&f.name) {
+                continue;
+            }
+            if !first {
                 self.emit(", ");
             }
+            first = false;
             write!(&mut self.output, "\"{}\"", f.name).unwrap();
         }
         self.emit("];\n");
@@ -19460,10 +19516,19 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         .unwrap();
         self.emit("            }\n");
         self.emit("        }\n");
-        // Cada field: presente en JSON → from_fitz_json; ausente con
-        // default → emitir el default; ausente nullable → None; ausente
-        // sin default ni nullable → error.
+        // Cada field REAL: presente en JSON → from_fitz_json;
+        // ausente con default → emitir el default; ausente nullable
+        // → None; ausente sin default ni nullable → error.
+        //
+        // W17 — los virtuales NO se procesan acá. El struct literal
+        // (más abajo) los emite directamente con
+        // `<field>: Default::default()` para evitar nombrar el tipo
+        // remap-degradado (`Vec<__FitzValue>` cuando el target type
+        // no está en el env del importer).
         for f in &sig.fields {
+            if is_virtual(&f.name) {
+                continue;
+            }
             let rust_ty = rust_type_for(&f.type_, self.env)?;
             writeln!(
                 &mut self.output,
@@ -19494,10 +19559,22 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             }
             self.emit("        };\n");
         }
-        // Construir el struct
+        // Construir el struct — fields reales referencian sus
+        // variables locales; fields virtuales se inicializan inline
+        // con `Default::default()` para evitar nombrar el tipo
+        // remap-degradado (W17).
         writeln!(&mut self.output, "        Ok({} {{", data_name).unwrap();
         for f in &sig.fields {
-            writeln!(&mut self.output, "            {},", f.name).unwrap();
+            if is_virtual(&f.name) {
+                writeln!(
+                    &mut self.output,
+                    "            {}: Default::default(),",
+                    f.name
+                )
+                .unwrap();
+            } else {
+                writeln!(&mut self.output, "            {},", f.name).unwrap();
+            }
         }
         self.emit("        })\n");
         self.emit("    }\n}\n\n");
