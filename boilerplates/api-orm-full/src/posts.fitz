@@ -139,11 +139,15 @@ async fn list_posts(status: Str?, tag: Str?) -> Result<List<PostSummary>> {
 @get("/posts/{id}")
 async fn get_post(id: Int) -> Result<Post> {
     let conn = db.connect(db_url()).await?
-    return Post.where(fn(p) => p.id == id)
+    // Workaround del gap "HTTP wrapper no desempaca Result tail
+    // sin Ok() explícito" (deuda v0.10.8). Usamos `?` + Ok()
+    // explícito en vez de `return <chain>.await` directo.
+    let p = Post.where(fn(p) => p.id == id)
         .preload("author")
         .preload("comments")
         .first(conn)
-        .await
+        .await?
+    return Ok(p)
 }
 
 // --- POST /posts — crear (auth) -----------------------------------
@@ -200,7 +204,10 @@ async fn update_post(user: User, id: Int, body: PostUpdate) -> Result<Int> {
     if (body.content != "") { updates["content"] = body.content }
     if (body.status != "") { updates["status"] = body.status }
 
-    return Post.where(fn(p) => p.id == id).update(conn, updates).await
+    // Workaround del gap "HTTP wrapper no desempaca Result tail
+    // sin Ok() explícito" (deuda v0.10.8).
+    let n = Post.where(fn(p) => p.id == id).update(conn, updates).await?
+    return Ok(n)
 }
 
 // --- DELETE /posts/{id} — borrar (auth + owner check) ------------
@@ -212,7 +219,8 @@ async fn delete_post(user: User, id: Int) -> Result<Int> {
     if (existing.author_id != user.id) {
         return Err("no podés borrar un post de otro autor")
     }
-    return Post.where(fn(p) => p.id == id).delete(conn).await
+    let n = Post.where(fn(p) => p.id == id).delete(conn).await?
+    return Ok(n)
 }
 
 // --- GET /stats/posts-per-user — aggregate con GROUP BY ----------
@@ -224,5 +232,6 @@ async fn delete_post(user: User, id: Int) -> Result<Int> {
 @get("/stats/posts-per-user")
 async fn stats_posts_per_user() -> Result<List<Map<Str, Any>>> {
     let conn = db.connect(db_url()).await?
-    return Post.group_by(fn(p) => p.author_id).count(conn).await
+    let rows = Post.group_by(fn(p) => p.author_id).count(conn).await?
+    return Ok(rows)
 }

@@ -1951,6 +1951,24 @@ levanta el server contra una DB real y se le pegan requests HTTP.
   exponer una API tipo `db.now()` built-in que emita el ISO 8601
   actual desde Fitz al insertar.
 
+- ⚠️ **HTTP wrapper no desempaca `Result<T>` tail sin `Ok(...)`
+  explícito**. Cuando un handler `async fn handler(...) -> Result<T>`
+  termina con `return <expr_que_devuelve_Result<T>>` (típicamente
+  el `.await` de un chain ORM como `Post.where(...).first(conn).await`),
+  el HTTP wrapper serializa el `Result` entero como
+  `{"Ok": {...}}` en lugar de extraer el `T` y devolverlo
+  directamente. Pero si el handler termina con `return Ok(x)`
+  explícito (típicamente tras `let x = <chain>.await?; return
+  Ok(x)`), el wrapper SÍ desempaca y devuelve `T` puro. **Caso
+  canónico que rompe**: `return <ChainQB>.first(db).await`.
+  **Workaround en api-orm-full**: reescribir los handlers afectados
+  (`get_post`, `update_post`, `delete_post`, `stats_posts_per_user`)
+  con `let x = ...?; return Ok(x)` en vez de `return ...await`.
+  **Fix futuro v0.10.8**: el HTTP wrapper debe detectar el tipo
+  del expr final y siempre desempacar `Result<T>` sea explícito o
+  no. Detectado al smoke real del boilerplate api-orm-full
+  cuando todo el resto del stack ya funcionaba.
+
 **Parches temporales aplicados al boilerplate api-orm-full
 (REVERTIR cuando los gaps de v0.10.8 cierren)**:
 
@@ -1964,6 +1982,13 @@ post-v0.10.8:
    `created_at` (users/posts/comments) y `published_at` (posts).
    Pre-requisito: cerrar gap "ORM no skipea Str sentinel del
    INSERT". Sin esto, el INSERT sigue mandando `''` y rompe.
+
+1.b. **`posts.fitz`** — revertir los handlers `get_post`,
+   `update_post`, `delete_post`, `stats_posts_per_user` a su
+   forma idiomática `return <chain>.await` (sin `let x = ...?;
+   return Ok(x)` boilerplate). Pre-requisito: cerrar gap
+   "HTTP wrapper no desempaca Result tail sin Ok() explícito".
+   Sin esto, los responses siguen viniendo como `{"Ok": ...}`.
 
 2. **`docs/deudas-post-5b.md`** — borrar este bloque entero de
    "Mini-fase post-release v0.10.7 — Gaps descubiertos en smoke
