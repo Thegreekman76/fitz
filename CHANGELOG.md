@@ -49,10 +49,31 @@ del proceso. Memoria despreciable (~24 KB por pool idle). Si
 nunca te volvés a conectar a una URL, el pool sobrevive sin
 uso — aceptable para 99% de los servicios.
 
-**Esto cierra implícitamente el "preload hang"** (10.9.1) que
-parecía ser un bug del codegen del preload. La causa raíz era
-el connection exhaustion — sin slots disponibles, todos los
-handlers terminaban colgados en `acquire()`.
+**El pool singleton fue validado end-to-end** en smoke real
+Docker post-tag: 3 GETs consecutivos = 2 conns constantes (1
+schema init + 1 del pool reutilizado), confirmando que ya no
+hay leak.
+
+### Preload hang sigue abierto — gap separado del driver
+
+El smoke real con `GET /posts/{id}/preload(...)` mostró que el
+preload hang **NO** era causado por el pool leak (como inicial-
+mente asumí). Después de cerrar el pool leak, el preload sigue
+colgándose en `extended_query` aún con conns disponibles.
+
+Diagnóstico del smoke: tras un preload colgado, `pg_stat_activity`
+muestra la conn en estado `idle` con la última query del preload
+("SELECT ... comments WHERE post_id IN ..."). Postgres terminó
+de servir; el cliente Fitz nunca leyó la respuesta final
+(probable: ReadyForQuery no se lee).
+
+Es un **bug separado del read loop del driver** (`Connection::
+extended_query` en `src/db.rs`) cuando hay múltiples queries
+chained sobre la misma `DbConnHandle`. Queda como deuda
+residual para v0.10.10.
+
+Los otros 12+ endpoints HTTP/WS del boilerplate funcionan
+correctamente con el pool singleton.
 
 ### Cambios coordinados
 

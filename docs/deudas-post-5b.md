@@ -2087,9 +2087,18 @@ GETs con `.preload(...)`.
   retorna `Arc<DbConnHandle>` directo, call sites
   (evaluator + codegen runtime) actualizados.
 
-- ✅ **10.9.1 (#1 nuevo) — "Preload runtime hang"**: cerrado
-  IMPLÍCITAMENTE con 10.9.2. La causa raíz era el connection
-  exhaustion, no un bug del codegen del preload.
+- ⚠️ **10.9.1 (#1 nuevo) — "Preload runtime hang" SIGUE ABIERTO**.
+  Asumí inicialmente que era causa-efecto del pool leak (10.9.2).
+  Smoke real post-v0.10.9 contradijo: con el pool singleton
+  funcionando (validado: 3 GETs = 2 conns constantes), un
+  `GET /posts/{id}` con `.preload(...)` sigue colgándose.
+  `pg_stat_activity` muestra la conn IDLE con la última query del
+  preload — Postgres terminó, el cliente Fitz nunca leyó el
+  ReadyForQuery final. Bug del read loop del driver
+  (`Connection::extended_query` en `src/db.rs`) cuando hay
+  múltiples queries chained sobre la misma `DbConnHandle`.
+  Deuda residual para v0.10.10. Los otros 12+ endpoints HTTP/WS
+  del boilerplate funcionan correctamente.
 
 **Smoke real Docker bloqueado por bug ambiente Windows**:
 Docker Desktop Windows tiene un bug intermitente con SCRAM-SHA-256
