@@ -2014,6 +2014,11 @@ fn scope_level_completions(
             "load_env",
             "fn(path: Str) -> Result<Null>  // parse KEY=VALUE file",
         ),
+        // 10.8.7 (v0.10.8) — broadcast cross-handler a clientes WS.
+        (
+            "ws_broadcast",
+            "fn(endpoint: Str, msg) -> Null  // broadcast JSON a clientes WS",
+        ),
     ] {
         items.push(CompletionItem {
             label: name.into(),

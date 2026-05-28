@@ -2035,3 +2035,36 @@ post-v0.10.8:
 5. **Documentación cap 31 de la guía / `docs/db-orm.md`** —
    si se documentan los gaps actuales como deudas del ORM,
    borrarlos de ahí también una vez que cierren.
+
+### 🎯 Cierre formal v0.10.8 (2026-05-28) — TODOS los gaps cerrados
+
+Mini-fase de cierre ejecutada en 4 rondas (10.8.1 → 10.8.8) en
+una sesión. Los 8 gaps descubiertos durante el smoke real Docker
+del boilerplate api-orm-full v0.10.7 quedaron cerrados con fix
++ test E2E + revert del workaround respectivo:
+
+| # | Gap | Estado |
+|---|-----|--------|
+| #1 | Narrowing flow-sensitive `Nullable<T>` post-`if (x != null)` | ✅ CERRADO 10.8.4 |
+| #2 | Broadcast HTTP → WS — built-in `ws_broadcast(endpoint, msg)` | ✅ CERRADO 10.8.7 |
+| #3 | OpenAPI 3.1 cross-module paths (paths vacío) | ✅ CERRADO 10.8.5 |
+| #4 | WS Router cross-module + AsyncAPI cross-module (404) | ✅ CERRADO 10.8.6 |
+| #5 | ORM no skipea Str sentinel del INSERT con DEFAULT del schema | ✅ CERRADO 10.8.2 (decorator `@db_default`) |
+| #6 | HTTP wrapper no desempaca `Result<T>` tail sin `Ok()` explícito | ✅ CERRADO 10.8.1 |
+| #7 | W17 skipea virtuales del JSON aunque `.preload(...)` los pobló | ✅ CERRADO 10.8.3 (conditional emit) |
+| #8 | Revert parches temporales del boilerplate | ✅ CERRADO 10.8.8 |
+
+**Tests al cierre**: 8 E2E nuevos en `tests/compile_e2e.rs` +
+smoke 292 verde + `cargo fmt --all -- --check` limpio + `cargo
+clippy --all-targets --release -- -D warnings` limpio.
+
+**Boilerplate api-orm-full** ahora en forma canónica:
+- `schema.fitz`: `timestamptz NOT NULL DEFAULT NOW()`.
+- `models.fitz`: `@db_default created_at: Str = ""`.
+- `posts.fitz`: handlers con `return <chain>.await` directo +
+  narrowing `if (status != null)` en vez de match arm.
+- `comments.fitz`: broadcast WS real con `ws_broadcast("/feed",
+  resp)` después del insert (notification realtime al feed).
+
+**Extensión VSCode v0.10.8**: grammar TextMate suma
+`ws_broadcast`, LSP completion lo lista en `scope_level_completions`.

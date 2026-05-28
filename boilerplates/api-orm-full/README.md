@@ -105,18 +105,18 @@ cp .env.example .env
 ### Desarrollo
 
 ```bash
-# Pin a la versión que incluya los fixes del boilerplate (v0.10.7+).
+# Pin a la versión que incluya los fixes del boilerplate (v0.10.8+).
 # Mientras el tag no esté publicado, usar el FITZ_REV del commit:
-docker compose build --build-arg FITZ_TAG=v0.10.7
+docker compose build --build-arg FITZ_TAG=v0.10.8
 docker compose up -d
 ```
 
 > **Nota sobre versión de Fitz**: el boilerplate ejercita features
-> introducidas en v0.10.7 (Map<Str, Any> indexing assignment
+> introducidas en v0.10.8 (Map<Str, Any> indexing assignment
 > dinámico, W18 cross-module virtuales, .has(var) sobre arrays).
 > Hasta que el tag esté publicado, `cargo install --git` con
 > default `main` puede no tenerlas. Pin con `--build-arg
-> FITZ_TAG=v0.10.7` (o `FITZ_REV=<commit-sha>`) para builds
+> FITZ_TAG=v0.10.8` (o `FITZ_REV=<commit-sha>`) para builds
 > reproducibles.
 
 El primer build compila `fitz` desde source (~5-8 min). Builds
@@ -279,14 +279,14 @@ en `src/models.fitz`:
 Estos gaps están abiertos y se documentan en `docs/deudas-post-5b.md`
 del repo principal de Fitz:
 
-- **Broadcast HTTP → WS cross-handler**: no hay API global tipo
-  `ws_broadcast(endpoint, msg)`. El `/feed` es broadcast simétrico
-  entre clientes WS, no triggereable desde un handler HTTP. Para
-  ese patrón canónico (comment nuevo → notification realtime a
-  otros usuarios) hace falta una primitiva nueva.
 - **Migraciones automáticas**: `fitz db diff` / `fitz db migrate`
   no existen todavía. El schema vive en `src/schema.fitz` como
   DDL crudo idempotente (`CREATE TABLE IF NOT EXISTS`).
-- **Narrowing flow-sensitive de Nullable**: `let s: Str = x` no
-  funciona después de `if (x != null)` — workaround con `match`
-  arms.
+
+Los gaps cross-module destapados al construir este boilerplate
+(OpenAPI cross-module paths, WS Router cross-module, AsyncAPI
+cross-module, ORM Str sentinel del INSERT, HTTP wrapper Result
+tail, W17 eager loading, narrowing flow-sensitive de Nullable,
+`ws_broadcast` cross-handler) se cerraron en **v0.10.8** —
+detalle en `docs/deudas-post-5b.md` sección "Mini-fase post-
+release v0.10.8" + CHANGELOG.

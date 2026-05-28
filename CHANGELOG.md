@@ -12,9 +12,110 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-benchmarks Fitz ORM vs SQLAlchemy, decidir scope del próximo
-norte técnico (curso "Fitz de 0 a experto" / registry 9.y.5 /
-bug del checker Option<String>).
+9no boilerplate `api-orm-full-fullstack` (frontend vanilla nginx,
+memoria `project_boilerplate_orm_full_fullstack.md`), benchmarks
+Fitz ORM vs SQLAlchemy, decidir scope del próximo norte técnico.
+
+## [v0.10.8] — 2026-05-28 — Cierre de 8 gaps del smoke real Docker
+
+**Mini-fase de cierre** de los 8 gaps cross-module descubiertos
+durante el smoke real del boilerplate `api-orm-full` con
+Postgres real en Docker (v0.10.7). El binario compila local +
+`fitz check` verde + smoke 292 verde no los detectaba — solo
+aparecen cuando el binario levanta el server contra DB real y se
+le pegan requests HTTP/WS. Todos cerrados en 4 rondas de
+sub-pasos (10.8.1 → 10.8.8) en una sesión, ~1500 LoC netas + 8
+tests E2E nuevos.
+
+### Round 1 (10.8.1 + 10.8.2 + 10.8.3)
+
+- **10.8.1 (#6) — HTTP wrapper desempaca `Result<T>` tail sin
+  `Ok()` explícito**. El codegen ahora emite `match` runtime que
+  desempaca: `Ok(v)` → 200 con `v` puro, `Err(e)` → 500 con
+  `{"error": e}`. Aplica al path `response_mode` (handlers
+  cross-module con `?` o `@authenticated`). Antes serializaba
+  `Result<T, E>` entero produciendo `{"Ok": ...}`.
+- **10.8.2 (#5) — Decorator `@db_default` para fields managed-by-DB**.
+  El ORM skipea estos del INSERT; Postgres aplica su `DEFAULT`
+  declarado en el schema (típico: `DEFAULT NOW()` para
+  timestamps). Field sigue en RETURNING * con el valor que
+  Postgres asignó. Paralelo a W4 pero general (cualquier tipo).
+- **10.8.3 (#7) — W17 eager loading: virtuales SÍ se emiten en
+  JSON cuando preloaded**. Runtime check: `Option<T>` → emit si
+  `is_some()`, `Vec<T>` → emit si `!is_empty()`. Antes los
+  virtuales JAMÁS aparecían en el JSON, perdiendo el beneficio
+  del `.preload(...)`.
+
+### Round 2 (10.8.4 + 10.8.5)
+
+- **10.8.4 (#1) — Narrowing flow-sensitive `Nullable<T>` post-
+  `if (x != null)`**. El checker refina el binding adentro del
+  then/else branch; el codegen emite shadow `let x = x.unwrap();`
+  para que el value Rust sea `T` puro. Cubre también `if (x ==
+  null)` para el else branch.
+- **10.8.5 (#3) — OpenAPI 3.1 cross-module paths**. El schema
+  emitido por `fitz build` ahora incluye los handlers HTTP de
+  módulos importados. Antes `paths: []` cuando los handlers
+  vivían cross-module. Fix vía
+  `pseudo_routes_from_program_and_modules(program,
+  module_http_stmts)`.
+
+### Round 3 (10.8.6 + 10.8.7)
+
+- **10.8.6 (#4) — WS Router cross-module + AsyncAPI cross-module**.
+  Handlers `@ws` cross-module se enchufan al Router axum del
+  main (paralelo a W16 para HTTP). El módulo emite
+  `pub async fn __ws_handler_<name>`; main registra
+  `.route("/path", axum::routing::get(crate::<mod>::__ws_handler_<name>))`.
+  El schema AsyncAPI 3.0 también se emite cuando los `@ws` viven
+  cross-module. Pre-fix: WS handshake al `/feed` cross-module
+  daba 404.
+- **10.8.7 (#2) — `ws_broadcast(endpoint, msg)` built-in**.
+  Habilita el patrón canónico SaaS "handler HTTP triggerea
+  notification realtime a clientes WS conectados". Helper en
+  `http.rs` (`ws_broadcast_to_endpoint`), built-in en evaluator
+  (`builtin_ws_broadcast`), signature `(Str, Any) -> Null` en
+  checker, codegen emite `crate::__fitz_ws_broadcast(...)` (con
+  `crate::` prefix para funcionar desde módulos). Pre-scan
+  `program_uses_ws_broadcast` activa preludio WS + helper.
+
+### Round 4 (10.8.8 — cierre formal)
+
+- Extensión VSCode: grammar TextMate suma `ws_broadcast` a la
+  lista de builtins highlightables; LSP completion lo lista en
+  `scope_level_completions`. Bumpeo a v0.10.8.
+- Boilerplate `api-orm-full` revertido a sintaxis canónica:
+  schema con `timestamptz NOT NULL DEFAULT NOW()`, models con
+  `@db_default`, handlers `posts.fitz` con `return <chain>.await`
+  directo, narrowing con `if (status != null)` en vez de match
+  arm, broadcast WS real en `comments.fitz`. README actualizado.
+- CHANGELOG, deudas-post-5b, FITZ_TAG en Dockerfile/README,
+  todos a v0.10.8.
+
+### Tests
+
+8 tests E2E nuevos en `tests/compile_e2e.rs`:
+`http_wrapper_desempaca_result_tail_sin_ok_explicito`,
+`orm_db_default_skipea_field_del_insert`,
+`orm_w17_eager_loaded_virtuales_aparecen_en_json`,
+`checker_narrow_nullable_post_if_not_null`,
+`checker_narrow_nullable_else_branch_eq_null`,
+`openapi_cross_module_incluye_handlers_de_modulos`,
+`ws_router_y_asyncapi_cross_module`,
+`ws_broadcast_builtin_cross_handler`.
+
+Smoke `GUIDE_EXAMPLES_COMPILE` 292 ejemplos verde con todos los
+fixes integrados. `cargo fmt --all -- --check` limpio,
+`cargo clippy --all-targets --release -- -D warnings` limpio.
+
+### Próximo norte
+
+- 9no boilerplate `api-orm-full-fullstack` (frontend vanilla
+  nginx sobre el backend api-orm-full, memoria
+  `project_boilerplate_orm_full_fullstack.md`).
+- Benchmarks Fitz ORM vs SQLAlchemy (boilerplate `task` actual
+  con SQLAlchemy vs `api-orm-full-fullstack` con ORM nativo).
+- Curso "Fitz de 0 a experto" (memoria `project_curso_plan.md`).
 
 ## [v0.10.7] — 2026-05-28 — W17/W18: cross-module ORM completo + boilerplate `api-orm-full` + 5 gaps cerrados
 

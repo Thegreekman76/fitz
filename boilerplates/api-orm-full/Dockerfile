@@ -13,7 +13,7 @@
 # Builds subsiguientes: ~30s si solo cambia src/.
 #
 # Build con tag específico:
-#   docker build --build-arg FITZ_TAG=v0.10.7 .
+#   docker build --build-arg FITZ_TAG=v0.10.8 .
 
 # ---- Stage 1: builder ----------------------------------------------
 FROM rust:1.95-slim AS builder
