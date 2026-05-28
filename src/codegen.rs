@@ -14743,7 +14743,9 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         }
         Ok(format!(
             "for __name in __preloads.iter() {{ \
+                eprintln!(\"[FITZ-PRELOAD] processing name={{}}\", __name); \
                 match __name.as_str() {{ {arms} _ => return Err(format!(\"preload `{{}}`: relation no soportada en {parent}\", __name)), }} \
+                eprintln!(\"[FITZ-PRELOAD] done name={{}}\", __name); \
             }} ",
             arms = arms,
             parent = parent_type_name,
