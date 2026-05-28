@@ -8227,7 +8227,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 // (JSONB / heterogéneos), porque ese caso lo cubre
                 // `__FitzValue`. Solo skipeamos cuando el field es Any
                 // pelado o Nullable(Any) — los casos de degradación W9.
-                // W18 (v0.10.8) — el chequeo de "degraded Any" debe
+                // W18 (v0.10.7) — el chequeo de "degraded Any" debe
                 // IGNORAR los virtual fields del ORM
                 // (`@has_many`/`@has_one`/BelongsToCompanion). W17
                 // skipea esos fields al emitir los impls
@@ -9364,7 +9364,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 // codegen emite `String`/`<T>` crudo y rustc rompe
                 // con `expected __FitzValue, found String`. Gap
                 // descubierto al escribir partial updates en
-                // boilerplate api-orm-full (v0.10.8).
+                // boilerplate api-orm-full (v0.10.7).
                 let storage_is_heterogeneous =
                     matches!(**k_ty, Type::Any) || matches!(**v_ty, Type::Any);
                 let (k_expr, v_expr) = if storage_is_heterogeneous {
@@ -12057,7 +12057,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 if let Some(code) = lit_code {
                     bindings.push(code);
                 } else {
-                    // v0.10.8 — gap cerrado: vars externas (`tag`,
+                    // v0.10.7 — gap cerrado: vars externas (`tag`,
                     // `body.tag`, etc.) sobre `.has(...)`. Antes solo
                     // se aceptaba literal Fitz. Ahora delegamos a
                     // `translate_closure_to_sql` que reusa la
@@ -14747,7 +14747,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 // serializa a JSON. NULL → SQL NULL. La string se
                 // produce por `.replace`, no por `format!` — usar `{}`
                 // pelado para que el format! Rust del runtime
-                // interpole `e`. (Bug detectado en v0.10.8: el código
+                // interpole `e`. (Bug detectado en v0.10.7: el código
                 // antes tenía `{{}}` escapado que dejaba `e` sin usar
                 // y rustc lo rechazaba como "argument never used".)
                 "match __v { \
@@ -17340,7 +17340,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("has", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-        // R.1.3-bis (v0.10.8) — Map heterogéneo: si cualquiera de k/v
+        // R.1.3-bis (v0.10.7) — Map heterogéneo: si cualquiera de k/v
         // es Any, el storage es `Vec<(__FitzValue, __FitzValue)>`, así
         // que la key del argumento debe envolverse como `__FitzValue`
         // antes de comparar. Sin esto, `__k2: &__FitzValue` se

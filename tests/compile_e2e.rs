@@ -5958,7 +5958,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
 #[test]
 fn auth_codegen_cross_module_provider_w12() {
-    // W12 (v0.10.8) — `@auth_provider` declarado en un módulo
+    // W12 (v0.10.7) — `@auth_provider` declarado en un módulo
     // importado (`auth.fitz`) y handlers `@authenticated`/`@admin`
     // en el main. El checker debe hacer fallback al provider importado
     // vía `TypeEnv::imported_auth_provider` (Paso 1 W12), el codegen
@@ -9755,7 +9755,7 @@ match dir.get(\"missing\") {
 
 #[test]
 fn map_str_any_indexing_assign_compilado() {
-    // R.1.3 (v0.10.8) — `Map<Str, Any>` con indexing assignment
+    // R.1.3 (v0.10.7) — `Map<Str, Any>` con indexing assignment
     // dinámico (`m["k"] = v`) ahora envuelve key/value como
     // `__FitzValue` cuando el storage es heterogéneo.
     //
@@ -9785,7 +9785,7 @@ print(m.has(\"missing\"))
 
 #[test]
 fn orm_array_has_acepta_var_externa() {
-    // v0.10.8 — gap cerrado: `.has(var)` sobre `text[]`/`int8[]`/etc.
+    // v0.10.7 — gap cerrado: `.has(var)` sobre `text[]`/`int8[]`/etc.
     // ahora acepta variables externas al closure, no solo literales.
     // Antes el codegen rechazaba con "el value debe ser literal del
     // tipo del array". Ahora delega a `translate_closure_to_sql`
@@ -9846,7 +9846,7 @@ fn main() => 0\n\
 
 #[test]
 fn cross_module_table_virtual_w18_remap_any() {
-    // W18 (v0.10.8) — el chequeo `has_opaque_field` de
+    // W18 (v0.10.7) — el chequeo `has_opaque_field` de
     // `emit_helpers_for_imported_types` ahora ignora los virtual
     // fields del ORM. Antes, un `@table type` con `@has_many` o
     // `@has_one` cuyo target no estaba importado al main hacía

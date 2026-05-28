@@ -53,7 +53,7 @@ type PostInput {
 
 // Partial update — todos los fields son opcionales (sentinel `""`
 // para "no actualizar"). Map<Str, Any> dinámico vía indexing
-// assignment es paridad bit-a-bit con el evaluator desde v0.10.8
+// assignment es paridad bit-a-bit con el evaluator desde v0.10.7
 // (gap del codegen cerrado al cerrar W17 — el indexing assignment
 // envuelve key/value como __FitzValue cuando el storage es
 // heterogéneo, igual que Map literal con hint `Map<_, Any>` desde
@@ -103,7 +103,7 @@ fn to_summary(p: Post) -> PostSummary {
 // Filtros opcionales: `status` (eq) y `tag` (array contains). Ambos
 // query params nullable (cliente puede omitir cualquiera). El
 // `tag` ejercita `.has(var)` sobre `text[]` — paridad bit-a-bit con
-// var externa en `.where(...)` (gap cerrado en v0.10.8).
+// var externa en `.where(...)` (gap cerrado en v0.10.7).
 @get("/posts?status={status}&tag={tag}")
 async fn list_posts(status: Str?, tag: Str?) -> Result<List<PostSummary>> {
     let conn = db.connect(db_url()).await?
@@ -193,7 +193,7 @@ async fn update_post(user: User, id: Int, body: PostUpdate) -> Result<Int> {
     // Partial update — Map<Str, Any> construido dinámicamente con
     // indexing assignment. El codegen envuelve key/value como
     // __FitzValue cuando el storage es heterogéneo (gap cerrado en
-    // v0.10.8). W7 (`.update(db, Map var)`) ya cerrado en v0.10.6.
+    // v0.10.7). W7 (`.update(db, Map var)`) ya cerrado en v0.10.6.
     let updates: Map<Str, Any> = {}
     if (body.title != "") { updates["title"] = body.title }
     if (body.slug != "") { updates["slug"] = body.slug }

@@ -16,15 +16,17 @@ benchmarks Fitz ORM vs SQLAlchemy, decidir scope del próximo
 norte técnico (curso "Fitz de 0 a experto" / registry 9.y.5 /
 bug del checker Option<String>).
 
-## [v0.10.8] — 2026-05-28 — `api-orm-full` boilerplate + 5 gaps cerrados
+## [v0.10.7] — 2026-05-28 — W17/W18: cross-module ORM completo + boilerplate `api-orm-full` + 5 gaps cerrados
 
-**8va plantilla del directorio `boilerplates/`** y **bloque de
-cierre de gaps del codegen** descubiertos durante su construcción.
-La política "cerrar gaps que aparezcan al construir el boilerplate
-ANTES del release" se aplicó estricto — todo lo que ahora corre
-el showcase es paridad bit-a-bit `fitz run` ↔ `fitz build`.
+**Release bundle**: cierre del cross-module ORM (W17 + W18), 8va
+plantilla del directorio `boilerplates/` (`api-orm-full`
+multi-archivo), y bloque de 4 gaps adicionales del codegen
+descubiertos al construir el boilerplate. La política
+"cerrar gaps que aparezcan al construir el boilerplate ANTES del
+release" se aplicó estricto — todo lo que ahora corre el showcase
+es paridad bit-a-bit `fitz run` ↔ `fitz build`.
 
-### Boilerplate `api-orm-full`
+### Boilerplate `api-orm-full` (nuevo)
 
 Multi-archivo (9 módulos Fitz) showcase del **stack web first-class
 entero** en un solo binario standalone:
@@ -48,7 +50,7 @@ cron jobs, `@auth_provider` y `@table` types viven en módulos
 por feature; el main solo hace `import auth, posts, comments,
 realtime, jobs`.
 
-### 5 gaps/bugs del codegen cerrados
+### 5 gaps/bugs del codegen cerrados (post-W17, durante boilerplate)
 
 Política: cerrar TODO gap descubierto durante el boilerplate
 ANTES de declarar el sub-paso completo (memoria
@@ -79,14 +81,18 @@ ANTES de declarar el sub-paso completo (memoria
   bindea via `__IntoPgValue::into_pg(...)`. Caso canónico: filtros
   por tag en endpoints listables.
 
-### Tests
+### Tests y validación al cierre
 
 - 3 tests E2E nuevos en `tests/compile_e2e.rs`:
   `map_str_any_indexing_assign_compilado`,
   `cross_module_table_virtual_w18_remap_any`,
   `orm_array_has_acepta_var_externa`.
-- Smoke `GUIDE_EXAMPLES_COMPILE` 292 ejemplos verde con los 5 fixes
-  integrados.
+- Test E2E W17 ya existente:
+  `cross_module_orm_virtual_fields_skip_w17`.
+- Smoke `GUIDE_EXAMPLES_COMPILE` 292 ejemplos verde con todos los
+  fixes integrados.
+- `cargo fmt --all -- --check` limpio.
+- `cargo clippy --all-targets --release -- -D warnings` limpio.
 
 ### Gaps abiertos derivados (NO bloquean el release)
 
@@ -98,9 +104,7 @@ Detalle en `docs/deudas-post-5b.md` sección "Mini-fase W18+".
   `ws_broadcast(endpoint, msg)` hoy. El boilerplate modela
   `/feed` como broadcast simétrico entre clientes WS.
 
-## [v0.10.7] — 2026-05-28 — W17: virtual fields skip en impls cross-module
-
-## [v0.10.7] — 2026-05-28 — W17: virtual fields skip en impls cross-module
+### W17: virtual fields skip en impls cross-module (incluido en este release)
 
 **Cierre del último gap conocido del codegen cross-module ORM**
 descubierto durante el primer intento de implementar el boilerplate
@@ -171,9 +175,6 @@ nueva):
 - ⚠️ Importar TODOS los `@table` types al módulo que use cualquier
   uno (el codegen valida ALL targets). Workaround: `from models
   import User, Post, ...` (todos los referenciados).
-
-Próximo norte: reanudar boilerplate `api-orm-full` multi-archivo
-(ahora viable con W17 cerrado).
 
 ## [v0.10.6] — 2026-05-27 — Bloque W1-W7: workarounds residuales del ORM cerrados
 
