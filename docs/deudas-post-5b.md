@@ -1928,13 +1928,19 @@ levanta el server contra una DB real y se le pegan requests HTTP.
   los captura).
 
 - ⚠️ **AsyncAPI 3.0 endpoint no se registra cuando los `@ws`
-  viven cross-module**. `GET /asyncapi.json` → 404 (bug paralelo
-  al anterior). El codegen del runtime HTTP solo detecta `has_ws`
-  mirando `program.ws_fns` local. Si `realtime.fitz` tiene los
-  `@ws` pero el main solo hace `import realtime`, el flag
-  `has_ws=false` en el main → ni el endpoint `/asyncapi.json` ni
-  el schema se emiten. **Fix futuro v0.10.8**: paralelo al
-  OpenAPI fix, mirar `loader.modules[*].ws_fn_stmts`.
+  viven cross-module + los handlers WS mismos NO se enchufan al
+  Router axum**. `GET /asyncapi.json` → 404 y `WS /feed` →
+  404 en handshake. **Más grave de lo que parecía**: no es solo
+  schema vacío como el OpenAPI cross-module — los WS handlers
+  cross-module no se registran como rutas en el axum::Router del
+  main. W16 (v0.10.7) cubrió solo `@get/@post/@put/@delete`, no
+  incluyó `@ws`. **Fix futuro v0.10.8**: extender W16 para que
+  itere también `loader.modules[*].ws_fn_stmts` y emita las
+  rutas WS qualified (`.route_service("/feed",
+  crate::realtime::__ws_handler_feed)` o equivalente), más el
+  AsyncAPI schema con los `@ws` de módulos. Detectado en smoke
+  real con cliente Node `ws`: handshake al endpoint cross-module
+  devuelve 404 antes del upgrade HTTP→WS.
 
 - ⚠️ **ORM no skipea fields `Str = ""` del INSERT cuando hay
   DEFAULT en el schema**. W4 cubre solo `id: Int = 0` para
