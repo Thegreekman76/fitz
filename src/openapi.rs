@@ -374,6 +374,24 @@ pub(crate) fn headers_from_decorators(
 pub fn pseudo_routes_from_ast(
     program: &crate::ast::Program,
 ) -> Result<Vec<OpenApiRouteInfo>, crate::error::FitzError> {
+    pseudo_routes_from_program_and_modules(program, &[])
+}
+
+/// 10.8.5 (v0.10.8) — variante cross-module aware de
+/// `pseudo_routes_from_ast`. Combina los handlers del `program`
+/// (main) y los `module_http_stmts` (slices preservados por W16 —
+/// `LoadedModule.http_fn_stmts`) en un solo Vec antes de extraer.
+/// Resultado: el schema OpenAPI 3.1 emitido contiene TODOS los
+/// endpoints HTTP, incluyendo los de módulos importados.
+///
+/// Antes del fix #3 v0.10.8, `pseudo_routes_from_ast` solo miraba
+/// el main → schema vacío (`paths: []`) cuando los handlers HTTP
+/// vivían cross-module. W16 ya enchufaba las rutas al Router, pero
+/// la documentación OpenAPI auto no se actualizaba.
+pub fn pseudo_routes_from_program_and_modules(
+    program: &crate::ast::Program,
+    module_http_stmts: &[&[crate::ast::Stmt]],
+) -> Result<Vec<OpenApiRouteInfo>, crate::error::FitzError> {
     use crate::ast::Stmt;
     use crate::http::parse_path_template;
 
@@ -383,8 +401,17 @@ pub fn pseudo_routes_from_ast(
     // consts (caso típico) — cero overhead.
     let consts = collect_top_level_int_consts(program);
 
+    // Concatenar todos los stmts: main primero, después los
+    // módulos en orden. Iteramos el slice unificado.
+    let mut all_stmts: Vec<&Stmt> = program.iter().collect();
+    for module_stmts in module_http_stmts {
+        for s in *module_stmts {
+            all_stmts.push(s);
+        }
+    }
+
     let mut out = Vec::new();
-    for s in program {
+    for s in all_stmts {
         let Stmt::FnDef {
             name,
             params,

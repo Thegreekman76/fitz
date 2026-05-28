@@ -9784,6 +9784,111 @@ print(m.has(\"missing\"))
 }
 
 #[test]
+fn openapi_cross_module_incluye_handlers_de_modulos() {
+    // 10.8.5 (v0.10.8) — fix #3: el schema OpenAPI 3.1 emitido por
+    // `fitz build` ahora incluye los handlers HTTP de módulos
+    // importados (`loader.modules[i].http_fn_stmts` capturados por
+    // W16). Antes el schema solo miraba el main → `paths: []`.
+    let stem = "openapi_cross_module";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    std::fs::write(
+        dir.join("api.fitz"),
+        "@get(\"/hello\")\n\
+         fn hello() -> Str => \"hola\"\n\
+         \n\
+         @get(\"/users/{id}\")\n\
+         fn get_user(id: Int) -> Str => \"user-{id}\"\n",
+    )
+    .expect("escribir api.fitz");
+
+    let main_src = "\
+import api\n\
+\n\
+@server(43914)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspección estática: el schema embebido en main.rs debe
+    // contener los paths de api.fitz (no solo del main).
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        assert!(
+            content.contains("\"/hello\":{"),
+            "main.rs debe incluir path `/hello` en schema OpenAPI (#3 fix)"
+        );
+        assert!(
+            content.contains("\"/users/{id}\":{"),
+            "main.rs debe incluir path `/users/{{id}}` en schema OpenAPI (#3 fix)"
+        );
+    }
+}
+
+#[test]
+fn checker_narrow_nullable_post_if_not_null() {
+    // 10.8.4 (v0.10.8) — fix #1: narrowing flow-sensitive de
+    // `Nullable<T>` → `T` adentro del `then` branch de
+    // `if (x != null) { ... }`. Antes el checker tipaba `x` como
+    // `Nullable<T>` adentro del if, forzando workaround con match
+    // arm `Pattern::Ident` (W2). Ahora `let s: T = x` directo
+    // funciona.
+    let src = "\
+fn process(status: Str?) -> Str {\n\
+    if (status != null) {\n\
+        let s: Str = status\n\
+        return s\n\
+    }\n\
+    return \"default\"\n\
+}\n\
+\n\
+print(process(\"ok\"))\n\
+print(process(null))\n\
+";
+    let (stdout, exit) = build_and_run("checker-narrow-not-null", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["ok", "default"]);
+}
+
+#[test]
+fn checker_narrow_nullable_else_branch_eq_null() {
+    // 10.8.4 — caso reverso: `if (x == null) {...} else { ... }`
+    // refina `x` a inner type adentro del `else`.
+    let src = "\
+fn process(status: Str?) -> Str {\n\
+    if (status == null) {\n\
+        return \"default\"\n\
+    } else {\n\
+        let s: Str = status\n\
+        return s\n\
+    }\n\
+}\n\
+\n\
+print(process(\"hello\"))\n\
+print(process(null))\n\
+";
+    let (stdout, exit) = build_and_run("checker-narrow-eq-null-else", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["hello", "default"]);
+}
+
+#[test]
 fn orm_w17_eager_loaded_virtuales_aparecen_en_json() {
     // 10.8.3 (v0.10.8) — fix #7: `__ToFitzJson` ahora emite los
     // virtual fields del ORM (companion/has_one/has_many) cuando

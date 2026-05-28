@@ -2602,6 +2602,56 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
     ty
 }
 
+/// 10.8.4 (v0.10.8) — flow-sensitive narrowing parcial sobre
+/// condiciones `Ident <op> null` (en cualquier orden). Si la
+/// condition matchea el patrón y el binding del Ident es
+/// `Nullable<T>`, devuelve `(name, T, def_span)` para que el caller
+/// declare un binding shadow en el scope del branch refinado.
+///
+/// - `want_not_null = true`: refinar cuando la condition es
+///   `x != null` o `null != x` (branch `then`).
+/// - `want_not_null = false`: refinar cuando la condition es
+///   `x == null` o `null == x` (branch `else`).
+///
+/// Limitaciones (deuda menor — refinable si entra demanda):
+/// - No soporta `not (x == null)` (negación explícita).
+/// - No soporta `x != null and ...` (chain de condiciones).
+/// - No soporta narrowing transitivo a través de fns.
+/// - No soporta narrowing del else side via early-return en then
+///   (típica idiom: `if (x == null) return; <usar x como T>`).
+fn narrow_null_check(
+    cond: &Expr,
+    ctx: &CheckCtx,
+    want_not_null: bool,
+) -> Option<(String, Type, crate::ast::Span)> {
+    use crate::ast::BinOpKind;
+    let Expr::BinOp {
+        op, left, right, ..
+    } = cond
+    else {
+        return None;
+    };
+    let matches_op = matches!(
+        (op, want_not_null),
+        (BinOpKind::NotEq, true) | (BinOpKind::Eq, false)
+    );
+    if !matches_op {
+        return None;
+    }
+    // Detectar (Ident, Null) en cualquier orden.
+    let name = match (left.as_ref(), right.as_ref()) {
+        (Expr::Ident(n, _), Expr::Null(_)) => n.clone(),
+        (Expr::Null(_), Expr::Ident(n, _)) => n.clone(),
+        _ => return None,
+    };
+    // Binding debe existir y ser Nullable<inner>.
+    let binding = ctx.lookup_binding(&name)?;
+    if let Type::Nullable(inner) = &binding.ty {
+        return Some((name, (**inner).clone(), binding.def_span));
+    }
+    None
+}
+
 /// Núcleo de síntesis. NO toca `type_info` directamente — el wrapper
 /// `infer_expr` lo hace al salir. Esto centraliza la política de
 /// poblamiento del side-table en un solo punto, evitando que cada
@@ -2806,13 +2856,40 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ),
                 );
             }
+            // 10.8.4 (v0.10.8) — fix #1: narrowing flow-sensitive de
+            // `Nullable<T>` → `T`. Si la condition es `x != null` (o
+            // `null != x`), refinamos el binding `x` adentro del
+            // `then` branch al inner type. Si es `x == null`,
+            // refinamos en el `else`. Caso canónico:
+            //   if (status != null) { let s: Str = status }
+            // Antes el checker tipaba `status` como `Str?` adentro
+            // del `if`, forzando workaround con match arm.
+            //
+            // Patrón soportado: comparación literal Ident <op> null
+            // (en cualquier orden) sobre un binding Nullable.
+            // No-soportado (deuda menor): chains como
+            // `if (x != null and ...)`, narrowing del else side via
+            // early-return en if-then, narrowing transitivo a través
+            // de fns.
+            let then_narrow = narrow_null_check(condition, ctx, /*want_not_null=*/ true);
+            let else_narrow = narrow_null_check(condition, ctx, /*want_not_null=*/ false);
             // Cada rama es un bloque; el "tipo" de un if-stmt es el
             // de su última expresión-stmt. Para 5.3.1 nos alcanza con
             // walkear los bloques (con scope) y devolver Any.
             // M4 (v0.10.15) — usar with_scope helper para auto-pop.
-            ctx.with_scope(|ctx| check_block(ctx, then));
+            ctx.with_scope(|ctx| {
+                if let Some((name, inner_ty, def_span)) = then_narrow {
+                    ctx.declare_var(name, inner_ty, def_span);
+                }
+                check_block(ctx, then)
+            });
             if let Some(else_body) = else_ {
-                ctx.with_scope(|ctx| check_block(ctx, else_body));
+                ctx.with_scope(|ctx| {
+                    if let Some((name, inner_ty, def_span)) = else_narrow {
+                        ctx.declare_var(name, inner_ty, def_span);
+                    }
+                    check_block(ctx, else_body)
+                });
             }
             Type::Any
         }

@@ -109,22 +109,14 @@ async fn list_posts(status: Str?, tag: Str?) -> Result<List<PostSummary>> {
     let conn = db.connect(db_url()).await?
     let qb = Post.order_by(fn(p) => p.created_at).limit(100)
 
-    // Narrowing de `Str?` → `Str` vía match arms (W2 cerrado en
-    // v0.10.6 — `Pattern::Ident` sobre Nullable refina al inner T).
-    // Sentinel "" para "no filtrar".
-    let s = match status {
-        null => "",
-        v => v,
+    // Narrowing de `Str?` → `Str` flow-sensitive post-`if (x != null)`
+    // (10.8.4 v0.10.8 — el checker refina el binding al inner type
+    // adentro del if).
+    if (status != null) {
+        qb = qb.where(fn(p) => p.status == status)
     }
-    if (s != "") {
-        qb = qb.where(fn(p) => p.status == s)
-    }
-    let t = match tag {
-        null => "",
-        v => v,
-    }
-    if (t != "") {
-        qb = qb.where(fn(p) => p.tags.has(t))
+    if (tag != null) {
+        qb = qb.where(fn(p) => p.tags.has(tag))
     }
 
     let rows = qb.all(conn).await?

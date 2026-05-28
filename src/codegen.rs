@@ -19363,6 +19363,23 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
     ) -> Result<(String, Type), FitzError> {
         let (cond_code, _) = self.gen_expr(condition)?;
 
+        // 10.8.4 (v0.10.8) — fix #1 (paridad codegen): narrowing
+        // flow-sensitive de `Nullable<T>` → `T` adentro del branch
+        // correspondiente. El checker ya refina el tipo del binding;
+        // acá replicamos en el codegen para que `Expr::Ident` adentro
+        // del branch vea el tipo refinado, Y emitimos un `let <name>
+        // = <name>.unwrap();` Rust al inicio del block para que el
+        // value sea `T` puro (no `Option<T>`).
+        //
+        // Patrón soportado: `if (x != null)` o `if (null != x)` →
+        // refinar `x` adentro del `then`. `if (x == null)` →
+        // refinar `x` adentro del `else`. Sin esto, code generado
+        // para `qb.where(fn(p) => p.status == x)` adentro del if
+        // intenta bindear `x: Option<String>` que no implementa
+        // `__IntoPgValue`.
+        let then_narrow = narrow_null_check_codegen(condition, self, true);
+        let else_narrow = narrow_null_check_codegen(condition, self, false);
+
         // Si ambas ramas (else incluido) terminan en un `Stmt::Expr`
         // que sea expresable como valor, el `if` es expresión con
         // valor. Si no, lo tratamos como statement con valor `()`
@@ -19424,7 +19441,19 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             // (`gen_stmt` se encarga del `;` y la indentación).
             let then_block = {
                 self.push_scope();
-                let mut full = self.gen_block_to_string(&then_stmts)?;
+                let mut full = String::new();
+                if let Some((name, inner_ty)) = &then_narrow {
+                    // Update codegen scope con tipo refinado.
+                    self.declare_var(name.clone(), inner_ty.clone());
+                    // Emit shadow let con .unwrap() para que el value
+                    // Rust sea T puro adentro del block.
+                    full.push_str(&format!(
+                        "{}let {n} = {n}.unwrap();\n",
+                        self.indent_str(),
+                        n = name
+                    ));
+                }
+                full.push_str(&self.gen_block_to_string(&then_stmts)?);
                 if let Some(e) = then_tail {
                     full.push_str(
                         &self.gen_stmt_to_string(&Stmt::Expr(e.clone(), crate::ast::Span::ZERO))?,
@@ -19443,7 +19472,16 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 let else_block =
                     {
                         self.push_scope();
-                        let mut full = self.gen_block_to_string(&else_stmts)?;
+                        let mut full = String::new();
+                        if let Some((name, inner_ty)) = &else_narrow {
+                            self.declare_var(name.clone(), inner_ty.clone());
+                            full.push_str(&format!(
+                                "{}let {n} = {n}.unwrap();\n",
+                                self.indent_str(),
+                                n = name
+                            ));
+                        }
+                        full.push_str(&self.gen_block_to_string(&else_stmts)?);
                         if let Some(e) = else_tail {
                             full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(
                                 e.clone(),
@@ -21478,8 +21516,19 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // El HTML de Scalar viene de `crate::openapi::SCALAR_HTML` y
         // se embebe textualmente también.
         if auto_openapi || auto_docs {
-            // Schema: armamos las rutas desde AST y serializamos a JSON.
-            let routes = crate::openapi::pseudo_routes_from_ast(program)?;
+            // Schema: armamos las rutas desde AST + handlers cross-module
+            // capturados por W16 (loader.modules[i].http_fn_stmts).
+            // 10.8.5 (v0.10.8) — fix #3: incluir handlers cross-module
+            // en el schema OpenAPI auto.
+            let module_http_stmts: Vec<&[Stmt]> = loader
+                .modules
+                .iter()
+                .map(|m| m.http_fn_stmts.as_slice())
+                .collect();
+            let routes = crate::openapi::pseudo_routes_from_program_and_modules(
+                program,
+                &module_http_stmts,
+            )?;
             // Q.2: `@server(api_version=...)` override del info.version.
             let schema = crate::openapi::generate_openapi_with_version(
                 &routes,
@@ -24326,6 +24375,45 @@ fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
 /// sites lo pasan por uniformidad — el wrapper ignora el env.
 fn wrap_as_fitz_value_with_env(code: &str, ty: &Type, _env: &TypeEnv) -> Result<String, FitzError> {
     wrap_as_fitz_value(code, ty)
+}
+
+/// 10.8.4 (v0.10.8) — paridad codegen del narrowing flow-sensitive
+/// del checker. Detecta condition `Ident <op> null` (en cualquier
+/// orden) y devuelve `(name, inner_ty)` si el binding actual es
+/// `Nullable<T>`. Espejo de `narrow_null_check` en `types.rs`.
+///
+/// `want_not_null = true` → refinar cuando `x != null` (branch
+/// `then`). `false` → refinar cuando `x == null` (branch `else`).
+fn narrow_null_check_codegen(
+    cond: &Expr,
+    ctx: &CodegenCtx,
+    want_not_null: bool,
+) -> Option<(String, Type)> {
+    use crate::ast::BinOpKind;
+    let Expr::BinOp {
+        op, left, right, ..
+    } = cond
+    else {
+        return None;
+    };
+    let matches_op = matches!(
+        (op, want_not_null),
+        (BinOpKind::NotEq, true) | (BinOpKind::Eq, false)
+    );
+    if !matches_op {
+        return None;
+    }
+    let name = match (left.as_ref(), right.as_ref()) {
+        (Expr::Ident(n, _), Expr::Null(_)) => n.clone(),
+        (Expr::Null(_), Expr::Ident(n, _)) => n.clone(),
+        _ => return None,
+    };
+    // Busca el binding del codegen — solo refinar si es Nullable<T>.
+    let ty = ctx.lookup_var(&name)?;
+    if let Type::Nullable(inner) = ty {
+        return Some((name, (**inner).clone()));
+    }
+    None
 }
 
 fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
