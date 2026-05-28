@@ -74,7 +74,7 @@ type PostSummary {
     status: Str
     tags: List<Str>
     created_at: Str
-    published_at: Str
+    published_at: Str?
 }
 
 // Response del aggregate (GROUP BY author_id).
@@ -164,7 +164,7 @@ async fn create_post(user: User, body: PostInput) -> Result<Post> {
         tags: body.tags,
         metadata: body.metadata,
         created_at: "",
-        published_at: "",
+        published_at: null,
     }).await?
     return Ok(new_post)
 }

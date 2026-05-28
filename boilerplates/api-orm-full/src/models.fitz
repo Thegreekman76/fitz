@@ -68,7 +68,11 @@
     tags: List<Str> = []
     metadata: Map<Str, Any> = {}
     @db_default created_at: Str = ""
-    published_at: Str = ""
+    // `published_at` queda como `Str?` (nullable) — el schema lo
+    // define como `timestamptz` sin DEFAULT, así que el ORM marshalea
+    // `null` Fitz → `NULL` SQL (semánticamente "post no publicado").
+    // Cuando el handler quiere publicar, setea con un timestamp ISO.
+    published_at: Str? = null
 
     @has_many("Comment", via="post_id", on_delete="cascade") comments: List<Comment> = []
 }
