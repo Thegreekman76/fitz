@@ -9810,12 +9810,22 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         rt = rust_type_for(err_ty, self.env)?
                     )
                 };
-                self.emit("return match (");
+                self.emit("eprintln!(\"[FITZ-RET-MATCH] pre-await\");\n");
+                self.emit("    let __ret_inner = (");
                 self.emit(&code);
-                self.emit(") {\n");
-                self.emit("        Ok(__v) => __FitzResponse { status: 200, body: ");
+                self.emit(");\n");
+                self.emit("    eprintln!(\"[FITZ-RET-MATCH] post-await, entering match\");\n");
+                self.emit("    return match __ret_inner {\n");
+                self.emit("        Ok(__v) => {\n");
+                self.emit(
+                    "            eprintln!(\"[FITZ-RET-MATCH] Ok arm, calling __to_fitz_json\");\n",
+                );
+                self.emit("            let __body = ");
                 self.emit(&ok_body);
-                self.emit(" },\n");
+                self.emit(";\n");
+                self.emit("            eprintln!(\"[FITZ-RET-MATCH] __to_fitz_json done\");\n");
+                self.emit("            __FitzResponse { status: 200, body: __body }\n");
+                self.emit("        },\n");
                 self.emit("        Err(__e) => __FitzResponse { status: 500, body: ");
                 self.emit(&err_body);
                 self.emit(" },\n");
