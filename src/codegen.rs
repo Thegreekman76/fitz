@@ -21320,6 +21320,12 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             self.emit("    use futures_util::FutureExt as _;\n");
             writeln!(
                 &mut self.output,
+                "    eprintln!(\"[FITZ-WRAP-PRE-CATCH] handler={}\");",
+                sig.name,
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
                 "    let __result = match std::panic::AssertUnwindSafe({}({})).catch_unwind().await {{",
                 sig.name,
                 call_args.join(", "),
@@ -21353,6 +21359,12 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         .unwrap();
         self.emit("        }\n");
         self.emit("    };\n");
+        writeln!(
+            &mut self.output,
+            "    eprintln!(\"[FITZ-WRAP-POST-CATCH] handler={} catch_unwind returned\");",
+            sig.name,
+        )
+        .unwrap();
 
         // MW.3: si la ruta declara cors, envolvemos el resultado en
         // `__apply_cors_and_respond(...)` para inyectar headers.
