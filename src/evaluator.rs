@@ -11608,6 +11608,19 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
         if state.meta.is_virtual_field(&f.name) {
             continue;
         }
+        // 10.8.2 (v0.10.8) — `@db_default` skipea el field del INSERT
+        // (Postgres aplica el DEFAULT del schema). Paralelo al codegen
+        // en `gen_orm_type_insert`. El field SÍ vuelve por el
+        // RETURNING (que se popula con SELECT * abajo).
+        let is_db_default = state
+            .meta
+            .columns
+            .get(&f.name)
+            .map(|c| c.db_default)
+            .unwrap_or(false);
+        if is_db_default {
+            continue;
+        }
         let sql_col = state
             .meta
             .columns
@@ -26390,6 +26403,7 @@ let r = match n {
                 sql_type: None,
                 unique: false,
                 indexed: false,
+                db_default: false,
             },
         );
         let expr = parse_closure_body("fn (u) => u.name == \"ada\"");

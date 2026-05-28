@@ -39,7 +39,7 @@
     name: Str = ""
     password_hash: Str = ""
     role: Str = "user"
-    created_at: Str = ""
+    @db_default created_at: Str = ""
 
     // Virtual fields (no van a la DB) — default explícito requerido
     // por el codegen del ORM para poder instanciar `User { ... }`
@@ -67,7 +67,7 @@
     status: Str = "draft"
     tags: List<Str> = []
     metadata: Map<Str, Any> = {}
-    created_at: Str = ""
+    @db_default created_at: Str = ""
     published_at: Str = ""
 
     @has_many("Comment", via="post_id", on_delete="cascade") comments: List<Comment> = []
@@ -79,5 +79,5 @@
     @belongs_to("User", on_delete="cascade") author_id: Int = 0
     author: User?
     content: Str = ""
-    created_at: Str = ""
+    @db_default created_at: Str = ""
 }

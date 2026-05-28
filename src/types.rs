@@ -410,6 +410,26 @@ pub struct ColumnMetadata {
     pub sql_type: Option<String>,
     pub unique: bool,
     pub indexed: bool,
+    /// 10.8.2 (v0.10.8) — `@db_default` marca el field como
+    /// "manejado por la DB": el ORM lo SKIPEA del INSERT, dejando
+    /// que Postgres aplique el `DEFAULT` declarado en el schema
+    /// (típicamente `DEFAULT NOW()` para timestamps, `DEFAULT
+    /// gen_random_uuid()` para UUIDs, etc.). El field sigue
+    /// participando del SELECT/UPDATE normal — el cliente lo recibe
+    /// del RETURNING * con el valor que Postgres asignó.
+    ///
+    /// Sin este flag, el ORM siempre incluye el field en el
+    /// INSERT con el value de Fitz (típicamente `""` para Str con
+    /// default `""`), que Postgres rechaza para tipos no-text
+    /// (`timestamptz`, `uuid`, etc.) o sobrescribe el DEFAULT
+    /// silenciosamente.
+    ///
+    /// **Trade-off**: pierde la capacidad de override desde el
+    /// cliente HTTP. Útil para fields que JAMÁS deberían venir
+    /// del cliente (`created_at`, `updated_at`). Si necesitás
+    /// override condicional, no uses `@db_default` y enviá el
+    /// timestamp explícito desde Fitz (via builtin o helper).
+    pub db_default: bool,
 }
 
 /// Fase 10.4.a — Tipo de relación declarada sobre un field.
@@ -1560,6 +1580,21 @@ pub fn process_table_decorators(
                     }
                     col_meta.indexed = true;
                 }
+                "db_default" => {
+                    // 10.8.2 (v0.10.8) — field manejado por la DB.
+                    // El ORM lo skipea del INSERT (Postgres aplica
+                    // su DEFAULT). Sin args ni kwargs.
+                    has_meta = true;
+                    if !d.args.is_empty() || !d.kwargs.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@db_default` no acepta args ni kwargs".to_string(),
+                        ));
+                    }
+                    col_meta.db_default = true;
+                }
                 "belongs_to" | "has_one" | "has_many" => {
                     let kind = match d.name.as_str() {
                         "belongs_to" => RelationKind::BelongsTo,
@@ -1596,7 +1631,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@belongs_to`, `@has_one`, `@has_many`."
+                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@db_default`, `@belongs_to`, `@has_one`, `@has_many`."
                         ),
                     ));
                 }

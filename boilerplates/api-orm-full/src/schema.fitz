@@ -13,16 +13,10 @@
 // `models.fitz`. El checker estático NO valida que ambos
 // coincidan (deuda derivada).
 //
-// **`created_at`/`published_at` como `text NOT NULL DEFAULT ''`**
-// (en vez de `timestamptz NOT NULL DEFAULT NOW()`): el ORM nativo
-// no tiene sentinel para Str/Nullable que skipee el field del
-// INSERT y aplique el DEFAULT del schema (W4 cubre solo `id: 0`
-// para bigserial). Como Fitz manda explícitamente
-// `created_at: ""` en el `User.insert(...)`, Postgres rechaza el
-// `''` como `timestamptz` inválido. Workaround: usar `text` puro
-// — el ORM ya marshalea DateTime como Str ISO 8601 placeholder
-// (cap 31), así que el cliente no nota la diferencia funcional.
-// Deuda residual para v0.10.8 (sentinel Str + DEFAULT auto).
+// **`created_at`/`published_at` como `timestamptz NOT NULL DEFAULT
+// NOW()`**: el ORM nativo skipea estos fields del INSERT cuando el
+// type Fitz los marca con `@db_default` (v0.10.8). Postgres aplica
+// el DEFAULT y devuelve el timestamp real via RETURNING *.
 //
 // Llamado desde `main.fitz::main_init()` antes de arrancar el
 // server.
@@ -40,7 +34,7 @@ async fn init_schema() -> Result<Null> {
             name            text NOT NULL,
             password_hash   text NOT NULL,
             role            text NOT NULL DEFAULT 'user',
-            created_at      text NOT NULL DEFAULT ''
+            created_at      timestamptz NOT NULL DEFAULT NOW()
         )
     """, []).await?
 
@@ -68,8 +62,8 @@ async fn init_schema() -> Result<Null> {
             status          text NOT NULL DEFAULT 'draft',
             tags            text[] NOT NULL DEFAULT '\{\}',
             metadata        jsonb NOT NULL DEFAULT '\{\}',
-            created_at      text NOT NULL DEFAULT '',
-            published_at    text NOT NULL DEFAULT ''
+            created_at      timestamptz NOT NULL DEFAULT NOW(),
+            published_at    timestamptz
         )
     """, []).await?
 

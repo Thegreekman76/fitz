@@ -9584,6 +9584,57 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 self.emit(" };\n");
                 return Ok(());
             }
+            // 10.8.1 (v0.10.7+) — fix #6: cuando el `return <expr>`
+            // del handler tiene tipo `Result<T, E>` (típicamente
+            // `return <chain>.await` que devuelve un Result sin Ok()
+            // literal), emitir un `match` runtime que desempaca como
+            // las ramas literales de arriba: `Ok(v)` → 200 con `v`
+            // puro, `Err(e)` → 500 con `{"error": e}`. Sin esto, el
+            // fallback genérico de abajo serializaba `Result<T,E>`
+            // entero produciendo `{"Ok": ...}` o `{"Err": "..."}`,
+            // que no es lo que el cliente HTTP espera.
+            //
+            // Paralelo runtime de `value_to_outcome` del intérprete:
+            // el wrapping/unwrapping del Result vive en el path
+            // HTTP, no en el handler mismo.
+            //
+            // Detectado al smoke real boilerplate api-orm-full: el
+            // handler `return Post.where(...).first(conn).await`
+            // emitía `Result<Post, String>::__to_fitz_json` que
+            // producía `{"Ok": {...}}` en lugar del Post puro.
+            if let Type::Result {
+                ok: ok_ty,
+                err: err_ty,
+            } = &ty
+            {
+                let ok_body = if matches!(**ok_ty, Type::Null) {
+                    "serde_json::Value::Null".to_string()
+                } else {
+                    format!(
+                        "<{rt} as __ToFitzJson>::__to_fitz_json(&__v)",
+                        rt = rust_type_for(ok_ty, self.env)?
+                    )
+                };
+                let err_body = if matches!(**err_ty, Type::Null) {
+                    "serde_json::json!({\"error\": serde_json::Value::Null})".to_string()
+                } else {
+                    format!(
+                        "serde_json::json!({{\"error\": <{rt} as __ToFitzJson>::__to_fitz_json(&__e)}})",
+                        rt = rust_type_for(err_ty, self.env)?
+                    )
+                };
+                self.emit("return match (");
+                self.emit(&code);
+                self.emit(") {\n");
+                self.emit("        Ok(__v) => __FitzResponse { status: 200, body: ");
+                self.emit(&ok_body);
+                self.emit(" },\n");
+                self.emit("        Err(__e) => __FitzResponse { status: 500, body: ");
+                self.emit(&err_body);
+                self.emit(" },\n");
+                self.emit("    };\n");
+                return Ok(());
+            }
             // El status default para el path "no error" es 200; el
             // usuario puede pisarlo con `return 401 { ... }` que el
             // codegen de `Stmt::ReturnStatus` maneja aparte.
@@ -13202,6 +13253,17 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             if meta.is_virtual_field(&f.name) {
                 continue;
             }
+            // 10.8.2 (v0.10.8) — `@db_default` skipea el field del
+            // INSERT (Postgres aplica el DEFAULT declarado en el
+            // schema). El field SÍ aparece en RETURNING * para que
+            // el cliente reciba el valor que Postgres asignó.
+            // Paralelo al W4 (id: 0 sentinel) pero general — vale
+            // para timestamps, UUIDs auto-generados, etc.
+            let is_db_default = meta
+                .columns
+                .get(&f.name)
+                .map(|c| c.db_default)
+                .unwrap_or(false);
             let sql_col = meta
                 .columns
                 .get(&f.name)
@@ -13233,16 +13295,25 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 ""
             };
 
-            // RETURNING incluye TODOS los fields (siempre) — no depende
-            // del path runtime.
-            if placeholder_idx_with > 0 {
+            // RETURNING incluye TODOS los fields (siempre, incluso
+            // db_default) — no depende del path runtime y el cliente
+            // necesita el valor asignado por Postgres.
+            if !returning_list.is_empty() {
                 returning_list.push_str(", ");
             }
             returning_list.push('"');
             returning_list.push_str(sql_col);
             returning_list.push('"');
 
-            // Pista "con PK": siempre acumulamos.
+            // 10.8.2 — `@db_default` se skipea de AMBAS pistas (con/
+            // sin PK). El field nunca participa del INSERT — sigue
+            // viniendo del RETURNING. Igual que `is_virtual_field`
+            // pero el field sí es real en la DB.
+            if is_db_default {
+                continue;
+            }
+
+            // Pista "con PK": acumulamos si no es db_default.
             if placeholder_idx_with > 0 {
                 col_list_with.push_str(", ");
                 placeholders_with.push_str(", ");
@@ -19529,7 +19600,59 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         self.emit("    fn __to_fitz_json(&self) -> serde_json::Value {\n");
         self.emit("        let mut __obj = serde_json::Map::new();\n");
         for f in &sig.fields {
+            // 10.8.3 (v0.10.8) — fix #7: los virtual fields del ORM
+            // (`@has_many`/`@has_one`/BelongsToCompanion) ahora SÍ
+            // se emiten en el JSON cuando están "preloaded" (no
+            // están en estado default). Esto activa el feature
+            // `.preload(...)` end-to-end: el cliente recibe los
+            // datos eager-loaded en el response.
+            //
+            // Runtime check según el tipo Rust del field:
+            // - Option<T> (companion / has_one): emit si `is_some()`.
+            // - Arc<Mutex<Vec<T>>> (has_many): emit si
+            //   `!lock().unwrap().is_empty()`.
+            //
+            // Tradeoff aceptado: una lista vacía legítima (post sin
+            // comments) NO se distingue de "no preloaded". El user
+            // que necesite distinguir esos casos puede usar un
+            // handler dedicado (`GET /posts/{id}/comments`) en
+            // lugar de eager loading. W17 sigue aplicando a
+            // `__FromFitzJson` (los virtuales NO van como body
+            // input — eso es correcto).
             if is_virtual(&f.name) {
+                let relation_kind = meta.and_then(|m| m.relations.get(&f.name).map(|r| r.kind));
+                match relation_kind {
+                    Some(crate::types::RelationKind::HasMany) => {
+                        // Arc<Mutex<Vec<T>>> — emit si no vacía.
+                        writeln!(
+                            &mut self.output,
+                            "        {{ let __g = self.{name}.lock().unwrap(); \
+                             if !__g.is_empty() {{ \
+                             __obj.insert(\"{name}\".to_string(), self.{name}.__to_fitz_json()); \
+                             }} }}",
+                            name = f.name
+                        )
+                        .unwrap();
+                    }
+                    Some(crate::types::RelationKind::HasOne)
+                    | Some(crate::types::RelationKind::BelongsToCompanion) => {
+                        // Option<T> — emit si Some.
+                        writeln!(
+                            &mut self.output,
+                            "        if self.{name}.is_some() {{ \
+                             __obj.insert(\"{name}\".to_string(), self.{name}.__to_fitz_json()); \
+                             }}",
+                            name = f.name
+                        )
+                        .unwrap();
+                    }
+                    _ => {
+                        // BelongsTo no es virtual (es FK real). Otros
+                        // casos (sin relation registrada pero
+                        // is_virtual=true): conservar el behavior W17
+                        // (skip). No debería pasar en práctica.
+                    }
+                }
                 continue;
             }
             writeln!(

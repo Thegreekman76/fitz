@@ -9784,6 +9784,229 @@ print(m.has(\"missing\"))
 }
 
 #[test]
+fn orm_w17_eager_loaded_virtuales_aparecen_en_json() {
+    // 10.8.3 (v0.10.8) — fix #7: `__ToFitzJson` ahora emite los
+    // virtual fields del ORM (companion/has_one/has_many) cuando
+    // están "preloaded" (no en estado default). Runtime check
+    // (`is_some()` o `!is_empty()`) decide skip vs emit.
+    //
+    // Antes (W17 estricto): los virtuales JAMÁS aparecían en el
+    // JSON, perdiendo el beneficio de `.preload(...)`.
+    let stem = "orm_w17_eager_json";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let src = "\
+@table(\"users\") type User {\n\
+    @primary id: Int = 0\n\
+    name: Str = \"\"\n\
+    @has_many(\"Post\", via=\"author_id\") posts: List<Post> = []\n\
+}\n\
+@table(\"posts\") type Post {\n\
+    @primary id: Int = 0\n\
+    @belongs_to(\"User\") author_id: Int = 0\n\
+    author: User?\n\
+    title: Str = \"\"\n\
+}\n\
+\n\
+@get(\"/users/{id}\")\n\
+async fn get_user(id: Int) -> Result<User> {\n\
+    let conn = db.connect(\"postgres://x:y@127.0.0.1/x\").await?\n\
+    return User.where(fn(u) => u.id == id).preload(\"posts\").first(conn).await\n\
+}\n\
+\n\
+@server(43913)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspección estática: el impl __ToFitzJson para UserData debe
+    // emitir el conditional `if !__g.is_empty()` para el field
+    // virtual `posts` (HasMany). Y PostData debe emitir
+    // `if self.author.is_some()` para `author` (BelongsToCompanion).
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        assert!(
+            content.contains("if !__g.is_empty() { __obj.insert(\"posts\""),
+            "main.rs debe emitir el conditional has_many para `posts` (#7 fix)"
+        );
+        assert!(
+            content.contains("if self.author.is_some() { __obj.insert(\"author\""),
+            "main.rs debe emitir el conditional companion para `author` (#7 fix)"
+        );
+    }
+}
+
+#[test]
+fn orm_db_default_skipea_field_del_insert() {
+    // 10.8.2 (v0.10.7+) — fix #5: decorator `@db_default` marca al
+    // field como "manejado por la DB". El ORM lo skipea del
+    // INSERT, dejando que Postgres aplique el `DEFAULT` declarado
+    // en el schema (típicamente `DEFAULT NOW()` para timestamps).
+    // El field sigue apareciendo en RETURNING * para que el
+    // cliente reciba el valor que Postgres asignó.
+    //
+    // Sin este flag, el INSERT mandaba el value Fitz (default
+    // literal `""` para Str) y Postgres rechazaba `''` para tipos
+    // no-text como `timestamptz`.
+    let stem = "orm_db_default_skip";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let src = "\
+@table(\"users\") type User {\n\
+    @primary id: Int = 0\n\
+    email: Str = \"\"\n\
+    @db_default created_at: Str = \"\"\n\
+}\n\
+\n\
+@get(\"/insert\")\n\
+async fn do_insert() -> Result<User> {\n\
+    let conn = db.connect(\"postgres://x:y@127.0.0.1/x\").await?\n\
+    return User.insert(conn, User { id: 0, email: \"a@b\", created_at: \"\" }).await\n\
+}\n\
+\n\
+@server(43912)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspección estática: el SQL INSERT no debe mencionar
+    // `created_at` (skipeado por @db_default), pero RETURNING sí.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        // El INSERT debe NO mencionar "created_at" en la col_list,
+        // pero SÍ en RETURNING.
+        let insert_line = content
+            .lines()
+            .find(|l| l.contains("INSERT INTO \\\"users\\\""))
+            .expect("no se emitió INSERT INTO users");
+        // El INSERT line tiene formato:
+        //   INSERT INTO "users" (cols...) VALUES (...) RETURNING cols...
+        // Partimos por VALUES para separar.
+        let parts: Vec<&str> = insert_line.split("VALUES").collect();
+        assert_eq!(parts.len(), 2, "INSERT line shape inesperado");
+        let cols_part = parts[0];
+        assert!(
+            !cols_part.contains("created_at"),
+            "El INSERT col_list NO debe incluir `created_at` (skipeado por @db_default): {}",
+            cols_part
+        );
+        let returning_part = parts[1];
+        assert!(
+            returning_part.contains("created_at"),
+            "El RETURNING SÍ debe incluir `created_at`: {}",
+            returning_part
+        );
+    }
+}
+
+#[test]
+fn http_wrapper_desempaca_result_tail_sin_ok_explicito() {
+    // 10.8.1 (v0.10.7+) — fix #6: handler HTTP que termina con
+    // `return <expr>` cuyo tipo es `Result<T>` (sin `Ok()` literal)
+    // ahora se desempaca con match runtime, devolviendo `T` puro en
+    // 200 o `{"error": e}` en 500. Antes el codegen serializaba el
+    // `Result<T, E>` entero produciendo `{"Ok": ...}` / `{"Err": ...}`.
+    //
+    // Caso canónico: `return helper().await` donde `helper` devuelve
+    // Result. Detectado al smoke real boilerplate api-orm-full con
+    // `return Post.where(...).first(conn).await` (chain ORM).
+    let stem = "http_wrapper_result_tail";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    // El `?` en el body activa response_mode (handler emite
+    // `-> __FitzResponse`), que es el path donde aplica el fix #6.
+    // Sin `?`, el handler cae en el path vanilla `-> Result<T, E>`
+    // que el wrapper desempaca solo (sin necesidad del fix).
+    let src = "\
+async fn pre_check() -> Result<Null> {\n\
+    return Ok(null)\n\
+}\n\
+\n\
+async fn get_value() -> Result<Int> {\n\
+    return Ok(42)\n\
+}\n\
+\n\
+@get(\"/value\")\n\
+async fn handler_ok() -> Result<Int> {\n\
+    let _ = pre_check().await?\n\
+    return get_value().await\n\
+}\n\
+\n\
+@server(43911)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    // Inspección estática del Rust generado: el handler con
+    // `return <expr_Result>` debe emitir `match (...)` con dos
+    // armas Ok(__v)/Err(__e), NO `<Result<Int, String> as
+    // __ToFitzJson>` directo.
+    let main_rs = std::path::PathBuf::from(format!("target/fitz-build/{}/src/main.rs", stem));
+    if main_rs.exists() {
+        let content = std::fs::read_to_string(&main_rs).expect("leer main.rs");
+        assert!(
+            content.contains("Ok(__v) => __FitzResponse { status: 200,"),
+            "main.rs debe emitir `Ok(__v) => __FitzResponse {{ status: 200, ...}}` (#6 fix)"
+        );
+        assert!(
+            content.contains("Err(__e) => __FitzResponse { status: 500,"),
+            "main.rs debe emitir `Err(__e) => __FitzResponse {{ status: 500, ...}}` (#6 fix)"
+        );
+        assert!(
+            !content.contains("<Result<i64, String> as __ToFitzJson>"),
+            "main.rs NO debe serializar `Result<i64, String>` entero (regresión del fix #6)"
+        );
+    }
+}
+
+#[test]
 fn orm_array_has_acepta_var_externa() {
     // v0.10.7 — gap cerrado: `.has(var)` sobre `text[]`/`int8[]`/etc.
     // ahora acepta variables externas al closure, no solo literales.
