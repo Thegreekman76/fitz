@@ -1902,3 +1902,84 @@ boilerplate, documentados para fases futuras):
   grande, queda como deuda visible. El boilerplate api-orm-full
   modela `/feed` como broadcast simétrico entre clientes WS para
   showcasear el WS sin pelear este gap.
+
+### Mini-fase post-release v0.10.7 — Gaps descubiertos en smoke real Docker
+
+Bloque de gaps descubiertos al hacer el smoke end-to-end del
+boilerplate `api-orm-full` con Postgres real adentro de Docker
+(tag `v0.10.7`). El binario compila local + `fitz check` verde +
+smoke 292 verde NO los detectaba — solo aparecen cuando el binario
+levanta el server contra una DB real y se le pegan requests HTTP.
+
+**3 gaps cross-module nuevos abiertos**:
+
+- ⚠️ **OpenAPI 3.1 schema vacío cuando los handlers HTTP viven
+  cross-module**. `GET /openapi.json` devuelve `{"paths": []}`
+  cuando los handlers `@get`/`@post`/`@put`/`@delete` están en
+  módulos importados (caso canónico de cualquier boilerplate
+  multi-archivo serio). El codegen del schema (`openapi.rs`) solo
+  mira `program.http_fns` del main local, no recolecta los
+  handlers cross-module via el loader. Resultado: el W16
+  (rutas cross-module se enchufan al Router) NO está coordinado
+  con el OpenAPI auto-generación. El Router responde a los
+  endpoints, pero `/openapi.json` y `/docs` salen vacíos
+  visualmente. **Fix futuro v0.10.8**: el generador de schema
+  debe iterar también `loader.modules[*].http_fn_stmts` (W16 ya
+  los captura).
+
+- ⚠️ **AsyncAPI 3.0 endpoint no se registra cuando los `@ws`
+  viven cross-module**. `GET /asyncapi.json` → 404 (bug paralelo
+  al anterior). El codegen del runtime HTTP solo detecta `has_ws`
+  mirando `program.ws_fns` local. Si `realtime.fitz` tiene los
+  `@ws` pero el main solo hace `import realtime`, el flag
+  `has_ws=false` en el main → ni el endpoint `/asyncapi.json` ni
+  el schema se emiten. **Fix futuro v0.10.8**: paralelo al
+  OpenAPI fix, mirar `loader.modules[*].ws_fn_stmts`.
+
+- ⚠️ **ORM no skipea fields `Str = ""` del INSERT cuando hay
+  DEFAULT en el schema**. W4 cubre solo `id: Int = 0` para
+  bigserial PK. Para timestamps con `DEFAULT NOW()` o cualquier
+  field con DEFAULT del lado Postgres, el INSERT siempre incluye
+  el field con el value de Fitz (típicamente `""` para
+  timestamps), que Postgres rechaza con
+  `"invalid input syntax for type timestamp with time zone: \"\""`.
+  **Workaround en el boilerplate api-orm-full**: cambiar el
+  schema de `timestamptz NOT NULL DEFAULT NOW()` a `text NOT
+  NULL DEFAULT ''` (pierde el tipo nativo, gana smoke OK). **Fix
+  futuro v0.10.8**: agregar sentinel general para Str/Nullable
+  ("si value es el default literal, skipear field del INSERT") o
+  exponer una API tipo `db.now()` built-in que emita el ISO 8601
+  actual desde Fitz al insertar.
+
+**Parches temporales aplicados al boilerplate api-orm-full
+(REVERTIR cuando los gaps de v0.10.8 cierren)**:
+
+Estos workarounds son temporales — el boilerplate debería volver
+a la sintaxis canónica (showcase del stack completo) cuando
+v0.10.8 cierre los gaps subyacentes. Lista para revertir
+post-v0.10.8:
+
+1. **`schema.fitz`** — revertir `text NOT NULL DEFAULT ''` →
+   `timestamptz NOT NULL DEFAULT NOW()` en los fields
+   `created_at` (users/posts/comments) y `published_at` (posts).
+   Pre-requisito: cerrar gap "ORM no skipea Str sentinel del
+   INSERT". Sin esto, el INSERT sigue mandando `''` y rompe.
+
+2. **`docs/deudas-post-5b.md`** — borrar este bloque entero de
+   "Mini-fase post-release v0.10.7 — Gaps descubiertos en smoke
+   real Docker" cuando los 3 gaps queden cerrados.
+
+3. **`schema.fitz`** — opcional, si llega `db.now()` o
+   built-in time: el handler podría setear `created_at: db.now()`
+   en lugar de depender del DEFAULT del schema. Decisión
+   pedagógica abierta.
+
+4. **README del boilerplate (`boilerplates/api-orm-full/README.md`)**
+   — actualizar la sección "Notas de diseño" con la sintaxis
+   canónica una vez los gaps cierren (sacar las menciones de
+   workarounds que ya no apliquen). Verificar también las
+   referencias a `v0.10.7` y bump a `v0.10.8` en `FITZ_TAG`.
+
+5. **Documentación cap 31 de la guía / `docs/db-orm.md`** —
+   si se documentan los gaps actuales como deudas del ORM,
+   borrarlos de ahí también una vez que cierren.
