@@ -654,10 +654,7 @@ pub async fn read_message(stream: &mut TcpStream) -> DbResult<BackendMessage> {
     stream.read_exact(&mut payload).await?;
     let msg = parse_backend_message(tag, &payload)?;
     // [10.10 DEBUG TEMPORAL — REVERTIR antes del tag v0.10.10]
-    eprintln!(
-        "[FITZ-WIRE] tag={} ({}) msg={:?}",
-        tag as char, tag, msg
-    );
+    eprintln!("[FITZ-WIRE] tag={} ({}) msg={:?}", tag as char, tag, msg);
     Ok(msg)
 }
 

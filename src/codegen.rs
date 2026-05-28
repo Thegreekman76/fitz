@@ -21456,10 +21456,14 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             self.emit("    eprintln!(\"[FITZ-HTTP-WRAP] entering match __result for handler\");\n");
             self.emit("    let __built = match __result {\n");
             self.emit("        Ok(__v) => {\n");
-            self.emit("            eprintln!(\"[FITZ-HTTP-WRAP] Ok branch, calling __to_fitz_json\");\n");
+            self.emit(
+                "            eprintln!(\"[FITZ-HTTP-WRAP] Ok branch, calling __to_fitz_json\");\n",
+            );
             self.emit("            let __body = __v.__to_fitz_json();\n");
             self.emit("            eprintln!(\"[FITZ-HTTP-WRAP] __to_fitz_json done, building response\");\n");
-            self.emit("            (axum::http::StatusCode::OK, axum::Json(__body)).into_response()\n");
+            self.emit(
+                "            (axum::http::StatusCode::OK, axum::Json(__body)).into_response()\n",
+            );
             self.emit("        },\n");
             // Mini-tanda HTTP-Err — convención: si el E del Result es
             // un Nominal con field `status: Int`, leemos ese field y
