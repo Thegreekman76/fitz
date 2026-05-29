@@ -9810,22 +9810,12 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         rt = rust_type_for(err_ty, self.env)?
                     )
                 };
-                self.emit("eprintln!(\"[FITZ-RET-MATCH] pre-await\");\n");
-                self.emit("    let __ret_inner = (");
+                self.emit("return match (");
                 self.emit(&code);
-                self.emit(");\n");
-                self.emit("    eprintln!(\"[FITZ-RET-MATCH] post-await, entering match\");\n");
-                self.emit("    return match __ret_inner {\n");
-                self.emit("        Ok(__v) => {\n");
-                self.emit(
-                    "            eprintln!(\"[FITZ-RET-MATCH] Ok arm, calling __to_fitz_json\");\n",
-                );
-                self.emit("            let __body = ");
+                self.emit(") {\n");
+                self.emit("        Ok(__v) => __FitzResponse { status: 200, body: ");
                 self.emit(&ok_body);
-                self.emit(";\n");
-                self.emit("            eprintln!(\"[FITZ-RET-MATCH] __to_fitz_json done\");\n");
-                self.emit("            __FitzResponse { status: 200, body: __body }\n");
-                self.emit("        },\n");
+                self.emit(" },\n");
                 self.emit("        Err(__e) => __FitzResponse { status: 500, body: ");
                 self.emit(&err_body);
                 self.emit(" },\n");
@@ -14131,9 +14121,6 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                                 Ok(__one) => {{ \
                                     let __rows = std::sync::Arc::new(std::sync::Mutex::new(vec![__one.clone()])); \
                                     {dispatch} \
-                                    eprintln!(\"[FITZ-FIRST-CLOSURE] dropping __rows, returning Ok\"); \
-                                    drop(__rows); \
-                                    eprintln!(\"[FITZ-FIRST-CLOSURE] __rows dropped, returning Ok(__one)\"); \
                                     Ok(__one) \
                                 }} \
                                 Err(__e) => Err(__e), \
@@ -14756,11 +14743,8 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         }
         Ok(format!(
             "for __name in __preloads.iter() {{ \
-                eprintln!(\"[FITZ-PRELOAD] processing name={{}}\", __name); \
                 match __name.as_str() {{ {arms} _ => return Err(format!(\"preload `{{}}`: relation no soportada en {parent}\", __name)), }} \
-                eprintln!(\"[FITZ-PRELOAD] done name={{}}\", __name); \
-            }} \
-            eprintln!(\"[FITZ-PRELOAD-LOOP-EXIT] type={parent}\"); ",
+            }} ",
             arms = arms,
             parent = parent_type_name,
         ))
@@ -19935,10 +19919,21 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 match relation_kind {
                     Some(crate::types::RelationKind::HasMany) => {
                         // Arc<Mutex<Vec<T>>> — emit si no vacía.
+                        // BUG FIX v0.10.10: drop el guard ANTES de
+                        // llamar `__to_fitz_json` sobre el mismo Arc.
+                        // El impl genérico `Arc<Mutex<T>>::__to_fitz_json`
+                        // re-lockea el Mutex; `std::sync::Mutex` no es
+                        // reentrante → deadlock. La versión vieja
+                        // (`let __g = self.x.lock(); if !__g.is_empty() {
+                        // ... self.x.__to_fitz_json() ... }`) colgaba el
+                        // wrapper HTTP cuando un `.preload(...)`
+                        // populaba el field. Fix: chequear is_empty en
+                        // un scope acotado que libera el guard al fin
+                        // del let, después serializar normalmente.
                         writeln!(
                             &mut self.output,
-                            "        {{ let __g = self.{name}.lock().unwrap(); \
-                             if !__g.is_empty() {{ \
+                            "        {{ let __is_empty = {{ let __g = self.{name}.lock().unwrap(); __g.is_empty() }}; \
+                             if !__is_empty {{ \
                              __obj.insert(\"{name}\".to_string(), self.{name}.__to_fitz_json()); \
                              }} }}",
                             name = f.name
@@ -21330,12 +21325,6 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             self.emit("    use futures_util::FutureExt as _;\n");
             writeln!(
                 &mut self.output,
-                "    eprintln!(\"[FITZ-WRAP-PRE-CATCH] handler={}\");",
-                sig.name,
-            )
-            .unwrap();
-            writeln!(
-                &mut self.output,
                 "    let __result = match std::panic::AssertUnwindSafe({}({})).catch_unwind().await {{",
                 sig.name,
                 call_args.join(", "),
@@ -21369,12 +21358,6 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         .unwrap();
         self.emit("        }\n");
         self.emit("    };\n");
-        writeln!(
-            &mut self.output,
-            "    eprintln!(\"[FITZ-WRAP-POST-CATCH] handler={} catch_unwind returned\");",
-            sig.name,
-        )
-        .unwrap();
 
         // MW.3: si la ruta declara cors, envolvemos el resultado en
         // `__apply_cors_and_respond(...)` para inyectar headers.
@@ -21475,18 +21458,11 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             .unwrap();
             self.emit("\n");
         } else if sig.returns_result {
-            self.emit("    eprintln!(\"[FITZ-HTTP-WRAP] entering match __result for handler\");\n");
             self.emit("    let __built = match __result {\n");
-            self.emit("        Ok(__v) => {\n");
-            self.emit(
-                "            eprintln!(\"[FITZ-HTTP-WRAP] Ok branch, calling __to_fitz_json\");\n",
-            );
-            self.emit("            let __body = __v.__to_fitz_json();\n");
-            self.emit("            eprintln!(\"[FITZ-HTTP-WRAP] __to_fitz_json done, building response\");\n");
-            self.emit(
-                "            (axum::http::StatusCode::OK, axum::Json(__body)).into_response()\n",
-            );
-            self.emit("        },\n");
+            self.emit("        Ok(__v) => (\n");
+            self.emit("            axum::http::StatusCode::OK,\n");
+            self.emit("            axum::Json(__v.__to_fitz_json()),\n");
+            self.emit("        ).into_response(),\n");
             // Mini-tanda HTTP-Err — convención: si el E del Result es
             // un Nominal con field `status: Int`, leemos ese field y
             // usamos su valor como HTTP status code (validado a 100..1000).
