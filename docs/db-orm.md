@@ -39,6 +39,8 @@ cierran el bloque "stack web first-class del lado server".
 - [24. Recetas — Cron job de limpieza](#24-recetas--cron-job-de-limpieza)
 - [25. Recetas — Bulk operations](#25-recetas--bulk-operations)
 - [26. Recetas — Schema idempotente al boot](#26-recetas--schema-idempotente-al-boot)
+- [26.b. Transactions (v0.10.14)](#26b-transactions-v01014)
+- [26.c. Migraciones automáticas (v0.10.16)](#26c-migraciones-autom%C3%A1ticas-v01016)
 - [27. Performance](#27-performance)
 - [28. Limitaciones honestas y deuda explícita](#28-limitaciones-honestas-y-deuda-expl%C3%ADcita)
 - [29. CLI con DB: cómo cada subcomando interactúa](#29-cli-con-db-c%C3%B3mo-cada-subcomando-interact%C3%BAa)
@@ -2559,6 +2561,94 @@ capturar correctamente.
 
 ---
 
+## 26.c. Migraciones automáticas (v0.10.16)
+
+`fitz db diff` introspecciona el schema real de Postgres, lo
+compara con los `@table type` declarados en tu programa, y emite
+el SQL `ALTER TABLE` necesario para sincronizarlos. `fitz db
+migrate` aplica un directorio de migration files versionados
+con tracking idempotente en la tabla `_fitz_migrations`. Sin
+deps externas (Alembic / Flyway / Liquibase / TypeORM CLI):
+todo vive en el binario `fitz`.
+
+### Subcomandos
+
+| Subcomando | Qué hace |
+|---|---|
+| `fitz db diff [archivo.fitz] [--out file.sql]` | Compara schema declarado (en `archivo.fitz` o `[bin].main` del manifest) con el real, emite SQL al stdout o file. |
+| `fitz db migrate [--dry-run]` | Aplica los `.sql` pendientes del dir `./migrations` en orden alfabético, registra cada uno en `_fitz_migrations`. `--dry-run` muestra qué se aplicaría sin tocar la DB. |
+| `fitz db status` | Lista cada archivo `.sql` con badge `✓ applied` / `→ PENDING`. |
+| `fitz db new <name>` | Crea `migrations/YYYYMMDDHHMMSS_<name>.sql` con stub vacío. |
+
+URL: lee `DATABASE_URL` env var, o pasa `--url
+postgres://...`. Dir: `./migrations` por default, override con
+`--dir`.
+
+### Workflow canónico
+
+```bash
+# 1. Editás `@table type User { ... name: Str = "" }` agregando campo.
+# 2. Generás migration vacía con timestamp.
+fitz db new add_name_to_users
+# → migrations/20260529150000_add_name_to_users.sql
+
+# 3. Generás el SQL automático y lo redirigís a la migration.
+fitz db diff > migrations/20260529150000_add_name_to_users.sql
+
+# 4. Aplicás contra la DB.
+fitz db migrate
+# → ✓ 1 migration(s) aplicada(s): 20260529150000
+```
+
+### Política
+
+- **Tracking**: tabla `_fitz_migrations` con `version TEXT
+  PRIMARY KEY` + `applied_at TIMESTAMPTZ DEFAULT NOW()`.
+- **Idempotente**: re-correr `migrate` con todo aplicado es
+  no-op (`✓ todas las migrations ya aplicadas`).
+- **Determinístico**: el diff emite cambios en orden seguro
+  (CREATE TABLE → ADD/DROP/ALTER COLUMN → CREATE INDEX →
+  DROP FK → ADD FK → DROP TABLE).
+- **Quoted identifiers**: todos los `CREATE TABLE`/`ALTER
+  COLUMN` quotean nombres (`"users"`, `"email"`) — los names
+  con reserved words o caracteres especiales no rompen.
+
+### Limitaciones explícitas del MVP
+
+- **No detecta renames** (column ni table): un rename Fitz-side
+  `name` → `full_name` se ve como `DROP COLUMN name + ADD
+  COLUMN full_name`, **perdiendo los datos**. Editá la
+  migration a mano (`ALTER TABLE ... RENAME COLUMN`) cuando el
+  caso lo justifique.
+- **`ALTER COLUMN ... TYPE` sin USING**: cambios de tipo
+  incompatibles (`text → int`) fallan. Editá la migration para
+  agregar `USING (col::int)` o data migration script.
+- **No emite defaults**: el ORM resuelve defaults client-side
+  al construir la instance. `@db_default` espera que la
+  migration tenga `DEFAULT NOW()` puesto a mano (el diff actual
+  reporta mismatch hasta que lo agregás).
+- **Solo schema `public`**: futuras schemas custom requieren
+  refinamiento del introspector.
+- **No down migrations**: las migrations son forward-only.
+  Para revertir, escribí una nueva migration con el cambio
+  inverso. (Igual que Rails sin `down`, Alembic sin
+  `downgrade`.)
+
+### Por qué Fitz hace esto distinto
+
+- **Cero deps externas**: ni `pip install alembic` ni `npm
+  install typeorm`. Todo en el binario `fitz`.
+- **Schema desde el código tipado**: la fuente de verdad es el
+  `@table type User { ... }` del lenguaje, no un YAML aparte
+  ni reflection runtime. Si el type cambia, el diff lo detecta.
+- **Paridad bit-a-bit con el resto del stack**: usa el mismo
+  driver Postgres puro que el ORM (`db::introspect_schema`
+  habla wire protocol v3.0 vía `information_schema` + `pg_catalog`).
+- **Idempotente por diseño**: el tracking en `_fitz_migrations`
+  es estándar; re-correr `migrate` o `diff` es siempre seguro.
+
+---
+
 ## 27. Performance
 
 Esta sección crecerá cuando aparezcan benchmarks reales del
@@ -2651,23 +2741,20 @@ post-Fase 10".
 Lo que NO está en el MVP, con plan de cierre y workaround
 recomendado:
 
-### Migraciones automáticas (`fitz db diff` / `fitz db migrate`)
+### Migraciones automáticas — **CERRADO en v0.10.16**
 
-- **Status**: deuda comprometida. Fase 10.6+ separada.
-- **Workaround**: `db.exec("CREATE TABLE IF NOT EXISTS ...", [])`
-  al boot, o sistema manual versionado (sección 26).
-- **Cuándo**: requiere diseñar el formato de migration files +
-  comparador AST `type` vs schema real Postgres.
+`fitz db diff/migrate/status/new` ya están en el binario. Ver
+sección 26.c para el workflow canónico y las limitaciones del
+MVP (no detecta renames, no emite defaults `@db_default`, no
+down migrations).
 
-### Transactions (`BEGIN` / `COMMIT` / `ROLLBACK`)
+### Transactions — **CERRADO en v0.10.14 (fn nombrada) + v0.10.15 (FnExpr inline)**
 
-- **Status**: cada query corre en auto-commit. Bloques
-  transaccionales llegan en sub-paso 10.7.
-- **Workaround**: `db.exec("BEGIN", [])` + queries + `db.exec(
-  "COMMIT", [])` manual. **Caveat**: el pool puede mover queries
-  a conns distintas, lo cual rompe la transaction. Hasta tener
-  `db.transaction(fn(tx) => ...)` con conn pinned, los workarounds
-  manuales son frágiles.
+`db.transaction(fn(tx) -> Result<T> { ... })` con
+auto-rollback en `Err` y captures del scope outer. Ver
+sección 26.b. Deuda futura (NO bloquea uso real): nested
+transactions con SAVEPOINT, niveles de aislamiento custom,
+read-only transactions.
 
 ### Composite primary keys
 
@@ -2743,10 +2830,23 @@ Lo que queda como deuda menor:
 
 ## 29. CLI con DB: cómo cada subcomando interactúa
 
-Fitz hoy NO tiene un subcomando `fitz db ...` dedicado (planeado
-para Fase 10.6+: `fitz db diff` / `fitz db migrate` / `fitz db
-inspect`). Pero todos los subcomandos generales del CLI funcionan
+Desde v0.10.16, Fitz tiene un subcomando dedicado `fitz db ...`
+con cuatro acciones (`diff` / `migrate` / `status` / `new`) — ver
+sección 26.c para el workflow canónico y limitaciones del MVP.
+El resto de los subcomandos generales del CLI también funcionan
 naturalmente con programas que usan el módulo `db` y el ORM.
+
+### `fitz db diff/migrate/status/new` — workflow de migraciones
+
+```bash
+export DATABASE_URL="postgres://fitz:fitz@localhost/myapp"
+fitz db new add_email_to_users          # crea migration vacía
+fitz db diff > migrations/<file>.sql    # genera ALTER TABLE auto
+fitz db migrate                          # aplica + tracking idempotente
+fitz db status                           # lista applied/pending
+```
+
+Detalle completo en sección 26.c.
 
 ### `fitz run [archivo]` — con DB
 

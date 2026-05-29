@@ -12,8 +12,136 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-benchmarks Fitz ORM vs SQLAlchemy, decidir scope del próximo
-norte técnico.
+boilerplates ORM Dockerizados extendidos, refinamientos del
+schema diff (renames opcionales, defaults `@db_default`).
+
+## [v0.10.16] — 2026-05-29 — Fase 10.6: migraciones automáticas ORM
+
+`fitz db diff/migrate/status/new` — el binario ahora introspecciona
+el schema real de Postgres, lo compara con los `@table type`
+declarados, y emite el SQL `ALTER TABLE` / `CREATE TABLE` necesario
+para sincronizar. Las migrations versionadas se aplican con
+tracking idempotente en `_fitz_migrations`. **Cero deps externas**:
+ni Alembic ni Flyway ni Liquibase ni TypeORM CLI. La fuente de
+verdad es el código tipado del lenguaje.
+
+### Subcomandos nuevos
+
+| Subcomando | Qué hace |
+|---|---|
+| `fitz db diff [archivo.fitz] [--out file.sql]` | Compara schema declarado vs real, emite SQL al stdout o file. |
+| `fitz db migrate [--dry-run]` | Aplica los `.sql` pendientes del dir `./migrations` en orden alfabético. |
+| `fitz db status` | Lista cada archivo `.sql` con badge `✓ applied` / `→ PENDING`. |
+| `fitz db new <name>` | Crea `migrations/YYYYMMDDHHMMSS_<name>.sql` con stub vacío. |
+
+URL: lee `DATABASE_URL` env var, o pasa `--url postgres://...`.
+Dir: `./migrations` por default, override con `--dir`. Entry:
+explícito o `[bin].main` del manifest.
+
+### Cambios técnicos
+
+- **src/migrations.rs** (~1260 LoC nuevas): módulo dedicado con
+  `Schema`/`Table`/`Column`/`Index`/`ForeignKey` structs,
+  `introspect_schema(conn)` via `information_schema` +
+  `pg_catalog`, `schema_from_program(program, type_env)` que
+  walka el AST + `TableMetadata`, `diff_schemas(current, target)`
+  con orden seguro (CREATE TABLE → ADD/DROP/ALTER COLUMN →
+  CREATE INDEX → DROP FK → ADD FK → DROP TABLE),
+  `changes_to_sql(changes)` con quoted identifiers, helpers de
+  tracking (`ensure_tracking_table`, `applied_versions`,
+  `read_migrations_dir`, `apply_migration`,
+  `apply_pending_migrations`, `status`).
+- **src/lib.rs**: nueva `pub mod migrations`.
+- **src/main.rs**: nueva variante `Commands::Db(DbCmd)` con 4
+  subcomandos vía clap. Handlers `db_diff_cmd`/`db_migrate_cmd`/
+  `db_status_cmd`/`db_new_cmd` con helpers `resolve_db_url`,
+  `resolve_migrations_dir`, `resolve_db_entry`,
+  `load_program_for_db`. Todos los handlers usan una sola
+  runtime tokio para connect + work (evita que health_check_task
+  muera con un runtime que se dropea entre connect y query).
+- **Cargo.toml**: `chrono = "0.4"` reusado (ya dep para
+  jobs/cron) para timestamps `YYYYMMDDHHMMSS_<name>.sql`.
+
+### Decisiones técnicas
+
+- **Quoted identifiers everywhere** (`"users"`, `"email"`): los
+  CREATE TABLE / ALTER COLUMN emitidos quotean cada nombre para
+  que reserved words o caracteres especiales no rompan.
+- **Filesystem-based, no DSL custom**: migrations son `.sql`
+  planos editables a mano. Patrón estándar de Flyway/Rails. El
+  diff genera el SQL, el user lo redirige al file y lo edita
+  si necesita refinos manuales.
+- **Forward-only** (sin `down` migrations): para revertir,
+  escribís una nueva migration con el cambio inverso. Patrón
+  Rails sin `down`, Alembic sin `downgrade`. Menos código,
+  menos drift posible entre `up` y `down` que se desincronizan.
+- **Tracking en tabla dedicada** (`_fitz_migrations` con
+  `version TEXT PRIMARY KEY` + `applied_at TIMESTAMPTZ DEFAULT
+  NOW()`): patrón estándar. Re-correr `migrate` es siempre
+  no-op si todo está aplicado.
+- **Schema diff determinístico**: orden estable de categorías +
+  sort alfabético dentro de cada categoría — re-correr `diff`
+  con los mismos inputs produce siempre el mismo output (clave
+  para grep/sed/CI checks contra diffs esperados).
+- **Solo schema `public`** en el MVP: refinamiento futuro si
+  entra demanda multi-schema.
+
+### Tests
+
+- **26 unit tests nuevos** en `src/migrations.rs::tests`
+  cubriendo: diff de schemas vacíos/iguales (idempotente);
+  CREATE/DROP table; ADD/DROP/ALTER column con type + nullable;
+  CREATE/DROP index; ADD foreign key; orden seguro (CREATE
+  antes que DROP); determinismo cross-runs; emission de SQL
+  para cada `Change`; round-trip `schema_from_program(src)`
+  con types Fitz reales + `diff` contra sí mismo es vacío;
+  dos versiones del schema yield `AddColumn`.
+- **2599/2599 unit tests verde** post-cambios (sin regresiones).
+- **Smoke real Postgres**: validable vía CI (job `db-postgres`).
+  En Windows host contra Docker-mapped Postgres reproduce un
+  bug pre-existente del driver wire protocol ("cstr no es
+  UTF-8") que NO bloquea uso desde Linux/CI.
+
+### Limitaciones explícitas del MVP
+
+- **No detecta renames** (column ni table): un rename Fitz-side
+  `name` → `full_name` se ve como `DROP COLUMN + ADD COLUMN`,
+  **perdiendo datos**. Editá la migration a mano (`ALTER TABLE
+  ... RENAME COLUMN`) cuando el caso lo justifique.
+- **`ALTER COLUMN ... TYPE` sin USING**: cambios incompatibles
+  (`text → int`) fallan. Editá la migration para agregar
+  `USING (col::int)`.
+- **No emite defaults**: `@db_default created_at: Str` espera
+  que la migration tenga `DEFAULT NOW()` puesto a mano (el
+  diff reporta mismatch hasta que lo agregás).
+- **Solo schema `public`** (no multi-schema).
+- **Forward-only** (sin `down`/`downgrade`).
+
+### Docs actualizados
+
+- `docs/db-orm.md`: nueva sección 26.c "Migraciones automáticas
+  (v0.10.16)" con workflow canónico + política + limitaciones +
+  por qué Fitz lo hace distinto. Sección 28 actualizada
+  (migraciones + transactions movieron de "deuda" a "CERRADO").
+  Sección 29 (CLI con DB) suma sub-sección con los 4 nuevos
+  subcomandos.
+- `docs/guide.md` cap 31 (Postgres + ORM nativo): nueva
+  sub-sección "Migraciones automáticas (v0.10.16)" con el
+  workflow básico y link a `docs/db-orm.md` para detalles.
+- `CHANGELOG.md`: esta entrada.
+
+### Por qué importa
+
+Hasta v0.10.15, el schema se escribía a mano en `db.exec(
+"CREATE TABLE IF NOT EXISTS ...", [])` al boot del programa
+(idiomatic en los ejemplos de la guía pero manual y no
+versionado). Equipos serios necesitan: cambios versionados, CI
+checks contra drift schema vs código, rollouts ordenados, y
+visibilidad de "qué migrations corren en cada deploy". `fitz db
+diff/migrate/status/new` resuelve esto en el binario, sin
+levantar deps externas. Combinado con Transactions ORM
+(v0.10.14-15), el stack DB de Fitz es ahora self-contained
+end-to-end.
 
 ## [v0.10.12] — 2026-05-29 — LSP completion tras `@` + 9no boilerplate fullstack
 

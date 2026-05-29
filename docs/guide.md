@@ -11523,6 +11523,48 @@ sin tener que pasarlos explícitamente.
 - **Transacciones read-only** (`BEGIN READ ONLY`) — el callback
   siempre puede escribir.
 
+### Migraciones automáticas (v0.10.16)
+
+Hasta v0.10.15 el schema vivía en `db.exec("CREATE TABLE IF NOT
+EXISTS ...", [])` al boot del programa (ver `examples/guide/
+31b-orm-crud-http.fitz`). Funciona pero es manual y no versionado.
+Desde **v0.10.16**, Fitz tiene un subcomando dedicado:
+
+```bash
+# 1. Edités `@table type User { ... name: Str = "" }` agregando un field.
+# 2. Generás migration vacía.
+fitz db new add_name_to_users
+# → migrations/20260529150000_add_name_to_users.sql
+
+# 3. Generás el SQL automático y lo redirigís al archivo.
+fitz db diff > migrations/20260529150000_add_name_to_users.sql
+
+# 4. Aplicás contra la DB (tracking idempotente en `_fitz_migrations`).
+fitz db migrate
+
+# 5. Estado en cualquier momento.
+fitz db status
+```
+
+`fitz db diff` introspecciona el schema real de Postgres
+(`information_schema` + `pg_catalog`), lo compara con los `@table
+type` declarados, y emite el `ALTER TABLE` / `CREATE TABLE` /
+`CREATE INDEX` necesario para sincronizarlos. El comparador es
+determinístico (orden seguro de aplicación) e idempotente
+(`diff(target, target) == ""`).
+
+**Limitaciones del MVP**: no detecta renames (un rename Fitz-side
+`name` → `full_name` se ve como `DROP COLUMN + ADD COLUMN`,
+perdiendo datos — editá la migration a mano cuando aplique); no
+emite defaults (`@db_default` exige `DEFAULT NOW()` puesto a
+mano); forward-only (sin `down` migrations; para revertir, nueva
+migration con cambio inverso). Detalle completo + workflow
+avanzado en `docs/db-orm.md` sección 26.c.
+
+**Cero deps externas**: ni Alembic ni Flyway ni Liquibase ni
+TypeORM CLI. Todo vive en el binario `fitz`. La fuente de verdad
+es tu código tipado, no un YAML aparte ni reflection runtime.
+
 ---
 
 ## 32. Variables de entorno

@@ -5,8 +5,8 @@
 // duplicada). Acá solo importamos lo que el CLI consume.
 
 use fitz::{
-    ast, codegen, cron_jobs, error, evaluator, fmt, http, launcher_template, lexer, lint, lockfile,
-    manifest, openapi, parser, pbs, pyi_loader, testing, types,
+    ast, codegen, cron_jobs, db, error, evaluator, fmt, http, launcher_template, lexer, lint,
+    lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, testing, types,
 };
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
@@ -262,6 +262,63 @@ enum Commands {
         #[arg(long)]
         deny: Vec<String>,
     },
+
+    /// Fase 10.6 — Migraciones automáticas del ORM. Compara el
+    /// schema declarado en los `@table` types con el schema real de
+    /// la DB, genera SQL DDL para sincronizar, y trackea qué
+    /// migraciones corrieron.
+    #[command(subcommand)]
+    Db(DbCmd),
+}
+
+#[derive(Subcommand)]
+enum DbCmd {
+    /// Compara el schema actual de la DB con el declarado en los
+    /// `@table` types del programa Fitz y emite SQL DDL para
+    /// sincronizar (CREATE TABLE / ADD COLUMN / etc.).
+    Diff {
+        /// Programa Fitz con los `@table` types. Si se omite,
+        /// usa el `[bin].main` del `fitz.toml` del cwd/ancestros.
+        file: Option<PathBuf>,
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+        /// Archivo de salida `.sql`. Si se omite, escribe a stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Corre todas las migraciones pendientes en `migrations/`
+    /// (o el dir custom de `--dir`). Idempotente — skipea las
+    /// ya aplicadas según `_fitz_migrations`.
+    Migrate {
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Solo imprime qué se aplicaría, sin tocar la DB.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Lista las migraciones del dir + estado (applied/pending).
+    Status {
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// Crea un archivo de migración vacío con prefijo timestamp
+    /// `YYYYMMDDHHMMSS_<name>.sql` en `migrations/`.
+    New {
+        /// Nombre descriptivo de la migración (snake_case).
+        name: String,
+        /// Directorio destino. Default: `./migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -374,6 +431,12 @@ fn main() {
         Commands::Lint { files, deny } => {
             lint_cmd(files, deny);
         }
+        Commands::Db(sub) => match sub {
+            DbCmd::Diff { file, url, out } => db_diff_cmd(file, url, out),
+            DbCmd::Migrate { url, dir, dry_run } => db_migrate_cmd(url, dir, dry_run),
+            DbCmd::Status { url, dir } => db_status_cmd(url, dir),
+            DbCmd::New { name, dir } => db_new_cmd(name, dir),
+        },
     }
 }
 
@@ -3937,6 +4000,306 @@ fn clear_screen_and_banner(target: &DevTarget, run_count: u32) {
     }
     eprintln!("▶ fitz dev (run #{}) — {}", run_count, target.display);
     eprintln!();
+}
+
+// =================================================================
+// Fase 10.6 — Handlers de `fitz db <subcomando>`
+// =================================================================
+
+/// Resuelve la URL de conexión PG: explícita > `DATABASE_URL` env.
+fn resolve_db_url(explicit: Option<String>) -> Result<String, String> {
+    match explicit {
+        Some(u) => Ok(u),
+        None => std::env::var("DATABASE_URL").map_err(|_| {
+            "URL Postgres no provista. Pasá `--url postgres://...` o seteá `DATABASE_URL` env."
+                .to_string()
+        }),
+    }
+}
+
+/// Resuelve el dir de migrations: explícito > `./migrations` (cwd).
+fn resolve_migrations_dir(explicit: Option<PathBuf>) -> PathBuf {
+    explicit.unwrap_or_else(|| PathBuf::from("migrations"))
+}
+
+/// Resuelve el entry .fitz: explícito > `[bin].main` del manifest.
+fn resolve_db_entry(file: Option<PathBuf>) -> Result<PathBuf, String> {
+    if let Some(f) = file {
+        return Ok(f);
+    }
+    let cwd = std::env::current_dir().map_err(|e| format!("cwd: {e}"))?;
+    let manifest_path = manifest::find_manifest(&cwd).ok_or_else(|| {
+        "no se pudo encontrar el entry — pasá `<archivo.fitz>` o asegurate de estar en un proyecto con `fitz.toml`".to_string()
+    })?;
+    let manifest_text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("leyendo `{}`: {e}", manifest_path.display()))?;
+    let m = manifest::Manifest::parse(&manifest_text).map_err(|e| format!("manifest: {e}"))?;
+    let bin_main = m.bin.as_ref().map(|b| b.main.clone()).ok_or_else(|| {
+        "el manifest no tiene `[bin].main` — pasá `<archivo.fitz>` explícito".to_string()
+    })?;
+    let manifest_dir = manifest_path
+        .parent()
+        .ok_or_else(|| "manifest sin parent".to_string())?
+        .to_path_buf();
+    Ok(manifest_dir.join(bin_main))
+}
+
+/// Lee + parsea + chequea un programa Fitz, devuelve (Program, TypeEnv).
+/// Usado por `db diff` para construir el schema esperado.
+fn load_program_for_db(entry: &std::path::Path) -> Result<(ast::Program, types::TypeEnv), String> {
+    let src = std::fs::read_to_string(entry)
+        .map_err(|e| format!("leyendo `{}`: {e}", entry.display()))?;
+    let tokens = lexer::tokenize(&src).map_err(|e| format!("lexer: {e}"))?;
+    let program = parser::parse(tokens).map_err(|e| format!("parser: {e}"))?;
+    let (env, _type_info, _def_info, errs) = types::check_program(&program);
+    if !errs.is_empty() {
+        return Err(format!(
+            "checker tipos ({} errores). Corré `fitz check` para detalles.",
+            errs.len()
+        ));
+    }
+    Ok((program, env))
+}
+
+fn db_diff_cmd(file: Option<PathBuf>, url: Option<String>, out: Option<PathBuf>) {
+    let entry = match resolve_db_entry(file) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let (program, env) = match load_program_for_db(&entry) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("✗ cargando programa: {e}");
+            std::process::exit(1);
+        }
+    };
+    let target = match migrations::schema_from_program(&program, &env) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ schema_from_program: {e}");
+            std::process::exit(1);
+        }
+    };
+    // Una sola runtime tokio para connect + introspect: la connection
+    // arma `tokio::spawn(health_check_task)`; si dropeamos el runtime
+    // entre connect y query, esa task muere y la próxima query rompe
+    // con "cstr no es UTF-8" o similar.
+    let rt = evaluator::build_runtime();
+    let result = rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        let current = migrations::introspect_schema(&conn)
+            .await
+            .map_err(|e| format!("introspect: {e}"))?;
+        Ok::<_, String>(current)
+    });
+    let current = match result {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let changes = migrations::diff_schemas(&current, &target);
+    if changes.is_empty() {
+        eprintln!("✓ schema sincronizado — no hay cambios pendientes");
+        return;
+    }
+    let sql = migrations::changes_to_sql(&changes);
+    match out {
+        Some(path) => {
+            if let Err(e) = std::fs::write(&path, &sql) {
+                eprintln!("✗ escribiendo `{}`: {e}", path.display());
+                std::process::exit(1);
+            }
+            eprintln!("✓ {} change(s) → {}", changes.len(), path.display());
+        }
+        None => {
+            print!("{}", sql);
+            eprintln!("✓ {} change(s) emitidos a stdout", changes.len());
+        }
+    }
+}
+
+fn db_migrate_cmd(url: Option<String>, dir: Option<PathBuf>, dry_run: bool) {
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let dir = resolve_migrations_dir(dir);
+    let migrations_list = match migrations::read_migrations_dir(&dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if migrations_list.is_empty() {
+        eprintln!(
+            "✓ no hay archivos `.sql` en `{}` — nada para migrar",
+            dir.display()
+        );
+        return;
+    }
+    let rt = evaluator::build_runtime();
+    if dry_run {
+        let result = rt.block_on(async {
+            let conn = db::connect_url(&url)
+                .await
+                .map_err(|e| format!("connect: {e}"))?;
+            migrations::status(&conn, &dir)
+                .await
+                .map_err(|e| format!("status: {e}"))
+        });
+        let report = match result {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("✗ {e}");
+                std::process::exit(1);
+            }
+        };
+        let mut pending = 0;
+        for (version, filename, status) in &report {
+            let badge = match status {
+                migrations::MigrationStatus::Applied => "✓ applied ",
+                migrations::MigrationStatus::Pending => {
+                    pending += 1;
+                    "→ PENDING "
+                }
+            };
+            eprintln!("  {badge} {version}  {filename}");
+        }
+        eprintln!("[dry-run] {pending} migration(s) pendiente(s) — no se aplicaron");
+        return;
+    }
+    let result = rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        migrations::apply_pending_migrations(&conn, &migrations_list)
+            .await
+            .map_err(|e| format!("migrate: {e}"))
+    });
+    let applied = match result {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if applied.is_empty() {
+        eprintln!("✓ todas las migrations ya aplicadas — no hubo cambios");
+    } else {
+        eprintln!("✓ {} migration(s) aplicada(s):", applied.len());
+        for v in &applied {
+            eprintln!("    {v}");
+        }
+    }
+}
+
+fn db_status_cmd(url: Option<String>, dir: Option<PathBuf>) {
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let dir = resolve_migrations_dir(dir);
+    let rt = evaluator::build_runtime();
+    let result = rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        migrations::status(&conn, &dir)
+            .await
+            .map_err(|e| format!("status: {e}"))
+    });
+    let report = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if report.is_empty() {
+        eprintln!(
+            "✓ no hay archivos `.sql` en `{}` — sin migrations tracked",
+            dir.display()
+        );
+        return;
+    }
+    let mut applied = 0;
+    let mut pending = 0;
+    for (version, filename, status) in &report {
+        let badge = match status {
+            migrations::MigrationStatus::Applied => {
+                applied += 1;
+                "✓ applied "
+            }
+            migrations::MigrationStatus::Pending => {
+                pending += 1;
+                "→ PENDING "
+            }
+        };
+        println!("  {badge} {version}  {filename}");
+    }
+    println!("\n{applied} applied, {pending} pending");
+}
+
+fn db_new_cmd(name: String, dir: Option<PathBuf>) {
+    let dir = resolve_migrations_dir(dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("✗ creando `{}`: {e}", dir.display());
+        std::process::exit(1);
+    }
+    // Timestamp `YYYYMMDDHHMMSS` UTC + name sanitizado.
+    let now = chrono::Utc::now();
+    let timestamp = now.format("%Y%m%d%H%M%S").to_string();
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let filename = format!("{timestamp}_{sanitized}.sql");
+    let path = dir.join(&filename);
+    if path.exists() {
+        eprintln!("✗ ya existe: `{}`", path.display());
+        std::process::exit(1);
+    }
+    let stub = format!(
+        "-- Migration: {sanitized}\n\
+         -- Created: {iso}\n\
+         --\n\
+         -- Editá este archivo con los statements SQL necesarios.\n\
+         -- Tip: usá `fitz db diff > {filename}` para generar el SQL\n\
+         -- automático desde los `@table` types del programa.\n\n",
+        iso = now.to_rfc3339(),
+    );
+    if let Err(e) = std::fs::write(&path, &stub) {
+        eprintln!("✗ escribiendo `{}`: {e}", path.display());
+        std::process::exit(1);
+    }
+    println!("✓ {}", path.display());
 }
 
 #[cfg(test)]
