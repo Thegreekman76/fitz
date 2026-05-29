@@ -11573,6 +11573,14 @@ transient `@renamed_from("old_name")` sobre el field o el type;
 el diff emite `ALTER TABLE ... RENAME COLUMN/TABLE` en vez de
 `DROP + ADD`.
 
+**Drift check + stamping** (v0.10.18): `fitz db check` corre el
+diff y devuelve exit 0/1 según haya drift entre el schema declarado
+y la DB real — hook para CI bloqueante ("no merge si el schema
+diverge"). `fitz db stamp <version>` (o `--all`) marca una
+migration como aplicada **sin ejecutar el SQL** — útil para
+adoptar Fitz en una DB legacy donde el schema ya está aplicado
+manualmente.
+
 **Limitaciones del MVP**: `ALTER COLUMN ... TYPE` sin USING (cambios
 de tipo incompatibles fallan — editá la migration para agregar
 `USING (col::int)`); solo schema `public`. Detalle completo +

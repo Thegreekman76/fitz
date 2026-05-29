@@ -12,9 +12,120 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-Fase 10.6.c (`fitz db check` + `fitz db stamp`), después
-10.6.d (data migrations en `.fitz`), después boilerplates ORM
-Dockerizados extendidos.
+Fase 10.6.d (data migrations en `.fitz`), después 10.6.e
+(history + squashing + schemas custom + offline SQL), después
+boilerplates ORM Dockerizados extendidos.
+
+## [v0.10.18] — 2026-05-29 — Fase 10.6.c: drift check + stamping (+ driver fix OID `name`)
+
+Cierra el Tier 1 más solicitado en surveys de Alembic: drift
+check para CI bloqueante. Más adopción de Fitz en DB legacy via
+stamping. Más un driver fix crítico descubierto durante el smoke
+real con Postgres local.
+
+### `fitz db check` — drift detection para CI
+
+Corre el diff del schema declarado vs la DB real:
+- **Exit 0** + `✓ schema sincronizado` si sin cambios.
+- **Exit 1** + SQL pendiente al stderr si hay drift, con sugerencia
+  de cómo sincronizar.
+
+```bash
+fitz db check src/main.fitz
+# ✓ schema sincronizado — schema declarado matchea la DB
+# (exit 0)
+```
+
+Patrón canónico en CI:
+```yaml
+- name: Schema drift check
+  run: fitz db check src/main.fitz
+  env:
+    DATABASE_URL: ${{ secrets.STAGING_DB_URL }}
+```
+
+### `fitz db stamp <version>` / `--all` — adoptar Fitz en DB legacy
+
+Marca migrations como aplicadas en `_fitz_migrations` **sin
+ejecutar el SQL**. Caso de uso típico: adoptar Fitz en un
+proyecto que ya tiene el schema aplicado manualmente.
+
+```bash
+# 1. Generás migration que matchea el schema actual:
+fitz db diff src/main.fitz > migrations/20260530000000_initial.sql
+
+# 2. Marcás como aplicada SIN ejecutarla:
+fitz db stamp 20260530000000
+#   ✓ stamped: 20260530000000
+
+# 3. A partir de acá, `migrate` aplica solo nuevas.
+```
+
+`--all` marca todas las pending del dir en una pasada (caso
+adopción inicial). Idempotente — ya-applied → no-op silencioso.
+Warning sobre versions que no existen en el dir (typo guard).
+
+### Driver fix — OID 19 (`name` type de `pg_catalog`) → Text
+
+**Descubierto durante el smoke real**: las queries de introspect
+de `migrations` consultan `information_schema.columns` cuyos
+campos `column_name` y `udt_name` son tipados como
+`sql_identifier` (alias de `name` interno de Postgres con OID 19).
+El driver no manejaba OID 19 → error
+`tipo Postgres OID 19 no soportado en MVP (10.5)` rompía TODO
+`fitz db ...` que introspectara.
+
+Fix trivial: `oid::NAME = 19` agregado al match `parse_text_value`
+(treat as Text, equivalente a `text`/`varchar`). Cambio de 6 LoC
++ desbloqueador crítico de toda la sub-fase 10.6.
+
+### Cambios técnicos
+
+- **src/migrations.rs**:
+  - Nueva fn `stamp_version(conn, version) -> DbResult<bool>` con
+    `ON CONFLICT DO NOTHING` para race-safety. Devuelve true si
+    insertó, false si ya estaba.
+  - Nueva fn `stamp_all_pending(conn, migrations) -> DbResult<Vec<String>>`
+    que itera el dir y stampea solo las no-applied.
+- **src/main.rs**:
+  - Nuevas variantes `DbCmd::Check { file, url }` y
+    `DbCmd::Stamp { version, all, url, dir }` con clap
+    `conflicts_with` entre version y all.
+  - Nuevos handlers `db_check_cmd` (reusa diff + decide exit
+    code) y `db_stamp_cmd` (wrap stamp_version / stamp_all_pending
+    + warning sobre versions no en dir).
+- **src/db.rs**:
+  - `oid::NAME = 19` agregado al módulo `oid`.
+  - Branch `oid::NAME` en `parse_text_value` (treat as Text junto
+    con `oid::TEXT` / `oid::VARCHAR`).
+- **editors/vscode/package.json**: 0.10.17 → 0.10.18.
+
+### Tests
+
+- **2 unit tests nuevos** en `src/migrations.rs::tests`:
+  - `check_es_verde_cuando_diff_es_vacio` + `check_falla_cuando_hay_drift`:
+    valida la decisión de exit code basada en `diff_schemas`.
+  - `stamp_version_y_stamp_all_pending_estan_exportadas`: smoke
+    estructural (rompe a compilar si renombran o cambian firmas).
+- **57/57 migrations tests verde** (54 anteriores + 3 nuevos).
+- **Smoke end-to-end real Postgres local validado**: create DB
+  → `db check` (drift detected, exit 1 con SQL) → `db new` +
+  `db diff --out` → `db migrate` → `db check` (sincronizado,
+  exit 0) → `db stamp <version>` (no-op) → `db stamp 19990101000000`
+  (warning + stamped) → `db stamp --all` (no-op) → `db stamp`
+  sin args (error claro).
+
+### Por qué importa
+
+`fitz db check` cierra el último gap visible para uso CI/CD
+profesional: equipos pueden bloquear PRs que diverjan del schema
+de staging. `fitz db stamp` destraba la adopción de Fitz en
+proyectos legacy (caso típico: equipo con SQLAlchemy quiere
+migrar a Fitz manteniendo la DB). El driver fix OID 19 era un
+landmine — sin él, **ninguna** corrida de `fitz db diff/check/migrate`
+funcionaba contra una DB que ya tuviera tables (porque la
+introspect failearía después de la primera). Lo descubrimos a
+las primeras corridas del smoke real con Postgres local.
 
 ## [v0.10.17] — 2026-05-29 — Fase 10.6.b: rollback + renames seguros
 

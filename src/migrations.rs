@@ -1553,6 +1553,66 @@ pub async fn rollback_n(
     Ok(reverted)
 }
 
+/// v0.10.18 (10.6.c.2) — Marca una version como aplicada en
+/// `_fitz_migrations` SIN ejecutar el SQL del archivo. Útil
+/// para adoptar Fitz en una DB legacy donde el schema ya está
+/// aplicado manualmente — sin stamp, `migrate` intentaría
+/// re-aplicar el `CREATE TABLE IF NOT EXISTS ...` que tal vez
+/// es fine pero el seed data o ALTER ya estaba.
+///
+/// Devuelve:
+/// - `Ok(true)` si insertó (la version no estaba registrada).
+/// - `Ok(false)` si la version YA estaba aplicada (no-op).
+///
+/// **NO valida** que la version exista en el dir de migrations
+/// — el caller (handler CLI `db_stamp_cmd`) decide la política
+/// y muestra warning si no existe en el dir.
+pub async fn stamp_version(conn: &std::sync::Arc<DbConnHandle>, version: &str) -> DbResult<bool> {
+    ensure_tracking_table(conn).await?;
+    let select_sql = format!(
+        "SELECT version FROM {} WHERE version = $1",
+        quote_ident(TRACKING_TABLE),
+    );
+    let qr = conn
+        .query(&select_sql, &[PgValue::Text(version.to_string())])
+        .await?;
+    if !qr.rows.is_empty() {
+        return Ok(false);
+    }
+    // INSERT con ON CONFLICT DO NOTHING como defensa contra
+    // race: dos `stamp` concurrentes sobre la misma version.
+    let insert_sql = format!(
+        "INSERT INTO {} (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
+        quote_ident(TRACKING_TABLE),
+    );
+    conn.exec(&insert_sql, &[PgValue::Text(version.to_string())])
+        .await?;
+    Ok(true)
+}
+
+/// v0.10.18 (10.6.c.2) — Marca TODAS las migrations pendientes
+/// del dir como aplicadas sin ejecutar SQL. Devuelve las
+/// versiones nuevamente stamped (vacío si todas ya estaban).
+/// Útil para adoptar Fitz en proyectos con schema legacy +
+/// múltiples migrations ya aplicadas a mano.
+pub async fn stamp_all_pending(
+    conn: &std::sync::Arc<DbConnHandle>,
+    migrations: &[MigrationFile],
+) -> DbResult<Vec<String>> {
+    let applied = applied_versions(conn).await?;
+    let applied_set: std::collections::HashSet<&str> = applied.iter().map(|s| s.as_str()).collect();
+    let mut stamped = Vec::new();
+    for m in migrations {
+        if applied_set.contains(m.version.as_str()) {
+            continue;
+        }
+        if stamp_version(conn, &m.version).await? {
+            stamped.push(m.version.clone());
+        }
+    }
+    Ok(stamped)
+}
+
 /// Versiones aplicadas ordenadas por `applied_at DESC` (más
 /// reciente primero). Usado por `rollback_n` para tomar las
 /// últimas N revertibles.
@@ -2794,5 +2854,52 @@ type Plain {
         let schema = schema_from_program(&prog, &env).expect("schema");
         let t = &schema.tables[0];
         assert_eq!(t.renamed_from.as_deref(), Some("legacy_users"));
+    }
+
+    // ============================================================
+    // v0.10.18 (10.6.c) — check + stamp
+    // ============================================================
+    //
+    // El handler `db_check_cmd` reusa `diff_schemas` (ya cubierto
+    // por los tests de diff arriba) + decide exit code basado en
+    // `changes.is_empty()`. Acá testeamos la decisión.
+
+    #[test]
+    fn check_es_verde_cuando_diff_es_vacio() {
+        let s = Schema {
+            tables: vec![table_users()],
+        };
+        let changes = diff_schemas(&s, &s);
+        assert!(
+            changes.is_empty(),
+            "diff de schemas iguales debe ser vacío (check exit 0)"
+        );
+    }
+
+    #[test]
+    fn check_falla_cuando_hay_drift() {
+        let current = Schema::default();
+        let target = Schema {
+            tables: vec![table_users()],
+        };
+        let changes = diff_schemas(&current, &target);
+        assert!(
+            !changes.is_empty(),
+            "diff entre vacío y populated NO debe ser vacío (check exit 1)"
+        );
+    }
+
+    // Los stamps requieren conn real — los tests unitarios sin DB
+    // solo pueden verificar que los símbolos están exportados.
+    // La validación end-to-end vive en el CI con DB real (job
+    // `db-postgres`) y en el smoke local del autor contra el
+    // Postgres 15 instalado.
+
+    #[test]
+    fn stamp_version_y_stamp_all_pending_estan_exportadas() {
+        // Smoke "el símbolo existe y es callable" — si alguien
+        // renombra o cambia firma, este test rompe a compilar.
+        let _f1: fn(_, _) -> _ = stamp_version;
+        let _f2: fn(_, _) -> _ = stamp_all_pending;
     }
 }

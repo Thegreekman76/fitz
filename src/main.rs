@@ -336,6 +336,38 @@ enum DbCmd {
         #[arg(long, default_value_t = 1)]
         count: usize,
     },
+    /// v0.10.18 — Drift check: corre el diff y devuelve exit 0
+    /// si el schema declarado matchea la DB, exit 1 con el SQL
+    /// pendiente al stderr si hay diferencias. Hook para CI
+    /// bloqueante ("no merge si el schema diverge").
+    Check {
+        /// Programa Fitz con los `@table` types. Si se omite,
+        /// usa el `[bin].main` del `fitz.toml`.
+        file: Option<PathBuf>,
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+    },
+    /// v0.10.18 — Marca una migration como aplicada SIN ejecutar
+    /// su SQL. Útil para adoptar Fitz en una DB legacy donde el
+    /// schema ya está aplicado manualmente. `--all` marca todas
+    /// las pending del dir como aplicadas.
+    Stamp {
+        /// Version a marcar (timestamp prefix del filename, p.ej.
+        /// `20260530120000`). Mutuamente excluyente con `--all`.
+        #[arg(conflicts_with = "all")]
+        version: Option<String>,
+        /// Marca todas las pending del dir como aplicadas.
+        /// Mutuamente excluyente con `<version>`.
+        #[arg(long)]
+        all: bool,
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -454,6 +486,13 @@ fn main() {
             DbCmd::Status { url, dir } => db_status_cmd(url, dir),
             DbCmd::New { name, dir } => db_new_cmd(name, dir),
             DbCmd::Rollback { url, dir, count } => db_rollback_cmd(url, dir, count),
+            DbCmd::Check { file, url } => db_check_cmd(file, url),
+            DbCmd::Stamp {
+                version,
+                all,
+                url,
+                dir,
+            } => db_stamp_cmd(version, all, url, dir),
         },
     }
 }
@@ -4363,6 +4402,157 @@ fn db_rollback_cmd(url: Option<String>, dir: Option<PathBuf>, count: usize) {
         for v in &reverted {
             eprintln!("    {v}");
         }
+    }
+}
+
+fn db_check_cmd(file: Option<PathBuf>, url: Option<String>) {
+    let entry = match resolve_db_entry(file) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let (program, env) = match load_program_for_db(&entry) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("✗ cargando programa: {e}");
+            std::process::exit(1);
+        }
+    };
+    let target = match migrations::schema_from_program(&program, &env) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ schema_from_program: {e}");
+            std::process::exit(1);
+        }
+    };
+    let rt = evaluator::build_runtime();
+    let current = match rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        migrations::introspect_schema(&conn)
+            .await
+            .map_err(|e| format!("introspect: {e}"))
+    }) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let changes = migrations::diff_schemas(&current, &target);
+    if changes.is_empty() {
+        eprintln!("✓ schema sincronizado — schema declarado matchea la DB");
+        std::process::exit(0);
+    }
+    // Drift detectado: SQL pendiente al stderr (visible en CI logs),
+    // count al stdout (parseable), exit 1.
+    let sql = migrations::changes_to_sql(&changes);
+    eprintln!(
+        "✗ drift detectado — {} change(s) pendiente(s):",
+        changes.len()
+    );
+    eprintln!();
+    eprintln!("{}", sql);
+    eprintln!(
+        "💡 corré `fitz db diff > migrations/<file>.sql` + `fitz db migrate` \
+         para sincronizar."
+    );
+    std::process::exit(1);
+}
+
+fn db_stamp_cmd(version: Option<String>, all: bool, url: Option<String>, dir: Option<PathBuf>) {
+    // clap garantiza version XOR all (conflicts_with), pero validamos
+    // que al menos UNO esté presente.
+    if version.is_none() && !all {
+        eprintln!(
+            "✗ `fitz db stamp` requiere `<version>` o `--all`. \
+             Ejemplos:\n  fitz db stamp 20260530120000\n  fitz db stamp --all"
+        );
+        std::process::exit(1);
+    }
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let dir = resolve_migrations_dir(dir);
+    let migrations_list = match migrations::read_migrations_dir(&dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let rt = evaluator::build_runtime();
+    if all {
+        let result = rt.block_on(async {
+            let conn = db::connect_url(&url)
+                .await
+                .map_err(|e| format!("connect: {e}"))?;
+            migrations::stamp_all_pending(&conn, &migrations_list)
+                .await
+                .map_err(|e| format!("stamp: {e}"))
+        });
+        let stamped = match result {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("✗ {e}");
+                std::process::exit(1);
+            }
+        };
+        if stamped.is_empty() {
+            eprintln!("✓ no hay migrations pending para stamp");
+        } else {
+            eprintln!("✓ {} migration(s) stamped:", stamped.len());
+            for v in &stamped {
+                eprintln!("    {v}");
+            }
+        }
+        return;
+    }
+    let version = version.unwrap(); // garantizado por el check arriba
+                                    // Warning si la version no está en el dir (puede ser intencional
+                                    // — adopción de versions legacy que no existen como files — pero
+                                    // típicamente es un typo).
+    let in_dir = migrations_list.iter().any(|m| m.version == version);
+    if !in_dir {
+        eprintln!(
+            "⚠ version `{version}` NO existe en `{}` — stamped igual, \
+             pero verificá que no sea un typo.",
+            dir.display()
+        );
+    }
+    let result = rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        migrations::stamp_version(&conn, &version)
+            .await
+            .map_err(|e| format!("stamp: {e}"))
+    });
+    let inserted = match result {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if inserted {
+        eprintln!("✓ stamped: {version}");
+    } else {
+        eprintln!("✓ no-op: version `{version}` ya estaba aplicada");
     }
 }
 

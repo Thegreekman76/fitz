@@ -2723,6 +2723,74 @@ match en current (la migration ya se aplicó):
 - Después de aplicar, el user borra una línea — equivalente a
   cerrar un PR.
 
+### Drift check + stamping (v0.10.18)
+
+**`fitz db check`** corre el diff y devuelve **exit 0** si el
+schema declarado matchea la DB, **exit 1** con el SQL pendiente
+al stderr si hay drift. Hook clave para CI bloqueante.
+
+```bash
+fitz db check src/main.fitz
+# Sin drift:
+#   ✓ schema sincronizado — schema declarado matchea la DB
+#   (exit 0)
+#
+# Con drift:
+#   ✗ drift detectado — 2 change(s) pendiente(s):
+#
+#   ALTER TABLE "users" ADD COLUMN "email" text NOT NULL;
+#   ...
+#
+#   💡 corré `fitz db diff > migrations/<file>.sql` + `fitz db migrate`
+#   (exit 1)
+```
+
+Patrón típico en `.github/workflows/*.yml`:
+
+```yaml
+- name: Schema drift check
+  run: fitz db check src/main.fitz
+  env:
+    DATABASE_URL: ${{ secrets.STAGING_DB_URL }}
+```
+
+**`fitz db stamp <version>`** marca una migration como
+aplicada en `_fitz_migrations` **sin ejecutar el SQL**. Útil
+para adoptar Fitz en una DB legacy donde el schema ya está
+aplicado manualmente (sin stamp, `migrate` intentaría re-aplicar
+y fallaría con duplicados o sobrescribiría seed data).
+
+```bash
+# Adoptás Fitz en una DB existente:
+# 1. Generás migration que matchea el schema actual:
+fitz db diff src/main.fitz > migrations/20260530000000_initial.sql
+
+# 2. Marcás la migration como aplicada SIN ejecutarla (la DB
+#    ya tiene las tables):
+fitz db stamp 20260530000000
+
+# Output:
+#   ✓ stamped: 20260530000000
+
+# 3. A partir de acá, `fitz db migrate` aplica solo las nuevas:
+fitz db migrate
+```
+
+**`fitz db stamp --all`** marca todas las pending del dir como
+aplicadas en una pasada. Útil cuando tenés varias migrations
+legacy ya aplicadas manualmente. Idempotente (versions ya
+applied → no-op silencioso).
+
+**Idempotencia**: stamp sobre una version ya applied → no-op
+silencioso (`✓ no-op: version X ya estaba aplicada`). El
+`ON CONFLICT DO NOTHING` interno cubre además el race entre dos
+stamps concurrentes sobre la misma version.
+
+**Warning sobre versions inexistentes**: si pasás una version
+que NO existe en el dir `migrations/`, el stamp emite warning
+pero igual la inserta — patrón "adopto una version legacy que
+NUNCA voy a tener como file". El warning evita typos accidentales.
+
 ### Defaults SQL via `@db_default("expr")`
 
 Desde v0.10.16, `@db_default` acepta un arg Str opcional con la
@@ -2986,7 +3054,7 @@ sección 26.c para el workflow canónico y limitaciones del MVP.
 El resto de los subcomandos generales del CLI también funcionan
 naturalmente con programas que usan el módulo `db` y el ORM.
 
-### `fitz db diff/migrate/status/new/rollback` — workflow de migraciones
+### `fitz db diff/migrate/status/new/rollback/check/stamp` — workflow de migraciones
 
 ```bash
 export DATABASE_URL="postgres://fitz:fitz@localhost/myapp"
@@ -2995,6 +3063,9 @@ fitz db diff > migrations/<file>.sql    # genera ALTER TABLE auto
 fitz db migrate                          # aplica + tracking idempotente
 fitz db status                           # lista applied/pending
 fitz db rollback                         # revierte el último (--count N)
+fitz db check                            # CI: exit 0 sync / exit 1 drift
+fitz db stamp 20260530000000             # adopt DB legacy: marca sin ejecutar
+fitz db stamp --all                      # marca todas las pending
 ```
 
 Detalle completo en sección 26.c.

@@ -8930,18 +8930,20 @@ release v0.10.17):
   code (fácil de olvidar uno); el decorator es declarativo y
   atómico.
 
-**Fase 10.6.c — Drift check + stamping**:
+**Fase 10.6.c — Drift check + stamping** ✅ CERRADA v0.10.18 (2026-05-29):
 
-- **`fitz db check`**: corre el diff, exit 0 si sin cambios, exit 1
-  con SQL pendiente al stderr si hay drift. Hook clave para CI
-  bloqueante ("PR no merge si schema declarado diverge de la DB
-  de staging"). *El gap más solicitado en surveys de Alembic.*
-- **`fitz db stamp <version>`**: marca `_fitz_migrations` en una
-  versión específica sin ejecutar la migration. Adopción inicial
-  en proyectos con schema legacy ya aplicado manualmente — sin
-  esto, adoptar Fitz fuerza una migration inicial gigante
-  duplicando lo que ya existe.
-- Estimado: ~3-4 hs.
+- ✅ **`fitz db check`**: corre el diff, exit 0 si sincronizado,
+  exit 1 con SQL pendiente al stderr si hay drift. Hook clave
+  para CI bloqueante. Smoke real Postgres validado end-to-end.
+- ✅ **`fitz db stamp <version> [--all]`**: marca
+  `_fitz_migrations` sin ejecutar el SQL. Adopción inicial en DB
+  legacy. Idempotente (ya-applied → no-op). Warning sobre
+  versions que no existen en el dir.
+- ✅ **Driver fix OID 19 (`name` type de `pg_catalog`)**: tratar
+  como Text. Destrabador crítico — sin esto, TODO `fitz db ...`
+  que introspecciona fallaba con "tipo Postgres OID 19 no
+  soportado" porque `information_schema.columns.column_name` es
+  `sql_identifier` que es alias de `name`.
 
 **Fase 10.6.d — Data migrations en `.fitz`**:
 
@@ -9007,9 +9009,9 @@ release v0.10.17):
 
 ### Orden comprometido
 
-1. **10.6.b** (rollback + renames) — v0.10.17, en curso.
-2. **10.6.c** (drift check + stamp) — v0.10.18.
-3. **10.6.d** (data migrations en `.fitz`) — v0.10.19.
+1. ✅ **10.6.b** (rollback + renames) — v0.10.17 CERRADA.
+2. ✅ **10.6.c** (drift check + stamp) — v0.10.18 CERRADA.
+3. **10.6.d** (data migrations en `.fitz`) — v0.10.19, próxima.
 4. **10.6.e** (history + squashing + schemas custom + offline SQL)
    — v0.10.20+.
 5. Tier 3 y out-of-scope quedan en deuda explícita; NO bloquean

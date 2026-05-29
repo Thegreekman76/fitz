@@ -1183,6 +1183,12 @@ fn saslprep_minimal(s: &str) -> String {
 pub mod oid {
     pub const BOOL: u32 = 16;
     pub const BYTEA: u32 = 17;
+    /// v0.10.18 — `name` (system identifier, 63 bytes). Devuelto
+    /// por queries sobre `information_schema` (typeado como
+    /// `sql_identifier` que es alias de `name`) y `pg_catalog`.
+    /// Lo tratamos como Text para que las queries de introspect
+    /// del módulo `migrations` funcionen.
+    pub const NAME: u32 = 19;
     pub const INT8: u32 = 20;
     pub const INT2: u32 = 21;
     pub const INT4: u32 = 23;
@@ -1334,6 +1340,7 @@ pub fn parse_text_value(oid: u32, bytes: Option<&[u8]>) -> DbResult<PgValue> {
         }
         oid::TEXT
         | oid::VARCHAR
+        | oid::NAME
         | oid::DATE
         | oid::TIME
         | oid::TIMESTAMP
