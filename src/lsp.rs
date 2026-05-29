@@ -1845,7 +1845,8 @@ fn after_dot_completions(
             ])
         }
         // Fase 10.1 — `DbConn` (driver Postgres nativo). Métodos query
-        // y exec son async; close es idempotente.
+        // y exec son async; close es idempotente. Fase 10.7 (v0.10.14)
+        // suma `transaction(fn(tx) -> Result<T>)` con auto-commit/rollback.
         Type::DbConn => method_items(&[
             (
                 "query",
@@ -1856,6 +1857,12 @@ fn after_dot_completions(
                 "async fn(sql: Str, args: List<Any>) -> Result<Int>  // rows affected".into(),
             ),
             ("close", "async fn() -> Result<Null>".into()),
+            ("is_closed", "async fn() -> Bool".into()),
+            (
+                "transaction",
+                "async fn(fn(tx: DbConn) -> Result<T>) -> Result<T>  // BEGIN/COMMIT/ROLLBACK auto"
+                    .into(),
+            ),
         ]),
         // Fase 10.3+ — `QueryBuilder<Row>` del ORM. Chain methods
         // preservan QB; terminales devuelven Result<...>.
@@ -4159,7 +4166,7 @@ mod tests {
         // Cursor en línea 1, col 15 (justo después de `conn.`).
         let items = completion_at_position(src, &program, &type_info, &env, 1, 15);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        for expected in ["query", "exec", "close"] {
+        for expected in ["query", "exec", "close", "is_closed", "transaction"] {
             assert!(
                 labels.contains(&expected),
                 "falta método `{expected}`: {labels:?}"

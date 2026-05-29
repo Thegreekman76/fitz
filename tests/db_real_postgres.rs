@@ -230,6 +230,152 @@ async fn error_response_parsea_mensaje_del_servidor() {
     conn.close().await.unwrap();
 }
 
+// =================================================================
+// Fase 10.7 — Transactions ORM (v0.10.14)
+// =================================================================
+// Tests E2E de `DbConnHandle::transaction` contra Postgres real.
+// Cubren los 3 casos canónicos:
+//   1. Happy path — callback retorna Ok, COMMIT, todo persiste.
+//   2. Rollback explícito — callback retorna Err, ROLLBACK, nada
+//      persiste.
+//   3. Conn vuelve al pool — después de tx OK o tx Err, la conn
+//      vuelve al pool y se puede reusar para queries siguientes.
+
+#[tokio::test]
+#[ignore]
+async fn tx_happy_path_commit_persiste() {
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    // Setup: tabla limpia.
+    conn.exec(
+        "DROP TABLE IF EXISTS fitz_tx_test; \
+         CREATE TABLE fitz_tx_test (id bigserial PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .expect("setup tabla");
+
+    let n = conn
+        .transaction(|tx| async move {
+            tx.exec(
+                "INSERT INTO fitz_tx_test (name) VALUES ($1)",
+                &[PgValue::Text("ada".into())],
+            )
+            .await?;
+            tx.exec(
+                "INSERT INTO fitz_tx_test (name) VALUES ($1)",
+                &[PgValue::Text("alan".into())],
+            )
+            .await?;
+            Ok(2)
+        })
+        .await
+        .expect("tx debería commitear");
+    assert_eq!(n, 2);
+
+    // Validar que los 2 rows persisten post-COMMIT.
+    let qr = conn
+        .query("SELECT count(*) AS n FROM fitz_tx_test", &[])
+        .await
+        .unwrap();
+    assert_eq!(qr.rows.len(), 1);
+    let count = qr.rows[0].get("n").unwrap();
+    assert_eq!(count, &PgValue::Int(2), "esperaba 2 rows post-COMMIT");
+
+    conn.exec("DROP TABLE fitz_tx_test", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tx_rollback_explicito_nada_persiste() {
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    conn.exec(
+        "DROP TABLE IF EXISTS fitz_tx_rb; \
+         CREATE TABLE fitz_tx_rb (id bigserial PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .expect("setup tabla");
+
+    let r: fitz::db::DbResult<()> = conn
+        .transaction(|tx| async move {
+            tx.exec(
+                "INSERT INTO fitz_tx_rb (name) VALUES ($1)",
+                &[PgValue::Text("never-commit".into())],
+            )
+            .await?;
+            // Forzar rollback retornando Err.
+            Err(fitz::db::DbError::Protocol("intencional rollback".into()))
+        })
+        .await;
+    assert!(r.is_err(), "tx debería propagar el Err del callback");
+
+    // Validar que el INSERT NO persistió (rollback automático).
+    let qr = conn
+        .query("SELECT count(*) AS n FROM fitz_tx_rb", &[])
+        .await
+        .unwrap();
+    let count = qr.rows[0].get("n").unwrap();
+    assert_eq!(
+        count,
+        &PgValue::Int(0),
+        "esperaba 0 rows post-ROLLBACK, fue: {:?}",
+        count
+    );
+
+    conn.exec("DROP TABLE fitz_tx_rb", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tx_conn_vuelve_al_pool_despues_de_tx() {
+    // Después de una tx (sea OK o Err), la conn vuelve al pool
+    // y queries siguientes la pueden reusar. Test contra leak.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    conn.exec(
+        "DROP TABLE IF EXISTS fitz_tx_pool; \
+         CREATE TABLE fitz_tx_pool (id bigserial PRIMARY KEY)",
+        &[],
+    )
+    .await
+    .unwrap();
+
+    // Run 5 transactions consecutivas — si la conn no volviera al
+    // pool, agotaríamos el pool (max=10 default) eventualmente.
+    // Con 5 iter sobre max=10, no llegamos al límite, pero el bug
+    // se manifestaría como "acquire colgado" o "max conns reached".
+    for i in 0..5 {
+        conn.transaction(|tx| {
+            let name = format!("iter_{i}");
+            async move {
+                tx.exec("INSERT INTO fitz_tx_pool DEFAULT VALUES", &[])
+                    .await?;
+                let _ = name; // capture, sin uso real
+                Ok::<_, fitz::db::DbError>(())
+            }
+        })
+        .await
+        .expect("tx debería completar sin colgarse");
+    }
+
+    let qr = conn
+        .query("SELECT count(*) AS n FROM fitz_tx_pool", &[])
+        .await
+        .unwrap();
+    assert_eq!(
+        qr.rows[0].get("n").unwrap(),
+        &PgValue::Int(5),
+        "esperaba 5 rows (1 por iter)"
+    );
+
+    conn.exec("DROP TABLE fitz_tx_pool", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
 #[tokio::test]
 #[ignore]
 async fn pool_queries_concurrentes_no_se_serializan() {

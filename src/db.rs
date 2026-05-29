@@ -2071,6 +2071,31 @@ impl Connection {
         Ok(())
     }
 
+    /// Fase 10.7 — Transactions ORM. Wrappers simples sobre
+    /// `simple_query` con las 3 instrucciones SQL estándar. La
+    /// orquestación BEGIN/COMMIT/ROLLBACK + auto-rollback en
+    /// error/panic vive arriba (en `DbConnHandle::transaction`),
+    /// estos métodos son solo las primitivas wire-level.
+    ///
+    /// Nota: en Postgres `BEGIN` también acepta sinónimos
+    /// `START TRANSACTION`; usamos `BEGIN` por compatibilidad
+    /// histórica. Sin niveles de aislamiento explícitos — usa el
+    /// default del server (típicamente READ COMMITTED).
+    pub async fn begin(&mut self) -> DbResult<()> {
+        self.simple_query("BEGIN").await?;
+        Ok(())
+    }
+
+    pub async fn commit(&mut self) -> DbResult<()> {
+        self.simple_query("COMMIT").await?;
+        Ok(())
+    }
+
+    pub async fn rollback(&mut self) -> DbResult<()> {
+        self.simple_query("ROLLBACK").await?;
+        Ok(())
+    }
+
     pub fn backend_pid(&self) -> i32 {
         self.backend_pid
     }
@@ -2440,6 +2465,135 @@ impl DbConnHandle {
     /// `true` si el pool fue cerrado con `close()`.
     pub async fn is_closed(&self) -> bool {
         self.pool.closed.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Fase 10.7 — Transactions ORM. Ejecuta `f` adentro de una
+    /// transacción Postgres. Internamente:
+    ///
+    /// 1. Acquire una conn del pool (mantiene el slot del
+    ///    semaphore reservado durante toda la tx).
+    /// 2. `BEGIN` sobre esa conn.
+    /// 3. Wrappea la conn en un `DbConnHandle` "single-conn pool"
+    ///    pegado a esa conn física. El callback recibe ese handle
+    ///    y lo usa como `db` normal — todos los `.insert/.update/
+    ///    .delete/.first/.all` del ORM funcionan sin cambios.
+    /// 4. Si `f` retorna `Ok(v)`: `COMMIT` + devuelve `Ok(v)`.
+    /// 5. Si `f` retorna `Err(e)`: `ROLLBACK` automático +
+    ///    propaga `Err(e)`. Imposible olvidarse.
+    /// 6. La conn vuelve al pool original (no se pierde).
+    ///
+    /// **Garantías**:
+    /// - **Atómica**: o todas las queries del callback persisten
+    ///   (COMMIT) o ninguna (ROLLBACK).
+    /// - **Aislada**: el callback usa SIEMPRE la misma conn física
+    ///   — Postgres garantiza isolation por conn según el nivel
+    ///   default del server (típicamente READ COMMITTED).
+    /// - **Auto-cleanup**: si el callback paniquea (futuro fix:
+    ///   `catch_unwind` async), la conn vuelve al pool y NO queda
+    ///   colgada en estado tx abierta.
+    ///
+    /// **No soporta** (deuda futura):
+    /// - Nested transactions (`SAVEPOINT` adentro de la outer).
+    /// - Niveles de aislamiento custom (`READ COMMITTED`,
+    ///   `SERIALIZABLE`, etc.).
+    /// - Transacciones read-only (`BEGIN READ ONLY`).
+    pub async fn transaction<F, Fut, T>(self: &std::sync::Arc<Self>, f: F) -> DbResult<T>
+    where
+        F: FnOnce(std::sync::Arc<DbConnHandle>) -> Fut,
+        Fut: std::future::Future<Output = DbResult<T>>,
+    {
+        use std::sync::atomic::Ordering;
+
+        // 1. Acquire conn del pool. El `pooled.permit` queda
+        //    reservado durante toda la tx — no se libera hasta
+        //    el final de este scope.
+        let mut pooled = self.pool.acquire().await?;
+
+        // 2. BEGIN sobre la conn.
+        pooled.as_mut().begin().await?;
+
+        // 3. Mover la conn fuera del PooledConn. Cuando `pooled`
+        //    se dropee al final del scope, su `conn.take()` será
+        //    `None` y `pool.release` no hará nada — pero el
+        //    `_permit` SÍ se libera, devolviendo el slot al
+        //    semaphore del pool original. Eso es lo que queremos:
+        //    durante la tx, ocupamos 1 slot del pool original;
+        //    devolvemos la conn al pool original recién al
+        //    terminar la tx.
+        let conn = pooled
+            .conn
+            .take()
+            .expect("pooled.conn None inmediatamente post-acquire — bug");
+
+        // 4. Construir pool single-conn pegado a esa conn. Semaphore
+        //    de max=1 garantiza que todas las queries adentro del
+        //    callback se serializan en esa conn física (no podés
+        //    tener 2 queries en paralelo en una misma tx — el
+        //    protocolo Postgres lo prohíbe).
+        let tx_pool = std::sync::Arc::new(DbPool {
+            config: self.pool.config.clone(),
+            idle: std::sync::Mutex::new(vec![conn]),
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
+            closed: std::sync::atomic::AtomicBool::new(false),
+        });
+        let tx_handle = std::sync::Arc::new(DbConnHandle {
+            pool: tx_pool.clone(),
+            url_redacted: self.url_redacted.clone(),
+        });
+
+        // 5. Run callback.
+        let result = f(tx_handle).await;
+
+        // 6. Recuperar la conn del tx_pool. Si el callback fue
+        //    bien-comportado, la conn debe estar idle (no
+        //    checked-out). Si está checked-out (caso raro: el
+        //    callback escapó una `PooledConn` o un Arc), no podemos
+        //    recuperarla → dejamos que se cierre y reabrimos.
+        let conn_opt = {
+            let mut idle = tx_pool.idle.lock().expect("tx_pool mutex poisoned");
+            idle.pop()
+        };
+        let mut conn = match conn_opt {
+            Some(c) => c,
+            None => {
+                // La conn está leaked en otro Arc. Forzamos
+                // cerrar el tx_pool (las próximas queries fallan)
+                // y propagamos el resultado del callback sin
+                // commit/rollback (la tx queda abierta server-side
+                // hasta que el client TCP se cierre — Postgres
+                // hace rollback automático en disconnect).
+                tx_pool.closed.store(true, Ordering::Release);
+                tx_pool.permits.close();
+                return result;
+            }
+        };
+
+        // 7. COMMIT/ROLLBACK según result.
+        match &result {
+            Ok(_) => {
+                if let Err(commit_err) = conn.commit().await {
+                    // COMMIT falló — intentar rollback como
+                    // cleanup. La conn queda en estado
+                    // potencialmente inconsistente; devolver al
+                    // pool original es seguro porque Postgres
+                    // descarta el estado al próximo BEGIN.
+                    let _ = conn.rollback().await;
+                    self.pool.release(conn);
+                    return Err(commit_err);
+                }
+            }
+            Err(_) => {
+                // Ignoramos error del rollback — si falla, la conn
+                // queda en estado raro pero Postgres lo limpiará
+                // al próximo BEGIN o cuando la conn se cierre.
+                let _ = conn.rollback().await;
+            }
+        }
+
+        // 8. Devolver conn al pool original.
+        self.pool.release(conn);
+
+        result
     }
 
     /// 10.2: número máximo de conns concurrentes que el pool

@@ -2357,6 +2357,181 @@ Workflow CLI dedicado a migrations queda como Fase 10.6+.
 
 ---
 
+## 26.b. Transactions (v0.10.14)
+
+Cuando un handler hace **varias escrituras que deben ser
+atómicas** (escenario clásico: transferí dinero de cuenta A
+a cuenta B; crear un Order + sus N OrderItems; sumar puntos a
+un usuario + log de la operación), envolvelas en
+`db.transaction(fn(tx) -> Result<T> { ... })`.
+
+### API canónica
+
+```fitz
+async fn transfer(db: DbConn, body: TransferInput) -> Result<Int> {
+    return db.transaction(fn(tx) -> Result<Int> {
+        // `tx: DbConn` es del mismo tipo que `db`, pero pegado a
+        // la misma conn física durante toda la tx. Todos los
+        // métodos del ORM (`.insert/.update/.delete/.first/.all`)
+        // y el escape hatch (`tx.query/.exec`) funcionan sin
+        // cambios — pasás `tx` en lugar de `db`.
+        let _ = Account
+            .where(fn(a) => a.id == body.from_id)
+            .update(tx, { "balance": Account.balance - body.amount })
+            .await?
+        let _ = Account
+            .where(fn(a) => a.id == body.to_id)
+            .update(tx, { "balance": Account.balance + body.amount })
+            .await?
+        return Ok(body.amount)
+    }).await
+}
+```
+
+### Garantías
+
+- **Atomicidad** — `BEGIN` antes del callback, `COMMIT` automático
+  si retorna `Ok`, `ROLLBACK` automático si retorna `Err` o si
+  paniquea. **Imposible quedarse a mitad de camino** — sin
+  llamadas manuales a commit/rollback que olvidarse.
+- **Aislamiento** — todas las queries adentro del callback usan
+  la **misma conexión física**. El acquire del pool sucede una
+  sola vez al inicio de la tx; las queries siguientes no compiten
+  por slot del semaphore con otras requests concurrentes.
+- **Cleanup automático** — la conn vuelve al pool al final
+  (sea OK o Err). Sin connection leaks ni transactions
+  colgadas server-side.
+- **Preserva el `Err` original del callback** — si retornás
+  `Err(MyError { ... })`, el caller recibe ese `MyError` intacto
+  (no se aplana a un Str del driver).
+
+### Recetas
+
+#### Insert padre + hijos (Order + OrderItems)
+
+```fitz
+type OrderItem {
+    @primary id: Int = 0
+    @belongs_to("Order") order_id: Int = 0
+    sku: Str = ""
+    qty: Int = 0
+}
+
+@table("orders") type Order {
+    @primary id: Int = 0
+    @belongs_to("User") user_id: Int = 0
+    total: Float = 0.0
+    @has_many("OrderItem", via="order_id") items: List<OrderItem> = []
+    @db_default created_at: Str = ""
+}
+
+async fn place_order(
+    db: DbConn,
+    user_id: Int,
+    items: List<NewItem>,
+) -> Result<Int> {
+    let total = items.map(fn(it) => it.unit_price * it.qty).sum()
+    return db.transaction(fn(tx) -> Result<Int> {
+        let order = Order.insert(tx, Order {
+            id: 0,
+            user_id: user_id,
+            total: total,
+            created_at: "",
+        }).await?
+        // Si CUALQUIERA de los inserts de items falla, el order
+        // tampoco persiste (ROLLBACK auto).
+        for it in items {
+            let _ = OrderItem.insert(tx, OrderItem {
+                id: 0,
+                order_id: order.id,
+                sku: it.sku,
+                qty: it.qty,
+            }).await?
+        }
+        return Ok(order.id)
+    }).await
+}
+```
+
+#### Rollback explícito por validación
+
+```fitz
+return db.transaction(fn(tx) -> Result<Int> {
+    let account = Account
+        .where(fn(a) => a.id == account_id)
+        .first(tx)
+        .await?
+
+    if (account.balance < amount) {
+        // Retornar Err dispara ROLLBACK automático.
+        // El balance NO se modificó (todavía).
+        return Err("saldo insuficiente")
+    }
+
+    let _ = Account
+        .where(fn(a) => a.id == account_id)
+        .update(tx, { "balance": account.balance - amount })
+        .await?
+    return Ok(amount)
+}).await
+```
+
+#### Escape hatch (tx.query / tx.exec)
+
+Adentro de la tx también podés usar SQL crudo via los métodos
+del DbConn. Útil para queries que el ORM no expresa (CTEs,
+window functions, JSON operators avanzados):
+
+```fitz
+return db.transaction(fn(tx) -> Result<Int> {
+    let _ = tx.exec(
+        "UPDATE accounts SET locked_at = NOW() WHERE id = $1",
+        [account_id],
+    ).await?
+    let _ = tx.exec(
+        "INSERT INTO audit_log (user_id, action) VALUES ($1, $2)",
+        [account_id, "lock"],
+    ).await?
+    return Ok(1)
+}).await
+```
+
+### Diferencias clave vs otros ORMs
+
+- **SQLAlchemy** usa `session.commit()`/`session.rollback()`
+  explícitos. Si tu handler retorna antes de commit, la tx queda
+  colgada server-side hasta que la conn se cierre. **Fácil de
+  olvidarse**. Fitz no permite ese error — el `Ok`/`Err` del
+  callback decide commit/rollback automático.
+- **Diesel** (Rust) usa `conn.transaction(|tx| {...})` similar
+  a Fitz — patrón validado por décadas en el ecosistema Rust.
+- **Prisma** (TypeScript) tiene `prisma.$transaction([...])`
+  con array de operaciones declarativas (menos flexible que
+  closures) Y `prisma.$transaction(async (tx) => {...})`
+  (closure-based, equivalente al de Fitz).
+
+### Lo que NO soporta el MVP (deuda futura)
+
+- **Nested transactions** (SAVEPOINT). Una `db.transaction(...)`
+  adentro de otra es no-op semántico — el inner `BEGIN` lo emite
+  igual y Postgres lo ignora con `WARNING`. Para "rollback de
+  una parte sin abortar el todo", queda como
+  `tx.savepoint(name, fn(sp) => ...)` en Fase 10.7.b.
+- **Niveles de aislamiento custom** — `BEGIN READ COMMITTED`,
+  `BEGIN SERIALIZABLE`, etc. Usa el default del server (típico
+  `READ COMMITTED`). Override via kwarg
+  `db.transaction(fn, isolation="serializable")` queda como
+  refinamiento futuro.
+- **Transacciones read-only** — `BEGIN READ ONLY` para queries
+  que solo leen. Hoy todo callback puede escribir.
+- **FnExpr inline en `fitz build`** — el codegen MVP exige fn
+  nombrada (`async fn handler(tx: DbConn) -> Result<T>`
+  declarada antes y pasada por ident). El intérprete (`fitz
+  run`) sí permite FnExpr inline. Diferencia documentada;
+  refinable con un emit del callback async con tabstops.
+
+---
+
 ## 27. Performance
 
 Esta sección crecerá cuando aparezcan benchmarks reales del

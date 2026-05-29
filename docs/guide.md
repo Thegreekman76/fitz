@@ -11448,6 +11448,72 @@ deploye como un binario standalone": Fitz lo hace hoy, en un
 solo lenguaje, con cero `requirements.txt`/`Cargo.toml`/
 `package.json` que mantener.
 
+### Transactions (v0.10.14)
+
+Cuando un handler hace **varias escrituras que deben ser
+atómicas** (ej: transferí dinero de una cuenta a otra, o creá
+un Order + sus OrderItems en una sola operación), envolvelas
+en `db.transaction(fn(tx) -> Result<T> { ... })`:
+
+```fitz
+async fn transfer(db: DbConn, body: TransferInput) -> Result<Int> {
+    return db.transaction(fn(tx) -> Result<Int> {
+        // Las queries adentro del callback usan `tx` (mismo tipo
+        // DbConn que `db`, pero pegado a la misma conn física).
+        // Todos los métodos del ORM funcionan sin cambios.
+        let _ = Account
+            .where(fn(a) => a.id == body.from_id)
+            .update(tx, { "balance": Account.balance - body.amount })
+            .await?
+        let _ = Account
+            .where(fn(a) => a.id == body.to_id)
+            .update(tx, { "balance": Account.balance + body.amount })
+            .await?
+        return Ok(body.amount)
+    }).await
+}
+```
+
+**Garantías**:
+
+- **Atomicidad** — el callback ejecuta dentro de `BEGIN`/`COMMIT`/
+  `ROLLBACK`. O todas las queries persisten (COMMIT al retornar
+  `Ok`), o ninguna persiste (ROLLBACK automático al retornar
+  `Err` o si la closure paniquea). Imposible quedarse a mitad
+  de camino.
+- **Aislamiento** — todas las queries adentro del callback usan
+  la **misma conexión física** (no acquire concurrentes del
+  pool). Postgres garantiza el isolation level del server
+  (default `READ COMMITTED`).
+- **Cleanup automático** — la conn vuelve al pool al final de
+  la tx (sea OK o Err). Sin leaks.
+
+**Diferencias clave vs otros ORMs**:
+
+- **SQLAlchemy** usa session+commit explícitos. Tenés que llamar
+  `session.commit()` o `session.rollback()` a mano. Si el handler
+  retorna antes de commit, la tx queda colgada server-side hasta
+  que la conn se cierre. Fácil de olvidarse.
+- **Diesel** usa `conn.transaction(|tx| {...})` closure-based
+  similar a Fitz — patrón validado por décadas en Rust ecosystem.
+- **Prisma** `prisma.$transaction([...])` toma un array de
+  operaciones declarativas; menos flexible que callbacks.
+
+**Lo que NO soporta el MVP** (deuda futura):
+
+- **Nested transactions** (SAVEPOINT). Una `db.transaction(...)`
+  adentro de otra es no-op semántico — el inner BEGIN se trata
+  como savepoint en Postgres pero Fitz lo emite como BEGIN plano
+  (que Postgres ignora con warning).
+- **Niveles de aislamiento custom** (`READ COMMITTED`,
+  `SERIALIZABLE`, etc.) — usa el default del server.
+- **Transacciones read-only** (`BEGIN READ ONLY`) — el callback
+  siempre puede escribir.
+- **FnExpr inline en `fitz build`** — el codegen MVP exige fn
+  nombrada (`async fn callback(tx: DbConn) -> Result<T>` declarada
+  antes y pasada por ident). El intérprete (`fitz run`) sí
+  permite FnExpr inline. Refinable a futuro.
+
 ---
 
 ## 32. Variables de entorno

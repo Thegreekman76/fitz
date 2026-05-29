@@ -5000,12 +5000,15 @@ async fn dispatch_method(
         (Value::DbConn(handle), "is_closed") => {
             db_conn_is_closed(Arc::clone(handle), &args).map_err(EvalSignal::Error)
         }
+        (Value::DbConn(handle), "transaction") => {
+            db_conn_transaction(Arc::clone(handle), &args, span).map_err(EvalSignal::Error)
+        }
         (Value::DbConn(_), other) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
             format!(
-                "`DbConn` no tiene el método `{}` (soportados: query, exec, close, is_closed)",
+                "`DbConn` no tiene el método `{}` (soportados: query, exec, close, is_closed, transaction)",
                 other,
             ),
         ))),
@@ -10503,6 +10506,137 @@ fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRe
                 Value::Str(e.to_string()),
             )))),
         }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// `conn.transaction(fn(tx) -> Result<T>) -> Future<Result<T>>` —
+/// Fase 10.7 (v0.10.14). Ejecuta el callback adentro de una
+/// transacción Postgres con commit automático en `Ok` y rollback
+/// automático en `Err`. El callback recibe `tx: DbConn` (mismo
+/// tipo que `db` — todos los métodos `.insert/.update/.first/.all`
+/// del ORM funcionan sin cambios) pegado a la misma conn física
+/// durante toda la tx.
+///
+/// **Semántica**:
+///   - `Ok(v)` del callback → `COMMIT` + return `Ok(v)`.
+///   - `Err(e)` del callback → `ROLLBACK` + return `Err(e)` preserva
+///     el `e` original (no se aplana a string del driver).
+///   - Error del driver (BEGIN/COMMIT/ROLLBACK fail) → `Err(<msg>)`
+///     con el error del driver formateado como Str.
+fn db_conn_transaction(
+    handle: Arc<crate::db::DbConnHandle>,
+    args: &[Value],
+    span: Span,
+) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`DbConn.transaction` espera 1 argumento (fn callback), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    // Validar que el arg es Function. Otros tipos no son invocables.
+    let callback = args[0].clone();
+    if !matches!(callback, Value::Function { .. }) {
+        return Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Function".into(),
+                found: callback.type_name().into(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`DbConn.transaction` espera una fn como argumento, recibió `{}`",
+                callback.type_name()
+            ),
+        ));
+    }
+    // Cell compartido para preservar el `Value` original del `Err`
+    // que el callback retornó. El driver solo expone `DbResult<Value>`
+    // — usamos un Mutex<Option<Value>> capturado por la closure para
+    // smuggle-ar el Err Fitz através del boundary.
+    let cb_err: std::sync::Arc<std::sync::Mutex<Option<Value>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let cb_err_outer = std::sync::Arc::clone(&cb_err);
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        let tx_result: crate::db::DbResult<Value> = handle
+            .transaction(|tx_handle| {
+                let cb = callback.clone();
+                let cb_err = std::sync::Arc::clone(&cb_err);
+                async move {
+                    let tx_value = Value::DbConn(tx_handle);
+                    let raw =
+                        match invoke_value(cb, vec![tx_value], "DbConn.transaction callback", span)
+                            .await
+                        {
+                            Ok(v) => v,
+                            Err(signal) => {
+                                return Err(crate::db::DbError::Protocol(format!(
+                                    "tx callback error: {signal:?}"
+                                )));
+                            }
+                        };
+                    // Si el callback es `async fn`, raw es un Future
+                    // perezoso — lo consumimos acá igual que `await`.
+                    let unwrapped = match raw {
+                        Value::Future(cell) => {
+                            let fut = cell.0.lock().take();
+                            match fut {
+                                Some(f) => f.await.map_err(|e| {
+                                    crate::db::DbError::Protocol(format!("tx callback await: {e}"))
+                                })?,
+                                None => {
+                                    return Err(crate::db::DbError::Protocol(
+                                        "tx callback Future ya consumido (bug)".into(),
+                                    ));
+                                }
+                            }
+                        }
+                        other => other,
+                    };
+                    match unwrapped {
+                        Value::Result(crate::value::ResultVariant::Ok(t)) => Ok(*t),
+                        Value::Result(crate::value::ResultVariant::Err(e)) => {
+                            // Preservamos el Err original via cell
+                            // compartido; el driver hace rollback.
+                            *cb_err.lock().expect("cb_err mutex poisoned") = Some(*e);
+                            Err(crate::db::DbError::Protocol("__tx_callback_err__".into()))
+                        }
+                        other => Err(crate::db::DbError::Protocol(format!(
+                            "DbConn.transaction callback debe retornar Result, retornó `{}`",
+                            other.type_name()
+                        ))),
+                    }
+                }
+            })
+            .await;
+
+        let final_value = match tx_result {
+            Ok(v) => Value::Result(crate::value::ResultVariant::Ok(Box::new(v))),
+            Err(e) => {
+                let mut guard = cb_err_outer.lock().expect("cb_err mutex poisoned");
+                if let Some(original_err) = guard.take() {
+                    // El Err viene del callback Fitz — restauramos
+                    // el Value original (puede ser Str, Instance, etc).
+                    Value::Result(crate::value::ResultVariant::Err(Box::new(original_err)))
+                } else {
+                    // Err del driver (BEGIN/COMMIT/ROLLBACK fail).
+                    Value::Result(crate::value::ResultVariant::Err(Box::new(Value::Str(
+                        e.to_string(),
+                    ))))
+                }
+            }
+        };
+        Ok(final_value)
     });
     Ok(Value::new_future(fut))
 }

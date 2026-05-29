@@ -4316,6 +4316,11 @@ fn infer_method_call(
             let row_ty = (**row).clone();
             Some(infer_aggregated_method(ctx, &row_ty, method, args_ty, span))
         }
+        // Fase 10.7 (v0.10.14) — métodos del driver Postgres sobre
+        // `DbConn`. `query/exec` escape hatch SQL crudo, `close/
+        // is_closed` lifecycle, `transaction` orquesta una tx con
+        // commit/rollback automático.
+        Type::DbConn => Some(infer_db_conn_method(ctx, method, args_ty, span)),
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
@@ -5953,6 +5958,112 @@ fn infer_wsconn_method(
                 conn_disp,
                 method,
             ),
+            );
+            Type::Any
+        }
+    }
+}
+
+/// Fase 10.7 (v0.10.14) — métodos del `DbConn` (driver Postgres
+/// nativo). Antes de v0.10.14 caían al catch-all "tipo X no tiene
+/// el método Y", que rechazaba todo lo que NO fuera primitivo
+/// built-in. Ahora dispatchamos al match dedicado.
+///
+/// **Signaturas**:
+///   - `query(sql: Str, args: List<Any>) -> Future<Result<List<DbRow>>>`
+///   - `exec(sql: Str, args: List<Any>) -> Future<Result<Int>>`
+///   - `close() -> Future<Result<Null>>`
+///   - `is_closed() -> Future<Bool>`
+///   - `transaction(fn(tx: DbConn) -> Result<T>) -> Future<Result<T>>`
+///     (commit/rollback automático según Ok/Err del callback)
+///
+/// El tipo `T` del `transaction` se infiere del callback (FnExpr
+/// inline o fn nombrada). Para el caso gradual (callback con tipo
+/// `Any`), retornamos `Future<Result<Any>>`.
+fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
+    match method {
+        "query" => {
+            check_method_arity(ctx, "query", args_ty, 2, span);
+            Type::Future(Box::new(Type::Result {
+                ok: Box::new(Type::List(Box::new(Type::DbRow))),
+                err: Box::new(Type::Str),
+            }))
+        }
+        "exec" => {
+            check_method_arity(ctx, "exec", args_ty, 2, span);
+            Type::Future(Box::new(Type::Result {
+                ok: Box::new(Type::Int),
+                err: Box::new(Type::Str),
+            }))
+        }
+        "close" => {
+            check_method_arity(ctx, "close", args_ty, 0, span);
+            Type::Future(Box::new(Type::Result {
+                ok: Box::new(Type::Null),
+                err: Box::new(Type::Str),
+            }))
+        }
+        "is_closed" => {
+            check_method_arity(ctx, "is_closed", args_ty, 0, span);
+            Type::Future(Box::new(Type::Bool))
+        }
+        "transaction" => {
+            // Esperamos 1 arg: una `Function` (FnExpr inline o fn
+            // nombrada). Infereremos el `T` del Result desde su ret
+            // type. Si el callback no tipa como Function o no retorna
+            // Result, error claro.
+            check_method_arity(ctx, "transaction", args_ty, 1, span);
+            let ok_ty = match args_ty.first() {
+                Some(Type::Function { ret, .. }) => {
+                    // El ret del callback puede ser `Result<T, _>`
+                    // (sync) o `Future<Result<T, _>>` (async fn).
+                    let unwrapped = match ret.as_ref() {
+                        Type::Future(inner) => inner.as_ref().clone(),
+                        other => other.clone(),
+                    };
+                    match unwrapped {
+                        Type::Result { ok, .. } => *ok,
+                        _ => {
+                            ctx.error_at(
+                                span,
+                                format!(
+                                    "el callback de `DbConn.transaction` debe retornar `Result<T, _>` (o `Future<Result<T, _>>` si es async); retorna `{}`",
+                                    ret.display(ctx.types),
+                                ),
+                            );
+                            Type::Any
+                        }
+                    }
+                }
+                Some(Type::Any) => {
+                    // Callback con tipo Any (gradual) — no podemos
+                    // inferir el T del Result. Retornamos Any.
+                    Type::Any
+                }
+                Some(other) => {
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`DbConn.transaction` espera una `fn(tx: DbConn) -> Result<T>` como argumento, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
+                    Type::Any
+                }
+                None => Type::Any,
+            };
+            Type::Future(Box::new(Type::Result {
+                ok: Box::new(ok_ty),
+                err: Box::new(Type::Str),
+            }))
+        }
+        _ => {
+            ctx.error_at(
+                span,
+                format!(
+                    "el tipo `DbConn` no tiene el método `{}` (soportados: query, exec, close, is_closed, transaction)",
+                    method
+                ),
             );
             Type::Any
         }

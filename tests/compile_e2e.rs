@@ -2843,6 +2843,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "30-cron-background.fitz",
     "31-orm.fitz",
     "31b-orm-crud-http.fitz",
+    "31c-transactions.fitz",
     "32-env.fitz",
 ];
 

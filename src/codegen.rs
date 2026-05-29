@@ -6435,6 +6435,54 @@ pub(crate) async fn __fitz_db_is_closed(conn: &__FitzDbConn) -> bool {
     conn.is_closed().await
 }
 
+/// `conn.transaction(callback)` — Fase 10.7 (v0.10.14). Ejecuta el
+/// callback adentro de una transacción Postgres con commit automático
+/// en Ok y rollback automático en Err. Genérica sobre el T del
+/// `Result<T, String>` que retorna el callback. Preserva el Err
+/// original via cell compartido (smuggle a través del DbResult).
+pub(crate) async fn __fitz_db_transaction<F, Fut, T>(
+    conn: &__FitzDbConn,
+    f: F,
+) -> Result<T, String>
+where
+    F: FnOnce(__FitzDbConn) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let cb_err: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let cb_err_outer = std::sync::Arc::clone(&cb_err);
+
+    let tx_result = conn
+        .transaction(|tx_handle| {
+            let cell = std::sync::Arc::clone(&cb_err);
+            async move {
+                let cb_result = f(tx_handle).await;
+                match cb_result {
+                    Ok(v) => Ok(v),
+                    Err(e) => {
+                        *cell.lock().expect(\"cb_err poisoned\") = Some(e);
+                        Err(__fitz_db_runtime::DbError::Protocol(
+                            \"__cb_err__\".into(),
+                        ))
+                    }
+                }
+            }
+        })
+        .await;
+
+    match tx_result {
+        Ok(v) => Ok(v),
+        Err(driver_err) => {
+            let mut guard = cb_err_outer.lock().expect(\"cb_err poisoned\");
+            if let Some(orig_err) = guard.take() {
+                Err(orig_err)
+            } else {
+                Err(driver_err.to_string())
+            }
+        }
+    }
+}
+
 // --- 10.b.3: trait `__FromFitzDbRow` para deserialización per-type ---
 //
 // El codegen ORM emite `impl __FromFitzDbRow for <Name>Data` por cada
@@ -12795,7 +12843,10 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         _field_span: crate::ast::Span,
         call_span: crate::ast::Span,
     ) -> Result<Option<(String, Type)>, FitzError> {
-        if !matches!(method, "query" | "exec" | "close" | "is_closed") {
+        if !matches!(
+            method,
+            "query" | "exec" | "close" | "is_closed" | "transaction"
+        ) {
             return Ok(None);
         }
         let (obj_code, _obj_ty) = self.gen_expr(object)?;
@@ -12891,6 +12942,108 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 Ok(Some((
                     format!("__fitz_db_is_closed(&{})", obj_code),
                     Type::Future(Box::new(Type::Bool)),
+                )))
+            }
+            "transaction" => {
+                // Fase 10.7 (v0.10.14) — Transactions ORM.
+                // MVP del codegen: solo fn NOMBRADA como callback.
+                // FnExpr inline (`db.transaction(fn(tx) => ...)`)
+                // queda como deuda — destrabable después con un
+                // gen_callback_inline_async-Result variant.
+                // El intérprete (`fitz run`) sí soporta inline.
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`DbConn.transaction` espera 1 argumento (fn callback), recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let fn_name = match &args[0] {
+                    Expr::Ident(name, _) => name.clone(),
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            "`DbConn.transaction` en codegen MVP: el callback debe ser una fn nombrada \
+                             (no FnExpr inline). El intérprete (`fitz run`) sí permite inline; para \
+                             `fitz build` declarar `async fn handler(tx: DbConn) -> Result<T> {...}` \
+                             y pasar el ident `handler` como callback.".to_string(),
+                        ));
+                    }
+                };
+                // Resolver signature de la fn referenciada para
+                // (a) extraer el ret type ok (T del Result<T>),
+                // (b) validar que toma 1 param DbConn,
+                // (c) validar que retorna Result<T, _>.
+                let (sig_params, sig_ret) = match self.resolve_named_callback(&fn_name) {
+                    Some((p, r)) => (p, r),
+                    None => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            format!(
+                                "`DbConn.transaction`: la fn `{}` no está declarada o no tiene signature visible",
+                                fn_name
+                            ),
+                        ));
+                    }
+                };
+                if sig_params.len() != 1 {
+                    return Err(self.err_at(
+                        args[0].span(),
+                        format!(
+                            "`DbConn.transaction`: el callback debe tomar 1 param (tx: DbConn), `{}` toma {}",
+                            fn_name, sig_params.len()
+                        ),
+                    ));
+                }
+                if !matches!(sig_params[0], Type::DbConn) {
+                    return Err(self.err_at(
+                        args[0].span(),
+                        format!(
+                            "`DbConn.transaction`: el callback debe recibir `DbConn` como param, `{}` recibe `{}`",
+                            fn_name,
+                            display_type(&sig_params[0], self.env),
+                        ),
+                    ));
+                }
+                // Extraer el ok type del Result<T, _>. Si el ret es
+                // `Future<Result<T, _>>` (async fn), desempacar la
+                // Future también.
+                let inner_ret = match &sig_ret {
+                    Type::Future(inner) => (**inner).clone(),
+                    other => other.clone(),
+                };
+                let ok_ty = match &inner_ret {
+                    Type::Result { ok, .. } => (**ok).clone(),
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            format!(
+                                "`DbConn.transaction`: el callback `{}` debe retornar `Result<T, _>` (o `Future<Result<T, _>>` si es async); retorna `{}`",
+                                fn_name,
+                                display_type(&sig_ret, self.env),
+                            ),
+                        ));
+                    }
+                };
+                // Emit: `__fitz_db_transaction(&db, |tx| async move
+                // { handler(tx).await })`. Si el handler es sync
+                // (no async), el await sobre el ret no aplica —
+                // pero como devuelve Result directo, podemos emit
+                // el wrap simple. Decision: SIEMPRE await — el
+                // codegen exige async fn callback (las queries del
+                // ORM son async).
+                Ok(Some((
+                    format!(
+                        "__fitz_db_transaction(&{db}, |__tx| async move {{ {fn_name}(__tx).await }})",
+                        db = obj_code,
+                        fn_name = fn_name,
+                    ),
+                    Type::Future(Box::new(Type::Result {
+                        ok: Box::new(ok_ty),
+                        err: Box::new(Type::Str),
+                    })),
                 )))
             }
             _ => unreachable!(),
