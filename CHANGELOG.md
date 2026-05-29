@@ -16,6 +16,123 @@ En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
 memoria `project_boilerplate_orm_full_fullstack.md`), benchmarks
 Fitz ORM vs SQLAlchemy, decidir scope del próximo norte técnico.
 
+## [v0.10.10] — 2026-05-28 — Fix deadlock `__to_fitz_json` en has_many virtual (preload hang cerrado)
+
+**Cierre del preload hang** dejado como deuda residual en v0.10.9.
+La hipótesis inicial (bug del read loop del driver Postgres al
+encadenar queries) era **incorrecta**: el driver funciona
+perfectamente y el preload completa todas sus queries (todos los
+`ReadyForQuery` se reciben). El bug está en el **codegen del impl
+`__ToFitzJson` para tipos con relations virtuales has_many**.
+
+### Root cause
+
+En `gen_type_http_impls_for_sig_with_meta` (src/codegen.rs), el
+conditional emit del field has_many virtual — introducido en
+v0.10.8.3 para activar `.preload(...)` end-to-end en el JSON
+response — tenía un fallo de lock scope:
+
+```rust
+{
+    let __g = self.comments.lock().unwrap();
+    if !__g.is_empty() {
+        __obj.insert(
+            "comments".to_string(),
+            self.comments.__to_fitz_json(),  // ← re-lockea
+        );
+    }
+}
+```
+
+Mientras `__g` retiene el `MutexGuard` sobre el `Mutex<Vec<...>>`,
+el `__to_fitz_json` del impl genérico `Arc<Mutex<T>>` hace
+`self.lock().unwrap().__to_fitz_json()` sobre el **mismo** Mutex.
+`std::sync::Mutex` NO es reentrante → **deadlock instantáneo**
+del worker thread.
+
+**Manifestación**: en el boilerplate api-orm-full, `GET /posts/{id}`
+con `.preload("author").preload("comments")` colgaba en la
+serialización del response (HTTP 000 timeout a los 8s). Los
+handlers SIN preloads activos funcionaban porque
+`__g.is_empty()` era true y nunca llegaba al re-lock.
+
+### Fix
+
+Liberar el guard ANTES del re-lock. Chequeo `is_empty` en un
+scope acotado que dropea el guard, después serialización normal:
+
+```rust
+{
+    let __is_empty = {
+        let __g = self.comments.lock().unwrap();
+        __g.is_empty()
+    };  // ← __g dropped aquí
+    if !__is_empty {
+        __obj.insert(
+            "comments".to_string(),
+            self.comments.__to_fitz_json(),  // ← lock libre ahora
+        );
+    }
+}
+```
+
+El re-lock dentro de `__to_fitz_json` ahora encuentra el Mutex libre.
+
+### Workflow de diagnóstico
+
+3 ciclos de eprintln strategic en commits `[REVERTIR]` aislaron el
+hang con precisión:
+1. `[FITZ-WIRE]` en `db.rs::read_message` → confirmó que el driver
+   recibe todos los `ReadyForQuery` del preload (descartó bug del
+   read loop).
+2. `[FITZ-PRELOAD] processing/done` + `[FITZ-PRELOAD-LOOP-EXIT]`
+   en `emit_preload_dispatch` → confirmó que el for loop del
+   preload completa OK.
+3. `[FITZ-FIRST-CLOSURE] dropping/dropped __rows` →
+   confirmó que el `drop(__rows)` no es el culpable.
+4. `[FITZ-WRAP-PRE-CATCH]` + `[FITZ-WRAP-POST-CATCH]` en
+   `emit_handler_dispatch_and_response` → confirmó que
+   `catch_unwind().await` del wrapper NUNCA retorna (handler
+   `Future` no completa).
+5. `[FITZ-RET-MATCH] pre-await / post-await / Ok arm calling
+   __to_fitz_json / __to_fitz_json done` en el handler return →
+   **bingo**: vimos hasta "Ok arm calling __to_fitz_json" pero
+   NUNCA "done". Aislado al impl.
+
+Todos los eprintln revertidos en este commit final.
+
+### Smoke real Docker validado
+
+`GET /posts/1` con `.preload("author").preload("comments")` ahora
+responde **HTTP 200 en ~140ms** con el Post + author (preloaded
+User) + comments (preloaded Vec<Comment>) embebidos en el JSON.
+Otros endpoints (`GET /posts`, `GET /stats/posts-per-user`,
+auth/register) sin regresiones.
+
+### Deuda menor del boilerplate descubierta
+
+El response de `GET /posts/{id}` expone `password_hash` del author
+porque `Post.author: User?` incluye ese field. **No es bug del
+lenguaje** — es del boilerplate. Fix típico: handler hace mapping
+a un `PostPublic`/`UserPublic` que omite el field sensible. Queda
+como deuda residual del boilerplate, no bloquea v0.10.10.
+
+### Cambios coordinados
+
+- `editors/vscode/package.json`: bump a `0.10.10`.
+- `boilerplates/api-orm-full/Dockerfile` + `README.md`:
+  `FITZ_TAG=v0.10.10` (en commit separado al rebuild del
+  boilerplate).
+
+### Validación
+
+- `cargo fmt --all -- --check` limpio.
+- `cargo clippy --all-targets -- -D warnings` limpio.
+- `cargo test --release --test compile_e2e cross_module_orm` verde.
+- Smoke real Docker: `GET /posts/1` con preload → 200 con author
+  + comments completos en 140ms (vs HTTP 000 timeout a los 8s en
+  v0.10.9).
+
 ## [v0.10.9] — 2026-05-28 — Pool singleton per URL (fix connection leak)
 
 **Mini-fase de cierre del gap runtime más serio** descubierto en

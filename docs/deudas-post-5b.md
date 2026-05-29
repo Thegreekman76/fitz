@@ -2069,6 +2069,43 @@ clippy --all-targets --release -- -D warnings` limpio.
 **Extensión VSCode v0.10.8**: grammar TextMate suma
 `ws_broadcast`, LSP completion lo lista en `scope_level_completions`.
 
+### Mini-fase v0.10.10 (2026-05-28) — Fix deadlock `__to_fitz_json` has_many virtual
+
+Cierre del **preload hang** dejado como deuda residual de v0.10.9.
+Bug aislado con 3 ciclos de eprintln strategic (revertidos en el
+mismo commit final). Root cause **NO** era el read loop del driver
+(como asumí en v0.10.9): era el codegen del impl `__ToFitzJson`
+del field has_many virtual.
+
+- ✅ **gen_type_http_impls_for_sig_with_meta** (src/codegen.rs):
+  el conditional emit del field has_many virtual (introducido en
+  v0.10.8.3 para activar `.preload(...)` end-to-end en el JSON
+  response) hacía `{ let __g = self.x.lock(); if !__g.is_empty() {
+  ...self.x.__to_fitz_json() } }`. El `__to_fitz_json` del impl
+  genérico `Arc<Mutex<T>>` re-lockea el MISMO Mutex. Como
+  `std::sync::Mutex` NO es reentrante, deadlock instantáneo.
+
+  **Fix**: liberar el guard ANTES del re-lock. Chequeo `is_empty`
+  en scope acotado:
+
+  ```rust
+  { let __is_empty = { let __g = self.x.lock().unwrap();
+                       __g.is_empty() };
+    if !__is_empty { __obj.insert(..., self.x.__to_fitz_json()); }
+  }
+  ```
+
+  Smoke real Docker validado: `GET /posts/1` con preload responde
+  200 en ~140ms con author + comments preloaded embebidos en
+  el JSON.
+
+**Deuda residual del boilerplate** descubierta durante el smoke:
+el response expone `password_hash` del author porque
+`Post.author: User?` incluye ese field. **No es bug del lenguaje**
+— el boilerplate debería mapear a un `PostPublic`/`UserPublic`
+que omita el field sensible. Fix para una próxima iteración del
+boilerplate.
+
 ### Mini-fase v0.10.9 (2026-05-28) — Pool singleton per URL
 
 Sub-paso post-v0.10.8: smoke real Docker descubrió **connection
@@ -2087,18 +2124,26 @@ GETs con `.preload(...)`.
   retorna `Arc<DbConnHandle>` directo, call sites
   (evaluator + codegen runtime) actualizados.
 
-- ⚠️ **10.9.1 (#1 nuevo) — "Preload runtime hang" SIGUE ABIERTO**.
-  Asumí inicialmente que era causa-efecto del pool leak (10.9.2).
-  Smoke real post-v0.10.9 contradijo: con el pool singleton
-  funcionando (validado: 3 GETs = 2 conns constantes), un
-  `GET /posts/{id}` con `.preload(...)` sigue colgándose.
-  `pg_stat_activity` muestra la conn IDLE con la última query del
-  preload — Postgres terminó, el cliente Fitz nunca leyó el
-  ReadyForQuery final. Bug del read loop del driver
-  (`Connection::extended_query` en `src/db.rs`) cuando hay
-  múltiples queries chained sobre la misma `DbConnHandle`.
-  Deuda residual para v0.10.10. Los otros 12+ endpoints HTTP/WS
-  del boilerplate funcionan correctamente.
+- ✅ **10.9.1 (#1 nuevo) — "Preload runtime hang" CERRADO en
+  v0.10.10**. La hipótesis inicial (bug del read loop del driver)
+  era **incorrecta** — el driver recibe todos los `ReadyForQuery`
+  del preload limpio. Aislado con eprintln en 3 ciclos: el hang
+  estaba en el **codegen del `impl __ToFitzJson` del field
+  has_many virtual** (introducido en v0.10.8.3 para activar
+  `.preload(...)` end-to-end en el JSON response). El conditional
+  emit hacía:
+  ```rust
+  { let __g = self.x.lock().unwrap();
+    if !__g.is_empty() { __obj.insert(..., self.x.__to_fitz_json()); }
+  }
+  ```
+  El `__to_fitz_json` del impl genérico `Arc<Mutex<T>>` re-lockea
+  el MISMO Mutex que `__g` retiene. `std::sync::Mutex` NO es
+  reentrante → deadlock. Fix en
+  `gen_type_http_impls_for_sig_with_meta`: chequear `is_empty` en
+  un scope acotado que dropea el guard ANTES del re-lock.
+  Validación smoke real Docker: `GET /posts/1` con preload
+  responde 200 con author + comments embebidos en ~140ms.
 
 **Smoke real Docker bloqueado por bug ambiente Windows**:
 Docker Desktop Windows tiene un bug intermitente con SCRAM-SHA-256
