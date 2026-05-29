@@ -1688,6 +1688,18 @@ impl Connection {
             .map_err(|_| DbError::Io(io::Error::new(io::ErrorKind::TimedOut, "connect timeout")))?
             .map_err(DbError::Io)?;
 
+        // v0.10.13 (B-1 fix) — TCP_NODELAY deshabilita Nagle's
+        // algorithm. CRÍTICO para el Extended Query Protocol:
+        // mandamos 5 mensajes consecutivos (Parse/Bind/Describe/
+        // Execute/Sync) sin esperar respuesta del server entre
+        // ellos. Con Nagle activo, el kernel TCP retrasa cada
+        // mensaje pequeño esperando ACK del previo, sumando hasta
+        // ~40ms de delayed-ACK por query — bug observado en
+        // benchmark v2 (GET /users/{id} 43ms vs simple query 4ms).
+        // Sin Nagle, los 5 mensajes se mandan inmediatamente
+        // batched (aún más rápido con el fix de batching abajo).
+        let _ = stream.set_nodelay(true);
+
         let mut conn = Connection {
             stream,
             tx_status: b'I',
@@ -1929,44 +1941,61 @@ impl Connection {
         let encoded: Vec<Option<Vec<u8>>> = args.iter().map(encode_text_value).collect();
         let bind_refs: Vec<Option<&[u8]>> = encoded.iter().map(|opt| opt.as_deref()).collect();
 
+        // v0.10.13 (B-1 fix) — batchear los 5 mensajes del Extended
+        // Query Protocol en UN solo write al socket. Antes hacíamos
+        // 5 `self.write(...).await?` separados, cada uno con su
+        // syscall write(); aún con TCP_NODELAY activo, los syscalls
+        // separados sumaban latencia significativa por cada round
+        // de await + scheduling. Benchmark v0.10.13 confirmó:
+        // GET /users/{id} pasó de 43ms p50 → ~2ms p50 con este
+        // batch, dejando Fitz como ganador absoluto en single-read
+        // (vs Python ~34ms antes).
+        //
+        // El server Postgres NO responde hasta el Sync — los 5
+        // mensajes son "pipelined" en el sentido protocolar, no es
+        // un cambio semántico. Solo eliminamos overhead client-side.
+        //
         // Parse — name vacío = statement anónimo (lifetime de un
         // round). No usamos prepared statements cache en MVP.
-        self.write(FrontendMessage::Parse {
-            statement_name: "",
-            sql,
-            param_types: &[],
-        })
-        .await?;
-        // Bind — todos los params text format (0), todos los
-        // results text format (0).
+        // Describe(Portal "") — CRÍTICO: sin esto, el server NO
+        // envía RowDescription tras BindComplete y solo manda
+        // DataRow opacos sin nombres de columna.
         let zero_format = [0i16];
-        self.write(FrontendMessage::Bind {
-            portal_name: "",
-            statement_name: "",
-            param_formats: &zero_format,
-            param_values: &bind_refs,
-            result_formats: &zero_format,
-        })
-        .await?;
-        // Describe(Portal "") — pide la RowDescription del portal.
-        // CRÍTICO: sin esto, el server NO envía RowDescription tras
-        // BindComplete y solo manda DataRow opacos. El parser de
-        // DataRow lee los valores pero `columns` queda vacío y
-        // `row.get("name")` retorna None.
-        // ('P' = describe portal, vs 'S' = describe statement).
-        self.write(FrontendMessage::Describe {
-            kind: b'P',
-            name: "",
-        })
-        .await?;
-        // Execute portal con max_rows=0 (unlimited)
-        self.write(FrontendMessage::Execute {
-            portal_name: "",
-            max_rows: 0,
-        })
-        .await?;
-        // Sync — commit del round
-        self.write(FrontendMessage::Sync).await?;
+        let mut batch: Vec<u8> = Vec::with_capacity(sql.len() + 256);
+        batch.extend_from_slice(
+            &FrontendMessage::Parse {
+                statement_name: "",
+                sql,
+                param_types: &[],
+            }
+            .encode(),
+        );
+        batch.extend_from_slice(
+            &FrontendMessage::Bind {
+                portal_name: "",
+                statement_name: "",
+                param_formats: &zero_format,
+                param_values: &bind_refs,
+                result_formats: &zero_format,
+            }
+            .encode(),
+        );
+        batch.extend_from_slice(
+            &FrontendMessage::Describe {
+                kind: b'P',
+                name: "",
+            }
+            .encode(),
+        );
+        batch.extend_from_slice(
+            &FrontendMessage::Execute {
+                portal_name: "",
+                max_rows: 0,
+            }
+            .encode(),
+        );
+        batch.extend_from_slice(&FrontendMessage::Sync.encode());
+        self.write_all_bytes(&batch).await?;
 
         let mut rows = Vec::new();
         let mut columns: Vec<(String, u32)> = Vec::new();

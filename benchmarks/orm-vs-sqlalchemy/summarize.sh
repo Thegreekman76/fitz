@@ -22,16 +22,27 @@ if [ ! -d "$RESULTS_DIR/fitz" ] || [ ! -d "$RESULTS_DIR/python" ]; then
     exit 1
 fi
 
-# Helpers para extraer valores de los JSON de oha.
-# oha schema (relevante):
-#   summary.successRate, summary.total, summary.requestsPerSec
-#   latencyPercentiles.p50, p95, p99   (en segundos)
-oha_p50() { jq -r '.latencyPercentiles.p50 // .summary.average' "$1"; }
-oha_p95() { jq -r '.latencyPercentiles.p95 // .summary.average' "$1"; }
-oha_p99() { jq -r '.latencyPercentiles.p99 // .summary.average' "$1"; }
-oha_rps() { jq -r '.summary.requestsPerSec // .rps' "$1"; }
-oha_total() { jq -r '.summary.total // .total_requests' "$1"; }
-oha_succ_rate() { jq -r '.summary.successRate // (.ok / .total_requests)' "$1"; }
+# Helpers para extraer valores de los JSON de oha 1.14+.
+# oha 1.14 schema (relevante):
+#   summary.successRate, summary.total (= duración total en SEG)
+#   rps.mean (= RPS promedio; antes era summary.requestsPerSec)
+#   latencyPercentiles.p50, p95, p99 (en SEG)
+#   statusCodeDistribution: {"200": N, ...} (sum para total requests)
+oha_p50() { jq -r '.latencyPercentiles.p50' "$1"; }
+oha_p95() { jq -r '.latencyPercentiles.p95' "$1"; }
+oha_p99() { jq -r '.latencyPercentiles.p99' "$1"; }
+# RPS sustained = total_requests / total_time (segundos).
+# Antes usaba `rps.mean` pero en oha 1.14 ese es el RPS INSTANTÁNEO
+# del peak, NO el sustained — daba números 50-80x el real (ej:
+# 17400 RPS reportado para 6521 reqs en 30s = 217 RPS real).
+oha_rps() {
+    jq -r '
+        ([.statusCodeDistribution | to_entries[].value] | add) as $total |
+        if .summary.total > 0 then ($total / .summary.total) else 0 end
+    ' "$1"
+}
+oha_total() { jq -r '[.statusCodeDistribution | to_entries[].value] | add' "$1"; }
+oha_succ_rate() { jq -r '.summary.successRate' "$1"; }
 
 # POST bench is custom JSON (kind=post_bench_custom).
 post_p50() { jq -r '.latency_sec.p50' "$1"; }

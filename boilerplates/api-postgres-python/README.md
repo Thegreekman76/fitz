@@ -307,18 +307,26 @@ El `docker-compose.yml` construye `DATABASE_URL` a partir de los
 
 ### El `docker compose up --build` tarda muchísimo la primera vez
 
-Es esperado (~8-12 min). El stage builder compila Fitz desde
-source con `--features python` activada. Si querés ver el
-progreso:
+**Desde v0.10.13 ya NO** — el Dockerfile usa el patrón pre-built
+`ghcr.io/thegreekman76/fitz:latest-python` que ya viene con fitz
+`--features python` compilado. Primer build ~30-60s (descarga
+imagen base + pip install requirements + COPY del proyecto).
+Rebuilds que solo tocan `src/` o `python/` son ~10-20s.
+
+Antes (pre-v0.10.13) el Dockerfile compilaba Fitz desde source con
+`cargo install --git`, lo que tomaba ~8-12 min la primera vez.
+Si necesitás reproducir esa variante (versión-pinned reproducible
+con `--features python`), podés pasar un tag específico:
 
 ```bash
-docker compose build api
-# muestra el cargo install corriendo, con todos los crates que
-# está compilando (pyo3, jsonwebtoken, axum, tokio, etc).
+# Latest del repo:
+docker compose build
+# O pinned a release específico:
+docker compose build --build-arg FITZ_TAG=v0.10.13-python
 ```
 
 Una vez cacheado, los rebuilds que solo tocan `src/` o
-`python/` son ~30s.
+`python/` son ~10-20s.
 
 ### El api dice "Connection refused" al conectarse a Postgres
 

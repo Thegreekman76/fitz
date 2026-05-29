@@ -34,7 +34,12 @@
     @primary id: Int = 0
     name: Str = ""
     email: Str = ""
-    created_at: Str = ""
+    // `@db_default` (v0.10.8): el ORM skipea el field del INSERT,
+    // Postgres aplica su `DEFAULT NOW()` declarado en el schema.
+    // Sin esto, el INSERT manda `''` a un `timestamptz`, que
+    // Postgres rechaza con `invalid input syntax for type timestamp
+    // with time zone`.
+    @db_default created_at: Str = ""
 }
 
 // Body input para POST /users. Separar `NewUser` (entrada HTTP) de

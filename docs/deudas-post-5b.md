@@ -2069,6 +2069,88 @@ clippy --all-targets --release -- -D warnings` limpio.
 **Extensión VSCode v0.10.8**: grammar TextMate suma
 `ws_broadcast`, LSP completion lo lista en `scope_level_completions`.
 
+### Deudas detectadas en el primer bench (2026-05-29) — URGENTES
+
+Descubiertas al correr el benchmark MVP de
+`benchmarks/orm-vs-sqlalchemy/` (Fitz ORM nativo vs SQLAlchemy
+interop Python). Los headline numbers (cold start 5.5x, GET lista
+9-11x faster en Fitz) ratifican la dirección, pero apareció una
+anomalía y un set de mejoras al bench mismo.
+
+#### ⚠️ B-1 (URGENTE) — Overhead constante del driver Postgres en extended query
+
+**Síntoma**: `GET /users/{id}` (que usa `WHERE id = $1`, extended
+query protocol) tarda **43.70 ms p50 en Fitz** vs **31.09 ms p50 en
+Python+SQLAlchemy**. Python es ~30% más rápido en este endpoint
+específico.
+
+**Comparación que destapa el bug**: `GET /users` (sin params, simple
+query) en el MISMO server Fitz tarda solo **4.92 ms p50** — un 89×
+más rápido que Python (46 ms). Y `GET /users/{id}` en PG con índice
+PRIMARY KEY es instantáneo (microsegundos). Entonces el overhead
+extra de Fitz en `/users/{id}` viene del **protocolo extended query
+mismo**, no de la query.
+
+**Sospecha**: en `src/db.rs::Connection::extended_query`, el flow
+hace **5 round-trips** al server (Parse → Bind → Describe → Execute
+→ Sync), cada uno con su read. Si cada round-trip suma ~8-10 ms de
+overhead (cualquier source: locks del Connection, alloc en wire
+buffer, await scheduling), eso suma los 40 ms observados.
+
+**Hipótesis alternativas** (a descartar antes de optimizar):
+- ¿`db.connect(url)` adentro del handler tiene overhead async que
+  multiplica por request? (POOL_CACHE singleton v0.10.9 debería
+  matar eso, pero capaz hay contención en el Mutex del cache).
+- ¿`__FromFitzDbRow` para un struct con 4 fields tiene
+  allocations excesivas?
+- ¿El extended query NO está reusando un statement preparado (Parse
+  cada vez)? SQLAlchemy probablemente sí cachea prepared statements
+  por SQL string.
+
+**Plan de investigación**:
+1. Reproducir con un test E2E aislado (1 handler, GET por id, 1000
+   requests serial, medir wall-time por request).
+2. Agregar `tracing` con spans alrededor de cada round-trip wire en
+   `extended_query` y medir.
+3. Si confirmado: cachear prepared statements por SQL en el pool.
+   Cambio interno al driver, sin tocar API pública.
+
+**Impacto si se cierra**: read single-by-PK con WHERE params pasa
+de ~40 ms a probablemente <2 ms (mismo orden que simple query),
+convirtiendo Fitz en 15x faster que Python en ese caso también, no
+30% más lento. Es el caso CRUD más común (GET resource by ID), así
+que cerrarlo desbloquea el headline "Fitz gana en TODO" en lugar de
+"gana en mucho pero no single-read".
+
+#### B-2 — Mejoras del bench MVP (no bloqueantes)
+
+Descubiertas al hacer dogfood del bench:
+
+- **Image size pesca imagen errónea** cuando hay otros boilerplates
+  cacheados. El `grep -E "^${name}-api:"` actual matchea bien al
+  bench actual, pero el grep original ("api-orm") era too loose.
+  **Fix aplicado en run.sh** v0.10.12 — anchor exacto al
+  `<dirname>-api:latest`.
+- **Memory peak `?`** cuando `container_name` del docker-compose
+  difiere del que asume el run.sh. El `docker stats` fallaba silenc
+  ioso, el sampler nunca escribía `mem.log`. **Fix aplicado en
+  run.sh** v0.10.12 — container names correctos.
+- **POST x 500 sequential** en Git Bash Windows toma ~10 min por el
+  overhead del subshell (~1s por iter del for loop). **Fix aplicado
+  en run.sh** — bajado a x 100. Posible mejora futura: usar `oha`
+  con body fijo para POST (ganamos throughput real ~100x, perdemos
+  email único por request — fair si POST hace UPSERT o si solo
+  medimos latencia bind/exec).
+- **Hardware info NO se auto-detecta** en el summary.md. Hay
+  placeholders `TODO`. Posible mejora: el script intenta detectar
+  CPU/RAM/OS automáticamente (cmd `wmic` Windows / `lscpu` Linux /
+  `sysctl -a` macOS) y los pinea al final.
+- **Bench unidimensional**: 3 endpoints aislados. Faltan escenarios
+  "extendidos" del roadmap original (mixed workload realista, bulk
+  inserts, escritura concurrente saturada). Quedan como mini-fase
+  futura cuando aparezca demanda real para publicar comparativa
+  más amplia.
+
 ### Mini-fase v0.10.10 (2026-05-28) — Fix deadlock `__to_fitz_json` has_many virtual
 
 Cierre del **preload hang** dejado como deuda residual de v0.10.9.

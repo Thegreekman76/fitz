@@ -1,66 +1,38 @@
 # Dockerfile multi-stage para api-fullstack-postgres.
 #
-# Build inicial: ~8-12 min (compila fitz + deps desde source).
-# Builds subsiguientes: ~30s si solo cambia src/ o python/ (cache
-# buildkit reusa la capa de cargo install).
+# Usa `fitz run --features python` (interop con SQLAlchemy en runtime).
 #
-# Alternativa rápida (desde v0.9.36): si querés evitar los ~5-8 min
-# de build inicial, usá la imagen pre-buildeada `:latest-python`:
+# **v0.10.13 (2026-05-29)**: migrado de `cargo install --git` (que
+# compilaba Fitz + PyO3 + deps desde source en ~8-12 min) al patrón
+# pre-built `ghcr.io/thegreekman76/fitz:latest-python`. Reducción
+# ~10x del build time. La imagen `:latest-python` se actualiza en
+# cada release del repo (workflow `.github/workflows/release.yml`,
+# job `docker-image-python`) — ya viene con fitz `--features python`
+# instalado, libpython3.12 + dev headers, y Rust toolchain (este
+# último descartado en stage 2).
 #
-#   FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
-#   # ... resto sin cambios
+# **IMPORTANTE — match Python entre builder y runtime**: la imagen
+# `:latest-python` se construye sobre `python:3.12-slim` (mismo base
+# que nuestro runtime). El binario fitz queda linkeado contra la
+# libpython3.12 que el runtime también provee. **Constraint
+# arquitectural permanente** de PyO3 + Linux — en Linux NO existe
+# el equivalente al `python3.dll` stable-ABI shim de Windows
+# (verificado empíricamente 2026-05-24; ver
+# `docs/deudas_lenguaje.md` sección R.bug-pyo3-abi3-portable-link).
 #
-# Trade-off: tag floating; mejor pin a `v0.9.X-python` para
-# reproducibilidad. El Dockerfile actual sigue clonando desde source
-# para que el build sea independiente del tag de la imagen.
+# Build con LATEST (default — recomendado):
+#   docker compose build
 #
-# IMPORTANTE — match Python entre builder y runtime: aunque
-# `auto-initialize` ya no está en el Cargo.toml de Fitz (mini-tanda
-# Cleanup-Residual+ 2026-05-22), el binario sigue linkeando contra
-# la libpython específica del builder.
-#
-# **Constraint arquitectural** (no deuda cerrable): en Linux NO
-# existe equivalente al `python3.dll` stable-ABI shim de Windows.
-# Verificado empíricamente 2026-05-24 con experimento Docker —
-# `/usr/local/lib/libpython3.so` en `python:3.X-slim` es un dummy
-# de 13 KB sin símbolos del API Python. Ver
-# `docs/deudas_lenguaje.md` sección R.bug-pyo3-abi3-portable-link.
-#
-# Solución permanente: `python:3.12-slim` como base de AMBOS stages.
+# Build con tag específico (reproducibilidad pinned):
+#   docker compose build --build-arg FITZ_TAG=v0.10.13-python
 
 # ---- Stage 1: builder ----------------------------------------------
-FROM python:3.12-slim AS builder
-
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        curl ca-certificates git \
-        python3-dev pkg-config libssl-dev build-essential && \
-    rm -rf /var/lib/apt/lists/*
-
-# Rust 1.95+ (Fitz pinea `rust-version = "1.95"` en Cargo.toml).
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.95.0 --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Pin opcional de versión de Fitz:
-#   docker build --build-arg FITZ_TAG=v0.9.25 .
-#   docker build --build-arg FITZ_REV=abc123 .
-#   docker build --build-arg FITZ_BRANCH=main .
-ARG FITZ_BRANCH=
-ARG FITZ_TAG=
-ARG FITZ_REV=
-
-RUN if [ -n "$FITZ_REV" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --rev "$FITZ_REV" --features python --bin fitz --locked; \
-    elif [ -n "$FITZ_TAG" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --tag "$FITZ_TAG" --features python --bin fitz --locked; \
-    elif [ -n "$FITZ_BRANCH" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --branch "$FITZ_BRANCH" --features python --bin fitz --locked; \
-    else \
-        cargo install --git https://github.com/Thegreekman76/fitz --features python --bin fitz --locked; \
-    fi
+# Imagen pre-built con fitz `--features python` lista para usar.
+ARG FITZ_TAG=latest-python
+FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder
 
 # ---- Stage 2: runtime ----------------------------------------------
+# `python:3.12-slim` limpio + COPY del binario fitz del builder.
 FROM python:3.12-slim
 
 RUN apt-get update && \
@@ -68,7 +40,10 @@ RUN apt-get update && \
         libpq5 ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /usr/local/cargo/bin/fitz /usr/local/bin/fitz
+# Binario fitz del stage builder. La imagen `:latest-python` lo deja
+# en `/usr/local/bin/fitz` (ver `.github/workflows/release.yml` →
+# `docker-image-python` job).
+COPY --from=builder /usr/local/bin/fitz /usr/local/bin/fitz
 
 WORKDIR /app
 

@@ -92,10 +92,19 @@ cp .env.example .env
 docker compose up --build
 ```
 
-**Primer build**: 8-12 minutos. Compila Fitz desde el source
-(con `--features python` para interop con CPython). Las builds
+**Primer build**: ~30-60s (desde v0.10.13). El Dockerfile usa la
+imagen pre-built `ghcr.io/thegreekman76/fitz:latest-python` que ya
+viene con Fitz `--features python` compilado. Las builds
 posteriores (cuando cambies código de `src/` o `python/`) son
-~30 segundos gracias al cache de Docker BuildKit.
+~10-20s gracias al cache de Docker BuildKit.
+
+Antes (pre-v0.10.13) el build era ~8-12 minutos porque compilaba
+Fitz desde source con `cargo install --git`. Si necesitás reproducir
+con versión pinned:
+
+```bash
+docker compose build --build-arg FITZ_TAG=v0.10.13-python
+```
 
 Cuando veas en los logs:
 
