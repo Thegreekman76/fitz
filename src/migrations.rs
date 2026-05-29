@@ -169,6 +169,15 @@ async fn introspect_columns(
     for c in columns.iter_mut() {
         if pk_cols.contains(&c.name) {
             c.is_primary = true;
+            // v0.10.16 — PG reporta `column_default = nextval(...)`
+            // para `bigserial` PK; el target schema NUNCA lo emite
+            // (es implícito del `PRIMARY KEY` con `bigserial`).
+            // Limpiamos para evitar falso positivo en el diff.
+            if let Some(d) = &c.default {
+                if d.starts_with("nextval(") {
+                    c.default = None;
+                }
+            }
         }
     }
     Ok(columns)
@@ -360,13 +369,12 @@ fn build_table_from_type(
         // construir la instancia). EXCEPCIONES:
         // - `@primary Int = 0` → `bigserial` ya implica default
         //   nextval; NO emitimos DEFAULT extra.
-        // - `@db_default` → el user lo agrega en el CREATE TABLE
-        //   manual (`@db_default created_at: Str` espera que la
-        //   DB tenga `DEFAULT NOW()`). En MVP NO sintetizamos
-        //   `DEFAULT NOW()` automático; queda como deuda visible
-        //   en docs — el user incluye el default en migration
-        //   manual o vía `fitz db diff` que detecta el mismatch.
-        let default = None;
+        // - `@db_default("<sql>")` (v0.10.16) — el user pasa la
+        //   expresión SQL explícita y el diff la emite en
+        //   `CREATE TABLE` / `ADD COLUMN` (e.g. `DEFAULT NOW()`).
+        // - `@db_default` sin args sigue siendo marker-only (skip
+        //   INSERT, sin default específico en la migration).
+        let default = col_meta.and_then(|c| c.db_default_sql.clone());
 
         columns.push(Column {
             name: sql_name.clone(),
@@ -550,6 +558,16 @@ pub enum Change {
         table: String,
         column: String,
         nullable: bool,
+    },
+    /// v0.10.16 — Cambio del DEFAULT de un column existente.
+    /// `new_default = Some(sql)` → `SET DEFAULT <sql>`; `None` →
+    /// `DROP DEFAULT`. La normalización para el diff es
+    /// case-insensitive sobre función calls SQL (`now()` matchea
+    /// `NOW()` y `Now()`).
+    AlterColumnDefault {
+        table: String,
+        column: String,
+        new_default: Option<String>,
     },
     CreateIndex {
         table: String,
@@ -756,8 +774,61 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
                     nullable: tc.nullable,
                 });
             }
+            // v0.10.16 — Default diff con normalización tolerante.
+            // Postgres devuelve `now()` lowercase con casts (e.g.
+            // `'foo'::text`); el user típicamente pasa `NOW()` o
+            // `'foo'`. Comparamos versiones normalizadas para evitar
+            // falsos positivos. Si el user remueve `@db_default(...)`,
+            // emitimos `DROP DEFAULT`; si agrega, `SET DEFAULT`.
+            let current_norm = cc.default.as_deref().map(normalize_default_for_diff);
+            let target_norm = tc.default.as_deref().map(normalize_default_for_diff);
+            if current_norm != target_norm {
+                changes.push(Change::AlterColumnDefault {
+                    table: target.name.clone(),
+                    column: tc.name.clone(),
+                    new_default: tc.default.clone(),
+                });
+            }
         }
     }
+}
+
+/// v0.10.16 — Normaliza una expresión SQL de default para
+/// comparación en el diff. El objetivo es ser permisivo con
+/// variaciones cosméticas que no cambian semántica:
+///
+/// - Lowercase de la expresión completa (PG normaliza `NOW()` →
+///   `now()` en `column_default`).
+/// - Strip de casts redundantes que PG agrega automáticamente
+///   (`'public'::text` → `'public'`, `42::bigint` → `42`).
+/// - Trim de whitespace.
+///
+/// NO intenta evaluar expresiones equivalentes (`now()` vs
+/// `CURRENT_TIMESTAMP` son ambos válidos para `timestamptz` pero
+/// se ven distintos — los tratamos como distintos).
+fn normalize_default_for_diff(s: &str) -> String {
+    let lower = s.trim().to_lowercase();
+    // Strip casts `::tipo` cuando el tipo es alfanumérico simple.
+    // Conservador: solo strip al final, no en medio (no rompemos
+    // expresiones complejas como `(a::int) + (b::int)`).
+    let no_cast = strip_trailing_pg_cast(&lower);
+    no_cast.to_string()
+}
+
+fn strip_trailing_pg_cast(s: &str) -> &str {
+    // Busca el último `::` y si lo que sigue es alfanumérico
+    // simple (`text`, `bigint`, `timestamptz`, etc.), lo recorta.
+    if let Some(idx) = s.rfind("::") {
+        let tail = &s[idx + 2..];
+        if !tail.is_empty()
+            && tail
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ' ')
+        {
+            return s[..idx].trim_end();
+        }
+    }
+    s
 }
 
 fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
@@ -836,11 +907,17 @@ fn change_to_sql(change: &Change) -> String {
         Change::CreateTable(t) => create_table_sql(t),
         Change::DropTable(name) => format!("DROP TABLE {};", quote_ident(name)),
         Change::AddColumn { table, column } => {
+            let default = column
+                .default
+                .as_deref()
+                .map(|d| format!(" DEFAULT {}", d))
+                .unwrap_or_default();
             format!(
-                "ALTER TABLE {} ADD COLUMN {} {}{};",
+                "ALTER TABLE {} ADD COLUMN {} {}{}{};",
                 quote_ident(table),
                 quote_ident(&column.name),
                 column.sql_type,
+                default,
                 if column.nullable { "" } else { " NOT NULL" },
             )
         }
@@ -863,6 +940,23 @@ fn change_to_sql(change: &Change) -> String {
                 new_type,
             )
         }
+        Change::AlterColumnDefault {
+            table,
+            column,
+            new_default,
+        } => match new_default {
+            Some(expr) => format!(
+                "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {};",
+                quote_ident(table),
+                quote_ident(column),
+                expr,
+            ),
+            None => format!(
+                "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT;",
+                quote_ident(table),
+                quote_ident(column),
+            ),
+        },
         Change::AlterColumnNullable {
             table,
             column,
@@ -1725,5 +1819,289 @@ type Plain {
             })
             .collect();
         assert_eq!(added, vec![("users", "name")]);
+    }
+
+    // ============================================================
+    // v0.10.16 — @db_default("expr") + AlterColumnDefault
+    // ============================================================
+
+    fn col_with_default(name: &str, sql_type: &str, default: Option<&str>) -> Column {
+        Column {
+            name: name.to_string(),
+            sql_type: sql_type.to_string(),
+            nullable: true,
+            default: default.map(|s| s.to_string()),
+            is_primary: false,
+        }
+    }
+
+    #[test]
+    fn create_table_with_default_emits_default_clause() {
+        let t = Table {
+            name: "events".to_string(),
+            columns: vec![
+                col("id", "bigint", false, true),
+                col_with_default("created_at", "timestamp with time zone", Some("NOW()")),
+            ],
+            indexes: vec![],
+            foreign_keys: vec![],
+        };
+        let sql = changes_to_sql(&[Change::CreateTable(t)]);
+        assert!(
+            sql.contains("DEFAULT NOW()"),
+            "esperaba DEFAULT NOW(): {sql}"
+        );
+    }
+
+    #[test]
+    fn add_column_with_default_emits_default_clause() {
+        let change = Change::AddColumn {
+            table: "events".to_string(),
+            column: col_with_default("created_at", "timestamp with time zone", Some("NOW()")),
+        };
+        let sql = changes_to_sql(&[change]);
+        assert!(sql.contains("ADD COLUMN"), "esperaba ADD COLUMN: {sql}");
+        assert!(
+            sql.contains("DEFAULT NOW()"),
+            "esperaba DEFAULT NOW(): {sql}"
+        );
+    }
+
+    #[test]
+    fn alter_column_default_set_emits_set_default() {
+        let change = Change::AlterColumnDefault {
+            table: "events".to_string(),
+            column: "created_at".to_string(),
+            new_default: Some("NOW()".to_string()),
+        };
+        let sql = changes_to_sql(&[change]);
+        assert!(sql.contains("SET DEFAULT NOW()"), "got: {sql}");
+    }
+
+    #[test]
+    fn alter_column_default_drop_emits_drop_default() {
+        let change = Change::AlterColumnDefault {
+            table: "events".to_string(),
+            column: "created_at".to_string(),
+            new_default: None,
+        };
+        let sql = changes_to_sql(&[change]);
+        assert!(sql.contains("DROP DEFAULT"), "got: {sql}");
+    }
+
+    #[test]
+    fn diff_adds_alter_column_default_when_default_added() {
+        let current = Schema {
+            tables: vec![Table {
+                name: "events".to_string(),
+                columns: vec![
+                    col("id", "bigint", false, true),
+                    col_with_default("created_at", "timestamp with time zone", None),
+                ],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let target = Schema {
+            tables: vec![Table {
+                name: "events".to_string(),
+                columns: vec![
+                    col("id", "bigint", false, true),
+                    col_with_default("created_at", "timestamp with time zone", Some("NOW()")),
+                ],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let changes = diff_schemas(&current, &target);
+        let set_defaults: Vec<_> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::AlterColumnDefault {
+                    new_default: Some(d),
+                    column,
+                    ..
+                } => Some((column.as_str(), d.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(set_defaults, vec![("created_at", "NOW()")]);
+    }
+
+    #[test]
+    fn diff_adds_alter_column_default_when_default_removed() {
+        let current = Schema {
+            tables: vec![Table {
+                name: "events".to_string(),
+                columns: vec![
+                    col("id", "bigint", false, true),
+                    col_with_default("created_at", "timestamp with time zone", Some("now()")),
+                ],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let target = Schema {
+            tables: vec![Table {
+                name: "events".to_string(),
+                columns: vec![
+                    col("id", "bigint", false, true),
+                    col_with_default("created_at", "timestamp with time zone", None),
+                ],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let changes = diff_schemas(&current, &target);
+        let drops = changes
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c,
+                    Change::AlterColumnDefault {
+                        new_default: None,
+                        ..
+                    }
+                )
+            })
+            .count();
+        assert_eq!(drops, 1);
+    }
+
+    #[test]
+    fn diff_default_idempotente_case_insensitive() {
+        // PG devuelve `now()` lowercase; el user pasó `NOW()`.
+        // El diff debe ser vacío (idempotente).
+        let current = Schema {
+            tables: vec![Table {
+                name: "events".to_string(),
+                columns: vec![col_with_default(
+                    "created_at",
+                    "timestamp with time zone",
+                    Some("now()"),
+                )],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let target = Schema {
+            tables: vec![Table {
+                name: "events".to_string(),
+                columns: vec![col_with_default(
+                    "created_at",
+                    "timestamp with time zone",
+                    Some("NOW()"),
+                )],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let changes = diff_schemas(&current, &target);
+        assert!(
+            changes.is_empty(),
+            "esperaba diff vacío (idempotente), got: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn diff_default_idempotente_strip_pg_cast() {
+        // PG devuelve `'public'::text` para literales Str; el user
+        // pasó `'public'`. El diff debe ser vacío.
+        let current = Schema {
+            tables: vec![Table {
+                name: "settings".to_string(),
+                columns: vec![col_with_default("scope", "text", Some("'public'::text"))],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let target = Schema {
+            tables: vec![Table {
+                name: "settings".to_string(),
+                columns: vec![col_with_default("scope", "text", Some("'public'"))],
+                indexes: vec![],
+                foreign_keys: vec![],
+            }],
+        };
+        let changes = diff_schemas(&current, &target);
+        assert!(
+            changes.is_empty(),
+            "esperaba diff vacío (cast strippeado), got: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn normalize_default_for_diff_lowercases_and_trims() {
+        assert_eq!(normalize_default_for_diff("  NOW()  "), "now()");
+        assert_eq!(normalize_default_for_diff("NOW()"), "now()");
+        assert_eq!(normalize_default_for_diff("Now()"), "now()");
+    }
+
+    #[test]
+    fn normalize_default_for_diff_strips_trailing_cast() {
+        assert_eq!(normalize_default_for_diff("'public'::text"), "'public'");
+        assert_eq!(normalize_default_for_diff("42::bigint"), "42");
+        assert_eq!(normalize_default_for_diff("0::double precision"), "0");
+    }
+
+    #[test]
+    fn schema_from_program_db_default_with_sql_arg() {
+        let src = r#"
+@table("events") type Event {
+    @primary id: Int = 0
+    @db_default("NOW()") created_at: Str = ""
+}
+"#;
+        let (prog, env) = parse_and_check(src);
+        let schema = schema_from_program(&prog, &env).expect("schema");
+        let t = &schema.tables[0];
+        let created = t.columns.iter().find(|c| c.name == "created_at").unwrap();
+        assert_eq!(created.default.as_deref(), Some("NOW()"));
+    }
+
+    #[test]
+    fn schema_from_program_db_default_without_arg_leaves_default_none() {
+        let src = r#"
+@table("events") type Event {
+    @primary id: Int = 0
+    @db_default created_at: Str = ""
+}
+"#;
+        let (prog, env) = parse_and_check(src);
+        let schema = schema_from_program(&prog, &env).expect("schema");
+        let t = &schema.tables[0];
+        let created = t.columns.iter().find(|c| c.name == "created_at").unwrap();
+        assert!(
+            created.default.is_none(),
+            "esperaba default = None (marker-only), got: {:?}",
+            created.default
+        );
+    }
+
+    #[test]
+    fn db_default_round_trip_no_diff() {
+        let src = r#"
+@table("events") type Event {
+    @primary id: Int = 0
+    @db_default("NOW()") created_at: Str = ""
+}
+"#;
+        let (prog, env) = parse_and_check(src);
+        let schema = schema_from_program(&prog, &env).expect("schema");
+        // Simular "current" como si PG devolviera el default con
+        // formato canonical lowercase.
+        let mut current = schema.clone();
+        if let Some(t) = current.tables.first_mut() {
+            for c in &mut t.columns {
+                if c.name == "created_at" {
+                    c.default = Some("now()".to_string());
+                }
+            }
+        }
+        let changes = diff_schemas(&current, &schema);
+        assert!(
+            changes.is_empty(),
+            "esperaba diff vacío post-round-trip, got: {changes:?}"
+        );
     }
 }

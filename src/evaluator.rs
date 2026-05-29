@@ -26614,6 +26614,7 @@ let r = match n {
                 unique: false,
                 indexed: false,
                 db_default: false,
+                db_default_sql: None,
             },
         );
         let expr = parse_closure_body("fn (u) => u.name == \"ada\"");

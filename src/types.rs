@@ -430,6 +430,19 @@ pub struct ColumnMetadata {
     /// override condicional, no uses `@db_default` y enviá el
     /// timestamp explícito desde Fitz (via builtin o helper).
     pub db_default: bool,
+    /// v0.10.16 — Expresión SQL del default cuando el user pasa
+    /// `@db_default("NOW()")`. `None` cuando se usa `@db_default`
+    /// sin args (comportamiento original 10.8.2: skip INSERT pero
+    /// sin default específico — el user mete el `DEFAULT NOW()` a
+    /// mano en su CREATE TABLE / migration).
+    ///
+    /// Cuando es `Some(sql)`, `fitz db diff` emite `DEFAULT <sql>`
+    /// en el CREATE TABLE / ADD COLUMN automáticamente. La
+    /// normalización del diff es case-insensitive sobre función
+    /// calls (`NOW()` == `now()`) — evita falsos positivos cuando
+    /// Postgres devuelve `now()` lowercase desde
+    /// `information_schema.columns.column_default`.
+    pub db_default_sql: Option<String>,
 }
 
 /// Fase 10.4.a — Tipo de relación declarada sobre un field.
@@ -1595,17 +1608,54 @@ pub fn process_table_decorators(
                 "db_default" => {
                     // 10.8.2 (v0.10.8) — field manejado por la DB.
                     // El ORM lo skipea del INSERT (Postgres aplica
-                    // su DEFAULT). Sin args ni kwargs.
+                    // su DEFAULT). v0.10.16 — acepta arg Str
+                    // opcional con la expresión SQL del default
+                    // (`@db_default("NOW()")`) para que `fitz db
+                    // diff` la emita en el CREATE TABLE / ADD
+                    // COLUMN automáticamente.
                     has_meta = true;
-                    if !d.args.is_empty() || !d.kwargs.is_empty() {
+                    if !d.kwargs.is_empty() {
                         errors.push(FitzError::new(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@db_default` no acepta args ni kwargs".to_string(),
+                            "`@db_default` no acepta kwargs".to_string(),
+                        ));
+                    }
+                    if d.args.len() > 1 {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@db_default` acepta como máximo un arg posicional (Str con la expresión SQL del default)".to_string(),
                         ));
                     }
                     col_meta.db_default = true;
+                    if let Some(arg) = d.args.first() {
+                        match arg {
+                            crate::ast::Expr::Str(s, _) => {
+                                let trimmed = s.trim();
+                                if trimmed.is_empty() {
+                                    errors.push(FitzError::new(
+                                        ErrorKind::TypeError,
+                                        type_span.line,
+                                        type_span.column,
+                                        "`@db_default(\"...\")` no acepta string vacío".to_string(),
+                                    ));
+                                } else {
+                                    col_meta.db_default_sql = Some(trimmed.to_string());
+                                }
+                            }
+                            _ => {
+                                errors.push(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    type_span.line,
+                                    type_span.column,
+                                    "`@db_default(...)` espera un Str literal con la expresión SQL del default (ej: `@db_default(\"NOW()\")`)".to_string(),
+                                ));
+                            }
+                        }
+                    }
                 }
                 "hidden" => {
                     // v0.10.11 — el field NO cruza la frontera HTTP.

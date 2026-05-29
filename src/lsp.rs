@@ -1115,7 +1115,7 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "db_default",
             "db_default",
             "@db_default — DB asigna el value (skipea INSERT)",
-            "ORM skipea el field del INSERT, Postgres aplica su DEFAULT (típico: timestamps, UUIDs gen_random_uuid()).",
+            "ORM skipea el field del INSERT, Postgres aplica su DEFAULT (típico: timestamps, UUIDs gen_random_uuid()). v0.10.16: opcionalmente acepta arg Str con la expresión SQL — `@db_default(\"NOW()\")` — que `fitz db diff` emite automáticamente en CREATE TABLE / ADD COLUMN.",
         ),
         (
             "hidden",

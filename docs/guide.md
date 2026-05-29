@@ -11553,11 +11553,19 @@ type` declarados, y emite el `ALTER TABLE` / `CREATE TABLE` /
 determinístico (orden seguro de aplicación) e idempotente
 (`diff(target, target) == ""`).
 
+**Defaults SQL** — desde v0.10.16, `@db_default("NOW()")` (o
+cualquier expresión SQL Postgres válida) hace que el diff emita
+`DEFAULT NOW()` en el `CREATE TABLE` / `ADD COLUMN` automáticamente.
+`@db_default` sin args sigue siendo marker-only (skipea INSERT,
+sin default específico). El diff normaliza
+(`NOW()` ↔ `now()`, casts `'foo'::text` ↔ `'foo'`) para evitar
+falsos positivos cuando Postgres reporta el default en su formato
+canónico.
+
 **Limitaciones del MVP**: no detecta renames (un rename Fitz-side
 `name` → `full_name` se ve como `DROP COLUMN + ADD COLUMN`,
-perdiendo datos — editá la migration a mano cuando aplique); no
-emite defaults (`@db_default` exige `DEFAULT NOW()` puesto a
-mano); forward-only (sin `down` migrations; para revertir, nueva
+perdiendo datos — editá la migration a mano cuando aplique);
+forward-only (sin `down` migrations; para revertir, nueva
 migration con cambio inverso). Detalle completo + workflow
 avanzado en `docs/db-orm.md` sección 26.c.
 

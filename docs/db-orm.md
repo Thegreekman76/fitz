@@ -2613,6 +2613,50 @@ fitz db migrate
   COLUMN` quotean nombres (`"users"`, `"email"`) — los names
   con reserved words o caracteres especiales no rompen.
 
+### Defaults SQL via `@db_default("expr")`
+
+Desde v0.10.16, `@db_default` acepta un arg Str opcional con la
+expresión SQL del default. Si está, `fitz db diff` emite
+`DEFAULT <expr>` en el `CREATE TABLE` / `ADD COLUMN`
+automáticamente. Si el field gana o pierde el arg después,
+emite `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`.
+
+```fitz
+@table("events") type Event {
+    @primary id: Int = 0
+    title: Str = ""
+
+    // Marker-only — el ORM skipea el INSERT, pero la migration
+    // NO mete `DEFAULT NOW()` automático. El user lo agrega
+    // a mano si lo quiere.
+    @db_default created_at: Str = ""
+
+    // Con arg SQL — la migration emite `updated_at timestamp
+    // with time zone NOT NULL DEFAULT NOW()` automáticamente.
+    @db_default("NOW()") updated_at: Str = ""
+
+    // Otras expresiones válidas: UUID auto-generado, contadores,
+    // strings literales, etc. Es SQL literal, no validado por Fitz.
+    @db_default("gen_random_uuid()") tracking_id: Str = ""
+}
+```
+
+El diff es **idempotente**: re-correr `fitz db diff` tras
+aplicar la migration no propone cambios. La normalización
+maneja:
+
+- **Case-insensitive de função calls**: `NOW()` ↔ `now()` ↔
+  `Now()` matchean (Postgres devuelve `now()` lowercase desde
+  `information_schema.column_default`).
+- **Strip de casts redundantes**: `'public'::text` ↔ `'public'`
+  matchean (PG agrega casts automáticos a literales Str).
+- **Trim whitespace**.
+
+NO intentamos evaluar expresiones equivalentes — `now()` y
+`CURRENT_TIMESTAMP` son ambos válidos para `timestamptz` pero
+los tratamos como distintos. Convención: elegí UNO en tu schema
+y manteneté consistente.
+
 ### Limitaciones explícitas del MVP
 
 - **No detecta renames** (column ni table): un rename Fitz-side
@@ -2623,10 +2667,6 @@ fitz db migrate
 - **`ALTER COLUMN ... TYPE` sin USING**: cambios de tipo
   incompatibles (`text → int`) fallan. Editá la migration para
   agregar `USING (col::int)` o data migration script.
-- **No emite defaults**: el ORM resuelve defaults client-side
-  al construir la instance. `@db_default` espera que la
-  migration tenga `DEFAULT NOW()` puesto a mano (el diff actual
-  reporta mismatch hasta que lo agregás).
 - **Solo schema `public`**: futuras schemas custom requieren
   refinamiento del introspector.
 - **No down migrations**: las migrations son forward-only.
@@ -2744,9 +2784,10 @@ recomendado:
 ### Migraciones automáticas — **CERRADO en v0.10.16**
 
 `fitz db diff/migrate/status/new` ya están en el binario. Ver
-sección 26.c para el workflow canónico y las limitaciones del
-MVP (no detecta renames, no emite defaults `@db_default`, no
-down migrations).
+sección 26.c para el workflow canónico (incluyendo
+`@db_default("NOW()")` que emite defaults SQL automáticamente
+desde v0.10.16) y las limitaciones del MVP (no detecta renames,
+no down migrations).
 
 ### Transactions — **CERRADO en v0.10.14 (fn nombrada) + v0.10.15 (FnExpr inline)**
 

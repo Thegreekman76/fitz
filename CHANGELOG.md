@@ -13,9 +13,9 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
 boilerplates ORM Dockerizados extendidos, refinamientos del
-schema diff (renames opcionales, defaults `@db_default`).
+schema diff (renames opcionales, down migrations).
 
-## [v0.10.16] — 2026-05-29 — Fase 10.6: migraciones automáticas ORM
+## [v0.10.16] — 2026-05-29 — Fase 10.6: migraciones automáticas ORM + `@db_default("expr")`
 
 `fitz db diff/migrate/status/new` — el binario ahora introspecciona
 el schema real de Postgres, lo compara con los `@table type`
@@ -37,6 +37,34 @@ verdad es el código tipado del lenguaje.
 URL: lee `DATABASE_URL` env var, o pasa `--url postgres://...`.
 Dir: `./migrations` por default, override con `--dir`. Entry:
 explícito o `[bin].main` del manifest.
+
+### `@db_default("expr")` — defaults SQL en el `type`
+
+El decorator `@db_default` (introducido en v0.10.8 como marker
+"skip INSERT") ahora acepta un arg Str opcional con la expresión
+SQL del default. Si está, `fitz db diff` emite `DEFAULT <expr>`
+automáticamente en `CREATE TABLE` / `ADD COLUMN`. Si cambia, el
+diff emite `ALTER TABLE ... ALTER COLUMN ... SET/DROP DEFAULT`.
+Sin arg, comportamiento original (marker-only).
+
+```fitz
+@table("events") type Event {
+    @primary id: Int = 0
+    @db_default("NOW()") created_at: Str = ""
+    @db_default("gen_random_uuid()") tracking_id: Str = ""
+}
+```
+
+**Idempotencia del diff** — la normalización es tolerante a
+variaciones cosméticas que Postgres aplica automáticamente:
+
+- Case-insensitive en function calls (`NOW()` ↔ `now()`).
+- Strip de casts redundantes (`'foo'::text` ↔ `'foo'`).
+- Trim whitespace.
+
+NO intenta evaluar expresiones equivalentes (`now()` ≠
+`CURRENT_TIMESTAMP` desde el lado del diff aunque ambos sean
+válidos para `timestamptz`). El user elige una y la mantiene.
 
 ### Cambios técnicos
 
@@ -61,6 +89,20 @@ explícito o `[bin].main` del manifest.
   muera con un runtime que se dropea entre connect y query).
 - **Cargo.toml**: `chrono = "0.4"` reusado (ya dep para
   jobs/cron) para timestamps `YYYYMMDDHHMMSS_<name>.sql`.
+- **src/types.rs**: `ColumnMetadata.db_default_sql:
+  Option<String>` paralelo al flag `db_default` existente. El
+  parser del decorator acepta 0 args (marker-only, backward
+  compat con v0.10.8) o 1 arg Str literal (nueva semántica
+  v0.10.16) — rechaza arg no-Str con mensaje específico.
+- **src/migrations.rs**: nueva variante `Change::AlterColumnDefault`
+  + helper `normalize_default_for_diff` (lowercase + strip
+  trailing PG cast). `introspect_columns` strippea `nextval(...)`
+  del default de PK bigserial para evitar falso positivo.
+- **src/lsp.rs**: doc del completion item `@db_default` actualizado
+  para mencionar el arg Str opcional con ejemplos.
+- **editors/vscode/package.json**: version `0.10.15` → `0.10.16`.
+  Grammar TextMate sin cambios (ya matchea `@db_default` y
+  cualquier decorator con args via la rule de strings).
 
 ### Decisiones técnicas
 
@@ -88,15 +130,19 @@ explícito o `[bin].main` del manifest.
 
 ### Tests
 
-- **26 unit tests nuevos** en `src/migrations.rs::tests`
+- **39 unit tests nuevos** en `src/migrations.rs::tests`
   cubriendo: diff de schemas vacíos/iguales (idempotente);
   CREATE/DROP table; ADD/DROP/ALTER column con type + nullable;
   CREATE/DROP index; ADD foreign key; orden seguro (CREATE
   antes que DROP); determinismo cross-runs; emission de SQL
   para cada `Change`; round-trip `schema_from_program(src)`
   con types Fitz reales + `diff` contra sí mismo es vacío;
-  dos versiones del schema yield `AddColumn`.
-- **2599/2599 unit tests verde** post-cambios (sin regresiones).
+  dos versiones del schema yield `AddColumn`. **+13 tests del
+  `@db_default("expr")`**: parse + emission CREATE TABLE/ADD
+  COLUMN/SET DEFAULT/DROP DEFAULT + idempotencia diff
+  case-insensitive + strip PG casts + round-trip schema con
+  default normalizado.
+- **2612/2612 unit tests verde** post-cambios (sin regresiones).
 - **Smoke real Postgres**: validable vía CI (job `db-postgres`).
   En Windows host contra Docker-mapped Postgres reproduce un
   bug pre-existente del driver wire protocol ("cstr no es
@@ -111,9 +157,10 @@ explícito o `[bin].main` del manifest.
 - **`ALTER COLUMN ... TYPE` sin USING**: cambios incompatibles
   (`text → int`) fallan. Editá la migration para agregar
   `USING (col::int)`.
-- **No emite defaults**: `@db_default created_at: Str` espera
-  que la migration tenga `DEFAULT NOW()` puesto a mano (el
-  diff reporta mismatch hasta que lo agregás).
+- **`@db_default` sin arg sigue siendo marker-only**: el
+  comportamiento de v0.10.8 se preserva (skip INSERT, sin
+  default en migration). Para que el diff emita el default,
+  pasale la expresión SQL explícita (`@db_default("NOW()")`).
 - **Solo schema `public`** (no multi-schema).
 - **Forward-only** (sin `down`/`downgrade`).
 
