@@ -2810,6 +2810,11 @@ deuda residual derivada.
 - Cuando aparezcan benchmarks reales del boilerplate 7, la
   sección 27 (Performance) deja el placeholder y suma números
   concretos vs SQLAlchemy.
+- **2026-05-29 (v0.10.13)** — primera corrida publicable del
+  bench MVP `api-postgres-fitz` vs `api-postgres-python`. Headline:
+  Fitz ORM es **5-10x más rápido** y **5.5x más eficiente en
+  memoria** que SQLAlchemy en read workloads sustained. Detalle
+  completo en [Benchmarks](benchmarks.md).
 
 Para tirar dudas / proponer recetas nuevas / reportar gaps del
 ORM, abrir un issue en

@@ -78,6 +78,31 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 
 ◈ **Postgres + ORM nativo**. **Hito del proyecto (v0.10.0 → v0.10.6)**: driver Postgres puro escrito en Fitz/Rust (~2400 LoC en `src/db.rs`, sin libpq, sin `tokio-postgres`/`sqlx`/`diesel`) + ORM declarativo sobre `type` con decoradores nativos del lenguaje (`@table`/`@primary`/`@column`/`@belongs_to`/`@has_many`/`@has_one`). SQL constante en codegen-time (cada `.where(closure)` se walka del AST DURANTE EL CODEGEN, fragmento SQL hard-coded en el binario — comparable a Diesel/sqlx, mejor que SQLAlchemy/ActiveRecord que construyen SQL via objetos en runtime). Eager loading con dispatch estático (`.preload("posts")` con relation name como Str literal compila a match exhaustivo en compile-time — typos detectados antes de correr). Tipos avanzados nativos: JSONB ↔ `Map<Str, Any>`, arrays Postgres ↔ `List<scalar>` (incluyendo `List<Int?>` con NULL en arrays), `Map<Str, T>` concreto homogéneo. Aggregates scalar + GROUP BY con `Aggregated<Row>` separado de `QueryBuilder<Row>`. **v0.10.6** cierra 7 fricciones residuales del codegen ORM en bloque: `id: 0` auto-asigna bigserial (W4), `db.close().await?` propaga errores como `Result<Null>` (W5), `.update(db, body.changes)` acepta Map var (W7), `.starts_with(prefix)` acepta var Str (W3), `body.field` en closures de `.where` (W6), Map literal `{"k": 1}` en field `Map<Str, Any>` (W1), `match user { null => x, u => u.name }` con refinement Nullable (W2). Paridad bit-a-bit `fitz run` ↔ `fitz build` validada en CI multi-plataforma con `postgres:16` service container corriendo 16 paridad codegen E2E + 27 evaluator E2E en cada push. **Único lenguaje moderno** que combina driver Postgres puro + ORM declarativo + paridad bit-a-bit intérprete↔binario nativo + LSP completo (autocomplete del ORM end-to-end con tipos refinados) **sin macros derive ni introspection runtime**. → [cap 31 (resumen)](https://thegreekman76.github.io/fitz/guide/#31-postgres--orm-nativo) y [guía exhaustiva DB y ORM](https://thegreekman76.github.io/fitz/db-orm/) (~2500 LoC con todos los operadores, recetas, CLI integration y limitaciones).
 
+### Benchmark Fitz ORM vs SQLAlchemy
+
+Para validar la promesa "binario nativo sin overhead" del ORM,
+mantenemos un **bench reproducible cabeza-a-cabeza** entre los dos
+boilerplates equivalentes
+([`api-postgres-fitz`](boilerplates/api-postgres-fitz/) vs
+[`api-postgres-python`](boilerplates/api-postgres-python/)) — mismo
+Postgres, mismos endpoints, misma firma. **Headline numbers en v0.10.13**
+(Intel Core Ultra 7 155H, Docker 29.2.1, sustained 30s c=10):
+
+| Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
+|---|---:|---:|---:|
+| Memory peak | **9.2 MB** | 51 MB | **5.5x más eficiente** |
+| GET /users p50 | **4.88 ms** | 37.85 ms | **7.76x** |
+| GET /users RPS | **1944** | 246 | **7.91x** |
+| GET /users/{id} p50 | **3.60 ms** | 31.87 ms | **8.85x** |
+| GET /users/{id} RPS | **2604** | 296 | **8.80x** |
+| Cold start | **0.14 s** | 0.22 s | 1.57x |
+| Image size | 131 MB | 258 MB | 2x más liviano |
+
+**Reproducí los números** con [`bash benchmarks/orm-vs-sqlalchemy/run.sh`](benchmarks/orm-vs-sqlalchemy/)
+(~5-8 min con cache Docker caliente; requiere `oha` + `jq`). Resultados
+publicables y detalle técnico en
+[`benchmarks/orm-vs-sqlalchemy/README.md`](benchmarks/orm-vs-sqlalchemy/README.md).
+
 § **Interop Python via PyO3**. Marshaling bidireccional `List`/`Map`/`Instance` ↔ `list`/`dict`, excepciones Python → `Result<T>`, bridge async tokio ↔ asyncio, `fitz py-types` auto-mapeo SQLAlchemy. Opt-in con feature `python`. **`fitz build --bundle-python` produce un binario standalone con CPython 3.14.5 embebido** (~22-35 MB según OS) — corre en cualquier máquina del triple destino sin Python instalado, sin `pip install`, sin runtime externo. **Con `--bundle-pip <paquete>` repetible** (Fase 8.c) o **`--bundle-pip-requirements <FILE>`** (cosecha 8.c v0.9.42 — lee del `requirements.txt` estándar), también empaqueta paquetes pip adentro: `fitz build --bundle-pip-requirements requirements.txt mi_app.fitz` produce un binario único de ~50 MB que incluye CPython + las deps + tu código. **Desde v0.9.46 el launcher usa crates `tar`+`flate2` inline (sin subprocess `tar`)**, habilitando runtimes minimalistas tipo `gcr.io/distroless/cc-debian12` (~22 MB base). **Smoke real Docker validado end-to-end con Postgres** (v0.9.50/52) en los boilerplates 5/6 — imagen final ~136 MB con sqlalchemy + psycopg2-binary embebidos. **En el destino: cero Python, cero pip, cero venv**. (Para el dev que buildea sí hace falta Python local — cualquier 3.10+ en Windows, 3.14.x en Linux/macOS hasta cerrar `R.bug-pyo3-abi3-portable-link`. Tabla completa de matices en el cap 21.12 de la guía.) **El único lenguaje del cuadro que hace esto** (Python necesita Python + venv + `pip install`, FastAPI necesita uvicorn + venv, Spring necesita JVM, Express necesita Node + npm install, Go no tiene interop Python). PyOxidizer hizo algo parecido para Python puro pero está ralentizado desde 2023; Fitz reimplementa el patrón sobre [python-build-standalone de Astral](https://github.com/astral-sh/python-build-standalone). → [cap 21](https://thegreekman76.github.io/fitz/guide/#21-interop-python).
 
 ## Estabilidad

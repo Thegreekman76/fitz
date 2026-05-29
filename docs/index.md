@@ -70,12 +70,37 @@ Windows x64, Linux x64, Linux ARM64 y macOS Apple Silicon. El mismo
 programa Fitz corre en cualquiera; cross-compile gratis vía rustc
 targets.
 
+### Benchmark Fitz ORM vs SQLAlchemy
+
+Para validar la promesa "binario nativo sin overhead" del ORM,
+mantenemos un **bench reproducible cabeza-a-cabeza** entre los dos
+boilerplates equivalentes
+([`api-postgres-fitz`](https://github.com/Thegreekman76/fitz/tree/main/boilerplates/api-postgres-fitz)
+vs [`api-postgres-python`](https://github.com/Thegreekman76/fitz/tree/main/boilerplates/api-postgres-python))
+— mismo Postgres, mismos endpoints, misma firma. **Headline numbers
+en v0.10.13** (Intel Core Ultra 7 155H, Docker 29.2.1, sustained
+30s c=10):
+
+| Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
+|---|---:|---:|---:|
+| Memory peak | **9.2 MB** | 51 MB | **5.5x más eficiente** |
+| GET /users p50 | **4.88 ms** | 37.85 ms | **7.76x** |
+| GET /users RPS | **1944** | 246 | **7.91x** |
+| GET /users/{id} p50 | **3.60 ms** | 31.87 ms | **8.85x** |
+| GET /users/{id} RPS | **2604** | 296 | **8.80x** |
+| Cold start | **0.14 s** | 0.22 s | 1.57x |
+| Image size | 131 MB | 258 MB | 2x más liviano |
+
+Detalle, metodología y "cómo reproducir" en
+[Benchmarks](benchmarks.md).
+
 ---
 
 ## Por dónde arrancar
 
 [Guía completa →](guide.md){ .md-button .md-button--primary }
 [DB y ORM →](db-orm.md){ .md-button }
+[Benchmarks →](benchmarks.md){ .md-button }
 [Boilerplates →](https://github.com/Thegreekman76/fitz/tree/main/boilerplates){ .md-button }
 [Ver el roadmap →](roadmap.md){ .md-button }
 [GitHub →](https://github.com/Thegreekman76/fitz){ .md-button }

@@ -166,3 +166,104 @@ hardware anotado a mano:
 
   Quedan como extensiones futuras (`run-extended.sh` cuando sea
   necesario).
+
+---
+
+## Última corrida publicable (2026-05-29) — v0.10.13
+
+**Hardware**:
+- CPU: Intel Core Ultra 7 155H (Meteor Lake, 16 cores)
+- RAM: 64 GB
+- OS: Windows 11 Pro
+- Docker: 29.2.1 (Desktop con WSL2 backend)
+
+**Versión Fitz**: `ghcr.io/thegreekman76/fitz:v0.10.13`
+(incluye **B-1 fix** del driver Postgres: TCP_NODELAY + batch de los
+5 mensajes del Extended Query Protocol — eliminó ~40ms de overhead
+constante en queries con parámetros, ver `docs/deudas-post-5b.md`
+sección "Deudas detectadas en el primer bench" → B-1).
+
+### Headline
+
+> **Fitz ORM es 5-10x más rápido y 5x más eficiente en memoria que
+> Python+SQLAlchemy** en read workloads (sustained 30s, c=10).
+> Empate técnico en write workload (POST es bottleneck del bench
+> mismo, no del server).
+
+### Cold start, image, memory
+
+| Métrica | Fitz ORM | Python (SQLAlchemy) | Speedup Fitz |
+|---|---:|---:|---:|
+| Cold start (s) | **0.14** | 0.22 | 1.57x |
+| Image size | 131 MB | 258 MB | **2x más liviano** |
+| Memory peak (MB) | **9.2** | 51.0 | **5.54x más eficiente** |
+
+### Latencia + throughput por endpoint
+
+#### `GET /users` (lista de 50 rows, 30s sustained, c=10)
+
+| Métrica | Fitz ORM | Python (SQLAlchemy) | Speedup |
+|---|---:|---:|---:|
+| p50 latency (ms) | **4.88** | 37.85 | **7.76x** |
+| p95 latency (ms) | **7.68** | 68.01 | **8.86x** |
+| p99 latency (ms) | **10.26** | 87.17 | **8.49x** |
+| Throughput (RPS) | **1944** | 246 | **7.91x** |
+| Total requests | 58,340 | 7,376 | — |
+| Success rate | 100% | 100% | — |
+
+#### `GET /users/{id}` (single read por PK, 30s sustained, c=10) ⭐
+
+| Métrica | Fitz ORM | Python (SQLAlchemy) | Speedup |
+|---|---:|---:|---:|
+| p50 latency (ms) | **3.60** | 31.87 | **8.85x** |
+| p95 latency (ms) | **5.85** | 56.17 | **9.60x** |
+| p99 latency (ms) | **8.62** | 71.78 | **8.33x** |
+| Throughput (RPS) | **2604** | 296 | **8.80x** |
+| Total requests | 78,138 | 8,885 | — |
+| Success rate | 100% | 100% | — |
+
+> **Antes del B-1 fix** (v0.10.12): Fitz tenía p50=43.70ms aquí —
+> ~30% MÁS LENTO que Python. El batching de Extended Query + Nagle
+> off lo bajó a **3.60ms, 12x más rápido que antes** y 8.85x más
+> rápido que Python.
+
+#### `POST /users` (100 sequential, body único por request)
+
+| Métrica | Fitz ORM | Python (SQLAlchemy) | Speedup |
+|---|---:|---:|---:|
+| p50 latency (ms) | 108.13 | 109.32 | ~empate |
+| p95 latency (ms) | 188.74 | 184.67 | ~empate |
+| p99 latency (ms) | 275.27 | 202.96 | 0.74x (Python wins) |
+| Throughput (RPS) | 4.83 | 5.23 | 0.92x |
+
+> **POST es bottleneck del cliente**, no del server. El script de
+> bench hace `curl` sequential con email único por request — en
+> Git Bash Windows cada subshell tarda ~1s overhead. Para medir
+> POST throughput real necesitaríamos `k6` o `wrk+lua` con body
+> randomization. Queda como extensión futura.
+
+### Cómo se reproduce
+
+```bash
+cd benchmarks/orm-vs-sqlalchemy
+bash run.sh
+```
+
+El script:
+1. `docker compose up -d --build` de cada boilerplate (usa
+   `ghcr.io/thegreekman76/fitz:latest{,−python}` pre-built).
+2. Seed 50 users via POST.
+3. Bench `GET /users` con oha 30s c=10 → JSON.
+4. Bench `GET /users/1` con oha 30s c=10 → JSON.
+5. Bench `POST /users` con curl loop 100 sequential.
+6. Memory peak via `docker stats` muestreado cada 500ms.
+7. `docker compose down -v` (clean state).
+8. Genera `results/<timestamp>/summary.md` con tablas comparativas.
+
+Tiempo total run: ~5-8 min (con imágenes ya cacheadas).
+
+### Variabilidad esperada
+
+±10% entre corridas. Para resultados más estables correr 3 veces y
+reportar mediana. Los **headline numbers** (5.54x memory, 8x reads)
+son consistentes entre corridas; solo cambian decimales.

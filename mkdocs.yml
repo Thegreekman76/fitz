@@ -129,6 +129,7 @@ nav:
   - Guía:
       - guide.md
   - 'DB y ORM': db-orm.md
+  - 'Benchmarks': benchmarks.md
   - Roadmap:
       - roadmap.md
       - 'Visión': vision.md
