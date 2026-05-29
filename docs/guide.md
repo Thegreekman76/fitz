@@ -11499,6 +11499,19 @@ async fn transfer(db: DbConn, body: TransferInput) -> Result<Int> {
 - **Prisma** `prisma.$transaction([...])` toma un array de
   operaciones declarativas; menos flexible que callbacks.
 
+**Sintaxis** — desde **v0.10.15** el callback puede ser FnExpr
+inline (`async fn(tx) -> Result<T> { ... }`) o fn nombrada
+(declarada con `async fn foo(tx: DbConn) -> Result<T> { ... }` y
+pasada por ident). Ambas formas funcionan tanto en `fitz run`
+como en `fitz build` (paridad bit-a-bit). El inline es la forma
+recomendada para closures cortos; nombrada cuando reusás la misma
+lógica de tx en varios endpoints.
+
+Captures del outer scope (vars del handler que envuelve la tx)
+funcionan vía doble `move` Rust emit (outer + async move) — el
+body puede usar `body.field`, `user.id`, args del handler, etc.,
+sin tener que pasarlos explícitamente.
+
 **Lo que NO soporta el MVP** (deuda futura):
 
 - **Nested transactions** (SAVEPOINT). Una `db.transaction(...)`
@@ -11509,10 +11522,6 @@ async fn transfer(db: DbConn, body: TransferInput) -> Result<Int> {
   `SERIALIZABLE`, etc.) — usa el default del server.
 - **Transacciones read-only** (`BEGIN READ ONLY`) — el callback
   siempre puede escribir.
-- **FnExpr inline en `fitz build`** — el codegen MVP exige fn
-  nombrada (`async fn callback(tx: DbConn) -> Result<T>` declarada
-  antes y pasada por ident). El intérprete (`fitz run`) sí
-  permite FnExpr inline. Refinable a futuro.
 
 ---
 

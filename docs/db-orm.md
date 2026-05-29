@@ -2510,6 +2510,38 @@ return db.transaction(fn(tx) -> Result<Int> {
   closures) Y `prisma.$transaction(async (tx) => {...})`
   (closure-based, equivalente al de Fitz).
 
+### Sintaxis del callback (v0.10.15)
+
+Desde v0.10.15, el callback puede ser tanto FnExpr inline como
+fn nombrada — paridad bit-a-bit entre `fitz run` y `fitz build`.
+
+**Inline** (recomendado para closures cortos):
+
+```fitz
+return db.transaction(async fn(tx) -> Result<Int> {
+    let _ = User.insert(tx, body).await?
+    return Ok(1)
+}).await
+```
+
+**Nombrada** (cuando reusás la misma lógica de tx en varios
+endpoints o querés testearla aislada):
+
+```fitz
+async fn create_user_tx(tx: DbConn) -> Result<Int> {
+    let _ = User.insert(tx, get_default_user()).await?
+    return Ok(1)
+}
+
+return db.transaction(create_user_tx).await
+```
+
+**Captures del outer scope**: el body inline puede usar vars del
+handler que envuelve la tx (`body.field`, `user.id`, args del
+handler, etc.) sin pasarlos explícitamente. El codegen emite
+doble `move` Rust (outer closure + async move inner) para
+capturar correctamente.
+
 ### Lo que NO soporta el MVP (deuda futura)
 
 - **Nested transactions** (SAVEPOINT). Una `db.transaction(...)`
@@ -2524,11 +2556,6 @@ return db.transaction(fn(tx) -> Result<Int> {
   refinamiento futuro.
 - **Transacciones read-only** — `BEGIN READ ONLY` para queries
   que solo leen. Hoy todo callback puede escribir.
-- **FnExpr inline en `fitz build`** — el codegen MVP exige fn
-  nombrada (`async fn handler(tx: DbConn) -> Result<T>`
-  declarada antes y pasada por ident). El intérprete (`fitz
-  run`) sí permite FnExpr inline. Diferencia documentada;
-  refinable con un emit del callback async con tabstops.
 
 ---
 

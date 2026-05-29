@@ -1,4 +1,4 @@
-// cap 31 (v0.10.14) — Transactions ORM.
+// cap 31 (v0.10.14 / inline v0.10.15) — Transactions ORM.
 //
 // `db.transaction(fn(tx) -> Result<T>)` envuelve un bloque de
 // queries adentro de BEGIN/COMMIT/ROLLBACK automático:
@@ -10,15 +10,17 @@
 // pegado a la MISMA conexión física durante toda la tx — no hay
 // race condition con otras requests concurrentes.
 //
-// **Nota sobre callbacks**: el codegen MVP (v0.10.14) exige que
-// el callback de `db.transaction(...)` sea una **fn nombrada**
-// (no FnExpr inline). El intérprete (`fitz run`) sí permite
-// inline. Refinable a futuro — ver cap 31 de la guía.
+// **v0.10.15 (Fase 10.7+)**: el codegen ahora acepta FnExpr inline
+// como callback además de fn nombrada. Captures del outer scope
+// funcionan vía doble `move` (closure outer + async move inner) —
+// el body usa `body.field` y `user.id` capturado del handler outer
+// sin necesidad de pasar args explícitos.
 //
-// Este ejemplo es PEDAGÓGICO — muestra los 3 patterns canónicos.
-// Para ejecutarlo necesitás Postgres real con la tabla `accounts`
-// creada. Sin Postgres válido, el `connect` final imprime Err clara
-// y el smoke `GUIDE_EXAMPLES_COMPILE` solo verifica que compile.
+// Este ejemplo es PEDAGÓGICO — muestra los 3 patterns canónicos con
+// la sintaxis inline más natural. Para ejecutarlo necesitás Postgres
+// real con la tabla `accounts` creada. Sin Postgres válido, el
+// `connect` final imprime Err clara y el smoke
+// `GUIDE_EXAMPLES_COMPILE` solo verifica que compile.
 
 @table("accounts") type Account {
     @primary id: Int = 0
@@ -26,36 +28,23 @@
     balance: Float = 0.0
 }
 
-// Body para el patrón 1 — transfer entre cuentas.
-type TransferInput {
-    from_id: Int
-    to_id: Int
-    amount: Float
-}
-
 // --- Patrón 1: transferencia atómica (debit + credit) -----------------
 //
 // Caso canónico de transactions: mover dinero entre 2 cuentas.
-// O el debit Y el credit persisten juntos, o ninguno persiste
-// (ej: si el segundo update falla, el primero se revierte).
-async fn transfer_tx(tx: DbConn) -> Result<Null> {
-    // En este ejemplo el body simple muestra el shape — un caso
-    // real leería from_id/to_id/amount de la TransferInput
-    // capturada por la closure outer. Para mostrarlo simple
-    // hardcodeamos.
-    let _ = tx.exec(
-        "UPDATE accounts SET balance = balance - 30.0 WHERE id = 1",
-        [],
-    ).await?
-    let _ = tx.exec(
-        "UPDATE accounts SET balance = balance + 30.0 WHERE id = 2",
-        [],
-    ).await?
-    return Ok(null)
-}
-
-async fn transfer(db: DbConn) -> Result<Null> {
-    return db.transaction(transfer_tx).await
+// O el debit Y el credit persisten juntos, o ninguno persiste.
+// `from_id`/`to_id`/`amount` se capturan del scope outer del handler.
+async fn transfer(db: DbConn, from_id: Int, to_id: Int, amount: Float) -> Result<Null> {
+    return db.transaction(async fn(tx) -> Result<Null> {
+        let _ = tx.exec(
+            "UPDATE accounts SET balance = balance - $1 WHERE id = $2",
+            [amount, from_id],
+        ).await?
+        let _ = tx.exec(
+            "UPDATE accounts SET balance = balance + $1 WHERE id = $2",
+            [amount, to_id],
+        ).await?
+        return Ok(null)
+    }).await
 }
 
 // --- Patrón 2: rollback explícito por validación ----------------------
@@ -63,83 +52,75 @@ async fn transfer(db: DbConn) -> Result<Null> {
 // El callback puede retornar Err en cualquier punto para abortar la tx.
 // Útil para validaciones que requieren leer estado del DB (saldo > 0,
 // stock disponible, etc.) antes de decidir si commiteamos.
-async fn safe_debit_tx(tx: DbConn) -> Result<Float> {
-    let account = Account
-        .where(fn(a) => a.id == 3)
-        .first(tx)
-        .await?
+async fn safe_debit(db: DbConn, account_id: Int, amount: Float) -> Result<Float> {
+    return db.transaction(async fn(tx) -> Result<Float> {
+        let account = Account
+            .where(fn(a) => a.id == account_id)
+            .first(tx)
+            .await?
 
-    if (account.balance < 40.0) {
-        return Err("saldo insuficiente")
-    }
+        if (account.balance < amount) {
+            return Err("saldo insuficiente")
+        }
 
-    let _ = Account
-        .where(fn(a) => a.id == 3)
-        .update(tx, { "balance": account.balance - 40.0 })
-        .await?
-    return Ok(account.balance - 40.0)
-}
-
-async fn safe_debit(db: DbConn) -> Result<Float> {
-    return db.transaction(safe_debit_tx).await
+        let _ = Account
+            .where(fn(a) => a.id == account_id)
+            .update(tx, { "balance": account.balance - amount })
+            .await?
+        return Ok(account.balance - amount)
+    }).await
 }
 
 // --- Patrón 3: insert padre + N hijos en 1 tx -------------------------
 //
-// Crear un registro "padre" + N "hijos" que deben quedar consistentes.
-// Si CUALQUIER insert falla, el padre tampoco persiste.
-async fn batch_create_tx(tx: DbConn) -> Result<Int> {
-    let balances = [100.0, 200.0, 50.0]
-    let count = 0
-    for bal in balances {
-        let _ = Account.insert(tx, Account {
-            id: 0,
-            owner: "alice",
-            balance: bal,
-        }).await?
-        count = count + 1
-    }
-    return Ok(count)
-}
-
-async fn batch_create(db: DbConn) -> Result<Int> {
-    return db.transaction(batch_create_tx).await
+// Crear N registros que deben quedar consistentes. Si CUALQUIER insert
+// falla, ninguno persiste. `owner` y `balances` se capturan del outer.
+async fn batch_create(db: DbConn, owner: Str, balances: List<Float>) -> Result<Int> {
+    return db.transaction(async fn(tx) -> Result<Int> {
+        let count = 0
+        for bal in balances {
+            let _ = Account.insert(tx, Account {
+                id: 0,
+                owner: owner,
+                balance: bal,
+            }).await?
+            count = count + 1
+        }
+        return Ok(count)
+    }).await
 }
 
 // --- main: smoke contra Postgres real ---------------------------------
-//
-// Setup esperado: DATABASE_URL apuntando a un Postgres con la tabla
-// `accounts` creada (ver schema inline más abajo). Sin eso, el connect
-// imprime Err y salimos limpio.
 
 let url = env_or("DATABASE_URL", "postgres://fitz:fitz@localhost/fitz?sslmode=disable")
 
 match db.connect(url).await {
     Ok(conn) => {
-        // Schema idempotente al boot (paralelo al cap 26 receta).
+        // Schema idempotente al boot.
         let _ = conn.exec(
             "CREATE TABLE IF NOT EXISTS accounts (id bigserial PRIMARY KEY, owner text, balance double precision DEFAULT 0)",
             [],
         ).await
-        // Limpiar para corridas reproducibles.
         let _ = conn.exec("DELETE FROM accounts", []).await
 
-        // Demo patrón 3: crear 3 cuentas con balance.
-        match batch_create(conn).await {
+        match batch_create(conn, "alice", [100.0, 200.0, 50.0]).await {
             Ok(n) => print("✓ batch_create: {n} cuentas creadas"),
             Err(e) => print("✗ batch_create: {e}"),
         }
 
-        // Demo patrón 1: transfer 30.0 de cuenta 1 → cuenta 2.
-        match transfer(conn).await {
+        match transfer(conn, 1, 2, 30.0).await {
             Ok(_) => print("✓ transfer: 30.0 de #1 → #2"),
             Err(e) => print("✗ transfer: {e}"),
         }
 
-        // Demo patrón 2: safe_debit con saldo OK.
-        match safe_debit(conn).await {
+        match safe_debit(conn, 3, 40.0).await {
             Ok(new_bal) => print("✓ safe_debit: cuenta #3 nuevo balance = {new_bal}"),
-            Err(e) => print("✗ safe_debit: {e}"),
+            Err(e) => print("✗ safe_debit OK: {e}"),
+        }
+
+        match safe_debit(conn, 3, 9999.0).await {
+            Ok(_) => print("✗ safe_debit debería haber fallado"),
+            Err(e) => print("✓ safe_debit Err esperada: {e}"),
         }
 
         let _ = conn.close().await
