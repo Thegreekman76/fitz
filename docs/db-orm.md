@@ -2613,6 +2613,116 @@ fitz db migrate
   COLUMN` quotean nombres (`"users"`, `"email"`) — los names
   con reserved words o caracteres especiales no rompen.
 
+### Down migrations + `fitz db rollback` (v0.10.17)
+
+Las migrations soportan secciones explícitas `-- UP` / `-- DOWN`
+para permitir rollback. Backward-compatible: archivos sin
+marcadores siguen siendo "UP implícito sin DOWN" (no se pueden
+revertir, pero `migrate` los aplica igual).
+
+```sql
+-- Migration: add_email_to_users
+-- Created: 2026-05-29T20:30:00Z
+
+-- UP
+ALTER TABLE "users" ADD COLUMN "email" text NOT NULL DEFAULT '';
+
+-- DOWN
+ALTER TABLE "users" DROP COLUMN "email";
+```
+
+```bash
+fitz db migrate     # aplica el UP
+fitz db rollback    # ejecuta el DOWN del último applied + borra
+                    # registro en _fitz_migrations
+fitz db rollback --count 3   # revierte las últimas 3
+```
+
+**Política**:
+
+- `fitz db new <name>` (v0.10.17) genera stubs con `-- UP` y
+  `-- DOWN` por convención — borrá la sección DOWN solo si la
+  migration es genuinamente irreversible.
+- El marcador es case-insensitive sobre línea propia: `-- UP`,
+  `-- up`, `--UP`, `-- Up` matchean. `-- UP foo` NO (chars
+  extra → SQL comment normal).
+- Sección DOWN vacía / solo whitespace → tratada como `None`
+  (irreversible).
+- Si querés revertir N>1 y una de las target NO tiene `-- DOWN`,
+  el rollback **aborta ANTES de tocar la DB** con mensaje
+  específico citando el filename. Cero estado parcial.
+- Cada `revert_migration` corre adentro de su propia tx (atomic
+  por migration). Rollback de N>1 es N tx individuales — si la
+  k-ésima falla en runtime, las anteriores ya persistieron. Para
+  "todo o nada" sobre N migrations, escribí una migration única
+  con todo el rollback.
+- **No hay limitación de "última N en filename order"** — el
+  rollback usa `applied_at DESC` del tracking, no el orden de
+  los archivos. Si aplicaste migration A, después B, después
+  reaplicaste A (caso raro pero posible vía stamp futuro),
+  rollback revierte A primero.
+
+### Renames seguros via `@renamed_from(...)` (v0.10.17)
+
+El diff detecta renames mediante el decorator transient
+`@renamed_from("nombre_anterior")` sobre el field o el type
+mismo. Sin el decorator, un rename Fitz-side
+`name → full_name` se ve como `DROP COLUMN name + ADD COLUMN
+full_name`, **perdiendo los datos**. El decorator hace que el
+diff emita `ALTER TABLE ... RENAME COLUMN` en su lugar.
+
+```fitz
+// Rename de column: campo Fitz `full_name` viene del column
+// SQL anterior `name`.
+@table("users") type User {
+    @primary id: Int = 0
+    @renamed_from("name") full_name: Str = ""
+}
+
+// Rename de tabla: type Fitz `User` mapea a la tabla SQL
+// `users` que ANTES se llamaba `legacy_users`.
+@table("users") @renamed_from("legacy_users") type User {
+    @primary id: Int = 0
+}
+```
+
+`fitz db diff` emite:
+
+```sql
+ALTER TABLE "legacy_users" RENAME TO "users";
+ALTER TABLE "users" RENAME COLUMN "name" TO "full_name";
+```
+
+**Orden seguro**: los renames van PRIMERO en el output (antes
+de cualquier `ADD/DROP COLUMN` o `ALTER COLUMN`). Esto garantiza
+que las acciones siguientes referencian los nombres post-rename
+(sin esto, un `ALTER COLUMN "full_name" TYPE varchar` sobre
+una tabla recién renombrada fallaría porque el column todavía
+no existe con ese nombre).
+
+**Decorator transient** — borralo después de aplicar la
+migration. El diff lo ignora silenciosamente cuando ya NO hay
+match en current (la migration ya se aplicó):
+
+- Si target tiene `@renamed_from("old")` Y current.columns
+  contiene "old" Y NO contiene "new" → emite RENAME COLUMN.
+- Si target tiene `@renamed_from("old")` pero current.columns
+  ya solo tiene "new" → no-op silencioso (typical caso
+  post-migration aplicada).
+- Si target tiene `@renamed_from("old")` Y current contiene
+  AMBOS "old" y "new" → no-op (sin colisión accidental — el
+  diff típico tratará "new" como existente y "old" como a
+  droppear según el resto del schema).
+
+**Por qué decorator y no subcomando** (`fitz db rename`):
+
+- Subcomando divorcia el rename del cambio en el code: fácil
+  de olvidar uno o el otro.
+- Decorator es declarativo, vive temporal en el code, atómico
+  con el cambio del nombre del field/type.
+- Después de aplicar, el user borra una línea — equivalente a
+  cerrar un PR.
+
 ### Defaults SQL via `@db_default("expr")`
 
 Desde v0.10.16, `@db_default` acepta un arg Str opcional con la
@@ -2659,20 +2769,19 @@ y manteneté consistente.
 
 ### Limitaciones explícitas del MVP
 
-- **No detecta renames** (column ni table): un rename Fitz-side
-  `name` → `full_name` se ve como `DROP COLUMN name + ADD
-  COLUMN full_name`, **perdiendo los datos**. Editá la
-  migration a mano (`ALTER TABLE ... RENAME COLUMN`) cuando el
-  caso lo justifique.
+- **Renames solo via `@renamed_from`** (v0.10.17): si NO ponés
+  el decorator, un rename `name → full_name` se ve como `DROP +
+  ADD` perdiendo datos. El decorator hace el rename seguro;
+  ver sub-sección "Renames seguros" arriba.
 - **`ALTER COLUMN ... TYPE` sin USING**: cambios de tipo
   incompatibles (`text → int`) fallan. Editá la migration para
   agregar `USING (col::int)` o data migration script.
 - **Solo schema `public`**: futuras schemas custom requieren
   refinamiento del introspector.
-- **No down migrations**: las migrations son forward-only.
-  Para revertir, escribí una nueva migration con el cambio
-  inverso. (Igual que Rails sin `down`, Alembic sin
-  `downgrade`.)
+- **Rollback de N>1 NO es atómico** (v0.10.17): cada
+  `revert_migration` corre en su propia tx. Para "todo o nada"
+  sobre N migrations, escribí una migration única con todo el
+  rollback adentro.
 
 ### Por qué Fitz hace esto distinto
 
@@ -2877,14 +2986,15 @@ sección 26.c para el workflow canónico y limitaciones del MVP.
 El resto de los subcomandos generales del CLI también funcionan
 naturalmente con programas que usan el módulo `db` y el ORM.
 
-### `fitz db diff/migrate/status/new` — workflow de migraciones
+### `fitz db diff/migrate/status/new/rollback` — workflow de migraciones
 
 ```bash
 export DATABASE_URL="postgres://fitz:fitz@localhost/myapp"
-fitz db new add_email_to_users          # crea migration vacía
+fitz db new add_email_to_users          # crea migration vacía con UP/DOWN
 fitz db diff > migrations/<file>.sql    # genera ALTER TABLE auto
 fitz db migrate                          # aplica + tracking idempotente
 fitz db status                           # lista applied/pending
+fitz db rollback                         # revierte el último (--count N)
 ```
 
 Detalle completo en sección 26.c.

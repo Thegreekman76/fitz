@@ -395,6 +395,13 @@ pub struct TableMetadata {
     /// son virtuales (no aparecen en SELECT/INSERT, se navegan
     /// con métodos en runtime — 10.4.b).
     pub relations: std::collections::HashMap<String, RelationMetadata>,
+    /// v0.10.17 (10.6.b.2) — Si está, `fitz db diff` emite
+    /// `ALTER TABLE "old" RENAME TO "new"` en vez de DROP + CREATE.
+    /// Decorator transient: el user lo borra después de aplicar la
+    /// migration. Sintaxis: `@table("new", renamed_from="old")` o
+    /// `@renamed_from("old") @table("new") type T { ... }`
+    /// (TBD parsing — solo kwarg en `@table` por simplicidad MVP).
+    pub renamed_from: Option<String>,
 }
 
 /// Fase 10.3.a — Configuración por columna del ORM. Se popula
@@ -443,6 +450,12 @@ pub struct ColumnMetadata {
     /// Postgres devuelve `now()` lowercase desde
     /// `information_schema.columns.column_default`.
     pub db_default_sql: Option<String>,
+    /// v0.10.17 (10.6.b.2) — Si está, `fitz db diff` emite
+    /// `ALTER TABLE ... RENAME COLUMN "old" TO "new"` en vez de
+    /// DROP COLUMN + ADD COLUMN. Decorator transient: el user
+    /// lo borra después de aplicar la migration.
+    /// Sintaxis: `@renamed_from("old") field_name: Type = default`.
+    pub renamed_from: Option<String>,
 }
 
 /// Fase 10.4.a — Tipo de relación declarada sobre un field.
@@ -1416,8 +1429,57 @@ pub fn process_table_decorators(
     // ¿Hay @table sobre el type?
     let mut sql_name: Option<String> = None;
     let mut has_table = false;
+    let mut table_renamed_from: Option<String> = None;
     for d in type_decorators {
         match d.name.as_str() {
+            "renamed_from" => {
+                // v0.10.17 — Decorator transient para renames seguros.
+                // `@renamed_from("old_table")` le dice al diff:
+                // emite `ALTER TABLE "old" RENAME TO "new"` en vez
+                // de DROP + CREATE.
+                if !d.kwargs.is_empty() {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        "`@renamed_from` no acepta kwargs".to_string(),
+                    ));
+                    continue;
+                }
+                if d.args.len() != 1 {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        format!(
+                            "`@renamed_from(\"old\")` espera exactamente 1 arg Str, recibió {}",
+                            d.args.len()
+                        ),
+                    ));
+                    continue;
+                }
+                match &d.args[0] {
+                    Expr::Str(s, _) => {
+                        let trimmed = s.trim();
+                        if trimmed.is_empty() {
+                            errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@renamed_from(\"...\")` no acepta string vacío".to_string(),
+                            ));
+                        } else {
+                            table_renamed_from = Some(trimmed.to_string());
+                        }
+                    }
+                    _ => errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        "`@renamed_from(...)` espera un Str literal con el nombre SQL anterior de la tabla".to_string(),
+                    )),
+                }
+            }
             "table" => {
                 if has_table {
                     errors.push(FitzError::new(
@@ -1475,7 +1537,7 @@ pub fn process_table_decorators(
                     type_span.line,
                     type_span.column,
                     format!(
-                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`."
+                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`, `@renamed_from`."
                     ),
                 ));
             }
@@ -1684,6 +1746,56 @@ pub fn process_table_decorators(
                         ));
                     }
                 }
+                "renamed_from" => {
+                    // v0.10.17 (10.6.b.2) — Decorator transient para
+                    // rename seguro del column SIN perder datos.
+                    // `@renamed_from("old_name") full_name: Str = ""`
+                    // hace que `fitz db diff` emita `ALTER TABLE
+                    // ... RENAME COLUMN "old_name" TO "full_name"`
+                    // en vez de DROP + ADD.
+                    has_meta = true;
+                    if !d.kwargs.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@renamed_from` no acepta kwargs".to_string(),
+                        ));
+                    }
+                    if d.args.len() != 1 {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            format!(
+                                "`@renamed_from(\"old\")` espera exactamente 1 arg Str, recibió {}",
+                                d.args.len()
+                            ),
+                        ));
+                    } else {
+                        match &d.args[0] {
+                            Expr::Str(s, _) => {
+                                let trimmed = s.trim();
+                                if trimmed.is_empty() {
+                                    errors.push(FitzError::new(
+                                        ErrorKind::TypeError,
+                                        type_span.line,
+                                        type_span.column,
+                                        "`@renamed_from(\"...\")` no acepta string vacío".to_string(),
+                                    ));
+                                } else {
+                                    col_meta.renamed_from = Some(trimmed.to_string());
+                                }
+                            }
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@renamed_from(...)` espera un Str literal con el nombre SQL anterior del column".to_string(),
+                            )),
+                        }
+                    }
+                }
                 "belongs_to" | "has_one" | "has_many" => {
                     let kind = match d.name.as_str() {
                         "belongs_to" => RelationKind::BelongsTo,
@@ -1720,7 +1832,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@db_default`, `@hidden`, `@belongs_to`, `@has_one`, `@has_many`."
+                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@db_default`, `@hidden`, `@belongs_to`, `@has_one`, `@has_many`, `@renamed_from`."
                         ),
                     ));
                 }
@@ -1779,6 +1891,7 @@ pub fn process_table_decorators(
         primary_field,
         columns,
         relations,
+        renamed_from: table_renamed_from,
     }))
 }
 

@@ -11544,6 +11544,9 @@ fitz db migrate
 
 # 5. Estado en cualquier momento.
 fitz db status
+
+# 6. Revertir el último (v0.10.17 — requiere sección `-- DOWN` en el .sql).
+fitz db rollback
 ```
 
 `fitz db diff` introspecciona el schema real de Postgres
@@ -11562,12 +11565,18 @@ sin default específico). El diff normaliza
 falsos positivos cuando Postgres reporta el default en su formato
 canónico.
 
-**Limitaciones del MVP**: no detecta renames (un rename Fitz-side
-`name` → `full_name` se ve como `DROP COLUMN + ADD COLUMN`,
-perdiendo datos — editá la migration a mano cuando aplique);
-forward-only (sin `down` migrations; para revertir, nueva
-migration con cambio inverso). Detalle completo + workflow
-avanzado en `docs/db-orm.md` sección 26.c.
+**Rollback + renames seguros** (v0.10.17): las migrations soportan
+secciones `-- UP` / `-- DOWN`; `fitz db rollback [--count N]`
+revierte las últimas N aplicadas ejecutando su DOWN adentro de tx.
+Renames Fitz-side sin perder datos se marcan con el decorator
+transient `@renamed_from("old_name")` sobre el field o el type;
+el diff emite `ALTER TABLE ... RENAME COLUMN/TABLE` en vez de
+`DROP + ADD`.
+
+**Limitaciones del MVP**: `ALTER COLUMN ... TYPE` sin USING (cambios
+de tipo incompatibles fallan — editá la migration para agregar
+`USING (col::int)`); solo schema `public`. Detalle completo +
+workflow avanzado en `docs/db-orm.md` sección 26.c.
 
 **Cero deps externas**: ni Alembic ni Flyway ni Liquibase ni
 TypeORM CLI. Todo vive en el binario `fitz`. La fuente de verdad

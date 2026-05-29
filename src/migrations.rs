@@ -40,6 +40,12 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
+    /// v0.10.17 (10.6.b.2) — Si está, hint al diff de que la
+    /// tabla SE LLAMABA `renamed_from` antes; emite `ALTER TABLE
+    /// "old" RENAME TO "new"` en vez de `DROP + CREATE`. Solo
+    /// poblado en el snapshot "target" (desde `schema_from_program`);
+    /// `introspect_schema` lo deja en `None`.
+    pub renamed_from: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -52,6 +58,11 @@ pub struct Column {
     /// si el column no tiene default.
     pub default: Option<String>,
     pub is_primary: bool,
+    /// v0.10.17 (10.6.b.2) — Si está, hint al diff de que el
+    /// column SE LLAMABA `renamed_from` antes; emite `ALTER
+    /// TABLE ... RENAME COLUMN "old" TO "new"` en vez de
+    /// `DROP + ADD`. Solo poblado en target.
+    pub renamed_from: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,6 +109,7 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
             columns,
             indexes,
             foreign_keys,
+            renamed_from: None,
         });
     }
     // Orden alfabético para snapshot determinístico (facilita
@@ -150,6 +162,7 @@ async fn introspect_columns(
             nullable: is_nullable.eq_ignore_ascii_case("YES"),
             default,
             is_primary: false, // se completa más abajo
+            renamed_from: None,
         });
     }
     // PK: cruce con pg_index para marcar `is_primary`.
@@ -382,6 +395,7 @@ fn build_table_from_type(
             nullable,
             default,
             is_primary,
+            renamed_from: col_meta.and_then(|c| c.renamed_from.clone()),
         });
 
         // Indexes per-field.
@@ -459,6 +473,7 @@ fn build_table_from_type(
         columns,
         indexes,
         foreign_keys,
+        renamed_from: meta.renamed_from.clone(),
     })
 }
 
@@ -585,6 +600,24 @@ pub enum Change {
         table: String,
         fk_name: String,
     },
+    /// v0.10.17 (10.6.b.2) — Rename de tabla preservando datos.
+    /// Emitido cuando el target Table tiene `renamed_from = Some(old)`
+    /// y existe en current con ese nombre. Va PRIMERO en el output
+    /// (antes de cualquier ALTER de columns) para que las acciones
+    /// siguientes operen sobre el nombre nuevo.
+    RenameTable {
+        old_name: String,
+        new_name: String,
+    },
+    /// v0.10.17 (10.6.b.2) — Rename de column preservando datos.
+    /// Emitido cuando un target Column tiene `renamed_from = Some(old)`
+    /// y existe en current.columns con ese nombre. Va inmediatamente
+    /// después de RenameTable y antes de ADD/DROP COLUMN.
+    RenameColumn {
+        table: String,
+        old_name: String,
+        new_name: String,
+    },
 }
 
 /// Compara `current` (snapshot via [`introspect_schema`]) con
@@ -601,16 +634,27 @@ pub enum Change {
 ///   que ALTER, DROP FK antes que DROP TABLE/COLUMN).
 ///
 /// Limitaciones MVP:
-/// - **No detecta renames** (column ni table). Un rename de
-///   `name` → `full_name` se ve como `DROP COLUMN name` + `ADD
-///   COLUMN full_name`, perdiendo los datos. El user debe editar
-///   el SQL manualmente o usar `fitz db new` + migration custom.
+/// - **Renames detectados solo via `@renamed_from(...)`** (v0.10.17).
+///   Sin el decorator, un rename de `name` → `full_name` se ve como
+///   `DROP COLUMN name` + `ADD COLUMN full_name`, perdiendo los datos.
+///   El user marca explícitamente el rename con `@renamed_from("old")`
+///   sobre el field/type para que el diff emita `RENAME COLUMN`/
+///   `RENAME TABLE` preservando los datos.
 /// - **`AlterColumnType` directo sin USING** — si los datos NO
 ///   convierten al nuevo tipo, Postgres falla. El user debe
 ///   editar la migration para agregar `USING (col::new_type)` o
 ///   data migration script.
 pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     let mut changes = Vec::new();
+
+    // --- 0. RENAMES (v0.10.17, 10.6.b.2). Pre-procesa los hints
+    // `renamed_from` del target: emite RenameTable + RenameColumn
+    // PRIMERO, y construye un `current_renamed` con los nombres ya
+    // actualizados para que el resto del diff (CREATE/DROP/ALTER)
+    // compare contra el estado post-rename — sin esto, una table
+    // renombrada se vería como DROP+CREATE perdiendo datos.
+    let current = apply_renames_from_target(current, target, &mut changes);
+    let current = &current;
 
     let current_table_names: std::collections::HashSet<&str> =
         current.tables.iter().map(|t| t.name.as_str()).collect();
@@ -715,6 +759,110 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     }
 
     changes
+}
+
+/// v0.10.17 (10.6.b.2) — Detecta los hints `renamed_from` del
+/// `target` schema y:
+/// 1. Emite los `Change::RenameTable` / `Change::RenameColumn`
+///    al frente de `changes` (orden: tables primero, después
+///    columns).
+/// 2. Devuelve una versión renombrada de `current` para que el
+///    resto del diff compare por nombres post-rename.
+///
+/// **Política**:
+/// - Rename activo solo si: target tiene `renamed_from = Some(old)`
+///   Y current.tables contiene una tabla con ese `old` name Y
+///   current.tables NO contiene una tabla con el nombre target
+///   (evita colisión accidental).
+/// - Renames de column adentro de una tabla renombrada usan el
+///   nombre target (post-rename) en el `RenameColumn.table`.
+/// - Hints sin match en `current` (ej: usuario dejó el decorator
+///   tras aplicar la migration) se ignoran silenciosamente — son
+///   no-op, no error. El user puede limpiarlos cuando quiera.
+fn apply_renames_from_target(
+    current: &Schema,
+    target: &Schema,
+    changes: &mut Vec<Change>,
+) -> Schema {
+    let mut renamed_tables: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    // 1. Detectar renames de tabla.
+    let current_table_names: std::collections::HashSet<&str> =
+        current.tables.iter().map(|t| t.name.as_str()).collect();
+    let mut table_renames: Vec<(String, String)> = Vec::new();
+    for t in &target.tables {
+        if let Some(old) = &t.renamed_from {
+            // Activa rename si:
+            // - old existe en current
+            // - new NO existe en current (sin colisión)
+            // - old != new (rename real, no no-op)
+            if old != &t.name
+                && current_table_names.contains(old.as_str())
+                && !current_table_names.contains(t.name.as_str())
+            {
+                table_renames.push((old.clone(), t.name.clone()));
+            }
+        }
+    }
+    table_renames.sort_by(|a, b| a.0.cmp(&b.0));
+    for (old, new) in &table_renames {
+        changes.push(Change::RenameTable {
+            old_name: old.clone(),
+            new_name: new.clone(),
+        });
+        renamed_tables.insert(old.clone(), new.clone());
+    }
+
+    // 2. Construir current renombrado (a nivel tabla).
+    let mut new_tables: Vec<Table> = current
+        .tables
+        .iter()
+        .map(|t| {
+            let mut t = t.clone();
+            if let Some(new_name) = renamed_tables.get(&t.name) {
+                t.name = new_name.clone();
+            }
+            t
+        })
+        .collect();
+
+    // 3. Detectar renames de column adentro de tablas que existen
+    // en ambos (post-rename). Por cada target column con
+    // `renamed_from`, si existe en current el column "old" y NO
+    // existe el "new", emitir RenameColumn.
+    for target_t in &target.tables {
+        let Some(current_t) = new_tables.iter_mut().find(|t| t.name == target_t.name) else {
+            continue;
+        };
+        let current_col_names: std::collections::HashSet<String> =
+            current_t.columns.iter().map(|c| c.name.clone()).collect();
+        let mut col_renames: Vec<(String, String)> = Vec::new();
+        for c in &target_t.columns {
+            if let Some(old) = &c.renamed_from {
+                if old != &c.name
+                    && current_col_names.contains(old.as_str())
+                    && !current_col_names.contains(c.name.as_str())
+                {
+                    col_renames.push((old.clone(), c.name.clone()));
+                }
+            }
+        }
+        col_renames.sort_by(|a, b| a.0.cmp(&b.0));
+        for (old, new) in &col_renames {
+            changes.push(Change::RenameColumn {
+                table: target_t.name.clone(),
+                old_name: old.clone(),
+                new_name: new.clone(),
+            });
+            // Renombrar in-place en current_t para que el resto
+            // del diff vea el nombre nuevo.
+            if let Some(col) = current_t.columns.iter_mut().find(|c| &c.name == old) {
+                col.name = new.clone();
+            }
+        }
+    }
+
+    Schema { tables: new_tables }
 }
 
 fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
@@ -1017,6 +1165,25 @@ fn change_to_sql(change: &Change) -> String {
                 quote_ident(fk_name),
             )
         }
+        Change::RenameTable { old_name, new_name } => {
+            format!(
+                "ALTER TABLE {} RENAME TO {};",
+                quote_ident(old_name),
+                quote_ident(new_name),
+            )
+        }
+        Change::RenameColumn {
+            table,
+            old_name,
+            new_name,
+        } => {
+            format!(
+                "ALTER TABLE {} RENAME COLUMN {} TO {};",
+                quote_ident(table),
+                quote_ident(old_name),
+                quote_ident(new_name),
+            )
+        }
     }
 }
 
@@ -1077,11 +1244,20 @@ const TRACKING_TABLE: &str = "_fitz_migrations";
 /// `version` es el prefijo del filename (típicamente timestamp
 /// `YYYYMMDDHHMMSS_descripcion.sql`). Postgres ordena por
 /// `version` lexicográfico = orden cronológico real.
+///
+/// v0.10.17 (10.6.b.1) — el SQL se split en `up_sql` y `down_sql`
+/// vía markers `-- UP` / `-- DOWN`. Backward-compat: archivos sin
+/// marcadores → todo es UP, `down_sql = None` (no soporta rollback).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationFile {
     pub version: String,
     pub filename: String,
-    pub sql: String,
+    /// SQL a ejecutar en `migrate` (forward). Siempre presente.
+    pub up_sql: String,
+    /// SQL a ejecutar en `rollback` (back). `None` si la migration
+    /// no declaró sección `-- DOWN`. `rollback` aborta con mensaje
+    /// claro si falta.
+    pub down_sql: Option<String>,
 }
 
 /// Estado de una migration: aplicada en la DB, o pendiente.
@@ -1153,16 +1329,79 @@ pub fn read_migrations_dir(dir: &std::path::Path) -> Result<Vec<MigrationFile>, 
                     .unwrap_or(&filename)
                     .to_string()
             });
-        let sql = std::fs::read_to_string(&path)
+        let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("leyendo `{}`: {e}", path.display()))?;
+        let (up_sql, down_sql) = split_up_down(&raw);
         migrations.push(MigrationFile {
             version,
             filename,
-            sql,
+            up_sql,
+            down_sql,
         });
     }
     migrations.sort_by(|a, b| a.version.cmp(&b.version));
     Ok(migrations)
+}
+
+/// v0.10.17 (10.6.b.1) — Split del contenido `.sql` en secciones
+/// `-- UP` y `-- DOWN`. Reglas:
+///
+/// - Si NO hay marcador `-- UP` ni `-- DOWN` → todo el contenido
+///   es UP, `down_sql = None`. Backward-compat con migrations
+///   v0.10.16 sin secciones explícitas.
+/// - Si hay `-- UP` (con o sin `-- DOWN`) → UP es el rango entre
+///   `-- UP` y `-- DOWN` (o EOF si no hay DOWN).
+/// - Si hay `-- DOWN` sin `-- UP` previo → todo lo previo es UP,
+///   lo siguiente es DOWN. (Caso: user pone el marker DOWN
+///   sin marker UP explícito.)
+/// - Marcador case-insensitive en una línea propia (whitespace
+///   permitido antes y después, sin chars adicionales adentro).
+///   `-- up`, `-- Up`, `--  UP` matchean; `-- UP foo` no.
+/// - Si `down_sql` queda como string vacío/whitespace → `None`
+///   (sección DOWN declarada pero vacía equivale a no declararla).
+fn split_up_down(raw: &str) -> (String, Option<String>) {
+    let mut up_lines: Vec<&str> = Vec::new();
+    let mut down_lines: Vec<&str> = Vec::new();
+    // Modos: 0 = pre-marker (cuenta como UP), 1 = en UP, 2 = en DOWN.
+    let mut mode: u8 = 0;
+    let mut saw_up_marker = false;
+    let mut saw_down_marker = false;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        let lower = trimmed.to_ascii_lowercase();
+        let is_up_marker = lower == "-- up" || lower == "--up";
+        let is_down_marker = lower == "-- down" || lower == "--down";
+        if is_up_marker {
+            mode = 1;
+            saw_up_marker = true;
+            continue;
+        }
+        if is_down_marker {
+            mode = 2;
+            saw_down_marker = true;
+            continue;
+        }
+        match mode {
+            0 | 1 => up_lines.push(line),
+            2 => down_lines.push(line),
+            _ => unreachable!(),
+        }
+    }
+    let up_sql = up_lines.join("\n");
+    let down_sql = if saw_down_marker {
+        let joined = down_lines.join("\n");
+        if joined.trim().is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    } else {
+        None
+    };
+    // Backward-compat sanity: si NO había marker UP ni DOWN,
+    // el up_sql es el contenido entero (modo 0 todo el archivo).
+    let _ = saw_up_marker;
+    (up_sql, down_sql)
 }
 
 /// Aplica una migration adentro de una transaction. Si el SQL
@@ -1178,7 +1417,7 @@ pub async fn apply_migration(
 ) -> DbResult<()> {
     ensure_tracking_table(conn).await?;
     let version = migration.version.clone();
-    let sql = migration.sql.clone();
+    let sql = migration.up_sql.clone();
     let tracking_table = TRACKING_TABLE.to_string();
     conn.transaction(move |tx| {
         let version = version.clone();
@@ -1201,6 +1440,133 @@ pub async fn apply_migration(
         }
     })
     .await
+}
+
+/// v0.10.17 (10.6.b.1) — Revierte una migration: ejecuta su
+/// sección `-- DOWN` adentro de tx + borra el registro de
+/// `_fitz_migrations`. Atomic: o todo persiste o nada.
+///
+/// **Errores**:
+/// - Si `down_sql` es `None` (migration sin `-- DOWN`): retorna
+///   `DbError::Protocol` con mensaje claro citando el filename.
+///   El caller debe abortar el rollback entero — sin DOWN no hay
+///   forma segura de revertir.
+/// - Si el SQL del DOWN falla: la tx se revierte (no se borra el
+///   registro de tracking) — el rollback parcial NO se persiste.
+pub async fn revert_migration(
+    conn: &std::sync::Arc<DbConnHandle>,
+    migration: &MigrationFile,
+) -> DbResult<()> {
+    let down_sql = migration.down_sql.as_ref().ok_or_else(|| {
+        DbError::Protocol(format!(
+            "migration `{}` no tiene sección `-- DOWN` — no se puede revertir. \
+             Agregá la sección `-- DOWN` con el SQL inverso (`DROP COLUMN`, \
+             etc.) y volvé a correr `fitz db rollback`.",
+            migration.filename
+        ))
+    })?;
+    ensure_tracking_table(conn).await?;
+    let version = migration.version.clone();
+    let sql = down_sql.clone();
+    let tracking_table = TRACKING_TABLE.to_string();
+    conn.transaction(move |tx| {
+        let version = version.clone();
+        let sql = sql.clone();
+        let tracking_table = tracking_table.clone();
+        async move {
+            tx.query(&sql, &[]).await?;
+            let delete_sql = format!(
+                "DELETE FROM {} WHERE version = $1",
+                quote_ident(&tracking_table),
+            );
+            tx.exec(&delete_sql, &[PgValue::Text(version)]).await?;
+            Ok(())
+        }
+    })
+    .await
+}
+
+/// v0.10.17 (10.6.b.1) — Rollback de las últimas `n` migrations
+/// aplicadas. Lee `_fitz_migrations` ordenado por `applied_at DESC`,
+/// cruza con los archivos del dir, y aplica `revert_migration` en
+/// ese orden (más reciente primero).
+///
+/// Retorna las versiones revertidas (vacío si no había nada
+/// aplicado o `n=0`).
+///
+/// **Errores fatales** (abortan ANTES de tocar la DB):
+/// - Alguna migration applied NO tiene file en el dir (archivo
+///   fue borrado tras applicar): no podemos revertir sin el
+///   `-- DOWN`. Error específico.
+/// - Alguna migration target del rollback NO tiene `-- DOWN`:
+///   error específico citando filename.
+///
+/// **Comportamiento incremental**: si la revert N falla
+/// runtime, las anteriores YA persistieron (cada `revert_migration`
+/// es atómico individual). Para rollback "todo o nada" sobre N
+/// migrations habría que envolver en outer transaction — deuda
+/// menor (raro tener N>1 en rollback típico).
+pub async fn rollback_n(
+    conn: &std::sync::Arc<DbConnHandle>,
+    migrations: &[MigrationFile],
+    n: usize,
+) -> DbResult<Vec<String>> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    ensure_tracking_table(conn).await?;
+    // Versiones aplicadas, ordenadas por applied_at DESC (más
+    // reciente primero). Lectura directa de _fitz_migrations.
+    let applied_desc = applied_versions_desc(conn).await?;
+    if applied_desc.is_empty() {
+        return Ok(Vec::new());
+    }
+    let target_versions: Vec<&String> = applied_desc.iter().take(n).collect();
+    // Buscar cada version en el dir de migrations.
+    let by_version: std::collections::HashMap<&str, &MigrationFile> =
+        migrations.iter().map(|m| (m.version.as_str(), m)).collect();
+    // Pre-flight: validar que TODAS las versions target tienen
+    // file + DOWN, ANTES de empezar a revertir. Falla fast.
+    for v in &target_versions {
+        let m = by_version.get(v.as_str()).ok_or_else(|| {
+            DbError::Protocol(format!(
+                "rollback: la version `{v}` está aplicada en la DB pero \
+                 NO hay archivo en el dir de migrations. Restaurá el \
+                 archivo o stampealá manualmente con SQL."
+            ))
+        })?;
+        if m.down_sql.is_none() {
+            return Err(DbError::Protocol(format!(
+                "rollback: migration `{}` no tiene sección `-- DOWN` — \
+                 no se puede revertir. Editá el archivo agregando `-- DOWN` \
+                 con el SQL inverso y reintentá.",
+                m.filename
+            )));
+        }
+    }
+    let mut reverted = Vec::with_capacity(target_versions.len());
+    for v in target_versions {
+        let m = by_version.get(v.as_str()).expect("pre-flight validó");
+        revert_migration(conn, m).await?;
+        reverted.push(v.clone());
+    }
+    Ok(reverted)
+}
+
+/// Versiones aplicadas ordenadas por `applied_at DESC` (más
+/// reciente primero). Usado por `rollback_n` para tomar las
+/// últimas N revertibles.
+async fn applied_versions_desc(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Vec<String>> {
+    ensure_tracking_table(conn).await?;
+    let sql = format!(
+        "SELECT version FROM {} ORDER BY applied_at DESC, version DESC",
+        quote_ident(TRACKING_TABLE),
+    );
+    let qr = conn.query(&sql, &[]).await?;
+    qr.rows
+        .iter()
+        .map(|row| extract_string(row, "version"))
+        .collect()
 }
 
 /// Aplica TODAS las migrations pendientes en orden. Skipea las
@@ -1362,6 +1728,7 @@ mod tests {
             nullable,
             default: None,
             is_primary,
+            renamed_from: None,
         }
     }
 
@@ -1374,6 +1741,7 @@ mod tests {
             ],
             indexes: vec![],
             foreign_keys: vec![],
+            renamed_from: None,
         }
     }
 
@@ -1625,6 +1993,7 @@ mod tests {
                     columns: vec![col("id", "bigint", false, true)],
                     indexes: vec![],
                     foreign_keys: vec![],
+                    renamed_from: None,
                 },
             ],
         };
@@ -1641,6 +2010,7 @@ mod tests {
                 columns: vec![col("id", "bigint", false, true)],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let target = Schema {
@@ -1832,6 +2202,7 @@ type Plain {
             nullable: true,
             default: default.map(|s| s.to_string()),
             is_primary: false,
+            renamed_from: None,
         }
     }
 
@@ -1845,6 +2216,7 @@ type Plain {
             ],
             indexes: vec![],
             foreign_keys: vec![],
+            renamed_from: None,
         };
         let sql = changes_to_sql(&[Change::CreateTable(t)]);
         assert!(
@@ -1900,6 +2272,7 @@ type Plain {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let target = Schema {
@@ -1911,6 +2284,7 @@ type Plain {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -1939,6 +2313,7 @@ type Plain {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let target = Schema {
@@ -1950,6 +2325,7 @@ type Plain {
                 ],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -1982,6 +2358,7 @@ type Plain {
                 )],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let target = Schema {
@@ -1994,6 +2371,7 @@ type Plain {
                 )],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2013,6 +2391,7 @@ type Plain {
                 columns: vec![col_with_default("scope", "text", Some("'public'::text"))],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let target = Schema {
@@ -2021,6 +2400,7 @@ type Plain {
                 columns: vec![col_with_default("scope", "text", Some("'public'"))],
                 indexes: vec![],
                 foreign_keys: vec![],
+                renamed_from: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2103,5 +2483,316 @@ type Plain {
             changes.is_empty(),
             "esperaba diff vacío post-round-trip, got: {changes:?}"
         );
+    }
+
+    // ============================================================
+    // v0.10.17 (10.6.b.1) — UP / DOWN parsing
+    // ============================================================
+
+    #[test]
+    fn split_up_down_sin_marcadores_es_up_completo() {
+        let (up, down) = split_up_down("CREATE TABLE x (id int);\n");
+        assert_eq!(up.trim(), "CREATE TABLE x (id int);");
+        assert!(down.is_none());
+    }
+
+    #[test]
+    fn split_up_down_con_ambos_marcadores() {
+        let raw = "-- UP\nCREATE TABLE x (id int);\n-- DOWN\nDROP TABLE x;\n";
+        let (up, down) = split_up_down(raw);
+        assert!(up.contains("CREATE TABLE x"));
+        assert!(!up.contains("DROP TABLE"));
+        let down = down.expect("esperaba DOWN");
+        assert!(down.contains("DROP TABLE x"));
+        assert!(!down.contains("CREATE TABLE"));
+    }
+
+    #[test]
+    fn split_up_down_marcador_case_insensitive() {
+        let raw = "-- up\nA;\n-- Down\nB;\n";
+        let (up, down) = split_up_down(raw);
+        assert!(up.contains("A;"));
+        assert_eq!(down.as_deref().map(str::trim), Some("B;"));
+    }
+
+    #[test]
+    fn split_up_down_seccion_down_vacia_es_none() {
+        let raw = "-- UP\nA;\n-- DOWN\n   \n  \n";
+        let (up, down) = split_up_down(raw);
+        assert!(up.contains("A;"));
+        assert!(
+            down.is_none(),
+            "DOWN whitespace-only debería normalizarse a None"
+        );
+    }
+
+    #[test]
+    fn split_up_down_sin_up_marker_pero_con_down() {
+        let raw = "CREATE TABLE x (id int);\n-- DOWN\nDROP TABLE x;\n";
+        let (up, down) = split_up_down(raw);
+        assert!(up.contains("CREATE TABLE x"));
+        assert_eq!(down.as_deref().map(str::trim), Some("DROP TABLE x;"));
+    }
+
+    #[test]
+    fn split_up_down_marker_con_chars_extra_no_es_marker() {
+        // `-- UP foo` NO es marcador (chars adicionales)
+        let raw = "-- UP foo\nA;\n";
+        let (up, down) = split_up_down(raw);
+        // Todo es UP (el "-- UP foo" es comment SQL inocuo)
+        assert!(up.contains("-- UP foo"));
+        assert!(up.contains("A;"));
+        assert!(down.is_none());
+    }
+
+    #[test]
+    fn read_migrations_dir_preserva_up_down() {
+        let tmp = std::env::temp_dir().join(format!("fitz_test_updown_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let file = tmp.join("20260530120000_test.sql");
+        std::fs::write(
+            &file,
+            "-- UP\nCREATE TABLE foo (id int);\n-- DOWN\nDROP TABLE foo;\n",
+        )
+        .unwrap();
+        let migrations = read_migrations_dir(&tmp).unwrap();
+        assert_eq!(migrations.len(), 1);
+        let m = &migrations[0];
+        assert!(m.up_sql.contains("CREATE TABLE foo"));
+        assert!(m.down_sql.as_deref().unwrap().contains("DROP TABLE foo"));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ============================================================
+    // v0.10.17 (10.6.b.2) — Renames via @renamed_from
+    // ============================================================
+
+    #[test]
+    fn diff_emits_rename_table_when_renamed_from_set() {
+        let current = Schema {
+            tables: vec![Table {
+                name: "old_users".to_string(),
+                columns: vec![col("id", "bigint", false, true)],
+                indexes: vec![],
+                foreign_keys: vec![],
+                renamed_from: None,
+            }],
+        };
+        let target = Schema {
+            tables: vec![Table {
+                name: "users".to_string(),
+                columns: vec![col("id", "bigint", false, true)],
+                indexes: vec![],
+                foreign_keys: vec![],
+                renamed_from: Some("old_users".to_string()),
+            }],
+        };
+        let changes = diff_schemas(&current, &target);
+        // Debe emitir solo RenameTable; el resto del diff es no-op.
+        let renames: Vec<_> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::RenameTable { old_name, new_name } => {
+                    Some((old_name.as_str(), new_name.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(renames, vec![("old_users", "users")]);
+        // No debería emitir CREATE TABLE ni DROP TABLE.
+        for c in &changes {
+            assert!(
+                !matches!(c, Change::CreateTable(_) | Change::DropTable(_)),
+                "rename no debería emitir CREATE/DROP TABLE; got: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn diff_emits_rename_column_when_renamed_from_set() {
+        let mut current_users = table_users();
+        // Reemplazar `email` por `old_email` en current.
+        current_users.columns = vec![
+            col("id", "bigint", false, true),
+            col("old_email", "text", false, false),
+        ];
+        let mut target_users = table_users();
+        target_users.columns = vec![
+            col("id", "bigint", false, true),
+            Column {
+                name: "email".to_string(),
+                sql_type: "text".to_string(),
+                nullable: false,
+                default: None,
+                is_primary: false,
+                renamed_from: Some("old_email".to_string()),
+            },
+        ];
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        let renames: Vec<_> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::RenameColumn {
+                    table,
+                    old_name,
+                    new_name,
+                } => Some((table.as_str(), old_name.as_str(), new_name.as_str())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(renames, vec![("users", "old_email", "email")]);
+        // No debería emitir ADD/DROP COLUMN.
+        for c in &changes {
+            assert!(
+                !matches!(c, Change::AddColumn { .. } | Change::DropColumn { .. }),
+                "rename no debería emitir ADD/DROP COLUMN; got: {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rename_table_sql_emite_alter_rename_to() {
+        let change = Change::RenameTable {
+            old_name: "old_users".to_string(),
+            new_name: "users".to_string(),
+        };
+        let sql = changes_to_sql(&[change]);
+        assert!(
+            sql.contains("ALTER TABLE \"old_users\" RENAME TO \"users\""),
+            "got: {sql}"
+        );
+    }
+
+    #[test]
+    fn rename_column_sql_emite_alter_rename_column() {
+        let change = Change::RenameColumn {
+            table: "users".to_string(),
+            old_name: "name".to_string(),
+            new_name: "full_name".to_string(),
+        };
+        let sql = changes_to_sql(&[change]);
+        assert!(
+            sql.contains("ALTER TABLE \"users\" RENAME COLUMN \"name\" TO \"full_name\""),
+            "got: {sql}"
+        );
+    }
+
+    #[test]
+    fn renamed_from_sin_old_en_current_es_noop_silencioso() {
+        // User dejó el decorator @renamed_from("old") pero ya
+        // aplicó la migration y la old_name ya no existe en current
+        // (current ya está renombrada). El diff NO debe emitir
+        // RenameTable spurio.
+        let current = Schema {
+            tables: vec![Table {
+                name: "users".to_string(),
+                columns: vec![col("id", "bigint", false, true)],
+                indexes: vec![],
+                foreign_keys: vec![],
+                renamed_from: None,
+            }],
+        };
+        let target = Schema {
+            tables: vec![Table {
+                name: "users".to_string(),
+                columns: vec![col("id", "bigint", false, true)],
+                indexes: vec![],
+                foreign_keys: vec![],
+                renamed_from: Some("old_users".to_string()),
+            }],
+        };
+        let changes = diff_schemas(&current, &target);
+        assert!(
+            changes.is_empty(),
+            "renamed_from sin match en current debe ser no-op, got: {changes:?}"
+        );
+    }
+
+    #[test]
+    fn rename_table_seguido_de_alter_column_orden_seguro() {
+        // current: tabla "old_x" con col `name`.
+        // target: tabla "x" renamed_from="old_x" con col `name`
+        // marcado nullable=true (current era false). El diff debe
+        // emitir RenameTable PRIMERO, después AlterColumnNullable
+        // referenciando el nombre NUEVO ("x"). Si no se renombra
+        // primero, el ALTER falla porque "x" no existe.
+        let current = Schema {
+            tables: vec![Table {
+                name: "old_x".to_string(),
+                columns: vec![col("name", "text", false, false)],
+                indexes: vec![],
+                foreign_keys: vec![],
+                renamed_from: None,
+            }],
+        };
+        let target = Schema {
+            tables: vec![Table {
+                name: "x".to_string(),
+                columns: vec![col("name", "text", true, false)],
+                indexes: vec![],
+                foreign_keys: vec![],
+                renamed_from: Some("old_x".to_string()),
+            }],
+        };
+        let changes = diff_schemas(&current, &target);
+        let rename_idx = changes
+            .iter()
+            .position(|c| matches!(c, Change::RenameTable { .. }));
+        let alter_idx = changes
+            .iter()
+            .position(|c| matches!(c, Change::AlterColumnNullable { .. }));
+        assert!(rename_idx.is_some(), "esperaba RenameTable: {changes:?}");
+        assert!(
+            alter_idx.is_some(),
+            "esperaba AlterColumnNullable: {changes:?}"
+        );
+        assert!(
+            rename_idx.unwrap() < alter_idx.unwrap(),
+            "RenameTable debe ir antes que AlterColumnNullable"
+        );
+        // El AlterColumn debe referenciar el nombre NUEVO.
+        for c in &changes {
+            if let Change::AlterColumnNullable { table, .. } = c {
+                assert_eq!(
+                    table, "x",
+                    "AlterColumnNullable debe referenciar el nombre POST-rename"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn schema_from_program_field_renamed_from_se_carga_a_column() {
+        let src = r#"
+@table("users") type User {
+    @primary id: Int = 0
+    @renamed_from("name") full_name: Str = ""
+}
+"#;
+        let (prog, env) = parse_and_check(src);
+        let schema = schema_from_program(&prog, &env).expect("schema");
+        let t = &schema.tables[0];
+        let col = t.columns.iter().find(|c| c.name == "full_name").unwrap();
+        assert_eq!(col.renamed_from.as_deref(), Some("name"));
+    }
+
+    #[test]
+    fn schema_from_program_table_renamed_from_se_carga_a_table() {
+        let src = r#"
+@table("users") @renamed_from("legacy_users") type User {
+    @primary id: Int = 0
+}
+"#;
+        let (prog, env) = parse_and_check(src);
+        let schema = schema_from_program(&prog, &env).expect("schema");
+        let t = &schema.tables[0];
+        assert_eq!(t.renamed_from.as_deref(), Some("legacy_users"));
     }
 }

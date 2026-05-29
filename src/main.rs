@@ -311,13 +311,30 @@ enum DbCmd {
         dir: Option<PathBuf>,
     },
     /// Crea un archivo de migración vacío con prefijo timestamp
-    /// `YYYYMMDDHHMMSS_<name>.sql` en `migrations/`.
+    /// `YYYYMMDDHHMMSS_<name>.sql` en `migrations/`. v0.10.17 —
+    /// el stub incluye secciones `-- UP` / `-- DOWN` por convención.
     New {
         /// Nombre descriptivo de la migración (snake_case).
         name: String,
         /// Directorio destino. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
+    },
+    /// v0.10.17 — Revierte las últimas N migraciones aplicadas
+    /// ejecutando su sección `-- DOWN` adentro de tx + borrando
+    /// el registro de `_fitz_migrations`. Default `N=1`. Aborta
+    /// fast si alguna migration target no tiene `-- DOWN`.
+    Rollback {
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Cantidad de migraciones a revertir (más reciente
+        /// primero). Default: 1.
+        #[arg(long, default_value_t = 1)]
+        count: usize,
     },
 }
 
@@ -436,6 +453,7 @@ fn main() {
             DbCmd::Migrate { url, dir, dry_run } => db_migrate_cmd(url, dir, dry_run),
             DbCmd::Status { url, dir } => db_status_cmd(url, dir),
             DbCmd::New { name, dir } => db_new_cmd(name, dir),
+            DbCmd::Rollback { url, dir, count } => db_rollback_cmd(url, dir, count),
         },
     }
 }
@@ -4292,7 +4310,11 @@ fn db_new_cmd(name: String, dir: Option<PathBuf>) {
          --\n\
          -- Editá este archivo con los statements SQL necesarios.\n\
          -- Tip: usá `fitz db diff > {filename}` para generar el SQL\n\
-         -- automático desde los `@table` types del programa.\n\n",
+         -- automático desde los `@table` types del programa.\n\n\
+         -- UP\n\
+         \n\n\
+         -- DOWN\n\
+         \n",
         iso = now.to_rfc3339(),
     );
     if let Err(e) = std::fs::write(&path, &stub) {
@@ -4300,6 +4322,48 @@ fn db_new_cmd(name: String, dir: Option<PathBuf>) {
         std::process::exit(1);
     }
     println!("✓ {}", path.display());
+}
+
+fn db_rollback_cmd(url: Option<String>, dir: Option<PathBuf>, count: usize) {
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let dir = resolve_migrations_dir(dir);
+    let migrations_list = match migrations::read_migrations_dir(&dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let rt = evaluator::build_runtime();
+    let result = rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        migrations::rollback_n(&conn, &migrations_list, count)
+            .await
+            .map_err(|e| format!("rollback: {e}"))
+    });
+    let reverted = match result {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if reverted.is_empty() {
+        eprintln!("✓ no hay migrations aplicadas para revertir");
+    } else {
+        eprintln!("✓ {} migration(s) revertida(s):", reverted.len());
+        for v in &reverted {
+            eprintln!("    {v}");
+        }
+    }
 }
 
 #[cfg(test)]

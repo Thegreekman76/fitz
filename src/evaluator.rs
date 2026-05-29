@@ -26363,6 +26363,7 @@ let r = match n {
             primary_field: Some("id".into()),
             columns: std::collections::HashMap::new(),
             relations: std::collections::HashMap::new(),
+            renamed_from: None,
         };
         (fields, meta)
     }
@@ -26615,6 +26616,7 @@ let r = match n {
                 indexed: false,
                 db_default: false,
                 db_default_sql: None,
+                renamed_from: None,
             },
         );
         let expr = parse_closure_body("fn (u) => u.name == \"ada\"");
@@ -26850,6 +26852,7 @@ let r = match n {
                 primary_field: Some("id".into()),
                 columns: std::collections::HashMap::new(),
                 relations: std::collections::HashMap::new(),
+                renamed_from: None,
             },
             where_sql: None,
             where_args: Vec::new(),

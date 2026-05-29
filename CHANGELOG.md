@@ -12,8 +12,173 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-boilerplates ORM Dockerizados extendidos, refinamientos del
-schema diff (renames opcionales, down migrations).
+Fase 10.6.c (`fitz db check` + `fitz db stamp`), después
+10.6.d (data migrations en `.fitz`), después boilerplates ORM
+Dockerizados extendidos.
+
+## [v0.10.17] — 2026-05-29 — Fase 10.6.b: rollback + renames seguros
+
+Cierra los dos gaps Tier 1 más visibles de migraciones contra
+Alembic: forward-only (sin rollback) y renames perdiendo datos.
+
+### Rollback (`fitz db rollback [--count N]`)
+
+Las migrations soportan secciones explícitas `-- UP` / `-- DOWN`
+para revertir. Backward-compatible: archivos sin marcadores
+siguen siendo "UP implícito sin DOWN" (no se pueden revertir,
+pero `migrate` los aplica igual).
+
+```sql
+-- Migration: add_email_to_users
+
+-- UP
+ALTER TABLE "users" ADD COLUMN "email" text NOT NULL DEFAULT '';
+
+-- DOWN
+ALTER TABLE "users" DROP COLUMN "email";
+```
+
+```bash
+fitz db rollback              # revierte el último
+fitz db rollback --count 3    # revierte los últimos 3
+```
+
+Política:
+- `fitz db new` genera stubs con `-- UP` / `-- DOWN` por
+  convención.
+- Marcador case-insensitive sobre línea propia (`-- UP`, `--up`,
+  `-- Up` matchean). `-- UP foo` NO (chars extra → SQL comment
+  normal).
+- Sección DOWN vacía / solo whitespace → `None` (irreversible).
+- Si querés revertir N>1 y alguna target NO tiene `-- DOWN`, el
+  rollback **aborta ANTES de tocar la DB** con mensaje específico
+  citando filename. Cero estado parcial pre-flight.
+- Cada `revert_migration` es atómico individual (1 tx). Rollback
+  de N>1 son N tx — si la k-ésima falla en runtime, las anteriores
+  ya persistieron. Para "todo o nada" sobre N, usar 1 migration
+  única con todo el rollback adentro.
+- Orden de rollback: `applied_at DESC` del tracking (más reciente
+  primero), NO orden de filename.
+
+### Renames seguros (`@renamed_from("old_name")`)
+
+Decorator transient sobre field o `@table` para que el diff
+emita `ALTER TABLE ... RENAME COLUMN/TABLE` en vez de `DROP +
+ADD`, preservando datos.
+
+```fitz
+// Rename column.
+@table("users") type User {
+    @primary id: Int = 0
+    @renamed_from("name") full_name: Str = ""
+}
+
+// Rename tabla.
+@table("users") @renamed_from("legacy_users") type User {
+    @primary id: Int = 0
+}
+```
+
+`fitz db diff` emite:
+
+```sql
+ALTER TABLE "legacy_users" RENAME TO "users";
+ALTER TABLE "users" RENAME COLUMN "name" TO "full_name";
+```
+
+Política:
+- Orden seguro en el output: renames PRIMERO, después
+  ADD/DROP/ALTER COLUMN sobre el nombre nuevo.
+- No-op silencioso cuando el rename ya se aplicó (target tiene
+  `@renamed_from("old")` pero current ya solo tiene "new" —
+  caso típico post-migration). El user borra el decorator
+  cuando quiera.
+- Por qué decorator y no subcomando: el subcomando divorcia
+  rename del cambio en el code (fácil olvidar uno); decorator
+  es declarativo + atómico con el código.
+
+### Cambios técnicos
+
+- **src/migrations.rs**:
+  - `MigrationFile` reemplaza `sql: String` por `up_sql: String`
+    + `down_sql: Option<String>`.
+  - Nueva fn `split_up_down(raw)` con parser line-anchored case-
+    insensitive de marcadores `-- UP` / `-- DOWN`.
+  - Nuevas variantes `Change::RenameTable` + `Change::RenameColumn`.
+  - Nueva fn `apply_renames_from_target(current, target, changes)`
+    que pre-procesa los hints `renamed_from` del target: emite
+    rename Changes al frente y devuelve una versión renombrada
+    de current para que el resto del diff compare por nombres
+    post-rename.
+  - Nueva fn `revert_migration(conn, migration)`: ejecuta el
+    `-- DOWN` adentro de tx + borra registro de
+    `_fitz_migrations`. Atomic. Error específico si `down_sql`
+    es None.
+  - Nueva fn `rollback_n(conn, migrations, n)`: pre-flight
+    valida que TODAS las versiones target tienen file + DOWN,
+    después revierte una por una (atomic individual).
+  - Nueva fn `applied_versions_desc` (orden por `applied_at
+    DESC`) para `rollback_n`.
+- **src/types.rs**:
+  - `TableMetadata.renamed_from: Option<String>` paralelo al
+    `sql_name`. Parsea `@renamed_from("old")` a nivel type.
+  - `ColumnMetadata.renamed_from: Option<String>` para fields.
+    Parsea `@renamed_from("old")` a nivel field.
+  - Validación: solo arg Str literal no vacío, rechaza otros
+    con mensaje claro.
+  - Error del decorator inválido sobre `type` actualizado para
+    listar `@renamed_from` también.
+- **src/main.rs**:
+  - Nueva variante `DbCmd::Rollback { url, dir, count }` +
+    dispatch + handler `db_rollback_cmd`.
+  - `db_new_cmd` genera stub con secciones `-- UP` / `-- DOWN`
+    por convención.
+- **src/lsp.rs**: nuevo completion item snippet para
+  `@renamed_from("${1:old_name}")`. Doc del `@db_default` y la
+  lista de decorators ORM en `AfterAt` actualizada.
+- **src/migrations.rs**: `Table.renamed_from` y
+  `Column.renamed_from` agregados (poblados solo en target
+  schema desde `schema_from_program`; `None` en introspect).
+- **editors/vscode/package.json**: 0.10.16 → 0.10.17.
+
+### Tests
+
+- **15 unit tests nuevos** en `src/migrations.rs::tests`:
+  - 6 sobre `split_up_down` (sin marcadores, ambos, case-
+    insensitive, sección vacía, sin UP solo DOWN, marker con
+    chars extra que NO es marker).
+  - 6 sobre renames (RenameTable + RenameColumn emit + SQL del
+    output + no-op silencioso cuando no hay match + orden
+    seguro rename-antes-de-alter + cargar `renamed_from` a
+    Column/Table desde program).
+  - 1 sobre `read_migrations_dir` que preserva up/down.
+  - 2 sobre `schema_from_program` con `@renamed_from` field y
+    table.
+- **54/54 migrations tests verde** (39 anteriores + 15 nuevos).
+- **2627/2627 lib tests verde** (sin regresiones).
+- **Smoke `GUIDE_EXAMPLES_COMPILE`** verde (292 ejemplos).
+- **Smoke manual**: `fitz check` y `fitz run` aceptan
+  `@renamed_from(...)` en field y type; `fitz db rollback
+  --help` documenta la nueva subcomando; `fitz db new` emite
+  stub con secciones `-- UP` / `-- DOWN`.
+
+### Limitaciones explícitas del MVP
+
+- **Rollback de N>1 NO es atómico transversal**: cada `revert`
+  es 1 tx aislada. Para "todo o nada" sobre N migrations, una
+  migration única con todo el rollback adentro.
+- **`@renamed_from` no detecta renames cíclicos** (A → B → A):
+  caso degenerado, el user lo resuelve manualmente.
+- **`ALTER COLUMN ... TYPE` sin USING** sigue siendo deuda
+  (cambios incompatibles fallan — editar migration con USING).
+
+### Por qué importa
+
+Hasta v0.10.16 Fitz tenía migraciones forward-only sin rollback
+y renames que perdían datos — los dos gaps más visibles vs
+Alembic. v0.10.17 los cierra. El siguiente Tier 1 del plan
+roadmap es **Fase 10.6.c (drift check + stamp)** para CI
+bloqueante y adopción en DB legacy.
 
 ## [v0.10.16] — 2026-05-29 — Fase 10.6: migraciones automáticas ORM + `@db_default("expr")`
 

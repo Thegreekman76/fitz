@@ -8887,6 +8887,136 @@ paridad bit-a-bit cumplida en v0.10.1.
 
 ---
 
+## Fase 10.6 — Migraciones automáticas ORM ✅ CERRADA v0.10.16 (2026-05-29)
+
+`fitz db diff/migrate/status/new` con introspección + diff
+determinístico + tracking idempotente en `_fitz_migrations`.
+Cierre completo del MVP + `@db_default("expr")` para defaults SQL
+auto-emitidos. Cero deps externas (ni Alembic ni Flyway ni
+Liquibase ni TypeORM CLI). Detalle técnico completo en
+`CHANGELOG.md` v0.10.16.
+
+---
+
+## Fase 10.6.b → 10.6.e — Migraciones: completar el paquete estilo Alembic 📊
+
+Plan de cierre del feature set de migraciones contra el baseline
+Alembic (el más maduro del espacio). Agrupado por **tier de uso
+real**, no por orden alfabético — Tier 1 es lo que más extraña la
+gente en producción seria, Tier 3 son casos raros.
+
+### Tier 1 — Gap visible que duele (≈ 1 release c/u)
+
+**Fase 10.6.b — Forward/back + renames seguros** (en curso, próxima
+release v0.10.17):
+
+- **10.6.b.1 — `-- UP` / `-- DOWN` + `fitz db rollback [N]`**:
+  sintaxis backward-compatible en `.sql` (archivos sin marcador
+  → todo `-- UP` implícito, sin DOWN). `MigrationFile` suma
+  `down_sql: Option<String>`. Subcomando nuevo `fitz db rollback
+  [N]` (default `N=1`) lee last N migrations aplicadas (DESC por
+  `applied_at`), ejecuta `-- DOWN` adentro de tx, borra registro
+  de `_fitz_migrations`. Sin `-- DOWN` → aborta con mensaje claro
+  citando filename. Stub de `fitz db new` actualizado para
+  incluir ambas secciones por convención. Opcional: flag
+  `--with-down` en `fitz db diff` para inferir DOWN del current
+  → target.
+- **10.6.b.2 — Renames vía `@renamed_from("old_name")`**:
+  decorator transient sobre field o `@table`. El diff lo lee y
+  emite `ALTER TABLE ... RENAME COLUMN "old" TO "new"` (o RENAME
+  TABLE) en vez de `DROP + ADD`. Tras aplicar la migration el
+  user borra el decorator (single-use). Por qué decorator vs
+  subcomando: el subcomando divorcia rename del cambio en el
+  code (fácil de olvidar uno); el decorator es declarativo y
+  atómico.
+
+**Fase 10.6.c — Drift check + stamping**:
+
+- **`fitz db check`**: corre el diff, exit 0 si sin cambios, exit 1
+  con SQL pendiente al stderr si hay drift. Hook clave para CI
+  bloqueante ("PR no merge si schema declarado diverge de la DB
+  de staging"). *El gap más solicitado en surveys de Alembic.*
+- **`fitz db stamp <version>`**: marca `_fitz_migrations` en una
+  versión específica sin ejecutar la migration. Adopción inicial
+  en proyectos con schema legacy ya aplicado manualmente — sin
+  esto, adoptar Fitz fuerza una migration inicial gigante
+  duplicando lo que ya existe.
+- Estimado: ~3-4 hs.
+
+**Fase 10.6.d — Data migrations en `.fitz`**:
+
+- Hoy las migrations son `.sql` puro (DDL + back-fills SQL planos).
+  Para transforms complejas (parsear JSON viejo → columns nuevas,
+  llamar HTTP de un service, etc.) hace falta lógica.
+- Diseño propuesto: permitir `.fitz` adicional al `.sql` en
+  `migrations/`. El runner detecta por extensión: `.sql` → ejecuta
+  directo via `db.exec`; `.fitz` → eval contra una `DbConn`
+  bindeada como `db` global del programa, con acceso a `db.query`
+  / `db.exec`. Tracking en `_fitz_migrations` por filename (el
+  ordering alfabético sigue valiendo).
+- Complejidad: requiere loader + checker + eval/codegen del `.fitz`
+  adentro del context de la migration. Estimado: ~6-8 hs.
+
+### Tier 2 — Útil para teams grandes (≈ 1-2 releases c/u)
+
+**Fase 10.6.e — History, squashing, schemas custom, offline SQL**:
+
+- **`fitz db history`**: log con `version` + `applied_at` (de
+  `_fitz_migrations`) + filename + tamaño del SQL. Para auditoría
+  real. Hoy `status` solo dice applied/pending.
+- **`fitz db squash <from> <to>`**: combina N migrations viejas en
+  una sola (preservando el effecto neto). Repos con 200+ migrations
+  se vuelven lentos.
+- **Schemas custom** (no solo `public`): multi-tenant via PG
+  schemas, separación dev/test. Requiere refactor del introspector
+  + parametrizar `schema` en `@table("schema.name")`.
+- **`--sql` offline mode** en `migrate`: emite el SQL que ejecutaría
+  sin tocar la DB. Para enviar a un DBA. Hoy `--dry-run` solo lista
+  pendientes sin SQL.
+- **Composite primary keys / CHECK constraints**: deuda del ORM
+  desde v0.10.0 que migrations las usaría. Out of scope estricto
+  de migrations pero entran acá si aterrizan en el ORM.
+
+### Tier 3 — Casos raros (deuda explícita, sin plan inmediato)
+
+- **Branches + merge migrations** (Alembic multi-heads): teams
+  grandes que mergean ramas con migrations divergentes. Rails y
+  Django no lo tienen y nadie llora.
+- **Pre/post hooks**: callbacks custom antes/después de cada
+  migration. Útil en monolitos enterprise.
+- **Multi-database**: read replicas, sharding, DBs separadas.
+- **Migration testing helpers** (`fitz db reset` + factories para
+  fixtures).
+
+### Out of scope estricto (features del ORM, no del migrator)
+
+- Triggers / functions / stored procedures
+- Materialized views
+- Partitioning
+- Full-text search index management custom
+
+### Diferenciales de Fitz que Alembic NO tiene (refuerzan el pitch)
+
+- **Cero deps externas**: `pip install alembic + sqlalchemy +
+  psycopg2` vs binario `fitz` solo.
+- **Schema desde código tipado del propio lenguaje**: Alembic
+  genera desde SQLAlchemy models (otro layer). Fitz lo genera
+  desde el lenguaje mismo, sin DSL paralelo.
+- **Paridad bit-a-bit con el resto del stack**: el wire protocol
+  no cambia entre `fitz run`, `fitz build`, y `fitz db ...`.
+
+### Orden comprometido
+
+1. **10.6.b** (rollback + renames) — v0.10.17, en curso.
+2. **10.6.c** (drift check + stamp) — v0.10.18.
+3. **10.6.d** (data migrations en `.fitz`) — v0.10.19.
+4. **10.6.e** (history + squashing + schemas custom + offline SQL)
+   — v0.10.20+.
+5. Tier 3 y out-of-scope quedan en deuda explícita; NO bloquean
+   declarar "paquete completo de migraciones".
+
+---
+
 ## Visión post-Fase 10 — Fase 11+ 🔮
 
 **Estado: especulativo.** Estas fases no están comprometidas en

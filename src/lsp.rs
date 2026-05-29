@@ -600,7 +600,8 @@ enum CompletionContext {
     ///   - Auth: `@authenticated`/`@admin`/`@auth_provider`
     ///   - WS + Jobs: `@ws`/`@cron`/`@background`/`@test`
     ///   - ORM: `@table`/`@primary`/`@column`/`@unique`/`@index`/
-    ///     `@db_default`/`@hidden`/`@belongs_to`/`@has_one`/`@has_many`
+    ///     `@db_default`/`@hidden`/`@belongs_to`/`@has_one`/`@has_many`/
+    ///     `@renamed_from` (v0.10.17)
     AfterAt,
     /// Cualquier otro contexto — listamos top-level + builtins + keywords.
     ScopeLevel,
@@ -1140,6 +1141,12 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "has_many(\"${1:Target}\", via=\"${2:fk}\")",
             "@has_many(\"Type\", via=\"fk_field\", on_delete?)",
             "Virtual List<Target>. El target hospeda el FK. Para `.preload(...)`.",
+        ),
+        (
+            "renamed_from",
+            "renamed_from(\"${1:old_name}\")",
+            "@renamed_from(\"old_name\") — rename seguro (v0.10.17)",
+            "Decorator transient para que `fitz db diff` emita `ALTER TABLE ... RENAME COLUMN/TABLE` en vez de DROP + ADD (preserva datos). Sobre un field: rename de column. Sobre el `type` (junto con `@table`): rename de tabla. Borralo después de aplicar la migration.",
         ),
     ];
 
