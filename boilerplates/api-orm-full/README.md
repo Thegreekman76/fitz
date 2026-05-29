@@ -105,22 +105,33 @@ cp .env.example .env
 ### Desarrollo
 
 ```bash
-# Pin a la versión que incluya los fixes del boilerplate (v0.10.9+).
-# Mientras el tag no esté publicado, usar el FITZ_REV del commit:
-docker compose build --build-arg FITZ_TAG=v0.10.9
+# Default — usa la imagen `ghcr.io/thegreekman76/fitz:latest`
+# (actualizada en cada release del repo, recomendado).
+docker compose build
 docker compose up -d
 ```
 
-> **Nota sobre versión de Fitz**: el boilerplate ejercita features
-> introducidas en v0.10.9 (Map<Str, Any> indexing assignment
-> dinámico, W18 cross-module virtuales, .has(var) sobre arrays).
-> Hasta que el tag esté publicado, `cargo install --git` con
-> default `main` puede no tenerlas. Pin con `--build-arg
-> FITZ_TAG=v0.10.9` (o `FITZ_REV=<commit-sha>`) para builds
-> reproducibles.
+> **Nota sobre versión de Fitz** (v0.10.11+): el Dockerfile usa
+> `ghcr.io/thegreekman76/fitz:latest` como builder pre-built — el
+> binario `fitz` viene listo, sin compilar desde source. **Reduce
+> el primer build de ~5-8min a ~30-60s**.
+>
+> Para reproducibilidad pinned, podés especificar un tag:
+>
+> ```bash
+> docker compose build --build-arg FITZ_TAG=v0.10.11
+> ```
+>
+> La imagen `:latest` se actualiza automáticamente cuando el repo
+> publica un release nuevo (`v*` tag → workflow `release.yml`).
+> Si Docker tiene una `:latest` cacheada vieja, refrescá:
+>
+> ```bash
+> docker pull ghcr.io/thegreekman76/fitz:latest
+> ```
 
-El primer build compila `fitz` desde source (~5-8 min). Builds
-subsiguientes solo recompilan tu código (~30s).
+El primer build descarga la imagen base + compila tu código (~30-60s).
+Builds subsiguientes solo recompilan tu código (~10-20s).
 
 Esperá a ver en los logs:
 

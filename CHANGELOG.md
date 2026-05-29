@@ -16,6 +16,140 @@ En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
 memoria `project_boilerplate_orm_full_fullstack.md`), benchmarks
 Fitz ORM vs SQLAlchemy, decidir scope del próximo norte técnico.
 
+## [v0.10.11] — 2026-05-29 — `@hidden` field decorator + boilerplates con LATEST
+
+Cierre de la **deuda menor del boilerplate** detectada en smoke real
+v0.10.10: el response de `GET /posts/{id}` con `.preload("author")`
+exponía `password_hash` del User embebido. Decisión de approach:
+**resolverlo a nivel del lenguaje** con un decorator nuevo en lugar
+de fix puntual en el boilerplate.
+
+### Nuevo decorator `@hidden` sobre fields
+
+Marca un field como invisible para el JSON I/O:
+
+```fitz
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str = ""
+    name: Str = ""
+    @hidden password_hash: Str = ""   // <-- nunca cruza HTTP
+    role: Str = "user"
+}
+```
+
+**Semántica**:
+- `__to_fitz_json` **skipea** el field — no aparece en el response
+  HTTP, en cualquier contexto donde el type se serialice (directo,
+  como field de otro type, eager-loaded via `.preload(...)`, etc.).
+- `__FromFitzJson` **rechaza** el field — si el body del cliente
+  incluye `{"password_hash": "..."}`, el server responde 400 con
+  `"campo no declarado"`.
+- El ORM lo **persiste normalmente** en Postgres (INSERT/SELECT/
+  UPDATE incluyen el field como cualquier columna). Solo cambia
+  el boundary HTTP.
+- El código Fitz interno asigna libremente el field: en `register`,
+  `User.insert(conn, User { password_hash: hash.password(body.password), ... })`
+  funciona igual.
+
+**Ortogonal al ORM**: `@hidden` funciona en types con o sin
+`@table` — útil también para metadata interna en types plain HTTP.
+
+### Cambios técnicos
+
+- **src/types.rs**: nuevo arm `"hidden"` en
+  `parse_table_decorators_for_type`. Tolera el decorator (sin args
+  ni kwargs). Importante: NO setea `any_field_decorator = true`
+  (que dispara el check "missing @table") — `@hidden` es ortogonal
+  al ORM y funciona en types plain HTTP.
+- **src/codegen.rs**: nuevo flag `TypeSigField.hidden: bool`
+  propagado desde `Field.decorators` en los 4 sitios donde se
+  construye `TypeSigField`. `gen_type_http_impls_for_sig_with_meta`
+  skipea fields con `hidden: true` en:
+  - `__to_fitz_json` body (no aparece en el output JSON).
+  - `__allowed` lista del `__FromFitzJson` (rechaza extras).
+  - field iteration del `__FromFitzJson` (no se lee del input).
+  - struct literal: usa el default declarado del field o
+    `Default::default()` para construir el struct sin el field.
+- **editors/vscode/package.json**: bump a `0.10.11`. La grammar
+  TextMate ya captura `@hidden` con el pattern genérico
+  `@[a-zA-Z_][a-zA-Z0-9_]*` — sin cambios necesarios.
+
+### Migración de boilerplates al patrón LATEST
+
+Aprovechando el ciclo, los Dockerfiles de `api-orm-full` y
+`api-postgres-fitz` pasan de `cargo install --git` (que compilaba
+Fitz desde source en ~5-8min) al patrón pre-built
+`ghcr.io/thegreekman76/fitz:latest` (ya usado en
+`api-middleware-cors`, `api-postgres-python`, `api-simple`,
+`api-websocket`, `cli-tool`, `api-fullstack-postgres`).
+
+**Reducción ~10x del build time**: primer build de ~5-8min pasa a
+~30-60s. La imagen `:latest` se actualiza automáticamente en cada
+release del repo (workflow `.github/workflows/release.yml`).
+
+```dockerfile
+ARG FITZ_TAG=latest
+FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder
+
+WORKDIR /app
+COPY fitz.toml ./
+COPY src/ ./src/
+RUN fitz build src/main.fitz
+
+FROM debian:bookworm-slim
+COPY --from=builder /app/src/main /usr/local/bin/app
+EXPOSE 3000
+CMD ["/usr/local/bin/app"]
+```
+
+En uso normal: `docker compose build` (sin `--build-arg`). Pinned:
+`docker compose build --build-arg FITZ_TAG=v0.10.11`.
+
+### Aplicación al boilerplate api-orm-full
+
+`User.password_hash` ahora marcado con `@hidden`. Validación bit-a-
+bit: `GET /posts/{id}` con preload author devuelve el User
+embebido SIN `password_hash` (vs el leak detectado en v0.10.10).
+
+### Documentación
+
+- **docs/db-orm.md** sección 4: nuevo bloque "`@hidden`: ocultar
+  fields de la frontera HTTP" con semántica + cuándo usar + cuándo
+  NO usar + ortogonalidad con `@table`.
+- **boilerplates/api-orm-full/README.md**: actualización del
+  comando `docker compose build` para usar LATEST por default.
+- **boilerplates/api-orm-full/Dockerfile** + `Dockerfile.distroless`:
+  migración al patrón pre-built.
+- **boilerplates/api-postgres-fitz/Dockerfile** + `Dockerfile.distroless`:
+  migración paralela.
+
+### Tests
+
+- **tests/compile_e2e.rs**: nuevo test
+  `hidden_decorator_skipea_field_en_json_io_v0_10_11` que valida
+  los 3 casos canónicos:
+  1. GET response NO incluye el hidden field aunque el handler le
+     asignó valor.
+  2. POST sin el field → 200 (el server usa el default).
+  3. POST con el field → 400 ("campo no declarado").
+
+### Validación
+
+- `cargo fmt --all -- --check` limpio.
+- `cargo clippy --all-targets -- -D warnings` limpio.
+- `cargo test --release --test compile_e2e hidden_decorator` verde.
+- `cargo test --release --test compile_e2e smoke_ejemplos_guia` 292
+  ejemplos verde (sin regresiones).
+
+### Deuda menor visible (NO bloquea release)
+
+LSP autocomplete context-aware después de `@`: hoy la grammar
+TextMate destaca cualquier `@name`, pero el LSP no sugiere la
+lista cerrada de decorators (`@get`/`@post`/`@table`/`@hidden`/
+etc.) al escribir `@`. Sería una mini-fase de ~30-60min en una
+próxima iteración cuando aparezca presión real.
+
 ## [v0.10.10] — 2026-05-28 — Fix deadlock `__to_fitz_json` en has_many virtual (preload hang cerrado)
 
 **Cierre del preload hang** dejado como deuda residual en v0.10.9.

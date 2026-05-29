@@ -7,37 +7,21 @@
 #
 # Resultado: imagen final ~30-50 MB (vs ~250 MB de api-postgres-python).
 #
-# Build inicial: ~5-8 min (compila fitz desde source SIN feature
-# python). Builds subsiguientes: ~30s si solo cambia src/.
+# **v0.10.11 (2026-05-29)**: migrado de `cargo install --git` (que
+# compilaba Fitz desde source en ~5-8min) al patrón pre-built
+# `ghcr.io/thegreekman76/fitz:latest`. Reducción ~10x del build
+# time. La imagen `:latest` se actualiza en cada release del repo
+# (workflow `.github/workflows/release.yml`).
 #
-# Build con tag específico:
-#   docker build --build-arg FITZ_TAG=v0.10.6 .
+# Build con LATEST (default — recomendado para uso normal):
+#   docker compose build
+#
+# Build con tag específico (reproducibilidad pinned):
+#   docker compose build --build-arg FITZ_TAG=v0.10.10
 
 # ---- Stage 1: builder ----------------------------------------------
-FROM rust:1.95-slim AS builder
-
-# Herramientas mínimas para compilar fitz desde source. Sin
-# python3-dev — no usamos PyO3 en este boilerplate.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        git ca-certificates pkg-config libssl-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-# Clonar Fitz desde el repo público.
-# Pinear con --build-arg FITZ_TAG=v0.10.X para reproducibilidad.
-ARG FITZ_BRANCH=
-ARG FITZ_TAG=
-ARG FITZ_REV=
-
-RUN if [ -n "$FITZ_REV" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --rev "$FITZ_REV" --bin fitz --locked; \
-    elif [ -n "$FITZ_TAG" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --tag "$FITZ_TAG" --bin fitz --locked; \
-    elif [ -n "$FITZ_BRANCH" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --branch "$FITZ_BRANCH" --bin fitz --locked; \
-    else \
-        cargo install --git https://github.com/Thegreekman76/fitz --bin fitz --locked; \
-    fi
+ARG FITZ_TAG=latest
+FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder
 
 # Copia del proyecto y compilación a binario nativo. El binario
 # resultante embebe el driver Postgres + ORM, no necesita nada más.

@@ -1481,10 +1481,22 @@ pub fn process_table_decorators(
         if f.decorators.is_empty() {
             continue;
         }
-        any_field_decorator = true;
+        // v0.10.11 — `any_field_decorator` solo cuenta decoradores
+        // ORM (primary/column/unique/index/db_default/belongs_to/
+        // has_one/has_many). `@hidden` es ortogonal al ORM y NO debe
+        // disparar el check "tiene decoradores ORM pero falta
+        // @table" (sino sería imposible usar @hidden en types plain
+        // HTTP sin tabla). Se setea dentro de cada arm específico
+        // del match abajo, no acá.
         let mut col_meta = ColumnMetadata::default();
         let mut has_meta = false;
         for d in &f.decorators {
+            // v0.10.11 — `@hidden` es ortogonal al ORM (no implica
+            // @table). Todos los demás decoradores de field SÍ son
+            // ORM-specific y disparan el check "missing @table".
+            if d.name != "hidden" {
+                any_field_decorator = true;
+            }
             match d.name.as_str() {
                 "primary" => {
                     if !d.args.is_empty() || !d.kwargs.is_empty() {
@@ -1595,6 +1607,33 @@ pub fn process_table_decorators(
                     }
                     col_meta.db_default = true;
                 }
+                "hidden" => {
+                    // v0.10.11 — el field NO cruza la frontera HTTP.
+                    // Tanto `__to_fitz_json` (response al cliente)
+                    // como `__FromFitzJson` (body del cliente) lo
+                    // SKIPEAN. Útil para campos sensibles
+                    // (`password_hash`, tokens) y metadata interna.
+                    // El field sigue siendo asignable desde código
+                    // Fitz interno y participa del I/O DB normal.
+                    // Sin args ni kwargs. El checker lo tolera
+                    // pero NO necesita estado adicional acá — el
+                    // codegen lo lee directo de `Field.decorators`.
+                    //
+                    // **No setea `has_meta = true`** — @hidden es
+                    // ortogonal al ORM. Funciona en types con o
+                    // sin @table. Si lo seteara, el checker
+                    // exigiría @table sobre el type aunque el user
+                    // solo quiera marcar un field como hidden en
+                    // un type plain HTTP.
+                    if !d.args.is_empty() || !d.kwargs.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@hidden` no acepta args ni kwargs".to_string(),
+                        ));
+                    }
+                }
                 "belongs_to" | "has_one" | "has_many" => {
                     let kind = match d.name.as_str() {
                         "belongs_to" => RelationKind::BelongsTo,
@@ -1631,7 +1670,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@db_default`, `@belongs_to`, `@has_one`, `@has_many`."
+                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@db_default`, `@hidden`, `@belongs_to`, `@has_one`, `@has_many`."
                         ),
                     ));
                 }

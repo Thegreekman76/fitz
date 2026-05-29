@@ -7285,6 +7285,183 @@ fn main() => 0\n\
 }
 
 #[test]
+fn hidden_decorator_skipea_field_en_json_io_v0_10_11() {
+    // v0.10.11 — `@hidden` field decorator:
+    //   - El field NO aparece en `__to_fitz_json` (response al
+    //     cliente — útil para `password_hash`, tokens internos).
+    //   - El field NO se acepta en `__FromFitzJson` (body del
+    //     cliente rechaza enviarlo con 400 "campo no declarado").
+    //   - El field SÍ existe en el struct Rust con su default
+    //     (`Str = ""` queda `""`, `Default::default()` si no hay
+    //     default). El código Fitz interno puede asignarlo
+    //     libremente.
+    //
+    // Caso canónico: deuda menor detectada en smoke real
+    // boilerplate api-orm-full v0.10.10 — `User.password_hash`
+    // exposed en el response de `GET /posts/{id}` con preload
+    // author.
+    let stem = "hidden_decorator_v0_10_11";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let main_src = "\
+type User {\n\
+    id: Int = 0\n\
+    email: Str = \"\"\n\
+    @hidden password_hash: Str = \"\"\n\
+}\n\
+\n\
+@get(\"/users\")\n\
+fn list_users() -> List<User> {\n\
+    return [User { id: 1, email: \"ada@example.com\", password_hash: \"super-secret\" }]\n\
+}\n\
+\n\
+@post(\"/users\")\n\
+fn create_user(body: User) -> User {\n\
+    return body\n\
+}\n\
+\n\
+@server(43917)\n\
+fn main() => 0\n\
+";
+    let main_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&main_path, main_src).expect("escribir main.fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_path)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló (@hidden):\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let addr = "127.0.0.1:43917".to_string();
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto 43917 en 3s");
+    }
+
+    use std::io::{Read, Write};
+    let send_req = |method: &str, path: &str, body: Option<&str>| -> (u16, String) {
+        let body_str = body.unwrap_or("");
+        let request = if let Some(b) = body {
+            format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                method, path, addr, b.len(), b
+            )
+        } else {
+            format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                method, path, addr
+            )
+        };
+        let _ = body_str;
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
+        let body = raw[body_start..].to_string();
+        (status, body)
+    };
+
+    // Caso 1: GET /users → 200, response NO incluye password_hash
+    // aunque el handler asignó "super-secret" al field.
+    let (status, body) = send_req("GET", "/users", None);
+    assert_eq!(status, 200, "GET /users → 200, fue {:?}", (status, &body));
+    assert!(
+        body.contains("\"id\":1") && body.contains("\"email\":\"ada@example.com\""),
+        "GET /users debe incluir id + email: {:?}",
+        body
+    );
+    assert!(
+        !body.contains("password_hash") && !body.contains("super-secret"),
+        "GET /users NO debe exponer password_hash: {:?}",
+        body
+    );
+
+    // Caso 2: POST /users SIN password_hash en el body → 200, el
+    // server crea User con password_hash="" (default).
+    let (status, body) = send_req(
+        "POST",
+        "/users",
+        Some(r#"{"id":2,"email":"bob@example.com"}"#),
+    );
+    assert_eq!(
+        status,
+        200,
+        "POST /users sin password_hash → 200, fue {:?}",
+        (status, &body)
+    );
+    assert!(
+        body.contains("\"email\":\"bob@example.com\""),
+        "POST /users body de respuesta: {:?}",
+        body
+    );
+
+    // Caso 3: POST /users CON password_hash en el body → 400,
+    // el server rechaza "campo no declarado".
+    let (status, body) = send_req(
+        "POST",
+        "/users",
+        Some(r#"{"id":3,"email":"eve@example.com","password_hash":"hax"}"#),
+    );
+    assert_eq!(
+        status,
+        400,
+        "POST /users con password_hash → 400, fue {:?}",
+        (status, &body)
+    );
+    assert!(
+        body.contains("password_hash") && body.contains("no declarado"),
+        "POST /users error debe citar el field rechazado: {:?}",
+        body
+    );
+
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[test]
 fn cross_module_body_type_serializa_w15() {
     // W15 (v0.10.11) — type declarado en un módulo importado y usado
     // como body en un handler del main. Antes de revisar W15 se asumía

@@ -37,7 +37,12 @@
     @primary id: Int = 0
     email: Str = ""
     name: Str = ""
-    password_hash: Str = ""
+    // `@hidden` (v0.10.11): el field NO se serializa al JSON
+    // response del cliente HTTP NI se acepta como body del cliente.
+    // El field sigue persistiéndose en Postgres como cualquier
+    // columna normal. Lo populamos en `register` con `hash.password
+    // (body.password)` y lo leemos en `login` para `hash.verify(...)`.
+    @hidden password_hash: Str = ""
     role: Str = "user"
     @db_default created_at: Str = ""
 

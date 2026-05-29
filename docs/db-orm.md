@@ -386,6 +386,56 @@ El user crea las tablas con `CREATE TABLE` (manualmente o via
 `db.exec(...)` al boot). Migraciones automáticas (`fitz db diff`)
 quedan como sub-paso futuro.
 
+### `@hidden`: ocultar fields de la frontera HTTP
+
+A partir de **v0.10.11**, el decorator `@hidden` marca un field
+como invisible para el JSON I/O:
+
+```fitz
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str = ""
+    name: Str = ""
+    @hidden password_hash: Str = ""   // <-- NUNCA cruza HTTP
+    role: Str = "user"
+}
+```
+
+**Qué cambia**:
+- `__to_fitz_json` skipea el field — el cliente HTTP **NUNCA** ve
+  `password_hash` en cualquier response que devuelva un `User`
+  (directo, como field de `Post.author`, eager-loaded via
+  `.preload("author")`, etc.).
+- `__FromFitzJson` rechaza el field — si el cliente envía un body
+  con `{"password_hash": "..."}`, el server responde 400 con
+  `"campo no declarado"`.
+- El ORM lo **persiste normalmente** en Postgres — el INSERT lo
+  incluye, el SELECT lo trae de vuelta, `.update(...)` lo
+  modifica. Solo cambia el boundary HTTP.
+
+**Cuándo usar**:
+- Campos sensibles (`password_hash`, tokens internos, claves API).
+- Metadata interna que no debe leakearse (timestamps de auditoría
+  sin sentido para el cliente, internal_status para flags
+  privados, etc.).
+
+**Cuándo NO usar** (alternativas mejores):
+- Campos que el cliente envía al **register/login** pero no debe
+  recibir de vuelta: usá un type dedicado `RegisterInput` /
+  `Credentials` separado del `User` table type. `@hidden` cubre
+  el lado "no exponer" pero el flujo input + persistencia separa
+  responsabilidades mejor.
+
+**Ortogonal a `@table`**: `@hidden` también funciona en types
+plain HTTP sin `@table`:
+
+```fitz
+type ResponseEnvelope {
+    data: Map<Str, Any>
+    @hidden internal_trace_id: Str = ""   // log interno, no al cliente
+}
+```
+
 ---
 
 ## 5. Read methods: `.all`, `.first`, `.count`, `.where`

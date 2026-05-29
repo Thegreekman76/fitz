@@ -7,38 +7,24 @@
 # viven en el binario `fitz` mismo.
 #
 # Resultado: imagen final ~30-50 MB (multi-archivo, varios handlers,
-# WS, cron). Para tagged release, pin con --build-arg FITZ_TAG.
+# WS, cron). Build inicial ~30-60s (descarga imagen base + compila
+# el proyecto). Builds subsiguientes ~10-20s con cache.
 #
-# Build inicial: ~5-8 min (compila fitz desde source).
-# Builds subsiguientes: ~30s si solo cambia src/.
+# **v0.10.11 (2026-05-29)**: migrado de `cargo install --git` (que
+# compilaba Fitz desde source en ~5-8min) al patrón pre-built
+# `ghcr.io/thegreekman76/fitz:latest`. Reducción ~10x del build
+# time. La imagen `:latest` se actualiza en cada release del repo
+# (workflow `.github/workflows/release.yml`).
 #
-# Build con tag específico:
-#   docker build --build-arg FITZ_TAG=v0.10.9 .
+# Build con LATEST (default — recomendado para uso normal):
+#   docker compose build
+#
+# Build con tag específico (reproducibilidad pinned):
+#   docker compose build --build-arg FITZ_TAG=v0.10.10
 
 # ---- Stage 1: builder ----------------------------------------------
-FROM rust:1.95-slim AS builder
-
-# Herramientas mínimas para compilar fitz desde source. Sin
-# python3-dev — no usamos PyO3.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        git ca-certificates pkg-config libssl-dev && \
-    rm -rf /var/lib/apt/lists/*
-
-# Clonar Fitz desde el repo público.
-ARG FITZ_BRANCH=
-ARG FITZ_TAG=
-ARG FITZ_REV=
-
-RUN if [ -n "$FITZ_REV" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --rev "$FITZ_REV" --bin fitz --locked; \
-    elif [ -n "$FITZ_TAG" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --tag "$FITZ_TAG" --bin fitz --locked; \
-    elif [ -n "$FITZ_BRANCH" ]; then \
-        cargo install --git https://github.com/Thegreekman76/fitz --branch "$FITZ_BRANCH" --bin fitz --locked; \
-    else \
-        cargo install --git https://github.com/Thegreekman76/fitz --bin fitz --locked; \
-    fi
+ARG FITZ_TAG=latest
+FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder
 
 # Copia del proyecto. Multi-archivo: el codegen carga los módulos
 # transitivos via fitz.toml ([bin].main = src/main.fitz).

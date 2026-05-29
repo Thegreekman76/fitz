@@ -3612,14 +3612,19 @@ fn collect_module_sigs(
                 };
                 let mut combined = Vec::with_capacity(resolved.len());
                 for r in resolved {
-                    let default = fields
+                    let (default, hidden) = fields
                         .iter()
                         .find(|f| f.name == r.name)
-                        .and_then(|f| f.default.clone());
+                        .map(|f| {
+                            let hidden = f.decorators.iter().any(|d| d.name == "hidden");
+                            (f.default.clone(), hidden)
+                        })
+                        .unwrap_or((None, false));
                     combined.push(TypeSigField {
                         name: r.name,
                         type_: r.type_,
                         default,
+                        hidden,
                     });
                 }
                 type_sigs.insert(
@@ -5049,6 +5054,17 @@ struct TypeSigField {
     /// Default expr del campo, tomado del AST de `Stmt::TypeDef`.
     /// `None` si el campo no tenía default declarado.
     default: Option<Expr>,
+    /// v0.10.11 — `@hidden` decorator: el field se SKIPEA tanto en
+    /// `__to_fitz_json` (no se expone al cliente HTTP) como en
+    /// `__FromFitzJson` (no se acepta del cliente como body).
+    /// Útil para campos sensibles (`password_hash`, tokens internos)
+    /// o para metadata interna que no debe cruzar la frontera HTTP.
+    /// El field sigue siendo asignable desde el código Fitz interno
+    /// (registro, persistencia DB, etc.) — solo la serialización
+    /// JSON es la que cambia. Cruzado con `@table` types: el field
+    /// SÍ va a la DB (no afecta el INSERT/SELECT), solo afecta el
+    /// boundary HTTP.
+    hidden: bool,
 }
 
 /// Info resuelta de un handler HTTP. La produce
@@ -7547,6 +7563,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         name: r.name.clone(),
                         type_: r.type_.clone(),
                         default: None,
+                        hidden: false,
                     })
                     .collect();
                 self.fields_by_id.insert(id, resolved);
@@ -7600,17 +7617,23 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             };
             // Combinamos: el orden viene de los `ResolvedField` (que
             // el checker mantiene en orden de declaración). Para cada
-            // uno, buscamos el AST por nombre para sacar el default.
+            // uno, buscamos el AST por nombre para sacar el default
+            // y los decoradores (v0.10.11 — `@hidden`).
             let mut combined = Vec::with_capacity(resolved.len());
             for r in &resolved {
-                let default = ast_fields
+                let (default, hidden) = ast_fields
                     .iter()
                     .find(|f: &&Field| f.name == r.name)
-                    .and_then(|f| f.default.clone());
+                    .map(|f| {
+                        let hidden = f.decorators.iter().any(|d| d.name == "hidden");
+                        (f.default.clone(), hidden)
+                    })
+                    .unwrap_or((None, false));
                 combined.push(TypeSigField {
                     name: r.name.clone(),
                     type_: r.type_.clone(),
                     default,
+                    hidden,
                 });
             }
             self.fields_by_id.insert(id, resolved);
@@ -8400,6 +8423,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                             name: f.name.clone(),
                             type_: self.remap_imported_nominals(&f.type_, module_index),
                             default: f.default.clone(),
+                            hidden: f.hidden,
                         })
                         .collect(),
                 };
@@ -19895,6 +19919,17 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         self.emit("    fn __to_fitz_json(&self) -> serde_json::Value {\n");
         self.emit("        let mut __obj = serde_json::Map::new();\n");
         for f in &sig.fields {
+            // v0.10.11 — `@hidden` field: skipea de la serialización
+            // JSON output (no se expone al cliente HTTP). El field
+            // sigue existiendo en el struct Rust y participa del
+            // I/O DB normal — solo queda invisible en el JSON
+            // response. Útil para `password_hash`, tokens internos,
+            // y cualquier metadata que no deba cruzar la frontera
+            // HTTP. Cierra la deuda detectada en smoke real
+            // boilerplate api-orm-full v0.10.10.
+            if f.hidden {
+                continue;
+            }
             // 10.8.3 (v0.10.8) — fix #7: los virtual fields del ORM
             // (`@has_many`/`@has_one`/BelongsToCompanion) ahora SÍ
             // se emiten en el JSON cuando están "preloaded" (no
@@ -19980,11 +20015,14 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             name
         )
         .unwrap();
-        // Validar extras — solo cuenta real fields, no virtuales.
+        // Validar extras — solo cuenta real fields, no virtuales
+        // ni hidden (v0.10.11). Hidden fields rechazan envío del
+        // cliente: si un body incluye `{"password_hash": "..."}`, el
+        // server devuelve 400 con "campo no declarado".
         self.emit("        let __allowed = [");
         let mut first = true;
         for f in sig.fields.iter() {
-            if is_virtual(&f.name) {
+            if is_virtual(&f.name) || f.hidden {
                 continue;
             }
             if !first {
@@ -20014,7 +20052,11 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         // remap-degradado (`Vec<__FitzValue>` cuando el target type
         // no está en el env del importer).
         for f in &sig.fields {
-            if is_virtual(&f.name) {
+            // v0.10.11 — los hidden NO se leen del JSON (igual que
+            // los virtuales). El struct literal de abajo los
+            // inicializa con su default declarado o
+            // `Default::default()` si no hay.
+            if is_virtual(&f.name) || f.hidden {
                 continue;
             }
             let rust_ty = rust_type_for(&f.type_, self.env)?;
@@ -20060,6 +20102,23 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     f.name
                 )
                 .unwrap();
+            } else if f.hidden {
+                // v0.10.11 — el field hidden NO viene del JSON.
+                // Inicializamos con su default declarado si lo tiene,
+                // o `Default::default()` si no (mismo fallback que
+                // los virtuales). Para `Str = ""`, Default es `""`.
+                if let Some(default_expr) = &f.default {
+                    let (code, ty) = self.gen_expr(default_expr)?;
+                    let coerced = coerce(&code, &ty, &f.type_, self.env);
+                    writeln!(&mut self.output, "            {}: {},", f.name, coerced).unwrap();
+                } else {
+                    writeln!(
+                        &mut self.output,
+                        "            {}: Default::default(),",
+                        f.name
+                    )
+                    .unwrap();
+                }
             } else {
                 writeln!(&mut self.output, "            {},", f.name).unwrap();
             }
