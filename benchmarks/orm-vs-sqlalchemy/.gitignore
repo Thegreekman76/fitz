@@ -1,0 +1,8 @@
+# Resultados de runs locales. NO commitear — cada hardware genera
+# resultados distintos. Para resultados publicables, copiar manualmente
+# el summary.md al final del README bajo "Última corrida".
+results/
+
+# Excepción: mantener el dir tracked vía .gitkeep para que el path
+# exista sin warnings al primer run.
+!results/.gitkeep

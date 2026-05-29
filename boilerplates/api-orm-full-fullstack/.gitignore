@@ -1,0 +1,15 @@
+# Build artifacts del boilerplate api-orm-full-fullstack.
+target/
+fitz.lock
+
+# Binarios sueltos que `fitz build` deja adyacentes al main.
+src/main
+src/main.exe
+src/main.pdb
+
+# Variables de entorno con secrets reales.
+.env
+
+# DB local (si alguien corre Postgres sin Docker).
+*.db
+*.sqlite

@@ -87,6 +87,13 @@ Tres opciones según el stack que prefieras:
   migrar gradualmente, o si necesitás librerías Python específicas
   (numpy/pandas/scipy/ML) en el mismo proceso.
 
+> **Benchmark Fitz ORM vs SQLAlchemy** — hay un
+> [benchmark cabeza-a-cabeza ejecutable](../benchmarks/orm-vs-sqlalchemy/)
+> entre `api-postgres-fitz` y `api-postgres-python` (mismo Postgres,
+> mismos endpoints, misma firma). Mide cold start, latencia
+> p50/p95/p99, throughput RPS, memory peak e image size.
+> `cd benchmarks/orm-vs-sqlalchemy && bash run.sh` (requiere `oha` + `jq`).
+
 ### Quiero el stack web completo (API + DB + frontend)
 
 **[`api-fullstack-postgres`](./api-fullstack-postgres/)** es el
