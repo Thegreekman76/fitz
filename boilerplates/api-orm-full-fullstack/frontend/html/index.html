@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Fitz Blog (fullstack)</title>
+    <script>
+        // Si hay token → posts. Si no → login.
+        const has_token = localStorage.getItem('fitz_token');
+        location.replace(has_token ? '/posts.html' : '/login.html');
+    </script>
+</head>
+<body>
+    Redirigiendo…
+</body>
+</html>

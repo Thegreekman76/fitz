@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Editar post — Fitz Blog</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        main.container { max-width: 720px; }
+        nav.boilerplate-banner { background: #0b3d2c; color: white; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        nav.boilerplate-banner a { color: #8be9c1; text-decoration: none; margin-right: 1rem; }
+        .hint { font-size: 0.85rem; color: #888; }
+    </style>
+</head>
+<body>
+<nav class="boilerplate-banner">
+    <strong>Fitz Blog (fullstack)</strong> &mdash;
+    <a href="/posts.html">← posts</a>
+</nav>
+<main class="container">
+    <h2>Editar post #<span id="pid"></span></h2>
+    <p class="hint">
+        Partial update — los campos vacíos NO se modifican. El handler
+        usa <code>Map&lt;Str, Any&gt;</code> dinámico que el ORM convierte a
+        un <code>UPDATE ... SET ...</code> condicional.
+    </p>
+    <form id="form">
+        <label>Título <input name="title" placeholder="(dejar vacío para no cambiar)"></label>
+        <label>Slug <input name="slug" placeholder="(dejar vacío para no cambiar)"></label>
+        <label>Contenido <textarea name="content" rows="6" placeholder="(dejar vacío para no cambiar)"></textarea></label>
+        <label>Status
+            <select name="status">
+                <option value="">(no cambiar)</option>
+                <option value="draft">draft</option>
+                <option value="published">published</option>
+            </select>
+        </label>
+        <button type="submit">Actualizar</button>
+    </form>
+    <p id="status" style="margin-top:1rem;"></p>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+const POST_ID = params.get('id');
+const TOKEN = localStorage.getItem('fitz_token');
+if (!TOKEN) window.location.href = '/login.html';
+document.getElementById('pid').textContent = POST_ID;
+
+document.getElementById('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const STATUS = document.getElementById('status');
+    STATUS.textContent = '';
+    STATUS.style.color = '';
+    const fd = new FormData(e.target);
+    // Solo enviar campos no vacíos. El handler interpreta "" como
+    // "no modificar" (sentinel del PUT partial update del boilerplate).
+    const body = {
+        title: fd.get('title') || '',
+        slug: fd.get('slug') || '',
+        content: fd.get('content') || '',
+        status: fd.get('status') || '',
+    };
+    try {
+        const r = await fetch(`/api/posts/${POST_ID}`, {
+            method: 'PUT',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${TOKEN}`,
+            },
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'falló');
+        STATUS.style.color = '#3a3';
+        STATUS.textContent = `Actualizado (${data} row(s) afectada(s)). `;
+        const link = document.createElement('a');
+        link.href = `/post-detail.html?id=${POST_ID}`;
+        link.textContent = 'Ver detalle';
+        STATUS.appendChild(link);
+    } catch (err) {
+        STATUS.style.color = '#c33';
+        STATUS.textContent = err.message;
+    }
+});
+</script>
+</body>
+</html>

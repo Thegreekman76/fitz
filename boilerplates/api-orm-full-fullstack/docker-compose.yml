@@ -1,0 +1,78 @@
+# docker-compose para api-orm-full-fullstack.
+#
+# Showcase del stack web first-class entero (HTTP + auth + WS + cron
+# + ORM Postgres) MÁS un frontend vanilla en nginx que consume todo
+# el backend desde un browser real.
+#
+# Tres servicios:
+#   - db        Postgres 16 (igual que api-orm-full).
+#   - api       binario fitz standalone con el blog/CMS completo.
+#   - frontend  nginx alpine que sirve los HTML y proxy-ea /api/ y
+#               /ws/ al backend (same-origin desde el browser, evita
+#               CORS y el gap "WS no permite custom Authorization
+#               header" del lado del cliente).
+#
+# Setup (una vez):
+#   cp .env.example .env
+#   # editar .env si querés credenciales custom o cambiar JWT_SECRET.
+#
+# Uso:
+#   docker compose up --build
+#   # esperar:
+#   #   db        listo (pg_isready)
+#   #   api       "[boot] schema DB inicializado" + "[ready] server..."
+#   #   frontend  "start worker process"
+#
+# Abrir el browser:
+#   http://localhost:8080/              redirige a /login.html si no hay token
+#   http://localhost:8080/login.html    crear cuenta + login
+#   http://localhost:8080/posts.html    listar posts con filtros
+#   http://localhost:8080/new-post.html crear (requiere login)
+#   http://localhost:8080/stats.html    Chart.js sobre GROUP BY del ORM
+#   http://localhost:8080/feed.html     WebSocket realtime
+#   http://localhost:8080/docs          UI Scalar (proxy a /api/docs)
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fitz-pg-fullstack
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fitz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fitz}
+      POSTGRES_DB: ${POSTGRES_DB:-fitz}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fitz} -d ${POSTGRES_DB:-fitz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: fitz-api-fullstack
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER:-fitz}:${POSTGRES_PASSWORD:-fitz}@db:5432/${POSTGRES_DB:-fitz}?sslmode=disable"
+      JWT_SECRET: ${JWT_SECRET:-demo-fullstack-secret-cambiame-en-prod}
+      MAX_DRAFTS_AGE_DAYS: ${MAX_DRAFTS_AGE_DAYS:-30}
+    # No exponemos el puerto 3000 al host — el frontend nginx llega
+    # via la red interna de compose (`api:3000`). Si querés probar el
+    # backend con curl directo desde el host, descomentá:
+    # ports:
+    #   - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: fitz-frontend
+    ports:
+      - "8080:8080"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

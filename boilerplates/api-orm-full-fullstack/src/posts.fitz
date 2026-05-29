@@ -1,0 +1,220 @@
+// posts.fitz — CRUD de posts + eager loading + aggregate.
+//
+// **Patrón cross-module (W12 + W16, v0.10.7)**:
+//   - Los handlers @get/@post/@put/@delete acá se enchufan al
+//     Router del main automáticamente vía W16 (`import posts`).
+//   - `@authenticated` resuelve al `@auth_provider` declarado en
+//     `auth.fitz` vía W12 (resolución cross-module del provider
+//     singleton).
+//
+// **Features del ORM ejercitadas** (cap 31):
+//   - `.where(closure)` con field access sobre vars externas
+//     (`p.author_id == user.id`) — W6 cerrado en v0.10.6.
+//   - `.order_by(...)`, `.limit(...)`, `.offset(...)` — pagination.
+//   - `.preload("author")` (BelongsToCompanion, W12 cerrado en
+//     v0.10.5) + `.preload("comments")` (HasMany).
+//   - `.first(db)`, `.all(db)`, `.count(db)`, `.insert(db, row)`,
+//     `.update(db, row|map)`, `.delete(db)`.
+//   - GROUP BY (`.group_by(...).count(db)`) → aggregate scalar.
+//
+// **Tipos avanzados**:
+//   - `tags: List<Str>` ↔ Postgres `text[]` con `.has(...)` para
+//     filtrar (cap 31 sección "Arrays + operadores").
+//   - `metadata: Map<Str, Any>` ↔ Postgres `jsonb`.
+//
+// **Workarounds activos (3 deudas residuales v0.10.7)**:
+//   - Importar TODOS los @table types al módulo aunque no se
+//     usen directamente — el codegen valida relations cross-type.
+//   - Anotar `let x: Str = match Result { ... }` cuando hay
+//     early-return en el Err arm (bug del checker, deuda menor).
+
+from config import db_url
+// Importar TODOS los @table types — el codegen valida las
+// relations de cada type referenciado (W17 + deuda residual).
+from models import User, Profile, Post, Comment
+// W12 — el `@auth_provider` vive en `auth.fitz`. El pre-scan del
+// checker recorre los imports DEL MÓDULO actual para encontrar
+// providers cross-module, así que necesitamos importar `auth`
+// también acá (no alcanza con que el main lo importe). El
+// ModuleLoader cachea por path, los handlers de `auth.fitz` no
+// se registran dos veces.
+import auth
+
+// --- Tipos de input/output ----------------------------------------
+
+type PostInput {
+    title: Str
+    slug: Str
+    content: Str = ""
+    status: Str = "draft"
+    tags: List<Str> = []
+    metadata: Map<Str, Any> = {}
+}
+
+// Partial update — todos los fields son opcionales (sentinel `""`
+// para "no actualizar"). Map<Str, Any> dinámico vía indexing
+// assignment es paridad bit-a-bit con el evaluator desde v0.10.7
+// (gap del codegen cerrado al cerrar W17 — el indexing assignment
+// envuelve key/value como __FitzValue cuando el storage es
+// heterogéneo, igual que Map literal con hint `Map<_, Any>` desde
+// W1).
+type PostUpdate {
+    title: Str = ""
+    slug: Str = ""
+    content: Str = ""
+    status: Str = ""
+}
+
+// Response liviana del list endpoint (sin eager-loaded fields).
+type PostSummary {
+    id: Int
+    author_id: Int
+    title: Str
+    slug: Str
+    status: Str
+    tags: List<Str>
+    created_at: Str
+    published_at: Str?
+}
+
+// Response del aggregate (GROUP BY author_id).
+type PostsPerUser {
+    author_id: Int
+    count: Int
+}
+
+fn to_summary(p: Post) -> PostSummary {
+    return PostSummary {
+        id: p.id,
+        author_id: p.author_id,
+        title: p.title,
+        slug: p.slug,
+        status: p.status,
+        tags: p.tags,
+        created_at: p.created_at,
+        published_at: p.published_at,
+    }
+}
+
+// --- GET /posts — listar con filtros opcionales (status, tag) -----
+//
+// Query params via `?key={var}&...` en el path. `Str?` permite que
+// el cliente omita el param sin recibir 400.
+// Filtros opcionales: `status` (eq) y `tag` (array contains). Ambos
+// query params nullable (cliente puede omitir cualquiera). El
+// `tag` ejercita `.has(var)` sobre `text[]` — paridad bit-a-bit con
+// var externa en `.where(...)` (gap cerrado en v0.10.7).
+@get("/posts?status={status}&tag={tag}")
+async fn list_posts(status: Str?, tag: Str?) -> Result<List<PostSummary>> {
+    let conn = db.connect(db_url()).await?
+    let qb = Post.order_by(fn(p) => p.created_at).limit(100)
+
+    // Narrowing de `Str?` → `Str` flow-sensitive post-`if (x != null)`
+    // (10.8.4 v0.10.8 — el checker refina el binding al inner type
+    // adentro del if).
+    if (status != null) {
+        qb = qb.where(fn(p) => p.status == status)
+    }
+    if (tag != null) {
+        qb = qb.where(fn(p) => p.tags.has(tag))
+    }
+
+    let rows = qb.all(conn).await?
+    return Ok(rows.map(fn(p) => to_summary(p)))
+}
+
+// --- GET /posts/{id} — uno con eager loading author + comments ---
+//
+// Dos `.preload(...)` encadenados: el ORM emite 3 queries totales
+// (1 para el post + 1 para author batch + 1 para comments batch),
+// cerrando N+1 sin glue manual.
+@get("/posts/{id}")
+async fn get_post(id: Int) -> Result<Post> {
+    let conn = db.connect(db_url()).await?
+    return Post.where(fn(p) => p.id == id)
+        .preload("author")
+        .preload("comments")
+        .first(conn)
+        .await
+}
+
+// --- POST /posts — crear (auth) -----------------------------------
+//
+// El handler `@authenticated` recibe el `User` autenticado como
+// primer param "leftover" (no path, no body, no query). El body
+// queda como segundo param.
+@authenticated
+@post("/posts")
+async fn create_post(user: User, body: PostInput) -> Result<Post> {
+    if (body.title == "" or body.slug == "") {
+        return Err("title y slug son obligatorios")
+    }
+    let conn = db.connect(db_url()).await?
+
+    // Sentinel id: 0 → bigserial. published_at "" si status=draft;
+    // el endpoint PUT del post puede actualizar a "published" más
+    // tarde (controla el cliente cuándo asignar published_at).
+    let new_post = Post.insert(conn, Post {
+        id: 0,
+        author_id: user.id,
+        title: body.title,
+        slug: body.slug,
+        content: body.content,
+        status: body.status,
+        tags: body.tags,
+        metadata: body.metadata,
+        created_at: "",
+        published_at: null,
+    }).await?
+    return Ok(new_post)
+}
+
+// --- PUT /posts/{id} — actualizar (auth + owner check) -----------
+//
+// Verifica que el `user.id` autenticado sea el `author_id` del
+// post antes de updatear — sino devuelve 403 implícito vía `Err`.
+@authenticated
+@put("/posts/{id}")
+async fn update_post(user: User, id: Int, body: PostUpdate) -> Result<Int> {
+    let conn = db.connect(db_url()).await?
+    let existing = Post.where(fn(p) => p.id == id).first(conn).await?
+    if (existing.author_id != user.id) {
+        return Err("no podés editar un post de otro autor")
+    }
+
+    // Partial update — Map<Str, Any> construido dinámicamente con
+    // indexing assignment. El codegen envuelve key/value como
+    // __FitzValue cuando el storage es heterogéneo (gap cerrado en
+    // v0.10.7). W7 (`.update(db, Map var)`) ya cerrado en v0.10.6.
+    let updates: Map<Str, Any> = {}
+    if (body.title != "") { updates["title"] = body.title }
+    if (body.slug != "") { updates["slug"] = body.slug }
+    if (body.content != "") { updates["content"] = body.content }
+    if (body.status != "") { updates["status"] = body.status }
+
+    return Post.where(fn(p) => p.id == id).update(conn, updates).await
+}
+
+// --- DELETE /posts/{id} — borrar (auth + owner check) ------------
+@authenticated
+@delete("/posts/{id}")
+async fn delete_post(user: User, id: Int) -> Result<Int> {
+    let conn = db.connect(db_url()).await?
+    let existing = Post.where(fn(p) => p.id == id).first(conn).await?
+    if (existing.author_id != user.id) {
+        return Err("no podés borrar un post de otro autor")
+    }
+    return Post.where(fn(p) => p.id == id).delete(conn).await
+}
+
+// --- GET /stats/posts-per-user — aggregate con GROUP BY ----------
+//
+// El ORM emite SQL: SELECT author_id, COUNT(*) FROM posts GROUP BY
+// author_id. Retorna List<Map<Str, Any>> que se serializa a JSON
+// gracias al `impl __MapKey for __FitzValue` (deuda #1 cerrada
+// en v0.10.4).
+@get("/stats/posts-per-user")
+async fn stats_posts_per_user() -> Result<List<Map<Str, Any>>> {
+    let conn = db.connect(db_url()).await?
+    return Post.group_by(fn(p) => p.author_id).count(conn).await
+}

@@ -12,9 +12,118 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-9no boilerplate `api-orm-full-fullstack` (frontend vanilla nginx,
-memoria `project_boilerplate_orm_full_fullstack.md`), benchmarks
-Fitz ORM vs SQLAlchemy, decidir scope del próximo norte técnico.
+benchmarks Fitz ORM vs SQLAlchemy, decidir scope del próximo
+norte técnico.
+
+## [v0.10.12] — 2026-05-29 — LSP completion tras `@` + 9no boilerplate fullstack
+
+Dos cambios paralelos en una sola release:
+
+### LSP completion tras `@` (DX del editor)
+
+Cerrada la deuda LSP heredada de v0.10.11 ("hoy grammar destaca
+cualquier `@name` pero el LSP no sugiere la lista cerrada de
+decorators"). Al escribir `@` o `@<prefix>` en el editor, el LSP
+sugiere ahora los 23 decorators del lenguaje con snippets útiles.
+
+**Cambios técnicos**:
+
+- **src/lsp.rs**: nuevo `CompletionContext::AfterAt` detectado
+  cuando el char antes del prefix ident es `@`. Tiene prioridad
+  sobre `AfterDot` (el char `@` no forma parte de un ident chain).
+- **src/lsp.rs**: nueva fn `decorator_completions()` que devuelve
+  los 23 decorators agrupados en 5 familias:
+  - HTTP routing: `@get`/`@post`/`@put`/`@delete`/`@server`/`@header`
+  - Middleware/CORS: `@middleware`/`@cors`
+  - Auth: `@authenticated`/`@admin`/`@auth_provider`
+  - WS + Jobs: `@ws`/`@cron`/`@background`/`@test`
+  - ORM: `@table`/`@primary`/`@column`/`@unique`/`@index`/
+    `@db_default`/`@hidden`/`@belongs_to`/`@has_one`/`@has_many`
+- **Snippets con tabstops** (`${N:placeholder}`): decorators con
+  args típicos (`@get("/path")`, `@table("name")`) emiten un
+  placeholder editable. Decorators sin args (`@hidden`,
+  `@primary`, `@test`, etc.) emiten el nombre plano. Decorators
+  de relation emiten dos tabstops (`@belongs_to("Target",
+  via="fk")`).
+- **src/bin/fitz-lsp.rs**: `CompletionOptions.trigger_characters`
+  expandido a `[".", "@"]` — VSCode invoca completion
+  automáticamente cuando el usuario tipea `@`.
+- **tests/lsp_e2e.rs**: nuevo test
+  `completion_after_at_lista_decorators_v0_10_12` que valida la
+  capability, la lista de 17 decorators core, kind=SNIPPET (15) e
+  insertTextFormat=2 (snippet). Test viejo
+  `completion_after_dot_sobre_str_lista_metodos_built_in`
+  actualizado para tolerar el nuevo trigger char `@`.
+
+### 9no boilerplate: `api-orm-full-fullstack` ⭐⭐⭐
+
+Replica el backend de `api-orm-full` (HTTP + auth + WS + cron +
+Postgres ORM) **sumando un frontend vanilla** en nginx que consume
+todo el stack desde un browser real. Cubre el ciclo "browser →
+server → DB" end-to-end.
+
+**Estructura**:
+- `src/` — idéntica a `api-orm-full` (ningún cambio al backend).
+- `frontend/` — Dockerfile + nginx.conf + 7 pantallas HTML/CSS/JS
+  vanilla (sin build step, sin node_modules, <100 KB total).
+- `docker-compose.yml` — 3 services: db (Postgres 16) + api (Fitz
+  binario standalone) + frontend (nginx-alpine).
+
+**Pantallas**:
+| URL | Endpoint(s) | Qué ejercita |
+|---|---|---|
+| `/login.html` | `POST /auth/login`, `POST /auth/register` | JWT en localStorage |
+| `/posts.html` | `GET /posts?status=&tag=` | listado con filtros |
+| `/post-detail.html?id=N` | `GET /posts/{id}` + preload, `POST /posts/{id}/comments` | eager loading inline |
+| `/new-post.html` | `POST /posts` | tags array + jsonb desde browser |
+| `/edit-post.html?id=N` | `PUT /posts/{id}` | partial update con `Map<Str, Any>` |
+| `/stats.html` | `GET /stats/posts-per-user` | GROUP BY con Chart.js |
+| `/feed.html` | `WS /feed` | WS auth realtime |
+
+**Decisión técnica clave — nginx proxy same-origin**: el frontend
+hace `fetch("/api/...")` y `new WebSocket("/ws/feed?token=...")`.
+nginx proxy-ea ambos al backend en `:3000`. Esto resuelve **dos
+limitaciones de los browsers** sin tocar el backend:
+- **Sin CORS**: requests same-origin desde la perspectiva del
+  browser.
+- **WS auth header injection**: los browsers NO permiten custom
+  headers en `new WebSocket(url)`; el frontend pasa el token JWT
+  como `?token=...` y nginx lo transforma a header
+  `Authorization: Bearer ...` antes del proxy.
+
+```nginx
+location /ws/ {
+    proxy_pass http://api:3000/;
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    set $auth_token "";
+    if ($arg_token) { set $auth_token "Bearer $arg_token"; }
+    proxy_set_header Authorization $auth_token;
+}
+```
+
+**Stack frontend**:
+- HTML/CSS/JS vanilla, sin build step.
+- Pico.css (classless) via CDN — sin clases CSS, HTML semántico
+  se ve bien.
+- Chart.js via CDN para `/stats.html`.
+- localStorage para JWT.
+
+`boilerplates/README.md` actualizado de "8 boilerplates" a "9
+boilerplates" con entrada nueva entre `api-orm-full` y
+`api-postgres-python`.
+
+### Validación
+
+- `cargo fmt --all -- --check` limpio.
+- `cargo clippy --all-targets --features lsp -- -D warnings` limpio.
+- `cargo test --release --features lsp --test lsp_e2e` 6 tests verde
+  (5 anteriores + 1 nuevo de AfterAt).
+- `cargo test --release --test compile_e2e smoke_ejemplos_guia` 292
+  ejemplos verde (sin regresiones).
+- Backend del 9no boilerplate: `fitz check src/main.fitz` limpio.
+- Smoke real Docker pendiente al release CI verde.
 
 ## [v0.10.11] — 2026-05-29 — `@hidden` field decorator + boilerplates con LATEST
 

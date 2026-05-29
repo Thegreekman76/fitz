@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Login — Fitz Blog</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        main.container { max-width: 480px; margin-top: 4rem; }
+        nav.boilerplate-banner { background: #0b3d2c; color: white; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        nav.boilerplate-banner a { color: #8be9c1; text-decoration: none; margin-right: 1rem; }
+    </style>
+</head>
+<body>
+<nav class="boilerplate-banner">
+    <strong>Fitz Blog (fullstack)</strong> &mdash;
+    <a href="/posts.html">posts</a>
+    <a href="/login.html">login</a>
+    <a href="/docs" target="_blank">API docs</a>
+</nav>
+<main class="container">
+    <article>
+        <header><strong>Iniciar sesión</strong></header>
+        <form id="login-form">
+            <label>Email
+                <input type="email" name="email" placeholder="ada@example.com" required>
+            </label>
+            <label>Password
+                <input type="password" name="password" placeholder="(8+ chars)" required minlength="8">
+            </label>
+            <button type="submit">Entrar</button>
+        </form>
+        <p id="status" style="margin-top:1rem;color:#c33;"></p>
+        <footer>
+            <small>¿No tenés cuenta? <a href="#" id="register-link">Crear una</a></small>
+        </footer>
+    </article>
+</main>
+<script>
+const $ = (sel) => document.querySelector(sel);
+const STATUS = $('#status');
+
+async function doLogin(email, password) {
+    const r = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+    });
+    const data = await r.json();
+    if (!r.ok || !data.token) {
+        throw new Error(data.error || 'login falló');
+    }
+    return data.token;
+}
+
+async function doRegister(email, name, password) {
+    const r = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, name, password }),
+    });
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.error || 'register falló');
+    return data;
+}
+
+$('#login-form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    STATUS.textContent = '';
+    const fd = new FormData(e.target);
+    try {
+        const token = await doLogin(fd.get('email'), fd.get('password'));
+        localStorage.setItem('fitz_token', token);
+        localStorage.setItem('fitz_email', fd.get('email'));
+        window.location.href = '/posts.html';
+    } catch (err) {
+        STATUS.textContent = err.message;
+    }
+});
+
+$('#register-link').addEventListener('click', async (e) => {
+    e.preventDefault();
+    const email = prompt('Email:');
+    if (!email) return;
+    const name = prompt('Nombre:');
+    if (!name) return;
+    const password = prompt('Password (8+ chars):');
+    if (!password) return;
+    STATUS.textContent = '';
+    try {
+        await doRegister(email, name, password);
+        STATUS.style.color = '#3a3';
+        STATUS.textContent = `Cuenta creada para ${email}. Iniciá sesión.`;
+        $('input[name=email]').value = email;
+    } catch (err) {
+        STATUS.style.color = '#c33';
+        STATUS.textContent = err.message;
+    }
+});
+</script>
+</body>
+</html>

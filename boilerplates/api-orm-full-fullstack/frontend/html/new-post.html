@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nuevo post — Fitz Blog</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        main.container { max-width: 720px; }
+        nav.boilerplate-banner { background: #0b3d2c; color: white; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        nav.boilerplate-banner a { color: #8be9c1; text-decoration: none; margin-right: 1rem; }
+    </style>
+</head>
+<body>
+<nav class="boilerplate-banner">
+    <strong>Fitz Blog (fullstack)</strong> &mdash;
+    <a href="/posts.html">← posts</a>
+</nav>
+<main class="container">
+    <h2>Nuevo post</h2>
+    <form id="form">
+        <label>Título <input name="title" required></label>
+        <label>Slug <input name="slug" placeholder="hola-mundo" required pattern="[a-z0-9-]+"></label>
+        <label>Contenido <textarea name="content" rows="6"></textarea></label>
+        <label>Status
+            <select name="status">
+                <option value="draft">draft</option>
+                <option value="published">published</option>
+            </select>
+        </label>
+        <label>Tags (coma-separados) <input name="tags" placeholder="rust, fitz, web"></label>
+        <label>Metadata JSON (opcional) <textarea name="metadata" rows="3" placeholder='{"lang":"es"}'>{}</textarea></label>
+        <button type="submit">Crear</button>
+    </form>
+    <p id="status" style="margin-top:1rem;"></p>
+</main>
+<script>
+const TOKEN = localStorage.getItem('fitz_token');
+if (!TOKEN) window.location.href = '/login.html';
+
+document.getElementById('form').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const STATUS = document.getElementById('status');
+    STATUS.textContent = '';
+    STATUS.style.color = '';
+    const fd = new FormData(e.target);
+    let metadata;
+    try {
+        metadata = JSON.parse(fd.get('metadata') || '{}');
+    } catch (err) {
+        STATUS.style.color = '#c33';
+        STATUS.textContent = 'Metadata no es JSON válido: ' + err.message;
+        return;
+    }
+    const body = {
+        title: fd.get('title'),
+        slug: fd.get('slug'),
+        content: fd.get('content'),
+        status: fd.get('status'),
+        tags: (fd.get('tags') || '').split(',').map(s => s.trim()).filter(Boolean),
+        metadata,
+    };
+    try {
+        const r = await fetch('/api/posts', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${TOKEN}`,
+            },
+            body: JSON.stringify(body),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error(data.error || 'falló');
+        window.location.href = `/post-detail.html?id=${data.id}`;
+    } catch (err) {
+        STATUS.style.color = '#c33';
+        STATUS.textContent = err.message;
+    }
+});
+</script>
+</body>
+</html>

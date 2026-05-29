@@ -590,6 +590,18 @@ enum CompletionContext {
     /// módulo target. `mod_path` son los segmentos del módulo
     /// (`["foo"]` o `["sub", "utils"]`).
     FromImportList { mod_path: Vec<String> },
+    /// v0.10.12 — `@` o `@<prefix>` — el cursor está tipeando un
+    /// decorator (después del `@`, antes del `(` o de un newline).
+    /// Listamos la lista cerrada de decorators del lenguaje con
+    /// snippets útiles. VSCode filtra client-side por `<prefix>`.
+    /// Cubre los 4 grupos:
+    ///   - HTTP routing: `@get`/`@post`/`@put`/`@delete`/`@server`/`@header`
+    ///   - Middleware/CORS: `@middleware`/`@cors`
+    ///   - Auth: `@authenticated`/`@admin`/`@auth_provider`
+    ///   - WS + Jobs: `@ws`/`@cron`/`@background`/`@test`
+    ///   - ORM: `@table`/`@primary`/`@column`/`@unique`/`@index`/
+    ///     `@db_default`/`@hidden`/`@belongs_to`/`@has_one`/`@has_many`
+    AfterAt,
     /// Cualquier otro contexto — listamos top-level + builtins + keywords.
     ScopeLevel,
 }
@@ -661,6 +673,7 @@ pub fn completion_at_position_with_uri(
             Some(uri) => from_import_completions(uri, &mod_path),
             None => Vec::new(),
         },
+        CompletionContext::AfterAt => decorator_completions(),
         CompletionContext::ScopeLevel => {
             // Mini-tanda LSPy.4 — pasar la línea del cursor (1-based)
             // para incluir vars locales/params del scope contenedor.
@@ -682,6 +695,18 @@ fn detect_completion_context(text: &str, line: u32, character: u32) -> Option<Co
     let mut i = offset;
     while i > 0 && is_ident_continue(bytes[i - 1]) {
         i -= 1;
+    }
+    // v0.10.12 — Si justo antes del prefix hay un `@`, contexto
+    // AfterAt (tipeando nombre de decorator). Cubre tanto `@|`
+    // (cursor inmediato al `@`, prefix vacío) como `@get|` (prefix
+    // "get"). VSCode filtra client-side por el prefix tipeado, así
+    // que devolvemos siempre la lista completa de decorators.
+    //
+    // Tiene prioridad sobre after-dot: el char `@` no puede formar
+    // parte de un ident chain (`a.b.c`), así que el después del `@`
+    // SIEMPRE es nombre de decorator.
+    if i > 0 && bytes[i - 1] == b'@' {
+        return Some(CompletionContext::AfterAt);
     }
     // Si justo antes hay un `.`, contexto after-dot.
     if i > 0 && bytes[i - 1] == b'.' {
@@ -932,6 +957,208 @@ fn is_ident_continue(b: u8) -> bool {
 ///
 /// Tipos cubiertos: `Nominal` (fields), `List` (6 métodos), `Map`
 /// (5 métodos), `Str` (3 métodos). Otros devuelven lista vacía.
+/// v0.10.12 — Completions para el contexto `AfterAt` (cursor
+/// tipeando un decorator después de `@`). Devuelve la lista cerrada
+/// de decorators del lenguaje agrupados por familia, con snippets
+/// `${N:label}` donde `${0}` indica el cursor final post-completion.
+///
+/// VSCode filtra client-side por el prefix tipeado, así que
+/// devolvemos siempre la lista completa — el usuario ve `@ge` →
+/// `@get`, `@post`, `@put`, `@delete` (filtrado a `@get` por
+/// prefix match).
+///
+/// **Snippets**:
+/// - Decorators con un arg típico (`@get("/path")`, `@table("name")`)
+///   emiten `nombre("${1:placeholder}")` con tabstop.
+/// - Decorators sin args (`@hidden`, `@primary`, `@test`,
+///   `@authenticated`, `@admin`, `@background`) emiten el nombre
+///   plano sin paréntesis.
+/// - Decorators con multiples args opcionales (`@server`, `@cors`)
+///   emiten `nombre(${1:args})` con un solo placeholder editable.
+/// - Decorators de relation (`@belongs_to`, `@has_one`, `@has_many`)
+///   emiten `nombre("${1:Target}", via="${2:fk}")` con dos tabstops.
+fn decorator_completions() -> Vec<CompletionItem> {
+    use tower_lsp::lsp_types::InsertTextFormat;
+
+    // Cada tuple: (label, snippet, detail, doc)
+    // - label es lo que aparece en la lista de VSCode.
+    // - snippet usa sintaxis ${N:placeholder} para tabstops.
+    // - detail es la firma corta.
+    // - doc es la descripción de qué hace.
+    let entries: &[(&str, &str, &str, &str)] = &[
+        // HTTP routing
+        (
+            "get",
+            "get(\"${1:/path}\")",
+            "@get(path) — HTTP GET handler",
+            "Registra un handler HTTP GET. Path con `{param}` para path params.",
+        ),
+        (
+            "post",
+            "post(\"${1:/path}\")",
+            "@post(path) — HTTP POST handler",
+            "Registra un handler HTTP POST. Body deserializado al tipo del param leftover.",
+        ),
+        (
+            "put",
+            "put(\"${1:/path}\")",
+            "@put(path) — HTTP PUT handler",
+            "Registra un handler HTTP PUT. Body deserializado al tipo del param leftover.",
+        ),
+        (
+            "delete",
+            "delete(\"${1:/path}\")",
+            "@delete(path) — HTTP DELETE handler",
+            "Registra un handler HTTP DELETE.",
+        ),
+        (
+            "server",
+            "server(${1:3000})",
+            "@server(port, host?, ws_heartbeat_secs?, ...)",
+            "Configura el listener HTTP. Args: port, host (default \"127.0.0.1\"), ws_heartbeat_secs, api_version, docs.",
+        ),
+        (
+            "header",
+            "header(\"${1:Header-Name}\")",
+            "@header(name) — param del handler bindeado desde header",
+            "El param del handler recibe el valor del header HTTP. Solo Str o Str?.",
+        ),
+        // Middleware / CORS
+        (
+            "middleware",
+            "middleware(${1:fn_name})",
+            "@middleware(fn) — apilable antes del decorator de ruta",
+            "Cadena de middlewares ejecutados en orden. `return null` continúa, `return <status> {...}` short-circuit.",
+        ),
+        (
+            "cors",
+            "cors()",
+            "@cors() o @cors({allow_origin: \"...\", ...})",
+            "CORS para la ruta. Sin args: defaults permisivos. Con map: override de allow_origin/methods/headers/max_age.",
+        ),
+        // Auth
+        (
+            "authenticated",
+            "authenticated",
+            "@authenticated — handler protegido por el provider",
+            "Valida bearer token via el @auth_provider singleton. El primer param leftover recibe el User autenticado.",
+        ),
+        (
+            "admin",
+            "admin",
+            "@admin — handler protegido + role == \"admin\"",
+            "Equivalente a @authenticated + check `user.role == \"admin\"`. Devuelve 403 si no admin.",
+        ),
+        (
+            "auth_provider",
+            "auth_provider",
+            "@auth_provider — singleton resolutor de tokens",
+            "Marca la fn como el provider de auth. Recibe Map<Str,Str> headers, retorna Result<User>.",
+        ),
+        // WS + Jobs
+        (
+            "ws",
+            "ws(\"${1:/path}\")",
+            "@ws(path) — WebSocket endpoint",
+            "Async fn con primer param WsConn<T> typed. T es el message type marshalled de/al cliente.",
+        ),
+        (
+            "cron",
+            "cron(\"${1:0 */5 * * * *}\")",
+            "@cron(expr) — job periódico",
+            "Expression cron (5/6/7 fields Unix). Sync o async. Sin params, return Null/Result/Future.",
+        ),
+        (
+            "background",
+            "background",
+            "@background — marca fn como spawnable via spawn(fn(...))",
+            "Marker opt-in. Habilita el call `spawn(fn(args))` fire-and-forget tipado a Future<T>.",
+        ),
+        (
+            "test",
+            "test",
+            "@test — registra como test unit (fitz test)",
+            "Sin params. Bodies pueden usar assert/assert_eq/assert_ne/assert_throws builtins.",
+        ),
+        // ORM
+        (
+            "table",
+            "table(\"${1:tabla}\")",
+            "@table(\"name\") — type → tabla Postgres",
+            "Habilita los read/write methods del ORM sobre el type. Requiere @primary en algún field.",
+        ),
+        (
+            "primary",
+            "primary",
+            "@primary — field es la PK",
+            "Sobre un field. Exactamente uno por type. Composite PKs no soportadas en MVP.",
+        ),
+        (
+            "column",
+            "column(\"${1:sql_name}\")",
+            "@column(sql_name) — override del nombre SQL del field",
+            "Por default el ORM usa el nombre Fitz del field. Con @column override-eás el SQL.",
+        ),
+        (
+            "unique",
+            "unique",
+            "@unique — columna UNIQUE en la DB",
+            "Marca el field como UNIQUE en el CREATE TABLE generado. Sin args.",
+        ),
+        (
+            "index",
+            "index",
+            "@index — columna indexada",
+            "Marca el field para CREATE INDEX. Sin args.",
+        ),
+        (
+            "db_default",
+            "db_default",
+            "@db_default — DB asigna el value (skipea INSERT)",
+            "ORM skipea el field del INSERT, Postgres aplica su DEFAULT (típico: timestamps, UUIDs gen_random_uuid()).",
+        ),
+        (
+            "hidden",
+            "hidden",
+            "@hidden — field invisible para el JSON HTTP I/O",
+            "Skipea de __to_fitz_json (no expone al cliente) y __FromFitzJson (rechaza extras). Útil: password_hash, tokens.",
+        ),
+        (
+            "belongs_to",
+            "belongs_to(\"${1:Target}\")",
+            "@belongs_to(\"Type\", on_delete?, on_update?)",
+            "Sobre un FK field. Soporta kwargs on_delete=\"cascade\"/\"set_null\"/\"restrict\"/\"no_action\".",
+        ),
+        (
+            "has_one",
+            "has_one(\"${1:Target}\", via=\"${2:fk}\")",
+            "@has_one(\"Type\", via=\"fk_field\", on_delete?)",
+            "Virtual field (no va a la DB). El target hospeda el FK. Para `.preload(...)`.",
+        ),
+        (
+            "has_many",
+            "has_many(\"${1:Target}\", via=\"${2:fk}\")",
+            "@has_many(\"Type\", via=\"fk_field\", on_delete?)",
+            "Virtual List<Target>. El target hospeda el FK. Para `.preload(...)`.",
+        ),
+    ];
+
+    entries
+        .iter()
+        .map(|(label, snippet, detail, doc)| CompletionItem {
+            label: label.to_string(),
+            kind: Some(CompletionItemKind::SNIPPET),
+            detail: Some((*detail).to_string()),
+            documentation: Some(tower_lsp::lsp_types::Documentation::String(
+                (*doc).to_string(),
+            )),
+            insert_text: Some((*snippet).to_string()),
+            insert_text_format: Some(InsertTextFormat::SNIPPET),
+            ..Default::default()
+        })
+        .collect()
+}
+
 fn after_dot_completions(
     program: &Program,
     type_info: &TypeInfo,

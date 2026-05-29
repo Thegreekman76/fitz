@@ -38,3 +38,8 @@ examples/guide/21-python-crud/crud.db
 # guía resuelvan en el sitio publicado. Si corrés `mkdocs serve`
 # local, hacé el mismo `cp` a mano.
 /docs/examples/
+
+# Drafts de blog posts para dev.to / Hashnode / etc — son borradores
+# de difusión, no parte de la doc del lenguaje. Quedan en el repo
+# local para iteración pero no se publican junto con el código.
+/docs/blog/

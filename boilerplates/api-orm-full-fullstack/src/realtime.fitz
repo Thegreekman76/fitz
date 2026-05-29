@@ -1,0 +1,81 @@
+// realtime.fitz — feed WS broadcast simétrico entre clientes.
+//
+// **Patrón cross-module (W12 + W16)**:
+//   - `@authenticated` apilado sobre `@ws` resuelve al provider de
+//     `auth.fitz` via W12. El handshake WS valida el JWT ANTES del
+//     upgrade — clientes sin token reciben 401 sin abrir el socket.
+//   - El handler `@ws("/feed")` se enchufa al Router del main via
+//     W16 (`import realtime`).
+//
+// **Modelo del canal**:
+//   - Clientes WS conectados al `/feed` envían FeedEvent JSON; el
+//     handler los marshalea automático al type Fitz.
+//   - Cada `conn.broadcast(stamped)` reenvía a TODOS los clientes
+//     conectados al endpoint (incluido el sender — convención
+//     Socket.IO/Phoenix).
+//   - El `user.name` del JWT se inyecta server-side en el evento
+//     antes del broadcast (no se confía en lo que mande el cliente).
+//
+// **AsyncAPI 3.0 auto-generado** en `/asyncapi.json` documenta el
+// canal `/feed` con el schema de `FeedEvent` y `bearerAuth` como
+// security requirement. Consumible con AsyncAPI Studio + generadores
+// de clientes JS/TS/Python.
+//
+// **Heartbeat** ping/pong cada 30s (default, override via
+// `@server(ws_heartbeat_secs=N)` en main.fitz) mantiene la conn
+// viva atravesando Nginx default 60s idle, CloudFlare ~100s,
+// AWS ALB 60s.
+//
+// **Deuda del lenguaje conocida** (NO bloquea el ejemplo): no hay
+// API global para "handler HTTP triggerea broadcast a clientes WS"
+// — `conn.broadcast(...)` solo funciona DESDE un handler `@ws`. El
+// patrón canónico SaaS (comment nuevo → otros usuarios reciben
+// notification real-time) hoy requiere que los clientes pollen el
+// endpoint o que el WS reciba el trigger del cliente mismo.
+
+from models import User, Profile, Post, Comment
+import auth
+
+// FeedEvent — el shape del mensaje que viaja por el WS. El user
+// y created_at los inyecta el server; el cliente solo necesita
+// mandar `{ kind, text }`. Marshaling JSON automático.
+type FeedEvent {
+    kind: Str        // "post_published" | "comment_added" | "system"
+    user: Str = ""
+    text: Str
+    created_at: Str = ""
+}
+
+// --- WS /feed — broadcast simétrico entre clientes conectados ---
+@authenticated
+@ws("/feed")
+async fn feed(conn: WsConn<FeedEvent>, user: User) -> Null {
+    // Mensaje de bienvenida solo al sender (no broadcast).
+    let welcome = FeedEvent {
+        kind: "system",
+        user: "system",
+        text: "bienvenido al feed, {user.name}",
+        created_at: "",
+    }
+    let _ = conn.send(welcome)
+
+    // Loop principal: recv → broadcast con user.name del JWT.
+    loop {
+        match conn.recv() {
+            Ok(msg) => {
+                let stamped = FeedEvent {
+                    kind: msg.kind,
+                    user: user.name,
+                    text: msg.text,
+                    created_at: "",
+                }
+                let _ = conn.broadcast(stamped)
+            }
+            Err(_) => {
+                // Conn cerrada o frame inválido — salida limpia.
+                return null
+            }
+        }
+    }
+    return null
+}

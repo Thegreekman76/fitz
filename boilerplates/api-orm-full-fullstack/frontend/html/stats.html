@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stats — Fitz Blog</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <style>
+        main.container { max-width: 800px; }
+        nav.boilerplate-banner { background: #0b3d2c; color: white; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        nav.boilerplate-banner a { color: #8be9c1; text-decoration: none; margin-right: 1rem; }
+        .hint { font-size: 0.85rem; color: #888; }
+    </style>
+</head>
+<body>
+<nav class="boilerplate-banner">
+    <strong>Fitz Blog (fullstack)</strong> &mdash;
+    <a href="/posts.html">← posts</a>
+    <a href="/stats.html">stats</a>
+</nav>
+<main class="container">
+    <h2>Posts por autor</h2>
+    <p class="hint">
+        El endpoint <code>GET /stats/posts-per-user</code> ejercita un
+        <strong>GROUP BY</strong> del ORM (<code>Post.group_by(fn(p) =&gt;
+        p.author_id).count(conn).await</code>). El response es
+        <code>List&lt;Map&lt;Str, Any&gt;&gt;</code> que el ORM serializa a JSON
+        sin glue manual (deuda #1 cerrada en v0.10.4).
+    </p>
+    <canvas id="chart" height="120"></canvas>
+    <details>
+        <summary>Raw JSON</summary>
+        <pre id="raw" style="background:#f0f0f0;padding:0.5rem;font-size:0.8rem;"></pre>
+    </details>
+</main>
+<script>
+async function load() {
+    const r = await fetch('/api/stats/posts-per-user');
+    const data = await r.json();
+    document.getElementById('raw').textContent = JSON.stringify(data, null, 2);
+
+    const labels = data.map(row => `User #${row.author_id}`);
+    const counts = data.map(row => row.count);
+
+    new Chart(document.getElementById('chart'), {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [{
+                label: 'Posts publicados',
+                data: counts,
+                backgroundColor: '#2a8a5a',
+            }],
+        },
+        options: {
+            responsive: true,
+            scales: { y: { beginAtZero: true, ticks: { stepSize: 1 } } },
+        },
+    });
+}
+load();
+</script>
+</body>
+</html>

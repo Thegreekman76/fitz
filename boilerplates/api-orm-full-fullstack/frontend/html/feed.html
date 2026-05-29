@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Feed (WS) — Fitz Blog</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        main.container { max-width: 800px; }
+        nav.boilerplate-banner { background: #0b3d2c; color: white; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        nav.boilerplate-banner a { color: #8be9c1; text-decoration: none; margin-right: 1rem; }
+        #status-dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #c33; margin-right: 0.5rem; vertical-align: middle; }
+        #status-dot.connected { background: #2a8; }
+        #log { background: #f5f5f5; padding: 1rem; border-radius: 4px; max-height: 400px; overflow: auto; font-family: monospace; font-size: 0.85rem; }
+        .msg { padding: 0.25rem 0; border-bottom: 1px solid #e0e0e0; }
+        .msg .who { color: #2a8a5a; font-weight: bold; }
+        .msg .when { color: #888; }
+        .msg.system { color: #888; font-style: italic; }
+        .hint { font-size: 0.85rem; color: #888; }
+    </style>
+</head>
+<body>
+<nav class="boilerplate-banner">
+    <strong>Fitz Blog (fullstack)</strong> &mdash;
+    <a href="/posts.html">← posts</a>
+    <a href="/feed.html">feed</a>
+</nav>
+<main class="container">
+    <h2>
+        Feed realtime
+        <small><span id="status-dot"></span><span id="status-text">desconectado</span></small>
+    </h2>
+    <p class="hint">
+        El endpoint <code>WS /feed</code> es <strong>auth-protected</strong>
+        (el @authenticated valida el JWT antes del upgrade HTTP). El
+        broadcast es simétrico — todos los conectados ven los mensajes,
+        incluido el emisor (convención Socket.IO/Phoenix).
+        El token JWT viaja como <code>?token=&lt;jwt&gt;</code> y nginx lo
+        inyecta como header <code>Authorization: Bearer ...</code> antes
+        de hacer el proxy al backend.
+    </p>
+    <form id="send-form" onsubmit="event.preventDefault(); send();">
+        <fieldset role="group">
+            <input id="msg-input" type="text" placeholder="Escribí algo y enter..." required>
+            <button type="submit">Enviar</button>
+        </fieldset>
+    </form>
+    <div id="log"></div>
+</main>
+<script>
+const TOKEN = localStorage.getItem('fitz_token');
+const EMAIL = localStorage.getItem('fitz_email') || 'anon';
+if (!TOKEN) window.location.href = '/login.html';
+
+const LOG = document.getElementById('log');
+const STATUS_DOT = document.getElementById('status-dot');
+const STATUS_TXT = document.getElementById('status-text');
+const INPUT = document.getElementById('msg-input');
+
+let ws = null;
+
+function logMsg(html, cls = '') {
+    const div = document.createElement('div');
+    div.className = 'msg ' + cls;
+    div.innerHTML = html;
+    LOG.appendChild(div);
+    LOG.scrollTop = LOG.scrollHeight;
+}
+
+function connect() {
+    // El token JWT va como query param ?token=...
+    // nginx lo convierte a header Authorization: Bearer ... antes
+    // del proxy al backend (browsers no permiten custom headers en
+    // el constructor de WebSocket).
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const url = `${proto}//${location.host}/ws/feed?token=${encodeURIComponent(TOKEN)}`;
+    logMsg(`Conectando a ${url}...`, 'system');
+    ws = new WebSocket(url);
+
+    ws.addEventListener('open', () => {
+        STATUS_DOT.classList.add('connected');
+        STATUS_TXT.textContent = 'conectado';
+        logMsg('✓ conectado', 'system');
+    });
+
+    ws.addEventListener('message', (ev) => {
+        // El backend define el shape del mensaje (typed via WsConn<T>
+        // en Fitz). Para el boilerplate api-orm-full el feed broadcast
+        // es libre — interpretamos como string plano si no es JSON.
+        let text = ev.data;
+        try {
+            const obj = JSON.parse(ev.data);
+            if (obj && typeof obj === 'object') {
+                const who = obj.from || 'anon';
+                const when = obj.at || new Date().toISOString().slice(11, 19);
+                text = `<span class="who">${esc(who)}</span> <span class="when">${esc(when)}</span> — ${esc(obj.text || JSON.stringify(obj))}`;
+            }
+        } catch { /* no era JSON, lo dejamos plano */ }
+        if (typeof text === 'string' && !text.includes('<span')) {
+            text = esc(text);
+        }
+        logMsg(text);
+    });
+
+    ws.addEventListener('close', (ev) => {
+        STATUS_DOT.classList.remove('connected');
+        STATUS_TXT.textContent = 'desconectado';
+        logMsg(`✗ desconectado (code=${ev.code})`, 'system');
+        // Reconnect después de 2s.
+        setTimeout(connect, 2000);
+    });
+
+    ws.addEventListener('error', () => {
+        logMsg('⚠ error de conexión', 'system');
+    });
+}
+
+function send() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        alert('Esperando conexión...');
+        return;
+    }
+    const text = INPUT.value.trim();
+    if (!text) return;
+    // Enviar como JSON con metadata útil. El backend re-broadcast
+    // simétrico (los demás clientes verán este mismo objeto).
+    const payload = {
+        from: EMAIL,
+        at: new Date().toISOString().slice(11, 19),
+        text,
+    };
+    ws.send(JSON.stringify(payload));
+    INPUT.value = '';
+}
+
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+connect();
+</script>
+</body>
+</html>

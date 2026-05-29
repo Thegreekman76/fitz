@@ -1,0 +1,23 @@
+// config.fitz — configuración del boilerplate api-orm-full.
+//
+// Centraliza la lectura de env vars en helpers reusables desde el
+// resto de los módulos. No expone `let X = env_or(...)` top-level
+// porque la deuda 5b.5 del codegen restringe RHS no literales a
+// nivel de módulo — los helpers leen on-demand.
+//
+// **Defaults útiles para `fitz run` local** (sin Docker). En
+// docker-compose.yml las env vars apuntan al servicio `db:5432`.
+
+// db_url — connection string al Postgres. Default apunta a
+// localhost para correr `fitz run src/main.fitz` sin Docker
+// (con un Postgres corriendo en localhost:5432 con user `fitz`).
+fn db_url() -> Str => env_or("DATABASE_URL", "postgres://fitz:fitz@localhost:5432/fitz?sslmode=disable")
+
+// jwt_secret — secret del HMAC del JWT. **Cambiar en producción**
+// vía la env var `JWT_SECRET`. El default es para que el ejemplo
+// arranque sin setup extra; no usar tal cual en producción real.
+fn jwt_secret() -> Str => env_or("JWT_SECRET", "demo-orm-full-secret-cambiame-en-prod")
+
+// max_drafts_age_days — drafts viejos que el cron borra al correr.
+// Default 30 días. Configurable vía env var `MAX_DRAFTS_AGE_DAYS`.
+fn max_drafts_age_days() -> Str => env_or("MAX_DRAFTS_AGE_DAYS", "30")

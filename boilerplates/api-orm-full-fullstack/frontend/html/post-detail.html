@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Post — Fitz Blog</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        main.container { max-width: 800px; }
+        nav.boilerplate-banner { background: #0b3d2c; color: white; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        nav.boilerplate-banner a { color: #8be9c1; text-decoration: none; margin-right: 1rem; }
+        .meta { color: #888; font-size: 0.9rem; }
+        .tag { display: inline-block; background: #e0f0e8; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; margin-right: 0.25rem; }
+        .comment { border-left: 3px solid #c0e0d0; padding: 0.5rem 1rem; margin: 0.5rem 0; }
+        .author-card { display: flex; gap: 1rem; align-items: center; background: #f5fbf8; padding: 0.75rem; border-radius: 6px; margin: 1rem 0; }
+        .json-debug { background: #f0f0f0; padding: 0.5rem; font-size: 0.75rem; max-height: 200px; overflow: auto; }
+    </style>
+</head>
+<body>
+<nav class="boilerplate-banner">
+    <strong>Fitz Blog (fullstack)</strong> &mdash;
+    <a href="/posts.html">← posts</a>
+    <a href="/new-post.html">nuevo</a>
+</nav>
+<main class="container" id="root">
+    <progress></progress>
+</main>
+<script>
+const params = new URLSearchParams(location.search);
+const POST_ID = params.get('id');
+const TOKEN = localStorage.getItem('fitz_token');
+
+async function load() {
+    const root = document.getElementById('root');
+    try {
+        const r = await fetch(`/api/posts/${POST_ID}`);
+        const p = await r.json();
+        if (!r.ok) throw new Error(p.error || 'no encontrado');
+
+        const tags = (p.tags || []).map(t => `<span class="tag">${esc(t)}</span>`).join('');
+        const author = p.author ? `
+            <div class="author-card">
+                <strong>${esc(p.author.name)}</strong>
+                <span class="meta">${esc(p.author.email)}</span>
+                <span class="meta">rol: ${esc(p.author.role)}</span>
+            </div>
+        ` : '<p class="meta"><em>(author no preloaded)</em></p>';
+
+        const comments = (p.comments || []).map(c => `
+            <div class="comment">
+                <strong>#${c.author_id}</strong>
+                <span class="meta">${c.created_at || ''}</span>
+                <p>${esc(c.content)}</p>
+            </div>
+        `).join('') || '<p class="meta"><em>Aún no hay comentarios.</em></p>';
+
+        root.innerHTML = `
+            <h2>${esc(p.title)}</h2>
+            <p class="meta">
+                ${p.status === 'published' ? '🟢' : '⚪'} ${p.status} ·
+                ${tags || '<em class="meta">sin tags</em>'} ·
+                creado ${p.created_at.split('.')[0]}
+                ${p.published_at ? `· publicado ${p.published_at.split('.')[0]}` : ''}
+            </p>
+            ${author}
+            <article>
+                <pre style="white-space: pre-wrap; font-family: inherit;">${esc(p.content)}</pre>
+            </article>
+            ${Object.keys(p.metadata || {}).length ? `
+                <details>
+                    <summary>metadata (jsonb)</summary>
+                    <pre class="json-debug">${esc(JSON.stringify(p.metadata, null, 2))}</pre>
+                </details>
+            ` : ''}
+            <h3>Comentarios</h3>
+            <div id="comments">${comments}</div>
+            ${TOKEN ? `
+                <form id="comment-form">
+                    <textarea name="content" rows="2" placeholder="Tu comentario..." required></textarea>
+                    <button type="submit">Comentar</button>
+                </form>
+            ` : '<p><em><a href="/login.html">Iniciá sesión</a> para comentar.</em></p>'}
+        `;
+
+        if (TOKEN) {
+            document.getElementById('comment-form').addEventListener('submit', postComment);
+        }
+    } catch (err) {
+        root.innerHTML = `<p style="color:#c33;">Error: ${esc(err.message)}</p>`;
+    }
+}
+
+async function postComment(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    try {
+        const r = await fetch(`/api/posts/${POST_ID}/comments`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${TOKEN}`,
+            },
+            body: JSON.stringify({ content: fd.get('content') }),
+        });
+        if (!r.ok) {
+            const data = await r.json();
+            throw new Error(data.error || 'falló');
+        }
+        await load();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+function esc(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+load();
+</script>
+</body>
+</html>

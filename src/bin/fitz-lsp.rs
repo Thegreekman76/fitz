@@ -137,14 +137,15 @@ impl LanguageServer for Backend {
                 // simple) en lugar de `DefinitionOptions`.
                 definition_provider: Some(OneOf::Left(true)),
                 // Fase 9.x.4 — anunciamos completion contextual.
-                // `trigger_characters = [".".into()]` hace que VSCode
-                // invoque automáticamente la completion tras un `.`
-                // (caso after-dot). Para typing normal, el cliente
-                // invoca por su cuenta. `resolve_provider: false`
-                // porque mandamos toda la info en el item (no usamos
-                // `completionItem/resolve` para detalles lazy).
+                // `trigger_characters = [".".into(), "@".into()]` hace
+                // que VSCode invoque automáticamente la completion tras
+                // un `.` (caso after-dot) o un `@` (caso AfterAt,
+                // v0.10.12 — lista de decorators). Para typing normal,
+                // el cliente invoca por su cuenta. `resolve_provider:
+                // false` porque mandamos toda la info en el item (no
+                // usamos `completionItem/resolve` para detalles lazy).
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".into()]),
+                    trigger_characters: Some(vec![".".into(), "@".into()]),
                     resolve_provider: Some(false),
                     ..CompletionOptions::default()
                 }),

@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="es" data-theme="light">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Posts — Fitz Blog</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+    <style>
+        main.container { max-width: 960px; }
+        nav.boilerplate-banner { background: #0b3d2c; color: white; padding: 0.5rem 1rem; margin-bottom: 2rem; }
+        nav.boilerplate-banner a { color: #8be9c1; text-decoration: none; margin-right: 1rem; }
+        nav.boilerplate-banner .user { float: right; font-size: 0.9rem; }
+        .tag { display: inline-block; background: #e0f0e8; padding: 0.1rem 0.4rem; border-radius: 4px; font-size: 0.75rem; margin-right: 0.25rem; }
+        .status-published { color: #2a8; }
+        .status-draft { color: #888; font-style: italic; }
+        .filters { display: flex; gap: 1rem; align-items: end; margin-bottom: 1rem; }
+        .filters > * { flex: 1; }
+        .filters button { flex: 0; }
+    </style>
+</head>
+<body>
+<nav class="boilerplate-banner">
+    <strong>Fitz Blog (fullstack)</strong> &mdash;
+    <a href="/posts.html">posts</a>
+    <a href="/new-post.html">nuevo</a>
+    <a href="/stats.html">stats</a>
+    <a href="/feed.html">feed</a>
+    <a href="/docs" target="_blank">API docs</a>
+    <span class="user">
+        <span id="user-email"></span>
+        <a href="#" id="logout">salir</a>
+    </span>
+</nav>
+<main class="container">
+    <hgroup>
+        <h2>Posts</h2>
+        <p>Listado con filtros opcionales por status y tag.</p>
+    </hgroup>
+    <form class="filters" id="filter-form" onsubmit="event.preventDefault(); load();">
+        <label>Status
+            <select name="status">
+                <option value="">(todos)</option>
+                <option value="draft">draft</option>
+                <option value="published">published</option>
+            </select>
+        </label>
+        <label>Tag
+            <input type="text" name="tag" placeholder="rust">
+        </label>
+        <button type="submit">Filtrar</button>
+    </form>
+    <table>
+        <thead>
+            <tr>
+                <th>id</th>
+                <th>título</th>
+                <th>autor</th>
+                <th>status</th>
+                <th>tags</th>
+                <th>creado</th>
+                <th></th>
+            </tr>
+        </thead>
+        <tbody id="rows">
+            <tr><td colspan="7"><progress></progress></td></tr>
+        </tbody>
+    </table>
+</main>
+<script>
+const TOKEN = localStorage.getItem('fitz_token');
+const EMAIL = localStorage.getItem('fitz_email');
+if (!TOKEN) window.location.href = '/login.html';
+document.getElementById('user-email').textContent = EMAIL || '';
+document.getElementById('logout').addEventListener('click', (e) => {
+    e.preventDefault();
+    localStorage.clear();
+    window.location.href = '/login.html';
+});
+
+async function authHeaders() {
+    return { 'Authorization': `Bearer ${TOKEN}` };
+}
+
+async function load() {
+    const fd = new FormData(document.getElementById('filter-form'));
+    const qs = new URLSearchParams();
+    if (fd.get('status')) qs.set('status', fd.get('status'));
+    if (fd.get('tag'))    qs.set('tag', fd.get('tag'));
+    const url = '/api/posts' + (qs.toString() ? '?' + qs.toString() : '');
+    const tbody = document.getElementById('rows');
+    tbody.innerHTML = '<tr><td colspan="7"><progress></progress></td></tr>';
+    try {
+        const r = await fetch(url);
+        const posts = await r.json();
+        if (!posts.length) {
+            tbody.innerHTML = '<tr><td colspan="7"><em>(sin resultados)</em></td></tr>';
+            return;
+        }
+        tbody.innerHTML = posts.map(p => `
+            <tr>
+                <td>${p.id}</td>
+                <td><a href="/post-detail.html?id=${p.id}">${escapeHtml(p.title)}</a></td>
+                <td>#${p.author_id}</td>
+                <td><span class="status-${p.status}">${p.status}</span></td>
+                <td>${(p.tags||[]).map(t => `<span class="tag">${escapeHtml(t)}</span>`).join('')}</td>
+                <td><small>${p.created_at.split('.')[0]}</small></td>
+                <td>
+                    <a href="/edit-post.html?id=${p.id}">editar</a> ·
+                    <a href="#" onclick="del(${p.id}); return false;">borrar</a>
+                </td>
+            </tr>
+        `).join('');
+    } catch (err) {
+        tbody.innerHTML = `<tr><td colspan="7" style="color:#c33;">${err.message}</td></tr>`;
+    }
+}
+
+async function del(id) {
+    if (!confirm(`¿Borrar post #${id}? (solo el autor puede)`)) return;
+    try {
+        const r = await fetch('/api/posts/' + id, {
+            method: 'DELETE',
+            headers: await authHeaders(),
+        });
+        if (!r.ok) {
+            const data = await r.json();
+            throw new Error(data.error || 'delete falló');
+        }
+        await load();
+    } catch (err) {
+        alert(err.message);
+    }
+}
+
+function escapeHtml(s) {
+    return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+load();
+</script>
+</body>
+</html>

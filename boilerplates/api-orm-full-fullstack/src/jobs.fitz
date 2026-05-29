@@ -1,0 +1,49 @@
+// jobs.fitz — cron jobs sin Celery (Fase 9.w.3).
+//
+// **Patrón**: `@cron("expr")` registra una fn como tarea periódica
+// que el runtime de Fitz dispara según el schedule. NO necesita
+// broker externo (Redis/RabbitMQ) ni proceso worker separado — el
+// scheduler vive en el binario mismo, paralelo a `tokio::spawn`.
+//
+// **Modelo crontab Unix** (5 fields + segundos opcional adelante):
+//   "<min> <hour> <day> <month> <weekday>"     → 5 fields
+//   "<sec> <min> <hour> <day> <month> <weekday>" → 6 fields
+//
+// Ejemplos comunes:
+//   "*/5 * * * *"          → cada 5 min
+//   "0 0 * * *"            → todos los días a medianoche UTC
+//   "0 */6 * * *"          → cada 6 horas en :00
+//   "0 30 9 * * 1-5"       → lunes a viernes 9:30 AM (6 fields)
+//
+// **Cross-module via W16**: el `@cron` declarado acá se enchufa al
+// scheduler del main automáticamente cuando main hace `import jobs`.
+//
+// **Idempotencia**: el cron NO garantiza "exactly once" si el
+// proceso se reinicia entre el trigger y el commit del DELETE. Para
+// jobs sensibles, usar advisory locks de Postgres o un timestamp
+// "last_run" en una tabla de control. Para este cleanup de drafts
+// viejos, "as-most-once + retry next tick" es aceptable.
+
+from config import db_url, max_drafts_age_days
+from models import User, Profile, Post, Comment
+
+// --- @cron("0 0 * * *") cleanup_old_drafts ----------------------
+//
+// Todos los días a medianoche UTC: borra los posts en status "draft"
+// con `created_at` más viejo que MAX_DRAFTS_AGE_DAYS (configurable
+// vía env var, default "30").
+//
+// SQL emitido (escape hatch via db.exec para INTERVAL paramétrico
+// que el ORM no expresa nativo todavía):
+//   DELETE FROM posts
+//   WHERE status = 'draft'
+//     AND created_at < NOW() - INTERVAL '<n> days'
+@cron("0 0 * * *")
+async fn cleanup_old_drafts() -> Result<Null> {
+    let conn = db.connect(db_url()).await?
+    let days = max_drafts_age_days()
+    let sql = "DELETE FROM posts WHERE status = 'draft' AND created_at < NOW() - (CAST($1 AS text) || ' days')::interval"
+    let affected = conn.exec(sql, [days]).await?
+    print("[cron] cleanup_old_drafts: borró {affected} drafts (>{days} días)")
+    return Ok(null)
+}

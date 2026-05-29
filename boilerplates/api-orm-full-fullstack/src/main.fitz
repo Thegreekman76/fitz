@@ -1,0 +1,55 @@
+// main.fitz — orquestador del boilerplate api-orm-full.
+//
+// **Showcase del ORM nativo + stack web first-class** completo:
+// HTTP + auth nativa + WebSockets tipados + cron jobs + Postgres
+// con ORM declarativo. Sin Python, sin libs externas — todo en el
+// binario `fitz` mismo, paridad bit-a-bit `fitz run` ↔ `fitz build`.
+//
+// **Patrón cross-module (W12 + W16 + W17 + W18, v0.10.7/.8)**:
+//   - Los handlers HTTP y WS viven en módulos por feature
+//     (auth/posts/comments/realtime).
+//   - Los cron jobs viven en `jobs.fitz`.
+//   - `import <modulo>` arriba del main alcanza para que el codegen
+//     enchufe handlers + jobs al `axum::Router` + scheduler.
+//   - El `@auth_provider` declarado en `auth.fitz` se encuentra
+//     cross-module por los `@authenticated`/`@admin` de los otros
+//     módulos vía W12 (los módulos lo importan también).
+//
+// **Cuándo modificar este archivo**:
+//   - Cambiar puerto del server o `ws_heartbeat_secs`.
+//   - Importar un módulo nuevo de feature (`import billing`, etc.).
+//   - Tocar el bootstrap del schema.
+
+import auth
+import posts
+import comments
+import realtime
+import jobs
+
+from schema import init_schema
+
+@server(3000, "0.0.0.0", ws_heartbeat_secs=30)
+fn main() => 0
+
+match init_schema().await {
+    Ok(_)  => print("[boot] schema DB inicializado"),
+    Err(e) => print("[boot] ERROR schema — {e}"),
+}
+
+print("[ready] server arrancando en :3000")
+print("[ready] endpoints:")
+print("[ready]   POST   /auth/register      crear cuenta")
+print("[ready]   POST   /auth/login         JWT (Bearer)")
+print("[ready]   GET    /me                 (auth)")
+print("[ready]   GET    /posts              listar (filtros: ?status&tag)")
+print("[ready]   GET    /posts/\{id\}         con eager loading author + comments")
+print("[ready]   POST   /posts              (auth)")
+print("[ready]   PUT    /posts/\{id\}         (auth + owner) partial update")
+print("[ready]   DELETE /posts/\{id\}         (auth + owner)")
+print("[ready]   GET    /posts/\{id\}/comments")
+print("[ready]   POST   /posts/\{id\}/comments (auth)")
+print("[ready]   GET    /stats/posts-per-user  GROUP BY aggregate")
+print("[ready]   WS     /feed               broadcast realtime (auth)")
+print("[ready]   cron @00:00 cleanup_old_drafts")
+print("[ready]   GET    /docs               UI Scalar (OpenAPI 3.1)")
+print("[ready]   GET    /asyncapi.json      schema WebSockets")

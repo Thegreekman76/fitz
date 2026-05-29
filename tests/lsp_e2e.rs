@@ -503,9 +503,14 @@ fn completion_after_dot_sobre_str_lista_metodos_built_in() {
         init_resp.contains(r#""completionProvider""#),
         "initialize sin completionProvider: {init_resp}",
     );
+    // v0.10.12 — trigger chars expandido a `[".","@"]` (`.` ya estaba,
+    // `@` sumado para AfterAt completion de decorators).
     assert!(
         init_resp.contains(r#""triggerCharacters":["."]"#)
-            || init_resp.contains(r#""triggerCharacters": ["."]"#),
+            || init_resp.contains(r#""triggerCharacters": ["."]"#)
+            || init_resp.contains(r#""triggerCharacters":[".","@"]"#)
+            || init_resp.contains(r#""triggerCharacters": [".","@"]"#)
+            || init_resp.contains(r#""triggerCharacters":[".", "@"]"#),
         "completionProvider sin trigger character `.`: {init_resp}",
     );
 
@@ -601,6 +606,151 @@ fn completion_after_dot_sobre_str_lista_metodos_built_in() {
             "completion scope-level sin label `{expected}`: {scope_resp}",
         );
     }
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+#[test]
+fn completion_after_at_lista_decorators_v0_10_12() {
+    // v0.10.12 — Completion tras `@`. El cursor en `@|` o `@<prefix>`
+    // dispara CompletionContext::AfterAt, que devuelve la lista
+    // cerrada de decorators del lenguaje con snippets útiles.
+    //
+    // Validamos:
+    //   1. Capability completionProvider anuncia `@` como trigger char.
+    //   2. Tras `@`, la lista incluye los decorators core de cada
+    //      familia: @get (HTTP), @authenticated (auth), @ws (WS),
+    //      @cron (jobs), @table (ORM), @hidden (ORM v0.10.11),
+    //      @belongs_to (ORM relations).
+    //   3. Los items tienen kind=SNIPPET (15) y insertTextFormat=2
+    //      (snippet con tabstops).
+    //   4. Decorators con args incluyen placeholders `${1:...}` en
+    //      el insertText. Decorators sin args (@hidden/@primary/etc.)
+    //      no usan placeholders.
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    // Handshake.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let init_resp = read_message(&mut stdout);
+
+    // Capability: completionProvider con trigger characters incluyendo `@`.
+    assert!(
+        init_resp.contains(r#""triggerCharacters":[".","@"]"#)
+            || init_resp.contains(r#""triggerCharacters": [".","@"]"#)
+            || init_resp.contains(r#""triggerCharacters":[".", "@"]"#)
+            || init_resp.contains(r#""triggerCharacters": [".", "@"]"#),
+        "completionProvider sin trigger character `@`: {init_resp}",
+    );
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // didOpen con `@\n`. Cursor en línea 0, col 1 — justo después del `@`.
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///dec.fitz","languageId":"fitz","version":1,"text":"@\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    // Drenamos diagnostics.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    // textDocument/completion en (0, 1) — after-at.
+    let comp_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///dec.fitz"},"position":{"line":0,"character":1},"context":{"triggerKind":2,"triggerCharacter":"@"}}}"#;
+    stdin.write_all(&frame(comp_req)).expect("write completion");
+    stdin.flush().expect("flush completion");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let comp_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando completion response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    assert!(
+        !comp_resp.contains(r#""error""#),
+        "completion devolvió error: {comp_resp}",
+    );
+
+    // Decorators core de cada familia deben aparecer.
+    for expected in [
+        "get",
+        "post",
+        "server",
+        "middleware",
+        "cors",
+        "authenticated",
+        "admin",
+        "auth_provider",
+        "ws",
+        "cron",
+        "background",
+        "test",
+        "table",
+        "primary",
+        "hidden",
+        "belongs_to",
+        "has_many",
+    ] {
+        assert!(
+            comp_resp.contains(&format!(r#""label":"{expected}""#))
+                || comp_resp.contains(&format!(r#""label": "{expected}""#)),
+            "completion AfterAt sin label `{expected}`: {comp_resp}",
+        );
+    }
+
+    // Kind=SNIPPET (15) en al menos un item.
+    assert!(
+        comp_resp.contains(r#""kind":15"#) || comp_resp.contains(r#""kind": 15"#),
+        "completion AfterAt items sin kind=SNIPPET: {comp_resp}",
+    );
+
+    // insertTextFormat=2 (snippet con tabstops).
+    assert!(
+        comp_resp.contains(r#""insertTextFormat":2"#)
+            || comp_resp.contains(r#""insertTextFormat": 2"#),
+        "completion AfterAt items sin insertTextFormat=Snippet: {comp_resp}",
+    );
+
+    // @get debe traer snippet con placeholder ${1:/path}.
+    assert!(
+        comp_resp.contains(r#"get(\"${1:/path}\")"#),
+        "completion @get sin snippet con placeholder: {comp_resp}",
+    );
+
+    // @hidden debe traer insertText plano (sin paréntesis ni placeholders).
+    assert!(
+        comp_resp.contains(r#""insertText":"hidden""#)
+            || comp_resp.contains(r#""insertText": "hidden""#),
+        "completion @hidden debería ser plano sin paréntesis: {comp_resp}",
+    );
 
     drop(stdin);
     wait_for_clean_exit(&mut child);

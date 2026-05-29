@@ -1,0 +1,92 @@
+// models.fitz — types con `@table` del dominio Blog/CMS.
+//
+// Cuatro tablas + sus relations:
+//   - User           → @has_many posts, @has_one profile
+//   - Profile        → @belongs_to user (con companion `user: User?`)
+//   - Post           → @belongs_to author (User), @has_many comments
+//   - Comment        → @belongs_to post, @belongs_to author (User)
+//
+// **Orden de declaración**: User está PRIMERO porque los demás
+// types referencian User como target de `@belongs_to`/companion. El
+// ORM acepta forward refs en `@has_many("Target", ...)` (Target se
+// declara después), pero los companion fields (`user: User?`) son
+// backward refs — el target debe estar declarado antes.
+//
+// **Tipos avanzados ejercitados**:
+//   - `password_hash: Str` Argon2id por usuario.
+//   - `role: Str` para `@admin` (default "user", "admin" para
+//     usuarios con privilegios).
+//   - `tags: List<Str>` ↔ Postgres `text[]` (ORM nativo lo
+//     marshalea bidireccional, cap 31 sección "Arrays").
+//   - `metadata: Map<Str, Any>` ↔ Postgres `jsonb` (idem, cap 31
+//     sección "JSONB libre" — útil para SEO settings, custom
+//     fields, etc. sin migrar el schema).
+//   - `status: Str` simulando enum ("draft" | "published") —
+//     Postgres ENUM nativo no soportado en ORM MVP (cap 31
+//     sección "Qué no está en el MVP").
+//
+// **Sentinel `id: Int = 0`**: deja que Postgres asigne el id via
+// bigserial al insertar. El ORM (W4 cerrado en v0.10.6) detecta
+// el sentinel y skipea el field del INSERT.
+//
+// **Cascade vía kwarg del decorator**: `on_delete="cascade"` es
+// parte del MISMO decorator de la relation (`@belongs_to(...,
+// on_delete="cascade")`), validado por el checker en compile-time.
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str = ""
+    name: Str = ""
+    // `@hidden` (v0.10.11): el field NO se serializa al JSON
+    // response del cliente HTTP NI se acepta como body del cliente.
+    // El field sigue persistiéndose en Postgres como cualquier
+    // columna normal. Lo populamos en `register` con `hash.password
+    // (body.password)` y lo leemos en `login` para `hash.verify(...)`.
+    @hidden password_hash: Str = ""
+    role: Str = "user"
+    @db_default created_at: Str = ""
+
+    // Virtual fields (no van a la DB) — default explícito requerido
+    // por el codegen del ORM para poder instanciar `User { ... }`
+    // sin nombrarlos.
+    @has_many("Post", via="author_id", on_delete="cascade") posts: List<Post> = []
+    @has_one("Profile", via="user_id", on_delete="cascade") profile: Profile? = null
+}
+
+@table("profiles") type Profile {
+    @primary id: Int = 0
+    @belongs_to("User", on_delete="cascade") user_id: Int = 0
+    user: User?
+    bio: Str = ""
+    avatar_url: Str = ""
+    website: Str = ""
+}
+
+@table("posts") type Post {
+    @primary id: Int = 0
+    @belongs_to("User", on_delete="cascade") author_id: Int = 0
+    author: User?
+    title: Str = ""
+    slug: Str = ""
+    content: Str = ""
+    status: Str = "draft"
+    tags: List<Str> = []
+    metadata: Map<Str, Any> = {}
+    @db_default created_at: Str = ""
+    // `published_at` queda como `Str?` (nullable) — el schema lo
+    // define como `timestamptz` sin DEFAULT, así que el ORM marshalea
+    // `null` Fitz → `NULL` SQL (semánticamente "post no publicado").
+    // Cuando el handler quiere publicar, setea con un timestamp ISO.
+    published_at: Str? = null
+
+    @has_many("Comment", via="post_id", on_delete="cascade") comments: List<Comment> = []
+}
+
+@table("comments") type Comment {
+    @primary id: Int = 0
+    @belongs_to("Post", on_delete="cascade") post_id: Int = 0
+    @belongs_to("User", on_delete="cascade") author_id: Int = 0
+    author: User?
+    content: Str = ""
+    @db_default created_at: Str = ""
+}
