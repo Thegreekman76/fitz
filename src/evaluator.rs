@@ -11045,13 +11045,18 @@ fn pg_value_to_fitz_with_oid(v: &crate::db::PgValue, oid_hint: Option<u32>) -> V
         crate::db::PgValue::Bool(b) => Value::Bool(*b),
         crate::db::PgValue::Bytes(b) => Value::Bytes(b.clone()),
         // Fase 10.5.b — array Postgres → List Fitz. Cada elemento se
-        // convierte recursivamente. Para arrays de date/timestamptz/
-        // uuid, propagamos el `elem_oid` para que los elementos sean
-        // Value::Date/DateTime/Uuid en vez de Str.
+        // convierte recursivamente. v0.10.24: el `elem_oid` se propaga
+        // SOLO si el caller pidió refinamiento (oid_hint.is_some()).
+        // Si oid_hint es None (default backward-compat), los elementos
+        // de un array uuid[]/date[]/timestamptz[] vuelven como Str
+        // — preserva comportamiento pre-v0.10.24 donde `rows[0]["ids"]`
+        // de un `db.query` raw retornaba `List<Str>`. El path ORM
+        // @table-typed (annotation-aware) sí pasa Some(_) y refina.
         crate::db::PgValue::Array { elem_oid, values } => {
+            let elem_hint = oid_hint.map(|_| *elem_oid);
             let items: Vec<Value> = values
                 .iter()
-                .map(|item| pg_value_to_fitz_with_oid(item, Some(*elem_oid)))
+                .map(|item| pg_value_to_fitz_with_oid(item, elem_hint))
                 .collect();
             Value::new_list(items)
         }
@@ -11114,20 +11119,21 @@ fn parse_pg_timestamp_naive(s: &str) -> Option<Value> {
 
 /// Mapea una fila Postgres a un `Value::Map` Fitz con pares
 /// (Str column_name, Value). El orden de columnas se preserva
-/// (Map adentro es Vec<(K, V)>). v0.10.24: el OID de cada columna
-/// se propaga al conversor para que date/timestamptz/uuid bajen
-/// tipados.
+/// (Map adentro es Vec<(K, V)>).
+///
+/// v0.10.24 nota: el path raw `db.query(...)` NO refina los Text
+/// según OID — date/timestamptz/uuid bajan como `Value::Str`
+/// (formato ISO 8601 / canonical UUID del wire Postgres). Razón:
+/// sin anotación destino del lado Fitz, asumir refinamiento
+/// rompería código pre-v0.10.24 que esperaba strings. Si el user
+/// quiere typed values, usa el ORM con `@table type X { d: Date }`
+/// o coerce manual con `Date.parse(s)?`.
 fn pg_row_to_fitz_map(row: &crate::db::Row) -> Value {
     let pairs: Vec<(Value, Value)> = row
         .columns()
         .iter()
         .zip(row.values().iter())
-        .map(|((name, oid), val)| {
-            (
-                Value::Str(name.clone()),
-                pg_value_to_fitz_with_oid(val, Some(*oid)),
-            )
-        })
+        .map(|((name, _oid), val)| (Value::Str(name.clone()), pg_value_to_fitz(val)))
         .collect();
     Value::new_map(pairs)
 }
@@ -12084,6 +12090,26 @@ fn is_map_type(t: &crate::ast::TypeExpr) -> bool {
     match t {
         crate::ast::TypeExpr::Generic { name, .. } => name == "Map",
         crate::ast::TypeExpr::Nullable(inner) => is_map_type(inner),
+        _ => false,
+    }
+}
+
+/// v0.10.24 (annotation-aware OID refinement) — `true` si el field
+/// type Fitz declara explícitamente uno de los 3 tipos nuevos
+/// (Date, DateTime, Uuid) o un wrapper que los contiene (Nullable o
+/// List<T>). Solo cuando devuelve `true`, el ORM read-back propaga
+/// el OID al converter para que `PgValue::Text` → `Value::Date/
+/// DateTime/Uuid`. Para fields declarados como `Str`/`List<Str>`/
+/// etc., backward-compat: mantener Value::Str (pre-v0.10.24).
+fn field_type_uses_new_temporal_or_uuid(t: &crate::ast::TypeExpr) -> bool {
+    match t {
+        crate::ast::TypeExpr::Named(name) => {
+            matches!(name.as_str(), "Date" | "DateTime" | "Uuid")
+        }
+        crate::ast::TypeExpr::Nullable(inner) => field_type_uses_new_temporal_or_uuid(inner),
+        crate::ast::TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => {
+            field_type_uses_new_temporal_or_uuid(&args[0])
+        }
         _ => false,
     }
 }
@@ -13972,16 +13998,27 @@ fn pg_row_to_instance(
         // Fase 10.5.a — si el field Fitz es Map<...> y el PgValue
         // es Text, parseamos como JSON. El driver mapea columnas
         // jsonb/json a `PgValue::Text` con el JSON crudo.
-        // v0.10.24 — propagamos el OID al converter para refinar
-        // PgValue::Text a Value::Date/DateTime/Uuid cuando aplica.
+        // v0.10.24 (annotation-aware OID refinement) — propagamos el
+        // OID al converter SOLO cuando el field type es uno de los
+        // tipos nuevos (Date/DateTime/Uuid). Si el user declaró
+        // `Str` o `List<Str>` (backward compat con código pre-v0.10.24
+        // que trataba date/timestamptz/uuid como strings ISO 8601),
+        // pasamos `None` y el converter cae a Value::Str. Esto evita
+        // breakage de programas existentes sin perder el upgrade
+        // automático cuando el user opt-in con anotación explícita.
+        let oid_hint = if field_type_uses_new_temporal_or_uuid(&f.type_) {
+            Some(oid)
+        } else {
+            None
+        };
         let fitz_value = if is_map_type(&f.type_) {
             match pg {
                 crate::db::PgValue::Text(s) => jsonb_text_to_fitz_value(s),
                 crate::db::PgValue::Null => Value::Null,
-                other => pg_value_to_fitz_with_oid(other, Some(oid)),
+                other => pg_value_to_fitz_with_oid(other, oid_hint),
             }
         } else {
-            pg_value_to_fitz_with_oid(pg, Some(oid))
+            pg_value_to_fitz_with_oid(pg, oid_hint)
         };
         field_values.push((f.name.clone(), fitz_value));
     }
