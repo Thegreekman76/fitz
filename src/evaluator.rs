@@ -26193,10 +26193,13 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn db_connect_url_con_sslmode_require_es_err() {
-        // sslmode=require todavía no llega en 10.1 — el connect
-        // devuelve Err con NotImplemented. El user lee el mensaje
-        // y sabe usar sslmode=disable o esperar el sub-paso futuro.
+    async fn db_connect_url_con_sslmode_require_resuelve_y_falla_en_red() {
+        // v0.10.23 (Fase 10.1.b) — sslmode=require ahora parsea OK
+        // y el connect intenta la conexión TCP real (que falla
+        // porque "h" no resuelve DNS). El test valida que el flow
+        // llega al I/O step (no aborta en el parser ni en el
+        // dispatch). Antes de v0.10.23, el connect retornaba Err
+        // con NotImplemented sin tocar el socket.
         let (env, res) =
             parse_eval_into_env("let r = db.connect(\"postgres://x@h/d?sslmode=require\").await")
                 .await;
@@ -26205,9 +26208,15 @@ let r = match n {
         match r {
             Value::Result(crate::value::ResultVariant::Err(boxed)) => {
                 if let Value::Str(msg) = boxed.as_ref() {
+                    // Aceptamos varias variantes del error de red
+                    // según OS (Windows: "Host desconocido", Linux:
+                    // "Name or service not known", etc.). Lo que NO
+                    // debe aparecer es "no implementado" o
+                    // "NotImplemented".
                     assert!(
-                        msg.contains("sslmode=require") || msg.contains("TLS"),
-                        "mensaje inesperado: {msg}"
+                        !msg.to_lowercase().contains("not implemented")
+                            && !msg.to_lowercase().contains("no implementado"),
+                        "esperaba error de red, no NotImplemented: {msg}"
                     );
                 } else {
                     panic!("esperaba Err(Str), fue Err({:?})", boxed);

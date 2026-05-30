@@ -221,9 +221,56 @@ postgres://[user[:password]@]host[:port]/dbname[?param=value&...]
 
 Parámetros soportados:
 
-- `sslmode=disable` — **requerido en MVP** (TLS strict viene como
-  sub-paso futuro 10.1.b).
+- `sslmode=disable|require|verify-ca|verify-full` — controla TLS.
+  Default `disable` si no se especifica. Detalle en
+  [sub-sección "TLS strict"](#tls-strict-v01023) abajo.
+- `sslrootcert=path/to/ca.pem` — custom CA bundle (PEM) para
+  `verify-ca`/`verify-full`. Sin esto, el driver usa el Mozilla
+  root CA bundle (`webpki-roots`) in-binary. Path relativo al
+  CWD del proceso.
 - `application_name=mi-app` — passthrough al server.
+
+### TLS strict (v0.10.23)
+
+Habilitado desde v0.10.23 (Fase 10.1.b) — apuntar el driver a
+managed Postgres real (Heroku, RDS, Supabase, Neon, Aiven, Render
+PG, Crunchy Bridge, etc.) sin downgrade a sslmode=disable.
+Implementado con `rustls` puro Rust + `webpki-roots` (Mozilla CA
+bundle in-binary). Cero deps system — no requiere OpenSSL/
+SChannel/SecTransport instalado.
+
+| `sslmode` | TLS | Cert chain | Hostname | Cuándo usar |
+|---|:---:|:---:|:---:|---|
+| `disable`     | ❌ | — | — | Local dev sin TLS (Postgres en Docker localhost, etc.) |
+| `require`     | ✅ | ❌ | ❌ | Dev/staging contra Postgres internos sin CA pública. NO usar en prod (MITM) |
+| `verify-ca`   | ✅ | ✅ | ❌ | Cert custom donde el CN/SAN difiere del hostname (proxies, port forward) |
+| `verify-full` | ✅ | ✅ | ✅ | **Recomendado producción** — modo usado por todos los managed Postgres |
+
+```fitz
+// Supabase / Neon / RDS — exigen TLS verify-full
+let db = db.connect(
+    "postgres://user:pass@db.proyecto.supabase.co:5432/postgres?sslmode=verify-full"
+).await?
+
+// Postgres interno con cert self-signed firmado por una CA corporativa
+let db = db.connect(
+    "postgres://user:pass@db.intra:5432/myapp?sslmode=verify-full&sslrootcert=/etc/ssl/corp-ca.pem"
+).await?
+```
+
+**Combinaciones inválidas** abortan en el parser con mensaje claro
+(no esperan a runtime):
+- `sslmode=disable&sslrootcert=...` (contradictorio — el cert no se usa).
+- `sslmode=require&sslrootcert=...` (inconsistente — require no verifica).
+- `sslrootcert=...` sin `sslmode=` (cert sin uso definido).
+
+**Out of scope MVP** (deuda visible, sin presión):
+- `sslmode=prefer`/`allow` (negociación dinámica con downgrade). El
+  flow correcto requiere reconectar si el server rechaza TLS — los
+  drivers Postgres modernos lo desalientan (vulnerable a MITM
+  stripping). Usá `disable` o `require`/`verify-full` explícito.
+- **Client cert auth** (`sslcert=`/`sslkey=`/`sslpassword=`).
+  Patrón enterprise raramente usado vs TLS server-only.
 
 ### `db.query(sql, params) -> Future<Result<List<DbRow>>>`
 

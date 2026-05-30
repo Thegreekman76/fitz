@@ -36,7 +36,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use std::io;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -79,6 +79,11 @@ pub enum DbError {
     /// (sslmode=require, tipos avanzados, etc.). Mensaje incluye
     /// referencia al sub-paso de cierre.
     NotImplemented(String),
+    /// v0.10.23 (Fase 10.1.b) — fallo del path TLS: SSLRequest
+    /// rechazado por el server ('N'/'E'), handshake roto (chain
+    /// inválida, hostname mismatch en verify-full, signature
+    /// inválida), o sslrootcert ilegible/malformado.
+    Tls(String),
 }
 
 impl fmt::Display for DbError {
@@ -97,6 +102,7 @@ impl fmt::Display for DbError {
                 write!(f, "tipo Postgres OID {oid} no soportado en MVP (10.5)")
             }
             DbError::NotImplemented(m) => write!(f, "no implementado: {m}"),
+            DbError::Tls(m) => write!(f, "TLS: {m}"),
         }
     }
 }
@@ -141,13 +147,33 @@ pub struct ConnectionConfig {
     pub password: Option<String>,
     pub dbname: String,
     pub sslmode: SslMode,
+    /// Fase 10.1.b — kwarg `sslrootcert=path/to/ca.pem` opcional para
+    /// custom CA. Si `None` y sslmode es `VerifyCa`/`VerifyFull`, el
+    /// driver usa el Mozilla root CA bundle de `webpki-roots`. Path
+    /// se resuelve relativo al CWD del proceso. Solo formato PEM.
+    pub sslrootcert: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SslMode {
+    /// Sin TLS — el handshake va plain sobre TCP. Default si la URL
+    /// no especifica `sslmode`.
     Disable,
-    /// Pospuesto a 10.1.b o sub-paso TLS futuro.
+    /// Fase 10.1.b — TLS obligatorio, pero NO verifica nada del cert
+    /// del server (acepta self-signed, expirado, hostname mismatch).
+    /// Útil para dev/staging contra Postgres internos sin CA. NO USAR
+    /// en producción — vulnerable a MITM.
     Require,
+    /// Fase 10.1.b — TLS obligatorio + verifica que el cert venga de
+    /// una CA confiable (chain), pero IGNORA el hostname. Útil para
+    /// configuraciones donde el cert tiene un CN distinto al hostname
+    /// (proxies, port forwarding). Verifica autenticidad del operador
+    /// pero no de la identidad específica.
+    VerifyCa,
+    /// Fase 10.1.b — TLS obligatorio + chain valida + hostname matchea
+    /// SAN/CN del cert. **Recomendado para producción**. Es el modo
+    /// que usan Heroku, RDS, Supabase, Neon, Aiven, Render PG.
+    VerifyFull,
 }
 
 impl ConnectionConfig {
@@ -209,7 +235,7 @@ impl ConnectionConfig {
 
         let (host, port) = split_host_port(host_port)?;
 
-        let sslmode = parse_sslmode(query)?;
+        let (sslmode, sslrootcert) = parse_ssl_params(query)?;
 
         Ok(ConnectionConfig {
             host,
@@ -218,6 +244,7 @@ impl ConnectionConfig {
             password,
             dbname,
             sslmode,
+            sslrootcert,
         })
     }
 }
@@ -254,34 +281,419 @@ fn parse_port(s: &str) -> DbResult<u16> {
         .map_err(|_| DbError::InvalidUrl(format!("puerto inválido '{s}'")))
 }
 
-fn parse_sslmode(query: Option<&str>) -> DbResult<SslMode> {
+/// v0.10.23 (Fase 10.1.b) — parser de los params SSL del query
+/// string. Devuelve `(sslmode, sslrootcert)`. Sin sslmode → Disable.
+/// `prefer`/`allow` (negociación dinámica) quedan out-of-scope MVP
+/// con mensaje claro citando el patrón compat (`disable`/`require`).
+fn parse_ssl_params(query: Option<&str>) -> DbResult<(SslMode, Option<std::path::PathBuf>)> {
+    let mut mode = SslMode::Disable;
+    let mut root_cert: Option<std::path::PathBuf> = None;
+    let mut mode_seen = false;
+
     let q = match query {
         Some(q) => q,
-        None => return Ok(SslMode::Disable),
+        None => return Ok((mode, root_cert)),
     };
+
     for pair in q.split('&') {
         let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
         match k {
             "sslmode" => {
-                return match v {
-                    "disable" | "" => Ok(SslMode::Disable),
-                    "require" | "verify-ca" | "verify-full" | "prefer" | "allow" => {
-                        Err(DbError::NotImplemented(format!(
-                            "sslmode={v} llega en sub-paso futuro de TLS \
-                             (10.1.b o posterior); usá sslmode=disable en 10.1"
+                mode_seen = true;
+                mode = match v {
+                    "disable" | "" => SslMode::Disable,
+                    "require" => SslMode::Require,
+                    "verify-ca" => SslMode::VerifyCa,
+                    "verify-full" => SslMode::VerifyFull,
+                    "prefer" | "allow" => {
+                        return Err(DbError::NotImplemented(format!(
+                            "sslmode={v} (negociación dinámica) queda \
+                             out-of-scope MVP; usá `require` si querés TLS, \
+                             `disable` si no, o `verify-full` para validar \
+                             cert (recomendado producción)"
                         )))
                     }
-                    other => Err(DbError::InvalidUrl(format!(
-                        "sslmode desconocido: '{other}'"
-                    ))),
+                    other => {
+                        return Err(DbError::InvalidUrl(format!(
+                            "sslmode desconocido: '{other}' (válidos: \
+                             disable, require, verify-ca, verify-full)"
+                        )))
+                    }
                 };
+            }
+            "sslrootcert" => {
+                if v.is_empty() {
+                    return Err(DbError::InvalidUrl("sslrootcert con value vacío".into()));
+                }
+                root_cert = Some(std::path::PathBuf::from(percent_decode(v)?));
             }
             // application_name, connect_timeout, etc. — silently
             // ignored en MVP. No daña, no afecta correctness.
             _ => continue,
         }
     }
-    Ok(SslMode::Disable)
+
+    // Combinaciones inválidas — mejor fallar temprano con mensaje
+    // claro que dejar al user con un binario que se conecta sin TLS
+    // pensando que estaba protegido.
+    if !mode_seen && root_cert.is_some() {
+        return Err(DbError::InvalidUrl(
+            "sslrootcert= sin sslmode= no tiene sentido: el cert no \
+             se va a usar. Agregá sslmode=verify-ca o verify-full"
+                .into(),
+        ));
+    }
+    if mode == SslMode::Disable && root_cert.is_some() {
+        return Err(DbError::InvalidUrl(
+            "sslrootcert= con sslmode=disable es contradictorio. Usá \
+             sslmode=verify-ca o verify-full para activar la validación"
+                .into(),
+        ));
+    }
+    if mode == SslMode::Require && root_cert.is_some() {
+        return Err(DbError::InvalidUrl(
+            "sslrootcert= con sslmode=require es inconsistente: require \
+             NO verifica el cert. Usá sslmode=verify-ca o verify-full"
+                .into(),
+        ));
+    }
+
+    Ok((mode, root_cert))
+}
+
+// =============================================================
+// TLS (Fase 10.1.b)
+// =============================================================
+//
+// El driver soporta TLS contra Postgres con 3 niveles de strictness:
+//
+//   `sslmode=require`     — TLS sí, verificación NO.
+//   `sslmode=verify-ca`   — TLS sí, chain validado, hostname IGNORADO.
+//   `sslmode=verify-full` — TLS sí, chain + hostname (recomendado prod).
+//
+// Implementación: rustls 0.23 + tokio-rustls 0.26 + webpki-roots
+// para el Mozilla CA bundle in-binary. `ring` como crypto provider
+// (pure Rust + assembly, sin system C deps tipo CMake/OpenSSL).
+//
+// `Once` para instalar el crypto provider de ring solo la primera
+// vez que se construye un `TlsConnector` — rustls 0.23 cambió a un
+// modelo donde el provider DEBE estar instalado antes de cualquier
+// `ClientConfig::builder()`. Sin esto:
+//   "no process-level CryptoProvider available -- call
+//   CryptoProvider::install_default()"
+
+static RUSTLS_PROVIDER_INSTALLED: std::sync::Once = std::sync::Once::new();
+
+fn ensure_rustls_provider() {
+    RUSTLS_PROVIDER_INSTALLED.call_once(|| {
+        // El `install_default()` retorna Result — falla si ya hay
+        // otro provider instalado. Como esto es nuestro código y
+        // somos el único caller, ignoramos el Err (idempotente).
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+/// SSLRequest: 8 bytes, magic 80877103 (0x04D2162F). El server
+/// responde 1 byte:
+///   'S' → TLS supported, proceed with handshake
+///   'N' → TLS no soportado por el server
+///   'E' → ErrorResponse a continuación
+const SSL_REQUEST_MAGIC: u32 = 80877103;
+
+/// Hace el SSLRequest dance + TLS handshake sobre el TcpStream
+/// recibido y devuelve el `TlsStream` upgrade-ado listo para el
+/// startup normal. Si el server responde 'N' o 'E', falla con
+/// mensaje claro (el caller pidió TLS y no lo recibió).
+async fn upgrade_to_tls(
+    mut tcp_stream: TcpStream,
+    config: &ConnectionConfig,
+) -> DbResult<tokio_rustls::client::TlsStream<TcpStream>> {
+    // SSLRequest = 4-byte big-endian length (8) + 4-byte big-endian
+    // magic. NO hay startup ni body — es un mensaje especial pre-
+    // startup que el server interpreta literalmente.
+    let mut ssl_request = [0u8; 8];
+    ssl_request[..4].copy_from_slice(&8u32.to_be_bytes());
+    ssl_request[4..].copy_from_slice(&SSL_REQUEST_MAGIC.to_be_bytes());
+    tcp_stream
+        .write_all(&ssl_request)
+        .await
+        .map_err(DbError::Io)?;
+
+    let mut response = [0u8; 1];
+    tcp_stream
+        .read_exact(&mut response)
+        .await
+        .map_err(DbError::Io)?;
+
+    match response[0] {
+        b'S' => {
+            // Server acepta TLS — procedemos con el handshake.
+        }
+        b'N' => {
+            return Err(DbError::Tls(format!(
+                "server Postgres no soporta TLS (respondió 'N' al SSLRequest) \
+                 pero el cliente pidió sslmode={}. Verificá que el server tenga \
+                 `ssl=on` en postgresql.conf, o usá sslmode=disable",
+                sslmode_str(config.sslmode)
+            )));
+        }
+        b'E' => {
+            // Server respondió ErrorResponse al SSLRequest. Drenamos
+            // el resto del mensaje para extraer la causa real.
+            let mut header = [0u8; 4];
+            tcp_stream
+                .read_exact(&mut header)
+                .await
+                .map_err(DbError::Io)?;
+            let len = u32::from_be_bytes(header) as usize;
+            if len >= 4 {
+                let mut payload = vec![0u8; len - 4];
+                let _ = tcp_stream.read_exact(&mut payload).await;
+            }
+            return Err(DbError::Tls(
+                "server Postgres respondió ErrorResponse al SSLRequest \
+                 (típico en versiones <8.0 o configuraciones muy custom)"
+                    .into(),
+            ));
+        }
+        other => {
+            return Err(DbError::Protocol(format!(
+                "SSLRequest: byte de respuesta inesperado 0x{other:02x} \
+                 (esperaba 'S'=0x53, 'N'=0x4E, o 'E'=0x45)"
+            )));
+        }
+    }
+
+    // Build TLS connector según el sslmode + sslrootcert.
+    ensure_rustls_provider();
+    let tls_config = build_tls_client_config(config)?;
+    let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config));
+
+    // ServerName: usado para SNI + (en verify-full) hostname check.
+    // Para require/verify-ca, lo mandamos igual al server (SNI es
+    // info pública del handshake) pero no validamos contra él.
+    let server_name =
+        rustls::pki_types::ServerName::try_from(config.host.clone()).map_err(|e| {
+            DbError::Tls(format!(
+                "hostname `{}` inválido para TLS SNI: {e}",
+                config.host
+            ))
+        })?;
+
+    connector
+        .connect(server_name, tcp_stream)
+        .await
+        .map_err(|e| DbError::Tls(format!("handshake TLS falló: {e}")))
+}
+
+fn sslmode_str(m: SslMode) -> &'static str {
+    match m {
+        SslMode::Disable => "disable",
+        SslMode::Require => "require",
+        SslMode::VerifyCa => "verify-ca",
+        SslMode::VerifyFull => "verify-full",
+    }
+}
+
+/// Construye el `ClientConfig` rustls según el sslmode + sslrootcert:
+///   - `require`     → NoVerifier (acepta cualquier cert)
+///   - `verify-ca`   → chain validado, hostname IGNORADO (wrapper
+///     que cachea el error "NotValidForName" y lo trata como Ok)
+///   - `verify-full` → default WebPkiServerVerifier (chain + hostname)
+///
+/// Si `sslrootcert` está seteado, se usa como root store en vez de
+/// webpki-roots. Solo formato PEM.
+fn build_tls_client_config(config: &ConnectionConfig) -> DbResult<rustls::ClientConfig> {
+    use rustls::ClientConfig;
+
+    let builder = ClientConfig::builder();
+
+    let tls_config = match config.sslmode {
+        SslMode::Disable => unreachable!("upgrade_to_tls solo se llama con TLS activo"),
+        SslMode::Require => builder
+            .dangerous()
+            .with_custom_certificate_verifier(std::sync::Arc::new(NoVerifier))
+            .with_no_client_auth(),
+        SslMode::VerifyCa | SslMode::VerifyFull => {
+            let root_store = build_root_store(config.sslrootcert.as_deref())?;
+            let webpki_verifier =
+                rustls::client::WebPkiServerVerifier::builder(std::sync::Arc::new(root_store))
+                    .build()
+                    .map_err(|e| {
+                        DbError::Tls(format!("no se pudo construir WebPkiServerVerifier: {e}"))
+                    })?;
+            let verifier: std::sync::Arc<dyn rustls::client::danger::ServerCertVerifier> =
+                if config.sslmode == SslMode::VerifyCa {
+                    std::sync::Arc::new(NoHostnameVerifier(webpki_verifier))
+                } else {
+                    webpki_verifier
+                };
+            builder
+                .dangerous()
+                .with_custom_certificate_verifier(verifier)
+                .with_no_client_auth()
+        }
+    };
+
+    Ok(tls_config)
+}
+
+fn build_root_store(custom_pem: Option<&std::path::Path>) -> DbResult<rustls::RootCertStore> {
+    let mut store = rustls::RootCertStore::empty();
+    if let Some(path) = custom_pem {
+        let pem_bytes = std::fs::read(path).map_err(|e| {
+            DbError::Tls(format!(
+                "no se pudo leer sslrootcert `{}`: {e}",
+                path.display()
+            ))
+        })?;
+        let mut cursor = std::io::Cursor::new(pem_bytes);
+        let mut count = 0;
+        for cert_result in rustls_pemfile::certs(&mut cursor) {
+            let cert = cert_result.map_err(|e| {
+                DbError::Tls(format!(
+                    "error parseando certificado PEM en `{}`: {e}",
+                    path.display()
+                ))
+            })?;
+            store.add(cert).map_err(|e| {
+                DbError::Tls(format!(
+                    "certificado de `{}` rechazado por rustls: {e}",
+                    path.display()
+                ))
+            })?;
+            count += 1;
+        }
+        if count == 0 {
+            return Err(DbError::Tls(format!(
+                "sslrootcert `{}` no contiene certificados PEM válidos \
+                 (esperaba uno o más bloques `-----BEGIN CERTIFICATE-----`)",
+                path.display()
+            )));
+        }
+    } else {
+        // Default: Mozilla CA bundle de webpki-roots, in-binary.
+        // Cubre Heroku, RDS, Supabase, Neon, Aiven, Render PG, etc.
+        store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    }
+    Ok(store)
+}
+
+/// Verifier para `sslmode=require` — acepta cualquier cert, sin
+/// validar nada. Equivalente a `curl --insecure`. NO USAR en
+/// producción. Útil para dev/staging contra servers internos sin
+/// CA, o para verificar conectividad TLS sin entrar al lío de
+/// cert chains.
+#[derive(Debug)]
+struct NoVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for NoVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        // Lista completa — el wrapper acepta cualquier sig de todas
+        // formas, pero rustls necesita conocer las que soportamos
+        // para que el handshake elija una mutuamente válida.
+        vec![
+            rustls::SignatureScheme::RSA_PKCS1_SHA1,
+            rustls::SignatureScheme::ECDSA_SHA1_Legacy,
+            rustls::SignatureScheme::RSA_PKCS1_SHA256,
+            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+            rustls::SignatureScheme::RSA_PKCS1_SHA384,
+            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+            rustls::SignatureScheme::RSA_PKCS1_SHA512,
+            rustls::SignatureScheme::ECDSA_NISTP521_SHA512,
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
+            rustls::SignatureScheme::ED25519,
+            rustls::SignatureScheme::ED448,
+        ]
+    }
+}
+
+/// Verifier para `sslmode=verify-ca` — delega chain validation al
+/// WebPkiServerVerifier estándar, pero catchea `NotValidForName`
+/// (hostname mismatch) y lo trata como Ok. Mantiene autenticidad
+/// del operador (cert venido de una CA confiable) sin exigir que
+/// el hostname matchee.
+#[derive(Debug)]
+struct NoHostnameVerifier(std::sync::Arc<rustls::client::WebPkiServerVerifier>);
+
+impl rustls::client::danger::ServerCertVerifier for NoHostnameVerifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        match self
+            .0
+            .verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+        {
+            Ok(v) => Ok(v),
+            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            // rustls 0.23.x agregó `NotValidForNameContext` con info
+            // estructurada del SAN/CN. Tratamos ambos casos.
+            Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::NotValidForNameContext { .. },
+            )) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
+            Err(other) => Err(other),
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.0.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.0.supported_verify_schemes()
+    }
 }
 
 fn percent_decode(s: &str) -> DbResult<String> {
@@ -640,7 +1052,13 @@ impl ErrorFields {
 
 /// Lee UN mensaje del servidor: tag(1) + length(4) + payload.
 /// Bloquea hasta tener el mensaje completo o error de I/O.
-pub async fn read_message(stream: &mut TcpStream) -> DbResult<BackendMessage> {
+///
+/// v0.10.23 (Fase 10.1.b) — genérico sobre `R: AsyncRead + Unpin`
+/// (antes hard-coded `TcpStream`) para soportar `TlsStream<TcpStream>`
+/// transparente cuando sslmode != Disable. `Box<dyn DbReadWrite>`
+/// implementa `AsyncRead` via deref, así que el call site del
+/// `Connection::read` sigue siendo idéntico.
+pub async fn read_message<R: AsyncRead + Unpin>(stream: &mut R) -> DbResult<BackendMessage> {
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).await?;
     let tag = header[0];
@@ -1662,8 +2080,17 @@ impl QueryResult {
 /// el pool de 10.2 envuelve en `Arc<Mutex<Connection>>` para
 /// múltiple acceso). En 10.1 una sola tarea posee el `Connection`
 /// y lo usa exclusivamente.
+/// v0.10.23 (Fase 10.1.b) — helper trait que permite tener un
+/// `Box<dyn DbReadWrite>` único como stream del `Connection`, sin
+/// importar si abajo hay un `TcpStream` plano (sslmode=disable) o
+/// un `tokio_rustls::client::TlsStream<TcpStream>` (sslmode=require/
+/// verify-ca/verify-full). Costo: una vtable lookup por read/write
+/// (~3ns), irrelevante vs el round-trip TCP.
+pub trait DbReadWrite: AsyncRead + AsyncWrite + Send + Unpin {}
+impl<T: AsyncRead + AsyncWrite + Send + Unpin> DbReadWrite for T {}
+
 pub struct Connection {
-    stream: TcpStream,
+    stream: Box<dyn DbReadWrite>,
     /// Status de la transacción actual: 'I' idle, 'T' in tx,
     /// 'E' in failed tx. Lo actualizamos en cada `ReadyForQuery`.
     /// Útil para diagnostics y para 10.7 (transactions).
@@ -1682,15 +2109,14 @@ pub struct Connection {
 
 impl Connection {
     /// Abre TCP, hace startup + auth, deja la conexión lista
-    /// para queries. Timeout total ~10 seg.
+    /// para queries. Timeout total ~10 seg. v0.10.23 (Fase 10.1.b):
+    /// si `config.sslmode != Disable`, hace SSLRequest dance + TLS
+    /// handshake antes del startup. El startup va sobre el stream
+    /// upgrade-ado (cifrado), de forma transparente al resto del
+    /// driver gracias al `Box<dyn DbReadWrite>`.
     pub async fn connect(config: &ConnectionConfig) -> DbResult<Self> {
-        if config.sslmode == SslMode::Require {
-            return Err(DbError::NotImplemented(
-                "sslmode=require llega en sub-paso TLS futuro; usá sslmode=disable en 10.1".into(),
-            ));
-        }
         let addr = format!("{}:{}", config.host, config.port);
-        let stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
+        let tcp_stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
             .await
             .map_err(|_| DbError::Io(io::Error::new(io::ErrorKind::TimedOut, "connect timeout")))?
             .map_err(DbError::Io)?;
@@ -1705,7 +2131,16 @@ impl Connection {
         // benchmark v2 (GET /users/{id} 43ms vs simple query 4ms).
         // Sin Nagle, los 5 mensajes se mandan inmediatamente
         // batched (aún más rápido con el fix de batching abajo).
-        let _ = stream.set_nodelay(true);
+        let _ = tcp_stream.set_nodelay(true);
+
+        // v0.10.23 (Fase 10.1.b) — TLS upgrade si corresponde.
+        // Sub-paso 1: SSLRequest dance (1-byte response: 'S'/'N'/'E')
+        // Sub-paso 2: TLS handshake con verifier según sslmode.
+        let stream: Box<dyn DbReadWrite> = if config.sslmode == SslMode::Disable {
+            Box::new(tcp_stream)
+        } else {
+            Box::new(upgrade_to_tls(tcp_stream, config).await?)
+        };
 
         let mut conn = Connection {
             stream,
@@ -2413,6 +2848,7 @@ impl DbConnHandle {
             password: None,
             dbname: "test-db".into(),
             sslmode: SslMode::Disable,
+            sslrootcert: None,
         };
         let pool = std::sync::Arc::new(DbPool {
             config: dummy_config,
@@ -2816,10 +3252,94 @@ mod tests {
         assert!(matches!(r, Err(DbError::InvalidUrl(_))));
     }
 
+    // v0.10.23 (Fase 10.1.b) — sslmode require/verify-ca/verify-full
+    // ahora parsean OK. prefer/allow siguen como NotImplemented.
+
     #[test]
-    fn url_sslmode_require_no_implementado() {
-        let r = ConnectionConfig::parse("postgres://user@host/db?sslmode=require");
+    fn url_sslmode_require_parsea_ok() {
+        let c = ConnectionConfig::parse("postgres://user@host/db?sslmode=require").unwrap();
+        assert_eq!(c.sslmode, SslMode::Require);
+        assert!(c.sslrootcert.is_none());
+    }
+
+    #[test]
+    fn url_sslmode_verify_ca_parsea_ok() {
+        let c = ConnectionConfig::parse("postgres://user@host/db?sslmode=verify-ca").unwrap();
+        assert_eq!(c.sslmode, SslMode::VerifyCa);
+    }
+
+    #[test]
+    fn url_sslmode_verify_full_parsea_ok() {
+        let c = ConnectionConfig::parse("postgres://user@host/db?sslmode=verify-full").unwrap();
+        assert_eq!(c.sslmode, SslMode::VerifyFull);
+    }
+
+    #[test]
+    fn url_sslmode_prefer_sigue_no_implementado() {
+        let r = ConnectionConfig::parse("postgres://user@host/db?sslmode=prefer");
         assert!(matches!(r, Err(DbError::NotImplemented(_))));
+    }
+
+    #[test]
+    fn url_sslmode_allow_sigue_no_implementado() {
+        let r = ConnectionConfig::parse("postgres://user@host/db?sslmode=allow");
+        assert!(matches!(r, Err(DbError::NotImplemented(_))));
+    }
+
+    #[test]
+    fn url_sslmode_desconocido_es_error() {
+        let r = ConnectionConfig::parse("postgres://user@host/db?sslmode=ultra-secure");
+        assert!(matches!(r, Err(DbError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn url_sslrootcert_con_verify_ca_parsea_ok() {
+        let c = ConnectionConfig::parse(
+            "postgres://user@host/db?sslmode=verify-ca&sslrootcert=/etc/ssl/ca.pem",
+        )
+        .unwrap();
+        assert_eq!(c.sslmode, SslMode::VerifyCa);
+        assert_eq!(
+            c.sslrootcert.as_deref(),
+            Some(std::path::Path::new("/etc/ssl/ca.pem"))
+        );
+    }
+
+    #[test]
+    fn url_sslrootcert_url_encoded_se_decodifica() {
+        let c = ConnectionConfig::parse(
+            "postgres://user@host/db?sslmode=verify-full&sslrootcert=%2Fhome%2Fme%2Fca.pem",
+        )
+        .unwrap();
+        assert_eq!(
+            c.sslrootcert.as_deref(),
+            Some(std::path::Path::new("/home/me/ca.pem"))
+        );
+    }
+
+    #[test]
+    fn url_sslrootcert_con_sslmode_disable_es_error() {
+        // Combinación contradictoria: aclarar al user explícito.
+        let r = ConnectionConfig::parse(
+            "postgres://user@host/db?sslmode=disable&sslrootcert=/etc/ssl/ca.pem",
+        );
+        assert!(matches!(r, Err(DbError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn url_sslrootcert_con_sslmode_require_es_error() {
+        // require NO valida nada — pasarle un rootcert es señal de
+        // confusión, mejor abortar.
+        let r = ConnectionConfig::parse(
+            "postgres://user@host/db?sslmode=require&sslrootcert=/etc/ssl/ca.pem",
+        );
+        assert!(matches!(r, Err(DbError::InvalidUrl(_))));
+    }
+
+    #[test]
+    fn url_sslrootcert_sin_sslmode_es_error() {
+        let r = ConnectionConfig::parse("postgres://user@host/db?sslrootcert=/etc/ssl/ca.pem");
+        assert!(matches!(r, Err(DbError::InvalidUrl(_))));
     }
 
     #[test]

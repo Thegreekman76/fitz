@@ -2170,6 +2170,20 @@ fn cargo_toml_for(
              hmac = \"0.12\"\n\
              base64 = \"0.22\"\n",
         );
+        // Fase 10.1.b — TLS stack del driver Postgres. Sin estas
+        // deps el `__fitz_db_runtime.rs` embebido NO compila — el
+        // path TLS (sslmode=require/verify-ca/verify-full) referencia
+        // `rustls`/`tokio_rustls`/`webpki_roots`/`rustls_pemfile`.
+        // Las 4 son no-opcionales para mantener el comportamiento
+        // bit-a-bit con `fitz run` (que también las trae no-opcional
+        // en el Cargo.toml del workspace). `ring` como crypto provider
+        // (puro Rust, sin deps system tipo CMake/clang/OpenSSL).
+        s.push_str(
+            "rustls = { version = \"0.23\", default-features = false, features = [\"std\", \"tls12\", \"ring\"] }\n\
+             tokio-rustls = { version = \"0.26\", default-features = false, features = [\"tls12\", \"ring\"] }\n\
+             webpki-roots = \"0.26\"\n\
+             rustls-pemfile = \"2\"\n",
+        );
         if !uses_auth {
             s.push_str("rand_core = { version = \"0.6\", features = [\"getrandom\"] }\n");
         }
@@ -32759,6 +32773,26 @@ mod tests {
             toml.contains("\"sync\""),
             "tokio.features debe incluir sync"
         );
+        // v0.10.23 (Fase 10.1.b) — TLS stack del driver Postgres.
+        // El runtime embebido referencia rustls/tokio_rustls/
+        // webpki_roots/rustls_pemfile, sin estas deps el código
+        // generado no compila.
+        assert!(
+            toml.contains("rustls = { version = \"0.23\""),
+            "esperaba rustls en Cargo.toml (TLS strict, v0.10.23): {toml}",
+        );
+        assert!(
+            toml.contains("tokio-rustls = { version = \"0.26\""),
+            "esperaba tokio-rustls en Cargo.toml: {toml}",
+        );
+        assert!(
+            toml.contains("webpki-roots = \"0.26\""),
+            "esperaba webpki-roots en Cargo.toml: {toml}",
+        );
+        assert!(
+            toml.contains("rustls-pemfile = \"2\""),
+            "esperaba rustls-pemfile en Cargo.toml: {toml}",
+        );
     }
 
     #[test]
@@ -32768,6 +32802,16 @@ mod tests {
         );
         assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
         assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
+        // v0.10.23 — sin db, tampoco TLS deps.
+        assert!(!toml.contains("rustls"), "rustls no debería estar sin db");
+        assert!(
+            !toml.contains("tokio-rustls"),
+            "tokio-rustls no debería estar sin db"
+        );
+        assert!(
+            !toml.contains("webpki-roots"),
+            "webpki-roots no debería estar sin db"
+        );
     }
 
     // ---- Fase 10.b.3 — ORM read methods en codegen ----

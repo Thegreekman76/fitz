@@ -12,8 +12,138 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-boilerplates ORM Dockerizados extendidos, o nuevo norte
-técnico a decidir (Fase 10.6 completada al 100% vs Alembic).
+Date/DateTime/UUID nativos (siguiente en el plan post-TLS), o
+boilerplates ORM Dockerizados extendidos.
+
+## [v0.10.23] — 2026-05-30 — Fase 10.1.b: TLS strict para el driver Postgres
+
+Cierre del sub-paso comprometido desde Fase 10.1. El driver ahora
+soporta los 4 modos `sslmode` estándar Postgres (`disable`,
+`require`, `verify-ca`, `verify-full`) + custom CA via
+`sslrootcert=path/to/ca.pem`. **Habilita apuntar el driver Fitz a
+managed Postgres real** (Heroku, RDS, Supabase, Neon, Aiven,
+Render PG, Crunchy Bridge, etc.) sin downgrade a `sslmode=disable`.
+
+### Modos soportados
+
+| `sslmode` | TLS | Cert chain | Hostname | Cuándo usar |
+|---|:---:|:---:|:---:|---|
+| `disable`     | ❌ | — | — | Local dev sin TLS (Postgres en Docker localhost) |
+| `require`     | ✅ | ❌ | ❌ | Dev/staging contra Postgres interno sin CA pública. NO usar en prod |
+| `verify-ca`   | ✅ | ✅ | ❌ | Cert con CN/SAN distinto al hostname (proxies, port forward) |
+| `verify-full` | ✅ | ✅ | ✅ | **Recomendado producción** — usado por todos los managed PG |
+
+```fitz
+// Managed PG real con TLS strict
+let db = db.connect(
+    "postgres://user:pass@db.proyecto.supabase.co:5432/postgres?sslmode=verify-full"
+).await?
+
+// Postgres interno con CA corporativa custom
+let db = db.connect(
+    "postgres://user:pass@db.intra:5432/myapp?sslmode=verify-full&sslrootcert=/etc/ssl/corp-ca.pem"
+).await?
+```
+
+### Implementación
+
+- Deps nuevas (no opcionales, parte del core del driver): `rustls
+  0.23` + `tokio-rustls 0.26` + `webpki-roots 0.26` + `rustls-pemfile 2`.
+- `rustls` con feature `ring` como crypto provider (puro Rust +
+  assembly, **sin deps system tipo CMake/clang/OpenSSL**). Mantiene
+  la promesa "binario standalone sin libs system".
+- `webpki-roots` trae el **Mozilla CA bundle in-binary** — cubre
+  Heroku/RDS/Neon/Aiven/Render/etc. sin que el user instale nada.
+- `Connection.stream` migrado de `TcpStream` a `Box<dyn DbReadWrite>`
+  con helper trait `DbReadWrite: AsyncRead + AsyncWrite + Send +
+  Unpin`. Costo: una vtable lookup por read/write (~3ns), irrelevante
+  vs el round-trip TCP. **Sin impacto en el bench v0.10.13** (los
+  números B-1 se mantienen).
+- `read_message` migrado de hard-coded `TcpStream` a genérico
+  `<R: AsyncRead + Unpin>`.
+- 3 `ServerCertVerifier` custom:
+  - `NoVerifier` (sslmode=require): acepta cualquier cert.
+  - `NoHostnameVerifier` (sslmode=verify-ca): wrapper sobre
+    `WebPkiServerVerifier` que catchea `CertificateError::NotValidForName`
+    (y `NotValidForNameContext` en rustls 0.23+) y lo trata como
+    Ok. Mantiene chain validation + skip hostname.
+  - Default `WebPkiServerVerifier` (sslmode=verify-full).
+- `SSLRequest` dance (8-byte magic 80877103) + server response
+  parsing ('S' = TLS supported, 'N' = no TLS, 'E' = error con
+  body drenado). Errores específicos según cada caso.
+- `ensure_rustls_provider()` instala el `ring` provider de rustls
+  via `std::sync::Once` la primera vez que se intenta un TLS upgrade.
+- Validación cruzada de combinaciones inválidas en el parser
+  (`sslmode=disable&sslrootcert=...`, `sslrootcert=` sin sslmode,
+  etc.) — fail-fast con mensaje claro en vez de runtime confuso.
+
+### URL parser
+
+- `SslMode` enum extendido: `Disable` / `Require` / `VerifyCa`
+  / `VerifyFull`.
+- `ConnectionConfig.sslrootcert: Option<PathBuf>` nuevo.
+- `sslmode=prefer|allow` siguen como `NotImplemented` con mensaje
+  claro (negociación dinámica con downgrade es vulnerable a MITM;
+  los drivers modernos lo desalientan).
+- `sslrootcert=` URL-decoded (paths con spaces o caracteres
+  especiales funcionan).
+
+### `DbError::Tls` variant nueva
+
+Fallos del path TLS (SSLRequest rechazado, handshake roto, sslrootcert
+ilegible/malformado, hostname mismatch en verify-full, etc.) ahora
+tienen variant dedicada con Display `"TLS: <msg>"`. Diferencia
+limpia de `DbError::Io` (TCP genérico) y `DbError::Auth` (credentials).
+
+### Validación end-to-end contra Supabase real
+
+Smoke E2E corrido contra el pooler de Supabase
+(`aws-1-us-west-2.pooler.supabase.com`):
+
+- `sslmode=disable`: SELECT 1 OK ✓
+- `sslmode=require`: TLS handshake completo + SELECT 1 OK ✓
+- `sslmode=verify-ca`/`verify-full`: UnknownIssuer — el verifier
+  funciona correctamente (Supabase pooler usa su propia CA fuera
+  del Mozilla bundle). El user puede bajar la CA cert del dashboard
+  Supabase y usarla como `sslrootcert=path/to/prod-ca-2021.crt`
+  para validación end-to-end.
+
+Para managed PG con cert público (Neon usa Let's Encrypt, RDS usa
+Amazon Root CA — ambos en `webpki-roots`), `verify-full` funciona
+sin custom CA.
+
+### Tests + suite
+
+- 10 unit tests nuevos en `db::tests`:
+  - `url_sslmode_require_parsea_ok`
+  - `url_sslmode_verify_ca_parsea_ok`
+  - `url_sslmode_verify_full_parsea_ok`
+  - `url_sslmode_prefer_sigue_no_implementado`
+  - `url_sslmode_allow_sigue_no_implementado`
+  - `url_sslmode_desconocido_es_error`
+  - `url_sslrootcert_con_verify_ca_parsea_ok`
+  - `url_sslrootcert_url_encoded_se_decodifica`
+  - `url_sslrootcert_con_sslmode_disable_es_error`
+  - `url_sslrootcert_con_sslmode_require_es_error`
+  - `url_sslrootcert_sin_sslmode_es_error`
+- 1 test refresh en `evaluator::tests` (`db_connect_url_con_sslmode_require_resuelve_y_falla_en_red`):
+  antes esperaba `NotImplemented`; ahora verifica que el flow
+  llega al I/O step (sslmode=require ya no rechaza early).
+- `cargo test --lib`: **2647 verde** (era 2637, +10 parser tests).
+- `cargo clippy --all-targets -- -D warnings`: verde.
+- `cargo fmt --all -- --check`: verde.
+
+### Cross-impact docs
+
+- `docs/db-orm.md` sección 3: sub-sección nueva "TLS strict
+  (v0.10.23)" con tabla de los 4 modos + ejemplos + combinaciones
+  inválidas + out of scope (`prefer`/`allow` + client cert auth).
+- `docs/guide.md` cap 31: ejemplo del driver `db` muestra dos
+  flavors (local sin TLS + managed con verify-full).
+- Cargo.toml: 4 deps nuevas con comentario justificando elección
+  (`rustls` sobre `native-tls` para mantener "binario standalone
+  sin deps system"; `ring` como crypto provider; `webpki-roots`
+  in-binary).
 
 ## [v0.10.22] — 2026-05-30 — Cierre 2 deudas residuales del codegen del driver DB
 

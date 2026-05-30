@@ -10937,7 +10937,15 @@ idéntico en intérprete y binario nativo.
 **Driver `db`** — módulo built-in. Siempre disponible, sin import.
 
 ```fitz
+// Local dev (Postgres en Docker, sin TLS):
 let db = db.connect("postgres://user:pass@host:5432/dbname?sslmode=disable").await?
+
+// Managed PG real (Heroku, RDS, Supabase, Neon, ...) — sslmode=verify-full
+// recomendado. El driver trae el Mozilla CA bundle in-binary (cero
+// deps system); cubre todos los managed PG mainstream.
+let db = db.connect(
+    "postgres://user:pass@db.proyecto.supabase.co:5432/postgres?sslmode=verify-full"
+).await?
 
 let rows = db.query("SELECT id, email FROM users WHERE active = $1", [true]).await?
 // rows: List<DbRow>
