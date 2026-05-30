@@ -2,7 +2,7 @@
   "name": "fitz-language",
   "displayName": "Fitz Language",
   "description": "Syntax highlighting and language server for the Fitz programming language.",
-  "version": "0.10.24",
+  "version": "0.10.25",
   "publisher": "fitz-lang",
   "engines": {
     "vscode": "^1.75.0"

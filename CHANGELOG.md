@@ -12,11 +12,115 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-v0.10.25 cierra la deuda comprometida del codegen para
-Date/DateTime/Uuid (que esta release deja explícita): `fitz build`
+v0.10.26 cerrar la deuda comprometida del codegen para
+Date/DateTime/Uuid (que v0.10.24 dejó explícita): `fitz build`
 emitir chrono/uuid + helpers de preludio + dispatch de cada
 constructor/método. Después: boilerplates ORM Dockerizados
 extendidos o nuevo norte técnico.
+
+## [v0.10.25] — 2026-05-30 — Hotfix v0.10.24: array elem_oid solo refina si caller pidió
+
+Hotfix del CI release v0.10.24 — 33 tests E2E del driver
+Postgres fallaron en cascada en GitHub Actions tras el push del
+tag v0.10.24, descubierto por el job `db-postgres` del workflow
+CI sobre `postgres:16`. Hot-issue resuelto antes de que llegue a
+ningún user real.
+
+### Síntoma
+
+Cascada que arrancó en `orm_uuid_array_e2e`:
+
+```
+thread 'orm_uuid_array_e2e' panicked at tests/db_real_postgres.rs:4528:26:
+    esperaba Str(UUID), fue Uuid(...)
+```
+
+Tras ese panic, los 32 tests siguientes fallaron con
+`Io(Custom { kind: Other, error: "A Tokio 1.x context was found,
+but it is being shutdown." })`. Test runner perdió el runtime
+tokio del primer test, y el pool singleton per-URL (desde v0.10.9)
+cacheaba un handle con tasks ligadas al runtime cerrado.
+
+### Root cause
+
+En `pg_value_to_fitz_with_oid`, el arm `PgValue::Array` siempre
+propagaba `elem_oid` a la recursión sobre items, ignorando el
+`oid_hint` del caller:
+
+```rust
+// ANTES (bug v0.10.24)
+crate::db::PgValue::Array { elem_oid, values } => {
+    let items: Vec<Value> = values
+        .iter()
+        .map(|item| pg_value_to_fitz_with_oid(item, Some(*elem_oid)))
+        .collect();
+    Value::new_list(items)
+}
+```
+
+Resultado: `db.query(...)` raw sobre una columna `uuid[]` /
+`date[]` / `timestamptz[]` devolvía `List<Uuid>` / `List<Date>` /
+`List<DateTime>` en vez de `List<Str>` (comportamiento
+pre-v0.10.24). Programas legacy que iteraban con
+`match v { Value::Str(s) => ..., _ => panic!() }` quebraban.
+
+### Fix
+
+Array recursion ahora hace `oid_hint.map(|_| *elem_oid)` — solo
+propaga `elem_oid` si el caller pasó `Some(_)`:
+
+```rust
+// DESPUÉS (fix v0.10.25)
+crate::db::PgValue::Array { elem_oid, values } => {
+    let elem_hint = oid_hint.map(|_| *elem_oid);
+    let items: Vec<Value> = values
+        .iter()
+        .map(|item| pg_value_to_fitz_with_oid(item, elem_hint))
+        .collect();
+    Value::new_list(items)
+}
+```
+
+Si `oid_hint` es `None` (default backward-compat de
+`pg_row_to_fitz_map` y de `pg_value_to_fitz`), los elementos
+vuelven como `Str`. El path ORM @table-typed (annotation-aware,
+ya corregido en commit previo del v0.10.24) sí pasa `Some(_)` y
+refina cuando el field declara explícitamente `Date`/`DateTime`/
+`Uuid` o `List<T>` con esos tipos.
+
+### Validación
+
+Local smoke contra Postgres real:
+
+```
+$ FITZ_TEST_PG_URL="postgres://...@localhost:5432/postgres?sslmode=disable" \
+    cargo test --release --test db_real_postgres -- --ignored --test-threads=1
+test result: ok. 49 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+                 ^^^^^^^^^^^^^^^^^^^^^^^ era 16/49 con la cascade
+```
+
+- `cargo test --lib`: **2647 verde** (sin cambios).
+- `cargo fmt --all -- --check`: verde.
+- `cargo clippy --all-targets -- -D warnings`: verde.
+
+### Backward compat preservada
+
+- **Programas pre-v0.10.24** usando `db.query(...)` sobre columnas
+  `date`/`timestamptz`/`uuid` (o arrays de esos): siguen recibiendo
+  `Str` / `List<Str>` con formato ISO 8601 / canonical Postgres.
+- **Programas pre-v0.10.24** usando `@table type X { d: Str }`
+  para columnas date/timestamptz/uuid: siguen recibiendo `Str`
+  en el field tras `Type.all(db)`.
+- **Programas v0.10.24+ opt-in**: declaran `@table type X { d: Date }`
+  con anotación explícita → la refinación annotation-aware dispara
+  y devuelven `Value::Date` tipado.
+
+### Cero impacto en feature surface
+
+Esta release es PURO hotfix del bug introducido en v0.10.24. Toda
+la API user-facing (constructors, métodos, ORM mapping, JSON,
+LSP, grammar) queda idéntica a v0.10.24. El extensión VSCode
+bump 0.10.24 → 0.10.25 es solo para alinear versiones.
 
 ## [v0.10.24] — 2026-05-30 — Date / DateTime / Uuid tipos nativos (intérprete)
 
