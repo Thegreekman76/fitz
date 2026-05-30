@@ -11581,6 +11581,16 @@ migration como aplicada **sin ejecutar el SQL** — útil para
 adoptar Fitz en una DB legacy donde el schema ya está aplicado
 manualmente.
 
+**Data migrations en `.fitz`** (v0.10.19): el dir `migrations/`
+acepta tanto `.sql` (DDL/DML crudo) como `.fitz` (scripts del
+propio lenguaje). Para transforms con lógica que SQL crudo no
+expresa elegantemente (back-fills condicionales, parseo de JSON
+viejo, HTTP calls durante la migración, etc.), declarás
+`async fn migrate(db: DbConn) -> Result<Null>` en un `.fitz` y
+el runner lo invoca con `db` pre-bindeado. Opcionalmente
+`async fn rollback(db: DbConn)` para `fitz db rollback`. Se
+intercalan con `.sql` en orden cronológico del prefix timestamp.
+
 **Limitaciones del MVP**: `ALTER COLUMN ... TYPE` sin USING (cambios
 de tipo incompatibles fallan — editá la migration para agregar
 `USING (col::int)`); solo schema `public`. Detalle completo +

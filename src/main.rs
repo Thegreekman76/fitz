@@ -4243,13 +4243,39 @@ fn db_migrate_cmd(url: Option<String>, dir: Option<PathBuf>, dry_run: bool) {
         eprintln!("[dry-run] {pending} migration(s) pendiente(s) — no se aplicaron");
         return;
     }
+    // v0.10.19 — dispatch per-migration por kind: .sql via
+    // `apply_migration` (SQL crudo adentro de tx), .fitz via
+    // `apply_fitz_migration_blocking` (parsea + invoca async fn
+    // migrate(db) + INSERT en _fitz_migrations al final).
     let result = rt.block_on(async {
         let conn = db::connect_url(&url)
             .await
             .map_err(|e| format!("connect: {e}"))?;
-        migrations::apply_pending_migrations(&conn, &migrations_list)
+        let applied_set = migrations::applied_versions(&conn)
             .await
-            .map_err(|e| format!("migrate: {e}"))
+            .map_err(|e| format!("applied_versions: {e}"))?;
+        let applied_set: std::collections::HashSet<&str> =
+            applied_set.iter().map(|s| s.as_str()).collect();
+        let mut new_versions: Vec<String> = Vec::new();
+        for m in &migrations_list {
+            if applied_set.contains(m.version.as_str()) {
+                continue;
+            }
+            match &m.kind {
+                migrations::MigrationKind::Sql { .. } => {
+                    migrations::apply_migration(&conn, m)
+                        .await
+                        .map_err(|e| format!("migrate `{}`: {e}", m.filename))?;
+                }
+                migrations::MigrationKind::Fitz { path, source } => {
+                    apply_fitz_migration_async(&conn, &m.version, &m.filename, path, source)
+                        .await
+                        .map_err(|e| format!("migrate `{}`: {e}", m.filename))?;
+                }
+            }
+            new_versions.push(m.version.clone());
+        }
+        Ok::<_, String>(new_versions)
     });
     let applied = match result {
         Ok(a) => a,
@@ -4379,12 +4405,13 @@ fn db_rollback_cmd(url: Option<String>, dir: Option<PathBuf>, count: usize) {
             std::process::exit(1);
         }
     };
+    // v0.10.19 — dispatch per-migration por kind (paralelo a migrate).
     let rt = evaluator::build_runtime();
     let result = rt.block_on(async {
         let conn = db::connect_url(&url)
             .await
             .map_err(|e| format!("connect: {e}"))?;
-        migrations::rollback_n(&conn, &migrations_list, count)
+        rollback_n_dispatch(&conn, &migrations_list, count)
             .await
             .map_err(|e| format!("rollback: {e}"))
     });
@@ -4403,6 +4430,251 @@ fn db_rollback_cmd(url: Option<String>, dir: Option<PathBuf>, count: usize) {
             eprintln!("    {v}");
         }
     }
+}
+
+/// v0.10.19 — Variante del `rollback_n` con dispatch por kind:
+/// .sql via `migrations::revert_migration` (SQL DOWN adentro de
+/// tx), .fitz via `revert_fitz_migration_async` (parsea + invoca
+/// async fn rollback(db) + DELETE de _fitz_migrations). Mismo
+/// pre-flight que `rollback_n` (todas las target tienen archivo +
+/// rollback path resoluble) antes de tocar la DB.
+async fn rollback_n_dispatch(
+    conn: &std::sync::Arc<db::DbConnHandle>,
+    migrations_list: &[migrations::MigrationFile],
+    n: usize,
+) -> Result<Vec<String>, String> {
+    if n == 0 {
+        return Ok(Vec::new());
+    }
+    migrations::ensure_tracking_table(conn)
+        .await
+        .map_err(|e| format!("ensure_tracking_table: {e}"))?;
+    let applied = migrations::applied_versions(conn)
+        .await
+        .map_err(|e| format!("applied_versions: {e}"))?;
+    let applied_desc: Vec<&String> = {
+        // Reusar applied_versions_desc requiere exponerla; en su
+        // lugar leemos applied (ASC) y reverteamos.
+        let mut v: Vec<&String> = applied.iter().collect();
+        v.reverse();
+        v
+    };
+    if applied_desc.is_empty() {
+        return Ok(Vec::new());
+    }
+    let target_versions: Vec<&String> = applied_desc.into_iter().take(n).collect();
+    let by_version: std::collections::HashMap<&str, &migrations::MigrationFile> = migrations_list
+        .iter()
+        .map(|m| (m.version.as_str(), m))
+        .collect();
+    // Pre-flight: cada target debe tener file + path resoluble.
+    for v in &target_versions {
+        let m = by_version.get(v.as_str()).ok_or_else(|| {
+            format!(
+                "rollback: la version `{v}` está aplicada en la DB pero \
+                 NO hay archivo en el dir de migrations. Restaurá el \
+                 archivo o stampealá manualmente."
+            )
+        })?;
+        match &m.kind {
+            migrations::MigrationKind::Sql { down_sql, .. } => {
+                if down_sql.is_none() {
+                    return Err(format!(
+                        "rollback: migration `{}` no tiene sección `-- DOWN` — \
+                         no se puede revertir. Editá el archivo agregando \
+                         `-- DOWN` con el SQL inverso y reintentá.",
+                        m.filename
+                    ));
+                }
+            }
+            migrations::MigrationKind::Fitz { source, .. } => {
+                if !fitz_migration_has_rollback(source) {
+                    return Err(format!(
+                        "rollback: migration `{}` (`.fitz`) no declara \
+                         `async fn rollback(db: DbConn) -> Result<Null>`. \
+                         Agregá la fn al archivo y reintentá.",
+                        m.filename
+                    ));
+                }
+            }
+        }
+    }
+    let mut reverted = Vec::with_capacity(target_versions.len());
+    for v in target_versions {
+        let m = by_version.get(v.as_str()).expect("pre-flight validó");
+        match &m.kind {
+            migrations::MigrationKind::Sql { .. } => {
+                migrations::revert_migration(conn, m)
+                    .await
+                    .map_err(|e| format!("revert `{}`: {e}", m.filename))?;
+            }
+            migrations::MigrationKind::Fitz { path, source } => {
+                revert_fitz_migration_async(conn, &m.version, &m.filename, path, source)
+                    .await
+                    .map_err(|e| format!("revert `{}`: {e}", m.filename))?;
+            }
+        }
+        reverted.push(v.clone());
+    }
+    Ok(reverted)
+}
+
+/// v0.10.19 (10.6.d) — Runner del `.fitz` script de una migration.
+/// Convención del archivo:
+///
+/// ```ignore
+/// async fn migrate(db: DbConn) -> Result<Null> {
+///     // back-fill, parseo de JSON viejo, etc.
+///     return Ok(null)
+/// }
+///
+/// // Opcional, requerido solo si querés que `fitz db rollback` ande:
+/// async fn rollback(db: DbConn) -> Result<Null> {
+///     return Ok(null)
+/// }
+/// ```
+///
+/// El runner:
+/// 1. Parsea el archivo y verifica que declara `migrate`.
+/// 2. Inyecta `db` como var pre-bindeada al env.
+/// 3. Appendea un stmt sintético al programa: `let __fitz_mig_result = migrate(db).await`.
+/// 4. Eval con `evaluator::eval_program_with_env`.
+/// 5. Si el último valor es `Result::Ok(_)` → trackea la migration aplicada.
+/// 6. Si es `Result::Err(msg)` → error sin trackear.
+///
+/// **Atomicidad**: la responsabilidad de envolver en tx queda al
+/// usuario (típicamente con `return db.transaction(fn(tx) -> Result<Null> { ... }).await`).
+/// El runner NO envuelve automático porque la `Value::DbConn` se
+/// pasa cruda; el user decide granularidad.
+async fn apply_fitz_migration_async(
+    conn: &std::sync::Arc<db::DbConnHandle>,
+    version: &str,
+    filename: &str,
+    path: &std::path::Path,
+    source: &str,
+) -> Result<(), String> {
+    run_fitz_migration_callback(conn, path, source, "migrate").await?;
+    // Si la callback retornó Ok, marcamos como aplicada. Esta
+    // INSERT NO está en la tx del user — si el user comiteó
+    // sus cambios dentro del `.fitz`, ya persistieron; este
+    // tracking es separado.
+    migrations::track_fitz_migration_applied(conn, version)
+        .await
+        .map_err(|e| format!("track aplicada: {e}"))?;
+    let _ = filename; // disponible para mensajes futuros si entra demanda
+    Ok(())
+}
+
+/// v0.10.19 — Análogo a `apply_fitz_migration_async` para
+/// rollback: invoca `async fn rollback(db)` + borra el registro.
+async fn revert_fitz_migration_async(
+    conn: &std::sync::Arc<db::DbConnHandle>,
+    version: &str,
+    filename: &str,
+    path: &std::path::Path,
+    source: &str,
+) -> Result<(), String> {
+    run_fitz_migration_callback(conn, path, source, "rollback").await?;
+    migrations::untrack_fitz_migration(conn, version)
+        .await
+        .map_err(|e| format!("untrack: {e}"))?;
+    let _ = filename;
+    Ok(())
+}
+
+/// Helper compartido por `apply_fitz_migration_async` y
+/// `revert_fitz_migration_async`. Parsea el archivo, verifica que
+/// `fn_name` esté declarada como `async fn(db: DbConn) -> ...`,
+/// crea env con `db` pre-bindeado a `Value::DbConn(conn)`,
+/// appendea `let __fitz_mig_result = <fn_name>(db).await` y eval
+/// con `evaluator::eval_program_with_env`. Inspecciona el último
+/// valor: `Result::Ok(_)` → Ok(()); `Result::Err(msg)` → Err(msg).
+async fn run_fitz_migration_callback(
+    conn: &std::sync::Arc<db::DbConnHandle>,
+    path: &std::path::Path,
+    source: &str,
+    fn_name: &str,
+) -> Result<(), String> {
+    use fitz::value::Value;
+    // 1. Lex + parse.
+    let tokens = lexer::tokenize(source).map_err(|e| format!("lexer: {e}"))?;
+    let mut program = parser::parse(tokens).map_err(|e| format!("parser: {e}"))?;
+    // 2. Verificar que `fn_name` está declarada como async fn.
+    let has_callback = program.iter().any(|stmt| matches!(stmt, ast::Stmt::FnDef { name, is_async, .. } if name == fn_name && *is_async));
+    if !has_callback {
+        return Err(format!(
+            "el archivo no declara `async fn {fn_name}(db: DbConn) -> Result<Null>`. \
+             El runner de `.fitz` migrations espera esa fn como entry point."
+        ));
+    }
+    // 3. Type-check (warning-only, paralelo a `fitz run` permissive).
+    let (_env, _ti, _di, _errs) = types::check_program(&program);
+    // 4. Appendear stmt sintético: `let __fitz_mig_result = <fn>(db).await`.
+    let call_expr = ast::Expr::Call {
+        callee: Box::new(ast::Expr::Ident(fn_name.to_string(), ast::Span::ZERO)),
+        args: vec![ast::Expr::Ident("db".to_string(), ast::Span::ZERO)],
+        span: ast::Span::ZERO,
+    };
+    let await_expr = ast::Expr::Await(Box::new(call_expr), ast::Span::ZERO);
+    let assign_stmt = ast::Stmt::Assign {
+        target: ast::AssignTarget::Ident("__fitz_mig_result".to_string()),
+        type_: None,
+        value: await_expr,
+        span: ast::Span::ZERO,
+    };
+    program.push(assign_stmt);
+    // 5. Env nuevo con builtins + db pre-bindeado.
+    // `new_repl_env()` arma un EnvRef con builtins registrados —
+    // mismo scope que un script `fitz run` típico.
+    let env = evaluator::new_repl_env();
+    // Inyectar db como Value::DbConn(Arc<DbConnHandle>).
+    env.lock()
+        .define("db", Value::DbConn(std::sync::Arc::clone(conn)));
+    // 6. Eval.
+    let base_dir = path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let last = evaluator::eval_program_with_env(
+        program,
+        base_dir,
+        env.clone(),
+        manifest::DepRegistry::new(),
+    )
+    .await
+    .map_err(|e| format!("eval: {e}"))?;
+    // 7. Inspeccionar `__fitz_mig_result`.
+    // El último stmt es el `let __fitz_mig_result = ...` cuyo
+    // valor retornado por eval_program_with_env es Null (asignación).
+    // Leemos el binding del env directamente para obtener el Value.
+    let _ = last;
+    let result = env
+        .lock()
+        .get("__fitz_mig_result")
+        .ok_or_else(|| "interno: __fitz_mig_result no quedó bindeado".to_string())?;
+    match result {
+        Value::Result(variant) => match variant {
+            fitz::value::ResultVariant::Ok(_) => Ok(()),
+            fitz::value::ResultVariant::Err(e) => Err(format!("`{fn_name}` retornó Err: {}", *e)),
+        },
+        other => Err(format!(
+            "`async fn {fn_name}` debe retornar Result<Null>, recibió: {other}"
+        )),
+    }
+}
+
+/// Heurística simple (basada en parse) para detectar si el `.fitz`
+/// migration declara `async fn rollback(db: DbConn)`. Usado por
+/// `rollback_n_dispatch` en el pre-flight check ANTES de tocar la
+/// DB, para fallar fast con mensaje claro.
+fn fitz_migration_has_rollback(source: &str) -> bool {
+    let Ok(tokens) = lexer::tokenize(source) else {
+        return false;
+    };
+    let Ok(program) = parser::parse(tokens) else {
+        return false;
+    };
+    program.iter().any(|stmt| matches!(stmt, ast::Stmt::FnDef { name, is_async, .. } if name == "rollback" && *is_async))
 }
 
 fn db_check_cmd(file: Option<PathBuf>, url: Option<String>) {

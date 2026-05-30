@@ -8945,19 +8945,34 @@ release v0.10.17):
   soportado" porque `information_schema.columns.column_name` es
   `sql_identifier` que es alias de `name`.
 
-**Fase 10.6.d — Data migrations en `.fitz`**:
+**Fase 10.6.d — Data migrations en `.fitz`** ✅ CERRADA v0.10.19 (2026-05-30):
 
-- Hoy las migrations son `.sql` puro (DDL + back-fills SQL planos).
-  Para transforms complejas (parsear JSON viejo → columns nuevas,
-  llamar HTTP de un service, etc.) hace falta lógica.
-- Diseño propuesto: permitir `.fitz` adicional al `.sql` en
-  `migrations/`. El runner detecta por extensión: `.sql` → ejecuta
-  directo via `db.exec`; `.fitz` → eval contra una `DbConn`
-  bindeada como `db` global del programa, con acceso a `db.query`
-  / `db.exec`. Tracking en `_fitz_migrations` por filename (el
-  ordering alfabético sigue valiendo).
-- Complejidad: requiere loader + checker + eval/codegen del `.fitz`
-  adentro del context de la migration. Estimado: ~6-8 hs.
+- ✅ Discovery: `read_migrations_dir` acepta `.sql` y `.fitz`;
+  intercala por orden alfabético del prefix timestamp.
+- ✅ Modelo: `.fitz` declara `async fn migrate(db: DbConn) ->
+  Result<Null>` (obligatoria) + `async fn rollback(db: DbConn)
+  -> Result<Null>` (opcional). El runner valida pre-flight.
+- ✅ Runner: parsea + verifica fn declarada + crea env con
+  builtins + bindea `db` como `Value::DbConn` + appendea stmt
+  sintético `let __mig_result = migrate(db).await` + eval con
+  `evaluator::eval_program_with_env` + inspecciona Ok/Err en el
+  env.
+- ✅ Tracking: `track_fitz_migration_applied` + `untrack_fitz_migration`
+  helpers en migrations.rs para INSERT/DELETE en `_fitz_migrations`.
+- ✅ Dispatch CLI: `db_migrate_cmd` y `rollback_n_dispatch` en
+  main.rs iteran por kind y delegan a `apply_migration` (Sql)
+  o `apply_fitz_migration_async` / `revert_fitz_migration_async`
+  (Fitz).
+- ✅ Pre-flight rollback: chequea que cada target `.fitz` tenga
+  `async fn rollback` declarada ANTES de tocar la DB (vía
+  helper `fitz_migration_has_rollback` que parsea source-only).
+- ✅ Atomicidad: `.fitz` NO se envuelve auto en tx (a diferencia
+  de `.sql`); el user decide granularidad típicamente con
+  `return db.transaction(fn(tx) -> Result<Null> { ... }).await`.
+- ✅ Smoke E2E real Postgres local validado bit-a-bit: migrate
+  `.sql` + `.fitz` mixtos → ambos aplican en orden → status OK
+  → rollback `.fitz` → re-migrate → status OK. Plus error path:
+  `.fitz` sin `rollback` fn aborta pre-flight.
 
 ### Tier 2 — Útil para teams grandes (≈ 1-2 releases c/u)
 
@@ -9011,9 +9026,9 @@ release v0.10.17):
 
 1. ✅ **10.6.b** (rollback + renames) — v0.10.17 CERRADA.
 2. ✅ **10.6.c** (drift check + stamp) — v0.10.18 CERRADA.
-3. **10.6.d** (data migrations en `.fitz`) — v0.10.19, próxima.
+3. ✅ **10.6.d** (data migrations en `.fitz`) — v0.10.19 CERRADA.
 4. **10.6.e** (history + squashing + schemas custom + offline SQL)
-   — v0.10.20+.
+   — v0.10.20+, próxima.
 5. Tier 3 y out-of-scope quedan en deuda explícita; NO bloquean
    declarar "paquete completo de migraciones".
 

@@ -2723,6 +2723,93 @@ match en current (la migration ya se aplicó):
 - Después de aplicar, el user borra una línea — equivalente a
   cerrar un PR.
 
+### Data migrations en `.fitz` (v0.10.19)
+
+`fitz db migrate` ahora reconoce DOS extensiones en `migrations/`:
+**`.sql`** (DDL/DML SQL crudo, splittable en `-- UP`/`-- DOWN`) y
+**`.fitz`** (scripts del propio lenguaje con `db.query`/`db.exec`/
+`db.transaction` adentro). Se intercalan en orden cronológico por
+el prefijo timestamp del filename.
+
+Las `.fitz` migrations habilitan transforms que SQL crudo no
+expresa con elegancia: back-fills con lógica condicional, parseo
+de JSON viejo a columns nuevas, HTTP calls a un service externo
+durante la migración, etc.
+
+**Convención del archivo `.fitz`**: declarar `async fn migrate(db:
+DbConn) -> Result<Null>`. Opcionalmente `async fn rollback(db:
+DbConn) -> Result<Null>` para que `fitz db rollback` ande.
+
+```fitz
+// migrations/20260530150000_backfill_full_name.fitz
+
+async fn migrate(db: DbConn) -> Result<Null> {
+    // 1 UPDATE sería suficiente acá, pero el patrón con loop
+    // demuestra que tenés acceso completo al lenguaje:
+    match db.query("SELECT id, first_name, last_name FROM users WHERE full_name IS NULL", []).await {
+        Ok(rows) => {
+            for r in rows {
+                let id = r.get("id")
+                let first = r.get("first_name")
+                let last = r.get("last_name")
+                let _ = db.exec(
+                    "UPDATE users SET full_name = $1 || ' ' || $2 WHERE id = $3",
+                    [first, last, id],
+                ).await?
+            }
+            return Ok(null)
+        }
+        Err(e) => return Err(e),
+    }
+}
+
+async fn rollback(db: DbConn) -> Result<Null> {
+    let _ = db.exec("UPDATE users SET full_name = NULL", []).await?
+    return Ok(null)
+}
+```
+
+**Política**:
+
+- **Discovery**: archivos `.sql` y `.fitz` se mezclan en el dir
+  `migrations/`. Orden por prefijo timestamp del filename.
+- **Tracking**: misma tabla `_fitz_migrations` que `.sql`. La
+  version es el prefix del filename.
+- **Atomicidad**: `.fitz` migrations **NO** se envuelven en tx
+  automáticamente. El user decide la granularidad: típicamente
+  `return db.transaction(fn(tx) -> Result<Null> { ... }).await`
+  adentro del cuerpo de `migrate`. Es responsabilidad del script
+  ser idempotente o atómico según su semántica.
+- **Validación pre-run**: el runner parsea el `.fitz` y verifica
+  que declara `async fn migrate(db: DbConn) -> Result<Null>`
+  antes de tocar la DB.
+- **Rollback opcional**: si el `.fitz` declara `async fn
+  rollback(db: DbConn) -> Result<Null>`, `fitz db rollback` la
+  invoca + borra el registro de tracking. Si NO la declara,
+  rollback aborta pre-flight con mensaje claro (paralelo a `.sql`
+  sin `-- DOWN`).
+- **`db` está pre-bindeado** al env del script al `Value::DbConn`
+  de la conn del CLI. NO requiere `db.connect(url)` adentro
+  (el CLI ya conectó por vos via `DATABASE_URL`/`--url`).
+- **El env del script tiene los builtins normales** (`print`,
+  `len`, `env_or`, `jwt`, `hash`, etc.). Imports relativos al
+  dir de la migration funcionan.
+
+**Cuándo usar `.fitz` vs `.sql`**:
+
+- `.sql` — DDL puro (CREATE TABLE / ADD COLUMN / CREATE INDEX),
+  back-fills triviales (`UPDATE users SET x = 1 WHERE x IS NULL`),
+  fixtures de seed. **80% de las migrations**.
+- `.fitz` — back-fills con lógica condicional o loops, parseo de
+  JSON viejo a columns nuevas, HTTP calls a un service externo
+  durante la migración, transforms que requieren state que SQL
+  crudo no expresa elegantemente.
+
+**Caveat**: las `.fitz` migrations corren via **intérprete**
+(no codegen), igual que `fitz run`. Para migrations grandes con
+miles de iteraciones, considerá hacer el bulk via 1 UPDATE
+SQL en una `.sql` separada en lugar de loop iterativo en `.fitz`.
+
 ### Drift check + stamping (v0.10.18)
 
 **`fitz db check`** corre el diff y devuelve **exit 0** si el

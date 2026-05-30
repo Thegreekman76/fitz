@@ -12,9 +12,172 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-Fase 10.6.d (data migrations en `.fitz`), después 10.6.e
-(history + squashing + schemas custom + offline SQL), después
-boilerplates ORM Dockerizados extendidos.
+Fase 10.6.e (history + squashing + schemas custom + offline SQL),
+después boilerplates ORM Dockerizados extendidos.
+
+## [v0.10.19] — 2026-05-30 — Fase 10.6.d: data migrations en `.fitz`
+
+`fitz db migrate` ahora reconoce DOS extensiones en `migrations/`:
+`.sql` (DDL/DML crudo, splittable en `-- UP`/`-- DOWN`) y **`.fitz`**
+(scripts del propio lenguaje con acceso completo a `db.query`,
+`db.exec`, `db.transaction`, etc.). Se intercalan en orden
+cronológico por el prefijo timestamp del filename.
+
+Habilita transforms que SQL crudo NO expresa con elegancia:
+back-fills con lógica condicional, parseo de JSON viejo a columns
+nuevas, HTTP calls a un service externo durante la migración,
+etc. — el caso típico que en Alembic / Rails se resuelve con
+"data migration en Python/Ruby".
+
+### Convención del `.fitz` migration
+
+```fitz
+// migrations/20260530150000_backfill_full_name.fitz
+
+async fn migrate(db: DbConn) -> Result<Null> {
+    // Acceso completo al lenguaje: loops, match, builtins,
+    // db.transaction(...) para granularidad atómica.
+    let _ = db.exec(
+        "UPDATE users SET full_name = first_name || ' ' || last_name WHERE full_name IS NULL",
+        [],
+    ).await?
+    return Ok(null)
+}
+
+// Opcional: si la declarás, `fitz db rollback` la invoca.
+async fn rollback(db: DbConn) -> Result<Null> {
+    let _ = db.exec("UPDATE users SET full_name = NULL", []).await?
+    return Ok(null)
+}
+```
+
+### Cambios técnicos
+
+- **src/migrations.rs**:
+  - `MigrationFile` refactorizado: ahora tiene `kind:
+    MigrationKind` en vez de `up_sql/down_sql` directos.
+  - Nueva enum `MigrationKind { Sql { up_sql, down_sql }, Fitz {
+    path, source } }` + helpers `is_fitz()`.
+  - `read_migrations_dir` acepta extensiones `.sql` y `.fitz`,
+    detecta por sufijo, construye la variante correcta.
+  - `apply_migration` rechaza migrations `.fitz` con error
+    específico (el caller debe despachar al runner del lenguaje).
+  - `revert_migration` y `rollback_n` paralelos rechazan
+    `.fitz` con guards explícitos.
+  - Nuevos helpers públicos `track_fitz_migration_applied(conn,
+    version)` y `untrack_fitz_migration(conn, version)` para que
+    el CLI inserte/borre el tracking después de invocar la
+    callback del lenguaje.
+- **src/main.rs**:
+  - `db_migrate_cmd` ahora itera con dispatch per-kind:
+    `.sql` → `apply_migration`, `.fitz` →
+    `apply_fitz_migration_async`.
+  - Nuevo `rollback_n_dispatch` paralelo a `migrations::rollback_n`
+    pero con dispatch per-kind. `db_rollback_cmd` lo usa.
+  - Nueva fn async `apply_fitz_migration_async(conn, version,
+    filename, path, source)`: invoca el runner + trackea.
+  - Nueva fn async `revert_fitz_migration_async`: invoca runner
+    sobre `rollback` + untrackea.
+  - Nueva fn async `run_fitz_migration_callback(conn, path,
+    source, fn_name)`: parsea el `.fitz`, verifica que la fn
+    está declarada como `async`, crea env vía
+    `evaluator::new_repl_env()`, bindea `db` al `Value::DbConn`
+    de la conn, appendea stmt sintético `let __fitz_mig_result =
+    <fn_name>(db).await`, eval con `eval_program_with_env`,
+    inspecciona el binding del env para extraer `Result::Ok(_)`
+    vs `Result::Err(msg)`.
+  - Nueva fn `fitz_migration_has_rollback(source)`: parsea
+    source-only (sin tocar DB) para pre-flight del rollback.
+- **editors/vscode/package.json**: 0.10.18 → 0.10.19.
+
+### Decisiones técnicas
+
+- **Convención `async fn migrate(db: DbConn) -> Result<Null>`**
+  (paralelo al patrón `@test fn ...` del test runner). El user
+  no escribe top-level code que dependa de un global `db` mágico;
+  declara una fn explícita. Validable estáticamente, inspectable
+  por el LSP, paralelo a cómo `fitz run` y `fitz test` ya
+  modelan entry points.
+- **`db` pre-bindeado al env del script**: la conn la maneja el
+  CLI (lee `DATABASE_URL` o `--url`); el `.fitz` NO necesita
+  llamar `db.connect(url)`. Inyectamos el `Value::DbConn` directo
+  via `env.lock().define("db", ...)` antes del eval.
+- **Atomicidad opt-in vs auto**: `.sql` migrations las envuelve
+  el código en `db.transaction` automático. `.fitz` NO — el user
+  decide granularidad (típicamente `return db.transaction(fn(tx)
+  => ...).await` adentro del cuerpo de `migrate`). Más flexible:
+  permite back-fills en chunks, retry parcial, multi-tx por
+  diseño cuando el dataset es grande.
+- **Rollback opcional**: si la `.fitz` declara `async fn
+  rollback(db)`, el rollback la usa + borra registro. Si NO la
+  declara, pre-flight aborta con mensaje claro (paralelo a `.sql`
+  sin `-- DOWN`).
+- **Eval, no codegen**: las `.fitz` migrations corren via
+  intérprete (`evaluator::eval_program_with_env`). Para
+  migrations con miles de iteraciones, el doc recomienda
+  delegar el bulk a 1 UPDATE SQL en una `.sql` aparte.
+- **Stmt sintético append**: en vez de invocar `migrate(db)`
+  desde Rust directo (complica el path de invoke_value/dispatch),
+  appendamos `let __fitz_mig_result = migrate(db).await` al AST
+  parseado antes del eval. El `__fitz_mig_result` queda en el
+  env, lo leemos vía `env.lock().get(...)` post-eval. Simple +
+  reusa todo el path de evaluación normal.
+
+### Tests
+
+- **1 unit test nuevo** en `src/migrations.rs::tests`:
+  `read_migrations_dir_detecta_fitz_files` valida que `.fitz` y
+  `.sql` se intercalan en orden alfabético + la variante `kind`
+  es la correcta + el `source` del `.fitz` queda cacheado.
+- **58/58 migrations tests verde** (57 anteriores + 1 nuevo).
+- **Smoke E2E real Postgres local validado bit-a-bit**:
+  - 2 migrations mixtas (1 `.sql` create_users + 1 `.fitz`
+    backfill_names) → `db status` lista ambas pending → `db
+    migrate` aplica ambas en orden → DB rows con `name`
+    rellenado por la `.fitz` → `_fitz_migrations` con ambas.
+  - `db rollback` revierte solo la `.fitz` (ejecuta su `async
+    fn rollback`) → `name` vacío + tracking de la `.fitz`
+    eliminado.
+  - Re-`db migrate` re-aplica solo la `.fitz` (la `.sql` sigue
+    applied) → idempotencia OK.
+  - Pre-flight error: `.fitz` SIN `async fn rollback` declarada
+    → `db rollback` aborta antes de tocar la DB con mensaje
+    específico ("no declara `async fn rollback(db: DbConn) ->
+    Result<Null>`. Agregá la fn al archivo y reintentá").
+
+### Cuándo usar `.fitz` vs `.sql`
+
+- **`.sql`** — DDL puro (CREATE TABLE / ADD COLUMN / CREATE
+  INDEX), back-fills triviales (`UPDATE users SET x = 1 WHERE x
+  IS NULL`), seed fixtures. **~80% de las migrations**.
+- **`.fitz`** — back-fills con lógica condicional o loops,
+  parseo de JSON viejo a columns nuevas, HTTP calls durante la
+  migración, transforms que requieren state que SQL crudo no
+  expresa elegantemente.
+
+### Limitaciones explícitas del MVP
+
+- **Sin auto-wrap en tx**: el user decide granularidad. Si la
+  `.fitz` migrate fallise a la mitad sin tx explícita, queda en
+  estado parcial — escribí `return db.transaction(...).await`
+  para garantizar atómico.
+- **Stmt sintético con var pública**: `let __fitz_mig_result`
+  contamina el env del script con un nombre interno. En
+  práctica no choca (`__` prefix convención), pero un script
+  que defina `__fitz_mig_result` por su cuenta tendría
+  comportamiento sorprendente.
+- **Eval-only**: las `.fitz` corren via intérprete, NO codegen.
+  Para bulk-loads masivos preferí SQL crudo (1 UPDATE >> N
+  iteraciones del intérprete).
+
+### Por qué importa
+
+Cierra el último gap funcional Tier 1 del plan vs Alembic.
+Equipos pueden ahora hacer transforms reales (no solo DDL) sin
+salir a Python/Ruby scripts externos. Combinado con drift check
+(v0.10.18), rollback + renames (v0.10.17), y el ORM nativo
+(v0.10.x), el stack DB de Fitz cubre el flujo completo de
+desarrollo + CI/CD de schema management.
 
 ## [v0.10.18] — 2026-05-29 — Fase 10.6.c: drift check + stamping (+ driver fix OID `name`)
 

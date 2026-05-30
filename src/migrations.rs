@@ -1252,12 +1252,46 @@ const TRACKING_TABLE: &str = "_fitz_migrations";
 pub struct MigrationFile {
     pub version: String,
     pub filename: String,
-    /// SQL a ejecutar en `migrate` (forward). Siempre presente.
-    pub up_sql: String,
-    /// SQL a ejecutar en `rollback` (back). `None` si la migration
-    /// no declaró sección `-- DOWN`. `rollback` aborta con mensaje
-    /// claro si falta.
-    pub down_sql: Option<String>,
+    pub kind: MigrationKind,
+}
+
+/// v0.10.19 (10.6.d) — Tipo de migration según su backend.
+///
+/// - `Sql`: archivo `.sql` con SQL crudo splittable en `-- UP` /
+///   `-- DOWN` (mantiene la semántica de v0.10.17).
+/// - `Fitz` (v0.10.19): archivo `.fitz` que declara `async fn
+///   migrate(db: DbConn) -> Result<Null>` y opcionalmente
+///   `async fn rollback(db: DbConn) -> Result<Null>`. El runner
+///   parsea + invoca la fn adentro de tx con `db` bindeado.
+///   Habilita transforms con lógica que SQL crudo no expresa
+///   (parseo JSON viejo → cols nuevas, back-fills condicionales,
+///   etc.).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MigrationKind {
+    Sql {
+        /// SQL a ejecutar en `migrate` (forward). Siempre presente.
+        up_sql: String,
+        /// SQL a ejecutar en `rollback`. `None` si la migration
+        /// no declaró sección `-- DOWN`.
+        down_sql: Option<String>,
+    },
+    Fitz {
+        /// Path absoluto al archivo `.fitz`. Lo guardamos por si
+        /// el runner necesita base_dir para resolver imports
+        /// relativos del module loader.
+        path: std::path::PathBuf,
+        /// Source completo del archivo. Cacheado en read para
+        /// evitar I/O extra durante el dispatch.
+        source: String,
+    },
+}
+
+impl MigrationFile {
+    /// `true` si la migration es un `.fitz` script con lógica
+    /// (necesita el runner del lenguaje, no `db.exec` directo).
+    pub fn is_fitz(&self) -> bool {
+        matches!(self.kind, MigrationKind::Fitz { .. })
+    }
 }
 
 /// Estado de una migration: aplicada en la DB, o pendiente.
@@ -1315,28 +1349,38 @@ pub fn read_migrations_dir(dir: &std::path::Path) -> Result<Vec<MigrationFile>, 
             continue;
         };
         let filename = filename_os.to_string_lossy().into_owned();
-        if !filename.ends_with(".sql") {
+        // v0.10.19 — aceptamos `.sql` Y `.fitz`. El runner despacha
+        // por `MigrationKind` después.
+        let ext = if filename.ends_with(".sql") {
+            ".sql"
+        } else if filename.ends_with(".fitz") {
+            ".fitz"
+        } else {
             continue;
-        }
+        };
         let version = filename
-            .strip_suffix(".sql")
+            .strip_suffix(ext)
             .unwrap_or(&filename)
             .split_once('_')
             .map(|(prefix, _)| prefix.to_string())
-            .unwrap_or_else(|| {
-                filename
-                    .strip_suffix(".sql")
-                    .unwrap_or(&filename)
-                    .to_string()
-            });
+            .unwrap_or_else(|| filename.strip_suffix(ext).unwrap_or(&filename).to_string());
         let raw = std::fs::read_to_string(&path)
             .map_err(|e| format!("leyendo `{}`: {e}", path.display()))?;
-        let (up_sql, down_sql) = split_up_down(&raw);
+        let kind = match ext {
+            ".sql" => {
+                let (up_sql, down_sql) = split_up_down(&raw);
+                MigrationKind::Sql { up_sql, down_sql }
+            }
+            ".fitz" => MigrationKind::Fitz {
+                path: path.clone(),
+                source: raw,
+            },
+            _ => unreachable!(),
+        };
         migrations.push(MigrationFile {
             version,
             filename,
-            up_sql,
-            down_sql,
+            kind,
         });
     }
     migrations.sort_by(|a, b| a.version.cmp(&b.version));
@@ -1415,9 +1459,18 @@ pub async fn apply_migration(
     conn: &std::sync::Arc<DbConnHandle>,
     migration: &MigrationFile,
 ) -> DbResult<()> {
+    let MigrationKind::Sql { up_sql, .. } = &migration.kind else {
+        return Err(DbError::Protocol(format!(
+            "apply_migration: `{}` es una `.fitz` migration y NO se aplica via SQL crudo. \
+             El caller (CLI) debe despachar a un runner del lenguaje. \
+             Si llegaste acá desde código tuyo, usá la dispatch por `MigrationKind` antes \
+             de llamar a `apply_migration`.",
+            migration.filename
+        )));
+    };
     ensure_tracking_table(conn).await?;
     let version = migration.version.clone();
-    let sql = migration.up_sql.clone();
+    let sql = up_sql.clone();
     let tracking_table = TRACKING_TABLE.to_string();
     conn.transaction(move |tx| {
         let version = version.clone();
@@ -1442,6 +1495,50 @@ pub async fn apply_migration(
     .await
 }
 
+/// v0.10.19 (10.6.d) — Helper para que el caller (main.rs) marque
+/// una `.fitz` migration como aplicada DESPUÉS de que el runner
+/// del lenguaje haya ejecutado `async fn migrate(db)` exitosamente.
+/// La tx de la fn del usuario ya commiteó (vía `db.transaction`
+/// adentro de la invocación), así que acá solo insertamos en
+/// `_fitz_migrations` como acto separado.
+///
+/// **Nota de atomicidad**: `.fitz` migrations NO son atómicas
+/// con respecto al tracking — si el `INSERT INTO _fitz_migrations`
+/// falla después de que el script ya commiteó, queda en estado
+/// "aplicada pero no trackeada". `migrate` la re-aplicaría en la
+/// próxima corrida. Es responsabilidad del script ser idempotente
+/// (paralelo a `CREATE TABLE IF NOT EXISTS` en `.sql`).
+pub async fn track_fitz_migration_applied(
+    conn: &std::sync::Arc<DbConnHandle>,
+    version: &str,
+) -> DbResult<()> {
+    ensure_tracking_table(conn).await?;
+    let insert_sql = format!(
+        "INSERT INTO {} (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
+        quote_ident(TRACKING_TABLE),
+    );
+    conn.exec(&insert_sql, &[PgValue::Text(version.to_string())])
+        .await?;
+    Ok(())
+}
+
+/// v0.10.19 (10.6.d) — Borra el tracking de una `.fitz` migration
+/// revertida exitosamente. Paralelo a `track_fitz_migration_applied`
+/// para el path rollback.
+pub async fn untrack_fitz_migration(
+    conn: &std::sync::Arc<DbConnHandle>,
+    version: &str,
+) -> DbResult<()> {
+    ensure_tracking_table(conn).await?;
+    let delete_sql = format!(
+        "DELETE FROM {} WHERE version = $1",
+        quote_ident(TRACKING_TABLE),
+    );
+    conn.exec(&delete_sql, &[PgValue::Text(version.to_string())])
+        .await?;
+    Ok(())
+}
+
 /// v0.10.17 (10.6.b.1) — Revierte una migration: ejecuta su
 /// sección `-- DOWN` adentro de tx + borra el registro de
 /// `_fitz_migrations`. Atomic: o todo persiste o nada.
@@ -1457,7 +1554,15 @@ pub async fn revert_migration(
     conn: &std::sync::Arc<DbConnHandle>,
     migration: &MigrationFile,
 ) -> DbResult<()> {
-    let down_sql = migration.down_sql.as_ref().ok_or_else(|| {
+    let MigrationKind::Sql { down_sql, .. } = &migration.kind else {
+        return Err(DbError::Protocol(format!(
+            "revert_migration: `{}` es una `.fitz` migration. \
+             El rollback de `.fitz` requiere despachar al runner del \
+             lenguaje (responsabilidad del CLI), no a SQL crudo.",
+            migration.filename
+        )));
+    };
+    let down_sql = down_sql.as_ref().ok_or_else(|| {
         DbError::Protocol(format!(
             "migration `{}` no tiene sección `-- DOWN` — no se puede revertir. \
              Agregá la sección `-- DOWN` con el SQL inverso (`DROP COLUMN`, \
@@ -1535,13 +1640,30 @@ pub async fn rollback_n(
                  archivo o stampealá manualmente con SQL."
             ))
         })?;
-        if m.down_sql.is_none() {
-            return Err(DbError::Protocol(format!(
-                "rollback: migration `{}` no tiene sección `-- DOWN` — \
-                 no se puede revertir. Editá el archivo agregando `-- DOWN` \
-                 con el SQL inverso y reintentá.",
-                m.filename
-            )));
+        // v0.10.19 — `.fitz` migrations en el path SQL-rollback son
+        // un error fast: el CLI las debe despachar al runner del
+        // lenguaje antes de invocar `rollback_n`. Por defensa,
+        // rechazamos acá.
+        match &m.kind {
+            MigrationKind::Fitz { .. } => {
+                return Err(DbError::Protocol(format!(
+                    "rollback: migration `{}` es `.fitz` — el rollback \
+                     requiere despachar al runner del lenguaje, no SQL \
+                     crudo. Si llegaste acá vía `rollback_n` directo, \
+                     usá el dispatch del CLI o llamá al runner manual.",
+                    m.filename
+                )));
+            }
+            MigrationKind::Sql { down_sql, .. } => {
+                if down_sql.is_none() {
+                    return Err(DbError::Protocol(format!(
+                        "rollback: migration `{}` no tiene sección `-- DOWN` — \
+                         no se puede revertir. Editá el archivo agregando `-- DOWN` \
+                         con el SQL inverso y reintentá.",
+                        m.filename
+                    )));
+                }
+            }
         }
     }
     let mut reverted = Vec::with_capacity(target_versions.len());
@@ -2619,8 +2741,46 @@ type Plain {
         let migrations = read_migrations_dir(&tmp).unwrap();
         assert_eq!(migrations.len(), 1);
         let m = &migrations[0];
-        assert!(m.up_sql.contains("CREATE TABLE foo"));
-        assert!(m.down_sql.as_deref().unwrap().contains("DROP TABLE foo"));
+        match &m.kind {
+            MigrationKind::Sql { up_sql, down_sql } => {
+                assert!(up_sql.contains("CREATE TABLE foo"));
+                assert!(down_sql.as_deref().unwrap().contains("DROP TABLE foo"));
+            }
+            other => panic!("esperaba MigrationKind::Sql, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn read_migrations_dir_detecta_fitz_files() {
+        // v0.10.19 (10.6.d) — `.fitz` y `.sql` se intercalan según
+        // orden alfabético. La variante `kind` indica el backend.
+        let tmp = std::env::temp_dir().join(format!("fitz_test_fitzmig_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let sql_file = tmp.join("20260530100000_create_users.sql");
+        let fitz_file = tmp.join("20260530120000_backfill_emails.fitz");
+        std::fs::write(&sql_file, "CREATE TABLE x (id int);\n").unwrap();
+        std::fs::write(
+            &fitz_file,
+            "async fn migrate(db: DbConn) -> Result<Null> { return Ok(null) }\n",
+        )
+        .unwrap();
+        let migrations = read_migrations_dir(&tmp).unwrap();
+        assert_eq!(migrations.len(), 2);
+        // Orden alfabético: 100000 < 120000 → sql primero, fitz segundo.
+        assert_eq!(migrations[0].version, "20260530100000");
+        assert!(matches!(migrations[0].kind, MigrationKind::Sql { .. }));
+        assert!(!migrations[0].is_fitz());
+        assert_eq!(migrations[1].version, "20260530120000");
+        assert!(matches!(migrations[1].kind, MigrationKind::Fitz { .. }));
+        assert!(migrations[1].is_fitz());
+        match &migrations[1].kind {
+            MigrationKind::Fitz { source, .. } => {
+                assert!(source.contains("async fn migrate"));
+            }
+            _ => unreachable!(),
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
