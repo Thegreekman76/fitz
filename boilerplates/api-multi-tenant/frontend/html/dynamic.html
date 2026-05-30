@@ -23,21 +23,36 @@
     </p>
 
     <div class="callout">
-        <strong>⚠️ Demo, no endpoint compilable</strong>: el Enfoque B
-        funciona en <code>fitz run</code> (intérprete) pero hoy NO
-        compila con <code>fitz build</code> debido a 2 deudas
-        residuales del codegen:
-        <ol>
-            <li><code>Result&lt;List&lt;Map&lt;Str, Any&gt;&gt;&gt;</code>
-                como retorno de handler HTTP no auto-serializa.</li>
-            <li><code>r.get("col")</code> sobre <code>DbRow</code> no
-                implementado en codegen (solo intérprete).</li>
-        </ol>
-        El boilerplate solo expone el <strong>Enfoque A</strong> como
-        binario standalone Dockerizado. Esta página explica el
-        patrón B con código de ejemplo para cuando esas deudas
-        cierren (sub-paso futuro de Fase 10.6 o 5b).
+        <strong>✅ Endpoint real, compilado con <code>fitz build</code></strong>:
+        Fitz v0.10.22 cierra las 2 deudas residuales del codegen que
+        antes bloqueaban este patrón (<code>Result&lt;List&lt;DbRow&gt;&gt;</code>
+        en handlers HTTP + métodos tipados sobre <code>DbRow</code>).
+        El binario Dockerizado de este boilerplate ya expone
+        <code>/products/dynamic</code> nativo.
     </div>
+
+    <h2>Probar el endpoint</h2>
+
+    <p>
+        Elegí el tenant — Acme y Beta están registrados en
+        <code>public.tenants</code> y pasan la whitelist. Zeta no existe
+        (rechazo). El cuarto opción es un intento de SQL injection que
+        falla por la misma razón.
+    </p>
+
+    <form id="dynamic-form">
+        <label for="tenant-select">X-Tenant header:</label>
+        <select id="tenant-select" name="tenant">
+            <option value="acme">acme — Acme Corp (válido)</option>
+            <option value="beta">beta — Beta LLC (válido)</option>
+            <option value="zeta">zeta — no registrado (rechazo)</option>
+            <option value="' OR 1=1 --">&apos; OR 1=1 -- (injection — rechazo)</option>
+        </select>
+        <button type="submit">GET /products/dynamic</button>
+    </form>
+
+    <h3>Resultado</h3>
+    <pre id="result-box"><em>Pulsá "GET" arriba para ver la respuesta.</em></pre>
 
     <h2>Validación de tenant</h2>
 
@@ -45,7 +60,7 @@
         <strong>Por qué es seguro</strong>: el slug se chequea contra
         <code>public.tenants</code> antes de interpolarlo en el SQL.
         Tenants no registrados (<code>zeta</code>) → error <em>antes</em>
-        de tocar el schema. SQL injection (<code>' OR 1=1 --</code>)
+        de tocar el schema. SQL injection (<code>&apos; OR 1=1 --</code>)
         → ni siquiera pasa la validación de la whitelist. Probá los
         4 valores del select arriba.
     </div>
@@ -54,7 +69,7 @@
 
     <pre><code>@header(name="X-Tenant")
 @get("/products/dynamic")
-async fn products_dynamic(x_tenant: Str) -> Result&lt;List&lt;Map&lt;Str, Any&gt;&gt;&gt; {
+async fn products_dynamic(x_tenant: Str) -> Result&lt;List&lt;DbRow&gt;&gt; {
     let conn = db.connect(db_url).await?
 
     // PASO CRÍTICO: validar slug contra la tabla central de tenants.
@@ -64,12 +79,13 @@ async fn products_dynamic(x_tenant: Str) -> Result&lt;List&lt;Map&lt;Str, Any&gt
         .await
     let _ = match tenant_match {
         Ok(_) =&gt; null,
-        Err(_) =&gt; return Err("tenant `{x_tenant}` no existe en `public.tenants`"),
+        Err(_) =&gt; return Err("tenant `{x_tenant}` no registrado en public.tenants"),
     }
 
     // Slug whitelisted → safe de interpolar.
-    let sql = "SELECT id, name, price, created_at FROM \"{x_tenant}\".\"products\" ORDER BY id"
-    return conn.query(sql, []).await
+    let conn2 = db.connect(db_url).await?
+    let sql = "SELECT id, name, price FROM \"{x_tenant}\".\"products\" ORDER BY id"
+    return conn2.query(sql, []).await
 }</code></pre>
 
     <h2>Cuándo elegir este enfoque vs Enfoque A</h2>
@@ -83,7 +99,7 @@ async fn products_dynamic(x_tenant: Str) -> Result&lt;List&lt;Map&lt;Str, Any&gt
         <tr>
             <td>Type safety del checker</td>
             <td>✅ Sí (compile-time)</td>
-            <td>❌ Map&lt;Str, Any&gt;</td>
+            <td>❌ DbRow (parseo runtime)</td>
         </tr>
         <tr>
             <td>Soporta tenants creados en runtime</td>
@@ -110,10 +126,27 @@ async fn products_dynamic(x_tenant: Str) -> Result&lt;List&lt;Map&lt;Str, Any&gt
     <p>Los dos enfoques conviven sin conflicto en el mismo backend.</p>
 
     <script>
-        // Sin JS interactivo — esta página es read-only educativa
-        // mientras las deudas del codegen (Map<Str,Any> serializa-
-        // ción + .get sobre DbRow) cierran. Cuando cierren, sumar
-        // el form + fetch como en acme.html/beta.html.
+        const form = document.getElementById("dynamic-form");
+        const select = document.getElementById("tenant-select");
+        const out = document.getElementById("result-box");
+
+        form.addEventListener("submit", async (e) => {
+            e.preventDefault();
+            const tenant = select.value;
+            out.textContent = "Consultando con X-Tenant: " + tenant + " ...";
+            try {
+                const resp = await fetch("/api/products/dynamic", {
+                    headers: { "X-Tenant": tenant },
+                });
+                const status = resp.status + " " + resp.statusText;
+                const body = await resp.text();
+                let pretty = body;
+                try { pretty = JSON.stringify(JSON.parse(body), null, 2); } catch (_) {}
+                out.textContent = "HTTP " + status + "\n\n" + pretty;
+            } catch (err) {
+                out.textContent = "Error de red: " + err;
+            }
+        });
     </script>
 
     <footer>

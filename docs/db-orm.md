@@ -225,18 +225,37 @@ Parámetros soportados:
   sub-paso futuro 10.1.b).
 - `application_name=mi-app` — passthrough al server.
 
-### `db.query(sql, params) -> Future<Result<List<Map<Str, Any>>>>`
+### `db.query(sql, params) -> Future<Result<List<DbRow>>>`
 
-Query crudo. Devuelve cada row como `Map<Str, Any>` con las columnas
-named. Los parámetros van como `$1`, `$2`, etc. (positional, NO
-named).
+Query crudo. Devuelve cada row como un `DbRow` opaco con las
+columnas named (parseo lazy + métodos tipados de extracción).
+Los parámetros van como `$1`, `$2`, etc. (positional, NO named).
 
 ```fitz
 let rows = db.query("SELECT id, email FROM users WHERE active = $1 AND age > $2",
     [true, 18]).await?
-// rows: List<Map<Str, Any>>
-// rows[0] → {"id": 42, "email": "ada@x.com"}
+// rows: List<DbRow>
+
+let r: DbRow = rows[0]
+let id: Int    = r.get_int("id")?           // Result<Int>
+let email: Str = r.get_str("email")?        // Result<Str>
 ```
+
+**Métodos sobre `DbRow`** (desde v0.10.22, paridad bit-a-bit
+intérprete↔codegen):
+
+| Método | Retorno | Notas |
+|---|---|---|
+| `r.get_int(col)`   | `Result<Int>`   | Falla si la col es NULL, no existe, o el tipo PG no es int |
+| `r.get_str(col)`   | `Result<Str>`   | Falla si NULL/no existe; acepta text/varchar/uuid/json/etc. |
+| `r.get_float(col)` | `Result<Float>` | float8/float4/numeric/etc. |
+| `r.get_bool(col)`  | `Result<Bool>`  | bool PG |
+| `r.len()`          | `Int`           | número de columnas del row |
+
+Para handlers HTTP que retornan rows crudos sin extracción, podés
+devolver `Result<List<DbRow>>` directo — el codegen auto-serializa
+cada row a `{col: val, ...}` en el JSON response (ver Boilerplate
+`api-multi-tenant` Enfoque B para el patrón canónico).
 
 ### `db.exec(sql, params) -> Future<Result<Int>>`
 

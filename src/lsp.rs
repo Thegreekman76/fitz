@@ -1857,7 +1857,7 @@ fn after_dot_completions(
         Type::DbConn => method_items(&[
             (
                 "query",
-                "async fn(sql: Str, args: List<Any>) -> Result<List<Map>>".into(),
+                "async fn(sql: Str, args: List<Any>) -> Result<List<DbRow>>".into(),
             ),
             (
                 "exec",
@@ -1870,6 +1870,16 @@ fn after_dot_completions(
                 "async fn(fn(tx: DbConn) -> Result<T>) -> Result<T>  // BEGIN/COMMIT/ROLLBACK auto"
                     .into(),
             ),
+        ]),
+        // v0.10.22 — `DbRow` (row crudo de `db.query`). Métodos tipados
+        // de extracción que devuelven `Result<T>` con error claro si la
+        // col no existe, es NULL, o el tipo PG no matchea.
+        Type::DbRow => method_items(&[
+            ("get_int", "fn(col: Str) -> Result<Int>".into()),
+            ("get_str", "fn(col: Str) -> Result<Str>".into()),
+            ("get_float", "fn(col: Str) -> Result<Float>".into()),
+            ("get_bool", "fn(col: Str) -> Result<Bool>".into()),
+            ("len", "fn() -> Int  // número de columnas del row".into()),
         ]),
         // Fase 10.3+ — `QueryBuilder<Row>` del ORM. Chain methods
         // preservan QB; terminales devuelven Result<...>.
@@ -4177,6 +4187,25 @@ mod tests {
             assert!(
                 labels.contains(&expected),
                 "falta método `{expected}`: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn after_dot_sobre_dbrow_lista_get_int_get_str_get_float_get_bool_len() {
+        // v0.10.22 — dispatch directo `Type::DbRow` → métodos tipados
+        // de extracción (get_int/get_str/get_float/get_bool) + len.
+        // Patrón: param `r: DbRow` + call completo `r.len()` para que
+        // el parser no abandone el stmt y el Ident(r) quede en TypeInfo.
+        let src = "fn run(r: DbRow) -> Int {\n  return r.len()\n}\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor en línea 1, col 11 (justo después de `r.`).
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 11);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["get_int", "get_str", "get_float", "get_bool", "len"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` sobre DbRow: {labels:?}"
             );
         }
     }

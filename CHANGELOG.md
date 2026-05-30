@@ -15,6 +15,107 @@ En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
 boilerplates ORM Dockerizados extendidos, o nuevo norte
 técnico a decidir (Fase 10.6 completada al 100% vs Alembic).
 
+## [v0.10.22] — 2026-05-30 — Cierre 2 deudas residuales del codegen del driver DB
+
+Cierra las 2 deudas heredadas que el Boilerplate 10
+(`api-multi-tenant`) destapó: queries con shape dinámico
+retornadas crudas como JSON desde un handler HTTP, y extracción
+tipada de columnas individuales sobre `DbRow` desde `fitz build`
+(antes solo intérprete).
+
+### Deuda A — `Result<List<DbRow>>` como retorno de handler HTTP
+
+Los handlers ahora pueden devolver `Result<List<DbRow>>` directo
+y el codegen auto-serializa cada row a `{col: val, ...}` en el
+JSON response. Útil para queries cuyo shape no se puede
+representar como `type` (CTEs, multi-tenant con schema dinámico,
+queries ad-hoc retornadas a frontends que aceptan shape libre).
+
+```fitz
+@get("/products/dynamic")
+async fn products() -> Result<List<DbRow>> {
+    let conn = db.connect(db_url).await?
+    return conn.query("SELECT id, name FROM acme.products", []).await
+}
+// HTTP 200 → [{"id":1,"name":"foo"},{"id":2,"name":"bar"}]
+```
+
+Implementación: nuevo `DB_HTTP_INTEGRATION_PRELUDE` emitido
+condicionalmente cuando `uses_db = true`, con `impl __ToFitzJson
+for __fitz_db_runtime::Row` que mapea cada `PgValue` al `Value`
+JSON correspondiente (incluye auto-detección de JSON/array
+strings como `jsonb` → JSON anidado real, no como string).
+
+### Deuda B — Métodos tipados sobre `DbRow` en codegen
+
+5 métodos nuevos vivos en `fitz build` con paridad bit-a-bit
+intérprete↔codegen:
+
+| Método | Retorno | Notas |
+|---|---|---|
+| `r.get_int(col)`   | `Result<Int>`   | Falla si NULL, no existe, o el tipo PG no es int |
+| `r.get_str(col)`   | `Result<Str>`   | Falla si NULL/no existe; acepta text/varchar/uuid/json/etc. |
+| `r.get_float(col)` | `Result<Float>` | float8/float4/numeric/etc. |
+| `r.get_bool(col)`  | `Result<Bool>`  | bool PG |
+| `r.len()`          | `Int`           | número de columnas del row |
+
+```fitz
+let rows = conn.query("SELECT id, name FROM users LIMIT 1", []).await?
+let r: DbRow = rows[0]
+let id: Int    = r.get_int("id")?       // Result<Int>
+let name: Str  = r.get_str("name")?     // Result<Str>
+```
+
+Sintaxis dedicada (`get_int` en vez de `get` polimórfico) por
+elección de diseño — el checker refina el ret type del call al
+`Result<T>` correcto sin requerir anotación en la lhs.
+
+### Boilerplate 10 (`api-multi-tenant`) — Enfoque B real, no demo
+
+El handler `GET /products/dynamic` con header `X-Tenant: <slug>`
++ validación whitelist contra `public.tenants` + SQL dinámico
+**ahora compila con `fitz build`** y se expone como endpoint
+nativo. El frontend `/dynamic.html` deja de ser solo-texto y
+suma un selector interactivo con 4 valores demo (acme/beta
+válidos, zeta no registrado, SQL injection rechazada por
+whitelist) + área de resultado en vivo.
+
+### Tests + smoke + LSP
+
+- 4 unit tests nuevos en `types::tests::checker_db_row_*`
+  (Result<Int> / Result<Str> / annotation-mismatch /
+  unknown-method).
+- 1 unit test nuevo en `lsp::tests::after_dot_sobre_dbrow_*`
+  (autocomplete tras `r.` lista get_int/get_str/get_float/
+  get_bool/len).
+- LSP `Type::DbRow` ahora aparece en `after_dot_completions`
+  con method_items dedicado.
+- Refresh signature del autocomplete `DbConn.query` (era
+  `Result<List<Map>>`, ahora `Result<List<DbRow>>`).
+- Smoke .fitz dedicado validado bit-a-bit `fitz run` ↔ `fitz
+  build` contra Postgres local (3 endpoints verde).
+- Smoke E2E Boilerplate 10 contra Postgres local: 7 endpoints
+  verde (3 Enfoque A + 4 Enfoque B incluido el caso injection).
+- `GUIDE_EXAMPLES_COMPILE` smoke (325 ejemplos) verde.
+- `cargo test --lib`: 2637 verde (sin feature) / 2749 verde
+  (con feature `lsp`).
+- `cargo fmt --all -- --check` + `cargo clippy --all-targets
+  -- -D warnings` verde.
+
+### Cross-impact docs
+
+- `docs/db-orm.md` sección 3: signature de `db.query` corregida
+  a `Future<Result<List<DbRow>>>` + sub-sección nueva sobre los
+  métodos `r.get_*`.
+- `docs/guide.md` cap 31: ejemplo del driver `db` actualizado
+  con DbRow + extracción tipada + nota sobre handlers HTTP
+  retornando `Result<List<DbRow>>`.
+- Boilerplate 10 README: bloque "Enfoque B" reescrito (deja
+  de citar deudas residuales) + curl ejemplo del caso injection
+  como demo de validación.
+- Extension VSCode bump 0.10.21 → 0.10.22 (grammar ya tenía
+  `DbRow`; el delta real es LSP completion + signatures).
+
 ## [v0.10.21] — 2026-05-30 — Fase 10.6.e.3: schemas custom (cierra Fase 10.6 entera)
 
 Última feature del Tier 2 del plan vs Alembic. **Cierra la Fase

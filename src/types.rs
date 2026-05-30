@@ -4570,6 +4570,12 @@ fn infer_method_call(
         // is_closed` lifecycle, `transaction` orquesta una tx con
         // commit/rollback automático.
         Type::DbConn => Some(infer_db_conn_method(ctx, method, args_ty, span)),
+        // v0.10.22 — `DbRow` (row crudo del query result) expone
+        // `.get(col: Str) -> Result<Any>` para extraer fields. El
+        // tipo retornado es Any porque el shape del row es dinámico
+        // (depende del SELECT). El user lo coerciona con anotación
+        // (`let id: Int = row.get("id")?`).
+        Type::DbRow => Some(infer_db_row_method(ctx, method, args_ty, span)),
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
@@ -6342,6 +6348,85 @@ fn infer_bytes_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
                 span,
                 format!(
                     "el tipo `Bytes` no tiene el método `{}` (soportados: len, is_empty, to_str)",
+                    method
+                ),
+            );
+            Type::Any
+        }
+    }
+}
+
+/// v0.10.22 — Métodos sobre `DbRow` (row crudo del query result).
+/// Habilita parsear fields del row en `fitz build` (antes solo
+/// funcionaba en intérprete porque ahí los rows son `Value::Map`).
+///
+/// Decisión MVP: en vez de `.get(col) -> Result<Any>` (que requeriría
+/// infraestructura de coerce `Any → Int/Str/Float/Bool` en codegen,
+/// no trivial), exponemos **4 variantes tipadas**:
+///
+///   - `get_int(name: Str) -> Result<Int>`
+///   - `get_str(name: Str) -> Result<Str>`
+///   - `get_float(name: Str) -> Result<Float>`
+///   - `get_bool(name: Str) -> Result<Bool>`
+///   - `len() -> Int` — cantidad de columnas.
+///
+/// Cada uno valida que (a) la columna existe y (b) el tipo PG matchea
+/// el destino esperado. `Err` con mensaje específico si no.
+///
+/// Las queries con shape variable (e.g. jsonb) siguen como deuda:
+/// el user puede devolver `Result<List<DbRow>>` directo desde el
+/// handler (Deuda A v0.10.22) en lugar de inspeccionar field a field.
+fn infer_db_row_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
+    let typed_get = |ok_ty: Type| -> Type {
+        Type::Result {
+            ok: Box::new(ok_ty),
+            err: Box::new(Type::Str),
+        }
+    };
+    let validate_str_arg = |ctx: &mut CheckCtx, name: &str| {
+        if let Some(arg) = args_ty.first() {
+            if !is_compatible(arg, &Type::Str) && !matches!(arg, Type::Any) {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`DbRow.{}(name)` espera Str, recibió `{}`",
+                        name,
+                        arg.display(ctx.types),
+                    ),
+                );
+            }
+        }
+    };
+    match method {
+        "get_int" => {
+            check_method_arity(ctx, "get_int", args_ty, 1, span);
+            validate_str_arg(ctx, "get_int");
+            typed_get(Type::Int)
+        }
+        "get_str" => {
+            check_method_arity(ctx, "get_str", args_ty, 1, span);
+            validate_str_arg(ctx, "get_str");
+            typed_get(Type::Str)
+        }
+        "get_float" => {
+            check_method_arity(ctx, "get_float", args_ty, 1, span);
+            validate_str_arg(ctx, "get_float");
+            typed_get(Type::Float)
+        }
+        "get_bool" => {
+            check_method_arity(ctx, "get_bool", args_ty, 1, span);
+            validate_str_arg(ctx, "get_bool");
+            typed_get(Type::Bool)
+        }
+        "len" => {
+            check_method_arity(ctx, "len", args_ty, 0, span);
+            Type::Int
+        }
+        _ => {
+            ctx.error_at(
+                span,
+                format!(
+                    "el tipo `DbRow` no tiene el método `{}` (soportados: get_int, get_str, get_float, get_bool, len)",
                     method
                 ),
             );
@@ -14890,6 +14975,79 @@ print(total)
         assert!(
             errs.is_empty(),
             "esperaba 0 errores (static ORM sigue tipando): {:?}",
+            errs
+        );
+    }
+
+    // v0.10.22 — Deuda B: métodos tipados sobre `DbRow`.
+    // Habilitan parseo de columnas crudas de `db.query` directamente en
+    // `fitz build` (antes solo el intérprete despachaba `.get`).
+
+    #[test]
+    fn checker_db_row_get_int_devuelve_result_int() {
+        let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
+                     let rows = db.query(\"SELECT id FROM users\", []).await?\n  \
+                     let r: DbRow = rows[0]\n  \
+                     let id: Int = r.get_int(\"id\")?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.is_empty(),
+            "esperaba 0 errores; get_int debe tipar como Result<Int>: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_db_row_get_str_devuelve_result_str() {
+        let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
+                     let rows = db.query(\"SELECT name FROM users\", []).await?\n  \
+                     let r: DbRow = rows[0]\n  \
+                     let name: Str = r.get_str(\"name\")?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.is_empty(),
+            "esperaba 0 errores; get_str debe tipar como Result<Str>: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_db_row_get_int_anotacion_str_es_error() {
+        // `let name: Str = r.get_int("id")?` debe ser ERROR: get_int
+        // refina a `Result<Int>`, `?` extrae Int, asignar a Str → fail.
+        let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
+                     let rows = db.query(\"SELECT id FROM users\", []).await?\n  \
+                     let r: DbRow = rows[0]\n  \
+                     let name: Str = r.get_int(\"id\")?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("Int")
+                || e.message.contains("Str")
+                || e.message.contains("incompatible")),
+            "esperaba error de tipo (Int vs Str): {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_db_row_metodo_desconocido_es_error() {
+        let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
+                     let rows = db.query(\"SELECT 1 AS x\", []).await?\n  \
+                     let r: DbRow = rows[0]\n  \
+                     let v: Int = r.get_potato(\"x\")?\n  \
+                     return Ok(null)\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("DbRow") && e.message.contains("get_potato")),
+            "esperaba error citando DbRow.get_potato: {:?}",
             errs
         );
     }

@@ -162,30 +162,45 @@ async fn beta_create_product(body: ProductInput) -> Result<BetaProduct> {
 }
 
 // ============================================================
-// Enfoque B — ORM raw dinámico (DEMO en frontend, no compilable)
+// Enfoque B — ORM raw dinámico (REAL, compilado, v0.10.22+)
 // ============================================================
 //
-// El Enfoque B (handler genérico con header `X-Tenant: <slug>` +
-// validación contra whitelist + query con SQL dinámico) **se
-// muestra como demo en el frontend** (`/dynamic.html`) pero NO
-// está expuesto como endpoint compilable.
+// Handler genérico que recibe `X-Tenant: <slug>` en headers,
+// valida el slug contra la whitelist `public.tenants` (defensa
+// SQL-injection: tenants no registrados son rechazados ANTES
+// de tocar el schema correspondiente), y emite `SELECT` con SQL
+// dinámico interpolando el schema name.
 //
-// **Por qué**: `fitz build` (codegen) tiene 2 deudas residuales
-// que bloquean este patrón:
-//   1. `Result<List<Map<Str, Any>>>` como retorno de handler no
-//      auto-serializa via `__ToFitzJson` (funciona en `fitz run`).
-//   2. `.get("col")` sobre `DbRow` no implementado en codegen
-//      (solo en intérprete).
+// Cubre el caso "tenants creados en runtime" sin requerir
+// rebuild del binario por cada tenant nuevo. Para tenants
+// estáticos (fijos), preferir Enfoque A (type-safe en compile-time).
 //
-// Ambas deudas son cierre futuro razonable. Mientras tanto, el
-// caso real "tenants dinámicos" se resuelve con:
-//   - Una tabla por tenant creada at runtime con `db.exec`.
-//   - El endpoint corre con `fitz run` (intérprete), no `fitz build`.
-//   - O un type concreto `DynProduct` + workaround manual via
-//     `db.query` + serialización Str a mano.
+// **Por qué es seguro**: el slug se chequea contra `public.tenants`
+// ANTES de interpolarlo en el SQL. SQL injection (`' OR 1=1 --`)
+// → no pasa la validación de whitelist y nunca llega al schema.
 //
-// Ver el frontend `/dynamic.html` para el código de ejemplo +
-// explicación + sección "Cuándo elegir A vs B".
+// **Habilitado por v0.10.22**: cierres de las 2 deudas residuales
+// del codegen (`Result<List<DbRow>>` como retorno de handler HTTP
+// + `.get_int/.get_str` sobre DbRow). Ahora compila con `fitz build`.
+
+@header(name="X-Tenant")
+@get("/products/dynamic")
+async fn products_dynamic(x_tenant: Str) -> Result<List<DbRow>> {
+    let conn = db.connect(db_url).await?
+
+    // PASO CRÍTICO: validar slug contra la tabla central de tenants.
+    // Sin esto, cualquier string en X-Tenant llegaría al SQL.
+    let tenant_match = Tenant.where(fn(t) => t.slug == x_tenant).first(conn).await
+    let _ = match tenant_match {
+        Ok(_) => null,
+        Err(_) => return Err("tenant `{x_tenant}` no registrado en public.tenants"),
+    }
+
+    // Slug whitelisted → safe de interpolar en SQL.
+    let conn2 = db.connect(db_url).await?
+    let sql = "SELECT id, name, price FROM \"{x_tenant}\".\"products\" ORDER BY id"
+    return conn2.query(sql, []).await
+}
 
 // ============================================================
 // Health + listing de tenants (helper para tests)
@@ -211,5 +226,5 @@ print("[ready]   GET  /acme/products                — AcmeProduct.all (SQL qua
 print("[ready]   POST /acme/products                — AcmeProduct.insert")
 print("[ready]   GET  /beta/products                — BetaProduct.all")
 print("[ready]   POST /beta/products                — BetaProduct.insert")
-print("[ready] Enfoque B (ORM raw dinámico): demo en frontend /dynamic.html")
-print("[ready]   (no compilado en este binario — deudas residuales del codegen)")
+print("[ready] Endpoints (Enfoque B — ORM raw dinámico con X-Tenant header):")
+print("[ready]   GET  /products/dynamic             — header X-Tenant: <slug>, schema interpolado")

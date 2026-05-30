@@ -15542,6 +15542,82 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 }
             }
         }
+        // v0.10.22 — Métodos sobre `DbRow` (row crudo del query
+        // result). Habilita parseo de fields del row en `fitz build`
+        // (antes solo funcionaba en intérprete).
+        //
+        // MVP: 4 variantes tipadas (get_int/get_str/get_float/get_bool)
+        // que extraen + validan tipo. `Err` si la col no existe o si
+        // el tipo PG no matchea. Para queries con shape dinámico que
+        // se devuelven cruda al cliente, usar el handler retornando
+        // `Result<List<DbRow>>` directo (Deuda A, mismo release).
+        if let Ok((obj_code, Type::DbRow)) = self.gen_expr(object) {
+            match method {
+                "get_int" | "get_str" | "get_float" | "get_bool" => {
+                    if args.len() != 1 {
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "`DbRow.{}(name)` espera 1 arg Str, recibió {}",
+                                method,
+                                args.len()
+                            ),
+                        ));
+                    }
+                    let (name_code, _) = self.gen_expr(&args[0])?;
+                    let (variant, expect_label, ok_ty) = match method {
+                        "get_int" => ("Int", "Int", Type::Int),
+                        "get_str" => ("Text", "Str", Type::Str),
+                        "get_float" => ("Float", "Float", Type::Float),
+                        "get_bool" => ("Bool", "Bool", Type::Bool),
+                        _ => unreachable!(),
+                    };
+                    let extract_value = match method {
+                        "get_int" | "get_float" | "get_bool" => "*__v".to_string(),
+                        "get_str" => "__v.clone()".to_string(),
+                        _ => unreachable!(),
+                    };
+                    let code = format!(
+                        "(match ({}).get(({}).as_str()) {{ \
+                            Some(__fitz_db_runtime::PgValue::{variant}(__v)) => Ok({extract_value}), \
+                            Some(__fitz_db_runtime::PgValue::Null) => Err(format!(\"col `{{}}` es NULL\", ({}))), \
+                            Some(__other) => Err(format!(\"col `{{}}` es {{:?}}, esperaba {expect_label}\", ({}), __other)), \
+                            None => Err(format!(\"col `{{}}` no existe en el row\", ({}))) \
+                        }})",
+                        obj_code, name_code, name_code, name_code, name_code,
+                        variant = variant,
+                        extract_value = extract_value,
+                        expect_label = expect_label,
+                    );
+                    return Ok((
+                        code,
+                        Type::Result {
+                            ok: Box::new(ok_ty),
+                            err: Box::new(Type::Str),
+                        },
+                    ));
+                }
+                "len" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(
+                            call_span,
+                            format!("`DbRow.len()` no acepta args, recibió {}", args.len()),
+                        ));
+                    }
+                    return Ok((format!("(({}).len() as i64)", obj_code), Type::Int));
+                }
+                _ => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`DbRow` no tiene método `{}` (soportados: get_int, get_str, get_float, get_bool, len)",
+                            method
+                        ),
+                    ));
+                }
+            }
+        }
+
         // Fase 10.b.3 — dispatch ORM sobre `Type.method(args)` cuando
         // `Type` tiene metadata `@table` en el env. Despachamos all/
         // first/count/where/insert acá ANTES del dispatch general de
@@ -20062,6 +20138,16 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
     /// emiten junto al struct (en `gen_type_http_impls`).
     fn emit_http_runtime_prelude(&mut self) {
         self.emit(HTTP_RUNTIME_PRELUDE);
+        // v0.10.22 — Integration prelude DB+HTTP. Solo cuando AMBOS
+        // están activos: emite `impl __ToFitzJson for __fitz_db_runtime::Row`
+        // que habilita handlers que devuelven `Result<List<Map<Str, Any>>>`
+        // directo desde `conn.query(...).await` (queries dinámicas,
+        // Enfoque B del boilerplate api-multi-tenant). Antes de
+        // v0.10.22 esto fallaba con `trait Row: __ToFitzJson not
+        // satisfied`.
+        if self.uses_db {
+            self.emit(DB_HTTP_INTEGRATION_PRELUDE);
+        }
         // Fase 9.w.2.c — preludio adicional cuando hay handlers @ws.
         // Vive separado de HTTP_RUNTIME_PRELUDE para que programas
         // HTTP sin WS no paguen el costo del bloque extra (~150 LoC
@@ -23491,6 +23577,78 @@ fn __json_shape(json: &serde_json::Value) -> &'static str {
         serde_json::Value::String(_) => "Str",
         serde_json::Value::Array(_) => "Array",
         serde_json::Value::Object(_) => "Object",
+    }
+}
+
+"#;
+
+/// v0.10.22 — Preludio adicional para programas que combinan DB +
+/// HTTP. Solo se emite cuando AMBOS están activos (`uses_db` y
+/// `uses_http`).
+///
+/// Define `impl __ToFitzJson for __fitz_db_runtime::Row` que serializa
+/// un row del query result como `{<col>: <json_value>}`. Habilita
+/// que handlers HTTP devuelvan `Result<List<Map<Str, Any>>>` directo
+/// desde `conn.query(...).await` — caso típico "queries dinámicas
+/// con shape variable" (Enfoque B del boilerplate api-multi-tenant).
+///
+/// Antes de v0.10.22 esto fallaba en `fitz build` con
+/// `trait bound Row: __ToFitzJson not satisfied`. Solo funcionaba
+/// en `fitz run` (intérprete) porque ahí los rows son `Value::Map`
+/// que ya tiene `__to_fitz_json` por el path Map<Str, Any>.
+const DB_HTTP_INTEGRATION_PRELUDE: &str = r#"// --- v0.10.22: integration DB + HTTP (Row → JSON serialization) ---
+
+impl __ToFitzJson for __fitz_db_runtime::Row {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        for (idx, (name, _oid)) in self.columns().iter().enumerate() {
+            let pg_val = match self.get_at(idx) {
+                Some(v) => v,
+                None => continue,
+            };
+            obj.insert(name.clone(), __fitz_pg_value_to_json(pg_val));
+        }
+        serde_json::Value::Object(obj)
+    }
+}
+
+fn __fitz_pg_value_to_json(v: &__FitzPgValue) -> serde_json::Value {
+    use __fitz_db_runtime::PgValue as P;
+    match v {
+        P::Null => serde_json::Value::Null,
+        P::Bool(b) => serde_json::Value::Bool(*b),
+        P::Int(i) => serde_json::Value::from(*i),
+        P::Float(f) => match serde_json::Number::from_f64(*f) {
+            Some(n) => serde_json::Value::Number(n),
+            None => serde_json::Value::String(format!("{}", f)),
+        },
+        P::Text(s) => {
+            // JSON/JSONB del driver vienen como PgValue::Text (wire
+            // format text). Si parsea como JSON válido, embed real
+            // (objetos/arrays jsonb se ven como tales). Si NO parsea
+            // (text normal), pasa como String.
+            if let Some(first) = s.trim_start().chars().next() {
+                if first == '{' || first == '[' {
+                    if let Ok(parsed) = serde_json::from_str(s) {
+                        return parsed;
+                    }
+                }
+            }
+            serde_json::Value::String(s.clone())
+        }
+        P::Bytes(b) => {
+            // Hex encoding paralelo al wire format text de BYTEA
+            // (`\x<hex>`). Roundtrip lossless.
+            let mut s = String::with_capacity(2 + b.len() * 2);
+            s.push_str("\\x");
+            for byte in b {
+                s.push_str(&format!("{:02x}", byte));
+            }
+            serde_json::Value::String(s)
+        }
+        P::Array { values, .. } => {
+            serde_json::Value::Array(values.iter().map(__fitz_pg_value_to_json).collect())
+        }
     }
 }
 

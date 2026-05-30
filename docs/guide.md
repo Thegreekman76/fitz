@@ -10940,13 +10940,25 @@ idéntico en intérprete y binario nativo.
 let db = db.connect("postgres://user:pass@host:5432/dbname?sslmode=disable").await?
 
 let rows = db.query("SELECT id, email FROM users WHERE active = $1", [true]).await?
-// rows: List<Map<Str, Any>>
+// rows: List<DbRow>
+
+let r: DbRow   = rows[0]
+let id: Int    = r.get_int("id")?
+let email: Str = r.get_str("email")?
 
 let affected = db.exec("UPDATE users SET last_seen = NOW() WHERE id = $1", [42]).await?
 // affected: Int
 
 db.close().await?
 ```
+
+`DbRow` es un row opaco con extracción tipada por columna —
+`r.get_int/get_str/get_float/get_bool` retornan `Result<T>` con
+error claro si la col no existe, es NULL, o el tipo PG no matchea.
+En handlers HTTP también podés retornar `Result<List<DbRow>>` y el
+codegen auto-serializa cada row a `{col: val, ...}` en el JSON
+response (útil para queries con shape dinámico no representable como
+`type`; ver el boilerplate `api-multi-tenant` Enfoque B).
 
 URL formato estándar Postgres (`postgres://[user[:pass]@]host[:port]/dbname[?params]`).
 `sslmode=disable` requerido en MVP (TLS strict viene como
@@ -11296,7 +11308,7 @@ let rows = db.query("
     )
     SELECT * FROM ranked WHERE rn = 1
 ", []).await?
-// rows: List<Map<Str, Any>>
+// rows: List<DbRow>
 
 let affected = db.exec("UPDATE counters SET value = value + 1 WHERE key = $1", ["clicks"]).await?
 ```

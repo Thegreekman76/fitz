@@ -52,12 +52,13 @@ nuevo requiere code change + rebuild.
 
 Handler genérico que routea por header `X-Tenant: <slug>`. Valida
 el slug contra `public.tenants` (whitelist) y emite query con SQL
-dinámico. `Map<Str, Any>` en vez de type concreto.
+dinámico. Retorna `List<DbRow>` (rows crudos del driver, auto-
+serializados a JSON `[{col: val}, ...]` por el codegen de v0.10.22).
 
 ```fitz
 @header(name="X-Tenant")
 @get("/products/dynamic")
-async fn products_dynamic(x_tenant: Str) -> Result<List<Map<Str, Any>>> {
+async fn products_dynamic(x_tenant: Str) -> Result<List<DbRow>> {
     let conn = db.connect(db_url).await?
 
     // Validar contra whitelist (`public.tenants`).
@@ -65,18 +66,21 @@ async fn products_dynamic(x_tenant: Str) -> Result<List<Map<Str, Any>>> {
         .first(conn).await
     let _ = match tenant_match {
         Ok(_) => null,
-        Err(_) => return Err("tenant `{x_tenant}` no existe"),
+        Err(_) => return Err("tenant `{x_tenant}` no registrado"),
     }
 
     // Slug whitelisted → safe de interpolar.
-    let sql = "SELECT id, name, price FROM \"{x_tenant}\".\"products\""
-    return conn.query(sql, []).await
+    let conn2 = db.connect(db_url).await?
+    let sql = "SELECT id, name, price FROM \"{x_tenant}\".\"products\" ORDER BY id"
+    return conn2.query(sql, []).await
 }
 ```
 
 **Usá esto** para SaaS con onboarding self-service (cliente se
 registra → CREATE SCHEMA + CREATE TABLE en runtime). Sin type safety
-del checker.
+compile-time (los campos del row se inspeccionan en runtime), pero
+con el escape hatch `r.get_int("col")` / `r.get_str("col")` cuando
+necesitás extraer una columna específica como tipo concreto Fitz.
 
 ## Estructura
 
@@ -156,7 +160,11 @@ curl -H "X-Tenant: beta" localhost:3000/products/dynamic
 
 # Validación: tenant no registrado → error claro
 curl -H "X-Tenant: zeta" localhost:3000/products/dynamic
-# → {"error":"tenant `zeta` no existe en `public.tenants`"}
+# → {"error":"tenant `zeta` no registrado en public.tenants"}
+
+# SQL injection — rechazado por la whitelist antes de tocar el schema
+curl -H "X-Tenant: ' OR 1=1 --" localhost:3000/products/dynamic
+# → {"error":"tenant `' OR 1=1 --` no registrado en public.tenants"}
 ```
 
 O via nginx proxy (same-origin, sin exponer :3000):
