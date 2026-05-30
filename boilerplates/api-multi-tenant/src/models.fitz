@@ -1,0 +1,97 @@
+// models.fitz — ORM types con schemas Postgres custom (v0.10.21).
+//
+// Patrón multi-tenant: cada cliente tiene su propio schema PG con
+// sus tablas. Aislamiento a nivel DB (no a nivel WHERE clause).
+//
+// **Enfoque A — ORM nativo estático**: types Fitz separados por
+// tenant. El `@table("schema.name")` compila a SQL con schema
+// qualifier (`SELECT FROM "acme"."products"`). Type-safe en el
+// checker, sin queries strings dinámicas. Limitación: no escala
+// a tenants dinámicos (cada nuevo tenant requiere un nuevo type
+// + rebuild). Apropiado para SaaS con # de tenants pequeño/fijo
+// (~5-20).
+//
+// **Enfoque B** (en main.fitz): para tenants dinámicos, usar
+// `db.query("SELECT FROM \"<schema>\".\"products\"", [])` con
+// `<schema>` validado contra `public.tenants` antes. Sin type
+// safety del checker pero soporta N tenants sin rebuild.
+
+// --- Tabla compartida en public schema ------------------------------
+//
+// Registro central de tenants. El middleware del header X-Tenant
+// valida que el slug existe acá ANTES de routear queries. Vive en
+// `public` (sin schema custom).
+
+@table("tenants") type Tenant {
+    @primary id: Int = 0
+    slug: Str = ""        // "acme", "beta", "tenant_xyz"
+    name: Str = ""        // nombre humano del cliente
+    @db_default("NOW()") created_at: Str = ""
+}
+
+// --- Enfoque A: types per-tenant en schemas custom -----------------
+//
+// Cada tenant tiene SU type Fitz con `@table("<tenant>.<table>")`.
+// El ORM genera el SQL qualified automáticamente:
+//
+//   AcmeProduct.all(db)
+//   -> SELECT "id","name","price" FROM "acme"."products"
+//
+//   BetaProduct.insert(db, BetaProduct {...})
+//   -> INSERT INTO "beta"."products" (...) VALUES (...)
+//
+// Si querés un 3er tenant, agregás un type nuevo
+// `@table("zeta.products") type ZetaProduct { ... }` + handlers
+// `@get("/zeta/products")`. Compile-time safe.
+
+@table("acme.products") type AcmeProduct {
+    @primary id: Int = 0
+    name: Str = ""
+    price: Float = 0.0
+    @db_default("NOW()") created_at: Str = ""
+}
+
+@table("acme.orders") type AcmeOrder {
+    @primary id: Int = 0
+    @belongs_to("AcmeProduct") product_id: Int = 0
+    qty: Int = 1
+    @db_default("NOW()") created_at: Str = ""
+}
+
+@table("beta.products") type BetaProduct {
+    @primary id: Int = 0
+    name: Str = ""
+    price: Float = 0.0
+    @db_default("NOW()") created_at: Str = ""
+}
+
+@table("beta.orders") type BetaOrder {
+    @primary id: Int = 0
+    @belongs_to("BetaProduct") product_id: Int = 0
+    qty: Int = 1
+    @db_default("NOW()") created_at: Str = ""
+}
+
+// --- Input types para POST -----------------------------------------
+//
+// Sin id ni created_at — los asigna Postgres (bigserial + DEFAULT
+// NOW()).
+
+type ProductInput {
+    name: Str = ""
+    price: Float = 0.0
+}
+
+// Shape del row del Enfoque B (raw db.query). Sin @table porque
+// el shape es dinámico (apunta a `<tenant>.products` con name
+// resuelto en runtime). Mapeo manual de Row → DynProduct en el
+// handler — workaround porque `Result<List<Map<Str, Any>>>` no
+// auto-serializa via codegen (funciona en `fitz run` pero no en
+// `fitz build`). Type concreto = compile OK + response JSON limpio.
+
+type DynProduct {
+    id: Int = 0
+    name: Str = ""
+    price: Float = 0.0
+    created_at: Str = ""
+}

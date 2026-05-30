@@ -1,0 +1,215 @@
+// api-multi-tenant — SaaS multi-tenant con schemas Postgres custom.
+//
+// Showcase del feature `@table("schema.name")` de v0.10.21:
+// aislamiento de datos a nivel DB (schemas PG separados) en vez
+// de a nivel WHERE clause (`WHERE tenant_id = X`).
+//
+// **Por qué schemas custom y no `tenant_id` column**:
+//   - Bug-proof: imposible que una query SELECT de tenant A
+//     accidentalmente lea data de tenant B. PG bloquea a nivel
+//     qualified name (`"acme"."products"` vs `"beta"."products"`).
+//     Sin riesgo de "olvidé el WHERE tenant_id".
+//   - Backups separables por tenant (`pg_dump --schema=acme`).
+//   - Permisos PG nativos por schema (GRANT SELECT por role).
+//   - Costo: migrations se aplican una vez por schema. Para
+//     tenants estáticos (este boilerplate) trivial. Para tenants
+//     dinámicos, ver Enfoque B abajo.
+//
+// **Dos enfoques mostrados**:
+//
+//   A. **ORM nativo estático** (recomendado para # tenants
+//      pequeño/fijo): types Fitz separados con
+//      `@table("acme.products")` / `@table("beta.products")`.
+//      Compile-time safe. Sin queries strings dinámicas.
+//      Limitación: cada nuevo tenant requiere code change + rebuild.
+//
+//   B. **ORM raw dinámico** (para tenants creados runtime):
+//      `db.query("SELECT FROM \"<schema>\".\"products\"", [])`
+//      con `<schema>` validado contra `public.tenants` antes.
+//      Sin type safety del checker pero soporta N tenants sin
+//      rebuild.
+
+from models import Tenant, AcmeProduct, BetaProduct, ProductInput
+
+let db_url = env_or("DATABASE_URL", "postgres://fitz:fitz@db:5432/fitz?sslmode=disable")
+
+// ============================================================
+// Boot: inicializar schemas + tables + seed de tenants demo
+// ============================================================
+//
+// Idempotente con `CREATE SCHEMA/TABLE IF NOT EXISTS` — re-corridas
+// no rompen estado. En proyectos reales, esto se reemplaza por
+// `fitz db migrate` con migrations versionadas (Fase 10.6).
+
+async fn init_db() -> Result<Null> {
+    let conn = db.connect(db_url).await?
+
+    // Schemas custom para 2 tenants demo.
+    let _ = conn.exec("CREATE SCHEMA IF NOT EXISTS acme", []).await?
+    let _ = conn.exec("CREATE SCHEMA IF NOT EXISTS beta", []).await?
+
+    // Tabla central de tenants en public.
+    let tenants_sql = """
+        CREATE TABLE IF NOT EXISTS tenants (
+            id         bigserial PRIMARY KEY,
+            slug       text NOT NULL UNIQUE,
+            name       text NOT NULL,
+            created_at timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(tenants_sql, []).await?
+
+    // Tables por tenant — misma estructura, schemas distintos.
+    let acme_products_sql = """
+        CREATE TABLE IF NOT EXISTS acme.products (
+            id         bigserial PRIMARY KEY,
+            name       text NOT NULL,
+            price      double precision NOT NULL DEFAULT 0,
+            created_at timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(acme_products_sql, []).await?
+
+    let acme_orders_sql = """
+        CREATE TABLE IF NOT EXISTS acme.orders (
+            id         bigserial PRIMARY KEY,
+            product_id bigint NOT NULL REFERENCES acme.products(id),
+            qty        integer NOT NULL DEFAULT 1,
+            created_at timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(acme_orders_sql, []).await?
+
+    let beta_products_sql = """
+        CREATE TABLE IF NOT EXISTS beta.products (
+            id         bigserial PRIMARY KEY,
+            name       text NOT NULL,
+            price      double precision NOT NULL DEFAULT 0,
+            created_at timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(beta_products_sql, []).await?
+
+    let beta_orders_sql = """
+        CREATE TABLE IF NOT EXISTS beta.orders (
+            id         bigserial PRIMARY KEY,
+            product_id bigint NOT NULL REFERENCES beta.products(id),
+            qty        integer NOT NULL DEFAULT 1,
+            created_at timestamptz NOT NULL DEFAULT NOW()
+        )
+    """
+    let _ = conn.exec(beta_orders_sql, []).await?
+
+    // Seed: registrar los 2 tenants demo en public.tenants.
+    let seed_sql = """
+        INSERT INTO tenants (slug, name) VALUES
+            ('acme', 'Acme Corp'),
+            ('beta', 'Beta LLC')
+        ON CONFLICT (slug) DO NOTHING
+    """
+    let _ = conn.exec(seed_sql, []).await?
+    return Ok(null)
+}
+
+match init_db().await {
+    Ok(_)  => print("[boot] schemas inicializados: acme, beta + tenants seedeados"),
+    Err(e) => print("[boot] ERROR init_db — {e}"),
+}
+
+// ============================================================
+// Enfoque A — ORM nativo estático per-tenant
+// ============================================================
+//
+// 4 handlers, 2 por tenant. Type-safe, sin queries dinámicas.
+// El ORM genera el SQL qualified automáticamente:
+//   AcmeProduct.all(conn) → SELECT "id","name","price","created_at"
+//                            FROM "acme"."products"
+
+@get("/acme/products")
+async fn acme_products() -> Result<List<AcmeProduct>> {
+    let conn = db.connect(db_url).await?
+    return AcmeProduct.all(conn).await
+}
+
+@post("/acme/products")
+async fn acme_create_product(body: ProductInput) -> Result<AcmeProduct> {
+    let conn = db.connect(db_url).await?
+    let row = AcmeProduct {
+        id: 0,
+        name: body.name,
+        price: body.price,
+        created_at: "",
+    }
+    return AcmeProduct.insert(conn, row).await
+}
+
+@get("/beta/products")
+async fn beta_products() -> Result<List<BetaProduct>> {
+    let conn = db.connect(db_url).await?
+    return BetaProduct.all(conn).await
+}
+
+@post("/beta/products")
+async fn beta_create_product(body: ProductInput) -> Result<BetaProduct> {
+    let conn = db.connect(db_url).await?
+    let row = BetaProduct {
+        id: 0,
+        name: body.name,
+        price: body.price,
+        created_at: "",
+    }
+    return BetaProduct.insert(conn, row).await
+}
+
+// ============================================================
+// Enfoque B — ORM raw dinámico (DEMO en frontend, no compilable)
+// ============================================================
+//
+// El Enfoque B (handler genérico con header `X-Tenant: <slug>` +
+// validación contra whitelist + query con SQL dinámico) **se
+// muestra como demo en el frontend** (`/dynamic.html`) pero NO
+// está expuesto como endpoint compilable.
+//
+// **Por qué**: `fitz build` (codegen) tiene 2 deudas residuales
+// que bloquean este patrón:
+//   1. `Result<List<Map<Str, Any>>>` como retorno de handler no
+//      auto-serializa via `__ToFitzJson` (funciona en `fitz run`).
+//   2. `.get("col")` sobre `DbRow` no implementado en codegen
+//      (solo en intérprete).
+//
+// Ambas deudas son cierre futuro razonable. Mientras tanto, el
+// caso real "tenants dinámicos" se resuelve con:
+//   - Una tabla por tenant creada at runtime con `db.exec`.
+//   - El endpoint corre con `fitz run` (intérprete), no `fitz build`.
+//   - O un type concreto `DynProduct` + workaround manual via
+//     `db.query` + serialización Str a mano.
+//
+// Ver el frontend `/dynamic.html` para el código de ejemplo +
+// explicación + sección "Cuándo elegir A vs B".
+
+// ============================================================
+// Health + listing de tenants (helper para tests)
+// ============================================================
+
+@get("/health")
+fn health() -> Str => "ok"
+
+@get("/tenants")
+async fn list_tenants() -> Result<List<Tenant>> {
+    let conn = db.connect(db_url).await?
+    return Tenant.all(conn).await
+}
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+print("[ready] Server arrancando en :3000")
+print("[ready] Endpoints (Enfoque A — ORM nativo estático con @table custom):")
+print("[ready]   GET  /health                       — sanity")
+print("[ready]   GET  /tenants                      — lista tenants registrados")
+print("[ready]   GET  /acme/products                — AcmeProduct.all (SQL qualified)")
+print("[ready]   POST /acme/products                — AcmeProduct.insert")
+print("[ready]   GET  /beta/products                — BetaProduct.all")
+print("[ready]   POST /beta/products                — BetaProduct.insert")
+print("[ready] Enfoque B (ORM raw dinámico): demo en frontend /dynamic.html")
+print("[ready]   (no compilado en este binario — deudas residuales del codegen)")

@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Dynamic — Enfoque B (X-Tenant)</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <nav>
+        <a href="/">Concepto</a>
+        <a href="/acme.html">Tenant Acme</a>
+        <a href="/beta.html">Tenant Beta</a>
+        <a href="/dynamic.html" class="active">Dinámico (X-Tenant)</a>
+    </nav>
+
+    <h1>Enfoque B: ORM raw dinámico (header X-Tenant)</h1>
+
+    <p>
+        El handler <code>GET /products/dynamic</code> recibe un header
+        <code>X-Tenant: &lt;slug&gt;</code>, lo valida contra la tabla
+        central <code>public.tenants</code> (whitelist), y emite query
+        contra el schema correspondiente con SQL dinámico.
+    </p>
+
+    <div class="callout">
+        <strong>⚠️ Demo, no endpoint compilable</strong>: el Enfoque B
+        funciona en <code>fitz run</code> (intérprete) pero hoy NO
+        compila con <code>fitz build</code> debido a 2 deudas
+        residuales del codegen:
+        <ol>
+            <li><code>Result&lt;List&lt;Map&lt;Str, Any&gt;&gt;&gt;</code>
+                como retorno de handler HTTP no auto-serializa.</li>
+            <li><code>r.get("col")</code> sobre <code>DbRow</code> no
+                implementado en codegen (solo intérprete).</li>
+        </ol>
+        El boilerplate solo expone el <strong>Enfoque A</strong> como
+        binario standalone Dockerizado. Esta página explica el
+        patrón B con código de ejemplo para cuando esas deudas
+        cierren (sub-paso futuro de Fase 10.6 o 5b).
+    </div>
+
+    <h2>Validación de tenant</h2>
+
+    <div class="callout">
+        <strong>Por qué es seguro</strong>: el slug se chequea contra
+        <code>public.tenants</code> antes de interpolarlo en el SQL.
+        Tenants no registrados (<code>zeta</code>) → error <em>antes</em>
+        de tocar el schema. SQL injection (<code>' OR 1=1 --</code>)
+        → ni siquiera pasa la validación de la whitelist. Probá los
+        4 valores del select arriba.
+    </div>
+
+    <h3>Código del handler</h3>
+
+    <pre><code>@header(name="X-Tenant")
+@get("/products/dynamic")
+async fn products_dynamic(x_tenant: Str) -> Result&lt;List&lt;Map&lt;Str, Any&gt;&gt;&gt; {
+    let conn = db.connect(db_url).await?
+
+    // PASO CRÍTICO: validar slug contra la tabla central de tenants.
+    let tenant_match = Tenant
+        .where(fn(t) =&gt; t.slug == x_tenant)
+        .first(conn)
+        .await
+    let _ = match tenant_match {
+        Ok(_) =&gt; null,
+        Err(_) =&gt; return Err("tenant `{x_tenant}` no existe en `public.tenants`"),
+    }
+
+    // Slug whitelisted → safe de interpolar.
+    let sql = "SELECT id, name, price, created_at FROM \"{x_tenant}\".\"products\" ORDER BY id"
+    return conn.query(sql, []).await
+}</code></pre>
+
+    <h2>Cuándo elegir este enfoque vs Enfoque A</h2>
+
+    <table>
+        <tr>
+            <th></th>
+            <th>Enfoque A (ORM nativo)</th>
+            <th>Enfoque B (raw dinámico)</th>
+        </tr>
+        <tr>
+            <td>Type safety del checker</td>
+            <td>✅ Sí (compile-time)</td>
+            <td>❌ Map&lt;Str, Any&gt;</td>
+        </tr>
+        <tr>
+            <td>Soporta tenants creados en runtime</td>
+            <td>❌ Requiere rebuild</td>
+            <td>✅ Sí (sin rebuild)</td>
+        </tr>
+        <tr>
+            <td>Refactor de schema (add column)</td>
+            <td>✅ Type change + rebuild</td>
+            <td>⚠️ Cuidado: los responses cambian shape</td>
+        </tr>
+        <tr>
+            <td>Performance</td>
+            <td>SQL hard-coded en build</td>
+            <td>SQL construido en runtime</td>
+        </tr>
+        <tr>
+            <td>Recomendado para</td>
+            <td>SaaS con ~5-20 tenants fijos</td>
+            <td>SaaS con onboarding self-service de tenants</td>
+        </tr>
+    </table>
+
+    <p>Los dos enfoques conviven sin conflicto en el mismo backend.</p>
+
+    <script>
+        // Sin JS interactivo — esta página es read-only educativa
+        // mientras las deudas del codegen (Map<Str,Any> serializa-
+        // ción + .get sobre DbRow) cierran. Cuando cierren, sumar
+        // el form + fetch como en acme.html/beta.html.
+    </script>
+
+    <footer>
+        <a href="/">← Volver al concepto</a>
+    </footer>
+</body>
+</html>

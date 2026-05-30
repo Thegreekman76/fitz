@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Fitz Multi-Tenant Boilerplate</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <nav>
+        <a href="/" class="active">Concepto</a>
+        <a href="/acme.html">Tenant Acme</a>
+        <a href="/beta.html">Tenant Beta</a>
+        <a href="/dynamic.html">Dinámico (X-Tenant)</a>
+    </nav>
+
+    <h1>SaaS Multi-Tenant con Schemas Postgres Custom</h1>
+
+    <p>
+        Este boilerplate muestra cómo construir un SaaS multi-tenant en
+        Fitz usando <strong>schemas Postgres custom</strong> (feature
+        de <code>v0.10.21</code>) para aislamiento de datos a nivel DB.
+        Cada cliente vive en su propio schema (<code>acme.products</code>,
+        <code>beta.products</code>, ...) en vez del patrón típico de
+        <code>WHERE tenant_id = X</code>.
+    </p>
+
+    <h2>¿Por qué schemas custom?</h2>
+
+    <table>
+        <tr>
+            <th>Enfoque</th>
+            <th>Aislamiento</th>
+            <th>Costo migrations</th>
+            <th>Backup por tenant</th>
+        </tr>
+        <tr>
+            <td>1 DB / 1 schema / <code>tenant_id</code> column</td>
+            <td>Bajo (bugs en WHERE → leak)</td>
+            <td>Bajo (1 migration para todos)</td>
+            <td>Requiere filtros custom</td>
+        </tr>
+        <tr style="background: #fff8e1;">
+            <td><strong>1 DB / 1 schema por tenant</strong> <em>(este boilerplate)</em></td>
+            <td><strong>Alto</strong> (PG schema-level, bug-proof)</td>
+            <td>Medio (1 vez por schema)</td>
+            <td>Trivial (<code>pg_dump --schema=acme</code>)</td>
+        </tr>
+        <tr>
+            <td>1 DB por tenant</td>
+            <td>Máximo</td>
+            <td>Alto (cada uno su pool)</td>
+            <td>Trivial</td>
+        </tr>
+    </table>
+
+    <div class="callout">
+        <strong>Bug-proof</strong>: con schemas custom, es <em>imposible</em>
+        que una query SELECT de <code>tenant_acme</code> accidentalmente
+        lea data de <code>tenant_beta</code>. Postgres bloquea a nivel
+        qualified name (<code>"acme"."products"</code> ≠
+        <code>"beta"."products"</code>). Sin riesgo de "olvidé el
+        <code>WHERE tenant_id</code>".
+    </div>
+
+    <h2>Los dos enfoques en este boilerplate</h2>
+
+    <h3>Enfoque A: ORM nativo estático per-tenant</h3>
+
+    <p>Para SaaS con # de tenants pequeño y fijo (~5-20).</p>
+
+    <pre><code>// models.fitz
+@table("acme.products") type AcmeProduct {
+    @primary id: Int = 0
+    name: Str = ""
+    price: Float = 0.0
+}
+
+@table("beta.products") type BetaProduct {
+    @primary id: Int = 0
+    name: Str = ""
+    price: Float = 0.0
+}
+
+// El ORM genera SQL qualified automáticamente:
+//   AcmeProduct.all(conn)
+//   → SELECT "id","name","price" FROM "acme"."products"
+
+@get("/acme/products")
+async fn acme_products() -> Result&lt;List&lt;AcmeProduct&gt;&gt; {
+    let conn = db.connect(db_url).await?
+    return AcmeProduct.all(conn).await
+}</code></pre>
+
+    <p>
+        ✅ Compile-time safe. Sin queries strings dinámicas.<br>
+        ❌ Cada nuevo tenant requiere code change + rebuild.
+    </p>
+
+    <p>Probalo: <a href="/acme.html">Tenant Acme</a> · <a href="/beta.html">Tenant Beta</a></p>
+
+    <h3>Enfoque B: ORM raw dinámico con whitelist</h3>
+
+    <p>Para SaaS con tenants creados en runtime.</p>
+
+    <pre><code>// main.fitz
+@header(name="X-Tenant")
+@get("/products/dynamic")
+async fn products_dynamic(x_tenant: Str) -> Result&lt;List&lt;Map&lt;Str, Any&gt;&gt;&gt; {
+    let conn = db.connect(db_url).await?
+
+    // PASO CRÍTICO: validar slug contra whitelist (la tabla
+    // central `public.tenants`) ANTES de interpolar. Sin esto,
+    // SQL injection seguro. CON esto, imposible — solo los slugs
+    // registrados son aceptados.
+    let tenant_match = Tenant.where(fn(t) =&gt; t.slug == x_tenant)
+        .first(conn).await
+    let _ = match tenant_match {
+        Ok(_) =&gt; null,
+        Err(_) =&gt; return Err("tenant no existe"),
+    }
+
+    // Slug whitelisted → safe.
+    let sql = "SELECT id, name, price FROM \"{x_tenant}\".\"products\""
+    return conn.query(sql, []).await
+}</code></pre>
+
+    <p>
+        ✅ Soporta N tenants sin rebuild.<br>
+        ❌ Sin type safety del checker. <code>Map&lt;Str, Any&gt;</code>
+        en vez de type concreto.
+    </p>
+
+    <p>Probalo: <a href="/dynamic.html">Dinámico (X-Tenant)</a></p>
+
+    <h2>Setup del schema en boot</h2>
+
+    <p>
+        En este boilerplate, el schema init corre en boot del backend
+        (<code>main.fitz</code> → <code>init_db()</code>) con
+        <code>CREATE SCHEMA IF NOT EXISTS</code> idempotente.
+    </p>
+
+    <p>
+        En producción real, esto se reemplaza por <code>fitz db migrate</code>
+        con migrations versionadas. <code>@table("schema.name")</code>
+        funciona idéntico en ambos casos — el diff de
+        <code>fitz db diff</code> emite <code>CREATE SCHEMA IF NOT EXISTS</code>
+        automático antes del <code>CREATE TABLE</code>. Ver
+        <a href="https://thegreekman76.github.io/fitz/db-orm/" target="_blank">
+        guía DB y ORM</a> sec 26.c.
+    </p>
+
+    <h2>Stack</h2>
+
+    <ul>
+        <li><strong>Backend</strong>: Fitz binario standalone (ORM nativo).
+        Sin Python, sin SQLAlchemy, sin Alembic.</li>
+        <li><strong>DB</strong>: Postgres 16 (Alpine).</li>
+        <li><strong>Frontend</strong>: HTML/CSS/JS vanilla en nginx.
+        Sin build step, sin <code>node_modules</code>.</li>
+        <li><strong>Proxy</strong>: nginx routea <code>/api/*</code> al
+        backend Fitz (same-origin, sin CORS).</li>
+    </ul>
+
+    <footer>
+        Generated by Fitz boilerplate <code>api-multi-tenant</code> ·
+        <a href="https://thegreekman76.github.io/fitz/" target="_blank">fitz docs</a>
+    </footer>
+</body>
+</html>

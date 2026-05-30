@@ -4,7 +4,7 @@ Plantillas listas para arrancar proyectos reales con Fitz. Todas
 están **Dockerizadas** — no necesitás instalar Rust, Python ni
 Postgres en tu máquina. Solo Docker y `docker compose`.
 
-## Los 9 boilerplates
+## Los 10 boilerplates
 
 | Boilerplate | Qué demuestra | Stack | Dockerfile | Compose |
 |-------------|---------------|-------|------------|---------|
@@ -15,6 +15,7 @@ Postgres en tu máquina. Solo Docker y `docker compose`.
 | [`api-postgres-fitz`](./api-postgres-fitz/) ⭐  | **CRUD con ORM nativo Fitz** + Postgres — sin Python   | Fitz standalone + Postgres                             | distroless    | 2 svcs  |
 | [`api-orm-full`](./api-orm-full/) ⭐⭐          | **Stack web first-class entero** (HTTP + auth + WS + cron + ORM) multi-archivo | Fitz standalone + Postgres                     | distroless    | 2 svcs  |
 | [`api-orm-full-fullstack`](./api-orm-full-fullstack/) ⭐⭐⭐ | **Stack entero + frontend vanilla** (7 pantallas HTML/JS sirviendo todo el ORM + WS + auth)  | Fitz standalone + Postgres + nginx | distroless | 3 svcs  |
+| [`api-multi-tenant`](./api-multi-tenant/) ⭐⭐⭐ | **SaaS multi-tenant con schemas Postgres custom** (`@table("schema.name")` de v0.10.21) + frontend educativo | Fitz standalone + Postgres + nginx | distroless | 3 svcs  |
 | [`api-postgres-python`](./api-postgres-python/) | CRUD multi-archivo con SQLAlchemy + Postgres (interop) | Fitz + `--features python` + Postgres                  | python:3.12   | 2 svcs  |
 | [`api-fullstack-postgres`](./api-fullstack-postgres/) | **CRUD fullstack** — API + frontend vanilla rico + Postgres | Fitz + `--features python` + Postgres + nginx  | python:3.12   | 3 svcs  |
 

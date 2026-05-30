@@ -1,0 +1,148 @@
+/* Shared styles para todas las pantallas del boilerplate
+   api-multi-tenant. Vanilla, sin frameworks. */
+
+* { box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 20px;
+    line-height: 1.6;
+    color: #1a1a1a;
+    background: #fafafa;
+}
+
+h1, h2, h3 { line-height: 1.25; margin-top: 1.5em; }
+h1 { color: #1a1a1a; border-bottom: 3px solid #ce412b; padding-bottom: 0.3em; }
+
+a { color: #ce412b; }
+
+nav {
+    display: flex;
+    gap: 1em;
+    padding: 12px 0;
+    margin-bottom: 20px;
+    border-bottom: 1px solid #e0e0e0;
+    font-size: 0.95em;
+}
+
+nav a {
+    text-decoration: none;
+    padding: 6px 12px;
+    border-radius: 4px;
+}
+
+nav a:hover { background: #f0f0f0; }
+nav a.active { background: #ce412b; color: white; }
+
+code {
+    background: #f0f0f0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-size: 0.92em;
+    font-family: ui-monospace, "SF Mono", Consolas, monospace;
+}
+
+pre {
+    background: #2a2a2a;
+    color: #f8f8f8;
+    padding: 14px;
+    border-radius: 6px;
+    overflow-x: auto;
+    font-size: 0.88em;
+    line-height: 1.45;
+}
+
+pre code { background: transparent; padding: 0; color: inherit; }
+
+.card {
+    background: white;
+    border: 1px solid #e0e0e0;
+    border-radius: 8px;
+    padding: 20px;
+    margin: 16px 0;
+}
+
+.callout {
+    background: #fff8e1;
+    border-left: 4px solid #f9a825;
+    padding: 12px 16px;
+    margin: 16px 0;
+    border-radius: 4px;
+}
+
+.callout strong { color: #856404; }
+
+button {
+    background: #ce412b;
+    color: white;
+    border: 0;
+    padding: 10px 18px;
+    border-radius: 4px;
+    font-size: 0.95em;
+    cursor: pointer;
+    margin-right: 8px;
+}
+
+button:hover { background: #a83520; }
+button:disabled { background: #bbb; cursor: not-allowed; }
+
+input, select {
+    padding: 8px 12px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 0.95em;
+    margin-right: 6px;
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 14px 0;
+}
+
+th, td {
+    text-align: left;
+    padding: 8px 12px;
+    border-bottom: 1px solid #e0e0e0;
+}
+
+th { background: #f5f5f5; font-weight: 600; }
+
+.response {
+    background: #f0f7ff;
+    border: 1px solid #b4d4ff;
+    padding: 12px;
+    border-radius: 4px;
+    margin: 12px 0;
+    font-family: ui-monospace, Consolas, monospace;
+    font-size: 0.88em;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.response.error {
+    background: #ffeded;
+    border-color: #ffb4b4;
+    color: #8a0000;
+}
+
+/* Tenant-specific color accents */
+.tenant-acme h1 { border-color: #d32f2f; }
+.tenant-acme button { background: #d32f2f; }
+.tenant-acme button:hover { background: #a02323; }
+
+.tenant-beta h1 { border-color: #1976d2; }
+.tenant-beta button { background: #1976d2; }
+.tenant-beta button:hover { background: #115293; }
+
+footer {
+    margin-top: 40px;
+    padding-top: 20px;
+    border-top: 1px solid #e0e0e0;
+    font-size: 0.85em;
+    color: #666;
+}

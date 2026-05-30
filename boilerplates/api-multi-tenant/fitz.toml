@@ -1,0 +1,8 @@
+[package]
+name = "fitz-api-multi-tenant"
+version = "0.1.0"
+edition = "2026"
+description = "SaaS multi-tenant con schemas Postgres custom — showcase de @table(\"schema.name\") (v0.10.21)"
+
+[bin]
+main = "src/main.fitz"

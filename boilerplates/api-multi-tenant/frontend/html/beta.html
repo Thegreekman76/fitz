@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Beta LLC — Tenant Beta</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="tenant-beta">
+    <nav>
+        <a href="/">Concepto</a>
+        <a href="/acme.html">Tenant Acme</a>
+        <a href="/beta.html" class="active">Tenant Beta</a>
+        <a href="/dynamic.html">Dinámico (X-Tenant)</a>
+    </nav>
+
+    <h1>🔵 Beta LLC</h1>
+
+    <p>
+        Tenant <strong>Beta</strong>. Sus datos viven en el schema
+        Postgres <code>beta</code>. Los handlers
+        <code>GET /beta/products</code> + <code>POST /beta/products</code>
+        emiten SQL contra <code>"beta"."products"</code>.
+    </p>
+
+    <div class="callout">
+        <strong>Notá la diferencia con Acme</strong>: el código del
+        backend para Beta es <em>idéntico al de Acme</em>, solo cambia
+        el type Fitz (<code>BetaProduct</code> con
+        <code>@table("beta.products")</code>). El ORM resuelve el
+        schema correcto en compile-time.
+    </div>
+
+    <h2>Crear producto</h2>
+
+    <div class="card">
+        <input type="text" id="beta-name" placeholder="Nombre" value="Gadget Beta">
+        <input type="number" id="beta-price" placeholder="Precio" value="19.99" step="0.01">
+        <button onclick="createProduct()">POST /api/beta/products</button>
+        <div id="create-response" class="response" style="display:none;"></div>
+    </div>
+
+    <h2>Productos en <code>"beta"."products"</code></h2>
+
+    <button onclick="loadProducts()">🔄 GET /api/beta/products</button>
+    <button onclick="loadFromAcme()" style="background: #d32f2f;">
+        ⚠️ Intentar leer desde Acme (debería traer otros productos)
+    </button>
+
+    <div id="products-table"></div>
+    <div id="list-response" class="response" style="display:none;"></div>
+
+    <script>
+        async function loadProducts() {
+            const tbl = document.getElementById('products-table');
+            const out = document.getElementById('list-response');
+            tbl.innerHTML = '';
+            out.style.display = 'none';
+            try {
+                const r = await fetch('/api/beta/products');
+                const data = await r.json();
+                renderTable(data, tbl);
+                out.textContent = `← GET /api/beta/products (${data.length} rows)\nSQL emitido:\n  SELECT "id","name","price","created_at" FROM "beta"."products"`;
+                out.classList.remove('error');
+                out.style.display = 'block';
+            } catch (e) {
+                out.textContent = `Error: ${e}`;
+                out.classList.add('error');
+                out.style.display = 'block';
+            }
+        }
+
+        async function loadFromAcme() {
+            const r = await fetch('/api/acme/products');
+            const data = await r.json();
+            alert(`Ir al endpoint de Acme devuelve ${data.length} productos\nDISTINTOS — los de Acme. Schemas custom = aislamiento real.\n\n${JSON.stringify(data, null, 2)}`);
+        }
+
+        async function createProduct() {
+            const name = document.getElementById('beta-name').value;
+            const price = parseFloat(document.getElementById('beta-price').value);
+            const out = document.getElementById('create-response');
+            try {
+                const r = await fetch('/api/beta/products', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name, price}),
+                });
+                const data = await r.json();
+                out.textContent = `→ POST /api/beta/products\n← ${JSON.stringify(data, null, 2)}`;
+                out.classList.remove('error');
+                out.style.display = 'block';
+                await loadProducts();
+            } catch (e) {
+                out.textContent = `Error: ${e}`;
+                out.classList.add('error');
+                out.style.display = 'block';
+            }
+        }
+
+        function renderTable(rows, container) {
+            if (!rows || rows.length === 0) {
+                container.innerHTML = '<p><em>No hay productos todavía. Creá uno arriba.</em></p>';
+                return;
+            }
+            let html = '<table><tr><th>ID</th><th>Nombre</th><th>Precio</th><th>Created at</th></tr>';
+            for (const r of rows) {
+                html += `<tr><td>${r.id}</td><td>${r.name}</td><td>$${r.price}</td><td>${r.created_at || '—'}</td></tr>`;
+            }
+            html += '</table>';
+            container.innerHTML = html;
+        }
+
+        loadProducts();
+    </script>
+
+    <footer>
+        <a href="/">← Volver al concepto</a> ·
+        Backend Fitz emite SQL distinto por tenant — verificá en logs del container.
+    </footer>
+</body>
+</html>

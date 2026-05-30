@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Acme Corp — Tenant Acme</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="tenant-acme">
+    <nav>
+        <a href="/">Concepto</a>
+        <a href="/acme.html" class="active">Tenant Acme</a>
+        <a href="/beta.html">Tenant Beta</a>
+        <a href="/dynamic.html">Dinámico (X-Tenant)</a>
+    </nav>
+
+    <h1>🔴 Acme Corp</h1>
+
+    <p>
+        Tenant <strong>Acme</strong>. Sus datos viven en el schema
+        Postgres <code>acme</code>. El backend Fitz expone los handlers
+        <code>GET /acme/products</code> y <code>POST /acme/products</code>
+        que emiten SQL contra <code>"acme"."products"</code>.
+    </p>
+
+    <div class="callout">
+        <strong>Enfoque A en acción</strong>: el ORM type
+        <code>AcmeProduct</code> se define con
+        <code>@table("acme.products")</code>. El método
+        <code>AcmeProduct.all(conn)</code> compila a
+        <code>SELECT "id","name","price","created_at" FROM "acme"."products"</code>
+        — qualified al schema correcto automáticamente. Lo mismo
+        para <code>.insert</code>, <code>.where</code>, etc.
+    </div>
+
+    <h2>Crear producto</h2>
+
+    <div class="card">
+        <input type="text" id="acme-name" placeholder="Nombre" value="Widget Acme">
+        <input type="number" id="acme-price" placeholder="Precio" value="9.99" step="0.01">
+        <button onclick="createProduct()">POST /api/acme/products</button>
+        <div id="create-response" class="response" style="display:none;"></div>
+    </div>
+
+    <h2>Productos en <code>"acme"."products"</code></h2>
+
+    <button onclick="loadProducts()">🔄 GET /api/acme/products</button>
+    <button onclick="loadFromBeta()" style="background: #1976d2;">
+        ⚠️ Intentar leer desde Beta (debería traer otros productos)
+    </button>
+
+    <div id="products-table"></div>
+    <div id="list-response" class="response" style="display:none;"></div>
+
+    <script>
+        async function loadProducts() {
+            const tbl = document.getElementById('products-table');
+            const out = document.getElementById('list-response');
+            tbl.innerHTML = '';
+            out.style.display = 'none';
+            try {
+                const r = await fetch('/api/acme/products');
+                const data = await r.json();
+                renderTable(data, tbl);
+                out.textContent = `← GET /api/acme/products (${data.length} rows)\nSQL emitido (verás en logs del backend):\n  SELECT "id","name","price","created_at" FROM "acme"."products"`;
+                out.classList.remove('error');
+                out.style.display = 'block';
+            } catch (e) {
+                out.textContent = `Error: ${e}`;
+                out.classList.add('error');
+                out.style.display = 'block';
+            }
+        }
+
+        async function loadFromBeta() {
+            // Demuestra que ir a Beta trae OTRA cosa — confirma
+            // aislamiento. No "leak" porque son schemas distintos.
+            const r = await fetch('/api/beta/products');
+            const data = await r.json();
+            alert(`Ir al endpoint de Beta devuelve ${data.length} productos\nDISTINTOS — los de Beta. Schemas custom = aislamiento real.\n\n${JSON.stringify(data, null, 2)}`);
+        }
+
+        async function createProduct() {
+            const name = document.getElementById('acme-name').value;
+            const price = parseFloat(document.getElementById('acme-price').value);
+            const out = document.getElementById('create-response');
+            try {
+                const r = await fetch('/api/acme/products', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({name, price}),
+                });
+                const data = await r.json();
+                out.textContent = `→ POST /api/acme/products\n← ${JSON.stringify(data, null, 2)}`;
+                out.classList.remove('error');
+                out.style.display = 'block';
+                await loadProducts();
+            } catch (e) {
+                out.textContent = `Error: ${e}`;
+                out.classList.add('error');
+                out.style.display = 'block';
+            }
+        }
+
+        function renderTable(rows, container) {
+            if (!rows || rows.length === 0) {
+                container.innerHTML = '<p><em>No hay productos todavía. Creá uno arriba.</em></p>';
+                return;
+            }
+            let html = '<table><tr><th>ID</th><th>Nombre</th><th>Precio</th><th>Created at</th></tr>';
+            for (const r of rows) {
+                html += `<tr><td>${r.id}</td><td>${r.name}</td><td>$${r.price}</td><td>${r.created_at || '—'}</td></tr>`;
+            }
+            html += '</table>';
+            container.innerHTML = html;
+        }
+
+        loadProducts();
+    </script>
+
+    <footer>
+        <a href="/">← Volver al concepto</a> ·
+        Verás logs del backend con el SQL real emitido por el ORM.
+    </footer>
+</body>
+</html>
