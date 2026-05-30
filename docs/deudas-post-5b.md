@@ -2077,7 +2077,50 @@ interop Python). Los headline numbers (cold start 5.5x, GET lista
 9-11x faster en Fitz) ratifican la dirección, pero apareció una
 anomalía y un set de mejoras al bench mismo.
 
-#### ⚠️ B-1 (URGENTE) — Overhead constante del driver Postgres en extended query
+#### ✅ B-1 CERRADO (v0.10.13, commit `67efabd`) — Overhead constante del driver Postgres en extended query
+
+**Resolución**: el root cause **no fue** la falta de prepared
+statement cache (hipótesis original); fue que los 5 mensajes del
+Extended Query Protocol (Parse + Bind + Describe + Execute + Sync)
+se enviaban como **5 llamadas separadas a `self.write(...)`**, cada
+una con su `socket.write()` syscall. Aun con TCP_NODELAY activo,
+las llamadas separadas sumaban latencia por await + scheduling de
+tokio en cada round.
+
+**Fix** ([src/db.rs:1951-2005](src/db.rs#L1951)): los 5 mensajes
+se serializan en un único `Vec<u8>` y se mandan al socket con un
+solo `write_all_bytes(&batch)`. Postgres NO responde hasta el
+Sync — los 5 mensajes son "pipelined" en el sentido protocolar,
+no es un cambio semántico; solo eliminamos overhead client-side.
+TCP_NODELAY se activó en el mismo commit para evitar Nagle.
+
+**Números post-fix** (corrida publicable v0.10.13, hardware Intel
+Core Ultra 7 155H + 64GB + Docker Desktop WSL2):
+
+| Endpoint | Pre-fix Fitz p50 | Post-fix Fitz p50 | Python SQLAlchemy p50 |
+|---|---:|---:|---:|
+| `GET /users/{id}` | 43.70 ms | **3.60 ms** | 31.87 ms |
+| `GET /users` | 4.92 ms | **4.88 ms** | 37.85 ms |
+
+Fitz pasó de "30% más lento que Python en single-by-PK" a **8.85x
+más rápido**. Bench publicable en
+`benchmarks/orm-vs-sqlalchemy/README.md` → "Última corrida
+publicable".
+
+Las hipótesis alternativas (POOL_CACHE contention, allocations en
+`__FromFitzDbRow`, prepared statement caching) NO se exploraron
+porque el fix de batching ya tiró la latencia al piso. Quedan como
+optimizaciones futuras solo si aparece presión real para sub-1ms
+single reads.
+
+---
+
+#### Histórico — análisis original de B-1 (mantenido por valor pedagógico)
+
+> Cerrado en v0.10.13 con un fix distinto al planteado. El análisis
+> original demostró el síntoma correctamente pero apuntó a la
+> hipótesis equivocada (statement cache); el batching de wire
+> messages fue el verdadero culpable.
 
 **Síntoma**: `GET /users/{id}` (que usa `WHERE id = $1`, extended
 query protocol) tarda **43.70 ms p50 en Fitz** vs **31.09 ms p50 en

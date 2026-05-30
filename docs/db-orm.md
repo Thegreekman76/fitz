@@ -3060,9 +3060,28 @@ y manteneté consistente.
 
 ## 27. Performance
 
-Esta sección crecerá cuando aparezcan benchmarks reales del
-boilerplate 7 (post-v0.10.2). Por ahora, observaciones conceptuales
-basadas en la arquitectura:
+Hay un benchmark publicable contra SQLAlchemy en
+[`benchmarks/orm-vs-sqlalchemy/`](../benchmarks/orm-vs-sqlalchemy/):
+3 endpoints idénticos (`GET /users`, `GET /users/{id}`, `POST /users`)
+sobre dos boilerplates equivalentes (`api-postgres-fitz` con ORM
+nativo vs `api-postgres-python` con SQLAlchemy interop). Headline
+(corrida v0.10.13, hardware Intel Core Ultra 7 + 64GB + Docker WSL2):
+
+| Métrica | Fitz ORM | Python+SQLAlchemy | Speedup |
+|---|---:|---:|---:|
+| Memory peak | **9.2 MB** | 51.0 MB | **5.54x más eficiente** |
+| `GET /users` p50 | **4.88 ms** | 37.85 ms | **7.76x** |
+| `GET /users/{id}` p50 | **3.60 ms** | 31.87 ms | **8.85x** |
+| `GET /users/{id}` RPS | **2604** | 296 | **8.80x** |
+
+Cold start 0.14s vs 0.22s. Image 131MB vs 258MB. POST sequential
+queda en empate (~108ms p50 ambos) — bottleneck del bench mismo
+(curl loop con subshell overhead), no del server.
+
+Las observaciones conceptuales abajo explican por qué Fitz tiende
+a ganar. Para reproducir el bench: `bash benchmarks/orm-vs-sqlalchemy/run.sh`.
+
+
 
 ### SQL constante en codegen-time
 
@@ -3132,12 +3151,34 @@ let users = User.preload("posts").all(db).await?
 vs sin preload con 100 users → 101 queries. Diferencia de orden de
 magnitud típicamente.
 
-### Próximos benchmarks comprometidos (boilerplate 7)
+### Optimizaciones cerradas que impactaron el bench
 
-- `wrk` / `oha` contra los endpoints CRUD: req/s, p50/p99 latency.
-- Comparación side-by-side contra boilerplate 6 (Python +
-  SQLAlchemy) sobre los mismos endpoints.
-- Footprint del binario (sin Python embebido).
+- **B-1 (v0.10.13)** — Driver Postgres `Extended Query Protocol`
+  batchea los 5 mensajes (Parse/Bind/Describe/Execute/Sync) en un
+  único `write_all_bytes(...)` + `TCP_NODELAY` activo. `GET
+  /users/{id}` pasó de **43.70ms p50 → 3.60ms p50** (12x más
+  rápido, de "30% más lento que Python" a "8.85x más rápido").
+- **Pool singleton per URL (v0.10.9)** — `db.connect(url)` cachea
+  el `Arc<DbConnHandle>` global; calls subsiguientes a la misma
+  URL devuelven `Arc::clone()` en vez de crear pool nuevo (fix
+  connection leak crítico que rompía boilerplates bajo carga
+  sostenida).
+- **`__to_fitz_json` deadlock fix (v0.10.10)** — el conditional
+  emit del field has_many virtual hacía re-lock del mismo Mutex
+  no-reentrante. Liberar el guard antes del `__to_fitz_json`
+  recursivo destrabó el preload hang.
+
+### Próximas extensiones del bench (no bloqueantes)
+
+- Mixed workload realista (reads + writes intercalados con ratio
+  típico OLTP 80/20).
+- Bulk inserts (1k+ rows en una transaction).
+- Queries con JOINs / preload eager loading (necesita
+  `api-orm-full` como bench target).
+- Escritura concurrente con saturación del pool.
+
+Quedan como `run-extended.sh` cuando aparezca demanda real para
+publicar comparativa más amplia.
 - Memory usage bajo carga sostenida.
 
 Detalle en `docs/roadmap.md` → "Plan boilerplates ORM/DB

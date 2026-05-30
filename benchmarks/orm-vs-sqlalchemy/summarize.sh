@@ -63,6 +63,103 @@ read_val() {
     [ -f "$f" ] && cat "$f" || echo "?"
 }
 
+# v0.10.23 — Auto-detección de hardware del runner. Reemplaza los
+# placeholders `TODO` del bloque "Notas". Soporta los 3 OS típicos
+# (Windows via Git Bash/WSL, Linux, macOS) con fallback claro si
+# alguna herramienta no está disponible. Falla silenciosa por
+# defecto — el bench no aborta porque el hardware no se detectó.
+#
+# **Windows**: usamos `powershell.exe + Get-CimInstance` en vez de
+# `wmic` porque WMIC fue deprecado en 2021 y removido de las builds
+# recientes de Windows 11. Get-CimInstance es el reemplazo oficial
+# y viene preinstalado en Windows 10+.
+detect_cpu() {
+    case "$(uname -s)" in
+        Linux*)
+            if command -v lscpu >/dev/null 2>&1; then
+                lscpu 2>/dev/null | awk -F: '/^Model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }'
+            else
+                cat /proc/cpuinfo 2>/dev/null | awk -F: '/^model name/ { sub(/^[[:space:]]+/, "", $2); print $2; exit }' || echo "?"
+            fi
+            ;;
+        Darwin*)
+            sysctl -n machdep.cpu.brand_string 2>/dev/null || echo "?"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            powershell.exe -NoProfile -Command \
+                "(Get-CimInstance Win32_Processor).Name" 2>/dev/null \
+                | tr -d '\r' \
+                | head -n1 \
+                || echo "?"
+            ;;
+        *) echo "?" ;;
+    esac
+}
+
+detect_ram_gb() {
+    case "$(uname -s)" in
+        Linux*)
+            awk '/^MemTotal/ { printf "%.0f GB", $2/1024/1024 }' /proc/meminfo 2>/dev/null || echo "?"
+            ;;
+        Darwin*)
+            local b
+            b=$(sysctl -n hw.memsize 2>/dev/null || echo "0")
+            awk -v b="$b" 'BEGIN { if (b > 0) printf "%.0f GB", b/1024/1024/1024; else print "?" }'
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            local gb
+            gb=$(powershell.exe -NoProfile -Command \
+                "[math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)" \
+                2>/dev/null | tr -d '\r' | head -n1)
+            if [ -n "$gb" ]; then echo "$gb GB"; else echo "?"; fi
+            ;;
+        *) echo "?" ;;
+    esac
+}
+
+detect_os() {
+    case "$(uname -s)" in
+        Linux*)
+            if [ -f /etc/os-release ]; then
+                . /etc/os-release
+                echo "${PRETTY_NAME:-Linux $(uname -r)}"
+            else
+                echo "Linux $(uname -r)"
+            fi
+            ;;
+        Darwin*)
+            local ver
+            ver=$(sw_vers -productVersion 2>/dev/null || echo "?")
+            echo "macOS $ver"
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            powershell.exe -NoProfile -Command \
+                "(Get-CimInstance Win32_OperatingSystem).Caption" 2>/dev/null \
+                | tr -d '\r' \
+                | sed 's/^Microsoft //' \
+                | head -n1 \
+                || echo "Windows"
+            ;;
+        *) uname -sr ;;
+    esac
+}
+
+detect_docker() {
+    docker --version 2>/dev/null | sed 's/^Docker version //;s/, build .*$//' || echo "?"
+}
+
+HW_CPU=$(detect_cpu)
+HW_RAM=$(detect_ram_gb)
+HW_OS=$(detect_os)
+HW_DOCKER=$(detect_docker)
+# Defaults para los casos en que las variables quedaron vacías
+# (awk no encontró match, wmic sin output, etc.). Sin esto el
+# markdown sale con bullets como "- CPU: " (no "- CPU: ?").
+[ -z "$HW_CPU" ] && HW_CPU="?"
+[ -z "$HW_RAM" ] && HW_RAM="?"
+[ -z "$HW_OS" ] && HW_OS="?"
+[ -z "$HW_DOCKER" ] && HW_DOCKER="?"
+
 # Cold start.
 COLD_FITZ=$(read_val "$RESULTS_DIR/fitz/cold_start.sec")
 COLD_PY=$(read_val "$RESULTS_DIR/python/cold_start.sec")
@@ -166,10 +263,12 @@ cat <<EOF
   con body randomization (k6, wrk+lua).
 - **Memory peak** muestreado cada 500ms via \`docker stats\` durante
   el bench. Puede subestimar peaks transientes <500ms.
-- Hardware del run NO está auto-detectado — anotar a mano abajo:
-  - CPU: TODO
-  - RAM: TODO
-  - OS: TODO
-  - Docker: TODO
+- **Hardware del run** (auto-detectado por \`summarize.sh\`; verificá
+  antes de publicar — PowerShell / lscpu / sysctl pueden devolver
+  \`?\` en entornos atípicos):
+  - CPU: $HW_CPU
+  - RAM: $HW_RAM
+  - OS: $HW_OS
+  - Docker: $HW_DOCKER
 
 EOF

@@ -876,6 +876,168 @@ Alembic. v0.10.17 los cierra. El siguiente Tier 1 del plan
 roadmap es **Fase 10.6.c (drift check + stamp)** para CI
 bloqueante y adopción en DB legacy.
 
+## [v0.10.15] — 2026-05-29 — `db.transaction` acepta FnExpr inline (paridad `fitz run` ↔ `fitz build`)
+
+Cierre de la deuda más visible de v0.10.14 — el codegen MVP solo
+aceptaba fn nombrada como callback de `db.transaction(...)`. Ahora
+acepta también FnExpr inline (`async fn(tx) -> Result<T> { ... }`)
+con captures del outer scope.
+
+### Cambio user-facing
+
+```fitz
+@post("/transfer/{from_id}/{to_id}/{amount}")
+async fn transfer(from_id: Int, to_id: Int, amount: Float) -> Result<Account> {
+    let conn = db.connect(db_url).await?
+    return conn.transaction(async fn(tx) -> Result<Account> {
+        let from = Account.where(fn(a) => a.id == from_id).first(tx).await?
+        let to = Account.where(fn(a) => a.id == to_id).first(tx).await?
+        // ... transferí dinero, balance check, etc.
+        return Ok(to)
+    }).await
+}
+```
+
+Antes (v0.10.14) el codegen forzaba extraer el callback a una fn
+nombrada por restricción del MVP. Ahora la sintaxis inline natural
+funciona idéntica a `fitz run`.
+
+### Implementación
+
+`gen_db_conn_method_call` arm `"transaction"` suma Path 2 nuevo
+para FnExpr inline:
+- Ret type sacado del `TypeInfo` del checker via
+  `type_info.type_at(args[0].span())` (NO `infer_callback_ret_silently`
+  que hace dry-run sin scope).
+- Push `unwrapped` (`Result<T>`) al `ret_stack`, no `inferred`
+  (`Future<Result<T>>`) — el body interno del async closure es
+  código cuyo ret natural es Result<T>; sin esto, `?` rechazaba
+  con "solo en fn que retorna Result".
+- Emit: `__fitz_db_transaction(&{db}, move |{param}: __FitzDbConn|
+  async move {{ {body} }})`. Doble `move` (outer FnOnce + inner
+  async Send).
+
+Path 3 (otro Expr) sigue dando error claro listando los 2 patterns
+válidos.
+
+### Cambios complementarios
+
+- `examples/guide/31c-transactions.fitz` revertido a la sintaxis
+  inline natural (era el fix forzado en v0.10.14 que extrajo las
+  3 closures a fns nombradas).
+- Extension VSCode bump 0.10.14 → 0.10.15.
+
+## [v0.10.14] — 2026-05-29 — Transactions ORM con `db.transaction(fn)` closure-based
+
+**Cierre formal Fase 10.7**. Escrituras atómicas multi-step con
+BEGIN/COMMIT/ROLLBACK automático según el `Result` del callback.
+Imposible olvidarse el commit/rollback — el control de flujo del
+Result garantiza la atomicidad.
+
+### API user-facing
+
+```fitz
+let result = db.transaction(async fn(tx) -> Result<Int> {
+    let user = User.insert(tx, User { ... }).await?
+    Order.insert(tx, Order { user_id: user.id, ... }).await?
+    return Ok(user.id)
+}).await?
+```
+
+El `tx: DbConn` es del mismo tipo que `db`, pero internamente
+pegado a la misma conn física durante toda la tx. Todos los métodos
+del ORM (`.insert`/`.update`/`.delete`/`.first`/`.all`) y escape
+hatch (`.query`/`.exec`) funcionan sin cambios.
+
+### Sub-pasos
+
+1. **`src/db.rs` — `Connection::begin/commit/rollback`** primitivos.
+   Wrappers simples sobre `simple_query`. Sin niveles de aislamiento
+   explícitos (usa default del server, típico READ COMMITTED).
+2. **`src/db.rs` — `DbConnHandle::transaction<F, Fut, T>(self:
+   &Arc<Self>, f)`** orquestador con auto-rollback en Err/panic +
+   cleanup de la conn al pool. Single-conn pool interno
+   (`max_conns=1`) garantiza isolation físico — todas las queries
+   del callback usan la misma conn.
+3. **`tests/db_real_postgres.rs`** — 3 tests E2E nuevos:
+   - `tx_happy_path_commit_persiste`
+   - `tx_rollback_explicito_nada_persiste`
+   - `tx_conn_vuelve_al_pool_despues_de_tx` (5 iter consecutivos sin leak)
+4. **`src/evaluator.rs`** — builtin `db_conn_transaction` + dispatch.
+   Preserva el `Value` original del Err callback via cell compartido
+   (`Arc<Mutex<Option<Value>>>`) — el `Err` Fitz no se aplana al
+   `DbError::Protocol` del driver.
+5. **`src/codegen.rs`** — `gen_db_conn_method_call` arm `"transaction"`
+   + `__fitz_db_transaction` helper genérico en el preludio. MVP
+   soporta SOLO fn nombrada como callback (no FnExpr inline); error
+   de codegen explícito sugiere el workaround. El intérprete sí
+   permite inline. Refinable a futuro → **cerrado en v0.10.15**.
+
+### Limitaciones MVP
+
+- Sin niveles de aislamiento custom (READ UNCOMMITTED, SERIALIZABLE,
+  etc.).
+- Sin nested transactions con SAVEPOINT.
+- Sin read-only transactions.
+
+Todos quedan como deuda menor (revisable si entra presión).
+
+## [v0.10.13] — 2026-05-29 — Driver Postgres B-1 fix (Extended Query batching + TCP_NODELAY) + bench fixes
+
+Bloque grande agrupando mini-fases relacionadas con la calidad del
+bench Fitz ORM vs SQLAlchemy + sus hallazgos.
+
+### B-1 — Extended Query Protocol optimization
+
+Root cause identificado en el benchmark v2: `GET /users/{id}` (que
+usa `WHERE id = $1`, extended query) tardaba 43ms p50 vs 4ms del
+simple query. El driver hacía 5 `self.write(...).await?` separados
+para Parse/Bind/Describe/Execute/Sync, sumando ~30-40ms de overhead
+por Nagle + 5 syscalls write() + 5 awaits.
+
+**Fix doble en [src/db.rs](src/db.rs)**:
+
+1. **`TCP_NODELAY`** al construir el TcpStream (deshabilita Nagle).
+   Crítico porque mandamos 5 mensajes consecutivos sin esperar
+   respuesta del server entre ellos — sin esto el kernel TCP
+   retrasaba cada paquete chico esperando ACK del previo.
+2. **Batch los 5 mensajes en UN solo `write_all_bytes(...)`** —
+   `Vec<u8>` con concat de los 5 `encode()`. Server Postgres NO
+   responde hasta `Sync`; es pipelining protocolar legítimo, no
+   cambio semántico.
+
+**Resultado** (bench publicable v0.10.13):
+
+| Endpoint | Pre-fix Fitz p50 | Post-fix Fitz p50 | Python SQLAlchemy p50 |
+|---|---:|---:|---:|
+| `GET /users/{id}` | 43.70 ms | **3.60 ms** | 31.87 ms |
+| `GET /users` | 4.92 ms | **4.88 ms** | 37.85 ms |
+
+Fitz pasó de "30% más lento que Python en single-by-PK" a **8.85x
+más rápido**. Headline del bench: **5-10x speedup + 5.5x menos
+memory** en read workloads.
+
+### Bench fixes
+
+- **Image size grep**: `^${boilerplate}-api:latest ` (anchor exacto)
+  para no pescar otros boilerplates cacheados.
+- **Memory peak sampler**: container names correctos según el
+  `container_name:` del docker-compose de cada boilerplate.
+- **POST x500 → x100**: en Git Bash Windows el overhead del subshell
+  (~1s/iter) hace que x500 tarde ~10min. x100 es suficiente para
+  p50/p95/p99 representativos.
+- **PID via archivo** para el memory sampler (fix Git Bash:
+  capturar PID via `$()` espera todo el subshell, hace hang).
+
+### Migración Python boilerplates → ghcr `fitz:latest-python`
+
+`api-postgres-python` + `api-fullstack-postgres`: Dockerfile migrado
+de `cargo install --git` (~8-12 min build inicial) al patrón
+pre-built `ghcr.io/thegreekman76/fitz:latest-python` (~30-60s).
+Reducción ~10x del build time. Trade-off: dependencia de la
+imagen publicada por CI release (default `latest-python`, override
+con `--build-arg FITZ_TAG=v0.10.13-python`).
+
 ## [v0.10.16] — 2026-05-29 — Fase 10.6: migraciones automáticas ORM + `@db_default("expr")`
 
 `fitz db diff/migrate/status/new` — el binario ahora introspecciona
