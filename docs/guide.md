@@ -11591,6 +11591,16 @@ el runner lo invoca con `db` pre-bindeado. Opcionalmente
 `async fn rollback(db: DbConn)` para `fitz db rollback`. Se
 intercalan con `.sql` en orden cronológico del prefix timestamp.
 
+**History + offline SQL + squash** (v0.10.20): `fitz db history`
+lista las migrations applied (audit log con `applied_at`).
+`fitz db migrate --sql` emite el SQL pendiente al stdout para
+handoff a un DBA (en lugar de ejecutar). `fitz db squash
+<from> <to>` combina N migrations viejas en una sola
+(concatena UP en orden + DOWN en orden inverso, mueve files
+originales a `migrations/squashed/`, actualiza tracking) —
+útil para acelerar bootstrap de devs nuevos en repos con 100+
+migrations.
+
 **Limitaciones del MVP**: `ALTER COLUMN ... TYPE` sin USING (cambios
 de tipo incompatibles fallan — editá la migration para agregar
 `USING (col::int)`); solo schema `public`. Detalle completo +

@@ -1675,6 +1675,56 @@ pub async fn rollback_n(
     Ok(reverted)
 }
 
+/// v0.10.20 (10.6.e.1) — Entrada del audit log de migraciones
+/// aplicadas. Lo emite `fitz db history`. `applied_at` viene como
+/// string ISO 8601 desde Postgres (el caller decide el display).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryEntry {
+    pub version: String,
+    pub applied_at: String,
+    /// Filename del archivo en el dir, si existe. `None` si la
+    /// version está aplicada pero el archivo fue removido (caso
+    /// típico: `db stamp <legacy_version>` sin archivo, o squash
+    /// que movió el viejo a `migrations/squashed/`).
+    pub filename: Option<String>,
+}
+
+/// v0.10.20 (10.6.e.1) — Audit log de migraciones aplicadas.
+/// Devuelve las entries ordenadas por `applied_at DESC` (más
+/// reciente primero) — orden natural para "qué se aplicó última".
+pub async fn history(
+    conn: &std::sync::Arc<DbConnHandle>,
+    dir: &std::path::Path,
+) -> DbResult<Vec<HistoryEntry>> {
+    ensure_tracking_table(conn).await?;
+    let sql = format!(
+        "SELECT version, applied_at FROM {} ORDER BY applied_at DESC, version DESC",
+        quote_ident(TRACKING_TABLE),
+    );
+    let qr = conn.query(&sql, &[]).await?;
+    let files = read_migrations_dir(dir).unwrap_or_default();
+    let by_version: std::collections::HashMap<String, String> = files
+        .iter()
+        .map(|m| (m.version.clone(), m.filename.clone()))
+        .collect();
+    let mut entries = Vec::with_capacity(qr.rows.len());
+    for row in &qr.rows {
+        let version = extract_string(row, "version")?;
+        let applied_at = match row.get("applied_at") {
+            Some(PgValue::Text(s)) => s.clone(),
+            Some(other) => format!("{other:?}"),
+            None => String::new(),
+        };
+        let filename = by_version.get(&version).cloned();
+        entries.push(HistoryEntry {
+            version,
+            applied_at,
+            filename,
+        });
+    }
+    Ok(entries)
+}
+
 /// v0.10.18 (10.6.c.2) — Marca una version como aplicada en
 /// `_fitz_migrations` SIN ejecutar el SQL del archivo. Útil
 /// para adoptar Fitz en una DB legacy donde el schema ya está
@@ -3061,5 +3111,36 @@ type Plain {
         // renombra o cambia firma, este test rompe a compilar.
         let _f1: fn(_, _) -> _ = stamp_version;
         let _f2: fn(_, _) -> _ = stamp_all_pending;
+    }
+
+    // ============================================================
+    // v0.10.20 (10.6.e.1) — history shape
+    // ============================================================
+
+    #[test]
+    fn history_entry_shape() {
+        // Smoke estructural: HistoryEntry expone los 3 fields que
+        // el CLI usa para format. Si alguien renombra rompe acá.
+        let e = HistoryEntry {
+            version: "20260530100000".to_string(),
+            applied_at: "2026-05-30 10:00:00+00".to_string(),
+            filename: Some("init.sql".to_string()),
+        };
+        assert_eq!(e.version, "20260530100000");
+        assert!(e.applied_at.contains("2026-05-30"));
+        assert_eq!(e.filename.as_deref(), Some("init.sql"));
+        // None filename para versions stamped sin archivo en dir.
+        let e2 = HistoryEntry {
+            version: "19990101000000".to_string(),
+            applied_at: "ago".to_string(),
+            filename: None,
+        };
+        assert!(e2.filename.is_none());
+    }
+
+    #[test]
+    fn history_signature_compila() {
+        // El símbolo `history` existe y devuelve el tipo esperado.
+        let _f: fn(_, _) -> _ = history;
     }
 }

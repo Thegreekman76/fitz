@@ -2723,6 +2723,73 @@ match en current (la migration ya se aplicó):
 - Después de aplicar, el user borra una línea — equivalente a
   cerrar un PR.
 
+### History + offline SQL + squash (v0.10.20)
+
+**`fitz db history`** — audit log de migrations aplicadas, orden
+`applied_at DESC`. Cruza tracking con files del dir; si una
+version está applied pero el file fue removido (caso típico de
+`db stamp <legacy>` o post-squash), aparece como `(file removido)`.
+
+```bash
+fitz db history
+# version              applied_at                       filename
+# -------------------- -------------------------------- ----------
+# 20260530120000       2026-05-30 10:53:24.800092-03    create_posts.sql
+# 20260530100000       2026-05-30 10:53:24.775132-03    create_users.sql
+# 2 migration(s) applied.
+```
+
+**`fitz db migrate --sql`** — Offline SQL mode. Emite el SQL
+pendiente al stdout en vez de ejecutarlo. Sigue conectándose
+para leer `_fitz_migrations` (qué está applied) y skipear esas.
+Útil para handoff a un DBA que aplica manual. Rechaza `.fitz`
+data migrations (no se materializan como SQL offline).
+
+```bash
+fitz db migrate --sql > pending.sql
+# 1 migration emitida — pasalo al DBA.
+psql -h prod-db -f pending.sql
+# Después marcalo como applied:
+fitz db stamp 20260530120000
+```
+
+**`fitz db squash <from> <to>`** — Combina las migrations del
+rango `[from, to]` (inclusive) en una sola. Concatena los UP
+en orden + los DOWN en orden inverso (para que el rollback siga
+funcionando). Mueve los files originales a `migrations/squashed/`
+(no los borra — quedan como histórico). Actualiza el tracking
+para apuntar al nuevo squashed.
+
+```bash
+fitz db squash 20260101000000 20260301000000
+# ✓ tracking actualizado: 47 versions removidas, stamped `20260101000000`
+# ✓ 47 migration(s) squashed → migrations/20260101000000_squashed.sql.
+#   Originales en migrations/squashed/.
+```
+
+Política:
+
+- **Solo `.sql`**: rechaza `.fitz` en el rango (squashing de
+  scripts del lenguaje no es semánticamente trivial — abríl
+  manualmente).
+- **Rango mínimo 2**: squashear 1 migration es no-op.
+- **Tracking inteligente**: si alguna del range estaba applied
+  en la DB, **borra** todas del rango de `_fitz_migrations` y
+  **stampea** solo `from` (el nuevo squashed). Si ninguna estaba
+  applied, no toca tracking — `migrate` aplicará el squashed
+  como una migration normal.
+- **Pre-flight**: aborta antes de tocar files si el squashed ya
+  existe (evita sobre-escribir si re-corrés sin pensar).
+- **`--no-tracking`**: skipea la actualización del tracking en
+  `_fitz_migrations` (para repos sin DB de staging accesible
+  desde el dev — útil en CI-only). Quedás responsable de stampear
+  manual el squashed en cada DB existente.
+
+Caso de uso típico: repo con 100+ migrations viejas que el equipo
+ya aplicó hace meses. Squashear las primeras 80 acelera el
+bootstrap de devs nuevos (1 migration en vez de 80) sin afectar
+a quienes ya las aplicaron (el tracking las trata como una sola).
+
 ### Data migrations en `.fitz` (v0.10.19)
 
 `fitz db migrate` ahora reconoce DOS extensiones en `migrations/`:
@@ -3141,18 +3208,21 @@ sección 26.c para el workflow canónico y limitaciones del MVP.
 El resto de los subcomandos generales del CLI también funcionan
 naturalmente con programas que usan el módulo `db` y el ORM.
 
-### `fitz db diff/migrate/status/new/rollback/check/stamp` — workflow de migraciones
+### `fitz db diff/migrate/status/new/rollback/check/stamp/history/squash` — workflow de migraciones
 
 ```bash
 export DATABASE_URL="postgres://fitz:fitz@localhost/myapp"
 fitz db new add_email_to_users          # crea migration vacía con UP/DOWN
 fitz db diff > migrations/<file>.sql    # genera ALTER TABLE auto
 fitz db migrate                          # aplica + tracking idempotente
+fitz db migrate --sql                    # v0.10.20: emite SQL offline (DBA)
 fitz db status                           # lista applied/pending
+fitz db history                          # v0.10.20: audit log applied_at DESC
 fitz db rollback                         # revierte el último (--count N)
 fitz db check                            # CI: exit 0 sync / exit 1 drift
 fitz db stamp 20260530000000             # adopt DB legacy: marca sin ejecutar
 fitz db stamp --all                      # marca todas las pending
+fitz db squash <from> <to>               # v0.10.20: combina migrations en una
 ```
 
 Detalle completo en sección 26.c.

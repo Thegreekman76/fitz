@@ -300,6 +300,17 @@ enum DbCmd {
         /// Solo imprime qué se aplicaría, sin tocar la DB.
         #[arg(long)]
         dry_run: bool,
+        /// v0.10.20 — Offline SQL mode: en vez de ejecutar las
+        /// migrations pendientes, las emite al stdout como SQL
+        /// concatenado (1 archivo por migration con header
+        /// `-- migration <version>: <filename>`). Útil para
+        /// pasarle el SQL a un DBA que aplica manual. Sigue
+        /// conectándose para leer `_fitz_migrations` (qué está
+        /// applied) — si no querés conectar, usá `--dry-run`.
+        /// Rechaza `.fitz` migrations (no se pueden materializar
+        /// como SQL offline).
+        #[arg(long)]
+        sql: bool,
     },
     /// Lista las migraciones del dir + estado (applied/pending).
     Status {
@@ -347,6 +358,41 @@ enum DbCmd {
         /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
         #[arg(long)]
         url: Option<String>,
+    },
+    /// v0.10.20 — Audit log: lista las migrations aplicadas con
+    /// `version` + `applied_at` + filename (si el file sigue
+    /// existiendo en el dir). Orden: más reciente primero.
+    History {
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+        /// Directorio con archivos. Default: `./migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+    /// v0.10.20 — Combina las migrations del rango `[from, to]`
+    /// (inclusive) en una sola. Concatena los UP en orden + los
+    /// DOWN en orden inverso. Mueve los files viejos a
+    /// `migrations/squashed/`. Si alguna del range ya estaba
+    /// aplicada en la DB, actualiza el tracking para apuntar al
+    /// nuevo squashed. Solo `.sql` (rechaza `.fitz`).
+    Squash {
+        /// Version del primer migration del rango (inclusive).
+        from: String,
+        /// Version del último migration del rango (inclusive).
+        to: String,
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Necesaria solo para actualizar el tracking; si pasás
+        /// `--no-tracking`, no se conecta.
+        #[arg(long)]
+        url: Option<String>,
+        /// Directorio con archivos. Default: `./migrations`.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+        /// Skipea la actualización del tracking en `_fitz_migrations`.
+        /// Útil para repos sin DB de staging accesible (CI-only).
+        #[arg(long)]
+        no_tracking: bool,
     },
     /// v0.10.18 — Marca una migration como aplicada SIN ejecutar
     /// su SQL. Útil para adoptar Fitz en una DB legacy donde el
@@ -482,11 +528,24 @@ fn main() {
         }
         Commands::Db(sub) => match sub {
             DbCmd::Diff { file, url, out } => db_diff_cmd(file, url, out),
-            DbCmd::Migrate { url, dir, dry_run } => db_migrate_cmd(url, dir, dry_run),
+            DbCmd::Migrate {
+                url,
+                dir,
+                dry_run,
+                sql,
+            } => db_migrate_cmd(url, dir, dry_run, sql),
             DbCmd::Status { url, dir } => db_status_cmd(url, dir),
             DbCmd::New { name, dir } => db_new_cmd(name, dir),
             DbCmd::Rollback { url, dir, count } => db_rollback_cmd(url, dir, count),
             DbCmd::Check { file, url } => db_check_cmd(file, url),
+            DbCmd::History { url, dir } => db_history_cmd(url, dir),
+            DbCmd::Squash {
+                from,
+                to,
+                url,
+                dir,
+                no_tracking,
+            } => db_squash_cmd(from, to, url, dir, no_tracking),
             DbCmd::Stamp {
                 version,
                 all,
@@ -4189,7 +4248,11 @@ fn db_diff_cmd(file: Option<PathBuf>, url: Option<String>, out: Option<PathBuf>)
     }
 }
 
-fn db_migrate_cmd(url: Option<String>, dir: Option<PathBuf>, dry_run: bool) {
+fn db_migrate_cmd(url: Option<String>, dir: Option<PathBuf>, dry_run: bool, sql: bool) {
+    if dry_run && sql {
+        eprintln!("✗ `--dry-run` y `--sql` son mutuamente excluyentes");
+        std::process::exit(1);
+    }
     let url = match resolve_db_url(url) {
         Ok(u) => u,
         Err(e) => {
@@ -4207,12 +4270,65 @@ fn db_migrate_cmd(url: Option<String>, dir: Option<PathBuf>, dry_run: bool) {
     };
     if migrations_list.is_empty() {
         eprintln!(
-            "✓ no hay archivos `.sql` en `{}` — nada para migrar",
+            "✓ no hay archivos `.sql`/`.fitz` en `{}` — nada para migrar",
             dir.display()
         );
         return;
     }
     let rt = evaluator::build_runtime();
+    // v0.10.20 — Offline SQL mode: emite el SQL pendiente al
+    // stdout en lugar de ejecutarlo. Sigue conectándose para
+    // leer _fitz_migrations (qué está applied) y skipear esas.
+    if sql {
+        let result = rt.block_on(async {
+            let conn = db::connect_url(&url)
+                .await
+                .map_err(|e| format!("connect: {e}"))?;
+            migrations::applied_versions(&conn)
+                .await
+                .map_err(|e| format!("applied_versions: {e}"))
+        });
+        let applied = match result {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("✗ {e}");
+                std::process::exit(1);
+            }
+        };
+        let applied_set: std::collections::HashSet<&str> =
+            applied.iter().map(|s| s.as_str()).collect();
+        let mut emitted = 0;
+        for m in &migrations_list {
+            if applied_set.contains(m.version.as_str()) {
+                continue;
+            }
+            match &m.kind {
+                migrations::MigrationKind::Sql { up_sql, .. } => {
+                    println!("-- migration {}: {}", m.version, m.filename);
+                    print!("{}", up_sql);
+                    if !up_sql.ends_with('\n') {
+                        println!();
+                    }
+                    println!();
+                    emitted += 1;
+                }
+                migrations::MigrationKind::Fitz { .. } => {
+                    eprintln!(
+                        "✗ `{}` es una `.fitz` data migration — NO se puede materializar \
+                         como SQL offline. Ejecutala via `fitz db migrate` directo \
+                         (sin --sql) contra la DB target.",
+                        m.filename
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        eprintln!(
+            "✓ {} migration(s) emitida(s) al stdout (no se aplicaron)",
+            emitted
+        );
+        return;
+    }
     if dry_run {
         let result = rt.block_on(async {
             let conn = db::connect_url(&url)
@@ -4826,6 +4942,244 @@ fn db_stamp_cmd(version: Option<String>, all: bool, url: Option<String>, dir: Op
     } else {
         eprintln!("✓ no-op: version `{version}` ya estaba aplicada");
     }
+}
+
+fn db_history_cmd(url: Option<String>, dir: Option<PathBuf>) {
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let dir = resolve_migrations_dir(dir);
+    let rt = evaluator::build_runtime();
+    let result = rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        migrations::history(&conn, &dir)
+            .await
+            .map_err(|e| format!("history: {e}"))
+    });
+    let entries = match result {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if entries.is_empty() {
+        eprintln!("✓ sin migrations aplicadas todavía");
+        return;
+    }
+    println!("{:<20} {:<32} filename", "version", "applied_at");
+    println!("{:-<20} {:-<32} {:-<40}", "", "", "");
+    for e in &entries {
+        let filename = e.filename.as_deref().unwrap_or("(file removido)");
+        println!("{:<20} {:<32} {}", e.version, e.applied_at, filename);
+    }
+    println!("\n{} migration(s) applied.", entries.len());
+}
+
+fn db_squash_cmd(
+    from: String,
+    to: String,
+    url: Option<String>,
+    dir: Option<PathBuf>,
+    no_tracking: bool,
+) {
+    let dir = resolve_migrations_dir(dir);
+    let migrations_list = match migrations::read_migrations_dir(&dir) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    // 1. Localizar las migrations en el rango (inclusive).
+    let from_idx = migrations_list.iter().position(|m| m.version == from);
+    let to_idx = migrations_list.iter().position(|m| m.version == to);
+    let (from_idx, to_idx) = match (from_idx, to_idx) {
+        (Some(f), Some(t)) => (f, t),
+        _ => {
+            eprintln!(
+                "✗ squash: no se encontraron las versions `{from}` y/o `{to}` en `{}`",
+                dir.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    if from_idx > to_idx {
+        eprintln!(
+            "✗ squash: `from` (`{from}`) viene DESPUÉS de `to` (`{to}`) en orden cronológico. \
+             Pasalas en orden."
+        );
+        std::process::exit(1);
+    }
+    let range = &migrations_list[from_idx..=to_idx];
+    if range.len() < 2 {
+        eprintln!("✗ squash: el rango tiene <2 migrations — nada para combinar");
+        std::process::exit(1);
+    }
+    // 2. Rechazar .fitz en el rango (squashing solo SQL en MVP).
+    for m in range {
+        if m.is_fitz() {
+            eprintln!(
+                "✗ squash: `{}` es `.fitz` data migration — squashing solo soporta `.sql` \
+                 en MVP. Excluí la `.fitz` del rango o aplicala manualmente.",
+                m.filename
+            );
+            std::process::exit(1);
+        }
+    }
+    // 3. Construir UP + DOWN concatenados.
+    let mut up_parts: Vec<String> = Vec::with_capacity(range.len());
+    let mut down_parts: Vec<String> = Vec::with_capacity(range.len());
+    let mut all_have_down = true;
+    for m in range {
+        match &m.kind {
+            migrations::MigrationKind::Sql { up_sql, down_sql } => {
+                up_parts.push(format!(
+                    "-- ↓ from {} ({})\n{}",
+                    m.version,
+                    m.filename,
+                    up_sql.trim_end()
+                ));
+                match down_sql {
+                    Some(d) => down_parts.push(format!(
+                        "-- ↑ from {} ({})\n{}",
+                        m.version,
+                        m.filename,
+                        d.trim_end()
+                    )),
+                    None => all_have_down = false,
+                }
+            }
+            migrations::MigrationKind::Fitz { .. } => unreachable!("filtrado arriba"),
+        }
+    }
+    // DOWN va en orden inverso (revierte newest primero).
+    down_parts.reverse();
+    // 4. Construir el archivo squashed.
+    let squashed_filename = format!("{from}_squashed.sql");
+    let squashed_path = dir.join(&squashed_filename);
+    if squashed_path.exists() {
+        eprintln!(
+            "✗ squash: ya existe `{}`. Borralo o usá otro `from` antes de re-squashear.",
+            squashed_path.display()
+        );
+        std::process::exit(1);
+    }
+    let now = chrono::Utc::now();
+    let mut squashed = String::new();
+    squashed.push_str(&format!(
+        "-- Squashed: combinación de {} migrations del rango [{}, {}]\n",
+        range.len(),
+        from,
+        to
+    ));
+    squashed.push_str(&format!("-- Created: {}\n", now.to_rfc3339()));
+    squashed.push_str("-- Generado por `fitz db squash`. Los archivos originales se movieron\n");
+    squashed.push_str("-- a `migrations/squashed/`. NO editar este archivo a mano salvo que\n");
+    squashed.push_str("-- sepas lo que estás haciendo — re-correr `fitz db squash` no es\n");
+    squashed.push_str("-- idempotente sobre un dir ya squasheado.\n");
+    squashed.push('\n');
+    squashed.push_str("-- UP\n");
+    squashed.push_str(&up_parts.join("\n\n"));
+    squashed.push('\n');
+    if all_have_down {
+        squashed.push_str("\n-- DOWN\n");
+        squashed.push_str(&down_parts.join("\n\n"));
+        squashed.push('\n');
+    } else {
+        squashed.push_str("\n-- (sin sección -- DOWN porque al menos una migration del rango\n");
+        squashed.push_str("-- no tenía DOWN. Si querés rollback, agregá la sección a mano.)\n");
+    }
+    // 5. Mover los archivos originales a `migrations/squashed/`.
+    let squashed_dir = dir.join("squashed");
+    if let Err(e) = std::fs::create_dir_all(&squashed_dir) {
+        eprintln!("✗ squash: creando `{}`: {e}", squashed_dir.display());
+        std::process::exit(1);
+    }
+    for m in range {
+        let src = dir.join(&m.filename);
+        let dst = squashed_dir.join(&m.filename);
+        if let Err(e) = std::fs::rename(&src, &dst) {
+            eprintln!(
+                "✗ squash: moviendo `{}` → `{}`: {e}",
+                src.display(),
+                dst.display()
+            );
+            std::process::exit(1);
+        }
+    }
+    // 6. Escribir el squashed.
+    if let Err(e) = std::fs::write(&squashed_path, &squashed) {
+        eprintln!("✗ squash: escribiendo `{}`: {e}", squashed_path.display());
+        std::process::exit(1);
+    }
+    // 7. Tracking: si alguna del range estaba applied, borrar todas
+    // del tracking y stampear solo `from` (la nueva squashed).
+    if !no_tracking {
+        let url = match resolve_db_url(url) {
+            Ok(u) => u,
+            Err(e) => {
+                eprintln!(
+                    "⚠ squash: archivo squashed creado pero no se pudo actualizar tracking: {e}. \
+                     Re-corré con `--url <url>` o seteá DATABASE_URL para sincronizar."
+                );
+                std::process::exit(1);
+            }
+        };
+        let rt = evaluator::build_runtime();
+        let target_versions: Vec<String> = range.iter().map(|m| m.version.clone()).collect();
+        let result = rt.block_on(async {
+            let conn = db::connect_url(&url)
+                .await
+                .map_err(|e| format!("connect: {e}"))?;
+            let applied = migrations::applied_versions(&conn)
+                .await
+                .map_err(|e| format!("applied_versions: {e}"))?;
+            let any_in_range = applied
+                .iter()
+                .any(|v| target_versions.iter().any(|tv| tv == v));
+            if !any_in_range {
+                return Ok::<_, String>(false); // nada que actualizar
+            }
+            // Borrar todas las del range que estén applied.
+            for v in &target_versions {
+                if applied.iter().any(|a| a == v) {
+                    migrations::untrack_fitz_migration(&conn, v)
+                        .await
+                        .map_err(|e| format!("untrack {v}: {e}"))?;
+                }
+            }
+            // Insertar el squashed (apunta a la version del `from`).
+            migrations::stamp_version(&conn, &target_versions[0])
+                .await
+                .map_err(|e| format!("stamp {}: {e}", target_versions[0]))?;
+            Ok(true)
+        });
+        match result {
+            Ok(true) => eprintln!(
+                "✓ tracking actualizado: {} versions removidas, stamped `{}`",
+                target_versions.len(),
+                target_versions[0]
+            ),
+            Ok(false) => eprintln!("✓ tracking sin cambios (ninguna del rango estaba applied)"),
+            Err(e) => {
+                eprintln!("⚠ squash: archivos OK pero tracking falló: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    eprintln!(
+        "✓ {} migration(s) squashed → `{}`. Originales en `{}`.",
+        range.len(),
+        squashed_path.display(),
+        squashed_dir.display()
+    );
 }
 
 #[cfg(test)]

@@ -8976,20 +8976,31 @@ release v0.10.17):
 
 ### Tier 2 — Útil para teams grandes (≈ 1-2 releases c/u)
 
-**Fase 10.6.e — History, squashing, schemas custom, offline SQL**:
+**Fase 10.6.e — History, offline SQL, squashing (parcial CERRADA v0.10.20 2026-05-30)**:
 
-- **`fitz db history`**: log con `version` + `applied_at` (de
-  `_fitz_migrations`) + filename + tamaño del SQL. Para auditoría
-  real. Hoy `status` solo dice applied/pending.
-- **`fitz db squash <from> <to>`**: combina N migrations viejas en
-  una sola (preservando el effecto neto). Repos con 200+ migrations
-  se vuelven lentos.
-- **Schemas custom** (no solo `public`): multi-tenant via PG
-  schemas, separación dev/test. Requiere refactor del introspector
-  + parametrizar `schema` en `@table("schema.name")`.
-- **`--sql` offline mode** en `migrate`: emite el SQL que ejecutaría
-  sin tocar la DB. Para enviar a un DBA. Hoy `--dry-run` solo lista
-  pendientes sin SQL.
+- ✅ **`fitz db history`**: log con `version` + `applied_at` + filename.
+  Orden `applied_at DESC`. Si version applied sin file en dir,
+  marca `(file removido)`. CERRADA v0.10.20.
+- ✅ **`fitz db migrate --sql`**: offline mode. Emite SQL pendiente
+  al stdout. Sigue conectando para leer tracking + skipear
+  applied. Rechaza `.fitz` (no se materializan offline). CERRADA
+  v0.10.20.
+- ✅ **`fitz db squash <from> <to>`**: combina migrations del rango
+  [from, to] en `<from>_squashed.sql`. Concatena UP + DOWN
+  inverso. Mueve files originales a `migrations/squashed/`.
+  Tracking inteligente: si alguna del range applied, borra todas
+  + stampea `from`. Flag `--no-tracking` para CI-only. CERRADA
+  v0.10.20.
+- 🟡 **Schemas custom (10.6.e.3) DIFERIDA a v0.10.21**: la
+  pre-eval reveló cross-cutting con ORM más grande de lo
+  estimado (~45 sitios entre evaluator/codegen/migrations que
+  usan `meta.sql_name`). Merece commit + tag propio para que el
+  smoke amplio cubra ORM downstream. Sub-fase aparte:
+  - Sintaxis: `@table("schema.name")` o kwarg `schema=`.
+  - `TableMetadata.schema: Option<String>` + parser.
+  - Refactor introspect (iterar schemas que aparecen en target).
+  - Refactor SQL emit del ORM (~40 sitios) para qualified names.
+  - Tests E2E con `CREATE SCHEMA` prep.
 - **Composite primary keys / CHECK constraints**: deuda del ORM
   desde v0.10.0 que migrations las usaría. Out of scope estricto
   de migrations pero entran acá si aterrizan en el ORM.
@@ -9027,8 +9038,11 @@ release v0.10.17):
 1. ✅ **10.6.b** (rollback + renames) — v0.10.17 CERRADA.
 2. ✅ **10.6.c** (drift check + stamp) — v0.10.18 CERRADA.
 3. ✅ **10.6.d** (data migrations en `.fitz`) — v0.10.19 CERRADA.
-4. **10.6.e** (history + squashing + schemas custom + offline SQL)
-   — v0.10.20+, próxima.
+4. ✅ **10.6.e.1+.2** (history + offline SQL + squash) — v0.10.20
+   CERRADA.
+5. **10.6.e.3** (schemas custom) — v0.10.21, próxima. Diferida
+   de 10.6.e original porque la pre-eval reveló cross-cutting
+   con ORM más grande que el estimate.
 5. Tier 3 y out-of-scope quedan en deuda explícita; NO bloquean
    declarar "paquete completo de migraciones".
 

@@ -12,8 +12,141 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-Fase 10.6.e (history + squashing + schemas custom + offline SQL),
-después boilerplates ORM Dockerizados extendidos.
+Fase 10.6.e.3 (schemas custom: `@table("schema.name")` + refactor
+introspector + ORM downstream), después boilerplates ORM
+Dockerizados extendidos.
+
+## [v0.10.20] — 2026-05-30 — Fase 10.6.e.1+.2: history + offline SQL + squash
+
+Cierra 3 de las 4 features del Tier 2 del plan vs Alembic:
+auditoría (`history`), handoff-a-DBA (`migrate --sql`), y
+compactación de migrations viejas (`squash`). Schemas custom
+(10.6.e.3) se difiere a v0.10.21 separada — la pre-eval reveló
+cross-cutting con el ORM más grande de lo estimado.
+
+### `fitz db history` — audit log de migrations applied
+
+Lista las migrations aplicadas con `version` + `applied_at` +
+filename. Orden `applied_at DESC` (más reciente primero). Si una
+version está applied pero el file fue removido del dir
+(post-squash o post-`stamp <legacy>`), aparece como
+`(file removido)`.
+
+```bash
+fitz db history
+# version              applied_at                       filename
+# -------------------- -------------------------------- ----------
+# 20260530120000       2026-05-30 10:53:24.800092-03    create_posts.sql
+# 20260530100000       2026-05-30 10:53:24.775132-03    create_users.sql
+# 2 migration(s) applied.
+```
+
+### `fitz db migrate --sql` — offline SQL mode (DBA handoff)
+
+En vez de ejecutar las migrations pendientes, emite el SQL
+concatenado al stdout (1 archivo por migration con header
+`-- migration <version>: <filename>`). Útil para pasarle el SQL
+a un DBA que aplica manual contra DBs prod sin exponer
+credenciales al CLI.
+
+```bash
+fitz db migrate --sql > pending.sql
+# 3 migrations emitidas al stdout
+# Pasalas al DBA → psql -h prod-db -f pending.sql
+# Marcalas como applied:
+fitz db stamp --all
+```
+
+- Sigue conectándose para leer `_fitz_migrations` (skipea
+  applied).
+- Rechaza `.fitz` data migrations (no se materializan como SQL
+  offline; usar `fitz db migrate` directo).
+- Incompatible con `--dry-run` (clap valida).
+
+### `fitz db squash <from> <to>` — compactar migrations viejas
+
+Combina migrations del rango `[from, to]` (inclusive) en un
+`<from>_squashed.sql`. Concatena los UP en orden + los DOWN en
+orden INVERSO (para que el rollback siga funcionando). Mueve los
+files originales a `migrations/squashed/` (no los borra). Si
+alguna del range estaba applied en la DB, actualiza el tracking
+para apuntar al nuevo squashed.
+
+```bash
+fitz db squash 20260101000000 20260301000000
+# ✓ tracking actualizado: 47 versions removidas, stamped `20260101000000`
+# ✓ 47 migration(s) squashed → migrations/20260101000000_squashed.sql.
+#   Originales en migrations/squashed/.
+```
+
+Política:
+
+- Solo `.sql` (rechaza `.fitz` en el rango — squashing de
+  scripts del lenguaje no es semánticamente trivial).
+- Rango mínimo 2 (squash de 1 = no-op rechazado).
+- Tracking inteligente: si alguna applied, borra todas + stampea
+  `from`. Si ninguna applied, no toca tracking.
+- Pre-flight: aborta si el squashed ya existe.
+- Flag `--no-tracking` para CI-only (skipea la actualización del
+  tracking; user responsable de stampear manual en cada DB).
+- Caso típico: repo con 100+ migrations viejas que el equipo ya
+  aplicó. Squashear las primeras 80 acelera el bootstrap de devs
+  nuevos sin afectar a quienes ya las aplicaron.
+
+### Cambios técnicos
+
+- **src/migrations.rs**:
+  - Nueva struct `HistoryEntry { version, applied_at, filename }`
+    + nueva `pub async fn history(conn, dir) -> DbResult<Vec<HistoryEntry>>`.
+- **src/main.rs**:
+  - Nueva variante `DbCmd::History { url, dir }` + handler
+    `db_history_cmd` (output tabular).
+  - Nueva variante `DbCmd::Squash { from, to, url, dir, no_tracking }`
+    + handler `db_squash_cmd` (read range + pre-flight + emit
+    squashed + move originals + update tracking).
+  - `DbCmd::Migrate` suma flag `--sql`; `db_migrate_cmd` branchea
+    en modo offline (lee tracking + emite SQL al stdout sin
+    ejecutar).
+- **editors/vscode/package.json**: 0.10.19 → 0.10.20.
+
+### Tests
+
+- **2 unit tests nuevos** en `src/migrations.rs::tests`:
+  `history_entry_shape` + `history_signature_compila`.
+- **60/60 migrations tests verde** (58 anteriores + 2 nuevos).
+- **Smoke E2E real Postgres local validado bit-a-bit**:
+  - 3 migrations `.sql` (create_users + add_name + create_posts)
+    → `--sql` emite las 3 al stdout con header correcto + no
+    toca DB → `migrate` aplica las 3 → `history` lista las 3 en
+    orden cronológico inverso con `applied_at`.
+  - `squash 20260530100000 20260530110000` combina users +
+    add_name → emite `20260530100000_squashed.sql` con UP en
+    orden + DOWN en orden inverso → mueve los 2 originales a
+    `migrations/squashed/` → tracking borra las 2 versions y
+    stampea solo `20260530100000` → `history` post-squash
+    muestra 2 entradas (squashed + create_posts) con el
+    squashed apuntando al filename nuevo.
+
+### Schemas custom — DIFERIDO a v0.10.21
+
+La pre-eval reveló:
+- ~45 sitios entre evaluator/codegen/migrations que usan
+  `meta.sql_name` directo sin concept de schema.
+- Cross-cutting con el ORM (SELECT/INSERT/UPDATE/DELETE
+  qualified, FK refs qualified, etc.).
+- Estimación realista ~5-6 hs + risk de bugs ORM downstream.
+
+Merece su propio commit + tag para que el smoke amplio cubra el
+ORM. Plan en `docs/roadmap.md` → "Fase 10.6.e.3".
+
+### Por qué importa
+
+`fitz db history` cierra el último gap de visibility ("¿qué se
+aplicó cuando?"). `migrate --sql` destraba el caso enterprise de
+DBA-handoff (ops separadas de devs). `squash` evita que el dir
+`migrations/` crezca sin techo en repos longevos — patrón
+estándar de Alembic/Django/Rails que ahora Fitz también ofrece
+con cero deps externas.
 
 ## [v0.10.19] — 2026-05-30 — Fase 10.6.d: data migrations en `.fitz`
 
