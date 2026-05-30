@@ -185,6 +185,12 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 cron = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
+# v0.10.24 (Fase Date/DateTime/Uuid) — Uuid v4 generation + parsing.
+# `v4` feature: random UUID generation con OsRng. Sin features extras
+# (no necesitamos serde direct, manejamos JSON via __To/FromFitzJson).
+# Crate ~50KB de Rust puro, ampliamente usado (~50M downloads/sem).
+uuid = { version = "1", features = ["v4"] }
+
 # Fase 10.1 — driver Postgres puro Fitz. SCRAM-SHA-256 (RFC 7677) usa
 # HMAC-SHA-256 + PBKDF2 sobre password derivation, y SHA-256 sobre el
 # StoredKey. RustCrypto crates: zero-deps nativas, audit history limpio,

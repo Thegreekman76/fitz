@@ -279,6 +279,12 @@ pub fn builtin_names() -> &'static [&'static str] {
         "load_env",
         // 10.8.7 (v0.10.8) — broadcast HTTP → WS cross-handler.
         "ws_broadcast",
+        // v0.10.24 — tipos built-in con constructors estáticos como
+        // Value::Module (Date.today/parse/from_ymd, DateTime.now/parse/
+        // from_timestamp, Uuid.v4/parse/nil).
+        "Date",
+        "DateTime",
+        "Uuid",
     ]
 }
 
@@ -5012,6 +5018,128 @@ async fn dispatch_method(
                 other,
             ),
         ))),
+        // v0.10.24 — Date instance methods. Extracción (year/month/day/
+        // weekday), conversión (to_str/to_datetime), formato custom.
+        (Value::Date(d), "year") => {
+            expect_arity("year", &args, 0, span)?;
+            use chrono::Datelike;
+            Ok(Value::Int(d.year() as i64))
+        }
+        (Value::Date(d), "month") => {
+            expect_arity("month", &args, 0, span)?;
+            use chrono::Datelike;
+            Ok(Value::Int(d.month() as i64))
+        }
+        (Value::Date(d), "day") => {
+            expect_arity("day", &args, 0, span)?;
+            use chrono::Datelike;
+            Ok(Value::Int(d.day() as i64))
+        }
+        (Value::Date(d), "weekday") => {
+            // ISO 8601 weekday: 1=Monday, 7=Sunday.
+            expect_arity("weekday", &args, 0, span)?;
+            use chrono::Datelike;
+            Ok(Value::Int(d.weekday().number_from_monday() as i64))
+        }
+        (Value::Date(d), "to_str") => {
+            expect_arity("to_str", &args, 0, span)?;
+            Ok(Value::Str(d.format("%Y-%m-%d").to_string()))
+        }
+        (Value::Date(d), "format") => date_format(*d, &args, span),
+        (Value::Date(d), "to_datetime") => {
+            // Date + 00:00:00 UTC time → DateTime<Utc>.
+            expect_arity("to_datetime", &args, 0, span)?;
+            let dt = d.and_hms_opt(0, 0, 0)
+                .expect("00:00:00 siempre válida")
+                .and_utc();
+            Ok(Value::DateTime(dt))
+        }
+        (Value::Date(_), other) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format)",
+                other,
+            ),
+        ))),
+        // v0.10.24 — DateTime instance methods. Extracción (year/.../second),
+        // timestamp Unix, conversión (to_str/date), formato custom.
+        (Value::DateTime(dt), "year") => {
+            expect_arity("year", &args, 0, span)?;
+            use chrono::Datelike;
+            Ok(Value::Int(dt.year() as i64))
+        }
+        (Value::DateTime(dt), "month") => {
+            expect_arity("month", &args, 0, span)?;
+            use chrono::Datelike;
+            Ok(Value::Int(dt.month() as i64))
+        }
+        (Value::DateTime(dt), "day") => {
+            expect_arity("day", &args, 0, span)?;
+            use chrono::Datelike;
+            Ok(Value::Int(dt.day() as i64))
+        }
+        (Value::DateTime(dt), "hour") => {
+            expect_arity("hour", &args, 0, span)?;
+            use chrono::Timelike;
+            Ok(Value::Int(dt.hour() as i64))
+        }
+        (Value::DateTime(dt), "minute") => {
+            expect_arity("minute", &args, 0, span)?;
+            use chrono::Timelike;
+            Ok(Value::Int(dt.minute() as i64))
+        }
+        (Value::DateTime(dt), "second") => {
+            expect_arity("second", &args, 0, span)?;
+            use chrono::Timelike;
+            Ok(Value::Int(dt.second() as i64))
+        }
+        (Value::DateTime(dt), "timestamp") => {
+            // Unix epoch seconds. Posibilita aritmética simple sin
+            // tener Duration aún: `dt2.timestamp() - dt1.timestamp()`.
+            expect_arity("timestamp", &args, 0, span)?;
+            Ok(Value::Int(dt.timestamp()))
+        }
+        (Value::DateTime(dt), "to_str") => {
+            expect_arity("to_str", &args, 0, span)?;
+            Ok(Value::Str(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()))
+        }
+        (Value::DateTime(dt), "date") => {
+            // Extract the date portion as Date.
+            expect_arity("date", &args, 0, span)?;
+            Ok(Value::Date(dt.date_naive()))
+        }
+        (Value::DateTime(dt), "format") => datetime_format(*dt, &args, span),
+        (Value::DateTime(_), other) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format)",
+                other,
+            ),
+        ))),
+        // v0.10.24 — Uuid instance methods. Sin extracción interna
+        // (versión/variant/etc. en MVP — agregable post-MVP si pide);
+        // solo to_str + is_nil que cubren el 99% del caso real.
+        (Value::Uuid(u), "to_str") => {
+            expect_arity("to_str", &args, 0, span)?;
+            Ok(Value::Str(u.to_string()))
+        }
+        (Value::Uuid(u), "is_nil") => {
+            expect_arity("is_nil", &args, 0, span)?;
+            Ok(Value::Bool(u.is_nil()))
+        }
+        (Value::Uuid(_), other) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`Uuid` no tiene el método `{}` (soportados: to_str, is_nil)",
+                other,
+            ),
+        ))),
         // U1 (v0.10.13) — migrado al constructor helper.
         _ => Err(EvalSignal::Error(FitzError::method_not_found(
             span.line,
@@ -5020,6 +5148,59 @@ async fn dispatch_method(
             method,
         ))),
     }
+}
+
+/// v0.10.24 — `date.format(fmt)` y `dt.format(fmt)`. Usan los specifiers
+/// estándar de chrono (`%Y`/`%m`/`%d`/`%H`/`%M`/`%S`/`%A` ...). Documentamos
+/// los más comunes en la guía. El formato `%` invalido panic-eaba en
+/// chrono <0.4.20; en 0.4.x moderno solo emite la string sin sustitución.
+/// Aridad fija 1 + Str.
+fn date_format(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
+    expect_arity("format", args, 1, span)?;
+    let fmt = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`Date.format(fmt)` espera Str, recibió `{}`",
+                    other.type_name()
+                ),
+            )));
+        }
+    };
+    Ok(Value::Str(d.format(&fmt).to_string()))
+}
+
+fn datetime_format(
+    dt: chrono::DateTime<chrono::Utc>,
+    args: &[Value],
+    span: Span,
+) -> EvalResult<Value> {
+    expect_arity("format", args, 1, span)?;
+    let fmt = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`DateTime.format(fmt)` espera Str, recibió `{}`",
+                    other.type_name()
+                ),
+            )));
+        }
+    };
+    Ok(Value::Str(dt.format(&fmt).to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -9100,6 +9281,69 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
         return Ok(value);
     }
 
+    // v0.10.24 — Str → Date/DateTime/Uuid coerción cuando la anotación
+    // lo pide y el valor recibido es Str (caso típico: body JSON HTTP
+    // con `"2026-05-30"` deserializado a Value::Str, anotación pide
+    // `Date`). Sin esto, el user tendría que llamar `Date.parse(s)?`
+    // manual sobre cada field después del deser, rompiendo el patrón
+    // canonical de Fitz "anotación + auto-coerción".
+    if let Value::Str(ref s) = value {
+        match type_name.as_str() {
+            "Date" => {
+                return match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    Ok(d) => Ok(Value::Date(d)),
+                    Err(e) => Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Date (ISO 8601 YYYY-MM-DD)".into(),
+                            found: format!("Str con valor inválido: {}", e),
+                        },
+                        0,
+                        0,
+                        format!("Str `{}` no es Date ISO 8601 (YYYY-MM-DD): {}", s, e),
+                    ))),
+                };
+            }
+            "DateTime" => {
+                // Acepta RFC 3339 estándar O el formato Postgres
+                // timestamptz `YYYY-MM-DD HH:MM:SS+TZ`.
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+                    return Ok(Value::DateTime(dt.with_timezone(&chrono::Utc)));
+                }
+                if let Some(v) = parse_pg_timestamptz(s) {
+                    return Ok(v);
+                }
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "DateTime (RFC 3339)".into(),
+                        found: format!("Str con valor inválido: {}", s),
+                    },
+                    0,
+                    0,
+                    format!(
+                        "Str `{}` no es DateTime RFC 3339 (ej: 2026-05-30T14:30:00Z)",
+                        s
+                    ),
+                )));
+            }
+            "Uuid" => {
+                return match uuid::Uuid::parse_str(s) {
+                    Ok(u) => Ok(Value::Uuid(u)),
+                    Err(e) => Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Uuid canonical (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)"
+                                .into(),
+                            found: format!("Str con valor inválido: {}", e),
+                        },
+                        0,
+                        0,
+                        format!("Str `{}` no es UUID canonical: {}", s, e),
+                    ))),
+                };
+            }
+            _ => {} // Other types — fall through to nominal coerce below.
+        }
+    }
+
     // Solo intentamos coercer cuando el valor es un Map. Cualquier otro
     // tipo (Instance ya, primitivo, Result, etc.) pasa tal cual — el
     // gradual del checker se encarga de aceptarlo si la anotación es
@@ -9571,6 +9815,101 @@ fn register_builtins(env: &EnvRef) {
         Value::Module {
             name: "db".into(),
             env: db_env,
+        },
+    );
+
+    // v0.10.24 (Date/DateTime/Uuid) — registrar los 3 tipos como
+    // `Value::Module` para que el dispatcher de field access los
+    // resuelva como `Date.today()`, `DateTime.now()`, `Uuid.v4()`,
+    // etc. Mismo patrón que `db`/`jwt`/`hash`. El nombre coincide
+    // con el del tipo built-in (namespace separado type ≠ value).
+    let date_env = Environment::new();
+    date_env.lock().define(
+        "today",
+        Value::Builtin {
+            name: "today",
+            func: builtin_date_today,
+        },
+    );
+    date_env.lock().define(
+        "parse",
+        Value::Builtin {
+            name: "parse",
+            func: builtin_date_parse,
+        },
+    );
+    date_env.lock().define(
+        "from_ymd",
+        Value::Builtin {
+            name: "from_ymd",
+            func: builtin_date_from_ymd,
+        },
+    );
+    env.lock().define(
+        "Date",
+        Value::Module {
+            name: "Date".into(),
+            env: date_env,
+        },
+    );
+
+    let datetime_env = Environment::new();
+    datetime_env.lock().define(
+        "now",
+        Value::Builtin {
+            name: "now",
+            func: builtin_datetime_now,
+        },
+    );
+    datetime_env.lock().define(
+        "parse",
+        Value::Builtin {
+            name: "parse",
+            func: builtin_datetime_parse,
+        },
+    );
+    datetime_env.lock().define(
+        "from_timestamp",
+        Value::Builtin {
+            name: "from_timestamp",
+            func: builtin_datetime_from_timestamp,
+        },
+    );
+    env.lock().define(
+        "DateTime",
+        Value::Module {
+            name: "DateTime".into(),
+            env: datetime_env,
+        },
+    );
+
+    let uuid_env = Environment::new();
+    uuid_env.lock().define(
+        "v4",
+        Value::Builtin {
+            name: "v4",
+            func: builtin_uuid_v4,
+        },
+    );
+    uuid_env.lock().define(
+        "parse",
+        Value::Builtin {
+            name: "parse",
+            func: builtin_uuid_parse,
+        },
+    );
+    uuid_env.lock().define(
+        "nil",
+        Value::Builtin {
+            name: "nil",
+            func: builtin_uuid_nil,
+        },
+    );
+    env.lock().define(
+        "Uuid",
+        Value::Module {
+            name: "Uuid".into(),
+            env: uuid_env,
         },
     );
 }
@@ -10296,11 +10635,336 @@ fn fitz_value_to_pg(v: &Value) -> Result<crate::db::PgValue, String> {
         Value::Str(s) => Ok(crate::db::PgValue::Text(s.clone())),
         Value::Bool(b) => Ok(crate::db::PgValue::Bool(*b)),
         Value::Bytes(b) => Ok(crate::db::PgValue::Bytes(b.clone())),
+        // v0.10.24 — Date/DateTime/Uuid → text en formato que Postgres
+        // acepta para `date`/`timestamptz`/`uuid` respectivamente. El
+        // server hace el cast implícito al tipo destino del param.
+        // Para columnas tipadas (`UPDATE users SET created_at = $1`),
+        // Postgres reconoce el text format y guarda el binario correcto.
+        Value::Date(d) => Ok(crate::db::PgValue::Text(d.format("%Y-%m-%d").to_string())),
+        Value::DateTime(dt) => Ok(crate::db::PgValue::Text(
+            // RFC 3339 con `Z` terminal — Postgres lo parsea como
+            // timestamptz UTC sin ambigüedad.
+            dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
+        )),
+        Value::Uuid(u) => Ok(crate::db::PgValue::Text(u.to_string())),
         other => Err(format!(
-            "{} no se puede pasar como arg de query — solo Int/Float/Str/Bool/Bytes/Null en 10.1 (composites en 10.5)",
+            "{} no se puede pasar como arg de query — solo Int/Float/Str/Bool/Bytes/Date/DateTime/Uuid/Null/List/Map<Str, Any> son marshalleables",
             other.type_name()
         )),
     }
+}
+
+// =============================================================
+// v0.10.24 — Date / DateTime / Uuid built-in constructors
+// =============================================================
+//
+// Constructors estáticos que viven como Builtin functions adentro
+// del `Value::Module` correspondiente (`Date`, `DateTime`, `Uuid`).
+// Pattern paralelo a `db.connect`, `jwt.encode`, `hash.password`.
+//
+// Cada uno: arity check + arg type check + construct + wrap. Los
+// que pueden fallar (`.parse`) devuelven `Result<T>` con `Err(Str)`
+// explicando el formato esperado.
+
+fn builtin_date_today(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`Date.today()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    // Local timezone del sistema → date sin tz. `chrono::Local::now`
+    // requiere feature `clock` (ya activa). Para Date solo queremos
+    // YYYY-MM-DD en el huso local del host.
+    let today = chrono::Local::now().date_naive();
+    Ok(Value::Date(today))
+}
+
+fn builtin_date_parse(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`Date.parse(s)` espera 1 arg Str, recibió {}", args.len()),
+        ));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`Date.parse(s)` espera Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    // ISO 8601 estricto `YYYY-MM-DD`. Sin variantes locales (`DD/MM`,
+    // `MM-DD-YYYY`) — el user que necesite parsear formato custom
+    // baja a Str + parsing manual.
+    match chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
+        Ok(d) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+            Value::Date(d),
+        )))),
+        Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+            Value::Str(format!(
+                "Date.parse: `{}` no es ISO 8601 (YYYY-MM-DD): {}",
+                s, e
+            )),
+        )))),
+    }
+}
+
+fn builtin_date_from_ymd(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 3 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 3,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`Date.from_ymd(year, month, day)` espera 3 args Int, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let nums: Result<Vec<i32>, FitzError> = args
+        .iter()
+        .enumerate()
+        .map(|(i, v)| match v {
+            Value::Int(n) => Ok(*n as i32),
+            other => Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`Date.from_ymd` arg {} espera Int, recibió `{}`",
+                    i,
+                    other.type_name()
+                ),
+            )),
+        })
+        .collect();
+    let n = nums?;
+    let (y, m, d) = (n[0], n[1] as u32, n[2] as u32);
+    match chrono::NaiveDate::from_ymd_opt(y, m, d) {
+        Some(date) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+            Value::Date(date),
+        )))),
+        None => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+            Value::Str(format!(
+                "Date.from_ymd: ({}, {}, {}) no es una fecha válida",
+                y, m, d
+            )),
+        )))),
+    }
+}
+
+fn builtin_datetime_now(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`DateTime.now()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    Ok(Value::DateTime(chrono::Utc::now()))
+}
+
+fn builtin_datetime_parse(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`DateTime.parse(s)` espera 1 arg Str, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`DateTime.parse(s)` espera Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    // RFC 3339 (ISO 8601) — formato canonical con TZ offset explícito
+    // o `Z` terminal. Acepta `2026-05-30T14:30:00Z`,
+    // `2026-05-30T14:30:00+00:00`, `2026-05-30T14:30:00-03:00`, etc.
+    // El parser de chrono normaliza a UTC internamente.
+    match chrono::DateTime::parse_from_rfc3339(&s) {
+        Ok(dt) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+            Value::DateTime(dt.with_timezone(&chrono::Utc)),
+        )))),
+        Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+            Value::Str(format!(
+                "DateTime.parse: `{}` no es RFC 3339 (ej: 2026-05-30T14:30:00Z): {}",
+                s, e
+            )),
+        )))),
+    }
+}
+
+fn builtin_datetime_from_timestamp(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`DateTime.from_timestamp(secs)` espera 1 arg Int (Unix epoch secs), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let secs = match &args[0] {
+        Value::Int(n) => *n,
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`DateTime.from_timestamp` espera Int, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0) {
+        Some(dt) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+            Value::DateTime(dt),
+        )))),
+        None => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+            Value::Str(format!(
+                "DateTime.from_timestamp: {} fuera de rango (-9999-01-01..9999-12-31)",
+                secs
+            )),
+        )))),
+    }
+}
+
+fn builtin_uuid_v4(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`Uuid.v4()` no acepta argumentos, recibió {}", args.len()),
+        ));
+    }
+    Ok(Value::Uuid(uuid::Uuid::new_v4()))
+}
+
+fn builtin_uuid_parse(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`Uuid.parse(s)` espera 1 arg Str, recibió {}", args.len()),
+        ));
+    }
+    let s = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`Uuid.parse(s)` espera Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    match uuid::Uuid::parse_str(&s) {
+        Ok(u) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+            Value::Uuid(u),
+        )))),
+        Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+            Value::Str(format!(
+                "Uuid.parse: `{}` no es UUID canonical (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): {}",
+                s, e
+            )),
+        )))),
+    }
+}
+
+fn builtin_uuid_nil(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`Uuid.nil()` no acepta argumentos, recibió {}", args.len()),
+        ));
+    }
+    Ok(Value::Uuid(uuid::Uuid::nil()))
 }
 
 /// Fase 10.5.a — convierte un `Value` Fitz a su representación
@@ -10334,34 +10998,136 @@ fn jsonb_text_to_fitz_value(s: &str) -> Value {
 }
 
 /// Convierte un `PgValue` recibido del servidor a `Value` Fitz.
+/// `oid_hint` permite refinar `PgValue::Text` a tipos nativos Fitz
+/// cuando el OID lo identifica (v0.10.24): OID 1082 (date),
+/// 1184/1114 (timestamptz/timestamp), 2950 (uuid). Sin hint o si
+/// el parse falla, cae a `Value::Str` (compat con el comportamiento
+/// pre-v0.10.24 donde estos tipos eran Str ISO 8601).
 fn pg_value_to_fitz(v: &crate::db::PgValue) -> Value {
+    pg_value_to_fitz_with_oid(v, None)
+}
+
+fn pg_value_to_fitz_with_oid(v: &crate::db::PgValue, oid_hint: Option<u32>) -> Value {
+    use crate::db::oid;
     match v {
         crate::db::PgValue::Null => Value::Null,
         crate::db::PgValue::Int(n) => Value::Int(*n),
         crate::db::PgValue::Float(x) => Value::Float(*x),
-        crate::db::PgValue::Text(s) => Value::Str(s.clone()),
+        crate::db::PgValue::Text(s) => {
+            // v0.10.24 — refinement por OID hint: Postgres devuelve
+            // date/timestamp/timestamptz/uuid como text en el wire,
+            // pero queremos el Value tipado adecuado para que el
+            // user pueda usar `.year()`, `.to_str()`, etc.
+            match oid_hint {
+                Some(oid::DATE) => match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+                    Ok(d) => Value::Date(d),
+                    Err(_) => Value::Str(s.clone()),
+                },
+                Some(oid::TIMESTAMPTZ) => {
+                    // Postgres timestamptz text format:
+                    // "YYYY-MM-DD HH:MM:SS[.ffffff]+TZ" (con espacio
+                    // y offset variable). chrono::DateTime no parsea
+                    // ese formato directo — necesitamos ajustar.
+                    parse_pg_timestamptz(s).unwrap_or_else(|| Value::Str(s.clone()))
+                }
+                Some(oid::TIMESTAMP) => {
+                    // timestamp WITHOUT TZ — asumimos UTC para
+                    // mapear a DateTime<Utc>. Caso menos común.
+                    parse_pg_timestamp_naive(s).unwrap_or_else(|| Value::Str(s.clone()))
+                }
+                Some(oid::UUID) => match uuid::Uuid::parse_str(s) {
+                    Ok(u) => Value::Uuid(u),
+                    Err(_) => Value::Str(s.clone()),
+                },
+                _ => Value::Str(s.clone()),
+            }
+        }
         crate::db::PgValue::Bool(b) => Value::Bool(*b),
         crate::db::PgValue::Bytes(b) => Value::Bytes(b.clone()),
         // Fase 10.5.b — array Postgres → List Fitz. Cada elemento se
-        // convierte recursivamente. `elem_oid` se descarta acá porque
-        // Value::List es homogéneo solo nominalmente — el tipo viene
-        // de la anotación del field (List<Int>, List<Str>, ...).
-        crate::db::PgValue::Array { values, .. } => {
-            let items: Vec<Value> = values.iter().map(pg_value_to_fitz).collect();
+        // convierte recursivamente. Para arrays de date/timestamptz/
+        // uuid, propagamos el `elem_oid` para que los elementos sean
+        // Value::Date/DateTime/Uuid en vez de Str.
+        crate::db::PgValue::Array { elem_oid, values } => {
+            let items: Vec<Value> = values
+                .iter()
+                .map(|item| pg_value_to_fitz_with_oid(item, Some(*elem_oid)))
+                .collect();
             Value::new_list(items)
         }
     }
 }
 
+/// v0.10.24 — parsea el formato text Postgres `timestamptz`
+/// (`YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM]` o `Z`). chrono soporta
+/// RFC 3339 pero no este formato directo, así que normalizamos
+/// (espacio → 'T', falta de ':' en el offset, etc.).
+fn parse_pg_timestamptz(s: &str) -> Option<Value> {
+    // Reemplazar espacio entre fecha y hora con 'T' (formato ISO).
+    let normalized = s.replacen(' ', "T", 1);
+    // Postgres puede emitir offsets `+00`, `-03`, `+0530` — RFC 3339
+    // requiere `:` (`+00:00`). Si no hay `:` en la última parte del
+    // offset, inyectamos uno. Heurística: si terminamos con 5 chars
+    // tipo `+0530` o 3 chars tipo `+03`, normalizar.
+    let normalized = normalize_pg_offset(&normalized);
+    chrono::DateTime::parse_from_rfc3339(&normalized)
+        .ok()
+        .map(|dt| Value::DateTime(dt.with_timezone(&chrono::Utc)))
+}
+
+fn normalize_pg_offset(s: &str) -> String {
+    // Buscar último '+' o '-' después de la T (para no confundir con
+    // el '-' del 'YYYY-MM-DD').
+    let bytes = s.as_bytes();
+    let t_idx = s.find('T').unwrap_or(0);
+    let mut last_sign = None;
+    for (i, &b) in bytes.iter().enumerate().skip(t_idx + 1) {
+        if b == b'+' || b == b'-' {
+            last_sign = Some(i);
+        }
+    }
+    let Some(sign_idx) = last_sign else {
+        // Sin offset explícito — agregar 'Z' si no termina así.
+        if s.ends_with('Z') {
+            return s.to_string();
+        }
+        return format!("{}Z", s);
+    };
+    let offset = &s[sign_idx..];
+    let body = &s[..sign_idx];
+    let normalized_offset = match offset.len() {
+        3 => format!("{}:00", offset), // "+03" → "+03:00"
+        5 if !offset.contains(':') => format!("{}:{}", &offset[..3], &offset[3..]),
+        _ => offset.to_string(),
+    };
+    format!("{}{}", body, normalized_offset)
+}
+
+/// v0.10.24 — parsea timestamp WITHOUT TZ. Asumimos UTC.
+fn parse_pg_timestamp_naive(s: &str) -> Option<Value> {
+    let normalized = s.replacen(' ', "T", 1);
+    chrono::NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S%.f")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S"))
+        .ok()
+        .map(|naive| Value::DateTime(naive.and_utc()))
+}
+
 /// Mapea una fila Postgres a un `Value::Map` Fitz con pares
 /// (Str column_name, Value). El orden de columnas se preserva
-/// (Map adentro es Vec<(K, V)>).
+/// (Map adentro es Vec<(K, V)>). v0.10.24: el OID de cada columna
+/// se propaga al conversor para que date/timestamptz/uuid bajen
+/// tipados.
 fn pg_row_to_fitz_map(row: &crate::db::Row) -> Value {
     let pairs: Vec<(Value, Value)> = row
         .columns()
         .iter()
         .zip(row.values().iter())
-        .map(|((name, _oid), val)| (Value::Str(name.clone()), pg_value_to_fitz(val)))
+        .map(|((name, oid), val)| {
+            (
+                Value::Str(name.clone()),
+                pg_value_to_fitz_with_oid(val, Some(*oid)),
+            )
+        })
         .collect();
     Value::new_map(pairs)
 }
@@ -13197,7 +13963,7 @@ fn pg_row_to_instance(
             .get(&f.name)
             .and_then(|c| c.sql_name.as_deref())
             .unwrap_or(f.name.as_str());
-        let pg = row.get(sql_col).ok_or_else(|| {
+        let (pg, oid) = row.get_with_oid(sql_col).ok_or_else(|| {
             format!(
                 "la columna `{}` (field `{}` de `{}`) no está en el resultset",
                 sql_col, f.name, type_name
@@ -13206,14 +13972,16 @@ fn pg_row_to_instance(
         // Fase 10.5.a — si el field Fitz es Map<...> y el PgValue
         // es Text, parseamos como JSON. El driver mapea columnas
         // jsonb/json a `PgValue::Text` con el JSON crudo.
+        // v0.10.24 — propagamos el OID al converter para refinar
+        // PgValue::Text a Value::Date/DateTime/Uuid cuando aplica.
         let fitz_value = if is_map_type(&f.type_) {
             match pg {
                 crate::db::PgValue::Text(s) => jsonb_text_to_fitz_value(s),
                 crate::db::PgValue::Null => Value::Null,
-                other => pg_value_to_fitz(other),
+                other => pg_value_to_fitz_with_oid(other, Some(oid)),
             }
         } else {
-            pg_value_to_fitz(pg)
+            pg_value_to_fitz_with_oid(pg, Some(oid))
         };
         field_values.push((f.name.clone(), fitz_value));
     }

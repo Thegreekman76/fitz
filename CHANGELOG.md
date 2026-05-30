@@ -12,8 +12,181 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-Date/DateTime/UUID nativos (siguiente en el plan post-TLS), o
-boilerplates ORM Dockerizados extendidos.
+v0.10.25 cierra la deuda comprometida del codegen para
+Date/DateTime/Uuid (que esta release deja explícita): `fitz build`
+emitir chrono/uuid + helpers de preludio + dispatch de cada
+constructor/método. Después: boilerplates ORM Dockerizados
+extendidos o nuevo norte técnico.
+
+## [v0.10.24] — 2026-05-30 — Date / DateTime / Uuid tipos nativos (intérprete)
+
+Cierre del bloque comprometido post-TLS — los 3 tipos temporales
+y de identidad más usados pasan de `Str` ISO 8601 a tipos
+built-in con constructors, métodos, integración driver Postgres
+y mapping ORM. **Soporte completo en `fitz run`**; `fitz build`
+queda como deuda explícita comprometida v0.10.25 (codegen emite
+error claro citando el sub-paso).
+
+### Tipos nuevos
+
+| Tipo | Wrapper interno | Postgres | JSON |
+|---|---|---|---|
+| `Date` | `chrono::NaiveDate` | `date` (OID 1082) | string ISO 8601 `YYYY-MM-DD` |
+| `DateTime` | `chrono::DateTime<chrono::Utc>` | `timestamptz` (OID 1184) | string RFC 3339 `YYYY-MM-DDTHH:MM:SSZ` |
+| `Uuid` | `uuid::Uuid` | `uuid` (OID 2950) | string canonical `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` |
+
+Decisiones de diseño:
+- **Naming**: `Uuid` (consistente con `DbConn`/`DbRow`/`PyAny`).
+- **TZ**: `DateTime` siempre UTC en MVP. `DateTime<TZ>` parametrizado
+  queda como deuda futura (usado por <5% de apps reales).
+- **Sin `Time` standalone**: caso de uso raro, suma deuda futura
+  si pide.
+- **Sin aritmética** (`dt + Duration`): `Duration` es otro tipo
+  built-in que sumamos si entra demanda.
+
+### API user-facing
+
+```fitz
+// Constructors estáticos (Value::Module global por tipo)
+let today: Date = Date.today()
+let dt: DateTime = DateTime.now()
+let id: Uuid = Uuid.v4()
+let nil_id: Uuid = Uuid.nil()
+let d: Date = Date.from_ymd(2026, 12, 25)?
+let dt2: DateTime = DateTime.parse("2026-12-25T18:00:00Z")?
+let u: Uuid = Uuid.parse("550e8400-e29b-41d4-a716-446655440000")?
+
+// Métodos instancia (dispatch sobre Value::Date/DateTime/Uuid)
+print(d.year())              // 2026
+print(d.month())             // 12
+print(d.weekday())           // 5 (ISO 8601, Friday)
+print(d.format("%A %B %d"))  // "Friday December 25" (chrono format)
+print(d.to_datetime())       // 2026-12-25T00:00:00Z
+
+print(dt.hour())             // 18
+print(dt.timestamp())        // 1766685600 (Unix epoch)
+print(dt.date())             // 2026-12-25 (extrae solo la fecha)
+
+print(u.to_str())            // canonical hyphenated
+print(u.is_nil())            // false (Uuid.nil() devuelve true)
+```
+
+### Integración driver Postgres (D.5)
+
+- `pg_value_to_fitz_with_oid(value, oid_hint)` refina
+  `PgValue::Text` a `Value::Date`/`DateTime`/`Uuid` cuando el OID
+  identifica `date` (1082) / `timestamptz` (1184) / `timestamp`
+  (1114) / `uuid` (2950).
+- `parse_pg_timestamptz` normaliza el formato Postgres
+  `YYYY-MM-DD HH:MM:SS±TZ` a RFC 3339 (espacio→T, offsets `+00`/
+  `+0530` → `+00:00`/`+05:30`).
+- `fitz_value_to_pg`: `Value::Date/DateTime/Uuid` → `PgValue::Text`
+  en el formato canonical que Postgres acepta via cast implícito.
+- `Row::get_with_oid(col)` devuelve `(PgValue, oid)` para que el
+  caller pueda hacer la refinación.
+- `pg_row_to_instance` y `pg_row_to_fitz_map` propagan el OID al
+  converter — el ORM read-back devuelve `Instance` con
+  `Value::Date`/`DateTime`/`Uuid` en los fields declarados como
+  tales.
+
+### ORM + migrations mapping (D.4 + D.7)
+
+`migrations::fitz_typeexpr_to_sql_type` mapea:
+- `Type::Date` → `date`
+- `Type::DateTime` → `timestamptz`
+- `Type::Uuid` → `uuid`
+
+Habilita el flujo canónico:
+
+```fitz
+@table("events") type Event {
+    @primary id: Int = 0
+    name: Str = ""
+    happens_on: Date = ""       // sentinel; user provee Date.from_ymd(...)
+    starts_at: DateTime = ""    // idem
+    external_id: Uuid = ""      // idem
+}
+```
+
+El checker acepta `Str` literal como default para fields
+Date/DateTime/Uuid (sentinel paralelo a `id: Int = 0`); el
+evaluator coerce el `Str` cuando se construye la Instance via
+`coerce_to_annotation`.
+
+### JSON serialization (D.6)
+
+- `value_to_json` emite Date/DateTime/Uuid como JSON string
+  canonical (estándar de la industria — JSON Schema
+  `"date"`/`"date-time"`/`"uuid"` formats).
+- `coerce_to_annotation` con annot `Date`/`DateTime`/`Uuid` sobre
+  `Value::Str` deserializa al tipo correspondiente. Caso típico:
+  HTTP body JSON con `"happens_on": "2026-12-25"` deserializado a
+  Instance con `Value::Date` en el field. Errores claros si el
+  string no matchea el formato esperado.
+- Para `DateTime`, acepta tanto RFC 3339 como el formato Postgres
+  timestamptz con espacio.
+
+### LSP + extensión VSCode
+
+- `lsp::scope_level_completions` lista `Date`/`DateTime`/`Uuid`
+  como built-in types.
+- `lsp::after_dot_completions` dispatches sobre `Type::Date`,
+  `Type::DateTime`, `Type::Uuid` con method_items dedicado
+  (year/month/.../format/to_str/etc.).
+- Grammar TextMate suma `Date`/`DateTime`/`Uuid` a
+  `support.type.builtin.fitz`.
+- Extensión VSCode bump 0.10.23 → 0.10.24.
+
+### Codegen — deuda explícita v0.10.25
+
+El codegen emite error claro cuando encuentra `Date`/`DateTime`/
+`Uuid` en el AST:
+
+```
+✗ codegen: Error — `Date` (tipo built-in v0.10.24) todavía no
+soportado en `fitz build` — sub-paso comprometido v0.10.25 (deuda
+explícita). Usá `fitz run` mientras tanto.
+```
+
+Cerrar la deuda v0.10.25 requiere ~500+ LoC adicionales en
+codegen: helpers de preludio emitiendo chrono/uuid + dispatch de
+cada constructor/método + `__IntoPgValue`/`__FromFitzDbRow` para
+los 3 tipos + `__ToFitzJson`/`__FromFitzJson` + Cargo.toml
+emisión condicional de `chrono` (ya parte del workspace) y
+`uuid` (dep nueva).
+
+### Smoke E2E real Postgres
+
+Validó el ciclo completo: `@table` con Date/DateTime/Uuid fields
+→ `Event.insert(conn, row)` con valores `Date.from_ymd(2026, 12, 25)?`/
+`DateTime.parse("2026-12-25T18:00:00Z")?`/`Uuid.v4()` → wire
+format text round-trip → `Event.all(conn)` → readback preserva
+tipos (`.year()`, `.hour()`, `.is_nil()` funcionan sobre la
+Instance recuperada).
+
+### Validación final
+
+- `cargo test --lib`: **2647 verde**.
+- `compile_e2e::smoke_ejemplos_guia_compilables` (325 ejemplos):
+  verde.
+- `cargo fmt --all -- --check`: verde.
+- `cargo clippy --all-targets -- -D warnings`: verde.
+
+### Deps nuevas
+
+- `uuid = { version = "1", features = ["v4"] }` — generación
+  random + parsing. Pure Rust ~50KB.
+- `chrono` ya era dep no-opcional desde Fase 9.w.3 (cron jobs);
+  reusado sin pulls nuevos.
+
+### Out of scope (deuda explícita v0.10.25+)
+
+- **Codegen completo** para `fitz build`: ~500+ LoC, próximo release.
+- **`Duration`** + aritmética (`dt + 1.days()`, `dt2 - dt1`).
+- **`Time` standalone** sin fecha (Postgres `time` OID 1083).
+- **`DateTime<TZ>`** parametrizado por timezone.
+- **Métodos adicionales en `Uuid`** (`version()`, `variant()`,
+  `bytes()`).
 
 ## [v0.10.23] — 2026-05-30 — Fase 10.1.b: TLS strict para el driver Postgres
 

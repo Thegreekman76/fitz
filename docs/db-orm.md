@@ -468,10 +468,27 @@ default Fitz se usa al construir el value que va a Postgres.
 | `List<Int?>` | `bigint[]` (con NULL aceptable en elementos) |
 | `Map<Str, Any>` | `jsonb` |
 | `Map<Str, Int>` (T concreto) | `jsonb` (shape homogéneo) |
+| `Date` (v0.10.24) | `date` |
+| `DateTime` (v0.10.24) | `timestamptz` (siempre UTC) |
+| `Uuid` (v0.10.24) | `uuid` |
 
-El user crea las tablas con `CREATE TABLE` (manualmente o via
-`db.exec(...)` al boot). Migraciones automáticas (`fitz db diff`)
-quedan como sub-paso futuro.
+`Date`/`DateTime`/`Uuid` son tipos built-in nativos (no `Str` ISO
+8601) desde v0.10.24. Tienen constructors estáticos
+(`Date.today()`, `DateTime.now()`, `Uuid.v4()`, etc.), métodos
+instancia (`.year()`/`.month()`/`.format(fmt)`/`.to_str()`/...) y
+round-trip transparente con Postgres. **Caveat v0.10.24**: el
+soporte completo está en `fitz run`; `fitz build` (codegen) los
+emite con error claro citando v0.10.25 como deuda comprometida.
+Para detalle, ver CHANGELOG v0.10.24.
+
+Convención de defaults: el user escribe `happens_on: Date = ""`
+(sentinel `Str`) y provee el valor real al construir la Instance
+con `Date.from_ymd(2026, 12, 25)?` o desde HTTP body JSON (que
+deserializa automático `"2026-12-25"` → `Value::Date`).
+
+El user crea las tablas con `CREATE TABLE` (manualmente, via
+`db.exec(...)` al boot, o via `fitz db diff/migrate` desde
+v0.10.16).
 
 ### `@hidden`: ocultar fields de la frontera HTTP
 

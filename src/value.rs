@@ -618,6 +618,23 @@ pub enum Value {
     /// Igualdad por identidad del `Arc`. Opaco para el user; sin
     /// Display ni serialización a JSON.
     QueryBuilder(Arc<dyn std::any::Any + Send + Sync>),
+
+    /// v0.10.24 — fecha sin hora ni tz. Wrapper sobre `chrono::NaiveDate`.
+    /// Construido vía `Date.today()` / `Date.parse("2026-05-30")`.
+    /// Display: ISO 8601 `YYYY-MM-DD`. Igualdad estructural (chrono
+    /// impl PartialEq).
+    Date(chrono::NaiveDate),
+
+    /// v0.10.24 — fecha + hora + tz (siempre UTC en MVP). Wrapper
+    /// sobre `chrono::DateTime<chrono::Utc>`. Display: ISO 8601
+    /// `YYYY-MM-DDTHH:MM:SSZ`. Igualdad estructural.
+    DateTime(chrono::DateTime<chrono::Utc>),
+
+    /// v0.10.24 — UUID. Wrapper sobre `uuid::Uuid`. Construido vía
+    /// `Uuid.v4()` (random) o `Uuid.parse("...")`. Display: formato
+    /// canonical `xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx` (lowercase,
+    /// con guiones). Igualdad estructural.
+    Uuid(uuid::Uuid),
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -687,6 +704,9 @@ impl Value {
             Value::WsConn(_) => "WsConn",
             Value::DbConn(_) => "DbConn",
             Value::QueryBuilder(_) => "QueryBuilder",
+            Value::Date(_) => "Date",
+            Value::DateTime(_) => "DateTime",
+            Value::Uuid(_) => "Uuid",
             #[cfg(feature = "python")]
             Value::PyObject(_) => "PyObject",
         }
@@ -821,6 +841,13 @@ impl std::fmt::Display for Value {
             Value::WsConn(_) => write!(f, "<ws-conn>"),
             Value::DbConn(h) => write!(f, "<db-conn {}>", h.url_redacted),
             Value::QueryBuilder(_) => write!(f, "<query-builder>"),
+            // v0.10.24 — Display canonical ISO 8601 / UUID. Sin
+            // wrapper como `<date 2026-05-30>` porque estos values son
+            // user-facing (se imprimen, se interpolan, van a JSON sin
+            // wrap). Mismo formato que su `to_str()` instance method.
+            Value::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
+            Value::DateTime(dt) => write!(f, "{}", dt.format("%Y-%m-%dT%H:%M:%SZ")),
+            Value::Uuid(u) => write!(f, "{}", u),
             Value::NativeFn(_) => write!(f, "<native function>"),
             #[cfg(feature = "python")]
             Value::PyObject(_) => write!(f, "<python object>"),

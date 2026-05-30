@@ -2036,6 +2036,17 @@ impl Row {
         self.values.get(idx)
     }
 
+    /// v0.10.24 — devuelve `(PgValue, OID)` para que el caller pueda
+    /// refinar el tipo del valor según el OID de la columna (date,
+    /// timestamptz, uuid). Sin esto, el caller (evaluador) solo ve
+    /// `PgValue::Text` sin poder distinguir entre `text`/`date`/etc.
+    pub fn get_with_oid(&self, name: &str) -> Option<(&PgValue, u32)> {
+        let idx = self.columns.iter().position(|(n, _)| n == name)?;
+        let v = self.values.get(idx)?;
+        let oid = self.columns[idx].1;
+        Some((v, oid))
+    }
+
     pub fn get_at(&self, idx: usize) -> Option<&PgValue> {
         self.values.get(idx)
     }

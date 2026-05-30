@@ -1881,6 +1881,42 @@ fn after_dot_completions(
             ("get_bool", "fn(col: Str) -> Result<Bool>".into()),
             ("len", "fn() -> Int  // número de columnas del row".into()),
         ]),
+        // v0.10.24 — `Date` instance methods. Extracción + conversión +
+        // formato custom con specifiers chrono (%Y, %m, %d, %A, etc.).
+        Type::Date => method_items(&[
+            ("year", "fn() -> Int".into()),
+            ("month", "fn() -> Int  // 1..12".into()),
+            ("day", "fn() -> Int  // 1..31".into()),
+            ("weekday", "fn() -> Int  // ISO 8601: 1=Mon..7=Sun".into()),
+            ("to_str", "fn() -> Str  // ISO 8601 YYYY-MM-DD".into()),
+            ("to_datetime", "fn() -> DateTime  // 00:00:00 UTC".into()),
+            (
+                "format",
+                "fn(fmt: Str) -> Str  // chrono format (%Y/%m/%d/%A/...)".into(),
+            ),
+        ]),
+        // v0.10.24 — `DateTime` instance methods. Mismo set que Date +
+        // hour/minute/second/timestamp + extracción `.date()`.
+        Type::DateTime => method_items(&[
+            ("year", "fn() -> Int".into()),
+            ("month", "fn() -> Int  // 1..12".into()),
+            ("day", "fn() -> Int  // 1..31".into()),
+            ("hour", "fn() -> Int  // 0..23".into()),
+            ("minute", "fn() -> Int  // 0..59".into()),
+            ("second", "fn() -> Int  // 0..59".into()),
+            ("timestamp", "fn() -> Int  // Unix epoch seconds".into()),
+            ("to_str", "fn() -> Str  // ISO 8601 con Z (UTC)".into()),
+            ("date", "fn() -> Date  // extrae la parte fecha".into()),
+            ("format", "fn(fmt: Str) -> Str  // chrono format".into()),
+        ]),
+        // v0.10.24 — `Uuid` instance methods. MVP acotado.
+        Type::Uuid => method_items(&[
+            (
+                "to_str",
+                "fn() -> Str  // canonical xxx-xxx-xxx-xxx-xxx".into(),
+            ),
+            ("is_nil", "fn() -> Bool".into()),
+        ]),
         // Fase 10.3+ — `QueryBuilder<Row>` del ORM. Chain methods
         // preservan QB; terminales devuelven Result<...>.
         Type::QueryBuilder(row) => {
@@ -2303,6 +2339,8 @@ fn scope_level_completions(
     for name in [
         "Int", "Float", "Str", "Bool", "Null", "Bytes", "Range", "Any", "List", "Map", "Result",
         "Future", "Request", "Response", "File", "PyAny", "WsConn", "DbConn", "DbRow",
+        // v0.10.24 — tipos temporales y UUID nativos.
+        "Date", "DateTime", "Uuid",
     ] {
         items.push(CompletionItem {
             label: name.into(),

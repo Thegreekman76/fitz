@@ -591,6 +591,14 @@ fn fitz_typeexpr_to_sql_type(
         "Str" => Ok("text".to_string()),
         "Bool" => Ok("boolean".to_string()),
         "Bytes" => Ok("bytea".to_string()),
+        // v0.10.24 — tipos temporales y UUID nativos. Mapeos canonical
+        // Postgres: Date → date (4 bytes), DateTime → timestamptz (8
+        // bytes UTC con offset), Uuid → uuid (16 bytes). El ORM
+        // marshaling (driver wire + JSON) se encarga de la conversión
+        // text ↔ binario.
+        "Date" => Ok("date".to_string()),
+        "DateTime" => Ok("timestamptz".to_string()),
+        "Uuid" => Ok("uuid".to_string()),
         "List" => {
             // List<T> → T[] Postgres array.
             let inner = match t {

@@ -113,6 +113,26 @@ pub enum Type {
     /// Opaca: el user no construye instancias.
     DbRow,
 
+    /// v0.10.24 — fecha sin hora ni tz. Formato ISO 8601 `YYYY-MM-DD`.
+    /// Construida via `Date.today()` o `Date.parse("2026-05-30")`.
+    /// Mapea a Postgres `date` (OID 1082) en ORM/driver.
+    Date,
+
+    /// v0.10.24 — fecha + hora + tz (siempre UTC en MVP). Formato ISO
+    /// 8601 `YYYY-MM-DDTHH:MM:SSZ`. Construida via `DateTime.now()` o
+    /// `DateTime.parse("...")`. Mapea a Postgres `timestamptz` (OID
+    /// 1184) en ORM/driver. TZ explícitas parametrizadas
+    /// (`DateTime<TZ>`) quedan como deuda futura — usado por <5% de
+    /// apps reales.
+    DateTime,
+
+    /// v0.10.24 — UUID v4 random. Formato canonical `xxxxxxxx-xxxx-
+    /// 4xxx-yxxx-xxxxxxxxxxxx`. Construido via `Uuid.v4()` (random) o
+    /// `Uuid.parse("...")`. Mapea a Postgres `uuid` (OID 2950) en
+    /// ORM/driver. Naming `Uuid` (no `UUID`) por consistencia con
+    /// `DbConn`/`DbRow`/`PyAny`.
+    Uuid,
+
     /// Fase 10.3+ — query builder del ORM. Devuelto por
     /// `Type.where(closure)` cuando `Type` tiene `@table`, y
     /// preservado por la chain `.where`/`.order_by`/`.limit`/
@@ -301,6 +321,9 @@ impl Type {
             }
             Type::DbConn => "DbConn".into(),
             Type::DbRow => "DbRow".into(),
+            Type::Date => "Date".into(),
+            Type::DateTime => "DateTime".into(),
+            Type::Uuid => "Uuid".into(),
             Type::QueryBuilder(row) => format!("QueryBuilder<{}>", row.display(env)),
             Type::Aggregated(row) => format!("Aggregated<{}>", row.display(env)),
             Type::Nominal(id) => env.info(*id).name.clone(),
@@ -964,6 +987,10 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
         // por `db.query`, también anotable.
         "DbConn" => Some(Type::DbConn),
         "DbRow" => Some(Type::DbRow),
+        // v0.10.24 — tipos built-in para fechas y UUIDs nativos.
+        "Date" => Some(Type::Date),
+        "DateTime" => Some(Type::DateTime),
+        "Uuid" => Some(Type::Uuid),
         _ => None,
     };
     if let Some(t) = prim {
@@ -2227,6 +2254,18 @@ fn check_field_default(
     if matches!(lit_type, Type::Int) && matches!(declared.base(), Type::Float) {
         return Ok(());
     }
+    // v0.10.24 — Str literal sentinel/default para Date/DateTime/Uuid.
+    // El user escribe `happens_on: Date = ""` como sentinel (paralelo
+    // a `id: Int = 0`). El evaluator coerce el Str → tipo correspondiente
+    // en runtime (via `coerce_to_annotation`); si el Str no parsea,
+    // falla en runtime con mensaje claro. Caso típico: Date/DateTime
+    // que se setea desde el JSON body HTTP, donde el "default Str"
+    // nunca llega a usarse porque el user provee el valor real.
+    if matches!(lit_type, Type::Str)
+        && matches!(declared.base(), Type::Date | Type::DateTime | Type::Uuid)
+    {
+        return Ok(());
+    }
     // Igualdad estructural sobre la base.
     if &lit_type != declared.base() {
         return Err(FitzError::new(
@@ -2605,6 +2644,23 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // v0.10.24 — Date/DateTime/Uuid namespace global con sus
+        // constructors estáticos como Value::Module. Tipados como `Any`
+        // (mismo patrón que db/jwt/hash) — el field access resuelve a
+        // Any → ret type del call viene del builtin runtime. La
+        // refinement a signatures concretas queda como deuda menor.
+        for module_name in ["Date", "DateTime", "Uuid"] {
+            self.scopes[0].insert(
+                module_name.into(),
+                VarBinding {
+                    ty: Type::Any,
+                    annotated: false,
+                    def_span: Span::ZERO,
+                    defaults_count: 0,
+                    has_varargs: false,
+                },
+            );
+        }
         // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
         // 3 builtins para leer variables de entorno desde Fitz.
         // `env(key) -> Result<Str>` fuerza al usuario a manejar el caso
@@ -4576,6 +4632,10 @@ fn infer_method_call(
         // (depende del SELECT). El user lo coerciona con anotación
         // (`let id: Int = row.get("id")?`).
         Type::DbRow => Some(infer_db_row_method(ctx, method, args_ty, span)),
+        // v0.10.24 — Date/DateTime/Uuid instance methods.
+        Type::Date => Some(infer_date_method(ctx, method, args_ty, span)),
+        Type::DateTime => Some(infer_datetime_method(ctx, method, args_ty, span)),
+        Type::Uuid => Some(infer_uuid_method(ctx, method, args_ty, span)),
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
@@ -6427,6 +6487,120 @@ fn infer_db_row_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span:
                 span,
                 format!(
                     "el tipo `DbRow` no tiene el método `{}` (soportados: get_int, get_str, get_float, get_bool, len)",
+                    method
+                ),
+            );
+            Type::Any
+        }
+    }
+}
+
+/// v0.10.24 — methods sobre `Date`. Extracción (year/month/day/weekday
+/// devuelven Int), conversión (to_str→Str, to_datetime→DateTime),
+/// formato custom (format(fmt: Str)→Str).
+fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
+    match method {
+        "year" | "month" | "day" | "weekday" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            Type::Int
+        }
+        "to_str" => {
+            check_method_arity(ctx, "to_str", args_ty, 0, span);
+            Type::Str
+        }
+        "to_datetime" => {
+            check_method_arity(ctx, "to_datetime", args_ty, 0, span);
+            Type::DateTime
+        }
+        "format" => {
+            if check_method_arity(ctx, "format", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Str)
+            {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Date.format(fmt)` espera `Str`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
+            }
+            Type::Str
+        }
+        _ => {
+            ctx.error_at(
+                span,
+                format!(
+                    "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format)",
+                    method
+                ),
+            );
+            Type::Any
+        }
+    }
+}
+
+/// v0.10.24 — methods sobre `DateTime`. Extracción (year/month/day/hour/
+/// minute/second devuelven Int), timestamp Unix epoch (Int),
+/// conversión (to_str→Str, date→Date), formato custom.
+fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
+    match method {
+        "year" | "month" | "day" | "hour" | "minute" | "second" | "timestamp" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            Type::Int
+        }
+        "to_str" => {
+            check_method_arity(ctx, "to_str", args_ty, 0, span);
+            Type::Str
+        }
+        "date" => {
+            check_method_arity(ctx, "date", args_ty, 0, span);
+            Type::Date
+        }
+        "format" => {
+            if check_method_arity(ctx, "format", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Str)
+            {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`DateTime.format(fmt)` espera `Str`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
+            }
+            Type::Str
+        }
+        _ => {
+            ctx.error_at(
+                span,
+                format!(
+                    "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format)",
+                    method
+                ),
+            );
+            Type::Any
+        }
+    }
+}
+
+/// v0.10.24 — methods sobre `Uuid`. MVP acotado: `to_str() -> Str` y
+/// `is_nil() -> Bool` cubren el 99% del caso real. Extracción de
+/// versión/variant/bytes raw queda como deuda post-MVP si pide.
+fn infer_uuid_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
+    match method {
+        "to_str" => {
+            check_method_arity(ctx, "to_str", args_ty, 0, span);
+            Type::Str
+        }
+        "is_nil" => {
+            check_method_arity(ctx, "is_nil", args_ty, 0, span);
+            Type::Bool
+        }
+        _ => {
+            ctx.error_at(
+                span,
+                format!(
+                    "`Uuid` no tiene el método `{}` (soportados: to_str, is_nil)",
                     method
                 ),
             );

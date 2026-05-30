@@ -1313,6 +1313,13 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 "QueryBuilder no es serializable a JSON — terminá la cadena con `.all(db)` / `.first(db)` para obtener el resultado".to_string(),
             );
         }
+        // v0.10.24 — Date/DateTime/Uuid serializan como JSON string
+        // canonical (ISO 8601 para temporales, formato canonical
+        // hyphenated para Uuid). Convención estándar de la industria
+        // (JSON Schema "date"/"date-time"/"uuid" formats).
+        Value::Date(d) => J::String(d.format("%Y-%m-%d").to_string()),
+        Value::DateTime(dt) => J::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
+        Value::Uuid(u) => J::String(u.to_string()),
         // Mini-tanda Mw-Wrap — `Value::NativeFn` es el callable
         // `next` que se pasa a wrap-style middlewares. Si llega al
         // serializer, el handler lo devolvió por error.

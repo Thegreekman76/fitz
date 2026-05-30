@@ -10489,6 +10489,22 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         return Ok((code, ty));
                     }
                 }
+                // v0.10.24 — Date/DateTime/Uuid son tipos built-in
+                // que en el intérprete viven como `Value::Module` con
+                // constructors estáticos (`Date.today()`, `Uuid.v4()`,
+                // etc.). El codegen NO los soporta todavía: necesita
+                // helpers de preludio para chrono+uuid + dispatch de
+                // cada constructor/método, deuda comprometida v0.10.25.
+                if matches!(name.as_str(), "Date" | "DateTime" | "Uuid") {
+                    return Err(self.err(format!(
+                        "`{}` (tipo built-in v0.10.24) todavía no soportado en `fitz build` — \
+                         sub-paso comprometido v0.10.25 (deuda explícita). \
+                         Usá `fitz run` mientras tanto. \
+                         Detalle: los tipos Date/DateTime/Uuid funcionan end-to-end en el intérprete \
+                         (constructors, métodos, ORM, driver) pero el codegen aún no emite chrono/uuid.",
+                        name
+                    )));
+                }
                 let ty = self
                     .lookup_var(name)
                     .cloned()
@@ -24961,7 +24977,12 @@ fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<Stri
         | Type::Bool
         | Type::Null
         | Type::Bytes
-        | Type::Range => Ok(format!("({} == {})", lhs, rhs)),
+        | Type::Range
+        // v0.10.24 — Date/DateTime/Uuid usan `chrono::NaiveDate` /
+        // `chrono::DateTime<Utc>` / `uuid::Uuid` que impl PartialEq.
+        | Type::Date
+        | Type::DateTime
+        | Type::Uuid => Ok(format!("({} == {})", lhs, rhs)),
         Type::Nominal(_) => Ok(format!(
             "(Arc::ptr_eq(&{lhs}, &{rhs}) \
              || *{lhs}.lock().unwrap() == *{rhs}.lock().unwrap())",
@@ -26120,6 +26141,9 @@ fn type_name(t: &Type) -> &'static str {
         Type::WsConn { .. } => "WsConn<...>",
         Type::DbConn => "DbConn",
         Type::DbRow => "DbRow",
+        Type::Date => "Date",
+        Type::DateTime => "DateTime",
+        Type::Uuid => "Uuid",
         Type::QueryBuilder(_) => "QueryBuilder<...>",
         Type::Aggregated(_) => "Aggregated<...>",
         Type::Nullable(_) => "T?",
@@ -26160,6 +26184,9 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         }
         Type::DbConn => "DbConn".into(),
         Type::DbRow => "DbRow".into(),
+        Type::Date => "Date".into(),
+        Type::DateTime => "DateTime".into(),
+        Type::Uuid => "Uuid".into(),
         Type::QueryBuilder(row) => format!("QueryBuilder<{}>", display_type(row, env)),
         Type::Aggregated(row) => format!("Aggregated<{}>", display_type(row, env)),
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
