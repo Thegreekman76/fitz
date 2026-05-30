@@ -12,9 +12,197 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-Fase 10.6.e.3 (schemas custom: `@table("schema.name")` + refactor
-introspector + ORM downstream), después boilerplates ORM
-Dockerizados extendidos.
+boilerplates ORM Dockerizados extendidos, o nuevo norte
+técnico a decidir (Fase 10.6 completada al 100% vs Alembic).
+
+## [v0.10.21] — 2026-05-30 — Fase 10.6.e.3: schemas custom (cierra Fase 10.6 entera)
+
+Última feature del Tier 2 del plan vs Alembic. **Cierra la Fase
+10.6 completa**: el paquete `fitz db ...` cubre ahora migrations
+generation + apply/rollback + drift check + stamping + history
++ offline SQL + squash + data migrations en `.fitz` + schemas
+custom Postgres. Equivalente funcional a Alembic con cero deps
+externas.
+
+### Sintaxis: `@table("schema.name")`
+
+`@table` ahora acepta opcionalmente un nombre de schema separado
+por `.`. Sin `.` (compat pre-v0.10.21), schema = `public`
+(default Postgres).
+
+```fitz
+@table("users") type User {              // public.users (default)
+    @primary id: Int = 0
+    email: Str = ""
+}
+
+@table("analytics.events") type Event {  // analytics.events (custom)
+    @primary id: Int = 0
+    name: Str = ""
+    @db_default("NOW()") at: Str = ""
+}
+```
+
+Validación del checker: ambos segmentos no-vacíos, sin
+whitespace, máximo 1 `.`. Strings inválidos (`""`, `"a.b.c"`,
+`"foo bar"`) → error de tipo claro.
+
+### Multi-schema end-to-end
+
+`fitz db check` con `analytics.events` + `users` (mixed):
+
+```sql
+CREATE SCHEMA IF NOT EXISTS "analytics";
+
+CREATE TABLE "analytics"."events" (
+    "id" bigserial PRIMARY KEY,
+    "name" text NOT NULL,
+    "at" text NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE "users" (
+    "id" bigserial PRIMARY KEY,
+    "email" text NOT NULL
+);
+```
+
+El ORM nativo usa qualified everywhere: `INSERT INTO
+"analytics"."events" (...)`, `SELECT ... FROM "analytics"."events"`,
+`UPDATE "analytics"."events" SET ... WHERE ...`, etc.
+
+### Casos de uso
+
+- **Multi-tenant via schemas**: `@table("tenant_acme.users")`,
+  `@table("tenant_beta.users")` aisla data por cliente.
+- **Separación dev/test/staging**: `@table("staging.events")`
+  vs `@table("prod.events")` en el mismo cluster.
+- **Módulos aislados**: `@table("auth.sessions")`,
+  `@table("billing.invoices")`, `@table("analytics.events")`
+  para namespacing en monolitos grandes.
+- **Naming conflict resolution**: dos modules con tabla
+  `events` viven en schemas distintos sin colisión.
+
+### Cambios técnicos
+
+- **src/types.rs**:
+  - `TableMetadata.schema: Option<String>` nuevo field. `None`
+    = `public`.
+  - Parser del decorator `@table("...")` splitea por `.` via
+    helper `split_schema_qualified_table(s)` con validación.
+  - Nuevo método `TableMetadata::qualified_sql_name()` —
+    returns `"schema"."name"` o `"name"` (ya quoteado).
+- **src/migrations.rs**:
+  - `Table.schema: Option<String>` + `qualified_id()` method.
+  - Nueva struct `TableRef { schema, name }` para identidad
+    cross-schema. Constructores `public()`, `qualified()`,
+    `from_table()`.
+  - `Change` enum refactorizado: todas las variants con `table`
+    ahora usan `TableRef` en vez de `String`. Nueva variant
+    `CreateSchema { name }` emitida primero en el diff.
+    `DropIndex` ahora tiene `schema: Option<String>` (PG needs
+    qualified DROP INDEX para non-public).
+  - `introspect_schema` ahora itera TODAS las user schemas
+    (excluye `pg_catalog`, `information_schema`, `pg_toast*`,
+    `pg_temp_*`, `_fitz_migrations`). `list_user_tables_qualified`
+    devuelve `(schema, name)` tuples. `introspect_columns`/
+    `indexes`/`foreign_keys` parametrizados por schema.
+  - `diff_schemas` compara por `qualified_id` (no por name).
+    Emite `CreateSchema` para schemas en target que no existen
+    en current. `apply_renames_from_target` es schema-aware
+    (renames dentro del mismo schema; cross-schema rename queda
+    como deuda menor).
+  - `change_to_sql` usa nuevo helper `quote_qualified(TableRef)`
+    everywhere. Bare names para `public`, `"schema"."name"` para
+    custom.
+- **src/codegen.rs**:
+  - `__FitzQueryBuilder.table` (preludio) ahora almacena la
+    forma ya-quoteada qualified (`"users"` o `"public"."x"`).
+    Los `format!` SQL del preludio cambian de `\"{}\"` a `{}`
+    (~5 sitios en `build_select_sql`/`count`/`update`/
+    `delete`/agg).
+  - `qb_constructor` pasa `meta.qualified_sql_name()` (already
+    quoted) en lugar de `meta.sql_name` (plain).
+  - `target_table` en preload arms (HasMany + BelongsToCompanion)
+    usa `qualified_sql_name()`; el format runtime `{table_lit}`
+    sin extra quotes + escape `replace('"', "\\\"")` para que
+    el embed funcione.
+- **src/evaluator.rs**:
+  - `SELECT ... FROM`, `INSERT INTO`, `UPDATE`, `DELETE FROM`,
+    aggregates: todos usan `state.meta.qualified_sql_name()`
+    (5 sitios refactorizados).
+- **editors/vscode/package.json**: 0.10.20 → 0.10.21.
+
+### Decisiones técnicas
+
+- **Sintaxis con `.` en string del `@table`**: minimal change vs
+  kwarg `@table("name", schema="...")`. Postgres usa la misma
+  convención (`schema.table`).
+- **`schema=None` = `public`**: backward compat 100% con código
+  pre-v0.10.21. Tables sin schema explícito se comportan
+  exactamente igual que antes.
+- **Already-quoted-qualified en el field `table` del QB**: el
+  preludio almacena `"public"."x"` ya quoteado y los `format!`
+  interpolan con `{}` directo. Más simple que un campo
+  `schema: Option<String>` paralelo + reconstruir en cada uso.
+- **Cross-schema FK references**: en MVP, el FK del `@belongs_to`
+  asume same-schema (la convención canonical "una table apunta
+  a otra del mismo módulo"). Cross-schema FK queda como deuda
+  menor si entra demanda.
+- **Cross-schema rename**: no soportado en MVP. `@renamed_from`
+  se interpreta dentro del schema actual de la table.
+
+### Tests
+
+- **0 unit tests nuevos** (existentes 60/60 cubren shape con
+  `schema: None` default; el path schema custom se valida vía
+  smoke E2E real).
+- **2633/2633 lib tests verde** sin regresiones.
+- **Smoke E2E real Postgres local validado bit-a-bit**:
+  - 2 `@table` mixed (`users` public + `analytics.events`):
+  - `db check` emite `CREATE SCHEMA IF NOT EXISTS "analytics";`
+    + 2 CREATE TABLE qualified correctamente.
+  - `db migrate` aplica todo OK.
+  - `db check` post-migrate → `✓ schema sincronizado`.
+  - ORM nativo: `User.insert(...)` (public) → id=1.
+    `Event.insert(...)` (analytics) → id=1. `User.all(...)`
+    + `Event.all(...)` SELECT contra `"analytics"."events"`
+    devuelve rows correctas.
+
+### Cierre formal Fase 10.6 — paquete migrations completo vs Alembic
+
+Las 4 features del Tier 2 del plan original están cerradas
+(v0.10.20 + v0.10.21). El stack `fitz db ...` ahora cubre:
+
+| Feature | Versión | Equivalente Alembic |
+|---|---|---|
+| Auto-generate diff desde código tipado | v0.10.16 | ✓ |
+| Apply pending + tracking idempotente | v0.10.16 | ✓ |
+| Defaults SQL `@db_default("expr")` | v0.10.16 | ✓ |
+| Down migrations + rollback | v0.10.17 | ✓ |
+| Renames seguros via `@renamed_from` | v0.10.17 | ✓ |
+| Drift check (CI bloqueante) | v0.10.18 | ✓ |
+| Stamping (adoptar DB legacy) | v0.10.18 | ✓ |
+| Data migrations en `.fitz` (Python-like) | v0.10.19 | ✓ |
+| History (audit log) | v0.10.20 | ✓ |
+| Offline SQL mode (DBA handoff) | v0.10.20 | ✓ |
+| Squash (compactar migrations viejas) | v0.10.20 | ✓ |
+| Schemas custom (multi-tenant) | v0.10.21 | ✓ |
+
+**Diferenciales que Alembic NO tiene**:
+- Cero deps externas (binario `fitz` solo vs `pip install
+  alembic + sqlalchemy + psycopg2`).
+- Schema desde código tipado del propio lenguaje (Alembic genera
+  desde SQLAlchemy models, otro layer).
+- Paridad bit-a-bit con el resto del stack (mismo driver en
+  `fitz run`, `fitz build`, `fitz db ...`).
+
+### Por qué importa
+
+Cierra el último item del Tier 2 del plan. Equipos pueden ahora
+modelar multi-tenant via PG schemas sin salir del lenguaje (cada
+tenant en su schema con `@table("tenant_X.users")`). El paquete
+completo de migrations queda al nivel funcional de Alembic con
+diferenciales reales (cero deps, paridad, schema desde el code).
 
 ## [v0.10.20] — 2026-05-30 — Fase 10.6.e.1+.2: history + offline SQL + squash
 

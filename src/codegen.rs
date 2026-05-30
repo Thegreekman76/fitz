@@ -6558,7 +6558,11 @@ pub(crate) fn __fitz_pg_to_bytes(v: &__FitzPgValue, col: &str) -> Result<Vec<u8>
 
 #[derive(Clone)]
 pub(crate) struct __FitzQueryBuilder<TData> {
-    /// Nombre SQL de la tabla (sin quotes — se quotea al emitir el SELECT).
+    /// v0.10.21 — Nombre SQL de la tabla ALREADY-QUOTED + qualified.\n\
+    /// Formato: `\\\"name\\\"` (default public) o `\\\"schema\\\".\\\"name\\\"`\n\
+    /// (schema custom). El SQL emit lo interpola con `{}` directo.\n\
+    /// Pre-v0.10.21 era `name` plano y se quoteaba al emit (`\\\"{}\\\"`),\n\
+    /// pero eso impedía schemas custom porque el quote no separa schema.
     table: String,
     /// Lista de columnas pre-emitidas (\"col1\", \"col2\", ...) — usado por
     /// `.all`/`.first` para construir el SELECT. `.count` ignora esto y
@@ -6659,7 +6663,7 @@ impl<TData> __FitzQueryBuilder<TData> {
     /// para forzar `LIMIT 1` sin tocar el `limit` que el user haya seteado.
     /// Paralelo a `build_select_sql` del evaluator.
     fn build_select_sql(&self, override_limit: Option<i64>) -> String {
-        let mut sql = format!(\"SELECT {} FROM \\\"{}\\\"\", self.cols, self.table);
+        let mut sql = format!(\"SELECT {} FROM {}\", self.cols, self.table);
         if let Some(w) = &self.where_sql {
             sql.push_str(\" WHERE \");
             sql.push_str(w);
@@ -6682,7 +6686,7 @@ impl<TData> __FitzQueryBuilder<TData> {
     /// ORDER BY / LIMIT / OFFSET / GROUP BY (último por simplicidad —
     /// el path GROUP BY de count llega con los agregados en 10.b.6).
     async fn count(self, conn: &__FitzDbConn) -> Result<i64, String> {
-        let mut sql = format!(\"SELECT COUNT(*) FROM \\\"{}\\\"\", self.table);
+        let mut sql = format!(\"SELECT COUNT(*) FROM {}\", self.table);
         if let Some(w) = &self.where_sql {
             sql.push_str(\" WHERE \");
             sql.push_str(w);
@@ -6723,7 +6727,7 @@ impl<TData> __FitzQueryBuilder<TData> {
         let where_sql_renum =
             __fitz_qb_renumber_placeholders(self.where_sql.as_deref().unwrap_or(\"\"), set_count);
         let sql = format!(
-            \"UPDATE \\\"{}\\\" SET {} WHERE {}\",
+            \"UPDATE {} SET {} WHERE {}\",
             self.table, set_clauses, where_sql_renum
         );
         set_args.extend(self.where_args);
@@ -6741,7 +6745,7 @@ impl<TData> __FitzQueryBuilder<TData> {
             );
         }
         let sql = format!(
-            \"DELETE FROM \\\"{}\\\" WHERE {}\",
+            \"DELETE FROM {} WHERE {}\",
             self.table,
             self.where_sql.as_deref().unwrap()
         );
@@ -6777,7 +6781,7 @@ impl<TData> __FitzQueryBuilder<TData> {
             ));
         }
         let mut sql = format!(
-            \"SELECT {} AS \\\"__agg\\\" FROM \\\"{}\\\"\",
+            \"SELECT {} AS \\\"__agg\\\" FROM {}\",
             agg_expr, self.table
         );
         if let Some(w) = &self.where_sql {
@@ -6988,7 +6992,7 @@ impl<TData> __FitzQueryBuilder<TData> {
             group_by_sql.push_str(&format!(\"\\\"{}\\\"\", sql_col));
         }
         let mut sql = format!(
-            \"SELECT {}, {} AS \\\"{}\\\" FROM \\\"{}\\\"\",
+            \"SELECT {}, {} AS \\\"{}\\\" FROM {}\",
             select_list, agg_expr, agg_name, self.table
         );
         if let Some(w) = &self.where_sql {
@@ -13507,7 +13511,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             cols.push_str(sql_col);
             cols.push('"');
         }
-        format!("SELECT {} FROM \"{}\"", cols, meta.sql_name)
+        format!("SELECT {} FROM {}", cols, meta.qualified_sql_name())
     }
 
     /// `Type.all(db)` — emite SELECT cols + deserialización de cada
@@ -13638,7 +13642,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             ));
         }
         let (meta, _fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
-        let sql = format!("SELECT COUNT(*) FROM \"{}\"", meta.sql_name);
+        let sql = format!("SELECT COUNT(*) FROM {}", meta.qualified_sql_name());
         let (db_code, _) = self.gen_expr(&args[0])?;
         let ret_ty = Type::Future(Box::new(Type::Result {
             ok: Box::new(Type::Int),
@@ -13827,13 +13831,14 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 field_pg_codes_no.push(pg_code);
             }
         }
+        let qualified = meta.qualified_sql_name();
         let sql_with = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
-            meta.sql_name, col_list_with, placeholders_with, returning_list
+            "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+            qualified, col_list_with, placeholders_with, returning_list
         );
         let sql_no = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
-            meta.sql_name, col_list_no, placeholders_no, returning_list
+            "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+            qualified, col_list_no, placeholders_no, returning_list
         );
 
         let (db_code, _) = self.gen_expr(&args[0])?;
@@ -13979,7 +13984,10 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         format!(
             "__FitzQueryBuilder::<{type_name}Data>::new({table}, {cols})",
             type_name = type_name,
-            table = rust_str_literal(&meta.sql_name),
+            // v0.10.21 — Already-quoted qualified form:
+            // `"users"` o `"public"."users"` — el preludio lo
+            // interpola con `{}` directo (sin extra quoting).
+            table = rust_str_literal(&meta.qualified_sql_name()),
             cols = rust_str_literal(&cols),
         )
     }
@@ -14939,7 +14947,10 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             let (target_meta, target_fields) =
                 self.orm_lookup_meta_and_fields(target_name, crate::ast::Span::ZERO)?;
             let target_data = format!("{}Data", target_name);
-            let target_table = &target_meta.sql_name;
+            // v0.10.21 — qualified ya-quoted (e.g. `\"users\"` o
+            // `\"public\".\"users\"`). El emit del SQL usa `{}`
+            // directo, NO `\\\"{}\\\"`.
+            let target_table = target_meta.qualified_sql_name();
             let cols = Self::orm_build_qb_cols(&target_meta, &target_fields);
             let fk_sql = target_meta
                 .columns
@@ -14960,7 +14971,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                     }}; \
                     if !__ids.is_empty() {{ \
                         let __placeholders = (1..=__ids.len()).map(|__i| format!(\"${{}}\", __i)).collect::<Vec<_>>().join(\", \"); \
-                        let __sql = format!(\"SELECT {cols_lit} FROM \\\"{table_lit}\\\" WHERE \\\"{fk_lit}\\\" IN ({{}})\", __placeholders); \
+                        let __sql = format!(\"SELECT {cols_lit} FROM {table_lit} WHERE \\\"{fk_lit}\\\" IN ({{}})\", __placeholders); \
                         match __fitz_db_query(&__conn_pl, __sql, __ids).await {{ \
                             Ok(__child_rows) => {{ \
                                 let __cg = __child_rows.lock().unwrap(); \
@@ -14989,7 +15000,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 name_lit = rust_str_literal(rel_name),
                 parent_pk = parent_pk,
                 cols_lit = cols.replace('"', "\\\""),
-                table_lit = target_table,
+                table_lit = target_table.replace('"', "\\\""),
                 fk_lit = fk_sql,
                 target_data = target_data,
                 fk_fitz = fk_fitz,
@@ -15034,7 +15045,8 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         let (target_meta, target_fields) =
             self.orm_lookup_meta_and_fields(target_name, crate::ast::Span::ZERO)?;
         let target_data = format!("{}Data", target_name);
-        let target_table = &target_meta.sql_name;
+        // v0.10.21 — qualified ya-quoted.
+        let target_table = target_meta.qualified_sql_name();
         let cols = Self::orm_build_qb_cols(&target_meta, &target_fields);
         // PK del target (la columna que matchea contra los FKs del
         // parent). Resolver sql_name override.
@@ -15062,7 +15074,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 }}; \
                 if !__ids.is_empty() {{ \
                     let __placeholders = (1..=__ids.len()).map(|__i| format!(\"${{}}\", __i)).collect::<Vec<_>>().join(\", \"); \
-                    let __sql = format!(\"SELECT {cols_lit} FROM \\\"{table_lit}\\\" WHERE \\\"{pk_lit}\\\" IN ({{}})\", __placeholders); \
+                    let __sql = format!(\"SELECT {cols_lit} FROM {table_lit} WHERE \\\"{pk_lit}\\\" IN ({{}})\", __placeholders); \
                     match __fitz_db_query(&__conn_pl, __sql, __ids).await {{ \
                         Ok(__target_rows) => {{ \
                             let __tg = __target_rows.lock().unwrap(); \
@@ -15090,7 +15102,7 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             }}, ",
             name_lit = rust_str_literal(companion_field),
             cols_lit = cols.replace('"', "\\\""),
-            table_lit = target_table,
+            table_lit = target_table.replace('"', "\\\""),
             pk_lit = target_pk_sql,
             target_data = target_data,
             fk_fitz = fk_fitz,

@@ -46,6 +46,22 @@ pub struct Table {
     /// poblado en el snapshot "target" (desde `schema_from_program`);
     /// `introspect_schema` lo deja en `None`.
     pub renamed_from: Option<String>,
+    /// v0.10.21 (10.6.e.3) — Schema Postgres custom. `None` =
+    /// `public` (default). Cuando `Some(s)`, el SQL emit usa
+    /// `"s"."name"` qualified everywhere.
+    pub schema: Option<String>,
+}
+
+impl Table {
+    /// v0.10.21 — Identidad cross-schema. Dos tables son la
+    /// misma sí y solo sí su `(schema, name)` matchea. `None`
+    /// schema se trata como `"public"` para comparación canónica
+    /// (matchea cualquier introspect que reporte explícitamente
+    /// `public`).
+    pub fn qualified_id(&self) -> (String, String) {
+        let s = self.schema.as_deref().unwrap_or("public");
+        (s.to_string(), self.name.clone())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,33 +109,71 @@ pub struct ForeignKey {
 /// `_fitz_migrations` que tracking del migrate).
 ///
 /// Política de exclusión:
-/// - `schemaname = 'public'` (default Postgres; configurable
-///   futura si entra demanda).
+/// - Schemas considerados: TODOS los user schemas (excluye
+///   `pg_catalog`, `information_schema`, `pg_toast`, `pg_temp_*`).
 /// - `table_type = 'BASE TABLE'` (skipea views).
 /// - Excluye explícitamente `_fitz_migrations`.
+///
+/// v0.10.21 (10.6.e.3) — Multi-schema: introspect iterar TODAS
+/// las user schemas, no solo `public`. Tables en schemas
+/// custom aparecen con `Table.schema = Some("schema_name")`;
+/// tables en `public` siguen con `schema = None` por
+/// convención (compat con código pre-v0.10.21).
 pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Schema> {
-    let table_names = list_user_tables(conn).await?;
-    let mut tables = Vec::with_capacity(table_names.len());
-    for name in &table_names {
-        let columns = introspect_columns(conn, name).await?;
-        let indexes = introspect_indexes(conn, name).await?;
-        let foreign_keys = introspect_foreign_keys(conn, name).await?;
+    let qualified = list_user_tables_qualified(conn).await?;
+    let mut tables = Vec::with_capacity(qualified.len());
+    for (schema, name) in &qualified {
+        let columns = introspect_columns(conn, schema, name).await?;
+        let indexes = introspect_indexes(conn, schema, name).await?;
+        let foreign_keys = introspect_foreign_keys(conn, schema, name).await?;
+        let schema_for_struct = if schema == "public" {
+            None
+        } else {
+            Some(schema.clone())
+        };
         tables.push(Table {
             name: name.clone(),
             columns,
             indexes,
             foreign_keys,
             renamed_from: None,
+            schema: schema_for_struct,
         });
     }
-    // Orden alfabético para snapshot determinístico (facilita
-    // tests + diffs reproducibles).
-    tables.sort_by(|a, b| a.name.cmp(&b.name));
+    // Orden determinístico: schema primero, después name. `public`
+    // tables (schema=None → "public" para sort) primero por orden
+    // alfabético del nombre canónico.
+    tables.sort_by_key(|a| a.qualified_id());
     Ok(Schema { tables })
 }
 
+/// v0.10.21 — Lista user-tables con su schema. Devuelve `(schema,
+/// name)` tuples ordenados. Excluye system schemas y
+/// `_fitz_migrations`.
+async fn list_user_tables_qualified(
+    conn: &std::sync::Arc<DbConnHandle>,
+) -> DbResult<Vec<(String, String)>> {
+    let sql = "SELECT table_schema, table_name FROM information_schema.tables \
+               WHERE table_schema NOT IN ('pg_catalog', 'information_schema') \
+                 AND table_schema NOT LIKE 'pg_toast%' \
+                 AND table_schema NOT LIKE 'pg_temp_%' \
+                 AND table_type = 'BASE TABLE' \
+                 AND table_name <> '_fitz_migrations' \
+               ORDER BY table_schema, table_name";
+    let qr = conn.query(sql, &[]).await?;
+    let mut out = Vec::with_capacity(qr.rows.len());
+    for row in &qr.rows {
+        let schema = extract_string(row, "table_schema")?;
+        let name = extract_string(row, "table_name")?;
+        out.push((schema, name));
+    }
+    Ok(out)
+}
+
 /// Lista las user-tables del schema `public`. Excluye system
-/// tables + `_fitz_migrations`.
+/// tables + `_fitz_migrations`. Mantenido por compat — preferí
+/// `list_user_tables_qualified` para multi-schema.
+#[allow(dead_code)]
 async fn list_user_tables(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Vec<String>> {
     let sql = "SELECT table_name FROM information_schema.tables \
                WHERE table_schema = 'public' \
@@ -139,15 +193,22 @@ async fn list_user_tables(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Vec<S
 /// `information_schema.columns`).
 async fn introspect_columns(
     conn: &std::sync::Arc<DbConnHandle>,
+    schema: &str,
     table: &str,
 ) -> DbResult<Vec<Column>> {
     // Cols base: nombre + tipo + nullable + default.
     let sql_cols = "SELECT column_name, data_type, udt_name, is_nullable, column_default \
                     FROM information_schema.columns \
-                    WHERE table_schema = 'public' AND table_name = $1 \
+                    WHERE table_schema = $1 AND table_name = $2 \
                     ORDER BY ordinal_position";
     let qr = conn
-        .query(sql_cols, &[PgValue::Text(table.to_string())])
+        .query(
+            sql_cols,
+            &[
+                PgValue::Text(schema.to_string()),
+                PgValue::Text(table.to_string()),
+            ],
+        )
         .await?;
     let mut columns: Vec<Column> = Vec::with_capacity(qr.rows.len());
     for row in &qr.rows {
@@ -165,14 +226,15 @@ async fn introspect_columns(
             renamed_from: None,
         });
     }
-    // PK: cruce con pg_index para marcar `is_primary`.
+    // PK: cruce con pg_index para marcar `is_primary`. La
+    // `regclass` cast resuelve `schema.table` correctamente.
     let sql_pk = "SELECT a.attname AS column_name \
                   FROM pg_index i \
                   JOIN pg_attribute a ON a.attrelid = i.indrelid \
                                      AND a.attnum = ANY(i.indkey) \
                   WHERE i.indrelid = ($1::regclass) AND i.indisprimary";
     let pk_qr = conn
-        .query(sql_pk, &[PgValue::Text(format!("public.{}", table))])
+        .query(sql_pk, &[PgValue::Text(format!("{schema}.{table}"))])
         .await?;
     let pk_cols: std::collections::HashSet<String> = pk_qr
         .rows
@@ -202,6 +264,7 @@ async fn introspect_columns(
 /// nuestra abstracción, no como Index separado).
 async fn introspect_indexes(
     conn: &std::sync::Arc<DbConnHandle>,
+    schema: &str,
     table: &str,
 ) -> DbResult<Vec<Index>> {
     let sql = "SELECT \
@@ -219,7 +282,7 @@ async fn introspect_indexes(
                WHERE i.indrelid = ($1::regclass) \
                  AND i.indisprimary = false";
     let qr = conn
-        .query(sql, &[PgValue::Text(format!("public.{}", table))])
+        .query(sql, &[PgValue::Text(format!("{schema}.{table}"))])
         .await?;
     let mut indexes = Vec::with_capacity(qr.rows.len());
     for row in &qr.rows {
@@ -242,6 +305,7 @@ async fn introspect_indexes(
 /// regla `ON DELETE` declarada.
 async fn introspect_foreign_keys(
     conn: &std::sync::Arc<DbConnHandle>,
+    schema: &str,
     table: &str,
 ) -> DbResult<Vec<ForeignKey>> {
     let sql = "SELECT \
@@ -261,10 +325,18 @@ async fn introspect_foreign_keys(
                    ON rc.constraint_name = tc.constraint_name \
                   AND rc.constraint_schema = tc.constraint_schema \
                WHERE tc.constraint_type = 'FOREIGN KEY' \
-                 AND tc.table_schema = 'public' \
-                 AND tc.table_name = $1 \
+                 AND tc.table_schema = $1 \
+                 AND tc.table_name = $2 \
                ORDER BY tc.constraint_name, kcu.ordinal_position";
-    let qr = conn.query(sql, &[PgValue::Text(table.to_string())]).await?;
+    let qr = conn
+        .query(
+            sql,
+            &[
+                PgValue::Text(schema.to_string()),
+                PgValue::Text(table.to_string()),
+            ],
+        )
+        .await?;
     let mut fks = Vec::with_capacity(qr.rows.len());
     for row in &qr.rows {
         let name = extract_string(row, "name")?;
@@ -347,7 +419,10 @@ pub fn schema_from_program(
         let table = build_table_from_type(name, ast_fields, meta, type_env)?;
         tables.push(table);
     }
-    tables.sort_by(|a, b| a.name.cmp(&b.name));
+    // v0.10.21 — Orden por (schema, name) canónico para que el
+    // diff sea determinístico cross-schema (`public.users` ANTES
+    // que `analytics.events` lex).
+    tables.sort_by_key(|a| a.qualified_id());
     Ok(Schema { tables })
 }
 
@@ -474,6 +549,7 @@ fn build_table_from_type(
         indexes,
         foreign_keys,
         renamed_from: meta.renamed_from.clone(),
+        schema: meta.schema.clone(),
     })
 }
 
@@ -552,25 +628,60 @@ fn fitz_typeexpr_to_sql_type(
 /// El diff las emite en orden seguro para ejecución secuencial:
 /// CREATE TABLE → ADD/DROP/ALTER COLUMN → CREATE/DROP INDEX →
 /// DROP FK → ADD FK → DROP TABLE.
+/// v0.10.21 (10.6.e.3) — Referencia a una tabla con schema
+/// optativo. `schema = None` significa `public` (default Postgres).
+/// El `quote_qualified` emite `"schema"."name"` o `"name"` según.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TableRef {
+    pub schema: Option<String>,
+    pub name: String,
+}
+
+impl TableRef {
+    /// Constructor para tables en `public` (compat v0.10.0-v0.10.20).
+    pub fn public(name: impl Into<String>) -> Self {
+        Self {
+            schema: None,
+            name: name.into(),
+        }
+    }
+
+    /// Constructor para tables en schema custom.
+    pub fn qualified(schema: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            schema: Some(schema.into()),
+            name: name.into(),
+        }
+    }
+
+    /// Construye TableRef desde un `Table` (read schema field).
+    pub fn from_table(t: &Table) -> Self {
+        Self {
+            schema: t.schema.clone(),
+            name: t.name.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     CreateTable(Table),
-    DropTable(String),
+    DropTable(TableRef),
     AddColumn {
-        table: String,
+        table: TableRef,
         column: Column,
     },
     DropColumn {
-        table: String,
+        table: TableRef,
         column: String,
     },
     AlterColumnType {
-        table: String,
+        table: TableRef,
         column: String,
         new_type: String,
     },
     AlterColumnNullable {
-        table: String,
+        table: TableRef,
         column: String,
         nullable: bool,
     },
@@ -580,41 +691,54 @@ pub enum Change {
     /// case-insensitive sobre función calls SQL (`now()` matchea
     /// `NOW()` y `Now()`).
     AlterColumnDefault {
-        table: String,
+        table: TableRef,
         column: String,
         new_default: Option<String>,
     },
     CreateIndex {
-        table: String,
+        table: TableRef,
         index: Index,
     },
     DropIndex {
-        table: String,
+        /// Schema del index (= schema de la tabla a la que pertenece).
+        /// `None` = public. Postgres `DROP INDEX` quotes con schema
+        /// si non-public.
+        schema: Option<String>,
         index_name: String,
     },
     AddForeignKey {
-        table: String,
+        table: TableRef,
         fk: ForeignKey,
     },
     DropForeignKey {
-        table: String,
+        table: TableRef,
         fk_name: String,
     },
     /// v0.10.17 (10.6.b.2) — Rename de tabla preservando datos.
     /// Emitido cuando el target Table tiene `renamed_from = Some(old)`
     /// y existe en current con ese nombre. Va PRIMERO en el output
     /// (antes de cualquier ALTER de columns) para que las acciones
-    /// siguientes operen sobre el nombre nuevo.
+    /// siguientes operen sobre el nombre nuevo. El rename ocurre
+    /// dentro del mismo schema (no se soporta cross-schema rename
+    /// en MVP).
     RenameTable {
+        schema: Option<String>,
         old_name: String,
         new_name: String,
+    },
+    /// v0.10.21 (10.6.e.3) — `CREATE SCHEMA IF NOT EXISTS "name"`.
+    /// Emitido cuando el target referencia un schema custom que NO
+    /// existe en current. Va PRIMERO en el output (antes de
+    /// CREATE TABLE en ese schema), idempotente vía `IF NOT EXISTS`.
+    CreateSchema {
+        name: String,
     },
     /// v0.10.17 (10.6.b.2) — Rename de column preservando datos.
     /// Emitido cuando un target Column tiene `renamed_from = Some(old)`
     /// y existe en current.columns con ese nombre. Va inmediatamente
     /// después de RenameTable y antes de ADD/DROP COLUMN.
     RenameColumn {
-        table: String,
+        table: TableRef,
         old_name: String,
         new_name: String,
     },
@@ -656,23 +780,47 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     let current = apply_renames_from_target(current, target, &mut changes);
     let current = &current;
 
-    let current_table_names: std::collections::HashSet<&str> =
-        current.tables.iter().map(|t| t.name.as_str()).collect();
-    let target_table_names: std::collections::HashSet<&str> =
-        target.tables.iter().map(|t| t.name.as_str()).collect();
+    // v0.10.21 — Identidad de tabla = (schema, name). Las tables
+    // del current se comparan por qualified_id contra las del
+    // target, no por name plano.
+    let current_ids: std::collections::HashSet<(String, String)> =
+        current.tables.iter().map(|t| t.qualified_id()).collect();
+    let target_ids: std::collections::HashSet<(String, String)> =
+        target.tables.iter().map(|t| t.qualified_id()).collect();
+
+    // --- 0.5. CREATE SCHEMA IF NOT EXISTS para schemas custom del
+    // target que no existen en current. Va PRIMERO (antes de CREATE
+    // TABLE en ese schema). Idempotente.
+    let current_schemas: std::collections::HashSet<String> = current
+        .tables
+        .iter()
+        .filter_map(|t| t.schema.clone())
+        .collect();
+    let mut new_schemas: Vec<String> = target
+        .tables
+        .iter()
+        .filter_map(|t| t.schema.clone())
+        .filter(|s| !current_schemas.contains(s))
+        .collect();
+    new_schemas.sort();
+    new_schemas.dedup();
+    for s in &new_schemas {
+        changes.push(Change::CreateSchema { name: s.clone() });
+    }
 
     // --- 1. CREATE TABLE (target tables no presentes en current).
     let mut create_tables: Vec<&Table> = target
         .tables
         .iter()
-        .filter(|t| !current_table_names.contains(t.name.as_str()))
+        .filter(|t| !current_ids.contains(&t.qualified_id()))
         .collect();
-    create_tables.sort_by(|a, b| a.name.cmp(&b.name));
+    create_tables.sort_by_key(|a| a.qualified_id());
     for t in &create_tables {
         changes.push(Change::CreateTable((*t).clone()));
     }
 
-    // --- 2. ALTER de tablas en AMBOS schemas.
+    // --- 2. ALTER de tablas en AMBOS (cross-schema match por
+    // qualified_id).
     let mut tables_to_alter: Vec<(&Table, &Table)> = current
         .tables
         .iter()
@@ -680,11 +828,11 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
             target
                 .tables
                 .iter()
-                .find(|t| t.name == c.name)
+                .find(|t| t.qualified_id() == c.qualified_id())
                 .map(|t| (c, t))
         })
         .collect();
-    tables_to_alter.sort_by(|a, b| a.0.name.cmp(&b.0.name));
+    tables_to_alter.sort_by_key(|a| a.0.qualified_id());
 
     // 2.1. Per-tabla: columns + indexes + FKs.
     for (current_t, target_t) in &tables_to_alter {
@@ -707,22 +855,19 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         to_drop.sort_by(|a, b| a.name.cmp(&b.name));
         for fk in to_drop {
             changes.push(Change::DropForeignKey {
-                table: current_t.name.clone(),
+                table: TableRef::from_table(current_t),
                 fk_name: fk.name.clone(),
             });
         }
     }
 
     // --- 4. ADD FK (después de tener todas las tables y cols).
-    // Incluye FKs de CreateTable también: si la tabla es nueva,
-    // emit FKs como ADD separado (en lugar de inline en el
-    // CREATE TABLE) — eso destraba ciclos entre tablas nuevas.
     for t in &create_tables {
         let mut fks: Vec<&ForeignKey> = t.foreign_keys.iter().collect();
         fks.sort_by(|a, b| a.name.cmp(&b.name));
         for fk in fks {
             changes.push(Change::AddForeignKey {
-                table: t.name.clone(),
+                table: TableRef::from_table(t),
                 fk: fk.clone(),
             });
         }
@@ -741,7 +886,7 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         to_add.sort_by(|a, b| a.name.cmp(&b.name));
         for fk in to_add {
             changes.push(Change::AddForeignKey {
-                table: target_t.name.clone(),
+                table: TableRef::from_table(target_t),
                 fk: fk.clone(),
             });
         }
@@ -751,11 +896,11 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     let mut drop_tables: Vec<&Table> = current
         .tables
         .iter()
-        .filter(|t| !target_table_names.contains(t.name.as_str()))
+        .filter(|t| !target_ids.contains(&t.qualified_id()))
         .collect();
-    drop_tables.sort_by(|a, b| a.name.cmp(&b.name));
+    drop_tables.sort_by_key(|a| a.qualified_id());
     for t in drop_tables {
-        changes.push(Change::DropTable(t.name.clone()));
+        changes.push(Change::DropTable(TableRef::from_table(t)));
     }
 
     changes
@@ -784,33 +929,36 @@ fn apply_renames_from_target(
     target: &Schema,
     changes: &mut Vec<Change>,
 ) -> Schema {
-    let mut renamed_tables: std::collections::HashMap<String, String> =
+    // v0.10.21 — Rename ahora es schema-aware. La identidad de
+    // tabla es `(schema, name)`. Renames cross-schema NO se
+    // soportan en MVP — el `renamed_from` se interpreta dentro
+    // del schema actual de la table target.
+    let mut renamed_tables: std::collections::HashMap<(Option<String>, String), String> =
         std::collections::HashMap::new();
-    // 1. Detectar renames de tabla.
-    let current_table_names: std::collections::HashSet<&str> =
-        current.tables.iter().map(|t| t.name.as_str()).collect();
-    let mut table_renames: Vec<(String, String)> = Vec::new();
+    let current_qual: std::collections::HashSet<(Option<String>, String)> = current
+        .tables
+        .iter()
+        .map(|t| (t.schema.clone(), t.name.clone()))
+        .collect();
+    let mut table_renames: Vec<(Option<String>, String, String)> = Vec::new();
     for t in &target.tables {
         if let Some(old) = &t.renamed_from {
-            // Activa rename si:
-            // - old existe en current
-            // - new NO existe en current (sin colisión)
-            // - old != new (rename real, no no-op)
-            if old != &t.name
-                && current_table_names.contains(old.as_str())
-                && !current_table_names.contains(t.name.as_str())
+            let old_key = (t.schema.clone(), old.clone());
+            let new_key = (t.schema.clone(), t.name.clone());
+            if old != &t.name && current_qual.contains(&old_key) && !current_qual.contains(&new_key)
             {
-                table_renames.push((old.clone(), t.name.clone()));
+                table_renames.push((t.schema.clone(), old.clone(), t.name.clone()));
             }
         }
     }
-    table_renames.sort_by(|a, b| a.0.cmp(&b.0));
-    for (old, new) in &table_renames {
+    table_renames.sort_by_key(|a| (a.0.clone(), a.1.clone()));
+    for (schema, old, new) in &table_renames {
         changes.push(Change::RenameTable {
+            schema: schema.clone(),
             old_name: old.clone(),
             new_name: new.clone(),
         });
-        renamed_tables.insert(old.clone(), new.clone());
+        renamed_tables.insert((schema.clone(), old.clone()), new.clone());
     }
 
     // 2. Construir current renombrado (a nivel tabla).
@@ -819,19 +967,21 @@ fn apply_renames_from_target(
         .iter()
         .map(|t| {
             let mut t = t.clone();
-            if let Some(new_name) = renamed_tables.get(&t.name) {
+            let key = (t.schema.clone(), t.name.clone());
+            if let Some(new_name) = renamed_tables.get(&key) {
                 t.name = new_name.clone();
             }
             t
         })
         .collect();
 
-    // 3. Detectar renames de column adentro de tablas que existen
-    // en ambos (post-rename). Por cada target column con
-    // `renamed_from`, si existe en current el column "old" y NO
-    // existe el "new", emitir RenameColumn.
+    // 3. Detectar renames de column dentro de tablas que existen
+    // en ambos schemas (post-rename, match por qualified_id).
     for target_t in &target.tables {
-        let Some(current_t) = new_tables.iter_mut().find(|t| t.name == target_t.name) else {
+        let Some(current_t) = new_tables
+            .iter_mut()
+            .find(|t| t.qualified_id() == target_t.qualified_id())
+        else {
             continue;
         };
         let current_col_names: std::collections::HashSet<String> =
@@ -850,7 +1000,7 @@ fn apply_renames_from_target(
         col_renames.sort_by(|a, b| a.0.cmp(&b.0));
         for (old, new) in &col_renames {
             changes.push(Change::RenameColumn {
-                table: target_t.name.clone(),
+                table: TableRef::from_table(target_t),
                 old_name: old.clone(),
                 new_name: new.clone(),
             });
@@ -870,6 +1020,7 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         current.columns.iter().map(|c| c.name.as_str()).collect();
     let target_col_names: std::collections::HashSet<&str> =
         target.columns.iter().map(|c| c.name.as_str()).collect();
+    let table_ref = TableRef::from_table(target);
 
     // Drop columns no en target.
     let mut to_drop: Vec<&Column> = current
@@ -880,7 +1031,7 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     to_drop.sort_by(|a, b| a.name.cmp(&b.name));
     for c in to_drop {
         changes.push(Change::DropColumn {
-            table: current.name.clone(),
+            table: table_ref.clone(),
             column: c.name.clone(),
         });
     }
@@ -894,7 +1045,7 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     to_add.sort_by(|a, b| a.name.cmp(&b.name));
     for c in to_add {
         changes.push(Change::AddColumn {
-            table: target.name.clone(),
+            table: table_ref.clone(),
             column: c.clone(),
         });
     }
@@ -910,29 +1061,23 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
             let target_type = normalize_sql_type_for_diff(&tc.sql_type);
             if current_type != target_type {
                 changes.push(Change::AlterColumnType {
-                    table: target.name.clone(),
+                    table: table_ref.clone(),
                     column: tc.name.clone(),
                     new_type: tc.sql_type.clone(),
                 });
             }
             if cc.nullable != tc.nullable {
                 changes.push(Change::AlterColumnNullable {
-                    table: target.name.clone(),
+                    table: table_ref.clone(),
                     column: tc.name.clone(),
                     nullable: tc.nullable,
                 });
             }
-            // v0.10.16 — Default diff con normalización tolerante.
-            // Postgres devuelve `now()` lowercase con casts (e.g.
-            // `'foo'::text`); el user típicamente pasa `NOW()` o
-            // `'foo'`. Comparamos versiones normalizadas para evitar
-            // falsos positivos. Si el user remueve `@db_default(...)`,
-            // emitimos `DROP DEFAULT`; si agrega, `SET DEFAULT`.
             let current_norm = cc.default.as_deref().map(normalize_default_for_diff);
             let target_norm = tc.default.as_deref().map(normalize_default_for_diff);
             if current_norm != target_norm {
                 changes.push(Change::AlterColumnDefault {
-                    table: target.name.clone(),
+                    table: table_ref.clone(),
                     column: tc.name.clone(),
                     new_default: tc.default.clone(),
                 });
@@ -984,6 +1129,7 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         current.indexes.iter().map(|i| i.name.as_str()).collect();
     let target_idx_names: std::collections::HashSet<&str> =
         target.indexes.iter().map(|i| i.name.as_str()).collect();
+    let table_ref = TableRef::from_table(target);
 
     // Drop indexes no en target.
     let mut to_drop: Vec<&Index> = current
@@ -994,7 +1140,7 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     to_drop.sort_by(|a, b| a.name.cmp(&b.name));
     for i in to_drop {
         changes.push(Change::DropIndex {
-            table: current.name.clone(),
+            schema: current.schema.clone(),
             index_name: i.name.clone(),
         });
     }
@@ -1008,7 +1154,7 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     to_add.sort_by(|a, b| a.name.cmp(&b.name));
     for i in to_add {
         changes.push(Change::CreateIndex {
-            table: target.name.clone(),
+            table: table_ref.clone(),
             index: i.clone(),
         });
     }
@@ -1053,7 +1199,7 @@ pub fn changes_to_sql(changes: &[Change]) -> String {
 fn change_to_sql(change: &Change) -> String {
     match change {
         Change::CreateTable(t) => create_table_sql(t),
-        Change::DropTable(name) => format!("DROP TABLE {};", quote_ident(name)),
+        Change::DropTable(tr) => format!("DROP TABLE {};", quote_qualified(tr)),
         Change::AddColumn { table, column } => {
             let default = column
                 .default
@@ -1062,7 +1208,7 @@ fn change_to_sql(change: &Change) -> String {
                 .unwrap_or_default();
             format!(
                 "ALTER TABLE {} ADD COLUMN {} {}{}{};",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(&column.name),
                 column.sql_type,
                 default,
@@ -1072,7 +1218,7 @@ fn change_to_sql(change: &Change) -> String {
         Change::DropColumn { table, column } => {
             format!(
                 "ALTER TABLE {} DROP COLUMN {};",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(column),
             )
         }
@@ -1083,7 +1229,7 @@ fn change_to_sql(change: &Change) -> String {
         } => {
             format!(
                 "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(column),
                 new_type,
             )
@@ -1095,13 +1241,13 @@ fn change_to_sql(change: &Change) -> String {
         } => match new_default {
             Some(expr) => format!(
                 "ALTER TABLE {} ALTER COLUMN {} SET DEFAULT {};",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(column),
                 expr,
             ),
             None => format!(
                 "ALTER TABLE {} ALTER COLUMN {} DROP DEFAULT;",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(column),
             ),
         },
@@ -1113,13 +1259,13 @@ fn change_to_sql(change: &Change) -> String {
             if *nullable {
                 format!(
                     "ALTER TABLE {} ALTER COLUMN {} DROP NOT NULL;",
-                    quote_ident(table),
+                    quote_qualified(table),
                     quote_ident(column),
                 )
             } else {
                 format!(
                     "ALTER TABLE {} ALTER COLUMN {} SET NOT NULL;",
-                    quote_ident(table),
+                    quote_qualified(table),
                     quote_ident(column),
                 )
             }
@@ -1131,16 +1277,18 @@ fn change_to_sql(change: &Change) -> String {
                 "CREATE {}INDEX {} ON {} ({});",
                 unique,
                 quote_ident(&index.name),
-                quote_ident(table),
+                quote_qualified(table),
                 cols.join(", "),
             )
         }
-        Change::DropIndex {
-            table: _,
-            index_name,
-        } => {
-            // Postgres DROP INDEX no requiere prefijo de tabla.
-            format!("DROP INDEX {};", quote_ident(index_name))
+        Change::DropIndex { schema, index_name } => {
+            // Postgres DROP INDEX requiere el schema si non-public
+            // (sino busca en search_path y puede no encontrarlo).
+            let qualified = match schema {
+                Some(s) => format!("{}.{}", quote_ident(s), quote_ident(index_name)),
+                None => quote_ident(index_name),
+            };
+            format!("DROP INDEX {};", qualified)
         }
         Change::AddForeignKey { table, fk } => {
             let on_delete = fk
@@ -1148,9 +1296,13 @@ fn change_to_sql(change: &Change) -> String {
                 .as_deref()
                 .map(|action| format!(" ON DELETE {}", action))
                 .unwrap_or_default();
+            // v0.10.21 — references_table puede ser schema-qualified
+            // si el target ORM declaró su `@table("schema.name")`.
+            // Hoy lo guardamos como bare name + asumimos same-schema;
+            // cross-schema FK queda como deuda menor.
             format!(
                 "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){};",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(&fk.name),
                 quote_ident(&fk.column),
                 quote_ident(&fk.references_table),
@@ -1161,14 +1313,24 @@ fn change_to_sql(change: &Change) -> String {
         Change::DropForeignKey { table, fk_name } => {
             format!(
                 "ALTER TABLE {} DROP CONSTRAINT {};",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(fk_name),
             )
         }
-        Change::RenameTable { old_name, new_name } => {
+        Change::RenameTable {
+            schema,
+            old_name,
+            new_name,
+        } => {
+            let old = TableRef {
+                schema: schema.clone(),
+                name: old_name.clone(),
+            };
+            // El nuevo name va SIN schema prefix (RENAME TO espera
+            // solo el name; el schema se preserva).
             format!(
                 "ALTER TABLE {} RENAME TO {};",
-                quote_ident(old_name),
+                quote_qualified(&old),
                 quote_ident(new_name),
             )
         }
@@ -1179,10 +1341,13 @@ fn change_to_sql(change: &Change) -> String {
         } => {
             format!(
                 "ALTER TABLE {} RENAME COLUMN {} TO {};",
-                quote_ident(table),
+                quote_qualified(table),
                 quote_ident(old_name),
                 quote_ident(new_name),
             )
+        }
+        Change::CreateSchema { name } => {
+            format!("CREATE SCHEMA IF NOT EXISTS {};", quote_ident(name))
         }
     }
 }
@@ -1215,7 +1380,7 @@ fn create_table_sql(t: &Table) -> String {
     // separados para destrabar ciclos entre tablas nuevas.
     format!(
         "CREATE TABLE {} (\n{}\n);",
-        quote_ident(&t.name),
+        quote_qualified(&TableRef::from_table(t)),
         lines.join(",\n"),
     )
 }
@@ -1229,6 +1394,17 @@ fn quote_ident(name: &str) -> String {
     // Escapar `"` adentro del nombre (raro pero posible).
     let escaped = name.replace('"', "\"\"");
     format!("\"{}\"", escaped)
+}
+
+/// v0.10.21 (10.6.e.3) — Quote PG-style con schema qualifier
+/// opcional. `schema = None` → `"name"`; `schema = Some(s)` →
+/// `"s"."name"`. El SQL emit de Change usa siempre este helper
+/// para que las tables en schemas custom funcionen.
+fn quote_qualified(t: &TableRef) -> String {
+    match &t.schema {
+        Some(s) => format!("{}.{}", quote_ident(s), quote_ident(&t.name)),
+        None => quote_ident(&t.name),
+    }
 }
 
 // =================================================================
@@ -1974,6 +2150,7 @@ mod tests {
             indexes: vec![],
             foreign_keys: vec![],
             renamed_from: None,
+            schema: None,
         }
     }
 
@@ -2014,7 +2191,7 @@ mod tests {
         let changes = diff_schemas(&current, &target);
         assert_eq!(changes.len(), 1);
         match &changes[0] {
-            Change::DropTable(name) => assert_eq!(name, "users"),
+            Change::DropTable(tr) => assert_eq!(tr.name, "users"),
             _ => panic!("se esperaba DropTable, got: {:?}", changes[0]),
         }
     }
@@ -2033,7 +2210,9 @@ mod tests {
         let added: Vec<_> = changes
             .iter()
             .filter_map(|c| match c {
-                Change::AddColumn { table, column } => Some((table.as_str(), column.name.as_str())),
+                Change::AddColumn { table, column } => {
+                    Some((table.name.as_str(), column.name.as_str()))
+                }
                 _ => None,
             })
             .collect();
@@ -2054,7 +2233,9 @@ mod tests {
         let dropped: Vec<_> = changes
             .iter()
             .filter_map(|c| match c {
-                Change::DropColumn { table, column } => Some((table.as_str(), column.as_str())),
+                Change::DropColumn { table, column } => {
+                    Some((table.name.as_str(), column.as_str()))
+                }
                 _ => None,
             })
             .collect();
@@ -2085,7 +2266,7 @@ mod tests {
                     table,
                     column,
                     new_type,
-                } => Some((table.as_str(), column.as_str(), new_type.as_str())),
+                } => Some((table.name.as_str(), column.as_str(), new_type.as_str())),
                 _ => None,
             })
             .collect();
@@ -2116,7 +2297,7 @@ mod tests {
                     table,
                     column,
                     nullable,
-                } => Some((table.as_str(), column.as_str(), *nullable)),
+                } => Some((table.name.as_str(), column.as_str(), *nullable)),
                 _ => None,
             })
             .collect();
@@ -2142,7 +2323,7 @@ mod tests {
             .iter()
             .filter_map(|c| match c {
                 Change::CreateIndex { table, index } => {
-                    Some((table.as_str(), index.name.as_str(), index.unique))
+                    Some((table.name.as_str(), index.name.as_str(), index.unique))
                 }
                 _ => None,
             })
@@ -2168,13 +2349,14 @@ mod tests {
         let dropped: Vec<_> = changes
             .iter()
             .filter_map(|c| match c {
-                Change::DropIndex { table, index_name } => {
-                    Some((table.as_str(), index_name.as_str()))
-                }
+                Change::DropIndex {
+                    schema: _,
+                    index_name,
+                } => Some(index_name.as_str()),
                 _ => None,
             })
             .collect();
-        assert_eq!(dropped, vec![("users", "users_email_idx")]);
+        assert_eq!(dropped, vec!["users_email_idx"]);
     }
 
     #[test]
@@ -2201,7 +2383,7 @@ mod tests {
             .iter()
             .filter_map(|c| match c {
                 Change::AddForeignKey { table, fk } => Some((
-                    table.as_str(),
+                    table.name.as_str(),
                     fk.column.as_str(),
                     fk.references_table.as_str(),
                 )),
@@ -2226,6 +2408,7 @@ mod tests {
                     indexes: vec![],
                     foreign_keys: vec![],
                     renamed_from: None,
+                    schema: None,
                 },
             ],
         };
@@ -2243,6 +2426,7 @@ mod tests {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -2285,7 +2469,7 @@ mod tests {
 
     #[test]
     fn changes_to_sql_drop_table_emits_ddl() {
-        let changes = vec![Change::DropTable("legacy".to_string())];
+        let changes = vec![Change::DropTable(TableRef::public("legacy".to_string()))];
         let sql = changes_to_sql(&changes);
         assert!(sql.contains("DROP TABLE"), "esperaba DROP TABLE: {sql}");
         assert!(sql.contains("\"legacy\""), "esperaba nombre quoted: {sql}");
@@ -2294,7 +2478,7 @@ mod tests {
     #[test]
     fn changes_to_sql_add_column_emits_alter_add() {
         let changes = vec![Change::AddColumn {
-            table: "users".to_string(),
+            table: TableRef::public("users"),
             column: col("name", "text", true, false),
         }];
         let sql = changes_to_sql(&changes);
@@ -2306,7 +2490,7 @@ mod tests {
     #[test]
     fn changes_to_sql_drop_column_emits_alter_drop() {
         let changes = vec![Change::DropColumn {
-            table: "users".to_string(),
+            table: TableRef::public("users"),
             column: "old".to_string(),
         }];
         let sql = changes_to_sql(&changes);
@@ -2318,7 +2502,7 @@ mod tests {
     #[test]
     fn changes_to_sql_alter_column_type_emits_alter_type() {
         let changes = vec![Change::AlterColumnType {
-            table: "users".to_string(),
+            table: TableRef::public("users"),
             column: "email".to_string(),
             new_type: "varchar".to_string(),
         }];
@@ -2416,7 +2600,9 @@ type Plain {
         let added: Vec<_> = changes
             .iter()
             .filter_map(|c| match c {
-                Change::AddColumn { table, column } => Some((table.as_str(), column.name.as_str())),
+                Change::AddColumn { table, column } => {
+                    Some((table.name.as_str(), column.name.as_str()))
+                }
                 _ => None,
             })
             .collect();
@@ -2449,6 +2635,7 @@ type Plain {
             indexes: vec![],
             foreign_keys: vec![],
             renamed_from: None,
+            schema: None,
         };
         let sql = changes_to_sql(&[Change::CreateTable(t)]);
         assert!(
@@ -2460,7 +2647,7 @@ type Plain {
     #[test]
     fn add_column_with_default_emits_default_clause() {
         let change = Change::AddColumn {
-            table: "events".to_string(),
+            table: TableRef::public("events"),
             column: col_with_default("created_at", "timestamp with time zone", Some("NOW()")),
         };
         let sql = changes_to_sql(&[change]);
@@ -2474,7 +2661,7 @@ type Plain {
     #[test]
     fn alter_column_default_set_emits_set_default() {
         let change = Change::AlterColumnDefault {
-            table: "events".to_string(),
+            table: TableRef::public("events"),
             column: "created_at".to_string(),
             new_default: Some("NOW()".to_string()),
         };
@@ -2485,7 +2672,7 @@ type Plain {
     #[test]
     fn alter_column_default_drop_emits_drop_default() {
         let change = Change::AlterColumnDefault {
-            table: "events".to_string(),
+            table: TableRef::public("events"),
             column: "created_at".to_string(),
             new_default: None,
         };
@@ -2505,6 +2692,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -2517,6 +2705,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2546,6 +2735,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -2558,6 +2748,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2591,6 +2782,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -2604,6 +2796,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2624,6 +2817,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -2633,6 +2827,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2847,6 +3042,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -2856,6 +3052,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: Some("old_users".to_string()),
+                schema: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2863,9 +3060,11 @@ type Plain {
         let renames: Vec<_> = changes
             .iter()
             .filter_map(|c| match c {
-                Change::RenameTable { old_name, new_name } => {
-                    Some((old_name.as_str(), new_name.as_str()))
-                }
+                Change::RenameTable {
+                    schema: None,
+                    old_name,
+                    new_name,
+                } => Some((old_name.as_str(), new_name.as_str())),
                 _ => None,
             })
             .collect();
@@ -2913,7 +3112,7 @@ type Plain {
                     table,
                     old_name,
                     new_name,
-                } => Some((table.as_str(), old_name.as_str(), new_name.as_str())),
+                } => Some((table.name.as_str(), old_name.as_str(), new_name.as_str())),
                 _ => None,
             })
             .collect();
@@ -2930,6 +3129,7 @@ type Plain {
     #[test]
     fn rename_table_sql_emite_alter_rename_to() {
         let change = Change::RenameTable {
+            schema: None,
             old_name: "old_users".to_string(),
             new_name: "users".to_string(),
         };
@@ -2943,7 +3143,7 @@ type Plain {
     #[test]
     fn rename_column_sql_emite_alter_rename_column() {
         let change = Change::RenameColumn {
-            table: "users".to_string(),
+            table: TableRef::public("users"),
             old_name: "name".to_string(),
             new_name: "full_name".to_string(),
         };
@@ -2967,6 +3167,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -2976,6 +3177,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: Some("old_users".to_string()),
+                schema: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3000,6 +3202,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: None,
+                schema: None,
             }],
         };
         let target = Schema {
@@ -3009,6 +3212,7 @@ type Plain {
                 indexes: vec![],
                 foreign_keys: vec![],
                 renamed_from: Some("old_x".to_string()),
+                schema: None,
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3031,7 +3235,7 @@ type Plain {
         for c in &changes {
             if let Change::AlterColumnNullable { table, .. } = c {
                 assert_eq!(
-                    table, "x",
+                    table.name, "x",
                     "AlterColumnNullable debe referenciar el nombre POST-rename"
                 );
             }

@@ -8991,16 +8991,39 @@ release v0.10.17):
   Tracking inteligente: si alguna del range applied, borra todas
   + stampea `from`. Flag `--no-tracking` para CI-only. CERRADA
   v0.10.20.
-- 🟡 **Schemas custom (10.6.e.3) DIFERIDA a v0.10.21**: la
-  pre-eval reveló cross-cutting con ORM más grande de lo
-  estimado (~45 sitios entre evaluator/codegen/migrations que
-  usan `meta.sql_name`). Merece commit + tag propio para que el
-  smoke amplio cubra ORM downstream. Sub-fase aparte:
-  - Sintaxis: `@table("schema.name")` o kwarg `schema=`.
-  - `TableMetadata.schema: Option<String>` + parser.
-  - Refactor introspect (iterar schemas que aparecen en target).
-  - Refactor SQL emit del ORM (~40 sitios) para qualified names.
-  - Tests E2E con `CREATE SCHEMA` prep.
+- ✅ **Schemas custom (10.6.e.3) CERRADA v0.10.21 (2026-05-30)**:
+  - Sintaxis `@table("schema.name")` (split por `.` en el
+    parser del decorator). Validación: ambos segmentos no
+    vacíos, sin whitespace, máximo 1 `.`.
+  - `TableMetadata.schema: Option<String>` poblado por el
+    checker; `None` = `public` (compat con código pre-v0.10.21).
+  - `TableRef { schema, name }` nuevo en migrations: identidad
+    cross-schema por `(schema, name)`. Diff por qualified_id.
+  - Introspect schemas-aware: `list_user_tables_qualified`
+    iterar TODAS las user schemas (excluye `pg_catalog`,
+    `information_schema`, `pg_toast*`, `pg_temp_*`, `_fitz_migrations`).
+    `introspect_columns`/`indexes`/`foreign_keys` parametrizados
+    por schema.
+  - Nuevo `Change::CreateSchema { name }` emitido PRIMERO en el
+    diff (antes de CREATE TABLE en ese schema). Idempotente vía
+    `IF NOT EXISTS`.
+  - SQL emit qualified everywhere via helper `quote_qualified` +
+    `TableMetadata::qualified_sql_name()` (`"schema"."name"`
+    o `"name"`).
+  - `__FitzQueryBuilder.table` (codegen preludio) ahora
+    almacena la forma ya-quoteada (`"users"` o `"public"."x"`);
+    los `format!` SQL del preludio cambian de `\"{}\"` a `{}`.
+    ~7 sitios en preludio + ~6 en codegen + ~5 en evaluator.
+  - Smoke E2E real Postgres local validado bit-a-bit:
+    - `db check` con `analytics.events` + `users` (mixed):
+      emite `CREATE SCHEMA IF NOT EXISTS "analytics";` +
+      `CREATE TABLE "analytics"."events"` + `CREATE TABLE "users"`.
+    - `db migrate` aplica todo correctamente.
+    - `db check` post-migrate → `✓ schema sincronizado`.
+    - ORM nativo `User.insert(conn, ...)` (public) Y
+      `Event.insert(conn, ...)` (analytics) ambos retornan id=N.
+    - `Event.all(conn)` SELECT contra `"analytics"."events"`
+      devuelve rows correctamente.
 - **Composite primary keys / CHECK constraints**: deuda del ORM
   desde v0.10.0 que migrations las usaría. Out of scope estricto
   de migrations pero entran acá si aterrizan en el ORM.
@@ -9040,9 +9063,9 @@ release v0.10.17):
 3. ✅ **10.6.d** (data migrations en `.fitz`) — v0.10.19 CERRADA.
 4. ✅ **10.6.e.1+.2** (history + offline SQL + squash) — v0.10.20
    CERRADA.
-5. **10.6.e.3** (schemas custom) — v0.10.21, próxima. Diferida
-   de 10.6.e original porque la pre-eval reveló cross-cutting
-   con ORM más grande que el estimate.
+5. ✅ **10.6.e.3** (schemas custom) — v0.10.21 CERRADA. **Cierre
+   formal de Fase 10.6 entera**: el paquete migrations completo
+   vs Alembic.
 5. Tier 3 y out-of-scope quedan en deuda explícita; NO bloquean
    declarar "paquete completo de migraciones".
 

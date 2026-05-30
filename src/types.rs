@@ -377,7 +377,18 @@ pub struct TableMetadata {
     /// en lowercase (`User` → `user`). Pluralización automática
     /// queda como deuda menor — el user puede especificar
     /// explícitamente.
+    ///
+    /// v0.10.21 (10.6.e.3) — Si el arg del decorator contiene
+    /// `.` (ej: `@table("analytics.events")`), el parser splitea
+    /// en `(schema, name)`: `sql_name = "events"`, `schema =
+    /// Some("analytics")`. Si NO contiene `.`, `schema = None`
+    /// (= `public` por convención Postgres).
     pub sql_name: String,
+    /// v0.10.21 (10.6.e.3) — Schema Postgres custom donde vive la
+    /// tabla. `None` = `public` (default). El SQL emit del ORM y
+    /// las migrations usan qualified names (`"schema"."name"`)
+    /// solo cuando `schema.is_some()`.
+    pub schema: Option<String>,
     /// Nombre Fitz del field marcado con `@primary`. `None` si
     /// no se marcó ningún field — el ORM en 10.3.b debe rechazar
     /// queries sobre tipos sin primary key declarada (por ahora;
@@ -402,6 +413,25 @@ pub struct TableMetadata {
     /// `@renamed_from("old") @table("new") type T { ... }`
     /// (TBD parsing — solo kwarg en `@table` por simplicidad MVP).
     pub renamed_from: Option<String>,
+}
+
+impl TableMetadata {
+    /// v0.10.21 (10.6.e.3) — Nombre SQL quoteado con schema
+    /// qualifier opcional. Tables en `public` (schema=None) →
+    /// `"name"`. Tables en schema custom → `"schema"."name"`.
+    /// Helper canónico para que TODOS los SQL emit del ORM
+    /// (SELECT/INSERT/UPDATE/DELETE en evaluator y codegen) usen
+    /// la misma convención y soporten schemas custom uniformemente.
+    pub fn qualified_sql_name(&self) -> String {
+        match &self.schema {
+            Some(s) => format!(
+                "\"{}\".\"{}\"",
+                s.replace('"', "\"\""),
+                self.sql_name.replace('"', "\"\"")
+            ),
+            None => format!("\"{}\"", self.sql_name.replace('"', "\"\"")),
+        }
+    }
 }
 
 /// Fase 10.3.a — Configuración por columna del ORM. Se popula
@@ -1428,6 +1458,7 @@ pub fn process_table_decorators(
 
     // ¿Hay @table sobre el type?
     let mut sql_name: Option<String> = None;
+    let mut table_schema: Option<String> = None;
     let mut has_table = false;
     let mut table_renamed_from: Option<String> = None;
     for d in type_decorators {
@@ -1508,7 +1539,24 @@ pub fn process_table_decorators(
                     sql_name = Some(type_name.to_lowercase());
                 } else if d.args.len() == 1 {
                     match &d.args[0] {
-                        Expr::Str(s, _) => sql_name = Some(s.clone()),
+                        Expr::Str(s, _) => {
+                            // v0.10.21 (10.6.e.3) — Split por `.`:
+                            // `"foo.bar"` → schema="foo", name="bar".
+                            // `"bar"` → schema=None, name="bar".
+                            // Validamos cada segmento no-vacío.
+                            match split_schema_qualified_table(s) {
+                                Ok((schema, name)) => {
+                                    table_schema = schema;
+                                    sql_name = Some(name);
+                                }
+                                Err(msg) => errors.push(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    type_span.line,
+                                    type_span.column,
+                                    msg,
+                                )),
+                            }
+                        }
                         other => errors.push(FitzError::new(
                             ErrorKind::TypeError,
                             type_span.line,
@@ -1888,11 +1936,49 @@ pub fn process_table_decorators(
 
     Ok(Some(TableMetadata {
         sql_name: sql_name.unwrap(), // garantizado por has_table check
+        schema: table_schema,
         primary_field,
         columns,
         relations,
         renamed_from: table_renamed_from,
     }))
+}
+
+/// v0.10.21 (10.6.e.3) — Split por `.` para `@table("schema.name")`.
+///
+/// - `"users"` → `(None, "users")` — schema default `public`.
+/// - `"analytics.events"` → `(Some("analytics"), "events")`.
+/// - `"a.b.c"` o `".name"` o `"schema."` o `""` → error.
+///
+/// El name y el schema deben ser identifiers SQL razonables: no
+/// vacíos, sin whitespace internal. NO validamos chars exóticos
+/// porque el `quote_ident` en migrations los protege con `"..."`.
+fn split_schema_qualified_table(s: &str) -> Result<(Option<String>, String), String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("`@table` no acepta string vacío".to_string());
+    }
+    if trimmed.contains(char::is_whitespace) {
+        return Err(format!(
+            "`@table(\"{trimmed}\")` contiene whitespace — nombres SQL no deben tener espacios"
+        ));
+    }
+    let parts: Vec<&str> = trimmed.split('.').collect();
+    match parts.len() {
+        1 => Ok((None, parts[0].to_string())),
+        2 => {
+            if parts[0].is_empty() || parts[1].is_empty() {
+                Err(format!(
+                    "`@table(\"{trimmed}\")` tiene segmento vacío: el formato `schema.name` requiere ambos no-vacíos"
+                ))
+            } else {
+                Ok((Some(parts[0].to_string()), parts[1].to_string()))
+            }
+        }
+        _ => Err(format!(
+            "`@table(\"{trimmed}\")` tiene más de un `.` — formato esperado: `\"name\"` o `\"schema.name\"`"
+        )),
+    }
 }
 
 /// Deuda residual #2 (v0.10.5) — registra automáticamente los

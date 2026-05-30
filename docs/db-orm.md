@@ -310,6 +310,25 @@ Convención: nombre de tabla en lowercase + plural snake_case
 Fitz puede ser cualquier identificador válido (típicamente
 PascalCase singular).
 
+**Schemas custom (v0.10.21)**: `@table("schema.name")` mapea a
+una tabla en un schema Postgres no-`public`. Útil para
+multi-tenant via schemas, separación dev/test, o módulos
+aislados.
+
+```fitz
+@table("analytics.events") type Event {
+    @primary id: Int = 0
+    name: Str
+    @db_default("NOW()") at: Str = ""
+}
+```
+
+`fitz db diff` emite `CREATE SCHEMA IF NOT EXISTS "analytics";`
++ `CREATE TABLE "analytics"."events" (...)` automáticamente. El
+ORM nativo (SELECT/INSERT/UPDATE/DELETE) usa el qualified name
+en TODAS las queries. Sin `.` en el arg, schema=`public`
+(comportamiento default — compat con código pre-v0.10.21).
+
 ### `@primary`
 
 Sobre un field. Debe haber **exactamente uno** por `type` con

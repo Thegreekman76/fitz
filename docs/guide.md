@@ -11601,6 +11601,16 @@ originales a `migrations/squashed/`, actualiza tracking) —
 útil para acelerar bootstrap de devs nuevos en repos con 100+
 migrations.
 
+**Schemas custom** (v0.10.21): `@table("schema.name")` mapea
+una tabla a un schema Postgres no-`public` (multi-tenant via
+schemas, separación dev/test, módulos aislados, etc.). El diff
+emite `CREATE SCHEMA IF NOT EXISTS` automático antes del
+`CREATE TABLE`. El ORM nativo (SELECT/INSERT/UPDATE/DELETE) usa
+el qualified name `"schema"."name"` en TODAS las queries. Sin
+`.` en el arg de `@table`, schema = `public` (compat con
+código pre-v0.10.21). **Cierra la Fase 10.6 — `fitz db ...`
+paquete completo equivalente a Alembic.**
+
 **Limitaciones del MVP**: `ALTER COLUMN ... TYPE` sin USING (cambios
 de tipo incompatibles fallan — editá la migration para agregar
 `USING (col::int)`); solo schema `public`. Detalle completo +

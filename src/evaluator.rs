@@ -10981,7 +10981,11 @@ fn build_select_sql(state: &QueryBuilderState, override_limit: Option<i64>) -> S
         col_list.push_str(sql_col);
         col_list.push('"');
     }
-    let mut sql = format!("SELECT {} FROM \"{}\"", col_list, state.meta.sql_name);
+    let mut sql = format!(
+        "SELECT {} FROM {}",
+        col_list,
+        state.meta.qualified_sql_name()
+    );
     if let Some(w) = &state.where_sql {
         sql.push_str(" WHERE ");
         sql.push_str(w);
@@ -11566,12 +11570,12 @@ fn build_aggregate_future(
     let where_args = state.where_args.clone();
     let where_sql = state.where_sql.clone();
     let group_by = state.group_by_clauses.clone();
-    let sql_name = state.meta.sql_name.clone();
+    let qualified_name = state.meta.qualified_sql_name();
 
     Box::pin(async move {
         if group_by.is_empty() {
             // Path scalar: igual al pre-10.5.f2.
-            let mut sql = format!("SELECT {} AS \"__agg\" FROM \"{}\"", agg_expr, sql_name);
+            let mut sql = format!("SELECT {} AS \"__agg\" FROM {}", agg_expr, qualified_name);
             if let Some(w) = &where_sql {
                 sql.push_str(" WHERE ");
                 sql.push_str(w);
@@ -11608,8 +11612,8 @@ fn build_aggregate_future(
                 group_by_sql.push_str(&format!("\"{}\"", sql_col));
             }
             let mut sql = format!(
-                "SELECT {}, {} AS \"{}\" FROM \"{}\"",
-                select_list, agg_expr, agg_name, sql_name
+                "SELECT {}, {} AS \"{}\" FROM {}",
+                select_list, agg_expr, agg_name, qualified_name
             );
             if let Some(w) = &where_sql {
                 sql.push_str(" WHERE ");
@@ -11930,8 +11934,11 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
         returning_list.push('"');
     }
     let sql = format!(
-        "INSERT INTO \"{}\" ({}) VALUES ({}) RETURNING {}",
-        state.meta.sql_name, col_list, placeholders, returning_list
+        "INSERT INTO {} ({}) VALUES ({}) RETURNING {}",
+        state.meta.qualified_sql_name(),
+        col_list,
+        placeholders,
+        returning_list
     );
 
     let fields_owned = state.fields.clone();
@@ -12156,8 +12163,10 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
     pg_args.extend(state.where_args.iter().cloned());
 
     let sql = format!(
-        "UPDATE \"{}\" SET {} WHERE {}",
-        state.meta.sql_name, set_clauses, where_sql_renum
+        "UPDATE {} SET {} WHERE {}",
+        state.meta.qualified_sql_name(),
+        set_clauses,
+        where_sql_renum
     );
 
     let fut: crate::value::FitzFuture = Box::pin(async move {
@@ -12190,8 +12199,8 @@ fn orm_qb_delete(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
         ));
     }
     let sql = format!(
-        "DELETE FROM \"{}\" WHERE {}",
-        state.meta.sql_name,
+        "DELETE FROM {} WHERE {}",
+        state.meta.qualified_sql_name(),
         state.where_sql.as_deref().unwrap()
     );
     let where_args = state.where_args.clone();
@@ -26364,6 +26373,7 @@ let r = match n {
             columns: std::collections::HashMap::new(),
             relations: std::collections::HashMap::new(),
             renamed_from: None,
+            schema: None,
         };
         (fields, meta)
     }
@@ -26853,6 +26863,7 @@ let r = match n {
                 columns: std::collections::HashMap::new(),
                 relations: std::collections::HashMap::new(),
                 renamed_from: None,
+                schema: None,
             },
             where_sql: None,
             where_args: Vec::new(),
