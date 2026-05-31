@@ -233,6 +233,11 @@ pub fn generate_project(
     let uses_fitz_value =
         program_uses_fitz_value(program) || loader.modules.iter().any(|m| m.uses_fitz_value);
 
+    // v0.10.26 — Date/DateTime/Uuid en el programa o cualquier módulo
+    // cargado. Dispara deps chrono+uuid + emisión de helpers preludio.
+    let uses_date_or_uuid =
+        program_uses_date_or_uuid(program) || loader.modules.iter().any(|m| m.uses_date_or_uuid);
+
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
@@ -252,6 +257,7 @@ pub fn generate_project(
             uses_jobs,
             uses_db,
             uses_fitz_value,
+            uses_date_or_uuid,
         ),
         main_rs,
         mod_files: {
@@ -765,6 +771,154 @@ fn program_uses_auth(program: &Program) -> bool {
 /// el helper; si no es DbConn, cae al dispatch normal. False
 /// positive aceptable — la única penalty es que se emite preludio
 /// no usado (eliminado por LTO).
+/// v0.10.26 (codegen Date/DateTime/Uuid) — detector análogo a
+/// `program_uses_db` que dispara cuando el programa usa los 3
+/// tipos built-in nuevos. Trigger conditions:
+///   - `Ident("Date" | "DateTime" | "Uuid")` aparece en cualquier
+///     expresión (acceso al Module para constructors).
+///   - Una anotación de tipo (`TypeExpr::Named`) o un wrapper
+///     (`Nullable`, `List<T>`, etc.) contiene uno de los 3 nombres.
+///
+/// Cuando es `true`, codegen sube chrono+uuid al Cargo.toml +
+/// emite el preludio con helpers de Date/DateTime/Uuid.
+fn program_uses_date_or_uuid(program: &Program) -> bool {
+    use crate::ast::{StrPart, TypeExpr};
+
+    fn type_uses(t: &TypeExpr) -> bool {
+        match t {
+            TypeExpr::Named(name) => matches!(name.as_str(), "Date" | "DateTime" | "Uuid"),
+            TypeExpr::Nullable(inner) => type_uses(inner),
+            TypeExpr::Generic { args, .. } => args.iter().any(type_uses),
+            TypeExpr::Function { params, ret } => params.iter().any(type_uses) || type_uses(ret),
+            TypeExpr::Tuple(elems) => elems.iter().any(type_uses),
+        }
+    }
+
+    fn expr_uses(e: &Expr) -> bool {
+        match e {
+            Expr::Ident(name, _) => {
+                matches!(name.as_str(), "Date" | "DateTime" | "Uuid")
+            }
+            Expr::Call { callee, args, .. } => expr_uses(callee) || args.iter().any(expr_uses),
+            Expr::BinOp { left, right, .. } => expr_uses(left) || expr_uses(right),
+            Expr::UnaryOp { operand, .. } => expr_uses(operand),
+            Expr::Field { object, .. } => expr_uses(object),
+            Expr::Index { object, index, .. } => expr_uses(object) || expr_uses(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses(object)
+                    || start.as_ref().is_some_and(|s| expr_uses(s))
+                    || end.as_ref().is_some_and(|x| expr_uses(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses(start) || expr_uses(end),
+            Expr::List(items, _) => items.iter().any(expr_uses),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses(expr)
+                    || expr_uses(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses(key)
+                    || expr_uses(value)
+                    || expr_uses(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses(f))
+            }
+            Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses(k) || expr_uses(v)),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses(v)),
+            Expr::Tuple(items, _) => items.iter().any(expr_uses),
+            Expr::TupleField { tuple, .. } => expr_uses(tuple),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses(condition)
+                    || then.iter().any(stmt_uses)
+                    || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Lit(_) => false,
+                StrPart::Expr(inner, _) => expr_uses(inner),
+            }),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses),
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses(inner),
+            Expr::NamedArg { value, .. } => expr_uses(value),
+            _ => false,
+        }
+    }
+
+    fn stmt_uses(s: &Stmt) -> bool {
+        match s {
+            Stmt::Expr(e, _) => expr_uses(e),
+            Stmt::Assign { value, type_, .. } => {
+                expr_uses(value) || type_.as_ref().is_some_and(type_uses)
+            }
+            Stmt::Return(e, _) => expr_uses(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses(status) || body.as_ref().is_some_and(expr_uses)
+            }
+            Stmt::FnDef {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
+                params
+                    .iter()
+                    .any(|p| p.type_.as_ref().is_some_and(type_uses))
+                    || return_type.as_ref().is_some_and(type_uses)
+                    || body.iter().any(stmt_uses)
+            }
+            Stmt::TypeDef {
+                fields, methods, ..
+            } => {
+                fields.iter().any(|f| type_uses(&f.type_))
+                    || methods.iter().any(|m| {
+                        m.params
+                            .iter()
+                            .any(|p| p.type_.as_ref().is_some_and(type_uses))
+                            || m.return_type.as_ref().is_some_and(type_uses)
+                            || m.body.iter().any(stmt_uses)
+                    })
+            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses(condition) || body.iter().any(stmt_uses),
+            Stmt::For { iter, body, .. } => expr_uses(iter) || body.iter().any(stmt_uses),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses),
+            Stmt::Break(..) | Stmt::Continue(..) | Stmt::Error(_) => false,
+            Stmt::Import { .. } | Stmt::FromImport { .. } => false,
+            Stmt::Destructure { value, .. } => expr_uses(value),
+        }
+    }
+
+    program.iter().any(stmt_uses)
+}
+
 fn program_uses_db(program: &Program) -> bool {
     use crate::ast::StrPart;
     fn expr_uses_db(e: &Expr) -> bool {
@@ -2039,7 +2193,7 @@ fn sanitize_crate_name(raw: &str) -> String {
 /// Cargo.toml para el project generado. Si `has_http` es true,
 /// suma axum + tokio + serde + serde_json (necesarios para 5b.6).
 /// Si no, queda sin `[dependencies]` y la compilación es rápida.
-#[allow(clippy::too_many_arguments)] // 9 flags semánticos uno-por-feature
+#[allow(clippy::too_many_arguments)] // 10 flags semánticos uno-por-feature
 fn cargo_toml_for(
     stem: &str,
     has_http: bool,
@@ -2050,6 +2204,7 @@ fn cargo_toml_for(
     uses_jobs: bool,
     uses_db: bool,
     uses_fitz_value: bool,
+    uses_date_or_uuid: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -2129,8 +2284,13 @@ fn cargo_toml_for(
     } else {
         ""
     };
-    let needs_deps_section =
-        has_http || uses_async || uses_python || uses_auth || uses_jobs || uses_db;
+    let needs_deps_section = has_http
+        || uses_async
+        || uses_python
+        || uses_auth
+        || uses_jobs
+        || uses_db
+        || uses_date_or_uuid;
     if !needs_deps_section {
         return header;
     }
@@ -2154,6 +2314,22 @@ fn cargo_toml_for(
          chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n"
     } else {
         ""
+    };
+    // v0.10.26 (codegen Date/DateTime/Uuid) — deps de chrono/uuid
+    // cuando el programa usa esos tipos built-in. `chrono` ya está
+    // si `uses_jobs = true` (cron); evitamos duplicar. `uuid` siempre
+    // se suma cuando `uses_date_or_uuid` (no la pulla nadie más).
+    let date_uuid_lines = if uses_date_or_uuid {
+        let mut s = String::new();
+        if !uses_jobs {
+            s.push_str(
+                "chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n",
+            );
+        }
+        s.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
+        s
+    } else {
+        String::new()
     };
     // Fase 10.1.c — crypto deps del driver Postgres puro: `sha2`
     // (StoredKey hash), `hmac` (HMAC-SHA-256 para SCRAM + PBKDF2),
@@ -2242,8 +2418,15 @@ fn cargo_toml_for(
         ""
     };
     format!(
-        "{}\n[dependencies]\n{}{}{}{}{}{}",
-        header, http_lines, tokio_line, pyo3_line, auth_lines_final, jobs_lines, db_lines
+        "{}\n[dependencies]\n{}{}{}{}{}{}{}",
+        header,
+        http_lines,
+        tokio_line,
+        pyo3_line,
+        auth_lines_final,
+        jobs_lines,
+        db_lines,
+        date_uuid_lines
     )
 }
 
@@ -2340,6 +2523,11 @@ struct LoadedModule {
     /// emit_helpers_for_imported_types) — necesario cuando los
     /// handlers HTTP viven en módulos pero main solo orquesta.
     has_http: bool,
+    /// v0.10.26 — `program_uses_date_or_uuid(module_program)`. El
+    /// main lo OR-ea con su propio flag para subir chrono/uuid al
+    /// Cargo.toml + emitir el preludio Date/DateTime/Uuid. Necesario
+    /// cuando el `type` con field `Date` vive en un módulo importado.
+    uses_date_or_uuid: bool,
     /// Fase 8.7.1 transitiva — imports Python que el módulo declaró
     /// (`from python import math`, `import python.os.path`, etc.).
     /// El codegen del módulo emite sus propios statics + getters
@@ -2730,6 +2918,7 @@ impl ModuleLoader {
         // W11 (v0.10.7) — flags transitivos del módulo (uses_fitz_value, uses_db, has_http).
         let module_uses_fitz_value = program_uses_fitz_value(&module_program);
         let module_uses_db = program_uses_db(&module_program);
+        let module_uses_date_or_uuid = program_uses_date_or_uuid(&module_program);
         let module_has_http = has_http_routes(&module_program);
         // W12 (v0.10.8) — detectar `@auth_provider` declarado EN este
         // módulo. Si el módulo lo tiene, exponemos
@@ -2801,6 +2990,7 @@ impl ModuleLoader {
             uses_auth: module_uses_auth,
             uses_fitz_value: module_uses_fitz_value,
             uses_db: module_uses_db,
+            uses_date_or_uuid: module_uses_date_or_uuid,
             has_http: module_has_http,
             python_imports: module_python_imports,
             auth_provider_fn: module_auth_provider_fn,
@@ -3913,6 +4103,9 @@ fn generate_main_rs(
             .modules
             .iter()
             .any(|m| !m.table_metadata.is_empty() || m.uses_db);
+    // v0.10.26 — Date/DateTime/Uuid transitivo (paralelo a uses_db).
+    let uses_date_or_uuid =
+        program_uses_date_or_uuid(program) || loader.modules.iter().any(|m| m.uses_date_or_uuid);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -3931,6 +4124,7 @@ fn generate_main_rs(
     ctx.uses_ws = uses_ws;
     ctx.uses_jobs = uses_jobs;
     ctx.uses_db = uses_db;
+    ctx.uses_date_or_uuid = uses_date_or_uuid;
     // 10.8.7 (v0.10.8) — pre-scan del builtin `ws_broadcast(endpoint, msg)`
     // en el main. Setear ANTES de emit_prelude para que
     // `emit_http_runtime_prelude` emita el helper
@@ -4314,6 +4508,11 @@ fn emit_main_rs_body(
     // `__IntoPgValue` + helpers async para connect/query/exec/close.
     // Solo se emite si el programa usa `db.*`.
     ctx.emit_db_prelude();
+    // v0.10.26 — preludio Date/DateTime/Uuid + DB. Helpers de coerción
+    // `__fitz_pg_to_date/datetime/uuid` + `__IntoPgValue` impls. Solo
+    // se emite cuando uses_date_or_uuid && uses_db; sin esto el code
+    // referencia chrono/uuid que no están en el Cargo.toml.
+    ctx.emit_date_uuid_db_prelude();
     // Fase 8.7.2: bindings Python globales (static + getter) emitidos
     // al top-level del crate para que cualquier fn los pueda referenciar.
     let py_imports = std::mem::take(&mut ctx.python_imports_ordered);
@@ -4968,6 +5167,11 @@ struct CodegenCtx<'a> {
     /// + preludio `__FitzDbConn`/`__FitzPgValue`/`__IntoPgValue`
     /// + helpers async `__fitz_db_*`.
     uses_db: bool,
+    /// v0.10.26: `true` si el programa usa Date/DateTime/Uuid.
+    /// Habilita emisión del preludio HTTP+JSON para los 3 tipos y
+    /// del preludio DB driver con `__IntoPgValue`/`__FromFitzDbRow`
+    /// branches. Cargo.toml suma chrono+uuid cuando es true.
+    uses_date_or_uuid: bool,
     /// Fase 9.w.3.c: info de cada cron job pre-recolectada. Cada entry
     /// tiene el nombre Rust de la fn target, el cron expression Str,
     /// y un flag `is_async`. `gen_main`/`gen_http_main` lo usan para
@@ -5176,6 +5380,7 @@ impl<'a> CodegenCtx<'a> {
             uses_ws_broadcast: false,
             uses_jobs: false,
             uses_db: false,
+            uses_date_or_uuid: false,
             cron_jobs_info: Vec::new(),
             ws_heartbeat_secs: 30,
             python_bindings: HashMap::new(),
@@ -6393,7 +6598,6 @@ impl<'a> __IntoPgValue for &'a str {
 impl __IntoPgValue for Vec<u8> {
     fn into_pg(self) -> __FitzPgValue { __FitzPgValue::Bytes(self) }
 }
-
 /// `db.connect(url) -> Future<Result<DbConn>>`. Mapea el `DbError`
 /// del runtime a `String` para que se desempaque idéntico a otros
 /// `Result<T, String>` Fitz (paralelo a `Result<T, String>` de
@@ -7054,6 +7258,129 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
 ",
             );
         }
+    }
+
+    /// v0.10.26 — Preludio Date/DateTime/Uuid + DB integration. Emite
+    /// los `impl __IntoPgValue for chrono::*/uuid::Uuid` (param
+    /// marshaling) y los helpers `__fitz_pg_to_date/datetime/uuid` +
+    /// normalizador timestamptz (row reading). Solo cuando AMBOS
+    /// `uses_date_or_uuid` y `uses_db` están activos: sin DB los
+    /// __IntoPgValue impls no se usan; sin Date/Uuid no hace falta
+    /// pagar el peso de chrono/uuid en el binario.
+    fn emit_date_uuid_db_prelude(&mut self) {
+        if !(self.uses_date_or_uuid && self.uses_db) {
+            return;
+        }
+        self.emit(
+            "\
+// --- v0.10.26: Date/DateTime/Uuid + DB integration (driver wire) ---
+
+impl __IntoPgValue for chrono::NaiveDate {
+    fn into_pg(self) -> __FitzPgValue {
+        __FitzPgValue::Text(self.format(\"%Y-%m-%d\").to_string())
+    }
+}
+impl __IntoPgValue for chrono::DateTime<chrono::Utc> {
+    fn into_pg(self) -> __FitzPgValue {
+        __FitzPgValue::Text(self.format(\"%Y-%m-%dT%H:%M:%S%.6fZ\").to_string())
+    }
+}
+impl __IntoPgValue for uuid::Uuid {
+    fn into_pg(self) -> __FitzPgValue {
+        __FitzPgValue::Text(self.to_string())
+    }
+}
+
+/// Coerción __FitzPgValue -> chrono::NaiveDate. Postgres emite date
+/// como text \"YYYY-MM-DD\" en el wire.
+pub(crate) fn __fitz_pg_to_date(
+    v: &__FitzPgValue,
+    col: &str,
+) -> Result<chrono::NaiveDate, String> {
+    match v {
+        __FitzPgValue::Text(s) => chrono::NaiveDate::parse_from_str(s, \"%Y-%m-%d\")
+            .map_err(|e| format!(\"columna `{}`: text `{}` no parsea a Date: {}\", col, s, e)),
+        __FitzPgValue::Null => Err(format!(
+            \"columna `{}` es NULL pero el field no es nullable\",
+            col
+        )),
+        other => Err(format!(
+            \"columna `{}`: PgValue {:?} no coerce a Date\",
+            col, other
+        )),
+    }
+}
+
+pub(crate) fn __fitz_pg_to_datetime(
+    v: &__FitzPgValue,
+    col: &str,
+) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    match v {
+        __FitzPgValue::Text(s) => {
+            let normalized = __fitz_pg_normalize_timestamptz(s);
+            chrono::DateTime::parse_from_rfc3339(&normalized)
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .map_err(|e| {
+                    format!(\"columna `{}`: text `{}` no parsea a DateTime: {}\", col, s, e)
+                })
+        }
+        __FitzPgValue::Null => Err(format!(
+            \"columna `{}` es NULL pero el field no es nullable\",
+            col
+        )),
+        other => Err(format!(
+            \"columna `{}`: PgValue {:?} no coerce a DateTime\",
+            col, other
+        )),
+    }
+}
+
+pub(crate) fn __fitz_pg_to_uuid(v: &__FitzPgValue, col: &str) -> Result<uuid::Uuid, String> {
+    match v {
+        __FitzPgValue::Text(s) => uuid::Uuid::parse_str(s)
+            .map_err(|e| format!(\"columna `{}`: text `{}` no parsea a Uuid: {}\", col, s, e)),
+        __FitzPgValue::Null => Err(format!(
+            \"columna `{}` es NULL pero el field no es nullable\",
+            col
+        )),
+        other => Err(format!(
+            \"columna `{}`: PgValue {:?} no coerce a Uuid\",
+            col, other
+        )),
+    }
+}
+
+/// Normaliza el text Postgres timestamptz (`YYYY-MM-DD HH:MM:SS[.f]±TZ`)
+/// a RFC 3339 (espacio -> T, offset variable a ±HH:MM o Z).
+fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
+    let normalized = s.replacen(' ', \"T\", 1);
+    let bytes = normalized.as_bytes();
+    let t_idx = normalized.find('T').unwrap_or(0);
+    let mut last_sign = None;
+    for (i, &b) in bytes.iter().enumerate().skip(t_idx + 1) {
+        if b == b'+' || b == b'-' {
+            last_sign = Some(i);
+        }
+    }
+    let Some(sign_idx) = last_sign else {
+        return if normalized.ends_with('Z') {
+            normalized
+        } else {
+            format!(\"{}Z\", normalized)
+        };
+    };
+    let offset = &normalized[sign_idx..];
+    let body = &normalized[..sign_idx];
+    let normalized_offset = match offset.len() {
+        3 => format!(\"{}:00\", offset),
+        5 if !offset.contains(':') => format!(\"{}:{}\", &offset[..3], &offset[3..]),
+        _ => offset.to_string(),
+    };
+    format!(\"{}{}\", body, normalized_offset)
+}
+
+",
+        );
     }
 
     /// Fase 8.7.1 transitiva — emite las `use crate::__fitz_py_*` que
@@ -10489,19 +10816,18 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         return Ok((code, ty));
                     }
                 }
-                // v0.10.24 — Date/DateTime/Uuid son tipos built-in
-                // que en el intérprete viven como `Value::Module` con
-                // constructors estáticos (`Date.today()`, `Uuid.v4()`,
-                // etc.). El codegen NO los soporta todavía: necesita
-                // helpers de preludio para chrono+uuid + dispatch de
-                // cada constructor/método, deuda comprometida v0.10.25.
+                // v0.10.26 — Date/DateTime/Uuid como Ident standalone
+                // (sin `.method()`) no tiene sentido por sí mismo —
+                // siempre se usan via field access `Date.today()` /
+                // `Uuid.v4()`. El gen_call los intercepta antes que
+                // llegue acá. Si llega un Ident "Date" suelto fuera de
+                // un call, es código sin valor (no se puede asignar
+                // un Module a una var en `fitz build`). Emitimos error
+                // claro citando el patrón canonical.
                 if matches!(name.as_str(), "Date" | "DateTime" | "Uuid") {
                     return Err(self.err(format!(
-                        "`{}` (tipo built-in v0.10.24) todavía no soportado en `fitz build` — \
-                         sub-paso comprometido v0.10.25 (deuda explícita). \
-                         Usá `fitz run` mientras tanto. \
-                         Detalle: los tipos Date/DateTime/Uuid funcionan end-to-end en el intérprete \
-                         (constructors, métodos, ORM, driver) pero el codegen aún no emite chrono/uuid.",
+                        "`{0}` es un namespace de constructors; usá `{0}.today()`/`{0}.now()`/`{0}.v4()`/`{0}.parse(s)`/etc., \
+                         no `{0}` solo como valor",
                         name
                     )));
                 }
@@ -11059,6 +11385,15 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             if let Expr::Ident(recv, _) = object.as_ref() {
                 if recv == "db" && self.lookup_var(recv).is_none() {
                     return self.gen_db_module_call(field, args, *field_span);
+                }
+                // v0.10.26 — Date/DateTime/Uuid constructor dispatch.
+                // `Date.today()`, `DateTime.parse(s)`, `Uuid.v4()`, etc.
+                // Paralelo a `db.connect`: detectar receiver "Date" /
+                // "DateTime" / "Uuid" NO shadow-eado por var local.
+                if matches!(recv.as_str(), "Date" | "DateTime" | "Uuid")
+                    && self.lookup_var(recv).is_none()
+                {
+                    return self.gen_temporal_module_call(recv, field, args, *field_span);
                 }
             }
 
@@ -12860,6 +13195,167 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             other => Err(self.err_at(
                 field_span,
                 format!("el módulo `db` no tiene `{}` (soportado: connect)", other),
+            )),
+        }
+    }
+
+    /// v0.10.26 — codegen Date/DateTime/Uuid: dispatch de constructors
+    /// estáticos (Date.today/parse/from_ymd, DateTime.now/parse/
+    /// from_timestamp, Uuid.v4/parse/nil). Paralelo a
+    /// `gen_db_module_call`. Each constructor emite la llamada chrono/
+    /// uuid correspondiente, envolviendo en Result cuando puede fallar.
+    fn gen_temporal_module_call(
+        &mut self,
+        recv: &str,
+        field: &str,
+        args: &[Expr],
+        field_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let arity_err = |expected: usize, got: usize| {
+            self.err_at(
+                field_span,
+                format!(
+                    "`{}.{}` espera {} argumento(s), recibió {}",
+                    recv, field, expected, got
+                ),
+            )
+        };
+        match (recv, field) {
+            // Date.today() → chrono::Local::now().date_naive()
+            ("Date", "today") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok(("chrono::Local::now().date_naive()".to_string(), Type::Date))
+            }
+            // Date.parse(s) → Result<NaiveDate, String>
+            ("Date", "parse") => {
+                if args.len() != 1 {
+                    return Err(arity_err(1, args.len()));
+                }
+                let (s_code, s_ty) = self.gen_expr(&args[0])?;
+                let s_c = coerce(&s_code, &s_ty, &Type::Str, self.env);
+                let code = format!(
+                    "({{ let __s = {}; chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").map_err(|e| format!(\"Date.parse: `{{}}` no es ISO 8601 (YYYY-MM-DD): {{}}\", __s, e)) }})",
+                    s_c
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new(Type::Date),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
+            // Date.from_ymd(y, m, d) → Result<NaiveDate, String>
+            ("Date", "from_ymd") => {
+                if args.len() != 3 {
+                    return Err(arity_err(3, args.len()));
+                }
+                let mut coerced = Vec::with_capacity(3);
+                for a in args {
+                    let (c, t) = self.gen_expr(a)?;
+                    coerced.push(coerce(&c, &t, &Type::Int, self.env));
+                }
+                let code = format!(
+                    "({{ let __y = {} as i32; let __m = {} as u32; let __d = {} as u32; \
+                     chrono::NaiveDate::from_ymd_opt(__y, __m, __d).ok_or_else(|| \
+                     format!(\"Date.from_ymd: ({{}}, {{}}, {{}}) no es una fecha válida\", __y, __m, __d)) }})",
+                    coerced[0], coerced[1], coerced[2]
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new(Type::Date),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
+            // DateTime.now() → chrono::Utc::now()
+            ("DateTime", "now") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok(("chrono::Utc::now()".to_string(), Type::DateTime))
+            }
+            // DateTime.parse(s) → Result<DateTime<Utc>, String>
+            ("DateTime", "parse") => {
+                if args.len() != 1 {
+                    return Err(arity_err(1, args.len()));
+                }
+                let (s_code, s_ty) = self.gen_expr(&args[0])?;
+                let s_c = coerce(&s_code, &s_ty, &Type::Str, self.env);
+                let code = format!(
+                    "({{ let __s = {}; chrono::DateTime::parse_from_rfc3339(&__s).map(|dt| dt.with_timezone(&chrono::Utc)).map_err(|e| format!(\"DateTime.parse: `{{}}` no es RFC 3339 (ej: 2026-05-30T14:30:00Z): {{}}\", __s, e)) }})",
+                    s_c
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new(Type::DateTime),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
+            // DateTime.from_timestamp(secs: Int) → Result<DateTime<Utc>, String>
+            ("DateTime", "from_timestamp") => {
+                if args.len() != 1 {
+                    return Err(arity_err(1, args.len()));
+                }
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
+                let code = format!(
+                    "({{ let __secs = {}; chrono::DateTime::<chrono::Utc>::from_timestamp(__secs, 0).ok_or_else(|| format!(\"DateTime.from_timestamp: {{}} fuera de rango\", __secs)) }})",
+                    n_c
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new(Type::DateTime),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
+            // Uuid.v4() → uuid::Uuid::new_v4()
+            ("Uuid", "v4") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok(("uuid::Uuid::new_v4()".to_string(), Type::Uuid))
+            }
+            // Uuid.nil() → uuid::Uuid::nil()
+            ("Uuid", "nil") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok(("uuid::Uuid::nil()".to_string(), Type::Uuid))
+            }
+            // Uuid.parse(s) → Result<Uuid, String>
+            ("Uuid", "parse") => {
+                if args.len() != 1 {
+                    return Err(arity_err(1, args.len()));
+                }
+                let (s_code, s_ty) = self.gen_expr(&args[0])?;
+                let s_c = coerce(&s_code, &s_ty, &Type::Str, self.env);
+                let code = format!(
+                    "({{ let __s = {}; uuid::Uuid::parse_str(&__s).map_err(|e| format!(\"Uuid.parse: `{{}}` no es UUID canonical: {{}}\", __s, e)) }})",
+                    s_c
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new(Type::Uuid),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
+            (recv, other) => Err(self.err_at(
+                field_span,
+                format!(
+                    "el módulo `{}` no tiene `{}` (soportados Date: today/parse/from_ymd; \
+                     DateTime: now/parse/from_timestamp; Uuid: v4/parse/nil)",
+                    recv, other
+                ),
             )),
         }
     }
@@ -15641,6 +16137,212 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                         call_span,
                         format!(
                             "`DbRow` no tiene método `{}` (soportados: get_int, get_str, get_float, get_bool, len)",
+                            method
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // v0.10.26 — Date instance methods. year/month/day/weekday
+        // (Int), to_str (Str ISO 8601), to_datetime (DateTime UTC),
+        // format(fmt: Str) → Str (chrono specifiers %Y/%m/%d/%A/etc.).
+        if let Ok((obj_code, Type::Date)) = self.gen_expr(object) {
+            match method {
+                "year" | "month" | "day" => {
+                    if !args.is_empty() {
+                        return Err(
+                            self.err_at(call_span, format!("`Date.{}()` no acepta args", method))
+                        );
+                    }
+                    let getter = match method {
+                        "year" => "year() as i64",
+                        "month" => "month() as i64",
+                        "day" => "day() as i64",
+                        _ => unreachable!(),
+                    };
+                    return Ok((
+                        format!(
+                            "({{ use chrono::Datelike as _; ({}).{} }})",
+                            obj_code, getter
+                        ),
+                        Type::Int,
+                    ));
+                }
+                "weekday" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`Date.weekday()` no acepta args"));
+                    }
+                    return Ok((
+                        format!(
+                            "({{ use chrono::Datelike as _; ({}).weekday().number_from_monday() as i64 }})",
+                            obj_code
+                        ),
+                        Type::Int,
+                    ));
+                }
+                "to_str" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`Date.to_str()` no acepta args"));
+                    }
+                    return Ok((
+                        format!("({}).format(\"%Y-%m-%d\").to_string()", obj_code),
+                        Type::Str,
+                    ));
+                }
+                "to_datetime" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`Date.to_datetime()` no acepta args"));
+                    }
+                    return Ok((
+                        format!(
+                            "({}).and_hms_opt(0, 0, 0).expect(\"00:00:00 siempre válida\").and_utc()",
+                            obj_code
+                        ),
+                        Type::DateTime,
+                    ));
+                }
+                "format" => {
+                    if args.len() != 1 {
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "`Date.format(fmt)` espera 1 arg Str, recibió {}",
+                                args.len()
+                            ),
+                        ));
+                    }
+                    let (fmt_code, fmt_ty) = self.gen_expr(&args[0])?;
+                    let fmt_c = coerce(&fmt_code, &fmt_ty, &Type::Str, self.env);
+                    return Ok((
+                        format!("({}).format(({}).as_str()).to_string()", obj_code, fmt_c),
+                        Type::Str,
+                    ));
+                }
+                _ => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`Date` no tiene método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format)",
+                            method
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // v0.10.26 — DateTime instance methods. Extracción (year..second
+        // Int), timestamp Unix epoch, to_str ISO 8601, date Date, format.
+        if let Ok((obj_code, Type::DateTime)) = self.gen_expr(object) {
+            match method {
+                "year" | "month" | "day" => {
+                    if !args.is_empty() {
+                        return Err(self
+                            .err_at(call_span, format!("`DateTime.{}()` no acepta args", method)));
+                    }
+                    let getter = match method {
+                        "year" => "year() as i64",
+                        "month" => "month() as i64",
+                        "day" => "day() as i64",
+                        _ => unreachable!(),
+                    };
+                    return Ok((
+                        format!(
+                            "({{ use chrono::Datelike as _; ({}).{} }})",
+                            obj_code, getter
+                        ),
+                        Type::Int,
+                    ));
+                }
+                "hour" | "minute" | "second" => {
+                    if !args.is_empty() {
+                        return Err(self
+                            .err_at(call_span, format!("`DateTime.{}()` no acepta args", method)));
+                    }
+                    let getter = match method {
+                        "hour" => "hour() as i64",
+                        "minute" => "minute() as i64",
+                        "second" => "second() as i64",
+                        _ => unreachable!(),
+                    };
+                    return Ok((
+                        format!(
+                            "({{ use chrono::Timelike as _; ({}).{} }})",
+                            obj_code, getter
+                        ),
+                        Type::Int,
+                    ));
+                }
+                "timestamp" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`DateTime.timestamp()` no acepta args"));
+                    }
+                    return Ok((format!("({}).timestamp()", obj_code), Type::Int));
+                }
+                "to_str" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`DateTime.to_str()` no acepta args"));
+                    }
+                    return Ok((
+                        format!("({}).format(\"%Y-%m-%dT%H:%M:%SZ\").to_string()", obj_code),
+                        Type::Str,
+                    ));
+                }
+                "date" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`DateTime.date()` no acepta args"));
+                    }
+                    return Ok((format!("({}).date_naive()", obj_code), Type::Date));
+                }
+                "format" => {
+                    if args.len() != 1 {
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "`DateTime.format(fmt)` espera 1 arg Str, recibió {}",
+                                args.len()
+                            ),
+                        ));
+                    }
+                    let (fmt_code, fmt_ty) = self.gen_expr(&args[0])?;
+                    let fmt_c = coerce(&fmt_code, &fmt_ty, &Type::Str, self.env);
+                    return Ok((
+                        format!("({}).format(({}).as_str()).to_string()", obj_code, fmt_c),
+                        Type::Str,
+                    ));
+                }
+                _ => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`DateTime` no tiene método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format)",
+                            method
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // v0.10.26 — Uuid instance methods. MVP acotado.
+        if let Ok((obj_code, Type::Uuid)) = self.gen_expr(object) {
+            match method {
+                "to_str" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`Uuid.to_str()` no acepta args"));
+                    }
+                    return Ok((format!("({}).to_string()", obj_code), Type::Str));
+                }
+                "is_nil" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`Uuid.is_nil()` no acepta args"));
+                    }
+                    return Ok((format!("({}).is_nil()", obj_code), Type::Bool));
+                }
+                _ => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`Uuid` no tiene método `{}` (soportados: to_str, is_nil)",
                             method
                         ),
                     ));
@@ -20178,6 +20880,15 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
         if self.uses_db {
             self.emit(DB_HTTP_INTEGRATION_PRELUDE);
         }
+        // v0.10.26 — JSON ser/de para Date/DateTime/Uuid cuando el
+        // programa los usa Y tiene HTTP (body in/out). Sin esto, un
+        // handler con `body: Event { happens_on: Date }` falla con
+        // "trait __FromFitzJson not satisfied for chrono::NaiveDate".
+        // Strings canonical: Date = ISO 8601 YYYY-MM-DD, DateTime =
+        // RFC 3339 con Z (UTC), Uuid = canonical hyphenated lowercase.
+        if self.uses_date_or_uuid {
+            self.emit(DATE_UUID_HTTP_INTEGRATION_PRELUDE);
+        }
         // Fase 9.w.2.c — preludio adicional cuando hay handlers @ws.
         // Vive separado de HTTP_RUNTIME_PRELUDE para que programas
         // HTTP sin WS no paguen el costo del bloque extra (~150 LoC
@@ -20441,9 +21152,25 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
             .unwrap();
             // Default o nullable
             if let Some(default_expr) = &f.default {
-                let (code, ty) = self.gen_expr(default_expr)?;
-                let coerced = coerce(&code, &ty, &f.type_, self.env);
-                writeln!(&mut self.output, "            None => {},", coerced).unwrap();
+                // v0.10.26 — sentinel `Str = ""` para fields
+                // Date/DateTime/Uuid se mapea al Default::default()
+                // del tipo destino (Date 1970-01-01, DateTime epoch,
+                // Uuid nil) en vez de pasar la string vacía sin coerción.
+                let sentinel = matches!(default_expr, Expr::Str(s, _) if s.is_empty())
+                    && matches!(f.type_, Type::Date | Type::DateTime | Type::Uuid);
+                if sentinel {
+                    let default_code = match &f.type_ {
+                        Type::Date => "chrono::NaiveDate::default()",
+                        Type::DateTime => "chrono::DateTime::<chrono::Utc>::default()",
+                        Type::Uuid => "uuid::Uuid::nil()",
+                        _ => unreachable!(),
+                    };
+                    writeln!(&mut self.output, "            None => {},", default_code).unwrap();
+                } else {
+                    let (code, ty) = self.gen_expr(default_expr)?;
+                    let coerced = coerce(&code, &ty, &f.type_, self.env);
+                    writeln!(&mut self.output, "            None => {},", coerced).unwrap();
+                }
             } else if matches!(f.type_, Type::Nullable(_)) {
                 self.emit("            None => None,\n");
             } else {
@@ -20475,9 +21202,28 @@ fn __pg_to_fv(v: &__FitzPgValue) -> __FitzValue {
                 // o `Default::default()` si no (mismo fallback que
                 // los virtuales). Para `Str = ""`, Default es `""`.
                 if let Some(default_expr) = &f.default {
-                    let (code, ty) = self.gen_expr(default_expr)?;
-                    let coerced = coerce(&code, &ty, &f.type_, self.env);
-                    writeln!(&mut self.output, "            {}: {},", f.name, coerced).unwrap();
+                    // v0.10.26 — sentinel Str = "" para fields
+                    // Date/DateTime/Uuid (mismo patrón que arriba).
+                    let sentinel = matches!(default_expr, Expr::Str(s, _) if s.is_empty())
+                        && matches!(f.type_, Type::Date | Type::DateTime | Type::Uuid);
+                    if sentinel {
+                        let default_code = match &f.type_ {
+                            Type::Date => "chrono::NaiveDate::default()",
+                            Type::DateTime => "chrono::DateTime::<chrono::Utc>::default()",
+                            Type::Uuid => "uuid::Uuid::nil()",
+                            _ => unreachable!(),
+                        };
+                        writeln!(
+                            &mut self.output,
+                            "            {}: {},",
+                            f.name, default_code
+                        )
+                        .unwrap();
+                    } else {
+                        let (code, ty) = self.gen_expr(default_expr)?;
+                        let coerced = coerce(&code, &ty, &f.type_, self.env);
+                        writeln!(&mut self.output, "            {}: {},", f.name, coerced).unwrap();
+                    }
                 } else {
                     writeln!(
                         &mut self.output,
@@ -23684,6 +24430,74 @@ fn __fitz_pg_value_to_json(v: &__FitzPgValue) -> serde_json::Value {
 
 "#;
 
+/// v0.10.26 — Preludio HTTP+Date/DateTime/Uuid: `impl __ToFitzJson`
+/// y `impl __FromFitzJson` para los 3 tipos cuando el programa los
+/// usa Y tiene handlers HTTP. Habilita body in/out con fields
+/// `Date`/`DateTime`/`Uuid` sin que el user escriba parse/format
+/// manual — el codegen marshalliza automáticamente.
+///
+/// JSON shape:
+///   - `Date` ↔ string ISO 8601 `"YYYY-MM-DD"`.
+///   - `DateTime` ↔ string RFC 3339 `"YYYY-MM-DDTHH:MM:SSZ"` (UTC).
+///   - `Uuid` ↔ string canonical hyphenated lowercase.
+///
+/// FromFitzJson rechaza con error claro si el string no parsea
+/// (caso típico: cliente envía `"happens_on": "yesterday"` →
+/// 400 Bad Request con mensaje específico). Mismo path que el
+/// intérprete vía `coerce_to_annotation`.
+const DATE_UUID_HTTP_INTEGRATION_PRELUDE: &str = r#"// --- v0.10.26: integration Date/DateTime/Uuid + HTTP (JSON ser/de) ---
+
+impl __ToFitzJson for chrono::NaiveDate {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::String(self.format("%Y-%m-%d").to_string())
+    }
+}
+
+impl __ToFitzJson for chrono::DateTime<chrono::Utc> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::String(self.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+    }
+}
+
+impl __ToFitzJson for uuid::Uuid {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::String(self.to_string())
+    }
+}
+
+impl __FromFitzJson for chrono::NaiveDate {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let s = json
+            .as_str()
+            .ok_or_else(|| format!("se esperaba Date (string ISO 8601), se recibió {}", __json_shape(json)))?;
+        chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .map_err(|e| format!("Date inválida `{}` (esperaba YYYY-MM-DD): {}", s, e))
+    }
+}
+
+impl __FromFitzJson for chrono::DateTime<chrono::Utc> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let s = json
+            .as_str()
+            .ok_or_else(|| format!("se esperaba DateTime (string RFC 3339), se recibió {}", __json_shape(json)))?;
+        chrono::DateTime::parse_from_rfc3339(s)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .map_err(|e| format!("DateTime inválida `{}` (esperaba ej: 2026-05-30T14:30:00Z): {}", s, e))
+    }
+}
+
+impl __FromFitzJson for uuid::Uuid {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let s = json
+            .as_str()
+            .ok_or_else(|| format!("se esperaba Uuid (string canonical), se recibió {}", __json_shape(json)))?;
+        uuid::Uuid::parse_str(s)
+            .map_err(|e| format!("Uuid inválido `{}` (esperaba xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx): {}", s, e))
+    }
+}
+
+"#;
+
 /// Fase 9.w.2.c — Preludio adicional para WebSockets.
 ///
 /// Define:
@@ -25407,6 +26221,14 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         // El user accede a campos con `row.get("col")` /
         // `row.get_at(idx)` que devuelven `Option<&PgValue>`.
         Type::DbRow => Ok("__FitzDbRow".to_string()),
+        // v0.10.26 — Date/DateTime/Uuid → wrappers chrono/uuid.
+        // chrono::NaiveDate (sin TZ, fecha pura). chrono::DateTime
+        // <chrono::Utc> (siempre UTC en MVP). uuid::Uuid (16 bytes).
+        // Las 3 impl Copy NO — son moves; needs_clone() devuelve
+        // true para incluir `.clone()` en assignments y arg-passing.
+        Type::Date => Ok("chrono::NaiveDate".to_string()),
+        Type::DateTime => Ok("chrono::DateTime<chrono::Utc>".to_string()),
+        Type::Uuid => Ok("uuid::Uuid".to_string()),
         // Fase 10.b.14 — `Aggregated<Row>` mapea al MISMO struct que
         // `QueryBuilder<Row>`: `__FitzQueryBuilder<RowData>`. Sólo
         // cambia el shape estático del terminal aggregate (verbose
@@ -25483,6 +26305,12 @@ fn orm_field_coerce_block(t: &Type, col_lit: &str, field_name: &str) -> Result<S
         Type::Str => Ok(format!("__fitz_pg_to_string(__v, {})?", col_lit)),
         Type::Bool => Ok(format!("__fitz_pg_to_bool(__v, {})?", col_lit)),
         Type::Bytes => Ok(format!("__fitz_pg_to_bytes(__v, {})?", col_lit)),
+        // v0.10.26 — coerción Date/DateTime/Uuid. El driver mapea
+        // OID DATE/TIMESTAMPTZ/UUID a `PgValue::Text`; nuestros
+        // helpers parsean con chrono/uuid en la frontera.
+        Type::Date => Ok(format!("__fitz_pg_to_date(__v, {})?", col_lit)),
+        Type::DateTime => Ok(format!("__fitz_pg_to_datetime(__v, {})?", col_lit)),
+        Type::Uuid => Ok(format!("__fitz_pg_to_uuid(__v, {})?", col_lit)),
         Type::Nullable(inner) => {
             let inner_block = orm_field_coerce_block(inner, col_lit, field_name)?;
             Ok(format!(
@@ -25970,6 +26798,13 @@ fn orm_marshal_field_to_pg(
         Type::Bool => Ok(format!("__FitzPgValue::Bool({})", accessor)),
         Type::Str => Ok(format!("__FitzPgValue::Text({})", accessor)),
         Type::Bytes => Ok(format!("__FitzPgValue::Bytes({})", accessor)),
+        // v0.10.26 — Date/DateTime/Uuid via __IntoPgValue trait (emite
+        // PgValue::Text en formato canonical: Date YYYY-MM-DD,
+        // DateTime RFC 3339 con Z, Uuid hyphenated). El trait impl
+        // vive en el preludio db (emit_db_prelude).
+        Type::Date | Type::DateTime | Type::Uuid => {
+            Ok(format!("__IntoPgValue::into_pg({})", accessor))
+        }
         Type::Nullable(inner) => {
             // `accessor` produce un `Option<T>` por valor (clonado por el
             // caller). Adentro del Some, `__some_v` queda como `T` por
@@ -26450,6 +27285,14 @@ fn show_expr(code: &str, ty: &Type) -> String {
         // "3.141592653589793" en ambos paths cuando el lado Python
         // tiene un float (su `__str__` coincide con `__fitz_fmt_float`).
         Type::PyAny => format!("format!(\"{{}}\", {})", code),
+        // v0.10.26 — Date/DateTime/Uuid Display con formato canonical
+        // matcheando el intérprete (Value::Date/DateTime/Uuid). El
+        // Display default de chrono::DateTime emite micros (".578379"),
+        // que NO matchea el intérprete; usamos `.format(...)` explícito
+        // sin micros. Date y Uuid: el Display default ya matchea.
+        Type::Date => format!("({}).format(\"%Y-%m-%d\").to_string()", code),
+        Type::DateTime => format!("({}).format(\"%Y-%m-%dT%H:%M:%SZ\").to_string()", code),
+        Type::Uuid => format!("({}).to_string()", code),
         Type::Nominal(_) => format!("format!(\"{{}}\", &*({}).lock().unwrap())", code),
         Type::Nullable(inner) => {
             // Capturamos el valor por referencia para no consumirlo.
@@ -27077,7 +27920,9 @@ mod tests {
     fn cargo_toml_async_sin_http_incluye_tokio_time() {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
-        let toml = cargo_toml_for("foo", false, true, false, false, false, false, false, false);
+        let toml = cargo_toml_for(
+            "foo", false, true, false, false, false, false, false, false, false,
+        );
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
         assert!(!toml.contains("axum"), "no debería incluir axum");
@@ -27085,7 +27930,9 @@ mod tests {
 
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
-        let toml = cargo_toml_for("foo", true, true, false, false, false, false, false, false);
+        let toml = cargo_toml_for(
+            "foo", true, true, false, false, false, false, false, false, false,
+        );
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
         assert!(toml.contains("\"macros\""));
@@ -27094,7 +27941,7 @@ mod tests {
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, false,
+            "foo", false, false, false, false, false, false, false, false, false,
         );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
@@ -27108,7 +27955,9 @@ mod tests {
     fn cargo_toml_con_python_incluye_pyo3() {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
-        let toml = cargo_toml_for("foo", false, false, true, false, false, false, false, false);
+        let toml = cargo_toml_for(
+            "foo", false, false, true, false, false, false, false, false, false,
+        );
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
         assert!(
@@ -27125,7 +27974,9 @@ mod tests {
 
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
-        let toml = cargo_toml_for("foo", true, false, true, false, false, false, false, false);
+        let toml = cargo_toml_for(
+            "foo", true, false, true, false, false, false, false, false, false,
+        );
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
         assert!(toml.contains("tokio"));
@@ -27133,7 +27984,9 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
-        let toml = cargo_toml_for("foo", true, false, false, false, false, false, false, false);
+        let toml = cargo_toml_for(
+            "foo", true, false, false, false, false, false, false, false, false,
+        );
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
     }
@@ -32105,7 +32958,9 @@ mod tests {
 
     #[test]
     fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
-        let toml = cargo_toml_for("app", false, false, false, false, false, true, false, false);
+        let toml = cargo_toml_for(
+            "app", false, false, false, false, false, true, false, false, false,
+        );
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
         // Sin HTTP/async, tokio se incluye por uses_jobs con multi_thread.
@@ -32116,7 +32971,9 @@ mod tests {
     #[test]
     fn cargo_toml_jobs_sin_http_incluye_signal_feature() {
         // Cron-only mode necesita `signal` para ctrl_c.
-        let toml = cargo_toml_for("app", false, false, false, false, false, true, false, false);
+        let toml = cargo_toml_for(
+            "app", false, false, false, false, false, true, false, false, false,
+        );
         assert!(
             toml.contains("\"signal\""),
             "esperaba tokio feature `signal` para cron-only mode, got:\n{}",
@@ -32128,7 +32985,9 @@ mod tests {
     fn cargo_toml_jobs_con_http_no_incluye_signal_feature() {
         // HTTP + cron: ctrl_c lo maneja `serve()` con su propio
         // shutdown signal; el main generado no usa signal directo.
-        let toml = cargo_toml_for("app", true, false, false, false, false, true, false, false);
+        let toml = cargo_toml_for(
+            "app", true, false, false, false, false, true, false, false, false,
+        );
         assert!(toml.contains("cron"));
         assert!(!toml.contains("\"signal\""));
     }
@@ -32772,7 +33631,7 @@ mod tests {
         // Programa con db debe ver sha2/hmac/base64 en el Cargo.toml.
         // Usamos `cargo_toml_for` directo (paralelo a los tests
         // existentes).
-        let toml = cargo_toml_for("foo", false, false, false, false, false, false, true, false);
+        let toml = cargo_toml_for("foo", false, false, false, false, false, false, true, false, false);
         assert!(
             toml.contains("sha2 = \"0.10\""),
             "esperaba sha2 en Cargo.toml: {toml}",
@@ -32825,7 +33684,7 @@ mod tests {
     #[test]
     fn codegen_db_cargo_toml_sin_db_no_suma_deps() {
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, false,
+            "foo", false, false, false, false, false, false, false, false, false,
         );
         assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
         assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
@@ -34022,7 +34881,9 @@ mod tests {
         // Programa con field Map<Str, Any> en type @table dispara
         // tanto uses_db como uses_fitz_value. Cargo.toml debe incluir
         // serde_json con preserve_order.
-        let toml = cargo_toml_for("app", false, false, false, false, false, false, true, true);
+        let toml = cargo_toml_for(
+            "app", false, false, false, false, false, false, true, true, false,
+        );
         assert!(
             toml.contains("serde_json"),
             "esperaba serde_json en Cargo.toml cuando uses_db+uses_fitz_value, fue: {}",

@@ -476,10 +476,11 @@ default Fitz se usa al construir el value que va a Postgres.
 8601) desde v0.10.24. Tienen constructors estáticos
 (`Date.today()`, `DateTime.now()`, `Uuid.v4()`, etc.), métodos
 instancia (`.year()`/`.month()`/`.format(fmt)`/`.to_str()`/...) y
-round-trip transparente con Postgres. **Caveat v0.10.24**: el
-soporte completo está en `fitz run`; `fitz build` (codegen) los
-emite con error claro citando v0.10.25 como deuda comprometida.
-Para detalle, ver CHANGELOG v0.10.24.
+round-trip transparente con Postgres. **Paridad bit-a-bit
+`fitz run` ↔ `fitz build` desde v0.10.26**: el codegen emite
+chrono/uuid en `Cargo.toml`, helpers de marshaling/parsing
+condicionales, y `__IntoPgValue`/`__FromFitzDbRow` para los 3
+tipos. Cero deuda residual en el bloque temporal/identidad.
 
 Convención de defaults: el user escribe `happens_on: Date = ""`
 (sentinel `Str`) y provee el valor real al construir la Instance

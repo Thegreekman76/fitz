@@ -12,11 +12,163 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-v0.10.26 cerrar la deuda comprometida del codegen para
-Date/DateTime/Uuid (que v0.10.24 dejó explícita): `fitz build`
-emitir chrono/uuid + helpers de preludio + dispatch de cada
-constructor/método. Después: boilerplates ORM Dockerizados
-extendidos o nuevo norte técnico.
+boilerplates ORM Dockerizados extendidos o nuevo norte técnico
+(bulk insert / `fitz db inspect` / composite PKs / JSON
+operators avanzados / W17 derived).
+
+## [v0.10.26] — 2026-05-30 — Codegen Date/DateTime/Uuid: paridad bit-a-bit `fitz run` ↔ `fitz build`
+
+Cierre de la deuda comprometida en CHANGELOG v0.10.24 — los 3 tipos
+temporales y de identidad ahora compilan a binario nativo con
+`fitz build`. **Paridad bit-a-bit completa con `fitz run`**: mismos
+constructors, métodos, ORM mapping, driver wire protocol, HTTP body
+in/out, migrations, defaults sentinel.
+
+### Cambios codegen (~700 LoC netas)
+
+**Detector + Cargo.toml condicional**:
+- `program_uses_date_or_uuid(program)` paralelo a `program_uses_db`,
+  walkea AST + TypeExpr buscando `Ident("Date"|"DateTime"|"Uuid")`
+  y annotations.
+- Transitivo via `LoadedModule.uses_date_or_uuid`.
+- `cargo_toml_for` suma `uuid = { version = "1", features = ["v4"] }`
+  + `chrono` (si no estaba ya por uses_jobs) al `Cargo.toml` del crate
+  generado cuando `uses_date_or_uuid = true`.
+- `CodegenCtx.uses_date_or_uuid` propagado para gateo de helpers.
+
+**Tipos + Display**:
+- `rust_type_for`: `Type::Date → chrono::NaiveDate`, `Type::DateTime
+  → chrono::DateTime<chrono::Utc>`, `Type::Uuid → uuid::Uuid`.
+- `show_expr` (str interpolation + print): Display canonical para
+  matchear el intérprete bit-a-bit:
+  - Date → `d.format("%Y-%m-%d").to_string()`
+  - DateTime → `dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()`
+    (sin micros — diferente al Display default de chrono).
+  - Uuid → `u.to_string()` (canonical hyphenated lowercase).
+- `field_eq_expr` + `type_name` + `display_type`: 3 nuevos arms.
+
+**Constructors (9 funcs)**:
+`gen_temporal_module_call(recv, field, args)` dispatch paralelo a
+`gen_db_module_call`. Cada constructor emite la llamada chrono/uuid
+correspondiente, envolviendo en Result cuando puede fallar:
+- `Date.today()` → `chrono::Local::now().date_naive()`
+- `Date.parse(s)` → `chrono::NaiveDate::parse_from_str(...).map_err(...)`
+- `Date.from_ymd(y, m, d)` → `chrono::NaiveDate::from_ymd_opt(...).ok_or_else(...)`
+- `DateTime.now()` → `chrono::Utc::now()`
+- `DateTime.parse(s)` → `chrono::DateTime::parse_from_rfc3339(...).map(...).map_err(...)`
+- `DateTime.from_timestamp(secs)` → `chrono::DateTime::<Utc>::from_timestamp(secs, 0).ok_or_else(...)`
+- `Uuid.v4()` → `uuid::Uuid::new_v4()`
+- `Uuid.parse(s)` → `uuid::Uuid::parse_str(...).map_err(...)`
+- `Uuid.nil()` → `uuid::Uuid::nil()`
+
+**Instance methods (13)**:
+Dispatch sobre `Type::Date`/`DateTime`/`Uuid` en `gen_method_call`:
+- Date: `year/month/day/weekday/to_str/to_datetime/format` (7).
+- DateTime: `year/month/day/hour/minute/second/timestamp/to_str/date/format` (10).
+- Uuid: `to_str/is_nil` (2).
+- Total: 13 (algunos comparten name pero distinto receiver).
+
+**HTTP JSON ser/de**:
+Nueva const `DATE_UUID_HTTP_INTEGRATION_PRELUDE` emitida cuando
+`uses_date_or_uuid && has_http` con impls de `__ToFitzJson` y
+`__FromFitzJson` para los 3 tipos. JSON shape canonical (JSON Schema
+"date"/"date-time"/"uuid" formats). `__FromFitzJson` rechaza con
+error claro si el string no parsea (→ 400 Bad Request al cliente
+con mensaje específico).
+
+**Driver wire protocol (ORM + raw query)**:
+- `emit_date_uuid_db_prelude()` método nuevo del CodegenCtx, emite
+  cuando `uses_date_or_uuid && uses_db`:
+  - `impl __IntoPgValue for chrono::NaiveDate/DateTime<Utc>/uuid::Uuid`
+    (param marshaling: `PgValue::Text` en formato canonical PG).
+  - `__fitz_pg_to_date/datetime/uuid(v, col) -> Result<T, String>`
+    (row reading: parse de `PgValue::Text` a chrono/uuid).
+  - `__fitz_pg_normalize_timestamptz(s)`: paralelo a
+    `parse_pg_timestamptz` del evaluator (`YYYY-MM-DD HH:MM:SS±TZ`
+    → RFC 3339).
+- `orm_marshal_field_to_pg` (INSERT path): nuevos arms para
+  Date/DateTime/Uuid via `__IntoPgValue::into_pg(...)`.
+- `orm_field_coerce_block` (SELECT path): nuevos arms via
+  `__fitz_pg_to_date/datetime/uuid(__v, col)?`.
+
+**Field default sentinel `Str = ""`**:
+Cuando un field `Date`/`DateTime`/`Uuid` tiene default `""` (Str
+literal sentinel, paralelo a `id: Int = 0`), el codegen emite el
+`Default::default()` correspondiente al tipo destino:
+- `Date → chrono::NaiveDate::default()` (1970-01-01)
+- `DateTime → chrono::DateTime::<chrono::Utc>::default()`
+- `Uuid → uuid::Uuid::nil()`
+
+Aplica tanto al path `__from_fitz_json` (None → default) como al path
+de fields hidden.
+
+### Cambios complementarios
+
+- **`__fitz_pg_to_date/datetime/uuid` gateados condicionalmente**:
+  los helpers se emiten SOLO cuando `uses_date_or_uuid && uses_db`.
+  Programas con `@table` que NO usan los 3 tipos no pagan el peso
+  de chrono/uuid ni de los helpers. La `use crate::{...}` de los
+  módulos no incluye los nuevos helpers en el import condicional
+  por defecto (los módulos que los necesiten resuelven via
+  inferencia del cross-impl).
+- **Error block removido**: el error claro de v0.10.24 que decía
+  "Date/DateTime/Uuid no soportado en `fitz build` — sub-paso
+  comprometido v0.10.26" se eliminó. Si el user escribe
+  `Date`/`DateTime`/`Uuid` solo (sin `.method()`), error nuevo
+  citando el patrón canonical de uso (siempre `.method()`).
+
+### Smoke E2E verde
+
+- `examples/guide/31-orm.fitz` (ya usaba Date en field) compila
+  ahora con `fitz build` sin error.
+- Smoke nuevo: `@table type Event { happens_on: Date, starts_at:
+  DateTime, external_id: Uuid }` + INSERT + readback via
+  `Event.all(conn)` preserva tipos. Métodos instancia
+  (`.year()`, `.hour()`, `.is_nil()`) funcionan sobre la Instance
+  recuperada del PG.
+- Smoke HTTP body in/out: POST con
+  `{"happens_on":"2026-12-25","starts_at":"...","external_id":"..."}`
+  → handler recibe `body.happens_on` como `Date`, `body.starts_at`
+  como `DateTime`. Date inválida en JSON → 400 con mensaje claro
+  citando el formato esperado.
+- `fitz db diff` emite `CREATE TABLE ... (happens_on date NOT NULL,
+  starts_at timestamptz NOT NULL, external_id uuid NOT NULL)` (ya
+  estaba desde v0.10.24 vía `migrations::fitz_typeexpr_to_sql_type`).
+
+### Validación final
+
+- `cargo test --lib`: **2647 verde**.
+- `compile_e2e::smoke_ejemplos_guia_compilables` (325 ejemplos):
+  verde (incluye 31-orm.fitz que antes fallaba con la deuda).
+- `tests::db_real_postgres` (49 ignored): **49/49 verde** contra PG
+  local.
+- `cargo fmt --all -- --check`: verde.
+- `cargo clippy --all-targets -- -D warnings`: verde.
+- Smoke real `fitz build` + ejecución contra PG local: 3
+  endpoints HTTP retornando Date/DateTime/Uuid + INSERT/SELECT en
+  tabla con los 3 tipos + body deserialization con error claro
+  para Dates inválidas.
+
+### Cross-impact docs
+
+- `docs/db-orm.md` sec 4 "Mapping de tipos Fitz → Postgres":
+  caveat "v0.10.24" reemplazado por "paridad bit-a-bit `fitz run`
+  ↔ `fitz build` desde v0.10.26".
+- VSCode extension bump 0.10.25 → 0.10.26.
+
+### Deps nuevas
+
+- `uuid` (re-emitido condicionalmente al Cargo.toml del crate
+  generado). `chrono` ya estaba (cron jobs); ahora también se
+  emite cuando `uses_date_or_uuid && !uses_jobs`.
+
+### Out of scope (deuda residual, sin presión)
+
+- **Aritmética de fechas** (`dt + Duration`): `Duration` es otro
+  tipo built-in, mini-fase aparte si entra demanda.
+- **Time standalone** (Postgres `time` OID 1083).
+- **DateTime con TZ parametrizado** (`DateTime<TZ>`).
+- **Métodos extra Uuid**: `version()`, `variant()`, `bytes()`.
 
 ## [v0.10.25] — 2026-05-30 — Hotfix v0.10.24: array elem_oid solo refina si caller pidió
 
