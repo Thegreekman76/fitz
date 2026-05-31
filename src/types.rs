@@ -412,11 +412,16 @@ pub struct TableMetadata {
     /// las migrations usan qualified names (`"schema"."name"`)
     /// solo cuando `schema.is_some()`.
     pub schema: Option<String>,
-    /// Nombre Fitz del field marcado con `@primary`. `None` si
-    /// no se marcó ningún field — el ORM en 10.3.b debe rechazar
-    /// queries sobre tipos sin primary key declarada (por ahora;
-    /// composite PK queda como deuda).
-    pub primary_field: Option<String>,
+    /// Nombres Fitz de los fields marcados con `@primary`. Vacío
+    /// si no hay PK declarada. Single-PK = `vec!["id"]`; composite
+    /// PK = `vec!["org_id", "user_id"]` (orden importa para el
+    /// `PRIMARY KEY (a, b)` constraint en CREATE TABLE).
+    ///
+    /// v0.10.27 (F2) — antes era `primary_field: Option<String>`
+    /// (un solo PK). Composite PK era deuda explícita. Ahora se
+    /// soporta N PKs; sitios que solo manejan single PK usan
+    /// `single_pk()` que devuelve `Option<&str>` solo si `len() == 1`.
+    pub primary_fields: Vec<String>,
     /// Overrides por columna. Indexed por nombre Fitz del field
     /// (no por nombre SQL — la mapping vive en este struct).
     /// Solo entries para fields con `@column`/`@unique`/`@index`;
@@ -436,6 +441,42 @@ pub struct TableMetadata {
     /// `@renamed_from("old") @table("new") type T { ... }`
     /// (TBD parsing — solo kwarg en `@table` por simplicidad MVP).
     pub renamed_from: Option<String>,
+    /// v0.10.27 (F3) — `@index(...)` decoradores apilables a nivel
+    /// type para definir índices compuestos / parciales sin escribir
+    /// `CREATE INDEX` a mano. Cada `IndexSpec` se traduce a un
+    /// `CREATE INDEX` en `fitz db diff/migrate`. Cumple drift check:
+    /// si el user remueve un `@index`, el diff emite `DROP INDEX`.
+    pub indexes: Vec<IndexSpec>,
+}
+
+/// v0.10.27 (F3) — Especificación de un índice del ORM. Se popula
+/// desde `@index(...)` a nivel type. Tres formas de uso:
+///   - `@index("col1, col2")` — composite simple.
+///   - `@index("col1, col2", unique=true)` — composite UNIQUE.
+///   - `@index("col1, col2", name="custom")` — nombre custom (sino
+///     auto-generado `idx_<table>_<col1>_<col2>`).
+///   - `@index("col1, col2", where_="deleted_at IS NULL")` — partial.
+///
+/// Expression indexes (`@index("lower(email)")`) NO en MVP — el
+/// arg es un parser SQL mini que sale de scope. Workaround: bajar
+/// a `db.exec("CREATE INDEX ...")` manual y skipear drift check
+/// para ese índice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSpec {
+    /// Nombre del índice. `None` = auto-generado por el migrator
+    /// como `idx_<table>_<col1>_<col2>_..._<unique?>` para que el
+    /// drift check pueda matchear DB-vs-Fitz consistentemente.
+    pub name: Option<String>,
+    /// Lista de columnas SQL (post `@column(name=...)` resolution).
+    /// Orden importa para Postgres (compound index left-prefix).
+    pub columns: Vec<String>,
+    /// UNIQUE flag — emite `CREATE UNIQUE INDEX` en vez de `CREATE
+    /// INDEX`. Útil para constraints de uniqueness sobre tuples.
+    pub unique: bool,
+    /// WHERE clause para partial index. `None` = full index. Útil
+    /// para soft-deletes: `WHERE deleted_at IS NULL` cubre solo
+    /// rows vivas, índice más chico.
+    pub where_clause: Option<String>,
 }
 
 impl TableMetadata {
@@ -454,6 +495,27 @@ impl TableMetadata {
             ),
             None => format!("\"{}\"", self.sql_name.replace('"', "\"\"")),
         }
+    }
+
+    /// v0.10.27 (F2) — Single-PK accessor para sitios que solo
+    /// manejan PK simple (sentinel `id: 0` auto-bigserial,
+    /// navigation belongs_to, etc.). Devuelve `Some(name)` SOLO si
+    /// hay exactamente UN PK. `None` para composite PK (N≥2) o
+    /// sin PK (N=0). Sitios composite-aware iteran sobre
+    /// `primary_fields` directo.
+    pub fn single_pk(&self) -> Option<&str> {
+        if self.primary_fields.len() == 1 {
+            Some(self.primary_fields[0].as_str())
+        } else {
+            None
+        }
+    }
+
+    /// v0.10.27 (F2) — `true` si el type tiene PK declarada
+    /// (single o composite). Útil como check rápido pre-operación
+    /// (e.g. ORM rechaza INSERT/SELECT sin PK declarada).
+    pub fn has_pk(&self) -> bool {
+        !self.primary_fields.is_empty()
     }
 }
 
@@ -1487,6 +1549,10 @@ pub fn process_table_decorators(
     let mut sql_name: Option<String> = None;
     let mut table_schema: Option<String> = None;
     let mut has_table = false;
+    // v0.10.27 (F3) — Acumulador para `@index(...)` decoradores.
+    // Se vacía a `TableMetadata.indexes` si has_table = true. Si NO
+    // hay @table pero hay @index, error (igual que @primary sin @table).
+    let mut pending_indexes: Vec<IndexSpec> = Vec::new();
     let mut table_renamed_from: Option<String> = None;
     for d in type_decorators {
         match d.name.as_str() {
@@ -1606,13 +1672,110 @@ pub fn process_table_decorators(
                     ));
                 }
             }
+            // v0.10.27 (F3) — `@index(cols, unique=?, name=?, where_=?)`.
+            // Apilable (múltiples `@index` sobre el mismo type). Cada
+            // uno produce un IndexSpec acumulado en `indexes`. El
+            // migrator emite CREATE INDEX / DROP INDEX desde diff.
+            "index" => {
+                // Arg 0: Str con cols separadas por coma (`"col1, col2"`).
+                if d.args.len() != 1 {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        format!(
+                            "`@index` espera 1 arg posicional (Str con cols separadas por coma), recibió {}",
+                            d.args.len()
+                        ),
+                    ));
+                    continue;
+                }
+                let cols_str = match &d.args[0] {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@index` espera un Str literal como arg 0 (cols separadas por coma)"
+                                .to_string(),
+                        ));
+                        continue;
+                    }
+                };
+                let columns: Vec<String> = cols_str
+                    .split(',')
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect();
+                if columns.is_empty() {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        "`@index(\"...\")` recibió string vacío; esperaba al menos una columna"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+                let mut unique = false;
+                let mut name: Option<String> = None;
+                let mut where_clause: Option<String> = None;
+                for (k, v) in &d.kwargs {
+                    match k.as_str() {
+                        "unique" => match v {
+                            Expr::Bool(b, _) => unique = *b,
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@index(unique=...)` espera Bool literal".to_string(),
+                            )),
+                        },
+                        "name" => match v {
+                            Expr::Str(s, _) => name = Some(s.clone()),
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@index(name=...)` espera Str literal".to_string(),
+                            )),
+                        },
+                        "where_" => match v {
+                            Expr::Str(s, _) => where_clause = Some(s.clone()),
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@index(where_=...)` espera Str literal con la WHERE clause SQL"
+                                    .to_string(),
+                            )),
+                        },
+                        other => errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            format!(
+                                "`@index` kwarg desconocido `{}`. Soportados: unique, name, where_",
+                                other
+                            ),
+                        )),
+                    }
+                }
+                pending_indexes.push(IndexSpec {
+                    name,
+                    columns,
+                    unique,
+                    where_clause,
+                });
+            }
             other => {
                 errors.push(FitzError::new(
                     ErrorKind::TypeError,
                     type_span.line,
                     type_span.column,
                     format!(
-                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`, `@renamed_from`."
+                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`, `@renamed_from`, `@index`."
                     ),
                 ));
             }
@@ -1622,7 +1785,7 @@ pub fn process_table_decorators(
     // Procesar decoradores de cada field (incluso si no hay @table —
     // esos decoradores sin @table son "error" porque solo tienen
     // sentido en contexto ORM).
-    let mut primary_field: Option<String> = None;
+    let mut primary_fields: Vec<String> = Vec::new();
     let mut columns: HashMap<String, ColumnMetadata> = HashMap::new();
     let mut relations: HashMap<String, RelationMetadata> = HashMap::new();
     let mut any_field_decorator = false;
@@ -1657,18 +1820,22 @@ pub fn process_table_decorators(
                             "`@primary` no acepta args ni kwargs".to_string(),
                         ));
                     }
-                    if let Some(prev) = &primary_field {
+                    // v0.10.27 (F2) — composite PK soportada: N @primary
+                    // fields se acumulan a `primary_fields`. Orden importa
+                    // para el `PRIMARY KEY (a, b)` constraint en CREATE
+                    // TABLE (PG arma el index según ese orden).
+                    if primary_fields.contains(&f.name) {
                         errors.push(FitzError::new(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
                             format!(
-                                "el tipo `{type_name}` tiene `@primary` en más de un field (`{}` y `{}`); composite primary keys no se soportan en 10.3",
-                                prev, f.name
+                                "el tipo `{type_name}` declara `@primary` dos veces sobre el field `{}`",
+                                f.name
                             ),
                         ));
                     } else {
-                        primary_field = Some(f.name.clone());
+                        primary_fields.push(f.name.clone());
                     }
                 }
                 "column" => {
@@ -1921,7 +2088,7 @@ pub fn process_table_decorators(
     // Validación cross: si hay decoradores de field ORM pero no
     // hay @table, el user probablemente olvidó el @table. Error
     // claro.
-    if !has_table && (primary_field.is_some() || any_field_decorator) {
+    if !has_table && (!primary_fields.is_empty() || any_field_decorator) {
         errors.push(FitzError::new(
             ErrorKind::TypeError,
             type_span.line,
@@ -1961,13 +2128,63 @@ pub fn process_table_decorators(
     // puebla con batch SELECT inverso.
     register_belongs_to_companions(&mut relations, fields);
 
+    // v0.10.27 (F3) — Resolver col names del @index del nombre Fitz
+    // al nombre SQL respetando `@column(name=...)`. Validar que cada
+    // col existe como field del type.
+    let mut resolved_indexes: Vec<IndexSpec> = Vec::with_capacity(pending_indexes.len());
+    for idx in pending_indexes {
+        let mut resolved_cols: Vec<String> = Vec::with_capacity(idx.columns.len());
+        let mut idx_errors: Vec<String> = Vec::new();
+        for fitz_col in &idx.columns {
+            // Buscar el field por nombre Fitz
+            let field_decl = fields.iter().find(|f| f.name == *fitz_col);
+            if field_decl.is_none() {
+                idx_errors.push(format!(
+                    "`@index(\"{}, ...\")`: el field `{}` no existe en `{}`",
+                    idx.columns.join(", "),
+                    fitz_col,
+                    type_name
+                ));
+                continue;
+            }
+            // Resolver SQL name del field (respeta @column(name=...))
+            let sql_col = columns
+                .get(fitz_col)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(fitz_col.as_str())
+                .to_string();
+            resolved_cols.push(sql_col);
+        }
+        for e in idx_errors {
+            errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                type_span.line,
+                type_span.column,
+                e,
+            ));
+        }
+        if !resolved_cols.is_empty() {
+            resolved_indexes.push(IndexSpec {
+                name: idx.name,
+                columns: resolved_cols,
+                unique: idx.unique,
+                where_clause: idx.where_clause,
+            });
+        }
+    }
+
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
     Ok(Some(TableMetadata {
         sql_name: sql_name.unwrap(), // garantizado por has_table check
         schema: table_schema,
-        primary_field,
+        primary_fields,
         columns,
         relations,
         renamed_from: table_renamed_from,
+        indexes: resolved_indexes,
     }))
 }
 
@@ -4412,6 +4629,28 @@ fn infer_method_call(
                         // Fase 10.b: ditto — evaluator devuelve Future.
                         return Some(Type::Future(Box::new(Type::Result {
                             ok: Box::new(row_ty),
+                            err: Box::new(Type::Str),
+                        })));
+                    }
+                    // v0.10.27 — F1 bulk insert: `Type.bulk_insert(rows,
+                    // db)` o `Type.bulk_insert(rows, db, batch_size)`.
+                    // Inserta N rows en batches con VALUES (...)
+                    // multi-tuple. Devuelve total rows insertadas.
+                    // Aridad acepta 2 (default batch) o 3 (batch custom).
+                    "bulk_insert" => {
+                        let n = args_ty.len();
+                        if n != 2 && n != 3 {
+                            let tname = ctx.types.info(*id).name.clone();
+                            ctx.error_at(
+                                span,
+                                format!(
+                                    "`{}.bulk_insert` espera 2 args (rows, db) o 3 (rows, db, batch_size: Int), recibió {}",
+                                    tname, n
+                                ),
+                            );
+                        }
+                        return Some(Type::Future(Box::new(Type::Result {
+                            ok: Box::new(Type::Int),
                             err: Box::new(Type::Str),
                         })));
                     }
@@ -14759,7 +14998,7 @@ print(total)
         let id = env.lookup("User").expect("User debería estar registrado");
         let meta = env.table_metadata(id).expect("debería haber TableMetadata");
         assert_eq!(meta.sql_name, "users");
-        assert_eq!(meta.primary_field, None);
+        assert_eq!(meta.primary_fields, Vec::<String>::new());
         assert!(meta.columns.is_empty());
     }
 
@@ -14780,7 +15019,7 @@ print(total)
         assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
         let id = env.lookup("User").unwrap();
         let meta = env.table_metadata(id).unwrap();
-        assert_eq!(meta.primary_field.as_deref(), Some("id"));
+        assert_eq!(meta.single_pk(), Some("id"));
     }
 
     #[test]
@@ -14829,12 +15068,29 @@ print(total)
     }
 
     #[test]
-    fn checker_dos_primary_son_error() {
+    fn checker_dos_primary_componen_composite_pk_v27() {
+        // v0.10.27 (F2) — 2 `@primary` ahora son composite PK
+        // (antes era error). El checker acepta; primary_fields
+        // queda con N entries en orden de aparición.
         let src = "@table type T {\n  @primary\n  a: Int\n  @primary\n  b: Int\n}";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("@primary")),
-            "esperaba error sobre @primary duplicado: {:?}",
+            errs.is_empty(),
+            "composite PK no debe ser error en v0.10.27: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_primary_sobre_mismo_field_dos_veces_es_error() {
+        // El check de duplicado se preserva, pero ahora aplica solo
+        // si el MISMO field aparece dos veces (no si hay 2 fields
+        // distintos con @primary, que es composite).
+        let src = "@table type T {\n  @primary\n  @primary\n  a: Int\n}";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("dos veces")),
+            "esperaba error sobre @primary duplicado en mismo field: {:?}",
             errs
         );
     }

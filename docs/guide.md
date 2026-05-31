@@ -11122,6 +11122,65 @@ request). Los values de tipos compuestos (List<scalar>, Map para
 JSONB) se marshallean con los casts SQL apropiados
 (`::text[]`/`::jsonb`).
 
+**`Type.bulk_insert(rows, db)`** (v0.10.27) — inserta muchas rows
+en batches multi-tuple `VALUES`. Default `batch_size=1000`.
+Optimizado para seeds y migraciones: 1 round-trip por batch.
+Devuelve el conteo total:
+
+```fitz
+let rows: List<User> = []
+let mut i = 0
+while (i < 5000) {
+    rows.push(User { id: 0, email: "u{i}@x.com", age: 20 })
+    i = i + 1
+}
+let n = User.bulk_insert(rows, db).await?
+print("inserted: {n}")  // 5000
+```
+
+Sentinel `id: 0` detectado de la PRIMERA row (asume shape
+uniforme — todas con o todas sin PK explícita). No emite
+`RETURNING *` (si necesitás los IDs auto-generados de cada row,
+usá `.insert` en loop).
+
+### Composite primary keys + `@index(...)` (v0.10.27)
+
+**Composite primary key**: N `@primary` por type. Útil para
+tablas de join (M:M):
+
+```fitz
+@table("memberships") type Membership {
+    @primary org_id: Int = 0
+    @primary user_id: Int = 0
+    role: Str = "member"
+}
+```
+
+`fitz db diff/migrate` emite `PRIMARY KEY (org_id, user_id)`.
+Insert con valores explícitos del PK tuple (no sentinel).
+
+**`@index(...)`**: decorator a nivel type que declara índices
+auto-emitidos por migrations. Composite, unique, partial:
+
+```fitz
+@table("posts")
+@index(author_id)
+@index(status, published_at)
+@index(slug, unique=true)
+@index(status, name="published_idx", where_=status == "published")
+type Post {
+    @primary id: Int = 0
+    author_id: Int = 0
+    slug: Str = ""
+    status: Str = "draft"
+    published_at: Str = ""
+}
+```
+
+Kwargs disponibles: `unique=true`, `name="..."`, `where_=<expr>`
+(partial index — el kwarg se llama `where_` porque `where` es
+reservada).
+
 ### Aggregates scalar + GROUP BY
 
 Sobre `QueryBuilder<Row>` los agregados scalar devuelven `Float`:

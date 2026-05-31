@@ -11508,6 +11508,12 @@ fn orm_dispatch_type_method(
         "insert" => orm_type_insert(type_value.clone(), args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        // v0.10.27 — F1: bulk insert con batching VALUES (...), (...), ...
+        // Útil para seeds/imports de 1k+ rows (10-100x más rápido que
+        // loop con .insert). Default batch_size = 1000.
+        "bulk_insert" => orm_type_bulk_insert(type_value.clone(), args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
         _ => Ok(None),
     }
 }
@@ -12643,7 +12649,9 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
         // y el valor runtime es `Int(0)`, lo skipeamos del INSERT para
         // que Postgres asigne el id via `bigserial`/`IDENTITY DEFAULT`.
         // Cualquier otro `id` explícito (1, 7, etc.) se inserta literal.
-        let is_pk_int_sentinel = state.meta.primary_field.as_deref() == Some(f.name.as_str())
+        // v0.10.27 (F2) — sentinel solo aplica a single PK Int.
+        // Composite PK: el user provee valores explícitos, no sentinel.
+        let is_pk_int_sentinel = state.meta.single_pk() == Some(f.name.as_str())
             && matches!(&f.type_, crate::ast::TypeExpr::Named(n) if n == "Int")
             && matches!(&value, Value::Int(0));
         if is_pk_int_sentinel {
@@ -12763,6 +12771,313 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
                 Value::Str(e.to_string()),
             )))),
         }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// v0.10.27 — F1: Bulk insert con batching VALUES multi-tuple.
+/// `Type.bulk_insert(rows, db)` o `Type.bulk_insert(rows, db, batch_size)`.
+/// Devuelve `Future<Result<Int>>` con el total de rows insertadas.
+///
+/// Args:
+///   - args[0]: `List<Type>` (instancias)
+///   - args[1]: DbConn
+///   - args[2] (opcional): Int batch_size (default 1000)
+///
+/// SQL emitido por batch: `INSERT INTO table (cols) VALUES (...), (...), ...`
+/// sin RETURNING (devolvemos el count del exec, no las rows insertadas).
+///
+/// Detección de PK sentinel: si el PRIMER row tiene `id: 0` (Int @primary
+/// sentinel), skipea la columna PK en TODOS los rows del batch
+/// (Postgres asigna bigserial). Si el primer row tiene id explícito,
+/// incluye la columna PK siempre. Rows con shape mixto fallan claro.
+///
+/// Per-row marshal: paralelo a `orm_type_insert` para JSONB (Map<...>
+/// → `$N::jsonb`), arrays (List<scalar> → `$N::int8[]`/etc.), y
+/// `@db_default` skip.
+fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`Type.bulk_insert(rows, db)` o `Type.bulk_insert(rows, db, batch_size)` espera 2 o 3 args, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    // arg 0: List<Instance>
+    let rows_shared = match &args[0] {
+        Value::List(l) => Arc::clone(l),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`Type.bulk_insert(rows, db)` primer arg debe ser List<Type>, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let rows: Vec<Value> = rows_shared.lock().clone();
+    // arg 1: DbConn
+    let db_handle = match &args[1] {
+        Value::DbConn(h) => Arc::clone(h),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "DbConn".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`Type.bulk_insert(rows, db)` segundo arg debe ser DbConn, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    // arg 2 (opcional): batch_size
+    let batch_size = if args.len() == 3 {
+        match &args[2] {
+            Value::Int(n) if *n > 0 => *n as usize,
+            Value::Int(n) => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!(
+                        "`Type.bulk_insert` batch_size debe ser Int > 0, recibió {}",
+                        n
+                    ),
+                ));
+            }
+            other => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Int".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line,
+                    span.column,
+                    format!(
+                        "`Type.bulk_insert` batch_size debe ser Int, recibió `{}`",
+                        other.type_name()
+                    ),
+                ));
+            }
+        }
+    } else {
+        1000
+    };
+    let state = type_value_to_state(type_value, span)?;
+
+    // Caso vacío: nada que insertar, retornar 0 sin tocar la DB.
+    if rows.is_empty() {
+        let fut: crate::value::FitzFuture = Box::pin(async move {
+            Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::Int(0),
+            ))))
+        });
+        return Ok(Value::new_future(fut));
+    }
+
+    // Validar que todos los rows son Instance del type correcto.
+    for (i, row) in rows.iter().enumerate() {
+        match row {
+            Value::Instance { type_name, .. } => {
+                if type_name != &state.type_name {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        span.line,
+                        span.column,
+                        format!(
+                            "`{}.bulk_insert`: rows[{}] es de tipo `{}`, esperaba `{}`",
+                            state.type_name, i, type_name, state.type_name
+                        ),
+                    ));
+                }
+            }
+            other => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: format!("Instance<{}>", state.type_name),
+                        found: other.type_name().into(),
+                    },
+                    span.line,
+                    span.column,
+                    format!(
+                        "`{}.bulk_insert`: rows[{}] no es una instancia, es `{}`",
+                        state.type_name,
+                        i,
+                        other.type_name()
+                    ),
+                ));
+            }
+        }
+    }
+
+    // Decidir si se skipea la columna PK (sentinel detection desde el
+    // primer row). Si el PK es Int y el primer row tiene Int(0),
+    // skipeamos PK en TODOS los rows (asume shape uniforme). Si el
+    // primer row tiene id explícito, NO skipea PK.
+    // v0.10.27 (F2) — sentinel detection en bulk_insert requiere
+    // single PK Int. Composite: pk_name=None, no sentinel applied.
+    let pk_name: Option<String> = state.meta.single_pk().map(String::from);
+    let skip_pk_in_all = match &rows[0] {
+        Value::Instance { fields, .. } => {
+            let f0 = fields.lock();
+            if let Some(pk) = pk_name.as_deref() {
+                let pk_field_decl = state.fields.iter().find(|f| f.name == pk);
+                let is_int_pk = pk_field_decl
+                    .map(|f| matches!(&f.type_, crate::ast::TypeExpr::Named(n) if n == "Int"))
+                    .unwrap_or(false);
+                if is_int_pk {
+                    let pk_value = f0.iter().find(|(n, _)| n == pk).map(|(_, v)| v.clone());
+                    matches!(pk_value, Some(Value::Int(0)))
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        }
+        _ => unreachable!(),
+    };
+
+    // Determinar la lista de fields a insertar (col_list + per-row marshal
+    // shape). Skipea virtuales, @db_default, y PK sentinel si aplica.
+    let mut col_list = String::new();
+    let mut insert_fields: Vec<&crate::ast::Field> = Vec::with_capacity(state.fields.len());
+    let mut first_col = true;
+    for f in state.fields.iter() {
+        if state.meta.is_virtual_field(&f.name) {
+            continue;
+        }
+        let is_db_default = state
+            .meta
+            .columns
+            .get(&f.name)
+            .map(|c| c.db_default)
+            .unwrap_or(false);
+        if is_db_default {
+            continue;
+        }
+        if skip_pk_in_all && pk_name.as_deref() == Some(f.name.as_str()) {
+            continue;
+        }
+        let sql_col = state
+            .meta
+            .columns
+            .get(&f.name)
+            .and_then(|c| c.sql_name.as_deref())
+            .unwrap_or(f.name.as_str());
+        if !first_col {
+            col_list.push_str(", ");
+        }
+        first_col = false;
+        col_list.push('"');
+        col_list.push_str(sql_col);
+        col_list.push('"');
+        insert_fields.push(f);
+    }
+
+    // Process en batches. Cada batch construye un SQL nuevo con su
+    // propio placeholder count + args concatenados.
+    let table_sql = state.meta.qualified_sql_name();
+    let type_name_owned = state.type_name.clone();
+    let insert_fields_owned: Vec<crate::ast::Field> = insert_fields.into_iter().cloned().collect();
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        let mut total_inserted: i64 = 0;
+        let to_err = |msg: String| -> Value {
+            Value::Result(crate::value::ResultVariant::Err(Box::new(Value::Str(msg))))
+        };
+        for chunk in rows.chunks(batch_size) {
+            let mut placeholder_idx = 0usize;
+            let mut tuples = String::new();
+            let mut batch_args: Vec<crate::db::PgValue> =
+                Vec::with_capacity(chunk.len() * insert_fields_owned.len());
+            for (ri, row) in chunk.iter().enumerate() {
+                if ri > 0 {
+                    tuples.push_str(", ");
+                }
+                tuples.push('(');
+                let row_fields_shared = match row {
+                    Value::Instance { fields, .. } => Arc::clone(fields),
+                    _ => unreachable!(),
+                };
+                let row_fields = row_fields_shared.lock().clone();
+                let mut first_p = true;
+                for f in insert_fields_owned.iter() {
+                    if !first_p {
+                        tuples.push_str(", ");
+                    }
+                    first_p = false;
+                    let value = row_fields
+                        .iter()
+                        .find(|(n, _)| n == &f.name)
+                        .map(|(_, v)| v.clone())
+                        .unwrap_or(Value::Null);
+                    let field_is_map = is_map_type(&f.type_);
+                    let field_list_elem = list_elem_pg_oid(&f.type_);
+                    let marshal_result: Result<(crate::db::PgValue, &str), String> = if field_is_map
+                    {
+                        fitz_value_to_jsonb(&value)
+                            .map(|pg| (pg, "::jsonb"))
+                            .map_err(|msg| {
+                                format!(
+                                    "bulk_insert row[{}] field `{}` (jsonb): {}",
+                                    ri, f.name, msg
+                                )
+                            })
+                    } else if let Some(elem_oid) = field_list_elem {
+                        fitz_list_to_pg_array(&value, elem_oid)
+                            .map(|pg| (pg, array_sql_cast_for(elem_oid).unwrap_or("")))
+                            .map_err(|msg| {
+                                format!(
+                                    "bulk_insert row[{}] field `{}` (array): {}",
+                                    ri, f.name, msg
+                                )
+                            })
+                    } else {
+                        fitz_value_to_pg(&value).map(|pg| (pg, "")).map_err(|msg| {
+                            format!("bulk_insert row[{}] field `{}`: {}", ri, f.name, msg)
+                        })
+                    };
+                    let (pg, placeholder_suffix) = match marshal_result {
+                        Ok(t) => t,
+                        Err(msg) => {
+                            return Ok(to_err(format!("{}.bulk_insert: {}", type_name_owned, msg)));
+                        }
+                    };
+                    placeholder_idx += 1;
+                    tuples.push_str(&format!("${}{}", placeholder_idx, placeholder_suffix));
+                    batch_args.push(pg);
+                }
+                tuples.push(')');
+            }
+            let sql = format!("INSERT INTO {} ({}) VALUES {}", table_sql, col_list, tuples);
+            match db_handle.exec(&sql, &batch_args).await {
+                Ok(n) => total_inserted += n as i64,
+                Err(e) => {
+                    return Ok(to_err(format!("{}.bulk_insert: {}", type_name_owned, e)));
+                }
+            }
+        }
+        Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+            Value::Int(total_inserted),
+        ))))
     });
     Ok(Value::new_future(fut))
 }
@@ -13121,17 +13436,19 @@ async fn orm_instance_navigate(
         // sigue siendo el del sibling, y el target se busca por su
         // PK matcheando el FK.
         crate::types::RelationKind::BelongsTo | crate::types::RelationKind::BelongsToCompanion => {
-            let primary_target = target_state.meta.primary_field.as_ref().ok_or_else(|| {
+            // v0.10.27 (F2) — navigation requiere single PK del target.
+            let primary_target_owned = target_state.meta.single_pk().map(String::from).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     span.line,
                     span.column,
                     format!(
-                        "navigation BelongsTo: el type `{}` no declara `@primary` en ningún field",
+                        "navigation BelongsTo: el type `{}` no declara `@primary` en exactamente un field (composite PK no soportada en navigation)",
                         rel.target_type
                     ),
                 ))
             })?;
+            let primary_target = &primary_target_owned;
             let fk_value = instance_fields_snapshot
                 .iter()
                 .find(|(n, _)| n == &rel.fk_field)
@@ -13150,20 +13467,22 @@ async fn orm_instance_navigate(
             (primary_target.clone(), fk_value)
         }
         crate::types::RelationKind::HasOne | crate::types::RelationKind::HasMany => {
-            let primary_this = this_meta.primary_field.as_ref().ok_or_else(|| {
+            // v0.10.27 (F2) — Has* navigation también requiere single PK
+            // del parent (this) para que el FK del target apunte ahí.
+            let primary_this_owned = this_meta.single_pk().map(String::from).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     span.line,
                     span.column,
                     format!(
-                        "navigation Has*: el type `{}` no declara `@primary` en ningún field",
+                        "navigation Has*: el type `{}` no declara `@primary` en exactamente un field (composite PK no soportada en navigation)",
                         instance_type_name
                     ),
                 ))
             })?;
             let primary_value = instance_fields_snapshot
                 .iter()
-                .find(|(n, _)| n == primary_this)
+                .find(|(n, _)| n == &primary_this_owned)
                 .map(|(_, v)| v.clone())
                 .ok_or_else(|| {
                     EvalSignal::Error(FitzError::new(
@@ -13172,7 +13491,7 @@ async fn orm_instance_navigate(
                         span.column,
                         format!(
                             "navigation Has*: la instancia de `{}` no tiene el field primary `{}`",
-                            instance_type_name, primary_this
+                            instance_type_name, primary_this_owned
                         ),
                     ))
                 })?;
@@ -27092,7 +27411,7 @@ let r = match n {
             } => {
                 assert_eq!(name, "User");
                 assert_eq!(meta.sql_name, "users");
-                assert_eq!(meta.primary_field.as_deref(), Some("id"));
+                assert_eq!(meta.single_pk(), Some("id"));
             }
             other => panic!("esperaba Value::Type con table_metadata, fue {:?}", other),
         }
@@ -27183,11 +27502,12 @@ let r = match n {
         ];
         let meta = crate::types::TableMetadata {
             sql_name: "users".into(),
-            primary_field: Some("id".into()),
+            primary_fields: vec!["id".into()],
             columns: std::collections::HashMap::new(),
             relations: std::collections::HashMap::new(),
             renamed_from: None,
             schema: None,
+            indexes: vec![],
         };
         (fields, meta)
     }
@@ -27673,11 +27993,12 @@ let r = match n {
             ],
             meta: crate::types::TableMetadata {
                 sql_name: "users".into(),
-                primary_field: Some("id".into()),
+                primary_fields: vec!["id".into()],
                 columns: std::collections::HashMap::new(),
                 relations: std::collections::HashMap::new(),
                 renamed_from: None,
                 schema: None,
+                indexes: vec![],
             },
             where_sql: None,
             where_args: Vec::new(),

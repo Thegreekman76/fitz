@@ -50,6 +50,14 @@ pub struct Table {
     /// `public` (default). Cuando `Some(s)`, el SQL emit usa
     /// `"s"."name"` qualified everywhere.
     pub schema: Option<String>,
+    /// v0.10.27 (F2) — composite PK. Si está y `len() >= 2`, el
+    /// CREATE TABLE emite `PRIMARY KEY (a, b)` como constraint
+    /// table-level (los columns individuales NO emiten `PRIMARY
+    /// KEY` inline). Si está y `len() == 1`, redundante con
+    /// `Column.is_primary` — preferimos el inline en ese caso. Si
+    /// vacío o None, no hay composite. La introspect popula desde
+    /// `pg_constraint` con contype='p'.
+    pub composite_pk: Vec<String>,
 }
 
 impl Table {
@@ -86,6 +94,12 @@ pub struct Index {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
+    /// v0.10.27 (F3) — WHERE clause SQL para partial indexes
+    /// (`CREATE INDEX ... WHERE deleted_at IS NULL`). `None` = full
+    /// index. Si está, el diff compara la string exacta vs lo que
+    /// Postgres reporta (los espacios/canonical form pueden diferir
+    /// — best-effort match, fallback regenerar el índice).
+    pub where_clause: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,6 +145,38 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
         } else {
             Some(schema.clone())
         };
+        // v0.10.27 (F2) — composite PK: si hay >=2 columns con
+        // is_primary=true post-introspect, los acumulamos acá. Single
+        // PK queda en Column.is_primary inline (composite_pk vacío).
+        let pk_cols_introspected: Vec<String> = columns
+            .iter()
+            .filter(|c| c.is_primary)
+            .map(|c| c.name.clone())
+            .collect();
+        let composite_pk = if pk_cols_introspected.len() >= 2 {
+            // Limpiar is_primary inline (la fuente de verdad para
+            // composite es la lista a nivel table) — sino diff vs
+            // target (que tiene composite_pk + is_primary=false en
+            // cols) emite falsos cambios.
+            let mut cols_normalized = columns.clone();
+            for c in cols_normalized.iter_mut() {
+                if c.is_primary {
+                    c.is_primary = false;
+                }
+            }
+            tables.push(Table {
+                name: name.clone(),
+                columns: cols_normalized,
+                indexes,
+                foreign_keys,
+                renamed_from: None,
+                schema: schema_for_struct,
+                composite_pk: pk_cols_introspected,
+            });
+            continue;
+        } else {
+            Vec::new()
+        };
         tables.push(Table {
             name: name.clone(),
             columns,
@@ -138,6 +184,7 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
             foreign_keys,
             renamed_from: None,
             schema: schema_for_struct,
+            composite_pk,
         });
     }
     // Orden determinístico: schema primero, después name. `public`
@@ -267,6 +314,9 @@ async fn introspect_indexes(
     schema: &str,
     table: &str,
 ) -> DbResult<Vec<Index>> {
+    // v0.10.27 (F3) — extendemos la query introspectiva para incluir
+    // `pg_get_expr(i.indpred, i.indrelid)` que devuelve la WHERE
+    // clause de partial indexes (`NULL` para full indexes).
     let sql = "SELECT \
                    c.relname AS index_name, \
                    i.indisunique AS is_unique, \
@@ -276,7 +326,8 @@ async fn introspect_indexes(
                            FROM unnest(i.indkey) WITH ORDINALITY AS k(idx, ord) \
                            JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = k.idx \
                            ORDER BY k.ord \
-                       ), ',') AS column_names \
+                       ), ',') AS column_names, \
+                   pg_get_expr(i.indpred, i.indrelid) AS where_clause \
                FROM pg_index i \
                JOIN pg_class c ON c.oid = i.indexrelid \
                WHERE i.indrelid = ($1::regclass) \
@@ -290,10 +341,16 @@ async fn introspect_indexes(
         let cols_csv = extract_string(row, "column_names")?;
         let cols: Vec<String> = cols_csv.split(',').map(|s| s.trim().to_string()).collect();
         let is_unique = extract_bool(row, "is_unique").unwrap_or(false);
+        // pg_get_expr devuelve NULL (= PgValue::Null) si no es partial.
+        let where_clause = match row.get("where_clause") {
+            Some(PgValue::Text(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        };
         indexes.push(Index {
             name,
             columns: cols,
             unique: is_unique,
+            where_clause,
         });
     }
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -443,11 +500,22 @@ fn build_table_from_type(
             continue;
         }
         let col_meta = meta.columns.get(&f.name);
-        let is_primary = meta.primary_field.as_deref() == Some(f.name.as_str());
+        // v0.10.27 (F2) — composite PK: el field es PK si está en
+        // `primary_fields` (no solo si es el ÚNICO). Para single PK
+        // sigue funcionando idéntico.
+        let is_primary = meta.primary_fields.iter().any(|p| p == &f.name);
+        // v0.10.27 (F2) — el CREATE TABLE inline `<col> <type> PRIMARY KEY`
+        // solo se emite si SINGLE PK (1 field). Para composite PK,
+        // el constraint va al final `PRIMARY KEY (a, b)` y los cols
+        // individuales solo emiten `NOT NULL` (el inline rompería).
+        let is_inline_pk = is_primary && meta.primary_fields.len() == 1;
 
         // Tipo Fitz → resolver via TypeExpr → SQL.
         let (fitz_inner_ty, nullable) = unwrap_nullable_typeexpr(&f.type_);
-        let sql_type = fitz_typeexpr_to_sql_type(&fitz_inner_ty, is_primary, col_meta)?;
+        // v0.10.27 (F2) — `bigserial` (auto-increment) solo se emite
+        // para SINGLE PK Int. Composite PK: cada col es `bigint`
+        // normal (el user provee valores explícitos del PK tuple).
+        let sql_type = fitz_typeexpr_to_sql_type(&fitz_inner_ty, is_inline_pk, col_meta)?;
         let sql_name = col_meta
             .and_then(|c| c.sql_name.clone())
             .unwrap_or_else(|| f.name.clone());
@@ -469,7 +537,9 @@ fn build_table_from_type(
             sql_type,
             nullable,
             default,
-            is_primary,
+            // v0.10.27 (F2) — solo single PK emite `PRIMARY KEY` inline;
+            // composite PK emite el constraint table-level abajo.
+            is_primary: is_inline_pk,
             renamed_from: col_meta.and_then(|c| c.renamed_from.clone()),
         });
 
@@ -480,6 +550,7 @@ fn build_table_from_type(
                     name: format!("{}_{}_key", table_name, sql_name),
                     columns: vec![sql_name.clone()],
                     unique: true,
+                    where_clause: None,
                 });
             }
             if cm.indexed {
@@ -487,6 +558,7 @@ fn build_table_from_type(
                     name: format!("{}_{}_idx", table_name, sql_name),
                     columns: vec![sql_name.clone()],
                     unique: false,
+                    where_clause: None,
                 });
             }
         }
@@ -507,10 +579,14 @@ fn build_table_from_type(
                     })?;
                 // PK column del target (default "id"). En PG las
                 // PK columns no tienen prefijo de tabla.
+                // v0.10.27 (F2) — FK referencing requiere single PK
+                // del target. Composite PK del target → fallback "id"
+                // (que típicamente no existirá, error claro en CREATE
+                // TABLE de PG si el user lo intenta).
                 let target_pk_field = type_env
                     .lookup(&rel.target_type)
                     .and_then(|tid| type_env.table_metadata(tid))
-                    .and_then(|m| m.primary_field.clone())
+                    .and_then(|m| m.single_pk().map(String::from))
                     .unwrap_or_else(|| "id".to_string());
                 let target_pk_sql = type_env
                     .lookup(&rel.target_type)
@@ -539,9 +615,54 @@ fn build_table_from_type(
         }
     }
 
+    // v0.10.27 (F3) — Indexes desde `@index(...)` decorators a
+    // nivel type (composite + partial + unique). Auto-generamos el
+    // name si el user no lo pasó: `idx_<table>_<col1>_<col2>...`
+    // con sufijo `_uniq` si unique. El nombre debe matchear lo que
+    // Postgres reporta vía pg_indexes para que el drift check no
+    // dispare CREATE/DROP en cada corrida.
+    for idx in &meta.indexes {
+        let auto_name = || {
+            let mut s = String::from("idx_");
+            s.push_str(&table_name);
+            for c in &idx.columns {
+                s.push('_');
+                s.push_str(c);
+            }
+            if idx.unique {
+                s.push_str("_uniq");
+            }
+            s
+        };
+        let index_name = idx.name.clone().unwrap_or_else(auto_name);
+        indexes.push(Index {
+            name: index_name,
+            columns: idx.columns.clone(),
+            unique: idx.unique,
+            where_clause: idx.where_clause.clone(),
+        });
+    }
+
     // Orden determinístico de indexes y FKs (para diffs estables).
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
     foreign_keys.sort_by(|a, b| a.name.cmp(&b.name));
+
+    // v0.10.27 (F2) — composite PK: resolver SQL names de los PK
+    // fields (respeta @column(name=...)). Solo poblamos si N>=2;
+    // single PK queda como `Column.is_primary` inline.
+    let composite_pk: Vec<String> = if meta.primary_fields.len() >= 2 {
+        meta.primary_fields
+            .iter()
+            .map(|pk_fitz| {
+                meta.columns
+                    .get(pk_fitz)
+                    .and_then(|c| c.sql_name.clone())
+                    .unwrap_or_else(|| pk_fitz.clone())
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Ok(Table {
         name: table_name,
@@ -550,6 +671,7 @@ fn build_table_from_type(
         foreign_keys,
         renamed_from: meta.renamed_from.clone(),
         schema: meta.schema.clone(),
+        composite_pk,
     })
 }
 
@@ -825,6 +947,22 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     create_tables.sort_by_key(|a| a.qualified_id());
     for t in &create_tables {
         changes.push(Change::CreateTable((*t).clone()));
+        // v0.10.27 (F3) — indexes definidos por `@index(...)` para
+        // tablas nuevas también van como CREATE INDEX separados (no
+        // inline en el CREATE TABLE para mantener simétrico con el
+        // diff path de tablas existentes). Auto-PK y auto-UNIQUE de
+        // columnas individuales NO entran acá — son parte del CREATE
+        // TABLE inline. Sólo emitimos los indexes "extra" del @index
+        // decorator o de @column.indexed/unique.
+        let mut idx_to_create: Vec<&Index> = t.indexes.iter().collect();
+        idx_to_create.sort_by(|a, b| a.name.cmp(&b.name));
+        let table_ref = TableRef::from_table(t);
+        for i in idx_to_create {
+            changes.push(Change::CreateIndex {
+                table: table_ref.clone(),
+                index: i.clone(),
+            });
+        }
     }
 
     // --- 2. ALTER de tablas en AMBOS (cross-schema match por
@@ -1281,12 +1419,22 @@ fn change_to_sql(change: &Change) -> String {
         Change::CreateIndex { table, index } => {
             let unique = if index.unique { "UNIQUE " } else { "" };
             let cols: Vec<String> = index.columns.iter().map(|c| quote_ident(c)).collect();
+            // v0.10.27 (F3) — partial index: append `WHERE <clause>`.
+            // El user pasa la SQL clause RAW (sin `WHERE`); Postgres
+            // valida el predicate al CREATE INDEX. Si la clause
+            // referencia cols inexistentes, el CREATE falla con
+            // mensaje claro.
+            let where_suffix = match &index.where_clause {
+                Some(w) => format!(" WHERE {}", w),
+                None => String::new(),
+            };
             format!(
-                "CREATE {}INDEX {} ON {} ({});",
+                "CREATE {}INDEX {} ON {} ({}){};",
                 unique,
                 quote_ident(&index.name),
                 quote_qualified(table),
                 cols.join(", "),
+                where_suffix,
             )
         }
         Change::DropIndex { schema, index_name } => {
@@ -1383,6 +1531,13 @@ fn create_table_sql(t: &Table) -> String {
             nullable,
             default,
         ));
+    }
+    // v0.10.27 (F2) — composite PK constraint table-level cuando
+    // `composite_pk.len() >= 2`. Single PK queda como `is_primary`
+    // inline en la columna (más legible y matchea introspect).
+    if t.composite_pk.len() >= 2 {
+        let cols: Vec<String> = t.composite_pk.iter().map(|c| quote_ident(c)).collect();
+        lines.push(format!("    PRIMARY KEY ({})", cols.join(", ")));
     }
     // FKs NO inline acá — el diff las emite como ADD CONSTRAINT
     // separados para destrabar ciclos entre tablas nuevas.
@@ -2159,6 +2314,7 @@ mod tests {
             foreign_keys: vec![],
             renamed_from: None,
             schema: None,
+            composite_pk: vec![],
         }
     }
 
@@ -2322,6 +2478,7 @@ mod tests {
             name: "users_email_key".to_string(),
             columns: vec!["email".to_string()],
             unique: true,
+            where_clause: None,
         });
         let target = Schema {
             tables: vec![target_users],
@@ -2346,6 +2503,7 @@ mod tests {
             name: "users_email_idx".to_string(),
             columns: vec!["email".to_string()],
             unique: false,
+            where_clause: None,
         });
         let current = Schema {
             tables: vec![current_users],
@@ -2417,6 +2575,7 @@ mod tests {
                     foreign_keys: vec![],
                     renamed_from: None,
                     schema: None,
+                    composite_pk: vec![],
                 },
             ],
         };
@@ -2435,6 +2594,7 @@ mod tests {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -2644,6 +2804,7 @@ type Plain {
             foreign_keys: vec![],
             renamed_from: None,
             schema: None,
+            composite_pk: vec![],
         };
         let sql = changes_to_sql(&[Change::CreateTable(t)]);
         assert!(
@@ -2701,6 +2862,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -2714,6 +2876,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2744,6 +2907,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -2757,6 +2921,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2791,6 +2956,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -2805,6 +2971,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -2826,6 +2993,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -2836,6 +3004,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3051,6 +3220,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -3061,6 +3231,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: Some("old_users".to_string()),
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3176,6 +3347,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -3186,6 +3358,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: Some("old_users".to_string()),
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3211,6 +3384,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: None,
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let target = Schema {
@@ -3221,6 +3395,7 @@ type Plain {
                 foreign_keys: vec![],
                 renamed_from: Some("old_x".to_string()),
                 schema: None,
+                composite_pk: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);

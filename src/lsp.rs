@@ -1109,8 +1109,8 @@ fn decorator_completions() -> Vec<CompletionItem> {
         (
             "index",
             "index",
-            "@index — columna indexada",
-            "Marca el field para CREATE INDEX. Sin args.",
+            "@index(col, ..., unique?, name?, where_?) — índice declarado al type (v0.10.27)",
+            "Sobre el `type` con `@table`: declara índices auto-emitidos por `fitz db diff/migrate`. Composite (multi-col), unique (`unique=true`), partial (`where_=<expr>`), nombre override (`name=\"...\"`).",
         ),
         (
             "db_default",
@@ -1228,10 +1228,22 @@ fn after_dot_completions(
                     "fn(predicate: fn(row) -> Bool) -> QueryBuilder".into(),
                 ),
                 (
+                    "first",
+                    format!("async fn(db: DbConn) -> Result<{}>", recv_name),
+                ),
+                ("count", "async fn(db: DbConn) -> Result<Int>".into()),
+                (
                     "insert",
                     format!(
                         "async fn(db: DbConn, row: {}) -> Result<{}>",
                         recv_name, recv_name
+                    ),
+                ),
+                (
+                    "bulk_insert",
+                    format!(
+                        "async fn(rows: List<{}>, db: DbConn, batch_size?: Int) -> Result<Int>",
+                        recv_name
                     ),
                 ),
             ]);
@@ -4255,7 +4267,7 @@ mod tests {
         // Cursor después de `User.` en línea 5, col 5.
         let items = completion_at_position(src, &program, &type_info, &env, 5, 5);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        for expected in ["all", "where", "insert"] {
+        for expected in ["all", "where", "first", "count", "insert", "bulk_insert"] {
             assert!(
                 labels.contains(&expected),
                 "falta estático ORM `{expected}`: {labels:?}"

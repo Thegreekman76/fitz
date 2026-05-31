@@ -397,13 +397,13 @@ en TODAS las queries. Sin `.` en el arg, schema=`public`
 
 ### `@primary`
 
-Sobre un field. Debe haber **exactamente uno** por `type` con
-`@table`. Tipo Int (con default `= 0` para que Postgres
-`bigserial` auto-asigne) o Str (UUID que el cliente genera).
+Sobre un field. **Uno o varios** `@primary` por `type` con
+`@table`. Un solo `@primary` Int con default `= 0` → Postgres
+`bigserial` auto-asigna. Str UUID → cliente genera.
 
 ```fitz
 @table("users") type User {
-    @primary id: Int = 0    // bigserial PRIMARY KEY
+    @primary id: Int = 0    // bigserial PRIMARY KEY (auto)
     email: Str
 }
 
@@ -413,7 +413,30 @@ Sobre un field. Debe haber **exactamente uno** por `type` con
 }
 ```
 
-El checker exige unicidad: dos `@primary` en el mismo type → error.
+**Composite primary key (v0.10.27)**: N `@primary` arman un PK
+tuple. Migrations emite `PRIMARY KEY (col1, col2)` table-level.
+Cada columna lleva su tipo individual (sin `bigserial` — los
+valores los provee el user explícitos):
+
+```fitz
+@table("memberships") type Membership {
+    @primary org_id: Int = 0
+    @primary user_id: Int = 0
+    role: Str = "member"
+    joined_at: Str = ""
+}
+
+// Insert con valores explícitos del PK tuple
+let m = Membership { org_id: 1, user_id: 42, role: "admin" }
+let r = Membership.insert(conn, m).await?
+```
+
+**Limitaciones composite PK en v0.10.27**:
+- Sentinel `id: 0` auto-bigserial NO aplica (es single-PK only).
+- Navigation methods (`@belongs_to`, `@has_many`, `@has_one`)
+  apuntan al **single PK** del target. BelongsTo a composite PK
+  → error de checker explícito.
+- `same field declared twice as @primary` → error claro.
 
 ### `@column(name="...")`
 
@@ -540,6 +563,49 @@ type ResponseEnvelope {
     @hidden internal_trace_id: Str = ""   // log interno, no al cliente
 }
 ```
+
+### `@index(...)` para composite / unique / partial indexes (v0.10.27)
+
+Decorator a nivel **type** (no a field) que declara índices que
+`fitz db diff` y `fitz db migrate` emiten automáticamente:
+
+```fitz
+@table("posts")
+@index(author_id)                                  // simple
+@index(status, published_at)                       // composite
+@index(slug, unique=true)                          // unique
+@index(status, name="published_idx", where_=status == "published")  // partial
+type Post {
+    @primary id: Int = 0
+    author_id: Int = 0
+    slug: Str = ""
+    status: Str = "draft"
+    published_at: Str = ""
+}
+```
+
+**Kwargs**:
+- `unique=true` — `CREATE UNIQUE INDEX`.
+- `name="..."` — override del nombre. Default
+  `idx_<table>_<col1>_<col2>...[_uniq]`.
+- `where_=...` — partial index. Acepta cualquier expresión
+  comparativa simple traducida a SQL (`col == "x"`, `col > N`,
+  `col is_in [a, b]`, etc.). El nombre del kwarg es `where_`
+  porque `where` es reservada del lenguaje.
+
+**Cuándo aplica**:
+- `fitz db diff` muestra los `CREATE INDEX` que faltan.
+- `fitz db migrate` los aplica.
+- Si la tabla **ya existe** con índices distintos, el diff muestra
+  el delta (drop + create cuando cambian columnas, drop puro
+  cuando sobran).
+
+**Lo que NO está en v0.10.27**:
+- **Expression indexes** sobre llamadas/funciones (`lower(email)`,
+  `to_tsvector('english', body)`): no se generan auto. Workaround:
+  `db.exec("CREATE INDEX ...")` al boot.
+- **Index method override** (`USING hash`, `USING gin`): no
+  expresable. Default `btree` (Postgres default).
 
 ---
 
@@ -909,6 +975,37 @@ print("nueva id: {inserted.id}")     // e.g. 42
 INSERT emite `RETURNING *` internamente, así que el row devuelto
 tiene todos los fields hidratados (incluyendo cualquier default
 declarado del lado SQL).
+
+### `Type.bulk_insert(rows, db, batch_size=1000) -> Future<Result<Int>>` (v0.10.27)
+
+Inserta múltiples rows en batches multi-tuple `VALUES (...), (...), ...`.
+Default `batch_size=1000` (configurable). Devuelve el conteo total
+de rows insertadas:
+
+```fitz
+let rows: List<User> = []
+let mut i = 0
+while (i < 5000) {
+    rows.push(User { id: 0, name: "user_{i}", role: "guest" })
+    i = i + 1
+}
+let n = User.bulk_insert(rows, db).await?
+print("inserted: {n}")  // 5000
+```
+
+**Sentinel `id: 0`**: detectado de la PRIMERA row. Si la primera
+trae `id: 0`, el SQL omite la columna PK en TODAS las rows del
+batch (Postgres genera con `bigserial`). Si la primera trae
+`id > 0`, todas las N rows incluyen PK explícito. Shape uniforme
+exigido (no mezclar). Composite PK: valores explícitos siempre
+(no hay sentinel multi-col).
+
+**No emite `RETURNING *`** (a diferencia de `.insert`): si
+necesitás los IDs auto-generados de cada row, usá `.insert` en
+loop. `bulk_insert` está optimizado para seeds/migraciones donde
+solo importa el conteo.
+
+Ver sección 25 para más patterns bulk.
 
 ### `QueryBuilder.update(db, changes: Map) -> Future<Result<Int>>`
 
@@ -2317,48 +2414,45 @@ async fn compute_daily_stats() {
 
 ## 25. Recetas — Bulk operations
 
-### Insert múltiple
-
-El ORM no tiene `.bulk_insert([...])` en MVP. Patterns:
-
-**Loop con .insert (N statements separados)**:
+### Insert múltiple — `Type.bulk_insert(rows, db)` (v0.10.27)
 
 ```fitz
-async fn insert_many(users: List<User>) -> Result<List<User>> {
-    let inserted: List<User> = []
-    for u in users {
-        let i = User.insert(db, u).await?
-        inserted.push(i)
-    }
-    return Ok(inserted)
-}
-```
-
-Costo: N round-trips al server. OK para N pequeño (<100).
-
-**Bulk insert con `db.exec` crudo + `VALUES` múltiple**:
-
-```fitz
-async fn bulk_insert_emails(emails: List<Str>) -> Result<Int> {
-    // Construye un VALUES multi-row a mano.
-    // (Esto es feo; un helper `bulk_insert` queda como deuda.)
-    let placeholders = ""
-    let params: List<Any> = []
-    let mut i = 1
-    for e in emails {
-        if i > 1 { placeholders = placeholders + ", " }
-        placeholders = placeholders + "(${i})"
-        params.push(e)
+async fn seed_users(db: DbConn) -> Result<Int> {
+    let rows: List<User> = []
+    let mut i = 0
+    while (i < 1000) {
+        rows.push(User { id: 0, name: "user_{i}", role: "guest" })
         i = i + 1
     }
-    let sql = "INSERT INTO users (email) VALUES " + placeholders
-    return db.exec(sql, params).await
+    let n = User.bulk_insert(rows, db).await?
+    print("inserted: {n}")
+    return Ok(n)
 }
 ```
 
-Caveat: la construcción dinámica del SQL es manual y propensa a
-errores. **`db.copy_in(...)` para datos grandes** es alternativa
-futura.
+Emite `INSERT INTO users ("name", "role") VALUES ($1, $2), ($3, $4), ...`
+en batches de 1000 rows por default (configurable con
+`User.bulk_insert(rows, db, batch_size=500)`). Devuelve el conteo
+total de rows insertadas.
+
+**Sentinel `id: 0` auto-bigserial**: la primera row del batch
+decide. Si su PK es `0` (Int sentinel), el SQL omite la columna
+PK en TODAS las rows del batch (Postgres genera con
+`bigserial`). Si la primera row trae PK > 0, las N rows incluyen
+PK explícito. Asunción: shape uniforme — no mezclar rows con y
+sin PK en el mismo `bulk_insert`.
+
+**Composite PK** (v0.10.27): el batch lleva los N valores del PK
+tuple explícitos en cada row. Sentinel no aplica (no hay
+`bigserial` para composite).
+
+**Costos**: 1 round-trip por batch (~1000 rows). Para datasets
+mayores (cientos de miles +), `db.copy_in` (COPY FROM STDIN)
+sigue como deuda futura.
+
+**Patrón anterior** (loop con `.insert`) sigue válido para casos
+de <100 rows o cuando necesitás la `Instance` devuelta por cada
+insert con todos los defaults aplicados.
 
 ### Update múltiple sobre set de IDs
 
@@ -3272,12 +3366,21 @@ sección 26.b. Deuda futura (NO bloquea uso real): nested
 transactions con SAVEPOINT, niveles de aislamiento custom,
 read-only transactions.
 
-### Composite primary keys
+### Composite primary keys — **CERRADO v0.10.27**
 
-- **Status**: solo un `@primary` único por type.
-- **Workaround**: tabla intermedia con su propio `@primary id: Int = 0`
-  + UNIQUE constraint a mano via `CREATE TABLE ... UNIQUE(a, b)`.
-- **Cuándo**: refinamiento futuro si entra presión.
+N `@primary` fields por type. Migrations emite `PRIMARY KEY (a, b)`
+constraint table-level; SELECT/INSERT/UPDATE/DELETE respetan
+composite. Sentinel `id: 0` auto-bigserial NO aplica (el user
+provee los N valores explícitos del PK tuple). Navigation
+belongs_to/has_many requiere single PK del target.
+
+```fitz
+@table("memberships") type Membership {
+    @primary org_id: Int = 0
+    @primary user_id: Int = 0
+    role: Str = ""
+}
+```
 
 ### TLS strict (`sslmode=require` / `verify-ca` / `verify-full`)
 
@@ -3315,18 +3418,25 @@ Lo que queda como deuda menor:
 
 ### Refinamientos pendientes del query builder
 
-- **Composite indexes, partial indexes, expression indexes**: no
-  se generan auto desde el `type`. El user los crea con
-  `db.exec("CREATE INDEX ...")` al boot. Relacionado con
-  migraciones automáticas.
-- **Bulk insert eficiente**: no hay `.bulk_insert([...])`. Loop
-  con `.insert(db, row)` es O(N) round-trips. Workaround:
-  `db.exec("INSERT INTO ... VALUES ...", [...])` con VALUES
-  multi-row construido a mano.
+- **Composite / partial / unique indexes via `@index(...)`** —
+  **CERRADO v0.10.27**. Decorator `@index(field1, field2, ...,
+  unique=true, name="...", where_=...)` declarado al type emite
+  `CREATE INDEX` auto desde `fitz db diff/migrate`. Soporta
+  composite (multi-col), unique, partial (`WHERE clause`), y
+  override del nombre. Expression indexes (sobre `func(col)`)
+  quedan como deuda menor.
+- **Bulk insert eficiente** — **CERRADO v0.10.27**.
+  `Type.bulk_insert([rows], db, batch_size=1000)` emite multi-row
+  VALUES en batches configurables. Paridad bit-a-bit
+  `fitz run` ↔ `fitz build`. Sentinel `id: 0` auto-bigserial
+  detectado de la PRIMERA row (asume shape uniforme — todas con
+  o todas sin PK explícita). Para composite PK los valores van
+  explícitos.
 - **`db.copy_in(...)` para inserts masivos**: Postgres
   `COPY FROM STDIN` (millones de rows en segundos) no está en el
-  driver. Workaround: subprocess `psql` o `pg_dump`/`pg_restore`.
-  Mini-fase aparte si entra presión real.
+  driver. Para datasets <100k rows, `bulk_insert` cubre el caso.
+  Mini-fase aparte si entra presión real para datasets grandes
+  (cientos de miles +).
 - **`fitz db inspect` / introspection del schema real**: no
   existe. Probablemente entra junto con `fitz db diff/migrate`.
 

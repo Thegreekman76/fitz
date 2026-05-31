@@ -13699,6 +13699,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             "insert" => self
                 .gen_orm_type_insert(type_name, args, call_span)
                 .map(Some),
+            // v0.10.27 — F1: bulk_insert paralelo a insert, multi-tuple
+            // VALUES con batching. Aridad 2 (rows, db) o 3 (rows, db,
+            // batch_size: Int).
+            "bulk_insert" => self
+                .gen_orm_type_bulk_insert(type_name, args, call_span)
+                .map(Some),
             // Fase 10.b.5 — chain methods sobre el Type construyen un
             // `__FitzQueryBuilder<TData>` nuevo y aplican el primer
             // fragmento del chain. La type del expresión devuelta es
@@ -13813,15 +13819,21 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.orm_lookup_meta_and_fields(&rel.target_type, call_span)?;
 
         // Resolver where_col_fitz + value_field_name según kind.
-        let this_primary = this_meta.primary_field.clone().ok_or_else(|| {
-            self.err_at(
-                call_span,
-                format!(
-                    "navigation: el type `{}` no declara `@primary` en ningún field",
-                    this_type_name
-                ),
-            )
-        })?;
+        // v0.10.27 (F2) — navigation requiere single PK. Composite PK
+        // sobre el parent NO está soportado en este path (navigation
+        // belongs_to/has_many requiere matching una sola col del FK).
+        let this_primary = this_meta
+            .single_pk()
+            .map(String::from)
+            .ok_or_else(|| {
+                self.err_at(
+                    call_span,
+                    format!(
+                        "navigation: el type `{}` no declara `@primary` en exactamente un field (composite PK no soportada en navigation)",
+                        this_type_name
+                    ),
+                )
+            })?;
         let (where_col_fitz, value_field_name) = match rel.kind {
             crate::types::RelationKind::BelongsTo
             | crate::types::RelationKind::BelongsToCompanion => {
@@ -13830,11 +13842,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 // recuperar el target via su PK matcheando el FK del
                 // parent. `rel.fk_field` apunta al FK column real en
                 // ambos casos (la companion reusa el FK del sibling).
-                let target_primary = target_meta.primary_field.clone().ok_or_else(|| {
+                let target_primary = target_meta.single_pk().map(String::from).ok_or_else(|| {
                     self.err_at(
                         call_span,
                         format!(
-                            "navigation BelongsTo: el type `{}` no declara `@primary`",
+                            "navigation BelongsTo: el type `{}` no declara `@primary` en exactamente un field (composite PK no soportada en navigation)",
                             rel.target_type
                         ),
                     )
@@ -14238,8 +14250,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // skipea el field del INSERT cuando el valor es el sentinel 0
         // (paridad con `orm_type_insert` del evaluator). El SQL queda
         // condicional: dos shapes (con/sin PK), elegidos en runtime.
-        let pk_int_field_name: Option<String> = if let Some(pk_name) = meta.primary_field.as_deref()
-        {
+        // v0.10.27 (F2) — sentinel detection requiere single PK Int.
+        // Composite PK no soporta sentinel (`id: 0`) auto-bigserial:
+        // el user provee los N valores explícitos del PK.
+        let pk_int_field_name: Option<String> = if let Some(pk_name) = meta.single_pk() {
             fields
                 .iter()
                 .find(|f| f.name == pk_name && matches!(&f.type_, Type::Int))
@@ -14454,6 +14468,217 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              }})",
             prelude_and_match = prelude_and_match,
             data = data_name,
+        );
+        Ok((code, ret_ty))
+    }
+
+    /// v0.10.27 — F1: Codegen `Type.bulk_insert(rows, db [, batch_size])`.
+    /// Paralelo a `orm_type_bulk_insert` del evaluator. Emite un async
+    /// block que:
+    ///   1. Decide skip_pk via detección del primer row (PK Int == 0).
+    ///   2. Chunk-ea por batch_size (default 1000).
+    ///   3. Por batch: construye SQL `INSERT INTO t (cols) VALUES
+    ///      (...), (...), ...` con args concatenados.
+    ///   4. Acumula el conteo total de rows insertadas.
+    ///
+    /// Devuelve `Future<Result<Int, String>>` con el total.
+    fn gen_orm_type_bulk_insert(
+        &mut self,
+        type_name: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 2 && args.len() != 3 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}.bulk_insert(rows, db)` o `{}.bulk_insert(rows, db, batch_size)` espera 2 o 3 args, recibió {}",
+                    type_name, type_name, args.len()
+                ),
+            ));
+        }
+        let (meta, fields) = self.orm_lookup_meta_and_fields(type_name, call_span)?;
+        // PK Int sentinel detection — mismo criterio que insert
+        // v0.10.27 (F2) — sentinel detection requiere single PK Int.
+        // Composite PK no soporta sentinel (`id: 0`) auto-bigserial:
+        // el user provee los N valores explícitos del PK.
+        let pk_int_field_name: Option<String> = if let Some(pk_name) = meta.single_pk() {
+            fields
+                .iter()
+                .find(|f| f.name == pk_name && matches!(&f.type_, Type::Int))
+                .map(|f| f.name.clone())
+        } else {
+            None
+        };
+
+        // Por cada field non-virtual, no @db_default: precomputar
+        // (col_quoted, cast_suffix, accessor_code, pg_marshal_code,
+        // is_pk). Reutilizamos en runtime para construir tuples de
+        // valores por row, branching skip_pk en runtime.
+        struct FieldEmit {
+            sql_col: String,
+            cast_suffix: &'static str,
+            pg_code_template: String, // accessor sub-string for "__g"
+            is_pk: bool,
+        }
+        let mut emits: Vec<FieldEmit> = Vec::new();
+        for f in &fields {
+            if meta.is_virtual_field(&f.name) {
+                continue;
+            }
+            let is_db_default = meta
+                .columns
+                .get(&f.name)
+                .map(|c| c.db_default)
+                .unwrap_or(false);
+            if is_db_default {
+                continue;
+            }
+            let sql_col_raw = meta
+                .columns
+                .get(&f.name)
+                .and_then(|c| c.sql_name.as_deref())
+                .unwrap_or(f.name.as_str())
+                .to_string();
+            let accessor = if needs_clone(&f.type_) {
+                format!("__g.{}.clone()", f.name)
+            } else {
+                format!("__g.{}", f.name)
+            };
+            let pg_code = orm_marshal_field_to_pg(&f.type_, &accessor, &f.name)?;
+            let cast_suffix = if let Some((_, _, _, cast)) = orm_list_scalar_info(&f.type_) {
+                cast
+            } else if orm_field_is_jsonb(&f.type_) {
+                "::jsonb"
+            } else {
+                ""
+            };
+            let is_pk = pk_int_field_name.as_deref() == Some(f.name.as_str());
+            emits.push(FieldEmit {
+                sql_col: sql_col_raw,
+                cast_suffix,
+                pg_code_template: pg_code,
+                is_pk,
+            });
+        }
+
+        // Pre-compute col_lists para los dos shapes.
+        let mut col_with = String::new();
+        let mut col_no = String::new();
+        for e in &emits {
+            if !col_with.is_empty() {
+                col_with.push_str(", ");
+            }
+            col_with.push('"');
+            col_with.push_str(&e.sql_col);
+            col_with.push('"');
+            if !e.is_pk {
+                if !col_no.is_empty() {
+                    col_no.push_str(", ");
+                }
+                col_no.push('"');
+                col_no.push_str(&e.sql_col);
+                col_no.push('"');
+            }
+        }
+        let qualified = meta.qualified_sql_name();
+
+        let (rows_code, _) = self.gen_expr(&args[0])?;
+        let (db_code, _) = self.gen_expr(&args[1])?;
+        let batch_size_code = if args.len() == 3 {
+            let (c, t) = self.gen_expr(&args[2])?;
+            coerce(&c, &t, &Type::Int, self.env)
+        } else {
+            "1000i64".to_string()
+        };
+
+        // Emit del bucle por row: build_row_tuple_no_pk + build_row_tuple_with_pk
+        // como dos string-template Rust (uno por shape). Cada uno appendea
+        // por field correspondiente.
+        let mut row_marshal_no = String::new();
+        let mut row_marshal_with = String::new();
+        // El runtime `__first_p` flag decide en cada iteración si
+        // pushear la coma. Las dos branches (with PK / without PK)
+        // emiten el mismo template per-field, pero la sin-PK skipea
+        // el field cuando es PK.
+        for e in &emits {
+            let pg = &e.pg_code_template;
+            let field_emit = format!(
+                "if __first_p {{ __first_p = false; }} else {{ __tuples.push_str(\", \"); }}\n                    __ph_idx += 1;\n                    __tuples.push_str(&format!(\"${{}}{cast}\", __ph_idx));\n                    __batch_args.push({{ {pg} }});\n                    ",
+                cast = e.cast_suffix,
+                pg = pg
+            );
+            row_marshal_with.push_str(&field_emit);
+            if !e.is_pk {
+                row_marshal_no.push_str(&field_emit);
+            }
+        }
+
+        let skip_pk_init = match &pk_int_field_name {
+            Some(pk) => format!(
+                "if let Some(__first_arc) = __rows_vec.first() {{\n        let __g = __first_arc.lock().unwrap();\n        __g.{} == 0\n    }} else {{ false }}",
+                pk
+            ),
+            None => "false".to_string(),
+        };
+
+        let sql_prefix_no = format!("INSERT INTO {} ({}) VALUES ", qualified, col_no);
+        let sql_prefix_with = format!("INSERT INTO {} ({}) VALUES ", qualified, col_with);
+
+        let ret_ty = Type::Future(Box::new(Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Str),
+        }));
+
+        let code = format!(
+            "(async {{\n    \
+             let __rows_arc = {rows};\n    \
+             let __rows_vec: Vec<_> = __rows_arc.lock().unwrap().clone();\n    \
+             let __db = {db};\n    \
+             let __batch_size_i64: i64 = {batch_size};\n    \
+             if __batch_size_i64 <= 0 {{\n        \
+             return Err(format!(\"{type_n}.bulk_insert: batch_size debe ser > 0, recibió {{}}\", __batch_size_i64));\n    \
+             }}\n    \
+             let __batch_size: usize = __batch_size_i64 as usize;\n    \
+             if __rows_vec.is_empty() {{\n        \
+             return Ok::<i64, String>(0i64);\n    \
+             }}\n    \
+             let __skip_pk: bool = {skip_pk_init};\n    \
+             let __sql_prefix: &str = if __skip_pk {{ {sql_no_lit} }} else {{ {sql_with_lit} }};\n    \
+             let mut __total: i64 = 0;\n    \
+             for __chunk in __rows_vec.chunks(__batch_size) {{\n        \
+             let mut __ph_idx: usize = 0;\n        \
+             let mut __tuples = String::new();\n        \
+             let mut __batch_args: Vec<__FitzPgValue> = Vec::new();\n        \
+             for (__ri, __row) in __chunk.iter().enumerate() {{\n            \
+             if __ri > 0 {{ __tuples.push_str(\", \"); }}\n            \
+             __tuples.push('(');\n            \
+             {{ \n                \
+             let __g = __row.lock().unwrap();\n                \
+             let mut __first_p = true;\n                \
+             if __skip_pk {{\n                    {row_no}\n                \
+             }} else {{\n                    {row_with}\n                \
+             }}\n            \
+             }}\n            \
+             __tuples.push(')');\n        \
+             }}\n        \
+             let __sql = format!(\"{{}}{{}}\", __sql_prefix, __tuples);\n        \
+             match __fitz_db_exec(&__db, __sql, __batch_args).await {{\n            \
+             Ok(__n) => __total += __n,\n            \
+             Err(__e) => return Err(format!(\"{type_n}.bulk_insert: {{}}\", __e)),\n        \
+             }}\n    \
+             }}\n    \
+             Ok::<i64, String>(__total)\n\
+             }})",
+            rows = rows_code,
+            db = db_code,
+            batch_size = batch_size_code,
+            type_n = type_name,
+            skip_pk_init = skip_pk_init,
+            sql_no_lit = rust_str_literal(&sql_prefix_no),
+            sql_with_lit = rust_str_literal(&sql_prefix_with),
+            row_no = row_marshal_no,
+            row_with = row_marshal_with,
         );
         Ok((code, ret_ty))
     }
@@ -15450,7 +15675,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         parent_meta: &crate::types::TableMetadata,
     ) -> Result<String, FitzError> {
         let mut arms = String::new();
-        let parent_pk = parent_meta.primary_field.clone().unwrap_or_default();
+        // v0.10.27 (F2) — preload eager requiere single PK del parent.
+        // Si composite, fallback a empty string (preload no aplica
+        // — el user no puede hacer .preload() sobre composite PK).
+        let parent_pk = parent_meta
+            .single_pk()
+            .map(String::from)
+            .unwrap_or_default();
         for (rel_name, rel) in parent_meta.relations.iter() {
             // Deuda #2 (v0.10.5) — incluir BelongsToCompanion además
             // de HasMany. La companion se sirve con SQL inverso
@@ -15576,7 +15807,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let cols = Self::orm_build_qb_cols(&target_meta, &target_fields);
         // PK del target (la columna que matchea contra los FKs del
         // parent). Resolver sql_name override.
-        let target_pk_fitz = target_meta.primary_field.clone().ok_or_else(|| {
+        let target_pk_fitz = target_meta.single_pk().map(String::from).ok_or_else(|| {
             self.err_at(
                 crate::ast::Span::ZERO,
                 format!(
@@ -33631,7 +33862,9 @@ mod tests {
         // Programa con db debe ver sha2/hmac/base64 en el Cargo.toml.
         // Usamos `cargo_toml_for` directo (paralelo a los tests
         // existentes).
-        let toml = cargo_toml_for("foo", false, false, false, false, false, false, true, false, false);
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, true, false, false,
+        );
         assert!(
             toml.contains("sha2 = \"0.10\""),
             "esperaba sha2 en Cargo.toml: {toml}",
