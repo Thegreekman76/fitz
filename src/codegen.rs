@@ -2326,7 +2326,14 @@ fn cargo_toml_for(
                 "chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n",
             );
         }
-        s.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
+        // v0.10.30 B.5 — feature `v7` para `Uuid.v7()` time-ordered.
+        // Mismo crate y versión que v4 (uuid 1.x); el feature `v7` se
+        // resuelve internamente con `now_v7()` y no agrega deps extras.
+        s.push_str("uuid = { version = \"1\", features = [\"v4\", \"v7\"] }\n");
+        // v0.10.30 B.7 — IANA timezone DB para `DateTime.in_tz(name)`.
+        // Pure Rust. La DB completa (~250KB) compiled-in para que el
+        // binario standalone resuelva cualquier name sin runtime extra.
+        s.push_str("chrono-tz = { version = \"0.10\", default-features = false }\n");
         s
     } else {
         String::new()
@@ -11209,6 +11216,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         Type::Bool,
                     ));
                 }
+                // v0.10.30 B.4 — Date/DateTime comparison directo
+                // (chrono types impl `Ord`).
+                if (matches!(lt, Type::Date) && matches!(rt, Type::Date))
+                    || (matches!(lt, Type::DateTime) && matches!(rt, Type::DateTime))
+                {
+                    return Ok((format!("({} {} {})", lc, sym, rc), Type::Bool));
+                }
                 let (l, r, _t) = numeric_coerce(&lc, &lt, &rc, &rt)
                     .ok_or_else(|| self.err_at(span, format!(
                         "comparación entre `{}` y `{}` no aplicable",
@@ -13448,15 +13462,137 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     },
                 ))
             }
+            // v0.10.30 B.6 — shortcuts symetric a los del intérprete.
+            ("Date", "tomorrow") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok((
+                    "chrono::Local::now().date_naive().succ_opt().expect(\"today+1 no overflow\")"
+                        .to_string(),
+                    Type::Date,
+                ))
+            }
+            ("Date", "yesterday") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok((
+                    "chrono::Local::now().date_naive().pred_opt().expect(\"today-1 no overflow\")"
+                        .to_string(),
+                    Type::Date,
+                ))
+            }
+            ("DateTime", "epoch") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok((
+                    "chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect(\"epoch siempre válida\")"
+                        .to_string(),
+                    Type::DateTime,
+                ))
+            }
+            // v0.10.30 B.5 — `Uuid.v7()` time-ordered. Requiere
+            // feature `uuid/v7` que `cargo_toml_for` ya activa.
+            ("Uuid", "v7") => {
+                if !args.is_empty() {
+                    return Err(arity_err(0, args.len()));
+                }
+                Ok(("uuid::Uuid::now_v7()".to_string(), Type::Uuid))
+            }
             (recv, other) => Err(self.err_at(
                 field_span,
                 format!(
-                    "el módulo `{}` no tiene `{}` (soportados Date: today/parse/from_ymd; \
-                     DateTime: now/parse/from_timestamp; Uuid: v4/parse/nil)",
+                    "el módulo `{}` no tiene `{}` (soportados Date: today/tomorrow/yesterday/parse/from_ymd; \
+                     DateTime: now/epoch/parse/from_timestamp; Uuid: v4/v7/parse/nil)",
                     recv, other
                 ),
             )),
         }
+    }
+
+    /// v0.10.30 (Tier B) — helper para parsear `args[0]` como Int en
+    /// los métodos `.add_*(n)` / `.subtract_*(n)`. Emite arity check y
+    /// coerción a Int. Comparte mensaje de error con el resto del
+    /// dispatch temporal.
+    fn gen_temporal_int_arg(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!("`{}(n)` espera 1 arg Int, recibió {}", method, args.len()),
+            ));
+        }
+        let (n_code, n_ty) = self.gen_expr(&args[0])?;
+        Ok(coerce(&n_code, &n_ty, &Type::Int, self.env))
+    }
+
+    /// v0.10.30 (Tier B.3) — paralelo a `gen_temporal_int_arg` pero
+    /// espera `Date` (para `d1.diff_days(d2)`).
+    fn gen_temporal_date_arg(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}(other)` espera 1 arg Date, recibió {}",
+                    method,
+                    args.len()
+                ),
+            ));
+        }
+        let (code, ty) = self.gen_expr(&args[0])?;
+        if !matches!(ty, Type::Date | Type::Any) {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`Date.{}(other)` espera `Date`, recibió `{}`",
+                    method,
+                    type_name(&ty)
+                ),
+            ));
+        }
+        Ok(code)
+    }
+
+    /// v0.10.30 (Tier B.3) — paralelo para `DateTime` (`dt1.diff_seconds(dt2)`).
+    fn gen_temporal_datetime_arg(
+        &mut self,
+        method: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<String, FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`{}(other)` espera 1 arg DateTime, recibió {}",
+                    method,
+                    args.len()
+                ),
+            ));
+        }
+        let (code, ty) = self.gen_expr(&args[0])?;
+        if !matches!(ty, Type::DateTime | Type::Any) {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`DateTime.{}(other)` espera `DateTime`, recibió `{}`",
+                    method,
+                    type_name(&ty)
+                ),
+            ));
+        }
+        Ok(code)
     }
 
     /// Despacha métodos sobre un `DbConn` opaco. Devuelve `Some` si
@@ -16549,11 +16685,78 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         Type::Str,
                     ));
                 }
+                // v0.10.30 B.1/B.2 — Date arithmetic. Emite el patrón
+                // `checked_add_signed(Duration::days(n))` o
+                // `checked_add_months/sub_months(Months::new(...))` con
+                // panic claro si overflow del rango NaiveDate.
+                "add_days" | "subtract_days" => {
+                    let n_expr = self.gen_temporal_int_arg(method, args, call_span)?;
+                    let sign = if method == "subtract_days" { "-" } else { "" };
+                    return Ok((
+                        format!(
+                            "({{ let __n: i64 = {sign}({n}); \
+                             ({obj}).checked_add_signed(chrono::Duration::days(__n)) \
+                             .unwrap_or_else(|| panic!(\"Date.{m}({{}}) overflow rango NaiveDate\", __n)) }})",
+                            sign = sign,
+                            n = n_expr,
+                            obj = obj_code,
+                            m = method,
+                        ),
+                        Type::Date,
+                    ));
+                }
+                "add_months" | "add_years" | "subtract_months" | "subtract_years" => {
+                    let n_expr = self.gen_temporal_int_arg(method, args, call_span)?;
+                    let scale = if method.ends_with("years") {
+                        "12i64"
+                    } else {
+                        "1i64"
+                    };
+                    let sign = if method.starts_with("subtract") {
+                        "-"
+                    } else {
+                        ""
+                    };
+                    return Ok((
+                        format!(
+                            "({{ let __raw: i64 = {sign}({n}); \
+                             let __m: i64 = __raw.checked_mul({scale}) \
+                                 .unwrap_or_else(|| panic!(\"Date.{m}({{}}) overflow i64 meses\", __raw)); \
+                             let __res = if __m >= 0 {{ \
+                                let __u: u32 = u32::try_from(__m).unwrap_or_else(|_| panic!(\"Date.{m}({{}}) overflow u32 meses\", __raw)); \
+                                ({obj}).checked_add_months(chrono::Months::new(__u)) \
+                             }} else {{ \
+                                let __u: u32 = u32::try_from(__m.unsigned_abs()).unwrap_or_else(|_| panic!(\"Date.{m}({{}}) overflow u32 meses\", __raw)); \
+                                ({obj}).checked_sub_months(chrono::Months::new(__u)) \
+                             }}; \
+                             __res.unwrap_or_else(|| panic!(\"Date.{m}({{}}) overflow rango NaiveDate\", __raw)) }})",
+                            sign = sign,
+                            n = n_expr,
+                            scale = scale,
+                            obj = obj_code,
+                            m = method,
+                        ),
+                        Type::Date,
+                    ));
+                }
+                // v0.10.30 B.3 — diff signed entre dos Date.
+                "diff_days" => {
+                    let other_expr = self.gen_temporal_date_arg(method, args, call_span)?;
+                    return Ok((
+                        format!(
+                            "({{ use chrono::Datelike as _; \
+                             ({obj}).signed_duration_since({other}).num_days() }})",
+                            obj = obj_code,
+                            other = other_expr,
+                        ),
+                        Type::Int,
+                    ));
+                }
                 _ => {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`Date` no tiene método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format)",
+                            "`Date` no tiene método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
                             method
                         ),
                     ));
@@ -16641,11 +16844,167 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         Type::Str,
                     ));
                 }
+                // v0.10.30 B.1/B.2 — DateTime sub-second arithmetic.
+                "add_seconds" | "add_minutes" | "add_hours" | "subtract_seconds"
+                | "subtract_minutes" | "subtract_hours" => {
+                    let n_expr = self.gen_temporal_int_arg(method, args, call_span)?;
+                    let factor: i64 = match method {
+                        "add_seconds" | "subtract_seconds" => 1,
+                        "add_minutes" | "subtract_minutes" => 60,
+                        "add_hours" | "subtract_hours" => 3600,
+                        _ => unreachable!(),
+                    };
+                    let sign = if method.starts_with("subtract") {
+                        "-"
+                    } else {
+                        ""
+                    };
+                    return Ok((
+                        format!(
+                            "({{ let __raw: i64 = {sign}({n}); \
+                             let __secs: i64 = __raw.checked_mul({factor}i64) \
+                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow i64 segundos\", __raw)); \
+                             ({obj}).checked_add_signed(chrono::Duration::seconds(__secs)) \
+                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow rango DateTime\", __raw)) }})",
+                            sign = sign,
+                            n = n_expr,
+                            factor = factor,
+                            obj = obj_code,
+                            m = method,
+                        ),
+                        Type::DateTime,
+                    ));
+                }
+                "add_days" | "subtract_days" => {
+                    let n_expr = self.gen_temporal_int_arg(method, args, call_span)?;
+                    let sign = if method.starts_with("subtract") {
+                        "-"
+                    } else {
+                        ""
+                    };
+                    return Ok((
+                        format!(
+                            "({{ let __n: i64 = {sign}({n}); \
+                             ({obj}).checked_add_signed(chrono::Duration::days(__n)) \
+                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow rango DateTime\", __n)) }})",
+                            sign = sign,
+                            n = n_expr,
+                            obj = obj_code,
+                            m = method,
+                        ),
+                        Type::DateTime,
+                    ));
+                }
+                "add_months" | "add_years" | "subtract_months" | "subtract_years" => {
+                    let n_expr = self.gen_temporal_int_arg(method, args, call_span)?;
+                    let scale = if method.ends_with("years") {
+                        "12i64"
+                    } else {
+                        "1i64"
+                    };
+                    let sign = if method.starts_with("subtract") {
+                        "-"
+                    } else {
+                        ""
+                    };
+                    return Ok((
+                        format!(
+                            "({{ let __raw: i64 = {sign}({n}); \
+                             let __m: i64 = __raw.checked_mul({scale}) \
+                                 .unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow i64 meses\", __raw)); \
+                             let __res = if __m >= 0 {{ \
+                                let __u: u32 = u32::try_from(__m).unwrap_or_else(|_| panic!(\"DateTime.{m}({{}}) overflow u32 meses\", __raw)); \
+                                ({obj}).checked_add_months(chrono::Months::new(__u)) \
+                             }} else {{ \
+                                let __u: u32 = u32::try_from(__m.unsigned_abs()).unwrap_or_else(|_| panic!(\"DateTime.{m}({{}}) overflow u32 meses\", __raw)); \
+                                ({obj}).checked_sub_months(chrono::Months::new(__u)) \
+                             }}; \
+                             __res.unwrap_or_else(|| panic!(\"DateTime.{m}({{}}) overflow rango DateTime\", __raw)) }})",
+                            sign = sign,
+                            n = n_expr,
+                            scale = scale,
+                            obj = obj_code,
+                            m = method,
+                        ),
+                        Type::DateTime,
+                    ));
+                }
+                // v0.10.30 B.3 — diff signed entre dos DateTime con
+                // truncamiento hacia 0 para unidades > 1 segundo.
+                "diff_seconds" | "diff_minutes" | "diff_hours" | "diff_days" => {
+                    let other_expr = self.gen_temporal_datetime_arg(method, args, call_span)?;
+                    let divisor: i64 = match method {
+                        "diff_seconds" => 1,
+                        "diff_minutes" => 60,
+                        "diff_hours" => 3600,
+                        "diff_days" => 86_400,
+                        _ => unreachable!(),
+                    };
+                    let code = if divisor == 1 {
+                        format!(
+                            "({obj}).signed_duration_since({other}).num_seconds()",
+                            obj = obj_code,
+                            other = other_expr,
+                        )
+                    } else {
+                        format!(
+                            "(({obj}).signed_duration_since({other}).num_seconds() / {divisor}i64)",
+                            obj = obj_code,
+                            other = other_expr,
+                            divisor = divisor,
+                        )
+                    };
+                    return Ok((code, Type::Int));
+                }
+                // v0.10.30 B.7 — `to_local()` formatea en TZ del sistema.
+                "to_local" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(call_span, "`DateTime.to_local()` no acepta args"));
+                    }
+                    return Ok((
+                        format!(
+                            "({obj}).with_timezone(&chrono::Local).format(\"%Y-%m-%dT%H:%M:%S%:z\").to_string()",
+                            obj = obj_code,
+                        ),
+                        Type::Str,
+                    ));
+                }
+                // v0.10.30 B.7 — `in_tz(iana)` via chrono-tz parse,
+                // Result<Str, Str> (Err si IANA name desconocido).
+                "in_tz" => {
+                    if args.len() != 1 {
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "`DateTime.in_tz(name)` espera 1 arg Str, recibió {}",
+                                args.len()
+                            ),
+                        ));
+                    }
+                    let (tz_code, tz_ty) = self.gen_expr(&args[0])?;
+                    let tz_c = coerce(&tz_code, &tz_ty, &Type::Str, self.env);
+                    let code = format!(
+                        "({{ let __dt = {obj}; let __tz_name: String = {tz}; \
+                         match __tz_name.parse::<chrono_tz::Tz>() {{ \
+                             Ok(__tz) => Ok(__dt.with_timezone(&__tz).format(\"%Y-%m-%dT%H:%M:%S%:z\").to_string()), \
+                             Err(_) => Err(format!(\"DateTime.in_tz: `{{}}` no es un nombre IANA válido (ej: `America/Argentina/Buenos_Aires`, `Europe/Paris`, `UTC`)\", __tz_name)) \
+                         }} }})",
+                        obj = obj_code,
+                        tz = tz_c,
+                    );
+                    return Ok((
+                        code,
+                        Type::Result {
+                            ok: Box::new(Type::Str),
+                            err: Box::new(Type::Str),
+                        },
+                    ));
+                }
                 _ => {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`DateTime` no tiene método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format)",
+                            "`DateTime` no tiene método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
                             method
                         ),
                     ));

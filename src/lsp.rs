@@ -1901,6 +1901,7 @@ fn after_dot_completions(
         ]),
         // v0.10.24 — `Date` instance methods. Extracción + conversión +
         // formato custom con specifiers chrono (%Y, %m, %d, %A, etc.).
+        // v0.10.30 Tier B — aritmética (add_/subtract_) + diff (signed Int).
         Type::Date => method_items(&[
             ("year", "fn() -> Int".into()),
             ("month", "fn() -> Int  // 1..12".into()),
@@ -1912,9 +1913,39 @@ fn after_dot_completions(
                 "format",
                 "fn(fmt: Str) -> Str  // chrono format (%Y/%m/%d/%A/...)".into(),
             ),
+            (
+                "add_days",
+                "fn(n: Int) -> Date  // v0.10.30 — n signed; panic si overflow".into(),
+            ),
+            (
+                "add_months",
+                "fn(n: Int) -> Date  // v0.10.30 — calendar-aware, clampea día".into(),
+            ),
+            (
+                "add_years",
+                "fn(n: Int) -> Date  // v0.10.30 — = add_months(n*12)".into(),
+            ),
+            (
+                "subtract_days",
+                "fn(n: Int) -> Date  // v0.10.30 — = add_days(-n)".into(),
+            ),
+            (
+                "subtract_months",
+                "fn(n: Int) -> Date  // v0.10.30 — = add_months(-n)".into(),
+            ),
+            (
+                "subtract_years",
+                "fn(n: Int) -> Date  // v0.10.30 — = add_years(-n)".into(),
+            ),
+            (
+                "diff_days",
+                "fn(other: Date) -> Int  // v0.10.30 — días signed; self - other".into(),
+            ),
         ]),
         // v0.10.24 — `DateTime` instance methods. Mismo set que Date +
         // hour/minute/second/timestamp + extracción `.date()`.
+        // v0.10.30 Tier B — sub-second + calendar arithmetic + diff +
+        // timezone display (to_local / in_tz IANA).
         Type::DateTime => method_items(&[
             ("year", "fn() -> Int".into()),
             ("month", "fn() -> Int  // 1..12".into()),
@@ -1926,6 +1957,78 @@ fn after_dot_completions(
             ("to_str", "fn() -> Str  // ISO 8601 con Z (UTC)".into()),
             ("date", "fn() -> Date  // extrae la parte fecha".into()),
             ("format", "fn(fmt: Str) -> Str  // chrono format".into()),
+            (
+                "add_seconds",
+                "fn(n: Int) -> DateTime  // v0.10.30 — Duration::seconds(n)".into(),
+            ),
+            (
+                "add_minutes",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "add_hours",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "add_days",
+                "fn(n: Int) -> DateTime  // v0.10.30 — Duration::days(n)".into(),
+            ),
+            (
+                "add_months",
+                "fn(n: Int) -> DateTime  // v0.10.30 — calendar-aware".into(),
+            ),
+            (
+                "add_years",
+                "fn(n: Int) -> DateTime  // v0.10.30 — = add_months(n*12)".into(),
+            ),
+            (
+                "subtract_seconds",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "subtract_minutes",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "subtract_hours",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "subtract_days",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "subtract_months",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "subtract_years",
+                "fn(n: Int) -> DateTime  // v0.10.30".into(),
+            ),
+            (
+                "diff_seconds",
+                "fn(other: DateTime) -> Int  // v0.10.30 — signed; self - other".into(),
+            ),
+            (
+                "diff_minutes",
+                "fn(other: DateTime) -> Int  // v0.10.30 — trunc hacia 0".into(),
+            ),
+            (
+                "diff_hours",
+                "fn(other: DateTime) -> Int  // v0.10.30 — trunc hacia 0".into(),
+            ),
+            (
+                "diff_days",
+                "fn(other: DateTime) -> Int  // v0.10.30 — trunc hacia 0".into(),
+            ),
+            (
+                "to_local",
+                "fn() -> Str  // v0.10.30 — ISO 8601 + offset en TZ del sistema".into(),
+            ),
+            (
+                "in_tz",
+                "fn(iana: Str) -> Result<Str>  // v0.10.30 — IANA tz name (ej: `America/Argentina/Buenos_Aires`)".into(),
+            ),
         ]),
         // v0.10.24 — `Uuid` instance methods. MVP acotado.
         Type::Uuid => method_items(&[

@@ -11,13 +11,165 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.10.29. Próximas direcciones
+Sin trabajo en curso al cierre de v0.10.30. Próximas direcciones
 priorizadas en `docs/deudas-post-5b.md` sección **"Deuda residual
-del ORM/DB post-v0.10.29"** (29 ítems Tier A-E con scope estimates).
-Recomendación: **Tier A + B (~50h)** cierran el MVP fuerte del ORM
-sin fricciones residuales conocidas. Alternativas no-ORM: nuevos
-boilerplates Dockerizados, contenido educativo, o saltar a Fase 11
-(frontend en `.fitz`).
+del ORM/DB post-v0.10.29"** (Tier A + C + D + E pendientes; Tier B
+cerrado en v0.10.30). Recomendación inmediata: **Tier A (~30-40h)**
+cierra el MVP fuerte del ORM (diff destructive check, ALTER TYPE
+USING, savepoints, isolation levels, drift completo de CHECK +
+cross-schema FK).
+
+## [v0.10.30] — 2026-05-31 — Tier B del cierre ORM/DB: API completion Date/DateTime/Uuid
+
+**Tier B entero cerrado en bloque (~12-16h estimadas, ~6h reales)**.
+7 sub-pasos coordinados que llevan los tipos nativos
+`Date`/`DateTime`/`Uuid` del estado "funcionales con getters" a
+"API completa con aritmética, diff, comparison y timezone display".
+Sin sintaxis nueva del lenguaje (todos métodos sobre tipos
+existentes), zero deps user-facing nuevas (chrono-tz + feature
+`uuid/v7` ya internos al binario), paridad bit-a-bit `fitz run` ↔
+`fitz build` para los 7 sub-pasos validada con 10 E2E nuevos.
+Ningún breaking en los 292 ejemplos del smoke `GUIDE_EXAMPLES_COMPILE`.
+
+### Sub-paso B.1 — Aritmética add_* sobre Date y DateTime
+
+- **Date**: `.add_days(n)`, `.add_months(n)`, `.add_years(n)`
+- **DateTime**: `.add_seconds(n)`, `.add_minutes(n)`, `.add_hours(n)`,
+  `.add_days(n)`, `.add_months(n)`, `.add_years(n)`
+
+`n: Int` signed (negativos OK). Sub-second units van vía
+`chrono::Duration::seconds(n * factor)`; calendar units (months/years)
+preservan day-of-month con clamping (`Jan 31 + 1 mes → Feb 28/29`)
+vía `chrono::Months` + `checked_add_months`/`checked_sub_months`.
+Overflow del rango interno (NaiveDate ±262143 / DateTime ±i64 secs)
+emite `FitzError` claro citando el método + el valor que rompió;
+en codegen panic con mismo formato.
+
+### Sub-paso B.2 — Subtract symmetric
+
+Aliases con negate runtime:
+- **Date**: `.subtract_days/months/years(n)` ≡ `.add_*(-n)`
+- **DateTime**: `.subtract_seconds/minutes/hours/days/months/years(n)`
+
+Misma semántica que B.1 con `n` invertido vía `checked_neg`
+(`i64::MIN` sin opuesto → error claro). Útil para legibilidad cuando
+`n` es un valor literal positivo (`d.subtract_days(7)` lee mejor que
+`d.add_days(-7)`).
+
+### Sub-paso B.3 — Diff entre fechas (signed Int)
+
+- **Date**: `d1.diff_days(d2)` → `Int` días entre d1 y d2 (negativo
+  si d2 posterior a d1)
+- **DateTime**: `.diff_seconds/minutes/hours/days(other)` con
+  truncamiento hacia 0 para unidades > 1 segundo (paralelo a
+  `Duration::num_seconds() / factor`)
+
+Patrón `dt2.diff_seconds(dt1)` se mapea a `dt2.signed_duration_since(dt1).num_seconds()`.
+
+### Sub-paso B.4 — Comparison operators `<` `>` `<=` `>=` Date/DateTime
+
+`chrono::NaiveDate` y `chrono::DateTime<Utc>` impl `Ord` nativo →
+mapping directo a los operadores Fitz. El checker suma
+`(Date, Date) | (DateTime, DateTime)` a las parejas permitidas
+(antes solo numéricos y Str), el evaluator suma dos arms en `compare()`,
+codegen emite `({lhs} < {rhs})` literal sin coerción. Workaround viejo
+`d1.timestamp() < d2.timestamp()` ya no necesario.
+
+### Sub-paso B.5 — `Uuid.v7()` time-ordered UUIDs
+
+`Uuid.v7()` constructor estático sobre el módulo `Uuid`. UUIDv7
+(RFC 9562, mayo 2024) codifica Unix millis en los primeros 48 bits
+→ ordenan cronológicamente en btree indexes, muy útil para PKs
+sortables por created_at (vs v4 random que produce index scattering).
+Implementado vía `uuid::Uuid::now_v7()` con feature `uuid/v7`
+añadida al `Cargo.toml` del binario y al Cargo.toml emitido por
+`fitz build`.
+
+### Sub-paso B.6 — Shortcuts
+
+- `Date.tomorrow()` ≡ `Date.today().add_days(1)`
+- `Date.yesterday()` ≡ `Date.today().add_days(-1)`
+- `DateTime.epoch()` ≡ `DateTime.from_timestamp(0).unwrap()`
+  (1970-01-01T00:00:00Z)
+
+Cubren patrones cortos sin necesidad de armar el chain
+manualmente.
+
+### Sub-paso B.7 — Timezone display (chrono-tz + IANA)
+
+- `DateTime.to_local()` → `Str`: formatea el instante UTC en la
+  zona local del sistema como ISO 8601 con offset
+  (`%Y-%m-%dT%H:%M:%S%:z`). Sin deps extras (`chrono::Local` ya
+  viene activo via feature `clock`).
+- `DateTime.in_tz(name: Str)` → `Result<Str>`: formatea en cualquier
+  IANA timezone name (`"America/Argentina/Buenos_Aires"`,
+  `"Europe/Paris"`, `"UTC"`, etc.). Name desconocido → `Err(Str)`
+  con sugerencia de ejemplos.
+
+**El instante UTC interno NO cambia** — son helpers de display, no
+aritmética. Dep nueva `chrono-tz = "0.10"` (sin features extras,
+~250KB compiled-in con la DB IANA completa); paralela en el binario
+y en el Cargo.toml emitido por `fitz build` (sumado al bloque
+`uses_date_or_uuid`).
+
+### Decisiones técnicas
+
+- **B.7 IANA names sobre enum built-in**: el caso real "convertir
+  DB-UTC al huso del user" requiere IANA strings (`"America/...",
+  `"Europe/..."`); enum dedicado quedaba expresivamente corto.
+  `chrono-tz` pesa ~250KB, costo aceptable.
+- **B.4 chrono nativo `Ord`**: en lugar de añadir un caso especial al
+  evaluator `compare()` que parsee fechas a Int, reusamos el
+  `PartialOrd` de chrono. Performance y semántica idénticas al
+  approach manual con menos código.
+- **`add_years` = `add_months * 12`**: simplifica al reusar
+  `checked_add_months`/`checked_sub_months` (chrono no expone
+  `add_years` directo). Trade-off menor: el mensaje de overflow cita
+  `add_months` con el N pre-escalado (`add_years(100M)` →
+  `add_months(1.2B)`). Refinable pasando el método como param si entra
+  presión.
+- **Negativos como `add_*(-n)` runtime**: `subtract_*` no son alias
+  léxicos del parser sino dispatchers separados que negan el arg.
+  Coste: dos arms más en el match (~30 LoC). Benefit: el método
+  citado en error siempre coincide con el que llamó el user
+  (`subtract_days` reporta `subtract_days`, no `add_days`).
+- **`?` requiere fn-Result wrapper**: las nuevas API constructoras
+  que retornan Result (`Date.from_ymd`, `DateTime.from_timestamp`,
+  `Uuid.parse`) se usan con `?` adentro de una fn `-> Result<T>`,
+  consistente con el resto del lenguaje (deuda menor: el codegen
+  no acepta `?` top-level aunque el intérprete sí — paralelo al
+  resto de programas del proyecto).
+
+### Tests
+
+- 10 E2E nuevos en `tests/compile_e2e.rs` cubriendo paridad bit-a-bit
+  `fitz run` ↔ `fitz build` para cada sub-paso B.1-B.7 + 1 runtime
+  overflow + 1 checker rejection (acumulado: 81 cli_e2e + **324
+  compile_e2e**).
+- 0 unit nuevos directos (los helpers `date_add_days`/`date_add_months`/
+  `datetime_add_duration`/`datetime_diff`/`datetime_in_tz` se cubren
+  vía los E2E que ejercitan todo el path eval → dispatch_method →
+  helper).
+- Smoke `GUIDE_EXAMPLES_COMPILE` verde (292 ejemplos).
+- Clippy `--all-targets -D warnings` limpio. Clippy `--features lsp`
+  limpio. fmt `--all --check` limpio.
+
+### Total al cierre v0.10.30
+
+**2739 unit + 292 smoke + 3 openapi + 81 cli_e2e + 324 compile_e2e
++ 52 db_real_postgres** (Tier B no toca DB — sin cambios en ese
+test set).
+
+### Próximo norte
+
+**Tier A** (cierre MVP fuerte del ORM): `fitz db diff
+--check-destructive`, `ALTER COLUMN TYPE` con `USING` automático,
+`db.connect(url, max_conns=N)` kwarg, savepoints / nested
+transactions, `ALTER TABLE ADD/DROP CONSTRAINT` para CHECKs, FK
+targeting composite PK, drift check de `@check_constraint` +
+cross-schema FK, isolation levels, `FITZ_DB_*` mid-run reload.
+Estimado ~30-40h (10 ítems independientes). Detalle en
+`docs/deudas-post-5b.md` → sección Tier A.
 
 ## [v0.10.29] — 2026-05-31 — Cierre masivo del ORM: JSON path + text search + @unique/@check + cross-schema FK + 6 cierres residuales más
 

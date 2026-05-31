@@ -497,13 +497,25 @@ default Fitz se usa al construir el value que va a Postgres.
 
 `Date`/`DateTime`/`Uuid` son tipos built-in nativos (no `Str` ISO
 8601) desde v0.10.24. Tienen constructors estáticos
-(`Date.today()`, `DateTime.now()`, `Uuid.v4()`, etc.), métodos
-instancia (`.year()`/`.month()`/`.format(fmt)`/`.to_str()`/...) y
-round-trip transparente con Postgres. **Paridad bit-a-bit
-`fitz run` ↔ `fitz build` desde v0.10.26**: el codegen emite
-chrono/uuid en `Cargo.toml`, helpers de marshaling/parsing
-condicionales, y `__IntoPgValue`/`__FromFitzDbRow` para los 3
-tipos. Cero deuda residual en el bloque temporal/identidad.
+(`Date.today()`/`Date.tomorrow()`/`Date.yesterday()`/`Date.from_ymd(y,m,d)?`/
+`Date.parse(s)?`, `DateTime.now()`/`DateTime.epoch()`/`DateTime.from_timestamp(secs)?`/
+`DateTime.parse(s)?`, `Uuid.v4()`/`Uuid.v7()`/`Uuid.nil()`/`Uuid.parse(s)?`),
+métodos instancia (getters `.year()`/`.month()`/`.day()`/`.weekday()`/
+`.hour()`/`.minute()`/`.second()`/`.timestamp()`, formato
+`.to_str()`/`.format(fmt)`, conversión `.to_datetime()`/`.date()`,
+y a partir de **v0.10.30 Tier B**: aritmética (`.add_days(n)`/
+`.add_months(n)`/`.add_years(n)` + `.subtract_*` symétrico; DateTime
+también suma `.add_seconds/minutes/hours(n)`), diff
+(`d1.diff_days(d2)` → signed `Int`; DateTime también
+`.diff_seconds/minutes/hours/days`), comparison nativa con
+`<`/`>`/`<=`/`>=` entre Date-Date y DateTime-DateTime, y display de
+timezone (`DateTime.to_local()` formatea en TZ del sistema; `.in_tz(iana)`
+→ `Result<Str>` con cualquier IANA name como `"America/Argentina/Buenos_Aires"`).
+**Paridad bit-a-bit `fitz run` ↔ `fitz build` desde v0.10.26**: el
+codegen emite chrono/uuid (+ chrono-tz desde v0.10.30) en `Cargo.toml`,
+helpers de marshaling/parsing condicionales, y `__IntoPgValue`/
+`__FromFitzDbRow` para los 3 tipos. **Round-trip transparente con
+Postgres**.
 
 Convención de defaults: el user escribe `happens_on: Date = ""`
 (sentinel `Str`) y provee el valor real al construir la Instance

@@ -11488,11 +11488,15 @@ Items comprometidos como deuda explícita:
 - **TLS strict (`sslmode=require`)**: el driver soporta
   `sslmode=disable`. TLS llega como sub-paso separado (StartTLS
   + cert validation).
-- **Date / Time / UUID nativos** como tipos del lenguaje: hoy
-  se modelan como `Str` ISO 8601 / formato canonical UUID. El
-  driver hace el round-trip correctamente, pero el `type` Fitz
-  no tiene primitivos dedicados. Tipos `Date`/`DateTime`/`UUID`
-  como built-ins son mini-fase aparte.
+- ~~**Date / Time / UUID nativos** como tipos del lenguaje~~ —
+  **CERRADO v0.10.24 (intérprete) + v0.10.26 (codegen) + v0.10.30
+  (API completion Tier B)**. `Date`/`DateTime`/`Uuid` son tipos
+  built-in con constructors (`Date.today/tomorrow/yesterday/parse/
+  from_ymd?`, `DateTime.now/epoch/parse/from_timestamp?`,
+  `Uuid.v4/v7/nil/parse?`), aritmética (`.add_days/months/years` +
+  `.subtract_*`), diff (`.diff_days/seconds/minutes/hours`),
+  comparison nativa (`<`/`>`/`<=`/`>=`) y timezone display
+  (`.to_local()`/`.in_tz(iana)`). Round-trip Postgres automático.
 - **JSON operators avanzados** (`@@`/`||`): los siete operadores
   mapeados como method calls cubren `?`/`?&`/`?|`/`@>`/`->>` +
   `#>`/`#>>` con cast tipado (`has_path` / `path_int` /

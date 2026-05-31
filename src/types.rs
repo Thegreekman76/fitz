@@ -7005,11 +7005,45 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
             }
             Type::Str
         }
+        // v0.10.30 B.1/B.2 — aritmética symétrica add_*/subtract_*. Todos
+        // toman `Int` (signed; negativos OK en add_*; subtract es sugar
+        // de add con negate runtime). Retornan `Date`.
+        "add_days" | "add_months" | "add_years" | "subtract_days" | "subtract_months"
+        | "subtract_years" => {
+            if check_method_arity(ctx, method, args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Date.{}(n)` espera `Int`, recibió `{}`",
+                        method,
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
+            }
+            Type::Date
+        }
+        // v0.10.30 B.3 — diff entre dos Date, signed Int días.
+        "diff_days" => {
+            if check_method_arity(ctx, "diff_days", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Date)
+            {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Date.diff_days(other)` espera `Date`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
+            }
+            Type::Int
+        }
         _ => {
             ctx.error_at(
                 span,
                 format!(
-                    "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format)",
+                    "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
                     method
                 ),
             );
@@ -7049,11 +7083,71 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
             }
             Type::Str
         }
+        // v0.10.30 B.1/B.2 — aritmética add_*/subtract_*. Sub-second
+        // units (seconds/minutes/hours) + calendar units (days/months/
+        // years). Todos `Int → DateTime`.
+        "add_seconds" | "add_minutes" | "add_hours" | "add_days" | "add_months" | "add_years"
+        | "subtract_seconds" | "subtract_minutes" | "subtract_hours" | "subtract_days"
+        | "subtract_months" | "subtract_years" => {
+            if check_method_arity(ctx, method, args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`DateTime.{}(n)` espera `Int`, recibió `{}`",
+                        method,
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
+            }
+            Type::DateTime
+        }
+        // v0.10.30 B.3 — diff entre DateTime, signed Int en la unidad.
+        "diff_seconds" | "diff_minutes" | "diff_hours" | "diff_days" => {
+            if check_method_arity(ctx, method, args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::DateTime)
+            {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`DateTime.{}(other)` espera `DateTime`, recibió `{}`",
+                        method,
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
+            }
+            Type::Int
+        }
+        // v0.10.30 B.7 — display helpers. `to_local()` formatea en TZ
+        // del sistema (ISO 8601 + offset). `in_tz(iana)` formatea en una
+        // zona IANA → `Result<Str>` (Err si IANA name desconocido).
+        "to_local" => {
+            check_method_arity(ctx, "to_local", args_ty, 0, span);
+            Type::Str
+        }
+        "in_tz" => {
+            if check_method_arity(ctx, "in_tz", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Str)
+            {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`DateTime.in_tz(name)` espera `Str` (IANA tz name), recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
+            }
+            Type::Result {
+                ok: Box::new(Type::Str),
+                err: Box::new(Type::Str),
+            }
+        }
         _ => {
             ctx.error_at(
                 span,
                 format!(
-                    "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format)",
+                    "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
                     method
                 ),
             );
@@ -7703,7 +7797,9 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
             }
         },
         BinOpKind::Lt | BinOpKind::LtEq | BinOpKind::Gt | BinOpKind::GtEq => {
-            // Comparación: numéricos o ambos Str.
+            // Comparación: numéricos, ambos Str, o ambos Date/DateTime
+            // (v0.10.30 B.4 — `chrono::NaiveDate` y `DateTime<Utc>` impl
+            // `Ord`, mapping natural a `<`/`<=`/`>`/`>=`).
             let ok = matches!(
                 (lt, rt),
                 (Type::Int, Type::Int)
@@ -7711,6 +7807,8 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                     | (Type::Float, Type::Int)
                     | (Type::Float, Type::Float)
                     | (Type::Str, Type::Str)
+                    | (Type::Date, Type::Date)
+                    | (Type::DateTime, Type::DateTime)
             );
             if !ok {
                 ctx.error_at(

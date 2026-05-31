@@ -2332,23 +2332,34 @@ features grandes que expanden el lenguaje (mini-fases dedicadas).
 | A.9 | `db.transaction` con isolation level (`SERIALIZABLE`/`REPEATABLE READ`/`READ ONLY`) | `db.rs:3302` comment "No soporta niveles de aislamiento custom" | ~2h |
 | A.10 | `FITZ_DB_*` mid-run reload (hoy `LazyLock` se fija al primer acceso) | `db.rs:2780, 2957` confirma `LazyLock`. Requiere refactor a `RwLock<DbLogMode>` o similar | ~3h |
 
-### Tier B — API completion Date/DateTime/Uuid (~12-16h, 7 ítems)
+### Tier B — API completion Date/DateTime/Uuid — **CERRADO 2026-05-31 (v0.10.30)**
 
-**Contexto**: Date/DateTime/Uuid YA son tipos nativos del lenguaje
-con constructores estáticos + 23 métodos getters + parse/format
-(cerrado en v0.10.26 con paridad bit-a-bit `fitz run` ↔ `fitz
-build` incluyendo ORM mapping). Lo que falta es la **API de
-aritmética y diff** que típicamente uno usa al trabajar con fechas.
+**Cerrado en bloque**. 7 sub-pasos coordinados en 1 sesión (~6h reales
+vs ~12-16h estimadas). Sin sintaxis nueva del lenguaje, paridad
+bit-a-bit `fitz run` ↔ `fitz build` validada con 10 E2E nuevos. Sin
+deps user-facing nuevas (chrono-tz + feature `uuid/v7` ya internos al
+binario). 0 breaking de los 292 ejemplos del smoke. Detalle por
+sub-paso en `CHANGELOG.md` v0.10.30.
 
-| ID | Item | Evidencia código | Scope |
-|----|------|------------------|------:|
-| B.1 | `.add_days(n)` / `.add_months(n)` / `.add_years(n)` (Date) + `.add_hours(n)` / `.add_minutes(n)` / `.add_seconds(n)` (DateTime) | Cero matches en `src/`. `evaluator.rs::infer_date_method` (línea ~6980) solo tiene `year/month/day/weekday/to_str/to_datetime/format` | ~3h |
-| B.2 | `.subtract_*` symmetric (alias de `add_*(-n)` para legibilidad) | Implicado por B.1 | ~1h |
-| B.3 | `.diff_days(other) -> Int` (Date) / `.diff_seconds(other) -> Int` (DateTime) | Cero matches | ~2h |
-| B.4 | Comparison operators (`<`/`>`/`<=`/`>=`) entre Date/DateTime | `types.rs:7705-7714` confirma `BinOpKind::Lt/Gt/...` solo Int/Float/Str. Hoy workaround via `d1.timestamp() < d2.timestamp()` | ~2h |
-| B.5 | `Uuid.v7()` (time-ordered UUIDs, popular para PKs sortables) | Solo `Uuid.v4()` en `evaluator.rs:9890`. Requiere `uuid = { features = ["v7"] }` en codegen | ~2h |
-| B.6 | Shortcuts: `Date.tomorrow()`, `Date.yesterday()`, `DateTime.epoch()` | Cero matches | ~1h |
-| B.7 | `DateTime.with_timezone(tz)` / `DateTime.utc()` — hoy `today()` usa Local y `now()` usa UTC sin forma de cambiarlo | Cero matches `with_timezone`. Requiere decisión: timezone como Str (`"America/Argentina/Buenos_Aires"`) o tipo dedicado | ~3-4h |
+| ID | Item | Estado |
+|----|------|------:|
+| B.1 | `.add_days/months/years` (Date) + `.add_seconds/minutes/hours/days/months/years` (DateTime) — n signed, overflow → error claro | ✅ |
+| B.2 | `.subtract_*` symmetric — alias con negate runtime (`checked_neg` defensivo) | ✅ |
+| B.3 | `.diff_days(other)` (Date) + `.diff_seconds/minutes/hours/days(other)` (DateTime) — signed Int, trunc hacia 0 para unidades > 1s | ✅ |
+| B.4 | Comparison `<` `>` `<=` `>=` entre Date/DateTime — chrono::Ord nativo, sin coerción | ✅ |
+| B.5 | `Uuid.v7()` time-ordered (RFC 9562) — feature `uuid/v7` sumada al Cargo.toml | ✅ |
+| B.6 | Shortcuts `Date.tomorrow()`/`Date.yesterday()`/`DateTime.epoch()` | ✅ |
+| B.7 | `DateTime.to_local()` (sin dep) + `DateTime.in_tz(iana)` (chrono-tz, Result<Str>) — display helpers, instante UTC no cambia | ✅ |
+
+**Deuda residual derivada (NO bloquea)**: (a) el mensaje de overflow
+de `add_years(N)` cita `add_months(N*12)` porque `add_years` se
+implementa como scale + delegate (refinable pasando method name como
+param); (b) `to_local()` formato fijo ISO 8601 con offset (no acepta
+fmt custom — el user que necesita formato custom hace
+`dt.in_tz("system_tz")?` + parse manual); (c) `with_timezone(tz)` que
+**rotara** el instante (no solo display) queda explícitamente fuera
+de scope — la semántica es ambigua y el user que necesita rotar puede
+usar `add_seconds(offset)` manual.
 
 ### Tier C — Operadores SQL faltantes (~12-20h, 3 ítems)
 

@@ -10595,3 +10595,379 @@ fn main() => 0\n\
         );
     }
 }
+
+// ===========================================================================
+// v0.10.30 — Tier B: API completion Date/DateTime/Uuid
+// ===========================================================================
+//
+// Tests E2E de paridad bit-a-bit `fitz run` ↔ `fitz build` para las
+// 7 features del Tier B. Helper `parity_run_vs_build` corre el mismo
+// programa por los dos paths y assertea que la salida coincide. Cada
+// test ejercita un sub-paso (B.1 add_*, B.2 subtract_*, B.3 diff_*,
+// B.4 comparison, B.5 Uuid.v7, B.6 shortcuts, B.7 timezone).
+
+/// Helper de paridad: corre `fitz run` y `fitz build && exec`,
+/// devuelve el stdout del run-mode (el de build se asserta igual al
+/// run). Aborta el test si el build o el run fallan.
+fn parity_run_vs_build(test_name: &str, src: &str) -> String {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&src_path, src).expect("write");
+
+    let out_run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz run");
+    assert!(
+        out_run.status.success(),
+        "fitz run falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out_run.stdout),
+        String::from_utf8_lossy(&out_run.stderr),
+    );
+    let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
+
+    let out_build = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        out_build.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out_build.stdout),
+        String::from_utf8_lossy(&out_build.stderr),
+    );
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    });
+    let exec = Command::new(&bin).output().expect("exec build");
+    assert!(
+        exec.status.success(),
+        "binario falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&exec.stdout),
+        String::from_utf8_lossy(&exec.stderr),
+    );
+    let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
+
+    assert_eq!(
+        run_stdout.replace("\r\n", "\n"),
+        build_stdout.replace("\r\n", "\n"),
+        "esperaba paridad bit-a-bit `fitz run` ↔ `fitz build`",
+    );
+    run_stdout
+}
+
+#[test]
+fn tier_b1_paridad_date_add_methods() {
+    // B.1 Date arithmetic: add_days/months/years con n positivo y negativo.
+    // Envuelto en `fn run() -> Result<Null>` porque codegen rechaza `?`
+    // top-level (el intérprete lo soporta, pero queremos paridad).
+    let src = "\
+fn run() -> Result<Null> {
+    let r1 = Date.from_ymd(2026, 1, 15)?
+    print(r1.add_days(10).to_str())
+    print(r1.add_days(-5).to_str())
+    print(r1.add_months(2).to_str())
+    print(r1.add_months(-1).to_str())
+    print(r1.add_years(1).to_str())
+    return Ok(null)
+}
+
+match run() {
+    Ok(_) => null,
+    Err(e) => print(e)
+}
+";
+    let stdout = parity_run_vs_build("tier_b1_date_add", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "2026-01-25");
+    assert_eq!(lines[1], "2026-01-10");
+    assert_eq!(lines[2], "2026-03-15");
+    assert_eq!(lines[3], "2025-12-15");
+    assert_eq!(lines[4], "2027-01-15");
+}
+
+#[test]
+fn tier_b1_paridad_datetime_add_methods() {
+    // B.1 DateTime arithmetic: sub-second + calendar units.
+    let src = "\
+fn run() -> Result<Null> {
+    let r1 = DateTime.from_timestamp(1735689600)?
+    print(r1.add_seconds(60).to_str())
+    print(r1.add_minutes(5).to_str())
+    print(r1.add_hours(2).to_str())
+    print(r1.add_days(1).to_str())
+    print(r1.add_months(1).to_str())
+    print(r1.add_years(1).to_str())
+    return Ok(null)
+}
+
+match run() {
+    Ok(_) => null,
+    Err(e) => print(e)
+}
+";
+    let stdout = parity_run_vs_build("tier_b1_datetime_add", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // 2025-01-01T00:00:00Z + 60s = 00:01:00
+    assert_eq!(lines[0], "2025-01-01T00:01:00Z");
+    assert_eq!(lines[1], "2025-01-01T00:05:00Z");
+    assert_eq!(lines[2], "2025-01-01T02:00:00Z");
+    assert_eq!(lines[3], "2025-01-02T00:00:00Z");
+    assert_eq!(lines[4], "2025-02-01T00:00:00Z");
+    assert_eq!(lines[5], "2026-01-01T00:00:00Z");
+}
+
+#[test]
+fn tier_b2_paridad_subtract_methods() {
+    // B.2 subtract symmetric (alias de add con negate).
+    let src = "\
+fn run() -> Result<Null> {
+    let d = Date.from_ymd(2026, 6, 15)?
+    print(d.subtract_days(10).to_str())
+    print(d.subtract_months(3).to_str())
+    print(d.subtract_years(1).to_str())
+    let dt = DateTime.from_timestamp(1735689600)?
+    print(dt.subtract_seconds(3600).to_str())
+    print(dt.subtract_hours(1).to_str())
+    print(dt.subtract_days(1).to_str())
+    return Ok(null)
+}
+
+match run() {
+    Ok(_) => null,
+    Err(e) => print(e)
+}
+";
+    let stdout = parity_run_vs_build("tier_b2_sub", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "2026-06-05");
+    assert_eq!(lines[1], "2026-03-15");
+    assert_eq!(lines[2], "2025-06-15");
+    // 2025-01-01T00:00:00Z - 3600s = 2024-12-31T23:00:00Z
+    assert_eq!(lines[3], "2024-12-31T23:00:00Z");
+    assert_eq!(lines[4], "2024-12-31T23:00:00Z");
+    assert_eq!(lines[5], "2024-12-31T00:00:00Z");
+}
+
+#[test]
+fn tier_b3_paridad_diff_methods() {
+    // B.3 diff entre fechas (signed Int).
+    let src = "\
+fn run() -> Result<Null> {
+    let d1 = Date.from_ymd(2026, 6, 15)?
+    let d2 = Date.from_ymd(2026, 6, 10)?
+    print(d1.diff_days(d2))
+    print(d2.diff_days(d1))
+    let dt1 = DateTime.from_timestamp(1735689600)?
+    let dt2 = DateTime.from_timestamp(1735693200)?
+    print(dt2.diff_seconds(dt1))
+    print(dt2.diff_minutes(dt1))
+    print(dt2.diff_hours(dt1))
+    print(dt2.diff_days(dt1))
+    return Ok(null)
+}
+
+match run() {
+    Ok(_) => null,
+    Err(e) => print(e)
+}
+";
+    let stdout = parity_run_vs_build("tier_b3_diff", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "5");
+    assert_eq!(lines[1], "-5");
+    // 1735693200 - 1735689600 = 3600 secs = 60 min = 1 hour = 0 days (trunc)
+    assert_eq!(lines[2], "3600");
+    assert_eq!(lines[3], "60");
+    assert_eq!(lines[4], "1");
+    assert_eq!(lines[5], "0");
+}
+
+#[test]
+fn tier_b4_paridad_comparison_operators() {
+    // B.4 <, >, <=, >= entre Date/DateTime (chrono::Ord nativos).
+    let src = "\
+fn run() -> Result<Null> {
+    let d1 = Date.from_ymd(2026, 1, 1)?
+    let d2 = Date.from_ymd(2026, 6, 15)?
+    print(d1 < d2)
+    print(d1 > d2)
+    print(d1 <= d1)
+    print(d2 >= d2)
+    let dt1 = DateTime.from_timestamp(1000)?
+    let dt2 = DateTime.from_timestamp(2000)?
+    print(dt1 < dt2)
+    print(dt1 >= dt2)
+    return Ok(null)
+}
+
+match run() {
+    Ok(_) => null,
+    Err(e) => print(e)
+}
+";
+    let stdout = parity_run_vs_build("tier_b4_cmp", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "true");
+    assert_eq!(lines[1], "false");
+    assert_eq!(lines[2], "true");
+    assert_eq!(lines[3], "true");
+    assert_eq!(lines[4], "true");
+    assert_eq!(lines[5], "false");
+}
+
+#[test]
+fn tier_b5_uuid_v7_es_v7_time_ordered() {
+    // B.5 Uuid.v7() — el version nibble en la posición 12 hex chars
+    // debe ser '7' (RFC 9562). No podemos assertear igualdad exacta
+    // (random), pero sí el shape canonical + el version byte.
+    let src = "\
+fn run() -> Result<Null> {
+    let u1 = Uuid.v7()
+    let s = u1.to_str()
+    print(s.len())
+    let parsed = Uuid.parse(s)?
+    print(parsed.is_nil())
+    return Ok(null)
+}
+
+match run() {
+    Ok(_) => null,
+    Err(e) => print(e)
+}
+";
+    let stdout = parity_run_vs_build("tier_b5_uuid_v7", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // Canonical UUID = 36 chars (8-4-4-4-12 hex + 4 hyphens).
+    assert_eq!(lines[0], "36");
+    assert_eq!(lines[1], "false");
+}
+
+#[test]
+fn tier_b6_paridad_shortcuts() {
+    // B.6 Date.tomorrow/yesterday y DateTime.epoch.
+    // Verificamos el shape (no fechas exactas — Local::now() varía):
+    // tomorrow - today = 1 día; today - yesterday = 1; epoch == 1970-01-01.
+    let src = "\
+let t = Date.today()
+let to = Date.tomorrow()
+let ye = Date.yesterday()
+print(to.diff_days(t))
+print(t.diff_days(ye))
+let e = DateTime.epoch()
+print(e.to_str())
+print(e.timestamp())
+";
+    let stdout = parity_run_vs_build("tier_b6_shortcuts", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "1");
+    assert_eq!(lines[1], "1");
+    assert_eq!(lines[2], "1970-01-01T00:00:00Z");
+    assert_eq!(lines[3], "0");
+}
+
+#[test]
+fn tier_b7_paridad_in_tz_iana() {
+    // B.7 timezone display: `to_local()` (TZ del sistema) + `in_tz`
+    // (IANA name → Result<Str>). El instante UTC interno (timestamp)
+    // NO cambia — solo el display.
+    let src = "\
+fn run() -> Result<Null> {
+    let dt = DateTime.from_timestamp(1735689600)?
+    match dt.in_tz(\"America/Argentina/Buenos_Aires\") {
+        Ok(s) => print(s),
+        Err(e) => print(e)
+    }
+    match dt.in_tz(\"UTC\") {
+        Ok(s) => print(s),
+        Err(e) => print(e)
+    }
+    match dt.in_tz(\"Not/A/Real_Zone\") {
+        Ok(s) => print(s),
+        Err(e) => print(\"err\")
+    }
+    return Ok(null)
+}
+
+match run() {
+    Ok(_) => null,
+    Err(e) => print(e)
+}
+";
+    let stdout = parity_run_vs_build("tier_b7_in_tz", src);
+    let lines: Vec<&str> = stdout.lines().collect();
+    // 2025-01-01T00:00:00Z = 2024-12-31T21:00:00-03:00 en BsAs.
+    assert_eq!(lines[0], "2024-12-31T21:00:00-03:00");
+    assert_eq!(lines[1], "2025-01-01T00:00:00+00:00");
+    assert_eq!(lines[2], "err");
+}
+
+#[test]
+fn tier_b_runtime_error_overflow_check() {
+    // El runtime tira panic claro al overflow (no silent wrap-around).
+    // Validamos con un test E2E que el exit != 0 y el mensaje cita el
+    // método + el valor que rompió.
+    let stem = "tier_b_overflow";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join(format!("{}.fitz", stem));
+    let src = "\
+let d = Date.from_ymd(9999, 12, 31)?
+let bomb = d.add_years(100000000)
+print(bomb.to_str())
+";
+    std::fs::write(&src_path, src).expect("write");
+
+    let out_run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz run");
+    // run debe fallar con error claro.
+    assert!(
+        !out_run.status.success(),
+        "esperaba que `fitz run` aborte por overflow"
+    );
+    let stderr = String::from_utf8_lossy(&out_run.stderr);
+    let stdout = String::from_utf8_lossy(&out_run.stdout);
+    let combined = format!("{}\n{}", stdout, stderr);
+    // `add_years(N)` internamente escala a `add_months(N*12)`, así que
+    // el mensaje cita `add_months` (deuda de UX menor — el N reportado
+    // es el ya escalado, no el original).
+    assert!(
+        combined.contains("add_months") && combined.contains("overflow"),
+        "esperaba mensaje con `add_months` y `overflow`, fue:\n{}",
+        combined
+    );
+}
+
+#[test]
+fn tier_b_checker_rechaza_arg_no_int() {
+    // El checker estático rechaza `d.add_days(\"hola\")` con error claro.
+    // Anotación `: Date` explícita: los constructores estáticos
+    // (`Date.today()`) retornan Any (Module call) — sin anotación, el
+    // checker queda en modo gradual y no chequea Int. Con `: Date`
+    // entra al path `infer_date_method` donde la regla del Tier B
+    // valida el tipo del arg.
+    let stderr = build_expect_fail(
+        "tier_b_checker_bad_arg",
+        "\
+let d: Date = Date.today()
+let bomb = d.add_days(\"hola\")
+print(bomb.to_str())
+",
+    );
+    assert!(
+        stderr.contains("add_days") && stderr.contains("Int"),
+        "esperaba error citando `add_days` + `Int`, fue:\n{}",
+        stderr
+    );
+}

@@ -186,10 +186,19 @@ cron = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 # v0.10.24 (Fase Date/DateTime/Uuid) — Uuid v4 generation + parsing.
-# `v4` feature: random UUID generation con OsRng. Sin features extras
-# (no necesitamos serde direct, manejamos JSON via __To/FromFitzJson).
-# Crate ~50KB de Rust puro, ampliamente usado (~50M downloads/sem).
-uuid = { version = "1", features = ["v4"] }
+# `v4` feature: random UUID generation con OsRng. v0.10.30 (Tier B.5)
+# suma `v7`: time-ordered UUIDs (popular para PKs sortables por created_at).
+# Sin features extras (no necesitamos serde direct, manejamos JSON via
+# __To/FromFitzJson). Crate ~50KB de Rust puro, ampliamente usado.
+uuid = { version = "1", features = ["v4", "v7"] }
+
+# v0.10.30 (Tier B.7) — IANA timezone database para
+# `DateTime.in_tz("America/Argentina/Buenos_Aires")`. Pure Rust, sin
+# deps nativas. La DB IANA pesa ~250KB compiled-in (todas las zonas
+# del mundo); valor: poder convertir un instante UTC al huso de
+# cualquier ciudad sin un servicio externo. El instante en sí (UTC
+# interno) NO cambia — son helpers de display.
+chrono-tz = { version = "0.10", default-features = false }
 
 # Fase 10.1 — driver Postgres puro Fitz. SCRAM-SHA-256 (RFC 7677) usa
 # HMAC-SHA-256 + PBKDF2 sobre password derivation, y SHA-256 sobre el

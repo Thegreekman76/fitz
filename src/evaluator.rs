@@ -5054,12 +5054,31 @@ async fn dispatch_method(
                 .and_utc();
             Ok(Value::DateTime(dt))
         }
+        // v0.10.30 B.1 — Date arithmetic. `n` puede ser negativo; overflow
+        // del rango Postgres (NaiveDate ±9999) → FitzError claro.
+        (Value::Date(d), "add_days") => date_add_days(*d, &args, span),
+        (Value::Date(d), "add_months") => date_add_months(*d, &args, span),
+        (Value::Date(d), "add_years") => date_add_months(
+            *d,
+            &date_scale_arg(&args, 12, "add_years", span)?,
+            span,
+        ),
+        // v0.10.30 B.2 — Date subtract (alias `add_*(-n)` por claridad).
+        (Value::Date(d), "subtract_days") => date_add_days(*d, &neg_int_arg(&args, "subtract_days", span)?, span),
+        (Value::Date(d), "subtract_months") => date_add_months(*d, &neg_int_arg(&args, "subtract_months", span)?, span),
+        (Value::Date(d), "subtract_years") => {
+            let neg = neg_int_arg(&args, "subtract_years", span)?;
+            date_add_months(*d, &date_scale_arg(&neg, 12, "subtract_years", span)?, span)
+        }
+        // v0.10.30 B.3 — Date diff: `d1.diff_days(d2)` = días desde d2 a d1.
+        // Resultado signed Int (d2 después de d1 → negativo).
+        (Value::Date(d), "diff_days") => date_diff_days(*d, &args, span),
         (Value::Date(_), other) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
             format!(
-                "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format)",
+                "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
                 other,
             ),
         ))),
@@ -5111,12 +5130,54 @@ async fn dispatch_method(
             Ok(Value::Date(dt.date_naive()))
         }
         (Value::DateTime(dt), "format") => datetime_format(*dt, &args, span),
+        // v0.10.30 B.1 — DateTime arithmetic. Sub-second units van como
+        // `Duration::seconds/minutes/hours`; days/months/years usan
+        // `checked_add_*` symétrico al patrón Date para preservar
+        // semántica calendar-aware (no Duration::days * N que ignora
+        // DST/leap years).
+        (Value::DateTime(dt), "add_seconds") => datetime_add_duration(*dt, &args, 1, "add_seconds", span),
+        (Value::DateTime(dt), "add_minutes") => datetime_add_duration(*dt, &args, 60, "add_minutes", span),
+        (Value::DateTime(dt), "add_hours") => datetime_add_duration(*dt, &args, 3600, "add_hours", span),
+        (Value::DateTime(dt), "add_days") => datetime_add_days(*dt, &args, span),
+        (Value::DateTime(dt), "add_months") => datetime_add_months(*dt, &args, span),
+        (Value::DateTime(dt), "add_years") => datetime_add_months(
+            *dt,
+            &date_scale_arg(&args, 12, "add_years", span)?,
+            span,
+        ),
+        // v0.10.30 B.2 — DateTime subtract.
+        (Value::DateTime(dt), "subtract_seconds") => datetime_add_duration(*dt, &neg_int_arg(&args, "subtract_seconds", span)?, 1, "subtract_seconds", span),
+        (Value::DateTime(dt), "subtract_minutes") => datetime_add_duration(*dt, &neg_int_arg(&args, "subtract_minutes", span)?, 60, "subtract_minutes", span),
+        (Value::DateTime(dt), "subtract_hours") => datetime_add_duration(*dt, &neg_int_arg(&args, "subtract_hours", span)?, 3600, "subtract_hours", span),
+        (Value::DateTime(dt), "subtract_days") => datetime_add_days(*dt, &neg_int_arg(&args, "subtract_days", span)?, span),
+        (Value::DateTime(dt), "subtract_months") => datetime_add_months(*dt, &neg_int_arg(&args, "subtract_months", span)?, span),
+        (Value::DateTime(dt), "subtract_years") => {
+            let neg = neg_int_arg(&args, "subtract_years", span)?;
+            datetime_add_months(*dt, &date_scale_arg(&neg, 12, "subtract_years", span)?, span)
+        }
+        // v0.10.30 B.3 — DateTime diff: signed Int seconds entre dt2 y self.
+        (Value::DateTime(dt), "diff_seconds") => datetime_diff(*dt, &args, 1, "diff_seconds", span),
+        (Value::DateTime(dt), "diff_minutes") => datetime_diff(*dt, &args, 60, "diff_minutes", span),
+        (Value::DateTime(dt), "diff_hours") => datetime_diff(*dt, &args, 3600, "diff_hours", span),
+        (Value::DateTime(dt), "diff_days") => datetime_diff(*dt, &args, 86_400, "diff_days", span),
+        // v0.10.30 B.7 — Timezone display. `to_local()` (sin dep extra,
+        // formato ISO 8601 en el TZ del sistema) cubre el 90% del caso
+        // real ("mostrar al user en su huso"). `in_tz(iana)` (vía
+        // `chrono-tz`) cubre conversion arbitraria a un IANA tz name.
+        // El instante en sí (UTC interno) NO cambia — son helpers de
+        // formato, no aritmética.
+        (Value::DateTime(dt), "to_local") => {
+            expect_arity("to_local", &args, 0, span)?;
+            let local = dt.with_timezone(&chrono::Local);
+            Ok(Value::Str(local.format("%Y-%m-%dT%H:%M:%S%:z").to_string()))
+        }
+        (Value::DateTime(dt), "in_tz") => datetime_in_tz(*dt, &args, span),
         (Value::DateTime(_), other) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
             span.column,
             format!(
-                "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format)",
+                "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
                 other,
             ),
         ))),
@@ -5201,6 +5262,356 @@ fn datetime_format(
         }
     };
     Ok(Value::Str(dt.format(&fmt).to_string()))
+}
+
+// ---------------------------------------------------------------------------
+// v0.10.30 (Tier B — Date/DateTime arithmetic + diff + timezone)
+// ---------------------------------------------------------------------------
+
+/// Lee `args[0]` como `Value::Int` con check de aridad 1. Helper común
+/// para todos los `.add_*(n)` / `.subtract_*(n)` / `.diff_*(other)`.
+fn expect_int_arg(method: &str, args: &[Value], span: Span) -> EvalResult<i64> {
+    expect_arity(method, args, 1, span)?;
+    match &args[0] {
+        Value::Int(n) => Ok(*n),
+        other => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`{}(n)` espera `Int`, recibió `{}`",
+                method,
+                other.type_name()
+            ),
+        ))),
+    }
+}
+
+/// Negativiza `args[0]` como Int para implementar `.subtract_*(n)`
+/// como `.add_*(-n)` sin duplicar dispatch. Devuelve `[Value::Int(-n)]`.
+/// Overflow defensivo via `checked_neg` (i64::MIN → error claro en vez
+/// de panic en debug y wrap-around en release).
+fn neg_int_arg(args: &[Value], method: &str, span: Span) -> EvalResult<Vec<Value>> {
+    let n = expect_int_arg(method, args, span)?;
+    match n.checked_neg() {
+        Some(neg) => Ok(vec![Value::Int(neg)]),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!("`{}({})` overflow: i64::MIN no tiene opuesto", method, n),
+        ))),
+    }
+}
+
+/// Escala el primer arg Int por un factor (usado para `add_years` = `add_months * 12`).
+/// Overflow → error claro. Devuelve `[Value::Int(n * factor)]`.
+fn date_scale_arg(args: &[Value], factor: i64, method: &str, span: Span) -> EvalResult<Vec<Value>> {
+    let n = expect_int_arg(method, args, span)?;
+    match n.checked_mul(factor) {
+        Some(scaled) => Ok(vec![Value::Int(scaled)]),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`{}({})` overflow: {} * {} no entra en i64",
+                method, n, n, factor
+            ),
+        ))),
+    }
+}
+
+/// `date.add_days(n)` — paralelo a `chrono::Duration::days(n)`. `n` signed.
+/// Overflow del rango `NaiveDate` (~-9999..+9999) → error claro.
+fn date_add_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
+    let n = expect_int_arg("add_days", args, span)?;
+    match d.checked_add_signed(chrono::Duration::days(n)) {
+        Some(new_d) => Ok(Value::Date(new_d)),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`Date.add_days({})` overflow: resultado fuera del rango NaiveDate",
+                n
+            ),
+        ))),
+    }
+}
+
+/// `date.add_months(n)` calendar-aware (preserva día del mes cuando es
+/// válido, clampea al último día del mes objetivo si no — ej `Jan 31 +
+/// 1 mes = Feb 28/29`). `n` signed: positivo → forward, negativo →
+/// backward. Implementado vía `chrono::Months::new(u32)` con
+/// `checked_add_months` / `checked_sub_months` según signo.
+fn date_add_months(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
+    let n = expect_int_arg("add_months", args, span)?;
+    let result = if n >= 0 {
+        let months = u32::try_from(n).map_err(|_| {
+            EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`Date.add_months({})` overflow: {} no entra en u32 meses",
+                    n, n
+                ),
+            ))
+        })?;
+        d.checked_add_months(chrono::Months::new(months))
+    } else {
+        // i64::MIN → unsigned_abs OK (= 2^63), pero >u32::MAX.
+        let months_u64 = n.unsigned_abs();
+        let months = u32::try_from(months_u64).map_err(|_| {
+            EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`Date.add_months({})` overflow: |{}| no entra en u32 meses",
+                    n, n
+                ),
+            ))
+        })?;
+        d.checked_sub_months(chrono::Months::new(months))
+    };
+    match result {
+        Some(new_d) => Ok(Value::Date(new_d)),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`Date.add_months({})` overflow: resultado fuera del rango NaiveDate",
+                n
+            ),
+        ))),
+    }
+}
+
+/// `d1.diff_days(d2)` → `d1 - d2` en días, signed. d2 después de d1 → negativo.
+fn date_diff_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
+    expect_arity("diff_days", args, 1, span)?;
+    let other = match &args[0] {
+        Value::Date(other) => *other,
+        v => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Date".into(),
+                    found: v.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`Date.diff_days(other)` espera `Date`, recibió `{}`",
+                    v.type_name()
+                ),
+            )));
+        }
+    };
+    let dur = d.signed_duration_since(other);
+    Ok(Value::Int(dur.num_days()))
+}
+
+/// `dt.add_seconds/minutes/hours(n)` — multiplica `n` por el factor del
+/// método (1/60/3600) y delega a `Duration::seconds(total)`. Overflow del
+/// rango DateTime → error claro.
+fn datetime_add_duration(
+    dt: chrono::DateTime<chrono::Utc>,
+    args: &[Value],
+    factor_secs: i64,
+    method: &str,
+    span: Span,
+) -> EvalResult<Value> {
+    let n = expect_int_arg(method, args, span)?;
+    let total_secs = match n.checked_mul(factor_secs) {
+        Some(v) => v,
+        None => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`DateTime.{}({})` overflow: {} * {} no entra en i64 segundos",
+                    method, n, n, factor_secs
+                ),
+            )))
+        }
+    };
+    match dt.checked_add_signed(chrono::Duration::seconds(total_secs)) {
+        Some(new_dt) => Ok(Value::DateTime(new_dt)),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`DateTime.{}({})` overflow: resultado fuera del rango DateTime",
+                method, n
+            ),
+        ))),
+    }
+}
+
+/// `dt.add_days(n)` con `chrono::Duration::days(n)`. Calendar-naive
+/// (no toca month/year). Para day-of-month arithmetic preservar usar
+/// `add_months(n)` (paralelo a Date).
+fn datetime_add_days(
+    dt: chrono::DateTime<chrono::Utc>,
+    args: &[Value],
+    span: Span,
+) -> EvalResult<Value> {
+    let n = expect_int_arg("add_days", args, span)?;
+    match dt.checked_add_signed(chrono::Duration::days(n)) {
+        Some(new_dt) => Ok(Value::DateTime(new_dt)),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`DateTime.add_days({})` overflow: resultado fuera del rango DateTime",
+                n
+            ),
+        ))),
+    }
+}
+
+/// `dt.add_months(n)` calendar-aware sobre DateTime. Paralelo a
+/// `date_add_months`: preserva la hora UTC del instante original,
+/// el cambio es solo en year/month/day (con clamping).
+fn datetime_add_months(
+    dt: chrono::DateTime<chrono::Utc>,
+    args: &[Value],
+    span: Span,
+) -> EvalResult<Value> {
+    let n = expect_int_arg("add_months", args, span)?;
+    let result = if n >= 0 {
+        let months = u32::try_from(n).map_err(|_| {
+            EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`DateTime.add_months({})` overflow: {} no entra en u32 meses",
+                    n, n
+                ),
+            ))
+        })?;
+        dt.checked_add_months(chrono::Months::new(months))
+    } else {
+        let months_u64 = n.unsigned_abs();
+        let months = u32::try_from(months_u64).map_err(|_| {
+            EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`DateTime.add_months({})` overflow: |{}| no entra en u32 meses",
+                    n, n
+                ),
+            ))
+        })?;
+        dt.checked_sub_months(chrono::Months::new(months))
+    };
+    match result {
+        Some(new_dt) => Ok(Value::DateTime(new_dt)),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`DateTime.add_months({})` overflow: resultado fuera del rango DateTime",
+                n
+            ),
+        ))),
+    }
+}
+
+/// `dt1.diff_{seconds,minutes,hours,days}(dt2)` → `(dt1 - dt2)` en la unidad
+/// pedida, signed. `factor_secs` es 1/60/3600/86400. Truncamiento hacia 0
+/// para unidades > 1 segundo (paralelo a `chrono::Duration::num_*`).
+fn datetime_diff(
+    dt: chrono::DateTime<chrono::Utc>,
+    args: &[Value],
+    factor_secs: i64,
+    method: &str,
+    span: Span,
+) -> EvalResult<Value> {
+    expect_arity(method, args, 1, span)?;
+    let other = match &args[0] {
+        Value::DateTime(other) => *other,
+        v => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "DateTime".into(),
+                    found: v.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`DateTime.{}(other)` espera `DateTime`, recibió `{}`",
+                    method,
+                    v.type_name()
+                ),
+            )));
+        }
+    };
+    let dur = dt.signed_duration_since(other);
+    let secs = dur.num_seconds();
+    let result = match factor_secs {
+        1 => secs,
+        60 => secs / 60,
+        3600 => secs / 3600,
+        86_400 => secs / 86_400,
+        _ => unreachable!("factor_secs solo 1/60/3600/86400"),
+    };
+    Ok(Value::Int(result))
+}
+
+/// `dt.in_tz(iana)` — formatea el instante UTC en la zona IANA pedida
+/// (`"America/Argentina/Buenos_Aires"`, `"Europe/Paris"`, etc.) como
+/// ISO 8601 con offset (`%Y-%m-%dT%H:%M:%S%:z`). El instante no cambia
+/// — esto es un helper de display. IANA name desconocido → `Err(Str)`.
+fn datetime_in_tz(
+    dt: chrono::DateTime<chrono::Utc>,
+    args: &[Value],
+    span: Span,
+) -> EvalResult<Value> {
+    expect_arity("in_tz", args, 1, span)?;
+    let tz_name = match &args[0] {
+        Value::Str(s) => s.clone(),
+        v => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: v.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`DateTime.in_tz(name)` espera `Str` (IANA tz name), recibió `{}`",
+                    v.type_name()
+                ),
+            )));
+        }
+    };
+    match tz_name.parse::<chrono_tz::Tz>() {
+        Ok(tz) => {
+            let local = dt.with_timezone(&tz);
+            Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::Str(local.format("%Y-%m-%dT%H:%M:%S%:z").to_string()),
+            ))))
+        }
+        Err(_) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+            Value::Str(format!(
+                "DateTime.in_tz: `{}` no es un nombre IANA válido (ej: `America/Argentina/Buenos_Aires`, `Europe/Paris`, `UTC`)",
+                tz_name
+            )),
+        )))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -8846,6 +9257,28 @@ fn compare(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> 
         }));
     }
 
+    // v0.10.30 B.4 — Date/DateTime comparison. `chrono::NaiveDate` y
+    // `chrono::DateTime<Utc>` derivan `Ord`/`PartialOrd`. Mapping
+    // natural: orden cronológico.
+    if let (Value::Date(a), Value::Date(b)) = (&l, &r) {
+        return Ok(Value::Bool(match op {
+            Lt => a < b,
+            LtEq => a <= b,
+            Gt => a > b,
+            GtEq => a >= b,
+            _ => unreachable!(),
+        }));
+    }
+    if let (Value::DateTime(a), Value::DateTime(b)) = (&l, &r) {
+        return Ok(Value::Bool(match op {
+            Lt => a < b,
+            LtEq => a <= b,
+            Gt => a > b,
+            GtEq => a >= b,
+            _ => unreachable!(),
+        }));
+    }
+
     type_error(op_name(op), &l, &r, span)
 }
 
@@ -9845,6 +10278,23 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_date_from_ymd,
         },
     );
+    // v0.10.30 B.6 — shortcuts `Date.tomorrow()` / `Date.yesterday()`
+    // sobre Local::now (paralelo a `today()`). Sirven para casos cortos
+    // sin necesidad de `today().add_days(±1)`.
+    date_env.lock().define(
+        "tomorrow",
+        Value::Builtin {
+            name: "tomorrow",
+            func: builtin_date_tomorrow,
+        },
+    );
+    date_env.lock().define(
+        "yesterday",
+        Value::Builtin {
+            name: "yesterday",
+            func: builtin_date_yesterday,
+        },
+    );
     env.lock().define(
         "Date",
         Value::Module {
@@ -9875,6 +10325,14 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_datetime_from_timestamp,
         },
     );
+    // v0.10.30 B.6 — shortcut `DateTime.epoch()` (timestamp 0 = 1970-01-01T00:00:00Z).
+    datetime_env.lock().define(
+        "epoch",
+        Value::Builtin {
+            name: "epoch",
+            func: builtin_datetime_epoch,
+        },
+    );
     env.lock().define(
         "DateTime",
         Value::Module {
@@ -9889,6 +10347,17 @@ fn register_builtins(env: &EnvRef) {
         Value::Builtin {
             name: "v4",
             func: builtin_uuid_v4,
+        },
+    );
+    // v0.10.30 B.5 — `Uuid.v7()` UUIDv7 time-ordered (RFC 9562). Los
+    // primeros 48 bits codifican Unix millis → ordenan cronológicamente,
+    // muy útiles para PKs sortables por created_at (vs v4 random que
+    // produce scattering en btree indexes).
+    uuid_env.lock().define(
+        "v7",
+        Value::Builtin {
+            name: "v7",
+            func: builtin_uuid_v7,
         },
     );
     uuid_env.lock().define(
@@ -10908,6 +11377,94 @@ fn builtin_uuid_v4(args: &[Value]) -> FitzResult<Value> {
         ));
     }
     Ok(Value::Uuid(uuid::Uuid::new_v4()))
+}
+
+/// v0.10.30 B.5 — UUIDv7 time-ordered. Primeros 48 bits = ms desde Unix
+/// epoch → ordena cronológicamente en btree, popular para PKs sortables
+/// por created_at (vs v4 que es full-random y produce scattering).
+/// Especificado en RFC 9562 (mayo 2024).
+fn builtin_uuid_v7(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`Uuid.v7()` no acepta argumentos, recibió {}", args.len()),
+        ));
+    }
+    Ok(Value::Uuid(uuid::Uuid::now_v7()))
+}
+
+/// v0.10.30 B.6 — `Date.tomorrow()` = `today() + 1d`. Local timezone
+/// (paralelo a `today()`). Overflow imposible en práctica (fecha local
+/// del sistema lejos del rango NaiveDate).
+fn builtin_date_tomorrow(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`Date.tomorrow()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let today = chrono::Local::now().date_naive();
+    Ok(Value::Date(
+        today.succ_opt().expect("today+1 no overflow en uso real"),
+    ))
+}
+
+/// v0.10.30 B.6 — `Date.yesterday()` = `today() - 1d`.
+fn builtin_date_yesterday(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`Date.yesterday()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let today = chrono::Local::now().date_naive();
+    Ok(Value::Date(
+        today.pred_opt().expect("today-1 no overflow en uso real"),
+    ))
+}
+
+/// v0.10.30 B.6 — `DateTime.epoch()` = Unix epoch (1970-01-01T00:00:00Z).
+/// Sirve como sentinel "fecha mínima representable" sin tener que
+/// llamar `from_timestamp(0)?` con match.
+fn builtin_datetime_epoch(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`DateTime.epoch()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let epoch =
+        chrono::DateTime::<chrono::Utc>::from_timestamp(0, 0).expect("epoch siempre válida");
+    Ok(Value::DateTime(epoch))
 }
 
 fn builtin_uuid_parse(args: &[Value]) -> FitzResult<Value> {
