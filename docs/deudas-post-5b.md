@@ -2277,3 +2277,123 @@ código pristine pre-v0.10.9. NO bloquea el release porque el fix
 es localizado al pool singleton y el ambiente Linux real no tiene
 ese issue. Validación smoke real queda como tarea CI Linux (job
 `db-postgres` ya integrado en `.github/workflows/ci.yml`).
+
+---
+
+## Deuda residual del ORM/DB post-v0.10.29
+
+> Sección creada al cerrar **v0.10.29** (2026-05-31) — "cierre
+> masivo del ORM" con 12 features residuales cerradas en bloque
+> (JSON path operators, `@@` text search, `@unique` composite,
+> `@check_constraint`, cross-schema FK, diff completo de indexes,
+> `fitz db inspect --all-schemas`, redaction de secrets en
+> `FITZ_DB_LOG`, DB errors enriquecidos con SQLSTATE+SQL+params,
+> `FITZ_DB_MAX_CONNS`, skip deliberado de JSON `||` merge, docs
+> masivos). Detalle exacto en `CHANGELOG.md` entry v0.10.29.
+>
+> **Esta sección lista lo que QUEDA pendiente al cierre.**
+> 29 ítems verificados con grep exhaustivo en `src/` (confirmando
+> que el código NO los implementa), agrupados en 5 tiers por
+> scope. **Mi recomendación**: Tier A + B cierran el MVP fuerte
+> del ORM en el sentido "sin fricciones residuales conocidas
+> para los patrones canónicos".
+>
+> Tests al cierre de v0.10.29: 2739 unit + 292 smoke + 3 openapi
+> + 81 cli_e2e + 52 db_real_postgres. fmt + clippy --all-targets
+> + clippy --features lsp limpios.
+
+### Resumen de tiers
+
+| Tier | Foco | Scope total | Items |
+|------|------|------------:|------:|
+| **A** | Cierre MVP fuerte del ORM | ~30-40h | 10 |
+| **B** | API completion Date/DateTime/Uuid | ~12-16h | 7 |
+| **C** | Operadores SQL faltantes | ~12-20h | 3 |
+| **D** | DX/LSP residual del ORM | ~5h | 2 |
+| **E** | Visión a futuro (expansión lenguaje) | días-semanas | 7 |
+
+**Recomendación**: si el norte es "ORM completo", arrancar por
+**Tier A + B (~50h totales)**. Tier C complementa con operadores
+SQL avanzados. Tier D mejora DX sin tocar lenguaje. Tier E son
+features grandes que expanden el lenguaje (mini-fases dedicadas).
+
+### Tier A — Cierre MVP fuerte del ORM (~30-40h, 10 ítems)
+
+| ID | Item | Evidencia código | Scope |
+|----|------|------------------|------:|
+| A.1 | `fitz db diff --check-destructive` — clasifica safe/risky/destructive y aborta sin `--allow-destructive` explícito | Cero matches `check_destructive`/`--check-destructive` en `src/` | ~2 días |
+| A.2 | `ALTER COLUMN TYPE` con `USING` automático para casts comunes (`int→bigint`, `text→varchar(N)`, etc.) | `migrations.rs:1529` emite `ALTER COLUMN TYPE` sin `USING`; comment en línea 978 marca como "deuda directo sin USING" | ~3h |
+| A.3 | `db.connect(url, max_conns=N)` kwarg del lenguaje (hoy solo env var `FITZ_DB_MAX_CONNS`) | Cero matches de kwarg `max_conns` en `evaluator.rs`. Requiere wire del kwarg desde evaluator + codegen | ~2h |
+| A.4 | Savepoints / nested transactions (`SAVEPOINT` adentro de la outer) | `db.rs:3301` comment explícito "No soporta nested transactions" | ~4h |
+| A.5 | `ALTER TABLE ADD/DROP CONSTRAINT` para CHECKs nuevos via diff (hoy `@check_constraint` solo emite en CREATE TABLE) | Cero matches `AddCheckConstraint`/`Change::AddCheck` | ~4h |
+| A.6 | FK targeting composite PK del target type (hoy fallback a "id" + error claro en runtime) | `migrations.rs:646` comment "Composite PK del target → fallback `id`" | ~3h |
+| A.7 | Drift check `@check_constraint` (introspect lee `pg_constraint.contype='c'`) | `types.rs:482` comment "introspect NO los lee del pg_constraint (MVP — deuda menor)" | ~2h |
+| A.8 | Drift check cross-schema FK (introspect popula `references_schema`) | `migrations.rs:65` comment "introspect NO los lee" — `references_schema` siempre `None` en introspect | ~2h |
+| A.9 | `db.transaction` con isolation level (`SERIALIZABLE`/`REPEATABLE READ`/`READ ONLY`) | `db.rs:3302` comment "No soporta niveles de aislamiento custom" | ~2h |
+| A.10 | `FITZ_DB_*` mid-run reload (hoy `LazyLock` se fija al primer acceso) | `db.rs:2780, 2957` confirma `LazyLock`. Requiere refactor a `RwLock<DbLogMode>` o similar | ~3h |
+
+### Tier B — API completion Date/DateTime/Uuid (~12-16h, 7 ítems)
+
+**Contexto**: Date/DateTime/Uuid YA son tipos nativos del lenguaje
+con constructores estáticos + 23 métodos getters + parse/format
+(cerrado en v0.10.26 con paridad bit-a-bit `fitz run` ↔ `fitz
+build` incluyendo ORM mapping). Lo que falta es la **API de
+aritmética y diff** que típicamente uno usa al trabajar con fechas.
+
+| ID | Item | Evidencia código | Scope |
+|----|------|------------------|------:|
+| B.1 | `.add_days(n)` / `.add_months(n)` / `.add_years(n)` (Date) + `.add_hours(n)` / `.add_minutes(n)` / `.add_seconds(n)` (DateTime) | Cero matches en `src/`. `evaluator.rs::infer_date_method` (línea ~6980) solo tiene `year/month/day/weekday/to_str/to_datetime/format` | ~3h |
+| B.2 | `.subtract_*` symmetric (alias de `add_*(-n)` para legibilidad) | Implicado por B.1 | ~1h |
+| B.3 | `.diff_days(other) -> Int` (Date) / `.diff_seconds(other) -> Int` (DateTime) | Cero matches | ~2h |
+| B.4 | Comparison operators (`<`/`>`/`<=`/`>=`) entre Date/DateTime | `types.rs:7705-7714` confirma `BinOpKind::Lt/Gt/...` solo Int/Float/Str. Hoy workaround via `d1.timestamp() < d2.timestamp()` | ~2h |
+| B.5 | `Uuid.v7()` (time-ordered UUIDs, popular para PKs sortables) | Solo `Uuid.v4()` en `evaluator.rs:9890`. Requiere `uuid = { features = ["v7"] }` en codegen | ~2h |
+| B.6 | Shortcuts: `Date.tomorrow()`, `Date.yesterday()`, `DateTime.epoch()` | Cero matches | ~1h |
+| B.7 | `DateTime.with_timezone(tz)` / `DateTime.utc()` — hoy `today()` usa Local y `now()` usa UTC sin forma de cambiarlo | Cero matches `with_timezone`. Requiere decisión: timezone como Str (`"America/Argentina/Buenos_Aires"`) o tipo dedicado | ~3-4h |
+
+### Tier C — Operadores SQL faltantes (~12-20h, 3 ítems)
+
+| ID | Item | Evidencia código | Scope |
+|----|------|------------------|------:|
+| C.1 | `ts_rank` full-text ranking (`order_by(fn(d) => d.body_tsv.rank("query"))` o similar) | Cero matches `ts_rank` en `src/`. Hoy escape hatch via `db.query(...)` con `ORDER BY ts_rank(...)` | ~2h |
+| C.2 | Expression indexes (`@index("lower(email)")`, `@index("to_tsvector('english', body)")`) — requiere parser SQL mini para introspect/drift | `types.rs:469` comment explícito "Expression indexes NO en MVP — requiere parser SQL mini" | ~1-2 días |
+| C.3 | JSON `\|\|` merge con patrón distinto (skipeado deliberado en v0.10.29 para `.where`; reabrirse como `Type.merge_jsonb_field(db, id, field, patch)` o adentro de `.update`) | Cero matches `.merge\(` en jsonb context. Decisión en v0.10.29: caso UPDATE dominante, escape hatch via `db.exec` documentado | ~3h |
+
+### Tier D — DX/LSP residual del ORM (~5h, 2 ítems)
+
+| ID | Item | Evidencia código | Scope |
+|----|------|------------------|------:|
+| D.1 | LSP completion para method calls del ORM en `.where(...)` (al escribir `u.email.`, suggest `is_in`/`like`/`starts_with`/`matches`/etc. con descripciones) | Cero matches de completion con context ORM en `src/lsp.rs`. Lo único `starts_with` es para `List<T>` (prefix matching), no para el method del ORM | ~3h |
+| D.2 | LSP hover sobre `@table` types mostrando el `CREATE TABLE` emitted (útil para debuggear migrations) | Cero matches `hover.*@table`/`create_table_sql.*hover` | ~2h |
+
+### Tier E — Visión a futuro (expansión del lenguaje)
+
+> **Estos NO cierran "el ORM" — lo expanden.** Cada uno es
+> mini-fase dedicada con decisiones de diseño previas. Scope
+> grande (días-semanas). Documentados acá para que aparezcan
+> en una sola tabla con el resto cuando se priorice.
+
+| ID | Item | Evidencia código | Scope |
+|----|------|------------------|------:|
+| E.1 | `Decimal`/`Numeric` type (precision arbitraria) — financial apps. Hoy `Str` o `Float` con precision loss | Cero matches `Type::Decimal`/NUMERIC OID en driver. Requiere `rust_decimal` o similar + `Type::Decimal` + OID 1700 (NUMERIC) en wire protocol | ~1 semana |
+| E.2 | Async query streaming cursor-based — `Type.stream(db) -> Stream<Type>` para resultsets gigantes sin cargar todo en memoria | Cero matches `DECLARE CURSOR`/`Stream<Row>` en `db.rs`. Requiere wire del protocolo cursor + Stream API + integration con tokio Stream trait | ~3-5 días |
+| E.3 | COPY FROM/TO — bulk loading de gigabytes. Hoy `bulk_insert` es batch INSERT (funciona pero no óptimo para `> 100K` rows) | Cero matches `COPY FROM`/`CopyFromStdin` | ~3 días |
+| E.4 | LISTEN/NOTIFY tipado — real-time pub/sub Postgres como capability del lenguaje (`@listen("channel") fn handler(payload: ...)` o similar) | Cero matches `LISTEN`/`NotificationResponse` excepto un comment sobre `pg_notify()` builtin | ~3-5 días |
+| E.5 | Window functions built-in (`ROW_NUMBER`/`RANK`/`LAG`/`LEAD`/`OVER (PARTITION BY ...)`) | Cero matches en `src/`. Hoy escape hatch via `db.query` | ~1 semana |
+| E.6 | CTE / `WITH` clauses built-in (`Type.with("subquery", ...)` o método similar) | Cero matches `with_clause`/`CteSpec`. Es lo más complejo del bloque (requiere modelar dependencias entre query trees) | ~2 semanas |
+| E.7 | `UNION`/`INTERSECT`/`EXCEPT` entre `QueryBuilder<T>` | Cero matches en `src/` | ~3-5 días |
+
+### Verificación
+
+Cada ítem de esta sección fue verificado con grep exhaustivo en
+`src/` el **2026-05-31** (post-v0.10.29). 3 ítems del inventario
+preliminar **resultaron estar ya implementados** y NO entran a esta
+tabla:
+
+- **GROUP BY en HTTP returns** (serialización `List<Map<Str, Any>>`
+  automática) → cerrado en v0.10.22 + v0.10.4 vía
+  `DB_HTTP_INTEGRATION_PRELUDE` + `impl __MapKey for __FitzValue`.
+- **Date/Time/Timestamp/UUID como tipos nativos del lenguaje** →
+  cerrado en v0.10.24 (intérprete) + v0.10.26 (codegen) con paridad
+  bit-a-bit. Lo que falta es API completion (Tier B arriba).
+- **TLS strict (`verify-ca`/`verify-full`)** → cerrado en v0.10.23
+  (`db.rs:372-373` con `SslMode::VerifyCa`/`VerifyFull`).

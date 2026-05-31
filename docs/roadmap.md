@@ -23,18 +23,21 @@
 - Métodos custom dentro de `class` del stub (`def method(self, ...)`) — el parser MVP los ignora; refinable si entra demanda real.
 - Lookup `.pyi` solo adyacente — decisión consciente (NO PYTHONPATH/site-packages) por reproducibilidad. Opt-in futuro si entra demanda.
 
-**Próximo norte grande**: **Fase 10 — Stack DB nativo + ORM declarativo**. **Diseño cerrado el 2026-05-25** (sesión de diseño completa antes de tocar código). Las 12 decisiones fundacionales están resueltas: driver Postgres puro Fitz (sin libpq), API toda async, pool built-in, ORM con decoradores sobre `type` (`@table` / `@primary` / `@belongs_to` / `@has_many` / `@many_to_many` / `@soft_delete`), cascades vía kwarg, lazy + eager opt-in con `.include(...)`, schema-diff autogenerado (`fitz db diff` / `migrate`), transactions closure-scope, raw SQL escape hatch, JSONB + arrays + dates + UUID + LISTEN/NOTIFY + FTS en el core. 10 sub-pasos planificados (10.1 driver wire protocol → 10.10 cierre formal). ~6300 LoC + 1 cap nuevo + ejemplo runnable + refresh boilerplates 5/6. Ver sección **Fase 10** dedicada abajo para el diseño completo.
+**Fase 10 — Stack DB nativo + ORM declarativo: CERRADA + Tier S + cierre masivo v0.10.29**. Driver Postgres puro Fitz (sin libpq) + ORM declarativo sobre `type` + paridad bit-a-bit `fitz run` ↔ `fitz build` + 10 sub-comandos `fitz db ...` + Tier S de observabilidad + cierre masivo v0.10.29 con 12 features residuales cerradas. Detalle por release en `CHANGELOG.md`.
 
-**Avance Fase 10 al 2026-05-26**: sub-pasos 10.1 (driver wire
-protocol + integración evaluator + codegen guard) → 10.2 (pool de
-conexiones + reconnect + health check) → 10.3 (ORM declarativo MVP
-con @table/@primary/@column, builder where/order_by/limit/offset/
-first/count, insert/update/delete con guard de seguridad) → 10.4
-(relations: @belongs_to/@has_one/@has_many + navigation methods
-lazy) **CERRADOS**. Validados contra Postgres real con **13
-tests E2E** (driver core + ORM CRUD + ORM builder completo +
-navigation cross-table). Próximo: **10.5 — Tipos avanzados**
-(JSONB, arrays, Date/Time/Timestamp, UUID).
+**Estado al 2026-05-31 (post-v0.10.29)**:
+
+- **Fase 10 entera (10.1 → 10.10)** + **Fase 10.b** (paridad codegen ORM) + **Tier S** (v0.10.27 bulk_insert + composite PK + @index, v0.10.28 fitz db inspect + @index using + FITZ_DB_LOG/HTTP_LOG) cerrados.
+- **v0.10.29 — Cierre masivo del ORM**: 12 features en bloque (JSON path operators + @@ text search + @unique composite + @check_constraint + cross-schema FK + diff completo de indexes + fitz db inspect --all-schemas + redaction secrets en FITZ_DB_LOG + DB errors con SQLSTATE+SQL+params + FITZ_DB_MAX_CONNS + skip deliberado JSON || merge + docs masivos).
+- **Tests al cierre**: 2739 unit + 292 smoke + 3 openapi + 81 cli_e2e + 52 db_real_postgres. fmt + clippy --all-targets + clippy --features lsp limpios.
+
+**Próximo norte (post-v0.10.29)**: tres opciones priorizadas por scope. Detalle en [`docs/deudas-post-5b.md`](deudas-post-5b.md) sección **"Deuda residual del ORM/DB post-v0.10.29"** (29 ítems agrupados en Tier A-E):
+
+1. **Tier A + B** (~50h): cierre del MVP fuerte del ORM (pre-flight destructive, ALTER USING auto, SAVEPOINT/nested tx, ADD CONSTRAINT CHECKs, drift checks @check + cross-schema FK, isolation level, FITZ_DB_* mid-run reload) + completion API Date/DateTime/Uuid (add_days/diff/comparison operators/Uuid.v7/timezone). Recomendado si el norte es "ORM completo sin fricciones".
+2. **Tier C + D** (~17h): operadores SQL faltantes (ts_rank, expression indexes, JSON || merge) + DX/LSP (completion ORM methods en .where, hover @table → CREATE TABLE).
+3. **Tier E** (días-semanas, expansión del lenguaje): Decimal/Numeric, async streaming cursor-based, COPY FROM/TO, LISTEN/NOTIFY tipado, window functions, CTE/WITH, UNION/INTERSECT/EXCEPT.
+
+Alternativas no-ORM: nuevos boilerplates Dockerizados, contenido educativo (curso `Fitz de 0 a experto`), Fase 11 (frontend en `.fitz`), Fase 12 (deployment ciudadano primera clase), Fase 13 (CLI builder nativo).
 
 Detalle exhaustivo de cada cierre en [`CHANGELOG.md`](../CHANGELOG.md) y deudas residuales en [`docs/deudas-post-5b.md`](deudas-post-5b.md).
 

@@ -11,8 +11,13 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-boilerplates ORM Dockerizados extendidos, o nuevo norte técnico.
+Sin trabajo en curso al cierre de v0.10.29. Próximas direcciones
+priorizadas en `docs/deudas-post-5b.md` sección **"Deuda residual
+del ORM/DB post-v0.10.29"** (29 ítems Tier A-E con scope estimates).
+Recomendación: **Tier A + B (~50h)** cierran el MVP fuerte del ORM
+sin fricciones residuales conocidas. Alternativas no-ORM: nuevos
+boilerplates Dockerizados, contenido educativo, o saltar a Fase 11
+(frontend en `.fitz`).
 
 ## [v0.10.29] — 2026-05-31 — Cierre masivo del ORM: JSON path + text search + @unique/@check + cross-schema FK + 6 cierres residuales más
 
