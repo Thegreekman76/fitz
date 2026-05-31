@@ -418,6 +418,12 @@ enum DbCmd {
         /// scripts externos). Default: vista texto plano legible.
         #[arg(long)]
         json: bool,
+        /// v0.10.29 — Listar TODOS los schemas user-defined a la
+        /// vez (no solo el filtrado por `--schema`). Cada schema
+        /// aparece con su propia sección. Mutuamente excluyente
+        /// con `--schema`.
+        #[arg(long, conflicts_with = "schema")]
+        all_schemas: bool,
     },
     /// v0.10.18 — Marca una migration como aplicada SIN ejecutar
     /// su SQL. Útil para adoptar Fitz en una DB legacy donde el
@@ -582,7 +588,8 @@ fn main() {
                 schema,
                 table,
                 json,
-            } => db_inspect_cmd(url, schema, table, json),
+                all_schemas,
+            } => db_inspect_cmd(url, schema, table, json, all_schemas),
         },
     }
 }
@@ -4283,7 +4290,13 @@ fn db_diff_cmd(file: Option<PathBuf>, url: Option<String>, out: Option<PathBuf>)
 /// DB, corre `introspect_schema` y emite el report en texto plano
 /// (default) o JSON (con `--json`). NO toca el programa Fitz —
 /// pura inspección del estado real de la DB.
-fn db_inspect_cmd(url: Option<String>, schema: Option<String>, table: Option<String>, json: bool) {
+fn db_inspect_cmd(
+    url: Option<String>,
+    schema: Option<String>,
+    table: Option<String>,
+    json: bool,
+    all_schemas: bool,
+) {
     let url = match resolve_db_url(url) {
         Ok(u) => u,
         Err(e) => {
@@ -4308,11 +4321,16 @@ fn db_inspect_cmd(url: Option<String>, schema: Option<String>, table: Option<Str
         }
     };
     if json {
-        match migrations::format_inspection_json(
-            &schema_introspected,
-            schema.as_deref(),
-            table.as_deref(),
-        ) {
+        let result = if all_schemas {
+            migrations::format_inspection_json_all_schemas(&schema_introspected, table.as_deref())
+        } else {
+            migrations::format_inspection_json(
+                &schema_introspected,
+                schema.as_deref(),
+                table.as_deref(),
+            )
+        };
+        match result {
             Ok(j) => {
                 println!("{j}");
             }
@@ -4322,11 +4340,15 @@ fn db_inspect_cmd(url: Option<String>, schema: Option<String>, table: Option<Str
             }
         }
     } else {
-        let text = migrations::format_inspection_text(
-            &schema_introspected,
-            schema.as_deref(),
-            table.as_deref(),
-        );
+        let text = if all_schemas {
+            migrations::format_inspection_text_all_schemas(&schema_introspected, table.as_deref())
+        } else {
+            migrations::format_inspection_text(
+                &schema_introspected,
+                schema.as_deref(),
+                table.as_deref(),
+            )
+        };
         print!("{text}");
     }
 }

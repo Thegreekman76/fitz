@@ -40,13 +40,19 @@ flowchart TD
     Fork -->|fitz openapi| OpenApi["<b>openapi.rs</b><br/>schema OpenAPI 3.1"]
     Fork -->|fitz fmt| Fmt["<b>fmt.rs</b><br/>pretty-printer"]
     Fork -->|fitz lint| Lint["<b>lint.rs</b><br/>linter de patrones"]
+    Fork -->|fitz db &lt;sub&gt;| Db["<b>migrations.rs</b><br/>schema diff + introspect"]
+    Db -->|diff/migrate/inspect| Driver["<b>db.rs</b><br/>driver Postgres puro<br/>(wire v3.0 + TLS + pool)"]
+    Driver --> Postgres[("Postgres real")]
+    Db -->|new/squash/stamp| FileSystem["archivos .sql/.fitz<br/>en migrations/"]
 
     classDef good fill:#dff5dd,stroke:#3a8a3a
     classDef bad fill:#fcdede,stroke:#a33
     classDef input fill:#e0e8ff,stroke:#446
+    classDef external fill:#fff5dd,stroke:#aa8
     class Source input
-    class OK,StdOut,Server,Bin,OpenApi,Fmt,Lint good
+    class OK,StdOut,Server,Bin,OpenApi,Fmt,Lint,FileSystem good
     class Abort bad
+    class Postgres external
 ```
 
 ASCII fallback (mismo diagrama, sin colores, para terminales y editores
@@ -75,34 +81,34 @@ que no rendericen mermaid):
                     │ types.rs │  resolver + check
                     └────┬─────┘
                          │
-       ┌─────────┬───────┼───────┬──────────┬─────────┬───────┐
-       ▼         ▼       ▼       ▼          ▼         ▼       ▼
-   fitz check  run/  build   openapi      fmt       lint    (errors)
-              test/         (openapi.rs) (fmt.rs)  (lint.rs)
-              dev/                                            │
-              repl                                            ▼
-                                                            exit 1
-              │            │
-              ▼            ▼
-       evaluator.rs   codegen.rs
-       env.rs+value   target/fitz-build/
-              │            ▼
-       ┌──────┴───┐    cargo build --release
-       ▼          ▼          │
-    CLI puro  http.rs        ▼
-    (stdout)  axum+tokio   binario
-              multi-thread adyacente al
-              (1 runtime)  .fitz o en
-              │            target/release/
+       ┌─────────┬───────┼───────┬──────────┬─────────┬───────┬──────┐
+       ▼         ▼       ▼       ▼          ▼         ▼       ▼      ▼
+   fitz check  run/  build   openapi      fmt       lint  fitz db  (errs)
+              test/         (openapi.rs) (fmt.rs) (lint.rs) <sub>    │
+              dev/                                            │      ▼
+              repl                                            │   exit 1
+              │            │                                  ▼
+              ▼            ▼                          migrations.rs
+       evaluator.rs   codegen.rs                     diff + introspect
+       env.rs+value   target/fitz-build/                      │
+              │            ▼                                  ▼
+       ┌──────┴───┐    cargo build --release              db.rs
+       ▼          ▼          │                         Postgres puro
+    CLI puro  http.rs        ▼                         (wire v3.0
+    (stdout)  axum+tokio   binario                      + TLS + pool)
+              multi-thread adyacente al                       │
+              (1 runtime)  .fitz o en                         ▼
+              │            target/release/                Postgres
               ▼
            servidor
 ```
 
 ## Los flujos del CLI
 
-El CLI ([main.rs](../src/main.rs)) tiene **15 sub-comandos** agrupados
-en 5 familias. Todos comparten el front-end (lexer → parser → checker)
-cuando trabajan con código Fitz; después se bifurcan:
+El CLI ([main.rs](../src/main.rs)) tiene **27 sub-comandos** (17
+top-level + 10 sub-comandos `db ...`) agrupados en **6 familias**.
+Todos comparten el front-end (lexer → parser → checker) cuando
+trabajan con código Fitz; después se bifurcan:
 
 **Familia 1 — Pipeline core del lenguaje**:
 - **`fitz run [archivo]`** — Chequea tipos en modo strict (flag
@@ -141,8 +147,31 @@ cuando trabajan con código Fitz; después se bifurcan:
 **Familia 4 — Interop Python (Fase 8, feature `python`)**:
 - **`fitz py-types <archivo.py>`** — Genera `type` Fitz desde modelos
   SQLAlchemy.
+- **`fitz py-stubs <archivo.py>`** — Genera stubs `.pyi` desde Fitz.
 
-**Familia 5 — Editor support (Fase 9.x, feature `lsp`)**:
+**Familia 5 — DB / migrations / ORM (Fase 10 + Tier S v0.10.28)**:
+- **`fitz db diff [--file] [--out]`** — Compara el schema declarado
+  (`@table` types del programa) vs el real de la DB, emite SQL DDL
+  con los cambios (CREATE/ALTER/DROP TABLE, ADD/DROP COLUMN, etc.).
+- **`fitz db migrate [--dry-run] [--sql]`** — Aplica migrations
+  pendientes contra la DB. Tracking idempotente via tabla
+  `_fitz_migrations`.
+- **`fitz db status`** — Lista migrations applied vs pending.
+- **`fitz db new <name>`** — Crea archivo `.sql`/`.fitz` nuevo con
+  timestamp prefix.
+- **`fitz db rollback [--count N]`** — Revierte las últimas N
+  migrations (usa el bloque `-- DOWN`).
+- **`fitz db check [--file]`** — Valida que el schema declarado +
+  migrations queden consistentes (lint estático sin tocar DB).
+- **`fitz db history`** — Lista migrations applied con timestamps.
+- **`fitz db squash <from> <to>`** — Combina migrations en una.
+- **`fitz db stamp <version> | --all`** — Marca migration(s) como
+  applied SIN ejecutar SQL (adopt legacy DB).
+- **`fitz db inspect [--schema | --all-schemas | --table | --json]`**
+  (v0.10.28 + `--all-schemas` v0.10.29) — Introspect del schema
+  **real** con vista texto + JSON machine-readable.
+
+**Familia 6 — Editor support (Fase 9.x, feature `lsp`)**:
 - **`fitz-lsp`** (bin separado, no sub-comando) — Language server sobre
   tower-lsp. Consumido por la extensión VSCode.
 
@@ -443,6 +472,93 @@ a `<cache_dir>/git/<sanitized-url>@<ref>/` (default
 revs. Detección de commit hash exacto para el lockfile via
 `git rev-parse HEAD`. Cache reuse sin re-clone automático;
 `fitz update <name>` invalida el cache.
+
+### db.rs — driver Postgres puro + ORM (Fase 10, ~3000+ LoC)
+
+El módulo más grande del proyecto en LoC. Implementa **driver
+Postgres completo en Fitz/Rust puro** (sin `tokio-postgres` /
+`sqlx` / `diesel` / `libpq`):
+
+- **Wire protocol v3.0**: `Connection::connect` hace handshake +
+  SCRAM-SHA-256 auth (RFC 7677) + PBKDF2-HMAC-SHA-256 +
+  StartupMessage. Simple Query y Extended Query con
+  Parse/Bind/Describe/Execute/Sync. ErrorResponse parseado
+  estructurado a `DbError::Server { severity, code, message }`
+  con SQLSTATE codes nativos.
+- **TLS strict** (v0.10.23): `sslmode=require` / `verify-ca` /
+  `verify-full` via `rustls` (CA bundle del sistema o
+  `sslrootcert=<path>` PEM custom). `disable` también soportado
+  para dev local.
+- **Pool de conexiones**: `DbPool` con `idle: Mutex<Vec<Connection>>`
+  + `permits: Semaphore` (default 10, override
+  `FITZ_DB_MAX_CONNS` v0.10.29 con clamp `[1, 200]`). Cache
+  global `OnceLock<HashMap<URL, Arc<DbConnHandle>>>` — múltiples
+  `db.connect(url)` con la misma URL devuelven el MISMO handle
+  (evita el "connection pool leak" donde cada call creaba pool
+  nuevo). Health check task background con `tokio::spawn` que
+  cierra conns idle stale cada 30s.
+- **Tipos PgValue**: 11 OIDs core (BOOL/INT/FLOAT/TEXT/BYTEA/
+  DATE/TIME/UUID/JSON/JSONB/VOID) + 12 array OIDs (`int4[]`,
+  `text[]`, `jsonb[]`, etc.). Marshaling bidireccional Fitz
+  `Value` ↔ `PgValue` con respeto de NULL adentro de arrays
+  (`List<Int?>` ↔ `int8[]` con `{a,NULL,c}` format).
+- **Observabilidad** (v0.10.28-29): `FITZ_DB_LOG=1|verbose` env
+  var opt-in. Mode `verbose` aplica **redaction de secrets**
+  (v0.10.29) sobre params via heurística contextual sobre el
+  SQL (`password`/`secret`/`token`/`api_key`/etc. → `<redacted>`).
+- **Errores enriquecidos** (v0.10.29): `DbError::Server` Display
+  ahora muestra `<severity> [<SQLSTATE>]: <msg>`. Las queries
+  fallidas pasan por `enrich_db_error_with_context` que suma
+  `[sql: <one-line truncado> params=[...]]` (con redaction).
+
+El ORM (decoradores `@table`/`@primary`/`@column`/`@belongs_to`/
+`@has_many`/`@has_one`/`@unique`/`@check_constraint`/`@index`)
+NO vive en `db.rs` — los decoradores se procesan en `types.rs`
+y poblan `TableMetadata`. El SQL builder de los read/write
+methods vive en `evaluator.rs` (`translate_method_call_to_sql`
+para `.where(...)` closures + métodos relacionados) y `codegen.rs`
+(paridad para `fitz build`).
+
+### migrations.rs — schema diff + introspect + DDL emit (Fase 10.6+)
+
+Sistema de migrations automático paralelo a Alembic / Flyway /
+TypeORM CLI, pero sin deps externas — todo Rust + el wire protocol
+del driver.
+
+- **`Schema`** = `Vec<Table>`; **`Table`** = `(name, columns,
+  indexes, foreign_keys, composite_pk, check_constraints,
+  schema, renamed_from)`. **`Index.using/where_clause`**
+  + **`ForeignKey.references_schema`** (v0.10.29 — cross-schema
+  FK transparente).
+- **`schema_from_program(program, type_env)`** — Construye el
+  "target" schema desde los `@table` types del AST. Resuelve
+  TypeMetadata → Table con auto-naming (constraints
+  `<table>_<col>_fkey`/`idx_<table>_<col>`/`chk_<table>_<idx>`),
+  composite PK como `PRIMARY KEY (a, b)` table-level, FK
+  qualified cross-schema.
+- **`introspect_schema(conn)`** — Lee el "current" schema de la
+  DB con queries contra `pg_catalog` (`pg_class`, `pg_attribute`,
+  `pg_index`, `pg_constraint`, `pg_am`). Cubre columns +
+  tipos + defaults + NOT NULL, indexes con WHERE clauses y
+  method (gin/gist/etc.), FKs con ON DELETE.
+- **`diff_schemas(current, target)`** — Devuelve `Vec<Change>`
+  determinístico:
+  - `CreateTable` / `DropTable` / `RenameTable`.
+  - `AddColumn` / `DropColumn` / `RenameColumn` / `AlterColumnType`
+    / `AlterColumnNullable` / `AlterColumnDefault`.
+  - `CreateIndex` / `DropIndex` (v0.10.29: detecta cambios en
+    `using`/`where_clause`/`unique`/`columns` cuando nombres
+    matchean → `DROP + CREATE` para regenerar).
+  - `AddForeignKey` / `DropForeignKey` (con schema qualifier
+    cross-schema).
+- **`changes_to_sql(changes)`** — Emit DDL ejecutable directo
+  via `psql -f` o `db.exec`.
+- **`format_inspection_text` / `format_inspection_json`** (v0.10.28)
+  + **`format_inspection_*_all_schemas`** (v0.10.29) — Pretty-
+  print del schema para `fitz db inspect`.
+- **Tracking via tabla `_fitz_migrations`**: `applied_versions`,
+  `record_applied`, `apply_pending_migrations`. Idempotente —
+  re-correr `fitz db migrate` salta las ya aplicadas.
 
 ### testing.rs — testing built-in (Fase 9.z.2.a)
 

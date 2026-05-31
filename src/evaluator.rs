@@ -13807,7 +13807,16 @@ fn translate_method_call_to_sql(
         //
         // Validación: el field debe ser `Map<...>` (jsonb column).
         // Si el user llama estos métodos sobre otro tipo, error claro.
-        "has_key" | "has_all_keys" | "has_any_keys" | "contains_json" | "get" => {
+        "has_key"
+        | "has_all_keys"
+        | "has_any_keys"
+        | "contains_json"
+        | "get"
+        | "has_path"
+        | "path_text"
+        | "path_int"
+        | "path_float"
+        | "path_bool" => {
             let field = fields
                 .iter()
                 .find(|f| f.name == col_name)
@@ -13831,6 +13840,29 @@ fn translate_method_call_to_sql(
                 fields,
                 meta,
             )
+        }
+        // v0.10.29 — Full-text search via Postgres tsvector. El
+        // field debe ser `Str` declarado del lado Fitz (las
+        // columnas tsvector se mapean a Str porque Fitz no tiene
+        // un tipo dedicado todavía; el `@column(sql_type="tsvector")`
+        // controla qué tipo SQL real va). Mapping:
+        //   .matches("query")  → `"col" @@ to_tsquery($N)`
+        //   .plainto_matches("query") → `"col" @@ plainto_tsquery($N)`
+        // Acepta var Str también — passan por el translator general.
+        "matches" | "plainto_matches" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "`{param_name}.{col_name}.{method}(query)` espera 1 arg Str"
+                ));
+            }
+            let q =
+                translate_expr_to_sql_with_env(&args[0], param_name, fields, meta, args_acc, env)?;
+            let func = if method == "plainto_matches" {
+                "plainto_tsquery"
+            } else {
+                "to_tsquery"
+            };
+            Ok(format!("\"{}\" @@ {}({})", sql_col, func, q))
         }
         // Fase 10.b.9.b — `u.field.between(low, high)` → SQL
         // `"field" BETWEEN $1 AND $2`. Equivalente a
@@ -13893,7 +13925,7 @@ fn translate_method_call_to_sql(
         }
         other => Err(format!(
             "método `.{other}(...)` no soportado sobre fields en `.where(...)`. \
-             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get."
+             Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches."
         )),
     }
 }
@@ -14044,6 +14076,68 @@ fn translate_jsonb_method(
                 .map_err(|e| format!(".contains_json: serialización JSON falló: {e}"))?;
             args_acc.push(crate::db::PgValue::Text(json_text));
             Ok(format!("\"{}\" @> ${}::jsonb", sql_col, args_acc.len()))
+        }
+        // v0.10.29 — Path access nested + cast tipado. Reciben 1 arg
+        // List<Str> literal con el path; emiten SQL con `#>` (jsonb
+        // path) o `#>>` (text path) + cast opcional al tipo Fitz
+        // pedido. Cubren el gap entre `.get("k")` single-level y el
+        // workaround de `db.query(...)` crudo para queries nested.
+        //
+        //   .has_path([a, b])    → `"col" #> $N::text[] IS NOT NULL`
+        //   .path_text([a, b])   → `("col" #>> $N::text[])`
+        //   .path_int([a, b])    → `(("col" #>> $N::text[])::bigint)`
+        //   .path_float([a, b])  → `(("col" #>> $N::text[])::float8)`
+        //   .path_bool([a, b])   → `(("col" #>> $N::text[])::boolean)`
+        //
+        // Path list vacío rechazado (no hay #> con array vacío
+        // semánticamente útil — sería el field entero, equivalente a
+        // `field.is_not_null()`). Cada key debe ser literal Str (MVP
+        // — vars externas en el array quedan deuda menor; el caller
+        // típico arma el path inline).
+        "has_path" | "path_text" | "path_int" | "path_float" | "path_bool" => {
+            if args.len() != 1 {
+                return Err(format!(
+                    "`.{method}([k1, k2, ...])` espera 1 arg (List literal de Str)"
+                ));
+            }
+            let items = match &args[0] {
+                Expr::List(items, _) => items,
+                _ => {
+                    return Err(format!(
+                        "`.{method}([k1, k2, ...])` MVP: el arg debe ser List literal `[a, b, c]`"
+                    ));
+                }
+            };
+            if items.is_empty() {
+                return Err(format!(
+                    "`.{method}([])` con path vacío no tiene semántica útil — usá `.is_not_null()` para chequear el field entero"
+                ));
+            }
+            let mut values: Vec<crate::db::PgValue> = Vec::with_capacity(items.len());
+            for it in items {
+                let s = match it {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        return Err(format!(
+                            "`.{method}([k1, k2, ...])` MVP: cada key del path debe ser string literal"
+                        ));
+                    }
+                };
+                values.push(crate::db::PgValue::Text(s));
+            }
+            args_acc.push(crate::db::PgValue::Array {
+                elem_oid: crate::db::oid::TEXT,
+                values,
+            });
+            let n = args_acc.len();
+            Ok(match method {
+                "has_path" => format!("\"{}\" #> ${}::text[] IS NOT NULL", sql_col, n),
+                "path_text" => format!("(\"{}\" #>> ${}::text[])", sql_col, n),
+                "path_int" => format!("((\"{}\" #>> ${}::text[])::bigint)", sql_col, n),
+                "path_float" => format!("((\"{}\" #>> ${}::text[])::float8)", sql_col, n),
+                "path_bool" => format!("((\"{}\" #>> ${}::text[])::boolean)", sql_col, n),
+                _ => unreachable!(),
+            })
         }
         _ => unreachable!(
             "translate_jsonb_method recibió un method no listado en el dispatch caller"
@@ -27508,6 +27602,7 @@ let r = match n {
             renamed_from: None,
             schema: None,
             indexes: vec![],
+            check_constraints: vec![],
         };
         (fields, meta)
     }
@@ -27769,6 +27864,177 @@ let r = match n {
         assert_eq!(sql, "(\"display_name\" = $1)");
     }
 
+    // ----- v0.10.29 — JSON path operators (has_path + path_text/int/float/bool) -----
+
+    fn make_jsonb_test_meta() -> (Vec<crate::ast::Field>, crate::types::TableMetadata) {
+        use crate::ast::TypeExpr;
+        let fields = vec![
+            crate::ast::Field {
+                name: "id".into(),
+                type_: TypeExpr::named("Int"),
+                default: None,
+                decorators: vec![],
+            },
+            crate::ast::Field {
+                name: "data".into(),
+                type_: TypeExpr::Generic {
+                    name: "Map".into(),
+                    args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Str".into())],
+                },
+                default: None,
+                decorators: vec![],
+            },
+        ];
+        let meta = crate::types::TableMetadata {
+            sql_name: "events".into(),
+            primary_fields: vec!["id".into()],
+            columns: std::collections::HashMap::new(),
+            relations: std::collections::HashMap::new(),
+            renamed_from: None,
+            schema: None,
+            indexes: vec![],
+            check_constraints: vec![],
+        };
+        (fields, meta)
+    }
+
+    #[test]
+    fn translate_has_path_emite_predicate_jsonb_path() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.has_path([\"user\", \"id\"])");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"data\" #> $1::text[] IS NOT NULL");
+        assert_eq!(args.len(), 1);
+        match &args[0] {
+            crate::db::PgValue::Array { elem_oid, values } => {
+                assert_eq!(*elem_oid, crate::db::oid::TEXT);
+                assert_eq!(values.len(), 2);
+                assert!(matches!(&values[0], crate::db::PgValue::Text(s) if s == "user"));
+                assert!(matches!(&values[1], crate::db::PgValue::Text(s) if s == "id"));
+            }
+            other => panic!("se esperaba PgValue::Array, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn translate_path_text_emite_extract_text() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.path_text([\"a\", \"b\"]) == \"x\"");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "((\"data\" #>> $1::text[]) = $2)");
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn translate_path_int_emite_cast_bigint() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.path_int([\"n\"]) == 42");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "(((\"data\" #>> $1::text[])::bigint) = $2)");
+        assert_eq!(args.len(), 2);
+        assert!(matches!(&args[1], crate::db::PgValue::Int(42)));
+    }
+
+    #[test]
+    fn translate_path_float_emite_cast_float8() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.path_float([\"score\"]) > 0.5");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "(((\"data\" #>> $1::text[])::float8) > $2)");
+        assert_eq!(args.len(), 2);
+    }
+
+    #[test]
+    fn translate_path_bool_emite_cast_boolean() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.path_bool([\"flag\"])");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "((\"data\" #>> $1::text[])::boolean)");
+        assert_eq!(args.len(), 1);
+    }
+
+    #[test]
+    fn translate_path_arg_vacio_es_error() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.has_path([])");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(msg.contains("path vacío"), "msg fue: {msg}");
+    }
+
+    #[test]
+    fn translate_path_arg_no_lista_es_error() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.path_text(\"single\")");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(msg.contains("List literal"), "msg fue: {msg}");
+    }
+
+    #[test]
+    fn translate_path_methods_sobre_field_no_jsonb_es_error() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.path_text([\"k\"])");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(msg.contains("Map<Str"), "msg fue: {msg}");
+    }
+
+    #[test]
+    fn translate_path_key_no_literal_es_error() {
+        let (fields, meta) = make_jsonb_test_meta();
+        let expr = parse_closure_body("fn (e) => e.data.path_text([42])");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "e", &fields, &meta, &mut args);
+        assert!(r.is_err());
+        let msg = r.unwrap_err();
+        assert!(msg.contains("string literal"), "msg fue: {msg}");
+    }
+
+    // ----- v0.10.29 — Full-text search via tsvector (@@) -----
+
+    #[test]
+    fn translate_matches_emite_to_tsquery() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.matches(\"ada\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" @@ to_tsquery($1)");
+        assert_eq!(args.len(), 1);
+        assert!(matches!(&args[0], crate::db::PgValue::Text(s) if s == "ada"));
+    }
+
+    #[test]
+    fn translate_plainto_matches_emite_plainto_tsquery() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.plainto_matches(\"hola mundo\")");
+        let mut args = Vec::new();
+        let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
+        assert_eq!(sql, "\"name\" @@ plainto_tsquery($1)");
+        assert!(matches!(&args[0], crate::db::PgValue::Text(s) if s == "hola mundo"));
+    }
+
+    #[test]
+    fn translate_matches_arity_invalida_es_error() {
+        let (fields, meta) = make_test_meta();
+        let expr = parse_closure_body("fn (u) => u.name.matches()");
+        let mut args = Vec::new();
+        let r = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().contains("matches"));
+    }
+
     // ----- Fase 10.5.b — helpers de arrays nativos -----
 
     #[test]
@@ -27999,6 +28265,7 @@ let r = match n {
                 renamed_from: None,
                 schema: None,
                 indexes: vec![],
+                check_constraints: vec![],
             },
             where_sql: None,
             where_args: Vec::new(),

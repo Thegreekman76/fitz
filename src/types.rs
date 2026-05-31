@@ -447,6 +447,12 @@ pub struct TableMetadata {
     /// `CREATE INDEX` en `fitz db diff/migrate`. Cumple drift check:
     /// si el user remueve un `@index`, el diff emite `DROP INDEX`.
     pub indexes: Vec<IndexSpec>,
+    /// v0.10.29 — `@check_constraint("<sql_expr>")` decoradores
+    /// apilables a nivel type para emitir `CHECK (<expr>)` en
+    /// `CREATE TABLE`. Sin drift check del lado del migrator (los
+    /// checks no se introspectean al MVP; el user los borra/recrea
+    /// con `db.exec` si cambia el shape).
+    pub check_constraints: Vec<CheckConstraintSpec>,
 }
 
 /// v0.10.27 (F3) — Especificación de un índice del ORM. Se popula
@@ -464,6 +470,30 @@ pub struct TableMetadata {
 /// arg es un parser SQL mini que sale de scope. Workaround: bajar
 /// a `db.exec("CREATE INDEX ...")` manual y skipear drift check
 /// para ese índice.
+/// v0.10.29 — Especificación de un CHECK constraint. Se popula
+/// desde `@check_constraint("<sql_expr>", name="optional")`.
+///
+/// El `expr` se pasa **literal** al SQL CREATE TABLE — Fitz no
+/// parsea la expresión (sería bajar a un parser SQL del check
+/// lang, fuera de scope MVP). El user es responsable de que sea
+/// SQL válido contra el shape de la tabla.
+///
+/// Drift check NO implementado en MVP — la introspect no lee
+/// `pg_constraint.contype = 'c'` para reconciliar. Si cambiás el
+/// `expr` Fitz-side sin migrar a mano, la DB sigue con el viejo.
+/// Documentado como caveat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckConstraintSpec {
+    /// Nombre del constraint. `None` = auto-generado como
+    /// `chk_<table>_<idx>`. Útil para drop por nombre desde
+    /// `db.exec` cuando hay drift.
+    pub name: Option<String>,
+    /// Expresión SQL booleana evaluada por row al INSERT/UPDATE.
+    /// Ejemplo: `"age >= 0 AND age <= 150"`, `"status IN ('a',
+    /// 'p', 'd')"`, `"start_date <= end_date"`.
+    pub expr: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSpec {
     /// Nombre del índice. `None` = auto-generado por el migrator
@@ -1563,6 +1593,7 @@ pub fn process_table_decorators(
     // Se vacía a `TableMetadata.indexes` si has_table = true. Si NO
     // hay @table pero hay @index, error (igual que @primary sin @table).
     let mut pending_indexes: Vec<IndexSpec> = Vec::new();
+    let mut pending_check_constraints: Vec<CheckConstraintSpec> = Vec::new();
     let mut table_renamed_from: Option<String> = None;
     for d in type_decorators {
         match d.name.as_str() {
@@ -1817,13 +1848,172 @@ pub fn process_table_decorators(
                     using,
                 });
             }
+            // v0.10.29 — `@unique(col1, col2, ..., name="optional")`.
+            // Shortcut de `@index(col1, col2, ..., unique=true)`. La
+            // sintaxis ergonómica es bare idents (`@unique(email,
+            // tenant_id)`); también acepta Str con commas
+            // (`@unique("email, tenant_id")`) por consistencia con
+            // `@index`. Solo kwarg soportado: `name="..."` (sin
+            // `where_=`/`using=`/`unique=` — para esos casos
+            // avanzados usar `@index(...)` directo).
+            "unique" => {
+                if d.args.is_empty() {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        "`@unique(col1, col2, ...)` espera al menos 1 columna posicional"
+                            .to_string(),
+                    ));
+                    continue;
+                }
+                let mut columns: Vec<String> = Vec::with_capacity(d.args.len());
+                let mut had_error = false;
+                for (i, arg) in d.args.iter().enumerate() {
+                    match arg {
+                        Expr::Ident(name, _) => columns.push(name.clone()),
+                        Expr::Str(s, _) => {
+                            // Permitir Str con commas (compat con @index).
+                            for part in s.split(',') {
+                                let p = part.trim();
+                                if !p.is_empty() {
+                                    columns.push(p.to_string());
+                                }
+                            }
+                        }
+                        _ => {
+                            errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                format!(
+                                    "`@unique` arg {}: cada column debe ser un Ident bare (`email`) o Str literal",
+                                    i
+                                ),
+                            ));
+                            had_error = true;
+                            break;
+                        }
+                    }
+                }
+                if had_error {
+                    continue;
+                }
+                if columns.is_empty() {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        "`@unique(...)` no recibió columnas válidas".to_string(),
+                    ));
+                    continue;
+                }
+                let mut name: Option<String> = None;
+                for (k, v) in &d.kwargs {
+                    match k.as_str() {
+                        "name" => match v {
+                            Expr::Str(s, _) => name = Some(s.clone()),
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@unique(name=...)` espera Str literal".to_string(),
+                            )),
+                        },
+                        other => errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            format!(
+                                "`@unique` kwarg desconocido `{}`. Solo soporta `name=\"...\"`; para `where_`/`using`/etc. usar `@index(unique=true, ...)` directo",
+                                other
+                            ),
+                        )),
+                    }
+                }
+                pending_indexes.push(IndexSpec {
+                    name,
+                    columns,
+                    unique: true,
+                    where_clause: None,
+                    using: None,
+                });
+            }
+            // v0.10.29 — `@check_constraint("<sql_expr>",
+            // name="optional")`. Apilable. La expr se pasa literal
+            // al CREATE TABLE — Fitz NO parsea SQL para validar
+            // contra el shape de la tabla; el user lo hace bien o
+            // Postgres lo rechaza al primer INSERT.
+            "check_constraint" => {
+                if d.args.len() != 1 {
+                    errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        type_span.line,
+                        type_span.column,
+                        format!(
+                            "`@check_constraint` espera 1 arg posicional (Str con la expresión SQL), recibió {}",
+                            d.args.len()
+                        ),
+                    ));
+                    continue;
+                }
+                let expr = match &d.args[0] {
+                    Expr::Str(s, _) => {
+                        let trimmed = s.trim().to_string();
+                        if trimmed.is_empty() {
+                            errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@check_constraint(\"\")` recibió string vacío".to_string(),
+                            ));
+                            continue;
+                        }
+                        trimmed
+                    }
+                    _ => {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@check_constraint` espera Str literal con la expresión SQL"
+                                .to_string(),
+                        ));
+                        continue;
+                    }
+                };
+                let mut name: Option<String> = None;
+                for (k, v) in &d.kwargs {
+                    match k.as_str() {
+                        "name" => match v {
+                            Expr::Str(s, _) => name = Some(s.clone()),
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@check_constraint(name=...)` espera Str literal".to_string(),
+                            )),
+                        },
+                        other => errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            format!(
+                                "`@check_constraint` kwarg desconocido `{}`. Soportados: name",
+                                other
+                            ),
+                        )),
+                    }
+                }
+                pending_check_constraints.push(CheckConstraintSpec { name, expr });
+            }
             other => {
                 errors.push(FitzError::new(
                     ErrorKind::TypeError,
                     type_span.line,
                     type_span.column,
                     format!(
-                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`, `@renamed_from`, `@index`."
+                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`, `@renamed_from`, `@index`, `@unique`, `@check_constraint`."
                     ),
                 ));
             }
@@ -2234,6 +2424,7 @@ pub fn process_table_decorators(
         relations,
         renamed_from: table_renamed_from,
         indexes: resolved_indexes,
+        check_constraints: pending_check_constraints,
     }))
 }
 
@@ -15605,6 +15796,235 @@ print(total)
             errs.iter()
                 .any(|e| e.message.contains("`@index(using=...)`")),
             "error debería citar el contrato de `using=`: {:?}",
+            errs
+        );
+    }
+
+    // ----- v0.10.29 — `@unique(col1, col2, ...)` composite shortcut -----
+
+    #[test]
+    fn checker_at_unique_bare_idents_genera_indexspec_unique() {
+        let src = "@table(\"users\")\n\
+                   @unique(email, tenant_id)\n\
+                   type User {\n  \
+                     id: Int = 0\n  \
+                     email: Str\n  \
+                     tenant_id: Int\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        let tokens = tokenize(src).expect("lex");
+        let program = parse(tokens).expect("parse");
+        let (env, _, _, _) = check_program(&program);
+        let tid = env.lookup("User").expect("User registrado");
+        let meta = env.table_metadata(tid).expect("@table metadata");
+        assert_eq!(meta.indexes.len(), 1);
+        let idx = &meta.indexes[0];
+        assert_eq!(
+            idx.columns,
+            vec!["email".to_string(), "tenant_id".to_string()]
+        );
+        assert!(idx.unique);
+        assert!(idx.where_clause.is_none());
+        assert!(idx.using.is_none());
+    }
+
+    #[test]
+    fn checker_at_unique_acepta_str_con_commas_compat_index() {
+        let src = "@table(\"users\")\n\
+                   @unique(\"email, tenant_id\")\n\
+                   type User {\n  \
+                     id: Int = 0\n  \
+                     email: Str\n  \
+                     tenant_id: Int\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        let tokens = tokenize(src).expect("lex");
+        let program = parse(tokens).expect("parse");
+        let (env, _, _, _) = check_program(&program);
+        let tid = env.lookup("User").expect("User registrado");
+        let meta = env.table_metadata(tid).expect("@table metadata");
+        assert_eq!(meta.indexes.len(), 1);
+        assert_eq!(
+            meta.indexes[0].columns,
+            vec!["email".to_string(), "tenant_id".to_string()]
+        );
+    }
+
+    #[test]
+    fn checker_at_unique_con_name_kwarg_lo_aplica() {
+        let src = "@table(\"users\")\n\
+                   @unique(email, name=\"users_email_uniq_custom\")\n\
+                   type User {\n  \
+                     id: Int = 0\n  \
+                     email: Str\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        let tokens = tokenize(src).expect("lex");
+        let program = parse(tokens).expect("parse");
+        let (env, _, _, _) = check_program(&program);
+        let tid = env.lookup("User").expect("User");
+        let meta = env.table_metadata(tid).expect("metadata");
+        assert_eq!(
+            meta.indexes[0].name.as_deref(),
+            Some("users_email_uniq_custom")
+        );
+    }
+
+    #[test]
+    fn checker_at_unique_sin_args_es_error() {
+        let src = "@table(\"users\")\n\
+                   @unique()\n\
+                   type User {\n  id: Int = 0\n}\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("`@unique")
+                && e.message.contains("al menos 1 columna")),
+            "esperaba error de aridad: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_at_unique_kwarg_invalido_es_error() {
+        let src = "@table(\"users\")\n\
+                   @unique(email, where_=\"foo\")\n\
+                   type User {\n  id: Int = 0\n  email: Str\n}\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("@unique")
+                && e.message.contains("where_")
+                && e.message.contains("@index")),
+            "esperaba error citando `@index` como alternativa: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_at_unique_apilable_genera_multiples_indexes() {
+        let src = "@table(\"users\")\n\
+                   @unique(email)\n\
+                   @unique(tenant_id, slug)\n\
+                   type User {\n  \
+                     id: Int = 0\n  \
+                     email: Str\n  \
+                     tenant_id: Int\n  \
+                     slug: Str\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        let tokens = tokenize(src).expect("lex");
+        let program = parse(tokens).expect("parse");
+        let (env, _, _, _) = check_program(&program);
+        let tid = env.lookup("User").expect("User");
+        let meta = env.table_metadata(tid).expect("metadata");
+        assert_eq!(meta.indexes.len(), 2);
+        assert!(meta.indexes.iter().all(|i| i.unique));
+    }
+
+    // ----- v0.10.29 — `@check_constraint("expr", name="optional")` -----
+
+    #[test]
+    fn checker_at_check_constraint_basico_se_registra() {
+        let src = "@table(\"users\")\n\
+                   @check_constraint(\"age >= 0 AND age <= 150\")\n\
+                   type User {\n  \
+                     id: Int = 0\n  \
+                     age: Int\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        let tokens = tokenize(src).expect("lex");
+        let program = parse(tokens).expect("parse");
+        let (env, _, _, _) = check_program(&program);
+        let tid = env.lookup("User").expect("User registrado");
+        let meta = env.table_metadata(tid).expect("metadata");
+        assert_eq!(meta.check_constraints.len(), 1);
+        assert_eq!(meta.check_constraints[0].expr, "age >= 0 AND age <= 150");
+        assert!(meta.check_constraints[0].name.is_none());
+    }
+
+    #[test]
+    fn checker_at_check_constraint_con_name_lo_aplica() {
+        let src = "@table(\"users\")\n\
+                   @check_constraint(\"status IN ('a', 'p')\", name=\"users_status_valid\")\n\
+                   type User {\n  \
+                     id: Int = 0\n  \
+                     status: Str\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        let tokens = tokenize(src).expect("lex");
+        let program = parse(tokens).expect("parse");
+        let (env, _, _, _) = check_program(&program);
+        let tid = env.lookup("User").expect("User");
+        let meta = env.table_metadata(tid).expect("metadata");
+        assert_eq!(
+            meta.check_constraints[0].name.as_deref(),
+            Some("users_status_valid")
+        );
+    }
+
+    #[test]
+    fn checker_at_check_constraint_apilable() {
+        let src = "@table(\"users\")\n\
+                   @check_constraint(\"age >= 0\")\n\
+                   @check_constraint(\"email != ''\")\n\
+                   type User {\n  \
+                     id: Int = 0\n  \
+                     age: Int\n  \
+                     email: Str\n\
+                   }\n";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores: {:?}", errs);
+        let tokens = tokenize(src).expect("lex");
+        let program = parse(tokens).expect("parse");
+        let (env, _, _, _) = check_program(&program);
+        let tid = env.lookup("User").expect("User");
+        let meta = env.table_metadata(tid).expect("metadata");
+        assert_eq!(meta.check_constraints.len(), 2);
+    }
+
+    #[test]
+    fn checker_at_check_constraint_sin_args_es_error() {
+        let src = "@table(\"users\")\n\
+                   @check_constraint()\n\
+                   type User {\n  id: Int = 0\n}\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("@check_constraint") && e.message.contains("1 arg")),
+            "esperaba error de aridad: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_at_check_constraint_str_vacio_es_error() {
+        let src = "@table(\"users\")\n\
+                   @check_constraint(\"\")\n\
+                   type User {\n  id: Int = 0\n}\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("string vacío")),
+            "esperaba error de string vacío: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn checker_at_check_constraint_arg_no_str_es_error() {
+        let src = "@table(\"users\")\n\
+                   @check_constraint(42)\n\
+                   type User {\n  id: Int = 0\n}\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("@check_constraint")
+                    && e.message.contains("Str literal")),
+            "esperaba error de tipo: {:?}",
             errs
         );
     }

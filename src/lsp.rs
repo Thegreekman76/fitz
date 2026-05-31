@@ -1103,8 +1103,14 @@ fn decorator_completions() -> Vec<CompletionItem> {
         (
             "unique",
             "unique",
-            "@unique — columna UNIQUE en la DB",
-            "Marca el field como UNIQUE en el CREATE TABLE generado. Sin args.",
+            "@unique — UNIQUE constraint (field-level sin args, o type-level con cols posicionales — v0.10.29)",
+            "Sobre un field sin args: marca el field como UNIQUE en el CREATE TABLE. Sobre el `type` (v0.10.29): `@unique(col1, col2, ..., name=\"optional\")` — composite UNIQUE shortcut, alias ergonómico de `@index(unique=true)`. Acepta bare idents o Str con commas.",
+        ),
+        (
+            "check_constraint",
+            "check_constraint(\"${1:expr}\")",
+            "@check_constraint(\"sql_expr\", name?) — CHECK constraint declarativo (v0.10.29)",
+            "Sobre el `type` con `@table`: emite `CHECK (<expr>)` en CREATE TABLE. La expr se pasa literal al SQL — Postgres valida en INSERT/UPDATE. Apilable. Sin drift check del migrator (deuda menor) — usar `db.exec(\"ALTER TABLE ... DROP/ADD CONSTRAINT\")` para cambios.",
         ),
         (
             "index",

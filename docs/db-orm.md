@@ -614,13 +614,131 @@ type Doc { ... }
   el delta (drop + create cuando cambian columnas, drop puro
   cuando sobran).
 
-**Lo que NO está en v0.10.28**:
+**Lo que NO está**:
 - **Expression indexes** sobre llamadas/funciones (`lower(email)`,
   `to_tsvector('english', body)`): no se generan auto. Workaround:
   `db.exec("CREATE INDEX ...")` al boot.
-- Diff name-based: si cambiás SOLO el `using=` (mismo nombre + cols),
-  el migrator NO detecta el cambio. Workaround: pasar `name=` distinto
-  para forzar regen.
+- **CERRADO v0.10.29**: el diff de indexes ahora detecta cambios
+  en `using` / `where_clause` / `unique` / `columns` aunque el
+  nombre + cols sean iguales, emitiendo `DROP INDEX + CREATE INDEX`
+  para regenerar. Antes era name-based puro y requería renombrar
+  el índice para forzar regen. El comparator de `where_clause`
+  normaliza whitespace + case para evitar regens espurios; `using`
+  trata `None` y `Some("btree")` como equivalentes.
+
+### `@unique(col1, col2, ...)` — composite uniqueness shortcut (v0.10.29)
+
+Alias ergonómico de `@index("col1, col2", unique=true)` con
+sintaxis más directa: bare idents posicionales en lugar de Str
+con commas + kwarg. Apilable.
+
+```fitz
+@table("users")
+@unique(email, tenant_id)                                // composite UNIQUE
+@unique(slug, name="users_slug_unique")                  // single col + nombre custom
+type User {
+  @primary id: Int = 0
+  email: Str
+  tenant_id: Int
+  slug: Str
+}
+```
+
+Emite los mismos `CREATE UNIQUE INDEX` que `@index(unique=true)`.
+Diferencias:
+
+- **Solo soporta `name="..."`** como kwarg. Para `where_=`/`using=`
+  usar `@index(unique=true, ...)` directo — el shortcut es para
+  uniqueness simple.
+- Acepta bare idents (`@unique(email, tenant_id)`) **o** Str con
+  commas (`@unique("email, tenant_id")`, compat con `@index`).
+- Auto-naming: `<table>_<col1>_<col2>_..._uniq`.
+
+### `@check_constraint("sql_expr", name="optional")` (v0.10.29)
+
+Decorator type-level que emite `CHECK (<expr>)` en `CREATE TABLE`.
+La expresión se pasa **literal** al SQL — Fitz no parsea SQL para
+validarla contra el shape del type, el user es responsable.
+
+```fitz
+@table("users")
+@check_constraint("age >= 0 AND age <= 150")
+@check_constraint("status IN ('active', 'pending', 'deleted')")
+@check_constraint("email LIKE '%@%'", name="users_email_format")
+type User {
+  @primary id: Int = 0
+  email: Str
+  age: Int
+  status: Str
+}
+```
+
+Emite (adentro del `CREATE TABLE`):
+
+```sql
+CONSTRAINT "chk_users_0" CHECK (age >= 0 AND age <= 150),
+CONSTRAINT "chk_users_1" CHECK (status IN ('active', 'pending', 'deleted')),
+CONSTRAINT "users_email_format" CHECK (email LIKE '%@%')
+```
+
+Auto-naming: `chk_<table>_<idx>` cuando no se especifica `name=`.
+
+**Limitaciones MVP**:
+
+- **Sin drift check** — la introspect (`fitz db inspect`) NO lee
+  los CHECK constraints del `pg_constraint`. Si cambiás un
+  `expr` Fitz-side, el migrator NO emite `DROP CONSTRAINT + ADD
+  CONSTRAINT`. Workaround: `db.exec("ALTER TABLE ... DROP
+  CONSTRAINT ... ; ALTER TABLE ... ADD CONSTRAINT ... CHECK
+  (...);")` manualmente, o renombrar el constraint con `name=`
+  para forzar regen al recrear la tabla.
+- **Solo en CREATE TABLE** — los CHECK se inline-an en el create
+  inicial. Si agregás un `@check_constraint` después de que la
+  tabla ya existe, NO se emite `ALTER TABLE ... ADD CONSTRAINT`
+  vía `fitz db diff`. Workaround: idem (manual).
+
+### Cross-schema FK transparente (v0.10.29)
+
+Cuando un type referencia con `@belongs_to("User")` un type que
+vive en un schema distinto al actual (`@table("public.User")`
+referenciado desde `@table("tenants.Membership")`), el FK SQL
+emit usa `REFERENCES "public"."users"(id)` con schema qualifier
+automáticamente. **Sin cambio de sintaxis** — el user sigue
+escribiendo `@belongs_to("User")` con nombre Fitz, y Fitz
+resuelve el schema desde el `@table` del target.
+
+```fitz
+@table("public.users")
+type User {
+  @primary id: Int = 0
+  name: Str
+}
+
+@table("tenants.memberships")
+type Membership {
+  @primary id: Int = 0
+  @belongs_to("User") user_id: Int   // FK cross-schema transparente
+  role: Str
+}
+```
+
+Emite:
+
+```sql
+ALTER TABLE "tenants"."memberships"
+    ADD CONSTRAINT "memberships_user_id_fkey"
+    FOREIGN KEY ("user_id") REFERENCES "public"."users" ("id");
+```
+
+**Same-schema** (target y current en `public` por default, o
+ambos en el mismo schema custom) → emite `REFERENCES "users"(id)`
+sin qualifier, **paridad bit-a-bit** con el comportamiento anterior
+(NO breaking change para boilerplates que asumen `public`).
+
+**Limitación MVP**: la introspect NO popula `references_schema`
+(deja siempre `None`), por lo que el drift check NO detecta si
+una FK cross-schema se modifica off-Fitz. Caso de uso típico:
+el user no rompe el schema con SQL crudo en producción.
 
 ---
 
@@ -949,6 +1067,9 @@ Post.where(fn(p) => p.tags.contained_in(["rust", "postgres", "go"]))  // tags <@
 | `.get(s)` (JSONB) | ✅ var Str OK |
 | `.has_all_keys([...])` / `.has_any_keys([...])` (JSONB) | ❌ List literal de Str |
 | `.contains_json({...})` (JSONB) | ❌ Map literal con values primitivos |
+| `.has_path([...])` (JSONB) | ❌ List literal de Str |
+| `.path_text([...])` / `.path_int([...])` / `.path_float([...])` / `.path_bool([...])` (JSONB) | ❌ List literal de Str |
+| `.matches(q)` / `.plainto_matches(q)` (tsvector full-text) | ✅ var Str OK |
 
 Cuando algo del translator no alcanza, bajar a `db.query(...)`
 crudo con SQL escrito a mano.
@@ -1614,11 +1735,70 @@ let ada_events = Event.where(fn(e) =>
 - `.contains_json({...})` solo acepta values primitivos
   (Int/Float/Str/Bool/Null). Maps/Lists nested adentro: workaround
   con `db.query(...)` crudo.
-- `.get(key) == value` compara texto. Para comparar contra Int,
-  bajar a `db.query` con cast `(data->>'k')::int`. Refinamiento
-  futuro: `.get_int(key)` / `.get_float(key)` / etc.
-- Nested path access (`e.data.get("a").get("b")` → `data->'a'->>'b'`)
-  no implementado MVP. Workaround: `db.query` crudo.
+- `.get(key) == value` compara texto (single-level). Para nested
+  path access + cast tipado, ver bloque siguiente (path operators
+  v0.10.29).
+
+### JSON path operators avanzados (v0.10.29)
+
+Cinco method calls sobre fields jsonb (`Map<Str, ...>`) que cierran
+el gap de `.get`/`.has_key` (single-level, text-only) habilitando
+acceso a **paths anidados** con **cast tipado** al tipo Fitz pedido.
+Cada uno recibe 1 arg `List<Str>` literal con el path; emiten SQL
+nativo Postgres con `#>` (jsonb path) o `#>>` (text path) + cast
+opcional.
+
+| Method                                     | SQL emitido                              | Para qué |
+|--------------------------------------------|------------------------------------------|----------|
+| `e.data.has_path(["a", "b"])`              | `"data" #> $1::text[] IS NOT NULL`      | el path existe |
+| `e.data.path_text(["a", "b"])`             | `("data" #>> $1::text[])`               | extract text |
+| `e.data.path_int(["a", "b"])`              | `(("data" #>> $1::text[])::bigint)`     | extract + cast Int |
+| `e.data.path_float(["a", "b"])`            | `(("data" #>> $1::text[])::float8)`     | extract + cast Float |
+| `e.data.path_bool(["a", "b"])`             | `(("data" #>> $1::text[])::boolean)`    | extract + cast Bool |
+
+Ejemplos end-to-end:
+
+```fitz
+// JSONB anidado: {"user": {"id": 5, "name": "ada"}, "score": 1.5, "active": true}
+
+// ¿El path existe?
+let with_uid = Event.where(fn(e) =>
+    e.data.has_path(["user", "id"])
+).all(db).await?
+
+// Filtro tipado por Int adentro del jsonb:
+let uid_5 = Event.where(fn(e) =>
+    e.data.path_int(["user", "id"]) == 5
+).all(db).await?
+
+// Filtro tipado por Float:
+let high_score = Event.where(fn(e) =>
+    e.data.path_float(["score"]) > 1.0
+).all(db).await?
+
+// Filtro Bool directo (path null → row rechazado):
+let active = Event.where(fn(e) =>
+    e.data.path_bool(["active"])
+).all(db).await?
+```
+
+**Caveats MVP** (refinable):
+
+- El path debe ser `List<Str>` **literal** con al menos 1 elemento
+  (vars externas como path quedan como deuda menor — el caller
+  típico arma el path inline).
+- Path vacío (`.has_path([])`) → error claro citando `.is_not_null()`
+  como alternativa.
+- El cast asume que el path apunta a un value del tipo declarado
+  (`path_int` ⇒ JSONB number, `path_bool` ⇒ JSONB boolean, etc.).
+  Si el value es de otro tipo, Postgres lanza error de cast en
+  runtime (mensaje propagado tal cual por el driver).
+- Si el path **no existe**, el extract devuelve NULL — en `WHERE`
+  el row se rechaza (semántica SQL estándar).
+- Comparar `path_int(...) == 0` para distinguir "no existe" vs
+  "existe con valor 0" → usar `has_path([...])` adicional.
+- Para chain estilo `e.data.get("a").get("b")` (azúcar sobre
+  `path_text(["a", "b"])`) → deuda menor del próximo bloque.
 
 Para casos no cubiertos, sigue disponible el escape hatch crudo:
 
@@ -1628,6 +1808,63 @@ let promos = db.query(
     ["%promo%"]
 ).await?
 ```
+
+### Full-text search con `@@` (v0.10.29)
+
+Dos method calls sobre fields `Str` para Postgres full-text
+search vía operator `@@`. El field SQL puede ser `tsvector`
+declarado con `@column(sql_type="tsvector")`; el cast a tsquery
+del lado lookup se hace automáticamente.
+
+| Method                                  | SQL emitido                       |
+|-----------------------------------------|-----------------------------------|
+| `e.body_tsv.matches("query")`           | `"body_tsv" @@ to_tsquery($1)`    |
+| `e.body_tsv.plainto_matches("hola")`    | `"body_tsv" @@ plainto_tsquery($1)` |
+
+Diferencia:
+
+- **`to_tsquery(text)`**: el query soporta syntax avanzada de
+  Postgres (`'cat & dog'`, `'cat | dog'`, `'cat & !mouse'`,
+  prefix `'cat:*'`). Errores de syntax SQL-side → runtime error.
+- **`plainto_matches(text)`**: el query es text libre (input del
+  user). Postgres convierte en tsquery con AND implícito entre
+  tokens. Más seguro para search bars donde el user escribe
+  cualquier cosa.
+
+Ejemplos:
+
+```fitz
+@table("docs")
+@index(body_tsv, using="gin")  // v0.10.28 — gin para full-text
+type Doc {
+  @primary id: Int = 0
+  body: Str
+  @column(sql_type="tsvector") body_tsv: Str
+}
+
+// search avanzado: soporta operators de tsquery
+let matches = Doc.where(fn(d) =>
+    d.body_tsv.matches("postgres & (full | text)")
+).all(db).await?
+
+// search del user libre (typical search bar):
+let user_input = body.q
+let matches = Doc.where(fn(d) =>
+    d.body_tsv.plainto_matches(user_input)
+).all(db).await?
+```
+
+Caveats:
+
+- El field declarado debe ser `Str` Fitz-side; el sql_type real
+  puede ser `tsvector` (via `@column(sql_type="tsvector")`).
+- Las funciones `to_tsquery`/`plainto_matches` no piden config
+  de language; usan el default Postgres (típicamente
+  `'english'`). Para multi-lang, bajar a `db.query` con cast
+  explícito: `to_tsquery('spanish', $1)`.
+- Ranking (`ts_rank`) NO está en MVP. Caso típico: bajar a
+  `db.query` con `SELECT ..., ts_rank(body_tsv, q) AS r FROM ...
+  ORDER BY r DESC`.
 
 ### Null Fitz → NULL real (no la string "null")
 
@@ -3416,20 +3653,28 @@ belongs_to/has_many requiere single PK del target.
 
 ### JSON operators avanzados
 
-Los operadores principales (`?`, `?&`, `?|`, `@>`, `->>`) están
-disponibles como method calls sobre fields jsonb (ver sección 13).
-Lo que queda como deuda menor:
+Los operadores principales (`?`, `?&`, `?|`, `@>`, `->>`, `#>`,
+`#>>`, `@@`) están disponibles como method calls sobre fields
+jsonb / tsvector (ver sección 13). Lo que queda como deuda menor:
 
-- `.has_all_keys/has_any_keys/contains_json` requieren args
-  literales (no vars del scope outer).
+- `.has_all_keys/has_any_keys/contains_json/has_path/path_*`
+  requieren args literales (no vars del scope outer para el
+  array de keys).
 - `.contains_json({...})` solo acepta values primitivos (no Maps
   anidados).
-- `.get(key)` devuelve text — comparación contra Int requiere
-  cast crudo (`db.query(...)`) o helper futuro (`.get_int(key)`).
-- Nested path access (`e.data.get("a").get("b")`) no soportado;
-  workaround con `db.query` crudo.
-- **Operadores faltantes**: `@@` (text search), `#>` / `#>>`
-  (path access estructurado), `||` (concat jsonb).
+- **CERRADO v0.10.29**: nested path access + cast tipado
+  (`has_path` / `path_text` / `path_int` / `path_float` /
+  `path_bool`) y **full-text search** (`matches` /
+  `plainto_matches` con `to_tsquery` / `plainto_tsquery`).
+- Chain estilo `e.data.get("a").get("b")` (azúcar sobre
+  `path_text`) sigue como deuda menor — el caller usa la versión
+  explícita `path_text(["a", "b"])`.
+- **Operadores faltantes**: `||` (concat jsonb) — caso de uso
+  dominante es `UPDATE ... SET data = data || $1` que no se
+  modela bien en `.where(...)` read-only; escape hatch via
+  `db.exec("UPDATE ... SET data = data || $1::jsonb WHERE id = $2",
+  [patch_json, id])`. Ranking full-text (`ts_rank`) — bajar a
+  `db.query` con `ORDER BY ts_rank(...)`.
 
 ### Refinamientos pendientes del query builder
 
@@ -3497,6 +3742,7 @@ fitz db squash <from> <to>               # v0.10.20: combina migrations en una
 fitz db inspect                          # v0.10.28: introspect del schema real
 fitz db inspect --table users            # focaliza una sola tabla
 fitz db inspect --schema tenant_a        # filtra por schema (default public)
+fitz db inspect --all-schemas            # v0.10.29: lista TODOS los schemas user-defined
 fitz db inspect --json                   # output machine-readable
 ```
 
@@ -3571,6 +3817,14 @@ Notas:
   override.
 - Tables en schemas distintos a `public` quedan filtradas por
   default — pasar `--schema <name>` para verlas.
+- **v0.10.29** — `--all-schemas` lista TODOS los schemas
+  user-defined a la vez (incluido `public`), agrupados con su
+  propia sub-vista. Mutuamente excluyente con `--schema`. Útil
+  para auditar bases multi-tenant sin tener que correr el
+  comando una vez por schema. Combinable con `--table X` para
+  filtrar un nombre puntual en todos los schemas. JSON shape:
+  `{"schemas": [{"schema": "ops", "tables": [...]}, ...]}` (sort
+  alfabético determinístico).
 
 ### Observabilidad — `FITZ_DB_LOG` (v0.10.28)
 
@@ -3593,11 +3847,87 @@ Output:
 - SQL multi-línea se colapsa a una sola línea para facilitar grep.
 - Params largos (>80 chars) se truncan con `…` final por seguridad
   básica (no se vuelca un BLOB entero al log).
+- **v0.10.29** — En mode `verbose`, los params correspondientes a
+  campos sensibles (`password`/`passwd`/`secret`/`api_key`/
+  `apikey`/`api_token`/`auth_token`/`access_token`/`refresh_token`/
+  `id_token`/`private_key`/`credential`/`passphrase`/`session_key`/
+  `session_token`/`csrf_token`) se enmascaran como `<redacted>` en
+  el output. Ejemplo: `UPDATE users SET password = $1 WHERE id = $2`
+  con params `["super_secret", 42]` loguea
+  `params=[$1=<redacted>, $2=42]`. Heurística best-effort que mira
+  ~50 chars antes del placeholder + descarta matches separados por
+  `WHERE`/`AND`/`OR`/etc. — sobre-redacta en bordes ambiguos (INSERT
+  con varias columnas) por seguridad. NO sustituye una review
+  general del código antes de habilitar `verbose` en prod, pero
+  cierra el agujero más obvio de secrets en plain text en stderr.
 - Loguea **todas** las queries: SELECT/INSERT/UPDATE/DELETE/DDL +
   queries internas del ORM (auto-genera). Cubre tanto `fitz run`
   como `fitz build` (mismo crate `fitz::db`).
 - El mode se fija al primer acceso del proceso (LazyLock). Cambios
   mid-run de la env var NO se reflejan.
+
+### Pool tuning — `FITZ_DB_MAX_CONNS` (v0.10.29)
+
+Env var opt-in para overridear el pool size del driver. Default
+`10` conexiones simultáneas máximas por URL. Útil para apps con
+mucho concurrent load (`> 10` requests simultáneos que pegan a la
+DB) o apps con muy poco load donde 10 conns es overkill.
+
+```bash
+export FITZ_DB_MAX_CONNS=50   # apps con mucho load HTTP
+export FITZ_DB_MAX_CONNS=3    # apps batch / cron con poco load
+```
+
+- Parsea + clamp a `[1, 200]`. Valores fuera de rango o no
+  numéricos → fallback a default 10.
+- Aplica a TODOS los pools de TODAS las URLs del proceso (es
+  global, no per URL). El cache de pools por URL (`connect_url`)
+  sigue siendo único.
+- LazyLock — cambios mid-run NO se reflejan. Reinicia el proceso.
+- `db.connect(url, max_conns=N)` como kwarg dedicado del lenguaje
+  queda como deuda menor (requiere wire del kwarg desde
+  evaluator + codegen). Por ahora la env var cubre el caso real.
+
+### Errores del driver con SQL contexto (v0.10.29)
+
+Cuando una query falla con un error del servidor Postgres
+(`DbError::Server`), el mensaje devuelto al programa Fitz ahora
+incluye:
+
+1. El **SQLSTATE code** entre corchetes (e.g. `[23505]` =
+   `unique_violation`, `[23503]` = `foreign_key_violation`,
+   `[42P01]` = `undefined_table`). El usuario puede grep / match
+   por código sin parsear el mensaje libre del severity.
+2. El **SQL one-line** truncado a 200 chars que disparó el error.
+3. Los **params bindeados** con **redaction de secrets** (mismo
+   filtro que `FITZ_DB_LOG=verbose` — `password`/`secret`/`token`/
+   `api_key`/`auth_token`/etc. quedan como `<redacted>`).
+
+Antes:
+
+```
+ERROR: duplicate key value violates unique constraint "users_email_key"
+```
+
+Después (v0.10.29):
+
+```
+ERROR [23505]: duplicate key value violates unique constraint "users_email_key"
+    [sql: INSERT INTO users (email, password) VALUES ($1, $2)
+     params=[$1="ada@x.com", $2=<redacted>]]
+```
+
+El usuario puede ver inmediatamente:
+- **Qué constraint** se violó (mensaje canónico).
+- **Qué tipo** de violación (SQLSTATE).
+- **Qué query** la disparó (sin abrir stacktrace ni mirar el log).
+- **Qué params** sin filtrar secrets.
+
+El enriquecimiento aplica a **todos** los errores del wire protocol,
+incluyendo `db.exec()`, `db.query()`, métodos del ORM (`.insert`,
+`.update`, `.delete`, etc.). Errores que NO son del server (I/O,
+protocol mismatch, TLS) pasan sin enriquecer (el contexto SQL no
+aplica).
 
 ### `fitz run [archivo]` — con DB
 

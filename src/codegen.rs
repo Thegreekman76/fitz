@@ -12955,7 +12955,16 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             //   .has_any_keys([...])     → `"col" ?| $N::text[]`
             //   .contains_json({...})    → `"col" @> $N::jsonb`
             //   .get("k")                → `("col"->>$N)` text
-            "has_key" | "has_all_keys" | "has_any_keys" | "contains_json" | "get" => {
+            "has_key"
+            | "has_all_keys"
+            | "has_any_keys"
+            | "contains_json"
+            | "get"
+            | "has_path"
+            | "path_text"
+            | "path_int"
+            | "path_float"
+            | "path_bool" => {
                 let field = fields
                     .iter()
                     .find(|f| f.name == col_name)
@@ -12988,11 +12997,36 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     callee_span,
                 )
             }
+            // v0.10.29 — Full-text search via Postgres tsvector.
+            // Paralelo a la rama del evaluator. El field debe ser
+            // `Str` declarado del lado Fitz (la column SQL puede
+            // ser tsvector via `@column(sql_type="tsvector")`).
+            "matches" | "plainto_matches" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!("`.{method}(query)` espera 1 arg Str"),
+                    ));
+                }
+                let q = self.translate_closure_to_sql(
+                    &args[0],
+                    param_name,
+                    fields,
+                    table_meta,
+                    bindings,
+                )?;
+                let func = if method.as_str() == "plainto_matches" {
+                    "plainto_tsquery"
+                } else {
+                    "to_tsquery"
+                };
+                Ok(format!("\"{}\" @@ {}({})", sql_col, func, q))
+            }
             other => Err(self.err_at(
                 callee_span,
                 format!(
                     "método `.{}(...)` no soportado sobre fields en `.where(...)`. \
-                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get.",
+                     Soportados: is_null, is_not_null, is_in, like, ilike, starts_with, ends_with, contains, between, has, contains_all, contained_in, has_key, has_all_keys, has_any_keys, contains_json, get, has_path, path_text, path_int, path_float, path_bool, matches, plainto_matches.",
                     other
                 ),
             )),
@@ -13152,6 +13186,71 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     rust_str_literal(&json_text)
                 ));
                 Ok(format!("\"{}\" @> ${}::jsonb", sql_col, bindings.len()))
+            }
+            // v0.10.29 — Path access nested + cast tipado. Paralelo
+            // a la rama del evaluator. Reciben 1 arg List<Str>
+            // literal con el path. Cada key se materializa en runtime
+            // como `__FitzPgValue::Text(...)` adentro de un Array
+            // text[] paralelo a `has_all_keys`. Path vacío rechazado
+            // (sugerencia: usar `.is_not_null()`).
+            "has_path" | "path_text" | "path_int" | "path_float" | "path_bool" => {
+                if args.len() != 1 {
+                    return Err(self.err_at(
+                        callee_span,
+                        format!("`.{method}([k1, k2, ...])` espera 1 arg (List literal Str)"),
+                    ));
+                }
+                let items = match &args[0] {
+                    Expr::List(items, _) => items,
+                    _ => {
+                        return Err(self.err_at(
+                            args[0].span(),
+                            format!("`.{method}([k1, k2, ...])` MVP: el arg debe ser List literal"),
+                        ));
+                    }
+                };
+                if items.is_empty() {
+                    return Err(self.err_at(
+                        args[0].span(),
+                        format!(
+                            "`.{method}([])` con path vacío no tiene semántica útil — usá `.is_not_null()` para chequear el field entero"
+                        ),
+                    ));
+                }
+                let mut elems_code = String::new();
+                for (i, it) in items.iter().enumerate() {
+                    let s = match it {
+                        Expr::Str(s, _) => s.clone(),
+                        _ => {
+                            return Err(self.err_at(
+                                it.span(),
+                                format!(
+                                    "`.{method}([k1, k2, ...])` MVP: cada key del path debe ser string literal"
+                                ),
+                            ));
+                        }
+                    };
+                    if i > 0 {
+                        elems_code.push_str(", ");
+                    }
+                    elems_code.push_str(&format!(
+                        "__FitzPgValue::Text({}.to_string())",
+                        rust_str_literal(&s)
+                    ));
+                }
+                bindings.push(format!(
+                    "__FitzPgValue::Array {{ elem_oid: __fitz_db_runtime::oid::TEXT, values: vec![{}] }}",
+                    elems_code
+                ));
+                let n = bindings.len();
+                Ok(match method {
+                    "has_path" => format!("\"{}\" #> ${}::text[] IS NOT NULL", sql_col, n),
+                    "path_text" => format!("(\"{}\" #>> ${}::text[])", sql_col, n),
+                    "path_int" => format!("((\"{}\" #>> ${}::text[])::bigint)", sql_col, n),
+                    "path_float" => format!("((\"{}\" #>> ${}::text[])::float8)", sql_col, n),
+                    "path_bool" => format!("((\"{}\" #>> ${}::text[])::boolean)", sql_col, n),
+                    _ => unreachable!(),
+                })
             }
             _ => unreachable!("translate_closure_jsonb_method recibió method no listado"),
         }
@@ -35563,6 +35662,145 @@ mod tests {
         assert!(
             rust.contains("__IntoPgValue>::into_pg"),
             "esperaba binding via `__IntoPgValue::into_pg(...)` para la var externa, fue: {rust}",
+        );
+    }
+
+    // ---- v0.10.29 — JSON path operators (codegen paridad) ----
+
+    /// Variante de `where_sql_fragment` con un field `data: Map<Str, Str>`
+    /// (columna jsonb) para validar los 5 path methods nuevos en codegen.
+    fn where_sql_fragment_with_jsonb(closure_body: &str) -> String {
+        let src = format!(
+            "@table(\"events\") type Event {{\n  \
+                 @primary id: Int = 0\n  \
+                 data: Map<Str, Str>\n\
+             }}\n\
+             async fn boot() -> Result<Null> {{\n  \
+                 let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                 let _ = Event.where(fn(e) => {body}).all(db).await?\n  \
+                 return Ok(null)\n\
+             }}\n",
+            body = closure_body
+        );
+        gen(&src).expect("codegen OK")
+    }
+
+    #[test]
+    fn codegen_where_has_path_emite_predicate_jsonb_path() {
+        let r = where_sql_fragment_with_jsonb("e.data.has_path([\"user\", \"id\"])");
+        assert!(
+            r.contains("\\\"data\\\" #> $1::text[] IS NOT NULL"),
+            "esperaba `\"data\" #> $1::text[] IS NOT NULL`, fue: {r}",
+        );
+        assert!(
+            r.contains("elem_oid: __fitz_db_runtime::oid::TEXT"),
+            "esperaba binding Array text[], fue: {r}",
+        );
+        assert!(
+            r.contains("__FitzPgValue::Text(\"user\".to_string())")
+                && r.contains("__FitzPgValue::Text(\"id\".to_string())"),
+            "esperaba ambas keys del path como Text bindings, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_path_text_emite_extract_text() {
+        let r = where_sql_fragment_with_jsonb("e.data.path_text([\"a\", \"b\"]) == \"x\"");
+        assert!(
+            r.contains("((\\\"data\\\" #>> $1::text[]) = $2)"),
+            "esperaba `(\"data\" #>> $1::text[]) = $2`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_path_int_emite_cast_bigint() {
+        let r = where_sql_fragment_with_jsonb("e.data.path_int([\"n\"]) == 42");
+        assert!(
+            r.contains("(((\\\"data\\\" #>> $1::text[])::bigint) = $2)"),
+            "esperaba cast `::bigint`, fue: {r}",
+        );
+        assert!(
+            r.contains("__FitzPgValue::Int(42i64)"),
+            "esperaba binding Int(42), fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_path_float_emite_cast_float8() {
+        let r = where_sql_fragment_with_jsonb("e.data.path_float([\"score\"]) > 0.5");
+        assert!(
+            r.contains("(((\\\"data\\\" #>> $1::text[])::float8) > $2)"),
+            "esperaba cast `::float8`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_path_bool_emite_cast_boolean() {
+        let r = where_sql_fragment_with_jsonb("e.data.path_bool([\"flag\"])");
+        assert!(
+            r.contains("((\\\"data\\\" #>> $1::text[])::boolean)"),
+            "esperaba cast `::boolean`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_path_vacio_aborta_con_mensaje_claro() {
+        let src = "@table(\"events\") type Event {\n  \
+                       @primary id: Int = 0\n  \
+                       data: Map<Str, Str>\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = Event.where(fn(e) => e.data.has_path([])).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de path vacío");
+        assert!(
+            err.message.contains("path vacío"),
+            "esperaba mención de `path vacío`, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_where_matches_emite_to_tsquery() {
+        // `.matches("query")` sobre Str field → `"col" @@ to_tsquery($N)`.
+        let r = where_sql_fragment("u.name.matches(\"ada\")");
+        assert!(
+            r.contains("\\\"name\\\" @@ to_tsquery($1)"),
+            "esperaba `\"name\" @@ to_tsquery($1)`, fue: {r}",
+        );
+        assert!(
+            r.contains("__FitzPgValue::Text(\"ada\".to_string())"),
+            "esperaba binding Text(\"ada\"), fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_plainto_matches_emite_plainto_tsquery() {
+        let r = where_sql_fragment("u.name.plainto_matches(\"hola mundo\")");
+        assert!(
+            r.contains("\\\"name\\\" @@ plainto_tsquery($1)"),
+            "esperaba `\"name\" @@ plainto_tsquery($1)`, fue: {r}",
+        );
+    }
+
+    #[test]
+    fn codegen_where_path_sobre_field_no_jsonb_aborta() {
+        let src = "@table(\"users\") type User {\n  \
+                       @primary id: Int = 0\n  \
+                       name: Str\n\
+                   }\n\
+                   async fn boot() -> Result<Null> {\n  \
+                       let db = db.connect(\"postgres://x@h/d\").await?\n  \
+                       let _ = User.where(fn(u) => u.name.path_text([\"k\"])).all(db).await?\n  \
+                       return Ok(null)\n\
+                   }\n";
+        let err = gen(src).expect_err("esperaba error de tipo incompatible");
+        assert!(
+            err.message.contains("Map<Str"),
+            "esperaba mención de `Map<Str`, fue: {}",
+            err.message
         );
     }
 

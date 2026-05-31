@@ -11493,9 +11493,12 @@ Items comprometidos como deuda explícita:
   driver hace el round-trip correctamente, pero el `type` Fitz
   no tiene primitivos dedicados. Tipos `Date`/`DateTime`/`UUID`
   como built-ins son mini-fase aparte.
-- **JSON operators avanzados** (`@@`/`#>`/`#>>`/`||`): los
-  cinco básicos (`?`/`?&`/`?|`/`@>`/`->>`) están mapeados como
-  method calls. Los avanzados se bajan a `db.query(...)` crudo.
+- **JSON operators avanzados** (`@@`/`||`): los siete operadores
+  mapeados como method calls cubren `?`/`?&`/`?|`/`@>`/`->>` +
+  `#>`/`#>>` con cast tipado (`has_path` / `path_int` /
+  `path_text` / `path_float` / `path_bool`, v0.10.29). Los
+  faltantes (text search `@@`, concat `||`) se bajan a
+  `db.query(...)` crudo.
 
 Ver [DB y ORM](db-orm.md) sección 28 para el listado completo
 de limitaciones y refinamientos pendientes.
@@ -11705,13 +11708,45 @@ es tu código tipado, no un YAML aparte ni reflection runtime.
   (no de tu código), opcionalmente filtrado por `--schema` o
   `--table`, con output texto plano o `--json` machine-readable.
   Útil para auditar antes de migrar, descubrir tablas legacy, o
-  comparar dev vs prod. Detalle en `docs/db-orm.md` sec 29.
+  comparar dev vs prod. **v0.10.29** suma `--all-schemas` para
+  listar TODOS los schemas user-defined a la vez. Detalle en
+  `docs/db-orm.md` sec 29.
 - **`@index(col, using="gin"|"gist"|"brin"|"hash"|"spgist")`** —
   method override para full-text search (`gin` sobre tsvector),
   range queries (`gist`), large tables resumidas (`brin`), etc.
   sin bajar a `db.exec`. Default `btree` (Postgres default).
 - **`FITZ_DB_LOG=1|verbose`** — env var opt-in que loguea cada
-  query del driver a stderr. Cubierto en cap 32.
+  query del driver a stderr. **v0.10.29** suma redaction
+  automática de secrets (`password`/`secret`/`token`/`api_key`/
+  etc. quedan como `<redacted>`). Cubierto en cap 32.
+
+**Cierre masivo de v0.10.29 — ORM completo**:
+
+- **JSON path operators** — `e.data.has_path([...])`,
+  `e.data.path_int([...])`, `e.data.path_text([...])`,
+  `e.data.path_float([...])`, `e.data.path_bool([...])` para
+  acceso anidado con cast tipado vía `#>` / `#>>` Postgres.
+  Cierra el agujero del `.get("k")` single-level.
+- **`@@` full-text search** — `body_tsv.matches(query)` con
+  `to_tsquery` para syntax avanzada o `plainto_matches(input)`
+  para search bars libres.
+- **`@unique(col1, col2, ...)`** — composite uniqueness shortcut
+  ergonómico (alias de `@index(unique=true)`).
+- **`@check_constraint("expr")`** — emite `CHECK (<expr>)` en
+  CREATE TABLE para constraints declarativos.
+- **Cross-schema FK transparente** — `@belongs_to("User")` con
+  target en otro schema (vía `@table("public.User")`) emite
+  `REFERENCES "public"."users"(id)` automáticamente.
+- **Diff completo de indexes** — el migrator detecta cambios en
+  `using` / `where_clause` / `unique` / `columns` cuando los
+  nombres matchean, emitiendo `DROP + CREATE` para regenerar.
+- **DB errors con SQL + SQLSTATE + params** — el `DbError::Server`
+  Display ahora incluye `[<SQLSTATE>]: <msg>` + `[sql: <query>
+  params=[...]]` (con redaction).
+- **`FITZ_DB_MAX_CONNS`** — env var opt-in para overridear el
+  pool size (default 10, clamp `[1, 200]`).
+
+Detalle completo en `docs/db-orm.md`.
 
 ---
 
@@ -11881,6 +11916,29 @@ Ambas:
   SELECT/INSERT/UPDATE/DELETE/DDL + queries internas del ORM.
 - Mode se fija al primer acceso del proceso (LazyLock). Cambios
   mid-run de la env var NO se reflejan.
+
+**v0.10.29 — redaction de secrets en `FITZ_DB_LOG=verbose`**: los
+params correspondientes a campos sensibles (`password`/`secret`/
+`token`/`api_key`/`auth_token`/`access_token`/`refresh_token`/
+`private_key`/`credential`/`passphrase`/`session_*`/`csrf_token`)
+se enmascaran automáticamente como `<redacted>` en el output.
+Heurística best-effort que mira ~50 chars antes del placeholder
++ descarta matches separados por `WHERE`/`AND`/`OR`/etc. Sobre-
+redacta en bordes ambiguos (INSERT con varias columnas) por
+seguridad — NO sustituye una review general antes de prod, pero
+cierra el agujero más obvio.
+
+### Pool tuning — `FITZ_DB_MAX_CONNS` (v0.10.29)
+
+```bash
+export FITZ_DB_MAX_CONNS=50   # apps con mucho concurrent HTTP load
+export FITZ_DB_MAX_CONNS=3    # cron / batch con poco load (default 10)
+```
+
+Override del pool size del driver Postgres. Clamp `[1, 200]`,
+fallback default 10 ante valores inválidos. Aplica global al
+proceso. Se fija al primer acceso (LazyLock); reiniciá para
+cambiar.
 
 ---
 

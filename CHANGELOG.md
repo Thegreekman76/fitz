@@ -12,8 +12,230 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-boilerplates ORM Dockerizados extendidos, JSON operators avanzados
-(json_each / jsonb_path_query), o nuevo norte técnico.
+boilerplates ORM Dockerizados extendidos, o nuevo norte técnico.
+
+## [v0.10.29] — 2026-05-31 — Cierre masivo del ORM: JSON path + text search + @unique/@check + cross-schema FK + 6 cierres residuales más
+
+**Release dedicado al cierre masivo de deudas residuales del ORM**.
+12 features nuevas + 1 skip deliberado en bloque que llevan el ORM
+de "funcional con caveats" a "completo + observable + ergonómico"
+para el caso de uso real de aplicaciones full-stack contra
+Postgres. Sin sintaxis nueva del lenguaje (la mayoría son
+extensiones de decoradores y métodos existentes), zero deps
+externas adicionales, paridad bit-a-bit `fitz run` ↔ `fitz build`
+mantenida. Ningún breaking change para los 292 ejemplos del smoke
+(`GUIDE_EXAMPLES_COMPILE` verde end-to-end).
+
+### Sub-paso 1 — JSON path operators (nested + cast tipado)
+
+Cinco method calls nuevos sobre fields jsonb (`Map<Str, ...>`) en
+closures de `.where(...)`. Cierran el agujero del `.get("k")`
+single-level habilitando acceso a paths anidados con cast tipado:
+
+- `e.data.has_path([k1, k2, ...])` → `"data" #> $N::text[] IS NOT NULL`
+- `e.data.path_text([k1, k2, ...])` → `("data" #>> $N::text[])`
+- `e.data.path_int([k1, k2, ...])` → `(("data" #>> $N::text[])::bigint)`
+- `e.data.path_float([k1, k2, ...])` → `(("data" #>> $N::text[])::float8)`
+- `e.data.path_bool([k1, k2, ...])` → `(("data" #>> $N::text[])::boolean)`
+
+Filtros tipados al estilo `e.data.path_int(["user", "id"]) == 5`
+reemplazan el workaround de `db.query(...)` con cast crudo.
+
+### Sub-paso 2 — Full-text search via `@@`
+
+Dos method calls sobre fields `Str` (típicamente columna tsvector
+via `@column(sql_type="tsvector")`):
+
+- `body_tsv.matches("query")` → `"body_tsv" @@ to_tsquery($1)` (syntax avanzada)
+- `body_tsv.plainto_matches(input)` → `"body_tsv" @@ plainto_tsquery($1)` (search bar libre)
+
+Combinable con `@index(body_tsv, using="gin")` v0.10.28 para
+performance de full-text search end-to-end sin bajar a SQL crudo.
+
+### Sub-paso 3 — `@unique(col1, col2, ...)` composite shortcut
+
+Decorator type-level nuevo, alias ergonómico de
+`@index(unique=true)`. Acepta bare idents o Str con commas. Solo
+soporta `name="..."` como kwarg (para `where_=`/`using=` usar
+`@index(...)` directo). Apilable.
+
+```fitz
+@table("users")
+@unique(email, tenant_id)
+@unique(slug, name="users_slug_unique")
+type User { ... }
+```
+
+### Sub-paso 4 — `@check_constraint("expr", name="optional")` decorator
+
+Emite `CHECK (<expr>)` en `CREATE TABLE`. La expresión se pasa
+literal al SQL. Apilable. Auto-naming `chk_<table>_<idx>`.
+
+```fitz
+@table("users")
+@check_constraint("age >= 0 AND age <= 150")
+@check_constraint("status IN ('active', 'pending', 'deleted')")
+type User { ... }
+```
+
+Limitación MVP: sin drift check (introspect no lee
+`pg_constraint.contype = 'c'`), sin diff automático de cambios.
+Workaround: `db.exec("ALTER TABLE ... DROP/ADD CONSTRAINT")` o
+recrear la tabla con `name=` distinto.
+
+### Sub-paso 5 — Cross-schema FK transparente
+
+Cuando un type referencia con `@belongs_to("User")` un type que
+vive en un schema distinto al actual, el FK SQL emit usa
+`REFERENCES "schema"."table"(col)` qualified automáticamente.
+**Sin cambio de sintaxis** — Fitz resuelve el schema desde el
+`@table` del target.
+
+```fitz
+@table("public.users") type User { ... }
+@table("tenants.memberships") type Membership {
+  @belongs_to("User") user_id: Int   // FK cross-schema transparente
+  ...
+}
+// Emite: REFERENCES "public"."users" ("id")
+```
+
+Same-schema → SQL sin qualifier (compat con boilerplates que
+asumen `public`).
+
+### Sub-paso 6 — Diff completo de indexes
+
+El migrator detecta cambios en `using` / `where_clause` / `unique`
+/ `columns` cuando los nombres matchean, emitiendo `DROP INDEX +
+CREATE INDEX` para regenerar con el shape nuevo. Antes era
+name-based puro y el user tenía que renombrar el índice para
+forzar regen. El comparator de `where_clause` normaliza whitespace
++ case para evitar regens espurios; `using` trata `None` y
+`Some("btree")` como equivalentes.
+
+### Sub-paso 7 — `fitz db inspect --all-schemas`
+
+Flag nuevo para listar TODOS los schemas user-defined a la vez
+(incluyendo `public`), agrupados con su propia sub-vista.
+Mutuamente excluyente con `--schema`. Combinable con `--table X`
+para filtrar un nombre puntual en todos los schemas. JSON shape:
+`{"schemas": [{"schema": "ops", "tables": [...]}, ...]}` con sort
+alfabético determinístico.
+
+### Sub-paso 8 — Redaction de secrets en `FITZ_DB_LOG=verbose`
+
+Los params correspondientes a campos sensibles (`password`/
+`passwd`/`passphrase`/`secret`/`api_key`/`apikey`/`api_token`/
+`auth_token`/`access_token`/`refresh_token`/`id_token`/
+`private_key`/`privkey`/`credential`/`session_key`/`session_token`/
+`csrf_token`) se enmascaran automáticamente como `<redacted>` en
+el output verbose. Heurística best-effort: mira ~50 chars antes
+del placeholder, descarta matches separados por `WHERE`/`AND`/
+`OR`/etc. Sobre-redacta en bordes ambiguos por seguridad.
+
+### Sub-paso 9 — DB errors enriquecidos con SQLSTATE + SQL + params
+
+`DbError::Server` Display ahora muestra `<severity> [<SQLSTATE>]: <msg>`.
+Las queries que fallan pasan por `enrich_db_error_with_context`
+que suma `[sql: <query truncado> params=[...]]` con la misma
+redaction de secrets que `FITZ_DB_LOG=verbose`.
+
+Antes:
+```
+ERROR: duplicate key value violates unique constraint "users_email_key"
+```
+
+Después:
+```
+ERROR [23505]: duplicate key value violates unique constraint "users_email_key"
+    [sql: INSERT INTO users (email, password) VALUES ($1, $2)
+     params=[$1="ada@x.com", $2=<redacted>]]
+```
+
+### Sub-paso 10 — `FITZ_DB_MAX_CONNS` pool tuning
+
+Env var opt-in para overridear el pool size del driver. Default
+10 conexiones simultáneas máximas por URL. Clamp `[1, 200]`.
+Aplica global al proceso (no per URL). Útil para apps con mucho
+concurrent load (`FITZ_DB_MAX_CONNS=50`) o cron jobs con poco load
+(`FITZ_DB_MAX_CONNS=3`). Kwarg dedicado del lenguaje
+(`db.connect(url, max_conns=N)`) queda como deuda menor.
+
+### Sub-paso 11 — Skip deliberado: JSON `||` merge
+
+Decisión documentada: el operador `||` jsonb (typical UPDATE `SET
+data = data || $1`) NO se modela en `.where(...)` (read-only).
+Caso de uso dominante cubierto por escape hatch:
+
+```fitz
+db.exec(
+    "UPDATE foo SET data = data || $1::jsonb WHERE id = $2",
+    [patch_json, id]
+).await?
+```
+
+### Tests
+
+- **+39 unit tests nuevos**: 17 evaluator (9 path methods + 3
+  matches + 6 @unique + helpers), 13 codegen (7 path codegen
+  paralelo + 2 matches codegen + 4 SQL emit), 17 migrations (5
+  diff indexes + 4 all-schemas + 6 @check + 2 cross-schema FK),
+  17 db (6 redaction parsing + 4 enrichment + 2 SQLSTATE Display
+  + 2 max_conns parser + 3 misc), 6 types (@check_constraint
+  decorator), 6 types (@unique decorator).
+- **1 E2E nuevo en `tests/db_real_postgres.rs`** contra Postgres
+  real: `orm_jsonb_path_operators_in_where_paridad_codegen_e2e`
+  (paridad bit-a-bit `fitz run` ↔ `fitz build` con table jsonb +
+  seed via `seed.exec` con literales nested + queries con los 5
+  path methods).
+
+Al cierre: **2739 unit + 292 smoke + 3 openapi + 81 cli_e2e + 52
+db_real_postgres** (51 viejos + 1 nuevo). `cargo fmt --all --
+--check` + `cargo clippy --all-targets -- -D warnings` + `cargo
+clippy --lib --features lsp -- -D warnings` todos limpios.
+
+### Cross-impact
+
+- `editors/vscode/package.json` bump 0.10.28 → 0.10.29.
+- `src/lsp.rs` descripción de `@unique` actualizada (single col
+  field-level + composite type-level v0.10.29) + nuevo entry
+  `@check_constraint` con snippet `@check_constraint("${1:expr}")`.
+- `docs/db-orm.md`: bloques nuevos para JSON path operators (sec
+  13), full-text search `@@` (sec 13 sub-bloque), `@unique`
+  composite + `@check_constraint` + cross-schema FK (sec 4 sub-
+  bloques), redaction de secrets en `FITZ_DB_LOG` (sec 29),
+  `FITZ_DB_MAX_CONNS` pool tuning (sec 29), DB errors con SQL
+  contexto (sec 29).
+- `docs/guide.md` cap 31 (Postgres + ORM): bullet "Cierre masivo
+  de v0.10.29 — ORM completo" con todos los items + cap 32 (env
+  vars) sumando `FITZ_DB_MAX_CONNS` paralelo a `FITZ_DB_LOG`.
+- `README.md` Estado del proyecto: bullet de v0.10.29 con todos
+  los items.
+- `docs/architecture.md`: conteo de sub-comandos actualizado (15
+  → 27 efectivos), Familia 5 DB nueva con los 10 sub-comandos
+  `fitz db ...` documentados, secciones nuevas para `db.rs`
+  (driver Postgres puro) y `migrations.rs` (schema diff +
+  introspect + DDL emit), diagramas mermaid + ASCII con path
+  `fitz db ...` → `migrations.rs` → `db.rs` → Postgres.
+
+### Deuda residual derivada (NO bloquea uso real)
+
+- `@check_constraint` sin drift check del migrator (introspect no
+  lee `pg_constraint.contype = 'c'`). Workaround: drop + recreate
+  manual via `db.exec`.
+- Cross-schema FK no popula `references_schema` desde la
+  introspect (deja siempre `None`), por lo que el drift no detecta
+  cambios cross-schema off-Fitz.
+- Chain estilo `e.data.get("a").get("b")` (azúcar sobre
+  `path_text(["a", "b"])`) sigue como deuda menor.
+- JSON `||` merge en `.where(...)` (skipeado deliberadamente —
+  caso UPDATE cubierto por escape hatch).
+- Ranking full-text (`ts_rank`) — bajar a `db.query` con `ORDER
+  BY ts_rank(...)`.
+- `db.connect(url, max_conns=N)` kwarg del lenguaje (hoy via env
+  var). Requiere wire del kwarg desde evaluator + codegen.
+- Cambios mid-run de `FITZ_DB_MAX_CONNS` NO se reflejan (LazyLock
+  igual que `FITZ_DB_LOG`). Workaround: reiniciar el proceso.
 
 ## [v0.10.28] — 2026-05-31 — Tier S del ORM: introspect + @index using + DB log + HTTP access log
 

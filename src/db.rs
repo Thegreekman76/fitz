@@ -93,10 +93,21 @@ impl fmt::Display for DbError {
             DbError::Io(e) => write!(f, "I/O: {e}"),
             DbError::Protocol(m) => write!(f, "protocolo: {m}"),
             DbError::Auth(m) => write!(f, "auth: {m}"),
+            // v0.10.29 — Suma el SQLSTATE entre corchetes cuando
+            // está disponible (Postgres siempre lo incluye en
+            // ErrorResponse). El user puede grep por código
+            // (`[23505]` = unique violation, `[23503]` = FK
+            // violation, etc.) sin parsear el mensaje libre.
             DbError::Server {
-                severity, message, ..
+                severity,
+                code,
+                message,
             } => {
-                write!(f, "{severity}: {message}")
+                if code.is_empty() {
+                    write!(f, "{severity}: {message}")
+                } else {
+                    write!(f, "{severity} [{code}]: {message}")
+                }
             }
             DbError::UnsupportedType(oid) => {
                 write!(f, "tipo Postgres OID {oid} no soportado en MVP (10.5)")
@@ -105,6 +116,61 @@ impl fmt::Display for DbError {
             DbError::Tls(m) => write!(f, "TLS: {m}"),
         }
     }
+}
+
+/// v0.10.29 — Enriquece un `DbError::Server` con el contexto del
+/// SQL + params que dispararon el error. Aplica la misma redaction
+/// de secrets que `FITZ_DB_LOG=verbose` para evitar leakear
+/// passwords/tokens en stderr o en logs estructurados. El sufijo
+/// es `[sql: <query truncado> params=[$1=..., ...]]`. Si el error
+/// no es `Server` (e.g. I/O, Protocol), passes through sin cambio
+/// — el contexto no aplica.
+pub(crate) fn enrich_db_error_with_context(err: DbError, sql: &str, args: &[PgValue]) -> DbError {
+    if let DbError::Server {
+        severity,
+        code,
+        message,
+    } = err
+    {
+        // SQL one-line truncado a 200 chars para no inflar mensajes.
+        let sql_oneline = sql
+            .replace(['\n', '\r'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let sql_short = if sql_oneline.chars().count() > 200 {
+            let mut s: String = sql_oneline.chars().take(200).collect();
+            s.push('…');
+            s
+        } else {
+            sql_oneline.clone()
+        };
+        let params_part = if args.is_empty() {
+            String::new()
+        } else {
+            let sql_lower = sql.to_ascii_lowercase();
+            let params: Vec<String> = args
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let pos = i + 1;
+                    if should_redact_param(&sql_lower, pos) {
+                        format!("${pos}=<redacted>")
+                    } else {
+                        format!("${pos}={}", format_log_value(v))
+                    }
+                })
+                .collect();
+            format!(" params=[{}]", params.join(", "))
+        };
+        let new_message = format!("{message} [sql: {sql_short}{params_part}]");
+        return DbError::Server {
+            severity,
+            code,
+            message: new_message,
+        };
+    }
+    err
 }
 
 impl std::error::Error for DbError {}
@@ -2701,6 +2767,36 @@ fn md5_compute(input: &[u8]) -> [u8; 16] {
 const DEFAULT_MAX_CONNS: usize = 10;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 30;
 
+/// v0.10.29 — `FITZ_DB_MAX_CONNS` env var opt-in para overridear
+/// el pool size del driver. Útil para apps que esperan mucho
+/// concurrent load (> 10 requests simultáneos hitting la DB) o
+/// para apps con muy poco load donde 10 conns es overkill.
+///
+/// Parseada una sola vez por proceso (`LazyLock`) — cambios
+/// mid-run NO se reflejan (mismo modelo que `FITZ_DB_LOG`).
+/// Valores inválidos o vacíos → fallback a `DEFAULT_MAX_CONNS`.
+/// Clamp: min 1, max 200 (más allá es probablemente un typo y
+/// satura Postgres `max_connections`).
+pub static FITZ_DB_MAX_CONNS: std::sync::LazyLock<usize> =
+    std::sync::LazyLock::new(|| match std::env::var("FITZ_DB_MAX_CONNS") {
+        Ok(s) => parse_max_conns_value(&s),
+        Err(_) => DEFAULT_MAX_CONNS,
+    });
+
+/// v0.10.29 — Parser puro testeable. Trim + parse + clamp [1, 200].
+/// Valores no parseables o fuera de rango → DEFAULT_MAX_CONNS.
+pub(crate) fn parse_max_conns_value(s: &str) -> usize {
+    match s.trim().parse::<usize>() {
+        Ok(n) if (1..=200).contains(&n) => n,
+        _ => DEFAULT_MAX_CONNS,
+    }
+}
+
+/// Resuelve el max_conns efectivo del pool: env var > default.
+pub(crate) fn effective_max_conns() -> usize {
+    *FITZ_DB_MAX_CONNS
+}
+
 /// Pool interno del `DbConnHandle`. NO se expone al evaluator
 /// directamente — el handle delega aquí. Compartido por
 /// `Arc<DbPool>` para que el spawned health check task pueda
@@ -2922,10 +3018,18 @@ pub fn format_db_log_line(
             if args.is_empty() {
                 format!("[fitz-db {ms:.1}ms verbose] {sql_oneline}")
             } else {
+                let sql_lower = sql.to_ascii_lowercase();
                 let params: Vec<String> = args
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| format!("${}={}", i + 1, format_log_value(v)))
+                    .map(|(i, v)| {
+                        let pos = i + 1;
+                        if should_redact_param(&sql_lower, pos) {
+                            format!("${pos}=<redacted>")
+                        } else {
+                            format!("${pos}={}", format_log_value(v))
+                        }
+                    })
                     .collect();
                 format!(
                     "[fitz-db {ms:.1}ms verbose] {sql_oneline} params=[{}]",
@@ -2934,6 +3038,115 @@ pub fn format_db_log_line(
             }
         }
     }
+}
+
+/// v0.10.29 — Keywords que indican que el valor del param es un
+/// secret y debe enmascarse en el log verbose. Cubre los nombres
+/// canónicos en SQL (mayoría en inglés porque las columnas en la
+/// industria son típicamente inglés, aunque el comment del query
+/// sea en otro idioma). Incluye varias formas comunes.
+const SENSITIVE_LOG_KEYWORDS: &[&str] = &[
+    "password",
+    "passwd",
+    "passphrase",
+    "secret",
+    "api_key",
+    "apikey",
+    "api_token",
+    "auth_token",
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "private_key",
+    "privkey",
+    "credential",
+    "session_key",
+    "session_token",
+    "csrf_token",
+];
+
+/// v0.10.29 — Palabras SQL que indican "cambio de cláusula" entre
+/// el keyword y el placeholder. Si una de estas aparece entre el
+/// keyword sensible y el `$N`, el placeholder pertenece a otra
+/// parte del statement y NO debe redactarse (e.g. `UPDATE x SET
+/// password = $1 WHERE id = $2` — `$2` corresponde a `id`, no a
+/// `password`, porque `WHERE` separa las dos cláusulas).
+const CONTEXT_BREAKERS: &[&str] = &[
+    " where ",
+    " and ",
+    " or ",
+    " having ",
+    " from ",
+    " join ",
+    " on ",
+    " group ",
+    " order ",
+    " into ",
+    " returning ",
+    " limit ",
+    " offset ",
+];
+
+/// v0.10.29 — Heurística best-effort para decidir si el param
+/// `$N` debe enmascararse en el log. Mira los ~50 chars previos al
+/// placeholder en el SQL (case-insensitive) y matchea keywords
+/// sensibles como sub-string + verifica que no haya context
+/// breaker entre el keyword y el placeholder.
+///
+/// Trade-offs documentados:
+/// - **Falsos positivos**: en INSERT con varias columnas (`INSERT
+///   INTO users (name, password) VALUES ($1, $2)`), la ventana
+///   antes de `$1` puede contener "password" → name queda redacted
+///   innecesariamente. Aceptable: sobre-redactar es preferible a
+///   leaks reales en logs.
+/// - **Falsos negativos**: si el keyword está muy lejos del
+///   placeholder (>50 chars), no matchea. El user debería evitar
+///   logging verbose en queries con secrets si quiere garantía
+///   total — la heurística cubre los casos típicos (UPDATE / WHERE
+///   / INSERT compactos).
+/// - **Caso especial `$10`, `$11`, etc.**: el needle `$1` no debe
+///   matchear adentro de `$10`/`$11`/`$12`/... por eso chequeamos
+///   que el char inmediatamente después no sea dígito.
+///
+/// `sql_lower` es el SQL ya en lowercase (cached por el caller
+/// para evitar re-allocar por cada param).
+pub(crate) fn should_redact_param(sql_lower: &str, position: usize) -> bool {
+    let needle = format!("${position}");
+    let mut start = 0;
+    while let Some(rel) = sql_lower[start..].find(&needle) {
+        let abs = start + rel;
+        let end = abs + needle.len();
+        // Skip si el char siguiente es dígito (buscando $1 pero
+        // matcheó adentro de $10/$11/...).
+        if let Some(next_ch) = sql_lower[end..].chars().next() {
+            if next_ch.is_ascii_digit() {
+                start = end;
+                continue;
+            }
+        }
+        let win_start = abs.saturating_sub(50);
+        let window = &sql_lower[win_start..abs];
+        for kw in SENSITIVE_LOG_KEYWORDS {
+            if let Some(kw_pos) = window.rfind(kw) {
+                // Verifica que entre el keyword y el placeholder
+                // no haya context breaker (WHERE/AND/OR/etc.) — si
+                // lo hay, el placeholder pertenece a otra cláusula.
+                let after_kw = &window[kw_pos + kw.len()..];
+                let mut broken = false;
+                for breaker in CONTEXT_BREAKERS {
+                    if after_kw.contains(breaker) {
+                        broken = true;
+                        break;
+                    }
+                }
+                if !broken {
+                    return true;
+                }
+            }
+        }
+        start = end;
+    }
+    false
 }
 
 /// Emite el log line a stderr si el mode es activo. Cheap cuando
@@ -2955,7 +3168,9 @@ impl DbConnHandle {
         let pool = std::sync::Arc::new(DbPool {
             config,
             idle: std::sync::Mutex::new(vec![initial_conn]),
-            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONNS)),
+            // v0.10.29 — Usa `effective_max_conns()` que respeta la
+            // env var `FITZ_DB_MAX_CONNS` (override opt-in).
+            permits: std::sync::Arc::new(tokio::sync::Semaphore::new(effective_max_conns())),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
         DbConnHandle { pool, url_redacted }
@@ -3011,7 +3226,13 @@ impl DbConnHandle {
         }
         .await;
         log_db_query(start.elapsed(), sql, args);
-        result
+        // v0.10.29 — Si el query falla con un error del servidor,
+        // enriquecemos el mensaje con el SQL one-line + params
+        // (respeta redaction de secrets). Sin esto, el error
+        // canónico de Postgres es `ERROR: duplicate key value` sin
+        // pista de qué query falló — el user tenía que mirar el
+        // stack trace para deducir el callsite.
+        result.map_err(|e| enrich_db_error_with_context(e, sql, args))
     }
 
     /// Ejecuta un statement que no espera rows (INSERT/UPDATE/
@@ -3180,12 +3401,14 @@ impl DbConnHandle {
         result
     }
 
-    /// 10.2: número máximo de conns concurrentes que el pool
-    /// puede emitir. Hoy fijo en `DEFAULT_MAX_CONNS = 10`;
-    /// configurable como kwarg `db.connect(url, max_conns=N)`
-    /// queda como deuda menor para 10.2.b.
+    /// Número máximo de conns concurrentes que el pool puede
+    /// emitir. v0.10.29 — Respeta la env var `FITZ_DB_MAX_CONNS`
+    /// si está seteada (clamp [1, 200]); fallback
+    /// `DEFAULT_MAX_CONNS = 10`. Kwarg `db.connect(url, max_conns=N)`
+    /// queda como deuda menor para iteración 2 (requiere wire del
+    /// kwarg desde evaluator + codegen).
     pub fn max_conns(&self) -> usize {
-        DEFAULT_MAX_CONNS
+        effective_max_conns()
     }
 
     /// 10.2 — diagnostics: número de conns idle en este instante.
@@ -4353,5 +4576,241 @@ mod tests {
         // 10 emojis + '…' = 11 chars.
         assert_eq!(t.chars().count(), 11);
         assert!(t.ends_with('…'));
+    }
+
+    // v0.10.29 — redaction de secrets en FITZ_DB_LOG=verbose
+
+    #[test]
+    fn should_redact_param_detecta_password_en_where() {
+        let sql = "select * from users where password = $1";
+        assert!(should_redact_param(sql, 1));
+    }
+
+    #[test]
+    fn should_redact_param_detecta_password_en_update() {
+        let sql = "update users set password = $1 where id = $2";
+        assert!(should_redact_param(sql, 1));
+        assert!(!should_redact_param(sql, 2));
+    }
+
+    #[test]
+    fn should_redact_param_detecta_secret_y_api_key() {
+        assert!(should_redact_param(
+            "insert into vault (secret) values ($1)",
+            1
+        ));
+        assert!(should_redact_param(
+            "update apps set api_key = $1 where id = $2",
+            1
+        ));
+        assert!(should_redact_param(
+            "select * from t where access_token = $1",
+            1
+        ));
+        assert!(should_redact_param(
+            "select * from t where refresh_token = $1",
+            1
+        ));
+        assert!(should_redact_param(
+            "select * from t where private_key = $1",
+            1
+        ));
+    }
+
+    #[test]
+    fn should_redact_param_no_redacta_columnas_normales() {
+        let sql = "select * from users where email = $1 and id = $2";
+        assert!(!should_redact_param(sql, 1));
+        assert!(!should_redact_param(sql, 2));
+    }
+
+    #[test]
+    fn should_redact_param_no_confunde_dolar_1_con_dolar_10() {
+        // Edge case: el needle `$1` no debe matchear adentro de `$10`.
+        let sql = "select * from users where id = $10 and email = $1";
+        // $1 → no debe redact (email no es sensitive).
+        assert!(!should_redact_param(sql, 1));
+        // $10 → tampoco (id no es sensitive).
+        assert!(!should_redact_param(sql, 10));
+    }
+
+    #[test]
+    fn should_redact_param_es_case_insensitive() {
+        let sql = "select * from t where PASSWORD = $1";
+        // El caller pasa siempre lowercase, así que el match es
+        // case-insensitive de hecho.
+        assert!(should_redact_param(&sql.to_ascii_lowercase(), 1));
+    }
+
+    #[test]
+    fn format_db_log_line_verbose_redacta_password() {
+        // El integrador completo: verbose con password en el SQL
+        // debe enmascarar el value real con `<redacted>`.
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(1),
+            "UPDATE users SET password = $1 WHERE id = $2",
+            &[PgValue::Text("super_secret_xyz".into()), PgValue::Int(42)],
+            DbLogMode::Verbose,
+        );
+        assert!(
+            line.contains("$1=<redacted>"),
+            "esperaba $1 enmascarado, fue: {line}"
+        );
+        assert!(
+            !line.contains("super_secret_xyz"),
+            "el secret NO debe aparecer en el log: {line}"
+        );
+        // El $2 (id = 42) sigue visible — no es sensitive.
+        assert!(line.contains("$2=42"), "{line}");
+    }
+
+    #[test]
+    fn format_db_log_line_verbose_no_redacta_email_normal() {
+        // Sanity: queries normales sin secrets siguen mostrando params.
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(1),
+            "SELECT * FROM users WHERE email = $1",
+            &[PgValue::Text("ada@example.com".into())],
+            DbLogMode::Verbose,
+        );
+        assert!(
+            line.contains("$1=\"ada@example.com\""),
+            "esperaba email visible (no sensitive), fue: {line}"
+        );
+    }
+
+    // v0.10.29 — DbError con SQL contexto + SQLSTATE en Display
+
+    // v0.10.29 — FITZ_DB_MAX_CONNS parser
+
+    #[test]
+    fn parse_max_conns_value_basico() {
+        assert_eq!(parse_max_conns_value("20"), 20);
+        assert_eq!(parse_max_conns_value(" 50 "), 50);
+        assert_eq!(parse_max_conns_value("1"), 1);
+        assert_eq!(parse_max_conns_value("200"), 200);
+    }
+
+    #[test]
+    fn parse_max_conns_value_invalido_fallback_default() {
+        assert_eq!(parse_max_conns_value(""), DEFAULT_MAX_CONNS);
+        assert_eq!(parse_max_conns_value("0"), DEFAULT_MAX_CONNS);
+        assert_eq!(parse_max_conns_value("201"), DEFAULT_MAX_CONNS);
+        assert_eq!(parse_max_conns_value("foo"), DEFAULT_MAX_CONNS);
+        assert_eq!(parse_max_conns_value("-5"), DEFAULT_MAX_CONNS);
+    }
+
+    #[test]
+    fn db_error_server_display_incluye_sqlstate_code() {
+        let err = DbError::Server {
+            severity: "ERROR".into(),
+            code: "23505".into(),
+            message: "duplicate key value violates unique constraint \"users_email_key\"".into(),
+        };
+        let s = err.to_string();
+        assert!(
+            s.contains("[23505]"),
+            "esperaba SQLSTATE entre corchetes: {s}"
+        );
+        assert!(s.starts_with("ERROR [23505]:"), "{s}");
+    }
+
+    #[test]
+    fn db_error_server_display_sin_code_omite_corchetes() {
+        let err = DbError::Server {
+            severity: "ERROR".into(),
+            code: String::new(),
+            message: "algo falló".into(),
+        };
+        let s = err.to_string();
+        assert!(!s.contains("[]"), "no debe haber [] vacíos: {s}");
+        assert_eq!(s, "ERROR: algo falló");
+    }
+
+    #[test]
+    fn enrich_db_error_suma_sql_y_params_al_mensaje() {
+        let err = DbError::Server {
+            severity: "ERROR".into(),
+            code: "23505".into(),
+            message: "duplicate key".into(),
+        };
+        let enriched = enrich_db_error_with_context(
+            err,
+            "INSERT INTO users (email) VALUES ($1)",
+            &[PgValue::Text("ada@x.com".into())],
+        );
+        let s = enriched.to_string();
+        assert!(s.contains("[sql: INSERT INTO users"), "{s}");
+        assert!(s.contains("$1=\"ada@x.com\""), "{s}");
+    }
+
+    #[test]
+    fn enrich_db_error_respeta_redaction_para_secrets() {
+        let err = DbError::Server {
+            severity: "ERROR".into(),
+            code: "23502".into(),
+            message: "not-null violation".into(),
+        };
+        let enriched = enrich_db_error_with_context(
+            err,
+            "UPDATE users SET password = $1 WHERE id = $2",
+            &[PgValue::Text("super_secret_xyz".into()), PgValue::Int(42)],
+        );
+        let s = enriched.to_string();
+        assert!(
+            s.contains("$1=<redacted>"),
+            "esperaba redaction del password: {s}"
+        );
+        assert!(
+            !s.contains("super_secret_xyz"),
+            "el secret NO debe aparecer: {s}"
+        );
+        assert!(s.contains("$2=42"), "{s}");
+    }
+
+    #[test]
+    fn enrich_db_error_pass_through_para_no_server_errors() {
+        let err = DbError::Protocol("badly framed message".into());
+        let enriched = enrich_db_error_with_context(err, "SELECT 1", &[]);
+        assert_eq!(enriched.to_string(), "protocolo: badly framed message");
+    }
+
+    #[test]
+    fn enrich_db_error_trunca_sql_largo() {
+        let long_sql =
+            "SELECT id, name, ".to_string() + &"col, ".repeat(100) + "x FROM users WHERE id = $1";
+        let err = DbError::Server {
+            severity: "ERROR".into(),
+            code: "42P01".into(),
+            message: "table does not exist".into(),
+        };
+        let enriched = enrich_db_error_with_context(err, &long_sql, &[PgValue::Int(1)]);
+        let s = enriched.to_string();
+        assert!(s.contains("…"), "esperaba SQL truncado: {s}");
+        assert!(s.len() < long_sql.len() + 100, "no debe inflar masivamente");
+    }
+
+    #[test]
+    fn format_db_log_line_verbose_redacta_api_key_en_insert() {
+        // INSERT positional: el log captura "api_key" en la lista
+        // de columnas y redacta el $N correspondiente.
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(1),
+            "INSERT INTO tokens (name, api_key) VALUES ($1, $2)",
+            &[
+                PgValue::Text("prod".into()),
+                PgValue::Text("sk-very-secret".into()),
+            ],
+            DbLogMode::Verbose,
+        );
+        // $2 corresponde a api_key → redacted.
+        assert!(
+            line.contains("$2=<redacted>"),
+            "esperaba api_key redacted, fue: {line}"
+        );
+        assert!(
+            !line.contains("sk-very-secret"),
+            "el secret NO debe aparecer en el log: {line}"
+        );
     }
 }

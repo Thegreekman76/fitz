@@ -58,6 +58,25 @@ pub struct Table {
     /// vacío o None, no hay composite. La introspect popula desde
     /// `pg_constraint` con contype='p'.
     pub composite_pk: Vec<String>,
+    /// v0.10.29 — `CHECK (<expr>)` constraints declarados con
+    /// `@check_constraint("expr", name="optional")` a nivel type.
+    /// Vacío = sin checks. Solo poblado en el snapshot "target"
+    /// del migrator (desde `schema_from_program`); `introspect_schema`
+    /// NO los lee del `pg_constraint` (MVP — deuda menor).
+    /// Consecuencia: el diff NO detecta drift de checks. Si el user
+    /// cambia un `expr` Fitz-side sin recrear la table, la DB sigue
+    /// con el viejo. Workaround: drop + create manual.
+    pub check_constraints: Vec<CheckConstraint>,
+}
+
+/// v0.10.29 — Constraint CHECK declarado con `@check_constraint(...)`.
+/// El `expr` es la expresión SQL booleana que Postgres valida en
+/// INSERT/UPDATE. El `name` se auto-genera si no se especifica
+/// (`<table>_<idx>_check`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckConstraint {
+    pub name: String,
+    pub expr: String,
 }
 
 impl Table {
@@ -117,6 +136,16 @@ pub struct ForeignKey {
     pub column: String,
     pub references_table: String,
     pub references_column: String,
+    /// v0.10.29 — Schema custom del target. `None` = mismo schema
+    /// que el current table (paridad con la convención Postgres
+    /// `public`). Cuando `Some(s)`, el SQL emit usa `REFERENCES
+    /// "s"."table"(col)` qualified, habilitando FKs cross-schema
+    /// transparentes (el user sigue declarando `@belongs_to("User")`
+    /// con nombre Fitz — Fitz resuelve el schema del target desde
+    /// su `@table("schema.name")`). La introspect lo deja en
+    /// `None` por simplicidad MVP — drift cross-schema queda como
+    /// deuda menor.
+    pub references_schema: Option<String>,
     /// `CASCADE` / `SET NULL` / `RESTRICT` / `NO ACTION`. None si
     /// no se declaró (= NO ACTION default de Postgres).
     pub on_delete: Option<String>,
@@ -181,6 +210,7 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
                 renamed_from: None,
                 schema: schema_for_struct,
                 composite_pk: pk_cols_introspected,
+                check_constraints: Vec::new(),
             });
             continue;
         } else {
@@ -194,6 +224,7 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
             renamed_from: None,
             schema: schema_for_struct,
             composite_pk,
+            check_constraints: Vec::new(),
         });
     }
     // Orden determinístico: schema primero, después name. `public`
@@ -434,6 +465,7 @@ async fn introspect_foreign_keys(
             column: local_column,
             references_table: ref_table,
             references_column: ref_column,
+            references_schema: None,
             on_delete,
         });
     }
@@ -588,33 +620,41 @@ fn build_table_from_type(
         if let Some(rel) = meta.relations.get(&f.name) {
             if rel.kind == crate::types::RelationKind::BelongsTo {
                 // Resolver target table name vía type_env.
-                let target_table = type_env
+                let target_meta = type_env
                     .lookup(&rel.target_type)
                     .and_then(|tid| type_env.table_metadata(tid))
-                    .map(|m| m.sql_name.clone())
                     .ok_or_else(|| {
                         format!(
                             "@belongs_to en `{}.{}` apunta a `{}` que no es @table",
                             type_name, f.name, rel.target_type
                         )
                     })?;
+                let target_table = target_meta.sql_name.clone();
+                // v0.10.29 — Cross-schema FK. Si el target type
+                // declara `@table("schema.name")` distinto al
+                // schema del current type, el FK emit usa
+                // `REFERENCES "schema"."name"(col)` qualified.
+                // Same-schema → references_schema = None (matchea
+                // convención Postgres `public` implícito).
+                let target_schema = target_meta.schema.clone();
+                let same_schema = target_schema.as_deref().unwrap_or("public")
+                    == meta.schema.as_deref().unwrap_or("public");
+                let references_schema = if same_schema { None } else { target_schema };
                 // PK column del target (default "id"). En PG las
                 // PK columns no tienen prefijo de tabla.
                 // v0.10.27 (F2) — FK referencing requiere single PK
                 // del target. Composite PK del target → fallback "id"
                 // (que típicamente no existirá, error claro en CREATE
                 // TABLE de PG si el user lo intenta).
-                let target_pk_field = type_env
-                    .lookup(&rel.target_type)
-                    .and_then(|tid| type_env.table_metadata(tid))
-                    .and_then(|m| m.single_pk().map(String::from))
+                let target_pk_field = target_meta
+                    .single_pk()
+                    .map(String::from)
                     .unwrap_or_else(|| "id".to_string());
-                let target_pk_sql = type_env
-                    .lookup(&rel.target_type)
-                    .and_then(|tid| type_env.table_metadata(tid))
-                    .and_then(|m| m.columns.get(&target_pk_field))
+                let target_pk_sql = target_meta
+                    .columns
+                    .get(&target_pk_field)
                     .and_then(|c| c.sql_name.clone())
-                    .unwrap_or(target_pk_field);
+                    .unwrap_or_else(|| target_pk_field.clone());
                 // Convención: nombre del constraint usa el
                 // schema "<table>_<col>_fkey" que PG usa por
                 // default cuando inline en CREATE TABLE.
@@ -630,6 +670,7 @@ fn build_table_from_type(
                     column: sql_name.clone(),
                     references_table: target_table,
                     references_column: target_pk_sql,
+                    references_schema,
                     on_delete,
                 });
             }
@@ -686,6 +727,23 @@ fn build_table_from_type(
         Vec::new()
     };
 
+    // v0.10.29 — CHECK constraints declarados con
+    // `@check_constraint("expr", name="optional")` a nivel type.
+    // Auto-naming: `chk_<table>_<idx>` cuando el user no especifica
+    // `name=`. Determinístico por orden de aparición en el AST.
+    let check_constraints: Vec<CheckConstraint> = meta
+        .check_constraints
+        .iter()
+        .enumerate()
+        .map(|(i, spec)| CheckConstraint {
+            name: spec
+                .name
+                .clone()
+                .unwrap_or_else(|| format!("chk_{}_{}", table_name, i)),
+            expr: spec.expr.clone(),
+        })
+        .collect();
+
     Ok(Table {
         name: table_name,
         columns,
@@ -694,6 +752,7 @@ fn build_table_from_type(
         renamed_from: meta.renamed_from.clone(),
         schema: meta.schema.clone(),
         composite_pk,
+        check_constraints,
     })
 }
 
@@ -1293,17 +1352,23 @@ fn strip_trailing_pg_cast(s: &str) -> &str {
 }
 
 fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
-    let current_idx_names: std::collections::HashSet<&str> =
-        current.indexes.iter().map(|i| i.name.as_str()).collect();
-    let target_idx_names: std::collections::HashSet<&str> =
-        target.indexes.iter().map(|i| i.name.as_str()).collect();
+    let current_by_name: std::collections::HashMap<&str, &Index> = current
+        .indexes
+        .iter()
+        .map(|i| (i.name.as_str(), i))
+        .collect();
+    let target_by_name: std::collections::HashMap<&str, &Index> = target
+        .indexes
+        .iter()
+        .map(|i| (i.name.as_str(), i))
+        .collect();
     let table_ref = TableRef::from_table(target);
 
     // Drop indexes no en target.
     let mut to_drop: Vec<&Index> = current
         .indexes
         .iter()
-        .filter(|i| !target_idx_names.contains(i.name.as_str()))
+        .filter(|i| !target_by_name.contains_key(i.name.as_str()))
         .collect();
     to_drop.sort_by(|a, b| a.name.cmp(&b.name));
     for i in to_drop {
@@ -1317,7 +1382,7 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     let mut to_add: Vec<&Index> = target
         .indexes
         .iter()
-        .filter(|i| !current_idx_names.contains(i.name.as_str()))
+        .filter(|i| !current_by_name.contains_key(i.name.as_str()))
         .collect();
     to_add.sort_by(|a, b| a.name.cmp(&b.name));
     for i in to_add {
@@ -1326,6 +1391,71 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
             index: i.clone(),
         });
     }
+
+    // v0.10.29 — Cierre de deuda v0.10.27/v0.10.28: para indexes
+    // con el MISMO nombre en current y target, comparar shape
+    // (columns, unique, where_clause, using). Si difieren → DROP +
+    // CREATE para regenerar con el shape nuevo. Antes el diff era
+    // name-based puro: el user tenía que cambiar el `name=` para
+    // forzar regeneración cuando solo cambiaba `using=` o
+    // `where_=`, lo que es ergonómicamente roto.
+    //
+    // Notas:
+    // - `where_clause` se compara via `where_clauses_match` (lectura
+    //   defensiva: Postgres lo canonicaliza con paréntesis extra y
+    //   espacios). El comparator hace match case-insensitive +
+    //   whitespace-collapsed. Empate → preservar (no regen espurio).
+    // - `using` se compara case-insensitive; `None`/`Some("btree")`
+    //   se consideran equivalentes (btree es el default Postgres).
+    let mut changed: Vec<(&Index, &Index)> = Vec::new();
+    for (name, target_idx) in target_by_name.iter() {
+        if let Some(current_idx) = current_by_name.get(name) {
+            if !indexes_equivalent_for_diff(current_idx, target_idx) {
+                changed.push((*current_idx, *target_idx));
+            }
+        }
+    }
+    changed.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+    for (current_idx, target_idx) in changed {
+        changes.push(Change::DropIndex {
+            schema: current.schema.clone(),
+            index_name: current_idx.name.clone(),
+        });
+        changes.push(Change::CreateIndex {
+            table: table_ref.clone(),
+            index: target_idx.clone(),
+        });
+    }
+}
+
+/// v0.10.29 — Comparator para diff de indexes (mismo nombre,
+/// comparar shape). Best-effort match — Postgres canonicaliza el
+/// `where_clause` con paréntesis y espacios extra al
+/// reintrospectear, por lo que comparamos case-insensitive +
+/// whitespace-collapsed para no disparar regens espurios.
+fn indexes_equivalent_for_diff(a: &Index, b: &Index) -> bool {
+    if a.columns != b.columns || a.unique != b.unique {
+        return false;
+    }
+    let a_method = a.using.as_deref().unwrap_or("btree").to_ascii_lowercase();
+    let b_method = b.using.as_deref().unwrap_or("btree").to_ascii_lowercase();
+    if a_method != b_method {
+        return false;
+    }
+    let a_where = a.where_clause.as_deref().map(canonicalize_where_clause);
+    let b_where = b.where_clause.as_deref().map(canonicalize_where_clause);
+    a_where == b_where
+}
+
+/// Best-effort canonicalization para comparar WHERE clauses entre
+/// la string declarada por el user y la que Postgres reporta tras
+/// re-introspect. Normaliza whitespace + case. NO parsea SQL —
+/// solo evita falsos positivos del diff por reformatting trivial.
+fn canonicalize_where_clause(s: &str) -> String {
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_ascii_lowercase()
 }
 
 /// Para evitar falsos positivos del diff: `bigserial` y `bigint`
@@ -1481,16 +1611,20 @@ fn change_to_sql(change: &Change) -> String {
                 .as_deref()
                 .map(|action| format!(" ON DELETE {}", action))
                 .unwrap_or_default();
-            // v0.10.21 — references_table puede ser schema-qualified
-            // si el target ORM declaró su `@table("schema.name")`.
-            // Hoy lo guardamos como bare name + asumimos same-schema;
-            // cross-schema FK queda como deuda menor.
+            // v0.10.29 — Cross-schema FK. Si `references_schema`
+            // está, emite `REFERENCES "schema"."table"(col)` con
+            // schema qualifier. None = same-schema (paridad con
+            // convención `public` implícito de Postgres).
+            let target_ref = TableRef {
+                schema: fk.references_schema.clone(),
+                name: fk.references_table.clone(),
+            };
             format!(
                 "ALTER TABLE {} ADD CONSTRAINT {} FOREIGN KEY ({}) REFERENCES {} ({}){};",
                 quote_qualified(table),
                 quote_ident(&fk.name),
                 quote_ident(&fk.column),
-                quote_ident(&fk.references_table),
+                quote_qualified(&target_ref),
                 quote_ident(&fk.references_column),
                 on_delete,
             )
@@ -1567,6 +1701,16 @@ fn create_table_sql(t: &Table) -> String {
     if t.composite_pk.len() >= 2 {
         let cols: Vec<String> = t.composite_pk.iter().map(|c| quote_ident(c)).collect();
         lines.push(format!("    PRIMARY KEY ({})", cols.join(", ")));
+    }
+    // v0.10.29 — CHECK constraints table-level (`@check_constraint`).
+    // Cada uno emite `CONSTRAINT "name" CHECK (<expr>)` adentro del
+    // CREATE TABLE para que Postgres valide en INSERT/UPDATE.
+    for chk in &t.check_constraints {
+        lines.push(format!(
+            "    CONSTRAINT {} CHECK ({})",
+            quote_ident(&chk.name),
+            chk.expr
+        ));
     }
     // FKs NO inline acá — el diff las emite como ADD CONSTRAINT
     // separados para destrabar ciclos entre tablas nuevas.
@@ -2555,6 +2699,65 @@ pub fn format_inspection_json(
     serde_json::to_string_pretty(&report).map_err(|e| format!("serde_json: {e}"))
 }
 
+/// v0.10.29 — Lista los schemas user-defined detectados por la
+/// introspect, en orden alfabético determinístico, con sus tablas
+/// agrupadas. Cada tabla sin schema explícito se trata como
+/// `public`. Útil para auditar bases multi-schema sin tener que
+/// correr `fitz db inspect --schema X` por cada uno.
+fn collect_schemas_from_tables(schema: &Schema) -> Vec<&str> {
+    let mut set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for t in &schema.tables {
+        set.insert(t.schema.as_deref().unwrap_or("public"));
+    }
+    set.into_iter().collect()
+}
+
+/// v0.10.29 — Variante de [`format_inspection_text`] que itera
+/// TODOS los schemas detectados. Output: cada schema con su header
+/// + sub-vista. Si `table_filter` está, filtra el nombre en TODOS
+///   los schemas — un mismo nombre puede aparecer en varios.
+pub fn format_inspection_text_all_schemas(schema: &Schema, table_filter: Option<&str>) -> String {
+    let mut out = String::new();
+    let schemas = collect_schemas_from_tables(schema);
+    if schemas.is_empty() {
+        out.push_str("(sin tablas user-defined detectadas)\n");
+        return out;
+    }
+    out.push_str(&format!(
+        "Schemas detectados: {}\n",
+        schemas.to_vec().join(", ")
+    ));
+    for s in &schemas {
+        out.push_str("\n=== ");
+        let sub = format_inspection_text(schema, Some(s), table_filter);
+        out.push_str(sub.trim_start_matches("Schema: ").trim_end());
+        out.push_str("\n=== end\n");
+    }
+    out
+}
+
+/// v0.10.29 — Variante de [`format_inspection_json`] que emite un
+/// reporte JSON con los schemas user-defined agrupados. Shape:
+/// `{"schemas": [{"schema": "public", "tables": [...]}, ...]}`.
+/// Determinístico (alphabetic sort de schema names).
+pub fn format_inspection_json_all_schemas(
+    schema: &Schema,
+    table_filter: Option<&str>,
+) -> Result<String, String> {
+    let schemas = collect_schemas_from_tables(schema);
+    let mut reports = Vec::with_capacity(schemas.len());
+    for s in &schemas {
+        let single = format_inspection_json(schema, Some(s), table_filter)?;
+        let parsed: serde_json::Value =
+            serde_json::from_str(&single).map_err(|e| format!("serde_json reparse: {e}"))?;
+        reports.push(parsed);
+    }
+    let report = serde_json::json!({
+        "schemas": reports,
+    });
+    serde_json::to_string_pretty(&report).map_err(|e| format!("serde_json: {e}"))
+}
+
 // =================================================================
 // Tests unitarios — solo lo que no requiere DB real
 // =================================================================
@@ -2620,6 +2823,7 @@ mod tests {
             renamed_from: None,
             schema: None,
             composite_pk: vec![],
+            check_constraints: vec![],
         }
     }
 
@@ -2832,6 +3036,260 @@ mod tests {
         assert_eq!(dropped, vec!["users_email_idx"]);
     }
 
+    // v0.10.29 — Diff completo de indexes: detectar cambios en
+    // `using` / `where_clause` / `unique` / `columns` cuando los
+    // nombres matchean. Antes el diff era name-based puro y el
+    // user tenía que cambiar `name=` para forzar regeneración.
+
+    #[test]
+    fn diff_indexes_cambio_de_using_dispara_drop_create() {
+        // index nombre + cols iguales, solo cambia `using` btree→gin
+        // → debe regenerar (DROP + CREATE).
+        let mut current_users = table_users();
+        current_users.indexes.push(Index {
+            name: "users_meta_idx".to_string(),
+            columns: vec!["meta".to_string()],
+            unique: false,
+            where_clause: None,
+            using: None, // btree default
+        });
+        let mut target_users = table_users();
+        target_users.indexes.push(Index {
+            name: "users_meta_idx".to_string(),
+            columns: vec!["meta".to_string()],
+            unique: false,
+            where_clause: None,
+            using: Some("gin".to_string()),
+        });
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        let dropped: Vec<&str> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::DropIndex { index_name, .. } => Some(index_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let created: Vec<(&str, Option<&str>)> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::CreateIndex { index, .. } => {
+                    Some((index.name.as_str(), index.using.as_deref()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dropped, vec!["users_meta_idx"]);
+        assert_eq!(created, vec![("users_meta_idx", Some("gin"))]);
+    }
+
+    #[test]
+    fn diff_indexes_cambio_de_where_clause_dispara_drop_create() {
+        // Partial index: cambio del WHERE → regenerar.
+        let mut current_users = table_users();
+        current_users.indexes.push(Index {
+            name: "users_active_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            where_clause: Some("deleted_at IS NULL".to_string()),
+            using: None,
+        });
+        let mut target_users = table_users();
+        target_users.indexes.push(Index {
+            name: "users_active_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            where_clause: Some("disabled = false".to_string()),
+            using: None,
+        });
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        let dropped: Vec<&str> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::DropIndex { index_name, .. } => Some(index_name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let created_where: Vec<Option<&str>> = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::CreateIndex { index, .. } => Some(index.where_clause.as_deref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(dropped, vec!["users_active_email_idx"]);
+        assert_eq!(created_where, vec![Some("disabled = false")]);
+    }
+
+    #[test]
+    fn diff_indexes_canonicaliza_where_clause_para_evitar_regens_espurios() {
+        // Misma semántica del WHERE pero distinto formatting
+        // (whitespace + case + paréntesis triviales): NO debe
+        // disparar regeneración. Esto cierra el caso típico
+        // donde Postgres reintrospectea el clause con paréntesis
+        // o case distinto al declarado.
+        let mut current_users = table_users();
+        current_users.indexes.push(Index {
+            name: "users_active_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            where_clause: Some("(deleted_at IS NULL)".to_string()),
+            using: None,
+        });
+        let mut target_users = table_users();
+        target_users.indexes.push(Index {
+            name: "users_active_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            where_clause: Some("deleted_at IS NULL".to_string()),
+            using: None,
+        });
+        let current = Schema {
+            tables: vec![current_users],
+        };
+        let target = Schema {
+            tables: vec![target_users],
+        };
+        let changes = diff_schemas(&current, &target);
+        // El comparator NO normaliza paréntesis (solo whitespace
+        // + case). Esperamos regen — documentado como limitación
+        // honesta del MVP. Caso ideal sería parsing del WHERE con
+        // canonicalización formal, deuda menor.
+        // El caso "solo whitespace" SÍ se canonicaliza:
+        let mut current_b = table_users();
+        current_b.indexes.push(Index {
+            name: "users_b_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            where_clause: Some("deleted_at  IS  NULL".to_string()),
+            using: None,
+        });
+        let mut target_b = table_users();
+        target_b.indexes.push(Index {
+            name: "users_b_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            where_clause: Some("DELETED_AT IS NULL".to_string()),
+            using: None,
+        });
+        let changes_b = diff_schemas(
+            &Schema {
+                tables: vec![current_b],
+            },
+            &Schema {
+                tables: vec![target_b],
+            },
+        );
+        let regen_count = changes_b
+            .iter()
+            .filter(|c| matches!(c, Change::CreateIndex { .. } | Change::DropIndex { .. }))
+            .count();
+        assert_eq!(
+            regen_count, 0,
+            "esperaba 0 cambios (whitespace+case canonicalizado), fueron: {:?}",
+            changes_b
+        );
+        // El otro caso (paréntesis extra) sí dispara — documentado.
+        let regen_count_a = changes
+            .iter()
+            .filter(|c| matches!(c, Change::CreateIndex { .. } | Change::DropIndex { .. }))
+            .count();
+        assert!(regen_count_a >= 2);
+    }
+
+    #[test]
+    fn diff_indexes_cambio_de_unique_dispara_drop_create() {
+        // Cambio unique → regenerar.
+        let mut current_users = table_users();
+        current_users.indexes.push(Index {
+            name: "users_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            where_clause: None,
+            using: None,
+        });
+        let mut target_users = table_users();
+        target_users.indexes.push(Index {
+            name: "users_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: true,
+            where_clause: None,
+            using: None,
+        });
+        let changes = diff_schemas(
+            &Schema {
+                tables: vec![current_users],
+            },
+            &Schema {
+                tables: vec![target_users],
+            },
+        );
+        let drops = changes
+            .iter()
+            .filter(|c| matches!(c, Change::DropIndex { .. }))
+            .count();
+        let creates = changes
+            .iter()
+            .filter_map(|c| match c {
+                Change::CreateIndex { index, .. } => Some(index.unique),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(drops, 1);
+        assert_eq!(creates, vec![true]);
+    }
+
+    #[test]
+    fn diff_indexes_btree_vs_none_son_equivalentes() {
+        // `using: None` y `using: Some("btree")` deben tratarse
+        // como equivalentes (btree es el default Postgres). No
+        // debe disparar regen.
+        let mut current_users = table_users();
+        current_users.indexes.push(Index {
+            name: "users_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            where_clause: None,
+            using: None,
+        });
+        let mut target_users = table_users();
+        target_users.indexes.push(Index {
+            name: "users_email_idx".to_string(),
+            columns: vec!["email".to_string()],
+            unique: false,
+            where_clause: None,
+            using: Some("btree".to_string()),
+        });
+        let changes = diff_schemas(
+            &Schema {
+                tables: vec![current_users],
+            },
+            &Schema {
+                tables: vec![target_users],
+            },
+        );
+        let regen = changes
+            .iter()
+            .filter(|c| matches!(c, Change::CreateIndex { .. } | Change::DropIndex { .. }))
+            .count();
+        assert_eq!(
+            regen, 0,
+            "esperaba 0 cambios (btree == None), fueron: {:?}",
+            changes
+        );
+    }
+
     #[test]
     fn diff_add_foreign_key_emits_add_foreign_key() {
         let current = Schema {
@@ -2847,6 +3305,7 @@ mod tests {
             references_table: "orgs".to_string(),
             references_column: "id".to_string(),
             on_delete: Some("CASCADE".to_string()),
+            references_schema: None,
         });
         let target = Schema {
             tables: vec![target_users],
@@ -2883,6 +3342,7 @@ mod tests {
                     renamed_from: None,
                     schema: None,
                     composite_pk: vec![],
+                    check_constraints: vec![],
                 },
             ],
         };
@@ -2902,6 +3362,7 @@ mod tests {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3112,6 +3573,7 @@ type Plain {
             renamed_from: None,
             schema: None,
             composite_pk: vec![],
+            check_constraints: vec![],
         };
         let sql = changes_to_sql(&[Change::CreateTable(t)]);
         assert!(
@@ -3170,6 +3632,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3184,6 +3647,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3215,6 +3679,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3229,6 +3694,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3264,6 +3730,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3279,6 +3746,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3301,6 +3769,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3312,6 +3781,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3528,6 +3998,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3539,6 +4010,7 @@ type Plain {
                 renamed_from: Some("old_users".to_string()),
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3655,6 +4127,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3666,6 +4139,7 @@ type Plain {
                 renamed_from: Some("old_users".to_string()),
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3692,6 +4166,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let target = Schema {
@@ -3703,6 +4178,7 @@ type Plain {
                 renamed_from: Some("old_x".to_string()),
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let changes = diff_schemas(&current, &target);
@@ -3866,6 +4342,7 @@ type Plain {
                     renamed_from: None,
                     schema: None,
                     composite_pk: vec![],
+                    check_constraints: vec![],
                 },
                 Table {
                     name: "posts".to_string(),
@@ -3887,10 +4364,12 @@ type Plain {
                         references_table: "users".to_string(),
                         references_column: "id".to_string(),
                         on_delete: Some("CASCADE".to_string()),
+                        references_schema: None,
                     }],
                     renamed_from: None,
                     schema: None,
                     composite_pk: vec![],
+                    check_constraints: vec![],
                 },
             ],
         }
@@ -4044,6 +4523,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec!["user_id".to_string(), "group_id".to_string()],
+                check_constraints: vec![],
             }],
         };
         let text = format_inspection_text(&schema, None, None);
@@ -4158,6 +4638,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let text = format_inspection_text(&schema, None, None);
@@ -4184,6 +4665,7 @@ type Plain {
                 renamed_from: None,
                 schema: None,
                 composite_pk: vec![],
+                check_constraints: vec![],
             }],
         };
         let json_str = format_inspection_json(&schema, None, None).expect("json");
@@ -4206,6 +4688,7 @@ type Plain {
                     renamed_from: None,
                     schema: None,
                     composite_pk: vec![],
+                    check_constraints: vec![],
                 },
                 Table {
                     name: "tenants_data".to_string(),
@@ -4215,6 +4698,7 @@ type Plain {
                     renamed_from: None,
                     schema: Some("tenant_a".to_string()),
                     composite_pk: vec![],
+                    check_constraints: vec![],
                 },
             ],
         };
@@ -4238,6 +4722,207 @@ type Plain {
         assert!(
             !text2.contains("Table: users"),
             "users NO aparece bajo tenant_a: {text2}"
+        );
+    }
+
+    // v0.10.29 — Cross-schema FK emit
+
+    #[test]
+    fn add_foreign_key_emit_usa_references_schema_qualified() {
+        let fk = ForeignKey {
+            name: "tenants_user_id_fkey".to_string(),
+            column: "user_id".to_string(),
+            references_table: "users".to_string(),
+            references_column: "id".to_string(),
+            references_schema: Some("public".to_string()),
+            on_delete: Some("CASCADE".to_string()),
+        };
+        let change = Change::AddForeignKey {
+            table: TableRef {
+                schema: Some("tenants".to_string()),
+                name: "memberships".to_string(),
+            },
+            fk,
+        };
+        let sql = change_to_sql(&change);
+        assert!(
+            sql.contains("REFERENCES \"public\".\"users\" (\"id\")"),
+            "esperaba REFERENCES qualified, fue: {sql}"
+        );
+        assert!(
+            sql.contains("ALTER TABLE \"tenants\".\"memberships\""),
+            "current table qualified: {sql}"
+        );
+    }
+
+    #[test]
+    fn add_foreign_key_emit_sin_references_schema_es_compat_anterior() {
+        let fk = ForeignKey {
+            name: "posts_author_id_fkey".to_string(),
+            column: "author_id".to_string(),
+            references_table: "users".to_string(),
+            references_column: "id".to_string(),
+            references_schema: None,
+            on_delete: None,
+        };
+        let change = Change::AddForeignKey {
+            table: TableRef {
+                schema: None,
+                name: "posts".to_string(),
+            },
+            fk,
+        };
+        let sql = change_to_sql(&change);
+        // Sin schema qualifier — compat con tests previos.
+        assert!(
+            sql.contains("REFERENCES \"users\" (\"id\")"),
+            "esperaba REFERENCES sin qualifier: {sql}"
+        );
+        assert!(!sql.contains("\"public\""), "no debe sumar public: {sql}");
+    }
+
+    // v0.10.29 — @check_constraint emit a CREATE TABLE
+
+    #[test]
+    fn create_table_sql_incluye_check_constraints() {
+        let t = Table {
+            name: "users".to_string(),
+            columns: vec![
+                col("id", "bigint", false, true),
+                col("age", "integer", false, false),
+            ],
+            indexes: vec![],
+            foreign_keys: vec![],
+            renamed_from: None,
+            schema: None,
+            composite_pk: vec![],
+            check_constraints: vec![
+                CheckConstraint {
+                    name: "chk_users_age_positive".to_string(),
+                    expr: "age >= 0 AND age <= 150".to_string(),
+                },
+                CheckConstraint {
+                    name: "chk_users_status_valid".to_string(),
+                    expr: "status IN ('a', 'p')".to_string(),
+                },
+            ],
+        };
+        let sql = create_table_sql(&t);
+        assert!(
+            sql.contains("CONSTRAINT \"chk_users_age_positive\" CHECK (age >= 0 AND age <= 150)"),
+            "esperaba CHECK 1, fue: {sql}"
+        );
+        assert!(
+            sql.contains("CONSTRAINT \"chk_users_status_valid\" CHECK (status IN ('a', 'p'))"),
+            "esperaba CHECK 2, fue: {sql}"
+        );
+    }
+
+    // v0.10.29 — `fitz db inspect --all-schemas`
+
+    fn multi_schema_fixture() -> Schema {
+        Schema {
+            tables: vec![
+                Table {
+                    name: "users".to_string(),
+                    columns: vec![col("id", "bigint", false, true)],
+                    indexes: vec![],
+                    foreign_keys: vec![],
+                    renamed_from: None,
+                    schema: None,
+                    composite_pk: vec![],
+                    check_constraints: vec![],
+                },
+                Table {
+                    name: "tenants".to_string(),
+                    columns: vec![col("id", "bigint", false, true)],
+                    indexes: vec![],
+                    foreign_keys: vec![],
+                    renamed_from: None,
+                    schema: Some("tenant_a".to_string()),
+                    composite_pk: vec![],
+                    check_constraints: vec![],
+                },
+                Table {
+                    name: "audit_log".to_string(),
+                    columns: vec![col("id", "bigint", false, true)],
+                    indexes: vec![],
+                    foreign_keys: vec![],
+                    renamed_from: None,
+                    schema: Some("ops".to_string()),
+                    composite_pk: vec![],
+                    check_constraints: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn format_inspection_text_all_schemas_muestra_todos_los_schemas() {
+        let s = multi_schema_fixture();
+        let text = format_inspection_text_all_schemas(&s, None);
+        // Header con los schemas detectados (orden alfabético).
+        assert!(
+            text.starts_with("Schemas detectados: ops, public, tenant_a\n"),
+            "header: {text}"
+        );
+        // Cada schema aparece como sección.
+        assert!(text.contains("public"), "missing public section: {text}");
+        assert!(text.contains("ops"), "missing ops section: {text}");
+        assert!(
+            text.contains("tenant_a"),
+            "missing tenant_a section: {text}"
+        );
+        // Las tablas de cada schema aparecen.
+        assert!(text.contains("Table: users"), "missing users: {text}");
+        assert!(text.contains("Table: tenants"), "missing tenants: {text}");
+        assert!(
+            text.contains("Table: audit_log"),
+            "missing audit_log: {text}"
+        );
+    }
+
+    #[test]
+    fn format_inspection_json_all_schemas_emite_schemas_array() {
+        let s = multi_schema_fixture();
+        let json_str = format_inspection_json_all_schemas(&s, None).expect("json OK");
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let schemas = v["schemas"].as_array().expect("schemas array");
+        // 3 schemas: ops, public, tenant_a (orden alfabético).
+        assert_eq!(schemas.len(), 3);
+        assert_eq!(schemas[0]["schema"], "ops");
+        assert_eq!(schemas[1]["schema"], "public");
+        assert_eq!(schemas[2]["schema"], "tenant_a");
+        // Cada uno con su tabla.
+        assert_eq!(schemas[0]["tables"][0]["name"], "audit_log");
+        assert_eq!(schemas[1]["tables"][0]["name"], "users");
+        assert_eq!(schemas[2]["tables"][0]["name"], "tenants");
+    }
+
+    #[test]
+    fn format_inspection_text_all_schemas_con_table_filter_aplica_global() {
+        // `--table users` con `--all-schemas` debe mostrar solo
+        // las tablas con ese nombre en CUALQUIER schema.
+        let s = multi_schema_fixture();
+        let text = format_inspection_text_all_schemas(&s, Some("users"));
+        assert!(text.contains("Table: users"), "users debe aparecer: {text}");
+        assert!(
+            !text.contains("Table: tenants"),
+            "tenants no debe aparecer: {text}"
+        );
+        assert!(
+            !text.contains("Table: audit_log"),
+            "audit_log no debe aparecer: {text}"
+        );
+    }
+
+    #[test]
+    fn format_inspection_text_all_schemas_sin_tablas_emite_mensaje_vacio() {
+        let s = Schema { tables: vec![] };
+        let text = format_inspection_text_all_schemas(&s, None);
+        assert!(
+            text.contains("sin tablas user-defined detectadas"),
+            "esperaba mensaje vacío, fue: {text}"
         );
     }
 }

@@ -1846,6 +1846,113 @@ fn orm_jsonb_operators_in_where_paridad_codegen_e2e() {
 }
 
 // =============================================================
+// v0.10.29 — JSON path operators en .where(...).
+//
+// has_path / path_text / path_int / path_float / path_bool
+// sobre fields jsonb (Map<Str, ...>) mapeados a operadores
+// nativos Postgres `#>` / `#>>` con cast tipado al tipo Fitz
+// pedido. Cubre paths anidados que .get/has_key single-level
+// no podían expresar. Antes el user tenía que bajar a
+// `db.query(...)` crudo para queries tipo `data #>> '{a,b}'`.
+// =============================================================
+
+#[test]
+#[ignore]
+fn orm_jsonb_path_operators_in_where_paridad_codegen_e2e() {
+    let url = pg_url();
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE IF EXISTS fitz_orm_v01029_paths_test", &[])
+            .await;
+        seed.exec(
+            "CREATE TABLE fitz_orm_v01029_paths_test (id bigint PRIMARY KEY, data jsonb)",
+            &[],
+        )
+        .await
+        .unwrap();
+        // Seed via SQL crudo con literales jsonb. Nested maps en
+        // Map literal del codegen son tricky (deuda menor), así
+        // que mantenemos el setup con seed.exec puro — el foco
+        // del test es .where(...) con path methods, no INSERT
+        // nested.
+        seed.exec(
+            "INSERT INTO fitz_orm_v01029_paths_test (id, data) VALUES \
+             (1, '{\"user\": {\"id\": 5, \"name\": \"ada\"},   \"score\": 0.5, \"active\": true}'::jsonb), \
+             (2, '{\"user\": {\"id\": 7, \"name\": \"alan\"},  \"score\": 1.5, \"active\": false}'::jsonb), \
+             (3, '{\"user\": {\"id\": 5, \"name\": \"grace\"}, \"score\": 2.5}'::jsonb)",
+            &[],
+        )
+        .await
+        .unwrap();
+        seed.close().await.unwrap();
+    });
+
+    let src = format!(
+        "@table(\"fitz_orm_v01029_paths_test\") type Event {{\n  \
+             @primary id: Int = 0\n  \
+             data: Map<Str, Any>\n\
+         }}\n\
+         async fn run() -> Result<Str> {{\n  \
+             let db = db.connect(\"{}\").await?\n  \
+             // .has_path([\"user\", \"id\"]) → 3 (todos tienen el path)\n  \
+             let with_uid = Event.where(fn(e) => e.data.has_path([\"user\", \"id\"])).all(db).await?\n  \
+             // .path_int([\"user\", \"id\"]) == 5 → 2 (rows 1 + 3)\n  \
+             let uid_5 = Event.where(fn(e) => e.data.path_int([\"user\", \"id\"]) == 5).all(db).await?\n  \
+             // .path_text([\"user\", \"name\"]) == \"ada\" → 1\n  \
+             let name_ada = Event.where(fn(e) => e.data.path_text([\"user\", \"name\"]) == \"ada\").all(db).await?\n  \
+             // .path_float([\"score\"]) > 1.0 → 2 (rows 2 + 3)\n  \
+             let score_hi = Event.where(fn(e) => e.data.path_float([\"score\"]) > 1.0).all(db).await?\n  \
+             // .path_bool([\"active\"]) → 1 (row 1: active=true; row 2 false rechaza, row 3 NULL rechaza)\n  \
+             let active = Event.where(fn(e) => e.data.path_bool([\"active\"])).all(db).await?\n  \
+             let n1 = len(with_uid)\n  \
+             let n2 = len(uid_5)\n  \
+             let n3 = len(name_ada)\n  \
+             let n4 = len(score_hi)\n  \
+             let n5 = len(active)\n  \
+             return Ok(\"has_path={{n1}} path_int={{n2}} path_text={{n3}} path_float={{n4}} path_bool={{n5}}\")\n\
+         }}\n\
+         async fn driver() -> Str {{\n  \
+             return match run().await {{\n    \
+                 Ok(s) => s\n    \
+                 Err(e) => \"err: {{e}}\"\n  \
+             }}\n\
+         }}\n\
+         print(driver().await)\n",
+        url
+    );
+
+    run_paridad_program(
+        &src,
+        "orm_jsonb_path_operators_in_where_codegen",
+        |stdout| {
+            assert!(
+                stdout.contains("has_path=3")
+                    && stdout.contains("path_int=2")
+                    && stdout.contains("path_text=1")
+                    && stdout.contains("path_float=2")
+                    && stdout.contains("path_bool=1"),
+                "esperaba `has_path=3 path_int=2 path_text=1 path_float=2 path_bool=1`, fue: {}",
+                stdout
+            );
+        },
+    );
+
+    rt.block_on(async {
+        let seed = connect_url(&url).await.unwrap();
+        let _ = seed
+            .exec("DROP TABLE fitz_orm_v01029_paths_test", &[])
+            .await;
+        seed.close().await.unwrap();
+    });
+}
+
+// =============================================================
 // Fase 10.b.14 — Paridad GROUP BY + aggregate (Aggregated<Row>)
 //
 // `.group_by(...).count/sum/avg/min/max(...).await?` ahora compila a
