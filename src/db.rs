@@ -2831,6 +2831,122 @@ impl std::fmt::Debug for DbConnHandle {
     }
 }
 
+// =====================================================================
+// v0.10.28 (Tier S, sub-paso 3) — FITZ_DB_LOG: query logging opt-in
+// =====================================================================
+
+/// Mode del logging del driver. Activado por la env var `FITZ_DB_LOG`:
+///
+/// - vacío / `=0` / no seteado → `Off` (default, zero overhead).
+/// - `=1` / `=true` → `Simple` (SQL + elapsed, sin params).
+/// - `=verbose` → `Verbose` (SQL + elapsed + params, truncated a
+///   80 chars cada uno para no inundar el log con BLOBs grandes).
+///
+/// Cualquier otro valor cae a `Off` (silencioso, no error — para
+/// que setear `FITZ_DB_LOG=true,verbose` accidentalmente no rompa
+/// el programa).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DbLogMode {
+    Off,
+    Simple,
+    Verbose,
+}
+
+/// Lee `FITZ_DB_LOG` una sola vez por proceso. Cambios mid-run de
+/// la env var NO se reflejan — el mode queda fijado al primer
+/// acceso (lazy). Compatible con `fitz run`, `fitz build` (el
+/// binario producido reusa el mismo `db.rs` via `pub use`), y
+/// tests (cada proceso de test relee la env var en su LazyLock).
+pub static DB_LOG_MODE: std::sync::LazyLock<DbLogMode> =
+    std::sync::LazyLock::new(|| match std::env::var("FITZ_DB_LOG").as_deref() {
+        Ok("verbose") => DbLogMode::Verbose,
+        Ok("1" | "true") => DbLogMode::Simple,
+        _ => DbLogMode::Off,
+    });
+
+/// Trunca un string a `max` chars (chars, no bytes — UTF-8 safe).
+/// Si el original era más largo, sufija `…` para indicarlo.
+fn truncate_for_log(s: &str, max: usize) -> String {
+    let mut chars = s.chars();
+    let prefix: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
+/// Formatea un solo `PgValue` para el log verbose. Strings y bytes
+/// se truncan a 80 chars (`MAX_LOG_VALUE`); el resto va sin
+/// truncar (Int/Float/Bool/Null/Array son cortos por naturaleza).
+const MAX_LOG_VALUE: usize = 80;
+
+fn format_log_value(v: &PgValue) -> String {
+    match v {
+        PgValue::Null => "NULL".to_string(),
+        PgValue::Int(n) => n.to_string(),
+        PgValue::Float(x) => x.to_string(),
+        PgValue::Bool(b) => b.to_string(),
+        PgValue::Text(s) => format!("\"{}\"", truncate_for_log(s, MAX_LOG_VALUE)),
+        PgValue::Bytes(b) => format!("<{} bytes>", b.len()),
+        PgValue::Array { values, .. } => {
+            let inner: Vec<String> = values.iter().take(8).map(format_log_value).collect();
+            let suffix = if values.len() > 8 { ", …" } else { "" };
+            format!("[{}{}]", inner.join(", "), suffix)
+        }
+    }
+}
+
+/// Formatea una línea de log lista para emitir a stderr. Pure
+/// function para que el unit test pueda asertir el output sin
+/// tocar stderr.
+pub fn format_db_log_line(
+    elapsed: std::time::Duration,
+    sql: &str,
+    args: &[PgValue],
+    mode: DbLogMode,
+) -> String {
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    // SQL one-line: colapso de \n / \r / runs de whitespace para
+    // que queries multi-línea queden legibles en una sola línea
+    // del log (el formato canónico de uvicorn/rails también así).
+    let sql_oneline = sql
+        .replace(['\n', '\r'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    match mode {
+        DbLogMode::Off => String::new(),
+        DbLogMode::Simple => format!("[fitz-db {ms:.1}ms] {sql_oneline}"),
+        DbLogMode::Verbose => {
+            if args.is_empty() {
+                format!("[fitz-db {ms:.1}ms verbose] {sql_oneline}")
+            } else {
+                let params: Vec<String> = args
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| format!("${}={}", i + 1, format_log_value(v)))
+                    .collect();
+                format!(
+                    "[fitz-db {ms:.1}ms verbose] {sql_oneline} params=[{}]",
+                    params.join(", ")
+                )
+            }
+        }
+    }
+}
+
+/// Emite el log line a stderr si el mode es activo. Cheap cuando
+/// `DbLogMode::Off` — un single load + match, sin allocations.
+fn log_db_query(elapsed: std::time::Duration, sql: &str, args: &[PgValue]) {
+    let mode = *DB_LOG_MODE;
+    if matches!(mode, DbLogMode::Off) {
+        return;
+    }
+    let line = format_db_log_line(elapsed, sql, args, mode);
+    eprintln!("{line}");
+}
+
 impl DbConnHandle {
     /// Construye un handle a partir de una conexión inicial. El
     /// pool empieza con esa conn en `idle` y crece on-demand
@@ -2874,14 +2990,28 @@ impl DbConnHandle {
     /// ejecuta, la devuelve al pool al terminar (vía Drop del
     /// PooledConn). Si el pool está cerrado o no puede abrir
     /// conn nueva, error claro.
+    ///
+    /// v0.10.28 — Si `FITZ_DB_LOG` está activo, emite a stderr
+    /// `[fitz-db Nms] <sql>` (Simple) o además params (Verbose)
+    /// post-ejecución, incluyendo el tiempo de adquisición de la
+    /// conn del pool. Loguea también las queries que fallan (el
+    /// log incluye SQL + tiempo; el error sale por el `?`
+    /// caller-side normal). En `Off` (default) el overhead es un
+    /// single atomic load.
     pub async fn query(&self, sql: &str, args: &[PgValue]) -> DbResult<QueryResult> {
-        let mut pooled = self.pool.acquire().await?;
-        let conn = pooled.as_mut();
-        if args.is_empty() {
-            conn.simple_query(sql).await
-        } else {
-            conn.extended_query(sql, args).await
+        let start = std::time::Instant::now();
+        let result = async {
+            let mut pooled = self.pool.acquire().await?;
+            let conn = pooled.as_mut();
+            if args.is_empty() {
+                conn.simple_query(sql).await
+            } else {
+                conn.extended_query(sql, args).await
+            }
         }
+        .await;
+        log_db_query(start.elapsed(), sql, args);
+        result
     }
 
     /// Ejecuta un statement que no espera rows (INSERT/UPDATE/
@@ -4105,5 +4235,123 @@ mod tests {
         // Segunda close — tampoco error.
         handle.close().await.unwrap();
         assert!(handle.is_closed().await);
+    }
+
+    // ================================================================
+    // v0.10.28 — FITZ_DB_LOG formatter unit tests
+    // ================================================================
+
+    #[test]
+    fn format_db_log_line_off_devuelve_string_vacio() {
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(5),
+            "SELECT 1",
+            &[],
+            DbLogMode::Off,
+        );
+        assert_eq!(line, "");
+    }
+
+    #[test]
+    fn format_db_log_line_simple_incluye_ms_y_sql() {
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(12),
+            "SELECT id FROM users WHERE id = $1",
+            &[PgValue::Int(42)],
+            DbLogMode::Simple,
+        );
+        assert!(line.starts_with("[fitz-db "), "{line}");
+        assert!(line.contains("12.0ms"), "{line}");
+        assert!(
+            line.contains("SELECT id FROM users WHERE id = $1"),
+            "{line}"
+        );
+        // Simple NO loguea params.
+        assert!(
+            !line.contains("params="),
+            "Simple no debe loguear params: {line}"
+        );
+        assert!(
+            !line.contains("42"),
+            "Simple no debe filtrar valores: {line}"
+        );
+    }
+
+    #[test]
+    fn format_db_log_line_verbose_incluye_params() {
+        let line = format_db_log_line(
+            std::time::Duration::from_micros(4100), // ~4.1ms
+            "INSERT INTO users (name, age) VALUES ($1, $2)",
+            &[PgValue::Text("ada".into()), PgValue::Int(30)],
+            DbLogMode::Verbose,
+        );
+        assert!(line.contains("verbose"), "{line}");
+        assert!(line.contains("params=["), "{line}");
+        assert!(line.contains("$1=\"ada\""), "{line}");
+        assert!(line.contains("$2=30"), "{line}");
+    }
+
+    #[test]
+    fn format_db_log_line_verbose_trunca_strings_largos() {
+        let huge = "x".repeat(200);
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(1),
+            "INSERT INTO blobs (data) VALUES ($1)",
+            &[PgValue::Text(huge)],
+            DbLogMode::Verbose,
+        );
+        // El string original tiene 200 chars; truncado a 80 + `…`.
+        // El log no debe contener la run completa de 200 'x'.
+        assert!(line.contains("…"), "debería truncar: {line}");
+        assert!(
+            !line.contains(&"x".repeat(200)),
+            "no debe filtrar full: {line}"
+        );
+    }
+
+    #[test]
+    fn format_db_log_line_colapsa_multilinea_sql() {
+        let sql = "SELECT\n  id,\n  name\nFROM users\nWHERE id = $1";
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(1),
+            sql,
+            &[PgValue::Int(1)],
+            DbLogMode::Simple,
+        );
+        // Multi-line debe quedar en una sola línea (whitespace
+        // colapsado).
+        assert!(!line.contains('\n'), "log debe ser one-line: {line}");
+        assert!(
+            line.contains("SELECT id, name FROM users WHERE id = $1"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn format_db_log_line_verbose_sin_args_no_emite_params() {
+        let line = format_db_log_line(
+            std::time::Duration::from_millis(1),
+            "BEGIN",
+            &[],
+            DbLogMode::Verbose,
+        );
+        assert!(line.contains("verbose"), "{line}");
+        assert!(line.contains("BEGIN"), "{line}");
+        // Sin args, no debería aparecer la sección params.
+        assert!(
+            !line.contains("params="),
+            "sin args no debe haber sección params: {line}"
+        );
+    }
+
+    #[test]
+    fn truncate_for_log_utf8_safe() {
+        // emoji = 4 bytes pero 1 char; el truncate cuenta chars,
+        // no bytes — no debe panic.
+        let s = "🦀".repeat(50);
+        let t = truncate_for_log(&s, 10);
+        // 10 emojis + '…' = 11 chars.
+        assert_eq!(t.chars().count(), 11);
+        assert!(t.ends_with('…'));
     }
 }

@@ -100,6 +100,15 @@ pub struct Index {
     /// Postgres reporta (los espacios/canonical form pueden diferir
     /// — best-effort match, fallback regenerar el índice).
     pub where_clause: Option<String>,
+    /// v0.10.28 — Access method (`USING <method>`). `None` = btree
+    /// (default Postgres, no se emite `USING` redundante).
+    /// `Some("gin"|"gist"|"brin"|"hash"|"spgist")` para overrides.
+    /// La introspect lee `pg_am.amname`; el target schema lo carga
+    /// desde `IndexSpec.using`. Diff name-based (igual que
+    /// where_clause) — cambiar SOLO el method no dispara DROP/CREATE;
+    /// renombrá el índice para forzar regen (deuda menor — sigue
+    /// pattern de v0.10.27 con where_clause).
+    pub using: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,12 +323,16 @@ async fn introspect_indexes(
     schema: &str,
     table: &str,
 ) -> DbResult<Vec<Index>> {
-    // v0.10.27 (F3) — extendemos la query introspectiva para incluir
-    // `pg_get_expr(i.indpred, i.indrelid)` que devuelve la WHERE
-    // clause de partial indexes (`NULL` para full indexes).
+    // v0.10.27 (F3) — `pg_get_expr(i.indpred, i.indrelid)` devuelve la
+    // WHERE clause de partial indexes (`NULL` para full).
+    // v0.10.28 — `am.amname` devuelve el access method del índice
+    // (`btree`/`gin`/`gist`/`hash`/`brin`/`spgist`). Mapeo a `using`:
+    // `"btree"` → `None` (default, no se vuelve a emitir el `USING
+    // btree` redundante); resto → `Some(lowercase)`.
     let sql = "SELECT \
                    c.relname AS index_name, \
                    i.indisunique AS is_unique, \
+                   am.amname AS access_method, \
                    array_to_string( \
                        ARRAY( \
                            SELECT a.attname \
@@ -330,6 +343,7 @@ async fn introspect_indexes(
                    pg_get_expr(i.indpred, i.indrelid) AS where_clause \
                FROM pg_index i \
                JOIN pg_class c ON c.oid = i.indexrelid \
+               JOIN pg_am am ON am.oid = c.relam \
                WHERE i.indrelid = ($1::regclass) \
                  AND i.indisprimary = false";
     let qr = conn
@@ -346,11 +360,16 @@ async fn introspect_indexes(
             Some(PgValue::Text(s)) if !s.is_empty() => Some(s.clone()),
             _ => None,
         };
+        let using = match extract_string(row, "access_method").ok() {
+            Some(m) if !m.eq_ignore_ascii_case("btree") => Some(m.to_ascii_lowercase()),
+            _ => None,
+        };
         indexes.push(Index {
             name,
             columns: cols,
             unique: is_unique,
             where_clause,
+            using,
         });
     }
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -551,6 +570,7 @@ fn build_table_from_type(
                     columns: vec![sql_name.clone()],
                     unique: true,
                     where_clause: None,
+                    using: None,
                 });
             }
             if cm.indexed {
@@ -559,6 +579,7 @@ fn build_table_from_type(
                     columns: vec![sql_name.clone()],
                     unique: false,
                     where_clause: None,
+                    using: None,
                 });
             }
         }
@@ -640,6 +661,7 @@ fn build_table_from_type(
             columns: idx.columns.clone(),
             unique: idx.unique,
             where_clause: idx.where_clause.clone(),
+            using: idx.using.clone(),
         });
     }
 
@@ -1419,6 +1441,12 @@ fn change_to_sql(change: &Change) -> String {
         Change::CreateIndex { table, index } => {
             let unique = if index.unique { "UNIQUE " } else { "" };
             let cols: Vec<String> = index.columns.iter().map(|c| quote_ident(c)).collect();
+            // v0.10.28 — method override (USING gin/gist/brin/etc.).
+            // `None` = btree default Postgres, no se emite USING.
+            let using_clause = match &index.using {
+                Some(m) => format!(" USING {}", m),
+                None => String::new(),
+            };
             // v0.10.27 (F3) — partial index: append `WHERE <clause>`.
             // El user pasa la SQL clause RAW (sin `WHERE`); Postgres
             // valida el predicate al CREATE INDEX. Si la clause
@@ -1429,10 +1457,11 @@ fn change_to_sql(change: &Change) -> String {
                 None => String::new(),
             };
             format!(
-                "CREATE {}INDEX {} ON {} ({}){};",
+                "CREATE {}INDEX {} ON {}{} ({}){};",
                 unique,
                 quote_ident(&index.name),
                 quote_qualified(table),
+                using_clause,
                 cols.join(", "),
                 where_suffix,
             )
@@ -2251,6 +2280,282 @@ fn canonicalize_sql_type(data_type: &str, udt_name: &str) -> String {
 }
 
 // =================================================================
+// v0.10.28 — `fitz db inspect`: formatters de schema introspectado
+// =================================================================
+
+/// Filtra las tables del schema según `schema_filter` (default
+/// `"public"` si `None`) y `table_filter` opcional. Devuelve un
+/// nuevo vec con las tables que matchean; orden preservado del
+/// input (ya viene ordenado por `(schema, name)` desde
+/// `introspect_schema`).
+fn filter_inspect_tables<'a>(
+    schema: &'a Schema,
+    schema_filter: Option<&str>,
+    table_filter: Option<&str>,
+) -> Vec<&'a Table> {
+    let want_schema = schema_filter.unwrap_or("public");
+    schema
+        .tables
+        .iter()
+        .filter(|t| {
+            let s = t.schema.as_deref().unwrap_or("public");
+            s == want_schema
+        })
+        .filter(|t| match table_filter {
+            Some(name) => t.name == name,
+            None => true,
+        })
+        .collect()
+}
+
+/// Vista texto plano legible del schema introspectado. Pensada
+/// para humanos en terminal — alineación tabular de columns,
+/// PK/FK/indexes anotados, schema-qualified si el filter pide
+/// algo distinto a `public`.
+pub fn format_inspection_text(
+    schema: &Schema,
+    schema_filter: Option<&str>,
+    table_filter: Option<&str>,
+) -> String {
+    let want_schema = schema_filter.unwrap_or("public");
+    let filtered = filter_inspect_tables(schema, schema_filter, table_filter);
+
+    let mut out = String::new();
+    out.push_str(&format!("Schema: {want_schema}\n"));
+
+    if filtered.is_empty() {
+        match table_filter {
+            Some(name) => {
+                out.push_str(&format!(
+                    "\n  (no se encontró la tabla `{name}` en el schema `{want_schema}`)\n"
+                ));
+            }
+            None => {
+                out.push_str(&format!(
+                    "\n  (sin tablas user-defined en el schema `{want_schema}`)\n"
+                ));
+            }
+        }
+        return out;
+    }
+
+    for t in &filtered {
+        out.push('\n');
+        out.push_str(&format!(
+            "Table: {} ({} col{})\n",
+            t.name,
+            t.columns.len(),
+            if t.columns.len() == 1 { "" } else { "s" }
+        ));
+
+        // Ancho dinámico para alinear nombre + tipo en columna.
+        let max_name = t.columns.iter().map(|c| c.name.len()).max().unwrap_or(0);
+        let max_type = t
+            .columns
+            .iter()
+            .map(|c| c.sql_type.len())
+            .max()
+            .unwrap_or(0);
+        let single_pk_col: Option<&str> = if t.composite_pk.is_empty() {
+            t.columns
+                .iter()
+                .find(|c| c.is_primary)
+                .map(|c| c.name.as_str())
+        } else {
+            None
+        };
+
+        for c in &t.columns {
+            let nullable_tag = if c.nullable { "NULL    " } else { "NOT NULL" };
+            let mut tags: Vec<String> = Vec::new();
+            if let Some(pk) = single_pk_col {
+                if pk == c.name {
+                    tags.push("PK".to_string());
+                }
+            }
+            if let Some(d) = &c.default {
+                tags.push(format!("default {d}"));
+            }
+            let suffix = if tags.is_empty() {
+                String::new()
+            } else {
+                format!("  {}", tags.join("  "))
+            };
+            out.push_str(&format!(
+                "  {name:<name_w$}  {ty:<ty_w$}  {nul}{suffix}\n",
+                name = c.name,
+                name_w = max_name,
+                ty = c.sql_type,
+                ty_w = max_type,
+                nul = nullable_tag,
+                suffix = suffix,
+            ));
+        }
+
+        if !t.composite_pk.is_empty() {
+            out.push_str(&format!("  Primary key: ({})\n", t.composite_pk.join(", ")));
+        }
+
+        if !t.indexes.is_empty() {
+            out.push_str("  Indexes:\n");
+            for idx in &t.indexes {
+                let kind = if idx.unique { "UNIQUE " } else { "" };
+                let using_label = idx
+                    .using
+                    .as_ref()
+                    .map(|u| format!("  USING {u}"))
+                    .unwrap_or_default();
+                let where_suffix = idx
+                    .where_clause
+                    .as_ref()
+                    .map(|w| format!("  WHERE {w}"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "    {name}  {kind}({cols}){using_label}{where_suffix}\n",
+                    name = idx.name,
+                    kind = kind,
+                    cols = idx.columns.join(", "),
+                    using_label = using_label,
+                    where_suffix = where_suffix,
+                ));
+            }
+        }
+
+        if !t.foreign_keys.is_empty() {
+            out.push_str("  Foreign keys:\n");
+            for fk in &t.foreign_keys {
+                let on_delete = fk
+                    .on_delete
+                    .as_ref()
+                    .map(|d| format!(" ON DELETE {d}"))
+                    .unwrap_or_default();
+                out.push_str(&format!(
+                    "    {name}: {col} -> {rt}({rc}){on_delete}\n",
+                    name = fk.name,
+                    col = fk.column,
+                    rt = fk.references_table,
+                    rc = fk.references_column,
+                    on_delete = on_delete,
+                ));
+            }
+        }
+    }
+
+    out
+}
+
+/// JSON machine-readable del schema introspectado. Shape lockeada
+/// para parsers externos:
+///
+/// ```json
+/// {
+///   "schema": "public",
+///   "tables": [
+///     {
+///       "name": "users",
+///       "schema": "public",
+///       "columns": [
+///         { "name": "id", "sql_type": "bigint", "nullable": false,
+///           "default": null, "is_primary": true }
+///       ],
+///       "primary_key": ["id"],
+///       "indexes": [
+///         { "name": "idx_users_email", "columns": ["email"],
+///           "unique": true, "where_clause": null }
+///       ],
+///       "foreign_keys": [
+///         { "name": "fk_posts_author", "column": "author_id",
+///           "references_table": "users", "references_column": "id",
+///           "on_delete": "CASCADE" }
+///       ]
+///     }
+///   ]
+/// }
+/// ```
+///
+/// `serde_json` con feature `preserve_order` garantiza orden estable
+/// de fields. Tablas y columnas vienen en el orden que devolvió la
+/// introspect (sort canónico de `(schema, name)` y orden de
+/// declaración respectivamente).
+pub fn format_inspection_json(
+    schema: &Schema,
+    schema_filter: Option<&str>,
+    table_filter: Option<&str>,
+) -> Result<String, String> {
+    let want_schema = schema_filter.unwrap_or("public");
+    let filtered = filter_inspect_tables(schema, schema_filter, table_filter);
+
+    let tables: Vec<serde_json::Value> = filtered
+        .iter()
+        .map(|t| {
+            let primary_key: Vec<&str> = if !t.composite_pk.is_empty() {
+                t.composite_pk.iter().map(|s| s.as_str()).collect()
+            } else {
+                t.columns
+                    .iter()
+                    .filter(|c| c.is_primary)
+                    .map(|c| c.name.as_str())
+                    .collect()
+            };
+            let columns: Vec<serde_json::Value> = t
+                .columns
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "name": c.name,
+                        "sql_type": c.sql_type,
+                        "nullable": c.nullable,
+                        "default": c.default,
+                        "is_primary": c.is_primary,
+                    })
+                })
+                .collect();
+            let indexes: Vec<serde_json::Value> = t
+                .indexes
+                .iter()
+                .map(|i| {
+                    serde_json::json!({
+                        "name": i.name,
+                        "columns": i.columns,
+                        "unique": i.unique,
+                        "where_clause": i.where_clause,
+                        "using": i.using,
+                    })
+                })
+                .collect();
+            let foreign_keys: Vec<serde_json::Value> = t
+                .foreign_keys
+                .iter()
+                .map(|fk| {
+                    serde_json::json!({
+                        "name": fk.name,
+                        "column": fk.column,
+                        "references_table": fk.references_table,
+                        "references_column": fk.references_column,
+                        "on_delete": fk.on_delete,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "name": t.name,
+                "schema": t.schema.as_deref().unwrap_or("public"),
+                "columns": columns,
+                "primary_key": primary_key,
+                "indexes": indexes,
+                "foreign_keys": foreign_keys,
+            })
+        })
+        .collect();
+
+    let report = serde_json::json!({
+        "schema": want_schema,
+        "tables": tables,
+    });
+
+    serde_json::to_string_pretty(&report).map_err(|e| format!("serde_json: {e}"))
+}
+
+// =================================================================
 // Tests unitarios — solo lo que no requiere DB real
 // =================================================================
 
@@ -2479,6 +2784,7 @@ mod tests {
             columns: vec!["email".to_string()],
             unique: true,
             where_clause: None,
+            using: None,
         });
         let target = Schema {
             tables: vec![target_users],
@@ -2504,6 +2810,7 @@ mod tests {
             columns: vec!["email".to_string()],
             unique: false,
             where_clause: None,
+            using: None,
         });
         let current = Schema {
             tables: vec![current_users],
@@ -3529,5 +3836,408 @@ type Plain {
     fn history_signature_compila() {
         // El símbolo `history` existe y devuelve el tipo esperado.
         let _f: fn(_, _) -> _ = history;
+    }
+
+    // ============================================================
+    // v0.10.28 — formatters de `fitz db inspect`
+    // ============================================================
+
+    /// Schema mock con 2 tables: `users` (PK + UNIQUE partial index)
+    /// y `posts` (FK ON DELETE CASCADE). Cubre la mayoría de casos
+    /// que el formatter tiene que mostrar.
+    fn inspect_schema_fixture() -> Schema {
+        Schema {
+            tables: vec![
+                Table {
+                    name: "users".to_string(),
+                    columns: vec![
+                        col("id", "bigint", false, true),
+                        col("email", "text", false, false),
+                        col("deleted_at", "timestamp with time zone", true, false),
+                    ],
+                    indexes: vec![Index {
+                        name: "idx_users_email_active".to_string(),
+                        columns: vec!["email".to_string()],
+                        unique: true,
+                        where_clause: Some("(deleted_at IS NULL)".to_string()),
+                        using: None,
+                    }],
+                    foreign_keys: vec![],
+                    renamed_from: None,
+                    schema: None,
+                    composite_pk: vec![],
+                },
+                Table {
+                    name: "posts".to_string(),
+                    columns: vec![
+                        col("id", "bigint", false, true),
+                        col("author_id", "bigint", false, false),
+                        col("title", "text", false, false),
+                    ],
+                    indexes: vec![Index {
+                        name: "idx_posts_author".to_string(),
+                        columns: vec!["author_id".to_string()],
+                        unique: false,
+                        where_clause: None,
+                        using: None,
+                    }],
+                    foreign_keys: vec![ForeignKey {
+                        name: "fk_posts_author".to_string(),
+                        column: "author_id".to_string(),
+                        references_table: "users".to_string(),
+                        references_column: "id".to_string(),
+                        on_delete: Some("CASCADE".to_string()),
+                    }],
+                    renamed_from: None,
+                    schema: None,
+                    composite_pk: vec![],
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn format_inspection_text_header_y_tables_completas() {
+        let s = inspect_schema_fixture();
+        let text = format_inspection_text(&s, None, None);
+        // Header del schema default.
+        assert!(text.starts_with("Schema: public\n"), "text: {text}");
+        // Ambas tablas aparecen con su count de cols.
+        assert!(
+            text.contains("Table: users (3 cols)\n"),
+            "missing users header: {text}"
+        );
+        assert!(
+            text.contains("Table: posts (3 cols)\n"),
+            "missing posts header: {text}"
+        );
+        // Cols con tipo + nullability + tag PK donde corresponde.
+        assert!(text.contains("id"), "missing id col: {text}");
+        assert!(text.contains("bigint"), "missing bigint: {text}");
+        assert!(text.contains("NOT NULL"), "missing NOT NULL: {text}");
+        assert!(text.contains("PK"), "missing PK tag: {text}");
+        // Nullable col se anota NULL.
+        assert!(text.contains("deleted_at"), "missing deleted_at: {text}");
+        assert!(text.contains("NULL "), "missing NULL tag: {text}");
+        // Index unique con WHERE clause.
+        assert!(
+            text.contains("idx_users_email_active"),
+            "missing index name: {text}"
+        );
+        assert!(
+            text.contains("UNIQUE (email)"),
+            "missing UNIQUE label: {text}"
+        );
+        assert!(
+            text.contains("WHERE (deleted_at IS NULL)"),
+            "missing WHERE: {text}"
+        );
+        // Index no-unique sale sin label UNIQUE.
+        assert!(
+            text.contains("idx_posts_author"),
+            "missing non-unique index: {text}"
+        );
+        // FK con ON DELETE.
+        assert!(
+            text.contains("fk_posts_author: author_id -> users(id) ON DELETE CASCADE"),
+            "missing FK line: {text}"
+        );
+    }
+
+    #[test]
+    fn format_inspection_text_filter_por_table() {
+        let s = inspect_schema_fixture();
+        let text = format_inspection_text(&s, None, Some("users"));
+        assert!(
+            text.contains("Table: users"),
+            "users debería aparecer: {text}"
+        );
+        assert!(
+            !text.contains("Table: posts"),
+            "posts NO debería aparecer cuando filtramos a users: {text}"
+        );
+    }
+
+    #[test]
+    fn format_inspection_text_schema_vacio_mensaje_claro() {
+        let s = Schema::default();
+        let text = format_inspection_text(&s, None, None);
+        assert!(text.starts_with("Schema: public\n"));
+        assert!(
+            text.contains("sin tablas user-defined"),
+            "mensaje 'sin tablas': {text}"
+        );
+    }
+
+    #[test]
+    fn format_inspection_text_filter_table_inexistente_mensaje_claro() {
+        let s = inspect_schema_fixture();
+        let text = format_inspection_text(&s, None, Some("nonexistent"));
+        assert!(
+            text.contains("no se encontró la tabla `nonexistent`"),
+            "mensaje table inexistente: {text}"
+        );
+    }
+
+    #[test]
+    fn format_inspection_json_shape_estable() {
+        let s = inspect_schema_fixture();
+        let json_str = format_inspection_json(&s, None, None).expect("json should serialize");
+        // Parsea de vuelta para validar shape (no comparar string
+        // bit-a-bit porque el pretty-printer mete spaces que pueden
+        // cambiar entre versiones de serde_json).
+        let v: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON");
+        // Shape top-level.
+        assert_eq!(v["schema"], "public");
+        let tables = v["tables"].as_array().expect("tables is array");
+        assert_eq!(tables.len(), 2);
+        // Primera tabla (users) — orden preservado de fixture.
+        let users = &tables[0];
+        assert_eq!(users["name"], "users");
+        assert_eq!(users["schema"], "public");
+        assert_eq!(users["primary_key"], serde_json::json!(["id"]));
+        // Cols dentro de users — orden preservado, shape estable.
+        let cols = users["columns"].as_array().unwrap();
+        assert_eq!(cols.len(), 3);
+        assert_eq!(cols[0]["name"], "id");
+        assert_eq!(cols[0]["sql_type"], "bigint");
+        assert_eq!(cols[0]["nullable"], false);
+        assert_eq!(cols[0]["is_primary"], true);
+        assert!(cols[0]["default"].is_null());
+        // Index con where_clause aparece.
+        let idx = &users["indexes"][0];
+        assert_eq!(idx["name"], "idx_users_email_active");
+        assert_eq!(idx["unique"], true);
+        assert_eq!(idx["where_clause"], "(deleted_at IS NULL)");
+        // posts FK serializa con on_delete.
+        let posts = &tables[1];
+        let fk = &posts["foreign_keys"][0];
+        assert_eq!(fk["name"], "fk_posts_author");
+        assert_eq!(fk["references_table"], "users");
+        assert_eq!(fk["on_delete"], "CASCADE");
+    }
+
+    #[test]
+    fn format_inspection_json_filter_por_table_devuelve_solo_esa() {
+        let s = inspect_schema_fixture();
+        let json_str = format_inspection_json(&s, None, Some("posts")).expect("json");
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let tables = v["tables"].as_array().unwrap();
+        assert_eq!(tables.len(), 1);
+        assert_eq!(tables[0]["name"], "posts");
+    }
+
+    #[test]
+    fn format_inspection_text_composite_pk_se_lista_separado() {
+        // Composite PK no marca is_primary inline en columns — el
+        // formatter debe leer `composite_pk` y emitir línea aparte.
+        let schema = Schema {
+            tables: vec![Table {
+                name: "memberships".to_string(),
+                columns: vec![
+                    col("user_id", "bigint", false, false),
+                    col("group_id", "bigint", false, false),
+                    col("role", "text", false, false),
+                ],
+                indexes: vec![],
+                foreign_keys: vec![],
+                renamed_from: None,
+                schema: None,
+                composite_pk: vec!["user_id".to_string(), "group_id".to_string()],
+            }],
+        };
+        let text = format_inspection_text(&schema, None, None);
+        assert!(
+            text.contains("Primary key: (user_id, group_id)"),
+            "composite PK debería listarse: {text}"
+        );
+        // No debería marcar PK inline en cols (porque is_primary=false).
+        assert!(
+            !text.contains("user_id  bigint    NOT NULL  PK"),
+            "composite PK no debería tagear PK inline: {text}"
+        );
+    }
+
+    // ============================================================
+    // v0.10.28 — @index(using="...") SQL emission + introspect
+    // ============================================================
+
+    #[test]
+    fn create_index_con_using_emite_using_method() {
+        let table_ref = TableRef {
+            schema: None,
+            name: "docs".to_string(),
+        };
+        let change = Change::CreateIndex {
+            table: table_ref,
+            index: Index {
+                name: "idx_docs_body_gin".to_string(),
+                columns: vec!["body".to_string()],
+                unique: false,
+                where_clause: None,
+                using: Some("gin".to_string()),
+            },
+        };
+        let sql = changes_to_sql(&[change]);
+        assert!(
+            sql.contains("USING gin"),
+            "SQL debe contener `USING gin`: {sql}"
+        );
+        // Forma esperada: `CREATE INDEX "idx_..." ON "docs" USING gin ("body");`
+        assert!(
+            sql.contains("ON \"docs\" USING gin (\"body\")"),
+            "SQL completo: {sql}"
+        );
+    }
+
+    #[test]
+    fn create_index_sin_using_no_emite_clausula() {
+        let table_ref = TableRef {
+            schema: None,
+            name: "users".to_string(),
+        };
+        let change = Change::CreateIndex {
+            table: table_ref,
+            index: Index {
+                name: "idx_users_email".to_string(),
+                columns: vec!["email".to_string()],
+                unique: false,
+                where_clause: None,
+                using: None,
+            },
+        };
+        let sql = changes_to_sql(&[change]);
+        assert!(
+            !sql.contains("USING"),
+            "btree default no debería emitir USING: {sql}"
+        );
+    }
+
+    #[test]
+    fn create_index_combina_unique_using_y_where() {
+        let table_ref = TableRef {
+            schema: None,
+            name: "users".to_string(),
+        };
+        let change = Change::CreateIndex {
+            table: table_ref,
+            index: Index {
+                name: "idx_users_email_active".to_string(),
+                columns: vec!["email".to_string()],
+                unique: true,
+                where_clause: Some("deleted_at IS NULL".to_string()),
+                using: Some("btree".to_string()),
+            },
+        };
+        let sql = changes_to_sql(&[change]);
+        // Orden: CREATE UNIQUE INDEX ... ON tbl USING ... (cols) WHERE ...
+        assert!(sql.starts_with("CREATE UNIQUE INDEX"), "{sql}");
+        assert!(sql.contains("USING btree"), "{sql}");
+        assert!(sql.contains("WHERE deleted_at IS NULL"), "{sql}");
+        // El `;` final.
+        assert!(sql.trim_end().ends_with(';'), "{sql}");
+    }
+
+    #[test]
+    fn format_inspection_text_muestra_using_cuando_no_es_btree() {
+        let schema = Schema {
+            tables: vec![Table {
+                name: "docs".to_string(),
+                columns: vec![
+                    col("id", "bigint", false, true),
+                    col("body", "text", false, false),
+                ],
+                indexes: vec![Index {
+                    name: "idx_docs_body_gin".to_string(),
+                    columns: vec!["body".to_string()],
+                    unique: false,
+                    where_clause: None,
+                    using: Some("gin".to_string()),
+                }],
+                foreign_keys: vec![],
+                renamed_from: None,
+                schema: None,
+                composite_pk: vec![],
+            }],
+        };
+        let text = format_inspection_text(&schema, None, None);
+        assert!(text.contains("USING gin"), "inspect text: {text}");
+    }
+
+    #[test]
+    fn format_inspection_json_incluye_using_field() {
+        let schema = Schema {
+            tables: vec![Table {
+                name: "docs".to_string(),
+                columns: vec![
+                    col("id", "bigint", false, true),
+                    col("body", "text", false, false),
+                ],
+                indexes: vec![Index {
+                    name: "idx_docs_body_gin".to_string(),
+                    columns: vec!["body".to_string()],
+                    unique: false,
+                    where_clause: None,
+                    using: Some("gin".to_string()),
+                }],
+                foreign_keys: vec![],
+                renamed_from: None,
+                schema: None,
+                composite_pk: vec![],
+            }],
+        };
+        let json_str = format_inspection_json(&schema, None, None).expect("json");
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let idx = &v["tables"][0]["indexes"][0];
+        assert_eq!(idx["using"], "gin");
+    }
+
+    #[test]
+    fn format_inspection_filter_por_schema_custom() {
+        // Tables en schemas distintos a public deben aparecer cuando
+        // pasamos --schema <name>, y NO cuando filtramos a public.
+        let schema = Schema {
+            tables: vec![
+                Table {
+                    name: "users".to_string(),
+                    columns: vec![col("id", "bigint", false, true)],
+                    indexes: vec![],
+                    foreign_keys: vec![],
+                    renamed_from: None,
+                    schema: None,
+                    composite_pk: vec![],
+                },
+                Table {
+                    name: "tenants_data".to_string(),
+                    columns: vec![col("id", "bigint", false, true)],
+                    indexes: vec![],
+                    foreign_keys: vec![],
+                    renamed_from: None,
+                    schema: Some("tenant_a".to_string()),
+                    composite_pk: vec![],
+                },
+            ],
+        };
+        // Default público: solo users.
+        let text = format_inspection_text(&schema, None, None);
+        assert!(text.contains("Table: users"), "users aparece: {text}");
+        assert!(
+            !text.contains("Table: tenants_data"),
+            "tenants_data NO aparece bajo public: {text}"
+        );
+        // Filter explícito tenant_a: solo tenants_data.
+        let text2 = format_inspection_text(&schema, Some("tenant_a"), None);
+        assert!(
+            text2.contains("Schema: tenant_a"),
+            "header tenant_a: {text2}"
+        );
+        assert!(
+            text2.contains("Table: tenants_data"),
+            "tenants_data aparece bajo tenant_a: {text2}"
+        );
+        assert!(
+            !text2.contains("Table: users"),
+            "users NO aparece bajo tenant_a: {text2}"
+        );
     }
 }

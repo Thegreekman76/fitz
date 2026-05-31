@@ -11699,6 +11699,20 @@ workflow avanzado en `docs/db-orm.md` sección 26.c.
 TypeORM CLI. Todo vive en el binario `fitz`. La fuente de verdad
 es tu código tipado, no un YAML aparte ni reflection runtime.
 
+**Tier S — observabilidad + introspect (v0.10.28)**:
+
+- **`fitz db inspect`** — introspect del schema **real** de la DB
+  (no de tu código), opcionalmente filtrado por `--schema` o
+  `--table`, con output texto plano o `--json` machine-readable.
+  Útil para auditar antes de migrar, descubrir tablas legacy, o
+  comparar dev vs prod. Detalle en `docs/db-orm.md` sec 29.
+- **`@index(col, using="gin"|"gist"|"brin"|"hash"|"spgist")`** —
+  method override para full-text search (`gin` sobre tsvector),
+  range queries (`gist`), large tables resumidas (`brin`), etc.
+  sin bajar a `db.exec`. Default `btree` (Postgres default).
+- **`FITZ_DB_LOG=1|verbose`** — env var opt-in que loguea cada
+  query del driver a stderr. Cubierto en cap 32.
+
 ---
 
 ## 32. Variables de entorno
@@ -11824,6 +11838,49 @@ Para escribir tests que dependan de env vars, setealas en el test
 mismo con `std::env::set_var` desde Rust (o desde el script que
 lanza el test runner). El builtin `env()` lee del environment del
 proceso, que es lo que cualquier herramienta de testing modifica.
+
+### Observabilidad — `FITZ_DB_LOG` y `FITZ_HTTP_LOG` (v0.10.28)
+
+Dos env vars opt-in para logging del runtime. Zero overhead si no
+están seteadas (default silencioso).
+
+**`FITZ_DB_LOG`** — loguea cada query del driver Postgres:
+
+```bash
+export FITZ_DB_LOG=1         # simple: SQL + tiempo
+export FITZ_DB_LOG=verbose   # además params (truncados a 80 chars)
+```
+
+```
+[fitz-db 1.2ms] SELECT id, email FROM users WHERE id = $1
+[fitz-db 4.1ms verbose] INSERT INTO users (name) VALUES ($1) params=[$1="ada"]
+```
+
+**`FITZ_HTTP_LOG`** — access log per-request paralelo a uvicorn /
+nginx access log:
+
+```bash
+export FITZ_HTTP_LOG=1         # simple: method + path + status + tiempo
+export FITZ_HTTP_LOG=verbose   # además User-Agent + Content-Length
+```
+
+```
+[fitz HTTP 12.3ms] GET /users/42 → 200
+[fitz HTTP 4.1ms] POST /users → 201
+[fitz HTTP 45.2ms verbose] GET /users → 200 (UA="curl/8.0" len=1234)
+```
+
+Ambas:
+
+- Salen a **stderr** — no contaminan el output del programa.
+- Loguean tanto en `fitz run` como en el binario compilado por
+  `fitz build` (paridad bit-a-bit, hereda gratis del crate
+  compartido).
+- Cubren todo el tráfico real: HTTP loguea handlers + preflight
+  OPTIONS + rutas auto `/openapi.json`/`/docs`; DB loguea
+  SELECT/INSERT/UPDATE/DELETE/DDL + queries internas del ORM.
+- Mode se fija al primer acceso del proceso (LazyLock). Cambios
+  mid-run de la env var NO se reflejan.
 
 ---
 

@@ -1697,6 +1697,117 @@ pub fn build_router(
     build_router_with_asyncapi(metas, registry, openapi_schema, None)
 }
 
+// =====================================================================
+// v0.10.28 (Tier S, sub-paso 4) — FITZ_HTTP_LOG: access log opt-in
+// =====================================================================
+
+/// Mode del access log HTTP. Activado por la env var `FITZ_HTTP_LOG`:
+///
+/// - vacío / `=0` / no seteado → `Off` (default, zero overhead, el
+///   middleware ni se monta).
+/// - `=1` / `=true` → `Simple` (method + path + status + elapsed).
+/// - `=verbose` → `Verbose` (además User-Agent + Content-Length).
+///
+/// Loguea TODAS las requests HTTP que pasen por el router: handlers
+/// matcheados, preflight OPTIONS (CORS), rutas auto `/openapi.json`/
+/// `/docs`/`/asyncapi.json`, y respuestas 401/403/400/500 de auth/
+/// middleware/handler. WebSocket handshake (GET /chat con upgrade)
+/// también pasa por el layer y se loguea como 101 Switching Protocols.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpLogMode {
+    Off,
+    Simple,
+    Verbose,
+}
+
+/// Lee `FITZ_HTTP_LOG` una sola vez por proceso. El mode queda
+/// fijado al primer acceso (lazy). Patrón paralelo al `DB_LOG_MODE`
+/// del driver (sub-paso 3).
+pub static HTTP_LOG_MODE: std::sync::LazyLock<HttpLogMode> =
+    std::sync::LazyLock::new(|| match std::env::var("FITZ_HTTP_LOG").as_deref() {
+        Ok("verbose") => HttpLogMode::Verbose,
+        Ok("1" | "true") => HttpLogMode::Simple,
+        _ => HttpLogMode::Off,
+    });
+
+/// Formatea una línea de access log lista para emitir a stderr.
+/// Pure function para que el unit test pueda asertir el output sin
+/// tocar stderr ni el axum Router.
+///
+/// Forma simple: `[fitz HTTP 12.3ms] GET /users/42 → 200`
+/// Forma verbose: `[fitz HTTP 45.2ms verbose] GET /users → 200 (UA="curl/8.0" len=1234)`
+pub fn format_http_log_line(
+    elapsed: std::time::Duration,
+    method: &str,
+    path: &str,
+    status: u16,
+    user_agent: Option<&str>,
+    content_length: Option<u64>,
+    mode: HttpLogMode,
+) -> String {
+    let ms = elapsed.as_secs_f64() * 1000.0;
+    match mode {
+        HttpLogMode::Off => String::new(),
+        HttpLogMode::Simple => {
+            format!("[fitz HTTP {ms:.1}ms] {method} {path} → {status}")
+        }
+        HttpLogMode::Verbose => {
+            let mut extras: Vec<String> = Vec::new();
+            if let Some(u) = user_agent {
+                extras.push(format!("UA=\"{u}\""));
+            }
+            if let Some(l) = content_length {
+                extras.push(format!("len={l}"));
+            }
+            let extras_str = if extras.is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", extras.join(" "))
+            };
+            format!("[fitz HTTP {ms:.1}ms verbose] {method} {path} → {status}{extras_str}")
+        }
+    }
+}
+
+/// Axum middleware (`from_fn` compatible) que loguea cada request.
+/// Solo se monta cuando `HTTP_LOG_MODE` != Off (decisión tomada en
+/// build_router_with_asyncapi) — overhead estricto cero cuando Off.
+async fn http_log_layer(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let start = std::time::Instant::now();
+    let method = req.method().as_str().to_string();
+    let path = req.uri().path().to_string();
+    // Capturamos User-Agent ANTES de mover el request al next.
+    let user_agent = req
+        .headers()
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let response = next.run(req).await;
+    let status = response.status().as_u16();
+    // Content-Length: axum lo suele setear via Body::size_hint del
+    // builder de respuesta. Para responses chunked/streaming puede
+    // no estar — None en ese caso, no error.
+    let content_length = response
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let line = format_http_log_line(
+        start.elapsed(),
+        &method,
+        &path,
+        status,
+        user_agent.as_deref(),
+        content_length,
+        *HTTP_LOG_MODE,
+    );
+    eprintln!("{line}");
+    response
+}
+
 /// Fase 9.w.2.d — variante de `build_router` que también acepta un
 /// schema AsyncAPI 3.0 pre-computado. Si `Some`, registra
 /// `/asyncapi.json` (y suma una nota a `/docs` listando los WS
@@ -1814,6 +1925,13 @@ pub fn build_router_with_asyncapi(
                 }),
             );
         }
+    }
+
+    // v0.10.28 — Access log opt-in. Solo se monta el layer si el mode
+    // es activo; cuando Off, el Router queda 100% como antes (zero
+    // overhead, ni siquiera la indirection del middleware).
+    if *HTTP_LOG_MODE != HttpLogMode::Off {
+        router = router.layer(axum::middleware::from_fn(http_log_layer));
     }
 
     router
@@ -7693,5 +7811,119 @@ fn me(user: User) -> Str => \"x\"\n\
             }
             other => panic!("esperaba binary `mismatch`, fue {:?}", other),
         }
+    }
+
+    // ================================================================
+    // v0.10.28 — FITZ_HTTP_LOG formatter unit tests
+    // ================================================================
+
+    #[test]
+    fn format_http_log_line_off_devuelve_string_vacio() {
+        let line = format_http_log_line(
+            std::time::Duration::from_millis(5),
+            "GET",
+            "/users",
+            200,
+            None,
+            None,
+            HttpLogMode::Off,
+        );
+        assert_eq!(line, "");
+    }
+
+    #[test]
+    fn format_http_log_line_simple_incluye_method_path_status_y_elapsed() {
+        let line = format_http_log_line(
+            std::time::Duration::from_millis(12),
+            "GET",
+            "/users/42",
+            200,
+            None,
+            None,
+            HttpLogMode::Simple,
+        );
+        assert!(line.starts_with("[fitz HTTP "), "{line}");
+        assert!(line.contains("12.0ms"), "{line}");
+        assert!(line.contains("GET /users/42 → 200"), "{line}");
+        // Simple no incluye UA ni Content-Length.
+        assert!(!line.contains("UA="), "Simple no debe loguear UA: {line}");
+        assert!(!line.contains("len="), "Simple no debe loguear len: {line}");
+    }
+
+    #[test]
+    fn format_http_log_line_verbose_incluye_user_agent_y_content_length() {
+        let line = format_http_log_line(
+            std::time::Duration::from_millis(45),
+            "POST",
+            "/users",
+            201,
+            Some("curl/8.0"),
+            Some(1234),
+            HttpLogMode::Verbose,
+        );
+        assert!(line.contains("verbose"), "{line}");
+        assert!(line.contains("POST /users → 201"), "{line}");
+        assert!(line.contains("UA=\"curl/8.0\""), "{line}");
+        assert!(line.contains("len=1234"), "{line}");
+    }
+
+    #[test]
+    fn format_http_log_line_verbose_sin_ua_ni_len_omite_secciones() {
+        // Caso típico: response sin Content-Length (streaming/chunked)
+        // y request sin User-Agent header.
+        let line = format_http_log_line(
+            std::time::Duration::from_millis(8),
+            "GET",
+            "/stream",
+            200,
+            None,
+            None,
+            HttpLogMode::Verbose,
+        );
+        assert!(line.contains("verbose"), "{line}");
+        assert!(line.contains("GET /stream → 200"), "{line}");
+        assert!(!line.contains("UA="), "sin UA no debe filtrar: {line}");
+        assert!(!line.contains("len="), "sin len no debe filtrar: {line}");
+    }
+
+    #[test]
+    fn format_http_log_line_status_4xx_y_5xx_loguean_normal() {
+        // 404/500 son requests HTTP válidas — el log las loguea igual.
+        let line_404 = format_http_log_line(
+            std::time::Duration::from_millis(2),
+            "GET",
+            "/nope",
+            404,
+            None,
+            None,
+            HttpLogMode::Simple,
+        );
+        assert!(line_404.contains("GET /nope → 404"), "{line_404}");
+
+        let line_500 = format_http_log_line(
+            std::time::Duration::from_millis(15),
+            "POST",
+            "/broken",
+            500,
+            None,
+            None,
+            HttpLogMode::Simple,
+        );
+        assert!(line_500.contains("POST /broken → 500"), "{line_500}");
+    }
+
+    #[test]
+    fn format_http_log_line_options_preflight_se_loguea_igual() {
+        // Preflight OPTIONS (CORS) son tráfico real — se loguean.
+        let line = format_http_log_line(
+            std::time::Duration::from_millis(1),
+            "OPTIONS",
+            "/users",
+            204,
+            None,
+            None,
+            HttpLogMode::Simple,
+        );
+        assert!(line.contains("OPTIONS /users → 204"), "{line}");
     }
 }

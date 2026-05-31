@@ -1109,8 +1109,8 @@ fn decorator_completions() -> Vec<CompletionItem> {
         (
             "index",
             "index",
-            "@index(col, ..., unique?, name?, where_?) — índice declarado al type (v0.10.27)",
-            "Sobre el `type` con `@table`: declara índices auto-emitidos por `fitz db diff/migrate`. Composite (multi-col), unique (`unique=true`), partial (`where_=<expr>`), nombre override (`name=\"...\"`).",
+            "@index(col, ..., unique?, name?, where_?, using?) — índice declarado al type (v0.10.27+)",
+            "Sobre el `type` con `@table`: declara índices auto-emitidos por `fitz db diff/migrate`. Composite (multi-col), unique (`unique=true`), partial (`where_=<expr>`), nombre override (`name=\"...\"`), method override (`using=\"gin\"|\"gist\"|\"brin\"|\"hash\"|\"spgist\"` — v0.10.28; btree default).",
         ),
         (
             "db_default",

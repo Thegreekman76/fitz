@@ -394,6 +394,31 @@ enum DbCmd {
         #[arg(long)]
         no_tracking: bool,
     },
+    /// v0.10.28 (Tier S, sub-paso 1) — Introspect del schema real
+    /// de la DB. Lista tables, columnas (tipo + nullability +
+    /// default), primary keys, indexes (con WHERE de partial) y
+    /// foreign keys. Sin tocar tu programa Fitz — pura
+    /// introspección de la DB conectada. Útil para auditar antes
+    /// de cambiar tipos, descubrir tables legacy, o comparar dos
+    /// envs (dev vs prod).
+    Inspect {
+        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        #[arg(long)]
+        url: Option<String>,
+        /// Schema a introspectar. Default: `public`. Tables en
+        /// schemas distintos quedan filtradas.
+        #[arg(long)]
+        schema: Option<String>,
+        /// Restringir a una sola tabla. Default: lista todas las
+        /// del schema. Si la tabla no existe en el schema, emite
+        /// mensaje claro sin error.
+        #[arg(long)]
+        table: Option<String>,
+        /// Output JSON machine-readable con shape lockeada (para
+        /// scripts externos). Default: vista texto plano legible.
+        #[arg(long)]
+        json: bool,
+    },
     /// v0.10.18 — Marca una migration como aplicada SIN ejecutar
     /// su SQL. Útil para adoptar Fitz en una DB legacy donde el
     /// schema ya está aplicado manualmente. `--all` marca todas
@@ -552,6 +577,12 @@ fn main() {
                 url,
                 dir,
             } => db_stamp_cmd(version, all, url, dir),
+            DbCmd::Inspect {
+                url,
+                schema,
+                table,
+                json,
+            } => db_inspect_cmd(url, schema, table, json),
         },
     }
 }
@@ -4245,6 +4276,58 @@ fn db_diff_cmd(file: Option<PathBuf>, url: Option<String>, out: Option<PathBuf>)
             print!("{}", sql);
             eprintln!("✓ {} change(s) emitidos a stdout", changes.len());
         }
+    }
+}
+
+/// v0.10.28 (Tier S, sub-paso 1) — `fitz db inspect`. Conecta a la
+/// DB, corre `introspect_schema` y emite el report en texto plano
+/// (default) o JSON (con `--json`). NO toca el programa Fitz —
+/// pura inspección del estado real de la DB.
+fn db_inspect_cmd(url: Option<String>, schema: Option<String>, table: Option<String>, json: bool) {
+    let url = match resolve_db_url(url) {
+        Ok(u) => u,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let rt = evaluator::build_runtime();
+    let result = rt.block_on(async {
+        let conn = db::connect_url(&url)
+            .await
+            .map_err(|e| format!("connect: {e}"))?;
+        migrations::introspect_schema(&conn)
+            .await
+            .map_err(|e| format!("introspect: {e}"))
+    });
+    let schema_introspected = match result {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if json {
+        match migrations::format_inspection_json(
+            &schema_introspected,
+            schema.as_deref(),
+            table.as_deref(),
+        ) {
+            Ok(j) => {
+                println!("{j}");
+            }
+            Err(e) => {
+                eprintln!("✗ format json: {e}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        let text = migrations::format_inspection_text(
+            &schema_introspected,
+            schema.as_deref(),
+            table.as_deref(),
+        );
+        print!("{text}");
     }
 }
 

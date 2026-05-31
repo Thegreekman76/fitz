@@ -4534,3 +4534,237 @@ async fn orm_uuid_array_e2e() {
     let _ = seed.exec("DROP TABLE fitz_orm_uuid_arr", &[]).await;
     seed.close().await.unwrap();
 }
+
+// =====================================================================
+// v0.10.28 (Tier S, sub-paso 1) — `fitz db inspect`: introspect end-to-
+// end contra Postgres real. Crea 2 tables con PK + partial unique
+// index + FK ON DELETE CASCADE, corre `introspect_schema`, valida
+// que el text + json formatters incluyen todo.
+// =====================================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn inspect_schema_text_y_json_contienen_todo_el_shape() {
+    let url = pg_url();
+    let seed = connect_url(&url).await.expect("connect");
+
+    // Cleanup previo (por si una corrida anterior dejó basura).
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_inspect_e2e_posts", &[])
+        .await;
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_inspect_e2e_users", &[])
+        .await;
+
+    // Setup: users con PK + nullable col + unique partial index;
+    // posts con FK ON DELETE CASCADE.
+    seed.exec(
+        "CREATE TABLE fitz_inspect_e2e_users (\
+             id bigserial PRIMARY KEY, \
+             email text NOT NULL, \
+             deleted_at timestamptz\
+         )",
+        &[],
+    )
+    .await
+    .expect("CREATE users");
+    seed.exec(
+        "CREATE UNIQUE INDEX idx_fitz_inspect_e2e_users_email_active \
+         ON fitz_inspect_e2e_users(email) WHERE deleted_at IS NULL",
+        &[],
+    )
+    .await
+    .expect("CREATE partial index");
+    seed.exec(
+        "CREATE TABLE fitz_inspect_e2e_posts (\
+             id bigserial PRIMARY KEY, \
+             author_id bigint NOT NULL REFERENCES fitz_inspect_e2e_users(id) ON DELETE CASCADE, \
+             title text NOT NULL\
+         )",
+        &[],
+    )
+    .await
+    .expect("CREATE posts");
+
+    // Introspect el schema real.
+    let schema = fitz::migrations::introspect_schema(&seed)
+        .await
+        .expect("introspect_schema OK");
+
+    // Text formatter — filtramos por table porque public puede
+    // tener basura ajena al test en la DB del dev.
+    let text_users =
+        fitz::migrations::format_inspection_text(&schema, None, Some("fitz_inspect_e2e_users"));
+    assert!(
+        text_users.contains("Table: fitz_inspect_e2e_users (3 cols)"),
+        "header con count: {text_users}"
+    );
+    assert!(text_users.contains("id"), "col id presente: {text_users}");
+    assert!(text_users.contains("PK"), "PK tag presente: {text_users}");
+    assert!(
+        text_users.contains("idx_fitz_inspect_e2e_users_email_active"),
+        "index name presente: {text_users}"
+    );
+    assert!(
+        text_users.contains("UNIQUE (email)"),
+        "UNIQUE label + cols presente: {text_users}"
+    );
+    assert!(
+        text_users.contains("WHERE (deleted_at IS NULL)"),
+        "WHERE de partial index presente: {text_users}"
+    );
+
+    let text_posts =
+        fitz::migrations::format_inspection_text(&schema, None, Some("fitz_inspect_e2e_posts"));
+    assert!(
+        text_posts.contains("Table: fitz_inspect_e2e_posts (3 cols)"),
+        "header posts: {text_posts}"
+    );
+    assert!(
+        text_posts.contains("ON DELETE CASCADE"),
+        "FK CASCADE presente: {text_posts}"
+    );
+    assert!(
+        text_posts.contains("author_id -> fitz_inspect_e2e_users(id)"),
+        "FK target presente: {text_posts}"
+    );
+
+    // JSON formatter — shape estable, parseable, contiene todo.
+    let json_str =
+        fitz::migrations::format_inspection_json(&schema, None, Some("fitz_inspect_e2e_users"))
+            .expect("format json OK");
+    let v: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON");
+    assert_eq!(v["schema"], "public");
+    let tables = v["tables"].as_array().expect("tables array");
+    assert_eq!(tables.len(), 1, "filter por table devuelve 1");
+    let users_v = &tables[0];
+    assert_eq!(users_v["name"], "fitz_inspect_e2e_users");
+    assert_eq!(users_v["primary_key"], serde_json::json!(["id"]));
+    let cols = users_v["columns"].as_array().unwrap();
+    assert_eq!(cols.len(), 3);
+    // id es PK + bigint + NOT NULL.
+    let id_col = cols.iter().find(|c| c["name"] == "id").expect("id col");
+    assert_eq!(id_col["sql_type"], "bigint");
+    assert_eq!(id_col["nullable"], false);
+    assert_eq!(id_col["is_primary"], true);
+    // deleted_at es NULL.
+    let del = cols
+        .iter()
+        .find(|c| c["name"] == "deleted_at")
+        .expect("deleted_at");
+    assert_eq!(del["nullable"], true);
+    // Index con where_clause.
+    let idx = users_v["indexes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["name"] == "idx_fitz_inspect_e2e_users_email_active")
+        .expect("partial index in json");
+    assert_eq!(idx["unique"], true);
+    assert!(idx["where_clause"]
+        .as_str()
+        .unwrap()
+        .contains("deleted_at IS NULL"));
+
+    // Cleanup.
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_inspect_e2e_posts", &[])
+        .await;
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_inspect_e2e_users", &[])
+        .await;
+    seed.close().await.unwrap();
+}
+
+// =====================================================================
+// v0.10.28 (Tier S, sub-paso 2) — @index(col, using="gin") method
+// override. Validamos round-trip: el SQL emitido por changes_to_sql
+// se aplica OK contra Postgres real (sintaxis válida), y la introspect
+// devuelve el method (`gin`) en el `using` del Index.
+// =====================================================================
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn introspect_y_diff_round_trip_using_gin_method() {
+    use fitz::migrations::{Change, Index, TableRef};
+
+    let url = pg_url();
+    let seed = connect_url(&url).await.expect("connect");
+
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_using_e2e_docs", &[])
+        .await;
+
+    // Setup: table con tsvector col (target natural de gin).
+    seed.exec(
+        "CREATE TABLE fitz_using_e2e_docs (\
+             id bigserial PRIMARY KEY, \
+             body tsvector NOT NULL\
+         )",
+        &[],
+    )
+    .await
+    .expect("CREATE table");
+
+    // Aplicamos el SQL que el migrator emitiría a partir de
+    // `@index("body", using="gin")` — validamos que la sintaxis es
+    // válida contra Postgres real (no solo unit test del string).
+    let create_change = Change::CreateIndex {
+        table: TableRef {
+            schema: None,
+            name: "fitz_using_e2e_docs".to_string(),
+        },
+        index: Index {
+            name: "idx_fitz_using_e2e_docs_body_gin".to_string(),
+            columns: vec!["body".to_string()],
+            unique: false,
+            where_clause: None,
+            using: Some("gin".to_string()),
+        },
+    };
+    let sql = fitz::migrations::changes_to_sql(&[create_change]);
+    seed.exec(&sql, &[])
+        .await
+        .expect("CREATE INDEX ... USING gin debe ser válido");
+
+    // Introspect debe reportar el method "gin".
+    let schema = fitz::migrations::introspect_schema(&seed)
+        .await
+        .expect("introspect");
+    let docs_table = schema
+        .tables
+        .iter()
+        .find(|t| t.name == "fitz_using_e2e_docs")
+        .expect("table fitz_using_e2e_docs presente");
+    let idx = docs_table
+        .indexes
+        .iter()
+        .find(|i| i.name == "idx_fitz_using_e2e_docs_body_gin")
+        .expect("gin index introspectado");
+    assert_eq!(
+        idx.using.as_deref(),
+        Some("gin"),
+        "introspect debería reportar using=gin, got {:?}",
+        idx.using
+    );
+
+    // Cross-check: format_inspection_text muestra USING gin.
+    let text = fitz::migrations::format_inspection_text(&schema, None, Some("fitz_using_e2e_docs"));
+    assert!(
+        text.contains("USING gin"),
+        "inspect text debería contener `USING gin`: {text}"
+    );
+
+    // Cross-check: format_inspection_json devuelve "using":"gin".
+    let json_str =
+        fitz::migrations::format_inspection_json(&schema, None, Some("fitz_using_e2e_docs"))
+            .expect("json");
+    let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+    assert_eq!(v["tables"][0]["indexes"][0]["using"], "gin");
+
+    // Cleanup.
+    let _ = seed
+        .exec("DROP TABLE IF EXISTS fitz_using_e2e_docs", &[])
+        .await;
+    seed.close().await.unwrap();
+}

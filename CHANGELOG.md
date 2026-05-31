@@ -12,9 +12,172 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md`. Próximos pasos planeados —
-boilerplates ORM Dockerizados extendidos o nuevo norte técnico
-(bulk insert / `fitz db inspect` / composite PKs / JSON
-operators avanzados / W17 derived).
+boilerplates ORM Dockerizados extendidos, JSON operators avanzados
+(json_each / jsonb_path_query), o nuevo norte técnico.
+
+## [v0.10.28] — 2026-05-31 — Tier S del ORM: introspect + @index using + DB log + HTTP access log
+
+Cierre del **Tier S del ORM**: 4 sub-pasos coordinados que cierran
+el ORM como herramienta operativa + observable end-to-end. Sin
+sintaxis nueva del lenguaje; tres features nuevas (sub-paso 1
+subcomando CLI, sub-paso 2 kwarg nuevo de un decorator existente,
+sub-pasos 3/4 env vars opt-in) que cubren el gap entre "tengo el
+ORM funcionando" y "tengo el ORM funcionando + sé qué está
+pasando + puedo auditar la DB sin abrir psql".
+
+### Sub-paso 1 — `fitz db inspect` (introspect del schema real)
+
+Subcomando nuevo `fitz db inspect [--url URL] [--schema name]
+[--table name] [--json]` que se conecta a Postgres y emite una
+vista legible del schema actual (tables, columnas con tipos +
+nullability + defaults, primary keys, indexes con WHERE de partial,
+foreign keys con ON DELETE). Sin tocar tu programa Fitz — pura
+introspección. Útil para auditar antes de migrar, descubrir tables
+legacy, comparar dev vs prod, o generar reportes machine-readable
+con `--json` (shape lockeada, parseable por scripts externos).
+
+Implementación: ensamblar + formatear sobre los helpers existentes
+(`introspect_columns`/`introspect_indexes`/`introspect_foreign_keys`/
+`list_user_tables_qualified`) — la query infra ya estaba lista
+desde v0.10.16. Nuevas APIs públicas `migrations::format_inspection_text`
+y `migrations::format_inspection_json`; filtrado in-memory post-
+introspect según `--schema` y `--table`.
+
+### Sub-paso 2 — `@index(col, using="gin")` method override
+
+El decorator `@index(...)` a nivel **type** acepta el kwarg nuevo
+`using=<method>` con whitelist Postgres oficial: `btree` (default,
+no se emite `USING` redundante), `hash`, `gin`, `gist`, `brin`,
+`spgist`. Habilita full-text search (`gin` sobre tsvector), range
+queries (`gist`), large time-series resumidas (`brin`) sin tener
+que bajar a `db.exec("CREATE INDEX ... USING gin")`.
+
+```fitz
+@table("docs")
+@index(body_tsv, using="gin")
+@index(price_range, using="gist")
+@index(created_at, using="brin")
+type Doc { ... }
+```
+
+Implementación: `IndexSpec.using: Option<String>` + `Index.using`
+en migrations + processor del kwarg con whitelist + propagación
+end-to-end (resolved_indexes → schema_from_program → CREATE INDEX
+SQL emit + introspect via `pg_am.amname` para round-trip + format
+text/json para que aparezca en `fitz db inspect`). Method
+inválido → error claro del checker en compile-time citando los
+soportados. Field-level `@index` (sobre un field individual) se
+mantiene SIN args (default btree, mismo comportamiento) — el
+`using=` solo aplica a nivel type.
+
+**Limitación heredada**: diff name-based — si cambiás SOLO el
+`using=` con mismo nombre + cols, el migrator NO detecta el
+cambio. Workaround: pasar `name=` distinto para forzar regen.
+Mismo patrón que `where_clause` desde v0.10.27.
+
+### Sub-paso 3 — `FITZ_DB_LOG` (query logging del driver)
+
+Env var opt-in que loguea cada query del driver Postgres a
+stderr post-ejecución. Zero overhead si no está seteada (single
+atomic load + match al inicio de cada call).
+
+- `FITZ_DB_LOG=1` o `=true` → mode Simple: `[fitz-db Nms] <sql>`.
+- `FITZ_DB_LOG=verbose` → además params: `params=[$1="ada", $2=42]`
+  (strings truncados a 80 chars con `…` final por seguridad — no
+  se vuelca un BLOB entero al log).
+- Vacío / `=0` / no seteado → Off, silencio total.
+
+Hook en `DbConnHandle::query` (punto único — `exec` delega ahí).
+SQL multi-línea se colapsa a una sola línea para grep. Loguea
+también las queries que fallan. Cubre tanto `fitz run` como el
+binario producido por `fitz build` (paridad bit-a-bit gratis —
+mismo crate `fitz::db` via `pub use`). Validado end-to-end
+contra Postgres local.
+
+### Sub-paso 4 — `FITZ_HTTP_LOG` (access log estilo uvicorn)
+
+Pieza paralela a `FITZ_DB_LOG` para el stack HTTP. Loguea per-
+request a stderr con method + path + status + elapsed.
+
+- `FITZ_HTTP_LOG=1` o `=true` → mode Simple: `[fitz HTTP Nms]
+  GET /users/42 → 200`.
+- `FITZ_HTTP_LOG=verbose` → además `(UA="curl/8.0" len=1234)`.
+- Vacío / `=0` / no seteado → Off, el layer middleware ni se
+  monta (literalmente zero overhead, no la indirection del wrapper).
+
+Implementación: `axum::middleware::from_fn(http_log_layer)`
+montado condicionalmente sobre el `Router` al final de
+`build_router_with_asyncapi` cuando `HTTP_LOG_MODE != Off`. Cubre
+**todas** las requests que pasan por el router: handlers
+matcheados, preflight OPTIONS de CORS, rutas auto `/openapi.json`/
+`/docs`/`/asyncapi.json`, WebSocket handshake (loguea como 101
+Switching Protocols), y respuestas 401/403/400/500 de auth/
+middleware/handler.
+
+Paridad bit-a-bit codegen: el binario producido por `fitz build`
+reusa el mismo `src/http.rs` via `fitz::http` re-export — el
+hook + LazyLock se heredan automáticamente sin wiring extra.
+
+### Tests
+
+- **+19 unit tests nuevos**: 5 de migrations (`create_index_con_using`/
+  `create_index_sin_using`/`create_index_combina_unique_using_y_where`/
+  `format_inspection_text_muestra_using`/`format_inspection_json_incluye_using`),
+  más 5 de migrations sobre el formatter base (`format_inspection_text_*`
+  + `format_inspection_json_*`), 3 de types (`checker_at_index_using_*`),
+  7 de db (`format_db_log_line_*` + `truncate_for_log_utf8_safe`), 6 de
+  http (`format_http_log_line_*`).
+- **2 E2E nuevos en `tests/db_real_postgres.rs`** contra Postgres
+  real: `inspect_schema_text_y_json_contienen_todo_el_shape` (PK
+  + partial unique index + FK CASCADE round-trip), y
+  `introspect_y_diff_round_trip_using_gin_method` (CREATE INDEX
+  USING gin aplicado + introspect lo devuelve correctamente).
+
+Al cierre: **2677 unit + smoke 325** (sin cambios — los ejemplos
+existentes siguen pasando bit-a-bit) **+ 51 db_real_postgres**
+(49 viejos + 2 nuevos). `cargo fmt --all -- --check` + `cargo
+clippy --all-targets -- -D warnings` + `cargo clippy --lib
+--features lsp -- -D warnings` todos limpios.
+
+### Cross-impact
+
+- `editors/vscode/package.json` bump 0.10.27 → 0.10.28.
+- `src/lsp.rs` descripción de `@index` suma `using=` con
+  whitelist al hover/completion.
+- `docs/db-orm.md` sec 4 (`@index`) suma bullet `using=` con
+  ejemplos canonicales; sec 29 (CLI con DB) suma bloque
+  dedicado a `fitz db inspect` con vista texto + JSON shape +
+  notas; sec nueva sobre `FITZ_DB_LOG` con formato + ejemplos.
+- `docs/guide.md` cap 31 (Postgres + ORM) suma bullet "Tier S"
+  con los 3 features visibles; cap 32 (env vars) suma sub-sección
+  "Observabilidad — `FITZ_DB_LOG` y `FITZ_HTTP_LOG`" con
+  formato + ejemplos + dónde aplica.
+
+### Deuda residual derivada (NO bloquea uso real)
+
+- Diff de indexes name-based no detecta cambios SOLO en
+  `where_clause` ni en `using` cuando nombre y cols son iguales.
+  Workaround documentado: `name=` distinto para forzar regen.
+- `fitz db inspect` cross-schema solo muestra el schema pasado
+  por `--schema` (default `public`). Listar TODOS los schemas
+  user-defined a la vez es trivial — sumar `--all-schemas` si
+  aparece demanda.
+- `FITZ_DB_LOG=verbose` trunca strings a 80 chars con `…` — sin
+  escape de chars no-imprimibles ni redaction de secrets visibles
+  en `$1="password_aqui"`. Caveat documentado en `docs/db-orm.md`.
+- Cambios mid-run de `FITZ_DB_LOG`/`FITZ_HTTP_LOG` NO se reflejan
+  (LazyLock se fija al primer acceso). Workaround: reiniciar el
+  proceso.
+
+## [v0.10.27] — 2026-05-30 — Bulk insert + composite PK + @index decorator
+
+Tres features ortogonales del ORM cerradas en bloque: `Type.bulk_insert(
+rows, db, batch_size=1000)` con paridad bit-a-bit run↔build, N `@primary`
+fields por type (composite PK) con `TableMetadata.primary_fields: Vec<String>`
++ helpers `single_pk()`/`has_pk()`, y `@index(col1, col2, ..., unique=true,
+name="...", where_=<expr>)` decorator a nivel type emitido por `fitz db
+diff`/`migrate` con auto-naming `idx_<table>_<col1>_<col2>...[_uniq]` y
+partial via WHERE clause. Detalles en el commit b07a36d y `docs/roadmap.md`.
 
 ## [v0.10.26] — 2026-05-30 — Codegen Date/DateTime/Uuid: paridad bit-a-bit `fitz run` ↔ `fitz build`
 

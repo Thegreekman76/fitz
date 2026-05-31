@@ -450,12 +450,15 @@ pub struct TableMetadata {
 }
 
 /// v0.10.27 (F3) — Especificación de un índice del ORM. Se popula
-/// desde `@index(...)` a nivel type. Tres formas de uso:
-///   - `@index("col1, col2")` — composite simple.
+/// desde `@index(...)` a nivel type. Formas de uso:
+///   - `@index("col1, col2")` — composite simple (btree implícito).
 ///   - `@index("col1, col2", unique=true)` — composite UNIQUE.
 ///   - `@index("col1, col2", name="custom")` — nombre custom (sino
 ///     auto-generado `idx_<table>_<col1>_<col2>`).
 ///   - `@index("col1, col2", where_="deleted_at IS NULL")` — partial.
+///   - `@index("col", using="gin")` — v0.10.28: method override
+///     (btree default; gin/gist/brin/hash/spgist habilitados sin
+///     bajar a `db.exec`).
 ///
 /// Expression indexes (`@index("lower(email)")`) NO en MVP — el
 /// arg es un parser SQL mini que sale de scope. Workaround: bajar
@@ -477,6 +480,13 @@ pub struct IndexSpec {
     /// para soft-deletes: `WHERE deleted_at IS NULL` cubre solo
     /// rows vivas, índice más chico.
     pub where_clause: Option<String>,
+    /// v0.10.28 — Method override (`USING <method>`). `None` =
+    /// btree (default Postgres). Whitelisted: `btree` | `hash` |
+    /// `gin` | `gist` | `brin` | `spgist`. Habilita full-text
+    /// search (`gin` sobre tsvector), range queries (`gist`),
+    /// large tables resumidas (`brin`) y bloom-style approximations
+    /// (extension) sin escape hatch a `db.exec`.
+    pub using: Option<String>,
 }
 
 impl TableMetadata {
@@ -1721,6 +1731,7 @@ pub fn process_table_decorators(
                 let mut unique = false;
                 let mut name: Option<String> = None;
                 let mut where_clause: Option<String> = None;
+                let mut using: Option<String> = None;
                 for (k, v) in &d.kwargs {
                     match k.as_str() {
                         "unique" => match v {
@@ -1751,12 +1762,48 @@ pub fn process_table_decorators(
                                     .to_string(),
                             )),
                         },
+                        // v0.10.28 — Method override. Whitelist de los
+                        // 6 methods oficiales de Postgres. Otro valor =
+                        // typo del user (mejor fallar en compile-time
+                        // que dejar pasar y romper al CREATE INDEX).
+                        "using" => match v {
+                            Expr::Str(s, _) => {
+                                const ALLOWED: &[&str] =
+                                    &["btree", "hash", "gin", "gist", "brin", "spgist"];
+                                let lower = s.to_ascii_lowercase();
+                                if !ALLOWED.contains(&lower.as_str()) {
+                                    errors.push(FitzError::new(
+                                        ErrorKind::TypeError,
+                                        type_span.line,
+                                        type_span.column,
+                                        format!(
+                                            "`@index(using=\"{s}\")`: method desconocido. \
+                                             Soportados: btree, hash, gin, gist, brin, spgist"
+                                        ),
+                                    ));
+                                } else if lower != "btree" {
+                                    // btree es default Postgres — lo
+                                    // dejamos como None para no emitir
+                                    // `USING btree` redundante (matchea
+                                    // lo que reporta introspect para el
+                                    // default).
+                                    using = Some(lower);
+                                }
+                            }
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@index(using=...)` espera Str literal con el method (\"gin\", \"gist\", etc.)"
+                                    .to_string(),
+                            )),
+                        },
                         other => errors.push(FitzError::new(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
                             format!(
-                                "`@index` kwarg desconocido `{}`. Soportados: unique, name, where_",
+                                "`@index` kwarg desconocido `{}`. Soportados: unique, name, where_, using",
                                 other
                             ),
                         )),
@@ -1767,6 +1814,7 @@ pub fn process_table_decorators(
                     columns,
                     unique,
                     where_clause,
+                    using,
                 });
             }
             other => {
@@ -2169,6 +2217,7 @@ pub fn process_table_decorators(
                 columns: resolved_cols,
                 unique: idx.unique,
                 where_clause: idx.where_clause,
+                using: idx.using,
             });
         }
     }
@@ -15478,6 +15527,84 @@ print(total)
             errs.iter()
                 .any(|e| e.message.contains("DbRow") && e.message.contains("get_potato")),
             "esperaba error citando DbRow.get_potato: {:?}",
+            errs
+        );
+    }
+
+    // ============================================================
+    // v0.10.28 — @index(col, using="...") method override
+    // ============================================================
+
+    /// Cada uno de los 6 methods whitelisteados de Postgres debe
+    /// ser aceptado sin error por el checker, y populado en
+    /// `TableMetadata.indexes[i].using`.
+    #[test]
+    fn checker_at_index_using_methods_whitelisteados_ok() {
+        for method in ["btree", "hash", "gin", "gist", "brin", "spgist"] {
+            let src = format!(
+                "@table(\"docs\")\n\
+                 @index(\"body\", using=\"{method}\")\n\
+                 type Doc {{\n  \
+                   id: Int = 0\n  \
+                   body: Str\n\
+                 }}\n"
+            );
+            let errs = errors_of(&src);
+            assert!(
+                errs.is_empty(),
+                "method `{method}` debería ser aceptado, errors: {:?}",
+                errs
+            );
+            // Validar que el using se popula (None para btree default,
+            // Some(lower) para el resto).
+            let tokens = tokenize(&src).expect("lex");
+            let program = parse(tokens).expect("parse");
+            let (env, _, _, _) = check_program(&program);
+            let tid = env.lookup("Doc").expect("Doc registrado");
+            let meta = env.table_metadata(tid).expect("@table metadata");
+            assert_eq!(meta.indexes.len(), 1, "1 @index");
+            if method == "btree" {
+                assert_eq!(
+                    meta.indexes[0].using, None,
+                    "btree default queda como None (no se emite USING redundante)"
+                );
+            } else {
+                assert_eq!(
+                    meta.indexes[0].using.as_deref(),
+                    Some(method),
+                    "method `{method}` se popula"
+                );
+            }
+        }
+    }
+
+    /// Method no whitelisteado emite error claro citando los soportados.
+    #[test]
+    fn checker_at_index_using_method_invalido_es_error() {
+        let src = "@table(\"docs\")\n\
+                   @index(\"body\", using=\"bloom\")\n\
+                   type Doc {\n  id: Int = 0\n  body: Str\n}\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter().any(|e| e.message.contains("bloom")
+                && e.message.contains("btree")
+                && e.message.contains("gin")),
+            "error debería citar el method invalido + lista de soportados: {:?}",
+            errs
+        );
+    }
+
+    /// `using=` con tipo no-Str es error.
+    #[test]
+    fn checker_at_index_using_no_str_es_error() {
+        let src = "@table(\"docs\")\n\
+                   @index(\"body\", using=42)\n\
+                   type Doc {\n  id: Int = 0\n  body: Str\n}\n";
+        let errs = errors_of(src);
+        assert!(
+            errs.iter()
+                .any(|e| e.message.contains("`@index(using=...)`")),
+            "error debería citar el contrato de `using=`: {:?}",
             errs
         );
     }

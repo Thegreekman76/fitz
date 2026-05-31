@@ -592,6 +592,20 @@ type Post {
   comparativa simple traducida a SQL (`col == "x"`, `col > N`,
   `col is_in [a, b]`, etc.). El nombre del kwarg es `where_`
   porque `where` es reservada del lenguaje.
+- `using="<method>"` — v0.10.28. Method override. Whitelist:
+  `btree` (default, no se emite USING), `hash`, `gin`, `gist`,
+  `brin`, `spgist`. Habilita full-text (`gin` sobre tsvector),
+  ranges (`gist`), large tables sintéticas (`brin`) sin bajar a
+  `db.exec`. Otro valor → error de compilación citando los
+  soportados.
+
+```fitz
+@table("docs")
+@index(body_tsv, using="gin")               // full-text search
+@index(price_range, using="gist")           // range queries
+@index(created_at, using="brin")            // grandes tablas time-series
+type Doc { ... }
+```
 
 **Cuándo aplica**:
 - `fitz db diff` muestra los `CREATE INDEX` que faltan.
@@ -600,12 +614,13 @@ type Post {
   el delta (drop + create cuando cambian columnas, drop puro
   cuando sobran).
 
-**Lo que NO está en v0.10.27**:
+**Lo que NO está en v0.10.28**:
 - **Expression indexes** sobre llamadas/funciones (`lower(email)`,
   `to_tsvector('english', body)`): no se generan auto. Workaround:
   `db.exec("CREATE INDEX ...")` al boot.
-- **Index method override** (`USING hash`, `USING gin`): no
-  expresable. Default `btree` (Postgres default).
+- Diff name-based: si cambiás SOLO el `using=` (mismo nombre + cols),
+  el migrator NO detecta el cambio. Workaround: pasar `name=` distinto
+  para forzar regen.
 
 ---
 
@@ -3457,12 +3472,14 @@ Lo que queda como deuda menor:
 ## 29. CLI con DB: cómo cada subcomando interactúa
 
 Desde v0.10.16, Fitz tiene un subcomando dedicado `fitz db ...`
-con cuatro acciones (`diff` / `migrate` / `status` / `new`) — ver
-sección 26.c para el workflow canónico y limitaciones del MVP.
-El resto de los subcomandos generales del CLI también funcionan
-naturalmente con programas que usan el módulo `db` y el ORM.
+con varias acciones (`diff` / `migrate` / `status` / `new` /
+`rollback` / `check` / `stamp` / `history` / `squash` / **`inspect`**
+desde v0.10.28) — ver sección 26.c para el workflow canónico y
+limitaciones del MVP. El resto de los subcomandos generales del CLI
+también funcionan naturalmente con programas que usan el módulo `db`
+y el ORM.
 
-### `fitz db diff/migrate/status/new/rollback/check/stamp/history/squash` — workflow de migraciones
+### `fitz db diff/migrate/status/new/rollback/check/stamp/history/squash/inspect` — workflow de migraciones + introspect
 
 ```bash
 export DATABASE_URL="postgres://fitz:fitz@localhost/myapp"
@@ -3477,9 +3494,110 @@ fitz db check                            # CI: exit 0 sync / exit 1 drift
 fitz db stamp 20260530000000             # adopt DB legacy: marca sin ejecutar
 fitz db stamp --all                      # marca todas las pending
 fitz db squash <from> <to>               # v0.10.20: combina migrations en una
+fitz db inspect                          # v0.10.28: introspect del schema real
+fitz db inspect --table users            # focaliza una sola tabla
+fitz db inspect --schema tenant_a        # filtra por schema (default public)
+fitz db inspect --json                   # output machine-readable
 ```
 
 Detalle completo en sección 26.c.
+
+### `fitz db inspect` — introspect del schema real (v0.10.28)
+
+Lista lo que la DB **realmente** tiene (no lo que tu código declara
+— para eso está `fitz db diff`). Útil para:
+
+- Auditar el schema antes de cambiar tipos (`fitz db inspect --table
+  users` antes de migrar).
+- Descubrir tables/columns legacy creadas fuera de Fitz.
+- Comparar dev vs prod (`fitz db inspect --url $PROD > prod.txt`
+  y diff manual).
+- Generar reportes machine-readable para scripts externos via
+  `--json`.
+
+Vista texto plano (default):
+
+```
+Schema: public
+
+Table: users (3 cols)
+  id          bigint                    NOT NULL  PK
+  email       text                      NOT NULL
+  deleted_at  timestamp with time zone  NULL
+  Indexes:
+    idx_users_email_active  UNIQUE (email)  WHERE (deleted_at IS NULL)
+
+Table: posts (3 cols)
+  id         bigint  NOT NULL  PK
+  author_id  bigint  NOT NULL
+  title      text    NOT NULL
+  Foreign keys:
+    posts_author_id_fkey: author_id -> users(id) ON DELETE CASCADE
+```
+
+Shape JSON estable (`--json`):
+
+```json
+{
+  "schema": "public",
+  "tables": [
+    {
+      "name": "users",
+      "schema": "public",
+      "columns": [
+        { "name": "id", "sql_type": "bigint", "nullable": false,
+          "default": null, "is_primary": true }
+      ],
+      "primary_key": ["id"],
+      "indexes": [
+        { "name": "idx_users_email_active", "columns": ["email"],
+          "unique": true, "where_clause": "(deleted_at IS NULL)",
+          "using": null }
+      ],
+      "foreign_keys": []
+    }
+  ]
+}
+```
+
+Notas:
+
+- NO se conecta al programa Fitz — solo a la DB. Independiente del
+  proyecto Fitz local.
+- Si la tabla no existe en el schema filtrado, emite mensaje claro
+  (no error): `(no se encontró la tabla \`X\`)`.
+- El `using` aparece como `null` cuando es btree (default Postgres);
+  como `"gin"`/`"gist"`/`"brin"`/etc. cuando el índice tiene method
+  override.
+- Tables en schemas distintos a `public` quedan filtradas por
+  default — pasar `--schema <name>` para verlas.
+
+### Observabilidad — `FITZ_DB_LOG` (v0.10.28)
+
+Env var opt-in que loguea cada query del driver a stderr post-
+ejecución. Zero overhead si no está seteada.
+
+```bash
+export FITZ_DB_LOG=1         # mode simple: SQL + tiempo
+export FITZ_DB_LOG=verbose   # además params (truncados a 80 chars)
+```
+
+Output:
+
+```
+[fitz-db 1.2ms] SELECT id, email FROM users WHERE id = $1
+[fitz-db 4.1ms verbose] INSERT INTO users (name) VALUES ($1) params=[$1="ada"]
+```
+
+- **A stderr**, NO contamina el stdout del programa.
+- SQL multi-línea se colapsa a una sola línea para facilitar grep.
+- Params largos (>80 chars) se truncan con `…` final por seguridad
+  básica (no se vuelca un BLOB entero al log).
+- Loguea **todas** las queries: SELECT/INSERT/UPDATE/DELETE/DDL +
+  queries internas del ORM (auto-genera). Cubre tanto `fitz run`
+  como `fitz build` (mismo crate `fitz::db`).
+- El mode se fija al primer acceso del proceso (LazyLock). Cambios
+  mid-run de la env var NO se reflejan.
 
 ### `fitz run [archivo]` — con DB
 
