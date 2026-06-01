@@ -36,7 +36,7 @@ asume VSCode para los screenshots ASCII.
 
 | Módulo | Caps | Estado |
 |--------|------|--------|
-| M1 — Setup y primer programa | 5 | 🚧 en construcción |
+| M1 — Setup y primer programa | 5 | ✅ cerrado (C1-C5) |
 | M2 — Tipos y funciones | 7 | 📋 planificado |
 | M3 — Módulos y organización | 5 | 📋 planificado |
 | M4 — HTTP first-class | 5 | 📋 planificado |
@@ -53,10 +53,10 @@ para empezar.
 Requisito explícito: VSCode + extensión Fitz instalada.
 
 - **[C1 — Instalación](m1-setup/c1-instalacion.md)** ← empezá acá
-- C2 — `fitz new` (próximamente)
-- C3 — Hola mundo + LSP (próximamente)
-- C4 — CLI esencial (próximamente)
-- C5 — REPL (próximamente)
+- **[C2 — `fitz new` (proyecto skeleton)](m1-setup/c2-fitz-new.md)**
+- **[C3 — Hola mundo + LSP visible](m1-setup/c3-hola-lsp.md)**
+- **[C4 — CLI esencial (run / check / fmt / lint)](m1-setup/c4-cli-esencial.md)**
+- **[C5 — REPL](m1-setup/c5-repl.md)**
 
 **Entregable del módulo**: tenés Fitz funcionando en tu máquina,
 con la extensión VSCode activa y un proyecto skeleton del que

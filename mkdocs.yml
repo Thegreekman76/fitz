@@ -132,6 +132,10 @@ nav:
       - curso/index.md
       - 'M1 — Setup y primer programa':
           - 'C1 — Instalación': curso/m1-setup/c1-instalacion.md
+          - 'C2 — fitz new': curso/m1-setup/c2-fitz-new.md
+          - 'C3 — Hola mundo + LSP': curso/m1-setup/c3-hola-lsp.md
+          - 'C4 — CLI esencial': curso/m1-setup/c4-cli-esencial.md
+          - 'C5 — REPL': curso/m1-setup/c5-repl.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:
