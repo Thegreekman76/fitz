@@ -146,7 +146,11 @@ print("Hola, {name}!")
 fitz run hola.fitz
 ```
 
-**3. Seguir aprendiendo.** La [**guía del lenguaje**](https://thegreekman76.github.io/fitz/guide/) cubre todo lo implementado en español, con ejemplos ejecutables. Empezá por el [cap 2 — Tu primer programa](https://thegreekman76.github.io/fitz/guide/#2-tu-primer-programa). Para la especificación completa (incluye features futuras), ver [docs/syntax-spec.md](docs/syntax-spec.md).
+**3. Seguir aprendiendo.** Tres puertas de entrada según con qué venís:
+
+- **¿Desde cero, querés que te lleven paso a paso?** El [**curso `Fitz de 0 a experto`**](https://thegreekman76.github.io/fitz/curso/) arranca con la instalación y crece capítulo a capítulo hasta una app real con Postgres + ORM + Docker.
+- **¿Sabés programar, querés referencia feature por feature?** La [**guía del lenguaje**](https://thegreekman76.github.io/fitz/guide/) cubre todo lo implementado en español, con ejemplos ejecutables. Empezá por el [cap 2 — Tu primer programa](https://thegreekman76.github.io/fitz/guide/#2-tu-primer-programa).
+- **¿Buscás la especificación completa** (incluye features futuras)? Ver [docs/syntax-spec.md](docs/syntax-spec.md).
 
 ## Boilerplates
 

@@ -12,6 +12,12 @@ Lo que ves acá funciona hoy contra el binario del repo. Si un ejemplo
 no corre, es un bug de la guía, del intérprete o del compilador —
 abrí un issue.
 
+> **¿Es tu primera vez con Fitz y querés que te lleven paso a paso
+> desde la instalación?** El [**curso `Fitz de 0 a experto`**](curso/index.md)
+> es la puerta de entrada pedagógica: un proyecto que crece capítulo a
+> capítulo desde "hola mundo" hasta una app real. Esta guía sigue
+> siendo el lugar para referencia feature por feature.
+
 ---
 
 ## Índice

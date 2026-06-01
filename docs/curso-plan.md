@@ -1,8 +1,26 @@
 # Curso `Fitz de 0 a experto` — Plan
 
-**Estado**: planificada, sin arrancar. Este documento es el
-plan de obra; el contenido real vivirá en `docs/curso/` cuando
-arranquemos.
+**Estado**: M1 en construcción (arrancó 2026-06-01, post-v0.11.1).
+El contenido real vive en [`docs/curso/`](curso/index.md).
+
+> **Actualización 2026-06-01 (al arrancar M1)**: tres ajustes
+> sobre el plan original (trazado en v0.9.x):
+>
+> 1. **M6 cambia capstone**: ORM nativo Fitz (cap 31 de la guía)
+>    como camino default; SQLAlchemy via `fitz py-types` queda como
+>    cap opcional para users con modelos Python existentes. La Fase
+>    10 (cerrada en v0.10.x) volvió a SQLAlchemy un nice-to-have,
+>    no la opción principal.
+> 2. **M7 espera Fase 12**: el módulo de deployment se documenta
+>    pero NO se escribe hasta que `fitz dockerfile`/`fitz compose`/
+>    `fitz deploy` (Fase 12) estén implementados. Sin esos
+>    sub-comandos, el cap quedaría inconsistente con la promesa
+>    "deployment ciudadano primera clase". M1-M6 se releasea como
+>    "curso completo backend"; M7 llega después.
+> 3. **Tabla nueva "Mapping curso → guide.md"** (ver más abajo).
+>    El curso NO duplica el contenido de la guía — la cita como
+>    referencia técnica. Cada cap del curso linkea al cap
+>    correspondiente de la guía para "el detalle exhaustivo".
 
 ---
 
@@ -163,33 +181,101 @@ cron de limpieza, todo en el mismo binario.
 
 ---
 
-### M6 — Capstone: Postgres + SQLAlchemy + Fitz (6 capítulos)
+### M6 — Capstone: Postgres + ORM nativo Fitz (6 capítulos)
+
+> **Cambio respecto al plan original**: este módulo usaba SQLAlchemy
+> via `fitz py-types` como capstone. Con la Fase 10 cerrada (ORM
+> nativo Fitz, driver Postgres puro, sin libpq), el camino default
+> ahora es el ORM nativo. SQLAlchemy queda como **cap opcional**
+> al final del módulo para users con modelos Python existentes.
 
 | Cap | Título | Cubre |
 |---|---|---|
-| C27 | Setup interop | Binario con feature `python` habilitada (o release con interop), venv con SQLAlchemy + psycopg, `from python import math` smoke |
-| C28 | Modelos SQLAlchemy | `db/models.py` con `User`/`Post` sobre Postgres real, `docker-compose.yml` para la DB |
-| C29 | `fitz py-types` | `fitz py-types db/models.py --out src/models/db_types.fitz`, regenerar cuando cambien los modelos Python |
-| C30 | CRUD end-to-end | Handlers Fitz que llaman `db.list_users()` → `List<User>` Fitz con coerción automática, `db.create_user(payload)?` propagando errores via `Result` |
-| C31 | DX en producción | `fitz dev` (hot reload) + `fitz test` (integración contra DB de test) + `fitz lint` + GitHub Actions ejemplo |
-| C32 | `fitz build` + Docker | Compilar a binario, Dockerfile multi-stage reusando el boilerplate `python-postgres`, deploy local con `docker compose up` |
+| C27 | Setup Postgres | `docker-compose.yml` para Postgres local, `db.connect(env("DATABASE_URL")?)`, primer query con `db.query` |
+| C28 | Modelos con `@table` | `type User { ... } @table("users") @primary id: Int` + `@column`/`@belongs_to`/`@has_many`, generación automática del schema |
+| C29 | Migraciones | `fitz db diff` para ver el SQL DDL que falta, `fitz db migrate` para aplicarlo, `fitz db status` para ver el estado |
+| C30 | CRUD end-to-end | Handlers Fitz con `User.where(fn(u) => ...).all(db)?`, `User.insert(db, user)`, eager loading con `.preload("posts")` |
+| C31 | DX en producción | `fitz dev` (hot reload) + `fitz test` (integración contra DB de test) + `fitz lint` + GitHub Actions con Postgres service container |
+| C32 | `fitz build` + Docker | Compilar a binario, Dockerfile multi-stage (boilerplate `api-orm-full` como referencia), deploy local con `docker compose up` |
 
-**Entregable**: app CRUD de blog con auth JWT, Postgres real,
-hot reload en dev, binario standalone para prod, Dockerizado.
+**Cap opcional al final del módulo** (no obligatorio para el
+entregable):
+
+| Cap | Título | Cubre |
+|---|---|---|
+| C32b | Si ya tenés modelos Python | `fitz py-types` para auto-generar types Fitz desde modelos SQLAlchemy, interop con feature `python` habilitada |
+
+**Entregable**: app CRUD de blog con auth JWT (de M5), Postgres
+real, migraciones automáticas, hot reload en dev, binario
+standalone para prod, Dockerizado. Sin `pip`, sin SQLAlchemy, sin
+ORM externo — todo nativo del lenguaje.
 
 ---
 
-### M7 — Producción y deployment (4 capítulos)
+### M7 — Producción y deployment (4 capítulos) — ⏸ PENDIENTE FASE 12
+
+> **Estado**: este módulo está **suspendido hasta que cierre Fase
+> 12** (deployment ciudadano primera clase). Los caps de abajo
+> asumen que `fitz dockerfile`/`fitz compose`/`fitz deploy` están
+> implementados y producen artefactos canónicos. Escribirlo antes
+> de que existan implicaría que el lector aprenda flow manual que
+> después cambia — peor pedagógicamente.
+>
+> Mientras tanto, **M1-M6 se releasea como "curso completo backend"**.
+> Los users que llegan al final de M6 ya tienen una app dockerizable
+> con el boilerplate `api-orm-full` como referencia (cap 32 del
+> módulo M6).
 
 | Cap | Título | Cubre |
 |---|---|---|
 | C33 | Estructura final | Walkthrough de la convención completa con justificación de cada carpeta — modelos vs services vs handlers vs db |
 | C34 | Variables de entorno | `env("DATABASE_URL")?` + `load_env(".env")?`, conventions para dev/staging/prod |
-| C35 | CI con GitHub Actions | `fitz check`, `fitz test`, `fitz lint`, `fitz fmt --check`, build matrix |
-| C36 | Más allá del curso | Roadmap personal: Fase 10 (ORM nativo), Fase 11 (frontend), cómo seguir aprendiendo, dónde reportar bugs |
+| C35 | `fitz dockerfile` + `fitz compose` | Generación automática del Dockerfile + docker-compose con la DB detectada del `@table` (Fase 12.1+12.2) |
+| C36 | CI + deploy + más allá | `fitz check`/`test`/`lint` en GitHub Actions + `fitz deploy` (Fase 12.x), roadmap personal del lector |
 
-**Entregable**: app de M6 con `.env` para configuración, CI
-verde en GitHub, lista para deploy real.
+**Entregable**: app de M6 con `.env` para configuración, CI verde
+en GitHub, `fitz dockerfile` + `fitz deploy` corriendo end-to-end.
+
+---
+
+## Mapping curso → guide.md
+
+El curso NO duplica el contenido de la guía. Cada capítulo cita
+la sección correspondiente de [`guide.md`](guide.md) como "detalle
+exhaustivo". El curso aporta:
+
+- **Narrativa**: un proyecto que crece capítulo a capítulo.
+- **Setup ergonómico**: VSCode + LSP visible desde C3.
+- **Organización de carpetas**: `src/models/` + `services/` +
+  `handlers/` + `db/` + `tests/` — convención que la guía no cubre.
+- **Decisiones del autor**: cuándo elegir qué.
+
+Mapping completo al estado actual de la guía (post-v0.11.1):
+
+| Cap curso | Cubre | Base en guide.md |
+|-----------|-------|------------------|
+| C1 Instalación | Setup `fitz` + VSCode + .vsix | (nuevo — no está en guía) |
+| C2 `fitz new` | Crear proyecto skeleton | §16b Package manager |
+| C3 Hola + LSP | Editar + hover + autocomplete | §2 + §22 (editores) |
+| C4 CLI esencial | run/check/fmt/lint en terminal | §23 fmt + §24 test + §25 dev + §27 lint |
+| C5 REPL | `fitz repl` + `:type` + `:load` | §26 REPL |
+| C6-C12 Tipos+fns | Vars/Strings/Fns/Control/Type/Result/HOF | §3-15 |
+| C13-C16 Módulos+pkg | `import` + multi-archivo + `[lib]` + path deps + tests | §16 + §16b + §24 |
+| C17 Tests | `@test`/`assert_eq`/`fitz test`/filtros | §24 |
+| C18-C22 HTTP | `@get`/path params/body/OpenAPI/middleware/CORS | §17 + §18 docs + middleware |
+| C23 Async | `async fn`/`.await`/`sleep` | §19 |
+| C24 Auth | `@auth_provider`/`@authenticated`/JWT/Argon2 | §28 |
+| C25 WS | `@ws`/`WsConn<T>`/broadcast/AsyncAPI | §29 |
+| C26 Cron | `@cron`/`@background`/`spawn` | §30 |
+| C27-C32 ORM nativo capstone | Postgres + `@table` + migraciones + CRUD + Docker | §31 Postgres + ORM + [DB y ORM exhaustivo](db-orm.md) |
+| C32b opcional | Interop SQLAlchemy | §21.8 Interop Python |
+| C33-C34 Producción (parcial) | Convención carpetas + env vars | §32 env (parcial) |
+| C35-C36 Deployment | `fitz dockerfile`/`compose`/`deploy`/CI | (pendiente Fase 12) |
+
+**Regla operativa del curso**: cada cap arranca diciendo qué
+features nuevas introduce y, al final, linkea a las secciones
+exhaustivas de la guía. El lector que quiera profundizar tiene
+camino claro; el lector que sigue lineal no se desvía.
 
 ---
 

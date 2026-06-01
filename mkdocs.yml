@@ -128,6 +128,10 @@ nav:
   - Inicio: index.md
   - Guía:
       - guide.md
+  - Curso:
+      - curso/index.md
+      - 'M1 — Setup y primer programa':
+          - 'C1 — Instalación': curso/m1-setup/c1-instalacion.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:
