@@ -1,4 +1,4 @@
-// Cap 33 — CLI builder nativo (Fase 13, v0.11.0).
+// Cap 33 — CLI builder nativo (Fase 13, v0.11.0 + polish v0.11.1).
 //
 // `@command("name", desc="...")` sobre una `fn` la declara como
 // comando CLI. El binario producido por `fitz build` parsea
@@ -10,8 +10,15 @@
 // - Param **sin default** → positional arg requerido.
 // - Param **con default** → flag opcional (`--name <value>` o
 //   `--name` si es Bool sin valor).
-// - Bool con `default = false` → flag bool sin valor.
+// - Bool con `default = false` → flag bool sin valor (`--loud`).
+// - Bool con `default = true` → flag se niega con `--no-<name>`
+//   (v0.11.1, paralelo a Cargo `--no-default-features`).
 // - Otros tipos con default → flag con valor.
+// - **Short flags auto-inferidos** (v0.11.1): primera letra del
+//   nombre del flag se mapea a `-x`. Colisiones (dos flags con
+//   misma inicial) → error en compile-time.
+// - **`List<Str>` variadic** (v0.11.1): último positional, absorbe
+//   N tokens restantes.
 //
 // El return type debe ser `Int` (exit code; `0` éxito).
 

@@ -9944,17 +9944,28 @@ fn check_command_decorator(
             return;
         }
         let p_type = ann_to_type(p.type_.as_ref(), ctx.types);
+        // v0.11.1 (Fase 13 polish) — `List<Str>` permitido como
+        // **variadic** (positional final que absorbe N tokens). Solo
+        // como último param positional (sin default). Otros tipos
+        // List<T> quedan como deuda futura (List<Int> requiere
+        // coerción per-token; el caso real cubre Str para args
+        // tipo `mybin run file1 file2 file3`).
+        let is_str_list_variadic = matches!(
+            &p_type,
+            Type::List(inner) if matches!(**inner, Type::Str)
+        );
         let valid = matches!(
             p_type,
             Type::Str | Type::Int | Type::Float | Type::Bool | Type::Any
-        ) || matches!(&p_type, Type::Nullable(inner) if matches!(**inner, Type::Str | Type::Int | Type::Float));
+        ) || matches!(&p_type, Type::Nullable(inner) if matches!(**inner, Type::Str | Type::Int | Type::Float))
+            || is_str_list_variadic;
         if !valid {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@command sobre fn '{}': param `{}` tiene tipo `{}` que no es CLI-marshallable. Soportados: `Str`/`Int`/`Float`/`Bool` (con o sin `?`).",
+                    "@command sobre fn '{}': param `{}` tiene tipo `{}` que no es CLI-marshallable. Soportados: `Str`/`Int`/`Float`/`Bool` (con o sin `?`), `List<Str>` solo como variadic final (v0.11.1).",
                     fn_name,
                     p.name,
                     p_type.display(ctx.types)
@@ -9962,22 +9973,34 @@ fn check_command_decorator(
             ));
             return;
         }
-        // Bool con default true → deuda menor (requiere `--no-flag`
-        // convention). MVP solo acepta Bool = false default.
-        if matches!(p_type, Type::Bool) {
-            if let Some(Expr::Bool(true, _)) = &p.default {
+        // v0.11.1 — variadic List<Str> debe ser el ÚLTIMO param del
+        // comando entero (no del último-sin-default), porque acumula
+        // los tokens positional restantes. Convención: el user
+        // escribe `files: List<Str> = []` (con default `[]`) para
+        // satisfacer la regla del parser "después de un default, todos
+        // los siguientes también". El `= []` es semánticamente
+        // redundante (variadic siempre empieza vacío + acumula) pero
+        // necesario para shape syntáctico.
+        if is_str_list_variadic {
+            let this_idx = params.iter().position(|q| std::ptr::eq(q, p)).unwrap();
+            if this_idx != params.len() - 1 {
                 ctx.errors.push(FitzError::new(
                     ErrorKind::TypeError,
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@command sobre fn '{}': param `Bool = true` no soportado en MVP (requiere convención `--no-{}` para negar). Usá `Bool = false` o invertí la lógica.",
+                        "@command sobre fn '{}': param `{}` (List<Str> variadic) debe ser el ÚLTIMO de TODOS los params. Movelo al final.",
                         fn_name, p.name
                     ),
                 ));
                 return;
             }
         }
+        // v0.11.1 (Fase 13 polish) — `Bool = true` ahora soportado.
+        // El parser de argv reconoce `--no-<name>` para negar el
+        // default. Ej: `verbose: Bool = true` → `--no-verbose` lo
+        // setea a false; presencia de `--verbose` redundante pero
+        // tolerada. Sin override → queda en true.
     }
 }
 

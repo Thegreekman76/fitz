@@ -105,6 +105,61 @@ pub fn param_is_flag(p: &Param) -> bool {
     p.default.is_some()
 }
 
+/// v0.11.1 (Fase 13 polish) — auto-infiere short flags por primera
+/// letra del nombre del param. Devuelve `HashMap<char, String>` que
+/// mapea `'l' → "loud"`, `'c' → "count"`, etc. Si dos flags empiezan
+/// con la misma letra (colisión), devuelve `Err` con mensaje claro:
+/// la `@command` debe renombrar uno o aceptar que solo el primero
+/// reciba short flag.
+///
+/// Decisión de diseño: short flags **auto** en vez de `@flag(short="l")`
+/// kwargs. Razón: la mayoría de las CLI standards (POSIX, GNU)
+/// usan primera letra; el override manual queda como deuda futura
+/// (kwargs en @flag requeriría AST change en Param). Si una colisión
+/// aparece, el user renombra o desactiva via kwarg futuro.
+pub fn compute_short_flags(
+    params: &[Param],
+) -> Result<std::collections::HashMap<char, String>, String> {
+    // v0.11.1 — variadic List<Str> al final NO recibe short flag (no es flag).
+    let variadic_idx = params
+        .last()
+        .filter(|p| {
+            matches!(
+                p.type_.as_ref().map(|t| t.display_name()),
+                Some(n) if n.starts_with("List<")
+            )
+        })
+        .map(|_| params.len() - 1);
+    let mut out: std::collections::HashMap<char, String> = std::collections::HashMap::new();
+    for (i, p) in params.iter().enumerate() {
+        if Some(i) == variadic_idx {
+            continue;
+        }
+        if !param_is_flag(p) {
+            continue;
+        }
+        let first = match p.name.chars().next() {
+            Some(c) => c.to_ascii_lowercase(),
+            None => continue,
+        };
+        if !first.is_ascii_alphanumeric() {
+            // Flags con nombre que empieza con `_` u otro símbolo:
+            // skipear short flag (poco común en CLIs públicas).
+            continue;
+        }
+        if let Some(existing) = out.get(&first) {
+            return Err(format!(
+                "@command short flag conflict: `--{}` y `--{}` comparten primera letra `-{}`. \
+                 Renombrá uno de los dos o desactivá short flags para uno (deuda futura: kwarg \
+                 `@flag(short=null)`).",
+                existing, p.name, first
+            ));
+        }
+        out.insert(first, p.name.clone());
+    }
+    Ok(out)
+}
+
 /// Construye el usage line "USAGE: bin <command> <positionals> [OPTIONS]"
 /// para un comando.
 pub fn usage_line(bin_name: &str, cmd: &CliCommand, multi_command: bool) -> String {
@@ -148,9 +203,17 @@ pub fn render_args_section(cmd: &CliCommand) -> String {
 }
 
 /// Renderea la sección OPTIONS (flags) del help de un comando. Incluye
-/// `-h, --help` siempre. Cada flag muestra default si está.
+/// `-h, --help` siempre. Cada flag muestra short form (`-x`, v0.11.1)
+/// si lo tiene auto-asignado + default si está.
 pub fn render_options_section(cmd: &CliCommand) -> String {
     let mut s = String::from("\n\nOPTIONS:\n");
+    // v0.11.1 — pre-compute short map para anotar cada flag con su `-x`.
+    let short_map = compute_short_flags(&cmd.params).unwrap_or_default();
+    // Invertir: name → short char (para lookup directo en el loop).
+    let mut by_name: std::collections::HashMap<&str, char> = std::collections::HashMap::new();
+    for (c, n) in &short_map {
+        by_name.insert(n.as_str(), *c);
+    }
     for p in &cmd.params {
         if !param_is_flag(p) {
             continue;
@@ -160,11 +223,23 @@ pub fn render_options_section(cmd: &CliCommand) -> String {
             .as_ref()
             .map(|t| t.display_name())
             .unwrap_or_else(|| "Any".into());
-        // Bool flags no muestran <value>; otros sí.
+        // v0.11.1 — short prefix (`-x, ` o vacío).
+        let short_prefix = match by_name.get(p.name.as_str()) {
+            Some(c) => format!("-{}, ", c),
+            None => String::new(),
+        };
+        // v0.11.1 — Bool flag con default = true muestra `--no-<name>`
+        // como forma de negar (paralelo a Cargo `--no-default-features`).
+        // Bool con default = false muestra `--<name>` para activar.
         let flag_form = if ty == "Bool" {
-            format!("--{}", p.name)
+            let default_true = matches!(&p.default, Some(crate::ast::Expr::Bool(true, _)));
+            if default_true {
+                format!("{}--no-{}", short_prefix, p.name)
+            } else {
+                format!("{}--{}", short_prefix, p.name)
+            }
         } else {
-            format!("--{} <{}>", p.name, ty.to_uppercase())
+            format!("{}--{} <{}>", short_prefix, p.name, ty.to_uppercase())
         };
         s.push_str(&format!("    {}\n", flag_form));
     }
@@ -293,16 +368,64 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
     }
 
     // Parsear positional + flags.
-    let positional_params: Vec<&Param> = cmd.params.iter().filter(|p| !param_is_flag(p)).collect();
-    let flag_params: Vec<&Param> = cmd.params.iter().filter(|p| param_is_flag(p)).collect();
+    // v0.11.1 — variadic List<Str> es el último param del cmd (con default
+    // `= []` por convención sintáctica). Se excluye de positional_params Y
+    // de flag_params para tratamiento especial (acumula tokens restantes).
+    let variadic_idx: Option<usize> = cmd
+        .params
+        .last()
+        .filter(|p| {
+            matches!(
+                p.type_.as_ref().map(|t| t.display_name()),
+                Some(n) if n.starts_with("List<")
+            )
+        })
+        .map(|_| cmd.params.len() - 1);
+    let positional_params: Vec<&Param> = cmd
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| Some(*i) != variadic_idx && !param_is_flag(p))
+        .map(|(_, p)| p)
+        .collect();
+    let flag_params: Vec<&Param> = cmd
+        .params
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| Some(*i) != variadic_idx && param_is_flag(p))
+        .map(|(_, p)| p)
+        .collect();
     let mut positional_values: Vec<String> = Vec::new();
     let mut flag_values: std::collections::HashMap<String, Option<String>> =
         std::collections::HashMap::new();
+
+    // v0.11.1 — pre-compute short flag map (`-l` → `loud`). Errores
+    // de colisión son responsabilidad del codegen/checker en runtime
+    // de codegen; acá fallback silencioso (`unwrap_or_default` = vacío).
+    let short_map = compute_short_flags(&cmd.params).unwrap_or_default();
 
     let mut i = 0;
     while i < remaining.len() {
         let tok = &remaining[i];
         if let Some(rest) = tok.strip_prefix("--") {
+            // v0.11.1 — `--no-<name>` para negar Bool flag (default
+            // true → false). Si el rest empieza con `no-` Y el resto
+            // matchea un flag Bool del comando, lo seteamos a false.
+            // Si no matchea (ej: `--noisy` es flag legítima), seguimos
+            // con el path normal.
+            let negation_target = rest.strip_prefix("no-").and_then(|n| {
+                flag_params
+                    .iter()
+                    .find(|p| p.name == n && param_is_bool(p))
+                    .map(|_| n.to_string())
+            });
+            if let Some(target) = negation_target {
+                // Aplicar negación: usamos sentinel `Some("false")`
+                // que el coerce maneja consistente con `--name=false`.
+                flag_values.insert(target, Some("false".to_string()));
+                i += 1;
+                continue;
+            }
             // Flag long form: `--name` o `--name=value`.
             if let Some(eq_pos) = rest.find('=') {
                 let key = &rest[..eq_pos];
@@ -326,26 +449,79 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
                     i += 2;
                 }
             }
+        } else if let Some(short_part) = tok.strip_prefix('-').filter(|s| !s.is_empty()) {
+            // v0.11.1 — short flag `-x` (single dash + single char).
+            // Resuelve via `short_map` a su long name y reutiliza el mismo
+            // path de flag long. MVP: solo `-x` single, sin combo `-xyz`
+            // ni `-x=v`. El user usa la forma larga para esos shapes.
+            let mut chars_iter = short_part.chars();
+            let first = chars_iter
+                .next()
+                .expect("short_part no vacío validado arriba");
+            if chars_iter.next().is_some() {
+                return ParseResult::Error(
+                    format!(
+                        "flag corta combinada o con `=` no soportada en MVP: `{}`. Usá la forma larga `--<name>`.",
+                        tok
+                    ),
+                    2,
+                );
+            }
+            let long_name = match short_map.get(&first.to_ascii_lowercase()) {
+                Some(n) => n.clone(),
+                None => {
+                    return ParseResult::Error(
+                        format!(
+                            "flag corta desconocida `-{}`. Disponibles: {}",
+                            first,
+                            short_map
+                                .iter()
+                                .map(|(c, n)| format!("-{} (--{})", c, n))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ),
+                        2,
+                    );
+                }
+            };
+            let param = flag_params.iter().find(|p| p.name == long_name);
+            let is_bool_flag = param.map(|p| param_is_bool(p)).unwrap_or(false);
+            if is_bool_flag {
+                flag_values.insert(long_name, None);
+                i += 1;
+            } else {
+                if i + 1 >= remaining.len() {
+                    return ParseResult::Error(
+                        format!("flag `-{}` (--{}) espera un valor", first, long_name),
+                        2,
+                    );
+                }
+                flag_values.insert(long_name, Some(remaining[i + 1].clone()));
+                i += 2;
+            }
         } else {
             positional_values.push(tok.clone());
             i += 1;
         }
     }
 
-    // Resolver positional args.
-    if positional_values.len() < positional_params.len() {
+    // v0.11.1 — variadic_idx ya capturado arriba. Si está, los positionals
+    // requeridos son los que vienen ANTES del variadic.
+    let has_variadic = variadic_idx.is_some();
+    let required_positional_count = positional_params.len();
+    if positional_values.len() < required_positional_count {
         let missing_param = &positional_params[positional_values.len()];
         return ParseResult::Error(
             format!(
                 "falta el argumento posicional `<{}>` (esperaba {} positional args, recibió {})",
                 missing_param.name,
-                positional_params.len(),
+                required_positional_count,
                 positional_values.len()
             ),
             2,
         );
     }
-    if positional_values.len() > positional_params.len() {
+    if !has_variadic && positional_values.len() > positional_params.len() {
         return ParseResult::Error(
             format!(
                 "demasiados argumentos posicionales: esperaba {}, recibió {} (extras: {:?})",
@@ -362,7 +538,15 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
     // signature.
     let mut invoke_args: Vec<Value> = Vec::with_capacity(cmd.params.len());
     let mut pos_iter = positional_values.into_iter();
-    for p in &cmd.params {
+    for (idx, p) in cmd.params.iter().enumerate() {
+        // v0.11.1 — variadic param: consume todos los tokens restantes
+        // del positional stream en una List.
+        if Some(idx) == variadic_idx {
+            let rest_strs: Vec<Value> = pos_iter.by_ref().map(Value::Str).collect();
+            let list_shared = std::sync::Arc::new(parking_lot::Mutex::new(rest_strs));
+            invoke_args.push(Value::List(list_shared));
+            continue;
+        }
         if param_is_flag(p) {
             // Flag — buscar en flag_values, sino usar default.
             let provided = flag_values.remove(&p.name);
@@ -372,11 +556,9 @@ pub fn parse_argv(argv: &[String], registry: &CliRegistry) -> ParseResult {
                     Err(e) => return ParseResult::Error(e, 2),
                 },
                 None => {
-                    // No provided → usar default.
-                    // El default se eval-uará por el evaluator al
-                    // invocar — acá mandamos un sentinel `Value::Null`
-                    // y el invoker resuelve. Workaround: mandar
-                    // Value::Default que el caller convierte.
+                    // No provided → usar default. El default se eval-uará
+                    // por el evaluator al invocar — mandamos sentinel
+                    // `Value::Null` y el invoker resuelve.
                     Value::Null
                 }
             };
@@ -419,11 +601,7 @@ fn param_is_bool(p: &Param) -> bool {
 /// Coerciona un valor string del CLI al tipo del param. None = flag
 /// sin valor (Bool present → true).
 fn coerce_arg_value(p: &Param, raw: Option<&str>) -> Result<Value, String> {
-    let head: &str = p
-        .type_
-        .as_ref()
-        .map(|t| t.head_name())
-        .unwrap_or("Str");
+    let head: &str = p.type_.as_ref().map(|t| t.head_name()).unwrap_or("Str");
     match raw {
         None => {
             // Solo válido para Bool (flag sin valor).

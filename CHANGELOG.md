@@ -11,13 +11,185 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.11.0. Fase 13 (CLI builder
-nativo) cerrada entera. Próxima dirección: **Fase 12** (Deployment
-ciudadano primera clase — `fitz dockerfile` autogenerado, `fitz
-deploy`, observability nativa con `@trace`/`@metric`, secrets
-management, feature flags), o **Tier E del ORM** (visión a futuro:
-Decimal/Numeric, streaming cursors, COPY FROM/TO, LISTEN/NOTIFY
-tipado, window functions, CTE/WITH).
+Sin trabajo en curso al cierre de v0.11.1. Fase 13 entera + polish
+cerrados. Próxima dirección: **Fase 12** (Deployment ciudadano
+primera clase — `fitz dockerfile`, observability, secrets, feature
+flags), o **Tier E del ORM** (Decimal/Numeric, streaming cursors,
+COPY FROM/TO, LISTEN/NOTIFY tipado, window functions, CTE/WITH).
+
+## [v0.11.1] — 2026-06-01 — Fase 13 polish: short flags + Bool=true negation + List<Str> variadic + fix CI fmt drift
+
+**4 sub-pasos coordinados (~5h reales)** cerrando las 3 deudas
+residuales de Fase 13 (v0.11.0) + un fix CI permanente.
+
+### Sub-paso 1 — rustfmt.toml committed + fix CI fmt drift
+
+**Fix permanente** del fail CI de v0.11.0 (`src/cli.rs:419` se
+formateaba distinto entre Windows local y Ubuntu CI). Causa: el
+repo no tenía `rustfmt.toml` committed, cada versión de rustfmt
+aplicaba defaults sutilmente distintos.
+
+- `rustfmt.toml` nuevo en repo root con `edition = "2021"`,
+  `max_width = 100`, `use_small_heuristics = "Default"`. Fija el
+  formato canonical para todos los devs + CI sin importar la
+  versión de rustfmt del runner.
+- Deuda documentada en `docs/deudas-post-5b.md` como CERRADA con
+  contexto del incidente y la decisión técnica.
+
+### Sub-paso 2 — Short flags auto-inferidos
+
+`-l` como atajo de `--loud` se infiere de la primera letra del
+nombre del flag. **Sin sintaxis extra del lado del user**:
+
+```fitz
+@command("greet")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    // Auto: --loud / -l, --count / -c
+    ...
+}
+```
+
+```bash
+$ ./mybin Ada -l -c 3
+HELLO, Ada!
+HELLO, Ada!
+HELLO, Ada!
+```
+
+- Helper nuevo `compute_short_flags(params) -> Result<HashMap<char,
+  String>, String>` en `src/cli.rs` que infiere los mappings.
+- **Detección de colisiones en compile-time**: dos flags con misma
+  primera letra (`loud` + `level`) → error claro al `fitz build`
+  con sugerencia ("Renombrá uno de los dos").
+- Parser de argv (`parse_argv` en intérprete + dispatcher generado
+  en `gen_cli_command_helpers`) normaliza `-x` → `--<long>` antes
+  del match flag. Same path para ambos. Soporta solo `-x` single en
+  MVP — combo `-xyz` y `-x=v` quedan como deuda menor.
+- Help text muestra `-l, --loud` cuando hay short asignado.
+
+### Sub-paso 3 — `Bool = true` con `--no-<flag>` negation
+
+Lifted la restricción MVP `Bool = true rechazado`. Ahora:
+
+```fitz
+@command("go")
+fn go(verbose: Bool = true) -> Int {
+    if verbose { print("verbose mode ON") } else { print("quiet") }
+    return 0
+}
+```
+
+```bash
+$ ./go                 # default → true
+verbose mode ON
+
+$ ./go --no-verbose    # negación explícita → false
+quiet
+```
+
+- Checker actualizado para aceptar `Bool = true` defaults.
+- Parser de argv reconoce `--no-<name>` para Bool flags: si el
+  resto matchea un flag Bool del comando, set a false. Si el nombre
+  empieza con `no-` pero no matchea (caso raro `--noisy` legítimo),
+  cae al path normal.
+- Help text emite `--no-<name>` para Bool con default true (paralelo
+  a Cargo `--no-default-features`).
+- Codegen emite arms `"no-<name>"` antes de los arms de flag normales
+  para el match parser.
+
+### Sub-paso 4 — `List<Str>` variadic positional
+
+Último param de tipo `List<Str>` con default `= []` absorbe N
+tokens posicionales restantes:
+
+```fitz
+@command("run")
+fn run(mode: Str, verbose: Bool = true, files: List<Str> = []) -> Int {
+    if verbose { print("mode: {mode}") }
+    for f in files {
+        print("  - {f}")
+    }
+    return 0
+}
+```
+
+```bash
+$ ./run fast a.txt b.txt c.txt
+mode: fast
+  - a.txt
+  - b.txt
+  - c.txt
+
+$ ./run fast --no-verbose
+# mode no impreso, files vacía
+```
+
+- Checker permite `List<Str>` como ÚLTIMO param de todos. Variadic
+  posicionado en otra ubicación → error.
+- Convención del `= []` default: requerido porque el parser Fitz
+  exige "después del primer default, todos los siguientes también".
+  El `[]` es semánticamente redundante (variadic siempre empieza
+  vacío y acumula) pero satisface el shape sintáctico.
+- Parser de argv: detecta variadic por type+posición, acumula
+  tokens restantes en `Vec<String>` → wrappea como
+  `Value::List(Arc<Mutex<...>>)`.
+- Codegen emite `__cli_variadic_<name>: Vec<String>` accumulator +
+  wrap final a `Arc<Mutex<Vec<String>>>` (mismo shape que los List
+  del runtime Fitz post-F17).
+- Variadic excluido de short flag auto (no es flag), de OPTIONS
+  section del help, y aparece en USAGE como `[<files>...]`.
+
+### Decisiones técnicas
+
+- **Short flags auto vs explícito**: optamos por auto-inferir
+  (primera letra) en vez de `@flag(short="l")` decorator porque
+  evita AST change en `Param` y matchea la convención CLI estándar
+  (POSIX, GNU). El override manual queda como deuda futura si entra
+  presión.
+- **Variadic requiere `= []` default**: violación menor de
+  semántica (variadic no necesita default conceptualmente) a cambio
+  de no tocar el parser Fitz. Trade-off aceptado por scope.
+- **`--no-<flag>` solo para Bool con default true**: técnicamente
+  podríamos soportar `--no-<flag>` para Bool con default false
+  también (negaría a false redundante), pero no aporta y agrega
+  ruido al help. Si el user lo quiere, escribe `--<flag>=false`.
+- **Smoke negation tiene priority sobre flag literal `no-foo`**: si
+  hay un Bool flag llamado `no-foo` Y un Bool flag llamado `foo`, la
+  arm `"no-foo"` matchea PRIMERO (case-sensitive exact). Documentado
+  pero raro en práctica.
+
+### Tests
+
+- **7 E2E nuevos** en `tests/compile_e2e.rs`:
+  `fase_13_short_flags_auto_inferidos`,
+  `fase_13_short_flag_desconocida_es_error`,
+  `fase_13_bool_default_true_se_niega_con_no_flag`,
+  `fase_13_list_str_variadic_absorbe_positionals`,
+  `fase_13_list_str_variadic_vacio_aceptado`,
+  `fase_13_paridad_run_vs_build_polish` (paridad bit-a-bit con
+  short flags + variadic + Bool=true combinados),
+  `fase_13_short_flag_collision_es_error_compile`.
+- Total Fase 13 E2E al cierre: **17/17 verdes** (10 de v0.11.0 + 7
+  nuevos de v0.11.1).
+- Smoke `GUIDE_EXAMPLES_COMPILE` verde (293 ejemplos).
+- Clippy `--all-targets -D warnings` + `--features lsp` limpios.
+  fmt `--all --check` ahora consistente entre Windows y Linux gracias
+  al `rustfmt.toml` committed.
+
+### Ejemplo `examples/guide/33-cli.fitz` actualizado
+
+Cap intro del ejemplo guide actualizado con las 3 features nuevas
+(short flags, Bool=true negation, variadic) documentadas en el
+header comment.
+
+### Total al cierre v0.11.1
+
+**2754 unit + 293 smoke + 81 cli_e2e + 341 compile_e2e (+7 nuevos
+Fase 13 polish) + 3 openapi + 61 db_real_postgres**.
+
+### Próximo norte
+
+Mismo que v0.11.0: **Fase 12** (Deployment) o **Tier E del ORM**.
 
 ## [v0.11.0] — 2026-06-01 — Fase 13: CLI builder nativo (`@command`)
 

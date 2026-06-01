@@ -11184,6 +11184,191 @@ fn fail() -> Int {
     assert!(stdout.contains("falling"));
 }
 
+// v0.11.1 — Fase 13 polish: short flags + Bool=true negation + List<Str> variadic.
+
+#[test]
+fn fase_13_short_flags_auto_inferidos() {
+    let src = "\
+@command(\"greet\")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud {
+            print(\"HELLO, {name}!\")
+        } else {
+            print(\"hello, {name}\")
+        }
+        n = n - 1
+    }
+    return 0
+}
+";
+    let (stdout, _, code) = build_and_run_cli("fase13_short_flags", src, &["Ada", "-l", "-c", "2"]);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "HELLO, Ada!");
+    assert_eq!(lines[1], "HELLO, Ada!");
+}
+
+#[test]
+fn fase_13_short_flag_desconocida_es_error() {
+    let src = "\
+@command(\"greet\")
+fn greet(name: Str, loud: Bool = false) -> Int {
+    print(name)
+    return 0
+}
+";
+    let (_, stderr, code) = build_and_run_cli("fase13_short_unknown", src, &["Ada", "-z"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("desconocida") || stderr.contains("-z"),
+        "esperaba mensaje sobre -z, fue: {stderr}"
+    );
+}
+
+#[test]
+fn fase_13_bool_default_true_se_niega_con_no_flag() {
+    let src = "\
+@command(\"go\")
+fn go(verbose: Bool = true) -> Int {
+    if verbose {
+        print(\"verbose mode ON\")
+    } else {
+        print(\"quiet mode\")
+    }
+    return 0
+}
+";
+    let (stdout_default, _, code_default) = build_and_run_cli("fase13_no_flag_default", src, &[]);
+    assert_eq!(code_default, 0);
+    assert!(
+        stdout_default.contains("verbose mode ON"),
+        "default true: {stdout_default}"
+    );
+
+    let (stdout_neg, _, code_neg) = build_and_run_cli("fase13_no_flag_neg", src, &["--no-verbose"]);
+    assert_eq!(code_neg, 0);
+    assert!(
+        stdout_neg.contains("quiet mode"),
+        "--no-verbose: {stdout_neg}"
+    );
+}
+
+#[test]
+fn fase_13_list_str_variadic_absorbe_positionals() {
+    let src = "\
+@command(\"run\")
+fn run(mode: Str, files: List<Str> = []) -> Int {
+    print(\"mode: {mode}\")
+    for f in files {
+        print(\"  - {f}\")
+    }
+    return 0
+}
+";
+    let (stdout, _, code) = build_and_run_cli(
+        "fase13_variadic_basic",
+        src,
+        &["fast", "a.txt", "b.txt", "c.txt"],
+    );
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines[0], "mode: fast");
+    assert_eq!(lines[1], "  - a.txt");
+    assert_eq!(lines[2], "  - b.txt");
+    assert_eq!(lines[3], "  - c.txt");
+}
+
+#[test]
+fn fase_13_list_str_variadic_vacio_aceptado() {
+    let src = "\
+@command(\"run\")
+fn run(files: List<Str> = []) -> Int {
+    print(\"count: {files.len()}\")
+    return 0
+}
+";
+    let (stdout, _, code) = build_and_run_cli("fase13_variadic_empty", src, &[]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("count: 0"));
+}
+
+#[test]
+fn fase_13_paridad_run_vs_build_polish() {
+    let stem = "fase13_paridad_polish";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src = "\
+@command(\"process\", desc=\"Process files\")
+fn process(mode: Str, verbose: Bool = true, count: Int = 1, files: List<Str> = []) -> Int {
+    if verbose {
+        print(\"mode={mode} count={count}\")
+    }
+    print(\"files: {files.len()}\")
+    return 0
+}
+";
+    let src_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&src_path, src).expect("write");
+
+    let bout = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        bout.status.success(),
+        "build failed:\nstderr: {}",
+        String::from_utf8_lossy(&bout.stderr)
+    );
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
+
+    let cli_args = ["fast", "-c", "3", "--no-verbose", "a.txt", "b.txt"];
+
+    let interp = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .arg("--")
+        .args(cli_args)
+        .output()
+        .expect("fitz run");
+    let interp_stdout = String::from_utf8_lossy(&interp.stdout).into_owned();
+
+    let compiled = Command::new(&bin).args(cli_args).output().expect("bin");
+    let compiled_stdout = String::from_utf8_lossy(&compiled.stdout).into_owned();
+
+    assert_eq!(
+        interp_stdout.replace("\r\n", "\n"),
+        compiled_stdout.replace("\r\n", "\n"),
+        "paridad bit-a-bit run↔build esperada con polish v0.11.1"
+    );
+    assert!(compiled_stdout.contains("files: 2"));
+    assert!(!compiled_stdout.contains("mode="));
+}
+
+#[test]
+fn fase_13_short_flag_collision_es_error_compile() {
+    let src = "\
+@command(\"go\")
+fn go(loud: Bool = false, level: Int = 1) -> Int {
+    print(\"x\")
+    return 0
+}
+";
+    let stderr = build_expect_fail("fase13_short_collision", src);
+    assert!(
+        stderr.contains("conflict") || stderr.contains("colisi") || stderr.contains("comparten"),
+        "esperaba mensaje de colisión, fue: {stderr}"
+    );
+}
+
 #[test]
 fn fase_13_cli_paridad_run_vs_build() {
     // Paridad bit-a-bit: el output del intérprete debe coincidir con

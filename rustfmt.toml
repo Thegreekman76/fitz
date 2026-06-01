@@ -1,0 +1,27 @@
+# rustfmt config del repo Fitz. Committed para fijar formato canonical
+# entre desarrolladores y CI — sin esto, mismatches sutiles entre la
+# versión local de rustfmt y la del CI rompen el job `cargo fmt --check`
+# (visto el 2026-06-01 con `src/cli.rs:419` chain colapsado en CI pero
+# multi-línea local).
+#
+# Filosofía: pocas reglas explícitas. Solo seteamos las que matchean lo
+# que ya está aplicado en el repo + las que cazan la divergencia que
+# observamos. El resto queda en defaults de rustfmt (estable desde Rust
+# 1.x — no rompen entre versiones).
+
+# Versión del style edition. Las defaults de "2024" están bien alineadas
+# con los defaults de Rust 1.85+; usamos "2021" (la default histórica)
+# para máxima compatibilidad con CI runners que pueden traer rustfmt
+# levemente más viejo. Si CI bumpea a 1.85+, mover a "2024".
+edition = "2021"
+
+# Ancho máximo de línea. Default 100. Lo dejamos explícito para que sea
+# obvio al lector y para evitar drift si rustfmt cambia el default.
+max_width = 100
+
+# Funciones chains pequeñas se colapsan en una sola línea aunque el
+# usuario las haya escrito multi-línea. Esto es lo que hizo fallar el
+# CI antes — el rustfmt del CI prefirió one-line para
+# `p.type_.as_ref().map(...).unwrap_or("Str")`. Le decimos explícito
+# que si entra en `max_width`, va en una línea.
+use_small_heuristics = "Default"

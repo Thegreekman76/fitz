@@ -8248,6 +8248,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let ident = sanitize_cli_ident(&cmd_name);
         let desc = cli_command_desc(decorators);
 
+        // v0.11.1 — variadic param detection (último param de tipo
+        // List<...>). Calculado al inicio porque tanto el help text
+        // como el parser body lo consultan.
+        let variadic_param_name: Option<String> = params
+            .last()
+            .filter(|p| {
+                matches!(
+                    p.type_.as_ref().map(|t| t.display_name()),
+                    Some(n) if n.starts_with("List<")
+                )
+            })
+            .map(|p| p.name.clone());
+
         // --- help string del comando ---
         self.emit(&format!(
             "fn __fitz_cli_{i}_help(bin: &str, _multi: bool) -> String {{\n",
@@ -8271,6 +8284,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         }
         let mut has_flags = false;
         for p in params {
+            // v0.11.1 — variadic se muestra como `[<files>...]` al
+            // final del USAGE, NO como flag.
+            if Some(&p.name) == variadic_param_name.as_ref() {
+                continue;
+            }
             if p.default.is_some() {
                 has_flags = true;
                 continue;
@@ -8283,10 +8301,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if has_flags {
             self.emit("    s.push_str(\" [OPTIONS]\");\n");
         }
+        // v0.11.1 — variadic en USAGE: `[<files>...]` después de OPTIONS.
+        if let Some(var_name) = &variadic_param_name {
+            self.emit(&format!(
+                "    s.push_str(\" [<{}>...]\");\n",
+                var_name.replace('"', "\\\"")
+            ));
+        }
         self.emit("    s.push('\\n');\n");
         // ARGS section
-        let positionals: Vec<&crate::ast::Param> =
-            params.iter().filter(|p| p.default.is_none()).collect();
+        let positionals: Vec<&crate::ast::Param> = params
+            .iter()
+            .filter(|p| p.default.is_none() && Some(&p.name) != variadic_param_name.as_ref())
+            .collect();
         if !positionals.is_empty() {
             self.emit("    s.push_str(\"\\nARGS:\\n\");\n");
             for p in &positionals {
@@ -8303,9 +8330,22 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
         }
         // OPTIONS section
+        // v0.11.1 (Fase 13 polish) — short flags + Bool=true negation
+        // se reflejan en el help text emitido. Pre-compute short map al
+        // build time para anotar cada flag con `-x, `.
+        let short_for_help = crate::cli::compute_short_flags(params).unwrap_or_default();
+        let mut short_by_name: std::collections::HashMap<&str, char> =
+            std::collections::HashMap::new();
+        for (c, n) in &short_for_help {
+            short_by_name.insert(n.as_str(), *c);
+        }
         self.emit("    s.push_str(\"\\nOPTIONS:\\n\");\n");
         for p in params {
             if p.default.is_none() {
+                continue;
+            }
+            // v0.11.1 — variadic NO es flag, se omite del listado de OPTIONS.
+            if Some(&p.name) == variadic_param_name.as_ref() {
                 continue;
             }
             let ty = p
@@ -8313,14 +8353,26 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 .as_ref()
                 .map(|t| t.display_name())
                 .unwrap_or_else(|| "Any".into());
+            let short_prefix = match short_by_name.get(p.name.as_str()) {
+                Some(c) => format!("-{}, ", c),
+                None => String::new(),
+            };
             if ty == "Bool" {
+                // v0.11.1 — Bool con default true muestra `--no-<name>`.
+                let default_true = matches!(&p.default, Some(Expr::Bool(true, _)));
+                let form = if default_true {
+                    format!("{}--no-{}", short_prefix, p.name)
+                } else {
+                    format!("{}--{}", short_prefix, p.name)
+                };
                 self.emit(&format!(
-                    "    s.push_str(\"    --{}\\n\");\n",
-                    p.name.replace('"', "\\\"")
+                    "    s.push_str(\"    {}\\n\");\n",
+                    form.replace('"', "\\\"")
                 ));
             } else {
                 self.emit(&format!(
-                    "    s.push_str(\"    --{} <{}>\\n\");\n",
+                    "    s.push_str(\"    {}--{} <{}>\\n\");\n",
+                    short_prefix.replace('"', "\\\""),
                     p.name.replace('"', "\\\""),
                     ty.to_uppercase().replace('"', "\\\"")
                 ));
@@ -8353,6 +8405,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 .as_ref()
                 .map(|t| t.display_name())
                 .unwrap_or_else(|| "Any".into());
+            // v0.11.1 — variadic List<Str> usa Vec<String> accumulator.
+            if Some(&p.name) == variadic_param_name.as_ref() {
+                self.emit(&format!(
+                    "    let mut __cli_variadic_{}: Vec<String> = Vec::new();\n",
+                    sanitize_cli_ident(&p.name)
+                ));
+                continue;
+            }
             let rust_ty = match ty.as_str() {
                 "Str" => "String",
                 "Int" => "i64",
@@ -8400,10 +8460,55 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 ));
             }
         }
-        // Parser loop.
+        // v0.11.1 (Fase 13 polish) — pre-compute short flags map en
+        // codegen-time. Cada flag se mapea a su primera letra
+        // (`loud` → `l`). Colisiones → error de codegen claro.
+        let short_map = crate::cli::compute_short_flags(params)
+            .map_err(|e| self.err_at(stmt.span(), format!("@command(\"{}\"): {}", cmd_name, e)))?;
+        // Parser loop. v0.11.1 — pre-normaliza `-x` → `--<long>` antes
+        // del dispatch para reusar el mismo match arm. Si la short
+        // flag no matchea ningún long name, deja el tok intacto y el
+        // dispatch existente la rechaza con "flag desconocida --x".
         self.emit("    let mut i = 0;\n");
         self.emit("    while i < rest.len() {\n");
-        self.emit("        let tok = &rest[i];\n");
+        self.emit("        let tok_raw = &rest[i];\n");
+        // v0.11.1 — normalizar short flag.
+        self.emit("        let tok_owned: String = {\n");
+        self.emit("            if let Some(sp) = tok_raw.strip_prefix('-').filter(|s| !s.is_empty() && !s.starts_with('-')) {\n");
+        self.emit("                let mut ci = sp.chars();\n");
+        self.emit("                let first = ci.next().expect(\"checked non-empty\");\n");
+        self.emit("                if ci.next().is_none() {\n");
+        // Si tenemos short flag conocida, mapear. Emit el match.
+        if !short_map.is_empty() {
+            self.emit("                    let mapped: Option<&'static str> = match first.to_ascii_lowercase() {\n");
+            // Orden determinístico (alfabético por char) para output reproducible.
+            let mut entries: Vec<(char, &str)> =
+                short_map.iter().map(|(c, n)| (*c, n.as_str())).collect();
+            entries.sort_by_key(|&(c, _)| c);
+            for (c, long_name) in entries {
+                self.emit(&format!(
+                    "                        '{}' => Some(\"{}\"),\n",
+                    c,
+                    long_name.replace('"', "\\\"")
+                ));
+            }
+            self.emit("                        _ => None,\n");
+            self.emit("                    };\n");
+            self.emit("                    match mapped {\n");
+            self.emit("                        Some(n) => format!(\"--{}\", n),\n");
+            self.emit("                        None => tok_raw.clone(),\n");
+            self.emit("                    }\n");
+        } else {
+            self.emit("                    tok_raw.clone()\n");
+        }
+        self.emit("                } else {\n");
+        self.emit("                    tok_raw.clone()\n");
+        self.emit("                }\n");
+        self.emit("            } else {\n");
+        self.emit("                tok_raw.clone()\n");
+        self.emit("            }\n");
+        self.emit("        };\n");
+        self.emit("        let tok = &tok_owned;\n");
         self.emit("        if let Some(flag_part) = tok.strip_prefix(\"--\") {\n");
         self.emit("            let (key, val_inline) = if let Some(eq) = flag_part.find('=') {\n");
         self.emit("                (&flag_part[..eq], Some(flag_part[eq+1..].to_string()))\n");
@@ -8411,8 +8516,41 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("                (flag_part, None)\n");
         self.emit("            };\n");
         self.emit("            match key {\n");
+        // v0.11.1 (Fase 13 polish) — `--no-<name>` arms para negar Bool
+        // flags. Vienen ANTES de las arms de flag normales para que un
+        // user que tenga un flag literal llamado `no-foo` (caso raro)
+        // gane sobre la negación de `--foo`. Variadic se excluye
+        // explícito (su default `= []` lo haría caer como flag de no
+        // saberlo).
         for p in params {
             if p.default.is_none() {
+                continue;
+            }
+            if Some(&p.name) == variadic_param_name.as_ref() {
+                continue;
+            }
+            let ty_name = p
+                .type_
+                .as_ref()
+                .map(|t| t.display_name())
+                .unwrap_or_else(|| "Any".into());
+            if ty_name != "Bool" {
+                continue;
+            }
+            let slot = format!("__cli_flag_{}", sanitize_cli_ident(&p.name));
+            self.emit(&format!(
+                "                \"no-{}\" => {{\n",
+                p.name.replace('"', "\\\"")
+            ));
+            self.emit(&format!("                    {} = false;\n", slot));
+            self.emit("                    i += 1;\n");
+            self.emit("                }\n");
+        }
+        for p in params {
+            if p.default.is_none() {
+                continue;
+            }
+            if Some(&p.name) == variadic_param_name.as_ref() {
                 continue;
             }
             let ty = p
@@ -8494,6 +8632,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         } else {
             self.emit("            // Resolver positional según el primer slot libre.\n");
             for p in &positionals {
+                // v0.11.1 — variadic se trata en el `else` final.
+                if Some(&p.name) == variadic_param_name.as_ref() {
+                    continue;
+                }
                 let slot = format!("__cli_pos_{}", sanitize_cli_ident(&p.name));
                 let ty = p
                     .type_
@@ -8520,19 +8662,55 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
                 assigned_idx += 1;
             }
-            self.emit("            } else {\n");
-            self.emit("                eprintln!(\"error: argumento posicional inesperado: `{}`\", tok);\n");
-            self.emit("                return 2i64;\n");
-            self.emit("            }\n");
+            // v0.11.1 — variadic catch-all en el `else` final. Si NO hay
+            // variadic, el else es error de positional inesperado. Si SÍ
+            // hay variadic, el else acumula al `Vec<String>`.
+            //
+            // Caso especial: si TODOS los positionals son el variadic
+            // (assigned_idx == 0), NO emitimos `if/else if` chain — solo
+            // el catch-all directo, sin envolver en if/else.
+            let has_if_chain = assigned_idx > 0;
+            if let Some(var_name) = variadic_param_name.as_ref() {
+                if has_if_chain {
+                    self.emit("            } else {\n");
+                    self.emit(&format!(
+                        "                __cli_variadic_{}.push(tok.clone());\n",
+                        sanitize_cli_ident(var_name)
+                    ));
+                    self.emit("            }\n");
+                } else {
+                    // Solo variadic: push directo, sin chain.
+                    self.emit(&format!(
+                        "            __cli_variadic_{}.push(tok.clone());\n",
+                        sanitize_cli_ident(var_name)
+                    ));
+                }
+            } else {
+                self.emit("            } else {\n");
+                self.emit("                eprintln!(\"error: argumento posicional inesperado: `{}`\", tok);\n");
+                self.emit("                return 2i64;\n");
+                self.emit("            }\n");
+            }
         }
         self.emit("            i += 1;\n");
         self.emit("        }\n");
         self.emit("    }\n");
 
-        // Unwrap positionals — error si faltan.
+        // Unwrap positionals — error si faltan. v0.11.1: variadic
+        // List<Str> se envuelve en `Arc<Mutex<Vec<String>>>` (mismo
+        // shape que los Lists del runtime Fitz post-F17).
         let mut handler_args: Vec<String> = Vec::with_capacity(params.len());
         for p in params {
             let ident = sanitize_cli_ident(&p.name);
+            // v0.11.1 — variadic.
+            if Some(&p.name) == variadic_param_name.as_ref() {
+                self.emit(&format!(
+                    "    let __cli_arg_{i} = std::sync::Arc::new(std::sync::Mutex::new(__cli_variadic_{i}));\n",
+                    i = ident
+                ));
+                handler_args.push(format!("__cli_arg_{}", ident));
+                continue;
+            }
             if p.default.is_none() {
                 self.emit(&format!(
                     "    let __cli_arg_{i} = match __cli_pos_{i} {{ Some(v) => v, None => {{ eprintln!(\"error: falta argumento <{n}>\"); return 2i64; }} }};\n",

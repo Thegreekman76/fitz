@@ -2440,3 +2440,32 @@ tabla:
   bit-a-bit. Lo que falta es API completion (Tier B arriba).
 - **TLS strict (`verify-ca`/`verify-full`)** → cerrado en v0.10.23
   (`db.rs:372-373` con `SslMode::VerifyCa`/`VerifyFull`).
+
+---
+
+## Deuda CI fmt — **CERRADO 2026-06-01 (v0.11.1)**
+
+**Síntoma observado**: el job `cargo fmt --all -- --check` del CI
+Ubuntu falló durante v0.11.0 con un diff sobre `src/cli.rs:419` que
+el `cargo fmt --all` local (Windows) NO marcaba como problema. La
+diferencia: rustfmt en Linux colapsaba el chain
+`p.type_.as_ref().map(|t| t.head_name()).unwrap_or("Str")` en una
+sola línea; el rustfmt local lo dejaba multi-línea.
+
+**Causa**: el repo no tenía `rustfmt.toml` committed. Sin config
+explícito, cada versión de rustfmt aplica sus defaults, y esos
+defaults pueden divergir sutilmente entre minor versions de Rust
+(visto entre 1.83 y 1.85 según observación local).
+
+**Fix**: `rustfmt.toml` committed al repo root con configuración
+mínima explícita (`edition = "2021"`, `max_width = 100`,
+`use_small_heuristics = "Default"`). Esto fija el formato canonical
+para todos los devs + CI sin importar qué versión de rustfmt traigan
+los runners. Verificado que el `cargo fmt --check` local + el del CI
+ahora coinciden.
+
+**Deuda residual menor (NO bloquea)**: el `rustfmt.toml` actual es
+minimalista. Si en algún momento queremos opciones más opinionadas
+(import grouping, comment width, etc.), las sumamos ahí. Documentado
+para visibilidad — todos los devs futuros saben que ESE es el lugar
+donde fijar reglas de fmt.
