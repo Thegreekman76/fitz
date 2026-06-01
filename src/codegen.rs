@@ -6868,6 +6868,15 @@ impl<TData> __FitzQueryBuilder<TData> {
         self
     }
 
+    // v0.10.32 (Tier C.1) — variante que acepta una clause ORDER BY
+    // ya formada por el codegen (`ts_rank(\"col\", to_tsquery('q')) DESC`,
+    // expression order, etc.). Usada por `.order_by(fn(u) =>
+    // u.field.rank(\"q\"))` para emitir ranking full-text.
+    fn with_order_by_raw(mut self, raw_clause: &str) -> Self {
+        self.order_by_clauses.push(raw_clause.to_string());
+        self
+    }
+
     fn with_limit(mut self, n: i64) -> Self {
         self.limit = Some(n);
         self
@@ -6957,6 +6966,41 @@ impl<TData> __FitzQueryBuilder<TData> {
         );
         set_args.extend(self.where_args);
         __fitz_db_exec(conn, sql, set_args).await
+    }
+
+    /// v0.10.32 (Tier C.3) — `.merge_jsonb(db, field, patch)` →
+    /// `UPDATE tbl SET \"field\" = \"field\" || $1::jsonb WHERE <where>`.
+    /// Operación parcial-merge sobre una col jsonb: las keys del patch
+    /// se aplican (overwrite si existen, agregar si no), el resto del
+    /// objeto se preserva.
+    ///
+    /// Limitación Postgres: `NULL || anything = NULL`. El user inicializa
+    /// la col con `{}` al INSERT para que el merge funcione.
+    async fn merge_jsonb_with_where(
+        self,
+        conn: &__FitzDbConn,
+        field_sql: &str,
+        patch_json: String,
+    ) -> Result<i64, String> {
+        if self.where_sql.is_none() {
+            return Err(
+                \"`.merge_jsonb(db, field, patch)` sin `.where(...)` previo no se permite\"
+                    .to_string(),
+            );
+        }
+        // renumerar $1..$M del where a $2..$(M+1).
+        let where_renum = __fitz_qb_renumber_placeholders(
+            self.where_sql.as_deref().unwrap_or(\"\"),
+            1,
+        );
+        let sql = format!(
+            \"UPDATE {} SET \\\"{}\\\" = \\\"{}\\\" || $1::jsonb WHERE {}\",
+            self.table, field_sql, field_sql, where_renum
+        );
+        let mut args: Vec<__FitzPgValue> = Vec::with_capacity(self.where_args.len() + 1);
+        args.push(__FitzPgValue::Text(patch_json));
+        args.extend(self.where_args.into_iter());
+        __fitz_db_exec(conn, sql, args).await
     }
 
     /// `.delete(db)` — `DELETE FROM table WHERE <where>`. Guard idem update.
@@ -15513,6 +15557,101 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 );
                 Ok(Some((code, ret_ty)))
             }
+            // v0.10.32 (Tier C.3) — `.merge_jsonb(db, field, patch)`
+            // emite jsonb merge via `||`. 3 args: DbConn, Str literal
+            // del field name, Map<Str, Any> con el patch.
+            "merge_jsonb" => {
+                if is_aggregated {
+                    return Err(self.err_at(
+                        call_span,
+                        "`.merge_jsonb(db, field, patch)` no es válido sobre un GROUP BY (Aggregated)"
+                            .to_string(),
+                    ));
+                }
+                if args.len() != 3 {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.merge_jsonb(db, field, patch)` espera 3 args, recibió {}",
+                            args.len()
+                        ),
+                    ));
+                }
+                let (db_code, _) = self.gen_expr(&args[0])?;
+                let field_name = match &args[1] {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        return Err(self.err_at(
+                            call_span,
+                            "`.merge_jsonb(db, field, patch)`: el field name debe ser Str literal en MVP",
+                        ));
+                    }
+                };
+                // Validar field existe + es Map<...>.
+                let field_def = fields
+                    .iter()
+                    .find(|f| f.name == field_name)
+                    .ok_or_else(|| {
+                        self.err_at(
+                            call_span,
+                            format!(
+                                "`.merge_jsonb`: field `{}` no existe en el type",
+                                field_name
+                            ),
+                        )
+                    })?;
+                if !matches!(field_def.type_, Type::Map(_, _)) {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.merge_jsonb`: field `{}` no es jsonb (tipo Fitz `Map<...>`)",
+                            field_name
+                        ),
+                    ));
+                }
+                // El patch (Map) lo serializamos a JSON string en
+                // codegen-time si es literal, sino lo evaluamos y
+                // emitimos un call al helper que serializa al runtime.
+                let (patch_code, patch_ty) = self.gen_expr(&args[2])?;
+                if !matches!(patch_ty, Type::Map(_, _) | Type::Any) {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`.merge_jsonb`: patch debe ser Map, recibió `{}`",
+                            crate::codegen::type_name(&patch_ty)
+                        ),
+                    ));
+                }
+                let sql_col = meta
+                    .columns
+                    .get(&field_name)
+                    .and_then(|c| c.sql_name.as_deref())
+                    .unwrap_or(field_name.as_str())
+                    .to_string();
+                let ret_ty = Type::Future(Box::new(Type::Result {
+                    ok: Box::new(Type::Int),
+                    err: Box::new(Type::Str),
+                }));
+                // Serializamos el patch a String JSON al runtime via
+                // serde_json (helper preludium si jsonb activo). Para
+                // MVP, asumimos que `patch_code` evalúa a un Map que
+                // ya tiene `__to_fitz_json()` impl (parte del preludium
+                // jsonb). Si no, runtime error.
+                let code = format!(
+                    "(async {{ \
+                        let __patch_map = {patch}; \
+                        let __patch_json_val = __patch_map.__to_fitz_json(); \
+                        let __patch_str = serde_json::to_string(&__patch_json_val) \
+                            .unwrap_or_else(|_| \"{{}}\".to_string()); \
+                        ({receiver}).merge_jsonb_with_where(&{db}, {field}, __patch_str).await \
+                    }})",
+                    patch = patch_code,
+                    receiver = receiver_code,
+                    db = db_code,
+                    field = rust_str_literal(&sql_col),
+                );
+                Ok(Some((code, ret_ty)))
+            }
             // Fase 10.b.6 — Agregados scalares sobre QueryBuilder.
             // El checker los tipa como `Future<Result<Float>>` (sin
             // distinguir el caso GROUP BY; ver `infer_query_builder_method`).
@@ -15744,6 +15883,86 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             } => (true, operand.as_ref().clone()),
             other => (false, other.clone()),
         };
+        // v0.10.32 (Tier C.1) — `u.field.rank("query")` o
+        // `u.field.plainto_rank("query")` emite
+        // `ts_rank("col", to_tsquery('query'))` con `DESC`/`ASC` según
+        // el signo. El query se inlina como SQL literal (Str literal
+        // obligatorio en MVP — vars quedan como deuda menor).
+        if let Expr::Call {
+            callee,
+            args: cargs,
+            ..
+        } = &field_expr
+        {
+            if let Expr::Field {
+                object,
+                field: method,
+                ..
+            } = callee.as_ref()
+            {
+                if method == "rank" || method == "plainto_rank" {
+                    if let Expr::Field {
+                        object: receiver,
+                        field: col,
+                        ..
+                    } = object.as_ref()
+                    {
+                        if let Expr::Ident(name, _) = receiver.as_ref() {
+                            if name == &param_name {
+                                if cargs.len() != 1 {
+                                    return Err(self.err_at(
+                                        call_span,
+                                        format!(
+                                            "`{}.{}.{}(q)` espera 1 arg Str",
+                                            param_name, col, method
+                                        ),
+                                    ));
+                                }
+                                if !fields.iter().any(|f| f.name == *col) {
+                                    return Err(self.err_at(
+                                        call_span,
+                                        format!(
+                                            "`.order_by`: field `{}` no existe en el type",
+                                            col
+                                        ),
+                                    ));
+                                }
+                                let q = match &cargs[0] {
+                                    Expr::Str(s, _) => s.clone(),
+                                    _ => {
+                                        return Err(self.err_at(
+                                            call_span,
+                                            format!("`.{method}(q)` en order_by espera Str literal (MVP)"),
+                                        ));
+                                    }
+                                };
+                                let sql_col = meta
+                                    .columns
+                                    .get(col)
+                                    .and_then(|c| c.sql_name.as_deref())
+                                    .unwrap_or(col.as_str())
+                                    .to_string();
+                                let tsquery_fn = if method == "plainto_rank" {
+                                    "plainto_tsquery"
+                                } else {
+                                    "to_tsquery"
+                                };
+                                let dir = if descending { "DESC" } else { "ASC" };
+                                let escaped_q = q.replace('\'', "''");
+                                let raw = format!(
+                                    "ts_rank(\\\"{sql_col}\\\", {tsquery_fn}('{escaped_q}')) {dir}"
+                                );
+                                return Ok(format!(
+                                    "({recv}).with_order_by_raw({raw})",
+                                    recv = receiver_code,
+                                    raw = rust_str_literal(&raw),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let col_name = match &field_expr {
             Expr::Field { object, field, .. } => match object.as_ref() {
                 Expr::Ident(name, _) if name == &param_name => {
@@ -15768,7 +15987,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             _ => {
                 return Err(self.err_at(
                     call_span,
-                    "`.order_by(closure)`: el body debe ser `u.field` o `-u.field`",
+                    "`.order_by(closure)`: el body debe ser `u.field` o `-u.field` (o `u.field.rank(\"q\")` para full-text — v0.10.32)",
                 ));
             }
         };

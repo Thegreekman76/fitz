@@ -12372,6 +12372,19 @@ pub fn orm_dispatch_qb_method(
         "update" => orm_qb_update(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
+        // v0.10.32 (Tier C.3) — JSON jsonb merge via Postgres `||`.
+        // `qb.merge_jsonb(db, field, patch)` ejecuta
+        // `UPDATE tbl SET "field" = "field" || $1::jsonb WHERE <where>`,
+        // preservando las keys existentes y agregando/overwriteando
+        // las del patch. Útil para "actualizar settings parcial sin
+        // perder el resto". Caso límite: si la col es NULL, `NULL ||
+        // anything = NULL` (limitación de Postgres). Workaround:
+        // `UPDATE ... SET field = COALESCE(field, '{}'::jsonb) || ...`
+        // (no implementado en MVP — el user inicializa la col con
+        // `{}` al INSERT).
+        "merge_jsonb" => orm_qb_merge_jsonb(state, args, span)
+            .map(Some)
+            .map_err(EvalSignal::Error),
         "delete" => orm_qb_delete(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
@@ -12729,6 +12742,87 @@ fn orm_qb_order_by(
         } => ("DESC", operand.as_ref().clone()),
         other => ("ASC", other.clone()),
     };
+    // v0.10.32 (Tier C.1) — `.order_by(fn(u) => u.field.rank("query"))`
+    // emite `ts_rank("field", to_tsquery($N))` (con `plainto_tsquery`
+    // si es `.plainto_rank`). Útil para ranking por relevancia en
+    // full-text search: combinar `.where(fn(u) => u.body.matches("q"))
+    // .order_by(fn(u) => -u.body.rank("q"))` ordena resultados por
+    // mejor match.
+    if let crate::ast::Expr::Call { callee, args, .. } = &field_expr {
+        if let crate::ast::Expr::Field {
+            object,
+            field: method,
+            ..
+        } = callee.as_ref()
+        {
+            if method == "rank" || method == "plainto_rank" {
+                if let crate::ast::Expr::Field {
+                    object: receiver,
+                    field: col,
+                    ..
+                } = object.as_ref()
+                {
+                    if let crate::ast::Expr::Ident(name, _) = receiver.as_ref() {
+                        if name == &param_name {
+                            if args.len() != 1 {
+                                return Err(FitzError::new(
+                                    ErrorKind::InvalidSyntax,
+                                    span.line,
+                                    span.column,
+                                    format!("`{param_name}.{col}.{method}(q)` espera 1 arg Str"),
+                                ));
+                            }
+                            if !state.fields.iter().any(|f| f.name == *col) {
+                                return Err(FitzError::new(
+                                    ErrorKind::InvalidSyntax,
+                                    span.line,
+                                    span.column,
+                                    format!("`.order_by`: field `{col}` no existe en el type"),
+                                ));
+                            }
+                            let sql_col = state
+                                .meta
+                                .columns
+                                .get(col)
+                                .and_then(|c| c.sql_name.as_deref())
+                                .unwrap_or(col.as_str())
+                                .to_string();
+                            // Eval arg como Str literal o var.
+                            let query_str = match &args[0] {
+                                crate::ast::Expr::Str(s, _) => s.clone(),
+                                other => {
+                                    return Err(FitzError::new(
+                                        ErrorKind::InvalidSyntax,
+                                        span.line,
+                                        span.column,
+                                        format!(
+                                            "`.{method}(q)` en order_by espera Str literal (MVP), recibió `{:?}`",
+                                            other
+                                        ),
+                                    ));
+                                }
+                            };
+                            let tsquery_fn = if method == "plainto_rank" {
+                                "plainto_tsquery"
+                            } else {
+                                "to_tsquery"
+                            };
+                            // ts_rank no usa params bindeados aquí
+                            // (el query string se inlinea para evitar
+                            // wire de PgValue al order_by stream — el
+                            // user pasa siempre Str literal).
+                            let escaped_q = query_str.replace('\'', "''");
+                            state.order_by_clauses.push(format!(
+                                "ts_rank(\"{sql_col}\", {tsquery_fn}('{escaped_q}')) {direction}"
+                            ));
+                            return Ok(Value::QueryBuilder(Arc::new(state)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let column = match &field_expr {
         crate::ast::Expr::Field { object, field, .. } => match object.as_ref() {
             crate::ast::Expr::Ident(name, _) if name == &param_name => {
@@ -12772,7 +12866,7 @@ fn orm_qb_order_by(
                 ErrorKind::InvalidSyntax,
                 span.line,
                 span.column,
-                "`.order_by(closure)`: el body debe ser `u.field` o `-u.field`".to_string(),
+                "`.order_by(closure)`: el body debe ser `u.field` o `-u.field` (o `u.field.rank(\"query\")` para full-text — v0.10.32)".to_string(),
             ));
         }
     };
@@ -14081,6 +14175,148 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
         where_sql_renum
     );
 
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        match db_handle.exec(&sql, &pg_args).await {
+            Ok(n) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::Int(n as i64),
+            )))),
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(e.to_string()),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+/// v0.10.32 (Tier C.3) — `qb.merge_jsonb(db, field, patch) ->
+/// Future<Result<Int>>`. Ejecuta
+/// `UPDATE tbl SET "field" = "field" || $1::jsonb WHERE <where>`,
+/// merging `patch` (Map<Str, Any>) en la columna jsonb existente.
+/// Las keys existentes que no están en patch se preservan; las que
+/// están se overwrite con el valor del patch (last-write-wins,
+/// semántica estándar de `||` jsonb).
+///
+/// **Limitación Postgres**: si la columna es NULL, `NULL || anything
+/// = NULL` (resultado NULL). El user debe inicializar la columna con
+/// `{}` al INSERT para que el merge funcione. Workaround con
+/// COALESCE no implementado en MVP (deuda menor).
+fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
+    if args.len() != 3 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 3,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.merge_jsonb(db, field, patch)` espera 3 args, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let db_handle = match &args[0] {
+        Value::DbConn(h) => Arc::clone(h),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "DbConn".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.merge_jsonb`: primer arg debe ser DbConn, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let field_name = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.merge_jsonb`: segundo arg (field) debe ser Str literal, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    // Validar que el field existe y es Map<...>.
+    let field_def = state
+        .fields
+        .iter()
+        .find(|f| f.name == field_name)
+        .ok_or_else(|| {
+            FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line,
+                span.column,
+                format!(
+                    "`.merge_jsonb`: field `{}` no existe en `{}`",
+                    field_name, state.type_name
+                ),
+            )
+        })?;
+    if !is_map_type(&field_def.type_) {
+        return Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Map<Str, Any>".into(),
+                found: "no-jsonb".into(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`.merge_jsonb`: field `{}` no es jsonb (tipo Fitz `Map<...>`); use `.update` regular para otros tipos",
+                field_name
+            ),
+        ));
+    }
+    let patch_value = args[2].clone();
+    // Marshall el patch a jsonb.
+    let pg_patch = fitz_value_to_jsonb(&patch_value).map_err(|msg| {
+        FitzError::new(
+            ErrorKind::TypeError,
+            span.line,
+            span.column,
+            format!("`.merge_jsonb`: patch: {}", msg),
+        )
+    })?;
+    if state.where_sql.is_none() {
+        return Err(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            "`.merge_jsonb` sin `.where(...)` previo no se permite (afectaría toda la tabla)"
+                .to_string(),
+        ));
+    }
+    let sql_col = state
+        .meta
+        .columns
+        .get(&field_name)
+        .and_then(|c| c.sql_name.as_deref())
+        .unwrap_or(field_name.as_str());
+    // SET col = col || $1::jsonb. El where_sql usa $1..$M; renumeramos
+    // $1..$M → $2..$(M+1) porque el patch ocupa $1.
+    let where_sql_renum = renumber_placeholders(state.where_sql.as_deref().unwrap_or(""), 1);
+    let mut pg_args: Vec<crate::db::PgValue> = Vec::with_capacity(state.where_args.len() + 1);
+    pg_args.push(pg_patch);
+    pg_args.extend(state.where_args.iter().cloned());
+    let sql = format!(
+        "UPDATE {} SET \"{}\" = \"{}\" || $1::jsonb WHERE {}",
+        state.meta.qualified_sql_name(),
+        sql_col,
+        sql_col,
+        where_sql_renum
+    );
     let fut: crate::value::FitzFuture = Box::pin(async move {
         match db_handle.exec(&sql, &pg_args).await {
             Ok(n) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(

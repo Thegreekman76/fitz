@@ -517,6 +517,21 @@ pub struct IndexSpec {
     /// large tables resumidas (`brin`) y bloom-style approximations
     /// (extension) sin escape hatch a `db.exec`.
     pub using: Option<String>,
+    /// v0.10.32 (Tier C.2) — Expression index. Cuando está,
+    /// `columns` se ignora y el SQL emit usa la expression
+    /// directamente: `CREATE INDEX ... ON tbl (<expression>)`.
+    /// Ejemplos canonical: `lower(email)` para búsqueda
+    /// case-insensitive, `to_tsvector('english', body)` para FTS,
+    /// `(price * quantity)` para totals. El user pasa la expression
+    /// raw via kwarg: `@index(expression="lower(email)")`.
+    ///
+    /// **Drift check incompleto**: la introspect lee el index
+    /// listing de `pg_indexes` pero NO parsea `pg_index.indexprs`
+    /// para detectar el expression. El diff puede generar
+    /// `DROP INDEX + CREATE INDEX` espurio en runs subsequentes.
+    /// Workaround: el user nombra el index explícito con `name=` y
+    /// confía en que el diff lo detecta por nombre (no por content).
+    pub expression: Option<String>,
 }
 
 impl TableMetadata {
@@ -1717,52 +1732,73 @@ pub fn process_table_decorators(
             // Apilable (múltiples `@index` sobre el mismo type). Cada
             // uno produce un IndexSpec acumulado en `indexes`. El
             // migrator emite CREATE INDEX / DROP INDEX desde diff.
+            // v0.10.32 (Tier C.2) — soporta también
+            // `@index(expression="lower(email)")` para expression
+            // indexes; en ese caso el arg posicional NO es required
+            // (las cols se ignoran).
             "index" => {
-                // Arg 0: Str con cols separadas por coma (`"col1, col2"`).
-                if d.args.len() != 1 {
+                // v0.10.32 (Tier C.2) — chequeo previo de `expression=`:
+                // si está presente, `arg 0` (cols Str) NO es requerido.
+                let has_expression_kwarg = d.kwargs.iter().any(|(k, _)| k == "expression");
+                if !has_expression_kwarg && d.args.len() != 1 {
                     errors.push(FitzError::new(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
                         format!(
-                            "`@index` espera 1 arg posicional (Str con cols separadas por coma), recibió {}",
+                            "`@index` espera 1 arg posicional (Str con cols separadas por coma) o `expression=...`, recibió {}",
                             d.args.len()
                         ),
                     ));
                     continue;
                 }
-                let cols_str = match &d.args[0] {
-                    Expr::Str(s, _) => s.clone(),
-                    _ => {
-                        errors.push(FitzError::new(
-                            ErrorKind::TypeError,
-                            type_span.line,
-                            type_span.column,
-                            "`@index` espera un Str literal como arg 0 (cols separadas por coma)"
-                                .to_string(),
-                        ));
-                        continue;
-                    }
-                };
-                let columns: Vec<String> = cols_str
-                    .split(',')
-                    .map(|c| c.trim().to_string())
-                    .filter(|c| !c.is_empty())
-                    .collect();
-                if columns.is_empty() {
+                if has_expression_kwarg && !d.args.is_empty() {
                     errors.push(FitzError::new(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
-                        "`@index(\"...\")` recibió string vacío; esperaba al menos una columna"
-                            .to_string(),
+                        "`@index(expression=...)` NO acepta arg posicional simultáneo. Usá uno u otro.".to_string(),
                     ));
                     continue;
                 }
+                let columns: Vec<String> = if has_expression_kwarg {
+                    Vec::new()
+                } else {
+                    let cols_str = match &d.args[0] {
+                        Expr::Str(s, _) => s.clone(),
+                        _ => {
+                            errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@index` espera un Str literal como arg 0 (cols separadas por coma)"
+                                    .to_string(),
+                            ));
+                            continue;
+                        }
+                    };
+                    let cols: Vec<String> = cols_str
+                        .split(',')
+                        .map(|c| c.trim().to_string())
+                        .filter(|c| !c.is_empty())
+                        .collect();
+                    if cols.is_empty() {
+                        errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            type_span.line,
+                            type_span.column,
+                            "`@index(\"...\")` recibió string vacío; esperaba al menos una columna"
+                                .to_string(),
+                        ));
+                        continue;
+                    }
+                    cols
+                };
                 let mut unique = false;
                 let mut name: Option<String> = None;
                 let mut where_clause: Option<String> = None;
                 let mut using: Option<String> = None;
+                let mut expression: Option<String> = None;
                 for (k, v) in &d.kwargs {
                     match k.as_str() {
                         "unique" => match v {
@@ -1829,12 +1865,36 @@ pub fn process_table_decorators(
                                     .to_string(),
                             )),
                         },
+                        // v0.10.32 (Tier C.2) — Expression index.
+                        // El user pasa la expression SQL raw; Fitz la
+                        // emite literal en CREATE INDEX (no la parsea).
+                        "expression" => match v {
+                            Expr::Str(s, _) => {
+                                let trimmed = s.trim();
+                                if trimmed.is_empty() {
+                                    errors.push(FitzError::new(
+                                        ErrorKind::TypeError,
+                                        type_span.line,
+                                        type_span.column,
+                                        "`@index(expression=\"\")` no acepta string vacío".to_string(),
+                                    ));
+                                } else {
+                                    expression = Some(trimmed.to_string());
+                                }
+                            }
+                            _ => errors.push(FitzError::new(
+                                ErrorKind::TypeError,
+                                type_span.line,
+                                type_span.column,
+                                "`@index(expression=...)` espera Str literal con la expresión SQL (ej: `\"lower(email)\"`)".to_string(),
+                            )),
+                        },
                         other => errors.push(FitzError::new(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
                             format!(
-                                "`@index` kwarg desconocido `{}`. Soportados: unique, name, where_, using",
+                                "`@index` kwarg desconocido `{}`. Soportados: unique, name, where_, using, expression",
                                 other
                             ),
                         )),
@@ -1846,6 +1906,7 @@ pub fn process_table_decorators(
                     unique,
                     where_clause,
                     using,
+                    expression,
                 });
             }
             // v0.10.29 — `@unique(col1, col2, ..., name="optional")`.
@@ -1937,6 +1998,7 @@ pub fn process_table_decorators(
                     unique: true,
                     where_clause: None,
                     using: None,
+                    expression: None,
                 });
             }
             // v0.10.29 — `@check_constraint("<sql_expr>",
@@ -2401,13 +2463,18 @@ pub fn process_table_decorators(
                 e,
             ));
         }
-        if !resolved_cols.is_empty() {
+        // v0.10.32 (Tier C.2) — expression indexes pasan aunque
+        // resolved_cols esté vacío (la expression es la fuente del
+        // index). Sin expression Y sin cols → skipear (probablemente
+        // typo en col names que el resolve filtró).
+        if !resolved_cols.is_empty() || idx.expression.is_some() {
             resolved_indexes.push(IndexSpec {
                 name: idx.name,
                 columns: resolved_cols,
                 unique: idx.unique,
                 where_clause: idx.where_clause,
                 using: idx.using,
+                expression: idx.expression,
             });
         }
     }
@@ -5231,6 +5298,12 @@ fn infer_query_builder_method(
             check_method_arity(ctx, method, args_ty, 2, span);
             future_result_int()
         }
+        // v0.10.32 (Tier C.3) — `.merge_jsonb(db, field, patch)` →
+        // Future<Result<Int>> con rows afectadas.
+        "merge_jsonb" => {
+            check_method_arity(ctx, method, args_ty, 3, span);
+            future_result_int()
+        }
         "delete" => {
             check_method_arity(ctx, method, args_ty, 1, span);
             future_result_int()
@@ -5239,7 +5312,7 @@ fn infer_query_builder_method(
             ctx.error_at(
                 span,
                 format!(
-                    "el método `QueryBuilder<{}>.{}` no existe (chain: where/order_by/limit/offset/group_by; terminales: all/first/count/sum/avg/min/max/update/delete)",
+                    "el método `QueryBuilder<{}>.{}` no existe (chain: where/order_by/limit/offset/group_by; terminales: all/first/count/sum/avg/min/max/update/delete/merge_jsonb)",
                     row.display(ctx.types),
                     other
                 ),

@@ -11,14 +11,109 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.10.31. Próximas direcciones
-priorizadas en `docs/deudas-post-5b.md`: Tier C (operadores SQL
-faltantes — ts_rank, expression indexes, JSON || merge), Tier D
-(LSP residual del ORM — completion en `.where()`, hover sobre
-`@table`), Tier E (visión a futuro: Decimal/Numeric, streaming
-cursors, COPY FROM/TO, LISTEN/NOTIFY tipado, window functions,
-CTE/WITH, UNION/INTERSECT/EXCEPT). El A.10 (`FITZ_DB_*` mid-run
-reload) queda solo del Tier A — refinable cuando aparezca presión.
+Sin trabajo en curso al cierre de v0.10.32. Tier A (9/10) + B + C + D
+cerrados. Próxima dirección: **Tier E** (visión a futuro, cada ítem
+mini-fase dedicada con decisión de diseño previa — Decimal/Numeric
+precision arbitraria, streaming cursors, COPY FROM/TO, LISTEN/NOTIFY
+tipado, window functions, CTE/WITH, UNION/INTERSECT/EXCEPT). A.10
+(`FITZ_DB_*` mid-run reload) sigue pendiente — refinable cuando
+aparezca presión real (hoy `LazyLock` cubre 99% del caso).
+
+## [v0.10.32] — 2026-06-01 — Tier C + D del cierre ORM/DB (operadores SQL + DX/LSP residual)
+
+**5 features coordinadas en bundle (~8h reales vs ~20h estimadas)**
+cerrando los 2 últimos tiers no-visión del ORM/DB. Sin breaking
+changes, paridad bit-a-bit `fitz run` ↔ `fitz build` mantenida. 3
+E2E nuevos contra Postgres real + 0 regresiones en 2739 unit + 292
+smoke + 81 cli_e2e + 324 compile_e2e + 3 openapi.
+
+### Tier C — Operadores SQL faltantes
+
+- **C.1 — `ts_rank` full-text ranking** en `.order_by(...)`. Sintaxis:
+  `.order_by(fn(u) => -u.body.rank("query"))` emite
+  `ORDER BY ts_rank("body", to_tsquery('query')) DESC`. Combinable con
+  `.where(fn(u) => u.body.matches("query"))` para ordenar resultados
+  full-text por relevancia. Variante `plainto_rank` para queries del
+  estilo "plain text" (`plainto_tsquery`). El query string se inlina
+  como SQL literal en MVP — vars quedan como deuda menor. Habilita el
+  pattern canonical de search ranking sin escape hatch a `db.query`.
+- **C.2 — Expression indexes** con `@index(expression="lower(email)")`.
+  El user pasa la SQL expression raw como kwarg dedicado; el codegen
+  emite `CREATE INDEX ... ON tbl (<expression>)` literal. Habilita
+  case-insensitive UNIQUE (`lower(email)`), full-text setup tsvector
+  (`to_tsvector('english', body)`), totals computados
+  (`(price * quantity)`), etc. **Drift check incompleto** documentado:
+  la introspect lee el index del catálogo pero NO parsea
+  `pg_index.indexprs` para detectar el expression — el user nombra
+  el index explícito con `name=` para drift name-based reliable.
+- **C.3 — JSON `||` merge en `.merge_jsonb`**. Sintaxis:
+  `User.where(fn(u) => u.id == 5).merge_jsonb(db, "data", {"new": "v"}).await?`.
+  Emite `UPDATE tbl SET "data" = "data" || $1::jsonb WHERE id = $2`
+  preservando las keys existentes del objeto jsonb y aplicando el
+  patch (overwrite si existen, agregar si no). Limitación Postgres
+  documentada: `NULL || anything = NULL` — el user inicializa la col
+  con `{}` al INSERT para que el merge funcione. Field debe ser
+  `Map<...>` (jsonb); error de checker si se intenta sobre otro tipo.
+
+### Tier D — DX/LSP residual
+
+- **D.1 — LSP completion ORM en `.where()`**. Los métodos ORM
+  (intercepted por el evaluator solo en `.where(closure)` context)
+  ahora aparecen en autocomplete del LSP cuando tipás `u.email.` o
+  `u.data.`. Los detail muestran `(ORM .where)` para distinguirlos
+  de métodos regulares. Cobertura: **Str** (`is_in`, `like`, `ilike`,
+  `matches`, `plainto_matches`, `between`, `is_null`, `is_not_null`),
+  **Map** (`has_key`, `has_all_keys`, `has_any_keys`, `contains_json`,
+  `has_path`, `path_text/int/float/bool`), **Int/Float**
+  (`is_in`, `between`, `is_null`, `is_not_null`), **Date/DateTime**
+  (idem). Fuera del `.where`, llamarlos genera error en runtime —
+  el LSP no detecta el contexto (limitación documentada).
+- **D.2 — LSP hover sobre `@table` types**. Al hover sobre un
+  identificador que tipa como `Type::Nominal(id)` con `@table`
+  metadata, el tooltip ahora incluye el `CREATE TABLE` SQL emitted
+  bajo el tipo declarado. Implementado vía
+  `migrations::schema_from_program` + `create_table_sql_for`. Útil
+  para debuggear migrations sin abrir `fitz db diff` — el LSP
+  muestra exactamente el shape SQL que el migrator emite. Si
+  `schema_from_program` falla (typo en relations, FK target no
+  existente), el augment se skipea (hover sigue mostrando solo el
+  tipo, sin error visual).
+
+### Decisiones técnicas
+
+- **C.1 inline el query string**: en lugar de bindear `$N`, el
+  query string se inlina al SQL literal (`to_tsquery('query')`). El
+  trade-off: aceptar solo Str literal en MVP, vars quedan como
+  deuda menor. Razón: el path order_by stream del runtime no tiene
+  acceso al pg_args store del where; cambiarlo requeriría refactor
+  cross-method.
+- **C.2 kwarg `expression=` exclusivo**: `@index(expression="...")`
+  NO acepta arg posicional simultáneo (`@index("col", expression="...")`).
+  Forzar la elección "cols o expression" evita ambigüedad semántica.
+- **C.3 `.merge_jsonb` separado de `.update`**: en lugar de embedded
+  semantics en `.update` con flags, una method dedicada. API más
+  explícita en el call site, signatura simple `(db, field, patch)`.
+- **D.1 completion sin scope detection**: el LSP NO detecta si el
+  cursor está adentro de un `.where(...)` closure — los métodos
+  ORM aparecen sobre Str/Map/etc. en todos los contextos. El detail
+  `(ORM .where)` informa al user.
+- **D.2 hover augment idempotente**: si `schema_from_program` falla,
+  el hover devuelve solo el tipo display (sin SQL).
+
+### Tests
+
+- **3 E2E reales contra Postgres** en `tests/db_real_postgres.rs`:
+  `tier_c1_ts_rank_order_by_works`, `tier_c2_expression_index_creates_lowercase_unique`,
+  `tier_c3_jsonb_merge_preserves_existing_keys`. Todos verdes
+  contra Postgres local.
+- Smoke `GUIDE_EXAMPLES_COMPILE` verde (292 ejemplos).
+- Clippy `--all-targets -D warnings` + `--features lsp` limpios.
+  fmt `--all --check` limpio.
+
+### Total al cierre v0.10.32
+
+**2739 unit + 292 smoke + 3 openapi + 81 cli_e2e + 324 compile_e2e
++ 61 db_real_postgres** (+3 nuevos del Tier C).
 
 ## [v0.10.31] — 2026-06-01 — Tier A del cierre ORM/DB: MVP fuerte (3 bloques en bundle)
 

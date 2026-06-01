@@ -627,9 +627,16 @@ type Doc { ... }
   cuando sobran).
 
 **Lo que NO está**:
-- **Expression indexes** sobre llamadas/funciones (`lower(email)`,
-  `to_tsvector('english', body)`): no se generan auto. Workaround:
-  `db.exec("CREATE INDEX ...")` al boot.
+- ~~**Expression indexes** sobre llamadas/funciones (`lower(email)`,
+  `to_tsvector('english', body)`)~~ — **CERRADO v0.10.32 (Tier
+  C.2)**. Usá `@index(expression="lower(email)", unique=true,
+  name="users_email_lower_uniq")` para emitir
+  `CREATE UNIQUE INDEX "users_email_lower_uniq" ON users (lower(email))`.
+  Combinable con `where_=`/`using=` igual que los index regulares.
+  **Drift check incompleto**: la introspect no parsea
+  `pg_index.indexprs` — el diff puede generar DROP+CREATE espurio
+  si el expression cambia con mismo name. Workaround: nombrar
+  explícito con `name=` para drift name-based reliable.
 - **CERRADO v0.10.29**: el diff de indexes ahora detecta cambios
   en `using` / `where_clause` / `unique` / `columns` aunque el
   nombre + cols sean iguales, emitiendo `DROP INDEX + CREATE INDEX`
@@ -1885,9 +1892,12 @@ Caveats:
   de language; usan el default Postgres (típicamente
   `'english'`). Para multi-lang, bajar a `db.query` con cast
   explícito: `to_tsquery('spanish', $1)`.
-- Ranking (`ts_rank`) NO está en MVP. Caso típico: bajar a
-  `db.query` con `SELECT ..., ts_rank(body_tsv, q) AS r FROM ...
-  ORDER BY r DESC`.
+- ~~Ranking (`ts_rank`) NO está en MVP~~ — **CERRADO v0.10.32
+  (Tier C.1)**. Usá `.order_by(fn(d) => -d.body_tsv.rank("query"))`
+  para emitir `ORDER BY ts_rank("body_tsv", to_tsquery('query')) DESC`.
+  Variante `plainto_rank` para plain queries. El query string se
+  inlina como SQL literal en MVP — vars como `query` argumento del
+  user requieren `db.query` directo.
 
 ### Null Fitz → NULL real (no la string "null")
 
@@ -3699,12 +3709,14 @@ jsonb / tsvector (ver sección 13). Lo que queda como deuda menor:
 - Chain estilo `e.data.get("a").get("b")` (azúcar sobre
   `path_text`) sigue como deuda menor — el caller usa la versión
   explícita `path_text(["a", "b"])`.
-- **Operadores faltantes**: `||` (concat jsonb) — caso de uso
-  dominante es `UPDATE ... SET data = data || $1` que no se
-  modela bien en `.where(...)` read-only; escape hatch via
-  `db.exec("UPDATE ... SET data = data || $1::jsonb WHERE id = $2",
-  [patch_json, id])`. Ranking full-text (`ts_rank`) — bajar a
-  `db.query` con `ORDER BY ts_rank(...)`.
+- ~~**Operadores faltantes**: `||` (concat jsonb), `ts_rank`~~ —
+  **CERRADOS v0.10.32 (Tier C.1 + C.3)**. `||` jsonb merge via
+  `qb.merge_jsonb(db, field, patch)` (ejecuta `UPDATE tbl SET
+  "field" = "field" || $1::jsonb WHERE <where>`, preservando keys
+  existentes). `ts_rank` via `.order_by(fn(u) => -u.body.rank("q"))`
+  para ordenar por relevancia full-text. Detalle en sección 28
+  (closures de `.where()`) + sección 31 (terminales del
+  QueryBuilder).
 
 ### Refinamientos pendientes del query builder
 

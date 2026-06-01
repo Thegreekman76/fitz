@@ -4827,6 +4827,7 @@ async fn introspect_y_diff_round_trip_using_gin_method() {
             unique: false,
             where_clause: None,
             using: Some("gin".to_string()),
+            expression: None,
         },
     };
     let sql = fitz::migrations::changes_to_sql(&[create_change]);
@@ -5106,6 +5107,173 @@ async fn tier_a7_introspect_check_constraint_table_level() {
     assert_eq!(check.expr, "price > 0", "expr canonicalizada");
 
     conn.exec("DROP TABLE fitz_a7_check", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+// =========================================================================
+// v0.10.32 — Tier C del cierre ORM/DB (operadores SQL faltantes)
+// =========================================================================
+
+#[tokio::test]
+#[ignore]
+async fn tier_c2_expression_index_creates_lowercase_unique() {
+    // C.2 — expression index. CREATE INDEX con `lower(email)` permite
+    // UNIQUE case-insensitive sin guardar la versión lowercased.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    let _ = conn
+        .exec("DROP TABLE IF EXISTS fitz_c2_expr_idx", &[])
+        .await;
+    conn.exec(
+        "CREATE TABLE fitz_c2_expr_idx (id bigserial PRIMARY KEY, email text NOT NULL)",
+        &[],
+    )
+    .await
+    .expect("setup");
+    // El SQL que `fitz db diff` emite cuando declarás
+    // `@index(expression="lower(email)", unique=true)`.
+    conn.exec(
+        "CREATE UNIQUE INDEX idx_fitz_c2_email_lower \
+         ON fitz_c2_expr_idx (lower(email))",
+        &[],
+    )
+    .await
+    .expect("CREATE expression INDEX debería compilar");
+
+    // Validar: insert con cases distintos del mismo email rechaza.
+    conn.exec(
+        "INSERT INTO fitz_c2_expr_idx (email) VALUES ($1)",
+        &[PgValue::Text("ADA@example.com".into())],
+    )
+    .await
+    .expect("primer insert ok");
+    let dup = conn
+        .exec(
+            "INSERT INTO fitz_c2_expr_idx (email) VALUES ($1)",
+            &[PgValue::Text("ada@example.com".into())],
+        )
+        .await;
+    assert!(
+        dup.is_err(),
+        "esperaba unique violation por expression index (case-insensitive)"
+    );
+
+    let _ = conn.exec("DROP TABLE fitz_c2_expr_idx", &[]).await;
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tier_c3_jsonb_merge_preserves_existing_keys() {
+    // C.3 — jsonb || merge. La SQL que emite `qb.merge_jsonb(db,
+    // "data", patch)`. Verificamos que las keys existentes sobreviven
+    // y las nuevas se agregan / overwrite.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_c3_merge", &[]).await;
+    conn.exec(
+        "CREATE TABLE fitz_c3_merge (id bigserial PRIMARY KEY, data jsonb NOT NULL)",
+        &[],
+    )
+    .await
+    .expect("setup");
+    conn.exec(
+        "INSERT INTO fitz_c3_merge (data) VALUES ($1::jsonb)",
+        &[PgValue::Text(r#"{"a": 1, "b": "old"}"#.into())],
+    )
+    .await
+    .expect("insert seed");
+    // Mergeamos: patch tiene "b" (overwrite) + "c" (new). "a" se preserva.
+    let n = conn
+        .exec(
+            "UPDATE fitz_c3_merge SET \"data\" = \"data\" || $1::jsonb WHERE id = $2",
+            &[
+                PgValue::Text(r#"{"b": "new", "c": 3}"#.into()),
+                PgValue::Int(1),
+            ],
+        )
+        .await
+        .expect("merge");
+    assert_eq!(n, 1);
+
+    let qr = conn
+        .query(
+            "SELECT data::text AS d FROM fitz_c3_merge WHERE id = 1",
+            &[],
+        )
+        .await
+        .unwrap();
+    let d = qr.rows[0]
+        .get("d")
+        .and_then(|v| {
+            if let PgValue::Text(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .expect("data column");
+    assert!(d.contains("\"a\": 1"), "preserva `a`: {d}");
+    assert!(d.contains("\"b\": \"new\""), "overwrite `b`: {d}");
+    assert!(d.contains("\"c\": 3"), "agrega `c`: {d}");
+
+    let _ = conn.exec("DROP TABLE fitz_c3_merge", &[]).await;
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tier_c1_ts_rank_order_by_works() {
+    // C.1 — `.order_by(fn(u) => -u.body.rank("query"))` emite
+    // `ORDER BY ts_rank("body", to_tsquery('query')) DESC`. Verificamos
+    // que el SQL canonical funciona y ordena por relevancia.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_c1_rank", &[]).await;
+    conn.exec(
+        "CREATE TABLE fitz_c1_rank (id bigserial PRIMARY KEY, body text NOT NULL)",
+        &[],
+    )
+    .await
+    .expect("setup");
+    conn.exec(
+        "INSERT INTO fitz_c1_rank (body) VALUES ($1), ($2), ($3)",
+        &[
+            PgValue::Text("fitz lenguaje moderno".into()),
+            PgValue::Text("fitz fitz fitz patagonia".into()),
+            PgValue::Text("rust nada que ver".into()),
+        ],
+    )
+    .await
+    .expect("seed");
+    // SELECT con ORDER BY ts_rank — el row con más matches "fitz" gana.
+    let qr = conn
+        .query(
+            "SELECT id, body FROM fitz_c1_rank \
+             WHERE to_tsvector('simple', body) @@ to_tsquery('simple', 'fitz') \
+             ORDER BY ts_rank(to_tsvector('simple', body), to_tsquery('simple', 'fitz')) DESC",
+            &[],
+        )
+        .await
+        .expect("query");
+    assert_eq!(qr.rows.len(), 2, "esperaba 2 matches de 'fitz'");
+    // El primer row debe ser "fitz fitz fitz patagonia" (3 ocurrencias).
+    let first_body = qr.rows[0]
+        .get("body")
+        .and_then(|v| {
+            if let PgValue::Text(s) = v {
+                Some(s.clone())
+            } else {
+                None
+            }
+        })
+        .expect("body");
+    assert!(
+        first_body.contains("fitz fitz fitz"),
+        "esperaba `fitz fitz fitz` primero (más rank), fue: {first_body}"
+    );
+
+    let _ = conn.exec("DROP TABLE fitz_c1_rank", &[]).await;
     conn.close().await.unwrap();
 }
 

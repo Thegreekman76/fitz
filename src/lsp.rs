@@ -191,21 +191,66 @@ pub fn make_hover(ty: &Type, env: &TypeEnv) -> Hover {
 /// cursor. El range cubre exactamente el identificador, así VSCode
 /// resalta el token en lugar de solo mostrar el tooltip. Si no hay
 /// un ident en la posición del cursor, `range = None` (fallback).
+///
+/// v0.10.32 (Tier D.2) — si el tipo es un `Type::Nominal(id)` con
+/// metadata `@table`, agregamos el `CREATE TABLE` SQL emitted al
+/// markdown (debajo del display del tipo). Útil para debuggear el
+/// shape SQL sin abrir `fitz db diff` o revisar la migration manual.
 pub fn make_hover_with_range(
     ty: &Type,
     env: &TypeEnv,
+    program: &crate::ast::Program,
     text: &str,
     line: u32,
     character: u32,
 ) -> Hover {
     let range = ident_range_at_position(text, line as usize, character as usize);
+    let mut value = format!("```fitz\n{}\n```", ty.display(env));
+    // v0.10.32 (Tier D.2) — append CREATE TABLE SQL si aplica.
+    if let Some(sql) = try_table_create_sql(ty, env, program) {
+        value.push_str(
+            "\n\n---\n\n**`CREATE TABLE` emitted** (vía `fitz db diff/migrate`):\n\n```sql\n",
+        );
+        value.push_str(&sql);
+        value.push_str("\n```");
+    }
     Hover {
         contents: HoverContents::Markup(MarkupContent {
             kind: MarkupKind::Markdown,
-            value: format!("```fitz\n{}\n```", ty.display(env)),
+            value,
         }),
         range,
     }
+}
+
+/// v0.10.32 (Tier D.2) — si `ty` es un `Type::Nominal(id)` con
+/// `TableMetadata` registrada, construye el SQL `CREATE TABLE` que
+/// `fitz db diff/migrate` emitiría para ese type. Devuelve `None`
+/// para tipos que no son `@table` o si la construcción del schema
+/// falla (typo en `@belongs_to`, etc.).
+///
+/// Reusa `migrations::schema_from_program` + `migrations::create_table_sql_for`
+/// para producir SQL idéntico al de `fitz db diff` — sin divergencia
+/// entre lo que el LSP muestra y lo que el migrator emite.
+fn try_table_create_sql(ty: &Type, env: &TypeEnv, program: &crate::ast::Program) -> Option<String> {
+    let type_id = match ty {
+        Type::Nominal(id) => *id,
+        _ => return None,
+    };
+    // Verificamos que sea @table (sino no tiene SQL para mostrar).
+    let table_meta = env.table_metadata(type_id)?;
+    let target_sql_name = table_meta.sql_name.clone();
+    let target_schema = table_meta.schema.clone();
+    // Construir el Schema entero. Si falla (typo en relations, etc.),
+    // skipear el augment — devolver None deja el hover con solo el
+    // tipo. El user ve los errores del checker en otro lado.
+    let schema = crate::migrations::schema_from_program(program, env).ok()?;
+    // Buscar la table matching y emitir el CREATE.
+    let table = schema
+        .tables
+        .iter()
+        .find(|t| t.name == target_sql_name && t.schema == target_schema)?;
+    Some(crate::migrations::create_table_sql_for(table))
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,12 +1410,46 @@ fn after_dot_completions(
                 "to_str_base",
                 "fn(base: Int) -> Str  // base ∈ {2, 8, 10, 16}".into(),
             ),
+            // v0.10.32 (Tier D.1) — ORM operators numéricos.
+            (
+                "is_in",
+                "fn(values: List<Int>) -> Bool  // (ORM .where) SQL IN".into(),
+            ),
+            (
+                "between",
+                "fn(lo: Int, hi: Int) -> Bool  // (ORM .where) SQL BETWEEN".into(),
+            ),
+            (
+                "is_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NULL".into(),
+            ),
+            (
+                "is_not_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NOT NULL".into(),
+            ),
         ]),
         Type::Float => method_items(&[
             ("abs", "fn() -> Float".into()),
             ("to_str", "fn() -> Str".into()),
             ("is_nan", "fn() -> Bool".into()),
             ("is_finite", "fn() -> Bool".into()),
+            // v0.10.32 (Tier D.1) — ORM operators numéricos.
+            (
+                "is_in",
+                "fn(values: List<Float>) -> Bool  // (ORM .where) SQL IN".into(),
+            ),
+            (
+                "between",
+                "fn(lo: Float, hi: Float) -> Bool  // (ORM .where) SQL BETWEEN".into(),
+            ),
+            (
+                "is_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NULL".into(),
+            ),
+            (
+                "is_not_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NOT NULL".into(),
+            ),
         ]),
         Type::List(t) => method_items(&[
             ("push", format!("fn({}) -> Null", t.display(type_env))),
@@ -1736,11 +1815,89 @@ fn after_dot_completions(
             ),
             // Mini-tanda Mb9 — has_value: chequea si V está presente.
             ("has_value", format!("fn({}) -> Bool", v.display(type_env),)),
+            // v0.10.32 (Tier D.1) — ORM operators sobre Map (jsonb).
+            // Solo válidos adentro de `.where(closure)` del ORM; el
+            // evaluator los intercepta para emitir operadores Postgres
+            // jsonb (`?`, `?&`, `?|`, `@>`, `#>`, `#>>`).
+            (
+                "has_key",
+                "fn(k: Str) -> Bool  // (ORM .where) jsonb ? — \"k\" existe en el top-level".into(),
+            ),
+            (
+                "has_all_keys",
+                "fn(keys: List<Str>) -> Bool  // (ORM .where) jsonb ?& — todas existen".into(),
+            ),
+            (
+                "has_any_keys",
+                "fn(keys: List<Str>) -> Bool  // (ORM .where) jsonb ?| — alguna existe".into(),
+            ),
+            (
+                "contains_json",
+                "fn(patch: Map<Str, Any>) -> Bool  // (ORM .where) jsonb @> — superset".into(),
+            ),
+            (
+                "has_path",
+                "fn(path: List<Str>) -> Bool  // (ORM .where) jsonb #> — path nested existe".into(),
+            ),
+            (
+                "path_text",
+                "fn(path: List<Str>) -> Str  // (ORM .where) jsonb #>> path → text".into(),
+            ),
+            (
+                "path_int",
+                "fn(path: List<Str>) -> Int  // (ORM .where) jsonb #>> + cast bigint".into(),
+            ),
+            (
+                "path_float",
+                "fn(path: List<Str>) -> Float  // (ORM .where) jsonb #>> + cast float8".into(),
+            ),
+            (
+                "path_bool",
+                "fn(path: List<Str>) -> Bool  // (ORM .where) jsonb #>> + cast boolean".into(),
+            ),
         ]),
         Type::Str => method_items(&[
             ("upper", "fn() -> Str".into()),
             ("lower", "fn() -> Str".into()),
             ("len", "fn() -> Int".into()),
+            // v0.10.32 (Tier D.1) — ORM operators sobre Str. Solo
+            // tienen efecto adentro de `.where(closure)` del ORM —
+            // el evaluator los intercepta y traduce a SQL. Fuera del
+            // ORM, llamarlos sobre un Str arroja error en runtime.
+            // Documentamos con `(ORM .where)` en el detail para que
+            // el user los distinga de los métodos Str regulares.
+            (
+                "is_in",
+                "fn(values: List<Str>) -> Bool  // (ORM .where) SQL IN".into(),
+            ),
+            (
+                "like",
+                "fn(pattern: Str) -> Bool  // (ORM .where) SQL LIKE — case-sensitive".into(),
+            ),
+            (
+                "ilike",
+                "fn(pattern: Str) -> Bool  // (ORM .where) SQL ILIKE — case-insensitive".into(),
+            ),
+            (
+                "matches",
+                "fn(query: Str) -> Bool  // (ORM .where) SQL @@ to_tsquery — full-text".into(),
+            ),
+            (
+                "plainto_matches",
+                "fn(query: Str) -> Bool  // (ORM .where) SQL @@ plainto_tsquery — plain text".into(),
+            ),
+            (
+                "is_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NULL".into(),
+            ),
+            (
+                "is_not_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NOT NULL".into(),
+            ),
+            (
+                "between",
+                "fn(lo: Str, hi: Str) -> Bool  // (ORM .where) SQL BETWEEN".into(),
+            ),
             // Mini-tanda S.1/S.2: métodos chicos de Str. `contains` y
             // `starts_with`/`ends_with` toman un `Str` y devuelven Bool.
             // `split` devuelve List<Str>. `trim` no toma args. `replace`
@@ -1941,6 +2098,23 @@ fn after_dot_completions(
                 "diff_days",
                 "fn(other: Date) -> Int  // v0.10.30 — días signed; self - other".into(),
             ),
+            // v0.10.32 (Tier D.1) — ORM operators temporales.
+            (
+                "is_in",
+                "fn(values: List<Date>) -> Bool  // (ORM .where) SQL IN".into(),
+            ),
+            (
+                "between",
+                "fn(lo: Date, hi: Date) -> Bool  // (ORM .where) SQL BETWEEN".into(),
+            ),
+            (
+                "is_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NULL".into(),
+            ),
+            (
+                "is_not_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NOT NULL".into(),
+            ),
         ]),
         // v0.10.24 — `DateTime` instance methods. Mismo set que Date +
         // hour/minute/second/timestamp + extracción `.date()`.
@@ -2028,6 +2202,23 @@ fn after_dot_completions(
             (
                 "in_tz",
                 "fn(iana: Str) -> Result<Str>  // v0.10.30 — IANA tz name (ej: `America/Argentina/Buenos_Aires`)".into(),
+            ),
+            // v0.10.32 (Tier D.1) — ORM operators temporales.
+            (
+                "is_in",
+                "fn(values: List<DateTime>) -> Bool  // (ORM .where) SQL IN".into(),
+            ),
+            (
+                "between",
+                "fn(lo: DateTime, hi: DateTime) -> Bool  // (ORM .where) SQL BETWEEN".into(),
+            ),
+            (
+                "is_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NULL".into(),
+            ),
+            (
+                "is_not_null",
+                "fn() -> Bool  // (ORM .where) SQL IS NOT NULL".into(),
             ),
         ]),
         // v0.10.24 — `Uuid` instance methods. MVP acotado.

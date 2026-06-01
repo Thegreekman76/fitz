@@ -2378,20 +2378,35 @@ fmt custom — el user que necesita formato custom hace
 de scope — la semántica es ambigua y el user que necesita rotar puede
 usar `add_seconds(offset)` manual.
 
-### Tier C — Operadores SQL faltantes (~12-20h, 3 ítems)
+### Tier C — Operadores SQL faltantes — **CERRADO 2026-06-01 (v0.10.32)**
 
-| ID | Item | Evidencia código | Scope |
-|----|------|------------------|------:|
-| C.1 | `ts_rank` full-text ranking (`order_by(fn(d) => d.body_tsv.rank("query"))` o similar) | Cero matches `ts_rank` en `src/`. Hoy escape hatch via `db.query(...)` con `ORDER BY ts_rank(...)` | ~2h |
-| C.2 | Expression indexes (`@index("lower(email)")`, `@index("to_tsvector('english', body)")`) — requiere parser SQL mini para introspect/drift | `types.rs:469` comment explícito "Expression indexes NO en MVP — requiere parser SQL mini" | ~1-2 días |
-| C.3 | JSON `\|\|` merge con patrón distinto (skipeado deliberado en v0.10.29 para `.where`; reabrirse como `Type.merge_jsonb_field(db, id, field, patch)` o adentro de `.update`) | Cero matches `.merge\(` en jsonb context. Decisión en v0.10.29: caso UPDATE dominante, escape hatch via `db.exec` documentado | ~3h |
+| ID | Item | Estado |
+|----|------|------:|
+| C.1 | `ts_rank` full-text ranking en `.order_by(fn(u) => -u.body.rank("query"))` emite `ORDER BY ts_rank("body", to_tsquery('query')) DESC`; variante `plainto_rank` para plain queries | ✅ |
+| C.2 | Expression indexes via `@index(expression="lower(email)")` kwarg dedicado. Drift check incompleto (introspect no parsea `pg_index.indexprs`) — refinar con `name=` explícito | ✅ |
+| C.3 | JSON `\|\|` merge via `qb.merge_jsonb(db, field, patch)` separado de `.update`. Emite `UPDATE tbl SET "field" = "field" \|\| $1::jsonb WHERE <where>` | ✅ |
 
-### Tier D — DX/LSP residual del ORM (~5h, 2 ítems)
+**Deuda residual derivada de Tier C (NO bloquea)**: (a) C.1 acepta
+solo Str literal en MVP (vars quedan como deuda menor — el path
+order_by stream no tiene acceso al pg_args del where); (b) C.2
+drift incompleto — la introspect no detecta cambio del expression
+con mismo name (el user debe re-nombrar el index para forzar regen);
+(c) C.3 `NULL || anything = NULL` por convención Postgres — el user
+inicializa la col con `{}` al INSERT.
 
-| ID | Item | Evidencia código | Scope |
-|----|------|------------------|------:|
-| D.1 | LSP completion para method calls del ORM en `.where(...)` (al escribir `u.email.`, suggest `is_in`/`like`/`starts_with`/`matches`/etc. con descripciones) | Cero matches de completion con context ORM en `src/lsp.rs`. Lo único `starts_with` es para `List<T>` (prefix matching), no para el method del ORM | ~3h |
-| D.2 | LSP hover sobre `@table` types mostrando el `CREATE TABLE` emitted (útil para debuggear migrations) | Cero matches `hover.*@table`/`create_table_sql.*hover` | ~2h |
+### Tier D — DX/LSP residual del ORM — **CERRADO 2026-06-01 (v0.10.32)**
+
+| ID | Item | Estado |
+|----|------|------:|
+| D.1 | LSP completion ORM en `.where()` — métodos como `is_in`/`like`/`matches`/`has_key`/`path_text`/etc. aparecen en autocomplete sobre Str/Map/Int/Float/Date/DateTime con detail `(ORM .where)` distintivo | ✅ |
+| D.2 | LSP hover sobre `@table` types muestra el `CREATE TABLE` SQL emitted vía `migrations::schema_from_program` + `create_table_sql_for` — útil para debuggear migrations sin abrir `fitz db diff` | ✅ |
+
+**Deuda residual derivada de Tier D (NO bloquea)**: (a) D.1 no
+detecta scope context — los métodos ORM aparecen siempre, fuera del
+`.where` llamarlos da error runtime (limitación documentada en el
+detail string); (b) D.2 si `schema_from_program` falla (typo en
+relations), el hover se devuelve sin el augment SQL — silente, no
+hay feedback visual al user.
 
 ### Tier E — Visión a futuro (expansión del lenguaje)
 

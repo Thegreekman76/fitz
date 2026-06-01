@@ -128,6 +128,14 @@ pub struct Index {
     /// renombrá el índice para forzar regen (deuda menor — sigue
     /// pattern de v0.10.27 con where_clause).
     pub using: Option<String>,
+    /// v0.10.32 (Tier C.2) — Expression index. Cuando está,
+    /// `columns` se ignora y el CREATE INDEX usa el expression raw
+    /// (ej: `lower(email)`, `to_tsvector('english', body)`). Diff
+    /// name-based con la misma limitación que where_clause/using:
+    /// la introspect NO parsea `pg_index.indexprs` para detectar el
+    /// expression, así que un cambio del expression con mismo name
+    /// NO se detecta como drift (refactorá el name para forzar regen).
+    pub expression: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -408,6 +416,11 @@ async fn introspect_indexes(
             unique: is_unique,
             where_clause,
             using,
+            // v0.10.32 (Tier C.2) — introspect NO parsea
+            // `pg_index.indexprs` para expression indexes. El user
+            // que declara `@index(expression="...")` debe nombrarlo
+            // explícito con `name=` para que el diff lo matchee.
+            expression: None,
         });
     }
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
@@ -727,6 +740,7 @@ fn build_table_from_type(
                     unique: true,
                     where_clause: None,
                     using: None,
+                    expression: None,
                 });
             }
             if cm.indexed {
@@ -736,6 +750,7 @@ fn build_table_from_type(
                     unique: false,
                     where_clause: None,
                     using: None,
+                    expression: None,
                 });
             }
         }
@@ -832,12 +847,20 @@ fn build_table_from_type(
     // Postgres reporta vía pg_indexes para que el drift check no
     // dispare CREATE/DROP en cada corrida.
     for idx in &meta.indexes {
+        // v0.10.32 (Tier C.2) — auto-naming para expression indexes:
+        // `idx_<table>_expr_<N>` con N basado en posición. El user es
+        // strongly recommended a nombrar explícitamente con `name=`
+        // para drift detection.
         let auto_name = || {
             let mut s = String::from("idx_");
             s.push_str(&table_name);
-            for c in &idx.columns {
-                s.push('_');
-                s.push_str(c);
+            if idx.expression.is_some() {
+                s.push_str("_expr");
+            } else {
+                for c in &idx.columns {
+                    s.push('_');
+                    s.push_str(c);
+                }
             }
             if idx.unique {
                 s.push_str("_uniq");
@@ -851,6 +874,7 @@ fn build_table_from_type(
             unique: idx.unique,
             where_clause: idx.where_clause.clone(),
             using: idx.using.clone(),
+            expression: idx.expression.clone(),
         });
     }
 
@@ -1941,7 +1965,17 @@ fn change_to_sql(change: &Change) -> String {
         }
         Change::CreateIndex { table, index } => {
             let unique = if index.unique { "UNIQUE " } else { "" };
-            let cols: Vec<String> = index.columns.iter().map(|c| quote_ident(c)).collect();
+            // v0.10.32 (Tier C.2) — expression index. Si `expression`
+            // está, el index se crea sobre la expresión literal en
+            // lugar de columnas (`CREATE INDEX ON tbl (lower(email))`).
+            // El user pasa la expression raw — Fitz no la parsea.
+            let target_expr = match &index.expression {
+                Some(expr) => format!("({})", expr),
+                None => {
+                    let cols: Vec<String> = index.columns.iter().map(|c| quote_ident(c)).collect();
+                    format!("({})", cols.join(", "))
+                }
+            };
             // v0.10.28 — method override (USING gin/gist/brin/etc.).
             // `None` = btree default Postgres, no se emite USING.
             let using_clause = match &index.using {
@@ -1958,12 +1992,12 @@ fn change_to_sql(change: &Change) -> String {
                 None => String::new(),
             };
             format!(
-                "CREATE {}INDEX {} ON {}{} ({}){};",
+                "CREATE {}INDEX {} ON {}{} {}{};",
                 unique,
                 quote_ident(&index.name),
                 quote_qualified(table),
                 using_clause,
-                cols.join(", "),
+                target_expr,
                 where_suffix,
             )
         }
@@ -2134,6 +2168,15 @@ fn diff_check_constraints(current: &Table, target: &Table, changes: &mut Vec<Cha
             }
         }
     }
+}
+
+/// v0.10.32 (Tier D.2) — wrapper público para uso desde el LSP
+/// (`fitz::lsp::try_table_create_sql`). Devuelve el mismo SQL que
+/// `change_to_sql(Change::CreateTable(t))` emite. Mantenido como
+/// alias para mantener `create_table_sql` privado al módulo (no
+/// queremos exponer toda la API interna del migrator).
+pub fn create_table_sql_for(t: &Table) -> String {
+    create_table_sql(t)
 }
 
 fn create_table_sql(t: &Table) -> String {
@@ -3454,6 +3497,7 @@ mod tests {
             unique: true,
             where_clause: None,
             using: None,
+            expression: None,
         });
         let target = Schema {
             tables: vec![target_users],
@@ -3480,6 +3524,7 @@ mod tests {
             unique: false,
             where_clause: None,
             using: None,
+            expression: None,
         });
         let current = Schema {
             tables: vec![current_users],
@@ -3517,6 +3562,7 @@ mod tests {
             unique: false,
             where_clause: None,
             using: None, // btree default
+            expression: None,
         });
         let mut target_users = table_users();
         target_users.indexes.push(Index {
@@ -3525,6 +3571,7 @@ mod tests {
             unique: false,
             where_clause: None,
             using: Some("gin".to_string()),
+            expression: None,
         });
         let current = Schema {
             tables: vec![current_users],
@@ -3563,6 +3610,7 @@ mod tests {
             unique: true,
             where_clause: Some("deleted_at IS NULL".to_string()),
             using: None,
+            expression: None,
         });
         let mut target_users = table_users();
         target_users.indexes.push(Index {
@@ -3571,6 +3619,7 @@ mod tests {
             unique: true,
             where_clause: Some("disabled = false".to_string()),
             using: None,
+            expression: None,
         });
         let current = Schema {
             tables: vec![current_users],
@@ -3611,6 +3660,7 @@ mod tests {
             unique: false,
             where_clause: Some("(deleted_at IS NULL)".to_string()),
             using: None,
+            expression: None,
         });
         let mut target_users = table_users();
         target_users.indexes.push(Index {
@@ -3619,6 +3669,7 @@ mod tests {
             unique: false,
             where_clause: Some("deleted_at IS NULL".to_string()),
             using: None,
+            expression: None,
         });
         let current = Schema {
             tables: vec![current_users],
@@ -3639,6 +3690,7 @@ mod tests {
             unique: false,
             where_clause: Some("deleted_at  IS  NULL".to_string()),
             using: None,
+            expression: None,
         });
         let mut target_b = table_users();
         target_b.indexes.push(Index {
@@ -3647,6 +3699,7 @@ mod tests {
             unique: false,
             where_clause: Some("DELETED_AT IS NULL".to_string()),
             using: None,
+            expression: None,
         });
         let changes_b = diff_schemas(
             &Schema {
@@ -3683,6 +3736,7 @@ mod tests {
             unique: false,
             where_clause: None,
             using: None,
+            expression: None,
         });
         let mut target_users = table_users();
         target_users.indexes.push(Index {
@@ -3691,6 +3745,7 @@ mod tests {
             unique: true,
             where_clause: None,
             using: None,
+            expression: None,
         });
         let changes = diff_schemas(
             &Schema {
@@ -3727,6 +3782,7 @@ mod tests {
             unique: false,
             where_clause: None,
             using: None,
+            expression: None,
         });
         let mut target_users = table_users();
         target_users.indexes.push(Index {
@@ -3735,6 +3791,7 @@ mod tests {
             unique: false,
             where_clause: None,
             using: Some("btree".to_string()),
+            expression: None,
         });
         let changes = diff_schemas(
             &Schema {
@@ -4802,6 +4859,7 @@ type Plain {
                         unique: true,
                         where_clause: Some("(deleted_at IS NULL)".to_string()),
                         using: None,
+                        expression: None,
                     }],
                     foreign_keys: vec![],
                     renamed_from: None,
@@ -4822,6 +4880,7 @@ type Plain {
                         unique: false,
                         where_clause: None,
                         using: None,
+                        expression: None,
                     }],
                     foreign_keys: vec![ForeignKey {
                         name: "fk_posts_author".to_string(),
@@ -5021,6 +5080,7 @@ type Plain {
                 unique: false,
                 where_clause: None,
                 using: Some("gin".to_string()),
+                expression: None,
             },
         };
         let sql = changes_to_sql(&[change]);
@@ -5049,6 +5109,7 @@ type Plain {
                 unique: false,
                 where_clause: None,
                 using: None,
+                expression: None,
             },
         };
         let sql = changes_to_sql(&[change]);
@@ -5072,6 +5133,7 @@ type Plain {
                 unique: true,
                 where_clause: Some("deleted_at IS NULL".to_string()),
                 using: Some("btree".to_string()),
+                expression: None,
             },
         };
         let sql = changes_to_sql(&[change]);
@@ -5098,6 +5160,7 @@ type Plain {
                     unique: false,
                     where_clause: None,
                     using: Some("gin".to_string()),
+                    expression: None,
                 }],
                 foreign_keys: vec![],
                 renamed_from: None,
@@ -5125,6 +5188,7 @@ type Plain {
                     unique: false,
                     where_clause: None,
                     using: Some("gin".to_string()),
+                    expression: None,
                 }],
                 foreign_keys: vec![],
                 renamed_from: None,

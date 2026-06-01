@@ -212,7 +212,17 @@ impl LanguageServer for Backend {
         // que VSCode highlightee el token en lugar de solo mostrar
         // el tooltip aislado.
         let hover = hover_for_position(&state.type_info, pos.line, pos.character).map(|ty| {
-            make_hover_with_range(ty, &state.type_env, &state.text, pos.line, pos.character)
+            // v0.10.32 (Tier D.2) — pasamos `program` para que el LSP
+            // pueda augmentar el hover con el CREATE TABLE SQL si el
+            // tipo es un `@table` type.
+            make_hover_with_range(
+                ty,
+                &state.type_env,
+                &state.program,
+                &state.text,
+                pos.line,
+                pos.character,
+            )
         });
         Ok(hover)
     }
