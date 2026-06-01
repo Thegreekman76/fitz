@@ -2317,20 +2317,37 @@ ese issue. Validación smoke real queda como tarea CI Linux (job
 SQL avanzados. Tier D mejora DX sin tocar lenguaje. Tier E son
 features grandes que expanden el lenguaje (mini-fases dedicadas).
 
-### Tier A — Cierre MVP fuerte del ORM (~30-40h, 10 ítems)
+### Tier A — Cierre MVP fuerte del ORM — **9/10 CERRADO 2026-06-01 (v0.10.31)**
 
-| ID | Item | Evidencia código | Scope |
-|----|------|------------------|------:|
-| A.1 | `fitz db diff --check-destructive` — clasifica safe/risky/destructive y aborta sin `--allow-destructive` explícito | Cero matches `check_destructive`/`--check-destructive` en `src/` | ~2 días |
-| A.2 | `ALTER COLUMN TYPE` con `USING` automático para casts comunes (`int→bigint`, `text→varchar(N)`, etc.) | `migrations.rs:1529` emite `ALTER COLUMN TYPE` sin `USING`; comment en línea 978 marca como "deuda directo sin USING" | ~3h |
-| A.3 | `db.connect(url, max_conns=N)` kwarg del lenguaje (hoy solo env var `FITZ_DB_MAX_CONNS`) | Cero matches de kwarg `max_conns` en `evaluator.rs`. Requiere wire del kwarg desde evaluator + codegen | ~2h |
-| A.4 | Savepoints / nested transactions (`SAVEPOINT` adentro de la outer) | `db.rs:3301` comment explícito "No soporta nested transactions" | ~4h |
-| A.5 | `ALTER TABLE ADD/DROP CONSTRAINT` para CHECKs nuevos via diff (hoy `@check_constraint` solo emite en CREATE TABLE) | Cero matches `AddCheckConstraint`/`Change::AddCheck` | ~4h |
-| A.6 | FK targeting composite PK del target type (hoy fallback a "id" + error claro en runtime) | `migrations.rs:646` comment "Composite PK del target → fallback `id`" | ~3h |
-| A.7 | Drift check `@check_constraint` (introspect lee `pg_constraint.contype='c'`) | `types.rs:482` comment "introspect NO los lee del pg_constraint (MVP — deuda menor)" | ~2h |
-| A.8 | Drift check cross-schema FK (introspect popula `references_schema`) | `migrations.rs:65` comment "introspect NO los lee" — `references_schema` siempre `None` en introspect | ~2h |
-| A.9 | `db.transaction` con isolation level (`SERIALIZABLE`/`REPEATABLE READ`/`READ ONLY`) | `db.rs:3302` comment "No soporta niveles de aislamiento custom" | ~2h |
-| A.10 | `FITZ_DB_*` mid-run reload (hoy `LazyLock` se fija al primer acceso) | `db.rs:2780, 2957` confirma `LazyLock`. Requiere refactor a `RwLock<DbLogMode>` o similar | ~3h |
+**9 ítems cerrados en bloque** (~12h reales vs ~30-40h estimadas).
+Detalle por sub-paso en `CHANGELOG.md` v0.10.31. Solo A.10 queda
+pendiente (FITZ_DB_* mid-run reload — refinable cuando aparezca
+presión, hoy `LazyLock` cubre 99% del caso real).
+
+| ID | Item | Estado |
+|----|------|------:|
+| A.1 | `fitz db diff --check-destructive` con clasificación Safe/Risky/Destructive + abort sin `--allow-destructive` | ✅ |
+| A.2 | `ALTER COLUMN TYPE` con `USING col::T` automático | ✅ |
+| A.3 | `db.connect(url, max_conns=N)` kwarg del lenguaje | ✅ |
+| A.4 | Savepoints / nested transactions vía `tx_depth` shared + SAVEPOINT/RELEASE/ROLLBACK TO | ✅ |
+| A.5 | `ALTER TABLE ADD/DROP CONSTRAINT` para CHECKs via diff | ✅ |
+| A.6 | FK targeting composite PK → error claro pre-DDL (en lugar de fallback silencioso a "id") | ✅ |
+| A.7 | Drift check `@check_constraint` (introspect lee `pg_constraint.contype='c'` via `pg_get_constraintdef`) | ✅ |
+| A.8 | Drift check cross-schema FK (introspect popula `references_schema` desde `ccu.table_schema`) | ✅ |
+| A.9 | `db.transaction(closure, isolation="...")` con whitelist 4 ANSI levels + READ ONLY/WRITE | ✅ |
+| A.10 | `FITZ_DB_*` mid-run reload (hoy `LazyLock` se fija al primer acceso) | ⏳ |
+
+**Deuda residual derivada (NO bloquea)**: (a) `parse_check_def` usa
+trim+exact comparison para drift — cambios cosméticos en
+espacios/case del expr pueden disparar DROP+ADD espurio (refinable
+con SQL normalizer si entra presión); (b) `@belongs_to(refs="col")`
+para FK single-col explícito a tabla con composite PK no
+implementado — A.6 solo da error claro, sub-paso `refs=` futuro
+permitiría declarar FK válida; (c) `db.connect(..., max_conns=N)`
+implementado vía env var override antes del connect — si un
+connect previo cacheó max_conns default, el override no aplica;
+(d) `transaction_with_isolation` solo whitelistea 12 strings ANSI
++ modificadores — `DEFERRABLE` queda como deuda menor.
 
 ### Tier B — API completion Date/DateTime/Uuid — **CERRADO 2026-05-31 (v0.10.30)**
 

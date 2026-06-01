@@ -1,0 +1,119 @@
+# Labels declarativas del repo Fitz.
+#
+# Para aplicarlas en GitHub corré `scripts/sync-labels.sh` (requiere `gh`
+# CLI autenticado). El script crea / actualiza las labels listadas acá.
+# Modificar este archivo NO sincroniza solo — corré el script después.
+
+# ─── Tipo de issue / PR ─────────────────────────────────────────────────
+- name: bug
+  color: "d73a4a"
+  description: Algo no funciona como debería
+- name: enhancement
+  color: "a2eeef"
+  description: Feature nueva o mejora propuesta
+- name: question
+  color: "d876e3"
+  description: Pregunta sobre el lenguaje, roadmap o diseño
+- name: docs
+  color: "0075ca"
+  description: Cambios solo a documentación
+- name: refactor
+  color: "fbca04"
+  description: Refactor sin cambio de comportamiento
+- name: test
+  color: "c2e0c6"
+  description: Solo agrega o mejora tests
+- name: chore
+  color: "ededed"
+  description: Mantenimiento del repo, deps, CI
+
+# ─── Estado / triage ────────────────────────────────────────────────────
+- name: needs-triage
+  color: "fef2c0"
+  description: Pendiente de revisar y categorizar
+- name: needs-info
+  color: "fbca04"
+  description: Falta información para avanzar — esperando respuesta del autor
+- name: confirmed
+  color: "0e8a16"
+  description: Reproducido / aceptado para trabajar
+- name: wontfix
+  color: "ffffff"
+  description: No se va a trabajar — explicación en el thread
+- name: duplicate
+  color: "cfd3d7"
+  description: Duplica otro issue ya abierto
+- name: invalid
+  color: "e4e669"
+  description: No es accionable como está
+
+# ─── Áreas del compilador (alineadas con src/) ──────────────────────────
+- name: "area: lexer-parser"
+  color: "5319e7"
+  description: Toca lexer.rs / parser.rs / ast.rs
+- name: "area: checker"
+  color: "5319e7"
+  description: Toca types.rs (sistema de tipos y checker estático)
+- name: "area: evaluator"
+  color: "5319e7"
+  description: Toca evaluator.rs (intérprete de fitz run/test/dev/repl)
+- name: "area: codegen"
+  color: "5319e7"
+  description: Toca codegen.rs (transpile a Rust + fitz build)
+- name: "area: http"
+  color: "5319e7"
+  description: Toca http.rs / openapi.rs (runtime HTTP + docs auto)
+- name: "area: db-orm"
+  color: "5319e7"
+  description: Toca db.rs / migrations.rs (driver Postgres + ORM)
+- name: "area: async"
+  color: "5319e7"
+  description: Async, .await, Future<T>, bridge tokio
+- name: "area: lsp"
+  color: "5319e7"
+  description: Toca lsp.rs / bin/fitz-lsp.rs (Language Server)
+- name: "area: editor-vscode"
+  color: "5319e7"
+  description: Toca editors/vscode/ (extensión, grammar, .vsix)
+- name: "area: package-manager"
+  color: "5319e7"
+  description: Toca manifest.rs / lockfile.rs / git_dep.rs (fitz.toml)
+- name: "area: dx"
+  color: "5319e7"
+  description: Toca fmt.rs / lint.rs / testing.rs (fmt/test/dev/repl/lint)
+- name: "area: python-interop"
+  color: "5319e7"
+  description: Toca py_interop.rs / py_types.rs (feature `python`)
+- name: "area: cli"
+  color: "5319e7"
+  description: Toca src/main.rs (subcomandos, flags, orquestación)
+- name: "area: ci"
+  color: "5319e7"
+  description: Toca .github/workflows/ o configuración de CI
+
+# ─── Prioridad ──────────────────────────────────────────────────────────
+- name: "priority: high"
+  color: "b60205"
+  description: Bloquea uso real o regresión clara
+- name: "priority: medium"
+  color: "d93f0b"
+  description: Fricción notable pero hay workaround
+- name: "priority: low"
+  color: "fbca04"
+  description: Mejora deseable, sin presión
+
+# ─── Buenos puntos de entrada ───────────────────────────────────────────
+- name: good first issue
+  color: "7057ff"
+  description: Buen ticket para una primera contribución
+- name: help wanted
+  color: "008672"
+  description: Se aceptan PRs externos para este ticket
+
+# ─── Lifecycle ──────────────────────────────────────────────────────────
+- name: breaking-change
+  color: "b60205"
+  description: Cambia comportamiento existente del lenguaje o CLI
+- name: regression
+  color: "b60205"
+  description: Algo que funcionaba antes ahora no funciona

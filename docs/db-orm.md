@@ -697,17 +697,26 @@ Auto-naming: `chk_<table>_<idx>` cuando no se especifica `name=`.
 
 **Limitaciones MVP**:
 
-- **Sin drift check** — la introspect (`fitz db inspect`) NO lee
-  los CHECK constraints del `pg_constraint`. Si cambiás un
-  `expr` Fitz-side, el migrator NO emite `DROP CONSTRAINT + ADD
-  CONSTRAINT`. Workaround: `db.exec("ALTER TABLE ... DROP
-  CONSTRAINT ... ; ALTER TABLE ... ADD CONSTRAINT ... CHECK
-  (...);")` manualmente, o renombrar el constraint con `name=`
-  para forzar regen al recrear la tabla.
-- **Solo en CREATE TABLE** — los CHECK se inline-an en el create
-  inicial. Si agregás un `@check_constraint` después de que la
-  tabla ya existe, NO se emite `ALTER TABLE ... ADD CONSTRAINT`
-  vía `fitz db diff`. Workaround: idem (manual).
+- ~~**Sin drift check**~~ — **CERRADO v0.10.31 (Tier A.7)**. La
+  introspect (`fitz db inspect` y `fitz db diff`) ahora lee
+  `pg_constraint.contype='c'` via `pg_get_constraintdef` y popula
+  `Schema.tables[].check_constraints`. El diff emite
+  `Change::DropCheckConstraint` para los del current ausentes en
+  target, `Change::AddCheckConstraint` para los nuevos del target,
+  y `DROP+ADD` cuando el expr cambia con el mismo name.
+- ~~**Solo en CREATE TABLE**~~ — **CERRADO v0.10.31 (Tier A.5)**.
+  Si agregás un `@check_constraint` después de que la tabla ya
+  existe, `fitz db diff` ahora emite `ALTER TABLE ... ADD
+  CONSTRAINT <name> CHECK (<expr>);`. Severity = Risky (puede
+  fallar runtime si rows existentes violan el predicado — `fitz
+  db diff --check-destructive` lo marca como `[RISKY]`).
+- **Caveat de canonicalización**: `pg_get_constraintdef` devuelve
+  el expr canonicalizado por Postgres (espacios + case
+  normalizados), no la string literal original. Si el user
+  escribe `@check_constraint("price>0")` y Postgres lo emite como
+  `(price > 0)`, el diff puede disparar DROP+ADD espurio en la
+  primera corrida después de upgrade. Deuda menor — refinable
+  con un SQL normalizer si entra presión.
 
 ### Cross-schema FK transparente (v0.10.29)
 
@@ -747,10 +756,12 @@ ambos en el mismo schema custom) → emite `REFERENCES "users"(id)`
 sin qualifier, **paridad bit-a-bit** con el comportamiento anterior
 (NO breaking change para boilerplates que asumen `public`).
 
-**Limitación MVP**: la introspect NO popula `references_schema`
-(deja siempre `None`), por lo que el drift check NO detecta si
-una FK cross-schema se modifica off-Fitz. Caso de uso típico:
-el user no rompe el schema con SQL crudo en producción.
+~~**Limitación MVP**: la introspect NO popula `references_schema`~~ —
+**CERRADO v0.10.31 (Tier A.8)**. La introspect ahora pulla
+`ccu.table_schema AS ref_schema` y popula `references_schema =
+Some(...)` cuando difiere del schema local (mismo schema → `None`
+para matchear convención del `schema_from_program`). Habilita
+drift end-to-end para FKs cross-schema modificadas off-Fitz.
 
 ---
 
@@ -3007,18 +3018,25 @@ capturar correctamente.
 
 ### Lo que NO soporta el MVP (deuda futura)
 
-- **Nested transactions** (SAVEPOINT). Una `db.transaction(...)`
-  adentro de otra es no-op semántico — el inner `BEGIN` lo emite
-  igual y Postgres lo ignora con `WARNING`. Para "rollback de
-  una parte sin abortar el todo", queda como
-  `tx.savepoint(name, fn(sp) => ...)` en Fase 10.7.b.
-- **Niveles de aislamiento custom** — `BEGIN READ COMMITTED`,
-  `BEGIN SERIALIZABLE`, etc. Usa el default del server (típico
-  `READ COMMITTED`). Override via kwarg
-  `db.transaction(fn, isolation="serializable")` queda como
-  refinamiento futuro.
-- **Transacciones read-only** — `BEGIN READ ONLY` para queries
-  que solo leen. Hoy todo callback puede escribir.
+- ~~**Nested transactions** (SAVEPOINT)~~ — **CERRADO v0.10.31
+  (Tier A.4)**. `db.transaction(fn(tx){ ... tx.transaction(fn(inner){
+  ... }) })` ahora detecta el nesting via `tx_depth` y emite
+  `SAVEPOINT fitz_sp_<N>`/`RELEASE SAVEPOINT`/`ROLLBACK TO
+  SAVEPOINT` en lugar de `BEGIN/COMMIT/ROLLBACK`. Inner Err deja
+  el outer intacto (rollback parcial); inner Ok release el
+  savepoint y el outer commitea las queries del outer + las del
+  inner exitoso. Sin sintaxis nueva — el mismo `tx.transaction`
+  funciona ambos casos.
+- ~~**Niveles de aislamiento custom**~~ — **CERRADO v0.10.31
+  (Tier A.9)**. `db.transaction(closure, isolation="SERIALIZABLE")`
+  con kwarg. Whitelist defensiva: `SERIALIZABLE`,
+  `REPEATABLE READ`, `READ COMMITTED`, `READ UNCOMMITTED`,
+  opcionalmente combinados con ` READ ONLY` / ` READ WRITE`
+  (`"SERIALIZABLE READ ONLY"`). El outer BEGIN emite
+  `BEGIN ISOLATION LEVEL <...>`; nested ignora (Postgres no permite
+  ISOLATION en SAVEPOINT — el nivel lo fija el outer).
+- **Transacciones read-only** — combinable con isolation:
+  `db.transaction(closure, isolation="REPEATABLE READ READ ONLY")`.
 
 ---
 
@@ -3896,9 +3914,14 @@ export FITZ_DB_MAX_CONNS=3    # apps batch / cron con poco load
   global, no per URL). El cache de pools por URL (`connect_url`)
   sigue siendo único.
 - LazyLock — cambios mid-run NO se reflejan. Reinicia el proceso.
-- `db.connect(url, max_conns=N)` como kwarg dedicado del lenguaje
-  queda como deuda menor (requiere wire del kwarg desde
-  evaluator + codegen). Por ahora la env var cubre el caso real.
+- ~~`db.connect(url, max_conns=N)` como kwarg dedicado del
+  lenguaje queda como deuda menor~~ — **CERRADO v0.10.31 (Tier
+  A.3)**. `db.connect(url, max_conns=20)` ahora funciona como
+  kwarg del lenguaje (paralelo a la env var, con override
+  per-process). Validación `1 ≤ N ≤ 1000` con error claro.
+  Implementado vía override de la env var antes del connect —
+  caveat: si un connect previo cacheó max_conns default, el
+  override no aplica.
 
 ### Errores del driver con SQL contexto (v0.10.29)
 

@@ -2919,6 +2919,17 @@ pub struct DbConnHandle {
     pool: std::sync::Arc<DbPool>,
     /// URL original sin password — útil para Display y errores.
     pub url_redacted: String,
+    /// v0.10.31 (Tier A.4) — profundidad de tx anidada. 0 = no estamos
+    /// en una tx. >0 = estamos adentro de `transaction(...)` con esa
+    /// cantidad de nestings. El depth se incrementa al entrar y se
+    /// decrementa al salir; la outer-tx usa `BEGIN/COMMIT/ROLLBACK`
+    /// y las inner-txs usan `SAVEPOINT/RELEASE/ROLLBACK TO SAVEPOINT`.
+    ///
+    /// Compartido entre el handle outer y los handles "sub-pool" que
+    /// `transaction()` crea para pasarle al callback — todos miran y
+    /// modifican el mismo Arc, así que el inner detecta correctamente
+    /// que está nested.
+    pub(crate) tx_depth: std::sync::Arc<std::sync::atomic::AtomicI32>,
 }
 
 impl std::fmt::Debug for DbConnHandle {
@@ -3173,7 +3184,12 @@ impl DbConnHandle {
             permits: std::sync::Arc::new(tokio::sync::Semaphore::new(effective_max_conns())),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
-        DbConnHandle { pool, url_redacted }
+        DbConnHandle {
+            pool,
+            url_redacted,
+            // v0.10.31 (Tier A.4) — depth=0 = no estamos en tx.
+            tx_depth: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
+        }
     }
 
     /// Constructor para tests del evaluator: produce un handle
@@ -3198,7 +3214,11 @@ impl DbConnHandle {
             permits: std::sync::Arc::new(tokio::sync::Semaphore::new(DEFAULT_MAX_CONNS)),
             closed: std::sync::atomic::AtomicBool::new(true),
         });
-        DbConnHandle { pool, url_redacted }
+        DbConnHandle {
+            pool,
+            url_redacted,
+            tx_depth: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
+        }
     }
 
     /// Ejecuta una query con args. Agarra una conn del pool,
@@ -3297,105 +3317,163 @@ impl DbConnHandle {
     ///   `catch_unwind` async), la conn vuelve al pool y NO queda
     ///   colgada en estado tx abierta.
     ///
-    /// **No soporta** (deuda futura):
-    /// - Nested transactions (`SAVEPOINT` adentro de la outer).
-    /// - Niveles de aislamiento custom (`READ COMMITTED`,
-    ///   `SERIALIZABLE`, etc.).
-    /// - Transacciones read-only (`BEGIN READ ONLY`).
+    /// v0.10.31 (Tier A.4 + A.9) — nested transactions vía SAVEPOINT +
+    /// isolation levels custom. Sigue funcionando con la firma original
+    /// `transaction(closure)`; el isolation se setea via
+    /// `transaction_with_isolation(level, closure)`.
+    ///
+    /// **Garantías** (sin cambios desde v0.10.14):
+    /// - **Atómica**: Ok → COMMIT, Err → ROLLBACK.
+    /// - **Aislada**: misma conn física durante toda la tx.
+    /// - **Auto-cleanup**: rollback automático en Err.
+    ///
+    /// **v0.10.31 — Nuevo**:
+    /// - **Nesting**: `tx.transaction(g)` adentro del callback outer
+    ///   usa `SAVEPOINT/RELEASE SAVEPOINT/ROLLBACK TO SAVEPOINT`
+    ///   en lugar de `BEGIN/COMMIT/ROLLBACK`. Detectado via
+    ///   `tx_depth` shared. El rollback inner deja al outer
+    ///   intacto, paralelo a la semántica nested de Postgres.
+    /// - **Isolation level**: outer tx (depth=0) puede setear
+    ///   `READ COMMITTED` / `REPEATABLE READ` / `SERIALIZABLE` /
+    ///   `READ ONLY` via `transaction_with_isolation`. Inner txs
+    ///   ignoran el isolation (Postgres lo fija al outer BEGIN).
     pub async fn transaction<F, Fut, T>(self: &std::sync::Arc<Self>, f: F) -> DbResult<T>
+    where
+        F: FnOnce(std::sync::Arc<DbConnHandle>) -> Fut,
+        Fut: std::future::Future<Output = DbResult<T>>,
+    {
+        self.transaction_with_isolation(None, f).await
+    }
+
+    /// v0.10.31 (Tier A.9) — variante que acepta isolation level.
+    /// `None` = default Postgres (READ COMMITTED). `Some("...")` =
+    /// emite `BEGIN ISOLATION LEVEL <...>`. Si depth > 0 (nested),
+    /// el isolation se ignora silenciosamente — Postgres lo fija al
+    /// outer BEGIN.
+    pub async fn transaction_with_isolation<F, Fut, T>(
+        self: &std::sync::Arc<Self>,
+        isolation: Option<&str>,
+        f: F,
+    ) -> DbResult<T>
     where
         F: FnOnce(std::sync::Arc<DbConnHandle>) -> Fut,
         Fut: std::future::Future<Output = DbResult<T>>,
     {
         use std::sync::atomic::Ordering;
 
-        // 1. Acquire conn del pool. El `pooled.permit` queda
-        //    reservado durante toda la tx — no se libera hasta
-        //    el final de este scope.
+        // v0.10.31 (Tier A.4) — depth tracking compartido entre outer
+        // y todas las nested. Incrementa al entrar, decrementa al
+        // salir. Decisivo para emitir BEGIN vs SAVEPOINT.
+        let depth_before = self.tx_depth.fetch_add(1, Ordering::SeqCst);
+
+        let (begin_sql, commit_sql, rollback_sql) = if depth_before == 0 {
+            // Outer tx: BEGIN [ISOLATION LEVEL ...] / COMMIT / ROLLBACK.
+            let begin = match isolation {
+                Some(level) => format!("BEGIN ISOLATION LEVEL {}", level),
+                None => "BEGIN".to_string(),
+            };
+            (begin, "COMMIT".to_string(), "ROLLBACK".to_string())
+        } else {
+            // Nested tx: SAVEPOINT / RELEASE / ROLLBACK TO SAVEPOINT.
+            // Isolation ignorado — Postgres no permite ISOLATION en
+            // SAVEPOINT, y el nivel lo fija el outer BEGIN para toda
+            // la duración de la tx.
+            let sp_name = format!("fitz_sp_{}", depth_before);
+            (
+                format!("SAVEPOINT {}", sp_name),
+                format!("RELEASE SAVEPOINT {}", sp_name),
+                format!("ROLLBACK TO SAVEPOINT {}", sp_name),
+            )
+        };
+
+        let result = self
+            .do_tx_inner(&begin_sql, &commit_sql, &rollback_sql, f)
+            .await;
+
+        self.tx_depth.fetch_sub(1, Ordering::SeqCst);
+        result
+    }
+
+    /// v0.10.31 (Tier A.4) — body común de outer y nested tx.
+    /// Toma los 3 SQL strings (BEGIN/COMMIT/ROLLBACK o SAVEPOINT/
+    /// RELEASE/ROLLBACK TO), ejecuta el dance estándar:
+    /// acquire conn → BEGIN → sub_pool dance → run f → COMMIT/ROLLBACK.
+    async fn do_tx_inner<F, Fut, T>(
+        self: &std::sync::Arc<Self>,
+        begin_sql: &str,
+        commit_sql: &str,
+        rollback_sql: &str,
+        f: F,
+    ) -> DbResult<T>
+    where
+        F: FnOnce(std::sync::Arc<DbConnHandle>) -> Fut,
+        Fut: std::future::Future<Output = DbResult<T>>,
+    {
+        use std::sync::atomic::Ordering;
+
+        // 1. Acquire conn del pool.
         let mut pooled = self.pool.acquire().await?;
 
-        // 2. BEGIN sobre la conn.
-        pooled.as_mut().begin().await?;
+        // 2. BEGIN o SAVEPOINT.
+        pooled.as_mut().simple_query(begin_sql).await?;
 
-        // 3. Mover la conn fuera del PooledConn. Cuando `pooled`
-        //    se dropee al final del scope, su `conn.take()` será
-        //    `None` y `pool.release` no hará nada — pero el
-        //    `_permit` SÍ se libera, devolviendo el slot al
-        //    semaphore del pool original. Eso es lo que queremos:
-        //    durante la tx, ocupamos 1 slot del pool original;
-        //    devolvemos la conn al pool original recién al
-        //    terminar la tx.
+        // 3. Mover la conn fuera del PooledConn (igual que el legacy).
         let conn = pooled
             .conn
             .take()
             .expect("pooled.conn None inmediatamente post-acquire — bug");
 
-        // 4. Construir pool single-conn pegado a esa conn. Semaphore
-        //    de max=1 garantiza que todas las queries adentro del
-        //    callback se serializan en esa conn física (no podés
-        //    tener 2 queries en paralelo en una misma tx — el
-        //    protocolo Postgres lo prohíbe).
-        let tx_pool = std::sync::Arc::new(DbPool {
+        // 4. Construir sub_pool single-conn.
+        let sub_pool = std::sync::Arc::new(DbPool {
             config: self.pool.config.clone(),
             idle: std::sync::Mutex::new(vec![conn]),
             permits: std::sync::Arc::new(tokio::sync::Semaphore::new(1)),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
-        let tx_handle = std::sync::Arc::new(DbConnHandle {
-            pool: tx_pool.clone(),
+        let sub_handle = std::sync::Arc::new(DbConnHandle {
+            pool: sub_pool.clone(),
             url_redacted: self.url_redacted.clone(),
+            // v0.10.31 — SHARED tx_depth Arc. El callback recursivo
+            // ve y mutará el mismo contador que el outer.
+            tx_depth: self.tx_depth.clone(),
         });
 
         // 5. Run callback.
-        let result = f(tx_handle).await;
+        let result = f(sub_handle).await;
 
-        // 6. Recuperar la conn del tx_pool. Si el callback fue
-        //    bien-comportado, la conn debe estar idle (no
-        //    checked-out). Si está checked-out (caso raro: el
-        //    callback escapó una `PooledConn` o un Arc), no podemos
-        //    recuperarla → dejamos que se cierre y reabrimos.
+        // 6. Recuperar la conn del sub_pool.
         let conn_opt = {
-            let mut idle = tx_pool.idle.lock().expect("tx_pool mutex poisoned");
+            let mut idle = sub_pool.idle.lock().expect("sub_pool mutex poisoned");
             idle.pop()
         };
         let mut conn = match conn_opt {
             Some(c) => c,
             None => {
-                // La conn está leaked en otro Arc. Forzamos
-                // cerrar el tx_pool (las próximas queries fallan)
-                // y propagamos el resultado del callback sin
-                // commit/rollback (la tx queda abierta server-side
-                // hasta que el client TCP se cierre — Postgres
-                // hace rollback automático en disconnect).
-                tx_pool.closed.store(true, Ordering::Release);
-                tx_pool.permits.close();
+                sub_pool.closed.store(true, Ordering::Release);
+                sub_pool.permits.close();
                 return result;
             }
         };
 
-        // 7. COMMIT/ROLLBACK según result.
+        // 7. COMMIT/ROLLBACK (o RELEASE/ROLLBACK TO SAVEPOINT).
         match &result {
             Ok(_) => {
-                if let Err(commit_err) = conn.commit().await {
-                    // COMMIT falló — intentar rollback como
-                    // cleanup. La conn queda en estado
-                    // potencialmente inconsistente; devolver al
-                    // pool original es seguro porque Postgres
-                    // descarta el estado al próximo BEGIN.
-                    let _ = conn.rollback().await;
+                if let Err(commit_err) = conn.simple_query(commit_sql).await {
+                    // Cleanup defensivo — el rollback puede fallar
+                    // también, lo ignoramos para devolver el commit_err
+                    // original (más informativo).
+                    let _ = conn.simple_query(rollback_sql).await;
                     self.pool.release(conn);
                     return Err(commit_err);
                 }
             }
             Err(_) => {
-                // Ignoramos error del rollback — si falla, la conn
-                // queda en estado raro pero Postgres lo limpiará
-                // al próximo BEGIN o cuando la conn se cierre.
-                let _ = conn.rollback().await;
+                let _ = conn.simple_query(rollback_sql).await;
             }
         }
 
-        // 8. Devolver conn al pool original.
+        // 8. Devolver conn al pool del self (outer pool o tx_pool
+        //    según depth_before).
         self.pool.release(conn);
 
         result

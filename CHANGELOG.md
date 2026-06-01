@@ -11,13 +11,157 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.10.30. Próximas direcciones
-priorizadas en `docs/deudas-post-5b.md` sección **"Deuda residual
-del ORM/DB post-v0.10.29"** (Tier A + C + D + E pendientes; Tier B
-cerrado en v0.10.30). Recomendación inmediata: **Tier A (~30-40h)**
-cierra el MVP fuerte del ORM (diff destructive check, ALTER TYPE
-USING, savepoints, isolation levels, drift completo de CHECK +
-cross-schema FK).
+Sin trabajo en curso al cierre de v0.10.31. Próximas direcciones
+priorizadas en `docs/deudas-post-5b.md`: Tier C (operadores SQL
+faltantes — ts_rank, expression indexes, JSON || merge), Tier D
+(LSP residual del ORM — completion en `.where()`, hover sobre
+`@table`), Tier E (visión a futuro: Decimal/Numeric, streaming
+cursors, COPY FROM/TO, LISTEN/NOTIFY tipado, window functions,
+CTE/WITH, UNION/INTERSECT/EXCEPT). El A.10 (`FITZ_DB_*` mid-run
+reload) queda solo del Tier A — refinable cuando aparezca presión.
+
+## [v0.10.31] — 2026-06-01 — Tier A del cierre ORM/DB: MVP fuerte (3 bloques en bundle)
+
+**9 features en bloque (~12h reales vs ~30-40h estimadas)** que
+llevan el ORM/DB del estado "funcional con fricciones residuales" a
+"MVP fuerte sin caveats conocidos" para el caso de uso real. Sin
+sintaxis nueva mayor (solo kwargs sobre 2 built-ins existentes),
+zero deps externas, paridad bit-a-bit `fitz run` ↔ `fitz build`
+mantenida. 6 E2E nuevos contra Postgres real + 0 regresiones en
+2739 unit + 292 smoke + 81 cli_e2e + 324 compile_e2e + 3 openapi.
+
+### Bloque 1 — Diff seguro + ALTER + CHECK constraints (A.1 + A.2 + A.5)
+
+- **A.1 — `fitz db diff --check-destructive`**: clasifica cada
+  change como `Safe` / `Risky` / `Destructive` y aborta con exit 1
+  si hay destructive sin `--allow-destructive` explícito. El SQL
+  emitido suma comentarios `-- [SAFE]` / `-- [RISKY]` /
+  `-- [DESTRUCTIVE]` por change. Política:
+  - **Destructive**: `DropTable`, `DropColumn`
+  - **Risky**: `AddColumn NOT NULL sin default`, `AlterColumnType`,
+    `AlterColumnNullable false`, `AlterColumnDefault`, `DropIndex`,
+    `AddCheckConstraint`
+  - **Safe**: el resto (CreateTable, CreateIndex, AddForeignKey,
+    DropForeignKey, RenameTable/Column, AlterColumnNullable true,
+    DropCheckConstraint, AddColumn nullable/con default)
+- **A.2 — `ALTER COLUMN TYPE` con `USING` automático**: el SQL emit
+  pasa de `ALTER TABLE t ALTER COLUMN c TYPE T;` a
+  `ALTER TABLE t ALTER COLUMN c TYPE T USING c::T;`. Postgres acepta
+  el cast explicit incluso para auto-castable (`int → bigint`), y es
+  required para casts non-auto (`text → int`, `varchar → int`).
+  Para casts que `::` no soporta (bytea ↔ text con encoding custom,
+  etc.), el user edita el SQL emitido manualmente.
+- **A.5 — `ALTER TABLE ADD/DROP CONSTRAINT` para CHECKs via diff**:
+  nuevas variantes `Change::AddCheckConstraint` y
+  `Change::DropCheckConstraint`. `diff_check_constraints()` compara
+  `current.check_constraints` vs `target.check_constraints` por
+  `name`; mismo name + expr distinto → DROP + ADD. Habilita la
+  evolución de `@check_constraint("...")` sin recrear la tabla —
+  drift detect completo en combinación con A.7.
+
+### Bloque 2 — Transacciones avanzadas (A.4 + A.9 + A.3)
+
+- **A.4 — Nested transactions vía SAVEPOINT**: `db.transaction(fn(tx)
+  { ... tx.transaction(fn(inner) { ... }) ... })` ahora funciona
+  correctamente. `DbConnHandle` suma `tx_depth: Arc<AtomicI32>`
+  shared entre outer y todos los handles de sub-pool. La outer tx
+  (depth=0) emite `BEGIN/COMMIT/ROLLBACK`; las nested (depth>0)
+  emiten `SAVEPOINT fitz_sp_<N>/RELEASE SAVEPOINT/ROLLBACK TO
+  SAVEPOINT`. Inner Err deja el outer intacto (rollback parcial).
+- **A.9 — Isolation levels custom**: `db.transaction(closure,
+  isolation="SERIALIZABLE")` (kwarg). Whitelist defensiva con 4
+  niveles ANSI (`READ UNCOMMITTED` / `READ COMMITTED` /
+  `REPEATABLE READ` / `SERIALIZABLE`) opcionalmente combinados con
+  `READ ONLY` / `READ WRITE` (`"SERIALIZABLE READ ONLY"`). Outer
+  tx emite `BEGIN ISOLATION LEVEL <...>`. Nested ignora el kwarg
+  (Postgres no permite ISOLATION en SAVEPOINT — el nivel lo fija
+  el outer BEGIN). Nuevo public method
+  `transaction_with_isolation(Option<&str>, closure)` en
+  `DbConnHandle` (call directo en Rust para tests).
+- **A.3 — `db.connect(url, max_conns=N)` kwarg**: pool size opt-in
+  del lado del lenguaje (antes solo via env var
+  `FITZ_DB_MAX_CONNS`). Validación `1 ≤ N ≤ 1000` con error claro.
+  Implementado vía override de la env var antes del connect (deuda
+  menor: si un connect previo ya cacheó `max_conns`, el override
+  no aplica — documentado).
+
+### Bloque 3 — FK + Drift completo (A.6 + A.7 + A.8)
+
+- **A.6 — FK composite PK del target con error claro**: antes de
+  v0.10.31, `@belongs_to user_id: Int` apuntando a un `@table` con
+  composite PK hacía fallback silencioso a `"id"` (típicamente no
+  existente) → error críptico de Postgres en `fitz db migrate`. Ahora
+  `schema_from_program` aborta con mensaje específico citando los
+  fields de la composite PK + sugiriendo workarounds (declarar
+  UNIQUE constraint single-column en el target, o usar single PK
+  surrogate). El sub-paso `refs=` para single-FK explícito queda
+  como deuda menor.
+- **A.7 — Drift de `@check_constraint` (introspect lee
+  `pg_constraint.contype='c'`)**: nueva fn
+  `introspect_check_constraints()` que pulla desde `pg_constraint`
+  con `pg_get_constraintdef(con.oid)` y canonicaliza la expr via
+  `parse_check_def()` (recorta `CHECK ` + paréntesis externos
+  balanceados — PG a veces emite 1 o 2 niveles). El diff ahora
+  detecta cambios reales del expr y DROP CHECK funciona end-to-end.
+- **A.8 — Drift cross-schema FK (introspect popula
+  `references_schema`)**: el SQL del FK introspect pulla también
+  `ccu.table_schema AS ref_schema`. Si el ref_schema difiere del
+  schema local → `references_schema = Some(...)`; mismo schema →
+  `None` (paridad con la convención de `schema_from_program`).
+  Habilita drift end-to-end para FKs declarados con
+  `@belongs_to("schema.User")` cross-schema.
+
+### Decisiones técnicas
+
+- **Severity opinionada, conservadora**: `DropIndex` es Risky (no
+  hay pérdida de data, pero performance impact); `DropForeignKey`
+  es Safe (solo remueve constraint). Refinable si entra presión.
+- **USING `col::T` siempre**: en lugar de detectar casos que no
+  necesitan USING, lo emitimos siempre. Postgres es permisivo con
+  el cast redundante. Beneficio: menos código + mensajes de error
+  más informativos en runtime.
+- **Composite PK FK error claro vs. fallback**: la antigua semántica
+  de fallback a `"id"` ocultaba el problema hasta el último momento.
+  Mejor abortar al `schema_from_program` con mensaje específico.
+- **Severity bloquea solo Destructive**: Risky se reporta como
+  warning pero no bloquea. La razón: Risky cubre cambios que el user
+  típicamente QUIERE hacer (`ALTER TYPE`), solo necesitan revisión.
+  Destructive es la línea roja real (data loss garantizada).
+- **`parse_check_def` con balance check**: detecta cuando los
+  paréntesis externos NO son envolventes (`(a) AND (b)`) y NO los
+  recorta. Esto evita corromper exprs composite donde el primer
+  `(` cierra en posición interna.
+- **Whitelist de isolation levels**: 4 ANSI x opcional READ ONLY/
+  WRITE = 12 strings válidos. Rechaza otros con error claro. Más
+  estricto que dejar pasar y que Postgres responda con error.
+
+### Tests
+
+- **6 E2E reales contra Postgres** en `tests/db_real_postgres.rs`
+  (`#[ignore]` por default, corren con `FITZ_TEST_PG_URL +
+  --ignored`): A.4 SAVEPOINT inner rollback + inner commit (2),
+  A.9 SERIALIZABLE + READ COMMITTED/REPEATABLE READ (2), A.7
+  introspect CHECK constraint, A.8 introspect cross-schema FK.
+  Todos verdes contra `postgres:16` local + dev.
+- **0 unit nuevos directos** — los helpers nuevos
+  (`severity()`/`count_by_severity`/`changes_to_sql_with_severity`/
+  `parse_check_def`/`dispatch_builtin_kwargs`) se cubren vía los
+  E2E que ejercitan todo el path.
+- Smoke `GUIDE_EXAMPLES_COMPILE` verde (292 ejemplos).
+- Clippy `--all-targets -D warnings` + `--features lsp` limpios.
+  fmt `--all --check` limpio.
+
+### Total al cierre v0.10.31
+
+**2739 unit + 292 smoke + 3 openapi + 81 cli_e2e + 324 compile_e2e
++ 58 db_real_postgres** (+6 nuevos del Tier A).
+
+### Próximo norte
+
+**Tier C** (operadores SQL faltantes — ts_rank, expression indexes,
+JSON `||` merge — ~12-20h) o **Tier D** (DX/LSP residual del ORM
+— completion en `.where(...)`, hover sobre `@table` — ~5h, quick
+win). Tier E es visión a futuro (cada ítem mini-fase dedicada).
 
 ## [v0.10.30] — 2026-05-31 — Tier B del cierre ORM/DB: API completion Date/DateTime/Uuid
 

@@ -1,0 +1,111 @@
+name: 🐛 Bug report
+description: Reportá un bug en el compilador, intérprete, codegen o herramientas.
+title: "[bug] "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por reportar un bug. Lo más útil es un programa Fitz mínimo
+        que reproduzca el problema. Si el bug depende de Postgres, Python,
+        o un OS específico, mencionalo en la sección "Entorno".
+
+  - type: textarea
+    id: descripcion
+    attributes:
+      label: Descripción
+      description: ¿Qué pasa? ¿Qué esperabas que pase?
+      placeholder: |
+        Cuando corro `fitz run ...` con un `type` que tiene un field
+        `Nullable<List<Int>>`, el checker me dice X pero esperaba Y.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduccion
+    attributes:
+      label: Programa mínimo para reproducir
+      description: |
+        Pegá el `.fitz` más chico posible que dispare el bug. Si hace
+        falta más de un archivo, listalos.
+      render: fitz
+      placeholder: |
+        type Foo { xs: List<Int>? }
+
+        let f = Foo { xs: null }
+        print(f)
+    validations:
+      required: true
+
+  - type: textarea
+    id: comando
+    attributes:
+      label: Comando ejecutado
+      description: ¿Qué subcomando de Fitz dispara el bug?
+      render: bash
+      placeholder: fitz run bug.fitz
+    validations:
+      required: true
+
+  - type: textarea
+    id: salida
+    attributes:
+      label: Salida observada
+      description: Pegá el output exacto (stderr + stdout). Cortá el ANSI si lo hay.
+      render: text
+    validations:
+      required: true
+
+  - type: textarea
+    id: salida-esperada
+    attributes:
+      label: Salida esperada
+      description: ¿Qué tendría que pasar?
+      render: text
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Versión de Fitz
+      description: Salida de `fitz --version`. Si compilás desde fuente, pegá el SHA del commit.
+      placeholder: "v0.10.30 — o SHA 0f3f221"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: plataforma
+    attributes:
+      label: Plataforma
+      multiple: true
+      options:
+        - Windows x64
+        - Linux x64
+        - Linux ARM64
+        - macOS Apple Silicon
+        - macOS Intel
+        - Otra (especificar en notas)
+    validations:
+      required: true
+
+  - type: dropdown
+    id: features
+    attributes:
+      label: Features de Cargo activas
+      multiple: true
+      options:
+        - default (ninguna feature opcional)
+        - python
+        - lsp
+    validations:
+      required: true
+
+  - type: textarea
+    id: notas
+    attributes:
+      label: Notas adicionales
+      description: |
+        Cualquier cosa que ayude — workarounds que probaste, hipótesis
+        sobre el módulo que falla (`evaluator.rs`, `codegen.rs`, etc.),
+        si pasa solo en `fitz run` o también en `fitz build`.

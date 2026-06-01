@@ -1,0 +1,90 @@
+name: ✨ Feature request
+description: Proponé una feature nueva o cambio del lenguaje, CLI, o herramientas.
+title: "[feature] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Gracias por proponer una feature. Antes de invertir tiempo en
+        código, abrir un issue ayuda a alinear scope y a evitar
+        duplicación con la deuda ya inventariada en
+        [docs/deudas-post-5b.md](https://github.com/Thegreekman76/fitz/blob/main/docs/deudas-post-5b.md)
+        y el roadmap.
+
+  - type: textarea
+    id: problema
+    attributes:
+      label: Problema que resuelve
+      description: |
+        ¿Qué dolor concreto estás teniendo hoy? Casos de uso reales,
+        no abstractos.
+      placeholder: |
+        Cuando hago un ORM query con `.where(closure)`, no tengo forma
+        de hacer full-text search nativo — termino bajando a `db.exec`.
+    validations:
+      required: true
+
+  - type: textarea
+    id: propuesta
+    attributes:
+      label: Propuesta
+      description: |
+        Cómo te imaginás la sintaxis o la API. Mostralo con código si es
+        un cambio del lenguaje.
+      render: fitz
+      placeholder: |
+        // Idea: agregar `.matches("query")` sobre fields tsvector
+        Doc.where(fn(d) => d.body_tsv.matches("rust postgres"))
+            .order_by(fn(d) => d.body_tsv.rank("rust postgres"))
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternativas
+    attributes:
+      label: Alternativas consideradas
+      description: |
+        ¿Qué otras formas pensaste? ¿Por qué la de arriba es mejor?
+      placeholder: |
+        - Bajar a `db.query(...)` crudo: funciona pero pierde el tipado
+          y la paridad run↔build.
+        - Decorator `@search` sobre el field: más verbose, no compone
+          con `.where`.
+    validations:
+      required: false
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Scope estimado
+      description: ¿Qué tamaño le ves al cambio?
+      options:
+        - "Chico (~horas — un par de funciones, sin tocar diseño)"
+        - "Mediano (~días — agrega API pública, requiere tests E2E)"
+        - "Grande (~semanas — cambia sintaxis o agrega capability nueva)"
+        - "No estoy seguro"
+    validations:
+      required: true
+
+  - type: textarea
+    id: paridad
+    attributes:
+      label: Paridad fitz run ↔ fitz build
+      description: |
+        Si es una feature user-facing del lenguaje, ¿toca solo el
+        evaluator, solo el codegen, o ambos? ¿Hay riesgo de que se
+        comporten diferente?
+    validations:
+      required: false
+
+  - type: textarea
+    id: ofrecimiento
+    attributes:
+      label: ¿Querés implementarlo vos?
+      description: |
+        Si te ofrecés a mandarlo como PR, decilo acá. Si no, está bien
+        — solo proponer la feature ya ayuda. El mantenedor puede tomar
+        el ticket o esperar a que alguien más se interese.
+    validations:
+      required: false

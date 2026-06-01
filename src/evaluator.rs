@@ -4086,10 +4086,246 @@ async fn invoke_value_named(
     }
 }
 
+/// v0.10.31 (Tier A.3 + A.9) — kwarg-aware dispatch para built-ins
+/// que soportan argumentos nombrados:
+///
+/// - `db.connect(url, max_conns=N)` — pool size opt-in (override de
+///   la env var `FITZ_DB_MAX_CONNS`).
+/// - `DbConn.transaction(closure, isolation="SERIALIZABLE"|"REPEATABLE READ"|
+///   "READ COMMITTED"|"READ UNCOMMITTED")` — isolation level del outer BEGIN.
+///
+/// Devuelve:
+/// - `Ok(Some(v))` → manejamos el call con esos kwargs, devuelve `v`.
+/// - `Ok(None)` → no es ningún built-in conocido, caller cae al
+///   path normal (method custom / error).
+/// - `Err(e)` → error de validación (kwarg desconocido, tipo malo,
+///   missing positional, etc.).
+fn dispatch_builtin_kwargs(
+    receiver: Value,
+    method: &str,
+    named_args: &[(Option<String>, Value)],
+    span: Span,
+) -> EvalResult<Option<Value>> {
+    // Caso 1: db.connect(url, max_conns=N)
+    if let Value::Module { name, .. } = &receiver {
+        if name == "db" && method == "connect" {
+            let mut url: Option<String> = None;
+            let mut max_conns: Option<i64> = None;
+            for (key, value) in named_args {
+                match key.as_deref() {
+                    None => {
+                        if url.is_some() {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                span.line, span.column,
+                                "`db.connect` espera solo 1 arg posicional (url: Str) — recibió 2 sin nombre".to_string(),
+                            )));
+                        }
+                        match value {
+                            Value::Str(s) => url = Some(s.clone()),
+                            other => {
+                                return Err(EvalSignal::Error(FitzError::new(
+                                    ErrorKind::TypeMismatch {
+                                        expected: "Str".into(),
+                                        found: other.type_name().into(),
+                                    },
+                                    span.line,
+                                    span.column,
+                                    format!(
+                                        "`db.connect` espera Str (URL Postgres), recibió `{}`",
+                                        other.type_name()
+                                    ),
+                                )));
+                            }
+                        }
+                    }
+                    Some("max_conns") => match value {
+                        Value::Int(n) => {
+                            if *n < 1 || *n > 1000 {
+                                return Err(EvalSignal::Error(FitzError::new(
+                                    ErrorKind::InvalidSyntax,
+                                    span.line,
+                                    span.column,
+                                    format!(
+                                        "`db.connect(..., max_conns={})` fuera de rango [1, 1000]",
+                                        n
+                                    ),
+                                )));
+                            }
+                            max_conns = Some(*n);
+                        }
+                        other => {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::TypeMismatch {
+                                    expected: "Int".into(),
+                                    found: other.type_name().into(),
+                                },
+                                span.line,
+                                span.column,
+                                format!(
+                                    "`db.connect(..., max_conns=N)` espera Int, recibió `{}`",
+                                    other.type_name()
+                                ),
+                            )));
+                        }
+                    },
+                    Some(other) => {
+                        return Err(EvalSignal::Error(FitzError::new(
+                            ErrorKind::InvalidSyntax,
+                            span.line,
+                            span.column,
+                            format!(
+                                "`db.connect` no acepta kwarg `{}` (soportados: `max_conns`)",
+                                other
+                            ),
+                        )));
+                    }
+                }
+            }
+            let url = url.ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    "`db.connect(url, max_conns=N)` requiere el primer arg posicional (url: Str)"
+                        .to_string(),
+                ))
+            })?;
+            // Lanzar el connect con max_conns override. Si max_conns
+            // está, lo seteamos via env var temporal antes del connect
+            // (mecanismo más simple sin refactorear `connect_url`).
+            // Decisión: el efecto es per-process via std::env::set_var,
+            // que afecta connects futuros también. Aceptable: el user
+            // que pasa max_conns explícito quiere ese valor para todos
+            // los pools subsequentes hasta que el process termine.
+            let max_conns_opt = max_conns;
+            let fut: crate::value::FitzFuture = Box::pin(async move {
+                if let Some(n) = max_conns_opt {
+                    // SAFETY: este set_var corre antes de cualquier
+                    // connect (porque connect_url lee la env var via
+                    // LazyLock al primer use). Si el user llama
+                    // db.connect(..., max_conns=20) DESPUÉS de un
+                    // db.connect(url) que ya cacheó el max_conns
+                    // default, el override NO aplica (deuda menor —
+                    // documentada en docs/db-orm.md).
+                    unsafe {
+                        std::env::set_var("FITZ_DB_MAX_CONNS", n.to_string());
+                    }
+                }
+                match crate::db::connect_url(&url).await {
+                    Ok(handle) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                        Value::DbConn(handle),
+                    )))),
+                    Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                        Value::Str(e.to_string()),
+                    )))),
+                }
+            });
+            return Ok(Some(Value::new_future(fut)));
+        }
+    }
+
+    // Caso 2: DbConn.transaction(closure, isolation="...")
+    if let Value::DbConn(handle) = &receiver {
+        if method == "transaction" {
+            let mut callback: Option<Value> = None;
+            let mut isolation: Option<String> = None;
+            for (key, value) in named_args {
+                match key.as_deref() {
+                    None => {
+                        if callback.is_some() {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                span.line, span.column,
+                                "`DbConn.transaction` espera solo 1 arg posicional (closure) — recibió 2 sin nombre".to_string(),
+                            )));
+                        }
+                        callback = Some(value.clone());
+                    }
+                    Some("isolation") => {
+                        let s = match value {
+                            Value::Str(s) => s.clone(),
+                            other => {
+                                return Err(EvalSignal::Error(FitzError::new(
+                                    ErrorKind::TypeMismatch {
+                                        expected: "Str".into(),
+                                        found: other.type_name().into(),
+                                    },
+                                    span.line, span.column,
+                                    format!(
+                                        "`DbConn.transaction(..., isolation=...)` espera Str, recibió `{}`",
+                                        other.type_name()
+                                    ),
+                                )));
+                            }
+                        };
+                        // Whitelist defensive: Postgres acepta solo
+                        // estos 4 niveles + opcional READ ONLY/WRITE.
+                        let upper = s.to_uppercase();
+                        let valid = matches!(
+                            upper.as_str(),
+                            "SERIALIZABLE"
+                                | "REPEATABLE READ"
+                                | "READ COMMITTED"
+                                | "READ UNCOMMITTED"
+                                | "SERIALIZABLE READ ONLY"
+                                | "REPEATABLE READ READ ONLY"
+                                | "READ COMMITTED READ ONLY"
+                                | "READ UNCOMMITTED READ ONLY"
+                                | "SERIALIZABLE READ WRITE"
+                                | "REPEATABLE READ READ WRITE"
+                                | "READ COMMITTED READ WRITE"
+                                | "READ UNCOMMITTED READ WRITE"
+                        );
+                        if !valid {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                span.line,
+                                span.column,
+                                format!(
+                                    "`isolation=\"{}\"` no es válido. Soportados: \
+                                     SERIALIZABLE, REPEATABLE READ, READ COMMITTED, \
+                                     READ UNCOMMITTED (opcional ` READ ONLY`/` READ WRITE`)",
+                                    s
+                                ),
+                            )));
+                        }
+                        isolation = Some(upper);
+                    }
+                    Some(other) => {
+                        return Err(EvalSignal::Error(FitzError::new(
+                            ErrorKind::InvalidSyntax,
+                            span.line, span.column,
+                            format!(
+                                "`DbConn.transaction` no acepta kwarg `{}` (soportado: `isolation`)",
+                                other
+                            ),
+                        )));
+                    }
+                }
+            }
+            let callback = callback.ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    "`DbConn.transaction(closure, isolation=...)` requiere el primer arg posicional (closure)".to_string(),
+                ))
+            })?;
+            return db_conn_transaction(std::sync::Arc::clone(handle), callback, isolation, span)
+                .map(Some)
+                .map_err(EvalSignal::Error);
+        }
+    }
+
+    Ok(None)
+}
+
 /// Fp.3 — método con args nombrados. Solo soporta métodos custom (R.3)
 /// y estáticos — los métodos built-in de List/Map/Str no tienen nombres
 /// de params expuestos. Si todos los args son posicionales, delega al
-/// path clásico.
+/// path clásico. v0.10.31 — soporta también kwargs sobre los built-ins
+/// `db.connect` (max_conns) y `DbConn.transaction` (isolation) via
+/// `dispatch_builtin_kwargs`.
 #[async_recursion]
 async fn dispatch_method_named(
     receiver: Value,
@@ -4102,6 +4338,13 @@ async fn dispatch_method_named(
     if !has_named {
         let positional: Vec<Value> = named_args.into_iter().map(|(_, v)| v).collect();
         return dispatch_method(receiver, method, positional, env, span).await;
+    }
+    // v0.10.31 (Tier A.3 + A.9) — kwargs sobre built-ins específicos.
+    // `db.connect(url, max_conns=N)` y `DbConn.transaction(closure,
+    // isolation="...")` aceptan kwargs nombrados. Otros built-ins
+    // siguen rechazando.
+    if let Some(handled) = dispatch_builtin_kwargs(receiver.clone(), method, &named_args, span)? {
+        return Ok(handled);
     }
     // Hay nombres — buscar método custom o estático con param names.
     let method_def_opt: Option<crate::ast::MethodDef> = match &receiver {
@@ -5007,7 +5250,26 @@ async fn dispatch_method(
             db_conn_is_closed(Arc::clone(handle), &args).map_err(EvalSignal::Error)
         }
         (Value::DbConn(handle), "transaction") => {
-            db_conn_transaction(Arc::clone(handle), &args, span).map_err(EvalSignal::Error)
+            // Positional path (sin kwargs). El isolation se pasa solo
+            // via dispatch_method_named — acá `db.transaction(closure)`
+            // usa default Postgres (READ COMMITTED).
+            if args.len() != 1 {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::WrongArgCount {
+                        expected: 1,
+                        found: args.len(),
+                    },
+                    span.line,
+                    span.column,
+                    format!(
+                        "`DbConn.transaction` espera 1 argumento (fn callback), recibió {}",
+                        args.len()
+                    ),
+                )));
+            }
+            let callback = args.into_iter().next().unwrap();
+            db_conn_transaction(Arc::clone(handle), callback, None, span)
+                .map_err(EvalSignal::Error)
         }
         (Value::DbConn(_), other) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
@@ -11855,25 +12117,11 @@ fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRe
 ///     con el error del driver formateado como Str.
 fn db_conn_transaction(
     handle: Arc<crate::db::DbConnHandle>,
-    args: &[Value],
+    callback: Value,
+    isolation: Option<String>,
     span: Span,
 ) -> FitzResult<Value> {
-    if args.len() != 1 {
-        return Err(FitzError::new(
-            ErrorKind::WrongArgCount {
-                expected: 1,
-                found: args.len(),
-            },
-            span.line,
-            span.column,
-            format!(
-                "`DbConn.transaction` espera 1 argumento (fn callback), recibió {}",
-                args.len()
-            ),
-        ));
-    }
-    // Validar que el arg es Function. Otros tipos no son invocables.
-    let callback = args[0].clone();
+    // Validar que callback es Function. Otros tipos no son invocables.
     if !matches!(callback, Value::Function { .. }) {
         return Err(FitzError::new(
             ErrorKind::TypeMismatch {
@@ -11898,7 +12146,7 @@ fn db_conn_transaction(
 
     let fut: crate::value::FitzFuture = Box::pin(async move {
         let tx_result: crate::db::DbResult<Value> = handle
-            .transaction(|tx_handle| {
+            .transaction_with_isolation(isolation.as_deref(), |tx_handle| {
                 let cb = callback.clone();
                 let cb_err = std::sync::Arc::clone(&cb_err);
                 async move {

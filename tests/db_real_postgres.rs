@@ -4875,3 +4875,293 @@ async fn introspect_y_diff_round_trip_using_gin_method() {
         .await;
     seed.close().await.unwrap();
 }
+
+// =========================================================================
+// v0.10.31 — Tier A del cierre ORM/DB
+// =========================================================================
+//
+// Tests E2E reales contra Postgres para A.4 (nested transactions),
+// A.7 (introspect CHECK), A.8 (introspect cross-schema FK), A.9
+// (isolation levels). A.1/A.2/A.5/A.6 son puramente codegen/diff
+// (sin DB real) — cubiertos en tests unit de `migrations.rs`. A.3
+// (max_conns kwarg) cubierto en unit del evaluator.
+
+#[tokio::test]
+#[ignore]
+async fn tier_a4_nested_transaction_savepoint_inner_rollback() {
+    // A.4 — nested transactions con SAVEPOINT. El inner Err hace
+    // ROLLBACK TO SAVEPOINT (no toca el outer); el outer commit
+    // persiste las queries del outer.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    conn.exec(
+        "DROP TABLE IF EXISTS fitz_a4_sp; \
+         CREATE TABLE fitz_a4_sp (id bigserial PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .expect("setup");
+
+    let conn_arc = std::sync::Arc::clone(&conn);
+    let r = conn_arc
+        .transaction(|tx| async move {
+            tx.exec(
+                "INSERT INTO fitz_a4_sp (name) VALUES ($1)",
+                &[PgValue::Text("outer1".into())],
+            )
+            .await?;
+            // Nested SAVEPOINT que rollbackea — outer1 debe persistir.
+            let _ = tx
+                .transaction(|inner| async move {
+                    inner
+                        .exec(
+                            "INSERT INTO fitz_a4_sp (name) VALUES ($1)",
+                            &[PgValue::Text("inner-rolled-back".into())],
+                        )
+                        .await?;
+                    Err::<(), _>(fitz::db::DbError::Protocol("inner rollback".into()))
+                })
+                .await;
+            tx.exec(
+                "INSERT INTO fitz_a4_sp (name) VALUES ($1)",
+                &[PgValue::Text("outer2".into())],
+            )
+            .await?;
+            Ok(())
+        })
+        .await;
+    assert!(r.is_ok(), "outer tx debería committear: {:?}", r);
+
+    // Validar: 2 rows (outer1, outer2). Sin "inner-rolled-back".
+    let qr = conn
+        .query("SELECT name FROM fitz_a4_sp ORDER BY id", &[])
+        .await
+        .unwrap();
+    assert_eq!(qr.rows.len(), 2, "esperaba 2 rows post-outer-commit");
+    assert_eq!(
+        qr.rows[0].get("name"),
+        Some(&PgValue::Text("outer1".into()))
+    );
+    assert_eq!(
+        qr.rows[1].get("name"),
+        Some(&PgValue::Text("outer2".into()))
+    );
+
+    conn.exec("DROP TABLE fitz_a4_sp", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tier_a4_nested_transaction_savepoint_inner_commit_persiste() {
+    // Hermano del test anterior: inner Ok → RELEASE SAVEPOINT, outer
+    // commit persiste las 3 rows.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    conn.exec(
+        "DROP TABLE IF EXISTS fitz_a4_sp_ok; \
+         CREATE TABLE fitz_a4_sp_ok (id bigserial PRIMARY KEY, name text)",
+        &[],
+    )
+    .await
+    .expect("setup");
+
+    let conn_arc = std::sync::Arc::clone(&conn);
+    let r = conn_arc
+        .transaction(|tx| async move {
+            tx.exec(
+                "INSERT INTO fitz_a4_sp_ok (name) VALUES ($1)",
+                &[PgValue::Text("a".into())],
+            )
+            .await?;
+            tx.transaction(|inner| async move {
+                inner
+                    .exec(
+                        "INSERT INTO fitz_a4_sp_ok (name) VALUES ($1)",
+                        &[PgValue::Text("b".into())],
+                    )
+                    .await?;
+                Ok::<(), fitz::db::DbError>(())
+            })
+            .await?;
+            tx.exec(
+                "INSERT INTO fitz_a4_sp_ok (name) VALUES ($1)",
+                &[PgValue::Text("c".into())],
+            )
+            .await?;
+            Ok(())
+        })
+        .await;
+    assert!(r.is_ok());
+
+    let qr = conn
+        .query("SELECT name FROM fitz_a4_sp_ok ORDER BY id", &[])
+        .await
+        .unwrap();
+    assert_eq!(qr.rows.len(), 3);
+    assert_eq!(qr.rows[0].get("name"), Some(&PgValue::Text("a".into())));
+    assert_eq!(qr.rows[1].get("name"), Some(&PgValue::Text("b".into())));
+    assert_eq!(qr.rows[2].get("name"), Some(&PgValue::Text("c".into())));
+
+    conn.exec("DROP TABLE fitz_a4_sp_ok", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tier_a9_transaction_isolation_serializable() {
+    // A.9 — verificamos que el BEGIN con isolation se acepta y la tx
+    // commitea. No probamos contención (que requeriría 2 conns
+    // racing — eso vive en tests futuros con setup más complejo).
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    conn.exec(
+        "DROP TABLE IF EXISTS fitz_a9_iso; \
+         CREATE TABLE fitz_a9_iso (id bigserial PRIMARY KEY, n int)",
+        &[],
+    )
+    .await
+    .expect("setup");
+
+    let conn_arc = std::sync::Arc::clone(&conn);
+    let r = conn_arc
+        .transaction_with_isolation(Some("SERIALIZABLE"), |tx| async move {
+            tx.exec(
+                "INSERT INTO fitz_a9_iso (n) VALUES ($1)",
+                &[PgValue::Int(42)],
+            )
+            .await?;
+            Ok(())
+        })
+        .await;
+    assert!(r.is_ok(), "tx SERIALIZABLE debería commitear: {:?}", r);
+
+    let qr = conn.query("SELECT n FROM fitz_a9_iso", &[]).await.unwrap();
+    assert_eq!(qr.rows.len(), 1);
+    assert_eq!(qr.rows[0].get("n"), Some(&PgValue::Int(42)));
+
+    conn.exec("DROP TABLE fitz_a9_iso", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tier_a9_transaction_isolation_read_committed_y_repeatable_read() {
+    // Sanity: los otros 2 niveles también se aceptan.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    for level in &["READ COMMITTED", "REPEATABLE READ"] {
+        let conn_arc = std::sync::Arc::clone(&conn);
+        let r = conn_arc
+            .transaction_with_isolation(Some(level), |tx| async move {
+                tx.exec("SELECT 1", &[]).await?;
+                Ok::<_, fitz::db::DbError>(())
+            })
+            .await;
+        assert!(
+            r.is_ok(),
+            "isolation `{}` debería aceptarse: {:?}",
+            level,
+            r
+        );
+    }
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tier_a7_introspect_check_constraint_table_level() {
+    // A.7 — introspect lee `pg_constraint.contype='c'`. Creamos una
+    // tabla con CHECK constraint y verificamos que aparece en el
+    // Schema introspected.
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    conn.exec(
+        "DROP TABLE IF EXISTS fitz_a7_check; \
+         CREATE TABLE fitz_a7_check (\
+             id bigserial PRIMARY KEY, \
+             price int, \
+             CONSTRAINT price_positive CHECK (price > 0)\
+         )",
+        &[],
+    )
+    .await
+    .expect("setup");
+
+    let schema = fitz::migrations::introspect_schema(&conn)
+        .await
+        .expect("introspect");
+    let table = schema
+        .tables
+        .iter()
+        .find(|t| t.name == "fitz_a7_check")
+        .expect("table presente");
+    let check = table
+        .check_constraints
+        .iter()
+        .find(|c| c.name == "price_positive")
+        .expect("check `price_positive` presente — A.7 debe poblarlo desde pg_constraint");
+    // PG emite `(price > 0)` con paréntesis externos; nuestro
+    // `parse_check_def` los recorta.
+    assert_eq!(check.expr, "price > 0", "expr canonicalizada");
+
+    conn.exec("DROP TABLE fitz_a7_check", &[]).await.unwrap();
+    conn.close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore]
+async fn tier_a8_introspect_cross_schema_fk_populates_references_schema() {
+    // A.8 — introspect popula `references_schema` cuando el FK
+    // apunta a otra schema. Creamos un schema custom + tabla, después
+    // tabla en public con FK a ese schema, verificamos que el FK
+    // introspected lleva references_schema=Some("fitz_a8_ns").
+    let url = pg_url();
+    let conn = connect_url(&url).await.unwrap();
+    conn.exec(
+        "DROP SCHEMA IF EXISTS fitz_a8_ns CASCADE; \
+         CREATE SCHEMA fitz_a8_ns; \
+         CREATE TABLE fitz_a8_ns.parents (id bigserial PRIMARY KEY); \
+         DROP TABLE IF EXISTS fitz_a8_children; \
+         CREATE TABLE fitz_a8_children (\
+             id bigserial PRIMARY KEY, \
+             parent_id bigint NOT NULL, \
+             CONSTRAINT fitz_a8_children_parent_id_fkey \
+                 FOREIGN KEY (parent_id) REFERENCES fitz_a8_ns.parents(id)\
+         )",
+        &[],
+    )
+    .await
+    .expect("setup cross-schema");
+
+    let schema = fitz::migrations::introspect_schema(&conn)
+        .await
+        .expect("introspect");
+    let table = schema
+        .tables
+        .iter()
+        .find(|t| t.name == "fitz_a8_children")
+        .expect("table fitz_a8_children");
+    let fk = table
+        .foreign_keys
+        .iter()
+        .find(|f| f.name == "fitz_a8_children_parent_id_fkey")
+        .expect("FK cross-schema");
+    assert_eq!(
+        fk.references_schema.as_deref(),
+        Some("fitz_a8_ns"),
+        "references_schema debería ser `fitz_a8_ns` (A.8): {:?}",
+        fk.references_schema
+    );
+    assert_eq!(fk.references_table, "parents");
+
+    // Cleanup.
+    let _ = conn
+        .exec(
+            "DROP TABLE IF EXISTS fitz_a8_children; \
+             DROP SCHEMA IF EXISTS fitz_a8_ns CASCADE",
+            &[],
+        )
+        .await;
+    conn.close().await.unwrap();
+}

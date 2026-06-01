@@ -178,6 +178,13 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
         let columns = introspect_columns(conn, schema, name).await?;
         let indexes = introspect_indexes(conn, schema, name).await?;
         let foreign_keys = introspect_foreign_keys(conn, schema, name).await?;
+        // v0.10.31 (Tier A.7) — CHECK constraints declarados a nivel
+        // tabla (pg_constraint.contype='c'). Habilita drift check: si
+        // el target declara `@check_constraint("...")` distinto al de
+        // la DB, el diff emite DROP+ADD. Antes de v0.10.31, current
+        // siempre quedaba vacío y el diff no detectaba cambios — la
+        // versión vieja del CHECK quedaba en la DB hasta drop manual.
+        let check_constraints = introspect_check_constraints(conn, schema, name).await?;
         let schema_for_struct = if schema == "public" {
             None
         } else {
@@ -210,7 +217,7 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
                 renamed_from: None,
                 schema: schema_for_struct,
                 composite_pk: pk_cols_introspected,
-                check_constraints: Vec::new(),
+                check_constraints: check_constraints.clone(),
             });
             continue;
         } else {
@@ -224,7 +231,7 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
             renamed_from: None,
             schema: schema_for_struct,
             composite_pk,
-            check_constraints: Vec::new(),
+            check_constraints,
         });
     }
     // Orden determinístico: schema primero, después name. `public`
@@ -415,9 +422,18 @@ async fn introspect_foreign_keys(
     schema: &str,
     table: &str,
 ) -> DbResult<Vec<ForeignKey>> {
+    // v0.10.31 (Tier A.8) — cross-schema FK drift. Pulleamos también
+    // `ccu.table_schema AS ref_schema` para detectar FKs que apuntan a
+    // tablas en otros schemas (`@belongs_to("schema.User")`). Si el
+    // schema del target == schema del local (mismo `tc.table_schema`),
+    // lo dejamos `None` para matchear la convención de
+    // `schema_from_program` (same-schema → None). Si difieren →
+    // `Some(ref_schema)` para que el diff compare cross-schema sin
+    // falsos cambios.
     let sql = "SELECT \
                    tc.constraint_name AS name, \
                    kcu.column_name AS local_column, \
+                   ccu.table_schema AS ref_schema, \
                    ccu.table_name AS ref_table, \
                    ccu.column_name AS ref_column, \
                    rc.delete_rule AS on_delete \
@@ -427,7 +443,7 @@ async fn introspect_foreign_keys(
                   AND tc.table_schema = kcu.table_schema \
                JOIN information_schema.constraint_column_usage ccu \
                    ON ccu.constraint_name = tc.constraint_name \
-                  AND ccu.table_schema = tc.table_schema \
+                  AND ccu.constraint_schema = tc.constraint_schema \
                JOIN information_schema.referential_constraints rc \
                    ON rc.constraint_name = tc.constraint_name \
                   AND rc.constraint_schema = tc.constraint_schema \
@@ -448,6 +464,7 @@ async fn introspect_foreign_keys(
     for row in &qr.rows {
         let name = extract_string(row, "name")?;
         let local_column = extract_string(row, "local_column")?;
+        let ref_schema_raw = extract_string(row, "ref_schema")?;
         let ref_table = extract_string(row, "ref_table")?;
         let ref_column = extract_string(row, "ref_column")?;
         let on_delete = extract_string_opt(row, "on_delete").and_then(|s| {
@@ -460,16 +477,123 @@ async fn introspect_foreign_keys(
                 Some(s)
             }
         });
+        // v0.10.31 (Tier A.8) — references_schema solo cuando difiere
+        // del schema local (paridad con la convención same-schema=None
+        // del `schema_from_program`). Esto preserva que el diff no
+        // emita falsos cambios para FKs same-schema legacy.
+        let references_schema = if ref_schema_raw == schema {
+            None
+        } else {
+            Some(ref_schema_raw)
+        };
         fks.push(ForeignKey {
             name,
             column: local_column,
             references_table: ref_table,
             references_column: ref_column,
-            references_schema: None,
+            references_schema,
             on_delete,
         });
     }
     Ok(fks)
+}
+
+/// v0.10.31 (Tier A.7) — Lista CHECK constraints declarados a nivel
+/// tabla. Lee `pg_constraint` con `contype = 'c'` (los únicos table-
+/// level checks; column-level checks como `CHECK (n > 0)` inline en
+/// `ADD COLUMN` también son `contype='c'` en PG). El `pg_get_constraintdef`
+/// devuelve la expresión SQL canonicalizada (`CHECK (price >= 0)`),
+/// que recortamos a `(price >= 0)` para matchear el shape que el user
+/// pasa en `@check_constraint("price >= 0")`.
+///
+/// Excluye constraints heredados (con `conislocal = false`) y los
+/// auto-generados por NOT NULL (no aparecen como contype='c' en PG
+/// 14+, pero algunos legacy sí — los filtramos por `convalidated`).
+async fn introspect_check_constraints(
+    conn: &std::sync::Arc<DbConnHandle>,
+    schema: &str,
+    table: &str,
+) -> DbResult<Vec<CheckConstraint>> {
+    let sql = "SELECT \
+                   con.conname AS name, \
+                   pg_get_constraintdef(con.oid) AS def \
+               FROM pg_catalog.pg_constraint con \
+               JOIN pg_catalog.pg_class rel ON rel.oid = con.conrelid \
+               JOIN pg_catalog.pg_namespace ns ON ns.oid = rel.relnamespace \
+               WHERE con.contype = 'c' \
+                 AND con.conislocal = true \
+                 AND ns.nspname = $1 \
+                 AND rel.relname = $2 \
+               ORDER BY con.conname";
+    let qr = conn
+        .query(
+            sql,
+            &[
+                PgValue::Text(schema.to_string()),
+                PgValue::Text(table.to_string()),
+            ],
+        )
+        .await?;
+    let mut checks = Vec::with_capacity(qr.rows.len());
+    for row in &qr.rows {
+        let name = extract_string(row, "name")?;
+        let def = extract_string(row, "def")?;
+        // `pg_get_constraintdef` devuelve `CHECK ((expr))` con
+        // double-paren por convención PG. Lo normalizamos a `expr`
+        // (sin `CHECK` ni paréntesis envolventes) para matchear el
+        // shape que `schema_from_program` carga desde el decorator.
+        let expr = parse_check_def(&def);
+        checks.push(CheckConstraint { name, expr });
+    }
+    Ok(checks)
+}
+
+/// v0.10.31 (Tier A.7) — extrae el `expr` desde el output de
+/// `pg_get_constraintdef`. PG emite `CHECK (<expr>)` o `CHECK ((<expr>))`
+/// (a veces double paren si la expr es composite). Recortamos `CHECK `
+/// al inicio y todos los pares de paréntesis externos balanceados.
+///
+/// El resultado no es necesariamente idéntico a la string original
+/// del user (PG canonicaliza espacios, mayúsculas, etc.) — el diff
+/// usa comparación trim+exact, así que un cambio puramente cosmético
+/// puede disparar DROP+ADD espurio. Deuda menor — refinable con un
+/// normalizer SQL parser si aparece presión.
+fn parse_check_def(def: &str) -> String {
+    let trimmed = def.trim();
+    let after_check = trimmed.strip_prefix("CHECK ").unwrap_or(trimmed).trim();
+    // Iteramos: si los paréntesis externos están balanceados (i.e., el
+    // primer `(` cierra exactamente en el último `)`), pelamos un
+    // nivel. `(a) AND (b)` NO se pela (el primer `)` cierra en posición
+    // interna). PG emite a veces 2 niveles para exprs complejas.
+    let mut current = after_check.to_string();
+    loop {
+        let s = current.trim().to_string();
+        if !(s.starts_with('(') && s.ends_with(')')) {
+            return s;
+        }
+        let bytes = s.as_bytes();
+        let mut depth: i32 = 0;
+        let mut closes_at_end = true;
+        for (i, &b) in bytes.iter().enumerate() {
+            match b {
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 && i < bytes.len() - 1 {
+                        // Los paréntesis externos no envuelven todo
+                        // (caso `(a) AND (b)`).
+                        closes_at_end = false;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !closes_at_end || depth != 0 {
+            return s;
+        }
+        current = s[1..s.len() - 1].trim().to_string();
+    }
 }
 
 // =================================================================
@@ -640,16 +764,40 @@ fn build_table_from_type(
                 let same_schema = target_schema.as_deref().unwrap_or("public")
                     == meta.schema.as_deref().unwrap_or("public");
                 let references_schema = if same_schema { None } else { target_schema };
-                // PK column del target (default "id"). En PG las
-                // PK columns no tienen prefijo de tabla.
-                // v0.10.27 (F2) — FK referencing requiere single PK
-                // del target. Composite PK del target → fallback "id"
-                // (que típicamente no existirá, error claro en CREATE
-                // TABLE de PG si el user lo intenta).
-                let target_pk_field = target_meta
-                    .single_pk()
-                    .map(String::from)
-                    .unwrap_or_else(|| "id".to_string());
+                // PK column del target. En PG las PK columns no tienen
+                // prefijo de tabla.
+                //
+                // v0.10.31 (Tier A.6) — error claro pre-DDL si el target
+                // tiene composite PK. Postgres rechaza FK single-column
+                // referenciando composite PK (no es UNIQUE por sí solo).
+                // Antes de v0.10.31 se hacía fallback silencioso a `"id"`,
+                // que típicamente no existía y daba un error de Postgres
+                // críptico en `fitz db migrate`. Ahora el error aborta
+                // `schema_from_program` con mensaje específico citando
+                // los fields de la PK composite y sugiriendo workarounds.
+                let target_pk_field = match target_meta.single_pk() {
+                    Some(pk) => pk.to_string(),
+                    None => {
+                        let pk_fields: Vec<&str> = target_meta
+                            .primary_fields
+                            .iter()
+                            .map(|s| s.as_str())
+                            .collect();
+                        return Err(format!(
+                            "@belongs_to en `{}.{}` apunta a `{}` que tiene composite PK \
+                             ({}). FK single-column no puede referenciar composite PK — \
+                             Postgres exige que la columna target sea UNIQUE por sí sola. \
+                             Workarounds: (a) declarar un UNIQUE constraint en una sola \
+                             columna del target y referenciarla via `@belongs_to(refs=\"<col>\")` \
+                             (deuda futura — sub-paso refs=); (b) usar `@table` sin composite \
+                             PK con auto-increment id como surrogate key.",
+                            type_name,
+                            f.name,
+                            rel.target_type,
+                            pk_fields.join(", ")
+                        ));
+                    }
+                };
                 let target_pk_sql = target_meta
                     .columns
                     .get(&target_pk_field)
@@ -874,6 +1022,36 @@ impl TableRef {
     }
 }
 
+/// v0.10.31 (Tier A.1) — clasificación de impacto de un `Change` para el
+/// flag `fitz db diff --check-destructive`. La política es opinionada
+/// pero conservadora:
+///
+/// - **Safe**: no toca data existente y no puede fallar por shape.
+///   Ej: `CREATE TABLE`, `ADD COLUMN nullable`, `DROP FOREIGN KEY`.
+/// - **Risky**: puede fallar runtime (NOT NULL sobre rows existentes,
+///   cast con pérdida de precisión) pero NO destruye data si tiene
+///   éxito. El SQL emitido sigue siendo válido — el usuario revisa.
+/// - **Destructive**: pérdida de data garantizada si se aplica.
+///   Ej: `DROP TABLE`, `DROP COLUMN`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Safe,
+    Risky,
+    Destructive,
+}
+
+impl Severity {
+    /// Etiqueta corta para comentarios en el SQL output del diff con
+    /// `--check-destructive`. `[SAFE]`/`[RISKY]`/`[DESTRUCTIVE]`.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Severity::Safe => "SAFE",
+            Severity::Risky => "RISKY",
+            Severity::Destructive => "DESTRUCTIVE",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
     CreateTable(Table),
@@ -953,6 +1131,178 @@ pub enum Change {
         old_name: String,
         new_name: String,
     },
+    /// v0.10.31 (Tier A.5) — `ALTER TABLE ... ADD CONSTRAINT <name>
+    /// CHECK (<expr>)`. Emitido cuando el target type declara un
+    /// `@check_constraint(...)` que no existe en el current schema.
+    /// Requiere que la tabla ya exista (no se usa en CREATE TABLE —
+    /// los CHECKs del CREATE van inline en `create_table_sql`).
+    AddCheckConstraint {
+        table: TableRef,
+        name: String,
+        expr: String,
+    },
+    /// v0.10.31 (Tier A.5) — `ALTER TABLE ... DROP CONSTRAINT <name>`.
+    /// Emitido cuando el current schema tiene un CHECK que ya no
+    /// está en el target. **NOTA**: la introspect actual (v0.10.31)
+    /// no popula `current.check_constraints` hasta cerrar A.7
+    /// (pg_constraint.contype='c'). Hasta entonces, DROP CHECK no
+    /// se dispara (current siempre vacío), pero el variant + emit
+    /// están listos para cuando A.7 cierre.
+    DropCheckConstraint {
+        table: TableRef,
+        name: String,
+    },
+}
+
+impl Change {
+    /// v0.10.31 (Tier A.1) — clasifica el `Change` por nivel de impacto.
+    ///
+    /// Ver `Severity` para la política. Resumen:
+    /// - DropTable / DropColumn → **Destructive** (pérdida de data).
+    /// - AddColumn NOT NULL sin default, AlterColumnType,
+    ///   AlterColumnNullable false, AlterColumnDefault, DropIndex →
+    ///   **Risky** (puede fallar runtime o impactar performance).
+    /// - Todo el resto → **Safe**.
+    pub fn severity(&self) -> Severity {
+        match self {
+            // Pérdida de data garantizada.
+            Change::DropTable(_) => Severity::Destructive,
+            Change::DropColumn { .. } => Severity::Destructive,
+
+            // Puede fallar o impactar performance, pero no destruye data.
+            Change::AddColumn { column, .. } => {
+                if !column.nullable && column.default.is_none() {
+                    // NOT NULL sin default → falla si la tabla tiene rows.
+                    Severity::Risky
+                } else {
+                    Severity::Safe
+                }
+            }
+            Change::AlterColumnType { .. } => Severity::Risky,
+            Change::AlterColumnNullable { nullable, .. } => {
+                if !nullable {
+                    // SET NOT NULL → falla si hay rows con NULL.
+                    Severity::Risky
+                } else {
+                    // DROP NOT NULL → siempre safe.
+                    Severity::Safe
+                }
+            }
+            Change::AlterColumnDefault { .. } => Severity::Risky,
+            Change::DropIndex { .. } => Severity::Risky,
+            // v0.10.31 (Tier A.5) — ADD CHECK puede fallar si rows
+            // existentes violan el predicado. DROP CHECK es safe
+            // (solo remueve la regla, no toca data).
+            Change::AddCheckConstraint { .. } => Severity::Risky,
+
+            // Seguros: no tocan data, no fallan por shape.
+            Change::CreateSchema { .. } => Severity::Safe,
+            Change::CreateTable(_) => Severity::Safe,
+            Change::CreateIndex { .. } => Severity::Safe,
+            Change::AddForeignKey { .. } => Severity::Safe,
+            Change::DropForeignKey { .. } => Severity::Safe,
+            Change::RenameTable { .. } => Severity::Safe,
+            Change::RenameColumn { .. } => Severity::Safe,
+            Change::DropCheckConstraint { .. } => Severity::Safe,
+        }
+    }
+}
+
+/// v0.10.31 (Tier A.1) — emite el SQL del diff con comentarios de
+/// severity por cada change. Versión enriquecida de `changes_to_sql`
+/// para el modo `--check-destructive`.
+///
+/// Cada change se emite como:
+///
+/// ```sql
+/// -- [SAFE] short_label
+/// SQL;
+/// ```
+///
+/// El `short_label` es informativo (tipo + tabla/colaborable).
+pub fn changes_to_sql_with_severity(changes: &[Change]) -> String {
+    let mut out = String::new();
+    for c in changes {
+        let sev = c.severity();
+        out.push_str(&format!("-- [{}] {}\n", sev.label(), change_short_label(c)));
+        out.push_str(&change_to_sql(c));
+        out.push('\n');
+    }
+    out
+}
+
+/// Helper para `changes_to_sql_with_severity` — etiqueta corta
+/// human-readable de un change ("AddColumn email to users").
+fn change_short_label(c: &Change) -> String {
+    match c {
+        Change::CreateTable(t) => format!("CreateTable {}", t.name),
+        Change::DropTable(tr) => format!("DropTable {}", tr.name),
+        Change::AddColumn { table, column } => {
+            format!("AddColumn {} to {}", column.name, table.name)
+        }
+        Change::DropColumn { table, column } => {
+            format!("DropColumn {} from {}", column, table.name)
+        }
+        Change::AlterColumnType {
+            table,
+            column,
+            new_type,
+        } => format!("AlterColumnType {}.{} -> {}", table.name, column, new_type),
+        Change::AlterColumnNullable {
+            table,
+            column,
+            nullable,
+        } => format!(
+            "AlterColumnNullable {}.{} -> {}",
+            table.name,
+            column,
+            if *nullable { "NULL" } else { "NOT NULL" }
+        ),
+        Change::AlterColumnDefault { table, column, .. } => {
+            format!("AlterColumnDefault {}.{}", table.name, column)
+        }
+        Change::CreateIndex { table, index } => {
+            format!("CreateIndex {} on {}", index.name, table.name)
+        }
+        Change::DropIndex { index_name, .. } => format!("DropIndex {}", index_name),
+        Change::AddForeignKey { table, fk } => {
+            format!("AddForeignKey {} on {}", fk.name, table.name)
+        }
+        Change::DropForeignKey { table, fk_name } => {
+            format!("DropForeignKey {} on {}", fk_name, table.name)
+        }
+        Change::RenameTable {
+            old_name, new_name, ..
+        } => format!("RenameTable {} -> {}", old_name, new_name),
+        Change::RenameColumn {
+            table,
+            old_name,
+            new_name,
+        } => format!("RenameColumn {}.{} -> {}", table.name, old_name, new_name),
+        Change::CreateSchema { name } => format!("CreateSchema {}", name),
+        Change::AddCheckConstraint { table, name, .. } => {
+            format!("AddCheckConstraint {} on {}", name, table.name)
+        }
+        Change::DropCheckConstraint { table, name } => {
+            format!("DropCheckConstraint {} on {}", name, table.name)
+        }
+    }
+}
+
+/// v0.10.31 (Tier A.1) — cuenta los changes por severity. Útil para
+/// el summary del modo `--check-destructive`.
+pub fn count_by_severity(changes: &[Change]) -> (usize, usize, usize) {
+    let mut safe = 0;
+    let mut risky = 0;
+    let mut destructive = 0;
+    for c in changes {
+        match c.severity() {
+            Severity::Safe => safe += 1,
+            Severity::Risky => risky += 1,
+            Severity::Destructive => destructive += 1,
+        }
+    }
+    (safe, risky, destructive)
 }
 
 /// Compara `current` (snapshot via [`introspect_schema`]) con
@@ -1061,10 +1411,15 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         .collect();
     tables_to_alter.sort_by_key(|a| a.0.qualified_id());
 
-    // 2.1. Per-tabla: columns + indexes + FKs.
+    // 2.1. Per-tabla: columns + indexes + checks.
     for (current_t, target_t) in &tables_to_alter {
         diff_columns(current_t, target_t, &mut changes);
         diff_indexes(current_t, target_t, &mut changes);
+        // v0.10.31 (Tier A.5) — ADD/DROP CHECK constraints sobre
+        // tabla existente. La function `diff_check_constraints` solo
+        // dispara DropCheckConstraint cuando A.7 esté cerrado
+        // (current.check_constraints lleno desde introspect).
+        diff_check_constraints(current_t, target_t, &mut changes);
     }
 
     // --- 3. DROP FK (antes de DROP TABLE / DROP COLUMN).
@@ -1525,10 +1880,26 @@ fn change_to_sql(change: &Change) -> String {
             column,
             new_type,
         } => {
+            // v0.10.31 (Tier A.2) — emit `USING <col>::<new_type>`
+            // siempre. Postgres acepta el cast explicit incluso para
+            // auto-castable (`int → bigint`), y es required para casts
+            // non-auto (`text → int`, `varchar → int`, casts con
+            // precision distinta). El syntax `col::type(n)` funciona
+            // para tipos parametrizados (`varchar(50)`/`numeric(10,2)`)
+            // y para arrays (`int8[]`).
+            //
+            // Para casts que Postgres no soporta directo (ej bytea →
+            // text en encoding específico, `timestamptz` ↔ `date` con
+            // format custom), el user edita el SQL emitido para usar
+            // la función adecuada (`USING encode(col, 'utf8')` /
+            // `USING col::date AT TIME ZONE 'UTC'`/etc.).
+            let col = quote_ident(column);
             format!(
-                "ALTER TABLE {} ALTER COLUMN {} TYPE {};",
+                "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{};",
                 quote_qualified(table),
-                quote_ident(column),
+                col,
+                new_type,
+                col,
                 new_type,
             )
         }
@@ -1667,6 +2038,100 @@ fn change_to_sql(change: &Change) -> String {
         }
         Change::CreateSchema { name } => {
             format!("CREATE SCHEMA IF NOT EXISTS {};", quote_ident(name))
+        }
+        // v0.10.31 (Tier A.5) — ADD/DROP CHECK constraint. El name
+        // se cita como identifier, el expr va RAW (el user escribe
+        // SQL válido adentro del `@check_constraint("...")`).
+        Change::AddCheckConstraint { table, name, expr } => {
+            format!(
+                "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({});",
+                quote_qualified(table),
+                quote_ident(name),
+                expr,
+            )
+        }
+        Change::DropCheckConstraint { table, name } => {
+            format!(
+                "ALTER TABLE {} DROP CONSTRAINT {};",
+                quote_qualified(table),
+                quote_ident(name),
+            )
+        }
+    }
+}
+
+/// v0.10.31 (Tier A.5) — diff de CHECK constraints entre current y
+/// target. Emite `Change::AddCheckConstraint` para los del target
+/// que no están en current, y `Change::DropCheckConstraint` para los
+/// del current que no están en target. La identidad es por `name`
+/// (matching de pg_constraint.conname). Si el `expr` cambia con el
+/// mismo name, se emite DROP + ADD (Postgres no soporta ALTER de la
+/// expresión, requiere drop + add explícito).
+///
+/// **NOTA pre-A.7**: hasta cerrar A.7, `current.check_constraints`
+/// está siempre vacío (la introspect no lee `pg_constraint.contype='c'`).
+/// Eso significa que en esta versión `DropCheckConstraint` NO se
+/// dispara y un cambio de `expr` con mismo name se ve como solo ADD
+/// (la regla vieja queda en la DB). Workaround documentado: el user
+/// hace DROP manual antes de re-correr. A.7 cierra esto.
+fn diff_check_constraints(current: &Table, target: &Table, changes: &mut Vec<Change>) {
+    let current_names: std::collections::HashSet<&str> = current
+        .check_constraints
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    let target_names: std::collections::HashSet<&str> = target
+        .check_constraints
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    let table_ref = TableRef::from_table(target);
+
+    // Drops primero (mismo orden que diff_columns / diff_indexes).
+    let mut to_drop: Vec<&CheckConstraint> = current
+        .check_constraints
+        .iter()
+        .filter(|c| !target_names.contains(c.name.as_str()))
+        .collect();
+    to_drop.sort_by(|a, b| a.name.cmp(&b.name));
+    for c in to_drop {
+        changes.push(Change::DropCheckConstraint {
+            table: table_ref.clone(),
+            name: c.name.clone(),
+        });
+    }
+
+    // Adds.
+    let mut to_add: Vec<&CheckConstraint> = target
+        .check_constraints
+        .iter()
+        .filter(|c| !current_names.contains(c.name.as_str()))
+        .collect();
+    to_add.sort_by(|a, b| a.name.cmp(&b.name));
+    for c in to_add {
+        changes.push(Change::AddCheckConstraint {
+            table: table_ref.clone(),
+            name: c.name.clone(),
+            expr: c.expr.clone(),
+        });
+    }
+
+    // Mismo name, expr distinto → DROP + ADD. Hasta que A.7 popule
+    // current.check_constraints, esto solo aplica para users que
+    // mantienen current_schemas custom (uso interno de la lib).
+    for tc in &target.check_constraints {
+        if let Some(cc) = current.check_constraints.iter().find(|c| c.name == tc.name) {
+            if cc.expr.trim() != tc.expr.trim() {
+                changes.push(Change::DropCheckConstraint {
+                    table: table_ref.clone(),
+                    name: tc.name.clone(),
+                });
+                changes.push(Change::AddCheckConstraint {
+                    table: table_ref.clone(),
+                    name: tc.name.clone(),
+                    expr: tc.expr.clone(),
+                });
+            }
         }
     }
 }

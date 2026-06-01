@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 Documentación del lenguaje
+    url: https://thegreekman76.github.io/fitz/
+    about: Guía, sintaxis y referencia. Mirá acá antes de abrir un issue de uso.
+  - name: 🗺️ Roadmap y deudas comprometidas
+    url: https://github.com/Thegreekman76/fitz/blob/main/docs/roadmap.md
+    about: Fases cerradas, próximo norte, y deuda residual inventariada.

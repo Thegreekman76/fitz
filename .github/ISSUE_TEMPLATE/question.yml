@@ -1,0 +1,34 @@
+name: 💬 Pregunta / Discusión
+description: Hacé una pregunta sobre el lenguaje, el roadmap, o una decisión de diseño.
+title: "[pregunta] "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Discussions todavía no está habilitado, así que las preguntas
+        van como issues. Antes de preguntar:
+
+        - **Pregunta sobre el lenguaje** → mirá [docs/guide.md](https://github.com/Thegreekman76/fitz/blob/main/docs/guide.md) primero.
+        - **Pregunta sobre roadmap** → mirá [docs/roadmap.md](https://github.com/Thegreekman76/fitz/blob/main/docs/roadmap.md).
+        - **Pregunta sobre decisión de diseño** → mirá [docs/design-decisions.md](https://github.com/Thegreekman76/fitz/blob/main/docs/design-decisions.md).
+
+        Si no encontrás la respuesta ahí, dale.
+
+  - type: textarea
+    id: pregunta
+    attributes:
+      label: Pregunta
+      description: ¿Qué querés saber?
+    validations:
+      required: true
+
+  - type: textarea
+    id: contexto
+    attributes:
+      label: Contexto
+      description: |
+        Opcional pero útil — ¿qué estás intentando hacer? ¿qué leíste
+        antes de preguntar?
+    validations:
+      required: false

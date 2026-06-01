@@ -286,6 +286,25 @@ enum DbCmd {
         /// Archivo de salida `.sql`. Si se omite, escribe a stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// v0.10.31 (Tier A.1) — clasifica cada change como
+        /// safe/risky/destructive y aborta si hay destructive
+        /// sin `--allow-destructive`. El SQL emitido suma
+        /// comentarios `-- [SAFE]` / `-- [RISKY]` / `-- [DESTRUCTIVE]`
+        /// por change para review humano antes de aplicar.
+        ///
+        /// Política: DropTable/DropColumn → Destructive;
+        /// AddColumn NOT NULL sin default / AlterColumnType /
+        /// SET NOT NULL / AlterColumnDefault / DropIndex →
+        /// Risky; resto → Safe.
+        #[arg(long)]
+        check_destructive: bool,
+        /// v0.10.31 (Tier A.1) — junto con `--check-destructive`,
+        /// permite que el diff emita aunque haya changes
+        /// destructivos. Sin este flag, `--check-destructive`
+        /// aborta con exit 1 si encuentra cualquier destructive.
+        /// Risky NO bloquea (solo se reporta).
+        #[arg(long)]
+        allow_destructive: bool,
     },
     /// Corre todas las migraciones pendientes en `migrations/`
     /// (o el dir custom de `--dir`). Idempotente — skipea las
@@ -558,7 +577,13 @@ fn main() {
             lint_cmd(files, deny);
         }
         Commands::Db(sub) => match sub {
-            DbCmd::Diff { file, url, out } => db_diff_cmd(file, url, out),
+            DbCmd::Diff {
+                file,
+                url,
+                out,
+                check_destructive,
+                allow_destructive,
+            } => db_diff_cmd(file, url, out, check_destructive, allow_destructive),
             DbCmd::Migrate {
                 url,
                 dir,
@@ -4215,7 +4240,13 @@ fn load_program_for_db(entry: &std::path::Path) -> Result<(ast::Program, types::
     Ok((program, env))
 }
 
-fn db_diff_cmd(file: Option<PathBuf>, url: Option<String>, out: Option<PathBuf>) {
+fn db_diff_cmd(
+    file: Option<PathBuf>,
+    url: Option<String>,
+    out: Option<PathBuf>,
+    check_destructive: bool,
+    allow_destructive: bool,
+) {
     let entry = match resolve_db_entry(file) {
         Ok(e) => e,
         Err(e) => {
@@ -4270,7 +4301,36 @@ fn db_diff_cmd(file: Option<PathBuf>, url: Option<String>, out: Option<PathBuf>)
         eprintln!("✓ schema sincronizado — no hay cambios pendientes");
         return;
     }
-    let sql = migrations::changes_to_sql(&changes);
+    // v0.10.31 (Tier A.1) — classification + guard. Aborta si hay
+    // destructive changes y no se pasó `--allow-destructive`.
+    if check_destructive {
+        let (safe, risky, destructive) = migrations::count_by_severity(&changes);
+        eprintln!(
+            "→ classification: {} safe, {} risky, {} destructive",
+            safe, risky, destructive
+        );
+        if destructive > 0 && !allow_destructive {
+            eprintln!(
+                "✗ {} change(s) destructive detectado(s) — rechazado por `--check-destructive`",
+                destructive
+            );
+            eprintln!("  Lista de changes destructivos:");
+            for c in &changes {
+                if c.severity() == migrations::Severity::Destructive {
+                    eprintln!("    • {}", change_short_label_for_cli(c));
+                }
+            }
+            eprintln!("  Para emitir igual: re-corré con `--allow-destructive`.");
+            eprintln!("  Para refactor seguro: marcá renames con `@renamed_from(\"old\")`.");
+            std::process::exit(1);
+        }
+    }
+    // SQL: con --check-destructive enriquecemos con comentarios per change.
+    let sql = if check_destructive {
+        migrations::changes_to_sql_with_severity(&changes)
+    } else {
+        migrations::changes_to_sql(&changes)
+    };
     match out {
         Some(path) => {
             if let Err(e) = std::fs::write(&path, &sql) {
@@ -4283,6 +4343,23 @@ fn db_diff_cmd(file: Option<PathBuf>, url: Option<String>, out: Option<PathBuf>)
             print!("{}", sql);
             eprintln!("✓ {} change(s) emitidos a stdout", changes.len());
         }
+    }
+}
+
+/// v0.10.31 (Tier A.1) — label corto del CLI espejado del helper
+/// `change_short_label` de migrations.rs. Vive acá porque la fn de
+/// migrations es `pub(crate)` y no podemos acceder desde main.rs sin
+/// re-exposicionarla. Mantener sincronizado con `change_short_label`
+/// de migrations.rs si cambia.
+fn change_short_label_for_cli(c: &migrations::Change) -> String {
+    use migrations::Change;
+    match c {
+        Change::DropTable(tr) => format!("DropTable {}", tr.name),
+        Change::DropColumn { table, column } => {
+            format!("DropColumn {} from {}", column, table.name)
+        }
+        // El guard solo lista Destructive; el resto no debería caer acá.
+        other => format!("{:?}", other),
     }
 }
 
