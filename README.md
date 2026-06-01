@@ -245,6 +245,35 @@ Por un developer independiente que quería un lenguaje que no tuviera que discul
 
 TheGreekMan (Palopoli Martín)
 
+### Cómo se construye
+
+Una nota honesta sobre el proceso, porque me parece más
+interesante que esconderlo:
+
+La idea, el roadmap, las decisiones de diseño y la dirección
+del lenguaje son mías. Soy dev full-stack (Python, FastAPI,
+Vue, Docker, Postgres) y aprendí Rust específicamente para
+construir Fitz. Cada decisión del lenguaje — por qué HTTP es
+ciudadano de primera, por qué `Result` y no excepciones, por
+qué `@table` se valida en compile-time — sale de frustraciones
+concretas de mi trabajo diario.
+
+El día a día de la implementación es colaborativo con Claude
+(Anthropic). El flujo típico: yo describo lo que quiero,
+discutimos trade-offs, escribo o me sugiere código, lo reviso,
+itero. Cuando me trabo con un sub-paso complejo, a veces caigo
+en lo que la comunidad llama *vibe coding* — describir el
+problema en voz alta y refinar juntos hasta que sale. Otras
+veces es revisión de código pura, o debugging compartido.
+
+El SHA del commit es mío, la responsabilidad técnica es mía,
+pero el proceso real es de a dos. Lo digo porque me parece más
+honesto que vender una historia de "lo hice solo a la
+medianoche" que no es como funcionó.
+
+Si te resuena el modelo, los commits cuentan la historia fina:
+qué pensé, qué probé, qué descarté.
+
 ## Licencia
 
 MIT
