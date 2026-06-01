@@ -39,7 +39,7 @@ asume VSCode para los screenshots ASCII.
 | M1 — Setup y primer programa | 6 | ✅ cerrado (C1-C6) |
 | M2 — Tipos y funciones | 7 | ✅ cerrado (C1-C7) |
 | M3 — Módulos y organización | 5 | ✅ cerrado (C1-C5) |
-| M4 — HTTP first-class | 5 | 📋 planificado |
+| M4 — HTTP first-class | 5 | ✅ cerrado (C1-C5) |
 | M5 — Async, auth, real-time | 4 | 📋 planificado |
 | M6 — Capstone Postgres + ORM nativo | 6 | 📋 planificado |
 | M7 — Producción y deployment | 4 | ⏸ pendiente (espera Fase 12) |
@@ -95,6 +95,22 @@ Requisito explícito: M2 completo.
 exponer una lib, consumir deps externas (path o git), y
 organizar proyectos serios (monorepo, layered architecture,
 shared libs).
+
+## M4 — HTTP first-class
+
+Requisito explícito: M3 completo.
+
+- **[C1 — `@get/@post/@put/@delete` + `@server`](m4-http/c1-verbos-server.md)**
+- **[C2 — Body, query params y headers](m4-http/c2-body-query-headers.md)**
+- **[C3 — Middleware + CORS](m4-http/c3-middleware-cors.md)**
+- **[C4 — OpenAPI 3.1 autogenerado + `/docs`](m4-http/c4-openapi-docs.md)**
+- **[C5 — Status codes custom + errores HTTP](m4-http/c5-status-content-errores.md)**
+
+**Entregable del módulo**: podés escribir una API completa
+production-ready en Fitz — handlers tipados, validación
+automática del input, errores ricos con status code correcto,
+middleware reusable, CORS configurado y docs autogenerados. Sin
+ningún `pip install`, `npm install`, ni `pom.xml`.
 
 ## Cómo está pensado el curso
 

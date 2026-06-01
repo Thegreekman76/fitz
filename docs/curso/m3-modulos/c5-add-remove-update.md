@@ -644,14 +644,17 @@ architecture.
 A partir del próximo módulo entramos al **diferencial más
 importante de Fitz frente a otros lenguajes**: HTTP **en el
 core del lenguaje**. Sin frameworks. `@get`, `@post`, `@server`,
-auth, middleware, OpenAPI auto-generado — todo built-in.
+middleware, OpenAPI auto-generado — todo built-in.
 
 M4 cubre:
-- C1 — `@get`/`@post`/`@put`/`@delete` + `@server`
-- C2 — Path params + query params + body deserialization
-- C3 — Middleware + CORS
-- C4 — OpenAPI auto-generado + `/docs` UI
-- C5 — Auth con `@authenticated` + JWT + Argon2
 
-Cuando esté listo, el cap C1 del M4 va a aparecer en el [índice
-del curso](../index.md).
+- **[C1 — `@get`/`@post`/`@put`/`@delete` + `@server`](../m4-http/c1-verbos-server.md)**
+- **[C2 — Body deserialization + query params + headers](../m4-http/c2-body-query-headers.md)**
+- **[C3 — Middleware + CORS](../m4-http/c3-middleware-cors.md)**
+- **[C4 — OpenAPI 3.1 auto-generado + `/docs`](../m4-http/c4-openapi-docs.md)**
+- **[C5 — Status codes custom + errores HTTP](../m4-http/c5-status-content-errores.md)**
+
+→ **[M4.C1 — Verbos + `@server`](../m4-http/c1-verbos-server.md)**
+
+(Auth nativa con `@authenticated`/`@admin` + JWT + Argon2 se
+cubre en **M5**, junto con `async`/`await` y WebSockets.)

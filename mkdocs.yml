@@ -151,6 +151,12 @@ nav:
           - 'C3 — Path deps + lockfile': curso/m3-modulos/c3-path-deps.md
           - 'C4 — Git deps + cache': curso/m3-modulos/c4-git-deps.md
           - 'C5 — fitz add/remove/update + patrones': curso/m3-modulos/c5-add-remove-update.md
+      - 'M4 — HTTP first-class':
+          - 'C1 — Verbos + @server': curso/m4-http/c1-verbos-server.md
+          - 'C2 — Body, query, headers': curso/m4-http/c2-body-query-headers.md
+          - 'C3 — Middleware + CORS': curso/m4-http/c3-middleware-cors.md
+          - 'C4 — OpenAPI + /docs': curso/m4-http/c4-openapi-docs.md
+          - 'C5 — Status custom + errores': curso/m4-http/c5-status-content-errores.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:
