@@ -8394,6 +8394,12 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // `@cron + @get/@post/...` se rechazan.
             check_cron_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
             check_background_decorator(ctx, fn_name, decorators, *fn_span);
+            // Fase 13 (v0.11.0) — `@command("name", desc="...")` declara
+            // una fn como comando CLI. Valida que la fn no tenga conflictos
+            // con decorators de servidor/job/test, que los params sean
+            // CLI-marshallables (Str/Int/Float/Bool/Str?), y que el return
+            // sea Int (exit code).
+            check_command_decorator(ctx, fn_name, params, &ret, decorators, *fn_span);
             ctx.push_scope();
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
@@ -9779,6 +9785,198 @@ fn check_background_decorator(
                 ),
             ));
             return;
+        }
+    }
+}
+
+/// Fase 13 (v0.11.0) — `@command("name", desc="...")` declara una
+/// fn como comando CLI. El binario producido por `fitz build` parsea
+/// `std::env::args()` y dispatcha al comando correspondiente.
+///
+/// Reglas validadas:
+/// - Args: exactamente 1 Str literal (nombre del comando, ej `"greet"`).
+/// - Kwargs opcionales: `desc="..."` (descripción para `--help`).
+/// - El return type debe ser `Int` (exit code; `0` éxito, otros = error).
+/// - Conflictos con decorators de servidor/job/test: `@command` NO
+///   combina con `@get/@post/@put/@delete/@server/@ws/@cron/@background/
+///   @auth_provider/@test`. La fn marcada como `@command` ES un
+///   comando CLI; no puede ser handler HTTP, cron job, ni test.
+/// - Params tipos válidos: `Str`, `Int`, `Float`, `Bool`, `Str?`,
+///   y opcionalmente con default value.
+///
+/// **Convención sin decorators en params** (decisión MVP — evita
+/// tocar `ast::Param`):
+/// - Param **sin default** → positional arg requerido (`mybin <name>`).
+/// - Param **con default** → flag opcional (`--name <value>` o `--name`
+///   si es Bool sin valor).
+/// - Bool con default `false` → flag bool (`--loud` lo prende a true).
+/// - Otros tipos con default → flag value (`--count 5`).
+///
+/// Esto es la convención usada por Click/Fire (Python) y Plumbum
+/// (Python). Reduce verbosidad vs requerir `@arg`/`@flag` en cada
+/// param. Trade-off: NO se puede tener positional optional args
+/// (los con default son flags).
+fn check_command_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    ret: &Type,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let cmd_deco = match decorators.iter().find(|d| d.name == "command") {
+        Some(d) => d,
+        None => return,
+    };
+    // 1) Args: exactamente 1 Str literal (nombre del comando).
+    if cmd_deco.args.len() != 1 {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@command sobre fn '{}': espera exactamente 1 argumento (nombre del comando como Str). Sintaxis: `@command(\"greet\")` o `@command(\"greet\", desc=\"...\")`.",
+                fn_name
+            ),
+        ));
+        return;
+    }
+    match &cmd_deco.args[0] {
+        Expr::Str(_, _) => {}
+        _ => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@command sobre fn '{}': el primer arg debe ser Str literal con el nombre del comando.",
+                    fn_name
+                ),
+            ));
+            return;
+        }
+    }
+    // 2) Kwargs: solo `desc="..."` aceptado.
+    for (key, value) in &cmd_deco.kwargs {
+        match key.as_str() {
+            "desc" => match value {
+                Expr::Str(_, _) => {}
+                _ => {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "@command sobre fn '{}': `desc=...` espera Str literal con la descripción.",
+                            fn_name
+                        ),
+                    ));
+                    return;
+                }
+            },
+            other => {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@command sobre fn '{}': kwarg desconocido `{}`. Soportado: `desc=\"...\"`.",
+                        fn_name, other
+                    ),
+                ));
+                return;
+            }
+        }
+    }
+    // 3) Conflictos con otros decoradores.
+    let conflicting = [
+        "get",
+        "post",
+        "put",
+        "delete",
+        "server",
+        "ws",
+        "cron",
+        "background",
+        "auth_provider",
+        "test",
+        "middleware",
+    ];
+    for other in decorators {
+        if conflicting.contains(&other.name.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@command sobre fn '{}' no es combinable con `@{}`: un comando CLI no puede ser handler HTTP, cron, test ni middleware.",
+                    fn_name, other.name
+                ),
+            ));
+            return;
+        }
+    }
+    // 4) Return type debe ser Int (exit code).
+    if !matches!(ret, Type::Int | Type::Any) {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@command sobre fn '{}': el return type debe ser `Int` (exit code). Devolvé `0` para éxito, `1+` para error. Recibido: `{}`.",
+                fn_name,
+                ret.display(ctx.types)
+            ),
+        ));
+    }
+    // 5) Params: solo tipos CLI-marshallables (Str/Int/Float/Bool/Str?).
+    for p in params {
+        if p.varargs {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@command sobre fn '{}': varargs (`...nombres: Str`) no soportado en MVP. Usá flags con default value o un `List<Str>` adentro del body.",
+                    fn_name
+                ),
+            ));
+            return;
+        }
+        let p_type = ann_to_type(p.type_.as_ref(), ctx.types);
+        let valid = matches!(
+            p_type,
+            Type::Str | Type::Int | Type::Float | Type::Bool | Type::Any
+        ) || matches!(&p_type, Type::Nullable(inner) if matches!(**inner, Type::Str | Type::Int | Type::Float));
+        if !valid {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@command sobre fn '{}': param `{}` tiene tipo `{}` que no es CLI-marshallable. Soportados: `Str`/`Int`/`Float`/`Bool` (con o sin `?`).",
+                    fn_name,
+                    p.name,
+                    p_type.display(ctx.types)
+                ),
+            ));
+            return;
+        }
+        // Bool con default true → deuda menor (requiere `--no-flag`
+        // convention). MVP solo acepta Bool = false default.
+        if matches!(p_type, Type::Bool) {
+            if let Some(Expr::Bool(true, _)) = &p.default {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@command sobre fn '{}': param `Bool = true` no soportado en MVP (requiere convención `--no-{}` para negar). Usá `Bool = false` o invertí la lógica.",
+                        fn_name, p.name
+                    ),
+                ));
+                return;
+            }
         }
     }
 }

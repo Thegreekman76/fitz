@@ -1,14 +1,28 @@
-# `cli-tool` — boilerplate CLI puro a binario nativo
+# `cli-tool` — boilerplate CLI con `@command` (Fase 13, v0.11.0)
 
-Generador de report de ventas que demuestra el subset CLI del
-lenguaje Fitz compilado a **binario nativo standalone** y
-empaquetado en una imagen Docker de **~22 MB** (`distroless/cc`).
+Generador de report de ventas que demuestra el **CLI builder nativo
+del lenguaje** (`@command`), compilado a **binario nativo standalone**
+y empaquetado en una imagen Docker de **~22 MB** (`distroless/cc`).
 
 Sin runtime Fitz en el destino. Sin Python. Sin Node. Sin libc del
-host. El binario `fitz-report-generator` corre, imprime el report,
-y sale.
+host. **Sin `clap`/`argparse`/`commander`**: el parser de argv y el
+help auto-generado los emite el codegen de Fitz.
+
+## Demo
 
 ```text
+$ ./cli-tool
+USAGE:
+    cli-tool <command> [ARGS] [OPTIONS]
+
+COMMANDS:
+    report     Show full sales report (summary + per-region + top)
+    count      Quick count of sales (with optional region filter)
+    regions    List unique regions present in the data
+
+Run `cli-tool <command> --help` for more info on a specific command.
+
+$ ./cli-tool report
 📊 Sales Report
 ===============
 
@@ -22,17 +36,47 @@ Por región:
 
 Top venta única:
   gadget ($320.00) en US
+
+$ ./cli-tool count --region AR
+3
+
+$ ./cli-tool report --min 100
+📊 Sales Report
+===============
+
+Total ventas: 4
+Revenue total: $829.00
+(...filtrado a ventas con monto >= 100)
+
+$ ./cli-tool regions
+AR
+BR
+US
+
+$ ./cli-tool report --help
+Show full sales report (summary + per-region + top)
+
+USAGE:
+    cli-tool report [OPTIONS]
+
+OPTIONS:
+    --min <FLOAT>
+    -h, --help
 ```
 
 ## Qué demuestra
 
-- **Tipos custom** con campos tipados (`type Sale { product: Str,
-  amount: Float, region: Str }`).
-- **Listas + métodos higher-order** (`.filter()`, `.map()`,
-  `.reduce()`, `.unique()`).
-- **Interpolación de strings con format specs** (`"${x:.2f}"`).
-- **Funciones top-level** con tipos explícitos.
-- **`fitz build`** comprime ~50 líneas de Fitz a un binario nativo
+- **`@command("name", desc=...)`**: declaración nativa de comandos CLI.
+- **Multi-comando con dispatch automático**: 3 subcomandos (`report`,
+  `count`, `regions`) en el mismo binario.
+- **Convención de params sin decorators extras**: params sin default
+  son positional args, con default son flags.
+- **Help auto-generado**: `--help` global lista comandos; per-command
+  muestra usage + args + options.
+- **Exit codes tipados**: `Int` return propaga como exit code POSIX.
+- **Tipos custom** (`type Sale`), **higher-order** (`.filter`/`.map`/
+  `.reduce`/`.unique`), **interpolación con format specs** (`${x:.2f}`).
+- **`fitz build`** comprime ~100 líneas de Fitz a un binario nativo
   Linux x86_64 standalone.
 
 ## Estructura del directorio

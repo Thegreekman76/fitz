@@ -1,25 +1,21 @@
-// cli-tool boilerplate — generador de report de ventas.
+// cli-tool boilerplate — generador de report de ventas (v0.11.0).
 //
-// Demuestra el subset CLI core del lenguaje compilado a binario
-// nativo standalone:
-//   - Tipos custom (`Sale`) con campos tipados.
-//   - Listas + métodos higher-order (`filter`, `map`, `reduce`).
-//   - Maps + lookup por clave (`get`).
-//   - Interpolación de strings con format specs (`:.2f` para Float).
-//   - Recursión vía métodos de colecciones.
+// **Hito de Fase 13**: este boilerplate ahora usa `@command` para
+// declarar comandos CLI nativos del lenguaje. El binario producido
+// por `fitz build` parsea `std::env::args()` automáticamente y
+// dispatcha al comando correspondiente. Help auto-generado,
+// validación de tipos, exit codes tipados.
 //
-// El binario `fitz build` produce ~5 MB standalone (Linux estático
-// con musl + `FROM scratch` en Docker). Sin runtime Fitz en el
-// destino, sin libc, nada.
+// Demuestra:
+//   - `@command("name", desc="...")` para declarar comandos.
+//   - Multi-comando con dispatch automático (3 commands).
+//   - Positional args (params sin default) + flags (params con default).
+//   - Help autogenerado: `cli-tool --help`, `cli-tool report --help`.
+//   - Exit codes tipados (`Int` return).
+//   - State compartido entre handlers (`let SALES` top-level).
 //
-// Roadmap del lenguaje (cuando arranque Fase 9 extras):
-//   - `args()` builtin para CLI args.
-//   - `stdin()` / `read_line()` para input interactivo.
-//   - `exit(code)` para exit codes custom.
-//   - `read_file(path)` / `write_file(path, contents)` para I/O.
-//
-// Mientras tanto, el input va hardcoded como `let SALES = [...]`.
-// Reemplazá ese array con tu data real.
+// El binario `fitz build` produce ~5 MB standalone (Linux con musl
+// + `FROM scratch` en Docker, ~22 MB imagen completa).
 
 type Sale {
     product: Str,
@@ -27,17 +23,24 @@ type Sale {
     region: Str,
 }
 
-// Datos de prueba — en un tool real esto vendría de un archivo,
-// argv, o stdin.
-let SALES: List<Sale> = [
-    Sale { product: "widget", amount: 99.50, region: "AR" },
-    Sale { product: "widget", amount: 149.00, region: "BR" },
-    Sale { product: "gadget", amount: 250.00, region: "AR" },
-    Sale { product: "gadget", amount: 320.00, region: "US" },
-    Sale { product: "thingamajig", amount: 12.50, region: "AR" },
-    Sale { product: "thingamajig", amount: 18.75, region: "BR" },
-    Sale { product: "widget", amount: 110.00, region: "US" },
-]
+// Data hardcoded como fn helper — en un tool real reemplazá con
+// lectura desde stdin, archivo o DB. Usamos fn en vez de `let X = [...]`
+// top-level porque el codegen no hoistea list literals con struct lits
+// como statics (deuda menor de la Fase 13 — list de structs sí
+// funcionan como locals adentro de fns).
+fn all_sales() -> List<Sale> {
+    return [
+        Sale { product: "widget", amount: 99.50, region: "AR" },
+        Sale { product: "widget", amount: 149.00, region: "BR" },
+        Sale { product: "gadget", amount: 250.00, region: "AR" },
+        Sale { product: "gadget", amount: 320.00, region: "US" },
+        Sale { product: "thingamajig", amount: 12.50, region: "AR" },
+        Sale { product: "thingamajig", amount: 18.75, region: "BR" },
+        Sale { product: "widget", amount: 110.00, region: "US" },
+    ]
+}
+
+// --- Helpers (sin @command — solo fns regulares) ---
 
 fn total(sales: List<Sale>) -> Float {
     return sales.reduce(0.0, fn(acc: Float, s: Sale) => acc + s.amount)
@@ -52,29 +55,61 @@ fn distinct_regions(sales: List<Sale>) -> List<Str> {
     return names.unique()
 }
 
-// Encuentra la venta de mayor monto. Helper top-level porque el
-// callback de `reduce` necesita ret type concreto y el parser no
-// acepta `if` como expresión inline en el body de un FnExpr.
 fn pick_top(acc: Sale, s: Sale) -> Sale {
     if (s.amount > acc.amount) { return s }
     return acc
 }
 
-print("📊 Sales Report")
-print("===============")
-print("")
-print("Total ventas: {SALES.len()}")
-print("Revenue total: ${total(SALES):.2f}")
-print("")
-print("Por región:")
-for region in distinct_regions(SALES) {
-    let subset: List<Sale> = by_region(SALES, region)
-    print("  {region}: {subset.len()} ventas, ${total(subset):.2f}")
+// --- Comandos CLI ---
+
+/// `cli-tool report [--min <FLOAT>]`
+/// Imprime el report completo (totales + by-region + top venta).
+/// Opcional: filtra ventas con monto mínimo.
+@command("report", desc="Show full sales report (summary + per-region + top)")
+fn report(min: Float = 0.0) -> Int {
+    let sales = all_sales()
+    let filtered = sales.filter(fn(s: Sale) => s.amount >= min)
+    print("📊 Sales Report")
+    print("===============")
+    print("")
+    print("Total ventas: {filtered.len()}")
+    print("Revenue total: ${total(filtered):.2f}")
+    print("")
+    print("Por región:")
+    for region in distinct_regions(filtered) {
+        let subset: List<Sale> = by_region(filtered, region)
+        print("  {region}: {subset.len()} ventas, ${total(subset):.2f}")
+    }
+    print("")
+    print("Top venta única:")
+    if (filtered.len() == 0) {
+        print("  (lista vacía — exit code 1)")
+        return 1
+    }
+    let top: Sale = filtered.reduce(filtered[0], pick_top)
+    print("  {top.product} (${top.amount:.2f}) en {top.region}")
+    return 0
 }
-print("")
-print("Top venta única:")
-if (SALES.len() == 0) {
-    print("  (lista vacía)")
+
+/// `cli-tool count [--region <STR>]`
+/// Cuenta cuántas ventas hay, opcionalmente filtrando por región.
+@command("count", desc="Quick count of sales (with optional region filter)")
+fn count(region: Str = "all") -> Int {
+    let sales = all_sales()
+    if region == "all" {
+        print("{sales.len()}")
+    } else {
+        print("{by_region(sales, region).len()}")
+    }
+    return 0
 }
-let top: Sale = SALES.reduce(SALES[0], pick_top)
-print("  {top.product} (${top.amount:.2f}) en {top.region}")
+
+/// `cli-tool regions`
+/// Lista las regiones únicas presentes en los datos, una por línea.
+@command("regions", desc="List unique regions present in the data")
+fn regions() -> Int {
+    for r in distinct_regions(all_sales()) {
+        print(r)
+    }
+    return 0
+}

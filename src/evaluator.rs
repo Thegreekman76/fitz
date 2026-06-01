@@ -436,6 +436,15 @@ fn process_decorator(
         return Ok(());
     }
 
+    // Fase 13 (v0.11.0) — `@command("name", desc="...")`: registra la
+    // fn como comando CLI. El checker ya validó shape (return Int,
+    // params Str/Int/Float/Bool, sin conflictos). Acá la registramos
+    // en el `CliRegistry` global para que el main del intérprete o
+    // del binario emitido por `fitz build` la dispatchee desde argv.
+    if deco.name == "command" {
+        return register_cli_command(deco, fn_name, params, handler);
+    }
+
     // Decorador desconocido. Mensaje listo para guiar al usuario.
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::InvalidSyntax,
@@ -443,7 +452,7 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command.",
             deco.name, fn_name,
         ),
     )))
@@ -619,6 +628,58 @@ fn collect_route_auth(
         }
     }
     Ok(spec)
+}
+
+/// Fase 13 (v0.11.0) — Procesa `@command("name", desc="...")` sobre
+/// una `Stmt::FnDef`. Extrae name + desc, los registra junto con
+/// los params y el handler en el `CliRegistry` activo. Sin registry
+/// activo, no-op silencioso (paralelo a `@test` — los comandos solo
+/// se materializan cuando `main.rs` instala el registry pre-eval).
+fn register_cli_command(
+    deco: &Decorator,
+    fn_name: &str,
+    params: &[Param],
+    handler: &Value,
+) -> Result<(), EvalSignal> {
+    // El checker validó shape (args/kwargs/conflictos/tipos); replicamos
+    // defensivamente solo lo crítico (nombre del comando como Str).
+    let cmd_name = match deco.args.first() {
+        Some(crate::ast::Expr::Str(s, _)) => s.clone(),
+        _ => {
+            // El checker ya emitió error; en `fitz run` con
+            // `--no-typecheck` podríamos llegar acá sin el error. Sigue
+            // con no-op silencioso para no bloquear el eval del resto.
+            return Ok(());
+        }
+    };
+    let desc = deco
+        .kwargs
+        .iter()
+        .find(|(k, _)| k == "desc")
+        .and_then(|(_, v)| match v {
+            crate::ast::Expr::Str(s, _) => Some(s.clone()),
+            _ => None,
+        });
+    let cmd = crate::cli::CliCommand {
+        name: cmd_name,
+        desc,
+        fn_name: fn_name.to_string(),
+        params: params.to_vec(),
+        handler: handler.clone(),
+    };
+    // Registry activo → push. Sin registry → no-op (idéntico a @test).
+    with_active_cli_registry(|opt| match opt {
+        Some(reg) => match reg.register(cmd) {
+            Ok(()) => Ok(()),
+            Err(e) => Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0,
+                0,
+                e,
+            ))),
+        },
+        None => Ok(()),
+    })
 }
 
 /// Procesa `@test` sobre una `Stmt::FnDef` (Fase 9.z.2.a). Valida la
@@ -1688,6 +1749,35 @@ struct Loader {
 
 thread_local! {
     static LOADER: RefCell<Option<Loader>> = const { RefCell::new(None) };
+    /// Fase 13 (v0.11.0) — CliRegistry activo. Poblado por el
+    /// evaluator cuando procesa `@command` decorators; consultado
+    /// por `main.rs` para detectar modo CLI y dispatchear desde
+    /// `std::env::args()`. Mismo patrón que `LOADER` y
+    /// `CURRENT_TEST_REGISTRY`.
+    static CLI_REGISTRY: RefCell<Option<std::sync::Arc<crate::cli::CliRegistry>>> = const { RefCell::new(None) };
+}
+
+/// Fase 13 — instala un CliRegistry compartido en el thread actual.
+/// Cualquier `@command` procesado durante `eval` poblará el registry.
+pub fn install_cli_registry(reg: std::sync::Arc<crate::cli::CliRegistry>) {
+    CLI_REGISTRY.with(|cell| {
+        *cell.borrow_mut() = Some(reg);
+    });
+}
+
+/// Fase 13 — desinstala el CliRegistry del thread actual.
+pub fn uninstall_cli_registry() {
+    CLI_REGISTRY.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Fase 13 — accede al CliRegistry activo. Devuelve None si no hay.
+pub fn with_active_cli_registry<F, R>(f: F) -> R
+where
+    F: FnOnce(Option<&std::sync::Arc<crate::cli::CliRegistry>>) -> R,
+{
+    CLI_REGISTRY.with(|cell| f(cell.borrow().as_ref()))
 }
 
 fn install_loader(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) {
@@ -3141,6 +3231,16 @@ fn bind_tuple_pattern(pat: &Pattern, v: &Value, env: EnvRef) {
 // ---------------------------------------------------------------------------
 // eval_expr — evalúa una expresión a un Value.
 // ---------------------------------------------------------------------------
+
+/// Fase 13 (v0.11.0) — wrapper público para evaluar una expresión
+/// individual desde fuera del módulo. Usado por `dispatch_cli` para
+/// resolver los defaults de los params de un `@command` handler
+/// cuando la flag no se pasó en argv.
+pub async fn eval_expr_for_default(expr: &crate::ast::Expr, env: EnvRef) -> Result<Value, String> {
+    eval_expr(expr, env)
+        .await
+        .map_err(|sig| format!("{:?}", sig))
+}
 
 #[async_recursion]
 async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {

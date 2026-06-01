@@ -11,13 +11,169 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.10.32. Tier A (9/10) + B + C + D
-cerrados. Próxima dirección: **Tier E** (visión a futuro, cada ítem
-mini-fase dedicada con decisión de diseño previa — Decimal/Numeric
-precision arbitraria, streaming cursors, COPY FROM/TO, LISTEN/NOTIFY
-tipado, window functions, CTE/WITH, UNION/INTERSECT/EXCEPT). A.10
-(`FITZ_DB_*` mid-run reload) sigue pendiente — refinable cuando
-aparezca presión real (hoy `LazyLock` cubre 99% del caso).
+Sin trabajo en curso al cierre de v0.11.0. Fase 13 (CLI builder
+nativo) cerrada entera. Próxima dirección: **Fase 12** (Deployment
+ciudadano primera clase — `fitz dockerfile` autogenerado, `fitz
+deploy`, observability nativa con `@trace`/`@metric`, secrets
+management, feature flags), o **Tier E del ORM** (visión a futuro:
+Decimal/Numeric, streaming cursors, COPY FROM/TO, LISTEN/NOTIFY
+tipado, window functions, CTE/WITH).
+
+## [v0.11.0] — 2026-06-01 — Fase 13: CLI builder nativo (`@command`)
+
+**Bump menor → 0.11.0** porque Fase 13 cierra entera una nueva
+ciudadana primera del lenguaje. Funcionalmente backward-compatible
+con v0.10.32 (los programas existentes siguen funcionando), pero
+suma una capacidad core del lenguaje que justifica el salto de
+minor.
+
+**5 sub-pasos coordinados (~10h reales vs ~12h estimadas)**.
+`@command("name", desc="...")` sobre una `fn` la declara como comando
+CLI; el binario producido por `fitz build` parsea
+`std::env::args()` y dispatcha al comando matching, con **help
+auto-generado** y **parser de positional args + flags** con **zero
+deps externas**. Convención sin decorators en params: positional vs
+flag se infiere del `default = ...` del param.
+
+### Sintaxis canónica
+
+```fitz
+@command("greet", desc="Greet a person")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud { print("HELLO, {name}!") } else { print("hello, {name}") }
+        n = n - 1
+    }
+    return 0
+}
+```
+
+```bash
+$ ./mybin greet Ada --loud --count 3
+HELLO, Ada!
+HELLO, Ada!
+HELLO, Ada!
+
+$ ./mybin --help
+USAGE:
+    mybin <command> [ARGS] [OPTIONS]
+COMMANDS:
+    greet    Greet a person
+...
+```
+
+### Sub-pasos
+
+- **13.1 — Parser/AST/Checker**: nueva fn `check_command_decorator`
+  en `src/types.rs` valida shape (arg Str literal con nombre del
+  comando, opcional kwarg `desc=`, return type `Int`, params
+  CLI-marshallables `Str/Int/Float/Bool/Str?`, sin varargs, sin
+  conflictos con decorators de servidor/job/test/middleware). Bool
+  con `default = true` rechazado en MVP (requiere convención
+  `--no-flag` para negar — documentado).
+- **13.2 — Evaluator (intérprete)**: nuevo módulo `src/cli.rs` con
+  `CliRegistry` (paralelo a `CronRegistry`), `CliCommand`,
+  `parse_argv()` con multi-command detection + dispatch. Helper
+  `with_active_cli_registry`/`install_cli_registry` thread-local
+  en `src/evaluator.rs`. `process_decorator` branch para
+  `@command` que pushea al registry activo. `src/main.rs::run_file`
+  instala el registry pre-eval y, post-eval, dispatcha CLI si
+  `count > 0` (skip HTTP/cron en ese caso).
+- **13.3 — Help autogeneration**: funciones puras
+  `render_global_help`/`render_command_help`/`usage_line`/
+  `render_args_section`/`render_options_section` en `src/cli.rs`.
+  El help se construye desde los specs registrados (no requiere
+  doc-strings). Padding consistente con clap.
+- **13.4 — Codegen (`fitz build`)**: `gen_cli_main` emite `fn main()`
+  (o `#[tokio::main]` si algún @command es async) con dispatch
+  estático: detecta modo single vs multi, parsea `--help` global,
+  matchea el subcomando contra arms generados. Per-command:
+  `__fitz_cli_run_<cmd>` parsea positional + flags con
+  type-coerciones (`parse::<i64>`/`parse::<f64>` + error claro
+  con exit 2). Help string emitida como const en build-time.
+  **Paridad bit-a-bit `fitz run` ↔ `fitz build`** validada con E2E
+  (`fase_13_cli_paridad_run_vs_build`).
+- **13.5 — Tests + ejemplo + docs**: 10 E2E nuevos en
+  `tests/compile_e2e.rs` (single command positional, multi-command
+  dispatch, Bool + Int flags, help global, help per-command,
+  comando desconocido exit 2, missing positional exit 2, bad Int
+  flag exit 2, exit code from handler, paridad run↔build). Ejemplo
+  runnable `examples/guide/33-cli.fitz` con 3 commands (greet/add/
+  status) sumado al smoke `GUIDE_EXAMPLES_COMPILE`.
+
+### Decisiones técnicas
+
+- **Convención sin `@arg`/`@flag` decorators**: la presencia de
+  `default = ...` en el param determina si es positional o flag.
+  Reduce verbosidad vs Click (Python) que exige `@click.argument`
+  por cada param. Trade-off: NO se puede tener positional
+  optional args (los con default son flags). Para casos límite, usá
+  `Str?` (nullable) que mantiene shape pero requiere `match` en el
+  body.
+- **Exit codes POSIX**: `0` éxito, `1+` retornado por el handler,
+  `2` errores de parsing del CLI. Convención estándar Linux.
+- **Detección de modo automática**: el binario tiene un único
+  "modo" determinado por los decorators presentes (`@get*` → HTTP,
+  `@cron` → cron-only, `@command` → CLI, ninguno → script plain).
+  Mutuamente excluyentes — el checker rechaza combinaciones con
+  error claro.
+- **Help string emitida en build-time como const**: en lugar de
+  construirla en runtime, el codegen emite las strings inline para
+  cada comando. Trade-off: binario más grande (~50 bytes por
+  comando) pero startup más rápido y sin allocs en el path normal.
+- **Boolean flag presence semantics**: `--loud` sin valor activa
+  el flag a `true` (idiomático CLI). `--loud=false` también funciona
+  para override explícito. Sin valor con flag no-Bool → error claro.
+- **`Bool = true` rechazado en MVP**: requiere convención
+  `--no-<flag>` para negar (paralelo a Cargo `--no-default-features`).
+  Implementable, deuda menor — el user invierte la lógica por ahora.
+
+### Tests
+
+- **10 E2E** en `tests/compile_e2e.rs::fase_13_cli_*` cubriendo
+  todo el path codegen + paridad bit-a-bit con el intérprete.
+- Smoke `GUIDE_EXAMPLES_COMPILE` verde (292 ejemplos + el nuevo
+  `33-cli.fitz` = 293).
+- Clippy `--all-targets -D warnings` + `--features lsp` limpios.
+  fmt `--all --check` limpio.
+
+### Boilerplate `cli-tool` actualizado
+
+`boilerplates/cli-tool/` ahora usa `@command` idiomático: 3
+comandos (`report`/`count`/`regions`) con help auto-generado,
+positional args y flags. README actualizado con demo completa de
+la nueva sintaxis. El binario compilado sigue siendo ~5 MB Linux
+standalone, imagen Docker `distroless/cc` ~22 MB.
+
+### Otros cambios incluidos en este release
+
+- **Fix CI LSP**: `make_hover_with_range` cambió signature en v0.10.32
+  (Tier D.2 — sumó `program: &Program`) pero el test unit
+  `lspy_make_hover_with_range_incluye_range_del_ident` no se
+  actualizó. Compilaba con `cargo test --lib` (sin `--features lsp`)
+  pero rompía en el job CI `cargo test --features lsp --lib lsp::`.
+  Fixed con `&Vec::new()` (Program vacío — el test valida solo el
+  Range, no el augment).
+
+### Total al cierre v0.11.0
+
+**2739 unit + 293 smoke + 3 openapi + 81 cli_e2e + 334 compile_e2e
++ 61 db_real_postgres** (+10 nuevos Fase 13 en compile_e2e).
+Acumulado de los `src/cli.rs` unit tests: ~15 directos.
+
+### Por qué Fase 13 importa
+
+Hace de Fitz **el único lenguaje moderno** que combina HTTP nativo
++ WebSockets tipados + ORM + jobs + **CLI builder nativo** en el
+core del compilador, con paridad bit-a-bit intérprete↔binario, **zero
+deps externas** para todas estas features intrínsecas. Cualquier
+otro stack requiere `clap`/`argparse`/`click`/`commander` separado.
+
+### Próximo norte
+
+**Fase 12** (Deployment ciudadano primera clase) o resto del **Tier E
+del ORM**. Detalle de cada uno en `docs/roadmap.md`.
 
 ## [v0.10.32] — 2026-06-01 — Tier C + D del cierre ORM/DB (operadores SQL + DX/LSP residual)
 

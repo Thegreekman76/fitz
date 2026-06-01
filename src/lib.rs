@@ -22,6 +22,7 @@
 
 pub mod ast; // Fase 2.2 — definición del AST
 pub mod asyncapi; // Fase 9.w.2.d — generador AsyncAPI 3.0 (WebSockets)
+pub mod cli; // Fase 13 (v0.11.0) — CLI builder nativo (`@command`)
 pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario
 pub mod cron_jobs; // Fase 9.w.3 — registry + scheduler de jobs `@cron`
 pub mod db; // Fase 10.1 — driver Postgres puro (wire protocol + SCRAM-SHA-256 + tipos OID)

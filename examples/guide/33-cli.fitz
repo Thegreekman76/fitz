@@ -1,0 +1,45 @@
+// Cap 33 — CLI builder nativo (Fase 13, v0.11.0).
+//
+// `@command("name", desc="...")` sobre una `fn` la declara como
+// comando CLI. El binario producido por `fitz build` parsea
+// `std::env::args()` y dispatcha al comando correspondiente. El
+// intérprete `fitz run` también soporta el dispatch (con `--` para
+// separar args de fitz de los del programa).
+//
+// Convención de params (sin decorators en `Param`):
+// - Param **sin default** → positional arg requerido.
+// - Param **con default** → flag opcional (`--name <value>` o
+//   `--name` si es Bool sin valor).
+// - Bool con `default = false` → flag bool sin valor.
+// - Otros tipos con default → flag con valor.
+//
+// El return type debe ser `Int` (exit code; `0` éxito).
+
+/// `mybin greet <name> [--loud] [--count <N>]`
+@command("greet", desc="Greet a person")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud {
+            print("HELLO, {name}!")
+        } else {
+            print("hello, {name}")
+        }
+        n = n - 1
+    }
+    return 0
+}
+
+/// `mybin add <a> <b>` — suma dos enteros.
+@command("add", desc="Sum two integers")
+fn add(a: Int, b: Int) -> Int {
+    print("{a} + {b} = {a + b}")
+    return 0
+}
+
+/// `mybin status` — sin args ni flags. Útil para health checks.
+@command("status", desc="Show status")
+fn status() -> Int {
+    print("status: OK")
+    return 0
+}

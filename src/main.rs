@@ -40,6 +40,15 @@ enum Commands {
         /// errores del checker abortan la ejecución (modo strict).
         #[arg(long)]
         no_typecheck: bool,
+        /// Fase 13 (v0.11.0) — Args adicionales que se pasan al
+        /// programa Fitz cuando tiene `@command` decorators. El
+        /// CliRegistry se popula al evaluar; si tiene >=1 comando,
+        /// estos args se parsean como argv del CLI (subcomando +
+        /// positional + flags). Ejemplo:
+        ///   `fitz run greeter.fitz -- greet Ada --loud`
+        /// El `--` separa los args de fitz de los del programa.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Compilar a binario (Fase 5b). Sin archivo, lee el manifest
     /// (Fase 9.y.2) y emite el binario a `<manifest>/target/release/`
@@ -470,11 +479,15 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file, no_typecheck } => {
+        Commands::Run {
+            file,
+            no_typecheck,
+            args,
+        } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
             let dep_registry = dep_registry_from(&resolved);
-            run_file(&resolved.entry, no_typecheck, dep_registry);
+            run_file(&resolved.entry, no_typecheck, dep_registry, args);
         }
         Commands::Build {
             file,
@@ -2149,7 +2162,104 @@ fn program_uses_from_python_import(program: &fitz::ast::Program) -> bool {
     })
 }
 
-fn run_file(path: &PathBuf, no_typecheck: bool, dep_registry: manifest::DepRegistry) {
+/// Fase 13 (v0.11.0) — Dispatcha args CLI al comando matcheante.
+/// Devuelve el exit code para que el caller lo propague vía
+/// `std::process::exit`. Imprime help / errors a stderr según
+/// corresponda.
+///
+/// Política de exit codes:
+/// - `0` éxito (handler retornó 0 o pidió --help).
+/// - `1`+ retornado por el handler como exit code.
+/// - `2` error de parsing del CLI (comando desconocido, arg faltante,
+///   tipo inválido). Convención estándar de POSIX.
+fn dispatch_cli(registry: &fitz::cli::CliRegistry, argv: &[String]) -> i32 {
+    let bin_name = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "fitz".to_string());
+    let cmds_snapshot = registry.snapshot();
+    let multi = cmds_snapshot.len() >= 2;
+    match fitz::cli::parse_argv(argv, registry) {
+        fitz::cli::ParseResult::GlobalHelp => {
+            println!(
+                "{}",
+                fitz::cli::render_global_help(&bin_name, &cmds_snapshot)
+            );
+            0
+        }
+        fitz::cli::ParseResult::CommandHelp(cmd) => {
+            println!("{}", fitz::cli::render_command_help(&bin_name, &cmd, multi));
+            0
+        }
+        fitz::cli::ParseResult::Error(msg, code) => {
+            eprintln!("error: {}", msg);
+            code
+        }
+        fitz::cli::ParseResult::Invoke(inv) => {
+            // Invocar el handler. El runtime tokio del evaluator
+            // construye una runtime current_thread.
+            let rt = evaluator::build_runtime();
+            let value_result = rt.block_on(async move {
+                // Resolver defaults para args == Value::Null (sentinel
+                // del parser cuando una flag no se pasó). El default
+                // del Param se evalúa al call site del handler.
+                let cmd = inv.cmd;
+                let mut final_args: Vec<fitz::value::Value> = Vec::with_capacity(cmd.params.len());
+                for (i, p) in cmd.params.iter().enumerate() {
+                    let v = &inv.args[i];
+                    let is_default_sentinel = matches!(v, fitz::value::Value::Null);
+                    match (is_default_sentinel, p.default.as_ref()) {
+                        (true, Some(de)) => {
+                            // Eval del default expression con un env
+                            // nuevo — los defaults son literales simples
+                            // por convención.
+                            let env = fitz::env::Environment::new();
+                            match evaluator::eval_expr_for_default(de, env).await {
+                                Ok(dv) => final_args.push(dv),
+                                Err(e) => {
+                                    return Err(format!(
+                                        "fallo al resolver default de `--{}`: {}",
+                                        p.name, e
+                                    ));
+                                }
+                            }
+                        }
+                        _ => final_args.push(v.clone()),
+                    }
+                }
+                evaluator::invoke_value(
+                    cmd.handler.clone(),
+                    final_args,
+                    &format!("@command(\"{}\")", cmd.name),
+                    fitz::ast::Span::ZERO,
+                )
+                .await
+                .map_err(|signal| format!("{:?}", signal))
+            });
+            match value_result {
+                Ok(fitz::value::Value::Int(n)) => n as i32,
+                Ok(other) => {
+                    eprintln!(
+                        "error: el comando devolvió `{}` en lugar de Int (exit code)",
+                        other.type_name()
+                    );
+                    1
+                }
+                Err(e) => {
+                    eprintln!("error: {}", e);
+                    1
+                }
+            }
+        }
+    }
+}
+
+fn run_file(
+    path: &PathBuf,
+    no_typecheck: bool,
+    dep_registry: manifest::DepRegistry,
+    cli_args: Vec<String>,
+) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
         std::process::exit(1);
@@ -2224,14 +2334,30 @@ fn run_file(path: &PathBuf, no_typecheck: bool, dep_registry: manifest::DepRegis
     // Fase 7.2: el server necesita el AST original también para
     // precomputar el schema OpenAPI (`components.schemas` recorre los
     // `Stmt::TypeDef`). Clonamos antes de moverlo al evaluator.
+    //
+    // Fase 13 (v0.11.0) — Instalamos un CliRegistry vacío antes del
+    // eval. Si el programa tiene `@command`s, los registrar acá.
+    // Post-eval, si count > 0, dispatchamos CLI desde `cli_args`.
+    let cli_registry = std::sync::Arc::new(fitz::cli::CliRegistry::new());
+    evaluator::install_cli_registry(std::sync::Arc::clone(&cli_registry));
     let program_for_server = program.clone();
     let (eval_result, registry) = http::with_active_registry(|| {
         evaluator::eval_with_base_and_deps_sync(program, base_dir, dep_registry)
     });
+    evaluator::uninstall_cli_registry();
 
     if let Err(e) = eval_result {
         eprintln!("{}", e);
         std::process::exit(1);
+    }
+
+    // v0.11.0 — Modo CLI tiene prioridad sobre HTTP server / cron.
+    // Si el programa declaró `@command`s, no servimos HTTP — somos
+    // un CLI tool. (En el futuro podríamos soportar HTTP + CLI
+    // coexistiendo via subcomandos `serve` / `cmd1`, pero MVP separa.)
+    if cli_registry.count() > 0 {
+        let exit_code = dispatch_cli(&cli_registry, &cli_args);
+        std::process::exit(exit_code);
     }
 
     if !registry.is_empty() {

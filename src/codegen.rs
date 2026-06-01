@@ -2170,6 +2170,70 @@ fn state_var_static_name(var_name: &str) -> String {
 ///
 /// Ejemplos: `02-hola` → `fitz_02-hola`, `mi.app` → `mi_app`,
 /// `simple` → `simple`.
+/// Fase 13 (v0.11.0) — extrae el nombre del comando desde un decorator
+/// `@command("name", desc="...")` aplicado a una FnDef. Devuelve None
+/// si el decorator no es @command (caller filtra antes).
+fn cli_command_name(decorators: &[Decorator]) -> Option<String> {
+    decorators
+        .iter()
+        .find(|d| d.name == "command")
+        .and_then(|d| {
+            d.args.first().and_then(|a| match a {
+                Expr::Str(s, _) => Some(s.clone()),
+                _ => None,
+            })
+        })
+}
+
+/// v0.11.0 — extrae la descripción opcional desde `desc="..."` kwarg
+/// del decorator `@command`. None si no se pasó.
+fn cli_command_desc(decorators: &[Decorator]) -> Option<String> {
+    decorators
+        .iter()
+        .find(|d| d.name == "command")
+        .and_then(|d| {
+            d.kwargs
+                .iter()
+                .find(|(k, _)| k == "desc")
+                .and_then(|(_, v)| match v {
+                    Expr::Str(s, _) => Some(s.clone()),
+                    _ => None,
+                })
+        })
+}
+
+/// v0.11.0 — sanitiza el nombre del comando para uso como identificador
+/// Rust (en `__fitz_cli_run_<name>` y similares). Reemplaza non-alnum
+/// con `_`; en práctica los nombres de comando son convencionales
+/// (kebab-case o snake_case), así que esto es defensivo.
+fn sanitize_cli_ident(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+/// v0.11.0 — para nombres de fn Fitz que se invocan directo en el
+/// Rust generado. Hoy el codegen no transforma identifiers (las fns
+/// Fitz mapean 1:1 a fns Rust). Si en algún momento Fitz acepta
+/// chars no-ASCII, este wrapper centraliza la transformación.
+fn sanitize_ident(raw: &str) -> String {
+    raw.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 fn sanitize_crate_name(raw: &str) -> String {
     let mut s: String = raw
         .chars()
@@ -4228,6 +4292,13 @@ struct PartitionedProgram<'a> {
     /// emitir el registro del job (parsing del schedule + `tokio::spawn`
     /// del loop).
     cron_fns: Vec<&'a Stmt>,
+    /// Fase 13 (v0.11.0) — handlers `@command("name", desc=...)`. La
+    /// fn también aparece en `top_fns` (se emite como `fn`/`async fn`
+    /// invocable); `cli_fns` separa la lista para que el codegen del
+    /// main pueda emitir el dispatch desde `std::env::args()`. La
+    /// presencia de CUALQUIER `@command` cambia el modo del binario
+    /// generado a "CLI tool" (en vez de HTTP server / cron-only).
+    cli_fns: Vec<&'a Stmt>,
     top_fns: Vec<&'a Stmt>,
     main_stmts: Vec<&'a Stmt>,
     server_config: Option<ServerConfigArgs>,
@@ -4249,6 +4320,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
     let mut http_fns: Vec<&Stmt> = Vec::new();
     let mut ws_fns: Vec<&Stmt> = Vec::new();
     let mut cron_fns: Vec<&Stmt> = Vec::new();
+    let mut cli_fns: Vec<&Stmt> = Vec::new();
     let mut top_fns: Vec<&Stmt> = Vec::new();
     let mut main_stmts: Vec<&Stmt> = Vec::new();
     let mut server_config: Option<ServerConfigArgs> = None;
@@ -4275,6 +4347,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                     let mut http_decos = false;
                     let mut ws_decos = false;
                     let mut cron_decos = false;
+                    let mut cli_decos = false;
                     for d in decorators {
                         // 7.5: `@server` acepta kwargs (delegado a
                         // `parse_server_decorator`).
@@ -4283,7 +4356,9 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                         // wrapper del codegen los procesa. Los
                         // decoradores HTTP de ruta `@get/@post/@put/@delete`
                         // siguen sin aceptar kwargs.
-                        if !matches!(d.name.as_str(), "server" | "header") {
+                        // Fase 13 (v0.11.0): `@command(name, desc="...")`
+                        // también acepta el kwarg `desc`.
+                        if !matches!(d.name.as_str(), "server" | "header" | "command") {
                             if let Some((key, _)) = d.kwargs.first() {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
@@ -4346,6 +4421,14 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // (9.w.3.a) ya validó shape + conflictos.
                             "cron" => cron_decos = true,
                             "background" => {}
+                            // Fase 13 (v0.11.0) — `@command("name", desc=)`.
+                            // La fn va a `cli_fns` (para emitir dispatch
+                            // desde argv) Y a `top_fns` (para emitir la fn
+                            // invocable). Acepta el kwarg `desc=` — el
+                            // chequeo general del bloque de kwargs del top
+                            // matcheaba todos los decoradores no whitelisted;
+                            // sumamos `command` a la lista que acepta kwargs.
+                            "command" => cli_decos = true,
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
@@ -4392,6 +4475,14 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                         // `cron_fns` para el registro del job.
                         cron_fns.push(s);
                         top_fns.push(s);
+                    } else if cli_decos {
+                        // Fase 13 (v0.11.0) — `@command("name", desc=)`.
+                        // Va a `cli_fns` para que el codegen del main
+                        // emita el dispatch desde argv. La fn se emite
+                        // también como `top_fns` (handler invocable
+                        // por el dispatch generado).
+                        cli_fns.push(s);
+                        top_fns.push(s);
                     } else if http_decos {
                         http_fns.push(s);
                     } else if name != "main" {
@@ -4411,6 +4502,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
         http_fns,
         ws_fns,
         cron_fns,
+        cli_fns,
         top_fns,
         main_stmts,
         server_config,
@@ -4635,6 +4727,14 @@ fn emit_main_rs_body(
             program,
             loader,
         )?;
+    } else if !p.cli_fns.is_empty() {
+        // Fase 13 (v0.11.0) — modo CLI tool: emite `fn main()` con
+        // parser de argv + dispatch a comandos `@command`. Tiene
+        // prioridad sobre cron-only y CLI plain. NO se evalúan
+        // `main_stmts` adicionales — si el user pone código top-level
+        // y `@command`s, los top-level se ignoran silenciosamente
+        // (paralelo a HTTP que ignora `main_stmts` también).
+        ctx.gen_cli_main(&p.cli_fns)?;
     } else {
         // Modo CLI: cuerpo de `fn main()` con el resto de stmts.
         ctx.gen_main(&p.main_stmts)?;
@@ -7980,6 +8080,481 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.pop_scope();
         self.indent -= 1;
         self.emit("}\n");
+        Ok(())
+    }
+
+    /// Fase 13 (v0.11.0) — emite el `fn main()` para programas con
+    /// `@command` decorators. Modo CLI tool: parser de argv +
+    /// dispatch por nombre de comando + per-command parsing de
+    /// positional args y flags. Paridad bit-a-bit con el dispatch
+    /// del intérprete (`src/cli.rs::parse_argv`).
+    ///
+    /// Estructura del output:
+    /// - `fn main()` (o `#[tokio::main] async fn main()` si algún
+    ///   `@command` es async) — entry point que detecta modo
+    ///   single vs multi, parsea `--help`, hace match del comando.
+    /// - `fn __fitz_cli_run_<cmd>(rest, bin, multi) -> i64` (o
+    ///   `async fn`) — dispatcher per-command que parsea
+    ///   positional + flags, coerciona tipos, invoca el handler.
+    /// - `fn __fitz_cli_<cmd>_help(bin, multi) -> String` — help
+    ///   string del comando, construida en build-time.
+    /// - `fn __fitz_cli_global_help(bin) -> String` — help global
+    ///   con lista de comandos.
+    fn gen_cli_main(&mut self, cli_fns: &[&Stmt]) -> Result<(), FitzError> {
+        // ¿Alguno es async?
+        let any_async = cli_fns
+            .iter()
+            .any(|s| matches!(s, Stmt::FnDef { is_async: true, .. }));
+        let multi = cli_fns.len() >= 2;
+
+        // 1) Help global.
+        self.emit("/// v0.11.0 — Help global del CLI (modo multi-comando).\n");
+        self.emit("fn __fitz_cli_global_help(bin: &str) -> String {\n");
+        self.emit("    let mut s = format!(\"USAGE:\\n    {} <command> [ARGS] [OPTIONS]\\n\\nCOMMANDS:\\n\", bin);\n");
+        let mut max_width = 0usize;
+        for stmt in cli_fns {
+            if let Stmt::FnDef { decorators, .. } = stmt {
+                if let Some(name) = cli_command_name(decorators) {
+                    if name.len() > max_width {
+                        max_width = name.len();
+                    }
+                }
+            }
+        }
+        for stmt in cli_fns {
+            if let Stmt::FnDef { decorators, .. } = stmt {
+                let cmd_name = match cli_command_name(decorators) {
+                    Some(n) => n,
+                    None => continue,
+                };
+                let desc = cli_command_desc(decorators).unwrap_or_default();
+                let padded = format!("    {:<width$}    {}", cmd_name, desc, width = max_width);
+                self.emit(&format!(
+                    "    s.push_str(&format!(\"{}\\n\"));\n",
+                    padded.replace('\\', "\\\\").replace('"', "\\\"")
+                ));
+            }
+        }
+        self.emit("    s.push_str(&format!(\"\\nRun `{} <command> --help` for more info on a specific command.\\n\", bin));\n");
+        self.emit("    s\n}\n\n");
+
+        // 2) Help + dispatch per-command.
+        for stmt in cli_fns {
+            self.gen_cli_command_helpers(stmt, multi)?;
+        }
+
+        // 3) `fn main()` con dispatch.
+        if any_async || self.uses_async || self.uses_jobs {
+            self.emit("#[tokio::main(flavor = \"current_thread\")]\n");
+            self.emit("async fn main() {\n");
+        } else {
+            self.emit("fn main() {\n");
+        }
+        self.emit("    let raw_args: Vec<String> = std::env::args().collect();\n");
+        self.emit("    let bin_name = raw_args.first()\n");
+        self.emit("        .map(|p| std::path::Path::new(p)\n");
+        self.emit("            .file_stem()\n");
+        self.emit("            .map(|s| s.to_string_lossy().into_owned())\n");
+        self.emit("            .unwrap_or_else(|| String::from(\"fitz-cli\")))\n");
+        self.emit("        .unwrap_or_else(|| String::from(\"fitz-cli\"));\n");
+        self.emit("    let argv: Vec<String> = raw_args.into_iter().skip(1).collect();\n");
+        if multi {
+            // Modo multi: detección de help global + dispatch por subcomando.
+            self.emit("    if argv.is_empty() || argv[0] == \"--help\" || argv[0] == \"-h\" {\n");
+            self.emit("        print!(\"{}\", __fitz_cli_global_help(&bin_name));\n");
+            self.emit("        std::process::exit(0);\n");
+            self.emit("    }\n");
+            self.emit("    let cmd_name = argv[0].clone();\n");
+            self.emit("    let rest: Vec<String> = argv.into_iter().skip(1).collect();\n");
+            self.emit("    let exit_code: i64 = match cmd_name.as_str() {\n");
+            for stmt in cli_fns {
+                if let Stmt::FnDef {
+                    decorators,
+                    is_async,
+                    ..
+                } = stmt
+                {
+                    if let Some(cmd_name) = cli_command_name(decorators) {
+                        let invoke = if *is_async {
+                            format!(
+                                "__fitz_cli_run_{n}(&rest, &bin_name).await",
+                                n = sanitize_cli_ident(&cmd_name)
+                            )
+                        } else {
+                            format!(
+                                "__fitz_cli_run_{n}(&rest, &bin_name)",
+                                n = sanitize_cli_ident(&cmd_name)
+                            )
+                        };
+                        self.emit(&format!(
+                            "        \"{}\" => {},\n",
+                            cmd_name.replace('"', "\\\""),
+                            invoke
+                        ));
+                    }
+                }
+            }
+            self.emit("        other => {\n");
+            self.emit("            eprintln!(\"error: comando desconocido: `{}`\", other);\n");
+            self.emit("            eprintln!(\"\");\n");
+            self.emit("            eprintln!(\"{}\", __fitz_cli_global_help(&bin_name));\n");
+            self.emit("            2i64\n");
+            self.emit("        }\n");
+            self.emit("    };\n");
+            self.emit("    std::process::exit(exit_code as i32);\n");
+        } else {
+            // Modo single: argv son directamente los args del comando único.
+            let stmt = cli_fns[0];
+            if let Stmt::FnDef {
+                decorators,
+                is_async,
+                ..
+            } = stmt
+            {
+                if let Some(cmd_name) = cli_command_name(decorators) {
+                    let suffix = if *is_async { ".await" } else { "" };
+                    self.emit(&format!(
+                        "    let exit_code: i64 = __fitz_cli_run_{n}(&argv, &bin_name){a};\n",
+                        n = sanitize_cli_ident(&cmd_name),
+                        a = suffix
+                    ));
+                    self.emit("    std::process::exit(exit_code as i32);\n");
+                }
+            }
+        }
+        self.emit("}\n\n");
+        Ok(())
+    }
+
+    /// v0.11.0 — emite los helpers `__fitz_cli_run_<cmd>` y
+    /// `__fitz_cli_<cmd>_help` para un único @command.
+    fn gen_cli_command_helpers(&mut self, stmt: &Stmt, multi: bool) -> Result<(), FitzError> {
+        let (cmd_name, fn_name, params, is_async, decorators) = match stmt {
+            Stmt::FnDef {
+                name,
+                params,
+                decorators,
+                is_async,
+                ..
+            } => {
+                let cn = match cli_command_name(decorators) {
+                    Some(n) => n,
+                    None => return Ok(()),
+                };
+                (cn, name.clone(), params, *is_async, decorators.as_slice())
+            }
+            _ => return Ok(()),
+        };
+        let ident = sanitize_cli_ident(&cmd_name);
+        let desc = cli_command_desc(decorators);
+
+        // --- help string del comando ---
+        self.emit(&format!(
+            "fn __fitz_cli_{i}_help(bin: &str, _multi: bool) -> String {{\n",
+            i = ident
+        ));
+        self.emit("    let mut s = String::new();\n");
+        if let Some(d) = &desc {
+            self.emit(&format!(
+                "    s.push_str(\"{}\\n\\n\");\n",
+                d.replace('\\', "\\\\").replace('"', "\\\"")
+            ));
+        }
+        // USAGE
+        self.emit("    s.push_str(\"USAGE:\\n    \");\n");
+        self.emit("    s.push_str(bin);\n");
+        if multi {
+            self.emit(&format!(
+                "    s.push_str(\" {}\");\n",
+                cmd_name.replace('"', "\\\"")
+            ));
+        }
+        let mut has_flags = false;
+        for p in params {
+            if p.default.is_some() {
+                has_flags = true;
+                continue;
+            }
+            self.emit(&format!(
+                "    s.push_str(\" <{}>\");\n",
+                p.name.replace('"', "\\\"")
+            ));
+        }
+        if has_flags {
+            self.emit("    s.push_str(\" [OPTIONS]\");\n");
+        }
+        self.emit("    s.push('\\n');\n");
+        // ARGS section
+        let positionals: Vec<&crate::ast::Param> =
+            params.iter().filter(|p| p.default.is_none()).collect();
+        if !positionals.is_empty() {
+            self.emit("    s.push_str(\"\\nARGS:\\n\");\n");
+            for p in &positionals {
+                let ty = p
+                    .type_
+                    .as_ref()
+                    .map(|t| t.display_name())
+                    .unwrap_or_else(|| "Any".into());
+                self.emit(&format!(
+                    "    s.push_str(\"    <{}>  ({})\\n\");\n",
+                    p.name.replace('"', "\\\""),
+                    ty.replace('"', "\\\"")
+                ));
+            }
+        }
+        // OPTIONS section
+        self.emit("    s.push_str(\"\\nOPTIONS:\\n\");\n");
+        for p in params {
+            if p.default.is_none() {
+                continue;
+            }
+            let ty = p
+                .type_
+                .as_ref()
+                .map(|t| t.display_name())
+                .unwrap_or_else(|| "Any".into());
+            if ty == "Bool" {
+                self.emit(&format!(
+                    "    s.push_str(\"    --{}\\n\");\n",
+                    p.name.replace('"', "\\\"")
+                ));
+            } else {
+                self.emit(&format!(
+                    "    s.push_str(\"    --{} <{}>\\n\");\n",
+                    p.name.replace('"', "\\\""),
+                    ty.to_uppercase().replace('"', "\\\"")
+                ));
+            }
+        }
+        self.emit("    s.push_str(\"    -h, --help\\n\");\n");
+        self.emit("    s\n}\n\n");
+
+        // --- dispatcher run fn ---
+        let async_marker = if is_async { "async " } else { "" };
+        self.emit(&format!(
+            "{a}fn __fitz_cli_run_{i}(rest: &[String], bin_name: &str) -> i64 {{\n",
+            a = async_marker,
+            i = ident
+        ));
+        self.emit("    for a in rest {\n");
+        self.emit("        if a == \"--help\" || a == \"-h\" {\n");
+        self.emit(&format!(
+            "            print!(\"{{}}\", __fitz_cli_{i}_help(bin_name, true));\n",
+            i = ident
+        ));
+        self.emit("            return 0;\n");
+        self.emit("        }\n");
+        self.emit("    }\n");
+
+        // Declare slots for each param.
+        for p in params {
+            let ty = p
+                .type_
+                .as_ref()
+                .map(|t| t.display_name())
+                .unwrap_or_else(|| "Any".into());
+            let rust_ty = match ty.as_str() {
+                "Str" => "String",
+                "Int" => "i64",
+                "Float" => "f64",
+                "Bool" => "bool",
+                _ => "String",
+            };
+            if p.default.is_none() {
+                // Positional — Option<T> hasta que llegue el arg.
+                self.emit(&format!(
+                    "    let mut __cli_pos_{}: Option<{}> = None;\n",
+                    sanitize_cli_ident(&p.name),
+                    rust_ty
+                ));
+            } else {
+                // Flag — inicializado al default value.
+                let default_lit = match (&ty[..], &p.default) {
+                    ("Bool", Some(Expr::Bool(b, _))) => format!("{}", b),
+                    ("Int", Some(Expr::Int(n, _))) => format!("{}i64", n),
+                    ("Float", Some(Expr::Float(x, _))) => format!("{}f64", x),
+                    ("Str", Some(Expr::Str(s, _))) => {
+                        format!(
+                            "String::from(\"{}\")",
+                            s.replace('\\', "\\\\").replace('"', "\\\"")
+                        )
+                    }
+                    _ => {
+                        // Fallback: emit el expr via gen_expr → evaluado al
+                        // call site del helper. Para MVP exigimos literal
+                        // simple en defaults de @command.
+                        return Err(self.err_at(
+                            stmt.span(),
+                            format!(
+                                "@command({}): el default de `{}` debe ser literal (Int/Float/Str/Bool) en MVP del codegen",
+                                cmd_name, p.name
+                            ),
+                        ));
+                    }
+                };
+                self.emit(&format!(
+                    "    let mut __cli_flag_{}: {} = {};\n",
+                    sanitize_cli_ident(&p.name),
+                    rust_ty,
+                    default_lit
+                ));
+            }
+        }
+        // Parser loop.
+        self.emit("    let mut i = 0;\n");
+        self.emit("    while i < rest.len() {\n");
+        self.emit("        let tok = &rest[i];\n");
+        self.emit("        if let Some(flag_part) = tok.strip_prefix(\"--\") {\n");
+        self.emit("            let (key, val_inline) = if let Some(eq) = flag_part.find('=') {\n");
+        self.emit("                (&flag_part[..eq], Some(flag_part[eq+1..].to_string()))\n");
+        self.emit("            } else {\n");
+        self.emit("                (flag_part, None)\n");
+        self.emit("            };\n");
+        self.emit("            match key {\n");
+        for p in params {
+            if p.default.is_none() {
+                continue;
+            }
+            let ty = p
+                .type_
+                .as_ref()
+                .map(|t| t.display_name())
+                .unwrap_or_else(|| "Any".into());
+            let slot = format!("__cli_flag_{}", sanitize_cli_ident(&p.name));
+            self.emit(&format!(
+                "                \"{}\" => {{\n",
+                p.name.replace('"', "\\\"")
+            ));
+            if ty == "Bool" {
+                // v0.11.0 — Bool flag sin valor explícito = `true`
+                // (presencia activa). `--loud` ≡ `--loud=true`.
+                // `--loud=false` también acepta el override explícito.
+                self.emit(&format!(
+                    "                    {} = match val_inline {{\n",
+                    slot
+                ));
+                self.emit("                        Some(v) => matches!(v.as_str(), \"true\" | \"1\" | \"yes\"),\n");
+                self.emit("                        None => true,\n");
+                self.emit("                    };\n");
+                self.emit("                    i += 1;\n");
+            } else {
+                self.emit("                    let v = match val_inline {\n");
+                self.emit("                        Some(v) => v,\n");
+                self.emit("                        None => {\n");
+                self.emit(&format!(
+                    "                            if i + 1 >= rest.len() {{ eprintln!(\"error: --{} espera valor\"); return 2i64; }}\n",
+                    p.name
+                ));
+                self.emit("                            i += 1;\n");
+                self.emit("                            rest[i].clone()\n");
+                self.emit("                        }\n");
+                self.emit("                    };\n");
+                match ty.as_str() {
+                    "Str" => {
+                        self.emit(&format!("                    {} = v;\n", slot));
+                    }
+                    "Int" => {
+                        self.emit(&format!(
+                            "                    match v.parse::<i64>() {{ Ok(n) => {} = n, Err(_) => {{ eprintln!(\"error: --{} espera Int, recibió `{{}}`\", v); return 2i64; }} }};\n",
+                            slot, p.name
+                        ));
+                    }
+                    "Float" => {
+                        self.emit(&format!(
+                            "                    match v.parse::<f64>() {{ Ok(n) => {} = n, Err(_) => {{ eprintln!(\"error: --{} espera Float, recibió `{{}}`\", v); return 2i64; }} }};\n",
+                            slot, p.name
+                        ));
+                    }
+                    _ => {
+                        self.emit(&format!("                    {} = v;\n", slot));
+                    }
+                }
+                self.emit("                    i += 1;\n");
+            }
+            self.emit("                }\n");
+        }
+        self.emit("                other => {\n");
+        self.emit("                    eprintln!(\"error: flag desconocida --{}\", other);\n");
+        self.emit(&format!(
+            "                    eprintln!(\"\");\n                    eprintln!(\"{{}}\", __fitz_cli_{i}_help(bin_name, true));\n",
+            i = ident
+        ));
+        self.emit("                    return 2i64;\n");
+        self.emit("                }\n");
+        self.emit("            }\n");
+        self.emit("        } else {\n");
+        // Positional — asignar en orden de declaración.
+        let mut assigned_idx = 0usize;
+        let total_positional = positionals.len();
+        if total_positional == 0 {
+            self.emit(
+                "            eprintln!(\"error: argumento posicional inesperado: `{}`\", tok);\n",
+            );
+            self.emit("            return 2i64;\n");
+        } else {
+            self.emit("            // Resolver positional según el primer slot libre.\n");
+            for p in &positionals {
+                let slot = format!("__cli_pos_{}", sanitize_cli_ident(&p.name));
+                let ty = p
+                    .type_
+                    .as_ref()
+                    .map(|t| t.display_name())
+                    .unwrap_or_else(|| "Any".into());
+                let cmp = if assigned_idx == 0 { "if" } else { "} else if" };
+                self.emit(&format!("            {} {}.is_none() {{\n", cmp, slot));
+                match ty.as_str() {
+                    "Str" => self.emit(&format!("                {} = Some(tok.clone());\n", slot)),
+                    "Int" => self.emit(&format!(
+                        "                match tok.parse::<i64>() {{ Ok(n) => {} = Some(n), Err(_) => {{ eprintln!(\"error: <{}> espera Int, recibió `{{}}`\", tok); return 2i64; }} }};\n",
+                        slot, p.name
+                    )),
+                    "Float" => self.emit(&format!(
+                        "                match tok.parse::<f64>() {{ Ok(n) => {} = Some(n), Err(_) => {{ eprintln!(\"error: <{}> espera Float, recibió `{{}}`\", tok); return 2i64; }} }};\n",
+                        slot, p.name
+                    )),
+                    "Bool" => self.emit(&format!(
+                        "                {} = Some(matches!(tok.as_str(), \"true\" | \"1\" | \"yes\"));\n",
+                        slot
+                    )),
+                    _ => self.emit(&format!("                {} = Some(tok.clone());\n", slot)),
+                }
+                assigned_idx += 1;
+            }
+            self.emit("            } else {\n");
+            self.emit("                eprintln!(\"error: argumento posicional inesperado: `{}`\", tok);\n");
+            self.emit("                return 2i64;\n");
+            self.emit("            }\n");
+        }
+        self.emit("            i += 1;\n");
+        self.emit("        }\n");
+        self.emit("    }\n");
+
+        // Unwrap positionals — error si faltan.
+        let mut handler_args: Vec<String> = Vec::with_capacity(params.len());
+        for p in params {
+            let ident = sanitize_cli_ident(&p.name);
+            if p.default.is_none() {
+                self.emit(&format!(
+                    "    let __cli_arg_{i} = match __cli_pos_{i} {{ Some(v) => v, None => {{ eprintln!(\"error: falta argumento <{n}>\"); return 2i64; }} }};\n",
+                    i = ident,
+                    n = p.name
+                ));
+                handler_args.push(format!("__cli_arg_{}", ident));
+            } else {
+                handler_args.push(format!("__cli_flag_{}", ident));
+            }
+        }
+
+        // Invoke handler.
+        let await_suffix = if is_async { ".await" } else { "" };
+        self.emit(&format!(
+            "    {fn}({args}){a}\n",
+            fn = sanitize_ident(&fn_name),
+            args = handler_args.join(", "),
+            a = await_suffix
+        ));
+        self.emit("}\n\n");
+
         Ok(())
     }
 

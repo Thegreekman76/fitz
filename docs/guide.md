@@ -11946,7 +11946,239 @@ cambiar.
 
 ---
 
-## 33. Plantillas y boilerplates
+## 33. CLI builder nativo (`@command`)
+
+**Hito de Fase 13 (v0.11.0)** — Fitz tiene un CLI builder nativo en
+el core del lenguaje. Una `fn` decorada con `@command("name", desc="...")`
+declara un comando CLI; el binario producido por `fitz build` parsea
+`std::env::args()` y dispatcha al comando correspondiente, con
+**help auto-generado** y **parser de positional args + flags** con
+**zero deps externas**.
+
+### Panorama vecino
+
+| Lenguaje / framework      | Stack típico                | Zero deps | Help auto | Tipado estático |
+|---------------------------|-----------------------------|:---------:|:---------:|:---------------:|
+| Python                    | `argparse` / `click` / `typer` | ❌ (stdlib o pip) | ✅ | ❌ |
+| Rust                      | `clap` (derive)             | ❌ (clap)  | ✅        | ✅              |
+| Go                        | `flag` stdlib + manual      | ✅ (stdlib)| ⚠️        | ⚠️              |
+| Node.js                   | `commander` / `yargs`       | ❌ (npm)   | ✅        | ❌              |
+| **Fitz** (v0.11.0)        | `@command` decorator        | ✅        | ✅        | ✅              |
+
+### Sintaxis básica
+
+```fitz
+/// Greet a person with optional volume + repetition.
+@command("greet", desc="Greet a person")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud {
+            print("HELLO, {name}!")
+        } else {
+            print("hello, {name}")
+        }
+        n = n - 1
+    }
+    return 0
+}
+```
+
+Después de `fitz build greeter.fitz`:
+
+```bash
+$ ./greeter Ada
+hello, Ada
+
+$ ./greeter Ada --loud
+HELLO, Ada!
+
+$ ./greeter Ada --loud --count 3
+HELLO, Ada!
+HELLO, Ada!
+HELLO, Ada!
+
+$ ./greeter --help
+USAGE:
+    greeter <name> [OPTIONS]
+
+ARGS:
+    <name>  (Str)
+
+OPTIONS:
+    --loud
+    --count <INT>
+    -h, --help
+```
+
+### Convención de params (sin decorators extras)
+
+Fitz NO requiere decorators sobre cada param. La convención es directa:
+
+| Patrón Fitz                  | Resultado CLI                                   |
+|------------------------------|-------------------------------------------------|
+| `name: Str` (sin default)    | Positional arg requerido `<name>`               |
+| `loud: Bool = false`         | Flag bool sin valor `--loud`                    |
+| `count: Int = 1`             | Flag con valor `--count <N>` (default `1`)     |
+| `host: Str = "localhost"`    | Flag con valor `--host <STR>`                  |
+| `rate: Float = 0.5`          | Flag con valor `--rate <FLOAT>`                |
+
+Reglas:
+- Params **sin default** → positional args, en orden de declaración.
+- Params **con default** → flags opcionales.
+- `Bool = false` → flag boolean; presencia = `true`.
+- `Bool = true` queda como deuda menor (requiere convención
+  `--no-flag` para negar). Por ahora invertí la lógica.
+- El return type debe ser `Int` — es el exit code.
+
+### Subcomandos (multi-command)
+
+Si declarás **2+ `@command`** en el mismo programa, son subcomandos:
+
+```fitz
+@command("greet", desc="Greet a person")
+fn greet(name: Str, loud: Bool = false) -> Int {
+    if loud { print("HELLO, {name}!") } else { print("hello, {name}") }
+    return 0
+}
+
+@command("status", desc="Show service status")
+fn status() -> Int {
+    print("status: OK")
+    return 0
+}
+```
+
+```bash
+$ ./mybin --help
+USAGE:
+    mybin <command> [ARGS] [OPTIONS]
+
+COMMANDS:
+    greet     Greet a person
+    status    Show service status
+
+Run `mybin <command> --help` for more info on a specific command.
+
+$ ./mybin greet Ada
+hello, Ada
+
+$ ./mybin status
+status: OK
+
+$ ./mybin greet --help
+Greet a person
+
+USAGE:
+    mybin greet <name> [OPTIONS]
+
+ARGS:
+    <name>  (Str)
+
+OPTIONS:
+    --loud
+    -h, --help
+```
+
+### Exit codes
+
+Convención POSIX:
+- `0` → éxito (handler retornó `0`).
+- `1`+ → error retornado explícitamente por el handler (`return 1`).
+- `2` → error de parsing del CLI (comando desconocido, arg faltante,
+  tipo inválido). El help se imprime al stderr.
+
+```fitz
+@command("fail")
+fn fail(reason: Str) -> Int {
+    print("error: {reason}", file="stderr")
+    return 7  // exit code propagado al shell
+}
+```
+
+### Detección automática del modo binario
+
+`fitz build` detecta el modo según los decorators del programa:
+
+| Decorators en el programa             | Modo del binario                              |
+|---------------------------------------|-----------------------------------------------|
+| `@get`/`@post`/`@put`/`@delete`/`@ws` | HTTP server (axum + tokio)                    |
+| `@cron` (sin HTTP)                    | Cron-only scheduler bloqueante                |
+| `@command` (sin HTTP, sin cron)       | CLI tool (parser argv + dispatch)             |
+| Ninguno                               | Script CLI plano (ejecuta `main_stmts`)       |
+
+**Mutuamente excluyentes**: el checker rechaza `@command + @get`,
+`@command + @cron`, `@command + @test`, etc. con error claro.
+
+### Modo intérprete (`fitz run`)
+
+El intérprete también soporta el dispatch CLI — útil para
+development y para tests. Pasás los args del programa después de
+`--` para separarlos de los args de `fitz`:
+
+```bash
+$ fitz run greeter.fitz -- greet Ada --loud
+HELLO, Ada!
+```
+
+**Paridad bit-a-bit**: el output del intérprete coincide
+exactamente con el del binario compilado para el mismo argv. Validado
+con E2E (`tests/compile_e2e.rs::fase_13_cli_paridad_run_vs_build`).
+
+### Por qué Fitz hace esto distinto
+
+1. **Zero deps externas**. El parser de argv vive en `src/cli.rs`
+   (~600 LoC), compilado dentro del binario `fitz`. El binario
+   producido por `fitz build` emite el dispatch inline; cero
+   `Cargo.toml` extras, cero `pip install`. Single binary.
+2. **Estático no reflection**. Los `@command` se enumeran en
+   compile-time; el dispatch es un `match` estático sobre el nombre
+   del comando, no un dict lookup runtime (como Click/Fire). Typo en
+   el nombre del comando se detecta antes de correr.
+3. **Convención sin decorators extras**. Click (Python) exige
+   `@click.argument(...)` y `@click.option(...)` por cada param.
+   Fitz infiere todo del shape del param: con/sin default determina
+   positional vs flag. Menos verbosidad para el caso común.
+4. **Help auto consistente**. El help string se construye en
+   build-time desde los decorators + nombres + tipos. El intérprete
+   y el binario emiten exactamente el mismo formato.
+5. **Tipado estático del exit code**. El checker exige `Int` como
+   return type. Olvidás `return 0` → error de compilación. En
+   Python/Node tenés que recordar `sys.exit()` manualmente.
+
+### Tipos soportados en params
+
+| Tipo Fitz | Marshalleable en CLI | Cómo se parsea                              |
+|-----------|:--------------------:|---------------------------------------------|
+| `Str`     | ✅                   | Pasa directo al param                       |
+| `Int`     | ✅                   | `parse::<i64>()` con error claro            |
+| `Float`   | ✅                   | `parse::<f64>()`                            |
+| `Bool`    | ✅                   | Flag presence = `true`; `--name=false` override |
+| `Str?`    | ✅                   | `None` si no se pasa (deuda menor en MVP)   |
+| `List<T>` | ❌ (deuda futura)    | Bajá a `Str` separado por comas y `.split`  |
+| `Map`     | ❌                   | No tiene sentido en CLI                     |
+
+### Lo que viene
+
+- **`@flag(short="l")` para short flags** (`-l` además de `--loud`).
+  Deuda menor — el parser ya soporta el shape, falta el wiring del
+  decorator.
+- **`Bool = true` con `--no-flag` negación**. Convención de Click
+  que esperan algunos users.
+- **Subgrupos de comandos** (`mybin orm migrate` vs `mybin orm seed`).
+  Más complejo — requiere parser jerárquico.
+- **`List<Str>` variádicos** (`mybin run file1.txt file2.txt`).
+  Buena para herramientas tipo `cat` o `ls`.
+- **Stdin parsing** (`mybin --stdin` lee config de stdin como JSON).
+  Deuda futura.
+
+Cap completo del CLI builder: ver `examples/guide/33-cli.fitz` para
+el ejemplo runnable + `boilerplates/cli-tool/` para un proyecto CLI
+completo con multiple comandos.
+
+---
+
+## 34. Plantillas y boilerplates
 
 Si llegaste hasta acá leyendo, ya viste cada feature de Fitz por
 separado: HTTP nativo, auth, WebSockets, jobs, interop Python,
@@ -12009,7 +12241,7 @@ escribir desde cero.
 
 ---
 
-## 34. Qué sigue
+## 35. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.

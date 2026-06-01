@@ -2845,6 +2845,8 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "31b-orm-crud-http.fitz",
     "31c-transactions.fitz",
     "32-env.fitz",
+    // v0.11.0 (Fase 13) — CLI builder con @command.
+    "33-cli.fitz",
 ];
 
 #[test]
@@ -10970,4 +10972,280 @@ print(bomb.to_str())
         "esperaba error citando `add_days` + `Int`, fue:\n{}",
         stderr
     );
+}
+
+// =========================================================================
+// v0.11.0 — Fase 13: CLI builder nativo (`@command`)
+// =========================================================================
+
+/// Helper: invoca el binario compilado con args adicionales, devuelve
+/// (stdout, stderr, exit_code). Paralelo a `build_and_run` pero acepta
+/// args adicionales para el CLI dispatch.
+fn build_and_run_cli(test_name: &str, src: &str, extra_args: &[&str]) -> (String, String, i32) {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&src_path, src).expect("write");
+
+    let out = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        out.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    });
+    let exec = Command::new(&bin)
+        .args(extra_args)
+        .output()
+        .expect("exec bin");
+    (
+        String::from_utf8_lossy(&exec.stdout).into_owned(),
+        String::from_utf8_lossy(&exec.stderr).into_owned(),
+        exec.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn fase_13_cli_single_command_positional_arg() {
+    let src = "\
+@command(\"greet\")
+fn greet(name: Str) -> Int {
+    print(\"hola, {name}\")
+    return 0
+}
+";
+    let (stdout, _stderr, code) = build_and_run_cli("fase13_single_pos", src, &["Ada"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("hola, Ada"), "stdout: {stdout}");
+}
+
+#[test]
+fn fase_13_cli_multi_command_dispatch() {
+    let src = "\
+@command(\"greet\", desc=\"saludar\")
+fn greet(name: Str) -> Int {
+    print(\"hola, {name}\")
+    return 0
+}
+
+@command(\"status\", desc=\"estado\")
+fn status() -> Int {
+    print(\"ok\")
+    return 0
+}
+";
+    // Dispatch `status` (sin positional).
+    let (stdout, _, code) = build_and_run_cli("fase13_multi_status", src, &["status"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("ok"), "stdout: {stdout}");
+}
+
+#[test]
+fn fase_13_cli_flag_bool_y_flag_int() {
+    let src = "\
+@command(\"greet\")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud {
+            print(\"HELLO, {name}!\")
+        } else {
+            print(\"hello, {name}\")
+        }
+        n = n - 1
+    }
+    return 0
+}
+";
+    let (stdout, _, code) =
+        build_and_run_cli("fase13_flags", src, &["Ada", "--loud", "--count", "2"]);
+    assert_eq!(code, 0);
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], "HELLO, Ada!");
+    assert_eq!(lines[1], "HELLO, Ada!");
+}
+
+#[test]
+fn fase_13_cli_help_global_lista_comandos() {
+    let src = "\
+@command(\"greet\", desc=\"Greet\")
+fn greet(name: Str) -> Int {
+    print(name)
+    return 0
+}
+
+@command(\"status\", desc=\"Status\")
+fn status() -> Int {
+    print(\"ok\")
+    return 0
+}
+";
+    let (stdout, _, code) = build_and_run_cli("fase13_help_global", src, &["--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("USAGE"), "stdout: {stdout}");
+    assert!(stdout.contains("greet"), "stdout: {stdout}");
+    assert!(stdout.contains("status"), "stdout: {stdout}");
+    assert!(stdout.contains("Greet"), "stdout: {stdout}");
+}
+
+#[test]
+fn fase_13_cli_help_command_individual() {
+    let src = "\
+@command(\"greet\", desc=\"saludar\")
+fn greet(name: Str, loud: Bool = false) -> Int {
+    print(name)
+    return 0
+}
+";
+    let (stdout, _, code) = build_and_run_cli("fase13_help_cmd", src, &["--help"]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("saludar"));
+    assert!(stdout.contains("<name>"));
+    assert!(stdout.contains("--loud"));
+}
+
+#[test]
+fn fase_13_cli_comando_desconocido_exit_2() {
+    let src = "\
+@command(\"greet\")
+fn greet(name: Str) -> Int {
+    print(name)
+    return 0
+}
+
+@command(\"status\")
+fn status() -> Int {
+    print(\"ok\")
+    return 0
+}
+";
+    let (_, stderr, code) = build_and_run_cli("fase13_unknown_cmd", src, &["bogus"]);
+    assert_eq!(code, 2, "esperaba exit 2 para comando desconocido");
+    assert!(stderr.contains("desconocido"), "stderr: {stderr}");
+}
+
+#[test]
+fn fase_13_cli_missing_positional_exit_2() {
+    let src = "\
+@command(\"greet\")
+fn greet(name: Str) -> Int {
+    print(name)
+    return 0
+}
+";
+    let (_, stderr, code) = build_and_run_cli("fase13_missing_pos", src, &[]);
+    assert_eq!(code, 2);
+    assert!(stderr.contains("falta"), "stderr: {stderr}");
+}
+
+#[test]
+fn fase_13_cli_flag_int_invalido_exit_2() {
+    let src = "\
+@command(\"greet\")
+fn greet(name: Str, count: Int = 1) -> Int {
+    print(name)
+    return 0
+}
+";
+    let (_, stderr, code) = build_and_run_cli("fase13_bad_int", src, &["Ada", "--count", "abc"]);
+    assert_eq!(code, 2);
+    assert!(
+        stderr.contains("--count") && stderr.contains("Int"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn fase_13_cli_handler_retorna_exit_code() {
+    // Verificamos que el Int retornado por el handler propaga como
+    // exit code del binario.
+    let src = "\
+@command(\"fail\")
+fn fail() -> Int {
+    print(\"falling\")
+    return 7
+}
+";
+    let (stdout, _, code) = build_and_run_cli("fase13_exit", src, &[]);
+    assert_eq!(code, 7);
+    assert!(stdout.contains("falling"));
+}
+
+#[test]
+fn fase_13_cli_paridad_run_vs_build() {
+    // Paridad bit-a-bit: el output del intérprete debe coincidir con
+    // el del binario compilado para el mismo argv.
+    let stem = "fase13_paridad";
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src = "\
+@command(\"greet\", desc=\"saludar\")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud {
+            print(\"HOLA, {name}\")
+        } else {
+            print(\"hola, {name}\")
+        }
+        n = n - 1
+    }
+    return 0
+}
+";
+    let src_path = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&src_path, src).expect("write");
+
+    // Build.
+    let bout = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(bout.status.success());
+
+    let bin = dir.join(if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    });
+
+    // Args para ambos paths.
+    let cli_args = ["Ada", "--loud", "--count", "3"];
+
+    let interp = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .arg("--")
+        .args(cli_args)
+        .output()
+        .expect("fitz run");
+    let interp_stdout = String::from_utf8_lossy(&interp.stdout).into_owned();
+    let interp_exit = interp.status.code().unwrap_or(-1);
+
+    let compiled = Command::new(&bin).args(cli_args).output().expect("bin");
+    let compiled_stdout = String::from_utf8_lossy(&compiled.stdout).into_owned();
+    let compiled_exit = compiled.status.code().unwrap_or(-1);
+
+    assert_eq!(
+        interp_stdout.replace("\r\n", "\n"),
+        compiled_stdout.replace("\r\n", "\n"),
+        "paridad bit-a-bit fitz run ↔ fitz build esperada"
+    );
+    assert_eq!(interp_exit, compiled_exit);
+    assert_eq!(interp_exit, 0);
 }

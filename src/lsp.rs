@@ -1126,6 +1126,13 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "@test — registra como test unit (fitz test)",
             "Sin params. Bodies pueden usar assert/assert_eq/assert_ne/assert_throws builtins.",
         ),
+        // v0.11.0 (Fase 13) — CLI builder.
+        (
+            "command",
+            "command(\"${1:name}\", desc=\"${2:descripción}\")",
+            "@command(name, desc=) — declara fn como comando CLI",
+            "El binario producido por `fitz build` parsea argv y dispatcha. Return type debe ser Int (exit code). Params sin default = positional args; con default = flags. Bool con default false → flag bool.",
+        ),
         // ORM
         (
             "table",
@@ -4262,8 +4269,14 @@ mod tests {
         let src = "let count = 42\n";
         let ty = Type::Int;
         let env = TypeEnv::new();
+        // v0.10.32 (Tier D.2) — `make_hover_with_range` ahora toma
+        // `program: &Program` para augmentar el hover con CREATE TABLE
+        // SQL cuando el tipo es un `@table`. Para este test del Range,
+        // pasamos un program vacío: ty es Int (no Nominal), entonces el
+        // augment se skipea silenciosamente y solo se valida el Range.
+        let empty_program: crate::ast::Program = Vec::new();
         // Cursor en col 6 (medio de "count" — "let " = 4 chars + "c" + "o").
-        let hover = make_hover_with_range(&ty, &env, src, 0, 6);
+        let hover = make_hover_with_range(&ty, &env, &empty_program, src, 0, 6);
         assert!(hover.range.is_some(), "esperaba Range, fue None");
         let r = hover.range.unwrap();
         assert_eq!(r.start, Position::new(0, 4)); // start de "count"
