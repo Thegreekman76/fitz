@@ -98,14 +98,22 @@ Detalle, metodología y "cómo reproducir" en
 
 ## Por dónde arrancar
 
-[Guía completa →](guide.md){ .md-button .md-button--primary }
+[Curso de 0 a experto →](curso/index.md){ .md-button .md-button--primary }
+[Guía completa →](guide.md){ .md-button }
 [DB y ORM →](db-orm.md){ .md-button }
 [Benchmarks →](benchmarks.md){ .md-button }
 [Boilerplates →](https://github.com/Thegreekman76/fitz/tree/main/boilerplates){ .md-button }
 [Ver el roadmap →](roadmap.md){ .md-button }
 [GitHub →](https://github.com/Thegreekman76/fitz){ .md-button }
 
-La guía cubre 34 capítulos con ejemplos runnable en
+El **[curso `Fitz de 0 a experto`](curso/index.md)** es la entrada
+recomendada si arrancás de cero. Te lleva paso a paso desde la
+instalación hasta una app real con HTTP + auth + Postgres, con un
+proyecto que crece capítulo a capítulo. M1 (setup) y M2 (tipos y
+funciones) están cerrados (13 caps, ~9k LoC); M3 (módulos) recién
+cerrado; M4-M7 en construcción.
+
+La **guía** cubre 34 capítulos con ejemplos runnable en
 [`examples/guide/`](https://github.com/Thegreekman76/fitz/tree/main/examples/guide):
 desde `print("hola")` hasta servidores HTTP con auth + WebSockets +
 cron jobs + Postgres + ORM nativo en menos de 100 líneas. Para el

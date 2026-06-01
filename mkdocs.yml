@@ -136,6 +136,21 @@ nav:
           - 'C3 — Hola mundo + LSP': curso/m1-setup/c3-hola-lsp.md
           - 'C4 — CLI esencial': curso/m1-setup/c4-cli-esencial.md
           - 'C5 — REPL': curso/m1-setup/c5-repl.md
+          - 'C6 — fitz build': curso/m1-setup/c6-fitz-build.md
+      - 'M2 — Tipos y funciones':
+          - 'C1 — Primitivos y strings': curso/m2-tipos-funciones/c1-primitivos-strings.md
+          - 'C2 — Variables e inferencia': curso/m2-tipos-funciones/c2-variables.md
+          - 'C3 — Operadores y if/else': curso/m2-tipos-funciones/c3-operadores-if.md
+          - 'C4 — Loops': curso/m2-tipos-funciones/c4-loops.md
+          - 'C5 — Listas, mapas y rangos': curso/m2-tipos-funciones/c5-listas-mapas-rangos.md
+          - 'C6 — Funciones + fitz test': curso/m2-tipos-funciones/c6-funciones.md
+          - 'C7 — type custom + match': curso/m2-tipos-funciones/c7-type-match.md
+      - 'M3 — Módulos y organización':
+          - 'C1 — Módulos + imports': curso/m3-modulos/c1-modulos-imports.md
+          - 'C2 — Lib local + [lib]': curso/m3-modulos/c2-lib-local.md
+          - 'C3 — Path deps + lockfile': curso/m3-modulos/c3-path-deps.md
+          - 'C4 — Git deps + cache': curso/m3-modulos/c4-git-deps.md
+          - 'C5 — fitz add/remove/update + patrones': curso/m3-modulos/c5-add-remove-update.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

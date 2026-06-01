@@ -36,9 +36,9 @@ asume VSCode para los screenshots ASCII.
 
 | Módulo | Caps | Estado |
 |--------|------|--------|
-| M1 — Setup y primer programa | 5 | ✅ cerrado (C1-C5) |
-| M2 — Tipos y funciones | 7 | 📋 planificado |
-| M3 — Módulos y organización | 5 | 📋 planificado |
+| M1 — Setup y primer programa | 6 | ✅ cerrado (C1-C6) |
+| M2 — Tipos y funciones | 7 | ✅ cerrado (C1-C7) |
+| M3 — Módulos y organización | 5 | ✅ cerrado (C1-C5) |
 | M4 — HTTP first-class | 5 | 📋 planificado |
 | M5 — Async, auth, real-time | 4 | 📋 planificado |
 | M6 — Capstone Postgres + ORM nativo | 6 | 📋 planificado |
@@ -57,10 +57,44 @@ Requisito explícito: VSCode + extensión Fitz instalada.
 - **[C3 — Hola mundo + LSP visible](m1-setup/c3-hola-lsp.md)**
 - **[C4 — CLI esencial (run / check / fmt / lint)](m1-setup/c4-cli-esencial.md)**
 - **[C5 — REPL](m1-setup/c5-repl.md)**
+- **[C6 — `fitz build` (compilar a binario nativo)](m1-setup/c6-fitz-build.md)**
 
 **Entregable del módulo**: tenés Fitz funcionando en tu máquina,
 con la extensión VSCode activa y un proyecto skeleton del que
-podés escribir, correr, formatear y debugear.
+podés escribir, correr, formatear, debugear, y **compilar a
+binario standalone para distribuir** (`fitz build`).
+
+## M2 — Tipos y funciones
+
+Requisito explícito: M1 completo.
+
+- **[C1 — Primitivos, strings e interpolación](m2-tipos-funciones/c1-primitivos-strings.md)**
+- **[C2 — Variables, anotaciones e inferencia](m2-tipos-funciones/c2-variables.md)**
+- **[C3 — Operadores y control de flujo (`if` / `else`)](m2-tipos-funciones/c3-operadores-if.md)**
+- **[C4 — Loops (`while`, `loop`, `for in`)](m2-tipos-funciones/c4-loops.md)**
+- **[C5 — Listas, mapas y rangos](m2-tipos-funciones/c5-listas-mapas-rangos.md)**
+- **[C6 — Funciones + `fitz test`](m2-tipos-funciones/c6-funciones.md)**
+- **[C7 — `type` (tipos custom) + `match`](m2-tipos-funciones/c7-type-match.md)**
+
+**Entregable del módulo**: podés modelar tu dominio con tipos
+custom, escribir fns que procesan colecciones, manejar errores
+con `Result`+`match`+`?`, y testear todo con `fitz test`. Es el
+toolkit base del lenguaje.
+
+## M3 — Módulos y organización
+
+Requisito explícito: M2 completo.
+
+- **[C1 — Módulos + imports (`from X import Y`)](m3-modulos/c1-modulos-imports.md)**
+- **[C2 — Lib local + sección `[lib]`](m3-modulos/c2-lib-local.md)**
+- **[C3 — Path deps + lockfile (`fitz.lock`)](m3-modulos/c3-path-deps.md)**
+- **[C4 — Git deps + cache local](m3-modulos/c4-git-deps.md)**
+- **[C5 — `fitz add` / `remove` / `update` + patrones](m3-modulos/c5-add-remove-update.md)**
+
+**Entregable del módulo**: podés partir tu proyecto en módulos,
+exponer una lib, consumir deps externas (path o git), y
+organizar proyectos serios (monorepo, layered architecture,
+shared libs).
 
 ## Cómo está pensado el curso
 

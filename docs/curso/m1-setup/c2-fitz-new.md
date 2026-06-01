@@ -2,28 +2,79 @@
 
 **Pre-requisitos**: [C1 — Instalación](c1-instalacion.md) terminado.
 
-**Objetivo**: crear el proyecto que va a **crecer con vos durante el
-resto del curso**. Al final del M6 va a ser una app HTTP + DB +
-auth; hoy es un "hola mundo", pero ya con la estructura estándar
-de cualquier proyecto Fitz.
+**Objetivo**: dominar `fitz new` y `fitz init` con **todos sus
+flags**, entender la anatomía completa de un `fitz.toml`
+(`[package]`, `[bin]`, `[lib]`, `[dependencies]`), y conocer la
+convención de carpetas estándar (`src/`, `tests/`, `examples/`).
 
-**Por qué importa**: hasta C1 hacíamos archivos sueltos. Eso sirve
-para experimentar, pero un proyecto real tiene un `fitz.toml`
-(manifest), `src/` (código), `.gitignore` (qué no commitear), y
-`git init` (versionado). `fitz new` arma todo eso en un paso.
+**Por qué importa**: a partir de este cap dejamos los archivos
+sueltos y trabajamos con **proyectos**. Toda app Fitz real (un
+CLI, un server HTTP, una lib publicada) arranca con la misma
+estructura — saberla de memoria te ahorra fricción durante todo
+el curso.
 
 ---
 
-## Paso 1 — Crear el proyecto
+## Mapa del cap
 
-Andá a la carpeta donde guardás tus proyectos (`~/proyectos`,
-`D:\dev`, lo que uses). Después:
-
-```bash
-fitz new mi-saludos
+```mermaid
+flowchart LR
+    A[Carpeta vacía] -->|fitz new mi-app| B[mi-app/<br/>fitz.toml<br/>src/main.fitz<br/>.gitignore<br/>.git/]
+    C[Carpeta existente] -->|cd cosa && fitz init| B
+    B --> D[fitz run<br/>desde la raíz]
+    B --> E[fitz build<br/>→ target/release/]
+    B --> F[git commit]
 ```
 
-Output esperado:
+---
+
+## Paso 1 — `fitz new` — sintaxis completa
+
+```
+fitz new [OPTIONS] <NAME>
+```
+
+| Argumento / flag | Qué hace |
+|---|---|
+| `<NAME>` (requerido) | Nombre del proyecto. **También nombre de la carpeta** que se crea. |
+| `--http` | Template HTTP server en vez del default CLI hello-world. |
+| `--no-git` | NO correr `git init`. Default: `git init` automático. |
+| `-h`, `--help` | Mostrar help. |
+
+### Reglas del nombre — regex `^[a-z][a-z0-9_-]{0,63}$`
+
+| Regla | Válidos | Inválidos |
+|---|---|---|
+| Solo lowercase | `mi-app`, `users` | `Mi-App`, `USERS` |
+| Empieza por letra (no dígito) | `app2`, `v3-server` | `2cosa`, `7names` |
+| Solo letras / dígitos / `-` / `_` | `my_lib`, `web-api-v2` | `mi.app`, `cosa@dos`, `con espacios` |
+| Máximo 64 caracteres | (regla rara de hit) | strings de >64 chars |
+
+Errores típicos del lexer del nombre:
+
+```bash
+fitz new "Bad-Name"
+```
+
+```
+✗ nombre inválido: `Bad-Name`. Debe matchear `^[a-z][a-z0-9_-]{0,63}$`
+  (lowercase, empezar con letra, contener solo letras/dígitos/`-`/`_`,
+  máx 64 caracteres).
+```
+
+```bash
+fitz new "2cosa"
+```
+
+```
+✗ nombre inválido: `2cosa`. Debe matchear ...
+```
+
+### Demo: crear con `--no-git`
+
+```bash
+fitz new mi-saludos --no-git
+```
 
 ```
 ✓ proyecto Fitz creado en `mi-saludos`
@@ -33,43 +84,90 @@ Para probarlo:
   fitz run src/main.fitz
 ```
 
-Vamos a ver qué generó:
-
 ```bash
-cd mi-saludos
-ls -la       # Linux/macOS
-# o
-dir          # Windows
+cd mi-saludos && ls -la
 ```
 
 ```
-.git/
 .gitignore
 fitz.toml
 src/
 ```
 
-Cuatro cosas:
-
-- **`fitz.toml`** — el manifest del proyecto. Análogo a `Cargo.toml`
-  (Rust), `package.json` (Node), o `pyproject.toml` (Python).
-  Declara nombre, versión, y entry point.
-- **`src/`** — donde vive tu código Fitz.
-  `src/main.fitz` adentro.
-- **`.gitignore`** — qué archivos NO subir al repo (compilados,
-  binarios temporales).
-- **`.git/`** — repo de git inicializado. `fitz new` corre
-  `git init` automático (si no querés, pasale `--no-git`).
-
-> **Convención de nombres**: el nombre del proyecto debe ser
-> minúscula + dígitos + `-`/`_`, empezando por letra. `mi-saludos`
-> y `mi_saludos` válidos; `MiSaludos` o `2saludos` no.
+Notá: **no hay `.git/`** porque pasamos `--no-git`. Útil cuando
+querés gestionar la inicialización del repo después (por ejemplo,
+en un monorepo).
 
 ---
 
-## Paso 2 — Inspeccionar `fitz.toml`
+## Paso 2 — `fitz init` — inicializar en carpeta existente
 
-Abrí `fitz.toml` (con VSCode si querés, ya que estás):
+```
+fitz init [OPTIONS]
+```
+
+| Flag | Qué hace |
+|---|---|
+| `--name <NAME>` | Sobreescribe el nombre del paquete (default: nombre del directorio). |
+| `--http` | Template HTTP server. |
+| `--no-git` | NO correr `git init`. |
+| `-h`, `--help` | Mostrar help. |
+
+### Cuándo usar `init` vs `new`
+
+| Escenario | Comando |
+|---|---|
+| Empezás de cero | `fitz new <name>` |
+| Cloneaste un repo y querés agregar Fitz | `cd repo && fitz init` |
+| Convertís un script `hola.fitz` suelto a proyecto | `mkdir mi-app && mv hola.fitz mi-app/src/main.fitz && cd mi-app && fitz init` |
+| El nombre del directorio no respeta las reglas | `cd "Mi Proyecto" && fitz init --name mi_proyecto` |
+
+### Demo: `fitz init --name`
+
+```bash
+mkdir "Mi Cosa"
+cd "Mi Cosa"
+fitz init --name mi-cosa
+```
+
+```
+✓ proyecto Fitz `mi-cosa` inicializado en `/ruta/.../Mi Cosa`
+
+Para probarlo:
+  fitz run src/main.fitz
+```
+
+### Edge case: `fitz.toml` ya existe
+
+```bash
+cd un-proyecto-ya-creado
+fitz init
+```
+
+```
+✗ ya existe un fitz.toml en este directorio.
+```
+
+`fitz init` **nunca sobreescribe** un manifest existente. Si
+querés re-arrancar, borralo a mano (con cuidado — perdés deps y
+config).
+
+---
+
+## Paso 3 — Anatomía del proyecto generado
+
+```
+mi-saludos/
+├── .git/                ← repo de git (si no pasaste --no-git)
+├── .gitignore           ← qué NO commitear
+├── fitz.toml            ← manifest del proyecto
+└── src/
+    └── main.fitz        ← entry point (lo que ejecuta `fitz run`)
+```
+
+Cuatro cosas. Veamos cada una.
+
+### `fitz.toml` — el manifest
 
 ```toml
 [package]
@@ -81,26 +179,84 @@ edition = "2026"
 main = "src/main.fitz"
 ```
 
-Tres campos:
+Tres secciones por default:
 
-- **`[package]`** — metadata del paquete.
-  - `name` y `version` — los identifican (en el futuro, también
-    cuando publiques a un registry).
-  - `edition` — versión del lenguaje. Por ahora `"2026"`.
-- **`[bin]`** — qué archivo es el entry point del binario.
-  `src/main.fitz` por default.
+#### `[package]` — metadata del paquete
 
-Cuando agreguemos dependencias en M3 va a aparecer una sección
-`[dependencies]`. Por ahora, esto es todo lo que necesitás saber.
+| Campo | Tipo | Para qué |
+|---|---|---|
+| `name` | Str | Nombre del paquete. Debe respetar el regex. |
+| `version` | Str | SemVer (`MAJOR.MINOR.PATCH`). Lo bumpeás vos en cada release. |
+| `edition` | Str | Versión del lenguaje (`"2026"` por ahora). |
 
-📚 **Detalle exhaustivo**: [cap 16b — Package manager](../../guide.md#16b---package-manager-fitztoml-fitz-new-fitz-add)
-de la guía.
+#### `[bin]` — entry point del binario
 
----
+| Campo | Tipo | Default | Para qué |
+|---|---|---|---|
+| `main` | Str (path) | `"src/main.fitz"` | Archivo `.fitz` que `fitz run`/`build` ejecuta cuando no pasás archivo. |
 
-## Paso 3 — `src/main.fitz`
+#### `[lib]` — entry point de la lib (opcional)
 
-Abrí `src/main.fitz`:
+Sección opcional. Útil cuando tu paquete **expone fns/types
+para que otros los importen** (por ejemplo, una utility lib).
+
+```toml
+[lib]
+entry = "src/lib.fitz"
+```
+
+| Campo | Tipo | Para qué |
+|---|---|---|
+| `entry` | Str (path) | Archivo `.fitz` que otros paquetes importan con `from <paquete> import ...`. |
+
+Coexiste con `[bin]` — un paquete puede tener AMBOS:
+- `[bin]` para correr standalone (`fitz run`).
+- `[lib]` para ser importado por otros (M3.C? cuando lleguemos).
+
+#### `[dependencies]` — deps externas (M3)
+
+Aún sin deps (lo cubrimos en M3), pero la sintaxis aceptada:
+
+```toml
+[dependencies]
+# Dep por path local (relativo al fitz.toml):
+util = { path = "../util" }
+
+# Dep por git con tag:
+shared = { git = "https://github.com/usuario/shared.git", tag = "v1.0.0" }
+
+# Dep por git con rev específico:
+shared = { git = "https://github.com/usuario/shared.git", rev = "a3f8b21" }
+```
+
+> Versiones sueltas (`foo = "1.0.0"`) parsean pero el resolver
+> las rechaza — el registry público todavía no existe. Fase
+> futura del lenguaje.
+
+### `.gitignore` — qué NO commitear
+
+```gitignore
+# Artefactos de compilación
+target/
+
+# Binarios generados por `fitz build` adyacentes al fuente.
+# Si publicás un paquete, ajustá esto a tus necesidades.
+*.exe
+*.pdb
+```
+
+Tres reglas:
+
+| Patrón | Por qué |
+|---|---|
+| `target/` | Carpeta donde `fitz build` deja artefactos intermedios. Equivalente a `target/` de Cargo o `dist/` de npm. |
+| `*.exe` | Binarios generados en single-file mode (`fitz build hola.fitz` → `hola.exe`). |
+| `*.pdb` | Symbols de debug de Windows. |
+
+Si publicás una lib, **no querés** que `*.exe` ignore exes
+intencionales (raro pero pasa) — ajustá a `*.exe` solo en `src/`.
+
+### `src/main.fitz` — entry point
 
 ```fitz
 // main.fitz — generado por `fitz new`
@@ -112,109 +268,60 @@ Abrí `src/main.fitz`:
 print("Hola desde mi-saludos 🏔️")
 ```
 
-Spoiler: **9.y.2 ya aterrizó** (la fase que menciona el comentario).
-Ese comentario es del template viejo y va a cambiar en próximas
-versiones. Mientras tanto, lo aprovechamos para mostrarte la
-ventaja del manifest mode.
+> **Nota**: el comentario menciona "9.y.2 aterrice" como
+> futuro, pero **9.y.2 ya está cerrada** (manifest mode). El
+> template del scaffolder está desactualizado — `fitz run`
+> sin args ya funciona desde la raíz del proyecto.
 
 ---
 
-## Paso 4 — Correr el proyecto
+## Paso 4 — Layout extendido (convención del lenguaje)
 
-Dos formas equivalentes, **ambas funcionan**:
-
-```bash
-# Forma 1 — con archivo explícito (single-file mode)
-fitz run src/main.fitz
-
-# Forma 2 — desde la raíz del proyecto, sin args (manifest mode)
-fitz run
-```
-
-Output esperado en las dos:
+Aunque `fitz new` solo crea lo mínimo, **la convención del
+ecosistema** para proyectos serios es:
 
 ```
-Hola desde mi-saludos 🏔️
+mi-paquete/
+├── .git/
+├── .gitignore
+├── README.md            ← README del proyecto (recomendado)
+├── CHANGELOG.md         ← historial de cambios (recomendado)
+├── fitz.toml            ← manifest
+├── fitz.lock            ← lockfile de deps (auto-generado al usar deps)
+├── src/
+│   ├── main.fitz        ← entry [bin].main
+│   ├── lib.fitz         ← entry [lib].entry (si exporta)
+│   ├── users.fitz       ← módulos adicionales
+│   └── orders.fitz
+├── tests/               ← @test fns en archivos separados
+│   ├── users_test.fitz
+│   └── integration_test.fitz
+├── examples/            ← ejemplos runnable de la lib (opcional)
+│   ├── basic.fitz
+│   └── advanced.fitz
+├── docs/                ← documentación adicional (opcional)
+│   └── arquitectura.md
+└── target/              ← (ignorado por git)
 ```
 
-**Manifest mode** es lo que vas a usar 95% del tiempo. `fitz run`
-sin args sube por las carpetas buscando un `fitz.toml` (Cargo-style),
-lo lee, y ejecuta el `[bin].main` declarado. Funciona desde
-cualquier subcarpeta del proyecto.
+### Tabla de roles
 
-```bash
-# También funciona desde adentro de src/:
-cd src
-fitz run
-```
+| Carpeta / archivo | Rol |
+|---|---|
+| `src/main.fitz` | Entry de binario CLI. `[bin].main` apunta acá. |
+| `src/lib.fitz` | Entry de lib. `[lib].entry` apunta acá. |
+| `src/<modulo>.fitz` | Submódulos del paquete (M3). |
+| `tests/<x>_test.fitz` | Tests de integración. Descubiertos auto por `fitz test`. |
+| `examples/*.fitz` | Demos del paquete (no entran al binario ni a `fitz test`). |
+| `docs/` | Markdown adicional (arquitectura, guías). |
+| `target/` | Output del codegen (Cargo project + binarios). Ignorado por git. |
+| `fitz.lock` | Lockfile de deps (Cargo-style). **Commiteá** este para apps; **NO commitees** para libs. |
 
 ---
 
-## Paso 5 — Modificar y volver a correr
+## Paso 5 — Variante `--http` (template HTTP)
 
-Probemos cambiar algo. Editá `src/main.fitz`:
-
-```fitz
-let nombre = "Patagonia"
-let edad = 200
-
-print("Saludos desde {nombre}")
-print("Tenés {edad} años de historia")
-```
-
-Guardá y corré:
-
-```bash
-fitz run
-```
-
-```
-Saludos desde Patagonia
-Tenés 200 años de historia
-```
-
-Si abriste VSCode con el proyecto, deberías haber visto el LSP
-en acción mientras editabas:
-- `nombre` y `edad` con su tipo inferido (`Str` e `Int`).
-- Colores distintos para keywords (`let`), strings, y la
-  interpolación `{nombre}`.
-
-Eso lo exprimimos en C3.
-
----
-
-## Paso 6 — `fitz init` (variante)
-
-`fitz new <nombre>` crea **una carpeta nueva**. Si ya tenés la
-carpeta creada (por ejemplo, hiciste `git clone` antes), usá
-`fitz init`:
-
-```bash
-mkdir mi-otro-proyecto
-cd mi-otro-proyecto
-fitz init
-```
-
-```
-✓ proyecto Fitz `mi-otro-proyecto` inicializado en `/ruta/a/mi-otro-proyecto`
-
-Para probarlo:
-  fitz run src/main.fitz
-```
-
-El nombre se deriva del directorio actual. Si querés sobrescribir,
-pasá `--name`:
-
-```bash
-fitz init --name otro-nombre
-```
-
----
-
-## Paso 7 — Variante `--http`
-
-Tanto `fitz new` como `fitz init` aceptan `--http` para arrancar
-con un template de servidor HTTP en vez del "hola mundo" CLI:
+Para arrancar con un server HTTP en vez del CLI hello-world:
 
 ```bash
 fitz new mi-api --http
@@ -232,19 +339,150 @@ fn index() -> Str {
 fn main() => 0
 ```
 
-Para probar:
+Probalo:
 
 ```bash
 cd mi-api
 fitz run
-# ... servidor HTTP en 127.0.0.1:3000 ...
-# (en otra terminal)
-curl http://127.0.0.1:3000/
-# Hola desde mi-api 🏔️
 ```
 
-No vamos a usar HTTP en M1 — esto es solo para que sepas que
-existe. El módulo **M4 (HTTP first-class)** lo arranca en serio.
+```
+🟢 servidor HTTP en 127.0.0.1:3000 (Ctrl+C para salir)
+```
+
+En otra terminal:
+
+```bash
+curl http://127.0.0.1:3000/
+```
+
+```
+Hola desde mi-api 🏔️
+```
+
+> El template `--http` lo profundizamos en M4 (HTTP first-class)
+> — auth, middleware, OpenAPI auto, WebSockets, etc. Por ahora
+> es solo el sneak peek.
+
+`fitz init --http` funciona idéntico (template HTTP en una
+carpeta existente).
+
+---
+
+## Paso 6 — `fitz run` desde la raíz (manifest mode)
+
+Lo vimos en C1 pero formalicemos. Dos modos:
+
+```mermaid
+flowchart TD
+    A[fitz run] --> B{¿Pasaste FILE?}
+    B -->|Sí: fitz run hola.fitz| C[Single-file mode<br/>ejecuta el archivo directo]
+    B -->|No: fitz run sin args| D{¿Hay fitz.toml en cwd o ancestros?}
+    D -->|Sí| E[Manifest mode<br/>lee fitz.toml<br/>ejecuta [bin].main]
+    D -->|No| F[Error:<br/>'no se encontró fitz.toml']
+```
+
+### Manifest mode — desde cualquier subcarpeta
+
+```bash
+fitz run                   # desde la raíz: ejecuta src/main.fitz
+cd src
+fitz run                   # desde adentro: encuentra fitz.toml en padre
+```
+
+El walk sube por ancestros hasta encontrar `fitz.toml` o llegar
+al root del filesystem. Igual que `cargo run` o `npm run`.
+
+### Single-file mode — archivo explícito
+
+```bash
+fitz run src/main.fitz     # OK
+fitz run otro/archivo.fitz # también OK
+fitz run /tmp/scratch.fitz # absoluto OK
+```
+
+Sin `fitz.toml` requerido. Útil para experimentos y scripts.
+
+---
+
+## Paso 7 — Modificar y volver a correr
+
+```fitz
+let lugar = "Patagonia"
+let altitud_m = 350
+
+print("📍 {lugar}")
+print("   altitud: {altitud_m} m")
+```
+
+```bash
+fitz run
+```
+
+```
+📍 Patagonia
+   altitud: 350 m
+```
+
+Si abriste VSCode con el proyecto (`code .`), deberías estar
+viendo:
+
+- **Highlighting**: keywords (`let`) en un color, strings en
+  otro, interpolación `{lugar}` resaltada.
+- **Hover**: pasá el mouse sobre `altitud_m` → `altitud_m: Int`
+  inferido.
+- **Errores live**: cambiá `altitud_m += "x"` y aparece el
+  subrayado rojo al instante.
+
+(Todo esto se cubre en detalle en C3.)
+
+---
+
+## Paso 8 — Exit codes y errores
+
+### Exit codes de `fitz new` / `fitz init`
+
+| Exit code | Causa |
+|---|---|
+| 0 | Proyecto creado/inicializado OK. |
+| 1 | Nombre inválido (regex). |
+| 1 | (init) `fitz.toml` ya existe. |
+| 1 | (new) Carpeta con ese nombre ya existe. |
+| 1 | Error de filesystem (permisos, disco lleno). |
+| 1 | `git init` falló (si NO pasaste `--no-git`). |
+
+### Tabla de errores típicos
+
+| Error | Causa probable | Fix |
+|---|---|---|
+| `nombre inválido: 'X'` | Nombre no respeta regex | Usá `lowercase-con-guiones` o `lower_snake_case` |
+| `fitz.toml ya existe` | Ya inicializaste el proyecto | Borralo a mano si querés re-arrancar |
+| `el directorio 'X' ya existe` | (new) Conflicto con carpeta existente | Elegí otro nombre o borrá la carpeta |
+| `git: command not found` | git no instalado | Instalá git, o pasá `--no-git` para skip |
+
+---
+
+## Paso 9 — Aplicarlo: nuestro proyecto del curso
+
+Si todavía no creaste `mi-saludos`, crealo ahora — **este es el
+proyecto que vamos a usar todo el curso**:
+
+```bash
+cd ~/proyectos        # o donde guardes tus proyectos
+fitz new mi-saludos
+cd mi-saludos
+fitz run
+```
+
+```
+Hola desde mi-saludos 🏔️
+```
+
+Abrilo en VSCode:
+
+```bash
+code .
+```
 
 ---
 
@@ -252,37 +490,70 @@ existe. El módulo **M4 (HTTP first-class)** lo arranca en serio.
 
 - [ ] `fitz new mi-saludos` creó la carpeta con `fitz.toml`,
       `src/main.fitz`, `.gitignore`, `.git/`.
-- [ ] `fitz run` desde la raíz del proyecto imprime el saludo.
-- [ ] `fitz run src/main.fitz` también funciona (ambas formas
-      son válidas).
-- [ ] Cuando modificás `src/main.fitz`, el siguiente `fitz run`
-      refleja los cambios sin extra configuración.
+- [ ] `fitz new "Bad-Name"` te da error de nombre inválido.
+- [ ] `fitz run` desde la raíz del proyecto ejecuta sin pasar el
+      archivo (manifest mode).
+- [ ] `fitz run src/main.fitz` también funciona (single-file
+      mode).
+- [ ] `fitz run` desde una **subcarpeta** del proyecto (ej.
+      `src/`) también encuentra el manifest.
+- [ ] `fitz init` en una carpeta existente respeta el nombre de
+      la carpeta (o `--name`).
+- [ ] `fitz init` en una carpeta con `fitz.toml` previo te da
+      error "ya existe un fitz.toml".
 
 ---
 
 ## Troubleshooting
 
-**`fitz: command not found`** — volvé a C1, paso 3. El binario
-no está en el `PATH`.
+### `fitz: command not found`
 
-**`error: el nombre 'X' no es válido`** — repasá la convención:
-minúscula + dígitos + `-`/`_`, empieza por letra.
+Volvé a C1, paso 3. El binario no está en el `PATH`.
 
-**`error: el archivo 'fitz.toml' ya existe`** (con `fitz init`) —
-ya hay un proyecto Fitz en esa carpeta. Si querés empezar de cero,
-borralo manualmente.
+### `error: el nombre 'X' no es válido`
 
-**`error: no se encontró 'fitz.toml' en el directorio actual ni en
-ancestros`** (con `fitz run` sin args) — estás fuera del proyecto.
-`cd mi-saludos` y volvé a probar.
+Repasá la convención: minúscula + dígitos + `-`/`_`, empieza por
+letra, máx 64 chars. Ejemplos OK: `mi-app`, `users_v2`,
+`web-server-3`. Ejemplos KO: `MiApp`, `2cosas`, `mi.app`,
+`con espacios`.
+
+### `error: el directorio 'X' ya existe`
+
+`fitz new` se rehúsa a sobrescribir. Opciones:
+- Elegí otro nombre.
+- Borrá la carpeta vieja a mano (con cuidado).
+- O entrá a la carpeta existente y corré `fitz init` adentro
+  (si no tiene `fitz.toml`).
+
+### `error: no se encontró 'fitz.toml' en el directorio actual ni en ancestros`
+
+(con `fitz run` sin args)
+
+- Estás fuera del proyecto. `cd mi-saludos` y volvé a probar.
+- O verificá que el `fitz.toml` se haya generado (`ls mi-saludos/`).
+
+### `error: 'git init' falló`
+
+`git` no está instalado o tiene problema. Soluciones:
+- Instalá git ([git-scm.com](https://git-scm.com/)).
+- O pasá `--no-git` y inicializás el repo después a mano.
+
+### El template `src/main.fitz` no se ve correcto en VSCode
+
+- ¿La extensión Fitz está instalada? (C1, Paso 4)
+- Bottom-right de VSCode dice el lenguaje detectado. Tiene que
+  decir "Fitz". Si dice "Plain Text", click ahí y elegí Fitz.
 
 ---
 
 ## Lo que viene en C3
 
 Ya tenés el proyecto. En el próximo cap **lo abrimos en VSCode y
-exprimimos el LSP**: hover con tipos, autocomplete contextual,
-errores subrayados en vivo, y Ctrl+Click para navegar al código.
+exprimimos el LSP** end-to-end: todos los settings de la
+extensión, output panel del language server, hover con tipos,
+autocomplete contextual (los 4 modos), errores subrayados live,
+go-to-definition, panel Problems, y los atajos de teclado
+clave.
 
-Es la diferencia entre escribir Fitz "a mano" y escribirlo como
-escribís TypeScript o Rust con su tooling moderno.
+Es la diferencia entre "escribir Fitz" y "escribir Fitz como
+escribís TypeScript o Rust con su tooling moderno".
