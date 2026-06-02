@@ -11,11 +11,156 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.11.1. Fase 13 entera + polish
-cerrados. Próxima dirección: **Fase 12** (Deployment ciudadano
-primera clase — `fitz dockerfile`, observability, secrets, feature
-flags), o **Tier E del ORM** (Decimal/Numeric, streaming cursors,
-COPY FROM/TO, LISTEN/NOTIFY tipado, window functions, CTE/WITH).
+Sin trabajo en curso al cierre de v0.11.2. Tier 1 de las deudas
+pre-M5 del curso (`docs/curso-plan.md`) cerrado entero. Próxima
+dirección: **9.w.1.iter2** (RBAC custom + token refresh — Tier 2,
+release dedicado) si el avance del curso lo demanda, o saltar a
+**Fase 12** (Deployment ciudadano primera clase) / **Tier E ORM**.
+
+## [v0.11.2] — 2026-06-02 — 9.w.3.iter2: Persistencia + retry + timezone + catch_up en `@cron`
+
+**Cierre formal de Tier 1 de las deudas pre-M5** acordadas el
+2026-06-01. Las tres deudas que bloqueaban escribir M5.C26 del
+curso (Jobs sin Celery) cerradas en bloque, paralelo bit-a-bit
+entre intérprete y codegen.
+
+`@cron("expr")` acepta **4 kwargs opcionales nuevos** — programas
+viejos siguen funcionando idénticos:
+
+```fitz
+let db = db.connect(env_or("DATABASE_URL", "postgres://...")).await
+
+@cron("0 9 * * *",
+      tz="America/Argentina/Buenos_Aires",
+      retry={max: 3, backoff: "exponential",
+             initial_secs: 1, max_secs: 30},
+      catch_up=true,
+      store=db)
+async fn cleanup() -> Result<Null> { ... }
+```
+
+- **`tz="IANA/Name"`** — interpreta el schedule en huso indicado
+  (vía `chrono_tz`). Default `"UTC"`.
+- **`retry={max, backoff, initial_secs, max_secs}`** — hasta N
+  reintentos con backoff (`"exponential"`/`"linear"`/`"constant"`),
+  cada delay capeado por `max_secs`. Default: sin retry.
+- **`catch_up=true`** — al boot, si hubo missed runs entre
+  `last_run_at` y `now`, ejecuta UN run inmediato (no N — evita
+  spam). Default `false` = skip.
+- **`store=<binding>`** — persiste el registry + cada attempt en
+  `fitz_cron_jobs` / `fitz_cron_runs` (auto-creadas con
+  `CREATE TABLE IF NOT EXISTS`). Visibility manual con `psql`.
+
+`@background` acepta los mismos `tz` y `retry` (sin `store` ni
+`catch_up` — persistencia de `spawn(...)` diferida a iter3).
+
+### Sub-paso a — Checker estático de kwargs
+
+Helpers libres `check_job_kwargs` + `check_retry_map` en
+`src/types.rs` parametrizados por allowed-list. Valida shape
+sintáctico (Str/Bool/Map literal según kwarg), rechaza
+duplicados y desconocidos con la lista de aceptados.
+`extract_int_literal` reconoce `Int(N)` y `UnaryOp { Neg, Int(N) }`
+para negativos. **+20 unit tests** (15 `cron_*` + 5
+`background_*`); total 24 + 8 al cierre.
+
+### Sub-paso b — Runtime intérprete: tipos extendidos
+
+`src/cron_jobs.rs`: `enum BackoffKind` (default `Exponential`) +
+`struct RetryConfig` con `Default` (max=0) + `delay_for_attempt`
+capeado + `struct CronJobOptions { tz, retry, catch_up, store }`
+con `Default`. `CronJob` gana los 4 campos; `register` acepta
+`CronJobOptions` como parámetro final.
+
+`src/evaluator.rs`: `register_cron_job` parsea kwargs del
+`Decorator` vía `parse_cron_job_options` + sub-helpers
+(`parse_retry_kwarg`, `resolve_store_kwarg`). El IANA real lo
+valida `chrono_tz::Tz::from_str` con error claro si falla.
+**+11 unit tests del registry + +7 unit tests del evaluator**.
+
+### Sub-paso c — Scheduler intérprete + tests E2E reales
+
+`src/cron_jobs.rs`: 7 helpers SQL (`init_storage` /
+`upsert_job_row` / `record_run_start` / `record_run_finish` /
+`update_job_last_run` / `read_last_run_at` /
+`parse_pg_timestamptz` — el último normaliza offset Postgres sin
+minutos). `run_cron_job` boot con init storage + upsert + catch_up
+(`Schedule::after(last)` en la tz). Loop tz-aware con
+`Schedule::upcoming(job.tz)` + `invoke_with_retry`.
+
+Schema:
+
+```sql
+fitz_cron_jobs(
+    name PK, schedule, tz,
+    last_run_at, last_status, last_error, next_run_at
+)
+fitz_cron_runs(
+    id BIGSERIAL, job_name, started_at, finished_at,
+    status, attempt, error
+)
+-- status: 'running' | 'ok' | 'failed' | 'retrying'
+-- attempt: 1-indexed; retry máx N produce hasta N+1 rows
+```
+
+**+6 tests E2E reales** contra Postgres en
+`tests/cron_jobs_real_postgres.rs` (`#[ignore]`, requieren
+`FITZ_TEST_PG_URL`).
+
+### Sub-paso d — Codegen `fitz build` paridad bit-a-bit
+
+`src/codegen.rs` (~720 LoC nuevas): `CronJobInfo` extendido con
+los 4 campos parseados build-time. `program_has_persistent_cron`
+walka AST y fuerza `uses_db=true` cuando encuentra
+`store=<ident>`. Preludio dividido en 4 constantes
+(`JOBS_COMMON_PRELUDE` + `JOBS_RUN_PRELUDE_SIMPLE` cuando no hay
+persistencia, o `SQL_HELPERS_PRELUDE` +
+`JOBS_RUN_PRELUDE_PERSISTENT` cuando sí). Trait
+`__FitzCronStoreFrom` polimórfico acepta `__FitzDbConn` directo
+o `Result<__FitzDbConn, String>` (caso idiomático `let db =
+db.connect(...).await` sin `?` top-level). `gen_main` reordena:
+stmts del usuario van ANTES de `emit_cron_job_spawns` para que
+bindings top-level estén en scope.
+
+`src/evaluator.rs::resolve_store_kwarg` también acepta
+`Value::Result(Ok(DbConn))` (paridad bit-a-bit con el trait del
+codegen).
+
+Validado contra Postgres 15 local: binario nativo con
+`@cron("*/2 * * * * *", store=db)` crea las dos tablas, persiste
+3 runs `status='ok' attempt=1` en 6s; `last_status='ok'` en
+`fitz_cron_jobs`.
+
+### Sub-paso e — Cap 30 + ejemplo + LSP refresh
+
+`docs/guide.md` cap 30 "Jobs sin Celery" — sub-sección nueva
+**"Persistencia, retry y timezone (iter2)"** documenta los 4
+kwargs con shape, defaults, schema DDL, queries de visibility
+con `psql`, semántica del binding `Result<DbConn>` top-level +
+`__FitzCronStoreFrom`. Limitación conocida documentada
+(`fitz run` cron-only con `store=db`). Sub-sección "Qué no está
+en el MVP" reescrita: salen los 3 items cerrados; entra
+`@background` con persistencia + retry (diferido a iter3).
+
+`examples/guide/30b-cron-persistente.fitz` (~50 LoC) — HTTP+cron
+con los 4 kwargs combinados. Sumado al smoke
+`GUIDE_EXAMPLES_COMPILE` (~290 ejemplos, todos verde en ~7 min).
+
+`src/lsp.rs` — descripciones de `@cron`/`@background` mencionan
+los kwargs nuevos. Grammar TextMate sin cambios. **112 tests LSP
+verdes**.
+
+### Cierre formal — Tier 1 del curso
+
+Total al cierre: **2792 unit + 6 E2E real Postgres + 1
+compile_e2e smoke + 112 LSP**. `cargo fmt --all` + `cargo clippy
+--all-targets -- -D warnings` limpios. mkdocs build sin
+warnings nuevos.
+
+Próximo norte: **9.w.1.iter2** (Tier 2 — RBAC custom + token
+refresh) o saltar a Fase 12 según necesidad del curso.
+
+---
 
 ## [v0.11.1] — 2026-06-01 — Fase 13 polish: short flags + Bool=true negation + List<Str> variadic + fix CI fmt drift
 

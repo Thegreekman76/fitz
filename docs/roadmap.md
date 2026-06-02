@@ -7664,18 +7664,138 @@ que tiene gaps obvios. Tiers definidos en `docs/curso-plan.md` →
 
 - **T1 — bloquean M5** (cerrar antes de arrancar a escribir
   caps):
-  - **9.w.3.iter2 — Persistencia + retry + timezone de jobs**:
-    persistencia del `CronRegistry` sobre la DB nativa de Fase 10
-    (tabla auto-generada con schedule + last_run + status); retry
-    con backoff exponencial vía `@cron("...", retry={max=3,
-    backoff="exponential"})` y equivalente en `@background`
-    (necesita storage durable para max_retries); cron timezone
-    configurable vía `@cron("...", tz="America/Argentina/
-    Buenos_Aires")` con default UTC; política de missed runs al
-    volver tras restart (default "skip", opt-in
-    `catch_up=true`). Tamaño estimado: ~500-700 LoC + cambios al
-    checker para los kwargs nuevos + cap 30 de la guía
-    actualizado.
+  - **9.w.3.iter2 — Persistencia + retry + timezone + catch_up
+    de jobs** ✅ **CERRADA 2026-06-02 (v0.11.2)**. 5 sub-pasos
+    coordinados (a checker, b runtime tipos, c scheduler + E2E
+    Postgres real, d codegen `fitz build` paridad, e cap 30 +
+    ejemplo runnable + LSP refresh) + cierre formal f. ~3000
+    LoC netas entre `src/types.rs` / `src/cron_jobs.rs` /
+    `src/evaluator.rs` / `src/codegen.rs` / `src/lsp.rs` +
+    `tests/cron_jobs_real_postgres.rs` + `docs/guide.md` cap 30
+    + `examples/guide/30b-cron-persistente.fitz`. Sub-pasos:
+    - 9.w.3.iter2.a: checker estático con helpers libres
+      `check_job_kwargs` + `check_retry_map` parametrizados por
+      allowed-list; valida shape sintáctico (`tz` Str literal,
+      `retry` Map literal con keys `max/backoff/initial_secs/
+      max_secs`, `catch_up` Bool literal, `store` Ident no-null),
+      rechaza desconocidos y duplicados con la lista de
+      aceptados. `extract_int_literal` reconoce `Int(N)` y
+      `UnaryOp { Neg, Int(N) }`. `@background` acepta `tz`/
+      `retry` (no `store`/`catch_up`). +20 unit tests checker.
+    - 9.w.3.iter2.b: tipos runtime en `cron_jobs.rs` — `enum
+      BackoffKind` (default `Exponential`) con
+      `derive(Default)`, `struct RetryConfig` con `Default`
+      (max=0 = sin retry) y `delay_for_attempt(attempt)` que
+      calcula el backoff (`exponential` shift saturado a 63
+      para no overflowear) capeado por `max_secs`. `struct
+      CronJobOptions { tz, retry, catch_up, store }` con
+      `Default` (UTC/None/false/None). `CronJob` gana los 4
+      campos; `CronRegistry::register` toma `CronJobOptions`
+      como parámetro final. `evaluator::register_cron_job`
+      parsea kwargs del `Decorator` vía
+      `parse_cron_job_options` + sub-helpers
+      (`parse_retry_kwarg`, `resolve_store_kwarg` que valida
+      contra `Value::DbConn` con error claro si tipo no
+      compatible). +11 unit cron_jobs + +7 unit evaluator.
+    - 9.w.3.iter2.c: scheduler intérprete adaptado. 7 helpers
+      SQL `init_storage` (CREATE TABLE IF NOT EXISTS de dos
+      tablas + un índice idempotentes) / `upsert_job_row` (ON
+      CONFLICT DO UPDATE) / `record_run_start` (RETURNING id,
+      acepta i64 o Text del BIGSERIAL) / `record_run_finish`
+      (UPDATE finished_at=now()) / `update_job_last_run` /
+      `read_last_run_at` / `parse_pg_timestamptz` (normaliza
+      offset Postgres sin minutos `+00`/`-03`/`+05` → `±DD:00`
+      para que `chrono::DateTime::parse_from_rfc3339` matchee).
+      `run_cron_job` boot con init + upsert + catch_up
+      (`Schedule::after(last)` en `job.tz`); loop tz-aware con
+      `Schedule::upcoming(job.tz)` convertido a UTC para el
+      sleep; `invoke_with_retry` que persiste cada attempt con
+      status `running`→`ok`|`retrying`|`failed`. Schema:
+      `fitz_cron_jobs(name PK, schedule, tz, last_run_at,
+      last_status, last_error, next_run_at)` + `fitz_cron_runs
+      (id BIGSERIAL, job_name, started_at, finished_at, status,
+      attempt, error)` + índice `(job_name, started_at DESC)`.
+      Helpers SQL marcados `#[doc(hidden)] pub` para uso de
+      tests E2E. +6 tests E2E reales `#[ignore]` en
+      `tests/cron_jobs_real_postgres.rs` contra Postgres 15
+      local del autor (memoria `reference_postgres_local`).
+    - 9.w.3.iter2.d: codegen `fitz build` paridad bit-a-bit.
+      `CronJobInfo` extendido con `tz_name/retry/catch_up/
+      store_var` parseados build-time vía
+      `parse_cron_kwargs_into_info` + `parse_cron_retry_map`.
+      `program_has_persistent_cron` walka AST buscando `@cron
+      (..., store=<Ident>)`; cuando true, fuerza `uses_db=true`
+      (suma `chrono-tz` al Cargo.toml generado si
+      `uses_date_or_uuid=false` para evitar dupe). Preludio
+      dividido en 4 constantes condicionales (`JOBS_COMMON_
+      PRELUDE` con trait `__FitzCronReturn` que mapea `()` o
+      `Result<(), String>` a uniform `Result<(), String>`,
+      siempre emitido; `JOBS_RUN_PRELUDE_SIMPLE` sin field
+      `store` + sin SQL helpers cuando no hay persistencia para
+      evitar referenciar `__FitzDbConn`; `SQL_HELPERS_PRELUDE`
+      con 7 helpers `__fitz_cron_*` paralelos al intérprete +
+      `JOBS_RUN_PRELUDE_PERSISTENT` con field `store:
+      Option<__FitzDbConn>` + trait polimórfico
+      `__FitzCronStoreFrom` que acepta `__FitzDbConn` directo
+      Y `Result<__FitzDbConn, String>` con panic claro si era
+      `Err` — destraba el patrón canónico `let db = db.connect
+      (...).await` top-level sin `?`). `gen_main` reordena:
+      stmts del usuario van ANTES de `emit_cron_job_spawns`
+      para que bindings top-level estén en scope al
+      referenciarlos como `store=db`. `gate de kwargs` del
+      partition extendido para aceptar kwargs en `@cron`/
+      `@background`. `emit_cron_job_spawns` construye
+      `__FitzCronOptions { tz: __tz, retry: ..., catch_up:
+      ..., (store: (&db).into_store())? }` con parseo IANA al
+      boot vía `.parse::<chrono_tz::Tz>().unwrap_or_else(panic)`.
+      `evaluator::resolve_store_kwarg` extendido en paralelo
+      para aceptar `Value::Result(Ok(DbConn))` y `Err(msg)`
+      con error claro (paridad runtime exacta). Validado
+      contra Postgres 15 local: binario nativo con `@cron("*/2
+      * * * * *", store=db)` crea las dos tablas, persiste 3
+      runs `status='ok' attempt=1` en 6s.
+    - 9.w.3.iter2.e: cap 30 de `docs/guide.md` "Jobs sin
+      Celery" suma sub-sección **"Persistencia, retry y
+      timezone (iter2)"** antes de "Cron-only mode" con shape
+      de cada kwarg + defaults + backoffs aceptados + schema
+      DDL + queries de visibility manual con `psql` + notas
+      sobre el binding `Result<DbConn>` top-level. Limitación
+      conocida documentada: `fitz run` cron-only con `store=db`
+      tiene bug del runtime tokio del intérprete (workarounds:
+      `fitz build` o sumar handler HTTP trivial). Sub-sección
+      "Qué no está en el MVP" reescrita: salen los 3 items
+      cerrados; entra `@background` con persistencia + retry
+      (diferido a iter3). `examples/guide/30b-cron-persistente.
+      fitz` nuevo (~50 LoC HTTP+cron con los 4 kwargs
+      combinados) sumado al smoke `GUIDE_EXAMPLES_COMPILE`
+      (~290 ejemplos verde en ~7 min). `src/lsp.rs`
+      descripciones de `@cron`/`@background` actualizadas con
+      los kwargs nuevos; grammar TextMate sin cambios. 112
+      tests LSP verdes.
+    - 9.w.3.iter2.f: cierre formal (CHANGELOG v0.11.2 +
+      roadmap actualizado + curso-plan.md marca T1 CERRADO
+      + memoria `project_curso_pre_m5_tiers` actualizada +
+      `docs/deudas-post-5b.md` nota de cierre + README +
+      CLAUDE.md refresh + prompt M5 con cap C26 reescrito
+      al iter2 entregado para próxima sesión).
+
+    **Total al cierre v0.11.2**: 2792 unit + 6 E2E real
+    Postgres + 1 compile_e2e smoke + 112 LSP. `cargo fmt --all`
+    + `cargo clippy --all-targets -- -D warnings` limpios.
+    mkdocs build sin warnings nuevos.
+
+    **Decisiones técnicas confirmadas con el autor al arrancar
+    (2026-06-01)**: D1 dos tablas (jobs + runs) vs una sola;
+    D2 CREATE TABLE IF NOT EXISTS auto al boot vs `fitz db
+    migrate` manual; D3 `store=<binding>` kwarg explícito vs
+    convention global singleton; D4 Map literal para `retry={...}`
+    vs kwargs sueltos; D5 3 backoff kinds desde el día 1
+    (exponential/linear/constant) vs solo exponential; D6
+    `@background` solo `tz`/`retry` en memoria (persistencia
+    diferida a iter3 — los args de `spawn` requieren JSON estable
+    + tabla `fitz_bg_jobs` separada); D7 `catch_up=false` default
+    (skip); D8 `chrono-tz = "0.10"` no-opcional (ya estaba
+    transitive desde Fase 10 — sin nueva dep).
 
 - **T2 — evaluar antes de M5** (cierran caso de uso del cap si
   entran):
@@ -7698,7 +7818,7 @@ que tiene gaps obvios. Tiers definidos en `docs/curso-plan.md` →
 
 **Orden de ejecución acordado**:
 
-1. 9.w.3.iter2 (T1) — release dedicado.
+1. ✅ **CERRADO 2026-06-02 (v0.11.2)** — 9.w.3.iter2 (T1).
 2. 9.w.1.iter2 (T2 — RBAC + refresh) — release dedicado tras T1.
 3. 9.w.2.iter2 (T2 — rooms + replay) — solo si el ejemplo del
    C25 del curso lo exige; si no, baja a T3.

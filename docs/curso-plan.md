@@ -374,11 +374,21 @@ Celery).
 
 ### T1 — bloquean M5 (cerrar antes de arrancar a escribir)
 
-| # | Item | Cap impactado | Por qué T1 |
+**Estado: CERRADO entero (2026-06-02, v0.11.2)** — bloque
+9.w.3.iter2 cubrió los tres items en un release dedicado.
+Detalle técnico en `docs/roadmap.md` → "9.w.3.iter2" y en el
+CHANGELOG. El cap 30 de la guía documenta el flow nuevo.
+
+| # | Item | Cap impactado | Estado |
 |---|---|---|---|
-| 1 | **Persistencia de jobs sobre DB nativa** | C26 Jobs | Ya no es deuda arquitectónica (Fase 10 cerró). Sin esto, el cap termina con "ojo, si reinicia se pierde", exactamente lo que vende Celery |
-| 2 | **Retry con backoff exponencial** para `@cron`/`@background` | C26 Jobs | Próximo paso natural tras persistencia (max_retries+backoff necesita storage durable). Es lo que un lector espera de "jobs sin Celery" |
-| 3 | **Cron timezone configurable** (`@cron(..., tz="America/Argentina/Buenos_Aires")`) | C26 Jobs | Chico (~50 LoC), default UTC sigue. Sin esto enseñar `@cron("0 9 * * *")` para "todos los días a las 9" es engañoso |
+| 1 | **Persistencia de jobs sobre DB nativa** | C26 Jobs | ✅ CERRADO v0.11.2 — `store=db` crea `fitz_cron_jobs` + `fitz_cron_runs` con CREATE TABLE IF NOT EXISTS al boot, persiste cada attempt |
+| 2 | **Retry con backoff exponencial** para `@cron` (+ `tz`/`retry` también en `@background`) | C26 Jobs | ✅ CERRADO v0.11.2 — `retry={max, backoff: "exponential"\|"linear"\|"constant", initial_secs, max_secs}` capeado |
+| 3 | **Cron timezone configurable** (`@cron(..., tz="America/Argentina/Buenos_Aires")`) | C26 Jobs | ✅ CERRADO v0.11.2 — IANA via `chrono-tz`, default UTC |
+
+**Bonus cerrado en el mismo bloque** (no estaba en T1 original):
+`catch_up=true|false` — al boot, si hubo missed runs entre
+`last_run_at` y `now`, ejecuta UN run inmediato (no N, evita
+spam). Default `false`.
 
 ### T2 — evaluar antes de M5 (cierran caso de uso del cap si entran)
 
@@ -402,7 +412,7 @@ Celery).
 
 Mini-fases discretas, una por release, en este orden:
 
-1. **9.w.3.iter2** — Persistencia + retry + timezone de jobs (T1.1 + T1.2 + T1.3 juntos — comparten el storage del `CronRegistry`).
+1. **9.w.3.iter2** ✅ **CERRADO 2026-06-02 (v0.11.2)** — Persistencia + retry + timezone + catch_up de jobs (T1.1 + T1.2 + T1.3 + bonus catch_up cerrados juntos).
 2. **9.w.1.iter2** — RBAC custom + token refresh (T2.6 + T2.7 — comparten la noción de "roles persistidos" si entra refresh).
 3. **9.w.2.iter2** — Rooms + reconnect state replay (T2.4 + T2.5 — solo si el ejemplo del C25 los exige; si no, baja a T3).
 4. **Arrancar M5 del curso**.

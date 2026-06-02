@@ -2469,3 +2469,71 @@ minimalista. Si en algún momento queremos opciones más opinionadas
 (import grouping, comment width, etc.), las sumamos ahí. Documentado
 para visibilidad — todos los devs futuros saben que ESE es el lugar
 donde fijar reglas de fmt.
+
+---
+
+## 9.w iteración 2 — Tier 1 deudas pre-M5 — **CERRADO 2026-06-02 (v0.11.2)**
+
+Las tres deudas que bloqueaban escribir M5.C26 del curso "Fitz de
+0 a experto" (acordadas el 2026-06-01 en `docs/curso-plan.md` →
+"Tiers pre-M5") cerradas en bloque coordinado:
+
+- **Persistencia de jobs sobre DB nativa** ✅ — `@cron("...",
+  store=db)` crea `fitz_cron_jobs` + `fitz_cron_runs` con
+  CREATE TABLE IF NOT EXISTS al boot del scheduler. Cada attempt
+  va a `fitz_cron_runs` con `status running|ok|failed|retrying`.
+  Visibility manual con `psql` (UI dedicada queda como sub-paso
+  futuro si aparece demanda).
+- **Retry con backoff exponencial** para `@cron` (+ `tz`/`retry`
+  también en `@background`) ✅ — `retry={max: N, backoff:
+  "exponential"|"linear"|"constant", initial_secs: I, max_secs:
+  M}` con delay capeado por `max_secs`. Cada attempt registrado
+  con número en `attempt` column.
+- **Cron timezone configurable** ✅ — `tz="IANA/Name"` via
+  `chrono-tz` (ya transitive desde Fase 10). `Schedule::upcoming
+  (tz)` tz-aware con conversión a UTC para el sleep.
+
+**Bonus cerrado en el mismo bloque** (no estaba en T1 original):
+
+- **`catch_up=true|false`** — al boot, si hubo missed runs entre
+  `last_run_at` y `now`, ejecuta UN run inmediato (no N — evita
+  spam). Default `false` = skip.
+
+**Paridad bit-a-bit `fitz run` ↔ `fitz build`** validada contra
+Postgres 15 local del autor. El codegen activa `uses_db=true`
+automáticamente cuando detecta `@cron(..., store=<Ident>)`
+(función `program_has_persistent_cron` walka AST). Cargo.toml
+generado suma `chrono-tz` cuando `uses_jobs && !uses_date_or_uuid`.
+Preludio dividido en 4 constantes (simple vs persistent) para
+evitar referencias a `__FitzDbConn` cuando el programa no usa el
+driver. Trait polimórfico `__FitzCronStoreFrom` acepta
+`__FitzDbConn` directo Y `Result<__FitzDbConn, String>` —
+destraba el patrón canónico `let db = db.connect(...).await`
+top-level sin `?`.
+
+**Deudas residuales derivadas de 9.w.3.iter2** (NO bloquean el
+arranque de M5, todas documentadas en cap 30 sub-sección "Qué no
+está en el MVP"):
+
+- `@background` con persistencia + retry sobre `spawn(...)` —
+  diferido a iter3. Los args del spawn requieren serialización
+  JSON estable + tabla `fitz_bg_jobs` separada. `@background`
+  acepta `tz`/`retry` en memoria pero no `store`/`catch_up`.
+- `fitz run` **cron-only** (programa con `@cron(..., store=db)`
+  sin `@server` ni handlers HTTP) tiene bug heredado del runtime
+  tokio `current_thread` del intérprete: la conn DB queda atada
+  al runtime del evaluator que cierra al pasar a `multi_thread`
+  para el scheduler. Workarounds: `fitz build` (binario nativo
+  arma su propio runtime multi-thread limpio) o sumar un handler
+  HTTP trivial. Cierre del bug requiere refactor del flow de
+  runtimes del intérprete (no trivial, deuda separada).
+- UI dedicada de visibility (panel admin tipo Sidekiq Web). Hoy
+  los datos están en las dos tablas, cualquier dashboard externo
+  (Grafana, Metabase) los lee.
+- Coordinación multi-instancia con locks distribuidos para que
+  un `@cron` solo corra en un nodo. Hoy cada réplica corre todos
+  sus jobs.
+
+**Detalle técnico completo**: `docs/roadmap.md` → "9.w iteración
+2" → sub-sección "9.w.3.iter2" expandida con los 6 sub-pasos
+a/b/c/d/e/f y CHANGELOG v0.11.2.
