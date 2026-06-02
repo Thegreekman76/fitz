@@ -2910,6 +2910,14 @@ struct CheckCtx<'a> {
     /// background — evita usos accidentales de spawn sobre fns
     /// regulares cuyo retorno el caller espera consumir.
     background_fns: std::collections::HashSet<String>,
+    /// Fase 12.1 — `Some((name, span))` cuando ya se vio un `@healthz`
+    /// en el walk. Singleton: un segundo `@healthz` en otra fn dispara
+    /// error explícito citando la primera. No persiste info adicional
+    /// (no hay downstream check como `@auth_provider`); el runtime y el
+    /// codegen re-recolectan por su cuenta al auto-mount `/healthz`.
+    healthz_first: Option<(String, Span)>,
+    /// Fase 12.1 — paralelo a `healthz_first` pero para `@readyz`.
+    readyz_first: Option<(String, Span)>,
     /// Mini-tanda L — stack paralelo a los `Expr::Loop` actualmente
     /// siendo chequeados. Cada frame recolecta los tipos de los
     /// valores de `break <v>` adentro. `Expr::Loop` consume el
@@ -2959,6 +2967,8 @@ impl<'a> CheckCtx<'a> {
             middleware_fn_names: std::collections::HashSet::new(),
             auth_provider: None,
             background_fns: std::collections::HashSet::new(),
+            healthz_first: None,
+            readyz_first: None,
             loop_depth: 0,
             break_value_stack: Vec::new(),
             errors: Vec::new(),
@@ -8394,6 +8404,14 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // `@cron + @get/@post/...` se rechazan.
             check_cron_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
             check_background_decorator(ctx, fn_name, decorators, *fn_span);
+            // Fase 12.1.a — validar `@healthz`/`@readyz` (probes K8s
+            // estilo). Singletons, sin args/kwargs/params, return
+            // `Bool`/`Result<Null>`/`Result<Bool>` (sync o async). NO
+            // combinables con `@get/@post/@put/@delete/@ws/@cron/
+            // @background/@auth_provider/@authenticated/@admin/@test/
+            // @command`. El runtime y el codegen auto-mount `/healthz`
+            // y `/readyz` cuando estos decorators están declarados.
+            check_health_decorators(ctx, fn_name, params, &ret, decorators, *fn_span);
             // Fase 13 (v0.11.0) — `@command("name", desc="...")` declara
             // una fn como comando CLI. Valida que la fn no tenga conflictos
             // con decorators de servidor/job/test, que los params sean
@@ -10142,6 +10160,166 @@ fn check_background_decorator(
             ));
             return;
         }
+    }
+}
+
+/// Fase 12.1.a — `@healthz`/`@readyz` declaran probes K8s estilo.
+/// El runtime y el codegen auto-mount `GET /healthz` y `GET /readyz`
+/// cuando estos decorators están declarados (paralelo a
+/// `/openapi.json` autoregistrado).
+///
+/// **Reglas validadas** (idénticas para `@healthz` y `@readyz`):
+/// - Sin args ni kwargs (`@healthz` puro, opcionalmente con `()`
+///   vacío).
+/// - Singleton: máximo uno por programa.
+/// - Sin params (las probes no reciben input).
+/// - Return type: `Bool` / `Result<Null>` / `Result<Bool>`. Si la fn
+///   es `async fn`, los Future de los anteriores también.
+/// - NO combinable con `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
+///   `@background`/`@auth_provider`/`@authenticated`/`@admin`/`@test`/
+///   `@command`. Las probes son rutas auto-mounted; el handler NO
+///   debe ser HTTP normal ni job ni test.
+///
+/// Errores van directo a `ctx.errors`. El singleton se trackea en
+/// `ctx.healthz_first` y `ctx.readyz_first` (Some al ver el primero).
+fn check_health_decorators(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    ret: &Type,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    for deco in decorators {
+        let kind = match deco.name.as_str() {
+            "healthz" => "healthz",
+            "readyz" => "readyz",
+            _ => continue,
+        };
+        // 1) Sin args ni kwargs.
+        if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{kind} sobre fn '{fn_name}': no admite args ni kwargs. \
+                     Sintaxis: `@{kind}\\nfn nombre() -> Bool {{ ... }}` o con `Result<Null>`/`Result<Bool>` (sync o async)."
+                ),
+            ));
+            continue;
+        }
+        // 2) Singleton.
+        let prev_slot = if kind == "healthz" {
+            &ctx.healthz_first
+        } else {
+            &ctx.readyz_first
+        };
+        if let Some((prev_name, prev_span)) = prev_slot {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{kind} duplicado: la fn '{prev_name}' (línea {prev_line}) ya fue declarada como probe; \
+                     la fn '{fn_name}' (línea {curr_line}) es una segunda. Solo se admite una por programa.",
+                    prev_line = prev_span.line,
+                    curr_line = fn_span.line
+                ),
+            ));
+            continue;
+        }
+        // 3) Conflictos con otros decoradores.
+        let conflicting = [
+            "get",
+            "post",
+            "put",
+            "delete",
+            "ws",
+            "cron",
+            "background",
+            "auth_provider",
+            "authenticated",
+            "admin",
+            "test",
+            "command",
+        ];
+        let mut conflict = None;
+        for other in decorators {
+            if conflicting.contains(&other.name.as_str()) {
+                conflict = Some(other.name.clone());
+                break;
+            }
+            // El otro probe en la misma fn también es conflicto.
+            // Ejemplo: `@healthz @readyz fn check() -> Bool { ... }`.
+            if other.name != deco.name && (other.name == "healthz" || other.name == "readyz") {
+                conflict = Some(other.name.clone());
+                break;
+            }
+        }
+        if let Some(other) = conflict {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{kind} sobre fn '{fn_name}' no es combinable con `@{other}`: las probes son rutas auto-mounted (`/{kind}`); el handler no puede ser HTTP normal, job, test ni CLI command."
+                ),
+            ));
+            continue;
+        }
+        // 4) Sin params.
+        if !params.is_empty() {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{kind} sobre fn '{fn_name}': la probe no admite params (las probes no reciben input). Tiene {n}.",
+                    n = params.len()
+                ),
+            ));
+            continue;
+        }
+        // 5) Return type: Bool / Result<Null> / Result<Bool> / Future
+        //    de los anteriores (transparente para async fns). Aceptamos
+        //    también `Any` (escape gradual del checker).
+        if !is_valid_health_return(ret) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{kind} sobre fn '{fn_name}': el return debe ser `Bool`, `Result<Null>` o `Result<Bool>` (sync o async). Es `{ty}`.",
+                    ty = ret.display(ctx.types)
+                ),
+            ));
+            continue;
+        }
+        // 6) Persistir el primer válido para detectar duplicados.
+        let slot = if kind == "healthz" {
+            &mut ctx.healthz_first
+        } else {
+            &mut ctx.readyz_first
+        };
+        *slot = Some((fn_name.to_string(), fn_span));
+    }
+}
+
+/// Helper de `check_health_decorators`: ¿es el return type aceptable
+/// para una probe? Aceptamos:
+/// - `Bool` directo.
+/// - `Null` (rare pero válido si la fn solo logea y siempre "pasa").
+/// - `Result<Null>` (Ok = healthy, Err = unhealthy).
+/// - `Result<Bool>` (Ok(true) healthy, Ok(false) unhealthy, Err también).
+/// - `Future<T>` con T cualquiera de los anteriores (async fn).
+/// - `Any` como escape gradual del checker.
+fn is_valid_health_return(ret: &Type) -> bool {
+    match ret {
+        Type::Bool | Type::Null | Type::Any => true,
+        Type::Result { ok, .. } => matches!(ok.as_ref(), Type::Null | Type::Bool | Type::Any),
+        Type::Future(inner) => is_valid_health_return(inner),
+        _ => false,
     }
 }
 
@@ -17030,5 +17208,184 @@ print(total)
             "esperaba error de tipo: {:?}",
             errs
         );
+    }
+
+    // ============================================================
+    // Fase 12.1.a — @healthz / @readyz tests
+    // ============================================================
+
+    /// Helper local — replica de `assert_auth_ok` para los tests de
+    /// las probes K8s. No reusa el del bloque @auth_provider porque
+    /// vive en un sub-módulo `tests` separado y el visibility no
+    /// llega; copiarlo es más simple.
+    fn assert_no_health_err(src: &str) {
+        let errs = errors_of(src);
+        let related: Vec<_> = errs
+            .iter()
+            .filter(|e| e.message.contains("@healthz") || e.message.contains("@readyz"))
+            .collect();
+        assert!(
+            related.is_empty(),
+            "esperaba sin errores de @healthz/@readyz, fue: {:?}",
+            related
+        );
+    }
+
+    /// Helper local — el programa debe producir al menos un error
+    /// cuyo mensaje contenga `expected_substr`.
+    fn assert_health_err(src: &str, expected_substr: &str) {
+        let errs = errors_of(src);
+        let matched = errs.iter().any(|e| e.message.contains(expected_substr));
+        assert!(
+            matched,
+            "esperaba error con substring '{}', errores fueron: {:?}",
+            expected_substr, errs
+        );
+    }
+
+    #[test]
+    fn healthz_basico_compila() {
+        // `@healthz fn liveness() -> Bool { return true }` debe compilar
+        // sin errores de tipo.
+        let src = "@healthz\n\
+                   fn liveness() -> Bool {\n  return true\n}";
+        assert_no_health_err(src);
+    }
+
+    #[test]
+    fn readyz_basico_compila() {
+        let src = "@readyz\n\
+                   fn readiness() -> Bool {\n  return true\n}";
+        assert_no_health_err(src);
+    }
+
+    #[test]
+    fn healthz_con_result_null_compila() {
+        // `Result<Null>` también es válido: Ok = healthy, Err = unhealthy.
+        let src = "@healthz\n\
+                   fn liveness() -> Result<Null> {\n  return Ok(null)\n}";
+        assert_no_health_err(src);
+    }
+
+    #[test]
+    fn healthz_con_result_bool_compila() {
+        let src = "@healthz\n\
+                   fn liveness() -> Result<Bool> {\n  return Ok(true)\n}";
+        assert_no_health_err(src);
+    }
+
+    #[test]
+    fn healthz_async_compila() {
+        // async fn liveness() -> Bool — el ret es Future<Bool>, válido.
+        let src = "async fn pausar(ms: Int) -> Int { return ms }\n\
+                   @healthz\n\
+                   async fn liveness() -> Bool {\n  let _ = pausar(0).await\n  return true\n}";
+        assert_no_health_err(src);
+    }
+
+    #[test]
+    fn healthz_con_args_es_error() {
+        let src = "@healthz(\"x\")\n\
+                   fn liveness() -> Bool {\n  return true\n}";
+        assert_health_err(src, "no admite args ni kwargs");
+    }
+
+    #[test]
+    fn healthz_con_kwargs_es_error() {
+        let src = "@healthz(timeout=10)\n\
+                   fn liveness() -> Bool {\n  return true\n}";
+        assert_health_err(src, "no admite args ni kwargs");
+    }
+
+    #[test]
+    fn healthz_con_params_es_error() {
+        // Las probes no reciben input — params es error.
+        let src = "@healthz\n\
+                   fn liveness(x: Int) -> Bool {\n  return true\n}";
+        assert_health_err(src, "no admite params");
+    }
+
+    #[test]
+    fn healthz_return_type_invalido_es_error() {
+        // Return debe ser Bool / Result<Null> / Result<Bool>.
+        let src = "@healthz\n\
+                   fn liveness() -> Int {\n  return 200\n}";
+        assert_health_err(src, "Bool");
+    }
+
+    #[test]
+    fn healthz_duplicado_es_error() {
+        // Singleton: dos @healthz disparan error citando el primero.
+        let src = "@healthz\n\
+                   fn first() -> Bool {\n  return true\n}\n\
+                   @healthz\n\
+                   fn second() -> Bool {\n  return false\n}";
+        assert_health_err(src, "@healthz duplicado");
+    }
+
+    #[test]
+    fn readyz_duplicado_es_error() {
+        let src = "@readyz\n\
+                   fn first() -> Bool {\n  return true\n}\n\
+                   @readyz\n\
+                   fn second() -> Bool {\n  return false\n}";
+        assert_health_err(src, "@readyz duplicado");
+    }
+
+    #[test]
+    fn healthz_y_readyz_separados_compilan() {
+        // `@healthz` + `@readyz` en distintas fns está OK — son
+        // singletons separados.
+        let src = "@healthz\n\
+                   fn liveness() -> Bool {\n  return true\n}\n\
+                   @readyz\n\
+                   fn readiness() -> Bool {\n  return true\n}";
+        assert_no_health_err(src);
+    }
+
+    #[test]
+    fn healthz_y_readyz_juntos_en_misma_fn_es_error() {
+        // Apilados sobre la misma fn → conflicto.
+        let src = "@healthz\n\
+                   @readyz\n\
+                   fn both() -> Bool {\n  return true\n}";
+        assert_health_err(src, "no es combinable");
+    }
+
+    #[test]
+    fn healthz_con_get_es_error() {
+        // Conflicto con decorator HTTP normal.
+        let src = "@healthz\n\
+                   @get(\"/probe\")\n\
+                   fn probe() -> Bool {\n  return true\n}";
+        assert_health_err(src, "no es combinable");
+    }
+
+    #[test]
+    fn healthz_con_cron_es_error() {
+        let src = "@healthz\n\
+                   @cron(\"0 0 * * *\")\n\
+                   fn job() -> Bool {\n  return true\n}";
+        assert_health_err(src, "no es combinable");
+    }
+
+    #[test]
+    fn healthz_con_background_es_error() {
+        let src = "@healthz\n\
+                   @background\n\
+                   fn job() -> Bool {\n  return true\n}";
+        assert_health_err(src, "no es combinable");
+    }
+
+    #[test]
+    fn healthz_con_authenticated_es_error() {
+        // Las probes NO deben ser autenticadas (K8s no manda bearer).
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n  return Err(\"x\")\n}\n\
+                   @healthz\n\
+                   @authenticated\n\
+                   fn probe(user: User) -> Bool {\n  return true\n}";
+        assert_health_err(src, "no es combinable");
     }
 }
