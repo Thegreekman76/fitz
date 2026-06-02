@@ -5332,6 +5332,29 @@ async fn dispatch_method(
         )));
     }
     match (&receiver, method) {
+        // Fase 12.2.a — Secret<T>.expose() desempaca al inner T.
+        // Sin args. Usar para pasar el valor crudo a builtins que lo
+        // necesitan: `jwt.encode(claims, secret.expose())`,
+        // `hash.verify(pass.expose(), hashed)`, `db.connect(url.expose())`.
+        // Es la ÚNICA forma de obtener el inner — el resto del lenguaje
+        // (print, Display, Debug, value_to_json) redacta.
+        (Value::Secret(inner), "expose") => {
+            if !args.is_empty() {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::WrongArgCount {
+                        expected: 0,
+                        found: args.len(),
+                    },
+                    span.line,
+                    span.column,
+                    format!(
+                        "Secret.expose() no admite argumentos, recibió {}",
+                        args.len()
+                    ),
+                )));
+            }
+            Ok((*inner.0).clone())
+        }
         // List
         (Value::List(_), "push") => list_push(receiver, args, span),
         (Value::List(_), "pop") => list_pop(receiver, args, span),
@@ -10729,6 +10752,21 @@ fn register_builtins(env: &EnvRef) {
         Value::Builtin {
             name: "load_env",
             func: builtin_load_env,
+        },
+    );
+    // Fase 12.2.a — Builtins de Fase 12 (Deployment).
+    env.lock().define(
+        "secret",
+        Value::Builtin {
+            name: "secret",
+            func: builtin_secret,
+        },
+    );
+    env.lock().define(
+        "config",
+        Value::Builtin {
+            name: "config",
+            func: builtin_config,
         },
     );
     // Fase 9.z.2.a — assertion builtins. Siempre disponibles (igual
@@ -16260,6 +16298,176 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
     };
     let value = std::env::var(&key).unwrap_or(default);
     Ok(Value::Str(value))
+}
+
+/// Fase 12.2.a — `secret(key: Str) -> Result<Secret<Str>>` builtin.
+///
+/// Multi-source lookup con la siguiente precedencia:
+///   1. Env var (`std::env::var(key)`).
+///   2. Mounted file `/run/secrets/<key>` — convención K8s/Docker
+///      secrets. En Windows el path no existe → skip silencioso.
+///   3. Si ninguno: `Err("secret 'KEY' no encontrado")`.
+///
+/// El valor se envuelve en `Value::Secret(SecretInner(Box::new(...)))`
+/// para que el resto del lenguaje (print/Display/Debug/JSON) lo
+/// redacte automático. Para usarlo en builtins como `jwt.encode` o
+/// `db.connect`, el caller hace `.expose()` explícito.
+///
+/// Patrón canónico:
+/// ```fitz
+/// let db_pass = secret("DB_PASSWORD")?
+/// let db = db.connect("postgres://user:{db_pass.expose()}@host/db?...").await?
+/// ```
+fn builtin_secret(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`secret(key)` espera 1 argumento (Str), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`secret(key)` espera Str como arg, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    // Source 1: env var.
+    if let Ok(value) = std::env::var(&key) {
+        return Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Secret(
+            crate::value::SecretInner(Box::new(Value::Str(value))),
+        )))));
+    }
+    // Source 2: mounted file (convención K8s/Docker secrets).
+    let mount_path = format!("/run/secrets/{}", key);
+    if let Ok(contents) = std::fs::read_to_string(&mount_path) {
+        // Trim trailing newline (mounted secrets típicamente terminan
+        // con \n por convención de los provisioners — k8s/docker secrets
+        // los escriben sin newline pero el caller puede agregar uno).
+        let trimmed = contents.trim_end_matches(['\n', '\r']).to_string();
+        return Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Secret(
+            crate::value::SecretInner(Box::new(Value::Str(trimmed))),
+        )))));
+    }
+    // No source disponible — Err.
+    Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+        format!(
+            "secret '{}' no encontrado (chequeado: env var, /run/secrets/{})",
+            key, key
+        ),
+    )))))
+}
+
+/// Fase 12.2.a — `config(key: Str, default: T) -> T` builtin.
+///
+/// Lookup type-coerced de un valor de configuración no-sensitive:
+///
+/// 1. Si la env var `key` existe, parsea según el tipo del `default`:
+///    - `Int`  → `i64::from_str_radix`.
+///    - `Float`→ `f64::parse`.
+///    - `Bool` → `"true"`/`"1"` → true, `"false"`/`"0"` → false.
+///    - `Str`  → passthrough.
+///
+///    Si el parse falla, retorna el default (no error — más
+///    ergonómico para configs misconfigured).
+///
+/// 2. Si la env var no existe, retorna el default tal cual.
+///
+/// vs `env_or(key, default) -> Str` (que solo soporta Str): `config`
+/// auto-coerciona y abre todas las primitive types. El cap del curso
+/// recomienda `config(...)` como reemplazo moderno de `env_or`.
+fn builtin_config(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`config(key, default)` espera 2 argumentos (Str, T), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`config(key, default)` espera Str como primer arg, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let default = &args[1];
+    let raw = match std::env::var(&key) {
+        Ok(v) => v,
+        Err(_) => return Ok(default.clone()),
+    };
+    // Coercer según el tipo del default.
+    let coerced = match default {
+        Value::Int(_) => raw
+            .parse::<i64>()
+            .ok()
+            .map(Value::Int)
+            .unwrap_or_else(|| default.clone()),
+        Value::Float(_) => raw
+            .parse::<f64>()
+            .ok()
+            .map(Value::Float)
+            .unwrap_or_else(|| default.clone()),
+        Value::Bool(_) => match raw.to_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => Value::Bool(true),
+            "false" | "0" | "no" | "off" => Value::Bool(false),
+            _ => default.clone(),
+        },
+        Value::Str(_) => Value::Str(raw),
+        // Para tipos compuestos (List/Map/Instance/etc.) no hacemos
+        // parsing — solo soportamos primitivos. El user envuelve env
+        // vars complejas con `secret(...)` o las parsea manual.
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int|Float|Bool|Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`config(key, default)` solo soporta defaults primitivos (Int/Float/Bool/Str), recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    Ok(coerced)
 }
 
 fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {

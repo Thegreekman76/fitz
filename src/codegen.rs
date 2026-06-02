@@ -28578,7 +28578,12 @@ fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<Stri
         | Type::QueryBuilder(_)
         | Type::Aggregated(_)
         | Type::Any
-        | Type::PyAny => Ok("false".to_string()),
+        | Type::PyAny
+        // Fase 12.2.a — `Secret<T>` aparece feature-gated en codegen
+        // (la integración real es 12.2.b). Defensivo: false. El
+        // checker no debería permitir Secret en field de `@table` —
+        // las DBs guardan el inner T crudo, no envuelto.
+        | Type::Secret(_) => Ok("false".to_string()),
         // Tuples (mini-tanda T): comparación element-wise. Rust ya
         // implementa PartialEq para tuples si cada slot lo hace,
         // así que `lhs == rhs` funciona directamente para tipos
@@ -29675,6 +29680,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::Map(_, _) => "Map<...>",
         Type::Result { .. } => "Result<...>",
         Type::Future(_) => "Future<...>",
+        Type::Secret(_) => "Secret<...>",
         Type::WsConn { .. } => "WsConn<...>",
         Type::DbConn => "DbConn",
         Type::DbRow => "DbRow",
@@ -29708,6 +29714,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::Map(k, v) => format!("Map<{}, {}>", display_type(k, env), display_type(v, env)),
         Type::Result { ok: inner, err: _ } => format!("Result<{}>", display_type(inner, env)),
         Type::Future(inner) => format!("Future<{}>", display_type(inner, env)),
+        Type::Secret(inner) => format!("Secret<{}>", display_type(inner, env)),
         Type::WsConn { recv, send } => {
             if recv == send {
                 format!("WsConn<{}>", display_type(recv, env))

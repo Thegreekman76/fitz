@@ -1375,6 +1375,17 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                     .to_string(),
             );
         }
+        // Fase 12.2.a — `Secret<T>` está bloqueado al serializer JSON
+        // por diseño: previene leaks accidentales de credenciales a
+        // clientes HTTP. Para enviar el inner T (raro y peligroso),
+        // el handler debe desempacar explícito con `.expose()`.
+        Value::Secret(_) => {
+            return Err(
+                "Secret<T> no es serializable a JSON (auto-redaction para prevenir leaks de credenciales). \
+                 Usá `.expose()` para desempacar el inner si realmente lo necesitás cruzar HTTP — \
+                 pero en ese caso es mejor pasar el valor crudo sin envolver en Secret en primer lugar.".to_string(),
+            );
+        }
         // Fase 9.w.2 — `WsConn` es un handle vivo a una conexión WS,
         // no un valor de datos. Si llega al serializer es bug del
         // handler (devolvió el conn en lugar de un msg/Result).

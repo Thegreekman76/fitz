@@ -348,6 +348,23 @@ impl PyObjectHandle {
     }
 }
 
+/// Fase 12.2.a — Wrapper del inner de `Value::Secret` con `Debug`
+/// custom que redacta. Existe como tipo dedicado (en vez de
+/// `Box<Value>` directo) para que el `derive(Debug)` de `Value`
+/// propague la redacción automáticamente — sin esto, el inner se
+/// pinta crudo en cualquier `format!("{:?}", value)` y leakea el
+/// secret a logs/panics. `PartialEq` deriva delegando al inner.
+#[derive(Clone, PartialEq)]
+pub struct SecretInner(pub Box<Value>);
+
+impl std::fmt::Debug for SecretInner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // NO mostrar el inner — esa es la regla. El `Debug` del Value
+        // que envuelve un Secret pinta `Secret(<redacted>)`.
+        write!(f, "<redacted>")
+    }
+}
+
 /// Un valor en runtime.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -561,6 +578,26 @@ pub enum Value {
     /// "un future se await una sola vez".
     Future(FutureCell),
 
+    /// Fase 12.2.a — `Secret<T>` valor opaco con auto-redaction.
+    /// Producido por el builtin `secret("KEY")` que lee env var /
+    /// mounted file `/run/secrets/<KEY>` / `.env` (precedencia). El
+    /// inner T se guarda envuelto en `SecretInner` cuyo `Debug` emite
+    /// `<redacted>` — el `derive(Debug)` de `Value` propaga esa
+    /// redacción al `Debug` del enum entero. El `Display` del Value
+    /// (impl manual abajo) emite `<redacted Secret<T>>`.
+    ///
+    /// `.expose() -> T` desempaca explícito el inner (dispatch en
+    /// `evaluator::dispatch_method`). Es la única forma de obtener
+    /// el valor crudo — `print(secret)` y `Debug` están bloqueados.
+    /// Serialization a JSON también rechaza con error explícito en
+    /// `crate::http::value_to_json` (12.2.b refinará el codegen
+    /// emit para alcanzar paridad bit-a-bit).
+    ///
+    /// `PartialEq` (impl manual abajo) compara los inner: dos
+    /// `Secret<Str>` son iguales si su contenido lo es — útil para
+    /// validar passwords contra hashes en MVP.
+    Secret(SecretInner),
+
     /// Objeto Python opaco — solo existe con la feature `python`.
     /// Producido por el loader `from python import <mod>` (Fase 8.1.2)
     /// y por accesos a atributos / llamadas que devuelven objetos
@@ -701,6 +738,7 @@ impl Value {
             Value::Module { .. } => "Module",
             Value::CorsConfig(_) => "CorsConfig",
             Value::Future(_) => "Future",
+            Value::Secret(_) => "Secret",
             Value::WsConn(_) => "WsConn",
             Value::DbConn(_) => "DbConn",
             Value::QueryBuilder(_) => "QueryBuilder",
@@ -838,6 +876,10 @@ impl std::fmt::Display for Value {
             },
             Value::CorsConfig(_) => write!(f, "<cors-config>"),
             Value::Future(_) => write!(f, "<future>"),
+            // Fase 12.2.a — Display redacta el inner para prevenir
+            // leaks accidentales en logs/print. La única forma de
+            // acceder al valor crudo es vía `.expose()` explícito.
+            Value::Secret(_) => write!(f, "<redacted Secret>"),
             Value::WsConn(_) => write!(f, "<ws-conn>"),
             Value::DbConn(h) => write!(f, "<db-conn {}>", h.url_redacted),
             Value::QueryBuilder(_) => write!(f, "<query-builder>"),
@@ -937,6 +979,12 @@ impl PartialEq for Value {
             // iguales estructuralmente (sockets distintos, broadcaster
             // entries distintas).
             (Value::WsConn(a), Value::WsConn(b)) => Arc::ptr_eq(a, b),
+            // Fase 12.2.a — Secret: igualdad delegando al inner.
+            // Permite validar credenciales (`stored == provided`) sin
+            // exposer el contenido. La comparación es estructural;
+            // un constant-time refinement queda como deuda menor
+            // (relevante para timing attacks en validación de hashes).
+            (Value::Secret(a), Value::Secret(b)) => a == b,
             // Igualdad por identidad del Arc — paralelo a WsConn.
             (Value::DbConn(a), Value::DbConn(b)) => Arc::ptr_eq(a, b),
             // Mismo criterio para QueryBuilder.

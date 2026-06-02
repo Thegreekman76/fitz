@@ -2644,6 +2644,15 @@ fn scope_level_completions(
             "load_env",
             "fn(path: Str) -> Result<Null>  // parse KEY=VALUE file",
         ),
+        // Fase 12.2.a — secret/config builtins.
+        (
+            "secret",
+            "fn(key: Str) -> Result<Secret<Str>>  // env var | /run/secrets/<key>",
+        ),
+        (
+            "config",
+            "fn(key: Str, default: T) -> T  // env var con type coercion + default",
+        ),
         // 10.8.7 (v0.10.8) — broadcast cross-handler a clientes WS.
         (
             "ws_broadcast",

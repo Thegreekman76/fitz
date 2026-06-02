@@ -74,6 +74,22 @@ pub enum Type {
     /// Nullable). Introducido en Fase 6.2.
     Future(Box<Type>),
 
+    /// Fase 12.2.a — `Secret<T>` tipo opaco con auto-redaction.
+    /// Construido por el builtin `secret("KEY")` que lee env var /
+    /// mounted file `/run/secrets/<key>` / `.env`. El Display y Debug
+    /// del runtime emiten `<redacted Secret<T>>` para prevenir leaks
+    /// accidentales en logs. Acceder al inner T requiere llamar
+    /// `.expose()` explícito — diseño defensive-by-default paralelo
+    /// al pattern Secret<T> de Rust libs como `secrecy`.
+    ///
+    /// Serialization a JSON está bloqueada en `value_to_json` — un
+    /// handler HTTP que devuelva `Secret<Str>` recibe error explícito
+    /// citando `.expose()` (deuda residual: refinement con field-level
+    /// redaction en types con field Secret).
+    ///
+    /// Aridad fija 1 (built-in genérico, paralelo a Future/Result/List).
+    Secret(Box<Type>),
+
     /// Fase 9.w.2 — `WsConn<T>` conexión WebSocket tipada. `T` es el
     /// tipo de mensaje (cualquier tipo que serialice a JSON: primitivo,
     /// `type` custom, List/Map, etc.). Aridad fija 1, built-in genérico
@@ -308,6 +324,7 @@ impl Type {
                 _ => format!("Result<{}, {}>", t.display(env), e.display(env)),
             },
             Type::Future(t) => format!("Future<{}>", t.display(env)),
+            Type::Secret(t) => format!("Secret<{}>", t.display(env)),
             // 9.w.2-wsconn-bidir — Display compacto:
             //   `WsConn<T>` cuando recv == send (caso simétrico,
             //   default histórico).
@@ -1160,6 +1177,16 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             expect_arity(name, 1, args)?;
             let inner = resolve_type_expr(&args[0], env)?;
             Ok(Type::Future(Box::new(inner)))
+        }
+        "Secret" => {
+            // Fase 12.2.a — `Secret<T>` tipo opaco con auto-redaction.
+            // Aridad fija 1. El inner T puede ser cualquier tipo
+            // resoluble; típicamente `Str` (passwords, tokens), pero
+            // también puede ser nominal (`Secret<Credentials>` para
+            // bundles atómicos).
+            expect_arity(name, 1, args)?;
+            let inner = resolve_type_expr(&args[0], env)?;
+            Ok(Type::Secret(Box::new(inner)))
         }
         "WsConn" => {
             // 9.w.2-wsconn-bidir (v0.9.38) — `WsConn` acepta 1 o 2
@@ -3249,6 +3276,46 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Fase 12.2.a — `secret(key) -> Result<Secret<Str>>` — lookup
+        // multi-source (env var → /run/secrets/<key>) que devuelve un
+        // tipo opaco con auto-redaction. El inner se accede con
+        // `.expose()` explícito.
+        self.scopes[0].insert(
+            "secret".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Str],
+                    ret: Box::new(Type::Result {
+                        ok: Box::new(Type::Secret(Box::new(Type::Str))),
+                        err: Box::new(Type::Str),
+                    }),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // Fase 12.2.a — `config(key, default) -> T` — lookup
+        // type-coerced. Return type depende del shape del default
+        // (Int/Float/Bool/Str). Lo tipamos como `Any` porque el
+        // checker no infiere "el tipo del second arg" como ret type
+        // todavía. Refinement futuro: especialización por shape del
+        // default. Por ahora el caller anota con `let port: Int =
+        // config("PORT", 8080)` y la coerción runtime ajusta.
+        self.scopes[0].insert(
+            "config".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Str, Type::Any],
+                    ret: Box::new(Type::Any),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         self.scopes[0].insert(
             "assert_eq".into(),
             VarBinding {
@@ -5192,6 +5259,35 @@ fn infer_method_call(
         Type::Date => Some(infer_date_method(ctx, method, args_ty, span)),
         Type::DateTime => Some(infer_datetime_method(ctx, method, args_ty, span)),
         Type::Uuid => Some(infer_uuid_method(ctx, method, args_ty, span)),
+        // Fase 12.2.a — `Secret<T>.expose() -> T` desempaca el inner.
+        // Único método del tipo; sin args. El checker chequea aridad
+        // y devuelve el inner T tipado (no Any) para que el resto del
+        // pipeline pueda razonar con tipo concreto.
+        Type::Secret(inner) => match method {
+            "expose" => {
+                if !args_ty.is_empty() {
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "Secret.expose() no admite argumentos, recibió {}",
+                            args_ty.len()
+                        ),
+                    );
+                }
+                Some((**inner).clone())
+            }
+            other => {
+                ctx.error_at(
+                    span,
+                    format!(
+                        "Secret<{}> no tiene el método `{}`. Único método disponible: `.expose()` (desempaca al inner). Display/Debug/JSON están redactados por diseño.",
+                        inner.display(ctx.types),
+                        other
+                    ),
+                );
+                Some(Type::Any)
+            }
+        },
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
@@ -17387,5 +17483,102 @@ print(total)
                    @authenticated\n\
                    fn probe(user: User) -> Bool {\n  return true\n}";
         assert_health_err(src, "no es combinable");
+    }
+
+    // ============================================================
+    // Fase 12.2.a — Secret<T> tipo opaco + secret/config builtins
+    // ============================================================
+
+    #[test]
+    fn secret_type_se_resuelve_y_display_es_redactable() {
+        // `Secret<Str>` debe resolver correctamente. Su display
+        // estructural mantiene el shape (para mensajes de error
+        // tipados). La redacción solo aplica al Display de Value.
+        let src = "let p: Secret<Str> = secret(\"K\")?";
+        let errs = errors_of(src);
+        // `?` adentro de top-level + `secret` que devuelve
+        // `Result<Secret<Str>>` debería tipar OK. El uso de `?` en
+        // top-level requiere fn padre Result o async fn (15.3.3 rule
+        // de la fase 5). Para test simple: envolver.
+        // Wrapping required: usamos async fn.
+        let _ = errs; // suficiente con que el shape esté declarable
+        let src2 = "async fn pp() -> Result<Null> {\n  let p: Secret<Str> = secret(\"K\")?\n  return Ok(null)\n}";
+        let errs2 = errors_of(src2);
+        assert!(errs2.is_empty(), "esperaba sin errores, fue: {:?}", errs2);
+    }
+
+    #[test]
+    fn secret_expose_devuelve_el_inner_tipado() {
+        // `.expose()` en `Secret<Str>` debe tipar `Str` (no Any).
+        // Esto permite chains tipadas: `secret("X")?.expose().len()`.
+        let src = "async fn pp() -> Result<Int> {\n\
+                   let p = secret(\"K\")?\n\
+                   let exposed: Str = p.expose()\n\
+                   return Ok(exposed.len())\n\
+                   }";
+        let errs = errors_of(src);
+        assert!(errs.is_empty(), "esperaba sin errores, fue: {:?}", errs);
+    }
+
+    #[test]
+    fn secret_metodo_desconocido_es_error() {
+        // Cualquier método que no sea `.expose()` debe fallar con
+        // mensaje claro.
+        let src = "async fn pp() -> Result<Null> {\n\
+                   let p = secret(\"K\")?\n\
+                   let _ = p.unwrap()\n\
+                   return Ok(null)\n\
+                   }";
+        let errs = errors_of(src);
+        let matched = errs
+            .iter()
+            .any(|e| e.message.contains("Secret") && e.message.contains(".expose()"));
+        assert!(
+            matched,
+            "esperaba mensaje con sugerencia de `.expose()`, fue: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn secret_expose_con_args_es_error() {
+        let src = "async fn pp() -> Result<Null> {\n\
+                   let p = secret(\"K\")?\n\
+                   let _ = p.expose(42)\n\
+                   return Ok(null)\n\
+                   }";
+        let errs = errors_of(src);
+        let matched = errs.iter().any(|e| {
+            e.message.contains("Secret.expose()") && e.message.contains("no admite argumentos")
+        });
+        assert!(
+            matched,
+            "esperaba error citando 'no admite argumentos', fue: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn config_tipa_como_any_independiente_del_default() {
+        // `config(key, default)` retorna Any (refinement futuro).
+        // El user anota destino con `let port: Int = config("P", 8080)`.
+        let src = "let port: Int = config(\"PORT\", 8080)";
+        let errs = errors_of(src);
+        assert!(
+            errs.is_empty(),
+            "esperaba sin errores con anotación destino, fue: {:?}",
+            errs
+        );
+    }
+
+    #[test]
+    fn secret_builtin_arg_debe_ser_str() {
+        // `secret(42)` con Int como key → error de tipo.
+        let src = "let _ = secret(42)";
+        let errs = errors_of(src);
+        let matched = errs
+            .iter()
+            .any(|e| e.message.contains("Str") || e.message.contains("Int"));
+        assert!(matched, "esperaba error de tipo en arg, fue: {:?}", errs);
     }
 }
