@@ -2107,19 +2107,11 @@ fn drained_response() -> axum::response::Response {
 ///   - `Bool false` → 503 + `{"status": "unhealthy"}`.
 ///   - `Result Err(e)` → 503 + `{"status": "unhealthy", "error": <e>}`.
 ///   - Cualquier panic / Future no resuelto → 503 con mensaje genérico.
-async fn invoke_health_check(
-    handle: HealthCheckHandle,
-    kind: &str,
-) -> axum::response::Response {
+async fn invoke_health_check(handle: HealthCheckHandle, kind: &str) -> axum::response::Response {
     use axum::response::IntoResponse;
     let name = handle.name.clone();
-    let raw = crate::evaluator::invoke_value(
-        handle.handler,
-        vec![],
-        &name,
-        crate::ast::Span::ZERO,
-    )
-    .await;
+    let raw =
+        crate::evaluator::invoke_value(handle.handler, vec![], &name, crate::ast::Span::ZERO).await;
     let value = match raw {
         Ok(v) => v,
         Err(_) => {
@@ -2128,9 +2120,7 @@ async fn invoke_health_check(
             eprintln!("[{kind}] error al invocar handler '{name}'");
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(
-                    serde_json::json!({"status": "unhealthy", "error": "handler error"}),
-                ),
+                axum::Json(serde_json::json!({"status": "unhealthy", "error": "handler error"})),
             )
                 .into_response();
         }
@@ -2142,9 +2132,7 @@ async fn invoke_health_check(
             eprintln!("[{kind}] handler '{name}' produjo Future con error");
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
-                axum::Json(
-                    serde_json::json!({"status": "unhealthy", "error": "future error"}),
-                ),
+                axum::Json(serde_json::json!({"status": "unhealthy", "error": "future error"})),
             )
                 .into_response();
         }
@@ -3923,7 +3911,10 @@ pub fn serve(
         // runtime, los tasks cron también se cancelan.
         crate::cron_jobs::spawn_cron_scheduler(cron_registry_for_scheduler);
         axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal(draining_for_shutdown, shutdown_timeout_secs))
+            .with_graceful_shutdown(shutdown_signal(
+                draining_for_shutdown,
+                shutdown_timeout_secs,
+            ))
             .await
     })?;
 
@@ -3960,9 +3951,7 @@ async fn shutdown_signal(
     // ~10s por default, pero load balancers más rápidos como Envoy ven
     // el cambio en ~1s).
     let grace = std::cmp::min(2u64, shutdown_timeout_secs.max(1));
-    eprintln!(
-        "[shutdown] esperando {grace}s de grace period para que el load balancer rerutee..."
-    );
+    eprintln!("[shutdown] esperando {grace}s de grace period para que el load balancer rerutee...");
     tokio::time::sleep(std::time::Duration::from_secs(grace)).await;
 
     eprintln!(
@@ -5393,7 +5382,7 @@ mod tests {
                 enable_docs: true,
                 api_version: None,
                 ws_heartbeat_secs: 30,
-            shutdown_timeout_secs: 30,
+                shutdown_timeout_secs: 30,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
@@ -5402,7 +5391,7 @@ mod tests {
                 enable_docs: true,
                 api_version: None,
                 ws_heartbeat_secs: 30,
-            shutdown_timeout_secs: 30,
+                shutdown_timeout_secs: 30,
             };
             let err = set_server_config(second).unwrap_err();
             // El error contiene el config existente, no el nuevo.
@@ -6317,10 +6306,7 @@ mod tests {
 
     // ---- 12.1.b — auto-mount de /healthz y /readyz ----
 
-    async fn oneshot_get(
-        registry: HttpRegistry,
-        path: &'static str,
-    ) -> (u16, String) {
+    async fn oneshot_get(registry: HttpRegistry, path: &'static str) -> (u16, String) {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
         let metas = registry.metas();

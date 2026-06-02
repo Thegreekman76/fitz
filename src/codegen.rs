@@ -25510,13 +25510,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("    (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({\"status\": \"draining\"}))).into_response()\n");
         self.emit("}\n\n");
 
-        self.emit("fn __fitz_health_unhealthy(err: Option<String>) -> axum::response::Response {\n");
+        self.emit(
+            "fn __fitz_health_unhealthy(err: Option<String>) -> axum::response::Response {\n",
+        );
         self.emit("    use axum::response::IntoResponse;\n");
         self.emit("    let body = match err {\n");
-        self.emit("        Some(e) => serde_json::json!({\"status\": \"unhealthy\", \"error\": e}),\n");
+        self.emit(
+            "        Some(e) => serde_json::json!({\"status\": \"unhealthy\", \"error\": e}),\n",
+        );
         self.emit("        None => serde_json::json!({\"status\": \"unhealthy\"}),\n");
         self.emit("    };\n");
-        self.emit("    (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response()\n");
+        self.emit(
+            "    (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response()\n",
+        );
         self.emit("}\n\n");
 
         // 3) Defaults — montados cuando el usuario NO declaró
@@ -25557,10 +25563,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("/// Fase 12.1.c — graceful shutdown handler.\n");
         self.emit("async fn __fitz_shutdown_signal(shutdown_timeout_secs: u64) {\n");
         self.emit("    let _ = tokio::signal::ctrl_c().await;\n");
-        self.emit("    eprintln!(\"\\n[shutdown] SIGINT recibido — flippeando draining state\");\n");
         self.emit(
-            "    __FITZ_DRAINING.store(true, std::sync::atomic::Ordering::SeqCst);\n",
+            "    eprintln!(\"\\n[shutdown] SIGINT recibido — flippeando draining state\");\n",
         );
+        self.emit("    __FITZ_DRAINING.store(true, std::sync::atomic::Ordering::SeqCst);\n");
         self.emit("    let grace = std::cmp::min(2u64, shutdown_timeout_secs.max(1));\n");
         self.emit("    eprintln!(\"[shutdown] esperando {}s de grace period para que el load balancer rerutee...\", grace);\n");
         self.emit("    tokio::time::sleep(std::time::Duration::from_secs(grace)).await;\n");
@@ -25604,9 +25610,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         )
         .unwrap();
         if check_draining {
-            self.emit(
-                "    if __FITZ_DRAINING.load(std::sync::atomic::Ordering::Relaxed) {\n",
-            );
+            self.emit("    if __FITZ_DRAINING.load(std::sync::atomic::Ordering::Relaxed) {\n");
             self.emit("        return __fitz_health_drained();\n");
             self.emit("    }\n");
         }
@@ -25625,13 +25629,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         };
         match mapping {
             HealthRetShape::Bool => {
-                writeln!(
-                    &mut self.output,
-                    "    let __r: bool = {};",
-                    call
-                )
-                .unwrap();
-                self.emit("    if __r { __fitz_health_ok() } else { __fitz_health_unhealthy(None) }\n");
+                writeln!(&mut self.output, "    let __r: bool = {};", call).unwrap();
+                self.emit(
+                    "    if __r { __fitz_health_ok() } else { __fitz_health_unhealthy(None) }\n",
+                );
             }
             HealthRetShape::ResultBool => {
                 writeln!(
