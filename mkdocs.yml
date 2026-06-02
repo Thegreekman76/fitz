@@ -162,6 +162,13 @@ nav:
           - 'C2 — Auth nativa (JWT + Argon2id)': curso/m5-async-auth-rt/c2-auth.md
           - 'C3 — WebSockets tipados + AsyncAPI': curso/m5-async-auth-rt/c3-websockets.md
           - 'C4 — Jobs sin Celery + persistencia': curso/m5-async-auth-rt/c4-jobs.md
+      - 'M6 — Capstone Postgres + ORM nativo':
+          - 'C1 — Setup Postgres + driver crudo': curso/m6-postgres-orm/c1-setup-driver-crudo.md
+          - 'C2 — @table + @primary + reads': curso/m6-postgres-orm/c2-table-decoradores-reads.md
+          - 'C3 — Writes + QueryBuilder + agregados': curso/m6-postgres-orm/c3-writes-querybuilder-agregados.md
+          - 'C4 — Relations + navigation + N+1': curso/m6-postgres-orm/c4-relations-navigation-preload.md
+          - 'C5 — Tipos avanzados (jsonb, arrays, Date)': curso/m6-postgres-orm/c5-tipos-avanzados.md
+          - 'C6 — Capstone: app CRUD completa': curso/m6-postgres-orm/c6-capstone-crud-completo.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

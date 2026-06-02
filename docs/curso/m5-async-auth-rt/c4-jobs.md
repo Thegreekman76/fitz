@@ -790,21 +790,15 @@ con esto: `Map<Str, Any>` ↔ jsonb, arrays nativos `List<T>` ↔
 `T[]`, JSON operators directos sobre `.where(...)`, navigation
 methods generados, etc.
 
-M6 cubre (6 caps planificados):
+M6 cubre 6 capítulos:
 
-- **C1** — Setup Postgres + `db.connect(URL).await` + `db.query`
-  / `db.exec` crudos.
-- **C2** — `type` con `@table`/`@primary`/`@column` + `Type.all()`
-  / `.first()` / `.where(closure)` / `.count()`.
-- **C3** — Insert / update / delete + QueryBuilder chain
-  (`.order_by`/`.limit`/`.offset`/`.group_by`).
-- **C4** — Relations (`@belongs_to`/`@has_many`/`@has_one`) +
-  navigation methods + `.preload("rel")` eager.
-- **C5** — Tipos avanzados (jsonb, arrays, Date/Time/UUID) +
-  operadores extendidos (`like`/`is_in`/`contains_json`).
-- **C6** — Capstone — app CRUD entera con auth + ORM + WS para
-  notificaciones + cron para limpieza + Docker.
+- **[C1 — Setup Postgres + `db.connect` + driver crudo](../m6-postgres-orm/c1-setup-driver-crudo.md)**
+- **[C2 — `@table`, `@primary` y lecturas tipadas](../m6-postgres-orm/c2-table-decoradores-reads.md)**
+- **[C3 — Writes + QueryBuilder chain + agregados](../m6-postgres-orm/c3-writes-querybuilder-agregados.md)**
+- **[C4 — Relations + navigation + eager loading](../m6-postgres-orm/c4-relations-navigation-preload.md)**
+- **[C5 — Tipos avanzados: jsonb, arrays, Date/DateTime/Uuid](../m6-postgres-orm/c5-tipos-avanzados.md)**
+- **[C6 — Capstone: app CRUD completa con auth + ORM + WS + cron + Docker](../m6-postgres-orm/c6-capstone-crud-completo.md)**
 
 Es el bloque más ambicioso del curso porque integra **TODO lo
-visto** en una app production-ready end-to-end. Cuando esté
-listo, el cap C1 va a aparecer en el [índice del curso](../index.md).
+visto** en una app production-ready end-to-end. Arrancá con
+[M6.C1](../m6-postgres-orm/c1-setup-driver-crudo.md).

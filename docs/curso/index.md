@@ -41,7 +41,7 @@ asume VSCode para los screenshots ASCII.
 | M3 — Módulos y organización | 5 | ✅ cerrado (C1-C5) |
 | M4 — HTTP first-class | 5 | ✅ cerrado (C1-C5) |
 | M5 — Async, auth, real-time | 4 | ✅ cerrado (C1-C4) |
-| M6 — Capstone Postgres + ORM nativo | 6 | 📋 planificado |
+| M6 — Capstone Postgres + ORM nativo | 6 | ✅ cerrado (C1-C6) |
 | M7 — Producción y deployment | 4 | ⏸ pendiente (espera Fase 12) |
 
 Total previsto: 7 módulos, 36 capítulos. Cada módulo es **unidad
@@ -129,6 +129,25 @@ auto-generado y heartbeat built-in, tareas programadas con tz
 IANA + retry con backoff + persistencia opcional sobre Postgres
 — todo built-in. **Sin Celery, sin Redis para infra básica, sin
 passport.js, sin socket.io**. Un binario standalone deployable.
+
+## M6 — Capstone Postgres + ORM nativo
+
+Requisito explícito: M5 completo.
+
+- **[C1 — Setup Postgres + `db.connect` + driver crudo](m6-postgres-orm/c1-setup-driver-crudo.md)**
+- **[C2 — `@table`, `@primary` y lecturas tipadas con el ORM](m6-postgres-orm/c2-table-decoradores-reads.md)**
+- **[C3 — Writes (`.insert`/`.update`/`.delete`) + QueryBuilder + agregados](m6-postgres-orm/c3-writes-querybuilder-agregados.md)**
+- **[C4 — Relations + navigation methods + eager loading](m6-postgres-orm/c4-relations-navigation-preload.md)**
+- **[C5 — Tipos avanzados: jsonb, arrays, Date/DateTime/Uuid](m6-postgres-orm/c5-tipos-avanzados.md)**
+- **[C6 — Capstone: app CRUD completa con auth + ORM + WS + cron + Docker](m6-postgres-orm/c6-capstone-crud-completo.md)**
+
+**Entregable del módulo**: una **app real production-ready** que
+integra TODO lo del curso — auth con JWT + Argon2id, ORM con
+relations sobre Postgres, WebSocket para notificaciones,
+cron jobs con persistencia, OpenAPI + AsyncAPI auto, todo en un
+binario standalone de ~30 MB con su `docker-compose.yml`.
+**Sin `pip install`, sin `npm install`, sin `requirements.txt`,
+sin `package.json`** — deploy = un binario.
 
 ## Cómo está pensado el curso
 
