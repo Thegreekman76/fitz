@@ -8453,6 +8453,62 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
              Ok(())\n\
              }\n\n",
         );
+        // Fase 12.2.b — tipo opaco `__FitzSecret<T>` paralelo bit-a-bit
+        // a `Value::Secret(SecretInner)` del intérprete. Display/Debug
+        // redactan; .expose() devuelve el inner T por valor. Construido
+        // SOLO via el builtin `__fitz_secret` (env var → mounted file).
+        // `#[allow(dead_code)]` cubre el caso programas que no usan
+        // Secret — dead_code_elim de rustc remueve la struct + impls.
+        self.emit(
+            "#[allow(dead_code)]\n\
+             pub struct __FitzSecret<T>(T);\n\n\
+             impl<T> __FitzSecret<T> {\n    \
+             #[allow(dead_code)]\n    \
+             pub fn new(value: T) -> Self {\n        \
+             __FitzSecret(value)\n    \
+             }\n    \
+             #[allow(dead_code)]\n    \
+             pub fn expose(self) -> T {\n        \
+             self.0\n    \
+             }\n    \
+             #[allow(dead_code)]\n    \
+             pub fn expose_ref(&self) -> &T {\n        \
+             &self.0\n    \
+             }\n\
+             }\n\n\
+             impl<T: Clone> Clone for __FitzSecret<T> {\n    \
+             fn clone(&self) -> Self {\n        \
+             __FitzSecret(self.0.clone())\n    \
+             }\n\
+             }\n\n\
+             impl<T> std::fmt::Display for __FitzSecret<T> {\n    \
+             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        \
+             write!(f, \"<redacted Secret>\")\n    \
+             }\n\
+             }\n\n\
+             impl<T> std::fmt::Debug for __FitzSecret<T> {\n    \
+             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        \
+             write!(f, \"<redacted Secret>\")\n    \
+             }\n\
+             }\n\n\
+             impl<T: PartialEq> PartialEq for __FitzSecret<T> {\n    \
+             fn eq(&self, other: &Self) -> bool {\n        \
+             self.0 == other.0\n    \
+             }\n\
+             }\n\n\
+             #[allow(dead_code)]\n\
+             fn __fitz_secret(key: &str) -> Result<__FitzSecret<String>, String> {\n    \
+             if let Ok(value) = std::env::var(key) {\n        \
+             return Ok(__FitzSecret::new(value));\n    \
+             }\n    \
+             let mount_path = format!(\"/run/secrets/{}\", key);\n    \
+             if let Ok(contents) = std::fs::read_to_string(&mount_path) {\n        \
+             let trimmed = contents.trim_end_matches(['\\n', '\\r']).to_string();\n        \
+             return Ok(__FitzSecret::new(trimmed));\n    \
+             }\n    \
+             Err(format!(\"secret '{}' no encontrado (chequeado: env var, /run/secrets/{})\", key, key))\n\
+             }\n\n",
+        );
     }
 
     fn gen_main(&mut self, stmts: &[&Stmt]) -> Result<(), FitzError> {
@@ -13044,6 +13100,78 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     err: Box::new(Type::Str),
                 },
             ));
+        }
+        // Fase 12.2.b — `secret(key) -> Result<Secret<Str>>`. El
+        // helper `__fitz_secret` lee env var → mounted file. Paralelo
+        // bit-a-bit a `evaluator::builtin_secret` del 12.2.a.
+        if name == "secret" && !self.is_user_callable(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`secret(key)` espera 1 argumento (Str), recibió {}",
+                        args.len()
+                    ),
+                ));
+            }
+            let (k_code, k_ty) = self.gen_expr(&args[0])?;
+            let k_coerced = coerce(&k_code, &k_ty, &Type::Str, self.env);
+            return Ok((
+                format!("__fitz_secret(&{})", k_coerced),
+                Type::Result {
+                    ok: Box::new(Type::Secret(Box::new(Type::Str))),
+                    err: Box::new(Type::Str),
+                },
+            ));
+        }
+        // Fase 12.2.b — `config(key, default) -> T`. El tipo retornado
+        // depende del shape del default (Int/Float/Bool/Str). Inlinemos
+        // el lookup + coerción directamente, paralelo a
+        // `evaluator::builtin_config`. El default's resolved type
+        // determina la closure de parsing.
+        if name == "config" && !self.is_user_callable(name) {
+            if args.len() != 2 {
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`config(key, default)` espera 2 argumentos (Str, T), recibió {}",
+                        args.len()
+                    ),
+                ));
+            }
+            let (k_code, k_ty) = self.gen_expr(&args[0])?;
+            let (d_code, d_ty) = self.gen_expr(&args[1])?;
+            let k_coerced = coerce(&k_code, &k_ty, &Type::Str, self.env);
+            // Emitimos un bloque inline que matchea el tipo del default.
+            // El return type es el mismo que el default — type-stable.
+            let code = match &d_ty {
+                Type::Int => format!(
+                    "{{ let __default: i64 = {}; std::env::var(&{}).ok().and_then(|v| v.parse::<i64>().ok()).unwrap_or(__default) }}",
+                    d_code, k_coerced
+                ),
+                Type::Float => format!(
+                    "{{ let __default: f64 = {}; std::env::var(&{}).ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(__default) }}",
+                    d_code, k_coerced
+                ),
+                Type::Bool => format!(
+                    "{{ let __default: bool = {}; std::env::var(&{}).ok().and_then(|v| match v.to_lowercase().as_str() {{ \"true\" | \"1\" | \"yes\" | \"on\" => Some(true), \"false\" | \"0\" | \"no\" | \"off\" => Some(false), _ => None, }}).unwrap_or(__default) }}",
+                    d_code, k_coerced
+                ),
+                Type::Str => format!(
+                    "{{ let __default: String = {}; std::env::var(&{}).unwrap_or(__default) }}",
+                    d_code, k_coerced
+                ),
+                other => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`config(key, default)` solo soporta defaults primitivos (Int/Float/Bool/Str), recibió `{}`",
+                            display_type(other, self.env)
+                        ),
+                    ));
+                }
+            };
+            return Ok((code, d_ty));
         }
         // Fase 6.6: builtin `sleep(ms: Int) -> Future<Null>`. Si el
         // usuario definió una fn `sleep` propia, `fn_sigs` la captura
@@ -18431,6 +18559,36 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         format!(
                             "`DateTime` no tiene método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
                             method
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Fase 12.2.b — `Secret<T>.expose() -> T` desempaca el inner.
+        // Único método; el checker (12.2.a) ya validó shape (sin args).
+        // Emit: `(<obj>).expose()` → consume el Secret y devuelve T.
+        if let Ok((obj_code, Type::Secret(inner))) = self.gen_expr(object) {
+            match method {
+                "expose" => {
+                    if !args.is_empty() {
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "Secret.expose() no admite argumentos, recibió {}",
+                                args.len()
+                            ),
+                        ));
+                    }
+                    return Ok((format!("({}).expose()", obj_code), (*inner).clone()));
+                }
+                other => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`Secret<{}>` no tiene método `{}` (único soportado: `.expose()`)",
+                            display_type(&inner, self.env),
+                            other
                         ),
                     ));
                 }
@@ -28883,6 +29041,18 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                 inner_rs
             ))
         }
+        // Fase 12.2.b — `Secret<T>` Fitz → `__FitzSecret<T>` Rust.
+        // El struct + impl Display/Debug (redactados) viven en el
+        // preludio cuando `uses_secret = true`. Construido solo via
+        // `secret(...)` builtin; `.expose()` lo desempaca al inner.
+        Type::Secret(inner) => {
+            let inner_rs = if matches!(**inner, Type::Any) {
+                "_".to_string()
+            } else {
+                rust_type_for(inner, env)?
+            };
+            Ok(format!("__FitzSecret<{}>", inner_rs))
+        }
         // Fase 9.w.2.c — `WsConn<T>` Fitz → `__FitzWsConn<T>` Rust.
         // El struct se emite en `WS_RUNTIME_PRELUDE` cuando
         // `uses_ws = true`. El handler recibe `__FitzWsConn<T>` por
@@ -33176,6 +33346,111 @@ mod tests {
     // ============================================================
     // Fase 12.1.c — codegen de @healthz/@readyz + shutdown_signal
     // ============================================================
+
+    // ============================================================
+    // Fase 12.2.b — codegen de Secret<T> + secret/config builtins
+    // ============================================================
+
+    #[test]
+    fn codegen_emite_struct_fitz_secret_en_preludio() {
+        // El preludio siempre emite __FitzSecret<T> + impls; rustc
+        // hace dead-code elim si no se usa.
+        let src = "let x = 42";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("pub struct __FitzSecret<T>(T)"),
+            "esperaba struct __FitzSecret en el preludio"
+        );
+        assert!(
+            code.contains("fn expose(self) -> T"),
+            "esperaba método expose() en __FitzSecret"
+        );
+        assert!(
+            code.contains("write!(f, \"<redacted Secret>\")"),
+            "esperaba Display/Debug redactado en __FitzSecret"
+        );
+    }
+
+    #[test]
+    fn codegen_secret_builtin_llama_fitz_secret_helper() {
+        let src = "fn main() => 0\n\
+                   let _ = secret(\"KEY\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_secret(&"),
+            "esperaba call a __fitz_secret(&...)"
+        );
+        // El helper builtin debe existir en el preludio.
+        assert!(
+            code.contains("fn __fitz_secret(key: &str)"),
+            "esperaba helper __fitz_secret en preludio"
+        );
+    }
+
+    #[test]
+    fn codegen_config_int_emite_parse_inline() {
+        // config con default Int debe emitir un bloque inline con
+        // parse::<i64>() y fallback al default.
+        let src = "let port: Int = config(\"PORT\", 8080)";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("let __default: i64 = 8080"),
+            "esperaba binding __default tipado Int"
+        );
+        assert!(
+            code.contains(".parse::<i64>()"),
+            "esperaba parse::<i64>() para coerción Int"
+        );
+    }
+
+    #[test]
+    fn codegen_config_bool_emite_match_inline() {
+        let src = "let flag: Bool = config(\"FLAG\", false)";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("let __default: bool = false"),
+            "esperaba binding __default tipado Bool"
+        );
+        // El match debe aceptar las variantes documentadas.
+        assert!(
+            code.contains("\"true\" | \"1\" | \"yes\" | \"on\""),
+            "esperaba match con variantes truthy"
+        );
+    }
+
+    #[test]
+    fn codegen_secret_expose_emite_metodo_rust() {
+        // `s.expose()` debe traducirse a `(<s>).expose()` Rust.
+        let src = "fn run() -> Result<Str> {\n\
+                   let s = secret(\"K\")?\n\
+                   let exposed: Str = s.expose()\n\
+                   return Ok(exposed)\n\
+                   }\n\
+                   print(run())";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains(".expose()"),
+            "esperaba llamada a .expose() en el output Rust"
+        );
+    }
+
+    #[test]
+    fn codegen_secret_metodo_desconocido_es_error() {
+        // El checker rechaza en compile-time; el codegen tiene una
+        // barrera defensiva por si el checker se desactiva (-no-typecheck).
+        // gen_ignoring_check fuerza al codegen a verlo.
+        let src = "fn run() -> Result<Null> {\n\
+                   let s = secret(\"K\")?\n\
+                   let _ = s.unwrap()\n\
+                   return Ok(null)\n\
+                   }";
+        let err = gen_ignoring_check(src).unwrap_err();
+        assert!(
+            err.message.contains(".expose()"),
+            "esperaba mensaje citando .expose(), fue: {}",
+            err.message
+        );
+    }
 
     #[test]
     fn codegen_emite_draining_state_y_shutdown_signal_para_http() {
