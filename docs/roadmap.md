@@ -9295,29 +9295,221 @@ HTMX. Mezcla de las mejores ideas.
 
 ### Fase 12 — Deployment ciudadano primera clase
 
-**Promesa**: del repo a producción en 1 comando.
+**Promesa**: del repo a producción en 1 comando. El binario de
+`fitz build` no solo corre — es **deployable end-to-end** sin
+pegar mil archivos YAML / scripts shell / Dockerfile manuales.
+Health checks built-in, graceful shutdown automático, secrets
+manageables con tipos opacos, observability auto-instrumentada
+con OpenTelemetry estándar, Dockerfile generado del shape del
+programa. Cero `helm install` para infra básica.
 
-- **`fitz deploy`** con detección automática de la plataforma
-  destino (configurable):
-  - Dockerfile autogenerado (multi-stage, distroless final).
-  - Healthcheck route auto (`GET /_health` registrada por el
-    runtime).
-  - Manifest de deploy según target (railway.toml, fly.toml,
-    k8s manifest).
-- **Observability nativa**:
-  - `@trace fn ...` instrumenta la fn con OpenTelemetry spans.
-  - `@metric counter("requests_total")` emite métricas
-    Prometheus.
-  - Logging estructurado built-in (JSON por default en
-    producción).
-- **Secrets management**: `@secret VARIABLE` que valida + inyecta
-  desde env/vault.
-- **Feature flags built-in**: `@flag("new_checkout")` con backend
-  pluggable (LaunchDarkly, GrowthBook).
+**Estado**: planificada con MVP comprometido. Desbloquea el
+**cap M7 entero del curso** que está en espera. Pre-reqs:
+ninguno bloqueante (SIGTERM via `tokio::signal::ctrl_c` ya
+disponible; runtime multi-thread post-F17 cubre concurrencia).
 
-**Por qué importa**: cierra el ciclo "código → producción" sin
-pasar por 10 herramientas externas. Es la **promesa de la
-visión**: "cero fricción hasta el primer deploy".
+### Scope MVP (Tier 1) — sub-fases 12.1-12.5
+
+**12.1 — Health checks + graceful shutdown** (3 sub-pasos)
+
+Decoradores nuevos del lenguaje:
+
+- `@healthz fn liveness() -> Bool` — liveness probe (K8s decide
+  si reiniciar).
+- `@readyz fn readiness() -> Bool` — readiness probe (K8s decide
+  si rutear tráfico).
+- Auto-mount `GET /healthz` + `GET /readyz` cuando se declaran
+  (paralelo al `/openapi.json` autoregistrado).
+- Defaults:
+  - Sin `@readyz`: 200 si `db.is_closed() == false`.
+  - Sin `@healthz`: 200 siempre.
+- SIGTERM handler en `serve()`: al recibir SIGTERM,
+  - `/readyz` empieza a retornar 503 (K8s deja de rutear).
+  - Server stop accepting new conns; in-flight terminan.
+  - WS conns reciben close frame `1001 Going Away`.
+  - Cron scheduler espera jobs en curso a terminar.
+  - Timeout configurable con `@server(shutdown_timeout_secs=N)`,
+    default 30s.
+
+Sub-pasos:
+- **12.1.a** — Checker: parse `@healthz`/`@readyz`, validar fn
+  shape, registrar en `HttpRegistry`.
+- **12.1.b** — Runtime intérprete: auto-mount handlers,
+  integrar SIGTERM handler, drain logic.
+- **12.1.c** — Codegen `fitz build`: paridad bit-a-bit, emitir
+  SIGTERM trap en el main generado, drain de cron/WS.
+
+**12.2 — Secrets + config management** (2 sub-pasos)
+
+API:
+
+- `secret(key: Str) -> Result<Secret<Str>>` builtin. Multi-source
+  con precedencia:
+  1. Env var (`$DB_PASS`).
+  2. Mounted file (`/run/secrets/DB_PASS`) — convención K8s/
+     Docker secrets.
+  3. `.env` file en cwd.
+  4. Si nada: `Err("secret 'DB_PASS' no encontrado")`.
+- `Secret<T>` **tipo opaco built-in**:
+  - `Display`/`print()` emite `<redacted Secret<Str>>`. Cero way
+    de leak accidental.
+  - `Debug` también redacta.
+  - `Secret<T>` no se serializa a JSON (`__ToFitzJson` retorna
+    error explícito en codegen).
+  - `.expose() -> T` desempaca explícito — para pasar al
+    `jwt.encode`/`hash.password`/`db.connect`.
+  - Comparación con `==` está OK (uso típico: validar
+    passwords). Constant-time.
+- `config(key: Str, default: T) -> T` builtin para valores
+  no-sensitive:
+  - Auto-coerciona según tipo del default: `config("PORT", 8080)`
+    → Int; `config("DEBUG", false)` → Bool.
+  - Multi-source: env var → `fitz.toml [config]` section →
+    default.
+- `env_or` existing sigue funcionando (deprecation suave —
+  el cap del curso recomienda `config(...)` como reemplazo).
+
+Sub-pasos:
+- **12.2.a** — Tipo `Secret<T>` en checker + runtime + display
+  redactado + builtins `secret`/`config`.
+- **12.2.b** — Codegen paridad: emit `__FitzSecret<T>` con
+  `Display` redactado + `expose()` + integración con
+  `__ToFitzJson` (error claro citando `.expose()`).
+
+**12.3 — Observability minimal con OpenTelemetry** (3 sub-pasos)
+
+Decisión: OTel estándar (OTLP). Suma ~10MB al binario cuando hay
+`@server`. Opt-out con `@server(observability=false)`.
+
+Auto-instrumentation (cero código del user):
+
+- **Spans** por cada handler HTTP: nombre=`<METHOD> <path>`,
+  attrs `http.method`, `http.target`, `http.status_code`,
+  `duration_ms`.
+- **Spans** anidados para `@auth_provider`, `db.query`/
+  `db.exec`, `@ws` recv/send.
+- **Counter** `http_requests_total{method, path, status}`.
+- **Histogram** `http_request_duration_seconds{method, path,
+  status}`.
+
+Structured logging built-in:
+
+- `log.info(msg, kwargs)` / `log.warn` / `log.error` /
+  `log.debug`.
+- `log.info("login ok", user_id=42, duration_ms=15)`.
+- Output JSON con `timestamp` + `level` + `msg` + traces
+  (`trace_id`/`span_id` correlacionados).
+- `Secret<T>` en kwargs se redacta automático.
+
+Export targets:
+
+- **dev default**: stdout JSON con span info.
+- **prod**: `OTEL_EXPORTER_OTLP_ENDPOINT=https://collector:4318`
+  + `OTEL_SERVICE_NAME=mi-app`.
+- Sampling head-based via `OTEL_TRACES_SAMPLER_ARG=0.1` (10%).
+
+Crate: `opentelemetry-otlp` con feature `http-proto`.
+
+Sub-pasos:
+- **12.3.a** — Setup base + structured logging (`log.info/warn/
+  error/debug`) sin spans/metrics todavía.
+- **12.3.b** — Auto-trace HTTP + auto-metric HTTP + correlación
+  `trace_id` en logs.
+- **12.3.c** — OTLP exporter + sampling + integración codegen +
+  `@server(observability=false)` opt-out.
+
+**12.4 — Dockerfile autogenerado + `fitz docker`** (2 sub-pasos)
+
+Sub-comando nuevo `fitz docker init` produce 3 archivos:
+
+- **`Dockerfile`** multi-stage: builder rust:1.95 → runtime
+  `gcr.io/distroless/cc-debian12`.
+- **`.dockerignore`** con `target/`, `.git/`, `*.fitz` (excluye
+  source code del binario final).
+- **`docker-compose.yml`** smart por defecto.
+
+Smart Dockerfile detection del shape del programa:
+
+- Si declara `@server(port)` → `EXPOSE <port>`.
+- Si usa `secret(...)` → comentario sobre `/run/secrets/` mount.
+- Si tiene Python bundleado (Fase 8.b) → fallback a
+  `debian:bookworm-slim` automático.
+
+Smart compose.yml:
+
+- Si usa `db.connect(env_or("DATABASE_URL", ...))` → suma
+  service `postgres:16-alpine` con healthcheck.
+- Si tiene `@cron` → `restart: unless-stopped`.
+- Si tiene `@healthz/@readyz` → `healthcheck:` agregado en
+  compose.
+
+Sub-comando `fitz docker build [--tag X]` — wrapper que invoca
+`docker build` con tags del `package.name`.
+
+Sub-pasos:
+- **12.4.a** — `fitz docker init` con templates fijos + detección
+  base de `@server` + `db.connect`.
+- **12.4.b** — Smart detection más rica (Python bundle,
+  healthchecks, cron) + `fitz docker build` wrapper.
+
+**12.5 — Guía + curso M7 + cierre formal** (3 sub-pasos)
+
+- **12.5.a** — Cap nuevo cap 35 en `docs/guide.md` "Deployment
+  ciudadano primera clase" — cubre 12.1-12.4 con ejemplos
+  runnable.
+- **12.5.b** — Caps del curso M7.C1-C4:
+  - **M7.C1** — Distribución avanzada (binarios standalone +
+    `fitz build --bundle-python` ya cerrado + cross-compile).
+  - **M7.C2** — Observability (12.3 entero).
+  - **M7.C3** — Secrets management (12.2) — flags queda deuda
+    visible.
+  - **M7.C4** — Deploy avanzado (12.1 + 12.4 + patterns de
+    production).
+- **12.5.c** — Cierre formal: CHANGELOG v0.12.0, roadmap,
+  README, CLAUDE.md, deudas-post-5b.md, smoke
+  `GUIDE_EXAMPLES_COMPILE` cubre los nuevos ejemplos.
+
+### Tier 2 — diferido a iter2 si aparece demanda
+
+- **12.6 — `fitz deploy` orchestrator** — un comando que ejecuta
+  el deployment según target. Targets MVP: `docker` (build +
+  push), `compose` (up local). Extendibles: `fly`, `railway`,
+  `k8s`. Plugin architecture pendiente.
+- **12.7 — `@trace`/`@metric` decoradores explícitos** — sobre
+  fns arbitrarias del business logic. Auto-instrumentation HTTP
+  del MVP cubre el 80% del valor.
+- **12.8 — Feature flags built-in** — `@flag("name")` +
+  `flag("name") -> Bool` + config via TOML/env. Sin demanda
+  real, diferido.
+
+### Resumen de archivos del lenguaje a tocar
+
+| Componente | Cambio | Sub-fase |
+|---|---|---|
+| `src/types.rs` | Tipo `Secret<T>` + checker para `@healthz`/`@readyz` | 12.1, 12.2 |
+| `src/evaluator.rs` | Builtins `secret`/`config`/`log.*` + SIGTERM | 12.1, 12.2, 12.3 |
+| `src/http.rs` | Auto-mount healthz/readyz + drain logic + OTel instrumentation | 12.1, 12.3 |
+| `src/codegen.rs` | Paridad bit-a-bit de todo lo anterior | 12.1, 12.2, 12.3 |
+| `src/cron_jobs.rs` | Drain logic al SIGTERM | 12.1 |
+| `src/main.rs` | Sub-comando `fitz docker init`/`build` | 12.4 |
+| `src/docker.rs` (nuevo) | Templates + smart detection | 12.4 |
+| `Cargo.toml` | Deps: `opentelemetry-otlp`, `tracing-opentelemetry`, `dotenvy` | 12.2, 12.3 |
+
+### Riesgos identificados y mitigaciones
+
+1. **OTel SDK pesa ~10MB**: opt-out con
+   `@server(observability=false)` para programas que no lo
+   necesitan. Binario sin OTel queda como antes (~30MB).
+2. **distroless no tiene shell**: para debug, el cap del curso
+   documenta `docker run -it --entrypoint=/busybox/sh` con
+   sidecar busybox temporal. Alternativa: flag `--base=alpine`.
+3. **Auto-trace puede ser ruidoso**: sampling head-based
+   default 100% en dev, 10% en prod via env var. Fácil de
+   tunear.
+4. **`Secret<T>` rompe paridad con tipos JSON**: si un handler
+   retorna `Secret<Str>`, el codegen falla con error claro
+   citando "Secret no es serializable; usar `.expose()` solo
+   donde realmente lo necesitás".
 
 **Inspiración**: fly.io DX, Vercel deployment, Datadog
 instrumentation as code.
