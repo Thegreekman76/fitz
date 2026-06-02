@@ -404,7 +404,11 @@ fn has_http_routes(program: &Program) -> bool {
                     // toda la infraestructura HTTP (axum + tokio +
                     // serde + __ToFitzJson/__FromFitzJson para el
                     // marshaling JSON del T).
-                    "get" | "post" | "put" | "delete" | "server" | "ws"
+                    //
+                    // Fase 12.1.c — `@healthz`/`@readyz` también: las
+                    // probes son rutas auto-mounted (`GET /healthz`,
+                    // `GET /readyz`) y necesitan axum/tokio igual.
+                    "get" | "post" | "put" | "delete" | "server" | "ws" | "healthz" | "readyz"
                 ))
         )
     })
@@ -2311,7 +2315,11 @@ fn cargo_toml_for(
     // (`src/db.rs` embebido) usa `tokio::time::timeout` para health-check
     // del pool + reconnect lazy. Sin feature `time` → E0433 al compilar.
     let needs_time = uses_async || uses_jobs || uses_db;
-    let needs_signal = uses_jobs && !has_http; // cron-only mode
+    // Fase 12.1.c — HTTP también necesita `signal` para el
+    // shutdown_signal del graceful shutdown (ctrl_c trap). Antes
+    // solo cron-only mode lo pedía (cron-only main hace
+    // `signal::ctrl_c().await` para no salir).
+    let needs_signal = has_http || uses_jobs;
     let needs_net = uses_db; // TcpStream del driver
     let tokio_features: Vec<&str> = {
         let mut feats: Vec<&str> = Vec::new();
@@ -4327,6 +4335,18 @@ struct PartitionedProgram<'a> {
     /// presencia de CUALQUIER `@command` cambia el modo del binario
     /// generado a "CLI tool" (en vez de HTTP server / cron-only).
     cli_fns: Vec<&'a Stmt>,
+    /// Fase 12.1.c — `Some(fn_stmt)` cuando el programa declara
+    /// `@healthz fn nombre() -> Bool { ... }`. La fn TAMBIÉN aparece
+    /// en `top_fns` (se emite como `pub fn` invocable normal); este
+    /// slot separa la referencia para que `gen_http_main` emita el
+    /// wrapper `__handler_healthz` con dispatch al user fn + mapping
+    /// del retorno a status. Sin `@healthz`, el wrapper default
+    /// retorna 200 fijo.
+    healthz_fn: Option<&'a Stmt>,
+    /// Fase 12.1.c — paralelo a `healthz_fn` para `@readyz`. El
+    /// wrapper consulta el flag draining antes de invocar el handler:
+    /// durante shutdown retorna 503 sin tocar el user fn.
+    readyz_fn: Option<&'a Stmt>,
     top_fns: Vec<&'a Stmt>,
     main_stmts: Vec<&'a Stmt>,
     server_config: Option<ServerConfigArgs>,
@@ -4349,6 +4369,8 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
     let mut ws_fns: Vec<&Stmt> = Vec::new();
     let mut cron_fns: Vec<&Stmt> = Vec::new();
     let mut cli_fns: Vec<&Stmt> = Vec::new();
+    let mut healthz_fn: Option<&Stmt> = None;
+    let mut readyz_fn: Option<&Stmt> = None;
     let mut top_fns: Vec<&Stmt> = Vec::new();
     let mut main_stmts: Vec<&Stmt> = Vec::new();
     let mut server_config: Option<ServerConfigArgs> = None;
@@ -4463,13 +4485,50 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // matcheaba todos los decoradores no whitelisted;
                             // sumamos `command` a la lista que acepta kwargs.
                             "command" => cli_decos = true,
+                            // Fase 12.1.c — `@healthz`/`@readyz` (K8s probes).
+                            // El checker (12.1.a) ya validó shape (sin args/
+                            // kwargs/params, singleton, sin conflictos con
+                            // HTTP/job/test). Acá detectamos defensivamente
+                            // y guardamos la referencia para emitir el
+                            // wrapper de auto-mount en `gen_http_main`. La
+                            // fn TAMBIÉN va a `top_fns` (se emite como
+                            // `pub fn`/`pub async fn` invocable — el
+                            // wrapper la llama por nombre).
+                            "healthz" => {
+                                if healthz_fn.is_some() {
+                                    return Err(FitzError::new(
+                                        ErrorKind::TypeError,
+                                        0,
+                                        0,
+                                        format!(
+                                            "@healthz duplicado en codegen: la fn '{}' es una segunda. Solo se admite una por programa.",
+                                            name
+                                        ),
+                                    ));
+                                }
+                                healthz_fn = Some(s);
+                            }
+                            "readyz" => {
+                                if readyz_fn.is_some() {
+                                    return Err(FitzError::new(
+                                        ErrorKind::TypeError,
+                                        0,
+                                        0,
+                                        format!(
+                                            "@readyz duplicado en codegen: la fn '{}' es una segunda. Solo se admite una por programa.",
+                                            name
+                                        ),
+                                    ));
+                                }
+                                readyz_fn = Some(s);
+                            }
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@ws/@server/@header/@middleware/@auth_provider/@authenticated/@admin)",
+                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@ws/@server/@header/@middleware/@auth_provider/@authenticated/@admin/@cron/@background/@command/@test/@healthz/@readyz)",
                                         other, name
                                     ),
                                 ));
@@ -4537,6 +4596,8 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
         ws_fns,
         cron_fns,
         cli_fns,
+        healthz_fn,
+        readyz_fn,
         top_fns,
         main_stmts,
         server_config,
@@ -4769,6 +4830,8 @@ fn emit_main_rs_body(
         ctx.gen_http_main(
             &p.http_fns,
             &p.ws_fns,
+            p.healthz_fn,
+            p.readyz_fn,
             &p.server_config,
             &p.main_stmts,
             program,
@@ -5033,6 +5096,13 @@ struct ServerConfigArgs {
     /// segundos. `0` desactiva (no recomendado para proxies/CDNs).
     /// Default 30. Seteado con `@server(ws_heartbeat_secs=N)`.
     ws_heartbeat_secs: u64,
+    /// Fase 12.1.c — tiempo máximo en segundos para el graceful
+    /// shutdown tras SIGTERM/Ctrl-C. Paralelo bit-a-bit al campo del
+    /// runtime `crate::http::ServerConfig::shutdown_timeout_secs`.
+    /// Default 30 (alineado con K8s terminationGracePeriodSeconds).
+    /// Seteado con `@server(shutdown_timeout_secs=N)`. `0` desactiva
+    /// el grace period (shutdown inmediato — no recomendado en prod).
+    shutdown_timeout_secs: u64,
 }
 
 impl Default for ServerConfigArgs {
@@ -5043,6 +5113,7 @@ impl Default for ServerConfigArgs {
             enable_docs: true,
             api_version: None,
             ws_heartbeat_secs: 30,
+            shutdown_timeout_secs: 30,
         }
     }
 }
@@ -5171,13 +5242,43 @@ fn parse_server_decorator(
                     ));
                 }
             },
+            // Fase 12.1.c — paralelo bit-a-bit al kwarg del runtime
+            // intérprete (12.1.b). Tiempo máximo del graceful shutdown
+            // tras SIGTERM. Default 30 (K8s terminationGracePeriodSeconds).
+            "shutdown_timeout_secs" => match value_expr {
+                Expr::Int(n, _) if *n >= 0 => {
+                    cfg.shutdown_timeout_secs = *n as u64;
+                }
+                Expr::Int(n, _) => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'shutdown_timeout_secs' debe ser Int >= 0, recibió {}",
+                            n
+                        ),
+                    ));
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'shutdown_timeout_secs' debe ser Int literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                }
+            },
             other => {
                 return Err(FitzError::new(
                     ErrorKind::TypeError,
                     0,
                     0,
                     format!(
-                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs.",
+                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs.",
                         other
                     ),
                 ));
@@ -24904,6 +25005,8 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         &mut self,
         http_fns: &[&Stmt],
         ws_fns: &[&Stmt],
+        healthz_fn: Option<&Stmt>,
+        readyz_fn: Option<&Stmt>,
         server_config: &Option<ServerConfigArgs>,
         main_stmts: &[&Stmt],
         program: &Program,
@@ -25082,6 +25185,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.emit("    axum::response::Html(__FITZ_ASYNCAPI_HTML)\n");
             self.emit("}\n\n");
         }
+
+        // Fase 12.1.c — Preamble de health checks + graceful shutdown.
+        // Emitido SIEMPRE (toda app HTTP tiene /healthz y /readyz
+        // auto-mounted, defaults si el usuario no declaró nada).
+        // Paralelo bit-a-bit al runtime intérprete (12.1.b).
+        self.emit_health_preamble(healthz_fn, readyz_fn)?;
 
         // F17.4b: tokio default (multi-thread). N workers según cores,
         // paralelismo HTTP real entre requests sobre los handlers.
@@ -25286,6 +25395,36 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.emit_indent();
             self.emit("    .route(\"/docs\", axum::routing::get(__serve_docs))\n");
         }
+        // Fase 12.1.c — auto-mount de /healthz y /readyz (paralelo a
+        // /openapi.json en runtime 12.1.b). Si el usuario declaró
+        // `@get("/healthz")` con handler HTTP normal, gana ese; el
+        // auto-mount cede para no panicar axum con rutas duplicadas.
+        if !user_paths.contains("/healthz") {
+            let target = match healthz_fn {
+                Some(_) => "__fitz_user_healthz",
+                None => "__fitz_default_healthz",
+            };
+            self.emit_indent();
+            writeln!(
+                &mut self.output,
+                "    .route(\"/healthz\", axum::routing::get({}))",
+                target
+            )
+            .unwrap();
+        }
+        if !user_paths.contains("/readyz") {
+            let target = match readyz_fn {
+                Some(_) => "__fitz_user_readyz",
+                None => "__fitz_default_readyz",
+            };
+            self.emit_indent();
+            writeln!(
+                &mut self.output,
+                "    .route(\"/readyz\", axum::routing::get({}))",
+                target
+            )
+            .unwrap();
+        }
         self.emit_indent();
         self.emit(";\n");
 
@@ -25313,13 +25452,256 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // el server termina (Ctrl+C), los tasks se cancelan al dropear
         // el runtime.
         self.emit_cron_job_spawns()?;
+        // Fase 12.1.c — graceful shutdown. SIGTERM/Ctrl-C flippea
+        // __FITZ_DRAINING (visto por /readyz que pasa a 503), espera
+        // un grace period chico (max(2, shutdown_timeout_secs)) para
+        // que k8s notique el cambio, y devuelve — axum cierra el
+        // listener y drena in-flight requests.
         self.emit_indent();
-        self.emit("axum::serve(__listener, __app).await.expect(\"axum::serve\");\n");
+        writeln!(
+            &mut self.output,
+            "axum::serve(__listener, __app).with_graceful_shutdown(__fitz_shutdown_signal({})).await.expect(\"axum::serve\");",
+            cfg.shutdown_timeout_secs
+        )
+        .unwrap();
 
         self.pop_scope();
         self.indent -= 1;
         self.emit("}\n");
         Ok(())
+    }
+
+    /// Fase 12.1.c — Emite preamble de health checks + draining state +
+    /// shutdown signal. Paralelo bit-a-bit al runtime intérprete
+    /// (`crate::http::default_health_response`,
+    /// `crate::http::drained_response`, `crate::http::shutdown_signal`).
+    ///
+    /// Genera siempre (toda app HTTP tiene `/healthz`+`/readyz` auto-
+    /// mounted) cuatro fns helper estáticas. Cuando el usuario declara
+    /// `@healthz`/`@readyz`, genera además wrappers que invocan al
+    /// user fn y mapean su retorno (Bool/Result<Null>/Result<Bool>)
+    /// al status apropiado.
+    fn emit_health_preamble(
+        &mut self,
+        healthz_fn: Option<&Stmt>,
+        readyz_fn: Option<&Stmt>,
+    ) -> Result<(), FitzError> {
+        // 1) Bandera atómica `__FITZ_DRAINING` compartida entre el
+        //    shutdown_signal y `/readyz`. LazyLock + Arc para que sea
+        //    accesible desde fns sync sin params.
+        self.emit("/// Fase 12.1.c — graceful shutdown / health checks state.\n");
+        self.emit(
+            "static __FITZ_DRAINING: std::sync::LazyLock<std::sync::Arc<std::sync::atomic::AtomicBool>> =\n",
+        );
+        self.emit(
+            "    std::sync::LazyLock::new(|| std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)));\n\n",
+        );
+
+        // 2) Helpers de respuesta — paralelos a
+        //    `default_health_response`/`drained_response`/(mapeo de
+        //    `invoke_health_check`) del runtime.
+        self.emit("fn __fitz_health_ok() -> axum::response::Response {\n");
+        self.emit("    use axum::response::IntoResponse;\n");
+        self.emit("    (axum::http::StatusCode::OK, axum::Json(serde_json::json!({\"status\": \"ok\"}))).into_response()\n");
+        self.emit("}\n\n");
+
+        self.emit("fn __fitz_health_drained() -> axum::response::Response {\n");
+        self.emit("    use axum::response::IntoResponse;\n");
+        self.emit("    (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(serde_json::json!({\"status\": \"draining\"}))).into_response()\n");
+        self.emit("}\n\n");
+
+        self.emit("fn __fitz_health_unhealthy(err: Option<String>) -> axum::response::Response {\n");
+        self.emit("    use axum::response::IntoResponse;\n");
+        self.emit("    let body = match err {\n");
+        self.emit("        Some(e) => serde_json::json!({\"status\": \"unhealthy\", \"error\": e}),\n");
+        self.emit("        None => serde_json::json!({\"status\": \"unhealthy\"}),\n");
+        self.emit("    };\n");
+        self.emit("    (axum::http::StatusCode::SERVICE_UNAVAILABLE, axum::Json(body)).into_response()\n");
+        self.emit("}\n\n");
+
+        // 3) Defaults — montados cuando el usuario NO declaró
+        //    `@healthz`/`@readyz`. /readyz consulta el flag draining.
+        self.emit("async fn __fitz_default_healthz() -> axum::response::Response {\n");
+        self.emit("    __fitz_health_ok()\n");
+        self.emit("}\n\n");
+
+        self.emit("async fn __fitz_default_readyz() -> axum::response::Response {\n");
+        self.emit("    if __FITZ_DRAINING.load(std::sync::atomic::Ordering::Relaxed) {\n");
+        self.emit("        return __fitz_health_drained();\n");
+        self.emit("    }\n");
+        self.emit("    __fitz_health_ok()\n");
+        self.emit("}\n\n");
+
+        // 4) Wrappers user-declared. Mapeo del retorno Fitz al status
+        //    HTTP via match exhaustivo sobre el TIPO concreto Rust que
+        //    emite el codegen para el user fn:
+        //      - Bool      → if/else.
+        //      - Result<(), String> → match Ok/Err.
+        //      - Result<bool, String> → match Ok(true)/Ok(false)/Err.
+        //      - ()        → siempre ok.
+        //    El return type lo leemos del FnDef.
+        if let Some(stmt) = healthz_fn {
+            self.emit_user_health_wrapper(stmt, "__fitz_user_healthz", false)?;
+        }
+        if let Some(stmt) = readyz_fn {
+            // /readyz: chequear draining ANTES de invocar al user fn.
+            // Si está draining, 503 inmediato (paralelo a
+            // `invoke_health_check` del runtime).
+            self.emit_user_health_wrapper(stmt, "__fitz_user_readyz", true)?;
+        }
+
+        // 5) Shutdown signal — paralelo bit-a-bit a
+        //    `crate::http::shutdown_signal`. Espera Ctrl-C (cubre
+        //    SIGTERM en Unix vía tokio default), flippea draining,
+        //    espera grace period chico, devuelve.
+        self.emit("/// Fase 12.1.c — graceful shutdown handler.\n");
+        self.emit("async fn __fitz_shutdown_signal(shutdown_timeout_secs: u64) {\n");
+        self.emit("    let _ = tokio::signal::ctrl_c().await;\n");
+        self.emit("    eprintln!(\"\\n[shutdown] SIGINT recibido — flippeando draining state\");\n");
+        self.emit(
+            "    __FITZ_DRAINING.store(true, std::sync::atomic::Ordering::SeqCst);\n",
+        );
+        self.emit("    let grace = std::cmp::min(2u64, shutdown_timeout_secs.max(1));\n");
+        self.emit("    eprintln!(\"[shutdown] esperando {}s de grace period para que el load balancer rerutee...\", grace);\n");
+        self.emit("    tokio::time::sleep(std::time::Duration::from_secs(grace)).await;\n");
+        self.emit("    eprintln!(\"[shutdown] cerrando listener — axum drena requests in-flight (max {}s)...\", shutdown_timeout_secs);\n");
+        self.emit("}\n\n");
+        Ok(())
+    }
+
+    /// Fase 12.1.c — Emite un wrapper async para un user handler
+    /// `@healthz`/`@readyz`. Detecta el `is_async` + el shape del
+    /// return type para emitir el mapeo apropiado a HTTP response.
+    ///
+    /// Si `check_draining` es `true` (caso `@readyz`), el wrapper
+    /// chequea `__FITZ_DRAINING` ANTES de invocar al user fn —
+    /// durante shutdown, 503 sin tocar el handler.
+    fn emit_user_health_wrapper(
+        &mut self,
+        stmt: &Stmt,
+        wrapper_name: &str,
+        check_draining: bool,
+    ) -> Result<(), FitzError> {
+        let Stmt::FnDef {
+            name,
+            is_async,
+            return_type,
+            ..
+        } = stmt
+        else {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0,
+                0,
+                "emit_user_health_wrapper: stmt no es FnDef (bug)".to_string(),
+            ));
+        };
+        self.emit("/// Fase 12.1.c — wrapper de user health handler.\n");
+        writeln!(
+            &mut self.output,
+            "async fn {}() -> axum::response::Response {{",
+            wrapper_name
+        )
+        .unwrap();
+        if check_draining {
+            self.emit(
+                "    if __FITZ_DRAINING.load(std::sync::atomic::Ordering::Relaxed) {\n",
+            );
+            self.emit("        return __fitz_health_drained();\n");
+            self.emit("    }\n");
+        }
+        // Invocar al user fn. Async → `<fn>().await`; sync → `<fn>()`.
+        let call = if *is_async {
+            format!("{}().await", name)
+        } else {
+            format!("{}()", name)
+        };
+        // Determinar el shape del return type (Bool / Result<Null> /
+        // Result<Bool> / Null / Future-wrapped). El checker (12.1.a)
+        // ya validó que sea uno de los aceptados.
+        let mapping = match return_type {
+            Some(te) => health_mapping_for_type_expr(te, *is_async),
+            None => HealthRetShape::Null,
+        };
+        match mapping {
+            HealthRetShape::Bool => {
+                writeln!(
+                    &mut self.output,
+                    "    let __r: bool = {};",
+                    call
+                )
+                .unwrap();
+                self.emit("    if __r { __fitz_health_ok() } else { __fitz_health_unhealthy(None) }\n");
+            }
+            HealthRetShape::ResultBool => {
+                writeln!(
+                    &mut self.output,
+                    "    let __r: Result<bool, String> = {};",
+                    call
+                )
+                .unwrap();
+                self.emit("    match __r {\n");
+                self.emit("        Ok(true) => __fitz_health_ok(),\n");
+                self.emit("        Ok(false) => __fitz_health_unhealthy(None),\n");
+                self.emit("        Err(e) => __fitz_health_unhealthy(Some(e)),\n");
+                self.emit("    }\n");
+            }
+            HealthRetShape::ResultNull => {
+                writeln!(
+                    &mut self.output,
+                    "    let __r: Result<(), String> = {};",
+                    call
+                )
+                .unwrap();
+                self.emit("    match __r {\n");
+                self.emit("        Ok(()) => __fitz_health_ok(),\n");
+                self.emit("        Err(e) => __fitz_health_unhealthy(Some(e)),\n");
+                self.emit("    }\n");
+            }
+            HealthRetShape::Null => {
+                writeln!(&mut self.output, "    let _ = {};", call).unwrap();
+                self.emit("    __fitz_health_ok()\n");
+            }
+        }
+        self.emit("}\n\n");
+        Ok(())
+    }
+}
+
+/// Fase 12.1.c — Shape del retorno de un handler `@healthz`/`@readyz`.
+/// El checker (12.1.a) ya validó que el `TypeExpr` sea uno de:
+/// Bool, Null, Result<Null>, Result<Bool>, Future<...> de esos.
+/// Esta enum colapsa la matriz al tipo concreto Rust que emite el
+/// codegen del user fn (después de transparentar el async wrapper).
+#[derive(Debug, Clone, Copy)]
+enum HealthRetShape {
+    Bool,
+    ResultBool,
+    ResultNull,
+    Null,
+}
+
+/// Helper de `emit_user_health_wrapper`. Determina la shape a partir
+/// del `TypeExpr` declarado. Si la fn es `async`, el Future ya se
+/// transparenta en el wrapper (lo desempacamos con `.await` al
+/// invocar) — el shape final es el inner T.
+fn health_mapping_for_type_expr(te: &TypeExpr, _is_async: bool) -> HealthRetShape {
+    // Desempacar Future<T>: el `.await` adentro del wrapper
+    // resuelve a T, así que tratamos el shape del inner.
+    let effective = match te {
+        TypeExpr::Generic { name, args } if name == "Future" => args.first().unwrap_or(te),
+        other => other,
+    };
+    match effective {
+        TypeExpr::Named(n) if n == "Bool" => HealthRetShape::Bool,
+        TypeExpr::Named(n) if n == "Null" => HealthRetShape::Null,
+        TypeExpr::Generic { name, args } if name == "Result" => match args.first() {
+            Some(TypeExpr::Named(n)) if n == "Bool" => HealthRetShape::ResultBool,
+            _ => HealthRetShape::ResultNull,
+        },
+        // Cualquier otro shape no debería pasar el checker. Default
+        // defensivo: tratar como Bool (mensaje feo pero no panic).
+        _ => HealthRetShape::Bool,
     }
 }
 
@@ -32783,6 +33165,155 @@ mod tests {
 
     // ---- 5b.6: HTTP / @server / handlers --------------------------------
 
+    // ============================================================
+    // Fase 12.1.c — codegen de @healthz/@readyz + shutdown_signal
+    // ============================================================
+
+    #[test]
+    fn codegen_emite_draining_state_y_shutdown_signal_para_http() {
+        // Cualquier programa HTTP emite el preamble de health checks
+        // + shutdown signal, incluso sin @healthz/@readyz declarados.
+        let src = "@server(3000) fn main() => 0\n\
+                   @get(\"/\") fn index() -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("static __FITZ_DRAINING"),
+            "esperaba `static __FITZ_DRAINING` en el output"
+        );
+        assert!(
+            code.contains("async fn __fitz_shutdown_signal"),
+            "esperaba `async fn __fitz_shutdown_signal` en el output"
+        );
+        assert!(
+            code.contains(".with_graceful_shutdown(__fitz_shutdown_signal("),
+            "esperaba `with_graceful_shutdown` en la línea de axum::serve"
+        );
+    }
+
+    #[test]
+    fn codegen_default_healthz_y_readyz_se_montan_sin_user_handlers() {
+        // Sin @healthz/@readyz declarados, las rutas se montan con
+        // los wrappers default (__fitz_default_healthz/readyz).
+        let src = "@server(3000) fn main() => 0\n\
+                   @get(\"/\") fn index() -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains(".route(\"/healthz\", axum::routing::get(__fitz_default_healthz))"),
+            "esperaba /healthz route con default handler"
+        );
+        assert!(
+            code.contains(".route(\"/readyz\", axum::routing::get(__fitz_default_readyz))"),
+            "esperaba /readyz route con default handler"
+        );
+        // Los wrappers default deben existir.
+        assert!(
+            code.contains("async fn __fitz_default_healthz"),
+            "esperaba `async fn __fitz_default_healthz`"
+        );
+        assert!(
+            code.contains("async fn __fitz_default_readyz"),
+            "esperaba `async fn __fitz_default_readyz`"
+        );
+    }
+
+    #[test]
+    fn codegen_user_healthz_bool_emite_wrapper_con_mapping_correcto() {
+        // @healthz fn liveness() -> Bool { ... } debe generar:
+        // - wrapper `__fitz_user_healthz` que llama liveness() sync
+        // - mapping if/else Bool → ok/unhealthy
+        let src = "@server(3000) fn main() => 0\n\
+                   @get(\"/\") fn idx() -> Str => \"x\"\n\
+                   @healthz fn liveness() -> Bool { return true }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("async fn __fitz_user_healthz"),
+            "esperaba wrapper `__fitz_user_healthz`"
+        );
+        assert!(
+            code.contains("let __r: bool = liveness();"),
+            "esperaba invocación sync `liveness()` con tipo bool"
+        );
+        assert!(
+            code.contains("if __r { __fitz_health_ok() } else { __fitz_health_unhealthy(None) }"),
+            "esperaba mapping if/else Bool → ok/unhealthy"
+        );
+        assert!(
+            code.contains(".route(\"/healthz\", axum::routing::get(__fitz_user_healthz))"),
+            "esperaba que la route apunte al wrapper user en vez del default"
+        );
+    }
+
+    #[test]
+    fn codegen_user_readyz_result_null_emite_draining_check_y_match() {
+        // @readyz fn readiness() -> Result<Null> { ... } debe generar:
+        // - draining check ANTES del invoke (durante shutdown 503 fijo)
+        // - match Ok(())/Err mapping
+        let src = "@server(3000) fn main() => 0\n\
+                   @get(\"/\") fn idx() -> Str => \"x\"\n\
+                   @readyz fn readiness() -> Result<Null> { return Ok(null) }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("async fn __fitz_user_readyz"),
+            "esperaba wrapper `__fitz_user_readyz`"
+        );
+        // El draining check debe aparecer adentro del wrapper user
+        // (antes del call a readiness()).
+        let wrapper_start = code
+            .find("async fn __fitz_user_readyz")
+            .expect("wrapper user_readyz");
+        let wrapper_section = &code[wrapper_start..wrapper_start + 800];
+        assert!(
+            wrapper_section.contains("__FITZ_DRAINING.load"),
+            "esperaba check de __FITZ_DRAINING adentro del wrapper readyz user"
+        );
+        assert!(
+            code.contains("let __r: Result<(), String> = readiness();"),
+            "esperaba tipo `Result<(), String>` para Result<Null>"
+        );
+        assert!(
+            code.contains("Ok(()) => __fitz_health_ok()"),
+            "esperaba match Ok(()) → ok"
+        );
+    }
+
+    #[test]
+    fn codegen_async_healthz_emite_await_en_wrapper() {
+        // @healthz async fn liveness() -> Bool { ... } debe invocar
+        // con .await en el wrapper.
+        let src = "@server(3000) fn main() => 0\n\
+                   @get(\"/\") fn idx() -> Str => \"x\"\n\
+                   @healthz async fn liveness() -> Bool { return true }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("let __r: bool = liveness().await;"),
+            "esperaba invocación async `liveness().await`"
+        );
+    }
+
+    #[test]
+    fn codegen_shutdown_timeout_secs_kwarg_pasa_al_signal_handler() {
+        // @server(3000, shutdown_timeout_secs=60) debe pasar 60 como
+        // arg de __fitz_shutdown_signal.
+        let src = "@server(3000, shutdown_timeout_secs=60) fn main() => 0\n\
+                   @get(\"/\") fn idx() -> Str => \"x\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains(".with_graceful_shutdown(__fitz_shutdown_signal(60))"),
+            "esperaba shutdown signal con timeout=60"
+        );
+    }
+
+    #[test]
+    fn codegen_shutdown_timeout_secs_default_30_cuando_no_se_setea() {
+        let src = "@server(3000) fn main() => 0\n\
+                   @get(\"/\") fn idx() -> Str => \"x\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains(".with_graceful_shutdown(__fitz_shutdown_signal(30))"),
+            "esperaba shutdown signal con timeout=30 (default)"
+        );
+    }
+
     #[test]
     fn http_main_emite_tokio_main_async() {
         // F17.4b: tokio runtime default = `multi_thread` (N workers según
@@ -35301,14 +35832,20 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_jobs_con_http_no_incluye_signal_feature() {
-        // HTTP + cron: ctrl_c lo maneja `serve()` con su propio
-        // shutdown signal; el main generado no usa signal directo.
+    fn cargo_toml_jobs_con_http_incluye_signal_feature_post_12_1_c() {
+        // Pre-12.1.c: HTTP+cron NO incluía signal — `serve()` tenía su
+        // propio shutdown_signal con la feature ya activada via el
+        // runtime de fitz. Post-12.1.c: el main GENERADO emite su
+        // propio `tokio::signal::ctrl_c()` dentro de
+        // `__fitz_shutdown_signal`, así que necesita feature `signal`.
         let toml = cargo_toml_for(
             "app", true, false, false, false, false, true, false, false, false,
         );
         assert!(toml.contains("cron"));
-        assert!(!toml.contains("\"signal\""));
+        assert!(
+            toml.contains("\"signal\""),
+            "post-12.1.c HTTP también necesita feature `signal` para shutdown_signal del main generado"
+        );
     }
 
     #[test]
