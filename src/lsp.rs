@@ -1282,6 +1282,19 @@ fn after_dot_completions(
                 ("verify", "fn(plain: Str, hashed: Str) -> Bool".into()),
             ]);
         }
+        // Fase 12.3.a.1 — módulo built-in `log` (structured logging).
+        // Mismo bypass que jwt/hash/db: tipa como `Any` en el checker
+        // (kwargs heterogéneos no expresables como `Type::Function`),
+        // así que el dispatch por tipo no lo identifica — resolvemos
+        // por nombre acá. 4 niveles paralelos a `tracing`.
+        "log" => {
+            return method_items(&[
+                ("info", "fn(msg: Str, **kvs) -> Null".into()),
+                ("warn", "fn(msg: Str, **kvs) -> Null".into()),
+                ("error", "fn(msg: Str, **kvs) -> Null".into()),
+                ("debug", "fn(msg: Str, **kvs) -> Null".into()),
+            ]);
+        }
         // Fase 10.1 — módulo built-in `db` para Postgres. Como `jwt`/
         // `hash`, tipa como `Any` en el checker (no hay `Type::Module`
         // dedicado en MVP), así que el dispatch por tipo no lo detecta.
@@ -2678,6 +2691,10 @@ fn scope_level_completions(
         ("jwt", "module: encode, decode"),
         ("hash", "module: password, verify"),
         ("db", "module: connect (Postgres native driver + ORM)"),
+        (
+            "log",
+            "module: info, warn, error, debug (structured logging)",
+        ),
     ] {
         items.push(CompletionItem {
             label: name.into(),

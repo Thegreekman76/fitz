@@ -3189,6 +3189,24 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Fase 12.3.a.1 — módulo `log` siempre disponible. Mismo patrón
+        // que `jwt`/`hash`/`db`: tipa como `Type::Any`. La firma exacta
+        // (`fn log.info(msg: Str, **kwargs) -> Null`) tiene kwargs
+        // heterogéneos arbitrarios que el sistema actual no modela como
+        // `Type::Function`; el field access cae a `Any` y los calls se
+        // chequean en runtime contra el reservado/shape del logger.
+        // Refinable post-MVP cuando entren union types o `Type::Module`
+        // dedicado.
+        self.scopes[0].insert(
+            "log".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // Fase 10.1.b — módulo `db` siempre disponible en el env
         // global. Tipado como `Type::Any` (mismo patrón que jwt/hash):
         // la signature exacta de `db.connect(url: Str) -> Future<Result<DbConn>>`

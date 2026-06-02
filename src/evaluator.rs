@@ -4544,6 +4544,112 @@ fn dispatch_builtin_kwargs(
     named_args: &[(Option<String>, Value)],
     span: Span,
 ) -> EvalResult<Option<Value>> {
+    // Fase 12.3.a.1 — Caso 0: log.{info,warn,error,debug}(msg, k=v, ...)
+    // Path con kwargs. El path sin kwargs (`log.info("solo msg")`) cae
+    // en `dispatch_method` clásico → `func(&[Value::Str(...)])` →
+    // `builtin_log_<level>`. Acá manejamos kwargs heterogéneos
+    // (Int/Float/Str/Bool/Secret) que viajan como key-value pairs.
+    if let Value::Module { name, .. } = &receiver {
+        if name == "log" && matches!(method, "info" | "warn" | "error" | "debug") {
+            let display = format!("log.{}", method);
+            let mut msg: Option<String> = None;
+            let mut kvs: Vec<(String, Value)> = Vec::new();
+            for (key, value) in named_args {
+                match key.as_deref() {
+                    None => {
+                        if msg.is_some() {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                span.line,
+                                span.column,
+                                format!(
+                                    "`{}` espera 1 solo argumento posicional (msg: Str) — recibió 2 sin nombre",
+                                    display
+                                ),
+                            )));
+                        }
+                        match value {
+                            Value::Str(s) => msg = Some(s.clone()),
+                            other => {
+                                return Err(EvalSignal::Error(FitzError::new(
+                                    ErrorKind::TypeMismatch {
+                                        expected: "Str".into(),
+                                        found: other.type_name().into(),
+                                    },
+                                    span.line,
+                                    span.column,
+                                    format!(
+                                        "`{}`: msg debe ser Str, recibió `{}`",
+                                        display,
+                                        other.type_name()
+                                    ),
+                                )));
+                            }
+                        }
+                    }
+                    Some(key_name) => {
+                        // Kwargs reservados — los emite el logger
+                        // automáticamente. Permitir override silencioso
+                        // ensucia el shape del registro y rompe
+                        // herramientas downstream (Loki/Datadog query).
+                        if matches!(key_name, "level" | "msg" | "timestamp") {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                span.line,
+                                span.column,
+                                format!(
+                                    "`{}`: el kwarg `{}` está reservado (el logger lo emite automáticamente)",
+                                    display, key_name
+                                ),
+                            )));
+                        }
+                        // Validar shape del value: primitivos + Secret.
+                        // En 12.3.a.1 también aceptamos List/Map para
+                        // forward-compat con 12.3.a.2 (el JSON nested
+                        // los soporta) — el output stub los renderea
+                        // con Display.
+                        match value {
+                            Value::Int(_)
+                            | Value::Float(_)
+                            | Value::Str(_)
+                            | Value::Bool(_)
+                            | Value::Null
+                            | Value::Secret(_)
+                            | Value::List(_)
+                            | Value::Map(_) => {
+                                kvs.push((key_name.to_string(), value.clone()));
+                            }
+                            other => {
+                                return Err(EvalSignal::Error(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    span.line,
+                                    span.column,
+                                    format!(
+                                        "`{}`: kwarg `{}` tiene tipo no serializable (`{}`). Soportados: Int, Float, Str, Bool, Null, Secret, List, Map",
+                                        display, key_name, other.type_name()
+                                    ),
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            let msg = msg.ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line,
+                    span.column,
+                    format!(
+                        "`{}(msg, k: v, ...)` requiere el primer arg posicional (msg: Str)",
+                        display
+                    ),
+                ))
+            })?;
+            emit_log_record(method, &msg, &kvs);
+            return Ok(Some(Value::Null));
+        }
+    }
+
     // Caso 1: db.connect(url, max_conns=N)
     if let Value::Module { name, .. } = &receiver {
         if name == "db" && method == "connect" {
@@ -10966,6 +11072,50 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
+    // Fase 12.3.a.1 — Módulo `log` para structured logging built-in.
+    // 4 niveles paralelos a `tracing` (info/warn/error/debug). Aceptan
+    // `msg: Str` posicional + kwargs heterogéneos. El path positional
+    // termina en `builtin_log_<level>`; el path con kwargs vive en
+    // `dispatch_builtin_kwargs` (que captura msg + kvs y llama directo
+    // a `emit_log_record`). Ver el bloque de doc al final de este
+    // archivo para detalle del shape de la API y kwargs reservados.
+    let log_env = Environment::new();
+    log_env.lock().define(
+        "info",
+        Value::Builtin {
+            name: "info",
+            func: builtin_log_info,
+        },
+    );
+    log_env.lock().define(
+        "warn",
+        Value::Builtin {
+            name: "warn",
+            func: builtin_log_warn,
+        },
+    );
+    log_env.lock().define(
+        "error",
+        Value::Builtin {
+            name: "error",
+            func: builtin_log_error,
+        },
+    );
+    log_env.lock().define(
+        "debug",
+        Value::Builtin {
+            name: "debug",
+            func: builtin_log_debug,
+        },
+    );
+    env.lock().define(
+        "log",
+        Value::Module {
+            name: "log".into(),
+            env: log_env,
+        },
+    );
+
     // Fase 10.1.b — módulo `db`: driver Postgres nativo. Solo expone
     // `connect(url)` que devuelve un `Future<Result<DbConn>>`. Los
     // métodos sobre la conexión (`query`/`exec`/`close`) se despachan
@@ -17170,6 +17320,129 @@ fn builtin_hash_verify(args: &[Value]) -> FitzResult<Value> {
         .verify_password(plain.as_bytes(), &parsed)
         .is_ok();
     Ok(Value::Bool(ok))
+}
+
+// ---------------------------------------------------------------------------
+// Fase 12.3.a.1 — Structured logging built-in: módulo `log`.
+//
+// Los 4 builtins (`info`/`warn`/`error`/`debug`) registrados como métodos
+// del `Value::Module` `log` desde `register_builtins`. Aceptan `msg: Str`
+// posicional + kwargs heterogéneos (Int/Float/Str/Bool/Secret/List/Map)
+// que viajan como key-value pairs adentro del registro emitido.
+//
+// API (la sintaxis de kwargs en function calls usa `name: value`, NO
+// `name=value` — los `=` están reservados para kwargs en decoradores):
+//
+//   log.info("login ok", user_id: 42, duration_ms: 15)
+//   log.warn("cache miss", key: "user_42")
+//   log.error("db connection failed", retry_in_s: 5)
+//   log.debug("cache hit", key: "user_42", ttl_remaining: 300)
+//
+// El path sin kwargs (`log.info("solo msg")`) usa `dispatch_method` clásico
+// y aterriza directo en el `builtin_log_<level>`. El path con kwargs pasa
+// por `dispatch_builtin_kwargs` (ver arriba) que recolecta msg + kvs y
+// llama a `emit_log_record` directo, bypaseando el builtin.
+//
+// Output en 12.3.a.1: stub simple con `eprintln!` formateado como
+// `[<LEVEL>] <msg> k1=v1 k2=v2`. El JSON real con `tracing-subscriber`
+// + TTY detection + `FITZ_LOG_FORMAT` override + `Secret<T>` redaction
+// llega en 12.3.a.2. Codegen paridad en 12.3.a.3.
+//
+// Kwargs reservados (rechazados con error claro): `msg`, `level`,
+// `timestamp` — los emite el logger automáticamente.
+// ---------------------------------------------------------------------------
+
+/// Stub del builtin `log.info` (path positional-only, sin kwargs).
+/// El path con kwargs vive en `dispatch_builtin_kwargs`.
+fn builtin_log_info(args: &[Value]) -> FitzResult<Value> {
+    let msg = expect_log_msg_positional(args, "log.info")?;
+    emit_log_record("info", &msg, &[]);
+    Ok(Value::Null)
+}
+
+/// Stub del builtin `log.warn`.
+fn builtin_log_warn(args: &[Value]) -> FitzResult<Value> {
+    let msg = expect_log_msg_positional(args, "log.warn")?;
+    emit_log_record("warn", &msg, &[]);
+    Ok(Value::Null)
+}
+
+/// Stub del builtin `log.error`.
+fn builtin_log_error(args: &[Value]) -> FitzResult<Value> {
+    let msg = expect_log_msg_positional(args, "log.error")?;
+    emit_log_record("error", &msg, &[]);
+    Ok(Value::Null)
+}
+
+/// Stub del builtin `log.debug`.
+fn builtin_log_debug(args: &[Value]) -> FitzResult<Value> {
+    let msg = expect_log_msg_positional(args, "log.debug")?;
+    emit_log_record("debug", &msg, &[]);
+    Ok(Value::Null)
+}
+
+/// Valida el primer (y único) arg posicional como `Str` (el msg).
+/// Compartido por los 4 builtins de log en el path sin kwargs.
+fn expect_log_msg_positional(args: &[Value], display: &str) -> FitzResult<String> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`{}` espera 1 argumento posicional (msg: Str) + kwargs opcionales (k: v), recibió {} posicionales",
+                display,
+                args.len()
+            ),
+        ));
+    }
+    match &args[0] {
+        Value::Str(s) => Ok(s.clone()),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Str".into(),
+                found: other.type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "`{}`: msg debe ser Str, recibió `{}`",
+                display,
+                other.type_name()
+            ),
+        )),
+    }
+}
+
+/// Emite UN registro de log al sink configurado. En 12.3.a.1 es un stub
+/// con `eprintln!` (level + msg + `k=v` separados por espacio). En
+/// 12.3.a.2 se reemplaza por `tracing` con JSON output, TTY detection y
+/// redaction automática de `Value::Secret`.
+fn emit_log_record(level: &str, msg: &str, kvs: &[(String, Value)]) {
+    if kvs.is_empty() {
+        eprintln!("[{}] {}", level.to_uppercase(), msg);
+    } else {
+        let kvs_str = kvs
+            .iter()
+            .map(|(k, v)| format!("{}={}", k, fmt_log_value(v)))
+            .collect::<Vec<_>>()
+            .join(" ");
+        eprintln!("[{}] {} {}", level.to_uppercase(), msg, kvs_str);
+    }
+}
+
+/// Formato textual de un Value para el output stub de 12.3.a.1.
+/// Strings sin comillas; Secret redactado con `<redacted>`; el resto vía
+/// Display. En 12.3.a.2 esto pasa a serialización JSON estructurada.
+fn fmt_log_value(v: &Value) -> String {
+    match v {
+        Value::Str(s) => s.clone(),
+        Value::Secret(_) => "<redacted>".to_string(),
+        other => format!("{}", other),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -28864,6 +29137,158 @@ let r = match n {
         }
         assert_eq!(env.get("ok"), Some(Value::Bool(true)));
         assert_eq!(env.get("bad"), Some(Value::Bool(false)));
+    }
+
+    // ---- Fase 12.3.a.1 — structured logging built-in ----
+    //
+    // Tests sobre los 4 builtins (`log.info/warn/error/debug`) y el
+    // dispatch de kwargs. No testean el output stderr en sí (eso es
+    // smoke E2E manual con el binario); chequean shape de la API,
+    // validaciones de tipos, kwargs reservados y wiring contra el env
+    // global del evaluator.
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_solo_msg_devuelve_null() {
+        let r = builtin_log_info(&[Value::Str("hola".into())]).unwrap();
+        assert_eq!(r, Value::Null);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_warn_solo_msg_devuelve_null() {
+        let r = builtin_log_warn(&[Value::Str("ojo".into())]).unwrap();
+        assert_eq!(r, Value::Null);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_error_solo_msg_devuelve_null() {
+        let r = builtin_log_error(&[Value::Str("malo".into())]).unwrap();
+        assert_eq!(r, Value::Null);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_debug_solo_msg_devuelve_null() {
+        let r = builtin_log_debug(&[Value::Str("trace".into())]).unwrap();
+        assert_eq!(r, Value::Null);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_msg_no_str_es_error_con_mencion_a_msg() {
+        let r = builtin_log_info(&[Value::Int(42)]);
+        assert!(r.is_err());
+        let err = r.unwrap_err();
+        assert!(err.message.contains("msg"));
+        assert!(err.message.contains("Str"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_aridad_incorrecta_es_error_positional() {
+        let r0 = builtin_log_info(&[]);
+        assert!(r0.is_err());
+        let r2 = builtin_log_info(&[Value::Str("a".into()), Value::Str("b".into())]);
+        assert!(r2.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_disponible_en_programa_fitz_via_module_access() {
+        let (env, res) = parse_eval_into_env(
+            "log.info(\"hola\")\n\
+             log.warn(\"ojo\")\n\
+             log.error(\"malo\")\n\
+             log.debug(\"trace\")\n\
+             let done = true",
+        )
+        .await;
+        res.unwrap();
+        let env = env.lock();
+        assert_eq!(env.get("done"), Some(Value::Bool(true)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_con_kwargs_heterogeneos_compila_y_ejecuta() {
+        // Sintaxis de kwargs en function calls es `name: value` (`=` está
+        // reservado para decoradores). Mismo shape que `db.connect(url,
+        // max_conns: 5)` / `DbConn.transaction(cb, isolation: "...")`.
+        let (env, res) = parse_eval_into_env(
+            "log.info(\"login ok\", user_id: 42, duration_ms: 15, role: \"admin\", active: true)\n\
+             let done = true",
+        )
+        .await;
+        res.unwrap();
+        let env = env.lock();
+        assert_eq!(env.get("done"), Some(Value::Bool(true)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_con_kwarg_reservado_level_es_error() {
+        let (_, res) = parse_eval_into_env("log.info(\"test\", level: \"INFO\")").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("reservado") && err.message.contains("level"),
+            "esperaba 'reservado' + 'level', fue: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_con_kwarg_reservado_msg_es_error() {
+        let (_, res) = parse_eval_into_env("log.info(\"test\", msg: \"override\")").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("reservado") && err.message.contains("msg"),
+            "esperaba 'reservado' + 'msg', fue: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_con_kwarg_reservado_timestamp_es_error() {
+        let (_, res) = parse_eval_into_env("log.info(\"test\", timestamp: \"now\")").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("reservado") && err.message.contains("timestamp"),
+            "esperaba 'reservado' + 'timestamp', fue: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_con_kwarg_no_serializable_es_error() {
+        // Una función como kwarg no es serializable (no es primitivo/Secret/List/Map).
+        let (_, res) = parse_eval_into_env(
+            "fn f() -> Int { return 0 }\n\
+             log.info(\"test\", cb: f)",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("no serializable") || err.message.contains("tipo"),
+            "esperaba 'no serializable' o 'tipo', fue: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_kwargs_msg_no_str_es_error() {
+        // Path kwargs con msg posicional Int — debe rechazar.
+        let (_, res) = parse_eval_into_env("log.info(42, foo: \"bar\")").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("msg") && err.message.contains("Str"),
+            "esperaba 'msg' + 'Str', fue: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn log_info_kwargs_sin_msg_positional_es_error() {
+        // Solo kwargs, sin el msg positional — debe rechazar.
+        let (_, res) = parse_eval_into_env("log.info(foo: \"bar\")").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("posicional") || err.message.contains("msg"),
+            "esperaba 'posicional' o 'msg', fue: {}",
+            err.message
+        );
     }
 
     // ---- Fase 9.w.3 — runtime cron + background + spawn ----
