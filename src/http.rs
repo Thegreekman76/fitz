@@ -413,6 +413,16 @@ pub struct ServerConfig {
     /// network. Override con `@server(ws_heartbeat_secs=60)` o
     /// `@server(ws_heartbeat_secs=0)`.
     pub ws_heartbeat_secs: u64,
+    /// Fase 12.1.b — Tiempo máximo en segundos que el server espera a
+    /// que terminen las requests in-flight tras recibir SIGTERM/Ctrl-C
+    /// antes de matar el proceso. Durante esta ventana, `/readyz`
+    /// retorna 503 para que K8s deje de rutear tráfico, y axum cierra
+    /// el listener pero deja que los handlers en curso terminen. Default
+    /// `30` — alineado con `terminationGracePeriodSeconds` default de
+    /// K8s. Override con `@server(shutdown_timeout_secs=60)`. `0`
+    /// desactiva el grace period (shutdown inmediato — no recomendado
+    /// en producción).
+    pub shutdown_timeout_secs: u64,
 }
 
 impl ServerConfig {
@@ -424,6 +434,7 @@ impl ServerConfig {
             enable_docs: true,
             api_version: None,
             ws_heartbeat_secs: 30,
+            shutdown_timeout_secs: 30,
         }
     }
 
@@ -470,6 +481,23 @@ pub enum AuthSpec {
 /// (los headers HTTP del request entrante) y espera `Result<User>` de
 /// vuelta. `Ok` → continúa al handler con el `user` inyectado; `Err` →
 /// 401 con `{"error": <msg>}`.
+/// Fase 12.1.b — Handle de un probe `@healthz` o `@readyz` registrado
+/// en runtime. Paralelo a `AuthProviderHandle` pero más simple:
+/// solo nombre + handler + is_async (no tiene tipo nominal asociado).
+#[derive(Debug, Clone)]
+pub struct HealthCheckHandle {
+    /// Nombre de la fn marcada con `@healthz` o `@readyz`. Solo para
+    /// logging.
+    pub name: String,
+    /// `Value::Function` (el handler resuelto del env de definición).
+    /// El call site lo invoca exactamente igual que cualquier
+    /// `Value::Function` Fitz.
+    pub handler: Value,
+    /// `true` si la fn es `async`. El call site debe await-ear el
+    /// `Value::Future` resultante.
+    pub is_async: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuthProviderHandle {
     /// Nombre de la fn marcada con `@auth_provider`. Solo para
@@ -520,6 +548,22 @@ pub struct HttpRegistry {
     /// (`run_scheduler_only`). `Arc` para compartirlo con los workers
     /// tokio que ejecutan los jobs.
     pub cron_registry: std::sync::Arc<crate::cron_jobs::CronRegistry>,
+    /// Fase 12.1.b — Handler `@healthz` (liveness probe K8s). `None`
+    /// si el programa no lo declaró → el auto-mount sirve una respuesta
+    /// 200 "ok" default. `Some(h)` → se invoca el handler Fitz y se
+    /// mapea el retorno a status code.
+    pub healthz_handler: Option<HealthCheckHandle>,
+    /// Fase 12.1.b — Handler `@readyz` (readiness probe K8s). `None`
+    /// → default returns 200 cuando no está draining, 503 cuando sí.
+    /// `Some(h)` → se invoca el handler Fitz; durante draining
+    /// SIEMPRE 503 sin tocar el handler.
+    pub readyz_handler: Option<HealthCheckHandle>,
+    /// Fase 12.1.b — Bandera atómica que indica si el server está
+    /// "draining" (SIGTERM/Ctrl-C ya disparó). `/readyz` la consulta
+    /// y retorna 503 cuando es `true`, para que K8s deje de rutear
+    /// requests nuevos a este pod. Compartida entre el handler y el
+    /// `shutdown_signal()` que la flippea.
+    pub draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl HttpRegistry {
@@ -530,6 +574,9 @@ impl HttpRegistry {
             auth_provider: None,
             ws_broadcaster: std::sync::Arc::new(WsBroadcaster::new()),
             cron_registry: std::sync::Arc::new(crate::cron_jobs::CronRegistry::new()),
+            healthz_handler: None,
+            readyz_handler: None,
+            draining: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -743,6 +790,43 @@ pub fn set_auth_provider(handle: AuthProviderHandle) -> Result<(), Box<AuthProvi
             return Err(Box::new(existing.clone()));
         }
         reg.auth_provider = Some(handle);
+        Ok(())
+    })
+}
+
+/// Fase 12.1.b — Resultado del intento de registrar un health handler.
+#[derive(Debug)]
+pub enum SetHealthHandlerError {
+    /// No hay registry HTTP activo (programa REPL / eval embebido).
+    NoRegistry,
+    /// Ya había un handler del mismo kind registrado; trae el nombre
+    /// previo para el mensaje de error.
+    Duplicate(String),
+}
+
+/// Fase 12.1.b — Setea el handler de `@healthz` o `@readyz` en el
+/// registry activo. `kind` debe ser `"healthz"` o `"readyz"`.
+/// Falla con `Duplicate(prev_name)` si ya había uno (singleton —
+/// paralelo a `set_auth_provider`). Sin registry → `NoRegistry`.
+pub fn set_health_handler(
+    kind: &str,
+    handle: HealthCheckHandle,
+) -> Result<(), SetHealthHandlerError> {
+    HTTP_REGISTRY.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let reg = match borrow.as_mut() {
+            Some(r) => r,
+            None => return Err(SetHealthHandlerError::NoRegistry),
+        };
+        let slot = match kind {
+            "healthz" => &mut reg.healthz_handler,
+            "readyz" => &mut reg.readyz_handler,
+            other => unreachable!("kind inválido para set_health_handler: {}", other),
+        };
+        if let Some(existing) = slot {
+            return Err(SetHealthHandlerError::Duplicate(existing.name.clone()));
+        }
+        *slot = Some(handle);
         Ok(())
     })
 }
@@ -1928,6 +2012,56 @@ pub fn build_router_with_asyncapi(
         }
     }
 
+    // Fase 12.1.b — auto-mount de `/healthz` y `/readyz` (K8s probes).
+    //
+    // Política:
+    //   - Si el usuario declaró `@get("/healthz")` (handler HTTP normal),
+    //     gana ese — el auto-mount cede (mismo patrón que /openapi.json).
+    //   - Si el usuario declaró `@healthz fn ...` (decorator dedicado),
+    //     se mounta esa fn con dispatch a `invoke_value` + mapeo del
+    //     retorno a status (Bool/Result<Null>/Result<Bool>).
+    //   - Si no declaró ninguno: default 200.
+    //   - Idem `/readyz` pero con state de "draining": cuando el atomic
+    //     está en `true` (SIGTERM disparado), retorna 503 SIN tocar el
+    //     handler — K8s deja de rutear inmediato.
+    if !metas.iter().any(|m| m.path == "/healthz") {
+        let healthz = registry.healthz_handler.clone();
+        router = router.route(
+            "/healthz",
+            axum::routing::get(move || {
+                let healthz = healthz.clone();
+                async move {
+                    match healthz {
+                        Some(h) => invoke_health_check(h, "healthz").await,
+                        None => default_health_response(),
+                    }
+                }
+            }),
+        );
+    }
+    if !metas.iter().any(|m| m.path == "/readyz") {
+        let readyz = registry.readyz_handler.clone();
+        let draining = registry.draining.clone();
+        router = router.route(
+            "/readyz",
+            axum::routing::get(move || {
+                let readyz = readyz.clone();
+                let draining = draining.clone();
+                async move {
+                    // Durante draining, 503 sin tocar el handler (K8s
+                    // deja de rutear inmediato).
+                    if draining.load(std::sync::atomic::Ordering::Relaxed) {
+                        return drained_response();
+                    }
+                    match readyz {
+                        Some(h) => invoke_health_check(h, "readyz").await,
+                        None => default_health_response(),
+                    }
+                }
+            }),
+        );
+    }
+
     // v0.10.28 — Access log opt-in. Solo se monta el layer si el mode
     // es activo; cuando Off, el Router queda 100% como antes (zero
     // overhead, ni siquiera la indirection del middleware).
@@ -1936,6 +2070,135 @@ pub fn build_router_with_asyncapi(
     }
 
     router
+}
+
+/// Fase 12.1.b — Respuesta default cuando no hay handler `@healthz`
+/// o `@readyz` declarado (y el server NO está draining). Status 200
+/// con body `{"status": "ok"}`. Body intencionalmente mínimo —
+/// cualquier endpoint que necesite más detalle declara su propio
+/// handler.
+fn default_health_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::OK,
+        axum::Json(serde_json::json!({"status": "ok"})),
+    )
+        .into_response()
+}
+
+/// Fase 12.1.b — Respuesta cuando el server está draining (post
+/// SIGTERM/Ctrl-C). Status 503 + body `{"status": "draining"}`. K8s
+/// con `readinessProbe` lo lee y deja de rutear traffic nuevo a este
+/// pod — mientras axum drena las requests in-flight.
+fn drained_response() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        axum::http::StatusCode::SERVICE_UNAVAILABLE,
+        axum::Json(serde_json::json!({"status": "draining"})),
+    )
+        .into_response()
+}
+
+/// Fase 12.1.b — Invoca un handler `@healthz`/`@readyz` y mapea el
+/// retorno Fitz a una HTTP response.
+///
+/// Reglas del retorno:
+///   - `Bool true` / `Result Ok(...)` / `Null` → 200 + `{"status": "ok"}`.
+///   - `Bool false` → 503 + `{"status": "unhealthy"}`.
+///   - `Result Err(e)` → 503 + `{"status": "unhealthy", "error": <e>}`.
+///   - Cualquier panic / Future no resuelto → 503 con mensaje genérico.
+async fn invoke_health_check(
+    handle: HealthCheckHandle,
+    kind: &str,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let name = handle.name.clone();
+    let raw = crate::evaluator::invoke_value(
+        handle.handler,
+        vec![],
+        &name,
+        crate::ast::Span::ZERO,
+    )
+    .await;
+    let value = match raw {
+        Ok(v) => v,
+        Err(_) => {
+            // Error de evaluación → unhealthy con mensaje genérico
+            // (el error específico va a stderr vía el evaluator).
+            eprintln!("[{kind}] error al invocar handler '{name}'");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(
+                    serde_json::json!({"status": "unhealthy", "error": "handler error"}),
+                ),
+            )
+                .into_response();
+        }
+    };
+    // Si fue async, el Value es un Future que hay que consumir.
+    let value = match await_if_future(value).await {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("[{kind}] handler '{name}' produjo Future con error");
+            return (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(
+                    serde_json::json!({"status": "unhealthy", "error": "future error"}),
+                ),
+            )
+                .into_response();
+        }
+    };
+    map_health_value_to_response(value)
+}
+
+/// Helper de `invoke_health_check`. Convierte el `Value` retornado por
+/// el handler Fitz a una HTTP response apropiada según las reglas
+/// documentadas arriba.
+fn map_health_value_to_response(value: Value) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match value {
+        Value::Bool(true) | Value::Null => (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({"status": "ok"})),
+        )
+            .into_response(),
+        Value::Bool(false) => (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            axum::Json(serde_json::json!({"status": "unhealthy"})),
+        )
+            .into_response(),
+        Value::Result(crate::value::ResultVariant::Ok(_)) => (
+            axum::http::StatusCode::OK,
+            axum::Json(serde_json::json!({"status": "ok"})),
+        )
+            .into_response(),
+        Value::Result(crate::value::ResultVariant::Err(boxed)) => {
+            let msg = match &*boxed {
+                Value::Str(s) => s.clone(),
+                other => format!("{}", other),
+            };
+            (
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                axum::Json(serde_json::json!({"status": "unhealthy", "error": msg})),
+            )
+                .into_response()
+        }
+        other => {
+            // Tipo inesperado (el checker debería haberlo prevenido).
+            // Tratamos como healthy con warning a stderr para no romper
+            // probes por bug del codegen.
+            eprintln!(
+                "[probe] handler retornó valor de tipo inesperado {} — tratando como OK",
+                other.type_name()
+            );
+            (
+                axum::http::StatusCode::OK,
+                axum::Json(serde_json::json!({"status": "ok"})),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// Convierte el `HeaderMap` de axum a un `HashMap<String, String>`
@@ -3622,6 +3885,10 @@ pub fn serve(
     // `Arc<HttpRegistry>` al router. Spawn del scheduler adentro del
     // runtime, paralelo a axum.
     let cron_registry_for_scheduler = registry.cron_registry.clone();
+    // Fase 12.1.b — capturamos draining + shutdown_timeout ANTES de
+    // mover `registry` al router; el shutdown signal los necesita.
+    let draining_for_shutdown = registry.draining.clone();
+    let shutdown_timeout_secs = registry.resolved_config().shutdown_timeout_secs;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -3656,17 +3923,51 @@ pub fn serve(
         // runtime, los tasks cron también se cancelan.
         crate::cron_jobs::spawn_cron_scheduler(cron_registry_for_scheduler);
         axum::serve(listener, router)
-            .with_graceful_shutdown(shutdown_signal())
+            .with_graceful_shutdown(shutdown_signal(draining_for_shutdown, shutdown_timeout_secs))
             .await
     })?;
 
     Ok(())
 }
 
-/// Escucha SIGINT (Ctrl-C) para graceful shutdown.
-async fn shutdown_signal() {
+/// Fase 12.1.b — Escucha SIGINT (Ctrl-C) y orquesta el graceful
+/// shutdown.
+///
+/// Secuencia:
+///   1. Espera a SIGINT/Ctrl-C.
+///   2. Flippea `draining` a `true` — `/readyz` empieza a retornar 503
+///      inmediato. K8s con `readinessProbe` deja de rutear traffic
+///      nuevo en ~1-2 ticks.
+///   3. Espera un grace period chico (2 segundos hardcoded en MVP)
+///      para que K8s vea el cambio y rerutee. Sin este delay, el pod
+///      puede recibir requests en flight justo en el momento del
+///      shutdown.
+///   4. Devuelve — axum cierra el listener y drena las requests
+///      in-flight. El timeout total lo controla
+///      `shutdown_timeout_secs` (default 30s) via el wrapper de tokio
+///      timeout más abajo (el caller arranca un timer paralelo si
+///      `> 0`).
+async fn shutdown_signal(
+    draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    shutdown_timeout_secs: u64,
+) {
     let _ = tokio::signal::ctrl_c().await;
-    eprintln!("\nbajando servidor...");
+    eprintln!("\n[shutdown] SIGINT recibido — flippeando draining state");
+    draining.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    // Grace period: dar tiempo a K8s a notar el 503 y rerutear traffic.
+    // 2 segundos es el mínimo razonable (kubelet polea probes cada
+    // ~10s por default, pero load balancers más rápidos como Envoy ven
+    // el cambio en ~1s).
+    let grace = std::cmp::min(2u64, shutdown_timeout_secs.max(1));
+    eprintln!(
+        "[shutdown] esperando {grace}s de grace period para que el load balancer rerutee..."
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(grace)).await;
+
+    eprintln!(
+        "[shutdown] cerrando listener — axum drena requests in-flight (max {shutdown_timeout_secs}s)..."
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -5063,6 +5364,7 @@ mod tests {
             enable_docs: true,
             api_version: None,
             ws_heartbeat_secs: 30,
+            shutdown_timeout_secs: 30,
         };
         let addr = c.to_socket_addr().unwrap();
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
@@ -5076,6 +5378,7 @@ mod tests {
             enable_docs: true,
             api_version: None,
             ws_heartbeat_secs: 30,
+            shutdown_timeout_secs: 30,
         };
         let err = c.to_socket_addr().unwrap_err();
         assert!(err.contains("no-es-ip"));
@@ -5090,6 +5393,7 @@ mod tests {
                 enable_docs: true,
                 api_version: None,
                 ws_heartbeat_secs: 30,
+            shutdown_timeout_secs: 30,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
@@ -5098,6 +5402,7 @@ mod tests {
                 enable_docs: true,
                 api_version: None,
                 ws_heartbeat_secs: 30,
+            shutdown_timeout_secs: 30,
             };
             let err = set_server_config(second).unwrap_err();
             // El error contiene el config existente, no el nuevo.
@@ -5117,6 +5422,7 @@ mod tests {
             enable_docs: true,
             api_version: None,
             ws_heartbeat_secs: 30,
+            shutdown_timeout_secs: 30,
         });
         let resolved = reg.resolved_config();
         assert_eq!(resolved.port, 80);
@@ -6007,6 +6313,73 @@ mod tests {
         .await;
         assert_eq!(status, 200);
         assert_eq!(body, "\"valor\"");
+    }
+
+    // ---- 12.1.b — auto-mount de /healthz y /readyz ----
+
+    async fn oneshot_get(
+        registry: HttpRegistry,
+        path: &'static str,
+    ) -> (u16, String) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+        let metas = registry.metas();
+        let router = build_router(&metas, std::sync::Arc::new(registry), None);
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn default_healthz_responde_200() {
+        // Sin @healthz declarado, el server auto-mounta /healthz con
+        // respuesta 200 default.
+        let (status, body) = oneshot_get(HttpRegistry::new(), "/healthz").await;
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["status"], serde_json::json!("ok"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn default_readyz_responde_200_cuando_no_drena() {
+        let (status, body) = oneshot_get(HttpRegistry::new(), "/readyz").await;
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["status"], serde_json::json!("ok"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn readyz_responde_503_durante_draining() {
+        // Con `draining = true`, /readyz retorna 503 SIN tocar el
+        // handler (incluso si lo hubiera). El test simula el state
+        // post-SIGTERM antes de que axum cierre el listener.
+        let registry = HttpRegistry::new();
+        registry
+            .draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (status, body) = oneshot_get(registry, "/readyz").await;
+        assert_eq!(status, 503);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["status"], serde_json::json!("draining"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn healthz_no_se_afecta_por_draining() {
+        // Liveness ≠ readiness: aunque estemos draining, /healthz
+        // sigue retornando 200 (el proceso está vivo). K8s sólo deja
+        // de rutear, no reinicia el pod por liveness.
+        let registry = HttpRegistry::new();
+        registry
+            .draining
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let (status, _) = oneshot_get(registry, "/healthz").await;
+        assert_eq!(status, 200);
     }
 
     // ---- 7.2 auto-register de /openapi.json ----

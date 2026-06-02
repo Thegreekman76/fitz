@@ -1132,6 +1132,24 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "@test — registra como test unit (fitz test)",
             "Sin params. Bodies pueden usar assert/assert_eq/assert_ne/assert_throws builtins.",
         ),
+        // Fase 12.1 (v0.12.0) — Health checks K8s.
+        (
+            "healthz",
+            "healthz",
+            "@healthz — liveness probe (auto-mount GET /healthz)",
+            "Singleton. Sin params. Return Bool / Result<Null> / Result<Bool> (sync o async). \
+             Mapea Bool true / Ok / Null → 200; Bool false / Err → 503. Sin @healthz declarado, \
+             el server auto-mounta GET /healthz con respuesta default 200.",
+        ),
+        (
+            "readyz",
+            "readyz",
+            "@readyz — readiness probe (auto-mount GET /readyz)",
+            "Singleton. Sin params. Return Bool / Result<Null> / Result<Bool> (sync o async). \
+             Durante SIGTERM/graceful shutdown, retorna 503 inmediato (K8s deja de rutear) sin tocar \
+             el handler. Sin @readyz declarado, el server auto-mounta GET /readyz con respuesta \
+             default 200.",
+        ),
         // v0.11.0 (Fase 13) — CLI builder.
         (
             "command",

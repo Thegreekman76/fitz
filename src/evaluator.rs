@@ -436,6 +436,16 @@ fn process_decorator(
         return Ok(());
     }
 
+    // Fase 12.1.b — `@healthz` y `@readyz`: K8s liveness/readiness
+    // probes. Registramos el handler en el slot dedicado del
+    // HttpRegistry; el auto-mount de `build_router_with_asyncapi`
+    // lo dispatcha en `GET /healthz` o `GET /readyz`. El checker
+    // (12.1.a) ya validó shape (sin args/kwargs/params, singleton,
+    // sin conflictos); replicamos defensivamente.
+    if deco.name == "healthz" || deco.name == "readyz" {
+        return register_health_handler(deco, fn_name, handler, fn_def_span);
+    }
+
     // Fase 13 (v0.11.0) — `@command("name", desc="...")`: registra la
     // fn como comando CLI. El checker ya validó shape (return Int,
     // params Str/Int/Float/Bool, sin conflictos). Acá la registramos
@@ -452,10 +462,69 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background, @command, @healthz, @readyz.",
             deco.name, fn_name,
         ),
     )))
+}
+
+/// Fase 12.1.b — Procesa `@healthz` o `@readyz` sobre una `Stmt::FnDef`.
+/// El checker (12.1.a) ya validó shape estáticamente; acá replicamos
+/// defensivamente: sin args/kwargs, singleton, HttpRegistry activo.
+///
+/// Si todo OK, registra el `HealthCheckHandle` en el slot dedicado
+/// del registry (`healthz_handler` o `readyz_handler`). El auto-mount
+/// en `build_router_with_asyncapi` lo dispatcha en `GET /healthz` o
+/// `GET /readyz` invocando este handler con `invoke_value` + mapeo
+/// del retorno a status.
+fn register_health_handler(
+    deco: &Decorator,
+    fn_name: &str,
+    handler: &Value,
+    fn_def_span: Span,
+) -> Result<(), EvalSignal> {
+    let kind = deco.name.as_str(); // "healthz" o "readyz"
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            fn_def_span.line,
+            fn_def_span.column,
+            msg,
+        ))
+    };
+    // 1) Sin args ni kwargs (el checker ya lo validó; defensa).
+    if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+        return Err(err(format!(
+            "@{kind} sobre fn '{fn_name}': no admite args ni kwargs."
+        )));
+    }
+    // 2) `handler` debe ser una Value::Function. El caller siempre nos
+    //    pasa la fn resuelta del env; defensa por si cambia.
+    let Value::Function { is_async, .. } = handler else {
+        return Err(err(format!(
+            "@{kind} sobre fn '{fn_name}': el handler no es una fn (bug del dispatcher)."
+        )));
+    };
+    let handle = crate::http::HealthCheckHandle {
+        name: fn_name.to_string(),
+        handler: handler.clone(),
+        is_async: *is_async,
+    };
+    // 3) Gate: HttpRegistry activo. Mismo modelo que
+    //    `register_auth_provider`: si no hay registry, el programa
+    //    está en un contexto sin HTTP (REPL/eval embebido) → error
+    //    claro citando que el decorator solo aplica a programas HTTP.
+    match crate::http::set_health_handler(kind, handle) {
+        Ok(()) => Ok(()),
+        Err(crate::http::SetHealthHandlerError::NoRegistry) => Err(err(format!(
+            "@{kind} sobre fn '{fn_name}': no hay servidor HTTP en este programa. \
+             El decorator solo aplica cuando declarás `@server(...)` con handlers HTTP."
+        ))),
+        Err(crate::http::SetHealthHandlerError::Duplicate(prev_name)) => Err(err(format!(
+            "@{kind} duplicado: la fn '{prev_name}' ya fue registrada como probe; '{fn_name}' es una segunda. \
+             Solo se admite una por programa."
+        ))),
+    }
 }
 
 /// Fase 9.w.1.c — Procesa el decorator `@auth_provider` sobre una
@@ -1287,10 +1356,31 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
+            // Fase 12.1.b — tiempo máximo en segundos del graceful
+            // shutdown tras SIGTERM/Ctrl-C. `0` desactiva el grace
+            // period. Default 30 (alineado con K8s
+            // `terminationGracePeriodSeconds`).
+            "shutdown_timeout_secs" => match value_expr {
+                Expr::Int(n, _) if *n >= 0 => {
+                    config.shutdown_timeout_secs = *n as u64;
+                }
+                Expr::Int(n, _) => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'shutdown_timeout_secs' debe ser Int >= 0, recibió {}",
+                        fn_name, n,
+                    )));
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'shutdown_timeout_secs' debe ser Int literal, recibió {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
             other => {
                 return Err(err(format!(
                     "@server sobre fn '{}': kwarg '{}' no reconocido. \
-                     Soportados: docs, api_version, ws_heartbeat_secs.",
+                     Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs.",
                     fn_name, other,
                 )));
             }
