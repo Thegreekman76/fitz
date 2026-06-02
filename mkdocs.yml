@@ -157,6 +157,11 @@ nav:
           - 'C3 — Middleware + CORS': curso/m4-http/c3-middleware-cors.md
           - 'C4 — OpenAPI + /docs': curso/m4-http/c4-openapi-docs.md
           - 'C5 — Status custom + errores': curso/m4-http/c5-status-content-errores.md
+      - 'M5 — Async, auth, real-time':
+          - 'C1 — async fn + .await + paralelismo': curso/m5-async-auth-rt/c1-async-await.md
+          - 'C2 — Auth nativa (JWT + Argon2id)': curso/m5-async-auth-rt/c2-auth.md
+          - 'C3 — WebSockets tipados + AsyncAPI': curso/m5-async-auth-rt/c3-websockets.md
+          - 'C4 — Jobs sin Celery + persistencia': curso/m5-async-auth-rt/c4-jobs.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

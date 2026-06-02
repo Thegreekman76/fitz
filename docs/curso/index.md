@@ -40,7 +40,7 @@ asume VSCode para los screenshots ASCII.
 | M2 — Tipos y funciones | 7 | ✅ cerrado (C1-C7) |
 | M3 — Módulos y organización | 5 | ✅ cerrado (C1-C5) |
 | M4 — HTTP first-class | 5 | ✅ cerrado (C1-C5) |
-| M5 — Async, auth, real-time | 4 | 📋 planificado |
+| M5 — Async, auth, real-time | 4 | ✅ cerrado (C1-C4) |
 | M6 — Capstone Postgres + ORM nativo | 6 | 📋 planificado |
 | M7 — Producción y deployment | 4 | ⏸ pendiente (espera Fase 12) |
 
@@ -111,6 +111,24 @@ production-ready en Fitz — handlers tipados, validación
 automática del input, errores ricos con status code correcto,
 middleware reusable, CORS configurado y docs autogenerados. Sin
 ningún `pip install`, `npm install`, ni `pom.xml`.
+
+## M5 — Async, auth, real-time
+
+Requisito explícito: M4 completo.
+
+- **[C1 — `async fn` + `.await` + paralelismo HTTP real](m5-async-auth-rt/c1-async-await.md)**
+- **[C2 — Auth nativa con `@auth_provider` + JWT + Argon2id](m5-async-auth-rt/c2-auth.md)**
+- **[C3 — WebSockets tipados con `@ws` + AsyncAPI auto](m5-async-auth-rt/c3-websockets.md)**
+- **[C4 — Jobs sin Celery (`@cron` + `@background` + `spawn`) + persistencia](m5-async-auth-rt/c4-jobs.md)**
+
+**Entregable del módulo**: tenés todas las features modernas de
+producción **integradas en el lenguaje**. Concurrencia real con
+N workers tokio multi-thread, login + JWT + Argon2id sin
+dependencias externas, canales WebSocket tipados con AsyncAPI 3.0
+auto-generado y heartbeat built-in, tareas programadas con tz
+IANA + retry con backoff + persistencia opcional sobre Postgres
+— todo built-in. **Sin Celery, sin Redis para infra básica, sin
+passport.js, sin socket.io**. Un binario standalone deployable.
 
 ## Cómo está pensado el curso
 

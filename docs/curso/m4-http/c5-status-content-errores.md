@@ -807,13 +807,13 @@ todo built-in, sin libs externas.
 
 M5 cubre:
 
-- **C1** — `async fn` + `.await` + `sleep` + paralelismo real
-- **C2** — Auth nativa: `@auth_provider` + `@authenticated` +
-  `@admin` + `jwt` + `hash` built-ins
-- **C3** — WebSockets tipados con `@ws("/chat")` + `WsConn<T>` +
-  broadcasting + AsyncAPI auto
-- **C4** — Jobs sin Celery: `@cron("*/5 * * * *")` +
-  `@background` + `spawn(...)`
+- **[C1 — `async fn` + `.await` + paralelismo HTTP real](../m5-async-auth-rt/c1-async-await.md)**
+- **[C2 — Auth nativa: `@auth_provider` + `@authenticated` +
+  `@admin` + `jwt` + `hash`](../m5-async-auth-rt/c2-auth.md)**
+- **[C3 — WebSockets tipados con `@ws("/chat")` + `WsConn<T>` +
+  broadcasting + AsyncAPI auto](../m5-async-auth-rt/c3-websockets.md)**
+- **[C4 — Jobs sin Celery: `@cron` + `@background` + `spawn` +
+  persistencia con Postgres](../m5-async-auth-rt/c4-jobs.md)**
 
-Cuando esté listo, el cap C1 del M5 va a aparecer en el [índice
-del curso](../index.md).
+Arrancá con [M5.C1](../m5-async-auth-rt/c1-async-await.md) o
+volvé al [índice del curso](../index.md).
