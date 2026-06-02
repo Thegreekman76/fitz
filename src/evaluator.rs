@@ -784,8 +784,32 @@ fn resolve_store_kwarg(
             ));
         }
     };
+    // 9.w.3.iter2 — paridad con el trait `__FitzCronStoreFrom` del
+    // codegen: aceptamos `Value::DbConn` directo (caso desempaquetado
+    // con `match`) o `Value::Result(Ok(DbConn))` (caso idiomático
+    // `let db = db.connect(...).await` sin `?` top-level). Si la conn
+    // falló al inicio (`Err`), error claro citando el motivo.
     match value {
         Value::DbConn(handle) => Ok(handle),
+        Value::Result(crate::value::ResultVariant::Ok(inner)) => match *inner {
+            Value::DbConn(handle) => Ok(handle),
+            other => Err(format!(
+                "{} sobre fn '{}': kwarg `store` debe resolver a un `DbConn`; \
+                 resolvió a `Result<{}>`.",
+                deco_name,
+                fn_name,
+                other.type_name()
+            )),
+        },
+        Value::Result(crate::value::ResultVariant::Err(msg)) => Err(format!(
+            "{} sobre fn '{}': la conn DB falló al inicio: {}.",
+            deco_name,
+            fn_name,
+            match *msg {
+                Value::Str(s) => s,
+                other => format!("{}", other),
+            }
+        )),
         other => Err(format!(
             "{} sobre fn '{}': kwarg `store` debe resolver a un `DbConn` (resultado de \
              `db.connect(...).await?`), resolvió a `{}`.",

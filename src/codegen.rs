@@ -215,6 +215,7 @@ pub fn generate_project(
     // Sumamos `m.uses_db` que invoca `program_uses_db` sobre el
     // module_program completo.
     let uses_db = program_uses_db(program)
+        || program_has_persistent_cron(program)
         || loader
             .modules
             .iter()
@@ -917,6 +918,22 @@ fn program_uses_date_or_uuid(program: &Program) -> bool {
     }
 
     program.iter().any(stmt_uses)
+}
+
+/// 9.w.3.iter2.d — `true` si el programa declara al menos una fn
+/// `@cron(..., store=<ident>)`. Cuando esto está activo, el codegen
+/// debe linkear el driver db (uses_db = true) porque los helpers SQL
+/// del scheduler usan `Arc<__FitzDbConn>`.
+fn program_has_persistent_cron(program: &Program) -> bool {
+    program.iter().any(|s| match s {
+        Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| {
+            d.name == "cron"
+                && d.kwargs
+                    .iter()
+                    .any(|(k, v)| k == "store" && matches!(v, Expr::Ident(_, _)))
+        }),
+        _ => false,
+    })
 }
 
 fn program_uses_db(program: &Program) -> bool {
@@ -2373,11 +2390,21 @@ fn cargo_toml_for(
     // Fase 9.w.3.c — `cron = "0.12"` para parsear cron expressions y
     // `chrono = "0.4"` (feature clock) para `Utc::now()` que usa el
     // scheduler. Ambas no-opcionales cuando `uses_jobs = true`.
+    //
+    // 9.w.3.iter2.d — `chrono-tz = "0.10"` también para `@cron(...,
+    // tz="IANA/Name")`. Cuando `uses_date_or_uuid` también está
+    // activo evitamos duplicarlo (se emite ahí abajo).
     let jobs_lines = if uses_jobs {
-        "cron = \"0.12\"\n\
-         chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n"
+        let mut s = String::from(
+            "cron = \"0.12\"\n\
+             chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n",
+        );
+        if !uses_date_or_uuid {
+            s.push_str("chrono-tz = { version = \"0.10\", default-features = false }\n");
+        }
+        s
     } else {
-        ""
+        String::new()
     };
     // v0.10.26 (codegen Date/DateTime/Uuid) — deps de chrono/uuid
     // cuando el programa usa esos tipos built-in. `chrono` ya está
@@ -4170,6 +4197,7 @@ fn generate_main_rs(
     // W11 (v0.10.7) — además de table_metadata, considerar
     // `m.uses_db` (db.connect/query/exec sin @table).
     let uses_db = program_uses_db(program)
+        || program_has_persistent_cron(program)
         || loader
             .modules
             .iter()
@@ -4358,7 +4386,13 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                         // siguen sin aceptar kwargs.
                         // Fase 13 (v0.11.0): `@command(name, desc="...")`
                         // también acepta el kwarg `desc`.
-                        if !matches!(d.name.as_str(), "server" | "header" | "command") {
+                        // 9.w.3.iter2: `@cron` y `@background` ahora aceptan
+                        // los kwargs `tz`/`retry`/`catch_up`/`store` (cron) y
+                        // `tz`/`retry` (background). El checker validó shape.
+                        if !matches!(
+                            d.name.as_str(),
+                            "server" | "header" | "command" | "cron" | "background"
+                        ) {
                             if let Some((key, _)) = d.kwargs.first() {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
@@ -4601,7 +4635,10 @@ fn emit_main_rs_body(
     // cada job (`__fitz_run_cron_job`). Solo se emiten si el programa
     // usa cron jobs o spawn. Va después del preludio base y antes de
     // los mod/use decls.
-    ctx.emit_jobs_prelude();
+    // 9.w.3.iter2.d — detecta `any_persistent` desde el AST porque
+    // `cron_jobs_info` se popula recién en `partition_program_stmts`.
+    let any_persistent_cron = program_has_persistent_cron(program);
+    ctx.emit_jobs_prelude(any_persistent_cron);
     // Fase 10.1.c — preludio del módulo `db`: tipos opacos
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + helpers async para connect/query/exec/close.
@@ -4674,6 +4711,10 @@ fn emit_main_rs_body(
 
     // Fase 9.w.3.c — pre-poblar `cron_jobs_info` desde `p.cron_fns` para
     // que `gen_main`/`gen_http_main` puedan emitir el registro de jobs.
+    //
+    // 9.w.3.iter2.d — parsea los kwargs del `@cron(...)`: `tz`, `retry`,
+    // `catch_up`, `store`. Defaults equivalentes al MVP (UTC, sin
+    // retry, sin catch_up, sin store).
     for stmt in &p.cron_fns {
         if let Stmt::FnDef {
             name,
@@ -4684,11 +4725,17 @@ fn emit_main_rs_body(
         {
             if let Some(deco) = decorators.iter().find(|d| d.name == "cron") {
                 if let Some(Expr::Str(expr, _)) = deco.args.first() {
-                    ctx.cron_jobs_info.push(CronJobInfo {
+                    let mut info = CronJobInfo {
                         fn_name: name.clone(),
                         expr: expr.clone(),
                         is_async: *is_async,
-                    });
+                        tz_name: "UTC".to_string(),
+                        retry: None,
+                        catch_up: false,
+                        store_var: None,
+                    };
+                    parse_cron_kwargs_into_info(&deco.kwargs, name, &mut info)?;
+                    ctx.cron_jobs_info.push(info);
                 }
             }
         }
@@ -4745,6 +4792,194 @@ fn emit_main_rs_body(
 /// Fase 9.w.3.c — info de un cron job recolectada durante el walk de
 /// `partition_program_stmts`. Cada FnDef con `@cron("expr")` produce
 /// una entry. El codegen del main lo consume al final para emitir
+/// 9.w.3.iter2.d — extrae los kwargs del `@cron(...)` del AST en
+/// build-time y los persiste en el `CronJobInfo`. El checker
+/// (9.w.3.iter2.a) ya validó shape sintáctico; acá replicamos las
+/// validaciones runtime que el evaluator hace en `parse_cron_job_options`.
+///
+/// Casos:
+/// - `tz=Str` → `tz_name` = string (validación IANA se difiere al runtime
+///   del binario nativo cuando `chrono_tz::Tz::from_str(...)` corra).
+/// - `retry=Map` → `retry` = `Some(CronJobRetryArgs { ... })` con defaults
+///   completados (max=0, backoff=exponential, initial_secs=1, max_secs=60).
+/// - `catch_up=Bool` → `catch_up` = bool.
+/// - `store=Ident` → `store_var` = `Some(name)`. Solo aceptamos Ident
+///   (no expresiones complejas) — mismo MVP que el intérprete.
+fn parse_cron_kwargs_into_info(
+    kwargs: &[(String, Expr)],
+    fn_name: &str,
+    info: &mut CronJobInfo,
+) -> Result<(), FitzError> {
+    let err = |msg: String| FitzError::new(ErrorKind::TypeError, 0, 0, msg);
+    for (k, v) in kwargs {
+        match k.as_str() {
+            "tz" => match v {
+                Expr::Str(s, _) => info.tz_name = s.clone(),
+                _ => {
+                    return Err(err(format!(
+                        "@cron sobre fn '{}': kwarg `tz` debe ser Str literal.",
+                        fn_name
+                    )));
+                }
+            },
+            "catch_up" => match v {
+                Expr::Bool(b, _) => info.catch_up = *b,
+                _ => {
+                    return Err(err(format!(
+                        "@cron sobre fn '{}': kwarg `catch_up` debe ser Bool literal.",
+                        fn_name
+                    )));
+                }
+            },
+            "store" => match v {
+                Expr::Ident(name, _) => info.store_var = Some(name.clone()),
+                _ => {
+                    return Err(err(format!(
+                        "@cron sobre fn '{}': kwarg `store` debe ser un identificador (e.g. `store=db`).",
+                        fn_name
+                    )));
+                }
+            },
+            "retry" => {
+                let entries = match v {
+                    Expr::Map(es, _) => es,
+                    _ => {
+                        return Err(err(format!(
+                            "@cron sobre fn '{}': kwarg `retry` debe ser Map literal.",
+                            fn_name
+                        )));
+                    }
+                };
+                info.retry = Some(parse_cron_retry_map(entries, fn_name)?);
+            }
+            other => {
+                return Err(err(format!(
+                    "@cron sobre fn '{}': kwarg `{}` no reconocido. \
+                     Aceptados: `tz`, `retry`, `catch_up`, `store`.",
+                    fn_name, other
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 9.w.3.iter2.d — extrae el Map literal de `retry={...}` al
+/// `CronJobRetryArgs` build-time. Reglas paralelas al runtime intérprete.
+fn parse_cron_retry_map(
+    entries: &[(Expr, Expr)],
+    fn_name: &str,
+) -> Result<CronJobRetryArgs, FitzError> {
+    let err = |msg: String| FitzError::new(ErrorKind::TypeError, 0, 0, msg);
+    let mut cfg = CronJobRetryArgs {
+        max: 0,
+        backoff: "exponential".to_string(),
+        initial_secs: 1,
+        max_secs: 60,
+    };
+    for (k_expr, v_expr) in entries {
+        let key = match k_expr {
+            Expr::Str(s, _) => s.clone(),
+            Expr::Ident(s, _) => s.clone(),
+            _ => {
+                return Err(err(format!(
+                    "@cron sobre fn '{}': keys del Map `retry` deben ser identificadores o Str.",
+                    fn_name
+                )));
+            }
+        };
+        match key.as_str() {
+            "max" => {
+                let n = extract_int_lit(v_expr).ok_or_else(|| {
+                    err(format!(
+                        "@cron sobre fn '{}': `retry.max` debe ser Int literal.",
+                        fn_name
+                    ))
+                })?;
+                if n < 0 {
+                    return Err(err(format!(
+                        "@cron sobre fn '{}': `retry.max` debe ser >= 0 (es {}).",
+                        fn_name, n
+                    )));
+                }
+                cfg.max = n as u32;
+            }
+            "backoff" => {
+                let s = match v_expr {
+                    Expr::Str(s, _) => s.clone(),
+                    _ => {
+                        return Err(err(format!(
+                            "@cron sobre fn '{}': `retry.backoff` debe ser Str literal.",
+                            fn_name
+                        )));
+                    }
+                };
+                if !matches!(s.as_str(), "exponential" | "linear" | "constant") {
+                    return Err(err(format!(
+                        "@cron sobre fn '{}': `retry.backoff` debe ser `exponential`/`linear`/`constant` (es `{}`).",
+                        fn_name, s
+                    )));
+                }
+                cfg.backoff = s;
+            }
+            "initial_secs" => {
+                let n = extract_int_lit(v_expr).ok_or_else(|| {
+                    err(format!(
+                        "@cron sobre fn '{}': `retry.initial_secs` debe ser Int literal.",
+                        fn_name
+                    ))
+                })?;
+                if n < 1 {
+                    return Err(err(format!(
+                        "@cron sobre fn '{}': `retry.initial_secs` debe ser >= 1 (es {}).",
+                        fn_name, n
+                    )));
+                }
+                cfg.initial_secs = n as u64;
+            }
+            "max_secs" => {
+                let n = extract_int_lit(v_expr).ok_or_else(|| {
+                    err(format!(
+                        "@cron sobre fn '{}': `retry.max_secs` debe ser Int literal.",
+                        fn_name
+                    ))
+                })?;
+                if n < 1 {
+                    return Err(err(format!(
+                        "@cron sobre fn '{}': `retry.max_secs` debe ser >= 1 (es {}).",
+                        fn_name, n
+                    )));
+                }
+                cfg.max_secs = n as u64;
+            }
+            other => {
+                return Err(err(format!(
+                    "@cron sobre fn '{}': key `{}` no reconocida en `retry`. \
+                     Aceptadas: `max`, `backoff`, `initial_secs`, `max_secs`.",
+                    fn_name, other
+                )));
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+/// Helper: extrae i64 de `Expr::Int` o `UnaryOp { Neg, Int }`.
+fn extract_int_lit(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(n, _) => Some(*n),
+        Expr::UnaryOp { op, operand, .. } => {
+            if matches!(op, crate::ast::UnaryOpKind::Neg) {
+                if let Expr::Int(n, _) = operand.as_ref() {
+                    return Some(-n);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// `tokio::spawn(__fitz_run_cron_job(...))`.
 #[derive(Debug, Clone)]
 struct CronJobInfo {
@@ -4755,6 +4990,28 @@ struct CronJobInfo {
     expr: String,
     /// `true` si la fn es async (cambia el dispatch del invoke).
     is_async: bool,
+    /// 9.w.3.iter2.d — kwargs del `@cron(..., tz=..., retry=...,
+    /// catch_up=..., store=...)` extraídos en build-time. Defaults
+    /// equivalentes al MVP cuando los kwargs no están.
+    tz_name: String,
+    retry: Option<CronJobRetryArgs>,
+    catch_up: bool,
+    /// `Some(var_name)` si `store=<ident>`. El codegen emite
+    /// `var_name.clone()` para pasar el `Arc<__FitzDbConn>` al spawn.
+    store_var: Option<String>,
+}
+
+/// 9.w.3.iter2.d — paralelo build-time de `RetryConfig` del runtime
+/// intérprete. Se serializa a `__FitzRetryConfig { ... }` literal
+/// adentro del wrapper async generado.
+#[derive(Debug, Clone)]
+struct CronJobRetryArgs {
+    max: u32,
+    /// `"exponential"` | `"linear"` | `"constant"`. El codegen lo emite
+    /// como variant del enum `__FitzBackoffKind`.
+    backoff: String,
+    initial_secs: u64,
+    max_secs: u64,
 }
 
 /// Valores parseados de `@server(port?, host?)`. Defaults aplicados
@@ -6568,6 +6825,10 @@ impl<'a> CodegenCtx<'a> {
         ));
         // Clone to release borrow on self
         let jobs = self.cron_jobs_info.clone();
+        // 9.w.3.iter2.d — `any_persistent` decide si el `__FitzCronOptions`
+        // generado incluye campo `store` (path persistente) o no (simple).
+        // El path simple omite el field completo para no tocar la struct.
+        let any_persistent = jobs.iter().any(|j| j.store_var.is_some());
         for job in &jobs {
             let escaped_expr = rust_str_literal(&job.expr);
             let escaped_name = rust_str_literal(&job.fn_name);
@@ -6575,36 +6836,88 @@ impl<'a> CodegenCtx<'a> {
                 "    eprintln!(\"   @cron  {} ({})\");\n",
                 job.fn_name, job.expr
             ));
+            // 9.w.3.iter2.d — Construye `__FitzCronOptions` con los
+            // kwargs del decorator. Si no hay kwargs, queda con
+            // defaults (UTC + no retry + no catch_up + no store).
+            let tz_literal = rust_str_literal(&job.tz_name);
+            let retry_expr = match &job.retry {
+                None => "None".to_string(),
+                Some(r) => format!(
+                    "Some(__FitzRetryConfig {{ max: {max}, backoff: __FitzBackoffKind::{backoff}, initial_secs: {initial}, max_secs: {max_secs} }})",
+                    max = r.max,
+                    backoff = match r.backoff.as_str() {
+                        "exponential" => "Exponential",
+                        "linear" => "Linear",
+                        "constant" => "Constant",
+                        _ => unreachable!("backoff validado por parse_cron_retry_map"),
+                    },
+                    initial = r.initial_secs,
+                    max_secs = r.max_secs,
+                ),
+            };
+            // Sólo emitimos el campo `store` cuando algún job del programa
+            // lo usa — en ese caso el preludio que se emite es
+            // `JOBS_RUN_PRELUDE_PERSISTENT` que sí tiene el campo. En modo
+            // simple omitimos el field para que matchee la struct simple.
+            let store_field = if any_persistent {
+                let expr = match &job.store_var {
+                    None => "None".to_string(),
+                    // El trait `__FitzCronStoreFrom` acepta tanto
+                    // `__FitzDbConn` directo como `Result<__FitzDbConn,
+                    // String>` (caso `let db = db.connect(...).await`
+                    // sin `?` top-level). Panic claro si la conn falló.
+                    Some(var) => format!("(&{}).into_store()", var),
+                };
+                format!(", store: {}", expr)
+            } else {
+                String::new()
+            };
+            let invoke_body = if job.is_async {
+                format!(
+                    "{{ use crate::__FitzCronReturn; {}().await.into_result() }}",
+                    job.fn_name
+                )
+            } else {
+                format!(
+                    "{{ use crate::__FitzCronReturn; {}().into_result() }}",
+                    job.fn_name
+                )
+            };
             self.emit(&format!(
                 "    {{\n        \
                      use std::str::FromStr;\n        \
                      let __normalized = __fitz_normalize_cron({expr});\n        \
                      let __schedule = cron::Schedule::from_str(&__normalized)\n            \
                          .unwrap_or_else(|e| panic!(\"@cron sobre fn '{{}}': expresión inválida `{{}}`: {{}}\", {name}, {expr}, e));\n        \
+                     let __tz = {tz_lit}.parse::<chrono_tz::Tz>()\n            \
+                         .unwrap_or_else(|_| panic!(\"@cron sobre fn '{{}}': IANA timezone `{{}}` no reconocido.\", {name}, {tz_lit}));\n        \
+                     let __opts = __FitzCronOptions {{ tz: __tz, retry: {retry}, catch_up: {catch_up}{store} }};\n        \
                      let __job_name = {name}.to_string();\n        \
-                     tokio::spawn(__fitz_run_cron_job(__job_name, __schedule, || async {{\n            \
-                         {invoke};\n        \
-                     }}));\n    \
+                     tokio::spawn(__fitz_run_cron_job(__job_name, __schedule, __opts, move || async {{ {invoke} }}));\n    \
                      }}\n",
                 expr = escaped_expr,
                 name = escaped_name,
-                invoke = if job.is_async {
-                    format!("{}().await", job.fn_name)
-                } else {
-                    format!("let _ = {}()", job.fn_name)
-                },
+                tz_lit = tz_literal,
+                retry = retry_expr,
+                catch_up = job.catch_up,
+                store = store_field,
+                invoke = invoke_body,
             ));
         }
         Ok(())
     }
 
-    fn emit_jobs_prelude(&mut self) {
+    /// `any_persistent`: true si el programa declara al menos un
+    /// `@cron(..., store=<ident>)`. Calculado en `generate_project`
+    /// antes de `partition_program_stmts` vía `program_has_persistent_cron`.
+    fn emit_jobs_prelude(&mut self, any_persistent: bool) {
         if !self.uses_jobs {
             return;
         }
+        // Helpers básicos heredados del MVP + tz-aware schedule.
         self.emit(
             "\
-// --- 9.w.3.c: runtime de jobs (@cron / @background / spawn) ---
+// --- 9.w.3.c + 9.w.3.iter2.d: runtime de jobs (@cron / @background / spawn) ---
 
 /// Normaliza una cron expression de 5 fields (Unix clásico) a 6 fields
 /// (con seconds al inicio = 0). El crate `cron` exige 6 o 7 fields.
@@ -6617,28 +6930,60 @@ pub(crate) fn __fitz_normalize_cron(expr: &str) -> String {
     }
 }
 
-/// Loop principal de un cron job: calcula el próximo tick, duerme,
-/// invoca el handler, repite. El handler es una closure async que
-/// invoca la fn target del usuario; el wrapper se construye en main.
-pub(crate) async fn __fitz_run_cron_job<F, Fut>(name: String, schedule: cron::Schedule, mut handler: F)
-where
-    F: FnMut() -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send,
-{
-    loop {
-        let now = chrono::Utc::now();
-        let Some(next) = schedule.upcoming(chrono::Utc).next() else {
-            eprintln!(\"\\u{1F550} cron job '{}' agotó su schedule, terminando.\", name);
-            return;
+/// 9.w.3.iter2 — backoff kind del retry. Se serializa al output del
+/// codegen como `__FitzBackoffKind::Exponential` etc.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum __FitzBackoffKind {
+    #[default]
+    Exponential,
+    Linear,
+    Constant,
+}
+
+/// 9.w.3.iter2 — paralelo build-time de `RetryConfig` del intérprete.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct __FitzRetryConfig {
+    pub max: u32,
+    pub backoff: __FitzBackoffKind,
+    pub initial_secs: u64,
+    pub max_secs: u64,
+}
+
+impl __FitzRetryConfig {
+    pub fn delay_for_attempt(&self, attempt: u32) -> std::time::Duration {
+        let base = self.initial_secs.max(1);
+        let cap = self.max_secs.max(1);
+        let raw = match self.backoff {
+            __FitzBackoffKind::Constant => base,
+            __FitzBackoffKind::Linear => base.saturating_mul(attempt as u64),
+            __FitzBackoffKind::Exponential => {
+                let shift = (attempt.saturating_sub(1)).min(63) as u64;
+                base.saturating_mul(1u64 << shift)
+            }
         };
-        let delay = (next - now).to_std().unwrap_or_else(|_| std::time::Duration::from_millis(0));
-        tokio::time::sleep(delay).await;
-        handler().await;
+        std::time::Duration::from_secs(raw.min(cap))
     }
 }
 
 ",
         );
+
+        // Helpers SQL para persistencia + scheduler completo.
+        // Cuando algún `@cron` tiene `store=<binding>` (= `uses_db = true`
+        // forzado por `program_has_persistent_cron`), emitimos la versión
+        // persistente con campo `store: Option<Arc<__FitzDbConn>>`.
+        // Cuando no hay persistencia emitimos la versión simple (sin
+        // campo `store`, sin helpers SQL — evita referencias a
+        // `__FitzDbConn` cuando el programa no usa el driver).
+        // El trait `__FitzCronReturn` lo emite SIEMPRE — ambas variantes
+        // del scheduler lo usan para mapear el return de la fn user.
+        self.emit(JOBS_COMMON_PRELUDE);
+        if any_persistent {
+            self.emit(SQL_HELPERS_PRELUDE);
+            self.emit(JOBS_RUN_PRELUDE_PERSISTENT);
+        } else {
+            self.emit(JOBS_RUN_PRELUDE_SIMPLE);
+        }
     }
 
     /// Fase 10.1.c — preludio del driver Postgres. Emite el módulo
@@ -8039,7 +8384,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // el main puede seguir con sus stmts. Si hay cron-only mode
         // (sin HTTP), el bloqueo con `ctrl_c` va al final.
         let has_cron = !self.cron_jobs_info.is_empty();
-        self.emit_cron_job_spawns()?;
+        // 9.w.3.iter2.d — los stmts top-level del usuario van ANTES de
+        // los spawns para que bindings como `let db = db.connect(...)`
+        // estén en scope cuando los `tokio::spawn(__fitz_run_cron_job(
+        // ..., store: Some(db.clone()), ...))` los referencian. El
+        // banner del scheduler también se emite después: el usuario
+        // ve sus prints primero y después el "Fitz scheduler arrancado".
+        //
         // Fase 8.7.2: los bindings Python son **globales** (static +
         // getter emitido al top-level del crate por
         // `emit_python_bindings_top_level`). El main body no necesita
@@ -8065,6 +8416,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             self.gen_stmt(stmt)?;
         }
+        self.emit_cron_job_spawns()?;
         // Fase 9.w.3.c — si hay cron jobs en modo CLI (sin HTTP),
         // bloqueamos sobre `signal::ctrl_c()` para que el proceso
         // quede vivo mientras los jobs corren. Decisión confirmada
@@ -26180,6 +26532,312 @@ impl __FromFitzJson for uuid::Uuid {
 /// Solo se emite cuando `ctx.uses_ws == true`. Sin uses_ws, programas
 /// HTTP regulares no pagan los ~150 LoC extra ni el costo de runtime
 /// del global broadcaster.
+/// 9.w.3.iter2.d — Helpers SQL para persistencia de cron jobs en
+/// `fitz_cron_jobs` y `fitz_cron_runs`. Solo se emite cuando al menos
+/// un `@cron(...)` tiene `store=<binding>`. Paralelo bit-a-bit a
+/// `cron_jobs.rs::{init_storage, upsert_job_row, record_run_start,
+/// record_run_finish, update_job_last_run, read_last_run_at,
+/// parse_pg_timestamptz}` del intérprete.
+const SQL_HELPERS_PRELUDE: &str = r##"
+const __FITZ_SQL_CREATE_JOBS: &str = "CREATE TABLE IF NOT EXISTS fitz_cron_jobs (name TEXT PRIMARY KEY, schedule TEXT NOT NULL, tz TEXT NOT NULL DEFAULT 'UTC', last_run_at TIMESTAMPTZ, last_status TEXT, last_error TEXT, next_run_at TIMESTAMPTZ)";
+
+const __FITZ_SQL_CREATE_RUNS: &str = "CREATE TABLE IF NOT EXISTS fitz_cron_runs (id BIGSERIAL PRIMARY KEY, job_name TEXT NOT NULL, started_at TIMESTAMPTZ NOT NULL DEFAULT now(), finished_at TIMESTAMPTZ, status TEXT NOT NULL, attempt INT NOT NULL DEFAULT 1, error TEXT)";
+
+const __FITZ_SQL_CREATE_INDEX_RUNS: &str = "CREATE INDEX IF NOT EXISTS idx_fitz_cron_runs_job_started ON fitz_cron_runs (job_name, started_at DESC)";
+
+pub(crate) async fn __fitz_cron_init_storage(conn: &__FitzDbConn) -> Result<(), String> {
+    conn.exec(__FITZ_SQL_CREATE_JOBS, &[]).await
+        .map_err(|e| format!("inicializando tabla fitz_cron_jobs: {}", e))?;
+    conn.exec(__FITZ_SQL_CREATE_RUNS, &[]).await
+        .map_err(|e| format!("inicializando tabla fitz_cron_runs: {}", e))?;
+    conn.exec(__FITZ_SQL_CREATE_INDEX_RUNS, &[]).await
+        .map_err(|e| format!("inicializando índice fitz_cron_runs: {}", e))?;
+    Ok(())
+}
+
+pub(crate) async fn __fitz_cron_upsert_job_row(conn: &__FitzDbConn, name: &str, schedule: &str, tz_name: &str) -> Result<(), String> {
+    conn.exec(
+        "INSERT INTO fitz_cron_jobs (name, schedule, tz) VALUES ($1, $2, $3) ON CONFLICT (name) DO UPDATE SET schedule = EXCLUDED.schedule, tz = EXCLUDED.tz",
+        &[__FitzPgValue::Text(name.to_string()), __FitzPgValue::Text(schedule.to_string()), __FitzPgValue::Text(tz_name.to_string())],
+    ).await.map_err(|e| format!("upsert fitz_cron_jobs '{}': {}", name, e))?;
+    Ok(())
+}
+
+pub(crate) async fn __fitz_cron_record_run_start(conn: &__FitzDbConn, name: &str, attempt: u32) -> Result<i64, String> {
+    let res = conn.query(
+        "INSERT INTO fitz_cron_runs (job_name, attempt, status) VALUES ($1, $2, 'running') RETURNING id",
+        &[__FitzPgValue::Text(name.to_string()), __FitzPgValue::Int(attempt as i64)],
+    ).await.map_err(|e| format!("insert fitz_cron_runs '{}': {}", name, e))?;
+    let row = res.rows.first().ok_or_else(|| format!("fitz_cron_runs insert no devolvió id para '{}'", name))?;
+    match row.get_at(0) {
+        Some(__FitzPgValue::Int(n)) => Ok(*n),
+        Some(__FitzPgValue::Text(s)) => s.parse::<i64>().map_err(|_| format!("fitz_cron_runs id `{}` no parsea a Int", s)),
+        other => Err(format!("fitz_cron_runs id con shape inesperado: {:?}", other)),
+    }
+}
+
+pub(crate) async fn __fitz_cron_record_run_finish(conn: &__FitzDbConn, run_id: i64, status: &str, error: Option<&str>) -> Result<(), String> {
+    let err_val = match error { Some(s) => __FitzPgValue::Text(s.to_string()), None => __FitzPgValue::Null };
+    conn.exec(
+        "UPDATE fitz_cron_runs SET status = $1, finished_at = now(), error = $2 WHERE id = $3",
+        &[__FitzPgValue::Text(status.to_string()), err_val, __FitzPgValue::Int(run_id)],
+    ).await.map_err(|e| format!("update fitz_cron_runs id={}: {}", run_id, e))?;
+    Ok(())
+}
+
+pub(crate) async fn __fitz_cron_update_job_last_run(conn: &__FitzDbConn, name: &str, status: &str, error: Option<&str>) -> Result<(), String> {
+    let err_val = match error { Some(s) => __FitzPgValue::Text(s.to_string()), None => __FitzPgValue::Null };
+    conn.exec(
+        "UPDATE fitz_cron_jobs SET last_run_at = now(), last_status = $1, last_error = $2 WHERE name = $3",
+        &[__FitzPgValue::Text(status.to_string()), err_val, __FitzPgValue::Text(name.to_string())],
+    ).await.map_err(|e| format!("update fitz_cron_jobs '{}': {}", name, e))?;
+    Ok(())
+}
+
+pub(crate) async fn __fitz_cron_read_last_run_at(conn: &__FitzDbConn, name: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    let res = conn.query(
+        "SELECT last_run_at FROM fitz_cron_jobs WHERE name = $1",
+        &[__FitzPgValue::Text(name.to_string())],
+    ).await.map_err(|e| format!("select fitz_cron_jobs '{}': {}", name, e))?;
+    let Some(row) = res.rows.first() else { return Ok(None); };
+    match row.get_at(0) {
+        Some(__FitzPgValue::Null) | None => Ok(None),
+        Some(__FitzPgValue::Text(s)) => __fitz_cron_parse_pg_timestamptz(s).map(Some),
+        other => Err(format!("fitz_cron_jobs.last_run_at shape inesperado: {:?}", other)),
+    }
+}
+
+fn __fitz_cron_parse_pg_timestamptz(s: &str) -> Result<chrono::DateTime<chrono::Utc>, String> {
+    let normalized = s.replacen(' ', "T", 1);
+    let with_offset = {
+        let bytes = normalized.as_bytes();
+        let n = bytes.len();
+        if n >= 3 {
+            let sign = bytes[n - 3];
+            let d1 = bytes[n - 2];
+            let d2 = bytes[n - 1];
+            if (sign == b'+' || sign == b'-') && d1.is_ascii_digit() && d2.is_ascii_digit() {
+                format!("{}:00", normalized)
+            } else { normalized }
+        } else { normalized }
+    };
+    chrono::DateTime::parse_from_rfc3339(&with_offset)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .map_err(|e| format!("parsing timestamptz `{}`: {}", s, e))
+}
+
+"##;
+
+/// 9.w.3.iter2.d — `__FitzCronOptions` + scheduler con tz/retry/catch_up
+/// (+ store cuando hay persistencia). Paralelo a `cron_jobs.rs::run_cron_job`/
+/// `invoke_with_retry` del intérprete.
+///
+/// El campo `store` está siempre presente; cuando no hay persistencia
+/// los call sites pasan `None`. Esto requiere que `__FitzDbConn` esté
+/// definido — el codegen activa `uses_db = true` automáticamente cuando
+/// detecta `@cron(..., store=<ident>)` vía `program_has_persistent_cron`.
+/// Trait + struct comunes a las dos variantes del preludio (con y sin
+/// persistencia). El trait mapea el return de la fn user a
+/// `Result<(), String>` uniforme; el `__FitzCronReturn` se reusa por
+/// los dos `JOBS_RUN_PRELUDE_*`.
+const JOBS_COMMON_PRELUDE: &str = r##"
+pub(crate) trait __FitzCronReturn { fn into_result(self) -> Result<(), String>; }
+impl __FitzCronReturn for () { fn into_result(self) -> Result<(), String> { Ok(()) } }
+impl __FitzCronReturn for Result<(), String> { fn into_result(self) -> Result<(), String> { self } }
+"##;
+
+/// 9.w.3.iter2.d — variante SIMPLE: sin persistencia, sin `store`.
+/// Aplica a programas con `@cron(...)` que opcionalmente usan
+/// `tz`/`retry`/`catch_up` pero no `store=<db>`. Evita referencias a
+/// `__FitzDbConn` que no estaría definido si el programa no usa
+/// el driver db.
+const JOBS_RUN_PRELUDE_SIMPLE: &str = r##"
+#[derive(Clone)]
+pub(crate) struct __FitzCronOptions {
+    pub tz: chrono_tz::Tz,
+    pub retry: Option<__FitzRetryConfig>,
+    pub catch_up: bool,
+}
+
+impl Default for __FitzCronOptions {
+    fn default() -> Self { Self { tz: chrono_tz::UTC, retry: None, catch_up: false } }
+}
+
+pub(crate) async fn __fitz_run_cron_job<F, Fut>(
+    name: String,
+    schedule: cron::Schedule,
+    opts: __FitzCronOptions,
+    mut handler: F,
+)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send,
+{
+    let _ = opts.catch_up; // sin store, catch_up es no-op.
+    loop {
+        let Some(next_in_tz) = schedule.upcoming(opts.tz).next() else {
+            eprintln!("\u{1F550} cron job '{}' agotó su schedule, terminando.", name);
+            return;
+        };
+        let next_utc = next_in_tz.with_timezone(&chrono::Utc);
+        let delay = (next_utc - chrono::Utc::now()).to_std().unwrap_or_else(|_| std::time::Duration::from_millis(0));
+        tokio::time::sleep(delay).await;
+        let max_attempts = 1 + opts.retry.map(|r| r.max).unwrap_or(0);
+        let mut attempt: u32 = 1;
+        loop {
+            let result = handler().await;
+            match result {
+                Ok(()) => break,
+                Err(msg) => {
+                    if attempt >= max_attempts {
+                        eprintln!("\u{1F550} cron job '{}' falló definitivamente tras {} intento(s): {}", name, attempt, msg);
+                        break;
+                    }
+                    let retry_cfg = opts.retry.expect("max_attempts > 1 implica retry.is_some()");
+                    let delay = retry_cfg.delay_for_attempt(attempt);
+                    eprintln!("\u{1F550} cron job '{}' falló (attempt {}/{}): {} — retry en {:?}", name, attempt, max_attempts, msg, delay);
+                    tokio::time::sleep(delay).await;
+                    attempt += 1;
+                }
+            }
+        }
+    }
+}
+"##;
+
+/// 9.w.3.iter2.d — variante PERSISTENT: trae el campo `store: Option<
+/// __FitzDbConn>`, los helpers SQL adicionales y la lógica de
+/// catch_up + persist de cada run.
+const JOBS_RUN_PRELUDE_PERSISTENT: &str = r##"
+/// Trait polimórfico para que el codegen pase `store: db.into_store()`
+/// donde `db` puede ser `__FitzDbConn` directo (caso `let db = match
+/// ... { Ok(c) => c, ... }`) o `Result<__FitzDbConn, String>` (caso
+/// idiomático `let db = db.connect(...).await` sin `?`). Panea con
+/// mensaje claro si la conn había fallado al inicio.
+pub(crate) trait __FitzCronStoreFrom { fn into_store(&self) -> Option<__FitzDbConn>; }
+impl __FitzCronStoreFrom for __FitzDbConn {
+    fn into_store(&self) -> Option<__FitzDbConn> { Some(self.clone()) }
+}
+impl __FitzCronStoreFrom for Result<__FitzDbConn, String> {
+    fn into_store(&self) -> Option<__FitzDbConn> {
+        match self {
+            Ok(c) => Some(c.clone()),
+            Err(e) => panic!("@cron(store=db): db.connect() falló al inicio: {}", e),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct __FitzCronOptions {
+    pub tz: chrono_tz::Tz,
+    pub retry: Option<__FitzRetryConfig>,
+    pub catch_up: bool,
+    pub store: Option<__FitzDbConn>,
+}
+
+impl Default for __FitzCronOptions {
+    fn default() -> Self {
+        Self { tz: chrono_tz::UTC, retry: None, catch_up: false, store: None }
+    }
+}
+
+pub(crate) async fn __fitz_run_cron_job<F, Fut>(
+    name: String,
+    schedule: cron::Schedule,
+    opts: __FitzCronOptions,
+    mut handler: F,
+)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), String>> + Send,
+{
+    // Boot: persistencia + catch_up.
+    if let Some(conn) = opts.store.clone() {
+        if let Err(e) = __fitz_cron_init_storage(&conn).await {
+            eprintln!("\u{1F550} cron job '{}' init storage falló, abortando: {}", name, e);
+            return;
+        }
+        if let Err(e) = __fitz_cron_upsert_job_row(&conn, &name, &schedule.to_string(), opts.tz.name()).await {
+            eprintln!("\u{1F550} cron job '{}' upsert falló, abortando: {}", name, e);
+            return;
+        }
+        if opts.catch_up {
+            match __fitz_cron_read_last_run_at(&conn, &name).await {
+                Ok(Some(last)) => {
+                    let last_in_tz = last.with_timezone(&opts.tz);
+                    let now_in_tz = chrono::Utc::now().with_timezone(&opts.tz);
+                    let missed = schedule.after(&last_in_tz).next().map(|n| n <= now_in_tz).unwrap_or(false);
+                    if missed {
+                        eprintln!("\u{1F550} cron job '{}' catch_up: missed runs detectados, ejecutando UN run inmediato.", name);
+                        __fitz_invoke_with_retry(&name, &opts, &mut handler).await;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("\u{1F550} cron job '{}' catch_up: error leyendo last_run_at: {}", name, e),
+            }
+        }
+    }
+    // Loop.
+    loop {
+        let Some(next_in_tz) = schedule.upcoming(opts.tz).next() else {
+            eprintln!("\u{1F550} cron job '{}' agotó su schedule, terminando.", name);
+            return;
+        };
+        let next_utc = next_in_tz.with_timezone(&chrono::Utc);
+        let delay = (next_utc - chrono::Utc::now()).to_std().unwrap_or_else(|_| std::time::Duration::from_millis(0));
+        tokio::time::sleep(delay).await;
+        __fitz_invoke_with_retry(&name, &opts, &mut handler).await;
+    }
+}
+
+async fn __fitz_invoke_with_retry<F, Fut>(name: &str, opts: &__FitzCronOptions, handler: &mut F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<(), String>>,
+{
+    let max_attempts = 1 + opts.retry.map(|r| r.max).unwrap_or(0);
+    let mut attempt: u32 = 1;
+    loop {
+        let run_id = if let Some(conn) = opts.store.as_ref() {
+            match __fitz_cron_record_run_start(conn, name, attempt).await {
+                Ok(id) => Some(id),
+                Err(e) => { eprintln!("\u{1F550} cron job '{}' record_run_start falló: {}", name, e); None }
+            }
+        } else { None };
+        let result = handler().await;
+        let is_last = attempt >= max_attempts;
+        match result {
+            Ok(()) => {
+                if let (Some(conn), Some(rid)) = (opts.store.as_ref(), run_id) {
+                    let _ = __fitz_cron_record_run_finish(conn, rid, "ok", None).await;
+                    let _ = __fitz_cron_update_job_last_run(conn, name, "ok", None).await;
+                }
+                return;
+            }
+            Err(msg) => {
+                let status = if is_last { "failed" } else { "retrying" };
+                if let (Some(conn), Some(rid)) = (opts.store.as_ref(), run_id) {
+                    let _ = __fitz_cron_record_run_finish(conn, rid, status, Some(&msg)).await;
+                }
+                if is_last {
+                    eprintln!("\u{1F550} cron job '{}' falló definitivamente tras {} intento(s): {}", name, attempt, msg);
+                    if let Some(conn) = opts.store.as_ref() {
+                        let _ = __fitz_cron_update_job_last_run(conn, name, "failed", Some(&msg)).await;
+                    }
+                    return;
+                }
+                let retry_cfg = opts.retry.expect("max_attempts > 1 implica retry.is_some()");
+                let delay = retry_cfg.delay_for_attempt(attempt);
+                eprintln!("\u{1F550} cron job '{}' falló (attempt {}/{}): {} — retry en {:?}", name, attempt, max_attempts, msg, delay);
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
+"##;
+
 const WS_RUNTIME_PRELUDE: &str = r#"// --- 9.w.2.c: runtime WebSocket (broadcaster + struct + trait) ---
 
 use std::sync::OnceLock;
