@@ -123,7 +123,21 @@ El estado actual del proyecto (fases cerradas, próximo norte, deudas comprometi
 
 ## Cómo empezar
 
-**1. Instalar Fitz.** Bajá el binario de tu plataforma desde [releases](https://github.com/Thegreekman76/fitz/releases/latest) (Linux x64/ARM, macOS ARM, Windows x64) y dejalo en cualquier carpeta del `PATH`. O compilá desde fuente:
+**1. Instalar Fitz.** One-liner para Linux / macOS / Windows:
+
+```bash
+# Linux / macOS
+curl -sSf https://thegreekman76.github.io/fitz/install.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://thegreekman76.github.io/fitz/install.ps1 | iex
+```
+
+El installer baja el último release, extrae los binarios a `~/.fitz/bin/` (o `%USERPROFILE%\.fitz\bin\` en Windows) y te dice cómo agregar el dir al `PATH`. Soporta `--version vX.Y.Z`, `--prefix <ruta>` y `--uninstall`.
+
+Alternativas: bajar el binario manual desde [releases](https://github.com/Thegreekman76/fitz/releases/latest) (Linux x64/ARM, macOS ARM, Windows x64) o compilar desde fuente:
 
 ```bash
 git clone https://github.com/Thegreekman76/fitz.git
@@ -131,6 +145,8 @@ cd fitz
 cargo build --release
 # El binario queda en target/release/fitz
 ```
+
+Detalle completo (incluyendo VSCode + extensión + troubleshooting) en el [cap C1 del curso](https://thegreekman76.github.io/fitz/curso/m1-setup/c1-instalacion/).
 
 **2. Tu primer programa.**
 
