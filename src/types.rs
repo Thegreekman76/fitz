@@ -9605,6 +9605,322 @@ fn collect_background_fns(ctx: &mut CheckCtx, program: &Program) {
 /// Validación sintáctica del cron expression: se hace en runtime/codegen
 /// (no en el checker) porque importar `cron` acá implica una dep en el
 /// path del checker. El checker valida shape; el runtime valida sintaxis.
+/// 9.w.3.iter2 — Extrae un valor `i64` de un literal Int, contemplando
+/// el caso `-N` que el parser emite como `UnaryOp { Neg, Int(N) }` (no
+/// como `Int(-N)` directo). Devuelve `None` si la expr no es un literal
+/// numérico simple.
+fn extract_int_literal(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(n, _) => Some(*n),
+        Expr::UnaryOp { op, operand, .. } => {
+            if matches!(op, crate::ast::UnaryOpKind::Neg) {
+                if let Expr::Int(n, _) = operand.as_ref() {
+                    return Some(-n);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// 9.w.3.iter2 — Valida los kwargs opcionales aceptados por `@cron` y
+/// `@background`. La lista `allowed` define qué kwargs son válidos para
+/// el decorator en cuestión (`@cron` acepta los 4; `@background` solo
+/// `tz` y `retry`).
+///
+/// Reglas comunes:
+/// - **Duplicados** → error (`tz="A", tz="B"`).
+/// - **Desconocido** → error con la lista de aceptados.
+/// - **`tz`**: `Expr::Str` literal. La validación IANA real (que la
+///   string sea un timezone conocido) la hace el runtime al registrar
+///   el job — el crate `chrono-tz` produce un error claro con sugerencia
+///   si no matchea.
+/// - **`retry`**: `Expr::Map` literal con keys del subset:
+///     - `max: Int` (>=0, default 0 = sin retry).
+///     - `backoff: Str` literal con valor en
+///       `{"exponential", "linear", "constant"}` (default `"exponential"`).
+///     - `initial_secs: Int` (>=1, default 1).
+///     - `max_secs: Int` (>=1, default 60).
+///
+///   Keys desconocidas, valores con tipo incorrecto, o `backoff` fuera
+///   del whitelist → error.
+/// - **`catch_up`**: `Expr::Bool` literal.
+/// - **`store`**: cualquier expresión. El checker NO valida que resuelva
+///   a `DbConn` (eso requeriría re-correr `infer_expr` adentro de este
+///   helper, que se llama fuera del walk principal). El runtime emite
+///   error claro si el valor no es `Value::DbConn`.
+///
+/// Devuelve `true` si todos los kwargs pasan; `false` si hubo al menos
+/// un error (el caller decide si seguir o cortar).
+fn check_job_kwargs(
+    ctx: &mut CheckCtx,
+    deco_name: &str,
+    fn_name: &str,
+    kwargs: &[(String, Expr)],
+    allowed: &[&str],
+    fn_span: Span,
+) -> bool {
+    let mut ok = true;
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for (k, v) in kwargs {
+        // Desconocido.
+        if !allowed.contains(&k.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "{} sobre fn '{}': kwarg `{}` no reconocido. Aceptados: {}.",
+                    deco_name,
+                    fn_name,
+                    k,
+                    allowed
+                        .iter()
+                        .map(|n| format!("`{}`", n))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            ));
+            ok = false;
+            continue;
+        }
+        // Duplicado.
+        if !seen.insert(k.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "{} sobre fn '{}': kwarg `{}` duplicado.",
+                    deco_name, fn_name, k,
+                ),
+            ));
+            ok = false;
+            continue;
+        }
+        // Validar shape del valor.
+        match k.as_str() {
+            "tz" => {
+                if !matches!(v, Expr::Str(_, _)) {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "{} sobre fn '{}': kwarg `tz` debe ser un Str literal con un IANA timezone (e.g. `tz=\"America/Argentina/Buenos_Aires\"`).",
+                            deco_name, fn_name,
+                        ),
+                    ));
+                    ok = false;
+                }
+            }
+            "catch_up" => {
+                if !matches!(v, Expr::Bool(_, _)) {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "{} sobre fn '{}': kwarg `catch_up` debe ser un Bool literal (`true`/`false`).",
+                            deco_name, fn_name,
+                        ),
+                    ));
+                    ok = false;
+                }
+            }
+            "store" => {
+                // Cualquier expr — el tipo se chequea en runtime.
+                // Validación mínima: no `Null` literal (`store=null`
+                // no tiene sentido y revela un bug del autor).
+                if matches!(v, Expr::Null(_)) {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "{} sobre fn '{}': kwarg `store` no puede ser `null`. Pasá una conn DB (e.g. `store=db` con `db = db.connect(...).await?`).",
+                            deco_name, fn_name,
+                        ),
+                    ));
+                    ok = false;
+                }
+            }
+            "retry" => {
+                if !check_retry_map(ctx, deco_name, fn_name, v, fn_span) {
+                    ok = false;
+                }
+            }
+            _ => unreachable!("kwarg name validado contra allowed"),
+        }
+    }
+    ok
+}
+
+/// 9.w.3.iter2 — valida el shape del Map literal pasado como
+/// `retry={...}`. Acepta solo keys conocidos y validates los tipos.
+///
+/// Si no es un Map literal en absoluto → error sugiriendo la sintaxis.
+fn check_retry_map(
+    ctx: &mut CheckCtx,
+    deco_name: &str,
+    fn_name: &str,
+    expr: &Expr,
+    fn_span: Span,
+) -> bool {
+    let entries = match expr {
+        Expr::Map(entries, _) => entries,
+        _ => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "{} sobre fn '{}': kwarg `retry` debe ser un Map literal (e.g. `retry={{max: 3, backoff: \"exponential\"}}`).",
+                    deco_name, fn_name,
+                ),
+            ));
+            return false;
+        }
+    };
+    let allowed = ["max", "backoff", "initial_secs", "max_secs"];
+    let mut ok = true;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for (k_expr, v_expr) in entries {
+        // El parser para `{a=1}` en posición de Map literal puede emitir
+        // tanto `Expr::Str("a", ...)` (clave Str estándar) como
+        // `Expr::Ident("a", ...)` cuando la key se escribe sin comillas
+        // (sintaxis abreviada estilo `cors({...})`). Aceptamos las dos.
+        let key_name = match k_expr {
+            Expr::Str(s, _) => s.clone(),
+            Expr::Ident(s, _) => s.clone(),
+            _ => {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "{} sobre fn '{}': las keys del Map `retry` deben ser identificadores o Str literales (aceptados: {}).",
+                        deco_name,
+                        fn_name,
+                        allowed
+                            .iter()
+                            .map(|n| format!("`{}`", n))
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                    ),
+                ));
+                ok = false;
+                continue;
+            }
+        };
+        if !allowed.contains(&key_name.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "{} sobre fn '{}': key `{}` no reconocida en `retry`. Aceptadas: {}.",
+                    deco_name,
+                    fn_name,
+                    key_name,
+                    allowed
+                        .iter()
+                        .map(|n| format!("`{}`", n))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                ),
+            ));
+            ok = false;
+            continue;
+        }
+        if !seen.insert(key_name.clone()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "{} sobre fn '{}': key `{}` duplicada en `retry`.",
+                    deco_name, fn_name, key_name,
+                ),
+            ));
+            ok = false;
+            continue;
+        }
+        match key_name.as_str() {
+            "max" | "initial_secs" | "max_secs" => match extract_int_literal(v_expr) {
+                Some(n) => {
+                    if key_name == "max" && n < 0 {
+                        ctx.errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            fn_span.line,
+                            fn_span.column,
+                            format!(
+                                "{} sobre fn '{}': `retry.max` debe ser >= 0 (es {}). Usá 0 para deshabilitar retry.",
+                                deco_name, fn_name, n,
+                            ),
+                        ));
+                        ok = false;
+                    } else if (key_name == "initial_secs" || key_name == "max_secs") && n < 1 {
+                        ctx.errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            fn_span.line,
+                            fn_span.column,
+                            format!(
+                                "{} sobre fn '{}': `retry.{}` debe ser >= 1 (es {}).",
+                                deco_name, fn_name, key_name, n,
+                            ),
+                        ));
+                        ok = false;
+                    }
+                }
+                None => {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "{} sobre fn '{}': `retry.{}` debe ser un Int literal.",
+                            deco_name, fn_name, key_name,
+                        ),
+                    ));
+                    ok = false;
+                }
+            },
+            "backoff" => match v_expr {
+                Expr::Str(s, _) => {
+                    if !matches!(s.as_str(), "exponential" | "linear" | "constant") {
+                        ctx.errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            fn_span.line,
+                            fn_span.column,
+                            format!(
+                                "{} sobre fn '{}': `retry.backoff` debe ser uno de `\"exponential\"`/`\"linear\"`/`\"constant\"` (es `\"{}\"`).",
+                                deco_name, fn_name, s,
+                            ),
+                        ));
+                        ok = false;
+                    }
+                }
+                _ => {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "{} sobre fn '{}': `retry.backoff` debe ser un Str literal.",
+                            deco_name, fn_name,
+                        ),
+                    ));
+                    ok = false;
+                }
+            },
+            _ => unreachable!("key validada contra allowed"),
+        }
+    }
+    ok
+}
+
 fn check_cron_decorator(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -9618,14 +9934,25 @@ fn check_cron_decorator(
         Some(d) => d,
         None => return,
     };
-    // 1) Args: exactamente 1 Str literal, sin kwargs.
-    if cron_deco.args.len() != 1 || !cron_deco.kwargs.is_empty() {
+    // 1) Args: exactamente 1 Str literal positional.
+    //
+    // 9.w.3.iter2 — kwargs opcionales aceptados:
+    //   - `tz: Str` (IANA timezone, default UTC)
+    //   - `retry: Map literal` con keys `max`/`backoff`/`initial_secs`/
+    //     `max_secs`. Default: sin retry.
+    //   - `catch_up: Bool` (política de missed runs tras restart;
+    //     default false = skip).
+    //   - `store: <expr>` que debe resolver a `DbConn` en runtime
+    //     (típico: `store=db` con `db` un binding del scope). El checker
+    //     NO valida el tipo de la expr — eso se hace al registrar el
+    //     job en runtime/codegen. Sin `store` → in-memory (MVP).
+    if cron_deco.args.len() != 1 {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
             fn_span.line,
             fn_span.column,
             format!(
-                "@cron sobre fn '{}': espera exactamente 1 argumento (cron expression Str). Sintaxis: `@cron(\"0 0 * * *\")`.",
+                "@cron sobre fn '{}': espera exactamente 1 argumento positional (cron expression Str). Sintaxis: `@cron(\"0 0 * * *\")` o `@cron(\"0 0 * * *\", tz=\"America/Buenos_Aires\", retry={{max: 3, backoff: \"exponential\"}}, catch_up=true, store=db)`.",
                 fn_name
             ),
         ));
@@ -9645,6 +9972,18 @@ fn check_cron_decorator(
             ));
             return;
         }
+    }
+    // 1b) Kwargs opcionales (9.w.3.iter2): valida shape de cada uno y
+    //     rechaza desconocidos/duplicados.
+    if !check_job_kwargs(
+        ctx,
+        "@cron",
+        fn_name,
+        &cron_deco.kwargs,
+        &["tz", "retry", "catch_up", "store"],
+        fn_span,
+    ) {
+        return;
     }
     // 2) Conflictos con otros decoradores HTTP / WS / background.
     let conflicting = [
@@ -9752,16 +10091,33 @@ fn check_background_decorator(
         Some(d) => d,
         None => return,
     };
-    if !bg_deco.args.is_empty() || !bg_deco.kwargs.is_empty() {
+    // 9.w.3.iter2 — `@background` ahora admite kwargs opcionales `tz`
+    // y `retry` (mismo shape que `@cron`). `store` y `catch_up` NO se
+    // aceptan en `@background` (persistencia de spawn jobs queda
+    // diferida a iter3 — los args del spawn requieren serialización
+    // JSON + tabla `fitz_bg_jobs` separada).
+    if !bg_deco.args.is_empty() {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
             fn_span.line,
             fn_span.column,
             format!(
-                "@background sobre fn '{}': no admite args ni kwargs. Sintaxis: `@background\\nfn {}(...) {{ ... }}`.",
-                fn_name, fn_name
+                "@background sobre fn '{}': no admite args positionals. Sintaxis: `@background` o `@background(tz=\"America/Buenos_Aires\", retry={{max: 3, backoff: \"exponential\"}})`.",
+                fn_name
             ),
         ));
+    }
+    if !check_job_kwargs(
+        ctx,
+        "@background",
+        fn_name,
+        &bg_deco.kwargs,
+        &["tz", "retry"],
+        fn_span,
+    ) {
+        // Si el shape de los kwargs es inválido, igual seguimos con la
+        // validación de conflictos (más errores arriba en el mismo
+        // walk del checker es mejor que abortar acá).
     }
     let conflicting = [
         "get",
@@ -15541,6 +15897,261 @@ print(total)
                 .iter()
                 .any(|e| e.message.contains("no es combinable")),
             "esperaba msg sobre combinación: {:?}",
+            errors
+        );
+    }
+
+    // -------------------------------------------------------------
+    // 9.w.3.iter2 — kwargs nuevos en `@cron` y `@background`.
+    // tz / retry / catch_up / store en `@cron`; tz / retry en `@bg`.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn cron_con_tz_valida_pasa_checker() {
+        // El checker NO valida la cadena IANA (eso es runtime); solo
+        // que sea Str literal.
+        let src = "@cron(\"0 0 * * *\", tz=\"America/Argentina/Buenos_Aires\")\n\
+                   fn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn cron_con_tz_no_str_es_error() {
+        let src = "@cron(\"0 0 * * *\", tz=42)\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("`tz`") && e.message.contains("Str literal")),
+            "esperaba msg sobre tz Str literal: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_retry_completo_pasa_checker() {
+        let src = "@cron(\"0 0 * * *\", retry={max: 3, backoff: \"exponential\", initial_secs: 1, max_secs: 60})\n\
+                   fn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn cron_con_retry_solo_max_pasa_checker() {
+        // Defaults razonables para los 3 sub-params restantes (los
+        // chequea el runtime, no el checker).
+        let src = "@cron(\"0 0 * * *\", retry={max: 5})\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn cron_con_retry_no_map_es_error() {
+        let src = "@cron(\"0 0 * * *\", retry=3)\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("`retry`") && e.message.contains("Map literal")),
+            "esperaba msg sobre retry Map literal: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_retry_key_desconocida_es_error() {
+        let src = "@cron(\"0 0 * * *\", retry={foo: 1})\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("`foo`") && e.message.contains("retry")),
+            "esperaba msg sobre key foo desconocida: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_retry_max_negativo_es_error() {
+        let src = "@cron(\"0 0 * * *\", retry={max: -1})\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("retry.max") && e.message.contains(">= 0")),
+            "esperaba msg sobre max >= 0: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_retry_backoff_desconocido_es_error() {
+        let src = "@cron(\"0 0 * * *\", retry={backoff: \"quadratic\"})\n\
+                   fn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("retry.backoff") && e.message.contains("exponential")),
+            "esperaba msg sobre backoff whitelist: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_retry_initial_secs_cero_es_error() {
+        let src = "@cron(\"0 0 * * *\", retry={initial_secs: 0})\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("initial_secs") && e.message.contains(">= 1")),
+            "esperaba msg sobre initial_secs >= 1: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_catch_up_pasa_checker() {
+        let src = "@cron(\"0 0 * * *\", catch_up=true)\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn cron_con_catch_up_no_bool_es_error() {
+        let src = "@cron(\"0 0 * * *\", catch_up=1)\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("catch_up") && e.message.contains("Bool literal")),
+            "esperaba msg sobre catch_up Bool: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_store_ident_pasa_checker() {
+        // El checker NO chequea que `db` resuelva a DbConn — eso es
+        // runtime. Acepta cualquier expr no-null.
+        let src = "let db = 1\n@cron(\"0 0 * * *\", store=db)\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        // `db` resuelve a Int en este programa sintético, pero el
+        // checker NO valida shape del store (queda runtime). El único
+        // error que podría aparecer es por la asignación `let db = 1`,
+        // que NO toca el decorator.
+        assert!(
+            !errors.iter().any(|e| e.message.contains("store")),
+            "no debería haber error sobre store: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_store_null_es_error() {
+        let src = "@cron(\"0 0 * * *\", store=null)\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("store") && e.message.contains("null")),
+            "esperaba msg sobre store no null: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_kwarg_desconocido_es_error() {
+        let src = "@cron(\"0 0 * * *\", foo=\"bar\")\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("`foo`") && e.message.contains("no reconocido")),
+            "esperaba msg sobre kwarg desconocido: {:?}",
+            errors
+        );
+    }
+
+    // NOTA: kwargs duplicados a nivel decorator (`tz=A, tz=B`) los
+    // rechaza el PARSER, no el checker, con el mensaje "argumento por
+    // nombre 'X=' ya fue dado en el mismo decorador". El helper
+    // `check_job_kwargs` igual lleva una rama defensiva por si el
+    // parser cambia. Sin test acá porque `errors_of` paneas en
+    // `parse(...).expect("parse OK")`.
+
+    #[test]
+    fn cron_todos_los_kwargs_juntos_pasa_checker() {
+        let src = "let db = 1\n\
+                   @cron(\"0 0 * * *\", tz=\"UTC\", retry={max: 3, backoff: \"linear\"}, catch_up=true, store=db)\n\
+                   fn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            !errors
+                .iter()
+                .any(|e| e.message.contains("@cron") || e.message.contains("kwarg")),
+            "happy path: no debería haber errores del @cron: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn background_con_tz_pasa_checker() {
+        let src = "@background(tz=\"America/Argentina/Buenos_Aires\")\n\
+                   fn send(addr: Str) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn background_con_retry_pasa_checker() {
+        let src = "@background(retry={max: 3, backoff: \"exponential\"})\n\
+                   fn send(addr: Str) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn background_con_store_es_error() {
+        // `store` NO es válido en `@background` (persistencia de spawn
+        // jobs queda diferida a iter3).
+        let src = "let db = 1\n@background(store=db)\nfn send(addr: Str) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("@background")
+                && e.message.contains("`store`")
+                && e.message.contains("no reconocido")),
+            "esperaba msg sobre store no aceptado en @background: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn background_con_catch_up_es_error() {
+        // `catch_up` tampoco aplica a `@background` (no es scheduling).
+        let src = "@background(catch_up=true)\nfn send(addr: Str) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("@background")
+                && e.message.contains("`catch_up`")
+                && e.message.contains("no reconocido")),
+            "esperaba msg sobre catch_up no aceptado en @background: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn background_con_args_posicional_sigue_siendo_error() {
+        // Confirmamos que el comportamiento heredado (no admite
+        // positionals) se mantiene tras agregar kwargs.
+        let src = "@background(\"x\")\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("@background")
+                && e.message.contains("no admite args positionals")),
+            "esperaba msg sobre positionals: {:?}",
             errors
         );
     }

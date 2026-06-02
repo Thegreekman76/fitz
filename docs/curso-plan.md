@@ -355,3 +355,60 @@ quieren llegar a producción.
   cero? → curso").
 - **Tiempo de escritura**: 36 capítulos es mucho. Mitigación:
   releasear por módulo, no esperar al curso entero.
+
+---
+
+## Tiers pre-M5 (acordado 2026-06-01)
+
+M5 del curso cubre Async (C23) + Auth (C24) + WebSockets (C25) +
+Jobs (C26). Los caps C24/C25/C26 tienen deudas residuales
+documentadas en `docs/roadmap.md` → "Fase 9.w iteración 2" que se
+diferían a "post-Fase 10". Fase 10 cerró en v0.10.x, así que el
+disparador real ahora es el avance del curso.
+
+**Decisión**: ciertas deudas se cierran ANTES de arrancar a
+escribir M5, para no enseñar funcionalidad con gaps obvios (ej:
+el cap C26 sin persistencia tendría que decir "ojo, si reinicia
+el server perdés los jobs" — justo lo que Fitz vende contra
+Celery).
+
+### T1 — bloquean M5 (cerrar antes de arrancar a escribir)
+
+| # | Item | Cap impactado | Por qué T1 |
+|---|---|---|---|
+| 1 | **Persistencia de jobs sobre DB nativa** | C26 Jobs | Ya no es deuda arquitectónica (Fase 10 cerró). Sin esto, el cap termina con "ojo, si reinicia se pierde", exactamente lo que vende Celery |
+| 2 | **Retry con backoff exponencial** para `@cron`/`@background` | C26 Jobs | Próximo paso natural tras persistencia (max_retries+backoff necesita storage durable). Es lo que un lector espera de "jobs sin Celery" |
+| 3 | **Cron timezone configurable** (`@cron(..., tz="America/Argentina/Buenos_Aires")`) | C26 Jobs | Chico (~50 LoC), default UTC sigue. Sin esto enseñar `@cron("0 9 * * *")` para "todos los días a las 9" es engañoso |
+
+### T2 — evaluar antes de M5 (cierran caso de uso del cap si entran)
+
+| # | Item | Cap impactado | Decisión |
+|---|---|---|---|
+| 4 | **Rooms/channels en WebSockets** | C25 WS | Depende del ejemplo del cap. Si el chat tiene salas (típico), entra T1. Si es chat global plano, baja a T3 |
+| 5 | **Reconnect con state replay** | C25 WS | Acopla con persistencia de T1.1. Si entra T1.1 con storage genérico, agrego mientras estoy ahí |
+| 6 | **RBAC con roles custom** (más allá de `@admin`) | C24 Auth | El cap puede vivir con `@admin` único, pero un curso real va a querer enseñar `@requires("editor")` o similar |
+| 7 | **Token refresh/revocación server-side** | C24 Auth | Acopla con T1.1 (la blacklist necesita storage). Si está la persistencia, este es chico |
+
+### T3 — post-M5 (mencionar como deuda visible en el cap, no bloquean)
+
+- Coordinación multi-instancia (locks distribuidos) — el curso enseña single-instance, está bien
+- `spawn` con coordinación múltiple (Promise.all style) — helper de stdlib eventualmente
+- Sessions cookie-based — alternativa a JWT, fuera de alcance del curso
+- JWT asimétricos (RS256/ES256) — advanced security
+- Backpressure explícito en WS
+- Heterogéneos en `jwt.encode/decode` (Map<Str, Any>)
+
+### Orden de ejecución acordado
+
+Mini-fases discretas, una por release, en este orden:
+
+1. **9.w.3.iter2** — Persistencia + retry + timezone de jobs (T1.1 + T1.2 + T1.3 juntos — comparten el storage del `CronRegistry`).
+2. **9.w.1.iter2** — RBAC custom + token refresh (T2.6 + T2.7 — comparten la noción de "roles persistidos" si entra refresh).
+3. **9.w.2.iter2** — Rooms + reconnect state replay (T2.4 + T2.5 — solo si el ejemplo del C25 los exige; si no, baja a T3).
+4. **Arrancar M5 del curso**.
+
+C23 (Async) no tiene deudas relevantes — sale directo cuando llegue su turno.
+
+Cuando alguno de los tiers cierre, marcarlo en esta tabla como
+**CERRADO** con fecha + versión, y actualizar paralelamente en
+`docs/roadmap.md` → "Fase 9.w iteración 2".

@@ -7655,6 +7655,58 @@ que se pierda en deploy, etc.). Sin presión real, no hay rush —
 9.w MVP cubre el caso típico de "API CRUD con login + tareas de
 mantenimiento" que es el 80% del uso esperado.
 
+**Disparador concreto: avance del curso al M5 (acordado
+2026-06-01)**. M5 del curso "Fitz de 0 a experto" (caps C23 async
++ C24 auth + C25 ws + C26 jobs) necesita que ciertas deudas de
+9.w cierren antes de ser escrito, para no enseñar funcionalidad
+que tiene gaps obvios. Tiers definidos en `docs/curso-plan.md` →
+"Tiers pre-M5":
+
+- **T1 — bloquean M5** (cerrar antes de arrancar a escribir
+  caps):
+  - **9.w.3.iter2 — Persistencia + retry + timezone de jobs**:
+    persistencia del `CronRegistry` sobre la DB nativa de Fase 10
+    (tabla auto-generada con schedule + last_run + status); retry
+    con backoff exponencial vía `@cron("...", retry={max=3,
+    backoff="exponential"})` y equivalente en `@background`
+    (necesita storage durable para max_retries); cron timezone
+    configurable vía `@cron("...", tz="America/Argentina/
+    Buenos_Aires")` con default UTC; política de missed runs al
+    volver tras restart (default "skip", opt-in
+    `catch_up=true`). Tamaño estimado: ~500-700 LoC + cambios al
+    checker para los kwargs nuevos + cap 30 de la guía
+    actualizado.
+
+- **T2 — evaluar antes de M5** (cierran caso de uso del cap si
+  entran):
+  - **9.w.1.iter2 — RBAC custom + token refresh**: RBAC con
+    roles custom más allá de `@authenticated`/`@admin` (ej:
+    `@requires("editor")`, modelo de permisos pluggable); token
+    refresh/revocación server-side con blacklist sobre la misma
+    DB de T1.
+  - **9.w.2.iter2 — Rooms + reconnect state replay** (solo si el
+    ejemplo del C25 del curso lo exige): sub-canales dentro de un
+    endpoint WS, reconnect con state replay (acopla con
+    persistencia de T1).
+
+- **T3 — post-M5** (mencionar como deuda visible en los caps, no
+  bloquean): coordinación multi-instancia con locks
+  distribuidos, `spawn` con coordinación múltiple (Promise.all
+  style), sessions cookie-based, JWT asimétricos (RS256/ES256),
+  backpressure explícito en WS, heterogéneos en
+  `jwt.encode/decode` (Map<Str, Any>).
+
+**Orden de ejecución acordado**:
+
+1. 9.w.3.iter2 (T1) — release dedicado.
+2. 9.w.1.iter2 (T2 — RBAC + refresh) — release dedicado tras T1.
+3. 9.w.2.iter2 (T2 — rooms + replay) — solo si el ejemplo del
+   C25 del curso lo exige; si no, baja a T3.
+4. Arrancar M5 del curso.
+
+C23 (Async) no tiene deudas relevantes — sale directo cuando
+llegue su turno.
+
 ### Próximo norte tras 9.w
 
 **Fase 10** arranca con el stack DB nativo (driver Postgres puro
