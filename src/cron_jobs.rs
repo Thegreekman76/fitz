@@ -313,6 +313,267 @@ impl CronRegistry {
     }
 }
 
+// ============================================================
+// 9.w.3.iter2 — Helpers SQL para persistencia opcional de jobs.
+// ============================================================
+//
+// Schema:
+//   CREATE TABLE fitz_cron_jobs (
+//       name TEXT PRIMARY KEY,
+//       schedule TEXT NOT NULL,
+//       tz TEXT NOT NULL DEFAULT 'UTC',
+//       last_run_at TIMESTAMPTZ,
+//       last_status TEXT,        -- 'ok' | 'failed'
+//       last_error TEXT,
+//       next_run_at TIMESTAMPTZ  -- reservado para visibility futura
+//   );
+//   CREATE TABLE fitz_cron_runs (
+//       id BIGSERIAL PRIMARY KEY,
+//       job_name TEXT NOT NULL,
+//       started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+//       finished_at TIMESTAMPTZ,
+//       status TEXT NOT NULL,    -- 'running' | 'ok' | 'failed' | 'retrying'
+//       attempt INT NOT NULL DEFAULT 1,
+//       error TEXT
+//   );
+//   CREATE INDEX idx_fitz_cron_runs_job_started
+//       ON fitz_cron_runs (job_name, started_at DESC);
+//
+// Decisiones:
+// - `CREATE TABLE IF NOT EXISTS` al boot del scheduler — sin
+//   ceremonia, seguro contra múltiples instancias arrancando.
+// - `name PRIMARY KEY` evita duplicados entre restarts.
+// - `last_run_at` se actualiza al finalizar UN job run completo
+//   (con éxito o tras agotar retries). No se actualiza por cada
+//   attempt intermedio.
+// - `fitz_cron_runs.attempt` empieza en 1 (el primer intento). Si
+//   `retry.max=3` entonces hay hasta 4 rows por tick (1+3).
+// - `error` es TEXT libre, sin tipado del FitzError — buffer de
+//   debug. El user puede limpiar la tabla manualmente.
+
+const SQL_CREATE_TABLE_JOBS: &str = "\
+CREATE TABLE IF NOT EXISTS fitz_cron_jobs (\
+    name TEXT PRIMARY KEY,\
+    schedule TEXT NOT NULL,\
+    tz TEXT NOT NULL DEFAULT 'UTC',\
+    last_run_at TIMESTAMPTZ,\
+    last_status TEXT,\
+    last_error TEXT,\
+    next_run_at TIMESTAMPTZ\
+)";
+
+const SQL_CREATE_TABLE_RUNS: &str = "\
+CREATE TABLE IF NOT EXISTS fitz_cron_runs (\
+    id BIGSERIAL PRIMARY KEY,\
+    job_name TEXT NOT NULL,\
+    started_at TIMESTAMPTZ NOT NULL DEFAULT now(),\
+    finished_at TIMESTAMPTZ,\
+    status TEXT NOT NULL,\
+    attempt INT NOT NULL DEFAULT 1,\
+    error TEXT\
+)";
+
+const SQL_CREATE_INDEX_RUNS: &str = "\
+CREATE INDEX IF NOT EXISTS idx_fitz_cron_runs_job_started \
+ON fitz_cron_runs (job_name, started_at DESC)";
+
+/// Crea las dos tablas `fitz_cron_jobs` y `fitz_cron_runs` + el índice
+/// si no existen. Idempotente; seguro contra concurrencia (Postgres
+/// serializa `CREATE TABLE IF NOT EXISTS`).
+#[doc(hidden)]
+pub async fn init_storage(conn: &crate::db::DbConnHandle) -> Result<(), String> {
+    conn.exec(SQL_CREATE_TABLE_JOBS, &[])
+        .await
+        .map_err(|e| format!("inicializando tabla fitz_cron_jobs: {}", e))?;
+    conn.exec(SQL_CREATE_TABLE_RUNS, &[])
+        .await
+        .map_err(|e| format!("inicializando tabla fitz_cron_runs: {}", e))?;
+    conn.exec(SQL_CREATE_INDEX_RUNS, &[])
+        .await
+        .map_err(|e| format!("inicializando índice fitz_cron_runs: {}", e))?;
+    Ok(())
+}
+
+/// `INSERT ... ON CONFLICT (name) DO UPDATE` que registra/actualiza el
+/// job en `fitz_cron_jobs`. Al reiniciar el proceso con la misma fn
+/// `@cron("...", store=db)` el schedule/tz se sincronizan sin perder
+/// `last_run_at` ni `last_status`.
+#[doc(hidden)]
+pub async fn upsert_job_row(
+    conn: &crate::db::DbConnHandle,
+    name: &str,
+    schedule: &str,
+    tz_name: &str,
+) -> Result<(), String> {
+    conn.exec(
+        "INSERT INTO fitz_cron_jobs (name, schedule, tz) VALUES ($1, $2, $3) \
+         ON CONFLICT (name) DO UPDATE SET schedule = EXCLUDED.schedule, tz = EXCLUDED.tz",
+        &[
+            crate::db::PgValue::Text(name.to_string()),
+            crate::db::PgValue::Text(schedule.to_string()),
+            crate::db::PgValue::Text(tz_name.to_string()),
+        ],
+    )
+    .await
+    .map_err(|e| format!("upsert fitz_cron_jobs '{}': {}", name, e))?;
+    Ok(())
+}
+
+/// `INSERT INTO fitz_cron_runs (... status='running') RETURNING id`.
+/// Devuelve el id BIGSERIAL para que `record_run_finish` lo actualice
+/// más tarde.
+#[doc(hidden)]
+pub async fn record_run_start(
+    conn: &crate::db::DbConnHandle,
+    name: &str,
+    attempt: u32,
+) -> Result<i64, String> {
+    let res = conn
+        .query(
+            "INSERT INTO fitz_cron_runs (job_name, attempt, status) \
+             VALUES ($1, $2, 'running') RETURNING id",
+            &[
+                crate::db::PgValue::Text(name.to_string()),
+                crate::db::PgValue::Int(attempt as i64),
+            ],
+        )
+        .await
+        .map_err(|e| format!("insert fitz_cron_runs '{}': {}", name, e))?;
+    let row = res
+        .rows
+        .first()
+        .ok_or_else(|| format!("fitz_cron_runs insert no devolvió id para '{}'", name))?;
+    match row.get_at(0) {
+        Some(crate::db::PgValue::Int(n)) => Ok(*n),
+        // El driver puede devolver el BIGSERIAL como Text si el wire
+        // format es text (Simple Query). Aceptamos ambas representaciones.
+        Some(crate::db::PgValue::Text(s)) => s
+            .parse::<i64>()
+            .map_err(|_| format!("fitz_cron_runs id `{}` no parsea a Int", s)),
+        other => Err(format!(
+            "fitz_cron_runs id con shape inesperado: {:?}",
+            other
+        )),
+    }
+}
+
+/// `UPDATE fitz_cron_runs SET status=..., finished_at=now(), error=... WHERE id=...`.
+#[doc(hidden)]
+pub async fn record_run_finish(
+    conn: &crate::db::DbConnHandle,
+    run_id: i64,
+    status: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let err_val = match error {
+        Some(s) => crate::db::PgValue::Text(s.to_string()),
+        None => crate::db::PgValue::Null,
+    };
+    conn.exec(
+        "UPDATE fitz_cron_runs SET status = $1, finished_at = now(), error = $2 WHERE id = $3",
+        &[
+            crate::db::PgValue::Text(status.to_string()),
+            err_val,
+            crate::db::PgValue::Int(run_id),
+        ],
+    )
+    .await
+    .map_err(|e| format!("update fitz_cron_runs id={}: {}", run_id, e))?;
+    Ok(())
+}
+
+/// `UPDATE fitz_cron_jobs SET last_run_at=now(), last_status=..., last_error=... WHERE name=...`.
+#[doc(hidden)]
+pub async fn update_job_last_run(
+    conn: &crate::db::DbConnHandle,
+    name: &str,
+    status: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let err_val = match error {
+        Some(s) => crate::db::PgValue::Text(s.to_string()),
+        None => crate::db::PgValue::Null,
+    };
+    conn.exec(
+        "UPDATE fitz_cron_jobs SET last_run_at = now(), last_status = $1, last_error = $2 \
+         WHERE name = $3",
+        &[
+            crate::db::PgValue::Text(status.to_string()),
+            err_val,
+            crate::db::PgValue::Text(name.to_string()),
+        ],
+    )
+    .await
+    .map_err(|e| format!("update fitz_cron_jobs '{}': {}", name, e))?;
+    Ok(())
+}
+
+/// `SELECT last_run_at FROM fitz_cron_jobs WHERE name=$1`. Devuelve
+/// `Ok(None)` si la fila no existe (primer arranque del job) o si
+/// `last_run_at` es NULL.
+#[doc(hidden)]
+pub async fn read_last_run_at(
+    conn: &crate::db::DbConnHandle,
+    name: &str,
+) -> Result<Option<chrono::DateTime<Utc>>, String> {
+    let res = conn
+        .query(
+            "SELECT last_run_at FROM fitz_cron_jobs WHERE name = $1",
+            &[crate::db::PgValue::Text(name.to_string())],
+        )
+        .await
+        .map_err(|e| format!("select fitz_cron_jobs '{}': {}", name, e))?;
+    let Some(row) = res.rows.first() else {
+        return Ok(None);
+    };
+    match row.get_at(0) {
+        Some(crate::db::PgValue::Null) | None => Ok(None),
+        Some(crate::db::PgValue::Text(s)) => {
+            // Postgres text format para TIMESTAMPTZ: "2026-06-02 12:34:56.789+00".
+            // chrono::DateTime parsea con `parse_from_str` o el formato RFC3339
+            // si reformateamos el espacio a 'T'. Usamos un parse defensivo.
+            parse_pg_timestamptz(s).map(Some)
+        }
+        other => Err(format!(
+            "fitz_cron_jobs.last_run_at shape inesperado: {:?}",
+            other
+        )),
+    }
+}
+
+/// Parsea un timestamptz Postgres text-format al `DateTime<Utc>`.
+/// Postgres emite el offset de tz **sin minutos** (`+00`, `-03`,
+/// `+05`) cuando son enteros, y con minutos cuando hay fracción
+/// (`+05:30`). RFC3339 exige siempre `±HH:MM`. Normalizamos:
+///   1. Espacio entre fecha y hora → `T`.
+///   2. Offset sin minutos al final → agregamos `:00`.
+fn parse_pg_timestamptz(s: &str) -> Result<chrono::DateTime<Utc>, String> {
+    let normalized = s.replacen(' ', "T", 1);
+    let with_offset = normalize_pg_tz_offset(&normalized);
+    chrono::DateTime::parse_from_rfc3339(&with_offset)
+        .map(|dt| dt.with_timezone(&Utc))
+        .map_err(|e| format!("parsing timestamptz `{}`: {}", s, e))
+}
+
+/// Si el string termina en `±DD` (offset Postgres sin minutos),
+/// agregamos `:00`. Casos cubiertos: `+00`, `-03`, `+05`. Si ya
+/// trae `:MM` o termina en `Z`, no toca.
+fn normalize_pg_tz_offset(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let n = bytes.len();
+    if n < 3 {
+        return s.to_string();
+    }
+    // Últimos 3 chars: `±DD`. Detectamos `+/-` en pos n-3 + dos dígitos.
+    let sign = bytes[n - 3];
+    let d1 = bytes[n - 2];
+    let d2 = bytes[n - 1];
+    if (sign == b'+' || sign == b'-') && d1.is_ascii_digit() && d2.is_ascii_digit() {
+        return format!("{}:00", s);
+    }
+    s.to_string()
+}
+
 /// Spawnea un `tokio::spawn` por cada cron job registrado. Cada task
 /// loopea con `tokio::time::sleep_until(next_tick) -> invoke`. El
 /// caller debe estar adentro de un runtime tokio (typical: el de
@@ -336,25 +597,163 @@ pub fn spawn_cron_scheduler(registry: Arc<CronRegistry>) {
     }
 }
 
-/// Loop principal de un cron job. Calcula el próximo tick, duerme
-/// hasta ahí, invoca el handler, repite. Errores del handler (panics
-/// del invoke o `Err(msg)` en el return) van a stderr; el loop sigue.
+/// 9.w.3.iter2 — Loop principal de un cron job, con tz-aware schedule,
+/// retry con backoff, persistencia opcional y catch_up de missed runs.
+///
+/// Boot:
+/// 1. Si `job.store.is_some()`: init storage + upsert del job row.
+///    Falla del init → log y abort del task (sin storage no podemos
+///    cumplir el contrato; otros jobs siguen corriendo).
+/// 2. Si `job.catch_up && job.store.is_some()`: leer `last_run_at`,
+///    detectar missed runs (≥1 tick entre last_run_at y now), si los
+///    hay ejecutar UN run inmediato (no N — evita spam).
+///
+/// Loop:
+/// 1. Calcular `next` con `Schedule::upcoming(job.tz)` y dormir hasta
+///    ahí (convertido a UTC para el sleep).
+/// 2. Llamar a `invoke_with_retry` que aplica la política de retry.
 async fn run_cron_job(job: CronJob) {
+    // ---- Boot: persistencia + catch_up ----
+    if let Some(conn) = job.store.clone() {
+        if let Err(e) = init_storage(&conn).await {
+            eprintln!(
+                "🕐 cron job '{}' no pudo inicializar storage, abortando task: {}",
+                job.name, e
+            );
+            return;
+        }
+        if let Err(e) =
+            upsert_job_row(&conn, &job.name, &job.schedule.to_string(), job.tz.name()).await
+        {
+            eprintln!(
+                "🕐 cron job '{}' no pudo registrar en fitz_cron_jobs, abortando task: {}",
+                job.name, e
+            );
+            return;
+        }
+        if job.catch_up {
+            match read_last_run_at(&conn, &job.name).await {
+                Ok(Some(last)) => {
+                    // Hay missed runs si al menos UN tick programado cae
+                    // entre `last` y `now`. Usamos `Schedule::after(last)`
+                    // en la tz del job y pedimos el primero — si existe y
+                    // es <= ahora, hubo missed runs.
+                    let last_in_tz = last.with_timezone(&job.tz);
+                    let now_in_tz = Utc::now().with_timezone(&job.tz);
+                    let missed = job
+                        .schedule
+                        .after(&last_in_tz)
+                        .next()
+                        .map(|next| next <= now_in_tz)
+                        .unwrap_or(false);
+                    if missed {
+                        eprintln!(
+                            "🕐 cron job '{}' catch_up: missed runs detectados (last={}), \
+                             ejecutando UN run inmediato.",
+                            job.name, last
+                        );
+                        invoke_with_retry(&job).await;
+                    }
+                }
+                Ok(None) => {
+                    // Primer arranque del job — no hay last_run_at, no
+                    // tiene sentido hablar de missed runs.
+                }
+                Err(e) => {
+                    eprintln!(
+                        "🕐 cron job '{}' catch_up: error leyendo last_run_at: {}",
+                        job.name, e
+                    );
+                    // No abortamos — seguimos al loop normal.
+                }
+            }
+        }
+    }
+
+    // ---- Loop normal ----
     loop {
-        let now = Utc::now();
-        let Some(next) = job.schedule.upcoming(Utc).next() else {
-            // El schedule no produce más disparos (e.g. una fecha
-            // pasada con year fijo). Salimos limpio.
+        let Some(next_in_tz) = job.schedule.upcoming(job.tz).next() else {
             eprintln!("🕐 cron job '{}' agotó su schedule, terminando.", job.name);
             return;
         };
-        let delay = (next - now)
+        let next_utc = next_in_tz.with_timezone(&Utc);
+        let delay = (next_utc - Utc::now())
             .to_std()
             .unwrap_or_else(|_| std::time::Duration::from_millis(0));
         tokio::time::sleep(delay).await;
-        if let Err(e) = invoke_cron_handler(&job).await {
-            eprintln!("🕐 cron job '{}' falló: {}", job.name, e);
-            // No abortamos el loop — el próximo tick reintenta.
+        invoke_with_retry(&job).await;
+    }
+}
+
+/// 9.w.3.iter2 — Invoca el handler aplicando la política de retry.
+/// Persiste cada attempt en `fitz_cron_runs` si `job.store.is_some()`.
+/// Actualiza `fitz_cron_jobs.last_*` al finalizar el último intento.
+///
+/// Cantidad total de intentos = `1 + retry.max` (la primera corrida
+/// más N retries). Si no hay `retry`, es 1 (paridad con MVP).
+async fn invoke_with_retry(job: &CronJob) {
+    let max_attempts = 1 + job.retry.map(|r| r.max).unwrap_or(0);
+    let mut attempt: u32 = 1;
+    loop {
+        // 1) Persist run start (si hay storage).
+        let run_id = if let Some(conn) = job.store.as_ref() {
+            match record_run_start(conn, &job.name, attempt).await {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    eprintln!(
+                        "🕐 cron job '{}' (attempt {}) record_run_start falló: {}",
+                        job.name, attempt, e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // 2) Invocar el handler.
+        let result = invoke_cron_handler(job).await;
+        let is_last_attempt = attempt >= max_attempts;
+
+        match result {
+            Ok(()) => {
+                if let (Some(conn), Some(rid)) = (job.store.as_ref(), run_id) {
+                    let _ = record_run_finish(conn, rid, "ok", None).await;
+                    let _ = update_job_last_run(conn, &job.name, "ok", None).await;
+                }
+                return;
+            }
+            Err(msg) => {
+                // Persist el run con `failed` (último) o `retrying`
+                // (siguientes intentos restantes).
+                let status = if is_last_attempt {
+                    "failed"
+                } else {
+                    "retrying"
+                };
+                if let (Some(conn), Some(rid)) = (job.store.as_ref(), run_id) {
+                    let _ = record_run_finish(conn, rid, status, Some(&msg)).await;
+                }
+                if is_last_attempt {
+                    eprintln!(
+                        "🕐 cron job '{}' falló definitivamente tras {} intento(s): {}",
+                        job.name, attempt, msg
+                    );
+                    if let Some(conn) = job.store.as_ref() {
+                        let _ = update_job_last_run(conn, &job.name, "failed", Some(&msg)).await;
+                    }
+                    return;
+                }
+                // Hay retry pendiente: dormir el backoff y seguir.
+                let retry_cfg = job.retry.expect("max_attempts > 1 implica retry.is_some()");
+                let delay = retry_cfg.delay_for_attempt(attempt);
+                eprintln!(
+                    "🕐 cron job '{}' falló (attempt {}/{}): {} — retry en {:?}",
+                    job.name, attempt, max_attempts, msg, delay
+                );
+                tokio::time::sleep(delay).await;
+                attempt += 1;
+            }
         }
     }
 }
