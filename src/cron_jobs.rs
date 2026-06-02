@@ -30,6 +30,119 @@ use chrono::Utc;
 use cron::Schedule;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::Duration;
+
+// ============================================================
+// 9.w.3.iter2 — Retry config + timezone + persistencia opts.
+// ============================================================
+
+/// Estrategia de backoff entre retries. Acordado D5: tres kinds desde
+/// el día 1; default `Exponential`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BackoffKind {
+    /// `delay = initial_secs * 2^(attempt-1)`. Recomendado para
+    /// jobs con dependencias externas que pueden bouncear (DB, HTTP).
+    #[default]
+    Exponential,
+    /// `delay = initial_secs * attempt`. Más predecible que exponential.
+    Linear,
+    /// `delay = initial_secs`. Útil cuando ya sabés el rate-limit del
+    /// upstream y querés un ritmo fijo.
+    Constant,
+}
+
+impl BackoffKind {
+    /// Parsea el string aceptado en `retry={backoff: "..."}`. El
+    /// checker (9.w.3.iter2.a) ya garantiza que solo lleguen valores
+    /// del whitelist, pero replicamos defensivamente en runtime.
+    pub fn from_str_strict(s: &str) -> Result<Self, String> {
+        match s {
+            "exponential" => Ok(Self::Exponential),
+            "linear" => Ok(Self::Linear),
+            "constant" => Ok(Self::Constant),
+            other => Err(format!(
+                "backoff `{}` inválido. Aceptados: `exponential`/`linear`/`constant`.",
+                other
+            )),
+        }
+    }
+}
+
+/// Config de retries por job. `max=0` desactiva retry (= MVP); con
+/// `max>0` cada job que falle vuelve a intentar hasta `max+1` veces
+/// total (la primera + N retries) con el backoff calculado.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryConfig {
+    /// Cantidad máxima de **reintentos**. 0 = una sola corrida (igual
+    /// que sin retry). 3 = primera + hasta 3 retries = 4 intentos max.
+    pub max: u32,
+    /// Estrategia entre retries.
+    pub backoff: BackoffKind,
+    /// Delay base en segundos. Cap mínimo 1.
+    pub initial_secs: u64,
+    /// Cap máximo del delay calculado. Evita que exponential explote.
+    pub max_secs: u64,
+}
+
+impl Default for RetryConfig {
+    fn default() -> Self {
+        Self {
+            max: 0,
+            backoff: BackoffKind::Exponential,
+            initial_secs: 1,
+            max_secs: 60,
+        }
+    }
+}
+
+impl RetryConfig {
+    /// Calcula el delay antes del retry `attempt` (1-indexed: `attempt=1`
+    /// es el primer retry tras un fallo, `attempt=2` el segundo, etc).
+    /// Capeado por `max_secs`.
+    pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
+        let base = self.initial_secs.max(1);
+        let cap = self.max_secs.max(1);
+        let raw = match self.backoff {
+            BackoffKind::Constant => base,
+            BackoffKind::Linear => base.saturating_mul(attempt as u64),
+            BackoffKind::Exponential => {
+                let shift = (attempt.saturating_sub(1)).min(63) as u64;
+                base.saturating_mul(1u64 << shift)
+            }
+        };
+        Duration::from_secs(raw.min(cap))
+    }
+}
+
+/// Opciones acumuladas de los kwargs de `@cron("...", tz=..., retry=...,
+/// catch_up=..., store=...)`. El evaluator/codegen parsean los kwargs
+/// del `Decorator` a esta struct y se la pasan al registry.
+#[derive(Debug, Clone)]
+pub struct CronJobOptions {
+    /// Timezone IANA usada para calcular el próximo tick. Default `Utc`
+    /// (comportamiento idéntico al MVP).
+    pub tz: chrono_tz::Tz,
+    /// Política de retry tras fallo. `None` = un solo intento (= MVP).
+    pub retry: Option<RetryConfig>,
+    /// Política de missed runs tras restart. `false` = skip (default),
+    /// `true` = ejecutar UN run inmediato para el último tick perdido
+    /// (no N, evita spam).
+    pub catch_up: bool,
+    /// Conn DB para persistencia del job. `None` = in-memory (= MVP,
+    /// backwards-compat con programas viejos).
+    pub store: Option<Arc<crate::db::DbConnHandle>>,
+}
+
+impl Default for CronJobOptions {
+    fn default() -> Self {
+        Self {
+            tz: chrono_tz::UTC,
+            retry: None,
+            catch_up: false,
+            store: None,
+        }
+    }
+}
 
 /// Normaliza una cron expression del usuario al formato del crate `cron`.
 ///
@@ -75,6 +188,22 @@ pub struct CronJob {
     /// vars top-level (consts, builtins) ven el mismo estado que el
     /// resto del programa.
     pub env: EnvRef,
+    /// 9.w.3.iter2 — timezone IANA usada para calcular el próximo
+    /// tick. El scheduler hace `chrono::DateTime<Tz>::with_timezone`
+    /// antes de pasar el "now" al `Schedule::upcoming`. Default UTC
+    /// (paridad con el MVP).
+    pub tz: chrono_tz::Tz,
+    /// 9.w.3.iter2 — política de retry. `None` = una sola corrida
+    /// por tick (= MVP). `Some(cfg)` = retry hasta `cfg.max` veces
+    /// con el backoff de `cfg.backoff`.
+    pub retry: Option<RetryConfig>,
+    /// 9.w.3.iter2 — política de missed runs tras restart. `false` =
+    /// skip ticks perdidos (default). `true` = ejecutar UN run
+    /// inmediato si hubo missed runs (no N — evita spam).
+    pub catch_up: bool,
+    /// 9.w.3.iter2 — conn DB para persistencia del job (registry +
+    /// runs). `None` = in-memory (= MVP).
+    pub store: Option<Arc<crate::db::DbConnHandle>>,
 }
 
 impl std::fmt::Debug for CronJob {
@@ -83,6 +212,13 @@ impl std::fmt::Debug for CronJob {
             .field("name", &self.name)
             .field("schedule", &self.schedule.to_string())
             .field("is_async", &self.is_async)
+            .field("tz", &self.tz.name())
+            .field("retry", &self.retry)
+            .field("catch_up", &self.catch_up)
+            .field(
+                "store",
+                &self.store.as_ref().map(|h| h.url_redacted.clone()),
+            )
             .finish()
     }
 }
@@ -130,6 +266,7 @@ impl CronRegistry {
         handler: Value,
         is_async: bool,
         env: EnvRef,
+        options: CronJobOptions,
     ) -> Result<(), String> {
         let normalized = normalize_cron_expression(cron_expr);
         let schedule = Schedule::from_str(&normalized).map_err(|e| {
@@ -142,12 +279,22 @@ impl CronRegistry {
                 name, cron_expr, e
             )
         })?;
+        let CronJobOptions {
+            tz,
+            retry,
+            catch_up,
+            store,
+        } = options;
         self.jobs.lock().push(CronJob {
             name,
             schedule,
             handler,
             is_async,
             env,
+            tz,
+            retry,
+            catch_up,
+            store,
         });
         Ok(())
     }
@@ -275,4 +422,187 @@ pub fn run_scheduler_only(registry: Arc<CronRegistry>) -> std::io::Result<()> {
         }
     });
     Ok(())
+}
+
+// ============================================================
+// 9.w.3.iter2 — Tests del registry extension.
+// ============================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::env::Environment;
+
+    #[test]
+    fn retry_config_default_es_no_retry() {
+        let cfg = RetryConfig::default();
+        assert_eq!(cfg.max, 0);
+        assert_eq!(cfg.backoff, BackoffKind::Exponential);
+        assert_eq!(cfg.initial_secs, 1);
+        assert_eq!(cfg.max_secs, 60);
+    }
+
+    #[test]
+    fn delay_exponential_duplica_cada_attempt() {
+        let cfg = RetryConfig {
+            max: 5,
+            backoff: BackoffKind::Exponential,
+            initial_secs: 1,
+            max_secs: 600,
+        };
+        assert_eq!(cfg.delay_for_attempt(1), Duration::from_secs(1));
+        assert_eq!(cfg.delay_for_attempt(2), Duration::from_secs(2));
+        assert_eq!(cfg.delay_for_attempt(3), Duration::from_secs(4));
+        assert_eq!(cfg.delay_for_attempt(4), Duration::from_secs(8));
+        assert_eq!(cfg.delay_for_attempt(5), Duration::from_secs(16));
+    }
+
+    #[test]
+    fn delay_exponential_capeado_por_max_secs() {
+        let cfg = RetryConfig {
+            max: 10,
+            backoff: BackoffKind::Exponential,
+            initial_secs: 1,
+            max_secs: 10,
+        };
+        // attempt=5 → 16s sin cap, capeado a 10s.
+        assert_eq!(cfg.delay_for_attempt(5), Duration::from_secs(10));
+        // attempts grandes nunca pasan el cap.
+        assert_eq!(cfg.delay_for_attempt(20), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn delay_linear_multiplica_attempt_por_initial() {
+        let cfg = RetryConfig {
+            max: 5,
+            backoff: BackoffKind::Linear,
+            initial_secs: 3,
+            max_secs: 100,
+        };
+        assert_eq!(cfg.delay_for_attempt(1), Duration::from_secs(3));
+        assert_eq!(cfg.delay_for_attempt(2), Duration::from_secs(6));
+        assert_eq!(cfg.delay_for_attempt(3), Duration::from_secs(9));
+    }
+
+    #[test]
+    fn delay_constant_siempre_initial() {
+        let cfg = RetryConfig {
+            max: 5,
+            backoff: BackoffKind::Constant,
+            initial_secs: 5,
+            max_secs: 100,
+        };
+        assert_eq!(cfg.delay_for_attempt(1), Duration::from_secs(5));
+        assert_eq!(cfg.delay_for_attempt(7), Duration::from_secs(5));
+    }
+
+    #[test]
+    fn backoff_kind_from_str_acepta_los_tres() {
+        assert_eq!(
+            BackoffKind::from_str_strict("exponential").unwrap(),
+            BackoffKind::Exponential
+        );
+        assert_eq!(
+            BackoffKind::from_str_strict("linear").unwrap(),
+            BackoffKind::Linear
+        );
+        assert_eq!(
+            BackoffKind::from_str_strict("constant").unwrap(),
+            BackoffKind::Constant
+        );
+    }
+
+    #[test]
+    fn backoff_kind_from_str_rechaza_otros() {
+        let err = BackoffKind::from_str_strict("quadratic").unwrap_err();
+        assert!(err.contains("exponential"), "msg: {}", err);
+    }
+
+    #[test]
+    fn cron_job_options_default_es_utc_in_memory() {
+        let opts = CronJobOptions::default();
+        assert_eq!(opts.tz, chrono_tz::UTC);
+        assert!(opts.retry.is_none());
+        assert!(!opts.catch_up);
+        assert!(opts.store.is_none());
+    }
+
+    #[test]
+    fn registry_register_con_defaults_es_backwards_compat() {
+        // Sin tz/retry/catch_up/store: comportamiento equivale al MVP.
+        let registry = CronRegistry::new();
+        let env = Environment::new();
+        let res = registry.register(
+            "tick".to_string(),
+            "0 0 * * *",
+            Value::Null,
+            false,
+            env,
+            CronJobOptions::default(),
+        );
+        assert!(res.is_ok(), "register debería pasar: {:?}", res);
+        assert!(registry.has_jobs());
+        let jobs = registry.jobs_snapshot();
+        assert_eq!(jobs.len(), 1);
+        let job = &jobs[0];
+        assert_eq!(job.name, "tick");
+        assert_eq!(job.tz, chrono_tz::UTC);
+        assert!(job.retry.is_none());
+        assert!(!job.catch_up);
+        assert!(job.store.is_none());
+    }
+
+    #[test]
+    fn registry_register_con_opciones_custom_preserva_campos() {
+        let registry = CronRegistry::new();
+        let env = Environment::new();
+        let opts = CronJobOptions {
+            tz: "America/Argentina/Buenos_Aires"
+                .parse::<chrono_tz::Tz>()
+                .unwrap(),
+            retry: Some(RetryConfig {
+                max: 3,
+                backoff: BackoffKind::Linear,
+                initial_secs: 2,
+                max_secs: 30,
+            }),
+            catch_up: true,
+            store: None,
+        };
+        let res = registry.register(
+            "cleanup".to_string(),
+            "0 3 * * *",
+            Value::Null,
+            true,
+            env,
+            opts,
+        );
+        assert!(res.is_ok());
+        let jobs = registry.jobs_snapshot();
+        let job = &jobs[0];
+        assert_eq!(job.tz.name(), "America/Argentina/Buenos_Aires");
+        let retry = job.retry.expect("retry");
+        assert_eq!(retry.max, 3);
+        assert_eq!(retry.backoff, BackoffKind::Linear);
+        assert_eq!(retry.initial_secs, 2);
+        assert_eq!(retry.max_secs, 30);
+        assert!(job.catch_up);
+    }
+
+    #[test]
+    fn registry_register_cron_invalido_devuelve_err() {
+        let registry = CronRegistry::new();
+        let env = Environment::new();
+        let res = registry.register(
+            "bad".to_string(),
+            "no es un cron",
+            Value::Null,
+            false,
+            env,
+            CronJobOptions::default(),
+        );
+        assert!(res.is_err());
+        let msg = res.unwrap_err();
+        assert!(msg.contains("cron expression"), "msg: {}", msg);
+    }
 }

@@ -564,9 +564,9 @@ fn register_cron_job(
     };
     // Extraer el cron expression — el checker validó que es 1 arg
     // Str literal. Acá replicamos defensivamente.
-    if deco.args.len() != 1 || !deco.kwargs.is_empty() {
+    if deco.args.len() != 1 {
         return Err(err(format!(
-            "@cron sobre fn '{}': espera exactamente 1 argumento (cron expression Str).",
+            "@cron sobre fn '{}': espera exactamente 1 argumento positional (cron expression Str).",
             fn_name,
         )));
     }
@@ -579,6 +579,10 @@ fn register_cron_job(
             )));
         }
     };
+    // 9.w.3.iter2 — parsea los kwargs opcionales (tz/retry/catch_up/store).
+    // El checker (9.w.3.iter2.a) ya validó shape sintáctico; acá
+    // convertimos a valores runtime y resolvemos `store` contra el env.
+    let options = parse_cron_job_options(deco, fn_name, env).map_err(&err)?;
     let is_async = matches!(handler, Value::Function { is_async: true, .. });
     crate::http::register_cron_job(
         fn_name.to_string(),
@@ -586,8 +590,228 @@ fn register_cron_job(
         handler.clone(),
         is_async,
         env.clone(),
+        options,
     )
     .map_err(err)
+}
+
+/// 9.w.3.iter2 — Convierte los kwargs del `Decorator` (validados por el
+/// checker) a `CronJobOptions`. Valida valores que el checker no puede
+/// (IANA tz real, resolución de `store=db` contra el env).
+fn parse_cron_job_options(
+    deco: &Decorator,
+    fn_name: &str,
+    env: &EnvRef,
+) -> Result<crate::cron_jobs::CronJobOptions, String> {
+    let mut options = crate::cron_jobs::CronJobOptions::default();
+    for (k, v) in &deco.kwargs {
+        match k.as_str() {
+            "tz" => {
+                let tz_str = match v {
+                    Expr::Str(s, _) => s,
+                    _ => {
+                        return Err(format!(
+                            "@cron sobre fn '{}': kwarg `tz` debe ser un Str literal.",
+                            fn_name
+                        ));
+                    }
+                };
+                options.tz = tz_str.parse::<chrono_tz::Tz>().map_err(|_| {
+                    format!(
+                        "@cron sobre fn '{}': IANA timezone `{}` no reconocido. \
+                         Ejemplos válidos: `\"UTC\"`, `\"America/Argentina/Buenos_Aires\"`, \
+                         `\"Europe/Madrid\"`, `\"Asia/Tokyo\"`. Lista completa en \
+                         https://en.wikipedia.org/wiki/List_of_tz_database_time_zones.",
+                        fn_name, tz_str
+                    )
+                })?;
+            }
+            "retry" => {
+                options.retry = Some(parse_retry_kwarg(v, "@cron", fn_name)?);
+            }
+            "catch_up" => {
+                options.catch_up = match v {
+                    Expr::Bool(b, _) => *b,
+                    _ => {
+                        return Err(format!(
+                            "@cron sobre fn '{}': kwarg `catch_up` debe ser un Bool literal.",
+                            fn_name
+                        ));
+                    }
+                };
+            }
+            "store" => {
+                options.store = Some(resolve_store_kwarg(v, "@cron", fn_name, env)?);
+            }
+            other => {
+                return Err(format!(
+                    "@cron sobre fn '{}': kwarg `{}` no reconocido. \
+                     Aceptados: `tz`, `retry`, `catch_up`, `store`.",
+                    fn_name, other
+                ));
+            }
+        }
+    }
+    Ok(options)
+}
+
+/// 9.w.3.iter2 — Convierte un `Expr::Map` literal de `retry={...}` a
+/// `RetryConfig`. El checker garantiza que llegan solo keys conocidas
+/// con shape correcto; los defaults faltantes se completan acá.
+fn parse_retry_kwarg(
+    expr: &Expr,
+    deco_name: &str,
+    fn_name: &str,
+) -> Result<crate::cron_jobs::RetryConfig, String> {
+    let entries = match expr {
+        Expr::Map(entries, _) => entries,
+        _ => {
+            return Err(format!(
+                "{} sobre fn '{}': kwarg `retry` debe ser un Map literal.",
+                deco_name, fn_name
+            ));
+        }
+    };
+    let mut cfg = crate::cron_jobs::RetryConfig::default();
+    for (k_expr, v_expr) in entries {
+        let key = match k_expr {
+            Expr::Str(s, _) => s.clone(),
+            Expr::Ident(s, _) => s.clone(),
+            _ => {
+                return Err(format!(
+                    "{} sobre fn '{}': keys del Map `retry` deben ser identificadores o Str.",
+                    deco_name, fn_name
+                ));
+            }
+        };
+        match key.as_str() {
+            "max" => {
+                let n = extract_int_literal_runtime(v_expr).ok_or_else(|| {
+                    format!(
+                        "{} sobre fn '{}': `retry.max` debe ser un Int literal.",
+                        deco_name, fn_name
+                    )
+                })?;
+                if n < 0 {
+                    return Err(format!(
+                        "{} sobre fn '{}': `retry.max` debe ser >= 0 (es {}).",
+                        deco_name, fn_name, n
+                    ));
+                }
+                cfg.max = n as u32;
+            }
+            "backoff" => {
+                let s = match v_expr {
+                    Expr::Str(s, _) => s,
+                    _ => {
+                        return Err(format!(
+                            "{} sobre fn '{}': `retry.backoff` debe ser un Str literal.",
+                            deco_name, fn_name
+                        ));
+                    }
+                };
+                cfg.backoff = crate::cron_jobs::BackoffKind::from_str_strict(s)
+                    .map_err(|e| format!("{} sobre fn '{}': {}", deco_name, fn_name, e))?;
+            }
+            "initial_secs" => {
+                let n = extract_int_literal_runtime(v_expr).ok_or_else(|| {
+                    format!(
+                        "{} sobre fn '{}': `retry.initial_secs` debe ser un Int literal.",
+                        deco_name, fn_name
+                    )
+                })?;
+                if n < 1 {
+                    return Err(format!(
+                        "{} sobre fn '{}': `retry.initial_secs` debe ser >= 1 (es {}).",
+                        deco_name, fn_name, n
+                    ));
+                }
+                cfg.initial_secs = n as u64;
+            }
+            "max_secs" => {
+                let n = extract_int_literal_runtime(v_expr).ok_or_else(|| {
+                    format!(
+                        "{} sobre fn '{}': `retry.max_secs` debe ser un Int literal.",
+                        deco_name, fn_name
+                    )
+                })?;
+                if n < 1 {
+                    return Err(format!(
+                        "{} sobre fn '{}': `retry.max_secs` debe ser >= 1 (es {}).",
+                        deco_name, fn_name, n
+                    ));
+                }
+                cfg.max_secs = n as u64;
+            }
+            other => {
+                return Err(format!(
+                    "{} sobre fn '{}': key `{}` no reconocida en `retry`. \
+                     Aceptadas: `max`, `backoff`, `initial_secs`, `max_secs`.",
+                    deco_name, fn_name, other
+                ));
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+/// 9.w.3.iter2 — Resuelve `store=<expr>` contra el env y verifica que
+/// sea un `Value::DbConn`. El checker solo valida que la expr no sea
+/// `null`; el chequeo de tipo real ocurre acá en runtime.
+fn resolve_store_kwarg(
+    expr: &Expr,
+    deco_name: &str,
+    fn_name: &str,
+    env: &EnvRef,
+) -> Result<std::sync::Arc<crate::db::DbConnHandle>, String> {
+    // Para `store=db` con `db` un binding del scope, lo más típico es
+    // un `Expr::Ident`. Para `store=registry.db` admitimos field access
+    // — extraemos vía `env.get(name)` para Ident y delegamos al
+    // evaluator para casos complejos vía un mini-eval.
+    let value = match expr {
+        Expr::Ident(name, _) => env.lock().get(name).ok_or_else(|| {
+            format!(
+                "{} sobre fn '{}': variable `{}` no encontrada en el scope. \
+                 Pasá una conn DB (e.g. `store=db` con `let db = db.connect(...).await?`).",
+                deco_name, fn_name, name
+            )
+        })?,
+        _ => {
+            return Err(format!(
+                "{} sobre fn '{}': kwarg `store` debe ser un identificador (e.g. `store=db`). \
+                 Expresiones complejas no se soportan en el MVP de iter2.",
+                deco_name, fn_name
+            ));
+        }
+    };
+    match value {
+        Value::DbConn(handle) => Ok(handle),
+        other => Err(format!(
+            "{} sobre fn '{}': kwarg `store` debe resolver a un `DbConn` (resultado de \
+             `db.connect(...).await?`), resolvió a `{}`.",
+            deco_name,
+            fn_name,
+            other.type_name()
+        )),
+    }
+}
+
+/// 9.w.3.iter2 — Variante runtime de `extract_int_literal` (existe una
+/// paralela en el checker). Reconoce `Expr::Int(n)` directo y
+/// `UnaryOp { Neg, Int(n) }` (parser emite negativos así).
+fn extract_int_literal_runtime(expr: &Expr) -> Option<i64> {
+    match expr {
+        Expr::Int(n, _) => Some(*n),
+        Expr::UnaryOp { op, operand, .. } => {
+            if matches!(op, crate::ast::UnaryOpKind::Neg) {
+                if let Expr::Int(n, _) = operand.as_ref() {
+                    return Some(-n);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
 }
 
 /// Fase 9.w.1.c — Recolecta la política de auth de un FnDef inspeccionando
@@ -28394,6 +28618,145 @@ let r = match n {
             err.message.contains("inválida")
                 || err.message.contains("invalid")
                 || err.message.contains("cron"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // 9.w.3.iter2 — kwargs runtime (tz/retry/catch_up/store) en @cron.
+    // -----------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_con_tz_valida_se_propaga_al_registry() {
+        let (_env, registry) = crate::http::with_active_registry_async(|| async {
+            let (env, res) = parse_eval_into_env(
+                "@cron(\"0 0 * * *\", tz=\"America/Argentina/Buenos_Aires\")\n\
+                 fn h() -> Null { return null }",
+            )
+            .await;
+            res.expect("evaluación OK");
+            env
+        })
+        .await;
+        let jobs = registry.cron_registry.jobs_snapshot();
+        assert_eq!(jobs[0].tz.name(), "America/Argentina/Buenos_Aires");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_con_tz_invalida_es_error_runtime() {
+        let result = crate::http::with_active_registry_async(|| async {
+            let (_env, res) = parse_eval_into_env(
+                "@cron(\"0 0 * * *\", tz=\"Mars/Olympus_Mons\")\n\
+                 fn h() -> Null { return null }",
+            )
+            .await;
+            res
+        })
+        .await;
+        let err = result.0.unwrap_err();
+        assert!(
+            err.message.contains("IANA") && err.message.contains("Mars/Olympus_Mons"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_con_retry_completo_se_propaga_al_registry() {
+        let (_env, registry) = crate::http::with_active_registry_async(|| async {
+            let (env, res) = parse_eval_into_env(
+                "@cron(\"0 0 * * *\", retry={max: 3, backoff: \"linear\", initial_secs: 2, max_secs: 30})\n\
+                 fn h() -> Null { return null }",
+            )
+            .await;
+            res.expect("evaluación OK");
+            env
+        })
+        .await;
+        let jobs = registry.cron_registry.jobs_snapshot();
+        let retry = jobs[0].retry.expect("retry set");
+        assert_eq!(retry.max, 3);
+        assert_eq!(retry.backoff, crate::cron_jobs::BackoffKind::Linear);
+        assert_eq!(retry.initial_secs, 2);
+        assert_eq!(retry.max_secs, 30);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_con_retry_solo_max_aplica_defaults() {
+        // Sin backoff/initial_secs/max_secs explícitos: defaults expo/1/60.
+        let (_env, registry) = crate::http::with_active_registry_async(|| async {
+            let (env, res) = parse_eval_into_env(
+                "@cron(\"0 0 * * *\", retry={max: 5})\n\
+                 fn h() -> Null { return null }",
+            )
+            .await;
+            res.expect("evaluación OK");
+            env
+        })
+        .await;
+        let jobs = registry.cron_registry.jobs_snapshot();
+        let retry = jobs[0].retry.expect("retry set");
+        assert_eq!(retry.max, 5);
+        assert_eq!(retry.backoff, crate::cron_jobs::BackoffKind::Exponential);
+        assert_eq!(retry.initial_secs, 1);
+        assert_eq!(retry.max_secs, 60);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_con_catch_up_se_propaga_al_registry() {
+        let (_env, registry) = crate::http::with_active_registry_async(|| async {
+            let (env, res) = parse_eval_into_env(
+                "@cron(\"0 0 * * *\", catch_up=true)\n\
+                 fn h() -> Null { return null }",
+            )
+            .await;
+            res.expect("evaluación OK");
+            env
+        })
+        .await;
+        let jobs = registry.cron_registry.jobs_snapshot();
+        assert!(jobs[0].catch_up);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_con_store_no_dbconn_es_error_runtime() {
+        // `store=x` con `x` siendo un Int → error claro citando DbConn.
+        let result = crate::http::with_active_registry_async(|| async {
+            let (_env, res) = parse_eval_into_env(
+                "let fake_db = 42\n\
+                 @cron(\"0 0 * * *\", store=fake_db)\n\
+                 fn h() -> Null { return null }",
+            )
+            .await;
+            res
+        })
+        .await;
+        let err = result.0.unwrap_err();
+        assert!(
+            err.message.contains("DbConn") && err.message.contains("Int"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_con_store_var_inexistente_es_error_claro() {
+        let result = crate::http::with_active_registry_async(|| async {
+            let (_env, res) = parse_eval_into_env(
+                "@cron(\"0 0 * * *\", store=db)\n\
+                 fn h() -> Null { return null }",
+            )
+            .await;
+            res
+        })
+        .await;
+        // El checker captura el `db` no definido como warning del
+        // checker estático; el `unwrap_err()` ve el error del checker
+        // O del runtime (cualquiera de los dos cubre el caso).
+        let err = result.0.unwrap_err();
+        assert!(
+            err.message.contains("db") || err.message.contains("store"),
             "mensaje inesperado: {}",
             err.message,
         );

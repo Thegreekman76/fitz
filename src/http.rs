@@ -758,6 +758,7 @@ pub fn register_cron_job(
     handler: crate::value::Value,
     is_async: bool,
     env: crate::env::EnvRef,
+    options: crate::cron_jobs::CronJobOptions,
 ) -> Result<(), String> {
     HTTP_REGISTRY.with(|cell| {
         let borrow = cell.borrow();
@@ -765,7 +766,7 @@ pub fn register_cron_job(
             "@cron sin contexto activo: solo aplica ejecutando con `fitz run` un archivo del programa.".to_string()
         })?;
         reg.cron_registry
-            .register(fn_name, cron_expr, handler, is_async, env)
+            .register(fn_name, cron_expr, handler, is_async, env, options)
     })
 }
 
