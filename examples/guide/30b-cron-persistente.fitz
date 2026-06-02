@@ -1,0 +1,56 @@
+// Cap 30 (iter2) — Cron persistente con tz + retry + catch_up + store.
+//
+// Programa HTTP+cron que demuestra el stack completo de jobs
+// programados de Fitz endurecido para producción:
+//
+// - `tz="America/Argentina/Buenos_Aires"` — el schedule se interpreta
+//   en huso de BsAs (lo que el operador espera al leer "0 9 * * *" =
+//   9 AM hora local), no UTC.
+// - `retry={max: 3, backoff: "exponential", initial_secs: 1,
+//   max_secs: 30}` — si el handler falla, hasta 3 reintentos con
+//   delay 1s, 2s, 4s (capeado a 30s). Cada attempt queda en
+//   `fitz_cron_runs`.
+// - `catch_up=true` — si el proceso estuvo abajo durante un tick
+//   programado, al arrancar ejecuta UN run inmediato (no N — evita
+//   spam).
+// - `store=db` — persiste registry + cada run en las tablas
+//   `fitz_cron_jobs` / `fitz_cron_runs`. Visibility con `psql`.
+//
+// El handler HTTP `@get("/health")` mantiene el runtime tokio
+// multi-thread vivo (lo que el scheduler necesita para sus tasks).
+//
+// Setup:
+//   $env:DATABASE_URL = "postgres://user:pass@localhost:5432/db?sslmode=disable"
+//   fitz build examples/guide/30b-cron-persistente.fitz
+//   ./30b-cron-persistente
+//   # En otra terminal:
+//   psql -c "SELECT * FROM fitz_cron_jobs"
+//   psql -c "SELECT job_name, status, attempt, error FROM fitz_cron_runs ORDER BY id DESC LIMIT 10"
+
+// Conn DB top-level. El binding queda como `Result<DbConn>` (no
+// `DbConn`); `@cron(..., store=db)` desempaca automáticamente con el
+// trait `__FitzCronStoreFrom`. Si la conn falla al inicio, panic con
+// mensaje claro citando el motivo.
+let db = db.connect(env_or("DATABASE_URL", "postgres://postgres:secret@localhost:5432/postgres?sslmode=disable")).await
+
+@cron("*/10 * * * * *",
+      tz="America/Argentina/Buenos_Aires",
+      retry={max: 3, backoff: "exponential", initial_secs: 1, max_secs: 30},
+      catch_up=true,
+      store=db)
+async fn heartbeat() -> Result<Null> {
+    // Caso típico: tarea de mantenimiento idempotente que loguea su
+    // tick. El runtime persiste cada attempt en fitz_cron_runs.
+    print("[cron] heartbeat tick")
+    return Ok(null)
+}
+
+@get("/health")
+fn health() -> Str {
+    return "ok"
+}
+
+@server(43931, docs=false)
+fn main() => 0
+
+print("Listo. GET /health o pegale psql a fitz_cron_jobs/fitz_cron_runs.")

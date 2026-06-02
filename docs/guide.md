@@ -10805,6 +10805,113 @@ $ curl localhost:43930/go/fitz
 El ejemplo entero compila a binario nativo con `fitz build` y
 produce output bit-a-bit idéntico al intérprete.
 
+### Persistencia, retry y timezone (iter2)
+
+Cuatro kwargs opcionales endurecen `@cron(...)` para servicios
+que tienen que sobrevivir a un restart o tolerar fallos
+upstream:
+
+- **`tz="IANA/Name"`** — interpreta la cron expression en el huso
+  indicado en vez de UTC. Acepta cualquier IANA timezone
+  (`"America/Argentina/Buenos_Aires"`, `"Europe/Madrid"`,
+  `"UTC"`). Sin esto, `"0 9 * * *"` significa "9 AM UTC", lo
+  que probablemente NO sea lo que el operador espera. Default
+  `"UTC"` (paridad con el MVP).
+- **`retry={max: N, backoff: "...", initial_secs: I, max_secs: M}`** —
+  si el handler devuelve `Err(...)` o paniquea, reintenta hasta
+  `N` veces con delay calculado. Backoffs aceptados:
+  `"exponential"` (delay = `I * 2^(attempt-1)`, recomendado para
+  upstream que puede bouncear), `"linear"` (`I * attempt`),
+  `"constant"` (`I`). Todos capeados por `max_secs`. Default:
+  sin retry (un solo intento, paridad con el MVP).
+- **`catch_up=true`** — si el proceso estuvo abajo durante uno
+  o más ticks programados, al arrancar ejecuta **UN** run
+  inmediato (no `N` — evita spam). Default `false` = skip
+  silencioso (la semántica de "no acumular trabajo viejo" es
+  la correcta para el 90% de casos; opt-in cuando importa).
+- **`store=<binding>`** — persiste el registry del job y cada
+  run en las tablas `fitz_cron_jobs` / `fitz_cron_runs` de la
+  conn DB indicada. Sin esto, los jobs viven en memoria y se
+  pierden al reiniciar (paridad con el MVP). Con esto, podés
+  inspeccionar la historia con `psql`:
+
+  ```sql
+  -- Último estado de cada job.
+  SELECT name, schedule, tz, last_run_at, last_status, last_error
+  FROM fitz_cron_jobs;
+
+  -- Últimas N ejecuciones (incluye intentos de retry).
+  SELECT job_name, started_at, finished_at, status, attempt, error
+  FROM fitz_cron_runs
+  ORDER BY id DESC LIMIT 20;
+  ```
+
+  Las tablas se crean automáticamente al boot del scheduler con
+  `CREATE TABLE IF NOT EXISTS`. Schema:
+
+  ```sql
+  fitz_cron_jobs(
+      name PRIMARY KEY, schedule, tz,
+      last_run_at, last_status, last_error, next_run_at
+  )
+  fitz_cron_runs(
+      id BIGSERIAL, job_name, started_at, finished_at,
+      status, attempt, error
+  )
+  -- status: 'running' | 'ok' | 'failed' | 'retrying'
+  -- attempt: 1-indexed; retry máx = N produce hasta N+1 rows
+  ```
+
+Ejemplo end-to-end combinando los cuatro kwargs +
+HTTP — `examples/guide/30b-cron-persistente.fitz`:
+
+```fitz
+let db = db.connect(env_or("DATABASE_URL", "postgres://...")).await
+
+@cron("*/10 * * * * *",
+      tz="America/Argentina/Buenos_Aires",
+      retry={max: 3, backoff: "exponential",
+             initial_secs: 1, max_secs: 30},
+      catch_up=true,
+      store=db)
+async fn heartbeat() -> Result<Null> {
+    print("[cron] heartbeat tick")
+    return Ok(null)
+}
+
+@get("/health")
+fn health() -> Str { return "ok" }
+
+@server(43931, docs=false)
+fn main() => 0
+```
+
+**Detalle del binding `db`**: queda como `Result<DbConn>` (no
+`DbConn`) porque `db.connect(...).await` retorna `Result` y `?`
+no está soportado top-level. El runtime/codegen desempaca
+automáticamente vía el trait `__FitzCronStoreFrom`: si la conn
+falló al inicio, panea con mensaje claro citando el motivo
+(equivalente al `expect()` que escribirías a mano).
+
+**Paridad bit-a-bit**: el comportamiento de los cuatro kwargs
+es idéntico en `fitz run` (HTTP+cron — vivo por el server) y
+`fitz build` → binario nativo. Los tipos del runtime
+(`BackoffKind`, `RetryConfig`, `CronJobOptions`) tienen sus
+paralelos `__FitzBackoffKind`/`__FitzRetryConfig`/
+`__FitzCronOptions` en el binario, con la misma lógica de
+`delay_for_attempt` y `invoke_with_retry`.
+
+**Limitación conocida** — `fitz run` en modo **cron-only**
+(programa con `@cron(..., store=db)` y SIN `@server` ni
+handlers HTTP) tiene un bug heredado del runtime tokio
+`current_thread` del intérprete: la conn DB queda atada al
+runtime del evaluator y el scheduler la pierde al pasar a
+`multi_thread`. Workarounds: (a) usar `fitz build` (el binario
+nativo arma su propio runtime multi-thread limpio), o (b)
+agregar al menos un handler HTTP trivial (como el `/health` de
+arriba) que mantiene el runtime vivo durante el desarrollo.
+Cierre del bug queda como deuda separada de iter2.
+
 ### Cron-only mode (sin server HTTP)
 
 Un programa con solo `@cron` (sin `@server` ni handlers HTTP)
@@ -10874,29 +10981,35 @@ intérprete↔binario**.
 
 ### Qué no está en el MVP
 
-Estos items están comprometidos como deuda explícita:
+iter2 cerró **persistencia + retry + timezone + catch_up** (ver
+sección anterior). Lo que queda como deuda explícita:
 
-- **Persistencia de jobs entre restarts**. Hoy los jobs viven en
-  memoria del proceso; un crash o deploy pierde los runs en
-  vuelo. Para servicios críticos hace falta una DB nativa (Fase
-  10) o backend de queue (Redis, post-MVP).
-- **Visibility de jobs** (panel admin que liste runs pasados,
-  estadísticas, retries). Hoy solo logs a stderr.
-- **Retry con backoff** cuando un job falla. Hoy errores van a
-  stderr y el job intenta de nuevo al próximo tick. Backoff
-  exponencial + max retries es deuda post-MVP.
+- **Visibility de jobs en panel admin nativo** (UI que liste
+  runs pasados con filtros, estadísticas agregadas, gráficos
+  de tasa de error). Hoy con `store=db` los datos están en
+  `fitz_cron_jobs` / `fitz_cron_runs` — los querés con `psql`
+  o un dashboard externo (Grafana, Metabase). Una UI dedicada
+  estilo Sidekiq Web podría llegar como sub-paso futuro.
+- **`@background` con persistencia + retry**. El runtime
+  intérprete y el codegen aceptan los kwargs `tz` y `retry`
+  sobre `@background` pero NO `store` ni `catch_up` (los args
+  del `spawn(...)` requieren serialización JSON estable + tabla
+  `fitz_bg_jobs` separada). Diferido a iter3 cuando aparezca
+  presión real.
 - **Coordinación entre múltiples instancias** (locks distribuidos
   para que un cron solo corra en un nodo). Hoy cada instancia
-  corre todos sus jobs.
+  corre todos sus jobs — si tenés 3 réplicas detrás de un load
+  balancer, el `@cron` dispara 3 veces. Para single-instance el
+  comportamiento es correcto.
 - **`spawn` con coordinación múltiple**: `spawn(...).await` solo
   awaitea un task; para `Promise.all([...])` style hace falta
   agregación manual con vectores de futures.
-- **Cron timezone configurable**. Hoy todos los jobs corren con
-  `chrono::Utc::now()`. Servicios multi-timezone requieren
-  conversión manual en el handler.
+- **`fitz run` cron-only con `store=db`**: ver la "Limitación
+  conocida" arriba. Workaround simple: agregar un handler HTTP
+  trivial o usar `fitz build`.
 
 Detalle completo en `docs/roadmap.md` para refinamientos pendientes
-y planes de endurecimiento para servicios críticos.
+y planes de endurecimiento adicionales.
 
 ---
 

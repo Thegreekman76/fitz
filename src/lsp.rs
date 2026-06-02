@@ -1112,13 +1112,19 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "cron",
             "cron(\"${1:0 */5 * * * *}\")",
             "@cron(expr) — job periódico",
-            "Expression cron (5/6/7 fields Unix). Sync o async. Sin params, return Null/Result/Future.",
+            "Expression cron (5/6/7 fields Unix). Sync o async. Sin params, return Null/Result/Future. \
+             Kwargs opcionales (iter2): `tz=\"IANA/Name\"` (default UTC), \
+             `retry={max: N, backoff: \"exponential\"|\"linear\"|\"constant\", initial_secs: I, max_secs: M}`, \
+             `catch_up=true|false` (default false), \
+             `store=db` (persiste runs en fitz_cron_jobs/fitz_cron_runs).",
         ),
         (
             "background",
             "background",
             "@background — marca fn como spawnable via spawn(fn(...))",
-            "Marker opt-in. Habilita el call `spawn(fn(args))` fire-and-forget tipado a Future<T>.",
+            "Marker opt-in. Habilita el call `spawn(fn(args))` fire-and-forget tipado a Future<T>. \
+             Kwargs opcionales (iter2): `tz=\"IANA/Name\"`, \
+             `retry={...}` (mismo shape que @cron).",
         ),
         (
             "test",

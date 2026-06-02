@@ -2841,6 +2841,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "29b-ws-binary.fitz",
     "29c-ws-bidir.fitz",
     "30-cron-background.fitz",
+    "30b-cron-persistente.fitz",
     "31-orm.fitz",
     "31b-orm-crud-http.fitz",
     "31c-transactions.fitz",
