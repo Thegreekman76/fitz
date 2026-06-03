@@ -61,6 +61,7 @@ $ ./server
 | **WS tipados + AsyncAPI auto** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Jobs sin Celery** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Postgres + ORM nativo** | ⚠️ | ⚠️ | ⚠️ | ✅ |
+| **Observability OTel** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | Interop Python | ✅ | ❌ | ❌ | ✅ |
 
 **Multiplataforma**: cada [release](https://github.com/Thegreekman76/fitz/releases/latest)

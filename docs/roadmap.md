@@ -9509,18 +9509,54 @@ var, no-op silencioso — zero overhead, zero conexiones de red.
    stderr. Sumar `opentelemetry-appender-tracing` o un layer
    custom para que también se exporten al log signal del
    backend OTel.
-3. **Correlación trace_id Fitz↔OTel**: hoy son IDs
-   independientes — nuestro `SpanContext` genera trace_id
-   propio para stderr logs, y el OTel span tiene los suyos.
-   Cuando los queries downstream necesiten cross-pipeline (e.g.
-   "todos los logs del request con trace_id de Jaeger"), unir
-   los dos pipelines: nuestro SpanContext deriva el trace_id
-   del OTel span activo cuando provider instalado.
+3. ~~**Correlación trace_id Fitz↔OTel**~~ **CERRADO en Fase
+   12.3.iter2.a (2026-06-03)**: `dispatch_request` abre el span
+   OTel ANTES del `SpanContext` propio y deriva el `trace_id`/
+   `span_id` desde el span OTel via
+   `SpanContext::with_ids(...)`. El `trace_id` en logs stderr
+   matchea el del backend (Jaeger/Tempo/Datadog) → queries
+   cross-pipeline habilitadas. Paridad bit-a-bit codegen.
 4. **Endpoint `/metrics` Prometheus opcional**: cuando el user
    prefiere Prometheus scraping sobre OTLP push, instalar
    `metrics-exporter-prometheus` como recorder + auto-mount
    `GET /metrics`. Activable con `@server(prometheus=true)` o
    similar.
+
+#### 12.3.iter2 — Cierre de deudas residuales de 12.3 (en curso)
+
+Mini-tanda dedicada a cerrar las deudas más visibles de 12.3
+antes de saltar a 12.4. Cada sub-paso es un commit con
+validación completa.
+
+- **12.3.iter2.a — Correlación `trace_id` Fitz↔OTel (CERRADA
+  2026-06-03)**. `dispatch_request` (intérprete) y el wrapper
+  HTTP del codegen abren el span OTel ANTES del `SpanContext`
+  propio. Cuando hay OTel activo, el SpanContext se construye
+  via nuevo constructor `SpanContext::with_ids(trace_id,
+  span_id)` derivando los IDs del span OTel
+  (`sctx.trace_id().to_string()` + `sctx.span_id().to_string()`).
+  El `trace_id` en logs stderr/JSON es EL MISMO que el del
+  backend OTel (Jaeger/Tempo/Honeycomb/Datadog) — habilita
+  cross-pipeline queries. Sin OTel activo, `new_root()` sigue
+  generando uuids frescos. Paridad bit-a-bit `fitz run` ↔ `fitz
+  build`. **2 unit tests nuevos**: `logging::iter2a_span_context_
+  with_ids_preserva_ids_pasados_y_parent_es_none` (constructor
+  API) + `codegen::iter2a_codegen_http_emite_with_ids_branch_
+  derivada_de_otel_span` (paridad codegen — verifica que el
+  wrapper emite el branch `with_ids` derivada del span OTel +
+  fallback `new_root` para `!is_otel_enabled`). Doc comments
+  de `src/observability.rs` actualizados marcando la deuda como
+  cerrada. Total al cierre: **2896 unit** (+2 vs 2894 del cierre
+  Fase 12.3). Clippy `--lib --tests --bins -- -D warnings`
+  limpio, fmt clean. Smoke `GUIDE_EXAMPLES_COMPILE` verde.
+
+- **12.3.iter2.b — Bridge logs OTel** (próximo). Sumar
+  `opentelemetry-appender-tracing` (o emit directo en
+  `emit_log_record`) para que los `log.info/warn/error/debug`
+  vayan también al log signal del backend OTel además del
+  stderr. Paralelo a los spans y métricas. Mantiene la
+  decisión "OTel-compatible para los tres signals (traces,
+  metrics, logs) cuando el provider está instalado".
 
 **12.4 — Dockerfile autogenerado + `fitz docker`** (2 sub-pasos)
 

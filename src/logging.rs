@@ -395,6 +395,24 @@ impl SpanContext {
             parent_span_id: Some(self.span_id.clone()),
         }
     }
+
+    /// Construye un `SpanContext` con `trace_id` y `span_id` provistos.
+    /// Llamado típicamente cuando hay un span OTel activo y queremos
+    /// que nuestro `trace_id`/`span_id` (emitidos en logs stderr/JSON)
+    /// matcheen exactamente los del span OTel — habilita
+    /// **cross-pipeline queries**: el `trace_id` que el usuario ve en
+    /// Jaeger/Tempo/Datadog/Honeycomb es EL MISMO que aparece en los
+    /// logs stderr/Loki del request.
+    ///
+    /// Fase 12.3.iter2.a — cierre de la deuda "correlación trace_id
+    /// Fitz↔OTel" derivada de Fase 12.3.
+    pub fn with_ids(trace_id: String, span_id: String) -> Self {
+        Self {
+            trace_id,
+            span_id,
+            parent_span_id: None,
+        }
+    }
 }
 
 /// Genera un trace_id = 32 hex chars (16 bytes random). Formato
@@ -755,6 +773,22 @@ mod tests {
         assert_eq!(grandchild.trace_id, root.trace_id);
         // El parent del grandchild es el child, NO el root.
         assert_eq!(grandchild.parent_span_id, Some(child.span_id.clone()));
+    }
+
+    #[test]
+    fn iter2a_span_context_with_ids_preserva_ids_pasados_y_parent_es_none() {
+        // Fase 12.3.iter2.a — constructor para correlación trace_id
+        // Fitz↔OTel. `dispatch_request` lo usa para derivar el
+        // SpanContext propio desde el span OTel cuando el provider
+        // está instalado, así el trace_id en logs stderr matchea el
+        // del backend OTel (Jaeger/Tempo/Datadog).
+        let ctx = SpanContext::with_ids(
+            "0123456789abcdef0123456789abcdef".to_string(),
+            "fedcba9876543210".to_string(),
+        );
+        assert_eq!(ctx.trace_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(ctx.span_id, "fedcba9876543210");
+        assert_eq!(ctx.parent_span_id, None, "with_ids construye root span");
     }
 
     #[tokio::test(flavor = "current_thread")]

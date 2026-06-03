@@ -2626,14 +2626,20 @@ sección "Deudas residuales derivadas"):
    OTel (todos los grandes backends OTel-spec soportan logs
    nativos). Activable en sub-paso futuro paralelo al bridge
    métricas.
-3. **Correlación trace_id Fitz↔OTel**: hoy son IDs
-   independientes — nuestro `SpanContext` genera trace_id propio
-   (uuid) para stderr logs, y el OTel span tiene los suyos
-   (generados por el SDK OTel). Cuando los queries downstream
-   necesiten cross-pipeline (ej "encontrar TODOS los logs del
-   request cuyo trace_id Jaeger muestra"), unir los dos
-   pipelines: cuando `is_otel_enabled()`, derivar nuestro
-   trace_id del OTel span activo via `Tracer::span_context()`.
+3. ~~**Correlación trace_id Fitz↔OTel**~~ **CERRADO en Fase
+   12.3.iter2.a (2026-06-03)**: cuando `is_otel_enabled()` es
+   `true`, `dispatch_request` abre el span OTel PRIMERO y deriva
+   el `SpanContext` propio desde `span.span_context().trace_id()`
+   + `.span_id()` via el nuevo constructor
+   `SpanContext::with_ids(trace_id, span_id)`. El `trace_id`
+   que aparece en los logs stderr/JSON es EL MISMO que el del
+   span OTel en Jaeger/Tempo/Datadog/Honeycomb — habilita
+   queries cross-pipeline. Sin OTel, `SpanContext::new_root()`
+   sigue generando IDs propios via uuid. Paridad bit-a-bit
+   `fitz run` ↔ `fitz build` (codegen emite el mismo patrón
+   `if let Some(span) = __otel_span.as_ref() { ... } else { new_root() }`).
+   2 unit tests nuevos: `logging::iter2a_span_context_with_ids_*`
+   + `codegen::iter2a_codegen_http_emite_with_ids_branch_*`.
 4. **Endpoint `/metrics` Prometheus opcional**: cuando el user
    prefiere Prometheus scraping sobre OTLP push, instalar
    `metrics-exporter-prometheus` como recorder + auto-mount

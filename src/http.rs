@@ -2810,7 +2810,6 @@ async fn dispatch_request(
         return outcome_to_response(outcome);
     }
 
-    let ctx = crate::logging::SpanContext::new_root();
     let start = std::time::Instant::now();
 
     // Fase 12.3.c.1 — abrir un OTel span paralelo al SpanContext propio
@@ -2819,9 +2818,14 @@ async fn dispatch_request(
     // `http.method`/`http.target` al boot; al final del request,
     // sumamos `http.status_code` + cierre. Sin provider instalado,
     // `is_otel_enabled()` es `false` y el bloque entero se skipea
-    // (zero overhead). IDs trace_id/span_id del span OTel y del
-    // SpanContext propio son independientes en MVP — refinable
-    // post-MVP si entra demanda real de correlación cross-pipeline.
+    // (zero overhead).
+    //
+    // Fase 12.3.iter2.a — el OTel span se abre ANTES del SpanContext
+    // propio para poder derivar `trace_id`/`span_id` desde sus IDs.
+    // Cuando OTel está activo, el `trace_id` que aparece en los logs
+    // stderr/Loki es EL MISMO que el del span OTel en
+    // Jaeger/Tempo/Datadog — habilita queries cross-pipeline. Sin
+    // OTel, `new_root()` genera trace_id/span_id frescos vía uuid.
     let mut otel_span = if crate::observability::is_otel_enabled() {
         use opentelemetry::trace::{Span as _, Tracer as _};
         use opentelemetry::KeyValue;
@@ -2832,6 +2836,21 @@ async fn dispatch_request(
         Some(span)
     } else {
         None
+    };
+
+    // Fase 12.3.iter2.a — derivar SpanContext propio desde el span OTel
+    // (cuando hay uno). `TraceId::to_string()` y `SpanId::to_string()`
+    // devuelven 32/16 hex chars lowercase — mismo formato del propio
+    // `generate_trace_id`/`generate_span_id`. Sin OTel, fresh uuid.
+    let ctx = if let Some(span) = otel_span.as_ref() {
+        use opentelemetry::trace::Span as _;
+        let sctx = span.span_context();
+        crate::logging::SpanContext::with_ids(
+            sctx.trace_id().to_string(),
+            sctx.span_id().to_string(),
+        )
+    } else {
+        crate::logging::SpanContext::new_root()
     };
 
     let outcome = crate::logging::with_span_context(ctx, || async {

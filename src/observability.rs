@@ -23,10 +23,14 @@
 //!   sub-paso futuro).
 //! - Logs OTel (los `log.X(...)` siguen yendo a stderr; el bridge
 //!   `opentelemetry-appender-tracing` queda como sub-paso futuro).
-//! - Correlación trace_id Fitz↔OTel: hoy son IDs independientes —
-//!   nuestro `SpanContext::new_root()` genera trace_id propio para
-//!   stderr logs, y el OTel span genera otro distinto para el
-//!   backend. Refinable post-MVP si entra demanda real.
+//! - ~~Correlación trace_id Fitz↔OTel~~ **CERRADO en Fase 12.3.iter2.a
+//!   (2026-06-03)**: cuando `is_otel_enabled()` es `true`,
+//!   `dispatch_request` deriva el `SpanContext` propio del span OTel
+//!   abierto (vía `SpanContext::with_ids(trace_id, span_id)`). El
+//!   `trace_id` que aparece en los logs stderr/JSON es EL MISMO que
+//!   el del span OTel en Jaeger/Tempo/Datadog/Honeycomb — habilita
+//!   queries cross-pipeline. Sin OTel, `SpanContext::new_root()`
+//!   sigue generando IDs propios via uuid.
 //!
 //! ## API
 //!

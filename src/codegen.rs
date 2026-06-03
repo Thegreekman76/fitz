@@ -24276,11 +24276,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             let path_lit = rust_str_literal(&sig.path);
             writeln!(
                 &mut self.output,
-                "    let __fitz_span_ctx = __FitzSpanContext::new_root();\n    \
-                 let __fitz_start_for_metrics = std::time::Instant::now();\n    \
+                "    let __fitz_start_for_metrics = std::time::Instant::now();\n    \
                  let __fitz_method_str: &'static str = \"{}\";\n    \
-                 let __fitz_path_template: &'static str = {};\n    \
-                 let __fitz_ctx_for_emit = __fitz_span_ctx.clone();",
+                 let __fitz_path_template: &'static str = {};",
                 method_lit, path_lit
             )
             .unwrap();
@@ -24290,6 +24288,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             // `OTEL_EXPORTER_OTLP_ENDPOINT`). Sin provider, el bloque
             // entero se skipea (zero overhead). Paralelo bit-a-bit a
             // `dispatch_request` del intérprete (12.3.c.1).
+            //
+            // Fase 12.3.iter2.a — el OTel span se abre ANTES del
+            // SpanContext propio para poder derivar `trace_id`/`span_id`
+            // desde sus IDs. Cuando OTel está activo, el `trace_id` que
+            // aparece en los logs stderr es EL MISMO que el del span
+            // OTel en Jaeger/Tempo/Datadog — habilita queries
+            // cross-pipeline. Sin OTel, `new_root()` genera fresh uuids.
             self.emit(
                 "    let mut __otel_span = if __fitz_otel_is_enabled() {\n        \
                  use opentelemetry::trace::{Span as _, Tracer as _};\n        \
@@ -24299,6 +24304,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                  span.set_attribute(KeyValue::new(\"http.method\", __fitz_method_str));\n        \
                  span.set_attribute(KeyValue::new(\"http.target\", __fitz_path_template.to_string()));\n        \
                  Some(span)\n    } else {\n        None\n    };\n",
+            );
+            // Fase 12.3.iter2.a — derivar SpanContext propio desde el
+            // span OTel (cuando hay uno). `TraceId::to_string()` y
+            // `SpanId::to_string()` devuelven 32/16 hex chars lowercase
+            // — mismo formato del propio `generate_trace_id`/
+            // `generate_span_id`. Sin OTel, fresh uuid via `new_root()`.
+            self.emit(
+                "    let __fitz_span_ctx = if let Some(span) = __otel_span.as_ref() {\n        \
+                 use opentelemetry::trace::Span as _;\n        \
+                 let sctx = span.span_context();\n        \
+                 __FitzSpanContext::with_ids(sctx.trace_id().to_string(), sctx.span_id().to_string())\n    } else {\n        \
+                 __FitzSpanContext::new_root()\n    };\n    \
+                 let __fitz_ctx_for_emit = __fitz_span_ctx.clone();\n",
             );
             self.emit(
                 "    let __response: axum::response::Response = __fitz_with_span_context(\n        \
@@ -31538,6 +31556,14 @@ impl __FitzSpanContext {
             parent_span_id: Some(self.span_id.clone()),
         }
     }
+    // Fase 12.3.iter2.a — constructor para derivar SpanContext desde
+    // un span OTel. Habilita correlacion trace_id Fitz<->OTel:
+    // cuando el provider OTel esta instalado, el trace_id en los logs
+    // matchea el del span OTel en el backend (Jaeger/Tempo/Datadog).
+    #[allow(dead_code)]
+    pub fn with_ids(trace_id: String, span_id: String) -> Self {
+        Self { trace_id, span_id, parent_span_id: None }
+    }
 }
 
 #[allow(dead_code)]
@@ -32118,6 +32144,52 @@ mod tests {
         assert!(
             !code.contains("__fitz_log_init"),
             "no debería emitir __fitz_log_init sin uses_logging: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn iter2a_codegen_http_emite_with_ids_branch_derivada_de_otel_span() {
+        // Fase 12.3.iter2.a — cuando hay handler HTTP, el wrapper
+        // codegen debe emitir el patrón "abrir OTel span primero,
+        // derivar SpanContext con `with_ids` desde sus IDs". Sin OTel
+        // activo en runtime, el branch alternativo (`new_root()`)
+        // dispara y todo sigue funcionando como antes (paridad
+        // bit-a-bit con `dispatch_request` del intérprete).
+        let src = "@get(\"/hello\")\nfn h() -> Str => \"ok\"\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El método `with_ids` debe estar definido en el preludio.
+        assert!(
+            code.contains("pub fn with_ids(trace_id: String, span_id: String)"),
+            "esperaba __FitzSpanContext::with_ids en el preludio: {}",
+            code
+        );
+        // El wrapper debe abrir el OTel span ANTES del SpanContext.
+        let otel_idx = code
+            .find("let mut __otel_span = if __fitz_otel_is_enabled()")
+            .expect("esperaba apertura de __otel_span en el wrapper");
+        let span_ctx_idx = code
+            .find("let __fitz_span_ctx = if let Some(span) = __otel_span.as_ref()")
+            .expect("esperaba derivación de __fitz_span_ctx desde __otel_span");
+        assert!(
+            otel_idx < span_ctx_idx,
+            "el OTel span debe abrirse ANTES de derivar el SpanContext: \
+             otel_idx={} span_ctx_idx={}",
+            otel_idx,
+            span_ctx_idx
+        );
+        // Branch alternativo: sin OTel activo, fallback a new_root.
+        assert!(
+            code.contains("__FitzSpanContext::new_root()"),
+            "esperaba fallback __FitzSpanContext::new_root() para !is_otel_enabled: {}",
+            code
+        );
+        // Uso explícito de `sctx.trace_id().to_string()` y
+        // `sctx.span_id().to_string()` para construir el SpanContext.
+        assert!(
+            code.contains("sctx.trace_id().to_string()")
+                && code.contains("sctx.span_id().to_string()"),
+            "esperaba derivación de trace_id/span_id desde sctx: {}",
             code
         );
     }
