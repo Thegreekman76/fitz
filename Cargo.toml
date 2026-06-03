@@ -210,6 +210,20 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "std", "fmt"] }
 
+# Fase 12.3.b.3 — métricas built-in (`http_requests_total` Counter +
+# `http_request_duration_seconds` Histogram). `metrics` es la API
+# estándar del ecosistema Rust (paralelo a `tracing` para logs/spans):
+# las macros `counter!()`/`histogram!()` despachan a un recorder global
+# instalable. Sin recorder, son no-op silenciosas — el binario default
+# de Fitz NO instala uno (zero overhead en producción si el user no
+# pide métricas explícitas). En 12.3.c sumamos el exporter OTLP que
+# se instala como recorder; opcionalmente un endpoint Prometheus /
+# metrics puede instalarse via `metrics-exporter-prometheus`.
+#
+# `metrics-util` (dev-dep abajo) provee `DebuggingRecorder` para tests
+# que validan que las macros se invocaron con los labels esperados.
+metrics = "0.24"
+
 # v0.10.24 (Fase Date/DateTime/Uuid) — Uuid v4 generation + parsing.
 # `v4` feature: random UUID generation con OsRng. v0.10.30 (Tier B.5)
 # suma `v7`: time-ordered UUIDs (popular para PKs sortables por created_at).
@@ -281,6 +295,12 @@ lsp = ["dep:tower-lsp"]
 # Directorios temporales para tests del loader de módulos (3.5):
 # permite armar fixtures en disco y limpiarlos automáticamente.
 tempfile = "3"
+
+# Fase 12.3.b.3 — `DebuggingRecorder` para tests que validan que las
+# macros `metrics::counter!()`/`metrics::histogram!()` se invocaron con
+# los labels esperados. Solo dev-dep — el binario release no la
+# necesita.
+metrics-util = "0.20"
 
 # Fase 9.w.2 — cliente WebSocket para tests E2E del runtime WS.
 # axum trae tokio-tungstenite como dep server-side cuando `feature ws`

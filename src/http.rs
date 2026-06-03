@@ -2789,7 +2789,10 @@ async fn dispatch_request(
         // trace_id/span_id del span del request. Naming OTel-compatible:
         // `http.method` / `http.target` / `http.status_code` /
         // `duration_ms`.
-        let duration_ms = start.elapsed().as_millis() as i64;
+        let elapsed = start.elapsed();
+        let duration_ms = elapsed.as_millis() as i64;
+        let duration_secs = elapsed.as_secs_f64();
+        let status_str = outcome.status.to_string();
         let kvs: Vec<(String, Value)> = vec![
             (
                 "http.method".to_string(),
@@ -2803,6 +2806,30 @@ async fn dispatch_request(
             ("duration_ms".to_string(), Value::Int(duration_ms)),
         ];
         crate::logging::emit_log_record("info", "http.access", &kvs);
+
+        // Fase 12.3.b.3 — métricas built-in. Counter +1 por request
+        // con labels (method, path-template, status). Histogram con el
+        // duration en segundos (Prometheus-style — buckets default del
+        // recorder + cuantiles vía `histogram_quantiles` cuando esté
+        // expuesto). Labels SIEMPRE iguales entre Counter y Histogram
+        // para correlación cross-metric.
+        //
+        // Sin recorder global instalado (caso default), las macros son
+        // no-op silenciosas — zero overhead. En 12.3.c sumamos el
+        // exporter OTLP que se instala como recorder global y conecta
+        // estas métricas al backend OTel. Naming Prometheus-style
+        // (`http_requests_total` / `http_request_duration_seconds`)
+        // por consistencia con el ecosistema; OTel semantic conventions
+        // (`http.server.request.duration`) se evalúan en 12.3.c si
+        // entra demanda real.
+        let labels = [
+            ("method", method_str.to_string()),
+            ("path", path_template.clone()),
+            ("status", status_str),
+        ];
+        metrics::counter!("http_requests_total", &labels).increment(1);
+        metrics::histogram!("http_request_duration_seconds", &labels).record(duration_secs);
+
         outcome
     })
     .await;
@@ -8337,5 +8364,262 @@ fn me(user: User) -> Str => \"x\"\n\
             HttpLogMode::Simple,
         );
         assert!(line.contains("OPTIONS /users → 204"), "{line}");
+    }
+
+    // -----------------------------------------------------------------
+    // Fase 12.3.b.3 — Métricas built-in (`http_requests_total` Counter
+    // + `http_request_duration_seconds` Histogram).
+    //
+    // Tests con `DebuggingRecorder` instalado como recorder local del
+    // thread (via `metrics::with_local_recorder`) para capturar las
+    // métricas emitidas adentro del closure. Sin recorder, las macros
+    // son no-op silenciosas — los tests validan que `dispatch_request`
+    // las invoca con los labels correctos.
+    // -----------------------------------------------------------------
+
+    /// Helper común: ejecuta un async block adentro de un Runtime tokio
+    /// nuevo, con un `DebuggingRecorder` instalado como recorder local
+    /// para el thread. Devuelve el snapshot final de métricas.
+    ///
+    /// El Runtime se crea adentro del closure de `with_local_recorder`
+    /// y se block_on adentro del mismo scope thread-local — eso es lo
+    /// que permite que las macros `metrics::counter!()` / `histogram!()`
+    /// del request handler hereden el recorder. Si extraemos el Future
+    /// y lo await-eamos afuera, el guard del recorder se dropea antes
+    /// (problema clásico thread-local + async).
+    ///
+    /// Por la misma razón, los tests son `#[test]` sync, NO
+    /// `#[tokio::test]`.
+    fn capture_metrics<F>(
+        setup_and_run: F,
+    ) -> Vec<(
+        metrics_util::CompositeKey,
+        metrics_util::debugging::DebugValue,
+    )>
+    where
+        F: for<'a> FnOnce(&'a tokio::runtime::Runtime),
+    {
+        let recorder = metrics_util::debugging::DebuggingRecorder::new();
+        let snapshotter = recorder.snapshotter();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("crear Runtime tokio");
+        metrics::with_local_recorder(&recorder, || {
+            setup_and_run(&rt);
+        });
+        snapshotter
+            .snapshot()
+            .into_vec()
+            .into_iter()
+            .map(|(ck, _unit, _desc, val)| (ck, val))
+            .collect()
+    }
+
+    #[test]
+    fn metrics_request_get_simple_emite_counter_y_histogram() {
+        let src = "@get(\"/hello\")\nfn h() -> Str => \"ok\"\n";
+
+        let captured = capture_metrics(|rt| {
+            rt.block_on(async {
+                use http_body_util::BodyExt;
+                use tower::ServiceExt;
+                let registry = registry_from_source(src).await;
+                let metas = registry.metas();
+                let router = build_router(&metas, std::sync::Arc::new(registry), None);
+
+                let req = axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/hello")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = router.oneshot(req).await.unwrap();
+                let _ = resp.into_body().collect().await.unwrap();
+            });
+        });
+
+        let counter_entry = captured
+            .iter()
+            .find(|(ck, _)| ck.key().name() == "http_requests_total")
+            .expect("esperaba counter http_requests_total");
+        let histogram_entry = captured
+            .iter()
+            .find(|(ck, _)| ck.key().name() == "http_request_duration_seconds")
+            .expect("esperaba histogram http_request_duration_seconds");
+
+        match &counter_entry.1 {
+            metrics_util::debugging::DebugValue::Counter(n) => assert_eq!(*n, 1),
+            other => panic!("Counter shape esperado, fue {:?}", other),
+        }
+
+        match &histogram_entry.1 {
+            metrics_util::debugging::DebugValue::Histogram(values) => {
+                assert!(
+                    !values.is_empty(),
+                    "histogram debería tener al menos 1 observación"
+                );
+                let first = values[0].into_inner();
+                assert!(first >= 0.0, "duration_secs debería ser >= 0");
+            }
+            other => panic!("Histogram shape esperado, fue {:?}", other),
+        }
+
+        let labels_counter: Vec<(String, String)> = counter_entry
+            .0
+            .key()
+            .labels()
+            .map(|l| (l.key().to_string(), l.value().to_string()))
+            .collect();
+        assert!(
+            labels_counter.contains(&("method".to_string(), "GET".to_string())),
+            "esperaba label method=GET, fue {:?}",
+            labels_counter
+        );
+        assert!(
+            labels_counter.contains(&("path".to_string(), "/hello".to_string())),
+            "esperaba label path=/hello, fue {:?}",
+            labels_counter
+        );
+        assert!(
+            labels_counter.contains(&("status".to_string(), "200".to_string())),
+            "esperaba label status=200, fue {:?}",
+            labels_counter
+        );
+
+        let labels_histo: Vec<(String, String)> = histogram_entry
+            .0
+            .key()
+            .labels()
+            .map(|l| (l.key().to_string(), l.value().to_string()))
+            .collect();
+        assert_eq!(
+            labels_counter, labels_histo,
+            "labels Counter y Histogram deberían matchear bit-a-bit"
+        );
+    }
+
+    #[test]
+    fn metrics_path_template_no_resuelve_params() {
+        // Path con `{id}` debe registrarse en métricas como TEMPLATE,
+        // no como el path resuelto (`/users/42`). Esto evita
+        // cardinality explosion en producción.
+        let src = "@get(\"/users/{id}\")\nfn h(id: Int) -> Str => \"u\"\n";
+
+        let captured = capture_metrics(|rt| {
+            rt.block_on(async {
+                use http_body_util::BodyExt;
+                use tower::ServiceExt;
+                let registry = registry_from_source(src).await;
+                let metas = registry.metas();
+                let router = build_router(&metas, std::sync::Arc::new(registry), None);
+
+                let req = axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/users/42")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = router.oneshot(req).await.unwrap();
+                let _ = resp.into_body().collect().await.unwrap();
+            });
+        });
+
+        let counter_entry = captured
+            .iter()
+            .find(|(ck, _)| ck.key().name() == "http_requests_total")
+            .expect("esperaba counter http_requests_total");
+        let labels: Vec<(String, String)> = counter_entry
+            .0
+            .key()
+            .labels()
+            .map(|l| (l.key().to_string(), l.value().to_string()))
+            .collect();
+        assert!(
+            labels.contains(&("path".to_string(), "/users/{id}".to_string())),
+            "path label debería ser template `/users/{{id}}`, fue {:?}",
+            labels
+        );
+        assert!(
+            !labels.iter().any(|(k, v)| k == "path" && v == "/users/42"),
+            "path label NO debería contener el valor resuelto: {:?}",
+            labels
+        );
+    }
+
+    #[test]
+    fn metrics_dos_requests_mismo_endpoint_acumulan_counter() {
+        let src = "@get(\"/hello\")\nfn h() -> Str => \"ok\"\n";
+
+        let captured = capture_metrics(|rt| {
+            rt.block_on(async {
+                use http_body_util::BodyExt;
+                use tower::ServiceExt;
+                let registry = registry_from_source(src).await;
+                let metas = registry.metas();
+                let router = build_router(&metas, std::sync::Arc::new(registry), None);
+
+                for _ in 0..3 {
+                    let req = axum::http::Request::builder()
+                        .method(axum::http::Method::GET)
+                        .uri("/hello")
+                        .body(Body::empty())
+                        .unwrap();
+                    let resp = router.clone().oneshot(req).await.unwrap();
+                    let _ = resp.into_body().collect().await.unwrap();
+                }
+            });
+        });
+
+        let counter_entry = captured
+            .iter()
+            .find(|(ck, _)| ck.key().name() == "http_requests_total")
+            .expect("counter esperado");
+        match &counter_entry.1 {
+            metrics_util::debugging::DebugValue::Counter(n) => {
+                assert_eq!(*n, 3, "3 requests deberían acumular Counter=3");
+            }
+            other => panic!("Counter shape esperado, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn metrics_status_500_se_registra_con_label_correcto() {
+        // Handler que retorna Result::Err → wrapper convierte a 500.
+        // Validamos que el label status="500" se setea correcto cuando
+        // el outcome.status no es 200.
+        let src = "@get(\"/fail\")\nfn h() -> Result<Str> => Err(\"boom\")\n";
+
+        let captured = capture_metrics(|rt| {
+            rt.block_on(async {
+                use http_body_util::BodyExt;
+                use tower::ServiceExt;
+                let registry = registry_from_source(src).await;
+                let metas = registry.metas();
+                let router = build_router(&metas, std::sync::Arc::new(registry), None);
+
+                let req = axum::http::Request::builder()
+                    .method(axum::http::Method::GET)
+                    .uri("/fail")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = router.oneshot(req).await.unwrap();
+                let _ = resp.into_body().collect().await.unwrap();
+            });
+        });
+
+        let counter_entry = captured
+            .iter()
+            .find(|(ck, _)| ck.key().name() == "http_requests_total")
+            .expect("counter esperado");
+        let labels: Vec<(String, String)> = counter_entry
+            .0
+            .key()
+            .labels()
+            .map(|l| (l.key().to_string(), l.value().to_string()))
+            .collect();
+        assert!(
+            labels.contains(&("status".to_string(), "500".to_string())),
+            "esperaba status=500 (Err → 500), labels fueron {:?}",
+            labels
+        );
     }
 }
