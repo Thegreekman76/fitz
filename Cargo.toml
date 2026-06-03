@@ -224,6 +224,30 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["e
 # que validan que las macros se invocaron con los labels esperados.
 metrics = "0.24"
 
+# Fase 12.3.c.1 — OTLP exporter para spans HTTP. Conecta los spans
+# que abre `dispatch_request` (12.3.b.2) a un backend OTel real
+# (Jaeger, Tempo, Honeycomb, Datadog, etc.) cuando la env var
+# `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada. Sin esa var, el init
+# es no-op silencioso — zero overhead, zero conexiones de red.
+#
+# Feature `http-proto` (HTTP transport con protobuf) sobre `grpc-tonic`
+# por tres razones:
+#  - No requiere `tonic` (que arrastra su propia stack de h2/hyper
+#    que choca con la versión que ya usa axum).
+#  - Funciona detrás de proxies HTTP corporativos sin permisos
+#    especiales (gRPC requiere HTTP/2 end-to-end).
+#  - Es lo que Datadog/Honeycomb/New Relic recomiendan para
+#    instrumentación de clientes.
+#
+# Env vars OTel-standard que init_otel lee:
+#  - OTEL_EXPORTER_OTLP_ENDPOINT (URL del collector — sin default;
+#    si no está, init es no-op).
+#  - OTEL_SERVICE_NAME (default "fitz-app").
+#  - OTEL_TRACES_SAMPLER_ARG (ratio 0.0-1.0; default 1.0 = 100%).
+opentelemetry = "0.32"
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+
 # v0.10.24 (Fase Date/DateTime/Uuid) — Uuid v4 generation + parsing.
 # `v4` feature: random UUID generation con OsRng. v0.10.30 (Tier B.5)
 # suma `v7`: time-ordered UUIDs (popular para PKs sortables por created_at).

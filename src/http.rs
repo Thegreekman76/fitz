@@ -2813,6 +2813,27 @@ async fn dispatch_request(
     let ctx = crate::logging::SpanContext::new_root();
     let start = std::time::Instant::now();
 
+    // Fase 12.3.c.1 — abrir un OTel span paralelo al SpanContext propio
+    // cuando el provider está instalado. El span OTel se envía al
+    // backend (Jaeger/Tempo/Honeycomb/Datadog) con atributos
+    // `http.method`/`http.target` al boot; al final del request,
+    // sumamos `http.status_code` + cierre. Sin provider instalado,
+    // `is_otel_enabled()` es `false` y el bloque entero se skipea
+    // (zero overhead). IDs trace_id/span_id del span OTel y del
+    // SpanContext propio son independientes en MVP — refinable
+    // post-MVP si entra demanda real de correlación cross-pipeline.
+    let mut otel_span = if crate::observability::is_otel_enabled() {
+        use opentelemetry::trace::{Span as _, Tracer as _};
+        use opentelemetry::KeyValue;
+        let tracer = crate::observability::tracer();
+        let mut span = tracer.start(format!("HTTP {} {}", method_str, path_template));
+        span.set_attribute(KeyValue::new("http.method", method_str));
+        span.set_attribute(KeyValue::new("http.target", path_template.clone()));
+        Some(span)
+    } else {
+        None
+    };
+
     let outcome = crate::logging::with_span_context(ctx, || async {
         let outcome = handle_task(
             registry,
@@ -2871,6 +2892,22 @@ async fn dispatch_request(
         outcome
     })
     .await;
+
+    // Fase 12.3.c.1 — finalizar el OTel span con el status code real
+    // y el resultado (Ok para 2xx/3xx, Error para 4xx/5xx). Solo si
+    // el provider estaba instalado al boot del request (zero overhead
+    // sin OTel).
+    if let Some(span) = otel_span.as_mut() {
+        use opentelemetry::trace::{Span as _, Status};
+        use opentelemetry::KeyValue;
+        span.set_attribute(KeyValue::new("http.status_code", outcome.status as i64));
+        if outcome.status >= 400 {
+            span.set_status(Status::error(format!("HTTP {}", outcome.status)));
+        } else {
+            span.set_status(Status::Ok);
+        }
+        span.end();
+    }
 
     outcome_to_response(outcome)
 }

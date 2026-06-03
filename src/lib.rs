@@ -40,6 +40,7 @@ pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
 pub mod logging; // Fase 12.3.a.2 — structured logging built-in (JSON + pretty + tracing)
 pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
 pub mod migrations; // Fase 10.6 — migraciones automáticas ORM (introspect + diff + emit)
+pub mod observability; // Fase 12.3.c.1 — OTLP exporter para spans HTTP
 pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
 pub mod parser; // Fase 2.3 — construcción del AST
 pub mod pbs; // Fase 8.b.1 — python-build-standalone download + cache para `--bundle-python`

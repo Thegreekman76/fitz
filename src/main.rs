@@ -484,6 +484,13 @@ fn main() {
     // instalado (caso `cargo test` con tests que inicializan logging),
     // es no-op.
     fitz::logging::init_logging();
+    // Fase 12.3.c.1 — Si `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada,
+    // instala el provider OTel global y los spans HTTP del intérprete
+    // se exportan al backend (Jaeger/Tempo/Honeycomb/Datadog/etc).
+    // Sin esa env var, es no-op silencioso — los handlers siguen con
+    // la instrumentación local (stderr logs + métricas in-memory)
+    // sin enviar nada por la red.
+    fitz::observability::init_otel();
 
     let cli = Cli::parse();
 
