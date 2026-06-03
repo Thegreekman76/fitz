@@ -203,8 +203,15 @@ pub fn generate_project(
     // comparte con `uses_jobs`/`uses_date_or_uuid` cuando aplican —
     // ver `cargo_toml_for`). Transitivo: cualquier módulo cargado
     // con `log.X(...)` también dispara la emisión.
-    let uses_logging =
-        program_uses_logging(program) || loader.modules.iter().any(|m| m.uses_logging);
+    //
+    // Fase 12.3.b.4 — Cualquier programa con HTTP (`@get`/`@post`/`@put`/
+    // `@delete`) activa el preludio automáticamente porque el dispatch
+    // HTTP emite el access log `log.info("http.access", ...)` + spans
+    // + métricas sin código del user. Opt-out con
+    // `@server(observability=false)` queda para 12.3.b.5.
+    let uses_logging = program_uses_logging(program)
+        || has_http
+        || loader.modules.iter().any(|m| m.uses_logging || m.has_http);
     // Fase 10.1.c — detección del módulo `db` (driver Postgres).
     // Suma `sha2`/`hmac`/`base64` + `tokio` con feature `net` al
     // Cargo.toml, emite el módulo `__fitz_db_runtime` (vía
@@ -2666,6 +2673,20 @@ fn cargo_toml_for(
         if !serde_json_already_emitted {
             s.push_str("serde_json = { version = \"1\", features = [\"preserve_order\"] }\n");
         }
+        // Fase 12.3.b.4 — `uuid` para generar trace_id/span_id en el
+        // SpanContext. Si `uses_date_or_uuid` ya emitió `uuid`,
+        // evitamos duplicar la entry.
+        if !uses_date_or_uuid {
+            s.push_str("uuid = { version = \"1\", features = [\"v4\"] }\n");
+        }
+        // Fase 12.3.b.4 — `metrics` para el Counter `http_requests_total`
+        // + Histogram `http_request_duration_seconds` emitidos en el
+        // dispatch HTTP del binario generado. Solo cuando hay HTTP —
+        // programas CLI puros con `log.X(...)` no instalan ningún
+        // recorder ni necesitan la dep.
+        if has_http {
+            s.push_str("metrics = \"0.24\"\n");
+        }
         s
     } else {
         String::new()
@@ -4361,8 +4382,12 @@ fn generate_main_rs(
     // arriba en `generate_project` — duplicado pragmático porque
     // `generate_main_rs` se llama también en path de tests unitarios
     // que no pasan por `generate_project`.
-    let uses_logging =
-        program_uses_logging(program) || loader.modules.iter().any(|m| m.uses_logging);
+    //
+    // Fase 12.3.b.4 — HTTP también activa uses_logging implícito (ver
+    // generate_project para el porqué).
+    let uses_logging = program_uses_logging(program)
+        || has_http
+        || loader.modules.iter().any(|m| m.uses_logging || m.has_http);
     // W8 (v0.10.7) — uses_db transitivo: si algún módulo cargado
     // declara `@table` types o usa db, el main emite el preludio db
     // entero para que los `use crate::__fitz_db_*` de los módulos
@@ -7286,6 +7311,19 @@ impl __FitzRetryConfig {
         }
         self.emit("\n// --- 12.3.a.3: runtime de structured logging (módulo `log`) ---\n");
         self.emit(LOGGING_PRELUDE);
+        // Fase 12.3.b.4 — `__fitz_current_span_context()` se emite
+        // con `tokio::task_local!` real cuando hay runtime tokio
+        // (`has_http`/`uses_async`/`uses_jobs`/`uses_db`); sino, stub
+        // que retorna None. Sin runtime tokio, `tokio::task_local!`
+        // no compila — los CLI puros con `log.X(...)` no pueden cargar
+        // la versión task_local-based.
+        let has_tokio_runtime =
+            self.has_http || self.uses_async || self.uses_jobs || self.uses_db;
+        if has_tokio_runtime {
+            self.emit(SPAN_CONTEXT_TOKIO);
+        } else {
+            self.emit(SPAN_CONTEXT_STUB);
+        }
         self.emit("\n");
     }
 
@@ -24122,9 +24160,41 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     /// handler decorado con `@get/@post/@put/@delete`. Extrae path
     /// params + body (si corresponde), llama a la fn original, y
     /// convierte el resultado en una `axum::response::Response`.
+    ///
+    /// Fase 12.3.b.4 — el body del wrapper se envuelve en
+    /// `__fitz_with_span_context(...)` paralelo bit-a-bit a
+    /// `dispatch_request` del intérprete (12.3.b.2). Logs del handler
+    /// heredan `trace_id`/`span_id` automático, y al final del request
+    /// se emite `log.info("http.access", ...)` + counter
+    /// `http_requests_total` + histogram
+    /// `http_request_duration_seconds` con labels `method`/`path`/
+    /// `status`. Sin opt-in del user.
     fn gen_http_handler_wrapper(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
         let sig = self.resolve_handler_signature(stmt)?;
         self.emit_axum_extractors(&sig)?;
+        // Fase 12.3.b.4 — abrir el scope del span context ANTES de
+        // cualquier código del wrapper (middlewares, auth, coerciones,
+        // dispatch). Todo el body queda adentro del closure async move
+        // del `__fitz_with_span_context`; los `return X;` del body
+        // retornan del closure (no de la fn wrapper outer). El
+        // `__response` capturado afuera se emite con access log +
+        // métricas via un re-entrar al scope, para que el access log
+        // tenga el mismo trace_id que los logs del handler.
+        let method_lit = sig.http_method;
+        let path_lit = rust_str_literal(&sig.path);
+        writeln!(
+            &mut self.output,
+            "    let __fitz_span_ctx = __FitzSpanContext::new_root();\n    \
+             let __fitz_start_for_metrics = std::time::Instant::now();\n    \
+             let __fitz_method_str: &'static str = \"{}\";\n    \
+             let __fitz_path_template: &'static str = {};\n    \
+             let __fitz_ctx_for_emit = __fitz_span_ctx.clone();\n    \
+             let __response: axum::response::Response = __fitz_with_span_context(\n        \
+             __fitz_span_ctx,\n        \
+             move || async move {{",
+            method_lit, path_lit
+        )
+        .unwrap();
         self.emit_middleware_chain(&sig);
         // Fase 9.w.1.d — auth check después de middlewares y antes de
         // body parsing. Si la ruta tiene `@authenticated`/`@admin`,
@@ -24135,6 +24205,38 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit_auth_check(&sig);
         self.emit_param_coercions(&sig)?;
         self.emit_handler_dispatch_and_response(&sig);
+        // Fase 12.3.b.4 — cerrar el closure async move + access log +
+        // métricas + cerrar la fn outer.
+        self.emit("        }\n    ).await;\n");
+        self.emit("    let __duration = __fitz_start_for_metrics.elapsed();\n");
+        self.emit("    let __duration_ms = __duration.as_millis() as i64;\n");
+        self.emit("    let __duration_secs = __duration.as_secs_f64();\n");
+        self.emit("    let __status_u16 = __response.status().as_u16();\n");
+        self.emit("    __fitz_with_span_context(__fitz_ctx_for_emit, move || async move {\n");
+        self.emit("        __fitz_log_info(\"http.access\", &[\n");
+        self.emit(
+            "            (\"http.method\", __FitzLogValue::Str(__fitz_method_str.to_string())),\n",
+        );
+        self.emit(
+            "            (\"http.target\", __FitzLogValue::Str(__fitz_path_template.to_string())),\n",
+        );
+        self.emit(
+            "            (\"http.status_code\", __FitzLogValue::Int(__status_u16 as i64)),\n",
+        );
+        self.emit("            (\"duration_ms\", __FitzLogValue::Int(__duration_ms)),\n");
+        self.emit("        ]);\n");
+        self.emit("        let __labels = [\n");
+        self.emit("            (\"method\", __fitz_method_str.to_string()),\n");
+        self.emit("            (\"path\", __fitz_path_template.to_string()),\n");
+        self.emit("            (\"status\", __status_u16.to_string()),\n");
+        self.emit("        ];\n");
+        self.emit("        metrics::counter!(\"http_requests_total\", &__labels).increment(1);\n");
+        self.emit(
+            "        metrics::histogram!(\"http_request_duration_seconds\", &__labels).record(__duration_secs);\n",
+        );
+        self.emit("    }).await;\n");
+        self.emit("    __response\n");
+        self.emit("}\n\n");
         self.emit_cors_helpers(&sig);
         Ok(())
     }
@@ -25407,7 +25509,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .unwrap();
             self.emit("\n");
         }
-        self.emit("}\n\n");
+        // Fase 12.3.b.4 — el cierre `}\n\n` del wrapper lo emite
+        // `gen_http_handler_wrapper` después de cerrar el scope del
+        // span context. Antes del refactor, ese `}` cerraba directo
+        // la fn `async fn __handler_<name>(...)`; con el wrap, primero
+        // hay que cerrar el async move del closure + emitir access
+        // log + métricas, y recién después cerrar la fn.
     }
 
     /// Q.3: si la ruta declara `cors(...)`, emite la fn
@@ -31181,10 +31288,16 @@ fn __fitz_log_now_rfc3339() -> String {
 }
 
 fn __fitz_log_format_json(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) -> String {
-    let mut obj = serde_json::Map::with_capacity(3 + kvs.len());
+    let span_ctx = __fitz_current_span_context();
+    let extra = span_ctx.as_ref().map(|_| 2).unwrap_or(0);
+    let mut obj = serde_json::Map::with_capacity(3 + extra + kvs.len());
     obj.insert("timestamp".into(), serde_json::Value::String(__fitz_log_now_rfc3339()));
     obj.insert("level".into(), serde_json::Value::String(level_str.to_uppercase()));
     obj.insert("msg".into(), serde_json::Value::String(msg.to_string()));
+    if let Some(ctx) = &span_ctx {
+        obj.insert("trace_id".into(), serde_json::Value::String(ctx.trace_id.clone()));
+        obj.insert("span_id".into(), serde_json::Value::String(ctx.span_id.clone()));
+    }
     for (k, v) in kvs {
         obj.insert((*k).to_string(), v.to_json_value());
     }
@@ -31203,13 +31316,17 @@ fn __fitz_log_format_pretty(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogV
     };
     let level_colored = format!("{}{}\x1b[0m", code, padding);
     let ts = __fitz_log_now_rfc3339();
+    let span_part = match __fitz_current_span_context() {
+        Some(ctx) => format!(" \x1b[2mtrace={} span={}\x1b[0m", ctx.trace_id, ctx.span_id),
+        None => String::new(),
+    };
     let kvs_part = if kvs.is_empty() {
         String::new()
     } else {
         let parts: Vec<String> = kvs.iter().map(|(k, v)| format!("{}={}", k, v.to_pretty())).collect();
         format!(" {}", parts.join(" "))
     };
-    format!("\x1b[2m{}\x1b[0m {} {}{}", ts, level_colored, msg, kvs_part)
+    format!("\x1b[2m{}\x1b[0m {} {}{}{}", ts, level_colored, msg, span_part, kvs_part)
 }
 
 fn __fitz_log_emit(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) {
@@ -31246,6 +31363,95 @@ fn __fitz_log_emit(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) {
 #[inline] pub(crate) fn __fitz_log_warn(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("warn", msg, kvs); }
 #[inline] pub(crate) fn __fitz_log_error(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("error", msg, kvs); }
 #[inline] pub(crate) fn __fitz_log_debug(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("debug", msg, kvs); }
+
+// --- Fase 12.3.b.4 — SpanContext (struct + helpers de generación) ---
+//
+// Paralelo bit-a-bit al `SpanContext` de `crate::logging` del intérprete.
+// Estructura + helpers van SIEMPRE adentro del preludio porque
+// `format_json`/`format_pretty` llaman a `__fitz_current_span_context()`.
+// La implementación real de `__fitz_current_span_context()` (con
+// `tokio::task_local!`) + `__fitz_with_span_context()` se emiten
+// CONDICIONALMENTE según `has_tokio_runtime` — programas CLI puros
+// con `log.X(...)` no necesitan tokio.
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct __FitzSpanContext {
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: Option<String>,
+}
+
+impl __FitzSpanContext {
+    #[allow(dead_code)]
+    pub fn new_root() -> Self {
+        Self {
+            trace_id: __fitz_generate_trace_id(),
+            span_id: __fitz_generate_span_id(),
+            parent_span_id: None,
+        }
+    }
+    #[allow(dead_code)]
+    pub fn new_child(&self) -> Self {
+        Self {
+            trace_id: self.trace_id.clone(),
+            span_id: __fitz_generate_span_id(),
+            parent_span_id: Some(self.span_id.clone()),
+        }
+    }
+}
+
+#[allow(dead_code)]
+fn __fitz_generate_trace_id() -> String {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    let mut s = String::with_capacity(32);
+    for b in bytes.iter() { s.push_str(&format!("{:02x}", b)); }
+    s
+}
+
+#[allow(dead_code)]
+fn __fitz_generate_span_id() -> String {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    let mut s = String::with_capacity(16);
+    for b in bytes.iter().take(8) { s.push_str(&format!("{:02x}", b)); }
+    s
+}
+"##;
+
+/// Fase 12.3.b.4 — `__fitz_current_span_context()` STUB para programas
+/// SIN runtime tokio (CLI puros que solo usan `log.X(...)`). Retorna
+/// None siempre. Se emite cuando `uses_logging` está activo pero
+/// ningún flag tokio-requiring (`has_http`/`uses_async`/`uses_jobs`/
+/// `uses_db`).
+const SPAN_CONTEXT_STUB: &str = r##"
+#[inline]
+pub(crate) fn __fitz_current_span_context() -> Option<__FitzSpanContext> { None }
+"##;
+
+/// Fase 12.3.b.4 — `__fitz_current_span_context()` + `__fitz_with_span_context()`
+/// con `tokio::task_local!`. Se emite cuando hay runtime tokio
+/// (cualquier programa con `@get/@post/@put/@delete/@cron/@background/
+/// db.X/spawn/.await`). El handler HTTP wrapper de `gen_http_handler_wrapper`
+/// usa `__fitz_with_span_context(...)` para envolver el body adentro
+/// del scope.
+const SPAN_CONTEXT_TOKIO: &str = r##"
+tokio::task_local! {
+    pub(crate) static __FITZ_SPAN_CONTEXT: __FitzSpanContext;
+}
+
+pub(crate) fn __fitz_current_span_context() -> Option<__FitzSpanContext> {
+    __FITZ_SPAN_CONTEXT.try_with(|ctx| ctx.clone()).ok()
+}
+
+#[allow(dead_code)]
+pub(crate) async fn __fitz_with_span_context<F, Fut, T>(ctx: __FitzSpanContext, f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    __FITZ_SPAN_CONTEXT.scope(ctx, f()).await
+}
 "##;
 
 // ---------------------------------------------------------------------------
