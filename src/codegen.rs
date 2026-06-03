@@ -2687,6 +2687,24 @@ fn cargo_toml_for(
         if has_http {
             s.push_str("metrics = \"0.24\"\n");
         }
+        // Fase 12.3.c.2 — `opentelemetry` + `opentelemetry_sdk` +
+        // `opentelemetry-otlp` para exportar spans HTTP al backend
+        // OTel real (Jaeger/Tempo/Honeycomb/Datadog) cuando
+        // `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada. Solo cuando hay
+        // HTTP — programas CLI puros no necesitan tracing distribuido.
+        // Features paralelas bit-a-bit al Cargo.toml del workspace
+        // (`http-proto` + `reqwest-blocking-client` + `trace`), con
+        // `default-features = false` para no traer `grpc-tonic` por
+        // accidente (que arrastra su propia stack h2/hyper).
+        if has_http {
+            s.push_str("opentelemetry = \"0.32\"\n");
+            s.push_str(
+                "opentelemetry_sdk = { version = \"0.32\", features = [\"rt-tokio\", \"trace\"] }\n",
+            );
+            s.push_str(
+                "opentelemetry-otlp = { version = \"0.32\", default-features = false, features = [\"http-proto\", \"reqwest-blocking-client\", \"trace\"] }\n",
+            );
+        }
         s
     } else {
         String::new()
@@ -4898,6 +4916,12 @@ fn emit_main_rs_body(
     // `log.info(...)` también lo activan. Sin uses_logging, no se
     // emiten deps tracing al Cargo.toml ni helpers al main.
     ctx.emit_logging_prelude();
+    // Fase 12.3.c.2 — preludio del OTLP exporter: `__fitz_otel_init` +
+    // `__fitz_otel_is_enabled` + `__fitz_otel_tracer`. Solo cuando hay
+    // HTTP (programas CLI puros no necesitan tracing distribuido).
+    // Va DESPUÉS de `emit_logging_prelude` porque el OTel init se llama
+    // adentro de `emit_log_init_call` después de `__fitz_log_init`.
+    ctx.emit_otel_prelude();
     // Fase 10.1.c — preludio del módulo `db`: tipos opacos
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + helpers async para connect/query/exec/close.
@@ -7371,11 +7395,33 @@ impl __FitzRetryConfig {
     /// Llamado al INICIO del main (antes de cualquier stmt del usuario)
     /// para que los `log.X(...)` posteriores respeten `RUST_LOG`. No
     /// hace nada si el programa no usa logging.
+    ///
+    /// Fase 12.3.c.2 — también emite `__fitz_otel_init();` después del
+    /// log init cuando hay HTTP. Si `OTEL_EXPORTER_OTLP_ENDPOINT` no
+    /// está seteada, el OTel init es no-op silencioso y los handlers
+    /// HTTP siguen con la instrumentación local (stderr logs +
+    /// métricas in-memory) sin enviar nada al backend.
     fn emit_log_init_call(&mut self) {
         if !self.uses_logging {
             return;
         }
         self.emit("    __fitz_log_init();\n");
+        if self.has_http {
+            self.emit("    __fitz_otel_init();\n");
+        }
+    }
+
+    /// Fase 12.3.c.2 — Emite el preludio del OTLP exporter
+    /// (`__fitz_otel_init` + `__fitz_otel_is_enabled` + `__fitz_otel_tracer`)
+    /// paralelo bit-a-bit a `crate::observability` del intérprete.
+    /// Solo se emite cuando hay HTTP — programas CLI puros con
+    /// `log.X(...)` no necesitan tracing distribuido.
+    fn emit_otel_prelude(&mut self) {
+        if !self.has_http || !self.uses_logging {
+            return;
+        }
+        self.emit(OTEL_PRELUDE);
+        self.emit("\n");
     }
 
     /// `__fitz_db_runtime` (declarado como `mod ... ;`) + alias
@@ -24234,13 +24280,31 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                  let __fitz_start_for_metrics = std::time::Instant::now();\n    \
                  let __fitz_method_str: &'static str = \"{}\";\n    \
                  let __fitz_path_template: &'static str = {};\n    \
-                 let __fitz_ctx_for_emit = __fitz_span_ctx.clone();\n    \
-                 let __response: axum::response::Response = __fitz_with_span_context(\n        \
-                 __fitz_span_ctx,\n        \
-                 move || async move {{",
+                 let __fitz_ctx_for_emit = __fitz_span_ctx.clone();",
                 method_lit, path_lit
             )
             .unwrap();
+            // Fase 12.3.c.2 — abrir OTel span paralelo al SpanContext
+            // propio cuando el provider está instalado al boot
+            // (`__fitz_otel_init` lo decidió leyendo
+            // `OTEL_EXPORTER_OTLP_ENDPOINT`). Sin provider, el bloque
+            // entero se skipea (zero overhead). Paralelo bit-a-bit a
+            // `dispatch_request` del intérprete (12.3.c.1).
+            self.emit(
+                "    let mut __otel_span = if __fitz_otel_is_enabled() {\n        \
+                 use opentelemetry::trace::{Span as _, Tracer as _};\n        \
+                 use opentelemetry::KeyValue;\n        \
+                 let tracer = __fitz_otel_tracer();\n        \
+                 let mut span = tracer.start(format!(\"HTTP {} {}\", __fitz_method_str, __fitz_path_template));\n        \
+                 span.set_attribute(KeyValue::new(\"http.method\", __fitz_method_str));\n        \
+                 span.set_attribute(KeyValue::new(\"http.target\", __fitz_path_template.to_string()));\n        \
+                 Some(span)\n    } else {\n        None\n    };\n",
+            );
+            self.emit(
+                "    let __response: axum::response::Response = __fitz_with_span_context(\n        \
+                 __fitz_span_ctx,\n        \
+                 move || async move {",
+            );
         }
         self.emit_middleware_chain(&sig);
         // Fase 9.w.1.d — auth check después de middlewares y antes de
@@ -24285,6 +24349,25 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 "        metrics::histogram!(\"http_request_duration_seconds\", &__labels).record(__duration_secs);\n",
             );
             self.emit("    }).await;\n");
+            // Fase 12.3.c.2 — cerrar el OTel span con http.status_code +
+            // status OK/Error. Paralelo bit-a-bit a `dispatch_request`
+            // del intérprete (12.3.c.1). Sin provider instalado, el
+            // bloque entero se skipea (`__otel_span == None`).
+            self.emit("    if let Some(span) = __otel_span.as_mut() {\n");
+            self.emit("        use opentelemetry::trace::{Span as _, Status};\n");
+            self.emit("        use opentelemetry::KeyValue;\n");
+            self.emit(
+                "        span.set_attribute(KeyValue::new(\"http.status_code\", __status_u16 as i64));\n",
+            );
+            self.emit("        if __status_u16 >= 400 {\n");
+            self.emit(
+                "            span.set_status(Status::error(format!(\"HTTP {}\", __status_u16)));\n",
+            );
+            self.emit("        } else {\n");
+            self.emit("            span.set_status(Status::Ok);\n");
+            self.emit("        }\n");
+            self.emit("        span.end();\n");
+            self.emit("    }\n");
             self.emit("    __response\n");
             self.emit("}\n\n");
         } else {
@@ -31508,6 +31591,85 @@ where
     Fut: std::future::Future<Output = T>,
 {
     __FITZ_SPAN_CONTEXT.scope(ctx, f()).await
+}
+"##;
+
+/// Fase 12.3.c.2 — preludio del OTLP exporter para spans HTTP del
+/// binario nativo. Paralelo bit-a-bit a `crate::observability` del
+/// intérprete (12.3.c.1). `__fitz_otel_init()` lee
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` y, si está, instala el provider OTel
+/// global. Sin la env var, no-op silencioso — zero overhead y zero
+/// conexiones de red. Solo se emite cuando hay HTTP (programas CLI
+/// puros no necesitan tracing distribuido).
+const OTEL_PRELUDE: &str = r##"
+// --- 12.3.c.2: OTLP exporter para spans HTTP ---
+
+static __FITZ_OTEL_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub(crate) fn __fitz_otel_is_enabled() -> bool {
+    __FITZ_OTEL_ENABLED.get().copied().unwrap_or(false)
+}
+
+pub(crate) fn __fitz_otel_init() {
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry::KeyValue;
+    use opentelemetry_otlp::WithExportConfig;
+    use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
+    use opentelemetry_sdk::Resource;
+
+    if __FITZ_OTEL_ENABLED.get().is_some() {
+        return;
+    }
+
+    let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") else {
+        let _ = __FITZ_OTEL_ENABLED.set(false);
+        return;
+    };
+    if endpoint.is_empty() {
+        let _ = __FITZ_OTEL_ENABLED.set(false);
+        return;
+    }
+
+    let service_name = std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "fitz-app".into());
+    let sampler_arg: f64 = std::env::var("OTEL_TRACES_SAMPLER_ARG")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(1.0);
+    let sampler_arg = sampler_arg.clamp(0.0, 1.0);
+
+    let exporter = match opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(format!("{}/v1/traces", endpoint.trim_end_matches('/')))
+        .build()
+    {
+        Ok(e) => e,
+        Err(err) => {
+            eprintln!(
+                "fitz: OTel exporter init failed ({}). Continuing without OTLP export.",
+                err
+            );
+            let _ = __FITZ_OTEL_ENABLED.set(false);
+            return;
+        }
+    };
+
+    let resource = Resource::builder()
+        .with_attribute(KeyValue::new("service.name", service_name))
+        .build();
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(resource)
+        .with_sampler(Sampler::TraceIdRatioBased(sampler_arg))
+        .build();
+
+    let _tracer = provider.tracer("fitz");
+    opentelemetry::global::set_tracer_provider(provider);
+    let _ = __FITZ_OTEL_ENABLED.set(true);
+}
+
+pub(crate) fn __fitz_otel_tracer() -> opentelemetry::global::BoxedTracer {
+    opentelemetry::global::tracer("fitz")
 }
 "##;
 
