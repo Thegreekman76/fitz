@@ -19,10 +19,10 @@ el curso.
 
 ```mermaid
 flowchart LR
-    A[Carpeta vacía] -->|fitz new mi-app| B[mi-app/<br/>fitz.toml<br/>src/main.fitz<br/>.gitignore<br/>.git/]
-    C[Carpeta existente] -->|cd cosa && fitz init| B
-    B --> D[fitz run<br/>desde la raíz]
-    B --> E[fitz build<br/>→ target/release/]
+    A[Carpeta vacía] -->|fitz new mi-app| B["mi-app/<br/>fitz.toml<br/>src/main.fitz<br/>.gitignore<br/>.git/"]
+    C[Carpeta existente] -->|"cd cosa &amp;&amp; fitz init"| B
+    B --> D["fitz run<br/>desde la raíz"]
+    B --> E["fitz build<br/>→ target/release/"]
     B --> F[git commit]
 ```
 
@@ -376,10 +376,10 @@ Lo vimos en C1 pero formalicemos. Dos modos:
 ```mermaid
 flowchart TD
     A[fitz run] --> B{¿Pasaste FILE?}
-    B -->|Sí: fitz run hola.fitz| C[Single-file mode<br/>ejecuta el archivo directo]
-    B -->|No: fitz run sin args| D{¿Hay fitz.toml en cwd o ancestros?}
-    D -->|Sí| E[Manifest mode<br/>lee fitz.toml<br/>ejecuta [bin].main]
-    D -->|No| F[Error:<br/>'no se encontró fitz.toml']
+    B -->|Sí: fitz run hola.fitz| C["Single-file mode<br/>ejecuta el archivo directo"]
+    B -->|No: fitz run sin args| D{"¿Hay fitz.toml en cwd o ancestros?"}
+    D -->|Sí| E["Manifest mode<br/>lee fitz.toml<br/>ejecuta [bin].main"]
+    D -->|No| F["Error:<br/>'no se encontró fitz.toml'"]
 ```
 
 ### Manifest mode — desde cualquier subcarpeta

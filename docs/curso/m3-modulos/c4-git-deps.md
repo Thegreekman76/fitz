@@ -21,10 +21,10 @@ de Rust, Go, Deno.
 
 ```mermaid
 flowchart LR
-    A[fitz.toml<br/>git = ..., tag = v1.0.0] --> B[fitz reconoce nueva dep]
-    B --> C[git clone --depth 1 --branch v1.0.0]
-    C --> D[~/.fitz/cache/git/<br/>github.com_user_repo&commat;v1.0.0/]
-    D --> E[Cargar el [lib].entry de la dep]
+    A["fitz.toml<br/>git = ..., tag = v1.0.0"] --> B[fitz reconoce nueva dep]
+    B --> C["git clone --depth 1 --branch v1.0.0"]
+    C --> D["~/.fitz/cache/git/<br/>github.com_user_repo@v1.0.0/"]
+    D --> E["Cargar el [lib].entry de la dep"]
     F[fitz.lock] --> G[Registra el commit hash exacto]
 ```
 
@@ -184,10 +184,10 @@ pineado** al original. Para actualizar: `fitz update` (M3.C5).
 
 ```mermaid
 flowchart TD
-    A{¿Quiero pinear a algo<br/>específico?} --> B{¿Voy a hacer<br/>upgrades regulares?}
-    B -->|Sí, sigo SemVer| C[Usar tag = vX.Y.Z]
-    B -->|No, quiero pin exacto| D[Usar rev = commit_sha]
-    A -->|Quiero ver siempre lo último| E[NO existe en Fitz<br/>usá rev del HEAD actual]
+    A{"¿Quiero pinear a algo<br/>específico?"} --> B{"¿Voy a hacer<br/>upgrades regulares?"}
+    B -->|Sí, sigo SemVer| C["Usar tag = vX.Y.Z"]
+    B -->|No, quiero pin exacto| D["Usar rev = commit_sha"]
+    A -->|Quiero ver siempre lo último| E["NO existe en Fitz<br/>usá rev del HEAD actual"]
 ```
 
 ### `tag = "vX.Y.Z"`

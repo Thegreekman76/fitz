@@ -28,11 +28,11 @@ Diesel/sqlx, mejor que SQLAlchemy/ActiveRecord/Hibernate.
 flowchart LR
     A["@table users type User"] --> B[checker valida fields contra type]
     B --> C[codegen emite SQL constante]
-    C --> D[User.all db .await]
-    C --> E[User.where closure.first db]
-    C --> F[User.where closure.count db]
-    G[@primary id] --> H[bigserial auto-asigna]
-    I[@column name] --> J[mapea snake_case ↔ camelCase]
+    C --> D["User.all db .await"]
+    C --> E["User.where closure.first db"]
+    C --> F["User.where closure.count db"]
+    G["@primary id"] --> H[bigserial auto-asigna]
+    I["@column name"] --> J["mapea snake_case ↔ camelCase"]
 ```
 
 ---

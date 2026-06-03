@@ -34,11 +34,11 @@ hoy combina las cinco.
 
 ```mermaid
 flowchart LR
-    A[Cliente WS connect] --> B[@authenticated valida token]
+    A[Cliente WS connect] --> B["@authenticated valida token"]
     B -->|ok| C[HTTP upgrade a WS]
     B -->|err| D[401 sin abrir socket]
     C --> E[handler async con WsConn]
-    E --> F[conn.recv -> Result T]
+    E --> F["conn.recv → Result T"]
     F -->|frame text JSON| G[deserializa a T auto]
     G --> H[conn.broadcast manda a todos]
     H --> I[serializa T a JSON auto]

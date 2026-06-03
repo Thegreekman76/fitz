@@ -23,13 +23,13 @@ todo eso se repite en cada handler.
 
 ```mermaid
 flowchart LR
-    A[Request] --> B[Middleware 1: Pre]
-    B --> C[Middleware 2: Wrap]
-    C --> D[Middleware 3: Wrap]
+    A[Request] --> B["Middleware 1: Pre"]
+    B --> C["Middleware 2: Wrap"]
+    C --> D["Middleware 3: Wrap"]
     D --> E[Handler]
-    E --> F[Middleware 3: Wrap salida]
-    F --> G[Middleware 2: Wrap salida]
-    G --> H[Middleware: Post]
+    E --> F["Middleware 3: Wrap salida"]
+    F --> G["Middleware 2: Wrap salida"]
+    G --> H["Middleware: Post"]
     H --> I[Response final]
     J[CORS] -.special.-> A
     J -.preflight.-> I

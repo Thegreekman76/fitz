@@ -19,10 +19,10 @@ monorepos, libs internas, y prototipado.
 
 ```mermaid
 flowchart LR
-    A[Mi app] --> B[fitz.toml<br/>[dependencies]<br/>lib = path]
-    B --> C[fitz.lock<br/>auto-generado]
-    A --> D[from lib import X]
-    D --> E[Loader resuelve<br/>al [lib].entry<br/>de la lib]
+    A[Mi app] --> B["fitz.toml<br/>[dependencies]<br/>lib = path"]
+    B --> C["fitz.lock<br/>auto-generado"]
+    A --> D["from lib import X"]
+    D --> E["Loader resuelve<br/>al [lib].entry<br/>de la lib"]
 ```
 
 ---
@@ -277,12 +277,12 @@ from auth import verify_token
 
 ```mermaid
 flowchart TD
-    A[from X import Y en mi código] --> B{¿X está declarado<br/>en dependencies?}
-    B -->|Sí| C[Resolver dep:<br/>cargar de path / git / cache]
-    B -->|No| D{¿X es un módulo local?<br/>X.fitz adyacente?}
+    A["from X import Y en mi código"] --> B{"¿X está declarado<br/>en dependencies?"}
+    B -->|Sí| C["Resolver dep:<br/>cargar de path / git / cache"]
+    B -->|No| D{"¿X es un módulo local?<br/>X.fitz adyacente?"}
     D -->|Sí| E[Cargar como módulo local]
-    D -->|No| F[Error: módulo no encontrado]
-    C --> G[Cargar [lib].entry de X]
+    D -->|No| F["Error: módulo no encontrado"]
+    C --> G["Cargar [lib].entry de X"]
     E --> H[Cargar el archivo local]
 ```
 

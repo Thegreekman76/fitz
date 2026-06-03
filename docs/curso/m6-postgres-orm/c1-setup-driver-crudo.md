@@ -28,14 +28,14 @@ de Fitz**: el driver Postgres + el ORM viven adentro del binario,
 
 ```mermaid
 flowchart LR
-    A[Postgres corriendo] --> B[URL postgres://user:pass@host:port/db]
-    B --> C[db.connect URL .await]
+    A[Postgres corriendo] --> B["URL postgres://user:pass@host:port/db"]
+    B --> C["db.connect URL .await"]
     C -->|Ok| D[DbConn pool interno]
-    C -->|Err| E[Result Err connection refused]
-    D --> F[db.exec SQL params]
-    D --> G[db.query SQL params]
+    C -->|Err| E["Result Err connection refused"]
+    D --> F["db.exec SQL params"]
+    D --> G["db.query SQL params"]
     F --> H[Int rows affected]
-    G --> I[List Map Str Any]
+    G --> I["List Map Str Any"]
     D --> J[db.close .await]
     D --> K[db.is_closed sync Bool]
 ```

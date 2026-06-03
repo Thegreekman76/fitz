@@ -25,10 +25,10 @@ flowchart LR
     A[Mi paquete] --> B{¿Solo bin?}
     A --> C{¿Solo lib?}
     A --> D{¿Ambos?}
-    B --> E[fitz.toml con<br/>[bin] main = src/main.fitz]
-    C --> F[fitz.toml con<br/>[lib] entry = src/lib.fitz]
-    D --> G[fitz.toml con<br/>[bin] + [lib]]
-    F --> H[Otro paquete<br/>importa con<br/>from mi_paquete import X]
+    B --> E["fitz.toml con<br/>[bin] main = src/main.fitz"]
+    C --> F["fitz.toml con<br/>[lib] entry = src/lib.fitz"]
+    D --> G["fitz.toml con<br/>[bin] + [lib]"]
+    F --> H["Otro paquete<br/>importa con<br/>from mi_paquete import X"]
 ```
 
 ---

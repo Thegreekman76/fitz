@@ -38,15 +38,15 @@ sin broker y con paridad intérprete↔binario**.
 
 ```mermaid
 flowchart LR
-    A[@cron expr] --> B[scheduler tokio]
+    A["@cron expr"] --> B[scheduler tokio]
     B --> C[fn corre cada tick]
-    D[@background fn] --> E[autorizada para spawn]
+    D["@background fn"] --> E[autorizada para spawn]
     E --> F[spawn fn_call desde handler]
     F --> G[Future detached]
-    H[iter2 store=db] --> I[persiste runs en fitz_cron_runs]
+    H["iter2 store=db"] --> I[persiste runs en fitz_cron_runs]
     J[iter2 retry] --> K[backoff exponential lineal const]
     L[iter2 tz IANA] --> M[interpretado en huso del usuario]
-    N[iter2 catch_up] --> O[un run al boot si missed]
+    N["iter2 catch_up"] --> O[un run al boot si missed]
 ```
 
 ---

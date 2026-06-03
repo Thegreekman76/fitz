@@ -21,13 +21,13 @@ evita bugs sutiles (`a + b == c` vs `a + (b == c)`).
 
 ```mermaid
 flowchart LR
-    A[Operadores] --> B[Aritméticos<br/>+, -, *, /, %]
-    A --> C[Comparación<br/>==, !=, <, >, <=, >=]
-    A --> D[Lógicos<br/>and, or, not]
-    A --> E[Bit-a-bit<br/>&, |, ^, ~, <<, >>]
-    A --> F[Asignación compuesta<br/>+=, -=, *=, ...]
-    G[Control de flujo] --> H[if / else if / else]
-    G --> I[if como expresión<br/>con valor]
+    A[Operadores] --> B["Aritméticos<br/>+, -, *, /, %"]
+    A --> C["Comparación<br/>==, !=, &lt;, &gt;, &lt;=, &gt;="]
+    A --> D["Lógicos<br/>and, or, not"]
+    A --> E["Bit-a-bit<br/>&amp;, |, ^, ~, &lt;&lt;, &gt;&gt;"]
+    A --> F["Asignación compuesta<br/>+=, -=, *=, ..."]
+    G[Control de flujo] --> H["if / else if / else"]
+    G --> I["if como expresión<br/>con valor"]
 ```
 
 ---

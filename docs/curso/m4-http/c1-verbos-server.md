@@ -25,10 +25,10 @@ config. En Fitz: anotás una función con `@get("/")`, corrés
 flowchart LR
     A["@get/@post/..."] --> B[fn handler]
     C["@server(...)"] --> D[port + host]
-    E[Path /users/{id}] --> F[Param tipado]
+    E["Path /users/{id}"] --> F[Param tipado]
     F --> G[Coerción automática]
     H[Return value] --> I[Serialización JSON automática]
-    J["Result<T>"] --> K[Ok 200 / Err 500]
+    J["Result&lt;T&gt;"] --> K["Ok 200 / Err 500"]
 ```
 
 ---
@@ -366,12 +366,12 @@ sin glue.
 flowchart TD
     A[Request HTTP] --> B[Path params coerced]
     B --> C{Coerción OK?}
-    C -->|No| D[400 + error claro]
+    C -->|No| D["400 + error claro"]
     C -->|Sí| E[Handler invocado]
     E --> F{Return value}
-    F -->|Ok/value/Instance| G[200 + JSON]
-    F -->|Err Str| H[500 + 'error: ...']
-    F -->|Err Type con status| I[status custom + body Instance]
+    F -->|"Ok/value/Instance"| G["200 + JSON"]
+    F -->|Err Str| H["500 + 'error: ...'"]
+    F -->|Err Type con status| I["status custom + body Instance"]
 ```
 
 ---

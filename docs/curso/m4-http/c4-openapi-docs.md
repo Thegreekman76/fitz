@@ -32,11 +32,14 @@ Swagger) como formato estándar — pero generarlo cuesta:
 
 ```mermaid
 flowchart LR
-    A[Tu código Fitz] --> B[Decoradores @get/@post/...]
-    A --> C[Tipos custom: type Foo {...}]
+    A[Tu código Fitz] --> B["Decoradores @get/@post/..."]
+    A --> C["Tipos custom: type Foo { ... }"]
     A --> D[Anotaciones de return]
-    A --> E[Path/Query/Body/Header params]
-    B & C & D & E --> F[Schema OpenAPI 3.1]
+    A --> E["Path/Query/Body/Header params"]
+    B --> F[Schema OpenAPI 3.1]
+    C --> F
+    D --> F
+    E --> F
     F --> G["/openapi.json"]
     F --> H["/docs UI Scalar"]
     F --> I["fitz openapi CLI"]
@@ -191,9 +194,9 @@ schema en el browser:
 
 ```mermaid
 flowchart LR
-    A[Browser abre /docs] --> B[Servidor responde HTML mínimo]
+    A["Browser abre /docs"] --> B[Servidor responde HTML mínimo]
     B --> C[Browser carga JS de Scalar desde CDN]
-    C --> D[Scalar pide /openapi.json]
+    C --> D["Scalar pide /openapi.json"]
     D --> E[Scalar renderiza UI interactiva]
 ```
 

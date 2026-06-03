@@ -34,15 +34,15 @@ con `bearerAuth` — todo built-in. Deploy: un binario.
 
 ```mermaid
 flowchart LR
-    A[Cliente: POST /login con creds] --> B[hash.verify Argon2id]
+    A["Cliente: POST /login con creds"] --> B[hash.verify Argon2id]
     B -->|ok| C[jwt.encode HS256]
     C --> D[Token JWT al cliente]
-    D --> E[Cliente: GET /me con Bearer]
-    E --> F[@auth_provider corre]
+    D --> E["Cliente: GET /me con Bearer"]
+    E --> F["@auth_provider corre"]
     F -->|Ok user| G[Handler ejecuta con user inyectado]
-    F -->|Err msg| H[401 con error msg]
+    F -->|Err msg| H["401 con error msg"]
     G --> I[Response 200]
-    J[@admin agrega check user.role == admin] --> K[403 si role != admin]
+    J["@admin agrega check user.role == admin"] --> K["403 si role != admin"]
 ```
 
 ---

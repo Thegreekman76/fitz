@@ -28,18 +28,18 @@ para la sección CRUD HTTP + ORM.
 
 ```mermaid
 flowchart LR
-    A[Cliente HTTP] --> B[POST /login]
+    A[Cliente HTTP] --> B["POST /login"]
     B --> C[hash.verify Argon2id]
     C --> D[jwt.encode HS256]
     D --> E[Token JWT]
-    E --> F[GET /notes con Bearer]
-    F --> G[@auth_provider]
-    G --> H[Note ORM .where user_id]
+    E --> F["GET /notes con Bearer"]
+    F --> G["@auth_provider"]
+    G --> H["Note ORM .where user_id"]
     H --> I[Response JSON]
-    J[POST /notes] --> K[Note.insert]
+    J["POST /notes"] --> K["Note.insert"]
     K --> L[WS broadcast nota nueva]
-    M[@cron 5min] --> N[cleanup archived > 30d]
-    O[Docker postgres:16] --> P[binario Fitz standalone]
+    M["@cron 5min"] --> N["cleanup archived &gt; 30d"]
+    O["Docker postgres:16"] --> P[binario Fitz standalone]
 ```
 
 ---

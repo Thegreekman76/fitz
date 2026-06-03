@@ -28,12 +28,12 @@ necesario para shippear APIs production-ready en Fitz.
 ```mermaid
 flowchart LR
     A[Handler retorna value] --> B{Tipo}
-    B -->|valor cualquiera| C[200 + JSON]
+    B -->|valor cualquiera| C["200 + JSON"]
     B -->|Ok v| C
-    B -->|Err Str| D[500 + 'error: ...']
-    B -->|Err Tipo con status| E[status del field + body Instance]
-    F[return num body] --> G[status custom inmediato]
-    H[Validaciones automáticas] --> I[400/415 automáticos]
+    B -->|Err Str| D["500 + 'error: ...'"]
+    B -->|Err Tipo con status| E["status del field + body Instance"]
+    F["return num body"] --> G["status custom inmediato"]
+    H["Validaciones automáticas"] --> I["400/415 automáticos"]
 ```
 
 ---
