@@ -4592,7 +4592,19 @@ fn dispatch_builtin_kwargs(
                         // automáticamente. Permitir override silencioso
                         // ensucia el shape del registro y rompe
                         // herramientas downstream (Loki/Datadog query).
-                        if matches!(key_name, "level" | "msg" | "timestamp") {
+                        //
+                        // Fase 12.3.b.1 — `trace_id`/`span_id` se suman
+                        // al set de reservados: los inyecta el sink
+                        // automáticamente desde el SpanContext activo
+                        // (via `with_span_context(...)`). Permitir
+                        // override quiebra la correlación entre logs y
+                        // spans, y por convención OTel los IDs son
+                        // controlados por la instrumentación, no por
+                        // el código del usuario.
+                        if matches!(
+                            key_name,
+                            "level" | "msg" | "timestamp" | "trace_id" | "span_id"
+                        ) {
                             return Err(EvalSignal::Error(FitzError::new(
                                 ErrorKind::InvalidSyntax,
                                 span.line,

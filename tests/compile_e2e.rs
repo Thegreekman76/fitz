@@ -11554,7 +11554,7 @@ fn m12_3_a_3_log_default_level_info_filtra_debug() {
     // Sin RUST_LOG seteada, default level = info. log.debug() NO debe
     // aparecer en el output stderr.
     let src = "\
-log.debug(\"oculto\", trace_id: \"x\")
+log.debug(\"oculto\", request_id: \"x\")
 log.info(\"visible\")
 ";
     let (_stdout, stderr, exit) = build_and_run_with_env_and_stderr(
@@ -11579,7 +11579,7 @@ log.info(\"visible\")
 fn m12_3_a_3_log_rust_log_debug_habilita_debug() {
     // Con RUST_LOG=debug, log.debug() SÍ aparece.
     let src = "\
-log.debug(\"ahora visible\", trace_id: \"abc\")
+log.debug(\"ahora visible\", request_id: \"abc\")
 log.info(\"tambien visible\")
 ";
     let (_stdout, stderr, exit) = build_and_run_with_env_and_stderr(

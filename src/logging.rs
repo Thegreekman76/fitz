@@ -161,13 +161,25 @@ pub fn emit_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
 }
 
 /// Construye el JSON flat: `{"timestamp": "...", "level": "INFO",
-/// "msg": "...", <kwargs>}`. Reservados (`level`/`msg`/`timestamp`)
-/// ya fueron rechazados en el evaluator — no hay riesgo de colisión.
+/// "msg": "...", "trace_id": "...", "span_id": "...", <kwargs>}`.
+/// Reservados (`level`/`msg`/`timestamp`/`trace_id`/`span_id`) ya
+/// fueron rechazados en el evaluator — no hay riesgo de colisión.
+///
+/// Fase 12.3.b.1 — `trace_id`/`span_id` se insertan automáticamente
+/// si hay span context activo via `with_span_context(...)`. Sin
+/// span activo, esos fields se omiten (no se emiten como `null`
+/// para no contaminar el shape).
 fn format_json(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String {
-    let mut obj = JsonMap::with_capacity(3 + kvs.len());
+    let span_ctx = current_span_context();
+    let extra = span_ctx.as_ref().map(|_| 2).unwrap_or(0);
+    let mut obj = JsonMap::with_capacity(3 + extra + kvs.len());
     obj.insert("timestamp".into(), JsonValue::String(now_rfc3339()));
     obj.insert("level".into(), JsonValue::String(level_str.to_uppercase()));
     obj.insert("msg".into(), JsonValue::String(msg.to_string()));
+    if let Some(ctx) = &span_ctx {
+        obj.insert("trace_id".into(), JsonValue::String(ctx.trace_id.clone()));
+        obj.insert("span_id".into(), JsonValue::String(ctx.span_id.clone()));
+    }
     for (k, v) in kvs {
         obj.insert(k.clone(), value_to_json_redacted(v));
     }
@@ -182,14 +194,23 @@ fn format_json(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String {
     })
 }
 
-/// Construye la línea pretty: `<ts> <LEVEL> <msg> k=v k="str" k=null`
-/// con ANSI colors por level. La detección de color usa el mismo TTY
-/// que detect_format — si llegamos acá es porque format == Pretty, que
-/// implica TTY o override pretty.
+/// Construye la línea pretty: `<ts> <LEVEL> <msg> trace=xxx span=yyy
+/// k=v k="str" k=null` con ANSI colors por level. La detección de
+/// color usa el mismo TTY que detect_format — si llegamos acá es
+/// porque format == Pretty, que implica TTY o override pretty.
+///
+/// Fase 12.3.b.1 — `trace=xxx span=yyy` se inyecta automáticamente
+/// si hay span context activo via `with_span_context(...)`. Sin span
+/// activo, los fields se omiten (paralelo a JSON). Forma dim para no
+/// dominar visualmente sobre el msg + kwargs del user.
 fn format_pretty(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String {
     let level_upper = level_str.to_uppercase();
     let level_colored = colorize_level(&level_upper);
     let ts = now_rfc3339();
+    let span_part = match current_span_context() {
+        Some(ctx) => format!(" \x1b[2mtrace={} span={}\x1b[0m", ctx.trace_id, ctx.span_id),
+        None => String::new(),
+    };
     let kvs_part = if kvs.is_empty() {
         String::new()
     } else {
@@ -202,7 +223,10 @@ fn format_pretty(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String 
     // ANSI dim sobre el timestamp para que el ojo vaya al level + msg
     // primero. Sin colors si stdout no soporta — el detect_format ya
     // garantiza Pretty solo en TTY o override explícito.
-    format!("\x1b[2m{}\x1b[0m {} {}{}", ts, level_colored, msg, kvs_part)
+    format!(
+        "\x1b[2m{}\x1b[0m {} {}{}{}",
+        ts, level_colored, msg, span_part, kvs_part
+    )
 }
 
 /// ANSI color por level. Convención bunyan/pino/uvicorn:
@@ -304,6 +328,129 @@ fn value_to_pretty(v: &Value) -> String {
         }
         _ => "<?>".to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fase 12.3.b.1 — SpanContext + correlación trace_id/span_id en logs.
+//
+// Infraestructura del span context para correlacionar logs emitidos
+// adentro de un mismo request HTTP (o cualquier scope que los wrap-ee).
+// Cuando hay un span activo via `with_span_context(ctx, fut)`, todos los
+// `log.info/warn/error/debug` emitidos adentro suman automáticamente
+// `trace_id` (32 hex chars, compartido por toda la cadena) y `span_id`
+// (16 hex chars, único por span) al output JSON / pretty.
+//
+// Approach: storage propio con `tokio::task_local!` (vs tracing nativo
+// `Span::extensions`). Razones:
+// - Simplicidad — sin Subscriber/Layer custom de tracing.
+// - Control total del shape del SpanContext (compatible con OTel sin
+//   forzar la jerarquía de tracing).
+// - `task_local!` atraviesa thread boundaries del runtime tokio
+//   multi-thread (handlers HTTP saltan workers).
+//
+// En 12.3.b.2 viene el wrapper HTTP que abre el span automático antes
+// de invocar el handler; en 12.3.c migramos al SpanContext de
+// OpenTelemetry sin cambiar la API pública.
+//
+// IDs OTel-compatibles:
+// - trace_id = 32 hex chars (16 bytes random sin guiones).
+// - span_id = 16 hex chars (8 bytes random sin guiones).
+// Generados con `uuid::Uuid::new_v4()` (ya en deps no opcional).
+
+/// Contexto de span activo para correlacionar logs. Inmutable —
+/// nuevos spans se construyen con `new_child()` que clona el `trace_id`
+/// y genera un `span_id` nuevo.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanContext {
+    /// 32 hex chars. Constante a lo largo de toda la cadena de spans
+    /// nested (un request HTTP entero comparte el mismo trace_id).
+    pub trace_id: String,
+    /// 16 hex chars. Único por span — cada `new_child()` genera uno
+    /// nuevo.
+    pub span_id: String,
+    /// `span_id` del padre si este es un span anidado. `None` para
+    /// spans root (típicamente el del handler HTTP inicial).
+    pub parent_span_id: Option<String>,
+}
+
+impl SpanContext {
+    /// Crea un span root (sin parent). Genera `trace_id` y `span_id`
+    /// fresh. Llamado típicamente por el wrapper HTTP al recibir un
+    /// request (12.3.b.2).
+    pub fn new_root() -> Self {
+        Self {
+            trace_id: generate_trace_id(),
+            span_id: generate_span_id(),
+            parent_span_id: None,
+        }
+    }
+
+    /// Crea un span hijo del actual. Comparte el `trace_id`, genera
+    /// `span_id` nuevo, registra el `span_id` del padre. Usado para
+    /// spans anidados (e.g. `db.query` adentro de un handler HTTP).
+    pub fn new_child(&self) -> Self {
+        Self {
+            trace_id: self.trace_id.clone(),
+            span_id: generate_span_id(),
+            parent_span_id: Some(self.span_id.clone()),
+        }
+    }
+}
+
+/// Genera un trace_id = 32 hex chars (16 bytes random). Formato
+/// OTel-compatible: las cadenas downstream (Datadog/Jaeger/Tempo) lo
+/// aceptan tal cual sin transformación.
+fn generate_trace_id() -> String {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    // hex de 16 bytes = 32 chars
+    let mut s = String::with_capacity(32);
+    for b in bytes.iter() {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+/// Genera un span_id = 16 hex chars (8 bytes random). Tomamos los
+/// primeros 8 bytes de un Uuid v4 — suficiente entropía para
+/// uniqueness práctica (2^64 espacio).
+fn generate_span_id() -> String {
+    let uuid = uuid::Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    let mut s = String::with_capacity(16);
+    for b in bytes.iter().take(8) {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
+}
+
+tokio::task_local! {
+    /// Span context activo del task actual. Set por
+    /// `with_span_context(ctx, fut)`. Leído por `current_span_context()`.
+    /// Sin set, las consultas devuelven `None`.
+    static SPAN_CONTEXT: SpanContext;
+}
+
+/// Devuelve el SpanContext activo del task tokio actual, si hay uno
+/// instalado. Llamado por `emit_log_record` para inyectar trace_id/
+/// span_id al output. Sin span activo → `None`.
+pub fn current_span_context() -> Option<SpanContext> {
+    SPAN_CONTEXT.try_with(|ctx| ctx.clone()).ok()
+}
+
+/// Ejecuta el future `fut` con `ctx` como span context activo.
+/// Wrapper sobre `LocalKey::scope`. Llamado típicamente por el
+/// wrapper HTTP al boot del request (12.3.b.2).
+///
+/// Adentro del scope, `current_span_context()` devuelve `Some(ctx)`.
+/// Spans anidados se crean con `ctx.new_child()` + nueva llamada a
+/// `with_span_context(child, ...)`.
+pub async fn with_span_context<F, Fut, T>(ctx: SpanContext, f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    SPAN_CONTEXT.scope(ctx, f()).await
 }
 
 #[cfg(test)]
@@ -558,5 +705,188 @@ mod tests {
         // los tests pretty pueden pasar falsos.
         let s = "\x1b[1;32mINFO\x1b[0m hola";
         assert_eq!(strip_ansi(s), "INFO hola");
+    }
+
+    // ---- Fase 12.3.b.1 — SpanContext + correlación trace_id en logs ----
+
+    #[test]
+    fn span_context_new_root_genera_ids_otel_compatible() {
+        let ctx = SpanContext::new_root();
+        // trace_id = 32 hex chars (16 bytes × 2).
+        assert_eq!(ctx.trace_id.len(), 32);
+        assert!(ctx.trace_id.chars().all(|c| c.is_ascii_hexdigit()));
+        // span_id = 16 hex chars (8 bytes × 2).
+        assert_eq!(ctx.span_id.len(), 16);
+        assert!(ctx.span_id.chars().all(|c| c.is_ascii_hexdigit()));
+        // Root no tiene parent.
+        assert_eq!(ctx.parent_span_id, None);
+    }
+
+    #[test]
+    fn span_context_new_root_genera_ids_distintos_entre_calls() {
+        let a = SpanContext::new_root();
+        let b = SpanContext::new_root();
+        assert_ne!(a.trace_id, b.trace_id, "trace_id debería ser único");
+        assert_ne!(a.span_id, b.span_id, "span_id debería ser único");
+    }
+
+    #[test]
+    fn span_context_new_child_hereda_trace_id_y_registra_parent() {
+        let parent = SpanContext::new_root();
+        let child = parent.new_child();
+        assert_eq!(
+            child.trace_id, parent.trace_id,
+            "child hereda trace_id del parent"
+        );
+        assert_ne!(child.span_id, parent.span_id, "child tiene span_id nuevo");
+        assert_eq!(
+            child.parent_span_id,
+            Some(parent.span_id.clone()),
+            "child registra parent_span_id"
+        );
+    }
+
+    #[test]
+    fn span_context_grandchild_mantiene_trace_id_y_actualiza_parent() {
+        let root = SpanContext::new_root();
+        let child = root.new_child();
+        let grandchild = child.new_child();
+        // El trace_id es estable across la cadena entera.
+        assert_eq!(grandchild.trace_id, root.trace_id);
+        // El parent del grandchild es el child, NO el root.
+        assert_eq!(grandchild.parent_span_id, Some(child.span_id.clone()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_span_context_devuelve_none_fuera_de_scope() {
+        // Sin `with_span_context(...)`, el TaskLocal no está set.
+        assert!(current_span_context().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_span_context_devuelve_some_adentro_de_with_span_context() {
+        let ctx = SpanContext::new_root();
+        let trace_id_expected = ctx.trace_id.clone();
+        let span_id_expected = ctx.span_id.clone();
+        with_span_context(ctx, || async move {
+            let observed = current_span_context().expect("debería estar set");
+            assert_eq!(observed.trace_id, trace_id_expected);
+            assert_eq!(observed.span_id, span_id_expected);
+        })
+        .await;
+        // Después del scope, el TaskLocal queda fuera de scope.
+        assert!(current_span_context().is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn format_json_sin_span_omite_trace_id_y_span_id() {
+        // Sin span activo, el JSON NO incluye trace_id ni span_id.
+        let line = format_json("info", "test", &[]);
+        let parsed: JsonValue = serde_json::from_str(&line).unwrap();
+        let obj = parsed.as_object().unwrap();
+        assert!(obj.get("trace_id").is_none(), "trace_id no debería estar");
+        assert!(obj.get("span_id").is_none(), "span_id no debería estar");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn format_json_con_span_activo_incluye_trace_id_y_span_id() {
+        let ctx = SpanContext::new_root();
+        let trace_id_expected = ctx.trace_id.clone();
+        let span_id_expected = ctx.span_id.clone();
+        with_span_context(ctx, || async move {
+            let line = format_json("info", "login ok", &[("user_id".into(), Value::Int(42))]);
+            let parsed: JsonValue = serde_json::from_str(&line).unwrap();
+            let obj = parsed.as_object().unwrap();
+            assert_eq!(
+                obj.get("trace_id").and_then(|v| v.as_str()),
+                Some(trace_id_expected.as_str())
+            );
+            assert_eq!(
+                obj.get("span_id").and_then(|v| v.as_str()),
+                Some(span_id_expected.as_str())
+            );
+            // Los kwargs del user siguen presentes.
+            assert_eq!(obj.get("user_id"), Some(&JsonValue::Number(42.into())));
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn format_json_orden_es_timestamp_level_msg_trace_span_kwargs() {
+        // El orden es importante para queryability — trace_id/span_id
+        // van entre msg y kwargs para que herramientas downstream los
+        // encuentren con un pattern fijo.
+        let ctx = SpanContext::new_root();
+        with_span_context(ctx, || async move {
+            let line = format_json("info", "x", &[("user_id".into(), Value::Int(1))]);
+            let ts_pos = line.find("\"timestamp\"").unwrap();
+            let level_pos = line.find("\"level\"").unwrap();
+            let msg_pos = line.find("\"msg\"").unwrap();
+            let trace_pos = line.find("\"trace_id\"").unwrap();
+            let span_pos = line.find("\"span_id\"").unwrap();
+            let user_pos = line.find("\"user_id\"").unwrap();
+            assert!(ts_pos < level_pos);
+            assert!(level_pos < msg_pos);
+            assert!(msg_pos < trace_pos);
+            assert!(trace_pos < span_pos);
+            assert!(span_pos < user_pos);
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn format_pretty_sin_span_no_emite_trace_part() {
+        let line = format_pretty("info", "test", &[]);
+        let stripped = strip_ansi(&line);
+        assert!(
+            !stripped.contains("trace="),
+            "trace= no debería estar sin span"
+        );
+        assert!(
+            !stripped.contains("span="),
+            "span= no debería estar sin span"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn format_pretty_con_span_activo_emite_trace_y_span_dim() {
+        let ctx = SpanContext::new_root();
+        let trace_id_expected = ctx.trace_id.clone();
+        let span_id_expected = ctx.span_id.clone();
+        with_span_context(ctx, || async move {
+            let line = format_pretty("info", "login", &[]);
+            let stripped = strip_ansi(&line);
+            assert!(
+                stripped.contains(&format!("trace={}", trace_id_expected)),
+                "esperaba trace=<id> en pretty: {}",
+                stripped
+            );
+            assert!(
+                stripped.contains(&format!("span={}", span_id_expected)),
+                "esperaba span=<id> en pretty: {}",
+                stripped
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn format_pretty_con_span_e_inclusion_de_kwargs() {
+        // El orden visual: ts LEVEL msg trace= span= k=v
+        // Validamos que ambos están presentes y que los kwargs van
+        // después del span info.
+        let ctx = SpanContext::new_root();
+        with_span_context(ctx, || async move {
+            let line = format_pretty("info", "msg", &[("user_id".into(), Value::Int(42))]);
+            let stripped = strip_ansi(&line);
+            let trace_pos = stripped.find("trace=").expect("trace= debería estar");
+            let user_pos = stripped.find("user_id=").expect("user_id= debería estar");
+            assert!(
+                trace_pos < user_pos,
+                "trace= debería ir antes que kwargs del user: {}",
+                stripped
+            );
+        })
+        .await;
     }
 }

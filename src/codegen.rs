@@ -13960,7 +13960,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     ));
                 }
             };
-            if matches!(key.as_str(), "level" | "msg" | "timestamp") {
+            // Fase 12.3.b.1 — `trace_id`/`span_id` también reservados:
+            // los inyecta el sink desde el SpanContext activo, paralelo
+            // bit-a-bit al check del evaluator (`dispatch_builtin_kwargs`).
+            if matches!(
+                key.as_str(),
+                "level" | "msg" | "timestamp" | "trace_id" | "span_id"
+            ) {
                 return Err(self.err_at(
                     key_span,
                     format!(
