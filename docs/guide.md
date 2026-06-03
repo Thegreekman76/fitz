@@ -78,10 +78,12 @@ abrí un issue.
 
 **Parte 12 — Operacional**
 32. [Variables de entorno](#32-variables-de-entorno)
+33. [Observability — logs, spans, métricas, OTel](#33-observability--logs-spans-métricas-otel)
 
-**Parte 13 — Cerrando**
-33. [Plantillas y boilerplates](#33-plantillas-y-boilerplates)
-34. [Qué sigue](#34-qué-sigue)
+**Parte 13 — CLI y cerrando**
+34. [CLI builder nativo (`@command`)](#34-cli-builder-nativo-command)
+35. [Plantillas y boilerplates](#35-plantillas-y-boilerplates)
+36. [Qué sigue](#36-qué-sigue)
 
 ---
 
@@ -12065,7 +12067,353 @@ cambiar.
 
 ---
 
-## 33. CLI builder nativo (`@command`)
+## 33. Observability — logs, spans, métricas, OTel
+
+**Hito de Fase 12.3 (v0.12.0)** — Fitz tiene **observability
+ciudadana de primera clase** en el core del compilador. Tres
+piezas nativas sobre el stack web first-class:
+
+1. **Structured logging built-in** — `log.info/warn/error/debug(...)`
+   con kwargs heterogéneos, output JSON o pretty, filter via
+   env var, redacción automática de `Secret`.
+2. **Spans HTTP automáticos** — cada request abre un
+   `SpanContext` root con `trace_id`/`span_id` OTel-compatibles;
+   logs adentro heredan automático el contexto. Counter +
+   Histogram con labels para correlación cross-metric.
+3. **Bridge OpenTelemetry opcional** — cuando
+   `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada, spans y logs van
+   al backend (Jaeger/Tempo/Honeycomb/Datadog). Métricas vía
+   endpoint `/metrics` Prometheus scrape (Tier3).
+
+Paridad bit-a-bit `fitz run` ↔ `fitz build` para los tres
+bloques. Activación dual (compile-time + env var). Decoradores
+nativos del lenguaje, no librerías opt-in.
+
+### Panorama vecino
+
+| Lenguaje      | Logs estructurados | Spans HTTP auto | OTel built-in |
+|---------------|---------------------|------------------|---------------|
+| Python (FastAPI) | `structlog`/`loguru` (lib) | Manual con `opentelemetry-api` (lib) | `opentelemetry-instrumentation-*` (lib) |
+| TypeScript (Express) | `pino`/`winston` (lib) | Manual con `@opentelemetry/*` (lib) | `@opentelemetry/sdk-node` (lib) |
+| Go (chi/gin)  | `slog` (std lib) o `zap` (lib) | Manual con `go.opentelemetry.io/contrib` (lib) | Lib oficial |
+| Rust (axum)   | `tracing` (lib) | Manual con `tower-http` + `tracing-opentelemetry` (lib) | Lib oficial |
+| **Fitz**      | **Core compilador** | **Core compilador (auto)** | **Core compilador (env var → on)** |
+
+En FastAPI/Express/Go/Rust, sumar observability completa requiere
+~3-5 libs distintas, glue manual, y conocer la matriz de
+compatibilidad entre versiones (típica fricción en producción).
+**En Fitz, observability viene activada de fábrica con HTTP**:
+escribís `@get("/users")` y ya tenés span, log estructurado de
+access, Counter + Histogram, todo correlacionado con `trace_id`.
+
+### 33.1. `log.info/warn/error/debug` — structured logging
+
+`log` es un módulo built-in del lenguaje (no requiere import).
+Cuatro métodos correspondientes a los niveles syslog clásicos:
+
+```fitz
+log.info("Server arrancado", port: 3000, env: "prod")
+log.warn("Cache miss alta", hit_rate: 0.42)
+log.error("DB query falló", error: "timeout", duration_ms: 5234)
+log.debug("Loop iter", i: 42, current: "x")
+```
+
+**Output**: JSON estructurado a stderr por default.
+
+```json
+{"timestamp":"2026-06-03T15:23:45.678Z","level":"INFO","msg":"Server arrancado","port":3000,"env":"prod"}
+```
+
+Una línea por log, ordering estable de fields (`timestamp` →
+`level` → `msg` → kwargs en orden de declaración). Listo para
+ingest por Loki/Datadog/Splunk/etc.
+
+**Pretty mode** con colors ANSI cuando stderr es TTY o cuando
+seteás `FITZ_LOG_FORMAT=pretty`:
+
+```
+2026-06-03T15:23:45.678Z INFO Server arrancado port=3000 env="prod"
+```
+
+**Filtros por nivel** via env var `FITZ_LOG` (default `info`):
+
+```bash
+FITZ_LOG=debug ./mi-app    # incluye debug, info, warn, error
+FITZ_LOG=warn ./mi-app     # solo warn + error
+```
+
+Soporta targets selectivos: `FITZ_LOG="fitz::log=info,h2=warn"`
+para filtrar logs por crate (formato `tracing-subscriber`).
+
+**Kwargs heterogéneos**: `Int`, `Float`, `Str`, `Bool`, `Null`,
+`Secret<T>` (redactado automático), `List<T>`, `Map<K, V>`,
+nominal types (Display de la instance).
+
+```fitz
+let user = User { id: 7, name: "ada" }
+let api_key = secret("KEY")?
+log.info("Login", user: user, key: api_key, tags: ["admin"])
+// → {"msg":"Login","user":"User { id: 7, name: \"ada\" }","key":"***","tags":["admin"]}
+```
+
+**Reservadas**: `level`, `msg`, `timestamp`, `trace_id`, `span_id`.
+Usarlas como kwarg → error de compilación.
+
+### 33.2. Spans HTTP automáticos + correlación
+
+Cada request HTTP arranca un `SpanContext` root con:
+- `trace_id` — 32 hex chars (16 bytes), OTel-compatible.
+- `span_id` — 16 hex chars (8 bytes).
+
+Todos los `log.X(...)` adentro del handler (incluso adentro de
+`fn` llamadas, async tasks, etc.) heredan automático el contexto.
+No tenés que pasar el `trace_id` por parámetro — vive en un
+`task_local` de tokio que cruza las await boundaries.
+
+```fitz
+fn parse_body(json: Str) -> Result<User> {
+    log.debug("Parsing body", len: json.len())  // ← trace_id auto
+    return Ok(User { id: 1, name: "x" })
+}
+
+@post("/users")
+async fn create_user(body: User) -> Result<User> {
+    log.info("Request recibida", id: body.id)   // ← mismo trace_id
+    return Ok(body)
+}
+```
+
+**Access log automático** en cada request. Sin código extra
+emitís:
+
+```json
+{"timestamp":"...","level":"INFO","msg":"http.access","trace_id":"...","span_id":"...","http.method":"POST","http.target":"/users","http.status_code":201,"duration_ms":42}
+```
+
+Naming OTel-compatible (`http.method`/`http.target`/
+`http.status_code`). El `http.target` usa el path template
+(`/users/{id}`) NO el path resuelto (`/users/42`) — evita
+cardinality explosion en herramientas downstream.
+
+**Métricas built-in**:
+- Counter `http_requests_total{method, path, status}` — total de
+  requests por endpoint + verbo + status.
+- Histogram `http_request_duration_seconds{method, path, status}`
+  — distribución de latencia.
+
+Labels EXACTAMENTE iguales entre Counter y Histogram para
+correlación cross-metric en Grafana/etc.
+
+**Opt-out por servidor entero** con `@server(observability=false)`
+— bypass total del wrapper de instrumentación. Útil en hot-paths
+o cuando tenés tu propio sistema de observability custom.
+
+```fitz
+@server(3000, observability=false)
+fn cfg() => 0
+```
+
+### 33.3. OTel exporter — backends reales
+
+Cuando seteás la env var `OTEL_EXPORTER_OTLP_ENDPOINT`, Fitz
+instala automáticamente:
+- **TracerProvider** que exporta cada span HTTP a `/v1/traces`
+  via OTLP HTTP/proto.
+- **LoggerProvider** que exporta cada `log.X(...)` LogRecord a
+  `/v1/logs` con `trace_id`/`span_id` propagados.
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 ./mi-app
+```
+
+Compatible con cualquier OpenTelemetry collector + backends
+spec-conformes: **Jaeger**, **Tempo** (Grafana stack), **Honeycomb**,
+**Datadog**, **New Relic**, **Lightstep**, **Dynatrace**,
+**SigNoz**, **Aspecto**, **Aspecto**, **Uptrace**, etc.
+
+**Otras env vars OTel-standard que Fitz lee**:
+- `OTEL_SERVICE_NAME` — nombre del servicio en el backend
+  (default `"fitz-app"`).
+- `OTEL_TRACES_SAMPLER_ARG` — ratio de sampling Float `[0.0, 1.0]`
+  (default `1.0` = todo).
+
+Sin la env var del endpoint, exporter no se instala — zero
+overhead, cero conexiones de red. Los logs siguen yendo a stderr;
+el access log y métricas Counter/Histogram funcionan igual
+(in-memory).
+
+**Correlación logs↔spans en el backend**: cuando OTel está
+activo, el `trace_id` que ves en los logs stderr/Loki es **el
+mismo** que muestra Jaeger/Tempo. Querys cross-pipeline tipo
+"todos los logs del request `abc123`" funcionan sin glue.
+
+### 33.4. `/metrics` Prometheus opt-in
+
+Para users que prefieren Prometheus scrape sobre OTLP push,
+activá el endpoint con kwarg o env var:
+
+```fitz
+@server(3000, prometheus=true)
+fn cfg() => 0
+```
+
+```bash
+FITZ_PROMETHEUS=1 ./mi-app   # runtime override sin recompilar
+```
+
+Cuando activo, Fitz instala `PrometheusBuilder` como recorder
+global del crate `metrics`. Los Counter/Histogram que YA emite
+el wrapper HTTP empiezan a popular Prometheus automático. Y
+auto-mounta `GET /metrics` con exposition format:
+
+```
+# HELP http_requests_total
+# TYPE http_requests_total counter
+http_requests_total{method="POST",path="/users",status="201"} 42
+# HELP http_request_duration_seconds
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{...,le="0.005"} 10
+http_request_duration_seconds_bucket{...,le="0.01"} 25
+...
+```
+
+El endpoint vive en el **mismo puerto + transporte** que el
+resto de la app (NO un puerto separado). Si declaraste tu
+propio `@get("/metrics")`, el tuyo gana — mismo patrón que
+`/openapi.json` / `/healthz`.
+
+**Prometheus + OTel**: si los dos están activos, **Prometheus
+gana** (solo UN recorder global de `metrics` permitido). El
+OTel exporter de spans/logs sigue funcionando; solo las métricas
+van a Prometheus en vez de OTLP.
+
+### 33.5. Patrón canónico — stack completo
+
+Lo que armás en una app de producción típica:
+
+```fitz
+type User { id: Int, name: Str, role: Str }
+
+@auth_provider
+async fn auth(headers: Map<Str, Str>) -> Result<User> {
+    let token = headers.get("authorization")?
+    let claims = jwt.decode(token, env("JWT_SECRET"))?
+    return Ok(User { id: claims["sub"], name: claims["name"], role: claims["role"] })
+}
+
+@authenticated @get("/me")
+async fn me(user: User) -> Result<User> {
+    log.info("/me hit", user_id: user.id)  // ← trace_id auto
+    return Ok(user)
+}
+
+// `prometheus=true` activa el scrape endpoint. OTel se activa
+// solo si OTEL_EXPORTER_OTLP_ENDPOINT está seteada (default off).
+@server(3000, prometheus=true)
+fn cfg() => 0
+```
+
+Deployás con env vars para activar OTel cuando lo necesités:
+
+```bash
+OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318 \
+OTEL_SERVICE_NAME=my-service \
+FITZ_LOG=info \
+./mi-app
+```
+
+Resultado: cada request abre un span en Jaeger, los logs salen
+a stderr con `trace_id` (que Loki indexa), y `/metrics` se
+puede scrapear con Prometheus. Todo correlacionado, todo
+out-of-the-box.
+
+### 33.6. Recetas comunes
+
+**Capturar contexto custom adentro de un span**:
+
+```fitz
+@get("/orders/{id}")
+async fn get_order(id: Int) -> Result<Order> {
+    log.debug("Fetching order", order_id: id)
+    let order = orders.find(fn(o) => o.id == id)?
+    log.info("Order found", order_id: id, total: order.total)
+    return Ok(order)
+}
+```
+
+**Logs estructurados sin HTTP** (CLI puros también soportan
+`log.*`):
+
+```fitz
+@command("import")
+fn import_data(file: Str) -> Int {
+    log.info("Iniciando import", file: file)
+    // ... lógica ...
+    log.info("Import completo", rows: 1234)
+    return 0
+}
+```
+
+(En CLI puros no hay `trace_id` automático — no hay request
+context. Pero los logs estructurados, filtros, y JSON output
+funcionan igual.)
+
+**Custom Counter/Histogram desde código del user** (manual con
+el crate `metrics` re-exportado, deuda menor — hoy podés
+emitir los nombres reservados desde el wrapper y opt-out con
+`@server(observability=false)` si chocan).
+
+**Health checks dedicados** con decorators `@healthz` /
+`@readyz` (Fase 12.1) — están separados del flujo de
+observability pero se combinan bien:
+
+```fitz
+@healthz
+fn alive() -> Bool => true
+
+@readyz
+async fn ready(db: DbConn) -> Result<Bool> {
+    let _ = db.query("SELECT 1").await?
+    return Ok(true)
+}
+```
+
+### 33.7. Qué NO hace Fitz (y por qué)
+
+- **Tracing manual de spans hijos** dentro de un handler — el
+  span root del request es automático, pero abrir spans
+  anidados (por ejemplo, `span("db query")` adentro de una fn)
+  requiere API que aún no expuso el lenguaje. Workaround:
+  los logs adentro del request heredan el `trace_id`, así que
+  podés filtrar por `trace_id` en el backend para ver toda la
+  cadena del request.
+- **Bridge métricas OTel** (deuda residual #1 de Fase 12.3).
+  Las métricas van a Prometheus si `prometheus=true`, o no
+  van a ningún lado si `prometheus=false` (Counter/Histogram
+  emitidos a recorder vacío). El crate
+  `metrics-exporter-opentelemetry = "0.2.1"` que cerraría esta
+  deuda está pineado a `opentelemetry_sdk = "0.31"` mientras
+  nosotros estamos en 0.32 — esperando release nuevo del crate.
+  Mientras tanto: scraper Prometheus → OTel collector cubre el
+  caso.
+- **Logs sin HTTP no llegan a OTel logs signal** — el bridge
+  iter2.b funciona pero requiere SpanContext activo (caso HTTP);
+  CLI puros emiten a stderr únicamente. Refinable cuando entre
+  demanda.
+
+### 33.8. Lo que viene
+
+- Cap dedicado de OTel queda pendiente de actualizar cuando
+  cierre Tier 2 (bridge métricas OTel). Mientras tanto, este cap
+  documenta el feature completo end-to-end con el workaround
+  Prometheus.
+- Sub-fase futura: API explícita para abrir spans hijos
+  (`@span("name") fn ...` o similar) cuando el lenguaje sume
+  primitivas adicionales para tracing manual.
+
+---
+
+## 34. CLI builder nativo (`@command`)
 
 **Hito de Fase 13 (v0.11.0)** — Fitz tiene un CLI builder nativo en
 el core del lenguaje. Una `fn` decorada con `@command("name", desc="...")`
@@ -12297,7 +12645,7 @@ completo con multiple comandos.
 
 ---
 
-## 34. Plantillas y boilerplates
+## 35. Plantillas y boilerplates
 
 Si llegaste hasta acá leyendo, ya viste cada feature de Fitz por
 separado: HTTP nativo, auth, WebSockets, jobs, interop Python,
@@ -12360,7 +12708,7 @@ escribir desde cero.
 
 ---
 
-## 35. Qué sigue
+## 36. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.

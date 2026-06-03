@@ -2611,15 +2611,36 @@ limpio.
 12.4, todas documentadas en `docs/roadmap.md` → "Fase 12.3" →
 sección "Deudas residuales derivadas"):
 
-1. **Bridge métricas OTel**: `metrics::counter!`/`histogram!` que
-   ya emiten Counter `http_requests_total` y Histogram
+1. **Bridge métricas OTel** **— INTENTADO en Fase 12.3.iter2.Tier2
+   (2026-06-03), BLOQUEADO por version conflict, ABIERTO**.
+   `metrics::counter!`/`histogram!` que ya emiten Counter
+   `http_requests_total` y Histogram
    `http_request_duration_seconds` despachan a recorder global
-   vacío hoy. Sumar `metrics-exporter-opentelemetry` como
-   recorder global cuando `is_otel_enabled()` — las métricas que
-   YA emite el código irían al backend OTel automático sin
-   tocar `dispatch_request` ni el wrapper del codegen. Activable
-   en sub-paso futuro de 12.3.iter2 o como parte de 12.5
-   (M7.C2 del curso).
+   vacío hoy (excepto cuando Prometheus está activado por
+   Tier3 — ahí van a la exposition format). El crate
+   `metrics-exporter-opentelemetry = "0.2.1"` (último release en
+   crates.io, 2025-11-15) pinea `opentelemetry_sdk = "0.31"`,
+   pero nosotros estamos en `0.32` para traces (12.3.c) + logs
+   (iter2.b). El árbol de deps no unifica — `MetricExporter`,
+   `Resource`, `SdkMeterProvider` son tipos DISTINTOS aunque
+   tengan el mismo nombre (`E0277: trait bound not satisfied`,
+   `E0308: mismatched types ... different SdkMeterProvider`).
+   El master del crate ya está en 0.32 (verificado en
+   https://github.com/Noelware/metrics-exporter-opentelemetry/blob/master/Cargo.toml)
+   pero no hay release nuevo aún. **Cierre esperado**: cuando
+   Noelware publique la próxima versión del crate (probable
+   v0.3.x), bumpear la dep y reintentar. Implementación ya
+   diseñada (no toca codegen) en branch local descartado: en
+   `serve()` llamar `init_otel_metrics()` DESPUÉS de
+   `init_prometheus()` para que Prometheus tenga precedencia
+   cuando ambos activos (solo UN recorder global de `metrics`
+   permitido), instalar `SdkMeterProvider` con `MetricExporter`
+   OTLP sobre `/v1/metrics` + reader periódico, instalar
+   `metrics_exporter_opentelemetry::Recorder` como global.
+   **Workaround mientras tanto**: Tier3 (Prometheus) cubre el
+   caso 90% — el user activa `@server(prometheus=true)`, OTel
+   collector hace scrape del endpoint `/metrics`. Pierde el
+   beneficio "single sink" de OTLP push pero funciona end-to-end.
 2. ~~**Bridge logs OTel**~~ **CERRADO en Fase 12.3.iter2.b
    (2026-06-03)**: cuando `is_otel_enabled()` es `true` Y el
    `LogExporter` se instaló correctamente, `emit_log_record`

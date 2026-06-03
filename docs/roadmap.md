@@ -9500,11 +9500,15 @@ var, no-op silencioso — zero overhead, zero conexiones de red.
 
 #### Deudas residuales derivadas de 12.3 (NO bloquean 12.4)
 
-1. **Bridge métricas OTel**: `metrics::counter!`/`histogram!`
-   despachan a recorder global vacío hoy. Sumar
-   `metrics-exporter-opentelemetry` como recorder global cuando
-   `is_otel_enabled()` está instalado — Counter/Histogram que
-   ya emite el código irían al backend OTel automático.
+1. **Bridge métricas OTel** **— INTENTADO en Fase 12.3.iter2.Tier2
+   (2026-06-03), BLOQUEADO por version conflict**. El crate
+   `metrics-exporter-opentelemetry = "0.2.1"` (último release en
+   crates.io) pinea `opentelemetry_sdk = "0.31"` mientras nosotros
+   estamos en 0.32 para traces+logs. Tipos `MetricExporter`/
+   `Resource`/`SdkMeterProvider` no unifican entre las dos
+   versiones del SDK. Master del crate ya está en 0.32, esperando
+   release oficial para reintentar. Workaround: Tier3 (Prometheus
+   scrape) cubre 90% — OTel collector hace pull del `/metrics`.
 2. ~~**Bridge logs OTel**~~ **CERRADO en Fase 12.3.iter2.b
    (2026-06-03)**: cuando `is_otel_enabled()` es `true` y el
    `LogExporter` se instaló, `emit_log_record` emite el LogRecord
@@ -9558,6 +9562,36 @@ validación completa.
   cerrada. Total al cierre: **2896 unit** (+2 vs 2894 del cierre
   Fase 12.3). Clippy `--lib --tests --bins -- -D warnings`
   limpio, fmt clean. Smoke `GUIDE_EXAMPLES_COMPILE` verde.
+
+- **12.3.iter2.Tier2 — Bridge métricas OTel (INTENTADO 2026-06-03,
+  BLOQUEADO por version conflict, ABIERTO)**. El crate
+  `metrics-exporter-opentelemetry = "0.2.1"` (último release en
+  crates.io, 2025-11-15) pinea `opentelemetry_sdk = "0.31"`,
+  pero nosotros usamos `0.32` desde 12.3.c. El árbol de deps
+  Cargo no unifica las dos versiones del SDK (`MetricExporter`,
+  `Resource`, `SdkMeterProvider` son tipos DISTINTOS bajo el
+  mismo nombre — errores `E0277` + `E0308` al intentar
+  conectar el `MetricExporter` de `opentelemetry-otlp 0.32` al
+  `MeterProvider` de `metrics-exporter-opentelemetry 0.2.1`).
+
+  Master del crate ya está en 0.32 (verificado en
+  https://github.com/Noelware/metrics-exporter-opentelemetry/blob/master/Cargo.toml).
+  Esperando release oficial — probable v0.3.x.
+
+  **Diseño listo** (no toca codegen): `serve()` llama
+  `init_otel_metrics()` DESPUÉS de `init_prometheus()` para que
+  Prometheus tenga precedencia cuando ambos activos (solo UN
+  recorder global de `metrics`); instala `SdkMeterProvider`
+  con `MetricExporter` OTLP sobre `/v1/metrics` + reader
+  periódico; instala `metrics_exporter_opentelemetry::Recorder`
+  como global. Cuando el crate ship una versión 0.32-compatible,
+  el cierre debería ser ~50 LoC.
+
+  **Workaround**: Tier3 (Prometheus) cubre el caso 90%. OTel
+  collector hace scrape del `/metrics` endpoint del binario.
+  Pierde el beneficio "single sink OTLP push" pero funciona
+  end-to-end (collector consolida traces + logs OTLP + metrics
+  scrape Prometheus).
 
 - **12.3.iter2.Tier3 — Endpoint `/metrics` Prometheus (CERRADA
   2026-06-03)**. Cierra la deuda residual #4 de Fase 12.3.

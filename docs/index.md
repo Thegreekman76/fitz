@@ -128,7 +128,7 @@ Dockerizados** del repo cubren CLI puro, REST API, auth + frontend,
 WebSockets con chat, CRUD multi-archivo con SQLAlchemy + Postgres,
 y un showcase fullstack con frontend rico + Postgres en 3
 containers. Cada uno con README exhaustivo. Ver el
-[cap 33 de la guía](guide.md#33-plantillas-y-boilerplates).
+[cap 35 de la guía](guide.md#35-plantillas-y-boilerplates).
 
 ### Extensión VSCode
 
