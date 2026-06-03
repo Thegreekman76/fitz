@@ -1,6 +1,8 @@
-# M7.C1 — Distribución avanzada: binarios standalone y cross-compile
+# M8.C1 — Distribución avanzada: binarios standalone y cross-compile
 
-**Pre-requisitos**: [M6.C6 — capstone CRUD completo](../m6-postgres-orm/c6-capstone-crud-completo.md).
+**Pre-requisitos**: [M7.C3 — SQLAlchemy interop + cuándo NO usarlo](../m7-python-interop/c3-sqlalchemy-async-vs-orm-nativo.md)
+(o, si decidiste saltarte M7 porque tu stack no toca Python, alcanza con
+[M6.C6 — capstone CRUD completo](../m6-postgres-orm/c6-capstone-crud-completo.md)).
 Tenés una app real cerrada (auth + ORM + WS + cron + Docker). Ahora vamos
 a sacarla del laptop y meterla en otras plataformas, con binarios que
 funcionen **sin instalar Fitz ni Rust ni Python en el destino**.
@@ -293,11 +295,11 @@ Si las 4 funcionan, dominaste distribución avanzada.
 
 ---
 
-## Próximo: M7.C2 — Observability en producción
+## Próximo: M8.C2 — Observability en producción
 
 Tu binario ya está listo para deployment. Ahora viene la pregunta:
 **cuando algo falla en producción, ¿cómo te enterás?** El próximo cap
 cubre logs estructurados, spans HTTP, métricas y el bridge OTel para
 integrar con Jaeger/Datadog/Honeycomb.
 
-→ [M7.C2 — Observability con OpenTelemetry](c2-observability-otel.md)
+→ [M8.C2 — Observability con OpenTelemetry](c2-observability-otel.md)

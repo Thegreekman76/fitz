@@ -1,0 +1,51 @@
+// examples/curso/m7-python-interop/c1-setup/app.fitz
+// Cap 7.C1 — primer programa con interop Python.
+//
+// Combina math + json + datetime con un handler HTTP.
+//
+// Setup:
+//   python3 -m venv venv && source venv/bin/activate
+//   cargo build --release --features python
+//
+// Run:
+//   source venv/bin/activate
+//   fitz-python run app.fitz
+//
+// Probar:
+//   curl localhost:3000/circle/5.0
+//   curl localhost:3000/timestamp
+
+from python import math
+from python import json
+from python import datetime
+
+@get("/circle/{radius}")
+fn circle_area(radius: Float) -> Map<Str, Any> {
+    let area = math.pi * radius * radius
+    let circumference = 2.0 * math.pi * radius
+    return {
+        "radius": radius,
+        "area": area,
+        "circumference": circumference
+    }
+}
+
+@get("/timestamp")
+fn timestamp() -> Map<Str, Any> {
+    let now = datetime.datetime.now()
+    return {
+        "iso": now.isoformat(),
+        "year": now.year,
+        "month": now.month,
+        "day": now.day
+    }
+}
+
+@get("/echo")
+fn echo() -> Str {
+    let payload = {"app": "demo-python-interop", "version": "v1.0"}
+    return json.dumps(payload)
+}
+
+@server(3000)
+fn main() => 0

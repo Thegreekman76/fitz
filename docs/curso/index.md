@@ -42,11 +42,14 @@ asume VSCode para los screenshots ASCII.
 | M4 — HTTP first-class | 5 | ✅ cerrado (C1-C5) |
 | M5 — Async, auth, real-time | 4 | ✅ cerrado (C1-C4) |
 | M6 — Capstone Postgres + ORM nativo | 6 | ✅ cerrado (C1-C6) |
-| M7 — Producción y deployment | 4 | ✅ cerrado (C1-C4) |
+| M7 — Interop Python | 3 | ✅ cerrado (C1-C3) |
+| M8 — Producción y deployment | 5 | ✅ cerrado (C1-C5) |
 
-Total previsto: 7 módulos, 36 capítulos. Cada módulo es **unidad
-releasable independiente** — no hace falta esperar que esté todo
-para empezar.
+Total: **8 módulos, 41 capítulos**. Cada módulo es **unidad releasable
+independiente** — no hace falta esperar que esté todo para empezar.
+M7 (Interop Python) se sumó después de cerrar el plan original M1-M7
+para cubrir el ecosistema Python como puente; el M8 anterior (Producción
+y deployment) se renumeró.
 
 ## M1 — Setup y primer programa
 
@@ -149,20 +152,44 @@ binario standalone de ~30 MB con su `docker-compose.yml`.
 **Sin `pip install`, sin `npm install`, sin `requirements.txt`,
 sin `package.json`** — deploy = un binario.
 
-## M7 — Producción y deployment
+## M7 — Interop Python
 
-Requisito explícito: M6 cerrado (tenés una app real para deployar).
+Requisitos explícitos: M6 cerrado (vas a comparar contra el ORM nativo
+en el cap C3), Python 3.10+ instalado, y un binario `fitz` compilado
+con `cargo build --release --features python` (el default standalone
+sigue sin libpython).
 
-- **[C1 — Distribución avanzada: binarios standalone y cross-compile](m7-produccion-deploy/c1-distribucion-binarios.md)**
-- **[C2 — Observability en producción: logs, spans, métricas, OTel](m7-produccion-deploy/c2-observability-otel.md)**
-- **[C3 — Secrets management: `secret()`, `config()` y `Secret<T>`](m7-produccion-deploy/c3-secrets-config.md)**
-- **[C4 — Deploy avanzado: Docker, healthz/readyz, K8s, 12-factor](m7-produccion-deploy/c4-deploy-docker-k8s.md)**
+- **[C1 — Setup venv + `from python import` + casos simples](m7-python-interop/c1-setup-imports.md)**
+- **[C2 — numpy + pandas reales: data analysis](m7-python-interop/c2-numpy-pandas-data-analysis.md)**
+- **[C3 — SQLAlchemy interop + bridge async + cuándo NO usarlo](m7-python-interop/c3-sqlalchemy-async-vs-orm-nativo.md)**
 
-**Entregable del módulo**: tu app de M6 corriendo en producción real
-con `fitz docker init` + monitoring (logs + spans + métricas) + K8s
-rolling deploys + healthchecks + SIGTERM drain. **12-factor
-compliance por default** sin instalar nada extra. Auditás los
-diferenciales de Fitz contra Python/TypeScript/Go/Spring en cada cap.
+**Entregable del módulo**: un servicio HTTP Fitz que combina handlers
+tipados nativos con calls a pandas para análisis de datos y SQLAlchemy
+para acceso a DB legacy — el puente al ecosistema Python sin renunciar
+a la identidad de Fitz (HTTP nativo, tipos, deployment standalone).
+**Cierra el círculo con M6**: matriz de decisión honesta para elegir
+ORM nativo Fitz vs SQLAlchemy según el contexto.
+
+## M8 — Producción y deployment
+
+Requisito explícito: M6 cerrado (tenés una app real para deployar) o
+M7 cerrado (si tu app usa interop Python — el cap M8.C5 te muestra
+cómo distribuir esos casos sin Python instalado en destino).
+
+- **[C1 — Distribución avanzada: binarios standalone y cross-compile](m8-produccion-deploy/c1-distribucion-binarios.md)**
+- **[C2 — Observability en producción: logs, spans, métricas, OTel](m8-produccion-deploy/c2-observability-otel.md)**
+- **[C3 — Secrets management: `secret()`, `config()` y `Secret<T>`](m8-produccion-deploy/c3-secrets-config.md)**
+- **[C4 — Deploy avanzado: Docker, healthz/readyz, K8s, 12-factor](m8-produccion-deploy/c4-deploy-docker-k8s.md)**
+- **[C5 — Deploy real de apps con interop Python (`--bundle-python` + `--bundle-pip`)](m8-produccion-deploy/c5-bundle-python-pip-deploy.md)**
+
+**Entregable del módulo**: tu app de M6 (puramente Fitz) o M7 (con
+interop Python) corriendo en producción real con `fitz docker init` +
+monitoring (logs + spans + métricas) + K8s rolling deploys +
+healthchecks + SIGTERM drain. Para apps con interop, el cap C5
+agrega `fitz build --bundle-python --bundle-pip` para empaquetar
+CPython + tus paquetes pip adentro del binario — **deploy = un solo
+archivo, sin Python instalado en el destino**. **12-factor compliance
+por default** sin instalar nada extra.
 
 ## Cómo está pensado el curso
 

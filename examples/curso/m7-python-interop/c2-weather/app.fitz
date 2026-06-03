@@ -1,0 +1,49 @@
+// examples/curso/m7-python-interop/c2-weather/app.fitz
+// Cap 7.C2 — handler HTTP que sirve análisis con pandas + numpy.
+//
+// Setup:
+//   python3 -m venv venv && source venv/bin/activate
+//   pip install pandas numpy
+//   python3 generate_data.py    # crea clima.csv una sola vez
+//
+// Run:
+//   source venv/bin/activate
+//   fitz-python run app.fitz
+//
+// Probar:
+//   curl localhost:3000/stats | head -c 200
+//   curl localhost:3000/percentiles/Bariloche
+//   curl localhost:3000/percentiles/Marte    # → 500 con ValueError
+
+from python import weather
+
+type StatRow {
+    mes: Int,
+    ciudad: Str,
+    temp_promedio: Float,
+    temp_desvio: Float,
+    humedad_promedio: Float,
+    muestras: Int
+}
+
+type Percentiles {
+    ciudad: Str,
+    p25: Float,
+    p50: Float,
+    p75: Float
+}
+
+@get("/stats")
+async fn stats() -> Result<List<StatRow>> {
+    let rows = weather.stats_por_mes_y_ciudad()?
+    return Ok(rows)
+}
+
+@get("/percentiles/{ciudad}")
+async fn percentiles(ciudad: Str) -> Result<Percentiles> {
+    let raw = weather.percentiles_de_ciudad(ciudad)?
+    return Ok(raw)
+}
+
+@server(3000)
+fn main() => 0

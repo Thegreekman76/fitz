@@ -1,0 +1,61 @@
+// examples/curso/m7-python-interop/c3-sqlalchemy/app.fitz
+// Cap 7.C3 — handler HTTP que usa SQLAlchemy 2.x async via interop.
+//
+// Setup:
+//   python3 -m venv venv && source venv/bin/activate
+//   pip install "sqlalchemy[asyncio]>=2.0" asyncpg
+//   docker run -d --name fitz-pg -e POSTGRES_PASSWORD=secret -p 5432:5432 postgres:16
+//   fitz-python py-types models.py --out models.fitz   # genera types
+//
+// Run:
+//   source venv/bin/activate
+//   fitz-python run app.fitz
+//
+// Probar:
+//   curl localhost:3000/users
+//   curl -X POST localhost:3000/users -H 'Content-Type: application/json' -d '{"name":"Ada","email":"ada@example.com"}'
+//   curl localhost:3000/users/1
+
+from python import db_helpers
+from models import User
+
+type UserWithOrders {
+    id: Int,
+    name: Str,
+    email: Str,
+    created_at: Str,
+    orders: List<Order>
+}
+
+type Order {
+    id: Int,
+    total_cents: Int,
+    created_at: Str
+}
+
+type CreateUserInput {
+    name: Str,
+    email: Str
+}
+
+@get("/users")
+async fn list_users() -> Result<List<User>> {
+    return db_helpers.list_users()?.await
+}
+
+@get("/users/{id}")
+async fn get_user(id: Int) -> Result<UserWithOrders> {
+    return db_helpers.get_user_with_orders(id)?.await
+}
+
+@post("/users")
+async fn create_user(body: CreateUserInput) -> Result<Map<Str, Int>> {
+    let new_id = db_helpers.create_user(body.name, body.email)?.await
+    return Ok({"id": new_id})
+}
+
+@server(3000)
+async fn main() {
+    let _ = db_helpers.init_schema()?.await
+    log.info("server listo")
+}

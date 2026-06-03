@@ -1,9 +1,13 @@
 # Curso `Fitz de 0 a experto` — Plan
 
-**Estado**: M1 en construcción (arrancó 2026-06-01, post-v0.11.1).
-El contenido real vive en [`docs/curso/`](curso/index.md).
+**Estado**: M1-M8 completos (cerrados al 2026-06-03). M7 (Interop
+Python) se sumó tras Fase 12.5 al detectar que el plan original no lo
+cubría como módulo dedicado — el ex-M7 (Producción y deployment) se
+renumeró a M8 y se le agregó un cap nuevo (M8.C5) sobre deploy real
+de apps con interop. El contenido vive en
+[`docs/curso/`](curso/index.md).
 
-> **Actualización 2026-06-01 (al arrancar M1)**: tres ajustes
+> **Actualización 2026-06-03 (al cerrar M7+M8)**: cinco ajustes
 > sobre el plan original (trazado en v0.9.x):
 >
 > 1. **M6 cambia capstone**: ORM nativo Fitz (cap 31 de la guía)
@@ -11,16 +15,30 @@ El contenido real vive en [`docs/curso/`](curso/index.md).
 >    cap opcional para users con modelos Python existentes. La Fase
 >    10 (cerrada en v0.10.x) volvió a SQLAlchemy un nice-to-have,
 >    no la opción principal.
-> 2. **M7 espera Fase 12**: el módulo de deployment se documenta
->    pero NO se escribe hasta que `fitz dockerfile`/`fitz compose`/
->    `fitz deploy` (Fase 12) estén implementados. Sin esos
->    sub-comandos, el cap quedaría inconsistente con la promesa
->    "deployment ciudadano primera clase". M1-M6 se releasea como
->    "curso completo backend"; M7 llega después.
+> 2. **M7 espera Fase 12** (ya CERRADO): el módulo de deployment
+>    esperaba que `fitz dockerfile`/`fitz compose`/`fitz deploy`
+>    (Fase 12) estuvieran implementados. Fase 12 ENTERA CERRADA al
+>    2026-06-03 (v0.12.5), el módulo se escribió y después se
+>    renumeró a M8 (ver punto 5).
 > 3. **Tabla nueva "Mapping curso → guide.md"** (ver más abajo).
 >    El curso NO duplica el contenido de la guía — la cita como
 >    referencia técnica. Cada cap del curso linkea al cap
 >    correspondiente de la guía para "el detalle exhaustivo".
+> 4. **M7 NUEVO — Interop Python (3 caps, 2026-06-03)**: el plan
+>    original tenía la interop Python como UN cap opcional (C32b)
+>    dentro de M6. Al cierre del curso, decidimos darle módulo
+>    dedicado porque la Fase 8 entera (8.1-8.b-8.c) cerró con
+>    features densas (marshaling, async bridge, `--bundle-python`,
+>    `--bundle-pip`) que justifican espacio propio. M7 nuevo cubre:
+>    C1 Setup venv + first imports, C2 numpy + pandas para data
+>    analysis real, C3 SQLAlchemy interop + matriz de decisión
+>    honesta vs ORM nativo.
+> 5. **M7 anterior renumerado a M8 + cap nuevo C5**: el módulo de
+>    producción y deployment ahora es M8. Cap M8.C5 NUEVO ("Deploy
+>    real de apps con interop Python") cubre `--bundle-python` +
+>    `--bundle-pip` + Dockerfile bundleado — específicamente para
+>    apps salidas de M7 que necesitan distribución sin Python en
+>    destino. Total final del curso: **8 módulos / 41 capítulos**.
 
 ---
 
@@ -268,9 +286,12 @@ Mapping completo al estado actual de la guía (post-v0.11.1):
 | C25 WS | `@ws`/`WsConn<T>`/broadcast/AsyncAPI | §29 |
 | C26 Cron | `@cron`/`@background`/`spawn` | §30 |
 | C27-C32 ORM nativo capstone | Postgres + `@table` + migraciones + CRUD + Docker | §31 Postgres + ORM + [DB y ORM exhaustivo](db-orm.md) |
-| C32b opcional | Interop SQLAlchemy | §21.8 Interop Python |
-| C33-C34 Producción (parcial) | Convención carpetas + env vars | §32 env (parcial) |
-| C35-C36 Deployment | `fitz dockerfile`/`compose`/`deploy`/CI | (pendiente Fase 12) |
+| **M7.C1-C3 Interop Python** (nuevo) | Setup venv + `from python import` + numpy/pandas + SQLAlchemy async | §21 entero (15 sub-secciones) |
+| M8.C1 Distribución avanzada | Binarios standalone + cross-compile + `--bundle-python` | §20 fitz build + §21.11 |
+| M8.C2 Observability | logs + spans + métricas + OTLP | §33 Observability |
+| M8.C3 Secrets management | `secret()` + `config()` + `Secret<T>` | §32 env + §35 Deployment |
+| M8.C4 Deploy con Docker | `fitz docker init/build` + healthz + K8s + 12-factor | §35 Deployment ciudadano |
+| **M8.C5 Deploy con interop Python** (nuevo) | `--bundle-python` + `--bundle-pip` + Dockerfile bundleado | §21.11 + §21.12 |
 
 **Regla operativa del curso**: cada cap arranca diciendo qué
 features nuevas introduce y, al final, linkea a las secciones

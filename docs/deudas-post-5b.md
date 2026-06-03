@@ -3106,3 +3106,105 @@ RBAC custom + token blacklist). Plan original cumplido al 100%.
 pre-M5 del curso" → "T2 — 9.w.1.iter2" → sub-paso 9.w.1.iter2.b
 expandido, y `docs/guide.md` → cap 28 sub-sec `auth` para el patrón
 canónico runnable.
+
+## Curso `Fitz de 0 a experto` — M7 nuevo (Interop Python) + M8 ampliado — **CERRADO 2026-06-03**
+
+Cierre del curso entero (8 módulos / 41 capítulos). Plan original
+tenía 7 módulos (M7 = Producción y deployment) con C32b opcional
+sobre interop SQLAlchemy. Al cierre detectamos que el material
+disponible de Fase 8 (15 sub-secciones del cap 21 + 9 ejemplos
+runnable + bundling completo `--bundle-python`/`--bundle-pip`)
+justificaba un módulo dedicado en lugar de UN cap opcional.
+
+**Decisión** (2026-06-03): renumerar M7 anterior (Producción y
+deployment) a M8 y crear M7 nuevo dedicado a Interop Python con 3
+caps. M8 además recibió un cap nuevo (M8.C5) sobre deploy real de
+apps con interop — específicamente para apps que salgan de M7 y
+necesiten distribución sin Python instalado en destino.
+
+**Sub-pasos**:
+
+- **Renumeración M7 → M8**: `git mv` del directorio, sed sobre los
+  4 caps internos cambiando "M7.C" → "M8.C", actualizando pre-req
+  del primer cap (M8.C1 ahora apunta a M7.C3 o M6.C6 si saltás
+  M7), "Validación final del módulo M7" → "M8", final summary del
+  curso movido a M8.C5.
+- **3 caps nuevos M7 Interop Python** (`docs/curso/m7-python-
+  interop/`):
+  - **C1 Setup venv + `from python import` + casos simples** —
+    venv estándar Python sin magia Fitz, `cargo build --features
+    python`, primer programa con math/json/datetime. Auto-coerción
+    primitiva (Fase 8.1.3), introducción al PyObject opaco.
+  - **C2 numpy + pandas reales** — handler HTTP que sirve análisis
+    de clima con pandas + numpy. Coerción a `type` nominal con
+    anotación destino (Fase 8.4). Excepciones Python → Result
+    automático (Fase 8.3). Benchmarks de marshaling.
+  - **C3 SQLAlchemy interop + bridge async + cuándo NO usarlo** —
+    matriz de decisión honesta vs ORM nativo Fitz. Patrón
+    canónico `<py_call>?.await` (Fase 8.6 bridge tokio↔asyncio).
+    `fitz py-types` para auto-generar types Fitz desde modelos
+    SQLAlchemy.
+- **1 cap nuevo M8.C5 Deploy real con interop Python**
+  (`docs/curso/m8-produccion-deploy/c5-bundle-python-pip-
+  deploy.md`) — `fitz build --bundle-python` (CPython 3.14.5
+  embebido via PBS de Astral) + `--bundle-pip` (paquetes pip
+  empaquetados via tarball secundario). Comparativa Path A
+  (Dockerfile default + venv en runtime, ~250 MB) vs Path B
+  (bundling completo + distroless, ~200 MB). Trade-offs honestos
+  (cuándo NO usar bundling).
+- **Ejemplos runnable** en `examples/curso/m7-python-interop/`:
+  c1-setup, c2-weather, c3-sqlalchemy — cada uno con README,
+  app.fitz, archivos Python helper, y comandos exactos de smoke
+  manual.
+- **Actualización del index y nav**: `docs/curso/index.md` con
+  tabla de 8 módulos / 41 caps + sección nueva M7 + M8
+  ampliada; `mkdocs.yml` con nav M7 (3 caps) + M8 (5 caps);
+  `docs/curso-plan.md` con header de "Actualización 2026-06-03"
+  expandido a 5 ajustes sobre el plan original, mapping
+  curso→guide.md refrescado.
+
+**Decisiones técnicas**: (a) renumeración M7→M8 vía `git mv`
+preservando history; (b) bar editorial idéntico a M1-M6 (header
++ mermaid + tabla diferencial + 7-9 pasos + validación +
+troubleshooting + lo que sigue); (c) cierre del curso entero en
+M8.C5 (era M8.C4 antes); (d) M8.C5 marca opcional para apps
+puramente Fitz nativas (M8.C4 deja link directo al cierre).
+
+**Tests al cierre**: sin cambios — release 100% docs/curso. 2957
+unit + 93 cli_e2e + 3 openapi_e2e + 358 compile_e2e + 6 E2E real
+Postgres. fmt + clippy heredados de v0.12.6 limpios.
+
+**Verificación pre-bump completa** (memoria
+`feedback_pre_release_verification`): roadmap actualizado ✓,
+curso-plan revisado con nota nueva ✓, deudas (esta entrada) ✓,
+CLAUDE entrada nueva ✓, CHANGELOG v0.12.7 ✓, docs/curso/index.md
+✓, mkdocs.yml ✓, extensión VSCode sin cambios (release 100%
+docs), examples/curso/m7-python-interop/ con READMEs + código ✓,
+README raíz sin cambios.
+
+**Cierre formal del curso `Fitz de 0 a experto` entero**: 8
+módulos / 41 capítulos. Plan original cumplido + ampliado para
+cubrir la interop Python como ciudadano pedagógico de primera
+clase y el deploy real de esas apps en producción.
+
+**Deudas residuales derivadas** (NO bloquean — refinamientos
+opcionales):
+
+1. **Smoke automatizado del curso M7 en CI**: hoy los ejemplos
+   runnable se validan a mano. Sumar al CI un job que corre
+   `cargo build --features python` + `fitz-python check
+   examples/curso/m7-python-interop/c*/app.fitz` daría no-drift
+   guarantee. Costo: +5-10 min de CI por release. Recomendado si
+   los caps M7 entran a Marketing/landing.
+2. **Smoke real Docker de M8.C5**: el cap incluye Dockerfiles
+   bundleados completos. Validación manual al cierre; smoke real
+   contra `python:3.X-slim-bookworm` con SQLAlchemy + asyncpg
+   queda como deuda si entra demanda.
+3. **Translation a inglés**: el curso entero está en español
+   (consistente con guide.md). Traducción a inglés queda como
+   sub-paso futuro si el material gana tracción.
+
+**Detalle técnico completo**: `docs/curso/index.md`,
+`docs/curso-plan.md` con la nota de actualización 2026-06-03, y
+los 3+5 caps en `docs/curso/m7-python-interop/` +
+`docs/curso/m8-produccion-deploy/`.

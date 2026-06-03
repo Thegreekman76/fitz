@@ -1,6 +1,6 @@
-# M7.C4 — Deploy avanzado: Docker, healthz/readyz, K8s, 12-factor
+# M8.C4 — Deploy avanzado: Docker, healthz/readyz, K8s, 12-factor
 
-**Pre-requisitos**: [M7.C3 — secrets management](c3-secrets-config.md).
+**Pre-requisitos**: [M8.C3 — secrets management](c3-secrets-config.md).
 Tu app maneja credenciales sin filtrarlas. Ahora la llevamos a
 producción real.
 
@@ -338,7 +338,7 @@ let write_db = db.connect(config("DATABASE_URL_WRITE", default_url))?
 
 ---
 
-## Validación final del módulo M7
+## Validación final del módulo M8
 
 Probá end-to-end el stack completo:
 
@@ -371,41 +371,21 @@ Si los 5 pasos funcionan, **tenés una app production-ready**.
 
 ---
 
-## Cierre del curso
+## Lo que viene en M8.C5
 
-Llegaste al final. Repasemos qué construiste:
+Tu app de M6 (ORM nativo) o de M7 (con interop Python) ya está
+production-ready en lo conceptual. Pero si usaste interop Python en
+M7, todavía hay una pieza pendiente para el deploy: **distribuir el
+binario sin requerir Python instalado en el destino**. El próximo
+cap cubre `fitz build --bundle-python` (CPython embebido) y
+`--bundle-pip` (paquetes pip empaquetados) — la promesa "un solo
+archivo" extendida a apps con interop.
 
-- **M1-M3**: setup, tipos, módulos. La base.
-- **M4**: HTTP first-class con OpenAPI auto.
-- **M5**: async + auth JWT/Argon2 + WebSockets + cron — el stack
-  web entero.
-- **M6**: Postgres + ORM nativo, capstone CRUD completo.
-- **M7**: distribución binarios + observability + secrets + deploy
-  con Dockerfile autogenerado.
+→ [M8.C5 — Deploy real de apps con interop Python](c5-bundle-python-pip-deploy.md)
 
-**Diferenciales de Fitz que ahora conocés a fondo**:
+---
 
-1. **Binarios standalone** sin runtime de Fitz/Rust/Python en destino.
-2. **Cross-compile gratis** vía rustc targets.
-3. **Driver Postgres puro** sin libpq, sin tokio-postgres externa.
-4. **ORM declarativo** con paridad bit-a-bit `fitz run` ↔ `fitz build`.
-5. **Auth nativa** con JWT + Argon2 + RBAC (`@requires`).
-6. **WebSockets tipados** con AsyncAPI auto.
-7. **Jobs sin Celery** — cron + spawn nativos, persistencia opcional.
-8. **Observability OTel built-in** — logs + spans + métricas + OTLP.
-9. **Secrets tipados** con `Secret<T>` opaco + redacción automática.
-10. **Dockerfile autogenerado** con detección AST del shape.
-
-**¿Qué sigue?**:
-
-- **Construí algo**: tomá uno de los [boilerplates](../../boilerplates/)
-  y modificalo para tu caso.
-- **Contribuí**: el repo está abierto, hay [issues etiquetados](https://github.com/Thegreekman76/fitz/issues)
-  buenos para arrancar.
-- **Compartí**: si publicaste algo con Fitz, contanos en el repo. Es
-  early-stage; tu feedback moldea el lenguaje.
-
-Gracias por hacer el curso entero. Te debo un café si nos cruzamos
-en El Chaltén.
-
-— Martin (autor de Fitz)
+El cierre del curso entero (resumen, diferenciales y agradecimiento)
+vive en **M8.C5**, que es el último cap del módulo y del curso. Si
+tu app NO usa interop Python, podés terminar acá — el M8.C5 es
+opcional para apps puramente Fitz nativas.

@@ -1,6 +1,6 @@
-# M7.C3 — Secrets management: `secret()`, `config()` y `Secret<T>`
+# M8.C3 — Secrets management: `secret()`, `config()` y `Secret<T>`
 
-**Pre-requisitos**: [M7.C2 — observability](c2-observability-otel.md).
+**Pre-requisitos**: [M8.C2 — observability](c2-observability-otel.md).
 Sabés emitir logs estructurados; ahora vas a asegurarte de que **no
 filtren credenciales**.
 
@@ -320,10 +320,10 @@ Si los 4 pasos pasan, dominaste secrets management.
 
 ---
 
-## Próximo: M7.C4 — Deploy avanzado con Docker
+## Próximo: M8.C4 — Deploy avanzado con Docker
 
 Tu app ahora maneja secrets sin filtrarlos. La última pieza:
 **llevarla a producción con `fitz docker init`**, healthz/readyz para
 K8s, SIGTERM drain, y patterns 12-factor.
 
-→ [M7.C4 — Deploy avanzado: Docker, healthz, K8s](c4-deploy-docker-k8s.md)
+→ [M8.C4 — Deploy avanzado: Docker, healthz, K8s](c4-deploy-docker-k8s.md)

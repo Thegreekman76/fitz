@@ -1,6 +1,6 @@
-# M7.C2 — Observability en producción: logs, spans, métricas, OTel
+# M8.C2 — Observability en producción: logs, spans, métricas, OTel
 
-**Pre-requisitos**: [M7.C1 — distribución avanzada](c1-distribucion-binarios.md).
+**Pre-requisitos**: [M8.C1 — distribución avanzada](c1-distribucion-binarios.md).
 Tu binario está listo. Ahora vas a saber qué hace en producción.
 
 **Objetivo**: emitir logs estructurados que un parser entiende, abrir
@@ -342,11 +342,11 @@ Si los 5 pasos funcionan, sabés operar Fitz en producción.
 
 ---
 
-## Próximo: M7.C3 — Secrets management
+## Próximo: M8.C3 — Secrets management
 
 Tu app ahora emite logs, spans y métricas. La pregunta siguiente es:
 **¿cómo configurás credenciales sin filtrarlas?** El próximo cap
 cubre `secret()` y `config()` built-ins, el tipo opaco `Secret<T>`,
 y patterns canónicos (.env, K8s secrets, Vault).
 
-→ [M7.C3 — Secrets management](c3-secrets-config.md)
+→ [M8.C3 — Secrets management](c3-secrets-config.md)

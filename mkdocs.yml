@@ -169,11 +169,16 @@ nav:
           - 'C4 — Relations + navigation + N+1': curso/m6-postgres-orm/c4-relations-navigation-preload.md
           - 'C5 — Tipos avanzados (jsonb, arrays, Date)': curso/m6-postgres-orm/c5-tipos-avanzados.md
           - 'C6 — Capstone: app CRUD completa': curso/m6-postgres-orm/c6-capstone-crud-completo.md
-      - 'M7 — Producción y deployment':
-          - 'C1 — Distribución avanzada (binarios + cross-compile)': curso/m7-produccion-deploy/c1-distribucion-binarios.md
-          - 'C2 — Observability en producción (logs + spans + OTel)': curso/m7-produccion-deploy/c2-observability-otel.md
-          - 'C3 — Secrets management (secret() + Secret<T>)': curso/m7-produccion-deploy/c3-secrets-config.md
-          - 'C4 — Deploy avanzado (Docker + healthz + K8s)': curso/m7-produccion-deploy/c4-deploy-docker-k8s.md
+      - 'M7 — Interop Python':
+          - 'C1 — Setup venv + from python import + casos simples': curso/m7-python-interop/c1-setup-imports.md
+          - 'C2 — numpy + pandas reales (data analysis)': curso/m7-python-interop/c2-numpy-pandas-data-analysis.md
+          - 'C3 — SQLAlchemy interop + bridge async + cuándo NO usarlo': curso/m7-python-interop/c3-sqlalchemy-async-vs-orm-nativo.md
+      - 'M8 — Producción y deployment':
+          - 'C1 — Distribución avanzada (binarios + cross-compile)': curso/m8-produccion-deploy/c1-distribucion-binarios.md
+          - 'C2 — Observability en producción (logs + spans + OTel)': curso/m8-produccion-deploy/c2-observability-otel.md
+          - 'C3 — Secrets management (secret() + Secret<T>)': curso/m8-produccion-deploy/c3-secrets-config.md
+          - 'C4 — Deploy avanzado (Docker + healthz + K8s)': curso/m8-produccion-deploy/c4-deploy-docker-k8s.md
+          - 'C5 — Deploy real con interop Python (--bundle-python + --bundle-pip)': curso/m8-produccion-deploy/c5-bundle-python-pip-deploy.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

@@ -11,11 +11,158 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-**Fase 12 ENTERA CERRADA** (12.1-12.5) + **9.w.1.iter2 ENTERA CERRADA**
-(.a RBAC custom + .b token blacklist). Próximo norte: Fase 13+
-(visión post-Fase 12 — `fitz deploy` orchestrator, feature flags, etc.)
-o release dedicado a feedback del curso M7. Tier 2 de Fase 12.3 (bridge
-métricas OTel) sigue bloqueado por release del crate.
+**Curso `Fitz de 0 a experto` cerrado entero (8 módulos / 41 caps)**:
+M7 nuevo dedicado a Interop Python (3 caps) + M8 (Producción y
+deployment, ex-M7) ampliado con un cap nuevo (M8.C5) sobre deploy
+real de apps con interop. **Fase 12 ENTERA + 9.w.1.iter2 ENTERA**
+siguen CERRADAS desde 2026-06-03. Próximo norte: Fase 13+ (visión
+post-Fase 12) según demanda real. Tier 2 de Fase 12.3 (bridge métricas
+OTel) sigue bloqueado por release del crate.
+
+## [v0.12.7] — 2026-06-03 — Curso M7 nuevo (Interop Python) + M8 ampliado (M7→M8 renumber + C5 nuevo)
+
+Release 100% docs/curso, sin cambios de código. Cierra el curso `Fitz
+de 0 a experto` entero (8 módulos / 41 capítulos). Plan original tenía
+7 módulos (M7 = Producción y deployment) pero al cierre detectamos un
+gap: la Interop Python (Fase 8) era módulo de feature densa
+documentado en cap 21 de la guía (~800 LoC, 15 sub-secciones) pero
+**sin presencia pedagógica** en el curso. El plan original lo trataba
+como UN cap opcional (C32b) dentro de M6, lo cual subutilizaba el
+material disponible (9 ejemplos runnable + bundling completo).
+
+**Decisión confirmada con el autor** (2026-06-03): renumerar el M7
+anterior (Producción y deployment) a M8, y crear un M7 nuevo dedicado
+a Interop Python con 3 caps. M8 además recibió un cap nuevo (M8.C5)
+sobre deploy real de apps con interop Python — específicamente para
+las apps que salgan de M7 que necesiten distribución sin Python
+instalado en destino.
+
+**M7 nuevo — Interop Python** (`docs/curso/m7-python-interop/`):
+
+- **M7.C1 — Setup venv + `from python import` + casos simples**
+  (`c1-setup-imports.md`). Setup del venv estándar Python (sin magia
+  Fitz, lee `VIRTUAL_ENV` al boot vía CPython), compilación de `fitz`
+  con `--features python`, primer programa con `math`/`json`/
+  `datetime`. Auto-coerción primitiva (Fase 8.1.3), introducción al
+  concepto de PyObject opaco para tipos complejos. Tabla diferencial
+  vs subprocess/IPC, Node `child_process`, Rust+PyO3 manual, Julia
+  PyCall, Java JNI. Ejemplo runnable handler HTTP combinando los 3
+  módulos stdlib.
+- **M7.C2 — numpy + pandas reales: data analysis**
+  (`c2-numpy-pandas-data-analysis.md`). El sweet spot real de la
+  interop: leer CSV con pandas, calcular con numpy, devolver
+  `list[dict]` que Fitz marshalea automático a
+  `List<Map<Str, Any>>`. Coerción a `type` nominal Fitz con
+  anotación destino (Fase 8.4). Excepciones Python →
+  `Result::Err` automático (Fase 8.3). Benchmarks de marshaling
+  (~12ms para 1000 filas + agg). Tabla diferencial vs FastAPI
+  dedicado, subprocess, FastAPI sidecar, Rust+PyO3 manual.
+- **M7.C3 — SQLAlchemy interop + bridge async + cuándo NO usarlo**
+  (`c3-sqlalchemy-async-vs-orm-nativo.md`). Cierre del módulo:
+  **matriz de decisión honesta** entre ORM nativo Fitz y SQLAlchemy
+  interop. Cubre el patrón canónico `<py_call>?.await` para
+  SQLAlchemy 2.x async (Fase 8.6 bridge tokio↔asyncio). `fitz
+  py-types` para auto-generar `type` Fitz desde modelos SQLAlchemy.
+  9 criterios de decisión (greenfield vs legacy, performance, sin
+  Python en runtime, validación estática, migrations, tooling,
+  equipo, multi-DB, triggers).
+
+**M8 — Producción y deployment** (renombrado de M7, `docs/curso/
+m8-produccion-deploy/`):
+
+- **M8.C1-C4** intactos (renumerados): distribución avanzada,
+  observability OTel, secrets management, deploy con Docker +
+  healthz + K8s + 12-factor.
+- **M8.C5 NUEVO — Deploy real de apps con interop Python**
+  (`c5-bundle-python-pip-deploy.md`). Cubre `fitz build
+  --bundle-python` (CPython 3.14.5 embebido vía python-build-
+  standalone de Astral) y `--bundle-pip` (paquetes pip embebidos
+  via venv temporal + tarball secundario). Comparativa Path A
+  (Dockerfile default + venv en runtime, ~250 MB) vs Path B
+  (bundling completo + distroless runtime, ~200 MB).
+  Trade-offs honestos (cuándo NO usar bundling: CI rápido, C
+  extensions con deps de sistema, layers cacheables, paquetes
+  >100 MB). Cuándo USAR: distribución a usuarios finales, edge
+  functions, reproducibilidad estricta. Smoke real validado con
+  pandas y SQLAlchemy bundleados.
+
+**Decisiones técnicas del nuevo M7/M8**:
+
+- **Bar editorial idéntico a M1-M6**: header con pre-requisitos +
+  objetivo + por qué importa + cross-link a guide.md cap 21,
+  mermaid map, tabla "Por qué Fitz es distinto" comparativa,
+  pasos numerados con código + outputs reales, subset compilable
+  a binario, validación checklist, troubleshooting, lo que sigue.
+- **Pre-req de M7**: M6 cerrado (necesario para entender la
+  matriz vs ORM nativo en M7.C3) + Python 3.10+ + `cargo build
+  --features python`.
+- **Cierre del curso** en M8.C5 (era M8.C4 antes). Si la app NO
+  usa interop Python, M8.C5 es opcional — M8.C4 deja link al
+  cierre.
+
+**Estructura final del curso** (8 módulos / 41 capítulos):
+
+| Módulo | Caps | Total |
+|---|---|---|
+| M1 — Setup y primer programa | C1-C6 | 6 |
+| M2 — Tipos y funciones | C1-C7 | 7 |
+| M3 — Módulos y organización | C1-C5 | 5 |
+| M4 — HTTP first-class | C1-C5 | 5 |
+| M5 — Async, auth, real-time | C1-C4 | 4 |
+| M6 — Capstone Postgres + ORM nativo | C1-C6 | 6 |
+| **M7 — Interop Python (NUEVO)** | C1-C3 | 3 |
+| **M8 — Producción y deployment (ex-M7 + C5 nuevo)** | C1-C5 | 5 |
+| **Total** | | **41** |
+
+**Sub-pasos del release**:
+
+- **Renumeración M7 → M8**: `git mv docs/curso/m7-produccion-
+  deploy/ → docs/curso/m8-produccion-deploy/`. Sed sobre los 4
+  caps existentes: "M7.C" → "M8.C", header del primer cap
+  pre-req actualizado, "Validación final del módulo M7" → "M8",
+  final summary del curso updateado. Renumeración interna 8 refs
+  en headers + cross-links.
+- **3 caps nuevos del M7 Interop Python** escritos siguiendo el
+  bar editorial M6: ~1100 LoC de markdown por cap.
+- **1 cap nuevo M8.C5**: ~800 LoC + el cierre del curso entero
+  movido a este cap.
+- **Ejemplos runnable** en `examples/curso/m7-python-interop/`:
+  C1 (`c1-setup/app.fitz` + README) — handler HTTP con math/
+  json/datetime; C2 (`c2-weather/` con app.fitz + weather.py +
+  generate_data.py + README) — análisis de clima con pandas
+  +numpy; C3 (`c3-sqlalchemy/` con app.fitz + models.py +
+  db_helpers.py + README) — SQLAlchemy 2.x async + bridge.
+- **`docs/curso/index.md`**: tabla de estado con 8 módulos / 41
+  caps. Sección nueva "M7 — Interop Python" con links a los 3
+  caps. Sección "M8 — Producción y deployment" actualizada con
+  cap M8.C5.
+- **`mkdocs.yml`**: nav nueva con M7 (3 caps) + M8 (5 caps).
+- **`docs/curso-plan.md`**: header de "Actualización 2026-06-03"
+  con 5 ajustes sobre el plan original, mapping curso → guide.md
+  refrescado.
+
+**Tests al cierre v0.12.7**: 2957 unit + 93 cli_e2e + 3 openapi_e2e
++ 358 compile_e2e + 6 E2E real Postgres (sin cambios — release 100%
+docs). Clippy + fmt heredados de v0.12.6 limpios.
+
+**Verificación pre-bump completa** (memoria
+`feedback_pre_release_verification`): roadmap actualizado, curso-plan
+revisado con la nota de actualización, deudas-post-5b nota de cierre
+del curso entero, CLAUDE entrada nueva, CHANGELOG (esta entrada),
+docs/curso/index.md ✓, mkdocs.yml ✓, extensión VSCode sin cambios
+(release 100% docs), examples sumados a `examples/curso/m7-python-
+interop/`, README sin cambios (link a curso index ya está).
+
+**Cierre formal del curso `Fitz de 0 a experto` entero**: 8 módulos
+/ 41 capítulos cubren desde "`print('hola')`" hasta apps production-
+ready con interop Python distribuidas como binarios bundleados. Plan
+original cumplido + ampliado.
+
+**Próximos nortes**: Fase 13+ (visión post-Fase 12 — `fitz deploy`
+orchestrator, feature flags, etc.) según demanda real, smoke
+automatizado del curso M7 con `cargo build --features python` en CI
+(deuda residual menor), o release dedicado a feedback de los users
+reales que terminen el curso.
 
 ## [v0.12.6] — 2026-06-03 — Fase 9.w.1.iter2.b: Token blacklist (auth nativa cerrada)
 
