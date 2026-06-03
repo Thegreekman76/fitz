@@ -2697,12 +2697,16 @@ fn cargo_toml_for(
         // `default-features = false` para no traer `grpc-tonic` por
         // accidente (que arrastra su propia stack h2/hyper).
         if has_http {
-            s.push_str("opentelemetry = \"0.32\"\n");
+            // Fase 12.3.iter2.b — feature `logs` en los tres crates OTel
+            // para que el LoggerProvider + LogExporter estén disponibles.
+            // Habilita que `__fitz_log_emit` exporte LogRecords a OTLP
+            // `/v1/logs` cuando `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada.
+            s.push_str("opentelemetry = { version = \"0.32\", features = [\"logs\"] }\n");
             s.push_str(
-                "opentelemetry_sdk = { version = \"0.32\", features = [\"rt-tokio\", \"trace\"] }\n",
+                "opentelemetry_sdk = { version = \"0.32\", features = [\"rt-tokio\", \"trace\", \"logs\"] }\n",
             );
             s.push_str(
-                "opentelemetry-otlp = { version = \"0.32\", default-features = false, features = [\"http-proto\", \"reqwest-blocking-client\", \"trace\"] }\n",
+                "opentelemetry-otlp = { version = \"0.32\", default-features = false, features = [\"http-proto\", \"reqwest-blocking-client\", \"trace\", \"logs\"] }\n",
             );
         }
         s
@@ -7374,6 +7378,16 @@ impl __FitzRetryConfig {
         }
         self.emit("\n// --- 12.3.a.3: runtime de structured logging (módulo `log`) ---\n");
         self.emit(LOGGING_PRELUDE);
+        // Fase 12.3.iter2.b — el helper `__fitz_emit_log_to_otel` tiene
+        // dos versiones: stub no-op (cuando OTEL_PRELUDE NO se emite)
+        // o impl real (parte de OTEL_PRELUDE). Aquí emitimos el stub
+        // SOLO si OTEL_PRELUDE no va a emitirse — mismo gate que
+        // `emit_otel_prelude` (has_http && uses_logging).
+        let will_emit_otel_prelude = self.has_http && self.uses_logging;
+        if !will_emit_otel_prelude {
+            self.emit(LOGGING_OTEL_NOOP_STUB);
+        }
+        self.emit(SPAN_CONTEXT_STRUCT);
         // Fase 12.3.b.4 — `__fitz_current_span_context()` se emite
         // con `tokio::task_local!` real cuando hay runtime tokio
         // (`has_http`/`uses_async`/`uses_jobs`/`uses_db`); sino, stub
@@ -31515,12 +31529,29 @@ fn __fitz_log_emit(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) {
         let _ = writeln!(s, "{}", line);
         let _ = s.flush();
     }
+    // Fase 12.3.iter2.b — emit paralelo al backend OTel. La impl real
+    // de `__fitz_emit_log_to_otel` está en OTEL_PRELUDE; sin OTEL_PRELUDE
+    // emitido, LOGGING_PRELUDE incluye el stub no-op de abajo.
+    __fitz_emit_log_to_otel(level_str, msg, kvs);
 }
 
 #[inline] pub(crate) fn __fitz_log_info(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("info", msg, kvs); }
 #[inline] pub(crate) fn __fitz_log_warn(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("warn", msg, kvs); }
 #[inline] pub(crate) fn __fitz_log_error(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("error", msg, kvs); }
 #[inline] pub(crate) fn __fitz_log_debug(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("debug", msg, kvs); }
+"##;
+
+// Fase 12.3.iter2.b — stub no-op de `__fitz_emit_log_to_otel` para
+// programas que NO emiten OTEL_PRELUDE (CLI puros con log.* sin HTTP).
+// Cuando OTEL_PRELUDE se emite, el stub NO se incluye y la impl real
+// de `__fitz_emit_log_to_otel` viene de OTEL_PRELUDE.
+const LOGGING_OTEL_NOOP_STUB: &str = r##"
+// Sin OTEL_PRELUDE: stub no-op. Los `log.*` solo van a stderr.
+#[inline]
+fn __fitz_emit_log_to_otel(_level_str: &str, _msg: &str, _kvs: &[(&str, __FitzLogValue)]) {
+    // no-op
+}
+"##;
 
 // --- Fase 12.3.b.4 — SpanContext (struct + helpers de generación) ---
 //
@@ -31531,7 +31562,7 @@ fn __fitz_log_emit(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) {
 // `tokio::task_local!`) + `__fitz_with_span_context()` se emiten
 // CONDICIONALMENTE según `has_tokio_runtime` — programas CLI puros
 // con `log.X(...)` no necesitan tokio.
-
+const SPAN_CONTEXT_STRUCT: &str = r##"
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct __FitzSpanContext {
     pub trace_id: String,
@@ -31685,13 +31716,117 @@ pub(crate) fn __fitz_otel_init() {
 
     let provider = SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
-        .with_resource(resource)
+        .with_resource(resource.clone())
         .with_sampler(Sampler::TraceIdRatioBased(sampler_arg))
         .build();
 
     let _tracer = provider.tracer("fitz");
     opentelemetry::global::set_tracer_provider(provider);
+
+    // Fase 12.3.iter2.b — LoggerProvider paralelo al TracerProvider.
+    // Cuando el span exporter funcionó, asumimos endpoint OTLP válido
+    // y armamos el log exporter sobre `/v1/logs`. Si el log exporter
+    // falla, log a stderr y seguimos con el tracer instalado.
+    match opentelemetry_otlp::LogExporter::builder()
+        .with_http()
+        .with_endpoint(format!("{}/v1/logs", endpoint.trim_end_matches('/')))
+        .build()
+    {
+        Ok(log_exporter) => {
+            use opentelemetry_sdk::logs::SdkLoggerProvider;
+            let logger_provider = SdkLoggerProvider::builder()
+                .with_batch_exporter(log_exporter)
+                .with_resource(resource)
+                .build();
+            let _ = __FITZ_OTEL_LOGGER_PROVIDER.set(logger_provider);
+        }
+        Err(err) => {
+            eprintln!(
+                "fitz: OTel log exporter init failed ({}). Logs will only go to stderr.",
+                err
+            );
+        }
+    }
+
     let _ = __FITZ_OTEL_ENABLED.set(true);
+}
+
+// Fase 12.3.iter2.b — LoggerProvider OTel global. `__fitz_otel_init`
+// lo instala cuando el endpoint OTLP responde. `__fitz_emit_log_to_otel`
+// lo consulta para emitir el LogRecord en paralelo a stderr.
+static __FITZ_OTEL_LOGGER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> = std::sync::OnceLock::new();
+
+// Fase 12.3.iter2.b — impl real del helper que LOGGING_PRELUDE llama
+// al final de `__fitz_log_emit`. Cuando OTel está activo Y el
+// LogExporter se instaló, emite el LogRecord paralelo via OTLP. Sin
+// alguno de los dos, no-op.
+fn __fitz_emit_log_to_otel(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) {
+    if !__fitz_otel_is_enabled() { return; }
+    let Some(provider) = __FITZ_OTEL_LOGGER_PROVIDER.get() else { return; };
+    use opentelemetry::logs::{AnyValue, LogRecord as _, Logger, LoggerProvider, Severity};
+    use opentelemetry::trace::{SpanId, TraceId};
+    use opentelemetry::Key;
+    use std::time::SystemTime;
+    let logger = provider.logger("fitz");
+    let mut record = logger.create_log_record();
+    let (severity_number, severity_text) = match level_str {
+        "error" => (Severity::Error, "ERROR"),
+        "warn"  => (Severity::Warn,  "WARN"),
+        "info"  => (Severity::Info,  "INFO"),
+        "debug" => (Severity::Debug, "DEBUG"),
+        _       => (Severity::Info,  "INFO"),
+    };
+    record.set_severity_number(severity_number);
+    record.set_severity_text(severity_text);
+    record.set_body(AnyValue::String(msg.to_string().into()));
+    record.set_observed_timestamp(SystemTime::now());
+    // Trace context derivado del SpanContext activo. iter2.a garantiza
+    // que ya son los IDs del span OTel cuando hay OTel activo →
+    // correlación logs↔spans automática.
+    if let Some(ctx) = __fitz_current_span_context() {
+        if let (Ok(trace_id), Ok(span_id)) = (
+            TraceId::from_hex(&ctx.trace_id),
+            SpanId::from_hex(&ctx.span_id),
+        ) {
+            record.set_trace_context(trace_id, span_id, None);
+        }
+    }
+    for (k, v) in kvs {
+        if let Some(av) = __fitz_logvalue_to_any_value(v) {
+            record.add_attribute(Key::new(k.to_string()), av);
+        }
+    }
+    logger.emit(record);
+}
+
+// Fase 12.3.iter2.b — convierte `__FitzLogValue` (build-time) a
+// `AnyValue` OTel (runtime). Paralelo a `value_to_any_value` del
+// intérprete. Secret → "***" redactado.
+fn __fitz_logvalue_to_any_value(v: &__FitzLogValue) -> Option<opentelemetry::logs::AnyValue> {
+    use opentelemetry::logs::AnyValue;
+    use opentelemetry::Key;
+    use std::collections::HashMap;
+    match v {
+        __FitzLogValue::Int(n) => Some(AnyValue::Int(*n)),
+        __FitzLogValue::Float(f) => Some(AnyValue::Double(*f)),
+        __FitzLogValue::Str(s) => Some(AnyValue::String(s.clone().into())),
+        __FitzLogValue::Bool(b) => Some(AnyValue::Boolean(*b)),
+        __FitzLogValue::Null => Some(AnyValue::String("null".to_string().into())),
+        __FitzLogValue::Secret => Some(AnyValue::String("***".to_string().into())),
+        __FitzLogValue::List(items) => {
+            let arr: Vec<AnyValue> = items.iter().filter_map(__fitz_logvalue_to_any_value).collect();
+            Some(AnyValue::ListAny(Box::new(arr)))
+        }
+        __FitzLogValue::Map(pairs) => {
+            let mut map: HashMap<Key, AnyValue> = HashMap::new();
+            for (k, v) in pairs.iter() {
+                if let Some(av) = __fitz_logvalue_to_any_value(v) {
+                    map.insert(Key::new(k.clone()), av);
+                }
+            }
+            Some(AnyValue::Map(Box::new(map)))
+        }
+    }
 }
 
 pub(crate) fn __fitz_otel_tracer() -> opentelemetry::global::BoxedTracer {
@@ -32145,6 +32280,89 @@ mod tests {
             !code.contains("__fitz_log_init"),
             "no debería emitir __fitz_log_init sin uses_logging: {}",
             code
+        );
+    }
+
+    #[test]
+    fn iter2b_codegen_cli_log_emite_stub_no_op_de_emit_to_otel() {
+        // Fase 12.3.iter2.b — programas CLI puros con `log.*` (sin
+        // HTTP) NO tienen OTEL_PRELUDE → LOGGING_PRELUDE incluye el
+        // stub no-op `__fitz_emit_log_to_otel` para que `__fitz_log_emit`
+        // pueda llamarlo sin romper compile. El stub no emite nada
+        // (logs van solo a stderr).
+        let src = "log.info(\"hello\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("Sin OTEL_PRELUDE: stub no-op"),
+            "esperaba stub no-op de __fitz_emit_log_to_otel para CLI: {}",
+            code
+        );
+        assert!(
+            code.contains("fn __fitz_emit_log_to_otel(_level_str: &str"),
+            "esperaba signature del stub no-op: {}",
+            code
+        );
+        assert!(
+            !code.contains("opentelemetry_otlp::LogExporter::builder"),
+            "CLI sin HTTP NO debe emitir el LogExporter init: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn iter2b_codegen_http_log_emite_logger_provider_real_y_log_exporter() {
+        // Fase 12.3.iter2.b — programas con HTTP + log.* incluyen
+        // OTEL_PRELUDE con LogExporter + LoggerProvider real. El stub
+        // no-op NO se emite (hay impl real). Cargo.toml emitido pide
+        // feature `logs` en los tres crates OTel.
+        let src = "log.info(\"hi\")\n@get(\"/x\")\nfn h() -> Str => \"ok\"\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El stub no-op NO debe estar.
+        assert!(
+            !code.contains("Sin OTEL_PRELUDE: stub no-op"),
+            "HTTP + log debe usar impl real, no stub: {}",
+            code
+        );
+        // LogExporter en el OTel init.
+        assert!(
+            code.contains("opentelemetry_otlp::LogExporter::builder"),
+            "esperaba LogExporter init en OTEL_PRELUDE: {}",
+            code
+        );
+        // LoggerProvider global static.
+        assert!(
+            code.contains("__FITZ_OTEL_LOGGER_PROVIDER"),
+            "esperaba __FITZ_OTEL_LOGGER_PROVIDER static: {}",
+            code
+        );
+        // Impl real del helper con LogRecord + trace_context.
+        assert!(
+            code.contains("fn __fitz_emit_log_to_otel(level_str: &str"),
+            "esperaba impl real de __fitz_emit_log_to_otel: {}",
+            code
+        );
+        assert!(
+            code.contains("record.set_trace_context"),
+            "esperaba set_trace_context para correlación: {}",
+            code
+        );
+        // Cargo.toml debe pedir feature `logs` en los tres crates OTel.
+        // Args: (stem, has_http, uses_async, uses_python, uses_auth,
+        // uses_ws, uses_jobs, uses_logging, uses_db, uses_fitz_value,
+        // uses_date_or_uuid). HTTP + logging activos disparan el bloque
+        // que emite las deps OTel + metrics + uuid + chrono + tracing.
+        let cargo = cargo_toml_for(
+            "foo", true, false, false, false, false, false, true, false, false, false,
+        );
+        assert!(
+            cargo.contains("opentelemetry-otlp"),
+            "Cargo.toml para HTTP+log debe incluir opentelemetry-otlp: {}",
+            cargo
+        );
+        assert!(
+            cargo.contains("\"logs\""),
+            "Cargo.toml debe pedir feature `logs` en los crates OTel: {}",
+            cargo
         );
     }
 

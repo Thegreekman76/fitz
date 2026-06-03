@@ -244,9 +244,9 @@ metrics = "0.24"
 #    si no está, init es no-op).
 #  - OTEL_SERVICE_NAME (default "fitz-app").
 #  - OTEL_TRACES_SAMPLER_ARG (ratio 0.0-1.0; default 1.0 = 100%).
-opentelemetry = "0.32"
-opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace"] }
+opentelemetry = { version = "0.32", features = ["logs"] }
+opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace", "logs"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs"] }
 
 # v0.10.24 (Fase Date/DateTime/Uuid) — Uuid v4 generation + parsing.
 # `v4` feature: random UUID generation con OsRng. v0.10.30 (Tier B.5)

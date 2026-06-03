@@ -158,6 +158,121 @@ pub fn emit_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
         let _ = writeln!(stderr, "{}", line);
         let _ = stderr.flush();
     }
+
+    // Fase 12.3.iter2.b — emit paralelo al backend OTel cuando el
+    // provider está instalado. Sin OTel activo, `logger_provider()`
+    // devuelve `None` y este bloque es no-op (zero overhead). Los
+    // logs en stderr siguen intactos — el bridge es ADITIVO, no
+    // reemplazo. El batch processor del SDK acumula los records y los
+    // envía async via OTLP HTTP/proto al endpoint `/v1/logs`.
+    if crate::observability::is_otel_enabled() {
+        emit_otel_log_record(level_str, msg, kvs);
+    }
+}
+
+/// Fase 12.3.iter2.b — emite el log record al provider OTel global
+/// cuando está instalado. Llamado desde `emit_log_record` después del
+/// write a stderr (emit ADITIVO, no reemplazo).
+///
+/// Estructura del LogRecord exportado:
+/// - `severity_number` + `severity_text`: mapeo 1:1 del `level_str`
+///   (`info`/`warn`/`error`/`debug` → `Severity::Info`/etc + texto
+///   uppercase).
+/// - `body`: `AnyValue::String(msg)` — el mensaje crudo, como en stderr.
+/// - `observed_timestamp`: `SystemTime::now()` — el SDK lo usa cuando
+///   el `timestamp` source no está set (caso típico).
+/// - `trace_context`: derivado del `SpanContext` activo via
+///   `current_span_context()`. Cuando hay OTel activo, el SpanContext
+///   ya está sincronizado con el span OTel (cierre iter2.a), así que
+///   esto produce correlación trace_id/span_id automática entre logs y
+///   spans en el backend (Jaeger/Tempo/Datadog).
+/// - `attributes`: cada `(k, v)` de los kwargs Fitz → `Key` + `AnyValue`.
+///   Valores complejos (List/Map/Instance) van como `ListAny`/`Map`
+///   estructurados (preserva el shape). Valores `Secret` van como
+///   `"***"` (redacción consistente con el output stderr).
+fn emit_otel_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
+    use opentelemetry::logs::{AnyValue, LogRecord as _, Logger, LoggerProvider, Severity};
+    use opentelemetry::trace::{SpanId, TraceId};
+    use opentelemetry::Key;
+    use std::time::SystemTime;
+
+    let Some(provider) = crate::observability::logger_provider() else {
+        return;
+    };
+    let logger = provider.logger("fitz");
+    let mut record = logger.create_log_record();
+
+    let (severity_number, severity_text) = match level_str {
+        "error" => (Severity::Error, "ERROR"),
+        "warn" => (Severity::Warn, "WARN"),
+        "info" => (Severity::Info, "INFO"),
+        "debug" => (Severity::Debug, "DEBUG"),
+        _ => (Severity::Info, "INFO"),
+    };
+    record.set_severity_number(severity_number);
+    record.set_severity_text(severity_text);
+    record.set_body(AnyValue::String(msg.to_string().into()));
+    record.set_observed_timestamp(SystemTime::now());
+
+    // Trace context derivado del SpanContext activo. Cierre iter2.a
+    // garantiza que los IDs ya son los del span OTel cuando hay OTel
+    // activo — esto produce correlación automática logs↔spans en el
+    // backend.
+    if let Some(ctx) = current_span_context() {
+        if let (Ok(trace_id), Ok(span_id)) = (
+            TraceId::from_hex(&ctx.trace_id),
+            SpanId::from_hex(&ctx.span_id),
+        ) {
+            record.set_trace_context(trace_id, span_id, None);
+        }
+    }
+
+    for (k, v) in kvs {
+        if let Some(av) = value_to_any_value(v) {
+            record.add_attribute(Key::new(k.clone()), av);
+        }
+    }
+
+    logger.emit(record);
+}
+
+/// Fase 12.3.iter2.b — convierte un `Value` Fitz a un `AnyValue` OTel
+/// para el LogRecord. Recursivo para List/Map; primitivos directos.
+/// `Secret` se redacta a `"***"` (consistente con el output stderr).
+fn value_to_any_value(v: &Value) -> Option<opentelemetry::logs::AnyValue> {
+    use opentelemetry::logs::AnyValue;
+    use opentelemetry::Key;
+    use std::collections::HashMap;
+    match v {
+        Value::Int(n) => Some(AnyValue::Int(*n)),
+        Value::Float(f) => Some(AnyValue::Double(*f)),
+        Value::Str(s) => Some(AnyValue::String(s.clone().into())),
+        Value::Bool(b) => Some(AnyValue::Boolean(*b)),
+        Value::Null => Some(AnyValue::String("null".to_string().into())),
+        Value::Secret(_) => Some(AnyValue::String("***".to_string().into())),
+        Value::List(items) => {
+            let arr: Vec<AnyValue> = items.lock().iter().filter_map(value_to_any_value).collect();
+            Some(AnyValue::ListAny(Box::new(arr)))
+        }
+        Value::Map(pairs) => {
+            let mut map: HashMap<Key, AnyValue> = HashMap::new();
+            for (k, v) in pairs.lock().iter() {
+                let key_str = match k {
+                    Value::Str(s) => s.clone(),
+                    Value::Int(n) => n.to_string(),
+                    _ => continue,
+                };
+                if let Some(av) = value_to_any_value(v) {
+                    map.insert(Key::new(key_str), av);
+                }
+            }
+            Some(AnyValue::Map(Box::new(map)))
+        }
+        // Tipos no triviales (Instance, Function, Future, etc.) —
+        // fallback al Display de Fitz para no perder info. El OTel
+        // backend lo recibe como string serializado.
+        _ => Some(AnyValue::String(format!("{}", v).into())),
+    }
 }
 
 /// Construye el JSON flat: `{"timestamp": "...", "level": "INFO",
@@ -773,6 +888,81 @@ mod tests {
         assert_eq!(grandchild.trace_id, root.trace_id);
         // El parent del grandchild es el child, NO el root.
         assert_eq!(grandchild.parent_span_id, Some(child.span_id.clone()));
+    }
+
+    #[test]
+    fn iter2b_value_to_any_value_primitivos_mapean_directo() {
+        // Fase 12.3.iter2.b — `value_to_any_value` convierte Value Fitz
+        // a AnyValue OTel para el LogRecord. Primitivos van directo.
+        use opentelemetry::logs::AnyValue;
+        // Int → Int
+        match value_to_any_value(&Value::Int(42)) {
+            Some(AnyValue::Int(n)) => assert_eq!(n, 42),
+            other => panic!("esperaba AnyValue::Int(42), fue {:?}", other),
+        }
+        // Float → Double
+        match value_to_any_value(&Value::Float(2.5)) {
+            Some(AnyValue::Double(f)) => assert!((f - 2.5).abs() < 1e-9),
+            other => panic!("esperaba AnyValue::Double(2.5), fue {:?}", other),
+        }
+        // Str → String
+        match value_to_any_value(&Value::Str("hola".into())) {
+            Some(AnyValue::String(s)) => assert_eq!(s.as_str(), "hola"),
+            other => panic!("esperaba AnyValue::String(\"hola\"), fue {:?}", other),
+        }
+        // Bool → Boolean
+        match value_to_any_value(&Value::Bool(true)) {
+            Some(AnyValue::Boolean(b)) => assert!(b),
+            other => panic!("esperaba AnyValue::Boolean(true), fue {:?}", other),
+        }
+        // Null → String "null"
+        match value_to_any_value(&Value::Null) {
+            Some(AnyValue::String(s)) => assert_eq!(s.as_str(), "null"),
+            other => panic!("esperaba AnyValue::String(\"null\"), fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn iter2b_value_to_any_value_secret_se_redacta() {
+        // Fase 12.3.iter2.b — Secret se exporta como `"***"` al OTel
+        // backend, paralelo a la redacción de Fase 12.3.a en stderr.
+        use opentelemetry::logs::AnyValue;
+        let secret = make_secret(Value::Str("super-secret-token".into()));
+        match value_to_any_value(&secret) {
+            Some(AnyValue::String(s)) => {
+                assert_eq!(s.as_str(), "***");
+                assert!(
+                    !s.as_str().contains("super-secret"),
+                    "el inner del Secret NO debe aparecer en el AnyValue: {:?}",
+                    s
+                );
+            }
+            other => panic!("esperaba AnyValue::String(\"***\"), fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn iter2b_value_to_any_value_list_y_map_son_recursivos() {
+        // Fase 12.3.iter2.b — List/Map estructurados van como
+        // ListAny/Map preservando el shape (no como string).
+        use opentelemetry::logs::AnyValue;
+        let list = make_list(vec![Value::Int(1), Value::Int(2)]);
+        match value_to_any_value(&list) {
+            Some(AnyValue::ListAny(items)) => {
+                assert_eq!(items.len(), 2);
+            }
+            other => panic!("esperaba AnyValue::ListAny, fue {:?}", other),
+        }
+        let map = make_map(vec![
+            (Value::Str("k".into()), Value::Int(42)),
+            (Value::Str("ok".into()), Value::Bool(true)),
+        ]);
+        match value_to_any_value(&map) {
+            Some(AnyValue::Map(m)) => {
+                assert_eq!(m.len(), 2);
+            }
+            other => panic!("esperaba AnyValue::Map, fue {:?}", other),
+        }
     }
 
     #[test]

@@ -2620,12 +2620,31 @@ sección "Deudas residuales derivadas"):
    tocar `dispatch_request` ni el wrapper del codegen. Activable
    en sub-paso futuro de 12.3.iter2 o como parte de 12.5
    (M7.C2 del curso).
-2. **Bridge logs OTel**: los `log.X(...)` siguen yendo solo a
-   stderr. Sumar `opentelemetry-appender-tracing` o un layer
-   custom para que también se exporten al log signal del backend
-   OTel (todos los grandes backends OTel-spec soportan logs
-   nativos). Activable en sub-paso futuro paralelo al bridge
-   métricas.
+2. ~~**Bridge logs OTel**~~ **CERRADO en Fase 12.3.iter2.b
+   (2026-06-03)**: cuando `is_otel_enabled()` es `true` Y el
+   `LogExporter` se instaló correctamente, `emit_log_record`
+   emite el LogRecord en paralelo al backend OTel via OTLP
+   HTTP/proto (endpoint `/v1/logs`). Stderr logs siguen
+   intactos (emit ADITIVO, no reemplazo). Trace context derivado
+   del `SpanContext` activo — adentro de un request HTTP los logs
+   heredan automático el mismo `trace_id`/`span_id` que el span
+   OTel (cierre iter2.a), habilita correlación logs↔spans en el
+   backend. Valores `Secret` se redactan a `"***"` consistente
+   con el output stderr. Paridad bit-a-bit `fitz run` ↔ `fitz
+   build` (codegen emite `__fitz_emit_log_to_otel` real adentro
+   de `OTEL_PRELUDE` + stub no-op en `LOGGING_OTEL_NOOP_STUB`
+   cuando OTel no aplica). Cargo.toml emitido suma feature `logs`
+   a los 3 crates OTel. **Decisión arquitectónica**: usamos la
+   API `opentelemetry::logs` SDK directamente (no
+   `opentelemetry-appender-tracing` como sugería el plan
+   original); el appender requiere emit via `tracing::event!`
+   pero nuestro `emit_log_record` escribe directo a stderr con
+   formatter custom (JSON/pretty de 12.3.a). Costo del refactor
+   custom formatter no se justifica para el caso. 4 unit tests
+   nuevos: `logging::iter2b_value_to_any_value_{primitivos,
+   secret_se_redacta,list_y_map_son_recursivos}` +
+   `codegen::iter2b_codegen_{cli_log_emite_stub_no_op,
+   http_log_emite_logger_provider_real}`.
 3. ~~**Correlación trace_id Fitz↔OTel**~~ **CERRADO en Fase
    12.3.iter2.a (2026-06-03)**: cuando `is_otel_enabled()` es
    `true`, `dispatch_request` abre el span OTel PRIMERO y deriva

@@ -9505,10 +9505,16 @@ var, no-op silencioso — zero overhead, zero conexiones de red.
    `metrics-exporter-opentelemetry` como recorder global cuando
    `is_otel_enabled()` está instalado — Counter/Histogram que
    ya emite el código irían al backend OTel automático.
-2. **Bridge logs OTel**: los `log.X(...)` siguen yendo solo a
-   stderr. Sumar `opentelemetry-appender-tracing` o un layer
-   custom para que también se exporten al log signal del
-   backend OTel.
+2. ~~**Bridge logs OTel**~~ **CERRADO en Fase 12.3.iter2.b
+   (2026-06-03)**: cuando `is_otel_enabled()` es `true` y el
+   `LogExporter` se instaló, `emit_log_record` emite el LogRecord
+   en paralelo al backend OTel via OTLP HTTP/proto (`/v1/logs`).
+   Stderr logs intactos (emit ADITIVO). Trace context derivado
+   del `SpanContext` → correlación logs↔spans automática en el
+   backend. Secret values redactados. Paridad bit-a-bit codegen.
+   Decisión arquitectónica: SDK directa, no
+   `opentelemetry-appender-tracing` (no se justifica refactor
+   del formatter custom JSON/pretty de 12.3.a).
 3. ~~**Correlación trace_id Fitz↔OTel**~~ **CERRADO en Fase
    12.3.iter2.a (2026-06-03)**: `dispatch_request` abre el span
    OTel ANTES del `SpanContext` propio y deriva el `trace_id`/
@@ -9550,13 +9556,55 @@ validación completa.
   Fase 12.3). Clippy `--lib --tests --bins -- -D warnings`
   limpio, fmt clean. Smoke `GUIDE_EXAMPLES_COMPILE` verde.
 
-- **12.3.iter2.b — Bridge logs OTel** (próximo). Sumar
-  `opentelemetry-appender-tracing` (o emit directo en
-  `emit_log_record`) para que los `log.info/warn/error/debug`
-  vayan también al log signal del backend OTel además del
-  stderr. Paralelo a los spans y métricas. Mantiene la
-  decisión "OTel-compatible para los tres signals (traces,
-  metrics, logs) cuando el provider está instalado".
+- **12.3.iter2.b — Bridge logs OTel (CERRADA 2026-06-03)**.
+  Cuando `is_otel_enabled()` está activo Y el `LogExporter` se
+  instaló correctamente, `emit_log_record` (intérprete) y
+  `__fitz_log_emit` (codegen) emiten el LogRecord en paralelo
+  al backend OTel via OTLP HTTP/proto al endpoint `/v1/logs`.
+  Logs en stderr siguen intactos (emit ADITIVO, no reemplazo).
+  El LogRecord exportado lleva: severity (text + numérico),
+  body (msg), observed_timestamp (`SystemTime::now()`),
+  attributes (kwargs Fitz → AnyValue OTel preservando shape
+  de List/Map), y trace context derivado del `SpanContext`
+  activo. Como el `SpanContext` ya está sincronizado con el
+  span OTel adentro de un request HTTP (cierre iter2.a), esto
+  habilita **correlación automática logs↔spans** en el backend
+  (Jaeger/Tempo/Datadog muestran los logs del request al
+  drill-down del span). Valores `Secret` se redactan a `"***"`
+  consistente con stderr.
+
+  Decisión arquitectónica: SDK `opentelemetry::logs` directa
+  (LoggerProvider en static `OnceLock`). El path canónico
+  recomendado era `opentelemetry-appender-tracing` (tracing
+  layer que captura `tracing::event!()`), pero requiere
+  refactorizar el formatter custom JSON/pretty de 12.3.a a
+  una impl de `FormatEvent` — costo no justificado. Nuestra
+  emisión a stderr usa write directo, no eventos tracing;
+  paralelamente emitimos al SDK OTel con la misma información.
+
+  Paridad bit-a-bit `fitz run` ↔ `fitz build`: en codegen,
+  `OTEL_PRELUDE` se extendió con `__FITZ_OTEL_LOGGER_PROVIDER`
+  static + impl real de `__fitz_emit_log_to_otel` +
+  `__fitz_logvalue_to_any_value`. Cuando OTEL_PRELUDE no se
+  emite (CLI puro con log.*), `LOGGING_OTEL_NOOP_STUB` incluye
+  el stub no-op para que `__fitz_log_emit` siempre tenga el
+  helper disponible. El SpanContext struct + helpers se
+  extrajeron a una constante separada `SPAN_CONTEXT_STRUCT`
+  para emisión limpia. Cargo.toml emitido suma feature `logs`
+  a los 3 crates OTel.
+
+  4 unit tests nuevos: `logging::iter2b_value_to_any_value_
+  primitivos_mapean_directo` + `_secret_se_redacta` +
+  `_list_y_map_son_recursivos` (helper de conversión Value Fitz
+  → AnyValue OTel) + `codegen::iter2b_codegen_cli_log_emite_
+  stub_no_op_de_emit_to_otel` + `_http_log_emite_logger_
+  provider_real_y_log_exporter` (paridad codegen).
+
+  Sin tests E2E con backend OTel real (requiere collector
+  vivo + InMemoryExporter complejo de instalar). Validación
+  smoke `GUIDE_EXAMPLES_COMPILE` verde + manual con curl
+  contra el binario emitido para verificar que no hay
+  regresiones de comportamiento.
 
 **12.4 — Dockerfile autogenerado + `fitz docker`** (2 sub-pasos)
 
