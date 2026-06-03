@@ -11,11 +11,120 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.11.2. Tier 1 de las deudas
-pre-M5 del curso (`docs/curso-plan.md`) cerrado entero. Próxima
-dirección: **9.w.1.iter2** (RBAC custom + token refresh — Tier 2,
-release dedicado) si el avance del curso lo demanda, o saltar a
-**Fase 12** (Deployment ciudadano primera clase) / **Tier E ORM**.
+Sin trabajo en curso al cierre de v0.12.1. Bloque iter2 de Fase 12.3
+cerrado (correlación trace_id + bridge logs + Prometheus + cap guía).
+Tier 2 (bridge métricas OTel) abierto a la espera de release nuevo del
+crate `metrics-exporter-opentelemetry`. Próxima dirección: **Fase 12.4
+— Dockerfile autogenerado + `fitz docker`**, o **9.w.1.iter2** (RBAC
+custom + token refresh) si el avance del curso lo demanda.
+
+## [v0.12.1] — 2026-06-03 — Fase 12.3.iter2: cierre de deudas residuales
+
+Mini-tanda dedicada a cerrar las deudas residuales de Fase 12.3. Tier 1
+(correlación trace_id + bridge logs) + Tier 3 (Prometheus) cerrados;
+Tier 2 (bridge métricas OTel) INTENTADO y BLOQUEADO por version
+conflict del crate (esperando release nuevo). Sumado **cap 33 nuevo
+"Observability"** en la guía con renumeración 33→34, 34→35, 35→36.
+
+**Deudas residuales de 12.3 al cierre**:
+
+- ✓ #2 Bridge logs OTel → CERRADO (iter2.b)
+- ✓ #3 Correlación trace_id Fitz↔OTel → CERRADO (iter2.a)
+- ✓ #4 Endpoint /metrics Prometheus → CERRADO (Tier3)
+- ✓ #5 Cap dedicado en guide.md → CERRADO
+- ⚠ #1 Bridge métricas OTel → BLOQUEADO (crate
+  `metrics-exporter-opentelemetry 0.2.1` pinea `opentelemetry_sdk 0.31`
+  mientras usamos 0.32; master del crate ya está en 0.32, esperando
+  release oficial). Workaround end-to-end: Tier3 (Prometheus scrape)
+  cubre 90%.
+
+**iter2.a — Correlación trace_id Fitz↔OTel**: `dispatch_request` y el
+wrapper HTTP del codegen abren el span OTel ANTES del SpanContext
+propio; nuevo constructor `SpanContext::with_ids(trace_id, span_id)`
+deriva los IDs del span OTel. El `trace_id` en logs stderr matchea
+exactamente el del backend OTel (Jaeger/Tempo/Datadog) →
+cross-pipeline queries habilitadas. Paridad bit-a-bit codegen.
+
+**iter2.b — Bridge logs OTel**: `emit_log_record` emite en paralelo a
+stderr Y al backend OTel via OTLP HTTP/proto sobre `/v1/logs` cuando
+el provider está activo. Trace context derivado del SpanContext →
+correlación logs↔spans automática en el backend. Decisión
+arquitectónica: SDK `opentelemetry::logs` directa (no
+`opentelemetry-appender-tracing` — refactorizar el formatter custom
+JSON/pretty de 12.3.a no se justifica).
+
+**Tier3 — Endpoint `/metrics` Prometheus**: `@server(prometheus=true)`
+compile-time + env var `FITZ_PROMETHEUS=1`/`true`/`yes` runtime
+override. Cuando activo, `serve()` instala `PrometheusBuilder` como
+recorder global del crate `metrics` y `build_router` auto-mounta
+`GET /metrics` con exposition format. Mismo puerto + transporte que
+el resto de la app (NO un puerto separado). Si Prometheus + OTel
+ambos activos, Prometheus gana (solo UN recorder global de `metrics`
+permitido).
+
+**Cap 33 nuevo "Observability — logs, spans, métricas, OTel"**:
+~300 LoC markdown end-to-end — structured logging con kwargs y
+redacción Secret, spans HTTP automáticos + correlación trace_id,
+OTel exporter (TracerProvider + LoggerProvider) opt-in via env var,
+`/metrics` Prometheus opt-in, patrón canónico stack completo,
+recetas comunes, panorama vecino (FastAPI/Express/Go/Rust), y
+honestidad sobre lo que NO hace.
+
+**Validación al cierre**: 2906 unit + 81 cli_e2e + 3 openapi_e2e + 4
+compile_e2e log codegen + smoke ~290 ejemplos verde en 833s.
+Clippy `--lib --tests --bins -- -D warnings` + fmt limpios.
+
+## [v0.12.0] — 2026-06-03 — Fase 12.3 entera: Observability minimal con OpenTelemetry
+
+Cierre formal de Fase 12.3 en 3 bloques + 11 sub-pasos. Observability
+ciudadana de primera clase en el core del compilador, con
+OpenTelemetry collector compatible (Jaeger, Tempo, Honeycomb, Datadog,
+etc.).
+
+**12.3.a — Structured logging built-in** (3 sub-pasos):
+`log.info/warn/error/debug(msg, kwargs)` con kwargs heterogéneos
+(`Int`/`Float`/`Str`/`Bool`/`Null`/`Secret`/`List`/`Map`/nominal),
+output JSON flat a stderr por default con `timestamp` + `level` +
+`msg` + kwargs; pretty mode con ANSI colors cuando TTY o
+`FITZ_LOG_FORMAT=pretty`. Filter via `FITZ_LOG=info|debug|warn|error`
+(default `info`). Redacción recursiva de `Value::Secret` en
+`List`/`Map`. Stack: `tracing` + `tracing-subscriber` + `chrono` +
+`serde_json`. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+**12.3.b — Spans HTTP + métricas + correlación trace_id** (5
+sub-pasos): cada request HTTP abre un `SpanContext` root con IDs
+OTel-compatibles (`trace_id` 32 hex / `span_id` 16 hex generados con
+`uuid::Uuid::new_v4()`). Logs del handler heredan automático
+`trace_id`/`span_id` via `tokio::task_local!` (atraviesa thread
+boundaries multi-thread). Access log `log.info("http.access", ...)`
+con `http.method`/`http.target` (template del route)/
+`http.status_code`/`duration_ms`. Counter `http_requests_total{method,
+path, status}` + Histogram `http_request_duration_seconds{method,
+path, status}` con labels iguales para correlación cross-metric.
+Opt-out total con `@server(observability=false)` que bypassa el
+wrapper de instrumentación entero.
+
+**12.3.c — OTLP exporter** (3 sub-pasos): cuando
+`OTEL_EXPORTER_OTLP_ENDPOINT` está seteada, conexión a backend OTel
+real con `opentelemetry-otlp = "0.32"` feature `http-proto` (sobre
+gRPC por simplicidad + compat proxy + recomendación
+Datadog/Honeycomb). Sampler `TraceIdRatioBased` con
+`OTEL_TRACES_SAMPLER_ARG` clamp `[0.0, 1.0]`. Service name desde
+`OTEL_SERVICE_NAME` (default `"fitz-app"`). Sin la env var, no-op
+silencioso — zero overhead, zero conexiones de red. Paridad bit-a-bit
+intérprete↔binario.
+
+**Deudas residuales derivadas** (NO bloquean Fase 12.4): bridge
+métricas OTel, bridge logs OTel, correlación trace_id Fitz↔OTel,
+endpoint `/metrics` Prometheus opt-in, cap dedicado en guide.md.
+**Las 5 cerradas en v0.12.1** excepto #1 (bridge métricas OTel) que
+quedó bloqueada por version conflict del crate
+`metrics-exporter-opentelemetry` 0.31 vs nuestro 0.32 — esperando
+release del crate.
+
+**Validación al cierre**: 2894 unit + 81 cli_e2e + 3 openapi_e2e + 4
+compile_e2e log codegen + smoke ~290 ejemplos verde. Clippy
+`--all-targets -- -D warnings` + `cargo fmt --all --check` limpios.
 
 ## [v0.11.2] — 2026-06-02 — 9.w.3.iter2: Persistencia + retry + timezone + catch_up en `@cron`
 
