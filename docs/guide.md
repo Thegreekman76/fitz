@@ -10063,6 +10063,35 @@ el runtime responde **403**. El checker exige que el tipo `User`
 fn dashboard(user: User) -> Str => "hola {user.name}"
 ```
 
+**`@requires("role")`** (Fase 9.w.1.iter2) — RBAC custom apilable
+para roles más allá de `admin`. El runtime ejecuta el provider e
+inyecta el `user`; después verifica que `user.role` matchee al
+menos uno de los roles requeridos. Si no, **403** con el role
+actual y los requeridos en el mensaje. Apilable para OR:
+
+```fitz
+@requires("editor")
+@post("/articles")
+fn create(body: Article, user: User) -> Article {
+    // Solo si user.role == "editor"
+    return body
+}
+
+@requires("editor")
+@requires("publisher")
+@put("/articles/{id}")
+fn publish(id: Int, user: User) -> Article {
+    // Si user.role == "editor" O user.role == "publisher"
+    ...
+}
+```
+
+Como `@admin`, `@requires` exige `role: Str` en el `User` type
+del provider (no nullable). Es independiente de `@authenticated`
+— pero implica auth (el wrapper corre el provider igual). El
+mensaje de 403 cita el role actual del user y la lista de roles
+requeridos, útil para debug y observabilidad.
+
 **`jwt`** — módulo built-in. Siempre disponible, sin import.
 
 ```fitz

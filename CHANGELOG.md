@@ -11,11 +11,113 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Fase 12.4 ENTERA CERRADA (12.4.a + 12.4.b). Queda 12.5 (cap nuevo "Deployment
-ciudadano primera clase" en `docs/guide.md` + caps del curso M7) para
-cerrar Fase 12 entera. También sigue abierta la 9.w.1.iter2 (RBAC custom +
-token refresh) si el avance del curso lo demanda. Tier 2 de Fase 12.3
-(bridge métricas OTel) sigue bloqueado por release del crate.
+Fase 12.4 ENTERA CERRADA + 9.w.1.iter2.a CERRADA (RBAC custom con
+`@requires`). Quedan abiertos: 9.w.1.iter2.b (token blacklist + refresh —
+builtins `auth.blacklist`/`auth.is_blacklisted` + tabla auto-creada),
+Fase 12.5 (cap "Deployment ciudadano primera clase" en `docs/guide.md` +
+caps del curso M7). Tier 2 de Fase 12.3 (bridge métricas OTel) sigue
+bloqueado por release del crate.
+
+## [v0.12.4] — 2026-06-03 — Fase 9.w.1.iter2.a: `@requires("role")` (RBAC custom)
+
+Decorator nuevo `@requires("role")` apilable para roles más allá de
+`@admin`. El runtime ejecuta el provider e inyecta el `user`; después
+verifica que `user.role` matchee al menos uno de los roles requeridos.
+Si no, 403 con el role actual y los requeridos en el mensaje.
+
+**Sintaxis**:
+
+```fitz
+@requires("editor")
+@post("/articles")
+fn create(body: Article, user: User) -> Article {
+    // Solo si user.role == "editor"
+}
+
+@requires("editor")
+@requires("publisher")
+@put("/articles/{id}")
+fn publish(id: Int, user: User) -> Article {
+    // OR — matchea cualquiera de los dos
+}
+```
+
+**Decisiones técnicas**:
+
+- **`@requires` implica auth** — el wrapper corre el `@auth_provider`
+  igual que `@authenticated`/`@admin`. No requiere apilar
+  `@authenticated` explícito.
+- **Multi-decorator = OR**, no AND. Razón: un user tiene UN role; pedir
+  "role == 'a' AND role == 'b'" sería incoherente. OR cubre "este
+  endpoint permite editor O publisher".
+- **Exige `role: Str` en `User`** (no nullable) — paralelo a `@admin`.
+  El checker rechaza tipos sin el field.
+- **Mensaje de 403 enriquecido** con el role del user y la lista de
+  requeridos: `"acceso prohibido — role 'viewer' no autorizado
+  (requeridos: editor, publisher)"`. Útil para debug y observability
+  (los logs lo capturan via Fase 12.3 OTel spans).
+- **MVP solo singular** — `user.role: Str`, no `user.roles: List<Str>`.
+  Multi-role queda como deuda residual visible (`@requires(roles=[...])`
+  o el patrón canónico `if user.roles.contains("editor") { ... }`).
+
+**Implementación**:
+
+- **Checker** (`src/types.rs`): `check_auth_decorators` acepta `requires`
+  como kind, valida shape (1 arg Str literal, sin kwargs, sólo sobre
+  handlers HTTP, exige `role: Str` en User), rechaza role duplicado en
+  decorators apilados. 9 unit tests nuevos.
+- **Runtime** (`src/http.rs`): `RouteSpec` gana `required_roles:
+  Vec<String>`. El wrapper de `dispatch_request` y el WS path dispara
+  el provider cuando `auth != None || !required_roles.is_empty()`.
+  Después del admin check, valida que `user.role` esté en
+  `required_roles`. 5 E2E nuevos en oneshot router (role correcto =
+  200, role incorrecto = 403, apilado acepta cualquiera, apilado
+  rechaza viewer, sin header = 401 ANTES de evaluar role).
+- **Codegen** (`src/codegen.rs`): `HandlerSig` gana `required_roles`,
+  `emit_auth_check` emite el role check después del admin check,
+  paralelo en el WS wrapper. `partition_program_stmts` acepta
+  `requires` como decorator válido. `auth_user_param_name` lookup
+  dispara también con `@requires` (no solo con `auth != None`).
+- **Evaluator** (`src/evaluator.rs`): nuevo helper
+  `collect_required_roles` paralelo a `collect_route_auth`. Pipeline
+  `process_decorator → register_http_route/register_ws_route` propaga
+  el slice nuevo. La detección del leftover `user param` dispara con
+  `has_auth_decorator` (auth O required_roles).
+- **LSP** (`src/lsp.rs`): nueva entrada en `decorator_completions()`
+  con snippet `requires("editor")` y descripción.
+
+**Tests al cierre v0.12.4**: 2951 unit (+14: 9 checker + 5 runtime) +
+93 cli_e2e + 3 openapi_e2e. Clippy `--lib --tests --bins -- -D warnings`
+limpio, `cargo fmt --all --check` limpio. (Nota: el test
+`logging::tests::detect_format_respeta_override_env_pretty` es flaky
+con `--test-threads=multiple` por race condition de env vars; passa
+con `--test-threads=1`. Pre-existente, NO de 9.w.1.iter2.a.)
+
+**Deuda residual derivada de 9.w.1.iter2.a** (sub-iter futuro):
+
+- **9.w.1.iter2.b — Token blacklist + refresh**: builtins
+  `auth.blacklist(db, jti, expires_at) -> Result<Null>` y
+  `auth.is_blacklisted(db, jti) -> Result<Bool>` con tabla
+  `fitz_token_blacklist(jti TEXT PRIMARY KEY, expires_at BIGINT
+  NOT NULL)` auto-creada al primer call (paralelo a Fase 9.w.3.iter2
+  cron persistente). Endpoints `/auth/logout` y `/auth/refresh` se
+  escriben a mano por el user (~10 LoC cada uno) con los builtins
+  disponibles; auto-mount queda fuera del MVP. Requiere DB
+  obligatoria (Postgres).
+- **Multi-role**: `user.roles: List<Str>` con `@requires(roles=
+  [...])`. Para el MVP, multi-role se cubre apilando `@requires`
+  decorators (OR) o con check manual en el handler.
+- **Role hierarchy**: "admin implies editor implies viewer" no se
+  modela. Aceptable para el MVP — el user lo arma a mano si quiere
+  (`@requires("admin") @requires("editor") @requires("viewer")` en
+  todos los handlers editor; o usa una fn helper `has_role(user, min)`
+  con la lógica de jerarquía).
+- **Auto-401 cuando `@requires` está apilado sin handler HTTP**: el
+  checker exige `@get`/`@post`/etc apilado; sin él, error claro.
+
+**Próximo norte**: **Fase 12.5** (cap "Deployment ciudadano primera
+clase" + caps del curso M7) y luego 9.w.1.iter2.b si la demanda real
+aparece.
 
 ## [v0.12.3] — 2026-06-03 — Fase 12.4.b: smart detection rica + `fitz docker build`
 

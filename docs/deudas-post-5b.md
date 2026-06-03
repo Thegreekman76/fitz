@@ -2867,3 +2867,80 @@ limitación conocida de interop indirecto).
 **Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.4 —
 Dockerfile autogenerado + `fitz docker`" → sub-paso 12.4.b expandido
 con sub-pasos 12.4.b.1 + 12.4.b.2.
+
+## Fase 9.w.1.iter2.a — `@requires("role")` (RBAC custom) — **CERRADO 2026-06-03**
+
+Cierre parcial de Fase 9.w.1.iter2 (queda 9.w.1.iter2.b para token
+blacklist + refresh). Decorator nuevo `@requires("role")` apilable
+sobre handlers HTTP/`@ws` para roles más allá de `@authenticated`/
+`@admin`. El runtime ejecuta el provider, inyecta el `user`, y valida
+que `user.role` matchee al menos uno de los roles requeridos. Si no,
+403 con role actual + requeridos en el mensaje.
+
+**Sintaxis**:
+
+```fitz
+@requires("editor")
+@post("/articles")
+fn create(body: Article, user: User) -> Article { ... }
+
+@requires("editor")
+@requires("publisher")
+@put("/articles/{id}")
+fn publish(id: Int, user: User) -> Article { ... }  // OR
+```
+
+**Decisiones técnicas del MVP**: (a) `@requires` implica auth (corre
+el provider igual que `@authenticated`/`@admin`); (b) multi-decorator
+= OR (un user tiene UN role, pedir A AND B sería incoherente); (c)
+exige `role: Str` no nullable en User type (paralelo a `@admin`);
+(d) mensaje de 403 enriquecido con role actual + lista de requeridos;
+(e) MVP singular `user.role: Str`, multi-role `user.roles: List<Str>`
+queda como deuda; (f) paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+**Implementación**:
+
+- `src/types.rs::check_auth_decorators` acepta `requires` como kind,
+  valida shape sintáctico, rechaza role duplicado en decorators
+  apilados. 9 unit tests (`requires_*`).
+- `src/http.rs::RouteSpec` gana `required_roles: Vec<String>`. El
+  wrapper `dispatch_request` y el WS path disparan el provider
+  cuando `auth != None || !required_roles.is_empty()`. Después del
+  admin check, valida que `user.role` esté en `required_roles`. 5
+  E2E nuevos en oneshot router.
+- `src/codegen.rs::HandlerSig` gana `required_roles`,
+  `emit_auth_check` emite el role check después del admin check
+  (paralelo en el WS wrapper). `partition_program_stmts` acepta
+  `requires` como decorator válido. `auth_user_param_name` lookup
+  dispara también con `@requires`.
+- `src/evaluator.rs`: helper nuevo `collect_required_roles` paralelo
+  a `collect_route_auth`. Pipeline `process_decorator →
+  register_http_route/register_ws_route` propaga el slice.
+- `src/lsp.rs::decorator_completions` suma entrada `requires` con
+  snippet `requires("editor")`.
+
+**Tests al cierre**: 2951 unit (+14) + 93 cli_e2e + 3 openapi_e2e.
+Clippy `--lib --tests --bins -- -D warnings` limpio, fmt clean.
+
+**Deudas residuales derivadas** (sub-iter futuro 9.w.1.iter2.b):
+
+1. **Token blacklist + revocación server-side**: builtins
+   `auth.blacklist(db, jti, expires_at) -> Result<Null>` y
+   `auth.is_blacklisted(db, jti) -> Result<Bool>` con tabla
+   `fitz_token_blacklist(jti TEXT PRIMARY KEY, expires_at BIGINT
+   NOT NULL)` auto-creada al primer call (paralelo a Fase 9.w.3.iter2
+   cron persistente). Patrón canónico: endpoints `/auth/logout` y
+   `/auth/refresh` se escriben a mano (~10 LoC cada uno) con los
+   builtins. Auto-mount fuera del MVP. Requiere DB obligatoria.
+2. **Multi-role**: `user.roles: List<Str>` con `@requires(roles=[...])`.
+   MVP se cubre apilando `@requires` decorators (OR) o con check
+   manual `if user.roles.contains("editor") { ... }`.
+3. **Role hierarchy** ("admin implies editor implies viewer") no se
+   modela. Aceptable para el MVP — el user lo arma a mano si quiere.
+4. **Mensajes 403 i18n**: el formato actual está en español
+   (consistente con el resto del runtime). Multi-lenguaje queda como
+   deuda separada si entra demanda.
+
+**Detalle técnico completo**: `docs/roadmap.md` → sección "Tiers
+pre-M5 del curso" → "T2 — 9.w.1.iter2" expandido con los dos
+sub-pasos.

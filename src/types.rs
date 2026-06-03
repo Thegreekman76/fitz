@@ -9343,13 +9343,70 @@ fn check_auth_decorators(
     decorators: &[Decorator],
     fn_span: Span,
 ) {
+    let mut seen_requires_roles: Vec<String> = Vec::new();
     for deco in decorators {
         let kind = match deco.name.as_str() {
-            "authenticated" | "admin" => deco.name.as_str(),
+            "authenticated" | "admin" | "requires" => deco.name.as_str(),
             _ => continue,
         };
-        // 1) Sin args ni kwargs en el MVP.
-        if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+        // 1) Validación de shape:
+        //    - `@authenticated`/`@admin`: sin args ni kwargs.
+        //    - `@requires`: 1 arg Str literal, sin kwargs. Fase 9.w.1.iter2.a.
+        if kind == "requires" {
+            if !deco.kwargs.is_empty() {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@requires sobre fn '{}': no admite kwargs en el MVP. Sintaxis: `@requires(\"role\")`.",
+                        fn_name,
+                    ),
+                ));
+                continue;
+            }
+            if deco.args.len() != 1 {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@requires sobre fn '{}': espera exactamente 1 arg (el role como Str literal), recibió {}.",
+                        fn_name,
+                        deco.args.len(),
+                    ),
+                ));
+                continue;
+            }
+            let role = match &deco.args[0] {
+                Expr::Str(s, _) => s.clone(),
+                _ => {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "@requires sobre fn '{}': el arg debe ser Str literal.",
+                            fn_name,
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            if seen_requires_roles.contains(&role) {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@requires sobre fn '{}': role '{}' duplicado en decorators apilados.",
+                        fn_name, role,
+                    ),
+                ));
+                continue;
+            }
+            seen_requires_roles.push(role);
+        } else if !deco.args.is_empty() || !deco.kwargs.is_empty() {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
                 fn_span.line,
@@ -9413,16 +9470,16 @@ fn check_auth_decorators(
                 ),
             ));
         }
-        // 5) `@admin` exige campo `role: Str` en el User type.
-        if kind == "admin" && !provider.has_role_field {
+        // 5) `@admin` y `@requires` exigen campo `role: Str` en el User type.
+        if (kind == "admin" || kind == "requires") && !provider.has_role_field {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@admin sobre fn '{}': el tipo `{}` (return del `@auth_provider`) debe tener un campo `role: Str` para discriminar admins. \
+                    "@{} sobre fn '{}': el tipo `{}` (return del `@auth_provider`) debe tener un campo `role: Str` para discriminar roles. \
                      Agregalo a la declaración de `{}`.",
-                    fn_name, provider.user_type_name, provider.user_type_name
+                    kind, fn_name, provider.user_type_name, provider.user_type_name
                 ),
             ));
         }
@@ -15781,6 +15838,128 @@ print(total)
                    @get(\"/me\")\n\
                    fn me(user: User) -> User { return user }";
         assert_auth_err(src, "no admite args ni kwargs");
+    }
+
+    // ----- Fase 9.w.1.iter2.a — @requires("role") (RBAC custom) -----
+
+    #[test]
+    fn requires_con_role_str_literal_no_da_error() {
+        // Patrón canónico: `@requires("editor")` sobre handler HTTP con
+        // provider declarado y User.role: Str. Compila limpio.
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires(\"editor\")\n\
+                   @post(\"/posts\")\n\
+                   fn create(user: User) -> Str { return \"ok\" }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn requires_sin_role_field_en_user_es_error() {
+        // Como `@admin`, `@requires` exige `role: Str` en el User type.
+        let src = "type User { id: Int, name: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires(\"editor\")\n\
+                   @get(\"/edit\")\n\
+                   fn h(user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "campo `role: Str`");
+    }
+
+    #[test]
+    fn requires_apilado_con_dos_roles_no_da_error() {
+        // Apilar dos `@requires` distintos = OR (el user.role debe matchear
+        // al menos uno).
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires(\"editor\")\n\
+                   @requires(\"publisher\")\n\
+                   @post(\"/articles\")\n\
+                   fn create(user: User) -> Str { return \"ok\" }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn requires_con_role_duplicado_es_error() {
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires(\"editor\")\n\
+                   @requires(\"editor\")\n\
+                   @get(\"/x\")\n\
+                   fn h(user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "duplicado");
+    }
+
+    #[test]
+    fn requires_sin_provider_es_error() {
+        let src = "type User { id: Int, role: Str }\n\
+                   @requires(\"editor\")\n\
+                   @get(\"/x\")\n\
+                   fn h(user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "no hay `@auth_provider`");
+    }
+
+    #[test]
+    fn requires_sin_handler_http_es_error() {
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires(\"editor\")\n\
+                   fn algo(user: User) -> Str { return \"x\" }";
+        assert_auth_err(src, "solo se aplica a handlers HTTP");
+    }
+
+    #[test]
+    fn requires_sin_arg_es_error() {
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires()\n\
+                   @get(\"/x\")\n\
+                   fn h(user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "espera exactamente 1 arg");
+    }
+
+    #[test]
+    fn requires_con_kwargs_es_error() {
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires(role=\"editor\")\n\
+                   @get(\"/x\")\n\
+                   fn h(user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "no admite kwargs");
+    }
+
+    #[test]
+    fn requires_sin_param_user_es_error() {
+        // `@requires` necesita el user inyectado para chequear el role.
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @requires(\"editor\")\n\
+                   @get(\"/x\")\n\
+                   fn h() -> Str { return \"ok\" }";
+        assert_auth_err(src, "falta param de tipo");
     }
 
     #[test]

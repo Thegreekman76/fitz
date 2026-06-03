@@ -154,6 +154,16 @@ pub struct RouteSpec {
     /// de `@authenticated`/`@admin` sobre el handler. `None` (default)
     /// es ruta pública.
     pub auth: AuthSpec,
+    /// Fase 9.w.1.iter2.a — RBAC custom via `@requires("role")`
+    /// apilable. Cada `@requires("X")` agrega `"X"` a este Vec.
+    /// El wrapper de runtime exige que `user.role` (Str) esté en este
+    /// Vec; si no, 403. `@requires` implica auth (el wrapper corre el
+    /// `@auth_provider` aunque `auth == None`). Empty vec = sin
+    /// requisito de role (default). Apilar dos `@requires("a")
+    /// @requires("b")` = `vec!["a", "b"]` = el role debe matchear al
+    /// menos uno (OR sobre los valores; AND sobre múltiples decorators
+    /// sería incoherente porque el user solo tiene UN role).
+    pub required_roles: Vec<String>,
     /// Fase 9.w.1.c — Nombre del param del handler donde inyectar el
     /// `user` retornado por el `@auth_provider`. `Some(name)` cuando
     /// `auth != None` y el handler declaró un param de tipo `User`
@@ -2513,9 +2523,10 @@ fn build_ws_method_router(
 
             // Auth pre-upgrade (paralelo al wrapper HTTP 9.w.1.c). El
             // checker garantiza que si `route.auth != None`, existe un
-            // provider en el registry.
+            // provider en el registry. Fase 9.w.1.iter2.a: `@requires("role")`
+            // también dispara el wrapper aunque `auth == None`.
             let mut auth_user: Option<Value> = None;
-            if route.auth != AuthSpec::None {
+            if route.auth != AuthSpec::None || !route.required_roles.is_empty() {
                 let provider = match registry.auth_provider.as_ref() {
                     Some(h) => h.clone(),
                     None => {
@@ -2607,6 +2618,46 @@ fn build_ws_method_router(
                                     axum::Json(serde_json::json!({
                                         "error": "acceso prohibido — se requiere rol admin"
                                     })),
+                                )
+                                    .into_response();
+                            }
+                        }
+                        // Fase 9.w.1.iter2.a — RBAC custom con
+                        // `@requires("role")`. El user.role (Str) debe
+                        // matchear al menos uno de los `required_roles`.
+                        if !route.required_roles.is_empty() {
+                            let actual_role = match user_box.as_ref() {
+                                Value::Instance { fields, .. } => {
+                                    let g = fields.lock();
+                                    g.iter().find_map(|(k, v)| {
+                                        if k == "role" {
+                                            if let Value::Str(s) = v {
+                                                return Some(s.clone());
+                                            }
+                                        }
+                                        None
+                                    })
+                                }
+                                _ => None,
+                            };
+                            let allowed = actual_role
+                                .as_ref()
+                                .is_some_and(|r| route.required_roles.iter().any(|x| x == r));
+                            if !allowed {
+                                let msg = match &actual_role {
+                                    Some(r) => format!(
+                                        "acceso prohibido — role '{}' no autorizado (requeridos: {})",
+                                        r,
+                                        route.required_roles.join(", "),
+                                    ),
+                                    None => format!(
+                                        "acceso prohibido — role faltante (requeridos: {})",
+                                        route.required_roles.join(", "),
+                                    ),
+                                };
+                                return (
+                                    StatusCode::FORBIDDEN,
+                                    axum::Json(serde_json::json!({"error": msg})),
                                 )
                                     .into_response();
                             }
@@ -3319,7 +3370,9 @@ async fn handle_task(
     //   - Provider falló con FitzError o devolvió shape distinto a
     //     `Result<User>` → 500 con mensaje (no debería pasar — el
     //     checker 9.w.1.a valida estáticamente; defensivo).
-    let auth_user: Option<Value> = if route.auth != AuthSpec::None {
+    let auth_user: Option<Value> = if route.auth != AuthSpec::None
+        || !route.required_roles.is_empty()
+    {
         let provider = match registry.auth_provider.as_ref() {
             Some(h) => h.clone(),
             None => {
@@ -3405,6 +3458,43 @@ async fn handle_task(
                                 "error": "acceso prohibido — se requiere rol admin",
                             }),
                         );
+                    }
+                }
+                // Fase 9.w.1.iter2.a — RBAC custom con `@requires("role")`.
+                // El user.role (Str) debe matchear al menos uno de los
+                // roles requeridos. Apilar `@requires("a") @requires("b")`
+                // produce `vec!["a","b"]` = OR.
+                if !route.required_roles.is_empty() {
+                    let actual_role = match user_box.as_ref() {
+                        Value::Instance { fields, .. } => {
+                            let guard = fields.lock();
+                            guard.iter().find_map(|(k, v)| {
+                                if k == "role" {
+                                    if let Value::Str(s) = v {
+                                        return Some(s.clone());
+                                    }
+                                }
+                                None
+                            })
+                        }
+                        _ => None,
+                    };
+                    let allowed = actual_role
+                        .as_ref()
+                        .is_some_and(|r| route.required_roles.iter().any(|x| x == r));
+                    if !allowed {
+                        let msg = match &actual_role {
+                            Some(r) => format!(
+                                "acceso prohibido — role '{}' no autorizado (requeridos: {})",
+                                r,
+                                route.required_roles.join(", "),
+                            ),
+                            None => format!(
+                                "acceso prohibido — role faltante (requeridos: {})",
+                                route.required_roles.join(", "),
+                            ),
+                        };
+                        return HandlerOutcome::json(403, serde_json::json!({ "error": msg }));
                     }
                 }
                 Some(*user_box)
@@ -6986,6 +7076,7 @@ mod tests {
                 middlewares: vec![],
                 cors: None,
                 auth: AuthSpec::None,
+                required_roles: Vec::new(),
                 auth_user_param_name: None,
                 is_ws: false,
                 ws_conn_param_name: None,
@@ -7081,6 +7172,7 @@ mod tests {
             middlewares: vec![],
             cors: None,
             auth: AuthSpec::None,
+            required_roles: Vec::new(),
             auth_user_param_name: None,
             is_ws: false,
             ws_conn_param_name: None,
@@ -7803,6 +7895,114 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         // Sin header, el provider falla con Err ANTES de evaluar role.
         // Resultado: 401 (no autenticado), no 403 (no autorizado).
         let (status, _body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/admin").await;
+        assert_eq!(status, 401);
+    }
+
+    // ---- Fase 9.w.1.iter2.a — @requires("role") (RBAC custom) ----
+
+    /// Programa con varios endpoints protegidos por `@requires`:
+    /// - `/editor` exige role "editor" (1 role).
+    /// - `/multi` apila `@requires("editor")` y `@requires("publisher")`
+    ///   = OR (matchea cualquiera de los dos).
+    const REQUIRES_E2E_SOURCE: &str = "\
+type User { id: Int, name: Str, role: Str }\n\
+@auth_provider\n\
+fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+    match headers.get(\"authorization\") {\n\
+        Ok(token) => {\n\
+            if (token == \"Bearer editor-token\") {\n\
+                return Ok(User { id: 1, name: \"Ed\", role: \"editor\" })\n\
+            }\n\
+            if (token == \"Bearer publisher-token\") {\n\
+                return Ok(User { id: 2, name: \"Pub\", role: \"publisher\" })\n\
+            }\n\
+            if (token == \"Bearer viewer-token\") {\n\
+                return Ok(User { id: 3, name: \"View\", role: \"viewer\" })\n\
+            }\n\
+            return Err(\"token inválido\")\n\
+        }\n\
+        Err(_) => return Err(\"falta Authorization\")\n\
+    }\n\
+}\n\
+@requires(\"editor\")\n\
+@get(\"/editor\")\n\
+fn editor_route(user: User) -> Str => user.name\n\
+@requires(\"editor\")\n\
+@requires(\"publisher\")\n\
+@get(\"/multi\")\n\
+fn multi_route(user: User) -> Str => user.name\n\
+";
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn requires_role_correcto_devuelve_200_con_user_inyectado() {
+        let (status, body) = run_oneshot_with_headers(
+            REQUIRES_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/editor",
+            &[("authorization", "Bearer editor-token")],
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"Ed\"");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn requires_role_incorrecto_devuelve_403() {
+        let (status, body) = run_oneshot_with_headers(
+            REQUIRES_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/editor",
+            &[("authorization", "Bearer viewer-token")],
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert!(
+            body.contains("viewer") && body.contains("editor"),
+            "esperaba mención del role actual y requerido en body, fue: {}",
+            body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn requires_apilado_acepta_cualquiera_de_los_dos_roles() {
+        // `/multi` exige editor OR publisher. Probamos los dos casos.
+        let (status_ed, _) = run_oneshot_with_headers(
+            REQUIRES_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/multi",
+            &[("authorization", "Bearer editor-token")],
+        )
+        .await;
+        assert_eq!(status_ed, 200);
+
+        let (status_pub, _) = run_oneshot_with_headers(
+            REQUIRES_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/multi",
+            &[("authorization", "Bearer publisher-token")],
+        )
+        .await;
+        assert_eq!(status_pub, 200);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn requires_apilado_rechaza_role_que_no_matchea_ninguno() {
+        // `/multi` exige editor OR publisher; viewer no es ninguno → 403.
+        let (status, _) = run_oneshot_with_headers(
+            REQUIRES_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/multi",
+            &[("authorization", "Bearer viewer-token")],
+        )
+        .await;
+        assert_eq!(status, 403);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn requires_sin_header_devuelve_401_no_403() {
+        // Sin header, provider falla con Err ANTES de evaluar role.
+        let (status, _) =
+            run_oneshot(REQUIRES_E2E_SOURCE, axum::http::Method::GET, "/editor").await;
         assert_eq!(status, 401);
     }
 

@@ -346,6 +346,7 @@ fn process_decorator(
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
+    required_roles: &[String],
     handler: &Value,
     env: &EnvRef,
     fn_def_span: Span,
@@ -362,6 +363,7 @@ fn process_decorator(
             middlewares,
             cors_config,
             auth_spec,
+            required_roles,
             handler,
             env,
         );
@@ -381,6 +383,7 @@ fn process_decorator(
             middlewares,
             cors_config,
             auth_spec,
+            required_roles,
             handler,
             env,
         );
@@ -945,6 +948,58 @@ fn collect_route_auth(
         }
     }
     Ok(spec)
+}
+
+/// Fase 9.w.1.iter2.a — Recolecta los roles requeridos por
+/// `@requires("role")` decorators apilados sobre el handler. Cada
+/// `@requires("X")` exige `X` como un valor válido del `user.role`.
+/// Múltiples `@requires` apilados = OR sobre los valores. El checker
+/// 9.w.1.iter2.a valida shape (Str literal, sin kwargs, sólo sobre
+/// handlers HTTP, exige `role: Str` en el User type); acá replicamos
+/// defensivamente el shape sintáctico para que el evaluator no panic
+/// si recibe AST mal formado.
+fn collect_required_roles(
+    decorators: &[Decorator],
+    fn_name: &str,
+) -> Result<Vec<String>, EvalSignal> {
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
+    let mut roles = Vec::new();
+    for deco in decorators {
+        if deco.name != "requires" {
+            continue;
+        }
+        if !deco.kwargs.is_empty() {
+            return Err(err(format!(
+                "@requires sobre fn '{}': no admite kwargs (sintaxis: `@requires(\"role\")`).",
+                fn_name,
+            )));
+        }
+        if deco.args.len() != 1 {
+            return Err(err(format!(
+                "@requires sobre fn '{}': espera exactamente 1 arg (el role como Str literal), \
+                 recibió {}.",
+                fn_name,
+                deco.args.len(),
+            )));
+        }
+        let role = match &deco.args[0] {
+            crate::ast::Expr::Str(s, _) => s.clone(),
+            other => {
+                return Err(err(format!(
+                    "@requires sobre fn '{}': el arg debe ser Str literal, recibió {:?}.",
+                    fn_name, other,
+                )));
+            }
+        };
+        if roles.contains(&role) {
+            return Err(err(format!(
+                "@requires sobre fn '{}': role '{}' duplicado en decorators apilados.",
+                fn_name, role,
+            )));
+        }
+        roles.push(role);
+    }
+    Ok(roles)
 }
 
 /// Fase 13 (v0.11.0) — Procesa `@command("name", desc="...")` sobre
@@ -1616,6 +1671,7 @@ fn register_http_route(
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
+    required_roles: &[String],
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -1713,11 +1769,12 @@ fn register_http_route(
     // mismo type) → regla del primer leftover (comportamiento pre-W14,
     // conservador). El caso "varios params del tipo User" lo rechaza
     // el chequeo de unicidad abajo.
-    let auth_user_param_name: Option<String> = if auth_spec != crate::http::AuthSpec::None {
+    let has_auth_decorator = auth_spec != crate::http::AuthSpec::None || !required_roles.is_empty();
+    let auth_user_param_name: Option<String> = if has_auth_decorator {
         if !crate::http::has_auth_provider() {
             return Err(err(format!(
                 "@{} sobre fn '{}': el `@auth_provider` debe estar declarado antes \
-                 que cualquier handler con `@authenticated`/`@admin` en el archivo. \
+                 que cualquier handler con `@authenticated`/`@admin`/`@requires` en el archivo. \
                  Movelo arriba de los handlers que lo usan.",
                 deco.name, fn_name,
             )));
@@ -1886,6 +1943,7 @@ fn register_http_route(
         middlewares: middlewares.to_vec(),
         cors: cors_config.clone(),
         auth: auth_spec,
+        required_roles: required_roles.to_vec(),
         auth_user_param_name,
         is_ws: false,
         ws_conn_param_name: None,
@@ -1920,6 +1978,7 @@ fn register_ws_route(
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
+    required_roles: &[String],
     handler: &Value,
     _env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -2066,6 +2125,7 @@ fn register_ws_route(
         middlewares: middlewares.to_vec(),
         cors: cors_config.clone(),
         auth: auth_spec,
+        required_roles: required_roles.to_vec(),
         auth_user_param_name,
         is_ws: true,
         ws_conn_param_name,
@@ -2882,13 +2942,18 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // si aparecen sin un `@get`/`@post`/`@put`/`@delete`, error
             // claro (paralelo a `@header`/`@middleware`).
             let auth_spec = collect_route_auth(decorators, name)?;
+            // Fase 9.w.1.iter2.a — recolectar `@requires("role")`
+            // apilados. Implica auth (mismo gate que `@authenticated`/
+            // `@admin`).
+            let required_roles = collect_required_roles(decorators, name)?;
             // Fase 9.w.2 — `@ws` también cuenta como handler HTTP para
-            // el chequeo de `@authenticated`/`@admin` apilados (auth
-            // pre-upgrade es analógo al HTTP wrapper).
-            if auth_spec != crate::http::AuthSpec::None
+            // el chequeo de `@authenticated`/`@admin`/`@requires`
+            // apilados (auth pre-upgrade es analógo al HTTP wrapper).
+            let has_auth_decorator =
+                auth_spec != crate::http::AuthSpec::None || !required_roles.is_empty();
+            if has_auth_decorator
                 && !decorators.iter().any(|d| {
-                    HttpMethod::from_decorator_name(&d.name).is_some()
-                        || d.name == "ws"
+                    HttpMethod::from_decorator_name(&d.name).is_some() || d.name == "ws"
                 })
             {
                 return Err(EvalSignal::Error(FitzError::new(
@@ -2896,7 +2961,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     0,
                     0,
                     format!(
-                        "@authenticated/@admin sobre fn '{}': solo aplica sobre \
+                        "@authenticated/@admin/@requires sobre fn '{}': solo aplica sobre \
                          handlers HTTP (apilar junto a `@get`/`@post`/`@put`/`@delete`/`@ws`).",
                         name,
                     ),
@@ -2907,6 +2972,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     || deco.name == "middleware"
                     || deco.name == "authenticated"
                     || deco.name == "admin"
+                    || deco.name == "requires"
                 {
                     continue; // ya procesado por sus `collect_*`
                 }
@@ -2919,6 +2985,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     &collected_middlewares,
                     &collected_cors,
                     auth_spec,
+                    &required_roles,
                     &func,
                     &env,
                     *span,

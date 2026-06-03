@@ -1096,6 +1096,15 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "Equivalente a @authenticated + check `user.role == \"admin\"`. Devuelve 403 si no admin.",
         ),
         (
+            "requires",
+            "requires(\"${1:editor}\")",
+            "@requires(role) — RBAC custom (Fase 9.w.1.iter2)",
+            "Handler protegido por role específico. Apilable: `@requires(\"editor\")` (un role); \
+             `@requires(\"editor\") @requires(\"publisher\")` (OR — matchea cualquiera). \
+             Implica auth (corre el provider). Exige `role: Str` en el User type. \
+             Devuelve 403 si el role del user no matchea.",
+        ),
+        (
             "auth_provider",
             "auth_provider",
             "@auth_provider — singleton resolutor de tokens",

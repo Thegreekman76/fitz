@@ -4685,6 +4685,15 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // `@put`/`@delete` apilado (validado por el
                             // checker 9.w.1.a y por el evaluator MVP).
                             "authenticated" | "admin" => {}
+                            // Fase 9.w.1.iter2.a — `@requires("role")`
+                            // apilable sobre handlers HTTP/`@ws`. El
+                            // wrapper (emit_auth_check) y el provider
+                            // call los procesan; el partition solo los
+                            // acepta como decorators válidos. NO setean
+                            // http_decos por sí solos — debe haber un
+                            // `@get`/`@post`/`@put`/`@delete`/`@ws`
+                            // apilado.
+                            "requires" => {}
                             // Fase 9.w.2.c — `@ws("/path")` marca un
                             // handler WebSocket. Va a `ws_fns` (no a
                             // `http_fns`) porque el wrapper generado
@@ -6111,6 +6120,11 @@ struct HandlerSig {
     /// Fase 9.w.1.d — política de auth de la ruta (`@authenticated` /
     /// `@admin` o ninguno). `AuthSpec::None` (default) es ruta pública.
     auth: crate::http::AuthSpec,
+    /// Fase 9.w.1.iter2.a — RBAC custom via `@requires("role")` apilable.
+    /// Vector con los roles requeridos (apilados ⇒ OR). Empty = sin
+    /// requisito. `@requires` implica auth (el wrapper corre el provider
+    /// aunque `auth == None`).
+    required_roles: Vec<String>,
     /// Fase 9.w.1.d — nombre del param del handler donde se inyecta el
     /// `user` retornado por el `@auth_provider`. `Some(name)` cuando
     /// `auth != None`; `None` cuando no hay auth. Identificado por
@@ -24524,15 +24538,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
 
         // Resolver auth desde decorators (paralelo a HandlerSig).
         let mut auth = crate::http::AuthSpec::None;
+        let mut required_roles: Vec<String> = Vec::new();
         for d in decorators {
             match d.name.as_str() {
                 "authenticated" if auth == crate::http::AuthSpec::None => {
                     auth = crate::http::AuthSpec::Authenticated;
                 }
                 "admin" => auth = crate::http::AuthSpec::Admin,
+                "requires" => {
+                    if let [Expr::Str(role, _)] = d.args.as_slice() {
+                        if !required_roles.contains(role) {
+                            required_roles.push(role.clone());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
+        let has_auth_decorator = auth != crate::http::AuthSpec::None || !required_roles.is_empty();
 
         // Identificar el param `WsConn<T>` y (si hay auth) el param
         // `user: T_user`. Resolver tipos para la signature Rust del
@@ -24557,7 +24580,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             })?;
             if matches!(ty, Type::WsConn { .. }) {
                 ws_conn_param = Some((p.name.clone(), ty));
-            } else if auth != crate::http::AuthSpec::None && user_param.is_none() {
+            } else if has_auth_decorator && user_param.is_none() {
                 user_param = Some((p.name.clone(), ty));
             }
         }
@@ -24593,10 +24616,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
 
         // Auth pre-upgrade. Paralelo a `emit_auth_check` pero adaptado
         // para el contexto WS (return Response directo si falla).
-        if auth != crate::http::AuthSpec::None {
+        if has_auth_decorator {
             if self.auth_provider_name.is_none() {
                 return Err(self.err_at(stmt.span(), format!(
-                    "@ws fn `{}` con `@authenticated`/`@admin`: falta `@auth_provider` (validado por checker, defensivo)",
+                    "@ws fn `{}` con `@authenticated`/`@admin`/`@requires`: falta `@auth_provider` (validado por checker, defensivo)",
                     name,
                 )));
             }
@@ -24646,6 +24669,34 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 self.emit("            ).into_response();\n");
                 self.emit("        }\n    }\n");
             }
+            // Fase 9.w.1.iter2.a — RBAC custom para `@ws`.
+            if !required_roles.is_empty() {
+                let roles_array = required_roles
+                    .iter()
+                    .map(|r| format!("\"{}\"", r.replace('\\', "\\\\").replace('"', "\\\"")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let roles_list_for_msg = required_roles.join(", ");
+                self.emit("    {\n        let __guard = __user.lock().unwrap();\n        let __role: String = __guard.role.clone();\n        drop(__guard);\n");
+                writeln!(
+                    &mut self.output,
+                    "        let __required: &[&str] = &[{}];",
+                    roles_array,
+                )
+                .unwrap();
+                self.emit("        if !__required.iter().any(|r| *r == __role.as_str()) {\n");
+                writeln!(
+                    &mut self.output,
+                    "            let __msg = format!(\"acceso prohibido — role '{{}}' no autorizado (requeridos: {})\", __role);",
+                    roles_list_for_msg.replace('{', "{{").replace('}', "}}"),
+                )
+                .unwrap();
+                self.emit("            return (\n");
+                self.emit("                axum::http::StatusCode::FORBIDDEN,\n");
+                self.emit("                axum::Json(serde_json::json!({\"error\": __msg})),\n");
+                self.emit("            ).into_response();\n");
+                self.emit("        }\n    }\n");
+            }
         }
 
         // 9.w.2-ws-auth-browser — echo del subprotocol seleccionado
@@ -24658,8 +24709,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("    };\n");
 
         // Upgrade closure.
-        // El `move` captura `__user` si aplica.
-        if auth != crate::http::AuthSpec::None {
+        // El `move` captura `__user` si aplica (incluyendo cuando solo
+        // hay `@requires` sin `@authenticated`).
+        if has_auth_decorator {
             self.emit("    ws.on_upgrade(move |__socket| async move {\n");
         } else {
             self.emit("    ws.on_upgrade(|__socket| async move {\n");
@@ -24771,13 +24823,15 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     /// 4. Para `@admin`: chequea `user.role == "admin"` → 403.
     /// 5. Bindea `let <user_param_name> = u;` para el handler.
     fn emit_auth_check(&mut self, sig: &HandlerSig) {
-        if sig.auth == crate::http::AuthSpec::None {
+        // Fase 9.w.1.iter2.a — `@requires("role")` también activa el
+        // wrapper aunque `auth == None`.
+        if sig.auth == crate::http::AuthSpec::None && sig.required_roles.is_empty() {
             return;
         }
         let user_name = sig
             .auth_user_param_name
             .clone()
-            .expect("auth_user_param_name siempre Some cuando auth != None");
+            .expect("auth_user_param_name siempre Some cuando hay auth decorator");
         let provider = self.auth_provider_call_path();
         let provider_await = if self.auth_provider_is_async {
             ".await"
@@ -24830,6 +24884,44 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.emit("            return (\n");
             self.emit("                axum::http::StatusCode::FORBIDDEN,\n");
             self.emit("                axum::Json(serde_json::json!({\"error\": \"acceso prohibido — se requiere rol admin\"})),\n");
+            self.emit("            ).into_response();\n");
+            self.emit("        }\n");
+            self.emit("    }\n");
+        }
+        // Fase 9.w.1.iter2.a — RBAC custom con `@requires("role")`.
+        // El user.role (Str) debe matchear al menos uno de los roles
+        // requeridos. Apilar `@requires("a") @requires("b")` produce
+        // `vec!["a","b"]` = OR.
+        if !sig.required_roles.is_empty() {
+            let roles_array = sig
+                .required_roles
+                .iter()
+                .map(|r| format!("\"{}\"", r.replace('\\', "\\\\").replace('"', "\\\"")))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let roles_list_for_msg = sig.required_roles.join(", ");
+            writeln!(
+                &mut self.output,
+                "    {{\n        let __guard = {}.lock().unwrap();\n        let __role: String = __guard.role.clone();\n        drop(__guard);",
+                user_name,
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "        let __required: &[&str] = &[{}];",
+                roles_array,
+            )
+            .unwrap();
+            self.emit("        if !__required.iter().any(|r| *r == __role.as_str()) {\n");
+            writeln!(
+                &mut self.output,
+                "            let __msg = format!(\"acceso prohibido — role '{{}}' no autorizado (requeridos: {})\", __role);",
+                roles_list_for_msg.replace('{', "{{").replace('}', "}}"),
+            )
+            .unwrap();
+            self.emit("            return (\n");
+            self.emit("                axum::http::StatusCode::FORBIDDEN,\n");
+            self.emit("                axum::Json(serde_json::json!({\"error\": __msg})),\n");
             self.emit("            ).into_response();\n");
             self.emit("        }\n");
             self.emit("    }\n");
@@ -24971,20 +25063,33 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // espejo del intérprete: handler protegido NO admite body
         // separado del user.
         let mut auth = crate::http::AuthSpec::None;
+        let mut required_roles: Vec<String> = Vec::new();
         for d in decorators {
             match d.name.as_str() {
                 "authenticated" if auth == crate::http::AuthSpec::None => {
                     auth = crate::http::AuthSpec::Authenticated;
                 }
                 "admin" => auth = crate::http::AuthSpec::Admin,
+                // Fase 9.w.1.iter2.a — RBAC custom. El checker valida
+                // shape; acá replicamos defensivamente.
+                "requires" => {
+                    if let [Expr::Str(role, _)] = d.args.as_slice() {
+                        if !required_roles.contains(role) {
+                            required_roles.push(role.clone());
+                        }
+                    }
+                }
                 _ => {}
             }
         }
-        if auth != crate::http::AuthSpec::None && self.auth_provider_name.is_none() {
+        // `@requires` implica auth — el wrapper corre el provider
+        // aunque `auth == None`.
+        let has_auth_decorator = auth != crate::http::AuthSpec::None || !required_roles.is_empty();
+        if has_auth_decorator && self.auth_provider_name.is_none() {
             return Err(self.err_at(
                 fn_span,
                 format!(
-                    "fn `{}`: `@authenticated`/`@admin` exige declarar un \
+                    "fn `{}`: `@authenticated`/`@admin`/`@requires` exige declarar un \
                  `@auth_provider` antes en el archivo.",
                     name,
                 ),
@@ -25001,7 +25106,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // Si hay un solo candidato leftover y no matchea por tipo,
         // fallback al pre-W14 (lo tomamos como user). Si hay varios y
         // ninguno matchea por tipo → error con sugerencia clara.
-        let auth_user_param_name: Option<String> = if auth != crate::http::AuthSpec::None {
+        let auth_user_param_name: Option<String> = if has_auth_decorator {
             let candidates: Vec<(&String, Option<&crate::ast::TypeExpr>)> = resolved_params
                 .iter()
                 .zip(params.iter())
@@ -25139,6 +25244,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             has_middleware,
             has_cors,
             auth,
+            required_roles,
             auth_user_param_name,
         })
     }
@@ -25206,6 +25312,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             || sig.has_cors
             || sig.body_param.is_some()
             || sig.auth != crate::http::AuthSpec::None
+            || !sig.required_roles.is_empty()
         {
             self.emit("    __hmap: axum::http::HeaderMap,\n");
         }

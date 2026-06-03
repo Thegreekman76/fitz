@@ -7799,11 +7799,24 @@ que tiene gaps obvios. Tiers definidos en `docs/curso-plan.md` →
 
 - **T2 — evaluar antes de M5** (cierran caso de uso del cap si
   entran):
-  - **9.w.1.iter2 — RBAC custom + token refresh**: RBAC con
-    roles custom más allá de `@authenticated`/`@admin` (ej:
-    `@requires("editor")`, modelo de permisos pluggable); token
-    refresh/revocación server-side con blacklist sobre la misma
-    DB de T1.
+  - **9.w.1.iter2 — RBAC custom + token refresh**:
+    - **9.w.1.iter2.a CERRADA (2026-06-03, v0.12.4)** — RBAC con
+      roles custom más allá de `@authenticated`/`@admin`:
+      decorator nuevo `@requires("role")` apilable. Validación
+      estática (shape + provider + `role: Str` en User type).
+      Runtime intérprete + paridad bit-a-bit codegen. Multi-role
+      via apilamiento (OR). Mensaje de 403 cita role actual +
+      requeridos. 14 unit tests (9 checker + 5 runtime). Detalle
+      técnico completo en `docs/deudas-post-5b.md` →
+      "Fase 9.w.1.iter2.a — `@requires` (RBAC custom)".
+    - **9.w.1.iter2.b PENDIENTE** — Token blacklist + refresh:
+      builtins `auth.blacklist(db, jti, expires_at)` y
+      `auth.is_blacklisted(db, jti)` con tabla
+      `fitz_token_blacklist` auto-creada (paralelo a Fase
+      9.w.3.iter2 cron persistente). Endpoints `/auth/logout`/
+      `/auth/refresh` se escriben a mano (~10 LoC cada uno) con
+      los builtins; auto-mount queda fuera del MVP. Requiere DB
+      obligatoria.
   - **9.w.2.iter2 — Rooms + reconnect state replay** (solo si el
     ejemplo del C25 del curso lo exige): sub-canales dentro de un
     endpoint WS, reconnect con state replay (acopla con
