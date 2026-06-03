@@ -1061,7 +1061,7 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "server",
             "server(${1:3000})",
             "@server(port, host?, ws_heartbeat_secs?, ...)",
-            "Configura el listener HTTP. Args: port, host (default \"127.0.0.1\"), ws_heartbeat_secs, api_version, docs.",
+            "Configura el listener HTTP. Args: port, host (default \"127.0.0.1\"). Kwargs: docs (default true), api_version, ws_heartbeat_secs (default 30), shutdown_timeout_secs (default 30), observability (default true, 12.3.b.5), prometheus (default false, 12.3.iter2.Tier3 — opt-in del endpoint /metrics + dual gate con env var FITZ_PROMETHEUS=1).",
         ),
         (
             "header",
