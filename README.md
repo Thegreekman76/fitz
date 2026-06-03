@@ -231,6 +231,13 @@ Verificá la instalación con `fitz --version` y `fitz --help`.
 | ----------------------------- | ------------------------------------------------------------------------------ |
 | `fitz py-types <archivo.py>`  | Genera `type` Fitz desde modelos SQLAlchemy. Output a stdout o `--out`.        |
 
+**Deployment** (Fase 12.4)
+
+| Comando                       | Qué hace                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------ |
+| `fitz docker init [--force]`  | Genera `Dockerfile` + `.dockerignore` + `docker-compose.yml` smart por defecto. Detecta `@server(port)`, `db.X(...)`, `from python import X`, `@cron` y adapta runtime + compose. |
+| `fitz docker build [--tag X]` | Thin wrapper sobre `docker build -t <tag> .`. Default `<package.name>:latest`. |
+
 ## Extensión VSCode
 
 Highlighting + LSP (diagnostics, hover, go-to-definition, autocomplete contextual) con el binario `fitz-lsp` bundleado en cada `.vsix` por plataforma.

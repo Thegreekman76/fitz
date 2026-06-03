@@ -11,11 +11,104 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-12.4.a CERRADA, queda 12.4.b (smart detection rica + `fitz docker build`
-wrapper) y 12.5 (cap nuevo en guía + caps del curso) para cerrar Fase 12
-entera. También sigue abierta la 9.w.1.iter2 (RBAC custom + token
-refresh) si el avance del curso lo demanda. Tier 2 de Fase 12.3 (bridge
-métricas OTel) sigue bloqueado por release del crate.
+Fase 12.4 ENTERA CERRADA (12.4.a + 12.4.b). Queda 12.5 (cap nuevo "Deployment
+ciudadano primera clase" en `docs/guide.md` + caps del curso M7) para
+cerrar Fase 12 entera. También sigue abierta la 9.w.1.iter2 (RBAC custom +
+token refresh) si el avance del curso lo demanda. Tier 2 de Fase 12.3
+(bridge métricas OTel) sigue bloqueado por release del crate.
+
+## [v0.12.3] — 2026-06-03 — Fase 12.4.b: smart detection rica + `fitz docker build`
+
+Cierra **Fase 12.4 entera**. Suma detección AST de interop Python y
+`@cron`, ajusta runtime + compose según el shape del programa, y agrega
+el sub-comando `fitz docker build [--tag X]` que tag-ea y delega a
+`docker build`.
+
+**Smart detection rica**:
+
+- **`uses_python`** (`from python import X` o `import python.X`) → el
+  runtime stage del Dockerfile cae a `python:3.12-slim-bookworm` (~55
+  MB) en vez de `gcr.io/distroless/cc-debian12` (~22 MB). El binario
+  producido por `fitz build` con interop dynamic-linkea
+  `libpython3.12.so` que distroless no incluye; con slim-bookworm ya
+  está + wget para healthcheck HTTP.
+- **`uses_cron`** (cualquier `@cron` decorator) → compose suma
+  `restart: unless-stopped` al service principal para que el scheduler
+  sobreviva crashes/redeploys.
+- **Healthcheck HTTP condicional** — si hay `@server(port)` Y el runtime
+  tiene wget disponible (`uses_python` → slim-bookworm), el compose suma
+  bloque `healthcheck:` que pega contra `/healthz` (auto-mounteado por
+  Fase 12.1.b). Con distroless (default, sin wget), el healthcheck NO
+  se emite — comentario explicativo en el compose con la receta para
+  agregarlo a mano si el user cambia el runtime.
+
+**Sub-comando nuevo `fitz docker build [--tag X]`**:
+
+- Thin wrapper sobre `docker build -t <tag> .` en el manifest_dir.
+- Default `--tag` = `<package.name>:latest`. Override con `--tag mi/app:v1`.
+- Aborta con mensaje claro si no hay `Dockerfile` (sugiere `fitz docker
+  init` primero) o si no hay `fitz.toml`.
+- Propaga el exit code de `docker build` para que CI lo capture igual.
+
+**Sub-pasos**:
+
+- **12.4.b.1** — `DockerShape` gana 2 campos (`uses_python`, `uses_cron`)
+  + `Default` derive (simplifica los literales de tests). Nuevos helpers
+  `stmt_uses_python` (mira `Stmt::Import`/`FromImport` con `path[0] ==
+  "python"`) y `stmt_uses_cron` (mira `Stmt::FnDef.decorators` con
+  `name == "cron"`). `render_dockerfile` consulta `runtime_image(shape)`
+  que devuelve `"python:3.12-slim-bookworm"` o `"gcr.io/distroless/cc-
+  debian12"`. `render_compose` suma `restart: unless-stopped` cuando
+  `uses_cron` y healthcheck HTTP cuando `server_port = Some` + `uses_python`
+  (comentario explicativo cuando es distroless). Handler `docker_init_cmd`
+  reporta los nuevos detectados. 13 unit tests nuevos en `docker::tests::*`
+  + 4 E2E nuevos en `cli_e2e` (init con python, con cron, healthcheck
+  HTTP en compose, comentario distroless).
+- **12.4.b.2** — Sub-enum `DockerCmd::Build { tag }` + handler
+  `docker_build_cmd(tag)` que reusa `resolve_entry(None)`, valida
+  `Dockerfile` existe, invoca `std::process::Command::new("docker") build
+  -t <tag> . ` en `manifest_dir` con propagación de exit code. 2 E2E
+  nuevos (`build sin dockerfile aborta`, `build sin manifest aborta`).
+
+**Tests al cierre v0.12.3**: 2937 unit (+13) + 93 cli_e2e (+6) + 3
+openapi_e2e. Clippy `--lib --tests --bins -- -D warnings` limpio,
+`cargo fmt --all --check` limpio.
+
+**Smoke real verde** validado a mano contra
+`boilerplates/api-postgres-python` (interop Python con SQLAlchemy):
+runtime cae a `python:3.12-slim-bookworm` automático, healthcheck HTTP
+emitido con wget, sin postgres en compose porque la DB se accede vía
+Python (limitación conocida — el helper detecta `db.X(...)` nativo Fitz,
+no interop indirecto).
+
+**Deudas residuales derivadas de 12.4.b** (NO bloquean cierre de Fase
+12):
+
+- **Detección DB indirecta vía interop Python**: el helper `uses_db`
+  solo detecta `db.X(...)` nativo Fitz. Programas que acceden a Postgres
+  con `from python import sqlalchemy` no disparan el service `db` en
+  compose. Workaround: usar `--force` y editar el compose, o usar el
+  driver Postgres nativo de Fitz (cap 31 de la guía). Fix futuro:
+  detectar `from python import sqlalchemy/psycopg2/asyncpg` con su
+  propio flag separado, o sumar flag `--with-postgres` al init.
+- **Healthcheck HTTP sin distroless**: el bloque healthcheck solo sale
+  cuando el runtime tiene wget (`uses_python`). Para programas no-Python
+  con `@server`, el user puede agregarlo a mano siguiendo el comentario
+  o cambiar el runtime. Fix futuro: bundlear un mini binario HTTP probe
+  en distroless, o usar healthcheck TCP (sin requerir wget) — TCP no
+  valida el endpoint exacto.
+- **`fitz docker build` no expone `--push`/`--platform`/`--no-cache`**:
+  el wrapper es thin de propósito. Para flags avanzados, correr `docker
+  build` directo. Refinable si aparece demanda real.
+- **Cross-module detection** sigue siendo deuda heredada de 12.4.a:
+  `@server`/`db.X(...)`/`@cron`/`from python import X` adentro de módulo
+  importado no dispara el shape. Workaround: declarar todo en el archivo
+  principal (caso típico).
+
+**Próximo norte**: **Fase 12.5** — cap nuevo "Deployment ciudadano
+primera clase" en `docs/guide.md` + caps del curso M7. O salto a
+**9.w.1.iter2** (RBAC custom + token refresh) si el avance del curso lo
+demanda.
 
 ## [v0.12.2] — 2026-06-03 — Fase 12.4.a: `fitz docker init` (Dockerfile + compose autogenerados)
 

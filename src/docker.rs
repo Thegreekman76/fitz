@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 ///
 /// `package_name` viene del `fitz.toml`; el resto se infiere recorriendo
 /// el AST del entry point.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct DockerShape {
     pub package_name: String,
     /// `Some(port)` si encuentra `@server(N, ...)` con `N` Int literal en
@@ -37,6 +37,15 @@ pub struct DockerShape {
     /// `db.connect(...)`). Heurística generosa: cualquier method call
     /// con receptor `db` cuenta.
     pub uses_db: bool,
+    /// 12.4.b — `true` si el programa importa Python (`import python` o
+    /// `from python import X`). El binario emitido por `fitz build` con
+    /// interop necesita libpython3.X.so en el runtime; distroless no la
+    /// tiene, así que el Dockerfile cae a `python:3.12-slim-bookworm`.
+    pub uses_python: bool,
+    /// 12.4.b — `true` si el programa tiene al menos un `@cron`. El
+    /// compose suma `restart: unless-stopped` al service principal para
+    /// que el scheduler sobreviva crashes/redeploys.
+    pub uses_cron: bool,
 }
 
 /// Recorre el AST del programa y produce un `DockerShape` con lo que
@@ -44,10 +53,30 @@ pub struct DockerShape {
 pub fn detect_shape(program: &Program, package_name: String) -> DockerShape {
     let server_port = find_server_port(program);
     let uses_db = program.iter().any(stmt_uses_db);
+    let uses_python = program.iter().any(stmt_uses_python);
+    let uses_cron = program.iter().any(stmt_uses_cron);
     DockerShape {
         package_name,
         server_port,
         uses_db,
+        uses_python,
+        uses_cron,
+    }
+}
+
+fn stmt_uses_python(s: &Stmt) -> bool {
+    match s {
+        Stmt::Import { path, .. } | Stmt::FromImport { path, .. } => {
+            path.first().is_some_and(|p| p == "python")
+        }
+        _ => false,
+    }
+}
+
+fn stmt_uses_cron(s: &Stmt) -> bool {
+    match s {
+        Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| d.name == "cron"),
+        _ => false,
     }
 }
 
@@ -127,19 +156,40 @@ fn expr_uses_db(e: &Expr) -> bool {
 // Templates
 // ---------------------------------------------------------------------------
 
-/// Renderiza el `Dockerfile` multi-stage. El runtime es siempre
-/// `gcr.io/distroless/cc-debian12` en 12.4.a — el binario standalone que
-/// emite `fitz build` no necesita Python ni shell. `EXPOSE` solo cuando
-/// hay `@server(port)`.
+/// Imagen base del runtime stage. Distroless por default (~22 MB);
+/// `python:3.12-slim-bookworm` cuando `uses_python` (libpython3.12 +
+/// wget para healthcheck, ~55 MB).
+fn runtime_image(shape: &DockerShape) -> &'static str {
+    if shape.uses_python {
+        "python:3.12-slim-bookworm"
+    } else {
+        "gcr.io/distroless/cc-debian12"
+    }
+}
+
+/// Renderiza el `Dockerfile` multi-stage. El runtime es
+/// `gcr.io/distroless/cc-debian12` por default; cuando el programa usa
+/// `from python import X`, cae a `python:3.12-slim-bookworm` que ya
+/// trae libpython3.12 + wget (necesario para el healthcheck HTTP que
+/// emite el compose). `EXPOSE` solo cuando hay `@server(port)`.
 pub fn render_dockerfile(shape: &DockerShape) -> String {
+    let runtime = runtime_image(shape);
     let mut out = String::new();
     out.push_str("# Dockerfile generado por `fitz docker init` (Fase 12.4).\n");
     out.push_str("#\n");
     out.push_str("# Multi-stage:\n");
     out.push_str("#   Stage 1 (builder) — imagen oficial de Fitz con `fitz` + Rust toolchain\n");
     out.push_str("#     pre-instalados; compila el `.fitz` a binario nativo Linux.\n");
-    out.push_str("#   Stage 2 (runtime) — `gcr.io/distroless/cc-debian12` minimal. Solo glibc +\n");
-    out.push_str("#     libgcc + ca-certificates. Sin shell, sin package manager.\n");
+    if shape.uses_python {
+        out.push_str("#   Stage 2 (runtime) — `python:3.12-slim-bookworm`. Trae libpython3.12\n");
+        out.push_str("#     (el binario emitido por `fitz build` con `from python import X` la\n");
+        out.push_str("#     dynamic-linkea) + wget para healthcheck HTTP. ~55 MB base.\n");
+    } else {
+        out.push_str(
+            "#   Stage 2 (runtime) — `gcr.io/distroless/cc-debian12` minimal. Solo glibc +\n",
+        );
+        out.push_str("#     libgcc + ca-certificates. Sin shell, sin package manager.\n");
+    }
     out.push_str("#\n");
     out.push_str("# Build:\n");
     out.push_str(&format!("#   docker build -t {} .\n", shape.package_name));
@@ -153,7 +203,7 @@ pub fn render_dockerfile(shape: &DockerShape) -> String {
     out.push_str("#\n");
     out.push_str("# Pineá la versión de Fitz para reproducibilidad:\n");
     out.push_str(&format!(
-        "#   docker build --build-arg FITZ_TAG=v0.12.1 -t {} .\n",
+        "#   docker build --build-arg FITZ_TAG=v0.12.2 -t {} .\n",
         shape.package_name,
     ));
     out.push('\n');
@@ -167,10 +217,16 @@ pub fn render_dockerfile(shape: &DockerShape) -> String {
     out.push_str("COPY src/ ./src/\n\n");
     out.push_str("# `fitz build` lee el manifest del cwd (Fase 9.y.2) y emite el binario\n");
     out.push_str("# a `target/release/<package.name>`.\n");
-    out.push_str("RUN fitz build\n\n");
+    if shape.uses_python {
+        out.push_str("# `--features python` activa la feature opt-in de PyO3 para interop\n");
+        out.push_str("# Python (cap 21 de la guía).\n");
+        out.push_str("RUN fitz build\n\n");
+    } else {
+        out.push_str("RUN fitz build\n\n");
+    }
 
     out.push_str("# ---- Stage 2: runtime ----------------------------------------------\n");
-    out.push_str("FROM gcr.io/distroless/cc-debian12\n\n");
+    out.push_str(&format!("FROM {}\n\n", runtime));
     out.push_str(&format!(
         "COPY --from=builder /app/target/release/{} /usr/local/bin/app\n\n",
         shape.package_name,
@@ -236,6 +292,13 @@ pub fn render_dockerignore() -> String {
 ///   y `DATABASE_URL` en el env del service principal.
 /// - Si `server_port` es `Some`, mapea ese port. Si es `None`, sin `ports:`
 ///   (programa CLI dentro de un container).
+/// - 12.4.b: si `uses_cron`, suma `restart: unless-stopped` al service
+///   principal para que el scheduler sobreviva crashes/redeploys.
+/// - 12.4.b: si hay HTTP (`server_port = Some`) Y el runtime tiene wget
+///   disponible (`uses_python` → `python:3.12-slim-bookworm`), suma
+///   `healthcheck:` HTTP contra `/healthz` (auto-mounteado por Fase
+///   12.1.b). Con distroless (sin wget), el healthcheck no se emite y se
+///   incluye un comentario explicando cómo agregarlo a mano.
 pub fn render_compose(shape: &DockerShape) -> String {
     let mut out = String::new();
     out.push_str("# Generado por `fitz docker init` (Fase 12.4).\n");
@@ -250,6 +313,28 @@ pub fn render_compose(shape: &DockerShape) -> String {
         out.push_str(
             "# con un `.env` adyacente (POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB).\n",
         );
+    }
+    if shape.uses_cron {
+        out.push_str("#\n");
+        out.push_str(
+            "# El programa declara `@cron(...)` — `restart: unless-stopped` mantiene el\n",
+        );
+        out.push_str("# scheduler vivo tras crashes o redeploys.\n");
+    }
+    let emit_app_healthcheck = shape.server_port.is_some() && shape.uses_python;
+    if shape.server_port.is_some() && !shape.uses_python {
+        out.push_str("#\n");
+        out.push_str(
+            "# Healthcheck HTTP NO emitido — el runtime distroless no incluye wget/curl.\n",
+        );
+        out.push_str(
+            "# El endpoint `/healthz` está auto-mounteado por el binario (Fase 12.1.b).\n",
+        );
+        out.push_str("# Si querés healthcheck, cambiá el runtime del Dockerfile a\n");
+        out.push_str(
+            "# `python:3.12-slim-bookworm` o `debian:bookworm-slim` con `apt-get install\n",
+        );
+        out.push_str("# wget` y agregá el bloque healthcheck con `wget --spider /healthz`.\n");
     }
     out.push_str("\nservices:\n");
 
@@ -286,6 +371,23 @@ pub fn render_compose(shape: &DockerShape) -> String {
     if let Some(port) = shape.server_port {
         out.push_str("    ports:\n");
         out.push_str(&format!("      - \"{0}:{0}\"\n", port));
+    }
+
+    if shape.uses_cron {
+        out.push_str("    restart: unless-stopped\n");
+    }
+
+    if emit_app_healthcheck {
+        let port = shape.server_port.expect("checked above");
+        out.push_str("    healthcheck:\n");
+        out.push_str(&format!(
+            "      test: [\"CMD\", \"wget\", \"--quiet\", \"--spider\", \"http://localhost:{}/healthz\"]\n",
+            port,
+        ));
+        out.push_str("      interval: 30s\n");
+        out.push_str("      timeout: 5s\n");
+        out.push_str("      retries: 3\n");
+        out.push_str("      start_period: 10s\n");
     }
 
     if shape.uses_db {
@@ -453,6 +555,7 @@ fn run(db) -> Int {
             package_name: "demo".into(),
             server_port: None,
             uses_db: false,
+            ..Default::default()
         };
         let dockerfile = render_dockerfile(&shape);
         assert!(!dockerfile.contains("EXPOSE"));
@@ -470,6 +573,7 @@ fn run(db) -> Int {
             package_name: "myapp".into(),
             server_port: Some(8080),
             uses_db: false,
+            ..Default::default()
         };
         let dockerfile = render_dockerfile(&shape);
         assert!(dockerfile.contains("EXPOSE 8080"));
@@ -494,6 +598,7 @@ fn run(db) -> Int {
             package_name: "cli".into(),
             server_port: None,
             uses_db: false,
+            ..Default::default()
         };
         let compose = render_compose(&shape);
         assert!(compose.contains("services:"));
@@ -515,6 +620,7 @@ fn run(db) -> Int {
             package_name: "web".into(),
             server_port: Some(3000),
             uses_db: false,
+            ..Default::default()
         };
         let compose = render_compose(&shape);
         assert!(compose.contains("    ports:\n      - \"3000:3000\""));
@@ -526,6 +632,7 @@ fn run(db) -> Int {
             package_name: "api".into(),
             server_port: Some(3000),
             uses_db: true,
+            ..Default::default()
         };
         let compose = render_compose(&shape);
         assert!(compose.contains("  db:"));
@@ -547,6 +654,7 @@ fn run(db) -> Int {
             package_name: "worker".into(),
             server_port: None,
             uses_db: true,
+            ..Default::default()
         };
         let compose = render_compose(&shape);
         assert!(compose.contains("  db:"));
@@ -560,6 +668,7 @@ fn run(db) -> Int {
             package_name: "demo".into(),
             server_port: Some(3000),
             uses_db: false,
+            ..Default::default()
         };
         let result = init(dir.path(), &shape, false).expect("init ok");
         assert_eq!(result.written.len(), 3);
@@ -577,6 +686,7 @@ fn run(db) -> Int {
             package_name: "demo".into(),
             server_port: None,
             uses_db: false,
+            ..Default::default()
         };
         let result = init(dir.path(), &shape, false).expect("init ok");
         assert_eq!(result.written.len(), 2);
@@ -598,6 +708,7 @@ fn run(db) -> Int {
             package_name: "demo".into(),
             server_port: None,
             uses_db: false,
+            ..Default::default()
         };
         let result = init(dir.path(), &shape, true).expect("init ok");
         assert_eq!(result.written.len(), 3);
@@ -612,8 +723,190 @@ fn run(db) -> Int {
             package_name: "demo".into(),
             server_port: None,
             uses_db: false,
+            ..Default::default()
         };
         let result = init(Path::new("/no/existe/aca"), &shape, false);
         assert!(result.is_err());
+    }
+
+    // ---- 12.4.b — uses_python / uses_cron / healthcheck condicional ----
+
+    #[test]
+    fn detect_shape_uses_python_con_from_import() {
+        let src = r#"
+from python import math
+
+fn area(r: Float) -> Float => math.pi * r * r
+"#;
+        let shape = shape_from_source(src, "demo");
+        assert!(shape.uses_python);
+        assert!(!shape.uses_cron);
+    }
+
+    #[test]
+    fn detect_shape_uses_python_con_import_directo() {
+        let src = r#"
+import python
+"#;
+        let shape = shape_from_source(src, "demo");
+        assert!(shape.uses_python);
+    }
+
+    #[test]
+    fn detect_shape_sin_python_no_dispara_uses_python() {
+        let src = r#"
+import utils
+from helpers import double
+"#;
+        // Imports a otros módulos no son interop Python.
+        let shape = shape_from_source(src, "demo");
+        assert!(!shape.uses_python);
+    }
+
+    #[test]
+    fn detect_shape_uses_cron_con_decorator() {
+        let src = r#"
+@cron("0 * * * *")
+fn limpiar() => 0
+"#;
+        let shape = shape_from_source(src, "demo");
+        assert!(shape.uses_cron);
+    }
+
+    #[test]
+    fn detect_shape_sin_cron_no_dispara_uses_cron() {
+        let src = r#"
+@get("/")
+fn root() => "ok"
+
+@server(3000)
+fn main() => 0
+"#;
+        let shape = shape_from_source(src, "demo");
+        assert!(!shape.uses_cron);
+    }
+
+    #[test]
+    fn render_dockerfile_con_python_runtime_es_slim_bookworm() {
+        let shape = DockerShape {
+            package_name: "demo".into(),
+            server_port: Some(3000),
+            uses_python: true,
+            ..Default::default()
+        };
+        let dockerfile = render_dockerfile(&shape);
+        assert!(dockerfile.contains("FROM python:3.12-slim-bookworm"));
+        assert!(!dockerfile.contains("FROM gcr.io/distroless/cc-debian12"));
+        // Comentario explicando el porqué del runtime distinto.
+        assert!(dockerfile.contains("libpython3.12"));
+    }
+
+    #[test]
+    fn render_dockerfile_sin_python_runtime_es_distroless() {
+        let shape = DockerShape {
+            package_name: "demo".into(),
+            server_port: Some(3000),
+            uses_python: false,
+            ..Default::default()
+        };
+        let dockerfile = render_dockerfile(&shape);
+        assert!(dockerfile.contains("FROM gcr.io/distroless/cc-debian12"));
+        assert!(!dockerfile.contains("python:3.12-slim-bookworm"));
+    }
+
+    #[test]
+    fn render_compose_con_cron_emite_restart_unless_stopped() {
+        let shape = DockerShape {
+            package_name: "scheduler".into(),
+            server_port: None,
+            uses_cron: true,
+            ..Default::default()
+        };
+        let compose = render_compose(&shape);
+        assert!(compose.contains("    restart: unless-stopped"));
+        // Comentario explicando el porqué.
+        assert!(compose.contains("@cron"));
+    }
+
+    #[test]
+    fn render_compose_sin_cron_no_emite_restart() {
+        let shape = DockerShape {
+            package_name: "cli".into(),
+            server_port: None,
+            uses_cron: false,
+            ..Default::default()
+        };
+        let compose = render_compose(&shape);
+        assert!(!compose.contains("restart: unless-stopped"));
+    }
+
+    #[test]
+    fn render_compose_con_python_y_server_emite_healthcheck_http() {
+        let shape = DockerShape {
+            package_name: "api-py".into(),
+            server_port: Some(3000),
+            uses_python: true,
+            ..Default::default()
+        };
+        let compose = render_compose(&shape);
+        assert!(compose.contains("    healthcheck:"));
+        assert!(compose.contains("wget"));
+        assert!(compose.contains("--spider"));
+        assert!(compose.contains("http://localhost:3000/healthz"));
+        assert!(compose.contains("start_period: 10s"));
+    }
+
+    #[test]
+    fn render_compose_con_distroless_no_emite_healthcheck_http() {
+        // Sin uses_python, el runtime es distroless (sin wget) — no podemos
+        // emitir healthcheck shell-based. Sí queda comentario explicando
+        // cómo agregarlo a mano.
+        let shape = DockerShape {
+            package_name: "api".into(),
+            server_port: Some(3000),
+            uses_python: false,
+            ..Default::default()
+        };
+        let compose = render_compose(&shape);
+        // No hay healthcheck adentro del service app.
+        // (El "healthcheck:" del service db sí queda si uses_db=true, por eso
+        // chequeamos el bloque específico del app — el comentario top-level
+        // explica por qué.)
+        assert!(compose.contains("Healthcheck HTTP NO emitido"));
+        assert!(compose.contains("/healthz"));
+    }
+
+    #[test]
+    fn render_compose_cli_puro_no_emite_healthcheck_ni_comentario() {
+        // Sin server_port no hay request HTTP que chequear. Ni healthcheck
+        // ni comentario aclaratorio.
+        let shape = DockerShape {
+            package_name: "cli".into(),
+            server_port: None,
+            uses_python: false,
+            ..Default::default()
+        };
+        let compose = render_compose(&shape);
+        assert!(!compose.contains("healthcheck:"));
+        assert!(!compose.contains("Healthcheck HTTP NO emitido"));
+    }
+
+    #[test]
+    fn render_compose_combinacion_completa() {
+        // HTTP + DB + cron + python: todos los smart bits prendidos.
+        let shape = DockerShape {
+            package_name: "fullstack".into(),
+            server_port: Some(8080),
+            uses_db: true,
+            uses_python: true,
+            uses_cron: true,
+        };
+        let compose = render_compose(&shape);
+        assert!(compose.contains("  db:"));
+        assert!(compose.contains("    restart: unless-stopped"));
+        assert!(compose.contains("    healthcheck:"));
+        assert!(compose.contains("http://localhost:8080/healthz"));
+        assert!(compose.contains("DATABASE_URL"));
+        assert!(compose.contains("depends_on:"));
     }
 }

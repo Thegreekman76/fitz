@@ -299,6 +299,15 @@ enum DockerCmd {
         #[arg(long)]
         force: bool,
     },
+    /// Thin wrapper sobre `docker build` que usa el Dockerfile del
+    /// directorio del manifest y tagea la imagen con el `package.name`
+    /// del `fitz.toml` (override con `--tag`). Aborta si no hay
+    /// Dockerfile (sugiere correr `fitz docker init` primero).
+    Build {
+        /// Tag de la imagen. Default: `<package.name>:latest`.
+        #[arg(long)]
+        tag: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -668,6 +677,7 @@ fn main() {
         },
         Commands::Docker(sub) => match sub {
             DockerCmd::Init { force } => docker_init_cmd(force),
+            DockerCmd::Build { tag } => docker_build_cmd(tag),
         },
     }
 }
@@ -4416,6 +4426,15 @@ fn docker_init_cmd(force: bool) {
     if shape.uses_db {
         println!("   detectado: uso de DB (db.X(...)) → compose suma postgres:16-alpine");
     }
+    if shape.uses_python {
+        println!(
+            "   detectado: interop Python → runtime fallback a python:3.12-slim-bookworm \
+             (libpython3.12 + wget)"
+        );
+    }
+    if shape.uses_cron {
+        println!("   detectado: @cron → compose suma restart: unless-stopped");
+    }
     println!();
 
     for path in &result.written {
@@ -4440,6 +4459,68 @@ fn docker_init_cmd(force: bool) {
             "Sugerencia: para reemplazar archivos existentes corré \
              `fitz docker init --force`."
         );
+    }
+}
+
+/// `fitz docker build [--tag X]` — thin wrapper sobre `docker build` con
+/// tag por defecto del `package.name` del manifest. Aborta si no hay
+/// `fitz.toml` arriba del cwd, si no hay `Dockerfile` en el manifest_dir,
+/// o si el `docker build` falla (propaga el exit code).
+fn docker_build_cmd(tag: Option<String>) {
+    let resolved = resolve_entry(None);
+    let ctx = match resolved.manifest_ctx {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "✗ `fitz docker build` requiere un proyecto Fitz con `fitz.toml`. \
+                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let dockerfile_path = ctx.manifest_dir.join("Dockerfile");
+    if !dockerfile_path.is_file() {
+        eprintln!(
+            "✗ no se encontró `Dockerfile` en `{}`. Corré `fitz docker init` para \
+             generarlo.",
+            ctx.manifest_dir.display(),
+        );
+        std::process::exit(1);
+    }
+
+    let tag = tag.unwrap_or_else(|| format!("{}:latest", ctx.manifest.package.name));
+
+    println!(
+        "▶ fitz docker build — tag `{}` en `{}`",
+        tag,
+        ctx.manifest_dir.display(),
+    );
+
+    let status = std::process::Command::new("docker")
+        .arg("build")
+        .arg("-t")
+        .arg(&tag)
+        .arg(".")
+        .current_dir(&ctx.manifest_dir)
+        .status();
+
+    match status {
+        Ok(s) if s.success() => {
+            println!("✓ build OK — `{}`", tag);
+        }
+        Ok(s) => {
+            // `docker build` ya escribió su error a stderr; salimos con su
+            // exit code para que CI lo capture igual.
+            std::process::exit(s.code().unwrap_or(1));
+        }
+        Err(e) => {
+            eprintln!(
+                "✗ no se pudo invocar `docker build`: {e}. ¿Está Docker instalado y \
+                 corriendo? (`docker --version` para verificar)"
+            );
+            std::process::exit(1);
+        }
     }
 }
 

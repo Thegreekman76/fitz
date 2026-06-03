@@ -9757,8 +9757,48 @@ Sub-pasos:
   documentadas: cross-module detection, falso positivo de `db` local,
   detección Python interop, healthchecks `@healthz/@readyz` y
   restart-policies `@cron`, `fitz docker build` wrapper.
-- **12.4.b** — Smart detection más rica (Python bundle,
-  healthchecks, cron) + `fitz docker build` wrapper.
+- **12.4.b (CERRADA 2026-06-03, v0.12.3)** — Smart detection rica +
+  `fitz docker build` wrapper. Cierra **Fase 12.4 entera**. Sub-pasos:
+  - **12.4.b.1** — `DockerShape` gana 2 campos (`uses_python`,
+    `uses_cron`) + `Default` derive. Helpers nuevos `stmt_uses_python`
+    (mira `Stmt::Import`/`FromImport` con `path[0] == "python"`) y
+    `stmt_uses_cron` (mira `Stmt::FnDef.decorators` con `name ==
+    "cron"`). `render_dockerfile` consulta `runtime_image(shape)` que
+    devuelve `"python:3.12-slim-bookworm"` cuando `uses_python` (el
+    binario emitido por `fitz build` con interop necesita
+    `libpython3.12.so` que distroless no incluye; slim-bookworm trae
+    libpython + wget) o `"gcr.io/distroless/cc-debian12"` (default).
+    `render_compose` suma `restart: unless-stopped` cuando `uses_cron`
+    y healthcheck HTTP contra `/healthz` cuando `server_port = Some` Y
+    `uses_python` (wget disponible); con distroless emite comentario
+    explicativo con la receta para agregarlo a mano. Handler
+    `docker_init_cmd` reporta los nuevos detectados. 13 unit tests
+    nuevos + 4 E2E nuevos.
+  - **12.4.b.2** — Sub-enum nuevo `DockerCmd::Build { tag: Option<String> }`.
+    Handler `docker_build_cmd(tag)` reusa `resolve_entry(None)` +
+    valida `Dockerfile` existe + invoca `std::process::Command::new(
+    "docker") build -t <tag> .` en `manifest_dir` con propagación del
+    exit code. Default `--tag` = `<package.name>:latest`. Aborta con
+    mensaje claro cuando falta Dockerfile (sugiere `fitz docker init`)
+    o `fitz.toml`. 2 E2E nuevos.
+  - Tests al cierre: 2937 unit (+13) + 93 cli_e2e (+6) + 3 openapi_e2e.
+    Clippy `--lib --tests --bins -- -D warnings` limpio, fmt clean.
+  - Decisiones técnicas: (a) runtime swap atómico al detectar interop
+    Python — alternativa rechazada de "siempre distroless + bundle
+    libpython" requeriría empaquetar libpython.so a mano, deuda mayor;
+    (b) healthcheck con `wget --spider` solo en slim-bookworm —
+    distroless sin shell no permite `CMD-SHELL`, opciones rechazadas
+    incluían bundlear mini-probe (deuda separada) y healthcheck TCP
+    (no valida endpoint exacto, sí estado del socket); (c) thin wrapper
+    `fitz docker build` sin `--push`/`--platform`/`--no-cache` — el
+    user que necesita flags advanced corre `docker build` directo.
+  - Smoke real validado contra `boilerplates/api-postgres-python`
+    (interop SQLAlchemy): runtime `python:3.12-slim-bookworm`
+    automático + healthcheck HTTP en compose.
+  - Deudas residuales derivadas: detección DB indirecta vía interop
+    Python (no dispara `uses_db`), healthcheck HTTP sin distroless,
+    `fitz docker build` thin (sin flags avanzados), cross-module
+    detection heredada de 12.4.a.
 
 **12.5 — Guía + curso M7 + cierre formal** (3 sub-pasos)
 

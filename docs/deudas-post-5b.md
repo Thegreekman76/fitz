@@ -2778,18 +2778,18 @@ que haya `@server`; (e) compose con DB sin `restart:` policies
    paralelo al codegen, trade-off aceptado del MVP. El user borra
    `db:` del compose a mano. Fix futuro: distinguir receptor `db`
    global vs binding local.
-3. **Detección Python interop diferida a 12.4.b** — programas con
-   `from python import X` no funcionan con distroless (necesita
-   libpython.so). Fix futuro: cuando `program_uses_python(program) →
-   true`, fallback a `debian:bookworm-slim` automático en el runtime
-   del Dockerfile.
-4. **Healthchecks HTTP + `restart:` policies diferidos a 12.4.b** —
-   depende de los decoradores `@healthz/@readyz` (todavía no
-   implementados, parte de Fase 12.1) y `@cron`. Compose actual sale
-   sin esos campos.
-5. **`fitz docker build [--tag X]` wrapper diferido a 12.4.b** —
-   thin wrapper sobre `docker build` con tags del `package.name`.
-   Trivial de implementar; queda como siguiente paso natural.
+3. ~~**Detección Python interop diferida a 12.4.b**~~ **CERRADO en
+   Fase 12.4.b (2026-06-03, v0.12.3)**: `uses_python` detecta
+   `from python import X` / `import python.X` y el Dockerfile cae a
+   `python:3.12-slim-bookworm` automático.
+4. ~~**Healthchecks HTTP + `restart:` policies diferidos a 12.4.b**~~
+   **CERRADO en Fase 12.4.b (2026-06-03, v0.12.3)**: `uses_cron` →
+   `restart: unless-stopped`; healthcheck HTTP contra `/healthz` cuando
+   hay `@server` Y runtime con wget (`uses_python`).
+5. ~~**`fitz docker build [--tag X]` wrapper diferido a 12.4.b**~~
+   **CERRADO en Fase 12.4.b (2026-06-03, v0.12.3)**: sub-comando
+   `fitz docker build [--tag X]` thin wrapper sobre `docker build -t
+   <pkg>:latest .` con override y propagación de exit code.
 
 **Tests al cierre**: 2924 unit (+18 del módulo `docker`) + 87
 cli_e2e (+6 del sub-comando) + 3 openapi_e2e. Clippy
@@ -2798,3 +2798,72 @@ cli_e2e (+6 del sub-comando) + 3 openapi_e2e. Clippy
 **Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.4 —
 Dockerfile autogenerado + `fitz docker`" → sub-paso 12.4.a expandido
 con todas las decisiones.
+
+## Fase 12.4.b — Smart detection rica + `fitz docker build` — **CERRADO 2026-06-03**
+
+Cierra **Fase 12.4 entera**. Suma detección AST de interop Python y
+`@cron`, ajusta runtime + compose según el shape del programa, y agrega
+el sub-comando `fitz docker build [--tag X]` que tag-ea y delega a
+`docker build`.
+
+**Smart detection rica**:
+
+- `uses_python` (`from python import X` o `import python.X`) → runtime
+  stage cae a `python:3.12-slim-bookworm` (~55 MB con libpython3.12 +
+  wget) en vez de distroless (~22 MB sin Python).
+- `uses_cron` (cualquier `@cron` decorator) → compose suma `restart:
+  unless-stopped` al service principal.
+- Healthcheck HTTP en compose solo cuando `server_port = Some` Y
+  `uses_python` (wget disponible). Con distroless emite comentario
+  explicativo con receta para agregarlo a mano.
+
+**Sub-comando `fitz docker build [--tag X]`**:
+
+- Thin wrapper sobre `docker build -t <tag> .` en `manifest_dir`.
+- Default `--tag` = `<package.name>:latest`.
+- Aborta con sugerencia si falta `Dockerfile` (recomienda `fitz docker
+  init`) o `fitz.toml`.
+- Propaga exit code de `docker build` para CI.
+
+**Decisiones técnicas**: (a) runtime swap atómico al detectar interop
+Python (alternativa rechazada: distroless + libpython bundleada, deuda
+mayor); (b) healthcheck con `wget --spider` solo en slim-bookworm —
+distroless sin shell no permite `CMD-SHELL` (alternativas rechazadas:
+mini-probe binario embebido, healthcheck TCP); (c) thin wrapper `fitz
+docker build` sin `--push`/`--platform`/`--no-cache` — para flags
+advanced, `docker build` directo.
+
+**Deudas residuales derivadas** (NO bloquean Fase 12.5):
+
+1. **Detección DB indirecta vía interop Python** — `uses_db` solo
+   detecta `db.X(...)` nativo Fitz. Programas que usan SQLAlchemy a
+   través de `from python import sqlalchemy` no disparan el service
+   `db:` en compose. Workaround: usar `--force` y editar a mano, o usar
+   el driver Postgres nativo de Fitz (cap 31). Fix futuro: detectar
+   `from python import sqlalchemy/psycopg2/asyncpg` con flag separado,
+   o sumar `--with-postgres` al `init`.
+2. **Healthcheck HTTP sin distroless** — el bloque solo sale cuando hay
+   wget (`uses_python`). Para programas no-Python con `@server`, el
+   user puede agregarlo a mano siguiendo el comentario o cambiar el
+   runtime. Fix futuro: bundlear mini binario HTTP probe en distroless,
+   o usar healthcheck TCP (sin validar endpoint exacto).
+3. **`fitz docker build` no expone `--push`/`--platform`/`--no-cache`**
+   — thin de propósito. Refinable si aparece demanda real (CI
+   multi-platform).
+4. **Cross-module detection** sigue siendo deuda heredada de 12.4.a:
+   `from python import X` / `@cron` / `@server` adentro de módulo
+   importado no dispara el shape. Workaround: declarar todo en el
+   archivo principal.
+
+**Tests al cierre**: 2937 unit (+13 del módulo `docker`) + 93 cli_e2e
+(+6 del sub-comando) + 3 openapi_e2e. Clippy `--lib --tests --bins
+-- -D warnings` limpio, fmt clean.
+
+**Smoke real verde** validado contra `boilerplates/api-postgres-python`
+(interop SQLAlchemy → runtime `python:3.12-slim-bookworm` automático +
+healthcheck HTTP en compose; ausencia de service `db:` documentada como
+limitación conocida de interop indirecto).
+
+**Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.4 —
+Dockerfile autogenerado + `fitz docker`" → sub-paso 12.4.b expandido
+con sub-pasos 12.4.b.1 + 12.4.b.2.

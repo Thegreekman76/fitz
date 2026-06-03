@@ -12411,18 +12411,21 @@ async fn ready(db: DbConn) -> Result<Bool> {
   (`@span("name") fn ...` o similar) cuando el lenguaje sume
   primitivas adicionales para tracing manual.
 
-### 33.9. Deployment — `fitz docker init` (Fase 12.4.a)
+### 33.9. Deployment — `fitz docker init` + `fitz docker build` (Fase 12.4)
 
 Para llevar todo el stack (HTTP + logs + spans + métricas + DB) a
-producción dentro de un container, Fitz tiene un sub-comando que
-genera Dockerfile + .dockerignore + docker-compose.yml smart por
-defecto:
+producción dentro de un container, Fitz tiene dos sub-comandos:
+`fitz docker init` genera Dockerfile + .dockerignore + docker-compose.yml
+smart por defecto; `fitz docker build [--tag X]` tag-ea y delega a
+`docker build`.
 
 ```bash
 $ fitz docker init
 ▶ fitz docker init — proyecto `mi-api` en `/path/al/proyecto`
    detectado: @server(port = 3000)
    detectado: uso de DB (db.X(...)) → compose suma postgres:16-alpine
+   detectado: interop Python → runtime fallback a python:3.12-slim-bookworm (libpython3.12 + wget)
+   detectado: @cron → compose suma restart: unless-stopped
 ✓ escrito: Dockerfile
 ✓ escrito: .dockerignore
 ✓ escrito: docker-compose.yml
@@ -12433,16 +12436,30 @@ entry point declarado en `[bin].main`, y emite:
 
 - **`Dockerfile`** multi-stage: builder
   `ghcr.io/thegreekman76/fitz:${FITZ_TAG}` con `RUN fitz build` →
-  runtime `gcr.io/distroless/cc-debian12` con solo el binario
-  (resultado típico ~30-50 MB sin Python interop). `EXPOSE` se
-  emite automáticamente si el programa declara `@server(N)`.
+  runtime adaptativo según el shape del programa:
+  - Por defecto **`gcr.io/distroless/cc-debian12`** (~22 MB sin
+    shell ni package manager — superficie mínima).
+  - Cuando el programa declara `from python import X`, cae a
+    **`python:3.12-slim-bookworm`** (~55 MB con libpython3.12 + wget).
+    El binario emitido por `fitz build` con interop dynamic-linkea
+    `libpython3.12.so` que distroless no incluye.
+  - `EXPOSE <port>` se emite automáticamente si el programa declara
+    `@server(N)`.
 - **`.dockerignore`** con `target/`, `.git/`, `.env*`,
   `__pycache__/`, configs de editor, etc.
-- **`docker-compose.yml`** smart: si el programa usa
-  `db.connect(...)` o cualquier `db.X(...)`, el compose suma un
-  service `postgres:16-alpine` con healthcheck + volume `pgdata` +
-  `DATABASE_URL` inyectada al service principal con
-  `depends_on: service_healthy`. Si no, sale solo el service `app`.
+- **`docker-compose.yml`** smart adaptativo:
+  - Si el programa usa `db.connect(...)` o cualquier `db.X(...)`
+    nativo Fitz, el compose suma un service `postgres:16-alpine` con
+    healthcheck + volume `pgdata` + `DATABASE_URL` inyectada con
+    `depends_on: service_healthy`.
+  - Si el programa tiene `@cron`, suma `restart: unless-stopped` al
+    service principal para que el scheduler sobreviva
+    crashes/redeploys.
+  - Si hay `@server(port)` Y el runtime tiene wget disponible
+    (`uses_python` → slim-bookworm), suma bloque `healthcheck:` HTTP
+    contra `/healthz` (auto-mounteado por Fase 12.1.b). Con distroless
+    el compose emite un comentario explicando cómo agregarlo a mano
+    si el user cambia el runtime.
 
 Para sobrescribir archivos existentes:
 
@@ -12452,6 +12469,17 @@ $ fitz docker init --force
 
 Sin `--force`, los archivos existentes se preservan (cero overwrite
 accidental de un Dockerfile hand-tuned).
+
+Para construir la imagen sin escribir `docker build` a mano:
+
+```bash
+$ fitz docker build              # tag: <package.name>:latest
+$ fitz docker build --tag mi/app:v1   # override del tag
+```
+
+El wrapper es thin — invoca `docker build -t <tag> .` en el directorio
+del manifest y propaga el exit code. Aborta con sugerencia clara si
+falta `Dockerfile` (recomendando correr `fitz docker init` primero).
 
 **Producción con OTel**: cuando arranques el container, exportá las
 env vars OTel y el binario reportará al backend automáticamente:
@@ -12469,16 +12497,24 @@ services:
       FITZ_PROMETHEUS: "1"             # endpoint /metrics activo
 ```
 
-**Lo que 12.4.a NO hace** (queda para 12.4.b):
+**Limitaciones conocidas de Fase 12.4** (deuda residual visible):
 
-- Detección de interop Python — programas con `from python import
-  X` necesitan fallback a `debian:bookworm-slim` (distroless no
-  tiene libpython.so).
-- Healthchecks HTTP en compose — requiere decoradores
-  `@healthz`/`@readyz` (Fase 12.1).
-- `restart: unless-stopped` automático para programas con `@cron`.
-- Wrapper `fitz docker build [--tag X]` — por ahora corré
-  `docker build .` directo después del init.
+- **DB indirecta vía interop Python**: el detector `uses_db` solo
+  matchea `db.X(...)` nativo Fitz. Programas que usan SQLAlchemy a
+  través de `from python import sqlalchemy` no disparan el service
+  `db:` en compose. Workaround: usar `--force` y editar a mano, o usar
+  el driver Postgres nativo de Fitz (cap 31).
+- **Healthcheck HTTP sin distroless**: el bloque solo sale cuando el
+  runtime tiene wget (`uses_python`). Para programas no-Python con
+  `@server`, el user puede agregar el healthcheck a mano o cambiar el
+  runtime (el comentario en el compose explica cómo).
+- **Cross-module detection**: el shape se calcula del entry point del
+  manifest. `@server`/`db.connect`/`@cron`/`from python import X`
+  adentro de un módulo importado no dispara el shape. Workaround:
+  declarar todo en el archivo principal (caso típico).
+- **`fitz docker build` thin**: sin `--push`/`--platform`/`--no-cache`.
+  Para CI multi-platform con `docker buildx`, correr `docker build`
+  directo.
 
 ---
 

@@ -173,11 +173,21 @@ Extensions. Detalle en
   `lint`).
 - **Fase 9.w MVP** — Stack web first-class (auth + JWT/Argon2 +
   WebSockets tipados + AsyncAPI auto + cron + spawn).
+- **Fase 10** — Stack DB nativo (driver Postgres puro Fitz + ORM
+  declarativo + migraciones automáticas + transactions + composite
+  PK + indexes + tipos avanzados Date/DateTime/Uuid).
+- **Fase 11** (v0.11.0) — CLI builder nativo (`@command` con
+  `--help` autogenerado, sin `clap`/`argparse`/`click`).
+- **Fase 12.1-12.3** — Healthz/readyz + Secret + Observability
+  minimal con OpenTelemetry (logs + spans + métricas + OTLP
+  exporter).
+- **Fase 12.4** — Dockerfile autogenerado (`fitz docker init` +
+  `fitz docker build` con detección AST de @server/db/python/cron
+  y runtime + compose adaptativos).
 
-**Próximo norte**: Fase 10 — Stack DB nativo (driver Postgres
-puro Fitz + ORM declarativo + migraciones autogeneradas).
-Mientras tanto, interop Python con SQLAlchemy cubre el gap
-(cap 21 de la guía).
+**Próximo norte**: Fase 12.5 (cap "Deployment ciudadano primera
+clase" en la guía + caps del curso M7) y/o Fase 9.w.1.iter2 (RBAC
+custom + token refresh).
 
 ---
 

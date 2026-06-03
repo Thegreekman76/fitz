@@ -2058,3 +2058,102 @@ fn docker_init_sin_manifest_aborta_con_mensaje_claro() {
         "stderr inesperado: {stderr}",
     );
 }
+
+// ---- 12.4.b — smart detection rica + `fitz docker build` ----
+
+#[test]
+fn docker_init_uses_python_reporta_runtime_fallback() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_fitz = "from python import math\n\nprint(\"hola\")\n";
+    let project = make_docker_project(tmp.path(), "py-cli", main_fitz);
+
+    let (stdout, stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let dockerfile = std::fs::read_to_string(project.join("Dockerfile")).unwrap();
+    assert!(
+        dockerfile.contains("FROM python:3.12-slim-bookworm"),
+        "Dockerfile esperado con runtime python:3.12-slim-bookworm: {dockerfile}",
+    );
+    assert!(!dockerfile.contains("FROM gcr.io/distroless/cc-debian12"));
+    assert!(stdout.contains("interop Python"));
+    assert!(stdout.contains("python:3.12-slim-bookworm"));
+}
+
+#[test]
+fn docker_init_uses_cron_emite_restart_unless_stopped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_fitz = "@cron(\"0 * * * *\")\nfn limpiar() => 0\n";
+    let project = make_docker_project(tmp.path(), "scheduler", main_fitz);
+
+    let (stdout, stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let compose = std::fs::read_to_string(project.join("docker-compose.yml")).unwrap();
+    assert!(compose.contains("    restart: unless-stopped"));
+    assert!(stdout.contains("@cron"));
+}
+
+#[test]
+fn docker_init_python_y_server_emite_healthcheck_http_en_compose() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_fitz = "\
+from python import os
+
+@get(\"/\")
+fn root() => \"ok\"
+
+@server(3000)
+fn main() => 0
+";
+    let project = make_docker_project(tmp.path(), "py-api", main_fitz);
+
+    let (_stdout, stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let compose = std::fs::read_to_string(project.join("docker-compose.yml")).unwrap();
+    assert!(compose.contains("    healthcheck:"));
+    assert!(compose.contains("wget"));
+    assert!(compose.contains("http://localhost:3000/healthz"));
+}
+
+#[test]
+fn docker_init_distroless_y_server_no_emite_healthcheck_pero_comentario_claro() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_fitz = "@get(\"/\")\nfn root() => \"ok\"\n\n@server(3000)\nfn main() => 0\n";
+    let project = make_docker_project(tmp.path(), "api", main_fitz);
+
+    let (_stdout, _stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0);
+
+    let compose = std::fs::read_to_string(project.join("docker-compose.yml")).unwrap();
+    // El comentario explicando por qué no emitimos healthcheck con
+    // distroless está presente.
+    assert!(compose.contains("Healthcheck HTTP NO emitido"));
+    assert!(compose.contains("/healthz"));
+}
+
+#[test]
+fn docker_build_sin_dockerfile_aborta_con_sugerencia() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = make_docker_project(tmp.path(), "no-dockerfile", "print(\"hola\")\n");
+    // NO corremos `docker init` primero — no debería haber Dockerfile.
+
+    let (_stdout, stderr, code) = run_fitz(&["docker", "build"], &project);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("Dockerfile") && stderr.contains("fitz docker init"),
+        "stderr inesperado: {stderr}",
+    );
+}
+
+#[test]
+fn docker_build_sin_manifest_aborta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["docker", "build"], tmp.path());
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("fitz.toml") || stderr.contains("fitz new"),
+        "stderr inesperado: {stderr}",
+    );
+}
