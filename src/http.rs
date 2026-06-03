@@ -2749,6 +2749,17 @@ fn attach_preflight(mr: MethodRouter, cors: std::sync::Arc<CorsConfig>) -> Metho
 /// el bridge mpsc/oneshot que existía en F4.x quedó eliminado al
 /// volver `Value`/`EnvRef` `Send` (F17.2-3) y `HttpRegistry`
 /// `Send + Sync`.
+///
+/// Fase 12.3.b.2 — auto-instrumentation HTTP:
+/// - Abre un `SpanContext::new_root()` antes de invocar `handle_task`.
+/// - Wrappea la ejecución con `with_span_context(ctx, ...)` para que
+///   TODO `log.info/warn/error/debug` emitido adentro del handler
+///   herede el `trace_id`/`span_id` automático.
+/// - Emite `log.info("http.access", ...)` al FINAL del request con
+///   `http.method`, `http.target`, `http.status_code`, `duration_ms`.
+///   El access log sale ADENTRO del scope, así que también incluye
+///   trace_id/span_id (correlación con el resto de los logs del
+///   request). Convención de naming OTel-compatible.
 async fn dispatch_request(
     registry: &HttpRegistry,
     route_idx: usize,
@@ -2757,15 +2768,45 @@ async fn dispatch_request(
     body: Vec<u8>,
     headers: HashMap<String, String>,
 ) -> Response {
-    let outcome = handle_task(
-        registry,
-        route_idx,
-        path_params,
-        query_params,
-        body,
-        headers,
-    )
+    let (method_str, path_template): (&'static str, String) = match registry.routes.get(route_idx) {
+        Some(route) => (route.method.as_str(), route.path.clone()),
+        None => ("UNKNOWN", String::new()),
+    };
+    let ctx = crate::logging::SpanContext::new_root();
+    let start = std::time::Instant::now();
+
+    let outcome = crate::logging::with_span_context(ctx, || async {
+        let outcome = handle_task(
+            registry,
+            route_idx,
+            path_params,
+            query_params,
+            body,
+            headers,
+        )
+        .await;
+        // Emit access log ADENTRO del scope para que herede
+        // trace_id/span_id del span del request. Naming OTel-compatible:
+        // `http.method` / `http.target` / `http.status_code` /
+        // `duration_ms`.
+        let duration_ms = start.elapsed().as_millis() as i64;
+        let kvs: Vec<(String, Value)> = vec![
+            (
+                "http.method".to_string(),
+                Value::Str(method_str.to_string()),
+            ),
+            ("http.target".to_string(), Value::Str(path_template.clone())),
+            (
+                "http.status_code".to_string(),
+                Value::Int(outcome.status as i64),
+            ),
+            ("duration_ms".to_string(), Value::Int(duration_ms)),
+        ];
+        crate::logging::emit_log_record("info", "http.access", &kvs);
+        outcome
+    })
     .await;
+
     outcome_to_response(outcome)
 }
 
