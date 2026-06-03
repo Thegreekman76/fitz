@@ -2708,3 +2708,38 @@ sección "Deudas residuales derivadas"):
 **Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.3 —
 Observability minimal con OpenTelemetry" expandida con los 11
 sub-pasos (a.1-3, b.1-5, c.1-3).
+
+## Smoke compile_e2e — gating de deps emitidas — **ABIERTO 2026-06-03**
+
+Heredado de v0.12.1 (Tier3 Prometheus). El smoke
+`GUIDE_EXAMPLES_COMPILE` compila ~290 ejemplos en serie, cada uno
+con su propio `target/fitz-build/<stem>/` separado. Sin cache
+compartido, cada ejemplo paga el cold-compile de toda dep que
+emita el `cargo_toml_for` cuando `has_http=true` (incluso si no
+las usa). Tras sumar `metrics-exporter-prometheus = "0.18"` en
+Tier3, el smoke en Linux fresh runner cruzó los 15 min y rompió
+CI (commit `ci: bumpear timeout 15→25 min`, 2026-06-03).
+
+**Fix temporal**: bumpear timeout a 25 min en `.github/workflows/
+ci.yml`. Compra tiempo pero no escala — cada feature nueva (12.4
+sumará deps de Docker compose codegen, 12.5+ podría sumar más)
+empuja el smoke arriba.
+
+**Fix real (deuda)**: gatear deps emitidas por el flag específico
+que las activa, NO solo por `has_http`. Concretamente:
+
+- `metrics-exporter-prometheus`: solo cuando
+  `@server(prometheus=true)`. Trade-off: pierde el path de env var
+  `FITZ_PROMETHEUS=1` activando Prometheus en runtime sin
+  recompilar. Aceptable si se documenta — el opt-in compile-time
+  cubre el 95% del caso real (production deployments declaran
+  Prometheus en el código).
+- `opentelemetry-otlp` con feature `logs`/`trace`: solo cuando
+  `uses_logging || uses_observability`. Ya está gateado por
+  `has_http` pero el feature `logs` podría salir si no hay
+  `log.*`.
+
+**Encaje natural con Fase 12.4** — el smart Cargo.toml detection
+(que ya planea suma deps según `db.connect`/`@cron`/etc.) puede
+unificarse con este gating. Cerrar en el mismo paso baja el
+smoke de ~17-20 min a ~10-12 min sobre Linux fresh.

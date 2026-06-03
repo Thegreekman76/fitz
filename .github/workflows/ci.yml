@@ -101,7 +101,13 @@ jobs:
         run: cargo test --release --test openapi_e2e
       - name: cargo test --test compile_e2e (smoke ejemplos guía)
         run: cargo test --release --test compile_e2e smoke_ejemplos -- --test-threads=1
-        timeout-minutes: 15
+        # 2026-06-03: bumpeado de 15→25 tras v0.12.1 (Tier3 sumó
+        # metrics-exporter-prometheus al Cargo.toml emitido por cada
+        # ejemplo HTTP → first-run cold compile ~17-20 min en Linux
+        # fresh runners). Deuda: gatear la dep por
+        # `@server(prometheus=true)` para que solo los ejemplos que
+        # la usen la paguen. Encaja con Fase 12.4 (smart Cargo.toml).
+        timeout-minutes: 25
 
   # LSP feature opt-in. Solo Linux — los LSP unit tests son
   # pure-function sobre AST/TypeInfo (sin I/O ni terminal), Linux
