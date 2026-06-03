@@ -9522,11 +9522,14 @@ var, no-op silencioso — zero overhead, zero conexiones de red.
    `SpanContext::with_ids(...)`. El `trace_id` en logs stderr
    matchea el del backend (Jaeger/Tempo/Datadog) → queries
    cross-pipeline habilitadas. Paridad bit-a-bit codegen.
-4. **Endpoint `/metrics` Prometheus opcional**: cuando el user
-   prefiere Prometheus scraping sobre OTLP push, instalar
-   `metrics-exporter-prometheus` como recorder + auto-mount
-   `GET /metrics`. Activable con `@server(prometheus=true)` o
-   similar.
+4. ~~**Endpoint `/metrics` Prometheus opcional**~~ **CERRADO en
+   Fase 12.3.iter2.Tier3 (2026-06-03)**: `metrics-exporter-
+   prometheus = "0.18"` con `default-features = false`. Dual
+   gate: `@server(prometheus=true)` + env var
+   `FITZ_PROMETHEUS=1` (env var override útil en producción).
+   `serve()` instala el recorder + `build_router` auto-mounta
+   `GET /metrics` con exposition format. Mismo puerto que la
+   app. Paridad bit-a-bit codegen via `PROMETHEUS_PRELUDE`.
 
 #### 12.3.iter2 — Cierre de deudas residuales de 12.3 (en curso)
 
@@ -9555,6 +9558,67 @@ validación completa.
   cerrada. Total al cierre: **2896 unit** (+2 vs 2894 del cierre
   Fase 12.3). Clippy `--lib --tests --bins -- -D warnings`
   limpio, fmt clean. Smoke `GUIDE_EXAMPLES_COMPILE` verde.
+
+- **12.3.iter2.Tier3 — Endpoint `/metrics` Prometheus (CERRADA
+  2026-06-03)**. Cierra la deuda residual #4 de Fase 12.3.
+  `metrics-exporter-prometheus = "0.18"` con `default-features = false`
+  (skipea `http-listener` que armaría su propio HTTP server, y
+  `push-gateway` que no es el caso 90%). Solo usamos
+  `PrometheusBuilder::new().build_recorder() + handle.render()`.
+
+  Dual gate de activación: (a) `@server(prometheus=true)` como
+  flag compile-time, parseado por evaluator + codegen, populando
+  `ServerConfig.prometheus_enabled: bool` (default `false`);
+  (b) env var `FITZ_PROMETHEUS=1`/`true`/`yes` como runtime
+  override — el flag y la env var se combinan con OR, así que
+  activar cualquiera de los dos enciende el endpoint. El env var
+  es útil en producción para activar/desactivar sin recompilar.
+
+  Cuando activo, `serve()` llama a `observability::init_prometheus`
+  que instala `PrometheusBuilder` como recorder global del crate
+  `metrics`. Los `metrics::counter!("http_requests_total", ...)`
+  + `metrics::histogram!("http_request_duration_seconds", ...)`
+  que YA emite `dispatch_request` (desde 12.3.b.3) empiezan a
+  popular el recorder Prometheus automático. `build_router`
+  auto-mounta `GET /metrics` con response que llama
+  `handle.render()` para producir el exposition format
+  Prometheus (text/plain con content-type
+  `text/plain; version=0.0.4; charset=utf-8`). El endpoint vive
+  en el MISMO puerto + transporte que el resto de la app (NO un
+  puerto separado) — menos surface área, menos config (port
+  forwarding/firewall rules). Si el user declaró su propio
+  `@get("/metrics")`, gana — mismo patrón que `/openapi.json`/
+  `/healthz`.
+
+  Paridad bit-a-bit `fitz run` ↔ `fitz build`: codegen emite un
+  `PROMETHEUS_PRELUDE` nuevo con `__FITZ_PROMETHEUS_HANDLE`
+  static + `__fitz_init_prometheus(compile_time_enabled: bool)`
+  (dual gate paralelo) + `__fitz_prometheus_route() ->
+  axum::Router` (retorna sub-Router con `/metrics` cuando handle
+  instalado, vacío cuando no). `gen_http_main` invoca
+  `__fitz_init_prometheus(<cfg.prometheus_enabled>)` después de
+  `__fitz_log_init` y `__fitz_otel_init`, y emite `.merge(
+  __fitz_prometheus_route())` al construir el Router (Router
+  vacío se merge sin efecto, equivalente a no agregar nada).
+  Cargo.toml emitido suma `metrics-exporter-prometheus = "0.18"`
+  con `default-features = false` cuando `has_http`.
+
+  Decisión deliberada: el dep va en Cargo.toml para CUALQUIER
+  programa HTTP, no solo cuando `@server(prometheus=true)`. Eso
+  habilita el path del env var sin necesidad de recompilar
+  (caso típico de producción: deployar con `@server` sin la
+  flag, después activar `FITZ_PROMETHEUS=1` en el container
+  config). Costo: dep pequeña (~few hundred KB), compile-time
+  impact moderado (smoke ~290 ejemplos tarda ~5-6 min con
+  cache caliente). Trade-off aceptado.
+
+  5 unit tests nuevos: 3 del evaluator (parsing del kwarg
+  `prometheus`) + 2 del codegen (emisión del PROMETHEUS_PRELUDE
+  + init call con flag false/true).
+
+  Tests E2E con scrape real omitidos — requeriría arrancar el
+  server real y hacer GET /metrics. La validación se hizo a
+  mano fuera de los tests automatizados.
 
 - **12.3.iter2.b — Bridge logs OTel (CERRADA 2026-06-03)**.
   Cuando `is_otel_enabled()` está activo Y el `LogExporter` se

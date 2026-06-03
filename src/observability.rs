@@ -206,6 +206,48 @@ pub fn logger_provider() -> Option<&'static SdkLoggerProvider> {
     OTEL_LOGGER_PROVIDER.get()
 }
 
+/// Fase 12.3.iter2.Tier3 — handle del recorder Prometheus cuando está
+/// instalado. El handle se usa por el endpoint `/metrics` para
+/// renderear la exposition format en cada scrape. `None` cuando
+/// Prometheus no fue habilitado (default).
+static PROMETHEUS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+
+/// Inicializa el recorder Prometheus global cuando `enabled` es `true`.
+/// Idempotente: el `OnceLock` solo acepta el primer set; sub-secuentes
+/// calls retornan el handle ya instalado.
+///
+/// Decisión: el endpoint `/metrics` se monta en el axum del usuario
+/// (NO en un puerto separado vía `http-listener` feature) — usa el
+/// mismo puerto + transporte que el resto de la app. Menos surface
+/// área, menos config (port forwarding, firewall rules, etc.).
+///
+/// Activación dual:
+/// - Compile-time: `@server(prometheus=true)` en el código Fitz.
+/// - Runtime: env var `FITZ_PROMETHEUS=1`/`true` (override).
+///
+/// Si AMBAS están: env var precedence (`true` o `false`). Sin
+/// ninguna: recorder no se instala, `/metrics` no se monta.
+///
+/// Fase 12.3.iter2.Tier3 — cierre de la deuda residual #4 de Fase 12.3.
+pub fn init_prometheus(enabled: bool) {
+    if !enabled || PROMETHEUS_HANDLE.get().is_some() {
+        return;
+    }
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // `set_global_recorder` falla si ya hay uno instalado. Lo
+    // ignoramos — el caso típico es REPL/tests/fitz dev re-ejecutando.
+    let _ = metrics::set_global_recorder(recorder);
+    let _ = PROMETHEUS_HANDLE.set(handle);
+}
+
+/// Devuelve el handle Prometheus para renderear la exposition format.
+/// `None` cuando el recorder no fue instalado. El endpoint `/metrics`
+/// del usuario lo consulta; si `None`, no monta la ruta.
+pub fn prometheus_handle() -> Option<&'static metrics_exporter_prometheus::PrometheusHandle> {
+    PROMETHEUS_HANDLE.get()
+}
+
 /// Devuelve el tracer global con nombre `"fitz"` para abrir spans
 /// HTTP. Llamar SOLO cuando `is_otel_enabled()` retorna `true` —
 /// sin provider instalado, el tracer es no-op pero igual paga la

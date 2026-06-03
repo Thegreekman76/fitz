@@ -1394,10 +1394,29 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
+            // Fase 12.3.iter2.Tier3 — opt-in del endpoint `/metrics`
+            // Prometheus. Default `false` (recorder no instalado, ruta
+            // no montada). `true` activa: PrometheusBuilder como
+            // recorder global + auto-mount `GET /metrics`. Env var
+            // `FITZ_PROMETHEUS=1`/`true`/`yes` también lo activa
+            // (override sobre el flag en runtime — útil en producción
+            // sin recompilar).
+            "prometheus" => match value_expr {
+                Expr::Bool(b, _) => {
+                    config.prometheus_enabled = *b;
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'prometheus' debe ser Bool literal, \
+                         recibió {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
             other => {
                 return Err(err(format!(
                     "@server sobre fn '{}': kwarg '{}' no reconocido. \
-                     Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability.",
+                     Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
                     fn_name, other,
                 )));
             }
@@ -25611,6 +25630,43 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("docs") && err.message.contains("Bool"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tier3_server_decorator_acepta_kwarg_prometheus_true() {
+        // Fase 12.3.iter2.Tier3 — @server(3000, prometheus=true) popula
+        // prometheus_enabled=true. Sin la flag, default false.
+        let src = "@server(3000, prometheus=true)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert!(cfg.prometheus_enabled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tier3_server_decorator_default_prometheus_es_false() {
+        // Sin kwarg: default false (recorder no instalado, /metrics no
+        // se monta).
+        let src = "@server(3000)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert!(!cfg.prometheus_enabled);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn tier3_server_decorator_prometheus_no_bool_es_error() {
+        let src = "@server(3000, prometheus=\"si\")\nfn cfg() => 0";
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("prometheus") && err.message.contains("Bool"),
             "mensaje inesperado: {}",
             err.message,
         );

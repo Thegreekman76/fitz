@@ -2708,6 +2708,16 @@ fn cargo_toml_for(
             s.push_str(
                 "opentelemetry-otlp = { version = \"0.32\", default-features = false, features = [\"http-proto\", \"reqwest-blocking-client\", \"trace\", \"logs\"] }\n",
             );
+            // Fase 12.3.iter2.Tier3 — `metrics-exporter-prometheus`
+            // siempre cuando hay HTTP para habilitar dual-gate (kwarg
+            // `@server(prometheus=true)` + env var `FITZ_PROMETHEUS=1`).
+            // `default-features = false` skipea `http-listener` (que
+            // armaría su propio HTTP server) + `push-gateway` (no es
+            // el caso 90%). Solo usamos `PrometheusBuilder::new()
+            // .build_recorder() + handle.render()` — sin features extras.
+            s.push_str(
+                "metrics-exporter-prometheus = { version = \"0.18\", default-features = false }\n",
+            );
         }
         s
     } else {
@@ -4926,6 +4936,13 @@ fn emit_main_rs_body(
     // Va DESPUÉS de `emit_logging_prelude` porque el OTel init se llama
     // adentro de `emit_log_init_call` después de `__fitz_log_init`.
     ctx.emit_otel_prelude();
+    // Fase 12.3.iter2.Tier3 — preludio del Prometheus exporter:
+    // `__fitz_init_prometheus` + `__fitz_prometheus_route`. Siempre
+    // cuando hay HTTP (la dep `metrics-exporter-prometheus` viene en
+    // el Cargo.toml emitido bajo el mismo gate). El gate dual
+    // (compile-time `@server(prometheus=true)` + env var
+    // `FITZ_PROMETHEUS=1`) vive dentro del helper de init.
+    ctx.emit_prometheus_prelude();
     // Fase 10.1.c — preludio del módulo `db`: tipos opacos
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + helpers async para connect/query/exec/close.
@@ -5340,6 +5357,13 @@ struct ServerConfigArgs {
     /// metal, cero overhead por request. Paralelo bit-a-bit al campo
     /// del runtime `crate::http::ServerConfig::observability_enabled`.
     observability_enabled: bool,
+    /// Fase 12.3.iter2.Tier3 — activa el endpoint `/metrics` Prometheus.
+    /// Default `false`. `@server(prometheus=true)` opt-in compile-time;
+    /// env var `FITZ_PROMETHEUS=1`/`true`/`yes` opt-in runtime
+    /// (precede sobre el flag — útil para activar/desactivar en
+    /// producción sin recompilar). Paralelo bit-a-bit al campo del
+    /// runtime `crate::http::ServerConfig::prometheus_enabled`.
+    prometheus_enabled: bool,
 }
 
 impl Default for ServerConfigArgs {
@@ -5352,6 +5376,7 @@ impl Default for ServerConfigArgs {
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
             observability_enabled: true,
+            prometheus_enabled: false,
         }
     }
 }
@@ -5529,13 +5554,32 @@ fn parse_server_decorator(
                     ));
                 }
             },
+            // Fase 12.3.iter2.Tier3 — paralelo bit-a-bit al kwarg del
+            // runtime intérprete. `true` opt-in del endpoint `/metrics`
+            // Prometheus en el binario nativo.
+            "prometheus" => match value_expr {
+                Expr::Bool(b, _) => {
+                    cfg.prometheus_enabled = *b;
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'prometheus' debe ser Bool literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                }
+            },
             other => {
                 return Err(FitzError::new(
                     ErrorKind::TypeError,
                     0,
                     0,
                     format!(
-                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability.",
+                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
                         other
                     ),
                 ));
@@ -7435,6 +7479,20 @@ impl __FitzRetryConfig {
             return;
         }
         self.emit(OTEL_PRELUDE);
+        self.emit("\n");
+    }
+
+    /// Fase 12.3.iter2.Tier3 — Emite el preludio Prometheus
+    /// (`__fitz_init_prometheus` + `__fitz_prometheus_route` +
+    /// `__FITZ_PROMETHEUS_HANDLE` static). Paralelo bit-a-bit a
+    /// `crate::observability::{init_prometheus,prometheus_handle}`
+    /// del intérprete. Solo se emite cuando hay HTTP (programas CLI
+    /// puros no exponen `/metrics`).
+    fn emit_prometheus_prelude(&mut self) {
+        if !self.has_http {
+            return;
+        }
+        self.emit(PROMETHEUS_PRELUDE);
         self.emit("\n");
     }
 
@@ -26059,6 +26117,16 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // user (incluso antes de los handlers HTTP / cron / state).
         // No-op si `uses_logging == false`.
         self.emit_log_init_call();
+        // Fase 12.3.iter2.Tier3 — init del recorder Prometheus si el
+        // compile-time flag (`@server(prometheus=true)`) o el env var
+        // (`FITZ_PROMETHEUS=1`) lo piden. El gate dual queda dentro
+        // del helper para paridad bit-a-bit con el runtime intérprete.
+        writeln!(
+            &mut self.output,
+            "    __fitz_init_prometheus({});",
+            cfg.prometheus_enabled
+        )
+        .unwrap();
         // Emitimos los main_stmts que NO son state (no están en
         // state_var_types). Los que sí son state ya viven en
         // thread_local — re-emitirlos como locales acá sería redundante.
@@ -26286,6 +26354,16 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 target
             )
             .unwrap();
+        }
+        // Fase 12.3.iter2.Tier3 — auto-mount /metrics si el handle está
+        // instalado (runtime check). El gate dual ya quedó codificado en
+        // `__fitz_prometheus_should_init` que `gen_http_main` invocó
+        // ANTES de construir el Router, así que cuando llegamos acá el
+        // handle ya está o no según corresponda. Mismo patrón que /docs/
+        // healthz: si el user declaró su propio @get("/metrics"), gana.
+        if !user_paths.contains("/metrics") {
+            self.emit_indent();
+            self.emit("    .merge(__fitz_prometheus_route())\n");
         }
         self.emit_indent();
         self.emit(";\n");
@@ -31834,6 +31912,71 @@ pub(crate) fn __fitz_otel_tracer() -> opentelemetry::global::BoxedTracer {
 }
 "##;
 
+/// Fase 12.3.iter2.Tier3 — preludio del endpoint `/metrics` Prometheus.
+/// Paralelo bit-a-bit a `crate::observability::{init_prometheus,
+/// prometheus_handle}` del intérprete. Solo se emite cuando hay HTTP.
+const PROMETHEUS_PRELUDE: &str = r##"
+// --- 12.3.iter2.Tier3: endpoint /metrics Prometheus ---
+
+// Handle global del recorder Prometheus. `__fitz_init_prometheus` lo
+// instala cuando el dual gate está activo (compile-time flag OR env
+// var). `__fitz_prometheus_route` lo consulta al armar el Router para
+// decidir si auto-montar `/metrics`.
+static __FITZ_PROMETHEUS_HANDLE: std::sync::OnceLock<
+    metrics_exporter_prometheus::PrometheusHandle,
+> = std::sync::OnceLock::new();
+
+/// Inicializa el recorder Prometheus cuando dual gate (compile-time
+/// flag desde `@server(prometheus=true)` OR env var
+/// `FITZ_PROMETHEUS=1`/`true`/`yes`) está activo. Idempotente.
+#[allow(dead_code)]
+fn __fitz_init_prometheus(compile_time_enabled: bool) {
+    let enabled = compile_time_enabled
+        || matches!(
+            std::env::var("FITZ_PROMETHEUS").as_deref(),
+            Ok("1" | "true" | "yes"),
+        );
+    if !enabled || __FITZ_PROMETHEUS_HANDLE.get().is_some() {
+        return;
+    }
+    let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+    let handle = recorder.handle();
+    // `set_global_recorder` falla si ya hay uno instalado (caso
+    // tests/REPL/dev re-ejecutando). Lo ignoramos.
+    let _ = metrics::set_global_recorder(recorder);
+    let _ = __FITZ_PROMETHEUS_HANDLE.set(handle);
+}
+
+/// Devuelve un sub-Router con `/metrics` cuando el handle está
+/// instalado, o un Router vacío cuando no. Se usa con `.merge(...)`
+/// en `gen_http_main` para componer condicionalmente.
+#[allow(dead_code)]
+fn __fitz_prometheus_route() -> axum::Router {
+    match __FITZ_PROMETHEUS_HANDLE.get() {
+        Some(handle) => {
+            let handle = handle.clone();
+            axum::Router::new().route(
+                "/metrics",
+                axum::routing::get(move || {
+                    let body = handle.render();
+                    async move {
+                        (
+                            axum::http::StatusCode::OK,
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )],
+                            body,
+                        )
+                    }
+                }),
+            )
+        }
+        None => axum::Router::new(),
+    }
+}
+"##;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -32280,6 +32423,67 @@ mod tests {
             !code.contains("__fitz_log_init"),
             "no debería emitir __fitz_log_init sin uses_logging: {}",
             code
+        );
+    }
+
+    #[test]
+    fn tier3_codegen_http_emite_prometheus_prelude_y_init_call_falso_por_default() {
+        // Fase 12.3.iter2.Tier3 — programas HTTP siempre traen el
+        // PROMETHEUS_PRELUDE (handle + init + route) para habilitar el
+        // dual gate (compile-time flag + env var FITZ_PROMETHEUS). Sin
+        // `@server(prometheus=true)`, el init se llama con `false` y
+        // sin env var el recorder no se instala.
+        let src = "@get(\"/x\")\nfn h() -> Str => \"ok\"\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__FITZ_PROMETHEUS_HANDLE"),
+            "esperaba static __FITZ_PROMETHEUS_HANDLE: {}",
+            code
+        );
+        assert!(
+            code.contains("fn __fitz_init_prometheus(compile_time_enabled: bool)"),
+            "esperaba helper __fitz_init_prometheus: {}",
+            code
+        );
+        assert!(
+            code.contains("__fitz_init_prometheus(false);"),
+            "esperaba init call con false (default sin @server(prometheus=true)): {}",
+            code
+        );
+        // El sub-Router con /metrics se merge sin condicional — el
+        // helper retorna empty Router si el handle no está instalado.
+        assert!(
+            code.contains(".merge(__fitz_prometheus_route())"),
+            "esperaba .merge(__fitz_prometheus_route()) en el Router: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn tier3_codegen_http_con_prometheus_true_emite_init_call_true() {
+        // Con `@server(prometheus=true)`, el compile-time flag dispara
+        // `__fitz_init_prometheus(true)`. El runtime instala el
+        // recorder + el `__fitz_prometheus_route()` mounta `/metrics`.
+        let src =
+            "@server(3000, prometheus=true)\nfn cfg() => 0\n@get(\"/x\")\nfn h() -> Str => \"ok\"\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_init_prometheus(true);"),
+            "esperaba init call con true: {}",
+            code
+        );
+        // Cargo.toml debe incluir la dep cuando has_http + uses_logging.
+        // Args: (stem, has_http, uses_async, uses_python, uses_auth,
+        // uses_ws, uses_jobs, uses_logging, uses_db, uses_fitz_value,
+        // uses_date_or_uuid). En el codegen real `uses_logging`
+        // auto-promueve a true cuando `has_http` es true.
+        let cargo = cargo_toml_for(
+            "foo", true, false, false, false, false, false, true, false, false, false,
+        );
+        assert!(
+            cargo.contains("metrics-exporter-prometheus"),
+            "Cargo.toml HTTP debe incluir metrics-exporter-prometheus: {}",
+            cargo
         );
     }
 

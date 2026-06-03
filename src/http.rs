@@ -434,6 +434,18 @@ pub struct ServerConfig {
     /// cuenta, o cuando el user tiene su propio sistema de observability
     /// custom. No afecta otros features (auth, CORS, middleware, etc.).
     pub observability_enabled: bool,
+    /// Fase 12.3.iter2.Tier3 — Activa el endpoint `/metrics` con
+    /// Prometheus exposition format. Cuando es `true`, `serve()` instala
+    /// `PrometheusBuilder` como recorder global del crate `metrics`
+    /// (los Counter/Histogram que ya emite `dispatch_request` empiezan
+    /// a popular el recorder automático), y `build_router` auto-mounta
+    /// `GET /metrics` que renderea la exposition format en cada scrape.
+    /// Default `false` — sin la flag, recorder vacío + ruta no montada.
+    /// Override: `@server(prometheus=true)`, o env var `FITZ_PROMETHEUS=1`
+    /// (env var precede sobre el flag — útil para activar/desactivar
+    /// en producción sin recompilar). Endpoint sobre el mismo puerto +
+    /// transporte que el resto de la app (NO un puerto separado).
+    pub prometheus_enabled: bool,
 }
 
 impl ServerConfig {
@@ -447,6 +459,7 @@ impl ServerConfig {
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
             observability_enabled: true,
+            prometheus_enabled: false,
         }
     }
 
@@ -2083,6 +2096,38 @@ pub fn build_router_with_asyncapi(
                 }
             }),
         );
+    }
+
+    // Fase 12.3.iter2.Tier3 — auto-mount `/metrics` Prometheus opcional.
+    // Solo si el provider está instalado (`init_prometheus(true)` fue
+    // llamado desde `serve()` cuando `@server(prometheus=true)` o env
+    // var `FITZ_PROMETHEUS=1`). Sin provider, la ruta NO se monta —
+    // request a `/metrics` cae a 404 default de axum, zero overhead.
+    //
+    // Si el usuario declaró su propio `@get("/metrics")` (caso raro
+    // pero válido — quizás un endpoint custom de Prometheus con
+    // labels específicos), su handler gana (mismo patrón que
+    // /openapi.json/healthz).
+    if let Some(handle) = crate::observability::prometheus_handle() {
+        if !metas.iter().any(|m| m.path == "/metrics") {
+            let handle = handle.clone();
+            router = router.route(
+                "/metrics",
+                axum::routing::get(move || {
+                    let body = handle.render();
+                    async move {
+                        (
+                            axum::http::StatusCode::OK,
+                            [(
+                                axum::http::header::CONTENT_TYPE,
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )],
+                            body,
+                        )
+                    }
+                }),
+            );
+        }
     }
 
     // v0.10.28 — Access log opt-in. Solo se monta el layer si el mode
@@ -3996,7 +4041,21 @@ pub fn serve(
     addr: std::net::SocketAddr,
 ) -> std::io::Result<()> {
     let metas = registry.metas();
-    let enable_docs = registry.resolved_config().enable_docs;
+    let resolved_config = registry.resolved_config();
+    let enable_docs = resolved_config.enable_docs;
+
+    // Fase 12.3.iter2.Tier3 — Prometheus opt-in. Dual gate: el flag
+    // del config (`@server(prometheus=true)`) OR la env var
+    // `FITZ_PROMETHEUS=1`/`true`/`yes`. El env var precede como
+    // override (útil en producción para desactivar/activar sin
+    // recompilar). Cuando true, `init_prometheus` instala el recorder
+    // global y `build_router` auto-mounta `GET /metrics`.
+    let prometheus_enabled = resolved_config.prometheus_enabled
+        || matches!(
+            std::env::var("FITZ_PROMETHEUS").as_deref(),
+            Ok("1" | "true" | "yes")
+        );
+    crate::observability::init_prometheus(prometheus_enabled);
 
     // Fase 7.2: precomputar el schema OpenAPI con `program` + `registry`
     // y pasarlo a `build_router`. El auto-register de `/openapi.json`
@@ -4049,7 +4108,7 @@ pub fn serve(
     // Fase 12.1.b — capturamos draining + shutdown_timeout ANTES de
     // mover `registry` al router; el shutdown signal los necesita.
     let draining_for_shutdown = registry.draining.clone();
-    let shutdown_timeout_secs = registry.resolved_config().shutdown_timeout_secs;
+    let shutdown_timeout_secs = resolved_config.shutdown_timeout_secs;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -4077,6 +4136,9 @@ pub fn serve(
             }
         } else {
             eprintln!("   (docs apagadas por @server(docs=false))");
+        }
+        if crate::observability::prometheus_handle().is_some() {
+            eprintln!("   GET /metrics       (Prometheus exposition format)");
         }
         // Fase 9.w.3 — arranca el cron scheduler antes de axum::serve.
         // Los tasks corren detached en el mismo runtime tokio. Cuando
@@ -5528,6 +5590,7 @@ mod tests {
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
             observability_enabled: true,
+            prometheus_enabled: false,
         };
         let addr = c.to_socket_addr().unwrap();
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
@@ -5543,6 +5606,7 @@ mod tests {
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
             observability_enabled: true,
+            prometheus_enabled: false,
         };
         let err = c.to_socket_addr().unwrap_err();
         assert!(err.contains("no-es-ip"));
@@ -5559,6 +5623,7 @@ mod tests {
                 ws_heartbeat_secs: 30,
                 shutdown_timeout_secs: 30,
                 observability_enabled: true,
+                prometheus_enabled: false,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
@@ -5569,6 +5634,7 @@ mod tests {
                 ws_heartbeat_secs: 30,
                 shutdown_timeout_secs: 30,
                 observability_enabled: true,
+                prometheus_enabled: false,
             };
             let err = set_server_config(second).unwrap_err();
             // El error contiene el config existente, no el nuevo.
@@ -5590,6 +5656,7 @@ mod tests {
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
             observability_enabled: true,
+            prometheus_enabled: false,
         });
         let resolved = reg.resolved_config();
         assert_eq!(resolved.port, 80);

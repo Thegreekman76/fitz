@@ -248,6 +248,23 @@ opentelemetry = { version = "0.32", features = ["logs"] }
 opentelemetry_sdk = { version = "0.32", features = ["rt-tokio", "trace", "logs"] }
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["http-proto", "reqwest-blocking-client", "trace", "logs"] }
 
+# Fase 12.3.iter2.Tier3 — endpoint `/metrics` Prometheus opt-in
+#
+# Cuando el user setea `@server(prometheus=true)` o env var
+# `FITZ_PROMETHEUS=1`, instalamos `PrometheusBuilder` como recorder
+# global del crate `metrics` (los Counter/Histogram que ya emite
+# `dispatch_request` empiezan a popular el recorder Prometheus
+# automático) + auto-mount `GET /metrics` que renderea la exposition
+# format. Default OFF — sin la flag, recorder vacío (no-op silencioso),
+# zero overhead.
+#
+# `default-features = false`: skipeamos `http-listener` (spawnaría su
+# propio HTTP server en otro puerto, redundante con el nuestro) y
+# `push-gateway` (Pushgateway no es el caso 90%). Solo usamos la API
+# `PrometheusBuilder::new().build_recorder() + handle.render()` que
+# no requiere features extras.
+metrics-exporter-prometheus = { version = "0.18", default-features = false }
+
 # v0.10.24 (Fase Date/DateTime/Uuid) — Uuid v4 generation + parsing.
 # `v4` feature: random UUID generation con OsRng. v0.10.30 (Tier B.5)
 # suma `v7`: time-ordered UUIDs (popular para PKs sortables por created_at).

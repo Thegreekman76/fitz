@@ -2659,13 +2659,30 @@ sección "Deudas residuales derivadas"):
    `if let Some(span) = __otel_span.as_ref() { ... } else { new_root() }`).
    2 unit tests nuevos: `logging::iter2a_span_context_with_ids_*`
    + `codegen::iter2a_codegen_http_emite_with_ids_branch_*`.
-4. **Endpoint `/metrics` Prometheus opcional**: cuando el user
-   prefiere Prometheus scraping sobre OTLP push, instalar
-   `metrics-exporter-prometheus` como recorder + auto-mount
-   `GET /metrics` (paralelo a `/openapi.json` / `/docs`).
-   Activable con `@server(prometheus=true)` o env var
-   `FITZ_PROMETHEUS=true`. Diferido hasta que entre demanda
-   concreta — OTLP cubre el caso 90%.
+4. ~~**Endpoint `/metrics` Prometheus opcional**~~ **CERRADO en
+   Fase 12.3.iter2.Tier3 (2026-06-03)**: `metrics-exporter-
+   prometheus = "0.18"` con `default-features = false` (skipea
+   `http-listener` + `push-gateway` que no necesitamos). Dual
+   gate: `@server(prometheus=true)` compile-time + env var
+   `FITZ_PROMETHEUS=1`/`true`/`yes` runtime override (útil en
+   producción sin recompilar). Cuando activo, `serve()` instala
+   `PrometheusBuilder` como recorder global del crate `metrics`
+   (los Counter/Histogram que ya emite `dispatch_request`
+   empiezan a popular el recorder automático), y `build_router`
+   auto-mounta `GET /metrics` que renderea la exposition format
+   en cada scrape — mismo puerto + transporte que el resto de la
+   app (NO un puerto separado). Paridad bit-a-bit `fitz run` ↔
+   `fitz build` (codegen emite `PROMETHEUS_PRELUDE` con
+   `__FITZ_PROMETHEUS_HANDLE` static + `__fitz_init_prometheus` +
+   `__fitz_prometheus_route` paralelos a la SDK del intérprete).
+   `ServerConfig` (runtime) + `ServerConfigArgs` (codegen) ganan
+   `prometheus_enabled: bool` (default `false`). Si el user
+   declaró su propio `@get("/metrics")`, gana — mismo patrón que
+   `/openapi.json`/`/healthz`. 5 unit tests nuevos:
+   `evaluator::tier3_server_decorator_{acepta_kwarg_prometheus_true,
+   default_prometheus_es_false,prometheus_no_bool_es_error}` +
+   `codegen::tier3_codegen_http_{emite_prometheus_prelude_y_init_
+   call_falso_por_default,con_prometheus_true_emite_init_call_true}`.
 
 **Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.3 —
 Observability minimal con OpenTelemetry" expandida con los 11
