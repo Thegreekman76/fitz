@@ -10119,6 +10119,133 @@ let ok = hash.verify("supersecret", hashed)  // Bool
 `verify` siempre devuelve `Bool` (no `Result`): hash malformado o
 mismatch → `false` por seguridad, no se filtra info al attacker.
 
+**`auth`** (Fase 9.w.1.iter2.b) — módulo built-in para token
+revocation. 3 builtins async que operan sobre Postgres con la tabla
+`fitz_token_blacklist(jti TEXT PRIMARY KEY, expires_at BIGINT NOT NULL)`
+auto-creada al primer call:
+
+```fitz
+// Revocar un token (típico: handler /auth/logout):
+auth.blacklist(db, jti, exp).await?     // Result<Null>
+
+// Chequear si un token está revocado (típico: @auth_provider):
+let revoked = auth.is_blacklisted(db, jti).await?   // Result<Bool>
+
+// Limpiar tokens vencidos (típico: @cron periódico):
+let deleted = auth.cleanup_expired(db).await?   // Result<Int>
+```
+
+**Decisiones de diseño**:
+
+- **`expires_at` como Unix epoch** (BIGINT): el JWT `exp` claim ya
+  viene como timestamp Unix, evita conversiones.
+- **Auto-filtrado de tokens vencidos** en `is_blacklisted`: el SQL
+  usa `expires_at > extract(epoch from now())`. Tokens con `exp`
+  pasado cuentan como NO blacklisted (el `jwt.decode` los rechaza
+  primero por expirados).
+- **`ON CONFLICT DO UPDATE`** en blacklist: re-blacklistear el mismo
+  jti actualiza `expires_at` sin fallar (caso raro pero posible).
+- **Tabla auto-creada con `CREATE TABLE IF NOT EXISTS`** al primer
+  call de cualquier builtin — idempotente, Postgres serializa con
+  LOCK interno.
+- **Paridad bit-a-bit `fitz run` ↔ `fitz build`** — el codegen emite
+  helpers `__fitz_auth_*` que comparten el mismo SQL que el
+  intérprete.
+
+**Patrón canónico — `/auth/logout` + `/auth/refresh` + provider**:
+
+Los endpoints se escriben **a mano** (no hay auto-mount como
+`/healthz`); el lenguaje provee los builtins, el user el flow. Lean
+y honesto: cubre el caso 90% en ~30 LoC.
+
+```fitz
+type User { id: Int, name: Str, role: Str }
+type LoginRequest { email: Str, password: Str }
+type LoginResponse { token: Str }
+
+@auth_provider
+async fn check(headers: Map<Str, Str>) -> Result<User> {
+    let token = extract_bearer(headers)?
+    let claims = jwt.decode(token, secret(), "HS256")?
+    let jti = claims.get("jti")?
+
+    // CHEQUEO DE BLACKLIST. Si el token fue revocado, rechazá.
+    if auth.is_blacklisted(db, jti).await? {
+        return Err("token revocado")
+    }
+
+    let user_id = claims.get("sub")?
+    return resolve_user_from_db(user_id).await
+}
+
+@post("/auth/login")
+async fn login(body: LoginRequest) -> Result<LoginResponse> {
+    let user = verify_credentials(body.email, body.password).await?
+    let jti = uuid.v4()   // único por token
+    let exp = now_unix() + 3600 * 24   // 24h validity
+    let token = jwt.encode({
+        "sub": user.id,
+        "jti": jti,
+        "exp": exp,
+        "role": user.role
+    }, secret())
+    return Ok(LoginResponse { token: token })
+}
+
+@authenticated
+@post("/auth/logout")
+async fn logout(user: User, headers: Map<Str, Str>) -> Result<Null> {
+    let token = extract_bearer(headers)?
+    let claims = jwt.decode(token, secret())?
+    let jti = claims.get("jti")?
+    let exp = claims.get("exp").parse_int()?
+    auth.blacklist(db, jti, exp).await?
+    return Ok(null)
+}
+
+@authenticated
+@post("/auth/refresh")
+async fn refresh(user: User, headers: Map<Str, Str>) -> Result<LoginResponse> {
+    // Estrategia simple: revocar el token actual y emitir uno nuevo.
+    let token = extract_bearer(headers)?
+    let old_claims = jwt.decode(token, secret())?
+    auth.blacklist(db, old_claims.get("jti")?, old_claims.get("exp").parse_int()?).await?
+
+    let new_jti = uuid.v4()
+    let new_exp = now_unix() + 3600 * 24
+    let new_token = jwt.encode({
+        "sub": user.id,
+        "jti": new_jti,
+        "exp": new_exp,
+        "role": user.role
+    }, secret())
+    return Ok(LoginResponse { token: new_token })
+}
+
+// Cleanup periódico de tokens vencidos.
+@cron("0 0 3 * * *")  // 3 AM daily
+async fn cleanup_blacklist() -> Result<Null> {
+    let deleted = auth.cleanup_expired(db).await?
+    log.info("blacklist cleanup", deleted_rows: deleted)
+    return Ok(null)
+}
+```
+
+**Lo que NO hace el MVP de 9.w.1.iter2.b**:
+
+- **Auto-mount de `/auth/logout` y `/auth/refresh`** — los escribís a
+  mano (~10 LoC cada uno). Razón: el flow exacto (qué returneás, qué
+  validás, qué loguéas) varía por proyecto. Auto-mount sería opinión
+  fuerte que después es difícil de deshacer.
+- **`auth.blacklist` síncrono** (sin DB) — el MVP requiere Postgres
+  vivo. Para in-memory rápido, usá un `Map<Str, Int>` global y
+  chequeálo a mano en el `@auth_provider`. Trade-off: no persiste
+  entre restarts.
+- **Token rotation con refresh tokens dedicados** — el MVP usa un
+  solo token largo (~24h) que se reemplaza en `/auth/refresh`.
+  Refresh tokens dedicados (modelo OAuth2 clásico) quedan como
+  pattern futuro si entra demanda.
+
 ### Ejemplo completo: login + /me + /admin
 
 `examples/guide/28-auth.fitz` arma una API mini-realista con los

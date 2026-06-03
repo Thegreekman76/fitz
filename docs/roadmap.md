@@ -7809,14 +7809,41 @@ que tiene gaps obvios. Tiers definidos en `docs/curso-plan.md` →
       requeridos. 14 unit tests (9 checker + 5 runtime). Detalle
       técnico completo en `docs/deudas-post-5b.md` →
       "Fase 9.w.1.iter2.a — `@requires` (RBAC custom)".
-    - **9.w.1.iter2.b PENDIENTE** — Token blacklist + refresh:
-      builtins `auth.blacklist(db, jti, expires_at)` y
-      `auth.is_blacklisted(db, jti)` con tabla
-      `fitz_token_blacklist` auto-creada (paralelo a Fase
-      9.w.3.iter2 cron persistente). Endpoints `/auth/logout`/
-      `/auth/refresh` se escriben a mano (~10 LoC cada uno) con
-      los builtins; auto-mount queda fuera del MVP. Requiere DB
-      obligatoria.
+    - **9.w.1.iter2.b CERRADA (2026-06-03, v0.12.6)** — Token blacklist.
+      Módulo built-in `auth` con 3 builtins async sobre Postgres:
+      `auth.blacklist(db, jti, expires_at) -> Future<Result<Null>>`,
+      `auth.is_blacklisted(db, jti) -> Future<Result<Bool>>`,
+      `auth.cleanup_expired(db) -> Future<Result<Int>>`. Tabla
+      `fitz_token_blacklist(jti TEXT PRIMARY KEY, expires_at BIGINT
+      NOT NULL)` auto-creada con CREATE TABLE IF NOT EXISTS al primer
+      call (paralelo a Fase 9.w.3.iter2 cron persistente). Decisiones:
+      `expires_at` Unix epoch (BIGINT) para matchear JWT `exp` claim
+      sin conversiones; auto-filtro `expires_at > now()` en
+      is_blacklisted (tokens vencidos no necesitan seguir bloqueando,
+      jwt.decode los rechaza por expirado primero); ON CONFLICT DO
+      UPDATE en blacklist (re-blacklisteo del mismo jti actualiza sin
+      fallar); server-clock manda (now() en SQL, no en Rust); tabla
+      auto-creada idempotente (Postgres serializa con LOCK interno);
+      paridad bit-a-bit `fitz run` ↔ `fitz build`. Sub-pasos:
+      **b.1** intérprete — 4 helpers `pub` en `src/evaluator.rs`
+      (constantes SQL + `ensure_token_blacklist_table`), 3 builtins
+      con validación de args, registro paralelo a jwt/hash/log,
+      checker con `auth` en scope base, **6 unit + 6 E2E real Postgres**;
+      **b.2** codegen — `expr_uses_auth` detecta `auth.X`,
+      `emit_auth_prelude` cuando `uses_auth && uses_db` emite 4
+      constantes SQL + ensure_table + 3 helpers `__fitz_auth_*` async
+      retornando `Result<T, String>`, `gen_call` despacha `auth.X`
+      paralelo a `gen_auth_jwt_*`, import cross-module, **1 E2E
+      compile test**; **b.3** docs/LSP/cierre — cap 28 sub-sec `auth`
+      con API + decisiones + patrón canónico completo (`/auth/logout`
+      + `/auth/refresh` + provider con check + `@cron` cleanup) + lo
+      que NO está en el MVP (auto-mount, in-memory, refresh tokens
+      dedicados), LSP `auth` module + scope_level_completion +
+      after-dot con signatures, CHANGELOG/roadmap/deudas/CLAUDE.
+      Total al cierre 9.w.1.iter2.b: 2957 unit + 93 cli_e2e + 3
+      openapi + 358 compile_e2e + 6 E2E real Postgres `#[ignore]`
+      (opt-in con `FITZ_TEST_PG_URL`). Cierra **Fase 9.w.1.iter2
+      entera** (.a RBAC custom + .b token blacklist).
   - **9.w.2.iter2 — Rooms + reconnect state replay** (solo si el
     ejemplo del C25 del curso lo exige): sub-canales dentro de un
     endpoint WS, reconnect con state replay (acopla con

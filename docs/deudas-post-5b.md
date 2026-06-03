@@ -3012,3 +3012,97 @@ deps emitidas en smoke (ABIERTO).
 **Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.5" con
 sub-pasos detallados, y `docs/guide.md` → cap 35 para la vista
 integradora.
+
+## Fase 9.w.1.iter2.b — Token blacklist (auth nativa cerrada) — **CERRADO 2026-06-03**
+
+**Cierra Fase 9.w.1.iter2 entera** (.a RBAC custom + .b token
+blacklist). Módulo built-in `auth` con 3 builtins async sobre
+Postgres + paridad bit-a-bit `fitz run` ↔ `fitz build` + cap 28 con
+patrón canónico de `/auth/logout`/`/auth/refresh`.
+
+**API**:
+
+```fitz
+auth.blacklist(db, jti, expires_at) -> Future<Result<Null>>
+auth.is_blacklisted(db, jti)         -> Future<Result<Bool>>
+auth.cleanup_expired(db)             -> Future<Result<Int>>
+```
+
+Tabla `fitz_token_blacklist(jti TEXT PRIMARY KEY, expires_at BIGINT
+NOT NULL)` auto-creada con CREATE TABLE IF NOT EXISTS al primer call
+(paralelo a Fase 9.w.3.iter2 cron persistente).
+
+**Decisiones técnicas del MVP**: (a) `expires_at` Unix epoch (BIGINT)
+para matchear JWT `exp` claim sin conversiones; (b) auto-filtro
+`expires_at > now()` en is_blacklisted (tokens vencidos no necesitan
+seguir bloqueando, jwt.decode los rechaza primero); (c) ON CONFLICT
+DO UPDATE en blacklist (re-blacklisteo del mismo jti actualiza sin
+fallar); (d) server-clock manda (now() en SQL, no en Rust — evita
+drift); (e) tabla auto-creada idempotente (Postgres serializa con
+LOCK interno); (f) paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+**Implementación**:
+
+- **b.1 Intérprete**: 4 helpers `pub` en `src/evaluator.rs` (4
+  constantes SQL + `ensure_token_blacklist_table`), 3 fns
+  `builtin_auth_blacklist/is_blacklisted/cleanup_expired` con
+  validación de args + signatures async `Future<Result<...>>`,
+  registro del módulo `auth` paralelo a jwt/hash/log en
+  `register_builtins`, checker con `auth` en scope base. **6 unit
+  tests** (aridad, primer arg DbConn, pre-registro del módulo) + **6
+  E2E reales contra Postgres** en
+  `tests/auth_blacklist_real_postgres.rs` con `#[ignore]`.
+- **b.2 Codegen**: `expr_uses_auth` extendido detecta `auth.X`.
+  `emit_auth_prelude` cuando `uses_auth && uses_db` emite 4
+  constantes SQL + `__fitz_ensure_token_blacklist_table` + los 3
+  helpers `__fitz_auth_*` async retornando `Result<T, String>`.
+  `gen_call` despacha `auth.X(...)` a fns helper paralelas a
+  `gen_auth_jwt_encode/decode`. Importación cross-module. **1 E2E
+  compile test** en `tests/compile_e2e.rs`.
+- **b.3 Docs/LSP/cierre**: cap 28 de `docs/guide.md` suma sub-sección
+  `auth` con API + decisiones + **patrón canónico completo** de
+  `/auth/logout` + `/auth/refresh` + provider con check + `@cron`
+  cleanup en <60 LoC. LSP `lsp.rs`: sumado `auth` a
+  `scope_level_completions` + after-dot con signatures completas.
+  CHANGELOG v0.12.6 + roadmap + esta nota + CLAUDE.md.
+
+**Tests al cierre**: 2957 unit (+6) + 93 cli_e2e + 3 openapi_e2e +
+358 compile_e2e (+1) + 6 E2E real Postgres `#[ignore]`. Clippy
+`--lib --tests --bins -- -D warnings` limpio, fmt clean.
+
+**Verificación pre-bump completa** (memoria
+`feedback_pre_release_verification`): roadmap ✓, guide.md cap 28
+sub-sec auth ✓, deudas (esta nota) ✓, CLAUDE ✓, CHANGELOG ✓, README
+sin cambios (cap 28 ya cita auth nativa), index.md sin cambios,
+extensión VSCode grammar sin cambios + LSP `auth` module
+completions ✓, examples sin runnable nuevo (sería overkill — el
+patrón vive en el cap 28), boilerplates sin cambios.
+
+**Deudas residuales derivadas** (NO bloquean Fase 13+):
+
+1. **Auto-mount de `/auth/logout` y `/auth/refresh`**: el flow exacto
+   varía por proyecto. Mantenerlo manual da más control. Si entra
+   demanda, sub-paso futuro con `@server(auto_auth_endpoints=true)`
+   como opt-in.
+2. **In-memory blacklist** (sin DB): para apps sin Postgres que
+   quieren revocation rápida, un `Map<Str, Int>` global + check
+   manual. Trade-off: no persiste entre restarts. Sub-paso futuro con
+   `auth.blacklist_local(jti, exp)` + flag opt-in.
+3. **Refresh tokens dedicados** (OAuth2 clásico con dual-token): el
+   MVP usa un solo token largo. Refresh tokens dedicados queda como
+   pattern futuro si entra demanda.
+4. **`jwt.encode` con `jti` automático**: el user pone
+   `"jti": uuid.v4()` a mano. Refinamiento futuro: kwarg `jti=true`
+   que auto-genera y devuelve `(token, jti)`.
+5. **Logging del blacklist hit**: el flow actual no loguea por
+   default cuando un token se rechaza por blacklist. El user puede
+   agregar `log.warn("token revocado", jti: jti)` adentro del
+   provider.
+
+**Cierre formal de Fase 9.w.1.iter2 entera** (auth nativa completa:
+RBAC custom + token blacklist). Plan original cumplido al 100%.
+
+**Detalle técnico completo**: `docs/roadmap.md` → sección "Tiers
+pre-M5 del curso" → "T2 — 9.w.1.iter2" → sub-paso 9.w.1.iter2.b
+expandido, y `docs/guide.md` → cap 28 sub-sec `auth` para el patrón
+canónico runnable.

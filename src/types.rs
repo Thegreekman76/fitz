@@ -3189,6 +3189,21 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Fase 9.w.1.iter2.b — módulo `auth` con builtins
+        // `blacklist(db, jti, expires_at)`, `is_blacklisted(db, jti)`,
+        // `cleanup_expired(db)`. Mismo patrón Type::Any que jwt/hash —
+        // las signatures heterogéneas (DbConn primer arg) se chequean
+        // en runtime con mensajes claros desde los builtins.
+        self.scopes[0].insert(
+            "auth".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // Fase 12.3.a.1 — módulo `log` siempre disponible. Mismo patrón
         // que `jwt`/`hash`/`db`: tipa como `Type::Any`. La firma exacta
         // (`fn log.info(msg: Str, **kwargs) -> Null`) tiene kwargs

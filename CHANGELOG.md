@@ -11,11 +11,142 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-**Fase 12 ENTERA CERRADA** (12.1 + 12.2 + 12.3 + 12.4 + 12.5) +
-9.w.1.iter2.a (RBAC custom con `@requires`). Quedan abiertos:
-9.w.1.iter2.b (token blacklist + refresh — sub-iter futuro), Fase 13+
-(visión post-Fase 12). Tier 2 de Fase 12.3 (bridge métricas OTel)
-sigue bloqueado por release del crate.
+**Fase 12 ENTERA CERRADA** (12.1-12.5) + **9.w.1.iter2 ENTERA CERRADA**
+(.a RBAC custom + .b token blacklist). Próximo norte: Fase 13+
+(visión post-Fase 12 — `fitz deploy` orchestrator, feature flags, etc.)
+o release dedicado a feedback del curso M7. Tier 2 de Fase 12.3 (bridge
+métricas OTel) sigue bloqueado por release del crate.
+
+## [v0.12.6] — 2026-06-03 — Fase 9.w.1.iter2.b: Token blacklist (auth nativa cerrada)
+
+Módulo built-in nuevo `auth` con 3 builtins async sobre Postgres para
+revocación de tokens. **Cierra Fase 9.w.1.iter2 entera** (.a RBAC custom
++ .b blacklist).
+
+**API**:
+
+```fitz
+auth.blacklist(db, jti, expires_at) -> Future<Result<Null>>
+auth.is_blacklisted(db, jti)         -> Future<Result<Bool>>
+auth.cleanup_expired(db)             -> Future<Result<Int>>  // rows borradas
+```
+
+Tabla `fitz_token_blacklist(jti TEXT PRIMARY KEY, expires_at BIGINT
+NOT NULL)` auto-creada con `CREATE TABLE IF NOT EXISTS` al primer call
+(paralelo a Fase 9.w.3.iter2 cron persistente).
+
+**Decisiones técnicas**:
+
+- **`expires_at` como Unix epoch (BIGINT)** — el JWT `exp` claim ya
+  viene como timestamp Unix, evita conversiones.
+- **Auto-filtro de tokens vencidos** en `is_blacklisted`: SQL usa
+  `expires_at > extract(epoch from now())`. Tokens con `exp` pasado
+  cuentan como NO blacklisted — el `jwt.decode` los rechaza primero
+  por expirado, no necesitan seguir bloqueando.
+- **`ON CONFLICT DO UPDATE`** en blacklist: re-blacklistear el mismo
+  jti actualiza `expires_at` sin fallar (caso raro de token re-emitido).
+- **Server-clock manda** (`now()` en SQL, no en Rust): evita drift
+  entre el binario y la DB.
+- **Auto-creación de tabla idempotente** — Postgres serializa CREATE
+  TABLE IF NOT EXISTS con LOCK interno.
+- **Paridad bit-a-bit `fitz run` ↔ `fitz build`** — el codegen emite
+  helpers `__fitz_auth_*` con el mismo SQL que el intérprete.
+
+**Patrón canónico documentado en cap 28**:
+
+- **`/auth/logout`** se escribe a mano (~10 LoC): `jwt.decode` + extraer
+  jti/exp + `auth.blacklist(db, jti, exp).await?`.
+- **`/auth/refresh`** se escribe a mano (~15 LoC): revocar token actual
+  + emitir uno nuevo con `jti` fresco.
+- **`@auth_provider`** chequea `auth.is_blacklisted(db, jti).await?`
+  antes de devolver el user.
+- **`@cron` periódico** llama `auth.cleanup_expired(db)` (típico
+  `@cron("0 0 3 * * *")` daily 3 AM).
+
+Auto-mount de logout/refresh queda **fuera del MVP** — el flow exacto
+varía por proyecto, mantenerlo manual da más control y honestidad.
+
+**Sub-pasos**:
+
+- **9.w.1.iter2.b.1 — Builtins intérprete**: 4 helpers `pub` en
+  `src/evaluator.rs` (`SQL_*` constantes + `ensure_token_blacklist_table`),
+  3 fns `builtin_auth_blacklist/is_blacklisted/cleanup_expired` con
+  validación de args + signatures async devolviendo `Future<Result<...>>`,
+  registro del módulo `auth` paralelo a `jwt`/`hash`/`log` en
+  `register_builtins`. Checker: `auth` registrado como `Type::Any` en
+  el scope base (paralelo a jwt/hash). **6 unit tests** sobre validación
+  de args (aridad incorrecta, primer arg debe ser DbConn, etc.) y
+  pre-registro del módulo. **6 E2E reales contra Postgres** en
+  `tests/auth_blacklist_real_postgres.rs` con `#[ignore]`: blacklist +
+  is_blacklisted devuelve true, jti inexistente devuelve false,
+  expires_at pasado cuenta como no-blacklisted (auto-filtro), cleanup
+  borra solo vencidas, re-blacklist actualiza expires_at (ON CONFLICT),
+  ensure_table es idempotente.
+- **9.w.1.iter2.b.2 — Paridad codegen**: `expr_uses_auth` extendido
+  para detectar `auth.{blacklist,is_blacklisted,cleanup_expired}`.
+  `emit_auth_prelude` cuando `uses_auth && uses_db` emite 4 constantes
+  SQL + `__fitz_ensure_token_blacklist_table` + los 3 helpers
+  `__fitz_auth_*` async retornando `Result<T, String>`. `gen_call`
+  despacha `auth.X(...)` a `gen_auth_blacklist/is_blacklisted/cleanup_expired`
+  análogos a `gen_auth_jwt_encode/decode`. Importación cross-module
+  cuando un módulo importer usa `auth.X` con db en scope. **1 E2E
+  test** en `tests/compile_e2e.rs::auth_blacklist_codegen_compila_los_3_builtins_y_emite_helpers`
+  valida que el programa con los 3 builtins compila a binario nativo
+  sin errores.
+- **9.w.1.iter2.b.3 — Docs + LSP + cierre formal**: cap 28 de
+  `docs/guide.md` suma sub-sección **`auth`** (después de `hash`)
+  con la API, decisiones de diseño, patrón canónico completo de
+  `/auth/logout` + `/auth/refresh` + provider + cleanup `@cron`, y lo
+  que NO está en el MVP (auto-mount, in-memory, refresh tokens
+  dedicados). LSP `lsp.rs`: sumado `auth` a `scope_level_completions`
+  + after-dot resuelve `auth.X` con signatures completas de los 3
+  builtins. CHANGELOG v0.12.6 (esta entrada) + roadmap actualizado +
+  deudas-post-5b nota de cierre + CLAUDE.md.
+
+**Tests al cierre v0.12.6**: 2957 unit (+6) + 93 cli_e2e + 3
+openapi_e2e + 358 compile_e2e (+1 codegen test) + 6 E2E real Postgres
+(`#[ignore]`, opt-in con `FITZ_TEST_PG_URL`). Clippy `--lib --tests
+--bins -- -D warnings` limpio, `cargo fmt --all --check` limpio.
+
+**Verificación pre-bump completa** (memoria
+`feedback_pre_release_verification`): roadmap ✓, guide.md cap 28
+sub-sec `auth` ✓, deudas-post-5b nota cierre 9.w.1.iter2 entera ✓,
+CLAUDE.md ✓, CHANGELOG ✓, README sin cambios (cap 28 ya cita auth
+nativa), docs/index.md sin cambios (`@requires` ya estaba listado),
+extensión VSCode grammar sin cambios (decoradores caen bajo regla
+genérica) — LSP `auth` module completions añadido, examples sin
+ejemplo runnable nuevo (sería un programa con DB persistente que
+requiere `FITZ_TEST_PG_URL` — overkill para smoke), boilerplates
+sin cambios.
+
+**Cierre formal de Fase 9.w.1.iter2 entera** (auth completa: RBAC
+custom + token blacklist). Plan original cumplido al 100%.
+
+**Deudas residuales derivadas de 9.w.1.iter2.b** (NO bloquean Fase
+13+):
+
+- **Auto-mount de `/auth/logout` y `/auth/refresh`**: el flow exacto
+  varía por proyecto; mantenerlo manual da más control. Si entra
+  demanda real, sub-paso futuro con `@server(auto_auth_endpoints=true)`
+  como opt-in.
+- **In-memory blacklist** (sin DB): para apps sin Postgres que
+  quieren revocation rápida, un `Map<Str, Int>` global + check
+  manual. Trade-off: no persiste entre restarts. Sub-paso futuro con
+  `auth.blacklist_local(jti, exp)` + flag opt-in.
+- **Refresh tokens dedicados** (OAuth2 clásico): el MVP usa un solo
+  token largo. Dual-token model queda como pattern futuro si entra
+  demanda.
+- **`jwt.encode` con `jti` automático**: el user pone `"jti":
+  uuid.v4()` a mano. Refinamiento futuro: kwarg `jti=true` que
+  auto-genera y devuelve `(token, jti)`.
+- **Logging del blacklist**: el flow actual no loguea por default
+  cuando un token se rechaza por blacklist. El user puede agregar
+  `log.warn("token revocado", jti: jti)` adentro del provider.
+
+**Próximo norte**: **Fase 13+** (visión post-Fase 12 — `fitz deploy`
+orchestrator, `@trace`/`@metric` decoradores explícitos, feature
+flags built-in) según demanda real. O release dedicado a feedback de
+los usuarios reales del curso M7 antes de seguir con código nuevo.
 
 ## [v0.12.5] — 2026-06-03 — Fase 12.5: Cap 35 + curso M7 + cierre formal Fase 12 entera
 

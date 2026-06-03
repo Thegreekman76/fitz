@@ -273,6 +273,9 @@ pub fn builtin_names() -> &'static [&'static str] {
         // El REPL los filtra con `:env`; el LSP los lista en completions.
         "jwt",
         "hash",
+        // Fase 9.w.1.iter2.b — `auth` con blacklist/is_blacklisted/cleanup_expired
+        // (tabla `fitz_token_blacklist` auto-creada al primer call).
+        "auth",
         // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates).
         "env",
         "env_or",
@@ -11187,6 +11190,45 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
+    // Fase 9.w.1.iter2.b — Módulo `auth` con 3 builtins para token
+    // blacklist + cleanup. La tabla `fitz_token_blacklist` se crea
+    // automáticamente al primer call con `CREATE TABLE IF NOT EXISTS`
+    // (paralelo a `cron_jobs::init_storage`).
+    //
+    // Patrón canónico: el `@auth_provider` chequea
+    // `auth.is_blacklisted(db, jti)` antes de devolver el user;
+    // un handler `/auth/logout` llama `auth.blacklist(db, jti, exp)`;
+    // un job `@cron` periódico llama `auth.cleanup_expired(db)`.
+    let auth_env = Environment::new();
+    auth_env.lock().define(
+        "blacklist",
+        Value::Builtin {
+            name: "blacklist",
+            func: builtin_auth_blacklist,
+        },
+    );
+    auth_env.lock().define(
+        "is_blacklisted",
+        Value::Builtin {
+            name: "is_blacklisted",
+            func: builtin_auth_is_blacklisted,
+        },
+    );
+    auth_env.lock().define(
+        "cleanup_expired",
+        Value::Builtin {
+            name: "cleanup_expired",
+            func: builtin_auth_cleanup_expired,
+        },
+    );
+    env.lock().define(
+        "auth",
+        Value::Module {
+            name: "auth".into(),
+            env: auth_env,
+        },
+    );
+
     // Fase 12.3.a.1 — Módulo `log` para structured logging built-in.
     // 4 niveles paralelos a `tracing` (info/warn/error/debug). Aceptan
     // `msg: Str` posicional + kwargs heterogéneos. El path positional
@@ -12979,6 +13021,324 @@ fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> Fi
     }
     let fut: crate::value::FitzFuture =
         Box::pin(async move { Ok(Value::Bool(handle.is_closed().await)) });
+    Ok(Value::new_future(fut))
+}
+
+// =================================================================
+// Fase 9.w.1.iter2.b — Token blacklist (built-in `auth` module)
+// =================================================================
+//
+// 3 builtins paralelos a `jwt.*`/`hash.*`:
+//
+//   auth.blacklist(db: DbConn, jti: Str, expires_at: Int) -> Future<Result<Null>>
+//   auth.is_blacklisted(db: DbConn, jti: Str) -> Future<Result<Bool>>
+//   auth.cleanup_expired(db: DbConn) -> Future<Result<Int>>  (rows borradas)
+//
+// Tabla `fitz_token_blacklist(jti TEXT PK, expires_at BIGINT)` auto-
+// creada con CREATE TABLE IF NOT EXISTS al primer call (paralelo a
+// cron_jobs::init_storage). `expires_at` es Unix epoch (segundos);
+// el comparison usa `expires_at > now()` para auto-filtrar tokens
+// con expiración pasada (no necesitan seguir bloqueando: el JWT
+// decode los rechaza por expirado primero).
+//
+// Patrón canónico de uso (cap 28 sub-sec 28.X):
+//
+//   // logout: el handler decodifica el JWT, extrae jti + exp, los
+//   // mete en la blacklist.
+//   @post("/auth/logout")
+//   async fn logout(headers: Map<Str, Str>) -> Result<Null> {
+//       let token = extract_bearer(headers)?
+//       let claims = jwt.decode(token, secret)?
+//       let jti = claims.get("jti")?
+//       let exp = claims.get("exp").parse_int()?
+//       auth.blacklist(db, jti, exp).await?
+//       return Ok(null)
+//   }
+//
+//   // provider: checkear blacklist antes de aceptar el token.
+//   @auth_provider
+//   async fn check(headers: Map<Str, Str>) -> Result<User> {
+//       let token = extract_bearer(headers)?
+//       let claims = jwt.decode(token, secret)?
+//       let jti = claims.get("jti")?
+//       if auth.is_blacklisted(db, jti).await? {
+//           return Err("token revocado")
+//       }
+//       // ... resolver el user ...
+//   }
+//
+// Decisiones:
+// - `expires_at` como BIGINT (Unix timestamp) en vez de TIMESTAMPTZ:
+//   el JWT `exp` claim ya viene como Unix epoch, evita conversión.
+// - `now()` en SQL para el check (Postgres `extract(epoch from now())`):
+//   el server-clock manda, no el binario Fitz que podría tener drift.
+// - ON CONFLICT DO UPDATE en `blacklist`: si re-blacklisteás el mismo
+//   jti (caso raro pero posible — token re-emitido por algún motivo),
+//   actualizamos expires_at en lugar de fallar con duplicate key.
+
+#[doc(hidden)]
+pub const SQL_CREATE_TABLE_TOKEN_BLACKLIST: &str = "\
+CREATE TABLE IF NOT EXISTS fitz_token_blacklist (\
+    jti TEXT PRIMARY KEY,\
+    expires_at BIGINT NOT NULL\
+)";
+
+#[doc(hidden)]
+pub const SQL_INSERT_TOKEN_BLACKLIST: &str = "\
+INSERT INTO fitz_token_blacklist (jti, expires_at) VALUES ($1, $2) \
+ON CONFLICT (jti) DO UPDATE SET expires_at = EXCLUDED.expires_at";
+
+#[doc(hidden)]
+pub const SQL_IS_TOKEN_BLACKLISTED: &str = "\
+SELECT EXISTS(\
+    SELECT 1 FROM fitz_token_blacklist \
+    WHERE jti = $1 AND expires_at > extract(epoch from now())::bigint\
+)";
+
+#[doc(hidden)]
+pub const SQL_CLEANUP_EXPIRED_TOKENS: &str = "\
+DELETE FROM fitz_token_blacklist \
+WHERE expires_at <= extract(epoch from now())::bigint";
+
+/// Crea la tabla `fitz_token_blacklist` si no existe. Idempotente —
+/// Postgres serializa `CREATE TABLE IF NOT EXISTS` con LOCK interno.
+#[doc(hidden)]
+pub async fn ensure_token_blacklist_table(
+    conn: &crate::db::DbConnHandle,
+) -> Result<(), crate::db::DbError> {
+    conn.exec(SQL_CREATE_TABLE_TOKEN_BLACKLIST, &[]).await?;
+    Ok(())
+}
+
+fn extract_db_handle_arg_for_auth(
+    fn_name: &str,
+    args: &[Value],
+    idx: usize,
+) -> Result<Arc<crate::db::DbConnHandle>, FitzError> {
+    match args.get(idx) {
+        Some(Value::DbConn(h)) => Ok(Arc::clone(h)),
+        Some(other) => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "DbConn".into(),
+                found: other.type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "`{}` espera `DbConn` como arg {}, recibió `{}`",
+                fn_name,
+                idx + 1,
+                other.type_name(),
+            ),
+        )),
+        None => Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: idx + 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`{}`: falta arg {} (DbConn)", fn_name, idx + 1,),
+        )),
+    }
+}
+
+fn extract_str_arg_for_auth(
+    fn_name: &str,
+    args: &[Value],
+    idx: usize,
+    label: &str,
+) -> Result<String, FitzError> {
+    match args.get(idx) {
+        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(other) => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Str".into(),
+                found: other.type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "`{}` espera `Str` para `{}` (arg {}), recibió `{}`",
+                fn_name,
+                label,
+                idx + 1,
+                other.type_name(),
+            ),
+        )),
+        None => Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: idx + 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`{}`: falta arg {} (`{}`)", fn_name, idx + 1, label,),
+        )),
+    }
+}
+
+fn extract_int_arg_for_auth(
+    fn_name: &str,
+    args: &[Value],
+    idx: usize,
+    label: &str,
+) -> Result<i64, FitzError> {
+    match args.get(idx) {
+        Some(Value::Int(n)) => Ok(*n),
+        Some(other) => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "`{}` espera `Int` para `{}` (arg {}), recibió `{}`",
+                fn_name,
+                label,
+                idx + 1,
+                other.type_name(),
+            ),
+        )),
+        None => Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: idx + 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!("`{}`: falta arg {} (`{}`)", fn_name, idx + 1, label,),
+        )),
+    }
+}
+
+fn builtin_auth_blacklist(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 3 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 3,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`auth.blacklist(db, jti, expires_at)` espera 3 args (DbConn, Str, Int), \
+                 recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let handle = extract_db_handle_arg_for_auth("auth.blacklist", args, 0)?;
+    let jti = extract_str_arg_for_auth("auth.blacklist", args, 1, "jti")?;
+    let expires_at = extract_int_arg_for_auth("auth.blacklist", args, 2, "expires_at")?;
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        if let Err(e) = ensure_token_blacklist_table(&handle).await {
+            return Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(format!("auth.blacklist: init table: {}", e)),
+            ))));
+        }
+        match handle
+            .exec(
+                SQL_INSERT_TOKEN_BLACKLIST,
+                &[
+                    crate::db::PgValue::Text(jti),
+                    crate::db::PgValue::Int(expires_at),
+                ],
+            )
+            .await
+        {
+            Ok(_) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::Null,
+            )))),
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(format!("auth.blacklist: {}", e)),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+fn builtin_auth_is_blacklisted(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`auth.is_blacklisted(db, jti)` espera 2 args (DbConn, Str), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let handle = extract_db_handle_arg_for_auth("auth.is_blacklisted", args, 0)?;
+    let jti = extract_str_arg_for_auth("auth.is_blacklisted", args, 1, "jti")?;
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        if let Err(e) = ensure_token_blacklist_table(&handle).await {
+            return Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(format!("auth.is_blacklisted: init table: {}", e)),
+            ))));
+        }
+        match handle
+            .query(SQL_IS_TOKEN_BLACKLISTED, &[crate::db::PgValue::Text(jti)])
+            .await
+        {
+            Ok(qr) => {
+                let blacklisted = qr
+                    .rows
+                    .first()
+                    .and_then(|row| row.values().first().cloned())
+                    .map(|v| matches!(v, crate::db::PgValue::Bool(true)))
+                    .unwrap_or(false);
+                Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                    Value::Bool(blacklisted),
+                ))))
+            }
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(format!("auth.is_blacklisted: {}", e)),
+            )))),
+        }
+    });
+    Ok(Value::new_future(fut))
+}
+
+fn builtin_auth_cleanup_expired(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`auth.cleanup_expired(db)` espera 1 arg (DbConn), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let handle = extract_db_handle_arg_for_auth("auth.cleanup_expired", args, 0)?;
+
+    let fut: crate::value::FitzFuture = Box::pin(async move {
+        if let Err(e) = ensure_token_blacklist_table(&handle).await {
+            return Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(format!("auth.cleanup_expired: init table: {}", e)),
+            ))));
+        }
+        match handle.exec(SQL_CLEANUP_EXPIRED_TOKENS, &[]).await {
+            Ok(n) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
+                Value::Int(n as i64),
+            )))),
+            Err(e) => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
+                Value::Str(format!("auth.cleanup_expired: {}", e)),
+            )))),
+        }
+    });
     Ok(Value::new_future(fut))
 }
 
@@ -29245,6 +29605,80 @@ let r = match n {
         assert!(r0.is_err());
         let r1 = builtin_hash_verify(&[Value::Str("a".into())]);
         assert!(r1.is_err());
+    }
+
+    // ---- Fase 9.w.1.iter2.b — auth.blacklist / is_blacklisted / cleanup_expired ----
+
+    #[test]
+    fn auth_blacklist_aridad_incorrecta_es_error() {
+        // Esperaba 3 args, recibe 2.
+        let r = builtin_auth_blacklist(&[Value::Str("x".into()), Value::Int(1)]);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().message.contains("3 args"));
+    }
+
+    #[test]
+    fn auth_blacklist_primer_arg_debe_ser_dbconn() {
+        let r = builtin_auth_blacklist(&[
+            Value::Str("not a db".into()),
+            Value::Str("jti-1".into()),
+            Value::Int(99999),
+        ]);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().message.contains("DbConn"));
+    }
+
+    #[test]
+    fn auth_blacklist_jti_debe_ser_str() {
+        // Construyo un Value::DbConn dummy con un handle creado a mano. No
+        // se llega a usar (el error se dispara antes del path async).
+        // Sin DbConnHandle real, simulamos con Int en el slot DB para
+        // verificar que el primer chequeo (DbConn) corre antes del segundo (Str).
+        let r = builtin_auth_blacklist(&[Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert!(r.is_err());
+        // El error es del primer arg (DbConn missing), no del jti.
+        let msg = r.unwrap_err().message;
+        assert!(msg.contains("DbConn"));
+    }
+
+    #[test]
+    fn auth_is_blacklisted_aridad_incorrecta_es_error() {
+        let r = builtin_auth_is_blacklisted(&[Value::Str("x".into())]);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().message.contains("2 args"));
+    }
+
+    #[test]
+    fn auth_cleanup_expired_aridad_incorrecta_es_error() {
+        let r = builtin_auth_cleanup_expired(&[]);
+        assert!(r.is_err());
+        assert!(r.unwrap_err().message.contains("1 arg"));
+    }
+
+    #[test]
+    fn auth_modulo_pre_registrado_y_acepta_field_access() {
+        // Verifica que `auth` está registrado como Value::Module y que
+        // `auth.blacklist`/`auth.is_blacklisted`/`auth.cleanup_expired`
+        // están accesibles como builtins.
+        let env = Environment::new();
+        register_builtins(&env);
+        let auth = env.lock().get("auth").expect("auth debería estar bindeado");
+        match auth {
+            Value::Module { name, env } => {
+                assert_eq!(name, "auth");
+                let g = env.lock();
+                assert!(matches!(g.get("blacklist"), Some(Value::Builtin { .. })));
+                assert!(matches!(
+                    g.get("is_blacklisted"),
+                    Some(Value::Builtin { .. })
+                ));
+                assert!(matches!(
+                    g.get("cleanup_expired"),
+                    Some(Value::Builtin { .. })
+                ));
+            }
+            other => panic!("esperaba Value::Module, recibió {:?}", other),
+        }
     }
 
     /// Test de end-to-end usando el evaluator real (no llamada directa

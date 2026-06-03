@@ -1291,6 +1291,26 @@ fn after_dot_completions(
                 ("verify", "fn(plain: Str, hashed: Str) -> Bool".into()),
             ]);
         }
+        // Fase 9.w.1.iter2.b — módulo built-in `auth` (token blacklist).
+        // Mismo bypass que jwt/hash/log: tipa como `Any` en el checker.
+        // Los 3 builtins son async + retornan Result, requieren `db`
+        // conectada en scope (primer arg DbConn).
+        "auth" => {
+            return method_items(&[
+                (
+                    "blacklist",
+                    "fn(db: DbConn, jti: Str, expires_at: Int) -> Future<Result<Null>>".into(),
+                ),
+                (
+                    "is_blacklisted",
+                    "fn(db: DbConn, jti: Str) -> Future<Result<Bool>>".into(),
+                ),
+                (
+                    "cleanup_expired",
+                    "fn(db: DbConn) -> Future<Result<Int>>".into(),
+                ),
+            ]);
+        }
         // Fase 12.3.a.1 — módulo built-in `log` (structured logging).
         // Mismo bypass que jwt/hash/db: tipa como `Any` en el checker
         // (kwargs heterogéneos no expresables como `Type::Function`),
@@ -2699,6 +2719,10 @@ fn scope_level_completions(
     for (name, detail) in [
         ("jwt", "module: encode, decode"),
         ("hash", "module: password, verify"),
+        (
+            "auth",
+            "module: blacklist, is_blacklisted, cleanup_expired (token blacklist sobre Postgres)",
+        ),
         ("db", "module: connect (Postgres native driver + ORM)"),
         (
             "log",

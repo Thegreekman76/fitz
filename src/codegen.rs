@@ -774,11 +774,16 @@ fn program_uses_auth(program: &Program) -> bool {
     fn expr_uses_auth(e: &Expr) -> bool {
         match e {
             Expr::Call { callee, args, .. } => {
-                // jwt.X(...) o hash.X(...).
+                // jwt.X(...) o hash.X(...) o auth.X(...) (Fase 9.w.1.iter2.b).
                 if let Expr::Field { object, field, .. } = callee.as_ref() {
                     if let Expr::Ident(recv, _) = object.as_ref() {
                         if (recv == "jwt" && matches!(field.as_str(), "encode" | "decode"))
                             || (recv == "hash" && matches!(field.as_str(), "password" | "verify"))
+                            || (recv == "auth"
+                                && matches!(
+                                    field.as_str(),
+                                    "blacklist" | "is_blacklisted" | "cleanup_expired"
+                                ))
                         {
                             return true;
                         }
@@ -3780,6 +3785,17 @@ fn generate_module_rs_with_bindings(
             "#[allow(unused_imports)]\n\
              use crate::{__fitz_jwt_encode, __fitz_jwt_decode, __fitz_hash_password, __fitz_hash_verify};\n\n",
         );
+        // Fase 9.w.1.iter2.b — cuando el módulo usa `auth.X(...)` Y el
+        // crate root activó uses_db (los 3 helpers viven en el preludio
+        // de auth del crate root + reciben &__FitzDbConn). Si el módulo
+        // usa auth.X sin db en scope, el call site falla con unbound
+        // antes de llegar a este import.
+        if ctx.uses_db {
+            ctx.emit(
+                "#[allow(unused_imports)]\n\
+                 use crate::{__fitz_auth_blacklist, __fitz_auth_is_blacklisted, __fitz_auth_cleanup_expired};\n\n",
+            );
+        }
     }
     // W11 (v0.10.7) — el módulo emite handlers HTTP (return de
     // tipos del lenguaje + decoradores `@get`/`@post`/etc + `return
@@ -7202,6 +7218,84 @@ impl<'a> CodegenCtx<'a> {
                      .is_ok()\n\
              }\n\n",
         );
+
+        // Fase 9.w.1.iter2.b — helpers para `auth.blacklist/is_blacklisted/
+        // cleanup_expired`. Solo se emiten cuando además `uses_db` es true
+        // (los 3 helpers reciben `&__FitzDbConn` que viene del preludio db
+        // 10.1.c). Si el programa usa `auth.X` sin db en scope, el codegen
+        // del callsite ya falla por unbound `db` antes de llegar acá.
+        if self.uses_db {
+            self.emit(
+                "/// 9.w.1.iter2.b — SQL para auto-crear la tabla `fitz_token_blacklist`\n\
+                 /// idempotentemente. Postgres serializa CREATE TABLE IF NOT EXISTS con\n\
+                 /// LOCK interno, así que es safe contra concurrencia.\n\
+                 const __FITZ_SQL_CREATE_TABLE_TOKEN_BLACKLIST: &str = \"CREATE TABLE IF NOT EXISTS fitz_token_blacklist (jti TEXT PRIMARY KEY, expires_at BIGINT NOT NULL)\";\n\n\
+                 /// ON CONFLICT DO UPDATE: si re-blacklisteás el mismo jti, actualizamos\n\
+                 /// expires_at en lugar de fallar con duplicate key.\n\
+                 const __FITZ_SQL_INSERT_TOKEN_BLACKLIST: &str = \"INSERT INTO fitz_token_blacklist (jti, expires_at) VALUES ($1, $2) ON CONFLICT (jti) DO UPDATE SET expires_at = EXCLUDED.expires_at\";\n\n\
+                 /// El comparison usa `expires_at > now()`: tokens con expiración pasada\n\
+                 /// no necesitan seguir bloqueando (el JWT decode los rechaza primero).\n\
+                 const __FITZ_SQL_IS_TOKEN_BLACKLISTED: &str = \"SELECT EXISTS(SELECT 1 FROM fitz_token_blacklist WHERE jti = $1 AND expires_at > extract(epoch from now())::bigint)\";\n\n\
+                 /// Cleanup periódico: borra rows con expires_at <= now().\n\
+                 const __FITZ_SQL_CLEANUP_EXPIRED_TOKENS: &str = \"DELETE FROM fitz_token_blacklist WHERE expires_at <= extract(epoch from now())::bigint\";\n\n\
+                 /// Crea la tabla `fitz_token_blacklist` si no existe (idempotente).\n\
+                 pub(crate) async fn __fitz_ensure_token_blacklist_table(\n    \
+                     conn: &__FitzDbConn,\n\
+                 ) -> Result<(), String> {\n    \
+                     conn.exec(__FITZ_SQL_CREATE_TABLE_TOKEN_BLACKLIST, &[])\n        \
+                         .await\n        \
+                         .map(|_| ())\n        \
+                         .map_err(|e| format!(\"auth: init table: {}\", e))\n\
+                 }\n\n\
+                 /// `auth.blacklist(db, jti, expires_at)` codegen helper.\n\
+                 pub(crate) async fn __fitz_auth_blacklist(\n    \
+                     conn: &__FitzDbConn,\n    \
+                     jti: String,\n    \
+                     expires_at: i64,\n\
+                 ) -> Result<(), String> {\n    \
+                     __fitz_ensure_token_blacklist_table(conn).await?;\n    \
+                     conn.exec(\n        \
+                         __FITZ_SQL_INSERT_TOKEN_BLACKLIST,\n        \
+                         &[__FitzPgValue::Text(jti), __FitzPgValue::Int(expires_at)],\n    \
+                     )\n    \
+                     .await\n    \
+                     .map(|_| ())\n    \
+                     .map_err(|e| format!(\"auth.blacklist: {}\", e))\n\
+                 }\n\n\
+                 /// `auth.is_blacklisted(db, jti)` codegen helper.\n\
+                 pub(crate) async fn __fitz_auth_is_blacklisted(\n    \
+                     conn: &__FitzDbConn,\n    \
+                     jti: String,\n\
+                 ) -> Result<bool, String> {\n    \
+                     __fitz_ensure_token_blacklist_table(conn).await?;\n    \
+                     match conn\n        \
+                         .query(__FITZ_SQL_IS_TOKEN_BLACKLISTED, &[__FitzPgValue::Text(jti)])\n        \
+                         .await\n    \
+                     {\n        \
+                         Ok(qr) => {\n            \
+                             let blacklisted = qr\n                \
+                                 .rows\n                \
+                                 .first()\n                \
+                                 .and_then(|row| row.values().first().cloned())\n                \
+                                 .map(|v| matches!(v, __FitzPgValue::Bool(true)))\n                \
+                                 .unwrap_or(false);\n            \
+                             Ok(blacklisted)\n        \
+                         }\n        \
+                         Err(e) => Err(format!(\"auth.is_blacklisted: {}\", e)),\n    \
+                     }\n\
+                 }\n\n\
+                 /// `auth.cleanup_expired(db)` codegen helper.\n\
+                 pub(crate) async fn __fitz_auth_cleanup_expired(\n    \
+                     conn: &__FitzDbConn,\n\
+                 ) -> Result<i64, String> {\n    \
+                     __fitz_ensure_token_blacklist_table(conn).await?;\n    \
+                     conn.exec(__FITZ_SQL_CLEANUP_EXPIRED_TOKENS, &[])\n        \
+                         .await\n        \
+                         .map(|n| n as i64)\n        \
+                         .map_err(|e| format!(\"auth.cleanup_expired: {}\", e))\n\
+                 }\n\n",
+            );
+        }
     }
 
     /// Fase 8.7.2 — emite los bindings Python como **statics globales
@@ -13178,6 +13272,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return self.gen_auth_hash_password(args, call_span);
                     }
                     ("hash", "verify") => return self.gen_auth_hash_verify(args, call_span),
+                    // Fase 9.w.1.iter2.b — `auth.blacklist/is_blacklisted/
+                    // cleanup_expired` se traducen a helpers async del
+                    // preludio. Bypass del shadowing (consistente con
+                    // jwt/hash).
+                    ("auth", "blacklist") => {
+                        return self.gen_auth_blacklist(args, call_span);
+                    }
+                    ("auth", "is_blacklisted") => {
+                        return self.gen_auth_is_blacklisted(args, call_span);
+                    }
+                    ("auth", "cleanup_expired") => {
+                        return self.gen_auth_cleanup_expired(args, call_span);
+                    }
                     // Fase 12.3.a.3 — `log.info/warn/error/debug(...)`
                     // se traduce al helper preludio
                     // `__fitz_log_<level>(msg, &[(k, val), ...])`.
@@ -14402,6 +14509,96 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         Ok((
             format!("__fitz_hash_verify({}, {})", plain_c, hashed_c),
             Type::Bool,
+        ))
+    }
+
+    // ---- Fase 9.w.1.iter2.b — auth.blacklist/is_blacklisted/cleanup_expired ----
+
+    /// `auth.blacklist(db, jti, expires_at)` →
+    /// `__fitz_auth_blacklist(&db, jti, expires_at)` que devuelve
+    /// `Future<Result<(), String>>`. El programa lo desempaca con
+    /// `.await?`.
+    fn gen_auth_blacklist(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 3 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`auth.blacklist` espera 3 argumentos (db: DbConn, jti: Str, expires_at: Int), recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (db_code, _) = self.gen_expr(&args[0])?;
+        let (jti_code, jti_ty) = self.gen_expr(&args[1])?;
+        let jti_c = coerce(&jti_code, &jti_ty, &Type::Str, self.env);
+        let (exp_code, exp_ty) = self.gen_expr(&args[2])?;
+        let exp_c = coerce(&exp_code, &exp_ty, &Type::Int, self.env);
+        Ok((
+            format!("__fitz_auth_blacklist(&{}, {}, {})", db_code, jti_c, exp_c),
+            Type::Future(Box::new(Type::Result {
+                ok: Box::new(Type::Null),
+                err: Box::new(Type::Str),
+            })),
+        ))
+    }
+
+    /// `auth.is_blacklisted(db, jti)` →
+    /// `__fitz_auth_is_blacklisted(&db, jti)` que devuelve
+    /// `Future<Result<bool, String>>`.
+    fn gen_auth_is_blacklisted(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 2 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`auth.is_blacklisted` espera 2 argumentos (db: DbConn, jti: Str), recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (db_code, _) = self.gen_expr(&args[0])?;
+        let (jti_code, jti_ty) = self.gen_expr(&args[1])?;
+        let jti_c = coerce(&jti_code, &jti_ty, &Type::Str, self.env);
+        Ok((
+            format!("__fitz_auth_is_blacklisted(&{}, {})", db_code, jti_c),
+            Type::Future(Box::new(Type::Result {
+                ok: Box::new(Type::Bool),
+                err: Box::new(Type::Str),
+            })),
+        ))
+    }
+
+    /// `auth.cleanup_expired(db)` →
+    /// `__fitz_auth_cleanup_expired(&db)` que devuelve
+    /// `Future<Result<i64, String>>` (rows borradas).
+    fn gen_auth_cleanup_expired(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`auth.cleanup_expired` espera 1 argumento (db: DbConn), recibió {}",
+                    args.len()
+                ),
+            ));
+        }
+        let (db_code, _) = self.gen_expr(&args[0])?;
+        Ok((
+            format!("__fitz_auth_cleanup_expired(&{})", db_code),
+            Type::Future(Box::new(Type::Result {
+                ok: Box::new(Type::Int),
+                err: Box::new(Type::Str),
+            })),
         ))
     }
 
