@@ -2537,3 +2537,111 @@ está en el MVP"):
 **Detalle técnico completo**: `docs/roadmap.md` → "9.w iteración
 2" → sub-sección "9.w.3.iter2" expandida con los 6 sub-pasos
 a/b/c/d/e/f y CHANGELOG v0.11.2.
+
+---
+
+## Fase 12.3 — Observability minimal con OpenTelemetry — **CERRADO 2026-06-03**
+
+Cierre formal de la fase entera con 11 commits a lo largo de 3
+bloques (12.3.a + 12.3.b + 12.3.c). Total al cierre: **2894 unit
++ 81 cli_e2e + 3 openapi_e2e + 4 compile_e2e del logging**, clippy
+`--all-targets -- -D warnings` limpio, `cargo fmt --all --check`
+limpio.
+
+**Lo que cierra (referencia)**:
+
+- **12.3.a — Structured logging built-in**: `log.info/warn/error/
+  debug(msg, kwargs)` con kwargs heterogéneos (Int/Float/Str/
+  Bool/Null/Secret/List/Map). Output JSON flat a stderr con
+  `timestamp`+`level`+`msg`+kwargs; pretty mode con ANSI bold
+  colors cuando TTY o override `FITZ_LOG_FORMAT=pretty`. Filter
+  via `RUST_LOG` (default `info`). Secret redactado automático
+  recursivo en List/Map. Paridad bit-a-bit intérprete↔binario
+  con `tracing` + `tracing-subscriber` + `chrono` + `serde_json`
+  como infraestructura.
+- **12.3.b — Spans HTTP + métricas + correlación trace_id**:
+  cada request HTTP abre un SpanContext root con IDs OTel-
+  compatibles (`trace_id` 32 hex / `span_id` 16 hex, generados
+  con `uuid::Uuid::new_v4()`). Logs adentro del handler heredan
+  trace_id/span_id automático. Al final del request, access log
+  `log.info("http.access", ...)` con `http.method`/`http.target`
+  (template del route, OTel-standard)/`http.status_code`/
+  `duration_ms` + Counter `http_requests_total{method, path,
+  status}` + Histogram `http_request_duration_seconds{method,
+  path, status}` (paridad cross-metric con mismos labels). Opt-
+  out total con `@server(observability=false)` — bypass del
+  wrapper de instrumentación, cero overhead bare-metal.
+- **12.3.c — OTLP exporter para spans HTTP**: cuando
+  `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada, conexión a backend
+  OTel real (Jaeger/Tempo/Honeycomb/Datadog) con `opentelemetry-
+  otlp = "0.32"` feature `http-proto`. Sampler
+  `TraceIdRatioBased` con `OTEL_TRACES_SAMPLER_ARG` clamp `[0.0,
+  1.0]`. Service name desde `OTEL_SERVICE_NAME` (default
+  `"fitz-app"`). Sin la env var, no-op silencioso — zero
+  overhead, zero conexiones de red. Paridad bit-a-bit
+  intérprete↔binario.
+
+**Decisiones técnicas clave confirmadas durante implementación**:
+
+- **Sintaxis kwargs de Fitz usa `name: value`** (no `name=value`).
+  Los `=` están reservados para kwargs en decoradores.
+  Confirmación al implementar el `log.info(msg, k: v)` —
+  consistente con `db.connect(url, max_conns: 5)`.
+- **Approach híbrido tracing**: instalamos `tracing-subscriber`
+  para que `tracing::enabled!` respete `RUST_LOG`, pero el JSON
+  output lo emitimos manual con `serde_json`. Razón: kwargs
+  heterogéneos runtime no se modelan limpios con las macros
+  `event!` que esperan field names en compile-time.
+- **Storage propio con `tokio::task_local!`** sobre tracing
+  nativo `Span::extensions`: simplicidad + control total del
+  shape OTel-compatible + atraviesa thread boundaries del
+  runtime tokio multi-thread (handlers HTTP saltean workers
+  entre `.await` points).
+- **`http.target` = path template** (no path resuelto):
+  convención OTel para agrupar requests por endpoint en
+  herramientas downstream (Datadog/Tempo). Evita cardinality
+  explosion en métricas.
+- **HTTP/proto transport** sobre gRPC para OTLP: simplicidad (no
+  requiere tonic), compatibilidad con proxies HTTP corporativos,
+  recomendación Datadog/Honeycomb/New Relic.
+- **`OnceLock<bool>` para `OTEL_ENABLED`**: evita lookup de env
+  var en cada request. Se determina UNA vez al boot.
+
+**Deudas residuales derivadas de Fase 12.3** (NO bloquean Fase
+12.4, todas documentadas en `docs/roadmap.md` → "Fase 12.3" →
+sección "Deudas residuales derivadas"):
+
+1. **Bridge métricas OTel**: `metrics::counter!`/`histogram!` que
+   ya emiten Counter `http_requests_total` y Histogram
+   `http_request_duration_seconds` despachan a recorder global
+   vacío hoy. Sumar `metrics-exporter-opentelemetry` como
+   recorder global cuando `is_otel_enabled()` — las métricas que
+   YA emite el código irían al backend OTel automático sin
+   tocar `dispatch_request` ni el wrapper del codegen. Activable
+   en sub-paso futuro de 12.3.iter2 o como parte de 12.5
+   (M7.C2 del curso).
+2. **Bridge logs OTel**: los `log.X(...)` siguen yendo solo a
+   stderr. Sumar `opentelemetry-appender-tracing` o un layer
+   custom para que también se exporten al log signal del backend
+   OTel (todos los grandes backends OTel-spec soportan logs
+   nativos). Activable en sub-paso futuro paralelo al bridge
+   métricas.
+3. **Correlación trace_id Fitz↔OTel**: hoy son IDs
+   independientes — nuestro `SpanContext` genera trace_id propio
+   (uuid) para stderr logs, y el OTel span tiene los suyos
+   (generados por el SDK OTel). Cuando los queries downstream
+   necesiten cross-pipeline (ej "encontrar TODOS los logs del
+   request cuyo trace_id Jaeger muestra"), unir los dos
+   pipelines: cuando `is_otel_enabled()`, derivar nuestro
+   trace_id del OTel span activo via `Tracer::span_context()`.
+4. **Endpoint `/metrics` Prometheus opcional**: cuando el user
+   prefiere Prometheus scraping sobre OTLP push, instalar
+   `metrics-exporter-prometheus` como recorder + auto-mount
+   `GET /metrics` (paralelo a `/openapi.json` / `/docs`).
+   Activable con `@server(prometheus=true)` o env var
+   `FITZ_PROMETHEUS=true`. Diferido hasta que entre demanda
+   concreta — OTLP cubre el caso 90%.
+
+**Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.3 —
+Observability minimal con OpenTelemetry" expandida con los 11
+sub-pasos (a.1-3, b.1-5, c.1-3).

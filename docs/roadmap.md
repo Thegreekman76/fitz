@@ -9376,47 +9376,151 @@ Sub-pasos:
   `Display` redactado + `expose()` + integración con
   `__ToFitzJson` (error claro citando `.expose()`).
 
-**12.3 — Observability minimal con OpenTelemetry** (3 sub-pasos)
+**12.3 — Observability minimal con OpenTelemetry** — **CERRADA**
+(2026-06-03)
 
-Decisión: OTel estándar (OTLP). Suma ~10MB al binario cuando hay
-`@server`. Opt-out con `@server(observability=false)`.
+Decisión confirmada: OTel estándar (OTLP) con sintaxis kwargs
+`name: value`. Opt-out con `@server(observability=false)` (12.3.b.5).
 
-Auto-instrumentation (cero código del user):
+Cierre formal con 11 commits a lo largo de 3 bloques. Total al
+cierre: 2894 unit + 81 cli_e2e + 3 openapi_e2e + 4 compile_e2e
+del logging. Clippy `--all-targets -- -D warnings` limpio,
+`cargo fmt --all --check` limpio.
 
-- **Spans** por cada handler HTTP: nombre=`<METHOD> <path>`,
-  attrs `http.method`, `http.target`, `http.status_code`,
-  `duration_ms`.
-- **Spans** anidados para `@auth_provider`, `db.query`/
-  `db.exec`, `@ws` recv/send.
-- **Counter** `http_requests_total{method, path, status}`.
-- **Histogram** `http_request_duration_seconds{method, path,
-  status}`.
+#### 12.3.a — Setup base + structured logging (CERRADA)
 
-Structured logging built-in:
+Builtins `log.info/warn/error/debug` con kwargs heterogéneos
+(Int/Float/Str/Bool/Null/Secret/List/Map), `Secret<T>`
+redactado automático, paridad bit-a-bit intérprete↔binario.
 
-- `log.info(msg, kwargs)` / `log.warn` / `log.error` /
-  `log.debug`.
-- `log.info("login ok", user_id=42, duration_ms=15)`.
-- Output JSON con `timestamp` + `level` + `msg` + traces
-  (`trace_id`/`span_id` correlacionados).
-- `Secret<T>` en kwargs se redacta automático.
+- **12.3.a.1**: módulo `log` como `Value::Module` + 4 builtins
+  stub con `eprintln!` + dispatch de kwargs en
+  `dispatch_builtin_kwargs` con kwargs reservados `level`/`msg`/
+  `timestamp` rechazados. Stubs para validar el wiring; el
+  output JSON real llega en 12.3.a.2. 14 unit tests.
+- **12.3.a.2**: JSON estructurado real con `tracing` +
+  `tracing-subscriber` (`EnvFilter::from_default_env()` con
+  `RUST_LOG`, default `info`); TTY detection con override
+  `FITZ_LOG_FORMAT=json|pretty`; pretty mode con ANSI bold
+  colors por level (DEBUG=magenta/INFO=green/WARN=yellow/
+  ERROR=red); JSON shape flat con `timestamp`+`level`+`msg`+
+  kwargs al mismo nivel; redacción recursiva de `Value::Secret`
+  en kwargs directos y dentro de `List`/`Map`; ChronoUtc RFC
+  3339 millis. Nuevo módulo `src/logging.rs` (~470 LoC) +
+  init_logging() en main.rs. 14 unit tests del módulo.
+- **12.3.a.3**: codegen paridad bit-a-bit en `fitz build`.
+  `LOGGING_PRELUDE` constante (~150 LoC del Rust emitido) con
+  enum tagged `__FitzLogValue` (Null/Bool/Int/Float/Str/Secret
+  marker/List/Map) + `__fitz_log_init` + 4 fns
+  `__fitz_log_<level>` + format JSON/pretty. Deps emitidas:
+  `tracing` + `tracing-subscriber` + `chrono` + `serde_json`
+  (con dedup según otros flags). `gen_log_call` traduce
+  `log.<level>(msg, k: v)` al helper preludio con conversión
+  recursiva del tipo al enum. 16 unit tests + 4 E2E del binario
+  nativo.
 
-Export targets:
+#### 12.3.b — Spans HTTP + métricas + correlación trace_id (CERRADA)
 
-- **dev default**: stdout JSON con span info.
-- **prod**: `OTEL_EXPORTER_OTLP_ENDPOINT=https://collector:4318`
-  + `OTEL_SERVICE_NAME=mi-app`.
-- Sampling head-based via `OTEL_TRACES_SAMPLER_ARG=0.1` (10%).
+Auto-instrumentation HTTP completa sin opt-in del user. Cada
+request abre un SpanContext root con IDs OTel-compatibles
+(trace_id 32 hex / span_id 16 hex) y los logs heredan
+automático. Al final del request, access log + Counter +
+Histogram.
 
-Crate: `opentelemetry-otlp` con feature `http-proto`.
+- **12.3.b.1**: infraestructura del `SpanContext` (struct +
+  `tokio::task_local!` storage + `with_span_context()` +
+  `current_span_context()`). `format_json`/`format_pretty`
+  inyectan automático `trace_id`/`span_id` cuando hay span
+  activo. Kwargs reservados extendidos a `level`/`msg`/
+  `timestamp`/`trace_id`/`span_id`. IDs generados con
+  `uuid::Uuid::new_v4()`. 12 unit tests nuevos.
+- **12.3.b.2**: wrapper HTTP automático en `dispatch_request`.
+  Envuelve `handle_task` con `with_span_context(ctx, ...)` para
+  que logs del handler hereden trace_id. Al final del request,
+  emite `log.info("http.access", ...)` con `http.method`/
+  `http.target`/`http.status_code`/`duration_ms` (OTel naming).
+  Access log adentro del scope para correlación con logs del
+  handler. `http.target` con TEMPLATE del route (no path
+  resuelto) — convención OTel.
+- **12.3.b.3**: métricas built-in con `metrics = "0.24"` crate.
+  Counter `http_requests_total{method, path, status}` +
+  Histogram `http_request_duration_seconds{method, path,
+  status}` registrados en `dispatch_request` adentro del scope
+  del span. Sin recorder global instalado, macros son no-op
+  silenciosas (zero overhead). 4 unit tests con
+  `DebuggingRecorder`.
+- **12.3.b.4**: codegen paridad bit-a-bit en `fitz build`.
+  `LOGGING_PRELUDE` extendido con SpanContext + helpers; split
+  preludio STUB/TOKIO según `has_tokio_runtime`. `uses_logging`
+  implícito con HTTP. Deps `uuid` + `metrics` condicionales en
+  el Cargo.toml emitido. Wrapper HTTP del binario nativo
+  paralelo bit-a-bit al intérprete.
+- **12.3.b.5**: opt-out `@server(observability=false)` parseado
+  en evaluator + codegen. `dispatch_request` bypasea TODO el
+  wrapper de instrumentación cuando flag está apagado —
+  handlers bare-metal, cero overhead. Bug fix incluido: fix
+  cargo fmt CI del 12.3.b.4 (`let has_tokio_runtime` condensado
+  en una línea). Bug de orden corregido: `ctx.observability_enabled`
+  capturado ANTES del loop `gen_http_handler_wrapper`. Smoke E2E
+  con 4 escenarios verde: intérprete default/off + binario
+  default/off bit-a-bit paralelos.
 
-Sub-pasos:
-- **12.3.a** — Setup base + structured logging (`log.info/warn/
-  error/debug`) sin spans/metrics todavía.
-- **12.3.b** — Auto-trace HTTP + auto-metric HTTP + correlación
-  `trace_id` en logs.
-- **12.3.c** — OTLP exporter + sampling + integración codegen +
-  `@server(observability=false)` opt-out.
+#### 12.3.c — OTLP exporter + sampling (CERRADA)
+
+Conexión a backend OTel real (Jaeger/Tempo/Honeycomb/Datadog)
+cuando `OTEL_EXPORTER_OTLP_ENDPOINT` está seteado. Sin la env
+var, no-op silencioso — zero overhead, zero conexiones de red.
+
+- **12.3.c.1**: setup base en intérprete. Crates
+  `opentelemetry = "0.32"` + `opentelemetry_sdk = "0.32"` +
+  `opentelemetry-otlp = "0.32"` con features `http-proto` +
+  `reqwest-blocking-client` + `trace` (default-features off).
+  Nuevo módulo `src/observability.rs` (~140 LoC) con
+  `init_otel()` + `is_otel_enabled()` (OnceLock) + `tracer()`.
+  Env vars OTel-standard: `OTEL_EXPORTER_OTLP_ENDPOINT` (sin
+  default), `OTEL_SERVICE_NAME` (default `"fitz-app"`),
+  `OTEL_TRACES_SAMPLER_ARG` (clamp `[0.0, 1.0]`, default 1.0).
+  `dispatch_request` abre OTel span paralelo al SpanContext
+  propio cuando provider instalado; cierra con `http.status_code`
+  + `Status::Ok`/`Status::error()`. HTTP/proto transport sobre
+  gRPC por simplicidad + compat proxy + recomendación
+  Datadog/Honeycomb. 2 unit tests smoke.
+- **12.3.c.2**: codegen paridad bit-a-bit en `fitz build`.
+  `OTEL_PRELUDE` constante paralela a `crate::observability`.
+  `emit_otel_prelude` method + llamada en `emit_main_rs_body`.
+  `__fitz_otel_init` en el main generado después de
+  `__fitz_log_init`. Wrapper HTTP del binario nativo emite el
+  OTel span open/close con los mismos atributos del intérprete.
+  Smoke E2E del binario nativo verde con endpoint dummy (puerto
+  vacío): batch exporter silencia errores de red en background
+  sin bloquear el handler.
+- **12.3.c.3**: cierre formal de Fase 12.3 entera. Roadmap
+  + deudas + README + CLAUDE refresh. Smoke
+  `GUIDE_EXAMPLES_COMPILE` verde.
+
+#### Deudas residuales derivadas de 12.3 (NO bloquean 12.4)
+
+1. **Bridge métricas OTel**: `metrics::counter!`/`histogram!`
+   despachan a recorder global vacío hoy. Sumar
+   `metrics-exporter-opentelemetry` como recorder global cuando
+   `is_otel_enabled()` está instalado — Counter/Histogram que
+   ya emite el código irían al backend OTel automático.
+2. **Bridge logs OTel**: los `log.X(...)` siguen yendo solo a
+   stderr. Sumar `opentelemetry-appender-tracing` o un layer
+   custom para que también se exporten al log signal del
+   backend OTel.
+3. **Correlación trace_id Fitz↔OTel**: hoy son IDs
+   independientes — nuestro `SpanContext` genera trace_id
+   propio para stderr logs, y el OTel span tiene los suyos.
+   Cuando los queries downstream necesiten cross-pipeline (e.g.
+   "todos los logs del request con trace_id de Jaeger"), unir
+   los dos pipelines: nuestro SpanContext deriva el trace_id
+   del OTel span activo cuando provider instalado.
+4. **Endpoint `/metrics` Prometheus opcional**: cuando el user
+   prefiere Prometheus scraping sobre OTLP push, instalar
+   `metrics-exporter-prometheus` como recorder + auto-mount
+   `GET /metrics`. Activable con `@server(prometheus=true)` o
+   similar.
 
 **12.4 — Dockerfile autogenerado + `fitz docker`** (2 sub-pasos)
 
