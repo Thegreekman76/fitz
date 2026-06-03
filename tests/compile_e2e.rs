@@ -11435,3 +11435,198 @@ fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
     assert_eq!(interp_exit, compiled_exit);
     assert_eq!(interp_exit, 0);
 }
+
+// ---------------------------------------------------------------------------
+// Fase 12.3.a.3 — codegen paridad bit-a-bit del módulo `log`.
+//
+// Compila programas con `log.info/warn/error/debug` a binario nativo
+// con `fitz build`, ejecuta el binario, captura stderr (donde el
+// logger emite por convención cargo) y valida el shape JSON estructurado
+// + filter por RUST_LOG + Secret redaction.
+// ---------------------------------------------------------------------------
+
+/// Como `build_and_run_with_stderr` pero permite setear env vars sobre
+/// el child que ejecuta el binario. Útil para tests del log que
+/// dependen de `RUST_LOG`/`FITZ_LOG_FORMAT`.
+fn build_and_run_with_env_and_stderr(
+    test_name: &str,
+    src: &str,
+    env_vars: &[(&str, &str)],
+) -> (String, String, i32) {
+    let stem = sanitize_stem(test_name);
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", stem));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join(format!("{}.fitz", stem));
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.clone()
+    };
+    let bin = dir.join(&bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let mut cmd = Command::new(&bin);
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    // FITZ_LOG_FORMAT=json explícito para tests deterministas — el
+    // auto-detect TTY no es predecible en CI ni con Command::output (que
+    // pipea stderr y no es TTY, así que JSON es default, pero ser
+    // explícito blinda contra runners raros).
+    let run = cmd.output().expect("invocar binario");
+    (
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+        String::from_utf8_lossy(&run.stderr).into_owned(),
+        run.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn m12_3_a_3_log_info_emite_json_con_shape_flat_a_stderr() {
+    // Programa con `log.info(msg, kwargs)` debe emitir JSON flat a
+    // stderr: timestamp + level + msg + kwargs al mismo nivel.
+    let src = "\
+log.info(\"login ok\", user_id: 42, role: \"admin\", active: true)
+print(\"done\")
+";
+    let (stdout, stderr, exit) = build_and_run_with_env_and_stderr(
+        "m12_3_a_3_log_info_emite_json",
+        src,
+        &[("FITZ_LOG_FORMAT", "json")],
+    );
+    assert_eq!(exit, 0, "exit code: {} stderr: {}", exit, stderr);
+    assert!(
+        stdout.contains("done"),
+        "esperaba 'done' en stdout: {}",
+        stdout
+    );
+    // Stderr debe tener UNA línea con JSON shape flat.
+    assert!(
+        stderr.contains("\"level\":\"INFO\""),
+        "esperaba 'level':'INFO' en stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("\"msg\":\"login ok\""),
+        "esperaba 'msg':'login ok' en stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("\"user_id\":42"),
+        "esperaba 'user_id':42 en stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("\"role\":\"admin\""),
+        "esperaba 'role':'admin' en stderr: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("\"active\":true"),
+        "esperaba 'active':true en stderr: {}",
+        stderr
+    );
+    // El timestamp debe tener shape ISO 8601 con 'Z' final.
+    assert!(
+        stderr.contains("\"timestamp\":") && stderr.contains("Z\""),
+        "esperaba timestamp ISO 8601 en stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn m12_3_a_3_log_default_level_info_filtra_debug() {
+    // Sin RUST_LOG seteada, default level = info. log.debug() NO debe
+    // aparecer en el output stderr.
+    let src = "\
+log.debug(\"oculto\", trace_id: \"x\")
+log.info(\"visible\")
+";
+    let (_stdout, stderr, exit) = build_and_run_with_env_and_stderr(
+        "m12_3_a_3_log_default_info",
+        src,
+        &[("FITZ_LOG_FORMAT", "json")],
+    );
+    assert_eq!(exit, 0);
+    assert!(
+        !stderr.contains("oculto"),
+        "log.debug debería estar filtrado con default level=info: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("\"msg\":\"visible\""),
+        "log.info debería aparecer con default level=info: {}",
+        stderr
+    );
+}
+
+#[test]
+fn m12_3_a_3_log_rust_log_debug_habilita_debug() {
+    // Con RUST_LOG=debug, log.debug() SÍ aparece.
+    let src = "\
+log.debug(\"ahora visible\", trace_id: \"abc\")
+log.info(\"tambien visible\")
+";
+    let (_stdout, stderr, exit) = build_and_run_with_env_and_stderr(
+        "m12_3_a_3_log_rust_log_debug",
+        src,
+        &[("FITZ_LOG_FORMAT", "json"), ("RUST_LOG", "debug")],
+    );
+    assert_eq!(exit, 0);
+    assert!(
+        stderr.contains("\"level\":\"DEBUG\""),
+        "log.debug debe aparecer con RUST_LOG=debug: {}",
+        stderr
+    );
+    assert!(
+        stderr.contains("ahora visible"),
+        "msg de debug debe aparecer con RUST_LOG=debug: {}",
+        stderr
+    );
+}
+
+#[test]
+fn m12_3_a_3_log_warn_con_secret_redacta_el_inner() {
+    // Programa que pone un Secret en kwargs — el value real (de la
+    // env var SMOKE_TOK) NO debe aparecer en el output.
+    let src = "\
+fn rotate() -> Result<Null> {
+    let token = secret(\"SMOKE_TOK\")?
+    log.warn(\"rotating\", user_id: 42, token: token)
+    return Ok(null)
+}
+let _ = rotate()
+";
+    let secret_value = "DO-NOT-LEAK-codegen-12-3-a-3-secret-xyz";
+    let (_stdout, stderr, exit) = build_and_run_with_env_and_stderr(
+        "m12_3_a_3_log_secret_redaction",
+        src,
+        &[("FITZ_LOG_FORMAT", "json"), ("SMOKE_TOK", secret_value)],
+    );
+    assert_eq!(exit, 0);
+    assert!(
+        stderr.contains("\"token\":\"<redacted>\""),
+        "esperaba token redacted en stderr: {}",
+        stderr
+    );
+    assert!(
+        !stderr.contains(secret_value),
+        "el secret real NO debe aparecer en stderr: {}",
+        stderr
+    );
+}

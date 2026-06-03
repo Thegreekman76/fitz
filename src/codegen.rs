@@ -196,6 +196,15 @@ pub fn generate_project(
     //
     // W10 (v0.10.7) — transitivo igual que uses_auth.
     let uses_jobs = program_uses_jobs(program) || loader.modules.iter().any(|m| m.uses_jobs);
+    // Fase 12.3.a.3 — detección de uso del módulo built-in `log`
+    // (`log.info/warn/error/debug`). Activa el preludio
+    // `__FitzLogValue` + `__fitz_log_*` en el main + las deps
+    // `tracing` + `tracing-subscriber` + `chrono` (esta última se
+    // comparte con `uses_jobs`/`uses_date_or_uuid` cuando aplican —
+    // ver `cargo_toml_for`). Transitivo: cualquier módulo cargado
+    // con `log.X(...)` también dispara la emisión.
+    let uses_logging =
+        program_uses_logging(program) || loader.modules.iter().any(|m| m.uses_logging);
     // Fase 10.1.c — detección del módulo `db` (driver Postgres).
     // Suma `sha2`/`hmac`/`base64` + `tokio` con feature `net` al
     // Cargo.toml, emite el módulo `__fitz_db_runtime` (vía
@@ -256,6 +265,7 @@ pub fn generate_project(
             uses_auth,
             uses_ws,
             uses_jobs,
+            uses_logging,
             uses_db,
             uses_fitz_value,
             uses_date_or_uuid,
@@ -640,6 +650,116 @@ fn program_uses_jobs(program: &Program) -> bool {
         }
         stmt_uses_spawn(s)
     })
+}
+
+/// Fase 12.3.a.3 — detección de uso del módulo built-in `log`. Walker
+/// recursivo paralelo a `program_uses_jobs` (busca calls específicos).
+/// `true` si encontramos cualquier `log.info/warn/error/debug(...)` en
+/// expressions del programa. El walker NO atiende a shadowing — si el
+/// user hace `let log = ...`, el codegen aplica el feature igual,
+/// trade-off aceptado del MVP (consistente con `program_uses_jobs`).
+fn program_uses_logging(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_log(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
+                    if let Expr::Ident(ident, _) = object.as_ref() {
+                        if ident == "log"
+                            && matches!(field.as_str(), "info" | "warn" | "error" | "debug")
+                        {
+                            return true;
+                        }
+                    }
+                }
+                expr_uses_log(callee) || args.iter().any(expr_uses_log)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_log(left) || expr_uses_log(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_log(operand),
+            Expr::Field { object, .. } => expr_uses_log(object),
+            Expr::Index { object, index, .. } => expr_uses_log(object) || expr_uses_log(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_log(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_log(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_log(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_log(start) || expr_uses_log(end),
+            Expr::List(items, _) => items.iter().any(expr_uses_log),
+            Expr::Tuple(items, _) => items.iter().any(expr_uses_log),
+            Expr::TupleField { tuple, .. } => expr_uses_log(tuple),
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_log(k) || expr_uses_log(v)),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Expr(inner, _) => expr_uses_log(inner),
+                StrPart::Lit(_) => false,
+            }),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_log(condition)
+                    || then.iter().any(stmt_uses_log)
+                    || else_.as_ref().is_some_and(|e| e.iter().any(stmt_uses_log))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_log),
+            Expr::Match { value, arms, .. } => {
+                expr_uses_log(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_log))
+            }
+            Expr::Await(inner, _) | Expr::Try(inner, _) => expr_uses_log(inner),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_log),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_log(expr)
+                    || expr_uses_log(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_log(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_log(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_log(key)
+                    || expr_uses_log(value)
+                    || expr_uses_log(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_log(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_log(f))
+            }
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_log(v)),
+            Expr::NamedArg { value, .. } => expr_uses_log(value),
+            _ => false,
+        }
+    }
+    fn stmt_uses_log(s: &Stmt) -> bool {
+        match s {
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => expr_uses_log(e),
+            Stmt::Assign { value, .. } => expr_uses_log(value),
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_log(condition) || body.iter().any(stmt_uses_log),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_log),
+            Stmt::For { iter, body, .. } => expr_uses_log(iter) || body.iter().any(stmt_uses_log),
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_log),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_log(status) || body.as_ref().is_some_and(expr_uses_log)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_log)
 }
 
 fn program_uses_auth(program: &Program) -> bool {
@@ -2287,6 +2407,7 @@ fn cargo_toml_for(
     uses_auth: bool,
     uses_ws: bool,
     uses_jobs: bool,
+    uses_logging: bool,
     uses_db: bool,
     uses_fitz_value: bool,
     uses_date_or_uuid: bool,
@@ -2378,6 +2499,7 @@ fn cargo_toml_for(
         || uses_python
         || uses_auth
         || uses_jobs
+        || uses_logging
         || uses_db
         || uses_date_or_uuid;
     if !needs_deps_section {
@@ -2523,8 +2645,33 @@ fn cargo_toml_for(
     } else {
         ""
     };
+    // Fase 12.3.a.3 — deps del logger built-in. `tracing` + `tracing-
+    // subscriber` paralelos a las del binario `fitz` del workspace (ver
+    // Cargo.toml raíz, sección "Fase 12.3.a.2"). `chrono` para
+    // `Utc::now().to_rfc3339()`; si `uses_jobs` o `uses_date_or_uuid`
+    // ya emitieron chrono, evitamos duplicar la entry. `serde_json` ya
+    // está en HTTP/auth/db cuando aplican; emitimos solo si NO está en
+    // ninguno (ej: programa CLI puro con `log.info(..., key: 42)`).
+    let logging_lines = if uses_logging {
+        let mut s = String::from(
+            "tracing = \"0.1\"\n\
+             tracing-subscriber = { version = \"0.3\", default-features = false, features = [\"env-filter\", \"std\", \"fmt\"] }\n",
+        );
+        if !uses_jobs && !uses_date_or_uuid {
+            s.push_str(
+                "chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n",
+            );
+        }
+        let serde_json_already_emitted = has_http || uses_auth || (uses_db && uses_fitz_value);
+        if !serde_json_already_emitted {
+            s.push_str("serde_json = { version = \"1\", features = [\"preserve_order\"] }\n");
+        }
+        s
+    } else {
+        String::new()
+    };
     format!(
-        "{}\n[dependencies]\n{}{}{}{}{}{}{}",
+        "{}\n[dependencies]\n{}{}{}{}{}{}{}{}",
         header,
         http_lines,
         tokio_line,
@@ -2532,7 +2679,8 @@ fn cargo_toml_for(
         auth_lines_final,
         jobs_lines,
         db_lines,
-        date_uuid_lines
+        date_uuid_lines,
+        logging_lines
     )
 }
 
@@ -2605,6 +2753,10 @@ struct LoadedModule {
     /// (`use crate::__FitzWsConn`, `use crate::__fitz_run_cron_job`).
     uses_ws: bool,
     uses_jobs: bool,
+    /// Fase 12.3.a.3 — `program_uses_logging(module_program)`. El main
+    /// OR-ea su propio flag con todos los módulos para decidir si emite
+    /// el preludio `__FitzLogValue` + `__fitz_log_*` en el crate root.
+    uses_logging: bool,
     uses_auth: bool,
     /// 10.8.7 (v0.10.8) — `program_uses_ws_broadcast(module_program)`.
     /// El main lo OR-ea con su propio flag para decidir si emite el
@@ -3021,6 +3173,12 @@ impl ModuleLoader {
         let module_uses_jobs = program_uses_jobs(&module_program);
         let module_uses_auth = program_uses_auth(&module_program);
         let module_uses_ws_broadcast = program_uses_ws_broadcast(&module_program);
+        // Fase 12.3.a.3 — flag transitivo de logging. El main lo OR-ea
+        // con su propio flag para emitir el preludio `__FitzLogValue` +
+        // `__fitz_log_*` en el crate root. Sin esto, un módulo con
+        // `log.info(...)` referencia `crate::__fitz_log_info` que no
+        // existe.
+        let module_uses_logging = program_uses_logging(&module_program);
         // W11 (v0.10.7) — flags transitivos del módulo (uses_fitz_value, uses_db, has_http).
         let module_uses_fitz_value = program_uses_fitz_value(&module_program);
         let module_uses_db = program_uses_db(&module_program);
@@ -3093,6 +3251,7 @@ impl ModuleLoader {
             uses_ws: module_uses_ws,
             uses_ws_broadcast: module_uses_ws_broadcast,
             uses_jobs: module_uses_jobs,
+            uses_logging: module_uses_logging,
             uses_auth: module_uses_auth,
             uses_fitz_value: module_uses_fitz_value,
             uses_db: module_uses_db,
@@ -4198,6 +4357,12 @@ fn generate_main_rs(
     let uses_auth = program_uses_auth(program) || loader.modules.iter().any(|m| m.uses_auth);
     let uses_ws = program_uses_ws(program) || loader.modules.iter().any(|m| m.uses_ws);
     let uses_jobs = program_uses_jobs(program) || loader.modules.iter().any(|m| m.uses_jobs);
+    // Fase 12.3.a.3 — transitivo de `uses_logging`. Mismo cálculo que
+    // arriba en `generate_project` — duplicado pragmático porque
+    // `generate_main_rs` se llama también en path de tests unitarios
+    // que no pasan por `generate_project`.
+    let uses_logging =
+        program_uses_logging(program) || loader.modules.iter().any(|m| m.uses_logging);
     // W8 (v0.10.7) — uses_db transitivo: si algún módulo cargado
     // declara `@table` types o usa db, el main emite el preludio db
     // entero para que los `use crate::__fitz_db_*` de los módulos
@@ -4230,6 +4395,7 @@ fn generate_main_rs(
     ctx.uses_auth = uses_auth;
     ctx.uses_ws = uses_ws;
     ctx.uses_jobs = uses_jobs;
+    ctx.uses_logging = uses_logging;
     ctx.uses_db = uses_db;
     ctx.uses_date_or_uuid = uses_date_or_uuid;
     // 10.8.7 (v0.10.8) — pre-scan del builtin `ws_broadcast(endpoint, msg)`
@@ -4700,6 +4866,13 @@ fn emit_main_rs_body(
     // `cron_jobs_info` se popula recién en `partition_program_stmts`.
     let any_persistent_cron = program_has_persistent_cron(program);
     ctx.emit_jobs_prelude(any_persistent_cron);
+    // Fase 12.3.a.3 — preludio del structured logging: enum
+    // `__FitzLogValue` + `__fitz_log_init/info/warn/error/debug`. Solo
+    // si el programa (o algún módulo cargado) usa el módulo built-in
+    // `log`. Independiente de cron/db/auth — programas CLI puros con
+    // `log.info(...)` también lo activan. Sin uses_logging, no se
+    // emiten deps tracing al Cargo.toml ni helpers al main.
+    ctx.emit_logging_prelude();
     // Fase 10.1.c — preludio del módulo `db`: tipos opacos
     // `__FitzDbConn`/`__FitzDbRow`/`__FitzPgValue` + trait
     // `__IntoPgValue` + helpers async para connect/query/exec/close.
@@ -5627,6 +5800,12 @@ struct CodegenCtx<'a> {
     /// `__fitz_run_cron_scheduler`, registro de jobs en main, y el
     /// modo "cron-only main" cuando no hay HTTP.
     uses_jobs: bool,
+    /// Fase 12.3.a.3: `true` si el programa usa el módulo built-in
+    /// `log` (`log.info/warn/error/debug`). Habilita emisión del
+    /// preludio `__FitzLogValue` + `__fitz_log_*` y la llamada inicial
+    /// `__fitz_log_init()` adentro del main generado. Cuando es false,
+    /// el binario no paga deps de tracing/tracing-subscriber.
+    uses_logging: bool,
     /// Fase 10.1.c: `true` si el programa usa el módulo `db` (driver
     /// Postgres puro). Habilita emisión del `mod __fitz_db_runtime;`
     /// + preludio `__FitzDbConn`/`__FitzPgValue`/`__IntoPgValue`
@@ -5844,6 +6023,7 @@ impl<'a> CodegenCtx<'a> {
             uses_ws: false,
             uses_ws_broadcast: false,
             uses_jobs: false,
+            uses_logging: false,
             uses_db: false,
             uses_date_or_uuid: false,
             cron_jobs_info: Vec::new(),
@@ -7088,6 +7268,40 @@ impl __FitzRetryConfig {
     }
 
     /// Fase 10.1.c — preludio del driver Postgres. Emite el módulo
+    /// Fase 12.3.a.3 — Emite el preludio del structured logging
+    /// built-in: enum `__FitzLogValue` + `__fitz_log_init` + 4 fns
+    /// `__fitz_log_<level>` + helpers JSON/pretty/format detection.
+    /// Solo se emite cuando `self.uses_logging` es true (programa o
+    /// algún módulo importado usa `log.info/warn/error/debug`). Sin
+    /// uses_logging, el binario no paga deps de tracing/
+    /// tracing-subscriber.
+    ///
+    /// Constante `LOGGING_PRELUDE` definida más abajo en este archivo.
+    /// El emit_main_rs_body lo llama después de auth/jobs/db para que
+    /// las fns top-level del usuario puedan referenciarlo sin `use`
+    /// extra.
+    fn emit_logging_prelude(&mut self) {
+        if !self.uses_logging {
+            return;
+        }
+        self.emit("\n// --- 12.3.a.3: runtime de structured logging (módulo `log`) ---\n");
+        self.emit(LOGGING_PRELUDE);
+        self.emit("\n");
+    }
+
+    /// Fase 12.3.a.3 — Emite la llamada `__fitz_log_init();` adentro de
+    /// `fn main()` si `uses_logging` es true. Idempotente runtime — el
+    /// init mismo del logger es no-op si ya hay subscriber instalado.
+    /// Llamado al INICIO del main (antes de cualquier stmt del usuario)
+    /// para que los `log.X(...)` posteriores respeten `RUST_LOG`. No
+    /// hace nada si el programa no usa logging.
+    fn emit_log_init_call(&mut self) {
+        if !self.uses_logging {
+            return;
+        }
+        self.emit("    __fitz_log_init();\n");
+    }
+
     /// `__fitz_db_runtime` (declarado como `mod ... ;`) + alias
     /// `__FitzDbConn`/`__FitzPgValue` + trait `__IntoPgValue` con
     /// impls para los primitivos Fitz + helpers async para los 5
@@ -8536,6 +8750,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         }
         self.indent += 1;
         self.push_scope();
+        // Fase 12.3.a.3 — init del logger ANTES de cualquier stmt del
+        // user. No-op si `uses_logging == false`.
+        self.emit_log_init_call();
         // Fase 9.w.3.c — registrar cron jobs ANTES de los stmts del
         // usuario. Los jobs corren en `tokio::spawn` independientes;
         // el main puede seguir con sus stmts. Si hay cron-only mode
@@ -8659,6 +8876,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         } else {
             self.emit("fn main() {\n");
         }
+        // Fase 12.3.a.3 — init del logger ANTES de cualquier código
+        // del CLI builder. No-op si `uses_logging == false`.
+        self.emit_log_init_call();
         self.emit("    let raw_args: Vec<String> = std::env::args().collect();\n");
         self.emit("    let bin_name = raw_args.first()\n");
         self.emit("        .map(|p| std::path::Path::new(p)\n");
@@ -12750,6 +12970,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return self.gen_auth_hash_password(args, call_span);
                     }
                     ("hash", "verify") => return self.gen_auth_hash_verify(args, call_span),
+                    // Fase 12.3.a.3 — `log.info/warn/error/debug(...)`
+                    // se traduce al helper preludio
+                    // `__fitz_log_<level>(msg, &[(k, val), ...])`.
+                    // Bypass del shadowing (consistente con jwt/hash).
+                    ("log", "info") | ("log", "warn") | ("log", "error") | ("log", "debug") => {
+                        return self.gen_log_call(field, args, call_span);
+                    }
                     _ => {}
                 }
             }
@@ -13657,6 +13884,194 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     // - `hash.password`: devuelve `Type::Str`.
     // - `hash.verify`: devuelve `Type::Bool`.
     // -----------------------------------------------------------------
+
+    /// Fase 12.3.a.3 — Traduce `log.<level>(msg, k: v, ...)` al helper
+    /// preludio `__fitz_log_<level>(<msg_str>, &[(<key>, <log_value>),
+    /// ...])`. El primer arg posicional es `msg: Str`; los kwargs van
+    /// como key-value pairs. Reservados (`msg`/`level`/`timestamp`)
+    /// se rechazan en compile-time. Valor de retorno = Null.
+    ///
+    /// Conversión de cada kwarg al enum `__FitzLogValue`:
+    /// - Primitivos (Int/Float/Str/Bool/Null) → variante directa.
+    /// - `Secret<T>` → variante `Secret` marker (sin inner; el valor
+    ///   real queda redactado).
+    /// - `Nullable<T>` → match runtime: `None` → `Null`, `Some(_)`
+    ///   → recurse.
+    /// - `List<T>` con T primitivo/Secret → vec runtime con conversión
+    ///   elemento a elemento.
+    /// - `Map<Str, T>` idem.
+    /// - Cualquier otro tipo (List/Map anidados profundo, nominales,
+    ///   etc.) → fallback `__FitzLogValue::Str(format!("{}", expr))`.
+    fn gen_log_call(
+        &mut self,
+        level: &str,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        // 1) Validar shape: primer arg positional = msg: Str. Resto =
+        //    NamedArg con key=identifier y value=expr.
+        if args.is_empty() {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`log.{}` requiere el primer arg posicional (msg: Str) + kwargs opcionales (k: v)",
+                    level
+                ),
+            ));
+        }
+        // El primer arg DEBE ser positional (no NamedArg).
+        let msg_arg = &args[0];
+        if let Expr::NamedArg { .. } = msg_arg {
+            return Err(self.err_at(
+                msg_arg.span(),
+                format!(
+                    "`log.{}` requiere el primer arg posicional (msg: Str), no kwarg",
+                    level
+                ),
+            ));
+        }
+        // 2) Generar la expresión del msg + coerce a String.
+        let (msg_code, msg_ty) = self.gen_expr(msg_arg)?;
+        if !matches!(msg_ty, Type::Str | Type::Any) {
+            return Err(self.err_at(
+                msg_arg.span(),
+                format!(
+                    "`log.{}`: msg debe ser Str, recibió `{}`",
+                    level,
+                    msg_ty.display(self.env)
+                ),
+            ));
+        }
+        let msg_c = coerce(&msg_code, &msg_ty, &Type::Str, self.env);
+
+        // 3) Procesar los kwargs (args[1..]).
+        let mut seen_kwargs: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut kvs_parts: Vec<String> = Vec::new();
+        for arg in &args[1..] {
+            let (key, value_expr, key_span) = match arg {
+                Expr::NamedArg { name, value, span } => (name.clone(), value.as_ref(), *span),
+                _ => {
+                    return Err(self.err_at(
+                        arg.span(),
+                        format!(
+                            "`log.{}` solo acepta 1 arg posicional (msg: Str); el resto deben ser kwargs (k: v)",
+                            level
+                        ),
+                    ));
+                }
+            };
+            if matches!(key.as_str(), "level" | "msg" | "timestamp") {
+                return Err(self.err_at(
+                    key_span,
+                    format!(
+                        "`log.{}`: el kwarg `{}` está reservado (el logger lo emite automáticamente)",
+                        level, key
+                    ),
+                ));
+            }
+            if !seen_kwargs.insert(key.clone()) {
+                return Err(self.err_at(
+                    key_span,
+                    format!("`log.{}`: el kwarg `{}` está duplicado", level, key),
+                ));
+            }
+            let (v_code, v_ty) = self.gen_expr(value_expr)?;
+            let log_value_code = self.gen_log_value_for_type(&v_code, &v_ty);
+            kvs_parts.push(format!("({:?}, {})", key, log_value_code));
+        }
+
+        let kvs_block = if kvs_parts.is_empty() {
+            "&[]".to_string()
+        } else {
+            format!("&[{}]", kvs_parts.join(", "))
+        };
+
+        Ok((
+            format!("{{ __fitz_log_{}(&{}, {}); () }}", level, msg_c, kvs_block),
+            Type::Null,
+        ))
+    }
+
+    /// Fase 12.3.a.3 — Emite código Rust que convierte una expresión
+    /// tipada al enum `__FitzLogValue`. Helper de `gen_log_call`.
+    ///
+    /// `expr_code` es código Rust que evalúa al valor (owned). El
+    /// resultado se inserta como `value` adentro del slice `&[(key,
+    /// value), ...]` que recibe `__fitz_log_<level>`.
+    ///
+    /// Política para tipos no triviales (List/Map):
+    /// - `List<T>` con T primitivo/Secret → conversión runtime
+    ///   `<expr>.lock().unwrap().iter().map(|__v| <conv>).collect()`.
+    /// - `Map<Str, T>` idem (key debe ser Str).
+    /// - Tipos no soportados directamente → fallback
+    ///   `__FitzLogValue::Str(format!("{{}}", expr))` que usa Display
+    ///   del tipo (la mayoría de los nominales generan Display).
+    fn gen_log_value_for_type(&self, expr_code: &str, ty: &Type) -> String {
+        match ty {
+            Type::Int => format!("__FitzLogValue::Int({})", expr_code),
+            Type::Float => format!("__FitzLogValue::Float({})", expr_code),
+            Type::Bool => format!("__FitzLogValue::Bool({})", expr_code),
+            Type::Str => format!("__FitzLogValue::Str(({}).to_string())", expr_code),
+            Type::Null => format!("{{ let _ = &{}; __FitzLogValue::Null }}", expr_code),
+            Type::Secret(_) => format!("{{ let _ = &{}; __FitzLogValue::Secret }}", expr_code),
+            Type::Nullable(inner) => {
+                let inner_conv = self.gen_log_value_for_inner_ref("__inner", inner);
+                format!(
+                    "match &{} {{ Some(__inner) => {}, None => __FitzLogValue::Null }}",
+                    expr_code, inner_conv
+                )
+            }
+            Type::List(inner) => {
+                let elem_conv = self.gen_log_value_for_inner_ref("__v", inner);
+                format!(
+                    "__FitzLogValue::List(({}).lock().unwrap().iter().map(|__v| {}).collect())",
+                    expr_code, elem_conv
+                )
+            }
+            Type::Map(_k, v) => {
+                // Para Map<K, V>, la key se serializa con format!("{}",
+                // __k). Funciona naturalmente para Str (sin comillas
+                // extras) y para Int/etc. (display directo).
+                let elem_conv = self.gen_log_value_for_inner_ref("__v", v);
+                format!(
+                    "__FitzLogValue::Map(({}).lock().unwrap().iter().map(|(__k, __v)| (format!(\"{{}}\", __k), {})).collect())",
+                    expr_code, elem_conv
+                )
+            }
+            // Any o tipos no soportados (nominales/Function/Module/...)
+            // → fallback con Display. La mayoría de los `type` Fitz
+            // generan Display que devuelve `Foo { ... }` — útil como
+            // texto de log aunque pierde estructura. Para shape JSON
+            // estructurado de nominales, deuda menor visible.
+            _ => format!("__FitzLogValue::Str(format!(\"{{}}\", {}))", expr_code),
+        }
+    }
+
+    /// Fase 12.3.a.3 — Variante de `gen_log_value_for_type` para usar
+    /// adentro de `iter().map(|__v| ...)` donde el valor llega como
+    /// `&T` (ref del item). Las primitivos se dereferencian (`*`),
+    /// Str se clonea, containers se referencian, Nullable se matchea.
+    fn gen_log_value_for_inner_ref(&self, var_name: &str, ty: &Type) -> String {
+        match ty {
+            Type::Int => format!("__FitzLogValue::Int(*{})", var_name),
+            Type::Float => format!("__FitzLogValue::Float(*{})", var_name),
+            Type::Bool => format!("__FitzLogValue::Bool(*{})", var_name),
+            Type::Str => format!("__FitzLogValue::Str({}.clone())", var_name),
+            Type::Null => format!("{{ let _ = {}; __FitzLogValue::Null }}", var_name),
+            Type::Secret(_) => format!("{{ let _ = {}; __FitzLogValue::Secret }}", var_name),
+            Type::Nullable(inner) => {
+                let inner_conv = self.gen_log_value_for_inner_ref("__inner", inner);
+                format!(
+                    "match {} {{ Some(__inner) => {}, None => __FitzLogValue::Null }}",
+                    var_name, inner_conv
+                )
+            }
+            // Containers anidados (List<List<T>>) → fallback Display
+            // para evitar over-engineering. Si entra demanda real,
+            // refinable con recurse explícito.
+            _ => format!("__FitzLogValue::Str(format!(\"{{}}\", {}))", var_name),
+        }
+    }
 
     fn gen_auth_jwt_encode(
         &mut self,
@@ -25355,6 +25770,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("#[tokio::main]\nasync fn main() {\n");
         self.indent += 1;
         self.push_scope();
+        // Fase 12.3.a.3 — init del logger ANTES de cualquier stmt del
+        // user (incluso antes de los handlers HTTP / cron / state).
+        // No-op si `uses_logging == false`.
+        self.emit_log_init_call();
         // Emitimos los main_stmts que NO son state (no están en
         // state_var_types). Los que sí son state ya viven en
         // thread_local — re-emitirlos como locales acá sería redundante.
@@ -30639,6 +31058,190 @@ fn translate_escape_like(s: &str) -> String {
     out
 }
 
+/// Fase 12.3.a.3 — Preludio del structured logging built-in. Paralelo
+/// bit-a-bit al módulo `crate::logging` del intérprete (mismo JSON
+/// shape flat, mismo pretty mode con ANSI colors, mismo TTY detection
+/// con override `FITZ_LOG_FORMAT=json|pretty`, mismo filter por
+/// `RUST_LOG` vía `tracing::enabled!(target: "fitz::log", ...)`,
+/// mismo Secret redaction recursiva en `List`/`Map`).
+///
+/// Diferencias del preludio respecto del módulo del intérprete:
+/// - Sin `Value` Fitz — usa enum `__FitzLogValue` dedicado, que el
+///   codegen construye en el call site según el tipo del kwarg
+///   (`gen_call_log_emit`). `__FitzLogValue::Secret` es marker (sin
+///   inner) — el value real nunca llega a este enum, queda redactado
+///   antes.
+/// - `std::sync::Mutex` en lugar de `parking_lot::Mutex` (no dep extra
+///   en el binario generado).
+/// - `tokio::sync::Mutex` no se usa: no hay `.await` adentro del lock.
+///
+/// Emitido inline en `main.rs` cuando `uses_logging == true`. Los
+/// módulos importan los helpers con `use crate::{__fitz_log_info,
+/// __fitz_log_warn, __fitz_log_error, __fitz_log_debug,
+/// __FitzLogValue}` (paralelo a `__fitz_jwt_encode`/`__fitz_db_*`).
+const LOGGING_PRELUDE: &str = r##"
+/// Fase 12.3.a.3 — enum tagged para kwargs heterogéneos del logger.
+/// El codegen lo construye en cada call site `log.X(msg, k: v)`:
+/// primitivos → variante directa; Secret → `Secret` (marker, sin
+/// inner); List<T> → `List(Vec<__FitzLogValue>)`; Map<K, V> →
+/// `Map(Vec<(String, __FitzLogValue)>)`. Recursivo.
+#[derive(Debug, Clone)]
+pub(crate) enum __FitzLogValue {
+    Null,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Secret,
+    List(Vec<__FitzLogValue>),
+    Map(Vec<(String, __FitzLogValue)>),
+}
+
+impl __FitzLogValue {
+    fn to_json_value(&self) -> serde_json::Value {
+        match self {
+            __FitzLogValue::Null => serde_json::Value::Null,
+            __FitzLogValue::Bool(b) => serde_json::Value::Bool(*b),
+            __FitzLogValue::Int(n) => serde_json::Value::Number((*n).into()),
+            __FitzLogValue::Float(f) => serde_json::Number::from_f64(*f)
+                .map(serde_json::Value::Number)
+                .unwrap_or_else(|| serde_json::Value::String(format!("{}", f))),
+            __FitzLogValue::Str(s) => serde_json::Value::String(s.clone()),
+            __FitzLogValue::Secret => serde_json::Value::String("<redacted>".to_string()),
+            __FitzLogValue::List(items) => serde_json::Value::Array(
+                items.iter().map(|v| v.to_json_value()).collect(),
+            ),
+            __FitzLogValue::Map(pairs) => {
+                let mut obj = serde_json::Map::with_capacity(pairs.len());
+                for (k, v) in pairs {
+                    obj.insert(k.clone(), v.to_json_value());
+                }
+                serde_json::Value::Object(obj)
+            }
+        }
+    }
+    fn to_pretty(&self) -> String {
+        match self {
+            __FitzLogValue::Null => "null".to_string(),
+            __FitzLogValue::Bool(b) => b.to_string(),
+            __FitzLogValue::Int(n) => n.to_string(),
+            __FitzLogValue::Float(f) => {
+                if f.fract() == 0.0 && f.is_finite() { format!("{:.1}", f) } else { format!("{}", f) }
+            }
+            __FitzLogValue::Str(s) => format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")),
+            __FitzLogValue::Secret => "<redacted>".to_string(),
+            __FitzLogValue::List(items) => {
+                let parts: Vec<String> = items.iter().map(|v| v.to_pretty()).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            __FitzLogValue::Map(pairs) => {
+                let parts: Vec<String> = pairs.iter().map(|(k, v)| format!("\"{}\": {}", k, v.to_pretty())).collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum __FitzLogFormat { Json, Pretty }
+
+fn __fitz_log_detect_format() -> __FitzLogFormat {
+    use std::io::IsTerminal;
+    if let Ok(v) = std::env::var("FITZ_LOG_FORMAT") {
+        match v.to_lowercase().as_str() {
+            "json" => return __FitzLogFormat::Json,
+            "pretty" => return __FitzLogFormat::Pretty,
+            _ => {}
+        }
+    }
+    if std::io::stderr().is_terminal() { __FitzLogFormat::Pretty } else { __FitzLogFormat::Json }
+}
+
+static __FITZ_LOG_STDERR: std::sync::OnceLock<std::sync::Mutex<std::io::Stderr>> = std::sync::OnceLock::new();
+
+/// Inicializa el subscriber tracing al boot del binario. Idempotente.
+/// Llamado desde `fn main()` ANTES del código del usuario para que
+/// `tracing::enabled!` respete `RUST_LOG` (default `info`).
+pub(crate) fn __fitz_log_init() {
+    use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt};
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+    let noop_layer = fmt::layer().with_writer(std::io::sink);
+    let _ = tracing_subscriber::registry().with(filter).with(noop_layer).try_init();
+}
+
+fn __fitz_log_now_rfc3339() -> String {
+    use chrono::SecondsFormat;
+    chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn __fitz_log_format_json(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) -> String {
+    let mut obj = serde_json::Map::with_capacity(3 + kvs.len());
+    obj.insert("timestamp".into(), serde_json::Value::String(__fitz_log_now_rfc3339()));
+    obj.insert("level".into(), serde_json::Value::String(level_str.to_uppercase()));
+    obj.insert("msg".into(), serde_json::Value::String(msg.to_string()));
+    for (k, v) in kvs {
+        obj.insert((*k).to_string(), v.to_json_value());
+    }
+    serde_json::to_string(&serde_json::Value::Object(obj))
+        .unwrap_or_else(|_| format!("{{\"level\":\"{}\",\"msg\":\"<serialize_error>\"}}", level_str.to_uppercase()))
+}
+
+fn __fitz_log_format_pretty(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) -> String {
+    let level_upper = level_str.to_uppercase();
+    let (code, padding) = match level_upper.as_str() {
+        "DEBUG" => ("\x1b[1;35m", "DEBUG"),
+        "INFO" => ("\x1b[1;32m", "INFO "),
+        "WARN" => ("\x1b[1;33m", "WARN "),
+        "ERROR" => ("\x1b[1;31m", "ERROR"),
+        _ => ("", level_upper.as_str()),
+    };
+    let level_colored = format!("{}{}\x1b[0m", code, padding);
+    let ts = __fitz_log_now_rfc3339();
+    let kvs_part = if kvs.is_empty() {
+        String::new()
+    } else {
+        let parts: Vec<String> = kvs.iter().map(|(k, v)| format!("{}={}", k, v.to_pretty())).collect();
+        format!(" {}", parts.join(" "))
+    };
+    format!("\x1b[2m{}\x1b[0m {} {}{}", ts, level_colored, msg, kvs_part)
+}
+
+fn __fitz_log_emit(level_str: &str, msg: &str, kvs: &[(&str, __FitzLogValue)]) {
+    use tracing::Level;
+    let level = match level_str {
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        "debug" => Level::DEBUG,
+        _ => Level::INFO,
+    };
+    let enabled = match level {
+        Level::ERROR => tracing::enabled!(target: "fitz::log", Level::ERROR),
+        Level::WARN => tracing::enabled!(target: "fitz::log", Level::WARN),
+        Level::INFO => tracing::enabled!(target: "fitz::log", Level::INFO),
+        Level::DEBUG => tracing::enabled!(target: "fitz::log", Level::DEBUG),
+        Level::TRACE => tracing::enabled!(target: "fitz::log", Level::TRACE),
+    };
+    if !enabled { return; }
+    let format = __fitz_log_detect_format();
+    let line = match format {
+        __FitzLogFormat::Json => __fitz_log_format_json(level_str, msg, kvs),
+        __FitzLogFormat::Pretty => __fitz_log_format_pretty(level_str, msg, kvs),
+    };
+    let stderr = __FITZ_LOG_STDERR.get_or_init(|| std::sync::Mutex::new(std::io::stderr()));
+    if let Ok(mut s) = stderr.lock() {
+        use std::io::Write;
+        let _ = writeln!(s, "{}", line);
+        let _ = s.flush();
+    }
+}
+
+#[inline] pub(crate) fn __fitz_log_info(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("info", msg, kvs); }
+#[inline] pub(crate) fn __fitz_log_warn(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("warn", msg, kvs); }
+#[inline] pub(crate) fn __fitz_log_error(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("error", msg, kvs); }
+#[inline] pub(crate) fn __fitz_log_debug(msg: &str, kvs: &[(&str, __FitzLogValue)]) { __fitz_log_emit("debug", msg, kvs); }
+"##;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -30800,7 +31403,7 @@ mod tests {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
         let toml = cargo_toml_for(
-            "foo", false, true, false, false, false, false, false, false, false,
+            "foo", false, true, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
@@ -30810,7 +31413,7 @@ mod tests {
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
         let toml = cargo_toml_for(
-            "foo", true, true, false, false, false, false, false, false, false,
+            "foo", true, true, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
@@ -30820,7 +31423,7 @@ mod tests {
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, false, false,
+            "foo", false, false, false, false, false, false, false, false, false, false,
         );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
@@ -30830,12 +31433,270 @@ mod tests {
     // Fase 8.7.1 — Cargo.toml condicional con pyo3
     // ---------------------------------------------------------------
 
+    // ---------------------------------------------------------------
+    // Fase 12.3.a.3 — codegen del módulo `log`
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn cargo_toml_con_logging_incluye_tracing_y_subscriber() {
+        // Programa CLI con `log.info(...)` → Cargo.toml suma
+        // tracing + tracing-subscriber + chrono + serde_json.
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, true, false, false, false,
+        );
+        assert!(
+            toml.contains("tracing = \"0.1\""),
+            "esperaba tracing en deps: {}",
+            toml
+        );
+        assert!(
+            toml.contains("tracing-subscriber"),
+            "esperaba tracing-subscriber en deps: {}",
+            toml
+        );
+        assert!(
+            toml.contains("env-filter"),
+            "esperaba feature env-filter en tracing-subscriber: {}",
+            toml
+        );
+        // chrono se incluye porque ni uses_jobs ni uses_date_or_uuid
+        // están activos.
+        assert!(toml.contains("chrono"), "esperaba chrono en deps: {}", toml);
+        // serde_json se incluye porque ni HTTP ni auth ni db lo
+        // habilitaron.
+        assert!(
+            toml.contains("serde_json"),
+            "esperaba serde_json en deps: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn cargo_toml_logging_con_jobs_no_duplica_chrono() {
+        // uses_logging + uses_jobs ambos true → chrono solo se emite
+        // una vez (lo emite jobs_lines; logging_lines lo skipea).
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, true, true, false, false, false,
+        );
+        let count_chrono = toml.matches("chrono = ").count();
+        assert!(
+            count_chrono == 1,
+            "chrono debería aparecer 1 vez, fue {}: {}",
+            count_chrono,
+            toml
+        );
+    }
+
+    #[test]
+    fn cargo_toml_sin_logging_no_incluye_tracing() {
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false,
+        );
+        assert!(
+            !toml.contains("tracing"),
+            "no debería incluir tracing: {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn cargo_toml_logging_con_http_no_duplica_serde_json() {
+        // HTTP ya trae serde_json; logging_lines NO debe duplicar.
+        let toml = cargo_toml_for(
+            "foo", true, false, false, false, false, false, true, false, false, false,
+        );
+        let count = toml.matches("serde_json = ").count();
+        assert!(
+            count == 1,
+            "serde_json debería aparecer 1 vez, fue {}: {}",
+            count,
+            toml
+        );
+    }
+
+    #[test]
+    fn program_uses_logging_detecta_log_info() {
+        let src = "log.info(\"hello\")";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(program_uses_logging(&program));
+    }
+
+    #[test]
+    fn program_uses_logging_detecta_los_4_niveles() {
+        for level in ["info", "warn", "error", "debug"] {
+            let src = format!("log.{}(\"x\")", level);
+            let program = parse(tokenize(&src).unwrap()).unwrap();
+            assert!(
+                program_uses_logging(&program),
+                "esperaba detectar log.{}",
+                level
+            );
+        }
+    }
+
+    #[test]
+    fn program_uses_logging_no_dispara_sin_log_call() {
+        let src = "print(\"hello\")\nlet x = 42";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(!program_uses_logging(&program));
+    }
+
+    #[test]
+    fn program_uses_logging_no_dispara_con_log_metodo_inexistente() {
+        // `log.trace(...)` NO es uno de los 4 niveles soportados —
+        // no debe disparar. Permite detectar typos con falsos
+        // positivos del walker.
+        let src = "log.trace(\"x\")";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(!program_uses_logging(&program));
+    }
+
+    #[test]
+    fn program_uses_logging_dispara_dentro_de_fn_body() {
+        let src = "fn greet(name: Str) -> Null {\n\
+                   log.info(\"hi\")\n\
+                   return null\n\
+                   }";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(program_uses_logging(&program));
+    }
+
+    #[test]
+    fn codegen_log_info_solo_msg_emite_call_a_helper() {
+        let src = "log.info(\"hola\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_log_info"),
+            "esperaba call a __fitz_log_info: {}",
+            code
+        );
+        assert!(
+            code.contains("__fitz_log_init();"),
+            "esperaba init del logger en main: {}",
+            code
+        );
+        assert!(
+            code.contains("pub(crate) enum __FitzLogValue"),
+            "esperaba enum __FitzLogValue en preludio: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn codegen_log_info_con_kwargs_emite_slice_de_tuples() {
+        let src = "log.info(\"login\", user_id: 42, role: \"admin\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_log_info"),
+            "esperaba __fitz_log_info: {}",
+            code
+        );
+        assert!(
+            code.contains("__FitzLogValue::Int(42i64)"),
+            "esperaba __FitzLogValue::Int(42i64): {}",
+            code
+        );
+        // user_id como key (string literal con quoting Rust).
+        assert!(
+            code.contains("\"user_id\""),
+            "esperaba key 'user_id' en code: {}",
+            code
+        );
+        assert!(
+            code.contains("\"role\""),
+            "esperaba key 'role' en code: {}",
+            code
+        );
+    }
+
+    #[test]
+    fn codegen_log_warn_con_secret_emite_marker_sin_inner() {
+        let src = "fn try_log() -> Result<Null> {\n\
+                   let token = secret(\"SECRET_X\")?\n\
+                   log.warn(\"rotating\", token: token)\n\
+                   return Ok(null)\n\
+                   }\n\
+                   log.info(\"start\")\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__FitzLogValue::Secret"),
+            "esperaba __FitzLogValue::Secret en code: {}",
+            code
+        );
+        // El value real del secret NUNCA debe aparecer literal en el
+        // código emitido del kwarg.
+        // (Aunque el secret es runtime, validamos que el codegen NO
+        // emite código que exponga el inner.)
+        let snippet = code.split("log.warn").nth(1).unwrap_or("");
+        assert!(
+            !snippet.contains("expose"),
+            "el codegen del kwarg Secret no debe emitir .expose(): {}",
+            snippet
+        );
+    }
+
+    #[test]
+    fn codegen_log_info_con_kwarg_reservado_es_error_de_codegen() {
+        // `level` está reservado — el codegen lo rechaza con error
+        // claro, paralelo al runtime intérprete (12.3.a.1).
+        let src = "log.info(\"x\", level: \"INFO\")";
+        let r = gen(src);
+        let err = r.unwrap_err();
+        assert!(
+            err.message.contains("reservado") && err.message.contains("level"),
+            "esperaba mención de 'reservado' + 'level' en error: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_log_info_con_kwarg_duplicado_es_error() {
+        let src = "log.info(\"x\", k: 1, k: 2)";
+        let r = gen(src);
+        let err = r.unwrap_err();
+        assert!(
+            err.message.contains("duplicado"),
+            "esperaba mención de 'duplicado': {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_log_info_sin_msg_es_error() {
+        let src = "log.info()";
+        let r = gen(src);
+        let err = r.unwrap_err();
+        assert!(
+            err.message.contains("posicional") || err.message.contains("msg"),
+            "esperaba mención de 'posicional' o 'msg': {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn codegen_sin_logging_no_emite_preludio_ni_init() {
+        // Programa que NO usa log.* — no debe emitir el preludio ni el
+        // init.
+        let src = "let x = 42\nprint(\"hi\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            !code.contains("__FitzLogValue"),
+            "no debería emitir __FitzLogValue sin uses_logging: {}",
+            code
+        );
+        assert!(
+            !code.contains("__fitz_log_init"),
+            "no debería emitir __fitz_log_init sin uses_logging: {}",
+            code
+        );
+    }
+
     #[test]
     fn cargo_toml_con_python_incluye_pyo3() {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
         let toml = cargo_toml_for(
-            "foo", false, false, true, false, false, false, false, false, false,
+            "foo", false, false, true, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
@@ -30854,7 +31715,7 @@ mod tests {
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
         let toml = cargo_toml_for(
-            "foo", true, false, true, false, false, false, false, false, false,
+            "foo", true, false, true, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
@@ -30864,7 +31725,7 @@ mod tests {
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
         let toml = cargo_toml_for(
-            "foo", true, false, false, false, false, false, false, false, false,
+            "foo", true, false, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
@@ -36092,7 +36953,7 @@ mod tests {
     #[test]
     fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, true, false, false, false,
+            "app", false, false, false, false, false, true, false, false, false, false,
         );
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
@@ -36105,7 +36966,7 @@ mod tests {
     fn cargo_toml_jobs_sin_http_incluye_signal_feature() {
         // Cron-only mode necesita `signal` para ctrl_c.
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, true, false, false, false,
+            "app", false, false, false, false, false, true, false, false, false, false,
         );
         assert!(
             toml.contains("\"signal\""),
@@ -36122,7 +36983,7 @@ mod tests {
         // propio `tokio::signal::ctrl_c()` dentro de
         // `__fitz_shutdown_signal`, así que necesita feature `signal`.
         let toml = cargo_toml_for(
-            "app", true, false, false, false, false, true, false, false, false,
+            "app", true, false, false, false, false, true, false, false, false, false,
         );
         assert!(toml.contains("cron"));
         assert!(
@@ -36771,7 +37632,7 @@ mod tests {
         // Usamos `cargo_toml_for` directo (paralelo a los tests
         // existentes).
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, true, false, false,
+            "foo", false, false, false, false, false, false, false, true, false, false,
         );
         assert!(
             toml.contains("sha2 = \"0.10\""),
@@ -36825,7 +37686,7 @@ mod tests {
     #[test]
     fn codegen_db_cargo_toml_sin_db_no_suma_deps() {
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, false, false,
+            "foo", false, false, false, false, false, false, false, false, false, false,
         );
         assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
         assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
@@ -38023,7 +38884,7 @@ mod tests {
         // tanto uses_db como uses_fitz_value. Cargo.toml debe incluir
         // serde_json con preserve_order.
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, false, true, true, false,
+            "app", false, false, false, false, false, false, false, true, true, false,
         );
         assert!(
             toml.contains("serde_json"),
