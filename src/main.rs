@@ -5,8 +5,8 @@
 // duplicada). Acá solo importamos lo que el CLI consume.
 
 use fitz::{
-    ast, codegen, cron_jobs, db, error, evaluator, fmt, http, launcher_template, lexer, lint,
-    lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, testing, types,
+    ast, codegen, cron_jobs, db, docker, error, evaluator, fmt, http, launcher_template, lexer,
+    lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, testing, types,
 };
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
@@ -278,6 +278,27 @@ enum Commands {
     /// migraciones corrieron.
     #[command(subcommand)]
     Db(DbCmd),
+
+    /// Fase 12.4 — Genera `Dockerfile`, `.dockerignore` y
+    /// `docker-compose.yml` para el proyecto actual. Detecta el
+    /// shape del programa (puerto HTTP, uso de DB) leyendo el AST
+    /// del entry point del manifest. Smart por defecto: si el
+    /// programa usa `db.connect(...)`, el compose suma un service
+    /// `postgres:16-alpine` con healthcheck.
+    #[command(subcommand)]
+    Docker(DockerCmd),
+}
+
+#[derive(Subcommand)]
+enum DockerCmd {
+    /// Genera los 3 archivos en el directorio del manifest. Si un
+    /// archivo ya existe, lo skipea (a menos que se pase `--force`).
+    Init {
+        /// Sobrescribir archivos existentes (Dockerfile, .dockerignore,
+        /// docker-compose.yml). Por defecto se preservan.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -644,6 +665,9 @@ fn main() {
                 json,
                 all_schemas,
             } => db_inspect_cmd(url, schema, table, json, all_schemas),
+        },
+        Commands::Docker(sub) => match sub {
+            DockerCmd::Init { force } => docker_init_cmd(force),
         },
     }
 }
@@ -4321,6 +4345,102 @@ fn clear_screen_and_banner(target: &DevTarget, run_count: u32) {
     }
     eprintln!("▶ fitz dev (run #{}) — {}", run_count, target.display);
     eprintln!();
+}
+
+// =================================================================
+// Fase 12.4 — Handler de `fitz docker init`
+// =================================================================
+
+/// `fitz docker init [--force]` — genera Dockerfile + .dockerignore +
+/// docker-compose.yml en el directorio del manifest. Detecta el shape
+/// del programa (puerto HTTP, uso de DB) leyendo el AST del entry point
+/// declarado en `[bin].main`.
+///
+/// Exit codes:
+///   - 0: éxito (al menos un archivo escrito o todo skipeado por
+///     existir + sin `--force`).
+///   - 1: error de IO / manifest no encontrado / parse del .fitz roto.
+fn docker_init_cmd(force: bool) {
+    // Reusamos `resolve_entry(None)` que walkea hacia arriba buscando
+    // `fitz.toml`. Si no hay manifest, aborta con mensaje claro.
+    let resolved = resolve_entry(None);
+    let ctx = match resolved.manifest_ctx {
+        Some(c) => c,
+        None => {
+            // `resolve_entry` solo devuelve `None` cuando pasamos un
+            // file explícito, pero `docker init` no acepta arg de
+            // archivo — este branch es defensa.
+            eprintln!(
+                "✗ `fitz docker init` requiere un proyecto Fitz con `fitz.toml`. \
+                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let source = fs::read_to_string(&resolved.entry).unwrap_or_else(|e| {
+        eprintln!(
+            "✗ no se pudo leer el entry point `{}`: {e}",
+            resolved.entry.display(),
+        );
+        std::process::exit(1);
+    });
+
+    let tokens = lexer::tokenize(&source).unwrap_or_else(|e| {
+        eprintln!("✗ `{}`: {e}", resolved.entry.display());
+        std::process::exit(1);
+    });
+
+    let program = parser::parse(tokens).unwrap_or_else(|e| {
+        eprintln!("✗ `{}`: {e}", resolved.entry.display());
+        std::process::exit(1);
+    });
+
+    let shape = docker::detect_shape(&program, ctx.manifest.package.name.clone());
+
+    let result = docker::init(&ctx.manifest_dir, &shape, force).unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo generar los archivos Docker: {e}");
+        std::process::exit(1);
+    });
+
+    println!(
+        "▶ fitz docker init — proyecto `{}` en `{}`",
+        shape.package_name,
+        ctx.manifest_dir.display(),
+    );
+    if let Some(port) = shape.server_port {
+        println!("   detectado: @server(port = {})", port);
+    } else {
+        println!("   detectado: programa CLI (sin @server)");
+    }
+    if shape.uses_db {
+        println!("   detectado: uso de DB (db.X(...)) → compose suma postgres:16-alpine");
+    }
+    println!();
+
+    for path in &result.written {
+        let rel = path
+            .strip_prefix(&ctx.manifest_dir)
+            .unwrap_or(path.as_path());
+        println!("✓ escrito: {}", rel.display());
+    }
+    for path in &result.skipped {
+        let rel = path
+            .strip_prefix(&ctx.manifest_dir)
+            .unwrap_or(path.as_path());
+        println!(
+            "- skipeado (ya existe, pasá --force para sobrescribir): {}",
+            rel.display()
+        );
+    }
+
+    if !result.skipped.is_empty() && !force {
+        println!();
+        println!(
+            "Sugerencia: para reemplazar archivos existentes corré \
+             `fitz docker init --force`."
+        );
+    }
 }
 
 // =================================================================

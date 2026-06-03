@@ -12411,6 +12411,75 @@ async fn ready(db: DbConn) -> Result<Bool> {
   (`@span("name") fn ...` o similar) cuando el lenguaje sume
   primitivas adicionales para tracing manual.
 
+### 33.9. Deployment — `fitz docker init` (Fase 12.4.a)
+
+Para llevar todo el stack (HTTP + logs + spans + métricas + DB) a
+producción dentro de un container, Fitz tiene un sub-comando que
+genera Dockerfile + .dockerignore + docker-compose.yml smart por
+defecto:
+
+```bash
+$ fitz docker init
+▶ fitz docker init — proyecto `mi-api` en `/path/al/proyecto`
+   detectado: @server(port = 3000)
+   detectado: uso de DB (db.X(...)) → compose suma postgres:16-alpine
+✓ escrito: Dockerfile
+✓ escrito: .dockerignore
+✓ escrito: docker-compose.yml
+```
+
+El comando lee el `fitz.toml` del cwd (o ancestros), parsea el
+entry point declarado en `[bin].main`, y emite:
+
+- **`Dockerfile`** multi-stage: builder
+  `ghcr.io/thegreekman76/fitz:${FITZ_TAG}` con `RUN fitz build` →
+  runtime `gcr.io/distroless/cc-debian12` con solo el binario
+  (resultado típico ~30-50 MB sin Python interop). `EXPOSE` se
+  emite automáticamente si el programa declara `@server(N)`.
+- **`.dockerignore`** con `target/`, `.git/`, `.env*`,
+  `__pycache__/`, configs de editor, etc.
+- **`docker-compose.yml`** smart: si el programa usa
+  `db.connect(...)` o cualquier `db.X(...)`, el compose suma un
+  service `postgres:16-alpine` con healthcheck + volume `pgdata` +
+  `DATABASE_URL` inyectada al service principal con
+  `depends_on: service_healthy`. Si no, sale solo el service `app`.
+
+Para sobrescribir archivos existentes:
+
+```bash
+$ fitz docker init --force
+```
+
+Sin `--force`, los archivos existentes se preservan (cero overwrite
+accidental de un Dockerfile hand-tuned).
+
+**Producción con OTel**: cuando arranques el container, exportá las
+env vars OTel y el binario reportará al backend automáticamente:
+
+```yaml
+services:
+  app:
+    build: .
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_SERVICE_NAME: "mi-api-prod"
+      OTEL_TRACES_SAMPLER_ARG: "0.1"   # 10% sampling
+      RUST_LOG: "info"
+      FITZ_LOG_FORMAT: "json"
+      FITZ_PROMETHEUS: "1"             # endpoint /metrics activo
+```
+
+**Lo que 12.4.a NO hace** (queda para 12.4.b):
+
+- Detección de interop Python — programas con `from python import
+  X` necesitan fallback a `debian:bookworm-slim` (distroless no
+  tiene libpython.so).
+- Healthchecks HTTP en compose — requiere decoradores
+  `@healthz`/`@readyz` (Fase 12.1).
+- `restart: unless-stopped` automático para programas con `@cron`.
+- Wrapper `fitz docker build [--tag X]` — por ahora corré
+  `docker build .` directo después del init.
+
 ---
 
 ## 34. CLI builder nativo (`@command`)

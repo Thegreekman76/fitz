@@ -1914,3 +1914,147 @@ fn py_stubs_skip_fns_y_vars_solo_classes() {
     assert!(!stdout.contains("fn helper"));
     assert!(!stdout.contains("VERSION"));
 }
+
+// =================================================================
+// Fase 12.4 — `fitz docker init`
+// =================================================================
+
+/// Crea un mini-proyecto Fitz con `fitz.toml` + `src/main.fitz` que el
+/// caller le pasa. Devuelve el path del directorio (raíz del proyecto).
+fn make_docker_project(tmp: &Path, pkg_name: &str, main_fitz: &str) -> std::path::PathBuf {
+    let project = tmp.join(pkg_name);
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(
+        project.join("fitz.toml"),
+        format!(
+            "[package]\nname = \"{pkg}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n",
+            pkg = pkg_name,
+        ),
+    )
+    .unwrap();
+    std::fs::write(project.join("src").join("main.fitz"), main_fitz).unwrap();
+    project
+}
+
+#[test]
+fn docker_init_cli_puro_escribe_tres_archivos_sin_expose_ni_db() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = make_docker_project(tmp.path(), "demo-cli", "print(\"hola\")\n");
+
+    let (stdout, stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let dockerfile = std::fs::read_to_string(project.join("Dockerfile")).unwrap();
+    let dockerignore = std::fs::read_to_string(project.join(".dockerignore")).unwrap();
+    let compose = std::fs::read_to_string(project.join("docker-compose.yml")).unwrap();
+
+    // Dockerfile: multi-stage, sin EXPOSE.
+    assert!(dockerfile.contains("FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder"));
+    assert!(dockerfile.contains("FROM gcr.io/distroless/cc-debian12"));
+    assert!(
+        dockerfile.contains("COPY --from=builder /app/target/release/demo-cli /usr/local/bin/app")
+    );
+    assert!(!dockerfile.contains("EXPOSE"));
+
+    // .dockerignore: targets locales.
+    assert!(dockerignore.contains("target/"));
+    assert!(dockerignore.contains(".env"));
+
+    // compose: solo `app` service, sin db, sin ports.
+    assert!(compose.contains("  app:"));
+    assert!(compose.contains("container_name: demo-cli"));
+    assert!(!compose.contains("  db:"));
+    assert!(!compose.contains("    ports:"));
+
+    // stdout reporta CLI puro.
+    assert!(stdout.contains("programa CLI (sin @server)"));
+    assert!(stdout.contains("escrito: Dockerfile"));
+    assert!(stdout.contains("escrito: .dockerignore"));
+    assert!(stdout.contains("escrito: docker-compose.yml"));
+}
+
+#[test]
+fn docker_init_http_con_server_emite_expose_y_ports() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_fitz = "@get(\"/\")\nfn root() => \"ok\"\n\n@server(8080)\nfn main() => 0\n";
+    let project = make_docker_project(tmp.path(), "myhttp", main_fitz);
+
+    let (stdout, stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let dockerfile = std::fs::read_to_string(project.join("Dockerfile")).unwrap();
+    let compose = std::fs::read_to_string(project.join("docker-compose.yml")).unwrap();
+
+    assert!(dockerfile.contains("EXPOSE 8080"));
+    assert!(compose.contains("    ports:\n      - \"8080:8080\""));
+    assert!(stdout.contains("@server(port = 8080)"));
+}
+
+#[test]
+fn docker_init_con_db_emite_postgres_y_database_url() {
+    let tmp = tempfile::tempdir().unwrap();
+    let main_fitz = "\
+@get(\"/users\")
+async fn list_users() -> List<Str> {
+    let conn = db.connect(\"postgres://x\")
+    []
+}
+
+@server(3000)
+fn main() => 0
+";
+    let project = make_docker_project(tmp.path(), "api-db", main_fitz);
+
+    let (stdout, stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let compose = std::fs::read_to_string(project.join("docker-compose.yml")).unwrap();
+    assert!(compose.contains("  db:"));
+    assert!(compose.contains("image: postgres:16-alpine"));
+    assert!(compose.contains("DATABASE_URL:"));
+    assert!(compose.contains("depends_on:"));
+    assert!(compose.contains("\nvolumes:\n  pgdata:"));
+    assert!(stdout.contains("uso de DB"));
+}
+
+#[test]
+fn docker_init_skipea_archivos_existentes_y_sugiere_force() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = make_docker_project(tmp.path(), "demo-skip", "print(\"hola\")\n");
+    std::fs::write(project.join("Dockerfile"), "viejo").unwrap();
+
+    let (stdout, stderr, code) = run_fitz(&["docker", "init"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let dockerfile = std::fs::read_to_string(project.join("Dockerfile")).unwrap();
+    assert_eq!(dockerfile, "viejo", "skip preservó el archivo viejo");
+
+    assert!(stdout.contains("skipeado"));
+    assert!(stdout.contains("--force"));
+}
+
+#[test]
+fn docker_init_force_sobrescribe_archivos_existentes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = make_docker_project(tmp.path(), "demo-force", "print(\"hola\")\n");
+    std::fs::write(project.join("Dockerfile"), "viejo").unwrap();
+
+    let (_stdout, stderr, code) = run_fitz(&["docker", "init", "--force"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let dockerfile = std::fs::read_to_string(project.join("Dockerfile")).unwrap();
+    assert!(dockerfile.contains("FROM ghcr.io/thegreekman76/fitz"));
+}
+
+#[test]
+fn docker_init_sin_manifest_aborta_con_mensaje_claro() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["docker", "init"], tmp.path());
+    assert_ne!(code, 0);
+    // Mensaje del helper resolve_entry: cita `fitz.toml` o el comando
+    // para crear uno.
+    assert!(
+        stderr.contains("fitz.toml") || stderr.contains("fitz new"),
+        "stderr inesperado: {stderr}",
+    );
+}

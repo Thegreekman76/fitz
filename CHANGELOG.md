@@ -11,12 +11,88 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Sin trabajo en curso al cierre de v0.12.1. Bloque iter2 de Fase 12.3
-cerrado (correlación trace_id + bridge logs + Prometheus + cap guía).
-Tier 2 (bridge métricas OTel) abierto a la espera de release nuevo del
-crate `metrics-exporter-opentelemetry`. Próxima dirección: **Fase 12.4
-— Dockerfile autogenerado + `fitz docker`**, o **9.w.1.iter2** (RBAC
-custom + token refresh) si el avance del curso lo demanda.
+12.4.a CERRADA, queda 12.4.b (smart detection rica + `fitz docker build`
+wrapper) y 12.5 (cap nuevo en guía + caps del curso) para cerrar Fase 12
+entera. También sigue abierta la 9.w.1.iter2 (RBAC custom + token
+refresh) si el avance del curso lo demanda. Tier 2 de Fase 12.3 (bridge
+métricas OTel) sigue bloqueado por release del crate.
+
+## [v0.12.2] — 2026-06-03 — Fase 12.4.a: `fitz docker init` (Dockerfile + compose autogenerados)
+
+Sub-comando nuevo `fitz docker init [--force]` que genera tres archivos
+en el directorio del manifest:
+
+- **`Dockerfile`** multi-stage: builder
+  `ghcr.io/thegreekman76/fitz:${FITZ_TAG}` con `RUN fitz build` → runtime
+  `gcr.io/distroless/cc-debian12` (~22 MB base + binario standalone).
+- **`.dockerignore`** con `target/`, `.git/`, `.env*`, `__pycache__/`,
+  etc.
+- **`docker-compose.yml`** smart por defecto.
+
+**Smart por defecto** (detección AST-only del entry point declarado en
+`[bin].main`):
+
+- `@server(N)` con N Int literal → `EXPOSE N` en Dockerfile + `ports:`
+  en compose.
+- `db.X(...)` en cualquier nodo del AST → compose suma service
+  `postgres:16-alpine` con healthcheck, volume `pgdata`, y
+  `DATABASE_URL: "postgres://${POSTGRES_USER:-fitz}:..."` inyectada al
+  service principal con `depends_on: service_healthy`.
+
+**Política de skip**: si un archivo ya existe, se skipea y se sugiere
+`--force` para sobrescribir. Cero overwrite accidental del Dockerfile
+hand-tuned de un boilerplate existente.
+
+**Decisiones técnicas del MVP (12.4.a)**:
+
+- **Sub-comando con sub-enum** `Commands::Docker(DockerCmd::Init {
+  force })` deja la puerta abierta a `fitz docker build` de 12.4.b sin
+  cambio breaking.
+- **AST-only del entry point** — fast (~50ms vs ~2s del eval), no
+  recursa en módulos importados (el caso típico tiene los decoradores
+  en el archivo principal; deuda residual visible).
+- **`uses_db` heurística generosa** paralela al `program_uses_db` del
+  codegen: cualquier `db.X(...)` cuenta. Falso positivo si el usuario
+  nombra una variable local `db`; trade-off aceptable, el user borra el
+  service `db:` a mano.
+- **Runtime distroless siempre** — programas con interop Python no
+  funcionan con distroless (necesita libpython.so); 12.4.b suma
+  detección automática + fallback a `debian:bookworm-slim`.
+- **Sin `restart:` policies ni healthchecks HTTP** en 12.4.a — eso lo
+  cubre 12.4.b según `@cron` / `@healthz`/`@readyz`.
+
+**Sub-paso (un solo sub-paso de 12.4.a)**:
+
+- **12.4.a** — nuevo módulo `src/docker.rs` (~520 LoC con tests) con la
+  API pública (`DockerShape`, `detect_shape`, `render_dockerfile`,
+  `render_dockerignore`, `render_compose`, `init` con `InitResult`).
+  `src/lib.rs` exporta el módulo. `src/main.rs` suma el sub-enum +
+  handler `docker_init_cmd` (~95 LoC) que reusa `resolve_entry(None)`
+  para walkear al manifest. 18 unit tests en el módulo + 6 E2E en
+  `tests/cli_e2e.rs` (CLI puro, HTTP con `@server`, con `db.connect`,
+  skip sin force, sobrescribe con force, abort sin manifest). Smoke
+  real validado contra `boilerplates/api-simple` (HTTP, no DB) y
+  `boilerplates/api-postgres-fitz` (HTTP + DB con compose smart).
+
+**Tests al cierre v0.12.2**: 2924 unit (+18) + 87 cli_e2e (+6) + 3
+openapi_e2e. Clippy `--lib --tests --bins -- -D warnings` limpio,
+`cargo fmt --all --check` limpio.
+
+**Deuda residual derivada de 12.4.a** (NO bloquea 12.4.b):
+
+- Cross-module detection — `@server`/`db.connect` adentro de un módulo
+  importado no dispara el shape. Workaround: declarar `@server` en el
+  archivo principal (caso típico).
+- Falso positivo `uses_db` si hay variable local llamada `db`. User
+  edita el compose a mano (deuda menor, paralela al codegen).
+- Detección Python interop diferida a 12.4.b (cuando dispara, fallback
+  a `debian:bookworm-slim` automático).
+- Healthchecks HTTP + `restart:` policies en compose diferidos a 12.4.b
+  (depende de `@healthz/@readyz` + `@cron`).
+- `fitz docker build [--tag X]` wrapper diferido a 12.4.b.
+
+**Próximo norte**: **Fase 12.4.b** — smart detection rica (Python
+fallback + healthchecks + cron restart) + `fitz docker build` wrapper.
 
 ## [v0.12.1] — 2026-06-03 — Fase 12.3.iter2: cierre de deudas residuales
 

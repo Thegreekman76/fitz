@@ -9733,8 +9733,30 @@ Sub-comando `fitz docker build [--tag X]` — wrapper que invoca
 `docker build` con tags del `package.name`.
 
 Sub-pasos:
-- **12.4.a** — `fitz docker init` con templates fijos + detección
-  base de `@server` + `db.connect`.
+- **12.4.a (CERRADA 2026-06-03, v0.12.2)** — `fitz docker init
+  [--force]` con templates fijos + detección AST-only de
+  `@server(port)` (Int literal) y `db.X(...)` (heurística generosa
+  paralela a `program_uses_db` del codegen). Nuevo módulo
+  `src/docker.rs` (~520 LoC con tests) expone `DockerShape`,
+  `detect_shape`, `render_dockerfile`/`render_dockerignore`/
+  `render_compose`, e `init(target_dir, shape, force) -> InitResult`
+  con política skip-por-default + sugerencia de `--force`. CLI suma
+  `Commands::Docker(DockerCmd::Init { force })` con sub-enum dedicado
+  (deja la puerta abierta a `fitz docker build` de 12.4.b sin breaking
+  change); handler `docker_init_cmd` (~95 LoC) reusa
+  `resolve_entry(None)` para walkear hasta `fitz.toml`. 18 unit tests
+  + 6 E2E (`cli_e2e`). Smoke real validado contra
+  `boilerplates/api-simple` (HTTP, no DB) y `boilerplates/api-postgres-fitz`
+  (HTTP + DB con compose smart). Tests al cierre: 2924 unit (+18) +
+  87 cli_e2e (+6) + 3 openapi_e2e. Decisiones técnicas: (a) AST-only
+  del entry point (fast ~50ms vs ~2s del eval, no cross-module);
+  (b) runtime distroless siempre en 12.4.a (Python interop fallback
+  diferido a 12.4.b); (c) `ports:` en compose siempre que haya
+  `@server`; (d) compose con db sin `restart:` policies en 12.4.a
+  (diferido a 12.4.b según `@cron`). Deudas residuales derivadas
+  documentadas: cross-module detection, falso positivo de `db` local,
+  detección Python interop, healthchecks `@healthz/@readyz` y
+  restart-policies `@cron`, `fitz docker build` wrapper.
 - **12.4.b** — Smart detection más rica (Python bundle,
   healthchecks, cron) + `fitz docker build` wrapper.
 

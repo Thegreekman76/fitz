@@ -2742,4 +2742,59 @@ que las activa, NO solo por `has_http`. Concretamente:
 **Encaje natural con Fase 12.4** — el smart Cargo.toml detection
 (que ya planea suma deps según `db.connect`/`@cron`/etc.) puede
 unificarse con este gating. Cerrar en el mismo paso baja el
-smoke de ~17-20 min a ~10-12 min sobre Linux fresh.
+smoke de ~17-20 min a ~10-12 min sobre Linux fresh. **Nota**:
+12.4.a (CERRADA 2026-06-03, v0.12.2) no introdujo deps nuevas al
+Cargo.toml emitido — solo escribe Dockerfile + compose + dockerignore
+estáticos al disco. El gating sigue siendo deuda viva para 12.4.b o
+sub-paso dedicado.
+
+## Fase 12.4.a — `fitz docker init` (Dockerfile autogenerado) — **CERRADO 2026-06-03**
+
+Cierre parcial de Fase 12.4 (queda 12.4.b para smart detection rica +
+`fitz docker build` wrapper). Sub-comando nuevo `fitz docker init
+[--force]` que genera Dockerfile multi-stage (builder
+`ghcr.io/thegreekman76/fitz` + runtime `gcr.io/distroless/cc-debian12`)
++ `.dockerignore` + `docker-compose.yml` con smart detection AST-only
+del entry point declarado en `[bin].main`. Política skip-por-default;
+`--force` sobrescribe. Validación smoke real verde contra dos
+boilerplates (HTTP puro + HTTP+DB con compose smart sumando
+`postgres:16-alpine` con healthcheck).
+
+**Decisiones técnicas del MVP**: (a) sub-comando con sub-enum
+`Commands::Docker(DockerCmd::Init)` para abrir paso a `fitz docker
+build` de 12.4.b sin breaking; (b) AST-only del entry point (fast
+~50ms, no cross-module); (c) runtime distroless siempre en 12.4.a
+(Python interop diferido a 12.4.b); (d) `ports:` en compose siempre
+que haya `@server`; (e) compose con DB sin `restart:` policies
+(diferido a 12.4.b según `@cron`).
+
+**Deudas residuales derivadas** (NO bloquean 12.4.b):
+
+1. **Cross-module detection** — `@server`/`db.connect` adentro de un
+   módulo importado no dispara el shape. Workaround: declarar
+   `@server` en el archivo principal (caso típico). Fix futuro:
+   recursar a través del loader del módulo (similar al codegen).
+2. **Falso positivo `uses_db` con variable local llamada `db`** —
+   paralelo al codegen, trade-off aceptado del MVP. El user borra
+   `db:` del compose a mano. Fix futuro: distinguir receptor `db`
+   global vs binding local.
+3. **Detección Python interop diferida a 12.4.b** — programas con
+   `from python import X` no funcionan con distroless (necesita
+   libpython.so). Fix futuro: cuando `program_uses_python(program) →
+   true`, fallback a `debian:bookworm-slim` automático en el runtime
+   del Dockerfile.
+4. **Healthchecks HTTP + `restart:` policies diferidos a 12.4.b** —
+   depende de los decoradores `@healthz/@readyz` (todavía no
+   implementados, parte de Fase 12.1) y `@cron`. Compose actual sale
+   sin esos campos.
+5. **`fitz docker build [--tag X]` wrapper diferido a 12.4.b** —
+   thin wrapper sobre `docker build` con tags del `package.name`.
+   Trivial de implementar; queda como siguiente paso natural.
+
+**Tests al cierre**: 2924 unit (+18 del módulo `docker`) + 87
+cli_e2e (+6 del sub-comando) + 3 openapi_e2e. Clippy
+`--lib --tests --bins -- -D warnings` limpio, fmt clean.
+
+**Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.4 —
+Dockerfile autogenerado + `fitz docker`" → sub-paso 12.4.a expandido
+con todas las decisiones.
