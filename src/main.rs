@@ -476,6 +476,15 @@ enum DbCmd {
 }
 
 fn main() {
+    // Fase 12.3.a.2 — Inicializa el subscriber de tracing (con
+    // `EnvFilter::from_default_env()`) UNA vez al boot del binario.
+    // Default level si `RUST_LOG` no está seteada = `info`. Sin esto
+    // los builtins `log.info/warn/error/debug` no respetarían el filter
+    // y emitirían siempre. Idempotente: si ya hay un subscriber global
+    // instalado (caso `cargo test` con tests que inicializan logging),
+    // es no-op.
+    fitz::logging::init_logging();
+
     let cli = Cli::parse();
 
     match cli.command {

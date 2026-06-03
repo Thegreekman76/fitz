@@ -17417,32 +17417,17 @@ fn expect_log_msg_positional(args: &[Value], display: &str) -> FitzResult<String
     }
 }
 
-/// Emite UN registro de log al sink configurado. En 12.3.a.1 es un stub
-/// con `eprintln!` (level + msg + `k=v` separados por espacio). En
-/// 12.3.a.2 se reemplaza por `tracing` con JSON output, TTY detection y
-/// redaction automática de `Value::Secret`.
+/// Emite UN registro de log al sink configurado. Desde 12.3.a.2 delega
+/// al módulo `crate::logging` que implementa el output real (JSON flat,
+/// pretty mode con ANSI, TTY detection, filter por `RUST_LOG` vía
+/// `tracing` + `tracing-subscriber`, redacción recursiva de
+/// `Value::Secret` en kwargs directos y dentro de `List`/`Map`).
+///
+/// Wrapper privado para mantener el call site existente
+/// (`dispatch_builtin_kwargs` + los 4 builtins stub) sin importar
+/// `crate::logging` desde cada sitio.
 fn emit_log_record(level: &str, msg: &str, kvs: &[(String, Value)]) {
-    if kvs.is_empty() {
-        eprintln!("[{}] {}", level.to_uppercase(), msg);
-    } else {
-        let kvs_str = kvs
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, fmt_log_value(v)))
-            .collect::<Vec<_>>()
-            .join(" ");
-        eprintln!("[{}] {} {}", level.to_uppercase(), msg, kvs_str);
-    }
-}
-
-/// Formato textual de un Value para el output stub de 12.3.a.1.
-/// Strings sin comillas; Secret redactado con `<redacted>`; el resto vía
-/// Display. En 12.3.a.2 esto pasa a serialización JSON estructurada.
-fn fmt_log_value(v: &Value) -> String {
-    match v {
-        Value::Str(s) => s.clone(),
-        Value::Secret(_) => "<redacted>".to_string(),
-        other => format!("{}", other),
-    }
+    crate::logging::emit_log_record(level, msg, kvs)
 }
 
 // ---------------------------------------------------------------------------

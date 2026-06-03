@@ -185,6 +185,31 @@ rand_core = { version = "0.6", features = ["getrandom"] }
 cron = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
+# Fase 12.3.a.2 — observability minimal con OpenTelemetry. `tracing` es
+# el estándar de facto del ecosistema Rust async para structured logging
+# + spans + metrics (mismo crate que va a alimentar el OTLP exporter en
+# 12.3.c). `tracing-subscriber` provee el subscriber instalado al boot
+# del proceso con `EnvFilter::from_default_env()` para que `RUST_LOG`
+# controle el nivel (default `info` si la var no se setea).
+#
+# Approach híbrido (decisión técnica de 12.3.a.2): el filter de nivel se
+# delega a tracing (via `EnvFilter` + `tracing::enabled!`), pero el JSON
+# output de `log.info/warn/error/debug` lo emite Fitz manual con
+# `serde_json` a stderr. Razón: los kwargs heterogéneos runtime
+# (`log.info("msg", user_id: 42, role: "admin")`) no se modelan limpios
+# con las macros `event!` de tracing que esperan field names en
+# compile-time. El subscriber queda instalado igual para que en 12.3.b
+# (auto-trace HTTP + spans + correlación trace_id en logs) podamos
+# sumar layers que catcheen los `tracing::span!` que el runtime HTTP
+# emitirá automáticamente.
+#
+# Sin feature `json` de tracing-subscriber (no usamos su `fmt::json()`,
+# emitimos JSON propio con shape flat para queryability en
+# Loki/Datadog/CloudWatch). Sin feature `chrono` extra: ya tenemos
+# chrono como dep no-opcional para `Utc::now()`.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["env-filter", "std", "fmt"] }
+
 # v0.10.24 (Fase Date/DateTime/Uuid) — Uuid v4 generation + parsing.
 # `v4` feature: random UUID generation con OsRng. v0.10.30 (Tier B.5)
 # suma `v7`: time-ordered UUIDs (popular para PKs sortables por created_at).

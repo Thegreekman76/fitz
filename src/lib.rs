@@ -37,6 +37,7 @@ pub mod launcher_template; // Fase 8.b.3 — template del launcher para `--bundl
 pub mod lexer; // Fase 2.1 — tokenización
 pub mod lint;
 pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
+pub mod logging; // Fase 12.3.a.2 — structured logging built-in (JSON + pretty + tracing)
 pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
 pub mod migrations; // Fase 10.6 — migraciones automáticas ORM (introspect + diff + emit)
 pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
