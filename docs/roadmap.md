@@ -9813,22 +9813,49 @@ Sub-pasos:
     `fitz docker build` thin (sin flags avanzados), cross-module
     detection heredada de 12.4.a.
 
-**12.5 — Guía + curso M7 + cierre formal** (3 sub-pasos)
+**12.5 — Guía + curso M7 + cierre formal** (3 sub-pasos) **— CERRADA
+2026-06-03 (v0.12.5). Cierra Fase 12 entera.**
 
-- **12.5.a** — Cap nuevo cap 35 en `docs/guide.md` "Deployment
-  ciudadano primera clase" — cubre 12.1-12.4 con ejemplos
-  runnable.
-- **12.5.b** — Caps del curso M7.C1-C4:
-  - **M7.C1** — Distribución avanzada (binarios standalone +
-    `fitz build --bundle-python` ya cerrado + cross-compile).
-  - **M7.C2** — Observability (12.3 entero).
-  - **M7.C3** — Secrets management (12.2) — flags queda deuda
-    visible.
-  - **M7.C4** — Deploy avanzado (12.1 + 12.4 + patterns de
-    production).
-- **12.5.c** — Cierre formal: CHANGELOG v0.12.0, roadmap,
-  README, CLAUDE.md, deudas-post-5b.md, smoke
-  `GUIDE_EXAMPLES_COMPILE` cubre los nuevos ejemplos.
+- **12.5.a (CERRADA, v0.12.5)** — Cap 35 nuevo "Deployment ciudadano
+  primera clase" en `docs/guide.md` con 8 sub-secciones (panorama,
+  healthz/readyz, Secret + config, observability, Docker, ejemplo
+  runnable, 12-factor, deudas). Vista integradora cross-link al cap 33
+  para detalle de OTel. Ejemplo runnable `examples/guide/35-deploy.fitz`
+  (<100 LoC con @server + @auth_provider + @admin + @requires +
+  @healthz + secret() + config() + log.info estructurado). Sumado al
+  smoke `GUIDE_EXAMPLES_COMPILE` (357 ejemplos, verde). Renumeración
+  caps 36 (Plantillas) + 37 (Qué sigue).
+- **12.5.b (CERRADA, v0.12.5)** — Caps del curso M7.C1-C4 completos en
+  `docs/curso/m7-produccion-deploy/`:
+  - **M7.C1 — `c1-distribucion-binarios.md`** (Distribución avanzada
+    — cross-compile gratis vía rustc targets, `--bundle-python`/
+    `--bundle-pip`, optimización con strip/LTO/UPX, inspección con
+    ldd/dumpbin).
+  - **M7.C2 — `c2-observability-otel.md`** (logs estructurados,
+    spans HTTP auto con trace_id propagado, métricas Prometheus,
+    bridge OTLP con Jaeger local, patterns de production).
+  - **M7.C3 — `c3-secrets-config.md`** (distinción config()/secret(),
+    `Secret<T>` opaco con `.expose()` explícito, redacción recursiva,
+    `load_env(.env)` para dev, K8s secrets + fly/Railway/Heroku
+    patterns).
+  - **M7.C4 — `c4-deploy-docker-k8s.md`** (`fitz docker init`/`build`,
+    healthz/readyz auto-mount + custom overrides, SIGTERM drain con
+    30s grace, rolling deploy K8s, tabla 12-factor compliance, cierre
+    del curso entero con resumen de los 10 diferenciales).
+  - `docs/curso/index.md` marca M7 ✅ cerrado; `mkdocs.yml` suma
+    la nav del módulo.
+- **12.5.c (CERRADA, v0.12.5)** — Cierre formal: CHANGELOG v0.12.5
+  detallado, roadmap actualizado (esta entrada), deudas-post-5b.md
+  con nota de cierre, CLAUDE.md, README.md/index.md, smoke
+  `GUIDE_EXAMPLES_COMPILE` cubre el ejemplo nuevo. Sin cambios de
+  código — release 100% docs.
+
+**Cierre formal de Fase 12 entera**: deployment ciudadano primera
+clase está completo. Los 5 sub-pasos cumplen el plan original al
+100%. Total de Fase 12 al cierre: ~2000 LoC docs nuevas (caps de
+guía + M7 entero) + 1 ejemplo runnable + 2 sub-comandos CLI nuevos
+(`fitz docker init` + `fitz docker build` de Fase 12.4) + tabla
+auth refinada con `@requires` (Fase 9.w.1.iter2.a paralela).
 
 ### Tier 2 — diferido a iter2 si aparece demanda
 

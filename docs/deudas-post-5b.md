@@ -2944,3 +2944,71 @@ Clippy `--lib --tests --bins -- -D warnings` limpio, fmt clean.
 **Detalle técnico completo**: `docs/roadmap.md` → sección "Tiers
 pre-M5 del curso" → "T2 — 9.w.1.iter2" expandido con los dos
 sub-pasos.
+
+## Fase 12.5 — Cap 35 + curso M7 + cierre formal Fase 12 entera — **CERRADO 2026-06-03**
+
+**Cierra Fase 12 entera** (12.1 + 12.2 + 12.3 + 12.4 + 12.5).
+Sub-paso 100% docs/curso, sin cambios de código.
+
+**Sub-pasos**:
+
+- **12.5.a — Cap 35 nuevo** "Deployment ciudadano primera clase" en
+  `docs/guide.md` con 8 sub-secciones integradoras y ejemplo runnable
+  `examples/guide/35-deploy.fitz` (<100 LoC end-to-end con todo el
+  stack). Sumado al smoke `GUIDE_EXAMPLES_COMPILE`. Renumeración
+  caps 36/37.
+- **12.5.b — Caps del curso M7** (C1-C4) completos en
+  `docs/curso/m7-produccion-deploy/`:
+  - C1: Distribución avanzada (binarios + cross-compile + bundle).
+  - C2: Observability en producción (logs + spans + métricas + OTel).
+  - C3: Secrets management (`Secret<T>` opaco + patterns K8s/fly/etc).
+  - C4: Deploy avanzado (Docker autogenerado + healthz + K8s + 12-factor).
+  - Cierre del curso entero con 10 diferenciales resumidos.
+- **12.5.c — Cierre formal**: CHANGELOG v0.12.5 detallado, roadmap
+  con sub-pasos expandidos, esta nota en deudas, CLAUDE.md,
+  README/index.md actualizados, mkdocs.yml suma nav M7. Smoke
+  GUIDE_EXAMPLES_COMPILE verde con +1 ejemplo (357 total).
+
+**Tests al cierre**: 2951 unit + 93 cli_e2e + 3 openapi_e2e + 357
+compile_e2e (+1 vs v0.12.4). Sin cambios de código — release 100%
+docs. fmt + clippy heredados de v0.12.4 limpios.
+
+**Verificación pre-bump completa** (memoria
+`feedback_pre_release_verification`): roadmap ✓, guide.md cap 35 ✓,
+deudas (esta nota) ✓, CLAUDE.md ✓, CHANGELOG ✓, README ✓,
+docs/index.md ✓, docs/curso/index.md M7 ✓, mkdocs.yml M7 nav ✓,
+extensión VSCode (sin cambios — 12.5 es 100% docs) ✓, examples
+ejemplo `35-deploy.fitz` ✓, boilerplates (sin cambios) ✓, smoke +
+lints ✓.
+
+**Cierre formal de Fase 12 entera** (deployment ciudadano primera
+clase). Plan original cumplido al 100%:
+
+- 12.1 healthz/readyz + SIGTERM drain (cerrado v0.12.0).
+- 12.2 Secret<T> + secret()/config()/load_env() (cerrado v0.12.0).
+- 12.3 Observability OTel (cerrado v0.12.0-12.1 con iter2 de Tier3
+  Prometheus + bridge logs + correlación trace_id).
+- 12.4 Dockerfile autogenerado + fitz docker init/build (cerrado
+  v0.12.2-12.3 con detección AST smart).
+- 12.5 Cap 35 + curso M7 + cierre formal (cerrado v0.12.5).
+
+**Deudas residuales NO bloqueantes** ya documentadas más arriba en
+este archivo: bridge métricas OTel (Tier 2 BLOQUEADO esperando
+release del crate `metrics-exporter-opentelemetry`), gating de
+deps emitidas en smoke (ABIERTO).
+
+**Próximos nortes opcionales** (sin demanda real, diferidos):
+
+- **9.w.1.iter2.b** — Token blacklist + refresh con builtins
+  `auth.blacklist`/`auth.is_blacklisted` + tabla
+  `fitz_token_blacklist` auto-creada.
+- **Fase 12.6** — `fitz deploy` orchestrator (docker/compose/fly/
+  railway/k8s con plugin architecture).
+- **Fase 12.7** — `@trace`/`@metric` decoradores explícitos sobre fns
+  business logic.
+- **Fase 12.8** — Feature flags built-in (`@flag("name")` +
+  `flag("name") -> Bool`).
+
+**Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.5" con
+sub-pasos detallados, y `docs/guide.md` → cap 35 para la vista
+integradora.

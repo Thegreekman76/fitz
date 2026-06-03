@@ -178,16 +178,22 @@ Extensions. Detalle en
   PK + indexes + tipos avanzados Date/DateTime/Uuid).
 - **Fase 11** (v0.11.0) — CLI builder nativo (`@command` con
   `--help` autogenerado, sin `clap`/`argparse`/`click`).
-- **Fase 12.1-12.3** — Healthz/readyz + Secret + Observability
-  minimal con OpenTelemetry (logs + spans + métricas + OTLP
-  exporter).
-- **Fase 12.4** — Dockerfile autogenerado (`fitz docker init` +
-  `fitz docker build` con detección AST de @server/db/python/cron
-  y runtime + compose adaptativos).
+- **Fase 12 ENTERA** — **Deployment ciudadano primera clase**.
+  Healthz/readyz auto-mount + SIGTERM drain (12.1), `Secret<T>`
+  opaco con redacción automática + builtins
+  `secret()`/`config()`/`load_env()` (12.2), Observability OTel
+  built-in con logs estructurados + spans HTTP + métricas
+  Counter/Histogram + bridge OTLP + endpoint `/metrics` Prometheus
+  (12.3), Dockerfile + compose autogenerados con
+  `fitz docker init`/`build` y detección AST del shape (12.4),
+  cap 35 integrador en la guía + curso M7 completo
+  (12.5).
+- **9.w.1.iter2.a** (v0.12.4) — RBAC custom con `@requires("role")`
+  apilable. Mensaje 403 enriquecido con role actual + requeridos.
 
-**Próximo norte**: Fase 12.5 (cap "Deployment ciudadano primera
-clase" en la guía + caps del curso M7) y/o Fase 9.w.1.iter2 (RBAC
-custom + token refresh).
+**Próximo norte**: 9.w.1.iter2.b (token blacklist + refresh —
+sub-iter futuro) o Fase 13+ (visión post-Fase 12 — `fitz deploy`
+orchestrator, feature flags built-in) según demanda real.
 
 ---
 

@@ -11,12 +11,113 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-Fase 12.4 ENTERA CERRADA + 9.w.1.iter2.a CERRADA (RBAC custom con
-`@requires`). Quedan abiertos: 9.w.1.iter2.b (token blacklist + refresh —
-builtins `auth.blacklist`/`auth.is_blacklisted` + tabla auto-creada),
-Fase 12.5 (cap "Deployment ciudadano primera clase" en `docs/guide.md` +
-caps del curso M7). Tier 2 de Fase 12.3 (bridge métricas OTel) sigue
-bloqueado por release del crate.
+**Fase 12 ENTERA CERRADA** (12.1 + 12.2 + 12.3 + 12.4 + 12.5) +
+9.w.1.iter2.a (RBAC custom con `@requires`). Quedan abiertos:
+9.w.1.iter2.b (token blacklist + refresh — sub-iter futuro), Fase 13+
+(visión post-Fase 12). Tier 2 de Fase 12.3 (bridge métricas OTel)
+sigue bloqueado por release del crate.
+
+## [v0.12.5] — 2026-06-03 — Fase 12.5: Cap 35 + curso M7 + cierre formal Fase 12 entera
+
+**Cierre formal de Fase 12 entera** (deployment ciudadano primera
+clase). Tres sub-pasos coordinados de pura documentación + curso:
+
+- **12.5.a — Cap 35 nuevo "Deployment ciudadano primera clase"** en
+  `docs/guide.md`. Vista integradora de los 4 sub-pasos de Fase 12
+  (healthz/readyz auto-mount + Secret<T> + observability OTel + Docker
+  autogenerado). Sub-secciones: 35.1 panorama del stack en una mirada,
+  35.2 healthz/readyz, 35.3 Secret<T> + config/secret built-ins, 35.4
+  referencia a cap 33 observability, 35.5 fitz docker init + build,
+  35.6 ejemplo runnable end-to-end (`examples/guide/35-deploy.fitz`,
+  <100 LoC con @server + @auth_provider + @admin + @requires +
+  @healthz + secret() + config() + log.info estructurado), 35.7 12-
+  factor compliance built-in con tabla, 35.8 deudas honestas. Cap
+  validado contra smoke `GUIDE_EXAMPLES_COMPILE` (357 ejemplos en
+  serie, ~5 min local). Caps subsiguientes renumerados (36 Plantillas
+  + 37 Qué sigue).
+
+- **12.5.b — Caps M7 del curso "Fitz de 0 a experto"** completos:
+  - **M7.C1 — Distribución avanzada** (`c1-distribucion-binarios.md`)
+    — binarios standalone, cross-compile gratis vía rustc targets,
+    `--bundle-python`/`--bundle-pip`, optimización (strip/LTO/UPX),
+    inspección con ldd/dumpbin.
+  - **M7.C2 — Observability en producción**
+    (`c2-observability-otel.md`) — `log.*` estructurado + redacción
+    de Secret, spans HTTP auto con trace_id propagado, métricas
+    Prometheus, bridge OTLP con Jaeger local, patterns (service name
+    por env, sampling, debug en prod).
+  - **M7.C3 — Secrets management** (`c3-secrets-config.md`) — distinción
+    config()/secret(), tipo opaco Secret<T>, .expose() explícito,
+    redacción recursiva en List/Map/Instance, load_env(.env) para dev,
+    K8s secrets + Sealed/External Operators, fly/Railway/Heroku
+    patterns.
+  - **M7.C4 — Deploy avanzado** (`c4-deploy-docker-k8s.md`) —
+    `fitz docker init`/`build`, healthz/readyz auto-mount + custom
+    overrides, SIGTERM drain (30s grace), aplicar a K8s con rolling
+    deploy, tabla 12-factor compliance, patterns (multi-stage compose,
+    sidecar log shipping, CDN, read replicas), cierre del curso entero.
+  - `docs/curso/index.md` marca M7 ✅ cerrado (C1-C4); `mkdocs.yml`
+    suma la nav del módulo.
+
+- **12.5.c — Cierre formal** (este release): CHANGELOG v0.12.5 +
+  roadmap actualizado con sub-pasos detallados + deudas-post-5b.md +
+  CLAUDE.md + verificación pre-bump completa (extensión VSCode sin
+  cambios, examples runnable validado, smoke verde).
+
+**Decisiones técnicas del cap 35**: (a) panorama vecino con tabla
+comparativa explícita (Python/TS/Go/Spring/**Fitz**) cubriendo las 4
+piezas; (b) ejemplo runnable mostrando @auth_provider + @admin +
+@requires + @healthz custom + secret() + config() + log.info — TODO
+el stack web first-class + Fase 12 trabajando junto en un solo
+archivo; (c) explicación honesta de limitaciones (healthcheck HTTP
+sin distroless, cross-module detection, etc); (d) cross-link al cap
+33 (Observability) para detalle exhaustivo en lugar de duplicar.
+
+**Decisiones técnicas del curso M7**: (a) 4 caps consistentes con el
+pattern de M6 (pre-requisitos + objetivo + por qué importa + tabla
+diferencial vs otros lenguajes + paso a paso + validación end-to-end +
+patrones de producción); (b) M7.C1 sale del curso lineal para abrir
+con distribución (no escala del binario que ya tenían de M6) — es la
+puerta a los demás caps "saliendo del laptop"; (c) M7.C4 cierra el
+curso entero con resumen de los 10 diferenciales aprendidos y
+sugerencias de siguiente paso (boilerplates + contribución).
+
+**Tests al cierre v0.12.5**: 2951 unit + 93 cli_e2e + 3 openapi_e2e
++ 357 compile_e2e (smoke verde local, +1 vs v0.12.4). Sin cambios de
+código — esta release es 100% docs/curso. fmt + clippy clean
+heredado de v0.12.4.
+
+**Verificación pre-bump (checklist según memoria)**:
+
+- ✓ `docs/roadmap.md` — Fase 12.5 marcada CERRADA con sub-pasos
+  detallados.
+- ✓ `docs/guide.md` — cap 35 nuevo + renumeración 36/37 + ejemplo
+  runnable agregado al smoke.
+- ✓ `docs/deudas-post-5b.md` — nota de cierre Fase 12.5 + cierre
+  formal de Fase 12 entera.
+- ✓ `CLAUDE.md` — entrada v0.12.5.
+- ✓ `CHANGELOG.md` — esta entrada.
+- ✓ `README.md` — bullet actualizado en Estado del proyecto.
+- ✓ `docs/index.md` — Fase 12 marcada cerrada en lista.
+- ✓ `docs/curso/index.md` — M7 ✅ cerrado.
+- ✓ `mkdocs.yml` — nav M7 sumada.
+- ✓ Extensión VSCode (grammar + LSP) — sin cambios (12.5 es 100%
+  docs, no toca lenguaje).
+- ✓ `examples/guide/35-deploy.fitz` — agregado y validado.
+- ✓ `boilerplates/` — sin cambios (cap 35 referencia los existentes).
+- ✓ Smoke + lints — verdes.
+
+**Cierre formal de Fase 12 entera** — el plan original
+"healthz/readyz + Secret + observability + Docker" + caps del curso
++ documentación integrada está cumplido al 100%. Próximos nortes:
+9.w.1.iter2.b (token blacklist + refresh) o Fase 13+ (visión
+post-Fase 12 — `fitz deploy` orchestrator, feature flags built-in,
+`@trace`/`@metric` explícitos, etc.) según demanda real.
+
+**Próximo norte**: **9.w.1.iter2.b** (sub-iter Token blacklist +
+refresh) — completar la pieza faltante de auth con tabla `fitz_token_blacklist`
+auto-creada y endpoints `/auth/logout`/`/auth/refresh` documentados
+como pattern canónico. O Fase 13+ si aparece demanda concreta.
 
 ## [v0.12.4] — 2026-06-03 — Fase 9.w.1.iter2.a: `@requires("role")` (RBAC custom)
 

@@ -169,6 +169,11 @@ nav:
           - 'C4 — Relations + navigation + N+1': curso/m6-postgres-orm/c4-relations-navigation-preload.md
           - 'C5 — Tipos avanzados (jsonb, arrays, Date)': curso/m6-postgres-orm/c5-tipos-avanzados.md
           - 'C6 — Capstone: app CRUD completa': curso/m6-postgres-orm/c6-capstone-crud-completo.md
+      - 'M7 — Producción y deployment':
+          - 'C1 — Distribución avanzada (binarios + cross-compile)': curso/m7-produccion-deploy/c1-distribucion-binarios.md
+          - 'C2 — Observability en producción (logs + spans + OTel)': curso/m7-produccion-deploy/c2-observability-otel.md
+          - 'C3 — Secrets management (secret() + Secret<T>)': curso/m7-produccion-deploy/c3-secrets-config.md
+          - 'C4 — Deploy avanzado (Docker + healthz + K8s)': curso/m7-produccion-deploy/c4-deploy-docker-k8s.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

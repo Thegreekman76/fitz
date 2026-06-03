@@ -1,0 +1,71 @@
+// Cap 35 — Deployment ciudadano primera clase (Fase 12.5.a).
+//
+// Microservicio que combina TODO el stack de Fase 12 en <100 LoC:
+// - HTTP nativo + auth + RBAC (Fase 4 + 9.w.1 + 9.w.1.iter2.a).
+// - Healthz custom + readyz auto-mount (Fase 12.1.b).
+// - secret()/config() built-ins (Fase 12.2).
+// - log.info estructurado con trace_id automático (Fase 12.3).
+// - Compatible con `fitz docker init` (Fase 12.4).
+//
+// Local dev:
+//   export DB_USER=fitz DB_PASS=fitz DB_HOST=localhost DB_NAME=mi_app APP_NAME=demo
+//   fitz run examples/guide/35-deploy.fitz
+//
+// Production:
+//   fitz docker init
+//   docker compose up --build
+//
+// NOTA: la idea es mostrar el shape end-to-end. Por simplicidad
+// el ejemplo NO requiere DB para que el smoke compile_e2e lo
+// compile sin Postgres en el CI runner — la línea `db.connect`
+// está comentada.
+
+type User { id: Int, name: Str, role: Str }
+
+@auth_provider
+async fn check(headers: Map<Str, Str>) -> Result<User> {
+    match headers.get("authorization") {
+        Ok(token) => {
+            // En producción acá iría validación contra cache/DB.
+            // Para el ejemplo, dos tokens hardcoded.
+            if (token == "Bearer demo-admin") {
+                return Ok(User { id: 1, name: "Ada", role: "admin" })
+            }
+            if (token == "Bearer demo-editor") {
+                return Ok(User { id: 2, name: "Ed", role: "editor" })
+            }
+            return Err("token inválido")
+        }
+        Err(_) => return Err("falta Authorization")
+    }
+}
+
+@get("/")
+fn root() -> Map<Str, Str> {
+    log.info("root hit")
+    return {"app": config("APP_NAME", "demo"), "version": "v1.0"}
+}
+
+@admin
+@get("/admin/stats")
+async fn stats(user: User) -> Map<Str, Int> {
+    log.info("stats request", admin: user.name)
+    return {"users": 42, "online": 7}
+}
+
+@requires("editor")
+@post("/articles")
+async fn create_article(body: Map<Str, Str>, user: User) -> Map<Str, Str> {
+    log.info("article created", author: user.name)
+    return {"status": "created", "author": user.name}
+}
+
+@server(3000, "0.0.0.0")
+fn main() {
+    // En producción real, descomentar para conectar a Postgres:
+    //   let db_url = "postgres://{secret("DB_USER").expose()}:{secret("DB_PASS").expose()}@{config("DB_HOST")}:5432/{config("DB_NAME")}"
+    //   log.info("conectando", host: config("DB_HOST"))
+    //   db.connect(db_url)?
+
+    log.info("server listo", app: config("APP_NAME", "demo"))
+}

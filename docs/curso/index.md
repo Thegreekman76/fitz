@@ -42,7 +42,7 @@ asume VSCode para los screenshots ASCII.
 | M4 — HTTP first-class | 5 | ✅ cerrado (C1-C5) |
 | M5 — Async, auth, real-time | 4 | ✅ cerrado (C1-C4) |
 | M6 — Capstone Postgres + ORM nativo | 6 | ✅ cerrado (C1-C6) |
-| M7 — Producción y deployment | 4 | ⏸ pendiente (espera Fase 12) |
+| M7 — Producción y deployment | 4 | ✅ cerrado (C1-C4) |
 
 Total previsto: 7 módulos, 36 capítulos. Cada módulo es **unidad
 releasable independiente** — no hace falta esperar que esté todo
@@ -148,6 +148,21 @@ cron jobs con persistencia, OpenAPI + AsyncAPI auto, todo en un
 binario standalone de ~30 MB con su `docker-compose.yml`.
 **Sin `pip install`, sin `npm install`, sin `requirements.txt`,
 sin `package.json`** — deploy = un binario.
+
+## M7 — Producción y deployment
+
+Requisito explícito: M6 cerrado (tenés una app real para deployar).
+
+- **[C1 — Distribución avanzada: binarios standalone y cross-compile](m7-produccion-deploy/c1-distribucion-binarios.md)**
+- **[C2 — Observability en producción: logs, spans, métricas, OTel](m7-produccion-deploy/c2-observability-otel.md)**
+- **[C3 — Secrets management: `secret()`, `config()` y `Secret<T>`](m7-produccion-deploy/c3-secrets-config.md)**
+- **[C4 — Deploy avanzado: Docker, healthz/readyz, K8s, 12-factor](m7-produccion-deploy/c4-deploy-docker-k8s.md)**
+
+**Entregable del módulo**: tu app de M6 corriendo en producción real
+con `fitz docker init` + monitoring (logs + spans + métricas) + K8s
+rolling deploys + healthchecks + SIGTERM drain. **12-factor
+compliance por default** sin instalar nada extra. Auditás los
+diferenciales de Fitz contra Python/TypeScript/Go/Spring en cada cap.
 
 ## Cómo está pensado el curso
 

@@ -82,8 +82,9 @@ abrí un issue.
 
 **Parte 13 — CLI y cerrando**
 34. [CLI builder nativo (`@command`)](#34-cli-builder-nativo-command)
-35. [Plantillas y boilerplates](#35-plantillas-y-boilerplates)
-36. [Qué sigue](#36-qué-sigue)
+35. [Deployment ciudadano primera clase](#35-deployment-ciudadano-primera-clase)
+36. [Plantillas y boilerplates](#36-plantillas-y-boilerplates)
+37. [Qué sigue](#37-qué-sigue)
 
 ---
 
@@ -12779,7 +12780,380 @@ completo con multiple comandos.
 
 ---
 
-## 35. Plantillas y boilerplates
+## 35. Deployment ciudadano primera clase
+
+**Hito de Fase 12 (v0.12.0 → v0.12.4)** — Fitz tiene
+**deployment ciudadano de primera clase**: las piezas que en otros
+lenguajes son librerías opt-in (health probes, secrets management,
+observability, Dockerfiles) están **en el core del compilador** con
+detección AST y paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+Este capítulo es la vista integradora — junta los 4 sub-pasos de Fase
+12 (healthz/readyz + Secret + OTel + Docker autogenerado) y muestra
+cómo el mismo programa Fitz pasa de `fitz run` local a un container
+en producción **sin cambiar una línea de código**, sólo agregando env
+vars y un sub-comando.
+
+### Panorama vecino
+
+| Lenguaje      | Health probes  | Secrets    | OTel        | Dockerfile autogenerado |
+| ------------- | -------------- | ---------- | ----------- | ----------------------- |
+| Python        | flask-healthz / FastAPI custom | python-dotenv + os.getenv | opentelemetry-api + 6 paquetes | ❌ (manual o cookiecutter) |
+| TypeScript    | terminus + manual handlers     | dotenv + process.env      | @opentelemetry/* + setup manual | ❌ (manual o Nx generators) |
+| Go            | gorilla/mux handlers manuales  | godotenv o env-config     | go.opentelemetry.io/otel + setup | ❌ (manual) |
+| Spring (Java) | actuator (opcional)            | @ConfigurationProperties  | spring-cloud-sleuth opcional | ❌ (manual o jib) |
+| **Fitz**      | **auto-mount `/healthz` + `/readyz`** | **`secret(key)` + `config(key)` built-ins** | **estructurado + OTLP built-in** | **`fitz docker init` smart** |
+
+Ningún otro lenguaje moderno combina las 4 piezas como features
+intrínsecas del compilador, con detección automática del shape del
+programa y paridad bit-a-bit intérprete↔binario.
+
+### 35.1. El stack de Fase 12 en una mirada
+
+Las 4 piezas trabajan juntas — cada feature genera información que
+las otras consumen:
+
+```
+       ┌─────────────────────────────────────────────────────────┐
+       │                  PROGRAMA FITZ                          │
+       │                                                         │
+       │  @server(3000)        @healthz             @cron("*")   │
+       │  @get(...)            @readyz              @background  │
+       │  @authenticated       db.connect(...)      log.info()   │
+       │  fn handler(...)      secret(...)                       │
+       └─────────────────────────────────────────────────────────┘
+                                  │
+                                  ▼
+           ┌────────────┬────────────┬────────────┐
+           │  12.1      │  12.2      │  12.3      │  12.4
+           │ healthz +  │ Secret<T>  │ Logs +     │ Dockerfile
+           │ readyz +   │ + config() │ Spans +    │ + compose
+           │ SIGTERM    │ + secret() │ Métricas + │ smart por
+           │ drain      │            │ OTel       │ detección AST
+           │ auto-     │            │            │
+           │ mount     │            │            │
+           └────────────┴────────────┴────────────┴────────────┘
+                                  │
+                                  ▼
+                          BINARIO STANDALONE
+                         (~22-55 MB, distroless)
+                                  │
+                                  ▼
+               ┌────────────────────────────────────┐
+               │  fitz docker build                 │
+               │  docker compose up                 │
+               │  kubectl apply / fly deploy        │
+               └────────────────────────────────────┘
+```
+
+### 35.2. Healthz y readyz (auto-mount, Fase 12.1)
+
+Todo HTTP server Fitz expone `/healthz` y `/readyz` **automáticamente**
+— sin código, sin libs, sin handlers manuales. El binario los emite
+desde el wrapper interno del servidor (Fase 12.1.b):
+
+```bash
+$ curl localhost:3000/healthz
+{"status":"ok"}
+
+$ curl localhost:3000/readyz
+{"status":"ready"}
+```
+
+**`/healthz`** (liveness probe K8s) — responde `200 OK` mientras el
+proceso esté vivo. Si el programa está en deadlock o panicó, axum no
+responde, y K8s lo reinicia.
+
+**`/readyz`** (readiness probe K8s) — responde `200 OK` cuando el
+proceso está listo para recibir tráfico, `503 Service Unavailable`
+durante el "draining" (SIGTERM ya disparó). Esto habilita
+**rolling deploys con cero downtime**: K8s deja de rutear tráfico al
+pod viejo antes de matarlo.
+
+**Override opcional con handlers custom** — si el programa declara
+`@get("/healthz")` o el decorator dedicado `@healthz fn ...`, Fitz lo
+prioriza sobre el auto-mount default. Patrón canónico:
+
+```fitz
+@healthz
+fn check_db_alive() -> Bool {
+    // True si la DB responde a SELECT 1, false si no.
+    return db.is_closed() == false
+}
+
+@readyz
+fn check_warmup() -> Bool {
+    // Por ejemplo: false hasta que el cache cargó.
+    return cache_ready
+}
+```
+
+Las dos fns deben retornar `Bool`. Si retornan `false`, el endpoint
+devuelve `503 Service Unavailable`. El `Drain` para readyz se activa
+automático al recibir SIGTERM.
+
+**Detalle completo**: cap 33.5 de esta misma guía (Observability
+incluye los detalles del SpanContext y los headers OTel-compatibles
+que `/healthz` también propaga).
+
+### 35.3. Secrets y config tipados (Fase 12.2)
+
+`secret(key) -> Secret<Str>` y `config(key) -> Str` son built-ins que
+leen env vars con dos semánticas distintas:
+
+- **`config("DATABASE_HOST", "localhost")`** — devuelve `Str` directo.
+  Toma `(key, default)` — si la env var no existe, usa el default.
+  Para configuración no sensitive: hostnames, ports, log levels.
+- **`secret("DATABASE_PASSWORD")`** — devuelve `Secret<Str>` opaco.
+  Toma sólo la `key`; si la env var no existe, error de runtime
+  (los secrets deben estar definidos explícitamente, sin defaults
+  silenciosos). No se puede imprimir, no se puede loggear, no se
+  puede serializar a JSON. Para extraer el valor real hay que llamar
+  `.expose()` explícitamente.
+
+```fitz
+let db_host = config("DATABASE_HOST", "localhost")  // Str — público
+let db_pass = secret("DATABASE_PASSWORD")            // Secret<Str> — opaco
+
+log.info("conectando a {db_host}")               // OK
+log.info("password={db_pass}")                   // ❌ checker error
+log.info("password={db_pass.expose()}")           // OK pero feo a propósito
+
+let url = "postgres://{db_pass.expose()}@{db_host}:5432/app"
+let conn = db.connect(url)?
+```
+
+**Redacción automática en logs/JSON** — si un valor `Secret<Str>` cae
+adentro de un kwarg de `log.info(...)`, se redacta a `"***"`
+automáticamente. Esto evita que un developer distraído filtre
+credenciales por accidente:
+
+```fitz
+log.info("login", user: user, password: pass)
+// → {"timestamp":"...","level":"INFO","msg":"login","user":{...},"password":"***"}
+```
+
+El `Secret<T>` también se redacta dentro de `List<Secret<T>>` y
+`Map<Str, Secret<T>>` recursivamente.
+
+**Patrón canónico de producción**:
+
+```fitz
+@server(3000)
+fn main() {
+    let db_url = "postgres://{secret("DB_USER").expose()}:{secret("DB_PASS").expose()}@{config("DB_HOST", "localhost")}:5432/{config("DB_NAME", "app")}"
+    print("conectando a {config("DB_HOST", "localhost")}")
+    db.connect(db_url)?
+}
+```
+
+Las credenciales nunca aparecen en logs, ni siquiera por accidente.
+El `config("DB_HOST", default)` es seguro de loggear.
+
+### 35.4. Observability con OTel (Fase 12.3)
+
+Detalle completo en [cap 33](#33-observability--logs-spans-métricas-otel).
+Resumen para deployment:
+
+- **Logs estructurados** → JSON a stderr por default; pretty en TTY o
+  con `FITZ_LOG_FORMAT=pretty`. Filter con `FITZ_LOG=info|debug|warn`.
+- **Spans HTTP** → cada request abre un span root con `trace_id`/
+  `span_id` (32+16 hex), todos los `log.*` adentro heredan el contexto.
+- **Métricas** → Counter `http_requests_total{method,path,status}` +
+  Histogram `http_request_duration_seconds{...}` emitidos automático.
+- **OTLP exporter** → seteando `OTEL_EXPORTER_OTLP_ENDPOINT`,
+  `OTEL_SERVICE_NAME` y `OTEL_TRACES_SAMPLER_ARG`, los spans y logs
+  van al backend (Jaeger, Tempo, Honeycomb, Datadog, etc.).
+- **Endpoint `/metrics` Prometheus** → activable con
+  `@server(prometheus=true)` o env var `FITZ_PROMETHEUS=1`.
+
+### 35.5. Dockerfile + compose autogenerados (Fase 12.4)
+
+`fitz docker init` lee el `fitz.toml` del cwd, parsea el entry point,
+detecta el shape del programa, y emite:
+
+- **`Dockerfile`** multi-stage con runtime adaptativo
+  (`distroless/cc-debian12` por default, `python:3.12-slim-bookworm`
+  cuando `from python import X`).
+- **`.dockerignore`** con los excludes típicos.
+- **`docker-compose.yml`** smart: suma `postgres:16-alpine` si
+  detecta `db.X(...)`, `restart: unless-stopped` con `@cron`,
+  healthcheck HTTP cuando hay `@server` + wget disponible.
+
+```bash
+$ fitz docker init
+▶ fitz docker init — proyecto `mi-api` en `/path/al/proyecto`
+   detectado: @server(port = 3000)
+   detectado: uso de DB (db.X(...)) → compose suma postgres:16-alpine
+✓ escrito: Dockerfile
+✓ escrito: .dockerignore
+✓ escrito: docker-compose.yml
+
+$ fitz docker build --tag mi-api:v1.0
+▶ fitz docker build — tag `mi-api:v1.0` en `/path/al/proyecto`
+...
+✓ build OK — `mi-api:v1.0`
+```
+
+Detalle completo en [cap 33.9](#339-deployment--fitz-docker-init--fitz-docker-build-fase-124).
+
+### 35.6. Ejemplo runnable: API de producción end-to-end
+
+`examples/guide/35-deploy.fitz` arma un microservicio que combina
+**todo el stack de Fase 12 en <100 LoC**. Un endpoint público + un
+endpoint protegido + DB + logs estructurados + healthz custom + uso
+de `secret()`/`config()`:
+
+```fitz
+type User { id: Int, name: Str, role: Str }
+
+@auth_provider
+async fn check(headers: Map<Str, Str>) -> Result<User> {
+    match headers.get("authorization") {
+        Ok(token) => {
+            // Validar token contra cache/DB...
+            if (token == "Bearer demo-admin") {
+                return Ok(User { id: 1, name: "Ada", role: "admin" })
+            }
+            return Err("token inválido")
+        }
+        Err(_) => return Err("falta Authorization")
+    }
+}
+
+@get("/")
+fn root() -> Map<Str, Str> {
+    log.info("root hit")
+    return {"app": config("APP_NAME", "demo"), "version": "v1.0"}
+}
+
+@admin
+@get("/admin/stats")
+async fn stats(user: User) -> Map<Str, Int> {
+    log.info("stats request", admin: user.name)
+    return {"users": 42, "online": 7}
+}
+
+@healthz
+async fn db_alive() -> Bool {
+    // Devuelve false si la DB no responde.
+    return db.is_closed() == false
+}
+
+@server(3000, "0.0.0.0")
+fn main() {
+    let db_url = "postgres://{secret("DB_USER").expose()}:{secret("DB_PASS").expose()}@{config("DB_HOST", "localhost")}:5432/{config("DB_NAME", "app")}"
+    log.info("conectando", host: config("DB_HOST", "localhost"))
+    db.connect(db_url)?
+    log.info("server listo")
+}
+```
+
+**Local dev** (`fitz run`):
+
+```bash
+$ export DB_USER=fitz DB_PASS=fitz DB_HOST=localhost DB_NAME=mi_app APP_NAME=demo
+$ fitz run examples/guide/35-deploy.fitz
+{"timestamp":"...","level":"INFO","msg":"conectando","host":"localhost"}
+{"timestamp":"...","level":"INFO","msg":"server listo"}
+```
+
+**Production deploy** (`fitz docker init` + compose):
+
+```bash
+$ fitz docker init       # genera Dockerfile + .dockerignore + compose.yml
+$ cat > .env <<EOF
+APP_NAME=mi-app-prod
+OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+OTEL_SERVICE_NAME=mi-app-prod
+OTEL_TRACES_SAMPLER_ARG=0.1
+RUST_LOG=info
+FITZ_LOG_FORMAT=json
+FITZ_PROMETHEUS=1
+DB_USER=postgres
+DB_PASS=$(openssl rand -hex 32)
+DB_HOST=db
+DB_NAME=mi_app
+EOF
+
+$ docker compose up --build
+```
+
+El mismo programa Fitz pasa de local a producción **sin cambiar una
+línea de código**. Solo cambian env vars y el sub-comando.
+
+### 35.7. Patrones canónicos de producción
+
+**12-factor compliance built-in** — Fitz cubre los 12 factores de
+forma idiomática:
+
+| Factor                 | Cómo Fitz lo cubre                                          |
+|------------------------|-------------------------------------------------------------|
+| I. Codebase            | `fitz.toml` + git (Fase 9.y).                               |
+| II. Dependencies       | `fitz.lock` + Cargo.toml emitido determinístico.            |
+| III. Config            | `config(key)` + `secret(key)` lee env vars (Fase 12.2).     |
+| IV. Backing services   | `db.connect(url_from_env)` (Fase 10).                       |
+| V. Build/release/run   | `fitz build` separa del runtime; binario standalone.        |
+| VI. Processes          | Stateless por default; jobs in-memory + persistencia DB.    |
+| VII. Port binding      | `@server(N, "0.0.0.0")` explícito.                          |
+| VIII. Concurrency      | Tokio multi-thread, scale horizontal.                       |
+| IX. Disposability      | SIGTERM drain automático (`/readyz` → 503) + 30s grace.     |
+| X. Dev/prod parity     | Mismo binario, mismas env vars, paridad bit-a-bit.          |
+| XI. Logs               | JSON estructurado a stderr (Fase 12.3.a).                   |
+| XII. Admin processes   | `@command("migrate")` + `fitz run` ad-hoc.                  |
+
+**Smart Dockerfile selection** — `fitz docker init` elige el runtime
+automático según el shape del programa:
+
+- Sin interop Python → `gcr.io/distroless/cc-debian12` (~22 MB).
+- Con `from python import X` → `python:3.12-slim-bookworm` (~55 MB).
+- Con `@cron` → suma `restart: unless-stopped` al compose.
+- Con `@server` → suma `EXPOSE` + `ports:`.
+- Con `db.X(...)` → suma service `postgres:16-alpine` con healthcheck.
+
+**Cero `pip install` para features intrínsecas** — JWT, Argon2,
+logs, spans, métricas, OTLP exporter, Prometheus exporter, todo
+embebido en el binario `fitz`. Compará con FastAPI o Express donde
+cada una es un paquete separado.
+
+**Paridad bit-a-bit** — el mismo programa corre idéntico con
+`fitz run` (intérprete) y `fitz build && ./binario` (Rust nativo).
+Esto incluye los headers OTel, las métricas, el shape del JSON de
+logs, los códigos de status. No hay "feature X solo funciona en
+build" o viceversa.
+
+### 35.8. Qué no está en el MVP
+
+Fase 12 cierra deployment-as-a-citizen al 95%. Lo que falta es deuda
+visible documentada:
+
+- **`fitz deploy` orchestrator** — un comando que ejecuta el deploy
+  según target (`docker compose up`, `fly deploy`, `kubectl apply`).
+  Cap 37 ("Qué sigue") lo menciona como Fase 12.6 diferida (sin
+  demanda real todavía).
+- **Auto-mount de `/auth/refresh` + `/auth/logout`** — el RBAC custom
+  de v0.12.4 (`@requires("role")`) cubre autorización. La revocación
+  de tokens necesita los builtins `auth.blacklist`/`auth.is_blacklisted`
+  + tabla `fitz_token_blacklist` (sub-iter 9.w.1.iter2.b pendiente).
+  Hasta entonces los handlers `/auth/logout` y `/auth/refresh` se
+  escriben a mano.
+- **`@trace`/`@metric` explícitos** — auto-instrumentation HTTP del
+  MVP cubre el 80%. Si querés spans nombrados sobre fns business
+  logic, queda como Fase 12.7 diferida.
+- **Feature flags** — `@flag("name") fn ...` + `flag("name") -> Bool`
+  + config via TOML/env. Sin demanda concreta, diferido a Fase 12.8.
+- **Healthcheck HTTP en distroless** — el compose smart solo emite
+  healthcheck cuando hay wget disponible (slim-bookworm), porque
+  distroless no tiene shell. Workaround documentado en cap 33.9
+  (cambiar runtime o agregar sidecar).
+- **CPython embebido en `fitz build`** — `--bundle-python` ya está
+  cerrado (cap 21.11), `--bundle-pip` para paquetes pip externos
+  está parcial. Los boilerplates 5/6 hoy usan `python:3.X-slim`;
+  cuando el sub-paso completo aterrice, pasan a `FROM scratch`.
+
+---
+
+## 36. Plantillas y boilerplates
 
 Si llegaste hasta acá leyendo, ya viste cada feature de Fitz por
 separado: HTTP nativo, auth, WebSockets, jobs, interop Python,
@@ -12842,7 +13216,7 @@ escribir desde cero.
 
 ---
 
-## 36. Qué sigue
+## 37. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.

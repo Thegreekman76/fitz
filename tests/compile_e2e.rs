@@ -2848,6 +2848,10 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "32-env.fitz",
     // v0.11.0 (Fase 13) — CLI builder con @command.
     "33-cli.fitz",
+    // v0.12.5 (Fase 12.5.a) — Cap 35 "Deployment ciudadano primera clase":
+    // ejemplo end-to-end que combina @server + @auth_provider + @admin +
+    // @requires + @healthz + secret() + config() + log.info estructurado.
+    "35-deploy.fitz",
 ];
 
 #[test]
