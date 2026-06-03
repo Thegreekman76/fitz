@@ -1377,10 +1377,27 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
+            // Fase 12.3.b.5 — opt-out de la instrumentación HTTP
+            // automática (span context + access log + métricas).
+            // Default `true` (instrumentación activa). `false` skipea
+            // TODO el wrapper de instrumentación — handlers corren
+            // bare-metal, cero overhead por request.
+            "observability" => match value_expr {
+                Expr::Bool(b, _) => {
+                    config.observability_enabled = *b;
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'observability' debe ser Bool literal, \
+                         recibió {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
             other => {
                 return Err(err(format!(
                     "@server sobre fn '{}': kwarg '{}' no reconocido. \
-                     Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs.",
+                     Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability.",
                     fn_name, other,
                 )));
             }

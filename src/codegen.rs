@@ -5006,16 +5006,20 @@ fn emit_main_rs_body(
         // wrappers, así `emit_cors_helpers` y el route loop en
         // `gen_http_main` ya tienen los maps poblados.
         ctx.precompute_cors_merge(&p.http_fns)?;
+        // Fase 9.w.2.e + Fase 12.3.b.5 — capturar flags del
+        // `@server(...)` ANTES de emitir cualquier wrapper. Los
+        // wrappers HTTP consultan `ctx.observability_enabled` para
+        // decidir si emitir el bloque de instrumentación (span +
+        // access log + métricas) o correr bare-metal; los wrappers WS
+        // consultan `ctx.ws_heartbeat_secs` para el call a
+        // `__fitz_ws_setup`.
+        if let Some(cfg) = &p.server_config {
+            ctx.ws_heartbeat_secs = cfg.ws_heartbeat_secs;
+            ctx.observability_enabled = cfg.observability_enabled;
+        }
         // Emitir un wrapper `async fn __handler_<name>` por cada handler.
         for stmt in &p.http_fns {
             ctx.gen_http_handler_wrapper(stmt)?;
-        }
-        // Fase 9.w.2.e — antes de emitir wrappers WS, capturamos el
-        // `ws_heartbeat_secs` del server config (si lo hay) en el
-        // ctx. Cada `gen_ws_handler_wrapper` emite el valor literal
-        // en el call a `__fitz_ws_setup`.
-        if let Some(cfg) = &p.server_config {
-            ctx.ws_heartbeat_secs = cfg.ws_heartbeat_secs;
         }
         // Fase 9.w.2.c — wrappers WS análogos (extractor
         // `WebSocketUpgrade`, auth pre-upgrade, on_upgrade closure).
@@ -5301,6 +5305,13 @@ struct ServerConfigArgs {
     /// Seteado con `@server(shutdown_timeout_secs=N)`. `0` desactiva
     /// el grace period (shutdown inmediato — no recomendado en prod).
     shutdown_timeout_secs: u64,
+    /// Fase 12.3.b.5 — activa la instrumentación HTTP automática
+    /// (span context + access log + métricas). Default `true`.
+    /// `@server(observability=false)` skipea TODO el wrapper de
+    /// instrumentación en el binario nativo — handlers corren bare-
+    /// metal, cero overhead por request. Paralelo bit-a-bit al campo
+    /// del runtime `crate::http::ServerConfig::observability_enabled`.
+    observability_enabled: bool,
 }
 
 impl Default for ServerConfigArgs {
@@ -5312,6 +5323,7 @@ impl Default for ServerConfigArgs {
             api_version: None,
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
+            observability_enabled: true,
         }
     }
 }
@@ -5470,13 +5482,32 @@ fn parse_server_decorator(
                     ));
                 }
             },
+            // Fase 12.3.b.5 — paralelo bit-a-bit al kwarg del runtime
+            // intérprete. `false` skipea TODO el wrapper de
+            // instrumentación HTTP en el binario nativo.
+            "observability" => match value_expr {
+                Expr::Bool(b, _) => {
+                    cfg.observability_enabled = *b;
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'observability' debe ser Bool literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                }
+            },
             other => {
                 return Err(FitzError::new(
                     ErrorKind::TypeError,
                     0,
                     0,
                     format!(
-                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs.",
+                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability.",
                         other
                     ),
                 ));
@@ -5852,6 +5883,13 @@ struct CodegenCtx<'a> {
     /// `gen_ws_handler_wrapper` para que el wrapper emita el valor
     /// literal en el call a `__fitz_ws_setup`.
     ws_heartbeat_secs: u64,
+    /// Fase 12.3.b.5: activa la instrumentación HTTP automática
+    /// (span context + access log + métricas) en el wrapper emitido
+    /// por `gen_http_handler_wrapper`. Default `true`. `@server(
+    /// observability=false)` lo apaga — handlers corren bare-metal
+    /// en el binario nativo. Seteado por `emit_main_rs_body` desde
+    /// `ServerConfigArgs.observability_enabled`.
+    observability_enabled: bool,
     /// Fase 9.w.1.d: nombre Rust de la fn marcada con `@auth_provider`
     /// (singleton). `None` si el programa no la tiene. El wrapper de
     /// cada handler con `@authenticated`/`@admin` la invoca antes del
@@ -6053,6 +6091,7 @@ impl<'a> CodegenCtx<'a> {
             uses_date_or_uuid: false,
             cron_jobs_info: Vec::new(),
             ws_heartbeat_secs: 30,
+            observability_enabled: true,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
             pattern_slot_counter: 0,
@@ -7317,8 +7356,7 @@ impl __FitzRetryConfig {
         // que retorna None. Sin runtime tokio, `tokio::task_local!`
         // no compila — los CLI puros con `log.X(...)` no pueden cargar
         // la versión task_local-based.
-        let has_tokio_runtime =
-            self.has_http || self.uses_async || self.uses_jobs || self.uses_db;
+        let has_tokio_runtime = self.has_http || self.uses_async || self.uses_jobs || self.uses_db;
         if has_tokio_runtime {
             self.emit(SPAN_CONTEXT_TOKIO);
         } else {
@@ -24172,29 +24210,38 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     fn gen_http_handler_wrapper(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
         let sig = self.resolve_handler_signature(stmt)?;
         self.emit_axum_extractors(&sig)?;
-        // Fase 12.3.b.4 — abrir el scope del span context ANTES de
-        // cualquier código del wrapper (middlewares, auth, coerciones,
-        // dispatch). Todo el body queda adentro del closure async move
-        // del `__fitz_with_span_context`; los `return X;` del body
-        // retornan del closure (no de la fn wrapper outer). El
-        // `__response` capturado afuera se emite con access log +
-        // métricas via un re-entrar al scope, para que el access log
-        // tenga el mismo trace_id que los logs del handler.
-        let method_lit = sig.http_method;
-        let path_lit = rust_str_literal(&sig.path);
-        writeln!(
-            &mut self.output,
-            "    let __fitz_span_ctx = __FitzSpanContext::new_root();\n    \
-             let __fitz_start_for_metrics = std::time::Instant::now();\n    \
-             let __fitz_method_str: &'static str = \"{}\";\n    \
-             let __fitz_path_template: &'static str = {};\n    \
-             let __fitz_ctx_for_emit = __fitz_span_ctx.clone();\n    \
-             let __response: axum::response::Response = __fitz_with_span_context(\n        \
-             __fitz_span_ctx,\n        \
-             move || async move {{",
-            method_lit, path_lit
-        )
-        .unwrap();
+        // Fase 12.3.b.5 — opt-out con `@server(observability=false)`:
+        // si el flag está apagado, NO emitimos el prelude del scope ni
+        // el wrap del cuerpo. El body corre bare-metal y se cierra con
+        // `}\n\n` directo después del dispatch. Captura una sola vez
+        // para usar el flag adentro de ambas ramas (apertura + cierre)
+        // sin recapturar entre `emit_*` calls que toman `&mut self`.
+        let observability = self.observability_enabled;
+        if observability {
+            // Fase 12.3.b.4 — abrir el scope del span context ANTES de
+            // cualquier código del wrapper (middlewares, auth, coerciones,
+            // dispatch). Todo el body queda adentro del closure async move
+            // del `__fitz_with_span_context`; los `return X;` del body
+            // retornan del closure (no de la fn wrapper outer). El
+            // `__response` capturado afuera se emite con access log +
+            // métricas via un re-entrar al scope, para que el access log
+            // tenga el mismo trace_id que los logs del handler.
+            let method_lit = sig.http_method;
+            let path_lit = rust_str_literal(&sig.path);
+            writeln!(
+                &mut self.output,
+                "    let __fitz_span_ctx = __FitzSpanContext::new_root();\n    \
+                 let __fitz_start_for_metrics = std::time::Instant::now();\n    \
+                 let __fitz_method_str: &'static str = \"{}\";\n    \
+                 let __fitz_path_template: &'static str = {};\n    \
+                 let __fitz_ctx_for_emit = __fitz_span_ctx.clone();\n    \
+                 let __response: axum::response::Response = __fitz_with_span_context(\n        \
+                 __fitz_span_ctx,\n        \
+                 move || async move {{",
+                method_lit, path_lit
+            )
+            .unwrap();
+        }
         self.emit_middleware_chain(&sig);
         // Fase 9.w.1.d — auth check después de middlewares y antes de
         // body parsing. Si la ruta tiene `@authenticated`/`@admin`,
@@ -24205,38 +24252,48 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit_auth_check(&sig);
         self.emit_param_coercions(&sig)?;
         self.emit_handler_dispatch_and_response(&sig);
-        // Fase 12.3.b.4 — cerrar el closure async move + access log +
-        // métricas + cerrar la fn outer.
-        self.emit("        }\n    ).await;\n");
-        self.emit("    let __duration = __fitz_start_for_metrics.elapsed();\n");
-        self.emit("    let __duration_ms = __duration.as_millis() as i64;\n");
-        self.emit("    let __duration_secs = __duration.as_secs_f64();\n");
-        self.emit("    let __status_u16 = __response.status().as_u16();\n");
-        self.emit("    __fitz_with_span_context(__fitz_ctx_for_emit, move || async move {\n");
-        self.emit("        __fitz_log_info(\"http.access\", &[\n");
-        self.emit(
-            "            (\"http.method\", __FitzLogValue::Str(__fitz_method_str.to_string())),\n",
-        );
-        self.emit(
-            "            (\"http.target\", __FitzLogValue::Str(__fitz_path_template.to_string())),\n",
-        );
-        self.emit(
-            "            (\"http.status_code\", __FitzLogValue::Int(__status_u16 as i64)),\n",
-        );
-        self.emit("            (\"duration_ms\", __FitzLogValue::Int(__duration_ms)),\n");
-        self.emit("        ]);\n");
-        self.emit("        let __labels = [\n");
-        self.emit("            (\"method\", __fitz_method_str.to_string()),\n");
-        self.emit("            (\"path\", __fitz_path_template.to_string()),\n");
-        self.emit("            (\"status\", __status_u16.to_string()),\n");
-        self.emit("        ];\n");
-        self.emit("        metrics::counter!(\"http_requests_total\", &__labels).increment(1);\n");
-        self.emit(
-            "        metrics::histogram!(\"http_request_duration_seconds\", &__labels).record(__duration_secs);\n",
-        );
-        self.emit("    }).await;\n");
-        self.emit("    __response\n");
-        self.emit("}\n\n");
+        if observability {
+            // Fase 12.3.b.4 — cerrar el closure async move + access log +
+            // métricas + cerrar la fn outer.
+            self.emit("        }\n    ).await;\n");
+            self.emit("    let __duration = __fitz_start_for_metrics.elapsed();\n");
+            self.emit("    let __duration_ms = __duration.as_millis() as i64;\n");
+            self.emit("    let __duration_secs = __duration.as_secs_f64();\n");
+            self.emit("    let __status_u16 = __response.status().as_u16();\n");
+            self.emit("    __fitz_with_span_context(__fitz_ctx_for_emit, move || async move {\n");
+            self.emit("        __fitz_log_info(\"http.access\", &[\n");
+            self.emit(
+                "            (\"http.method\", __FitzLogValue::Str(__fitz_method_str.to_string())),\n",
+            );
+            self.emit(
+                "            (\"http.target\", __FitzLogValue::Str(__fitz_path_template.to_string())),\n",
+            );
+            self.emit(
+                "            (\"http.status_code\", __FitzLogValue::Int(__status_u16 as i64)),\n",
+            );
+            self.emit("            (\"duration_ms\", __FitzLogValue::Int(__duration_ms)),\n");
+            self.emit("        ]);\n");
+            self.emit("        let __labels = [\n");
+            self.emit("            (\"method\", __fitz_method_str.to_string()),\n");
+            self.emit("            (\"path\", __fitz_path_template.to_string()),\n");
+            self.emit("            (\"status\", __status_u16.to_string()),\n");
+            self.emit("        ];\n");
+            self.emit(
+                "        metrics::counter!(\"http_requests_total\", &__labels).increment(1);\n",
+            );
+            self.emit(
+                "        metrics::histogram!(\"http_request_duration_seconds\", &__labels).record(__duration_secs);\n",
+            );
+            self.emit("    }).await;\n");
+            self.emit("    __response\n");
+            self.emit("}\n\n");
+        } else {
+            // Fase 12.3.b.5 — opt-out: cierre directo de la fn sin
+            // wrap. `emit_handler_dispatch_and_response` deja el body
+            // terminado con un expression que evalúa a Response (sin
+            // `;`), justo lo que necesita la fn outer.
+            self.emit("}\n\n");
+        }
         self.emit_cors_helpers(&sig);
         Ok(())
     }

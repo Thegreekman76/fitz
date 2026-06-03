@@ -423,6 +423,17 @@ pub struct ServerConfig {
     /// desactiva el grace period (shutdown inmediato — no recomendado
     /// en producción).
     pub shutdown_timeout_secs: u64,
+    /// Fase 12.3.b.5 — Activa la instrumentación HTTP automática
+    /// (SpanContext root por request, `log.info("http.access", ...)`
+    /// con `http.method`/`http.target`/`http.status_code`/`duration_ms`,
+    /// Counter `http_requests_total` + Histogram
+    /// `http_request_duration_seconds` con labels). Default `true`.
+    /// Override explícito con `@server(observability=false)` skipea TODO
+    /// el wrapper de instrumentación — los handlers corren bare-metal,
+    /// sin overhead por request. Útil en hot-paths donde cada microsegundo
+    /// cuenta, o cuando el user tiene su propio sistema de observability
+    /// custom. No afecta otros features (auth, CORS, middleware, etc.).
+    pub observability_enabled: bool,
 }
 
 impl ServerConfig {
@@ -435,6 +446,7 @@ impl ServerConfig {
             api_version: None,
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
+            observability_enabled: true,
         }
     }
 
@@ -2772,6 +2784,32 @@ async fn dispatch_request(
         Some(route) => (route.method.as_str(), route.path.clone()),
         None => ("UNKNOWN", String::new()),
     };
+
+    // Fase 12.3.b.5 — opt-out con `@server(observability=false)`.
+    // Cuando está deshabilitada, bypaseamos TODO el wrapper de
+    // instrumentación: no abrimos span context, no emitimos access
+    // log, no registramos métricas. Los handlers corren bare-metal,
+    // sin overhead por request. El user que escribió
+    // `log.X(...)` adentro de un handler igual los emite, pero sin
+    // trace_id/span_id (no hay span activo).
+    let observability_enabled = registry
+        .server_config
+        .as_ref()
+        .map(|c| c.observability_enabled)
+        .unwrap_or(true);
+    if !observability_enabled {
+        let outcome = handle_task(
+            registry,
+            route_idx,
+            path_params,
+            query_params,
+            body,
+            headers,
+        )
+        .await;
+        return outcome_to_response(outcome);
+    }
+
     let ctx = crate::logging::SpanContext::new_root();
     let start = std::time::Instant::now();
 
@@ -5433,6 +5471,7 @@ mod tests {
             api_version: None,
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
+            observability_enabled: true,
         };
         let addr = c.to_socket_addr().unwrap();
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
@@ -5447,6 +5486,7 @@ mod tests {
             api_version: None,
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
+            observability_enabled: true,
         };
         let err = c.to_socket_addr().unwrap_err();
         assert!(err.contains("no-es-ip"));
@@ -5462,6 +5502,7 @@ mod tests {
                 api_version: None,
                 ws_heartbeat_secs: 30,
                 shutdown_timeout_secs: 30,
+                observability_enabled: true,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
@@ -5471,6 +5512,7 @@ mod tests {
                 api_version: None,
                 ws_heartbeat_secs: 30,
                 shutdown_timeout_secs: 30,
+                observability_enabled: true,
             };
             let err = set_server_config(second).unwrap_err();
             // El error contiene el config existente, no el nuevo.
@@ -5491,6 +5533,7 @@ mod tests {
             api_version: None,
             ws_heartbeat_secs: 30,
             shutdown_timeout_secs: 30,
+            observability_enabled: true,
         });
         let resolved = reg.resolved_config();
         assert_eq!(resolved.port, 80);
