@@ -11,6 +11,114 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.13.1] — 2026-06-04 — Smoke gating de deps emitidas (deuda boring cerrada)
+
+**Cierre de la deuda residual "Smoke compile_e2e — gating de deps
+emitidas"** (abierta en v0.12.1 cuando Tier3 sumó
+`metrics-exporter-prometheus` al codegen). El smoke
+`GUIDE_EXAMPLES_COMPILE` compila ~360 ejemplos en serie sin cache
+compartido; cada uno pagaba cold-compile de `metrics-exporter-prometheus`
+aunque no usara Prometheus. CI Linux ya tuvo que bumpear timeout
+15→25 min en commit `94e97c5`. Esta release refina el gating del
+Cargo.toml emitido por `cargo_toml_for`:
+
+- **`metrics-exporter-prometheus` solo se emite cuando hay
+  `@server(prometheus=true)` literal en código.** Detector nuevo
+  `program_uses_prometheus_export(program)` paralelo a
+  `program_uses_trace_metric`. Propagado a `CodegenCtx` +
+  `cargo_toml_for` (param nuevo `uses_prometheus_export`).
+- **`emit_prometheus_prelude` gateado por el mismo flag**
+  (paralelo bit-a-bit). El static `__FITZ_PROMETHEUS_HANDLE`, el
+  helper `__fitz_init_prometheus(...)`, y el helper
+  `__fitz_prometheus_route()` ya no se emiten en programas sin
+  opt-in. La call `__fitz_init_prometheus(...)` en `gen_main_with_http`
+  + el `.merge(__fitz_prometheus_route())` en el Router también
+  gateados.
+- **Breaking behavior**: el path env var `FITZ_PROMETHEUS=1` ya no
+  funciona como override de runtime — production deployments
+  declaran Prometheus en código con `@server(prometheus=true)`.
+  Trade-off aceptado: el opt-in compile-time cubre el 95% del caso
+  real (CI/CD pipelines saben en compile time si Prometheus va o
+  no); el env var override era nice-to-have que no justifica
+  ~5 min CI extra por release.
+
+**Decisiones de scope confirmadas al arrancar**:
+
+- Solo se gatea Prometheus. Las deps OTel (`opentelemetry`,
+  `opentelemetry_sdk`, `opentelemetry-otlp`) siguen emitidas
+  con `has_http` porque `uses_logging` se fuerza a `true` cuando
+  `has_http=true` (línea 213-215 de `src/codegen.rs`) — el
+  wrapper HTTP emite `__fitz_log_info("http.access", ...)` +
+  `__fitz_with_span_context(...)` + branches sobre
+  `__fitz_otel_is_enabled()` sin opt-in del user. Removerlas
+  exige también gatear el access log automático del wrapper, lo
+  cual cambia comportamiento user-visible (programas HTTP
+  simples pierden auto access logs). Queda como deuda residual
+  separada en `docs/deudas-post-5b.md`.
+- El crate `metrics` (liviano, no pulla deps grandes) queda
+  emitido cuando `has_http || uses_trace_metric` (sin cambio).
+- Sin cross-module detection del `@server(prometheus=true)` — MVP
+  solo detecta top-level del main. Workaround: declarar `@server`
+  en el archivo principal (caso típico ya).
+
+**Cambios concretos en el codegen**:
+
+- Nueva función pure-function `program_uses_prometheus_export`
+  walka decorators top-level buscando `name=="server"` con
+  `kwargs["prometheus"] == Expr::Bool(true, _)` literal.
+- `cargo_toml_for` recibe nuevo param `uses_prometheus_export:
+  bool` (positional, último). 20 call sites actualizados (1
+  producción + 19 tests).
+- `CodegenCtx` gana field `uses_prometheus_export: bool` (default
+  `false`), seteado en `generate_main_rs` desde el detector +
+  `generate_project` propagado a `cargo_toml_for`.
+- `emit_prometheus_prelude` early-return si
+  `!has_http || !uses_prometheus_export`.
+- `gen_main_with_http` skipea la línea `__fitz_init_prometheus(...)`
+  cuando `!uses_prometheus_export`.
+- `gen_router_with_routes` skipea `.merge(__fitz_prometheus_route())`
+  cuando `!uses_prometheus_export`.
+
+**Tests al cierre v0.13.1**:
+
+- 3 tests nuevos en `codegen::tests`:
+  - `tier3_codegen_http_sin_prometheus_no_emite_prelude_ni_dep`
+    (reescritura del antiguo
+    `tier3_codegen_http_emite_prometheus_prelude_y_init_call_falso_por_default`):
+    sin `@server(prometheus=true)` no se emite ni el preludio ni
+    la dep `metrics-exporter-prometheus`.
+  - `tier3_codegen_http_con_prometheus_true_emite_prelude_y_dep`
+    (refinado del antiguo
+    `tier3_codegen_http_con_prometheus_true_emite_init_call_true`):
+    con `@server(prometheus=true)` se emite todo (handle + init +
+    route + dep).
+  - `v0_13_1_program_uses_prometheus_export_detecta_kwarg_true` +
+    `..._no_dispara_sin_kwarg`: cubren el detector pure-function
+    sobre 4 casos (con kwarg true, sin kwarg, con `false`
+    explícito, con otros kwargs como `observability=true`).
+- Total al cierre: **3003 unit (+2 vs v0.13.0; 2 tests refactor de los Tier3 viejos + 2 detectores nuevos) + 112 LSP + 360
+  compile_e2e + 3 openapi** verde. `cargo fmt --all --check` +
+  `cargo clippy --lib --tests --bins -- -D warnings` limpios.
+
+**Documentación actualizada**:
+
+- `docs/guide.md` cap 33.4 documenta el breaking behavior del env
+  var `FITZ_PROMETHEUS=1` con nota explícita.
+- `docs/deudas-post-5b.md` marca la deuda "Smoke compile_e2e —
+  gating de deps emitidas" como CERRADO 2026-06-04 con timing
+  before/after.
+- `docs/roadmap.md` nota breve en la entrada v0.13.x.
+- README + extensión VSCode no afectados (deuda interna del CI,
+  no user-visible más allá del breaking del env var override).
+
+**Próximo norte**: el grueso de Fase 12 entera cerrado (Tier 1 +
+Tier 2). Próximas direcciones según demanda real:
+
+- Cerrar la deuda residual OTel deps gating (requiere también
+  gatear access log auto del wrapper).
+- Fase 13+ (orquestación distribuida, multi-tenant) si aparece
+  demanda concreta.
+
 ## [v0.13.0] — 2026-06-04 — Fase 12 Tier 2: `fitz deploy` (12.6) + `@trace`/`@metric` (12.7) + `@flag` / `flag()` (12.8)
 
 **Release coordinado de las 3 sub-fases del Tier 2 de Fase 12**:

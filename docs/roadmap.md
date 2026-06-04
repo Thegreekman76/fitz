@@ -9947,6 +9947,53 @@ cambios (decorators caen bajo `@<ident>` genérico).
 para deploy targets `fly`/`railway`/`k8s`). Sin presión
 inmediata.
 
+### v0.13.1 (2026-06-04) — Smoke gating de deps emitidas (deuda boring cerrada)
+
+Refinamiento del Cargo.toml emitido por `cargo_toml_for` para que
+las deps pesadas se gateen por el flag específico que las
+activa, NO por `has_http` genérico. Cierre de la deuda
+"Smoke compile_e2e — gating de deps emitidas" abierta en
+v0.12.1 cuando Tier3 sumó `metrics-exporter-prometheus = "0.18"`
+(commit `ci: bumpear timeout 15→25 min`, 2026-06-03).
+
+**Concretamente**:
+
+- `metrics-exporter-prometheus` solo se emite cuando hay
+  `@server(prometheus=true)` literal en código. Detector nuevo
+  `program_uses_prometheus_export(program)` paralelo a
+  `program_uses_trace_metric`. Propagado a `CodegenCtx` +
+  `cargo_toml_for` (param nuevo `uses_prometheus_export`,
+  último positional). 20 call sites de tests actualizados.
+- `emit_prometheus_prelude` + `__fitz_init_prometheus(...)` call
+  + `.merge(__fitz_prometheus_route())` gateados por el mismo
+  flag (paralelo bit-a-bit).
+- **Breaking behavior**: el path env var `FITZ_PROMETHEUS=1` ya
+  no funciona como override de runtime — exige
+  `@server(prometheus=true)` literal. Documentado en
+  `docs/guide.md` cap 33.4. Trade-off aceptado: el opt-in
+  compile-time cubre el 95% del caso real.
+
+**Decisión de scope confirmada**: las deps OTel siguen
+emitidas con `has_http` (sin cambio) — el wrapper HTTP del
+codegen emite `__fitz_with_span_context(...)` +
+`__fitz_log_info("http.access", ...)` + branches sobre
+`__fitz_otel_is_enabled()` sin opt-in del user (la línea
+`uses_logging = has_http || ...` fuerza el preludio entero
+cuando hay HTTP). Removerlas requiere también gatear el access
+log auto del wrapper — queda como deuda residual separada
+abierta en `docs/deudas-post-5b.md` ("Smoke compile_e2e —
+gating de OTel deps + access log auto").
+
+**Tests al cierre v0.13.1**: **3003 unit (+2 nuevos vs v0.13.0)** + 112
+LSP + 360 compile_e2e + 3 openapi. `cargo fmt --all --check` +
+`cargo clippy --lib --tests --bins -- -D warnings` limpios.
+
+**Timing**: baseline pre-fix local Windows fresh
+~522s (~8.7 min) sobre 360 ejemplos. CI Linux fresh runner
+proporciona mayor mejora absoluta — el cold-compile de
+`metrics-exporter-prometheus` + transitivos cae completo en
+~95% de los ejemplos.
+
 ### Resumen de archivos del lenguaje a tocar
 
 | Componente | Cambio | Sub-fase |

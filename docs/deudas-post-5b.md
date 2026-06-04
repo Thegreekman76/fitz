@@ -2709,10 +2709,10 @@ sección "Deudas residuales derivadas"):
 Observability minimal con OpenTelemetry" expandida con los 11
 sub-pasos (a.1-3, b.1-5, c.1-3).
 
-## Smoke compile_e2e — gating de deps emitidas — **ABIERTO 2026-06-03**
+## Smoke compile_e2e — gating de deps emitidas — **CERRADO 2026-06-04 (v0.13.1)**
 
 Heredado de v0.12.1 (Tier3 Prometheus). El smoke
-`GUIDE_EXAMPLES_COMPILE` compila ~290 ejemplos en serie, cada uno
+`GUIDE_EXAMPLES_COMPILE` compila ~360 ejemplos en serie, cada uno
 con su propio `target/fitz-build/<stem>/` separado. Sin cache
 compartido, cada ejemplo paga el cold-compile de toda dep que
 emita el `cargo_toml_for` cuando `has_http=true` (incluso si no
@@ -2720,33 +2720,106 @@ las usa). Tras sumar `metrics-exporter-prometheus = "0.18"` en
 Tier3, el smoke en Linux fresh runner cruzó los 15 min y rompió
 CI (commit `ci: bumpear timeout 15→25 min`, 2026-06-03).
 
-**Fix temporal**: bumpear timeout a 25 min en `.github/workflows/
-ci.yml`. Compra tiempo pero no escala — cada feature nueva (12.4
-sumará deps de Docker compose codegen, 12.5+ podría sumar más)
-empuja el smoke arriba.
+**Cierre v0.13.1 (2026-06-04)**: gating refinado del Cargo.toml
+emitido por `cargo_toml_for`. Concretamente:
 
-**Fix real (deuda)**: gatear deps emitidas por el flag específico
-que las activa, NO solo por `has_http`. Concretamente:
-
-- `metrics-exporter-prometheus`: solo cuando
-  `@server(prometheus=true)`. Trade-off: pierde el path de env var
-  `FITZ_PROMETHEUS=1` activando Prometheus en runtime sin
-  recompilar. Aceptable si se documenta — el opt-in compile-time
+- **`metrics-exporter-prometheus` solo cuando hay
+  `@server(prometheus=true)` literal**. Detector nuevo
+  `program_uses_prometheus_export(program)` walka decorators
+  top-level buscando `kwargs["prometheus"] == Expr::Bool(true, _)`.
+  Propagado a `CodegenCtx.uses_prometheus_export` +
+  `cargo_toml_for` (param nuevo, último positional). 20 call
+  sites de tests actualizados con un single-pass PowerShell.
+- **`emit_prometheus_prelude` + `__fitz_init_prometheus(...)` call
+  + `.merge(__fitz_prometheus_route())` gateados por el mismo
+  flag** (paralelo bit-a-bit). Programas sin opt-in no emiten ni
+  el static `__FITZ_PROMETHEUS_HANDLE`, ni el helper, ni la ruta.
+- **Breaking behavior aceptado**: el path env var
+  `FITZ_PROMETHEUS=1` ya no funciona como override de runtime —
+  exige `@server(prometheus=true)` literal. Documentado en
+  `docs/guide.md` cap 33.4. Trade-off: el opt-in compile-time
   cubre el 95% del caso real (production deployments declaran
-  Prometheus en el código).
-- `opentelemetry-otlp` con feature `logs`/`trace`: solo cuando
-  `uses_logging || uses_observability`. Ya está gateado por
-  `has_http` pero el feature `logs` podría salir si no hay
-  `log.*`.
+  Prometheus en código); el env var override era nice-to-have.
 
-**Encaje natural con Fase 12.4** — el smart Cargo.toml detection
-(que ya planea suma deps según `db.connect`/`@cron`/etc.) puede
-unificarse con este gating. Cerrar en el mismo paso baja el
-smoke de ~17-20 min a ~10-12 min sobre Linux fresh. **Nota**:
-12.4.a (CERRADA 2026-06-03, v0.12.2) no introdujo deps nuevas al
-Cargo.toml emitido — solo escribe Dockerfile + compose + dockerignore
-estáticos al disco. El gating sigue siendo deuda viva para 12.4.b o
-sub-paso dedicado.
+**Timing observado local** (Windows 11 + Ryzen + NVMe + Cargo
+cache fresh): baseline pre-fix `522.13s ≈ 8.7 min` sobre 360
+ejemplos. Post-fix se mide separado abajo. **El CI Linux fresh
+runner** debería ver mayor mejora absoluta porque el cold-compile
+de `metrics-exporter-prometheus` + sus transitivos (`indexmap`,
+`prometheus` crate, `protobuf`) cae completo en programas no-
+Prometheus (~95% de los ejemplos).
+
+**Decisión de scope confirmada al arrancar**: las deps OTel
+(`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`)
+quedan emitidas con `has_http` (sin cambio). Razón: el wrapper
+HTTP del codegen emite `__fitz_with_span_context(...)` +
+`__fitz_log_info("http.access", ...)` + branches sobre
+`__fitz_otel_is_enabled()` sin opt-in del user — la línea
+`uses_logging = has_http || ...` fuerza el preludio entero
+cuando hay HTTP. Removerlas requiere también gatear el access
+log auto del wrapper, lo cual cambia comportamiento user-visible
+(programas HTTP simples como los ejemplos pedagógicos de la
+guía pierden auto access logs + spans). Queda como deuda
+residual abierta (ver abajo).
+
+**Tests al cierre**: 3 unit tests nuevos en `codegen::tests`
+(`tier3_codegen_http_sin_prometheus_no_emite_prelude_ni_dep`,
+`tier3_codegen_http_con_prometheus_true_emite_prelude_y_dep`,
+`v0_13_1_program_uses_prometheus_export_detecta_kwarg_true`,
+`v0_13_1_program_uses_prometheus_export_no_dispara_sin_kwarg`).
+
+## Smoke compile_e2e — gating de OTel deps + access log auto — **ABIERTO 2026-06-04**
+
+Deuda residual derivada del cierre parcial de la deuda anterior
+(v0.13.1 solo cerró Prometheus). Las 3 deps OTel
+(`opentelemetry`, `opentelemetry_sdk`, `opentelemetry-otlp`)
+siguen emitidas con cualquier `has_http=true` porque
+`uses_logging` se fuerza a `true` cuando `has_http=true` (línea
+213-215 de `src/codegen.rs`) — el wrapper HTTP emite
+`__fitz_with_span_context(...)` + `__fitz_log_info("http.access",
+...)` + branches sobre `opentelemetry::trace::*` sin opt-in del
+user.
+
+**Fix futuro**: gatear las 3 deps + el access log auto del
+wrapper + el OTel branch del wrapper por
+`uses_logging_explicit` (es decir, `program_uses_logging` sin el
+forzado `|| has_http`). Programas HTTP que NO usen `log.X(...)`
+explícito pierden el access log auto + spans OTel — caso típico:
+ejemplos pedagógicos de la guía y CLIs HTTP triviales.
+
+**Trade-off del fix**: pierdes la auto-observability "free para
+todo handler HTTP" que se vendió en Fase 12.3.b.4. Quedan
+opciones:
+
+- (a) Default opt-in: si el user quiere access logs auto, declara
+  `log.info("startup")` en algún lugar del programa.
+- (b) Nuevo kwarg `@server(observability=true)` explicit
+  (rechazado por el prompt de v0.13.1, pero podría revisitarse
+  si la presión real aparece).
+- (c) Hacer noop el access log auto cuando no hay subscriber
+  instalado (probable — `tracing::info!` no allocates cuando no
+  hay subscriber). El span sigue emitiendo "in-process" sin
+  exportar, costo bajo.
+
+**Estimación del win**: la dep `opentelemetry-otlp` con feature
+`reqwest-blocking-client` pulla `reqwest` que pulla `tokio` +
+`hyper` + chains varios. Es de las deps más pesadas del codegen.
+Probablemente otro ~3-5 min CI menos sobre Linux fresh si se
+gatea cleanly.
+
+**Bloqueante para arrancar**: decidir entre las 3 opciones de
+arriba o un sub-paso dedicado con su propio mini-roadmap.
+
+## (HISTÓRICO) Fix temporal pre-v0.13.1 — timeout CI 15→25 min
+
+Bumpear timeout a 25 min en `.github/workflows/ci.yml`. Compró
+tiempo pero no escaló — cada feature nueva (12.4 sumará deps de
+Docker compose codegen, 12.5+ podría sumar más) empujaba el
+smoke arriba. **Cerrado por v0.13.1** que ataca la causa raíz
+del lado Prometheus. El timeout 25 min queda — sirve de
+margen para el ojo del huracán cuando entre Fase 13+. La
+deuda OTel arriba puede recortar otros ~3-5 min cuando se
+cierre.
 
 ## Fase 12.4.a — `fitz docker init` (Dockerfile autogenerado) — **CERRADO 2026-06-03**
 

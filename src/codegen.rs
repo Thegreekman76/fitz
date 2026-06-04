@@ -260,6 +260,14 @@ pub fn generate_project(
     // en el main; cross-module queda como deuda menor).
     let uses_trace_metric = program_uses_trace_metric(program);
 
+    // v0.13.1 — `@server(prometheus=true)` literal en el main. MVP
+    // solo detecta top-level del main (paralelo a uses_trace_metric);
+    // cross-module queda como deuda menor. Cierra la deuda "Smoke
+    // gating de deps emitidas" — la dep `metrics-exporter-prometheus`
+    // solo se emite con opt-in compile-time. Trade-off documentado:
+    // el path env var `FITZ_PROMETHEUS=1` ya no override-a en runtime.
+    let uses_prometheus_export = program_uses_prometheus_export(program);
+
     // Fase 12.8 — feature flags: detecta `@flag(...)` o builtins
     // `flag(...)`/`flags.X(...)`. El programa siempre puede usar el
     // builtin aunque no haya defaults declarados, así que también
@@ -297,6 +305,7 @@ pub fn generate_project(
             uses_db,
             uses_fitz_value,
             uses_date_or_uuid,
+            uses_prometheus_export,
         ),
         main_rs,
         mod_files: {
@@ -577,6 +586,35 @@ fn program_uses_trace_metric(program: &Program) -> bool {
         Stmt::FnDef { decorators, .. } => decorators
             .iter()
             .any(|d| d.name == "trace" || d.name == "metric"),
+        _ => false,
+    })
+}
+
+/// v0.13.1 — `true` si alguna fn top-level tiene un decorator
+/// `@server(prometheus=true)` literal. Habilita la emisión del
+/// preludio Prometheus + endpoint `/metrics` + dep
+/// `metrics-exporter-prometheus` al Cargo.toml.
+///
+/// Cierre de la deuda "Smoke compile_e2e — gating de deps emitidas":
+/// la dep `metrics-exporter-prometheus` ya no se emite en cualquier
+/// programa HTTP, solo cuando el código declara Prometheus
+/// explícito. Trade-off: el path env var `FITZ_PROMETHEUS=1` ya no
+/// override-a en runtime — production deployments declaran
+/// Prometheus en código.
+///
+/// El detector solo mira decorators top-level. `@server` solo se
+/// permite sobre fns top-level (cross-module diferido como deuda
+/// menor — caso típico: el @server vive en el archivo principal).
+fn program_uses_prometheus_export(program: &Program) -> bool {
+    program.iter().any(|stmt| match stmt {
+        Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| {
+            if d.name != "server" {
+                return false;
+            }
+            d.kwargs
+                .iter()
+                .any(|(k, v)| k == "prometheus" && matches!(v, Expr::Bool(true, _)))
+        }),
         _ => false,
     })
 }
@@ -2602,6 +2640,7 @@ fn cargo_toml_for(
     uses_db: bool,
     uses_fitz_value: bool,
     uses_date_or_uuid: bool,
+    uses_prometheus_export: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -2902,16 +2941,23 @@ fn cargo_toml_for(
             s.push_str(
                 "opentelemetry-otlp = { version = \"0.32\", default-features = false, features = [\"http-proto\", \"reqwest-blocking-client\", \"trace\", \"logs\"] }\n",
             );
-            // Fase 12.3.iter2.Tier3 — `metrics-exporter-prometheus`
-            // siempre cuando hay HTTP para habilitar dual-gate (kwarg
-            // `@server(prometheus=true)` + env var `FITZ_PROMETHEUS=1`).
+            // v0.13.1 — `metrics-exporter-prometheus` solo cuando el
+            // código declara `@server(prometheus=true)` literal. Cierra
+            // la deuda "Smoke gating de deps emitidas": antes la dep se
+            // emitía con cualquier HTTP para habilitar el path env var
+            // `FITZ_PROMETHEUS=1` en runtime, pero el smoke compile_e2e
+            // pagaba el cold-compile de la dep en ~290 ejemplos.
+            // Trade-off: el env var override deja de funcionar —
+            // production deployments declaran Prometheus en código.
             // `default-features = false` skipea `http-listener` (que
             // armaría su propio HTTP server) + `push-gateway` (no es
             // el caso 90%). Solo usamos `PrometheusBuilder::new()
             // .build_recorder() + handle.render()` — sin features extras.
-            s.push_str(
-                "metrics-exporter-prometheus = { version = \"0.18\", default-features = false }\n",
-            );
+            if uses_prometheus_export {
+                s.push_str(
+                    "metrics-exporter-prometheus = { version = \"0.18\", default-features = false }\n",
+                );
+            }
         }
         s
     } else {
@@ -4643,6 +4689,13 @@ fn generate_main_rs(
     // en el main; cross-module queda como deuda menor (workaround:
     // declarar la fn instrumentada en el main).
     let uses_trace_metric = program_uses_trace_metric(program);
+    // v0.13.1 — `@server(prometheus=true)` literal en el main. MVP
+    // solo detecta top-level del main (paralelo a uses_trace_metric);
+    // cross-module queda como deuda menor — caso típico: el `@server`
+    // vive en el archivo principal. Cierra la deuda "Smoke gating
+    // de deps emitidas" — la dep `metrics-exporter-prometheus` solo
+    // se emite con opt-in compile-time.
+    let uses_prometheus_export = program_uses_prometheus_export(program);
     // W8 (v0.10.7) — uses_db transitivo: si algún módulo cargado
     // declara `@table` types o usa db, el main emite el preludio db
     // entero para que los `use crate::__fitz_db_*` de los módulos
@@ -4677,6 +4730,7 @@ fn generate_main_rs(
     ctx.uses_jobs = uses_jobs;
     ctx.uses_logging = uses_logging;
     ctx.uses_trace_metric = uses_trace_metric;
+    ctx.uses_prometheus_export = uses_prometheus_export;
     ctx.uses_flags = uses_flags;
     ctx.flag_defaults = flag_defaults.clone();
     ctx.uses_db = uses_db;
@@ -6205,6 +6259,14 @@ struct CodegenCtx<'a> {
     /// alrededor del body y suma `tracing`/`metrics` al Cargo.toml
     /// emitido cuando no había HTTP que ya los traía.
     uses_trace_metric: bool,
+    /// v0.13.1: `true` si el programa declara `@server(prometheus=true)`
+    /// literal. Habilita la emisión del preludio Prometheus
+    /// (`__FITZ_PROMETHEUS_HANDLE` + `__fitz_init_prometheus` +
+    /// `__fitz_prometheus_route`) + endpoint `/metrics` auto-mounted +
+    /// dep `metrics-exporter-prometheus` al Cargo.toml. Cierre de la
+    /// deuda "Smoke gating de deps emitidas" — antes la dep se emitía
+    /// con cualquier HTTP, ahora solo con opt-in compile-time.
+    uses_prometheus_export: bool,
     /// Fase 12.8: `true` si el programa usa feature flags (`@flag(...)`,
     /// builtin `flag(...)`, módulo `flags.X(...)`). Habilita emisión
     /// del preludio `__FitzFlagRegistry` + helpers + el init call
@@ -6450,6 +6512,7 @@ impl<'a> CodegenCtx<'a> {
             uses_jobs: false,
             uses_logging: false,
             uses_trace_metric: false,
+            uses_prometheus_export: false,
             uses_flags: false,
             flag_defaults: std::collections::BTreeMap::new(),
             uses_db: false,
@@ -7986,10 +8049,18 @@ impl __FitzRetryConfig {
     /// (`__fitz_init_prometheus` + `__fitz_prometheus_route` +
     /// `__FITZ_PROMETHEUS_HANDLE` static). Paralelo bit-a-bit a
     /// `crate::observability::{init_prometheus,prometheus_handle}`
-    /// del intérprete. Solo se emite cuando hay HTTP (programas CLI
-    /// puros no exponen `/metrics`).
+    /// del intérprete.
+    ///
+    /// v0.13.1 — gating refinado: solo se emite cuando el programa
+    /// declara `@server(prometheus=true)` explícito. Antes (Tier3
+    /// original) el preludio se emitía con cualquier HTTP para
+    /// habilitar el path env var `FITZ_PROMETHEUS=1` en runtime,
+    /// pero el smoke `compile_e2e` pagaba el cold-compile de
+    /// `metrics-exporter-prometheus` en ~290 ejemplos. Trade-off:
+    /// el env var override deja de funcionar — production
+    /// deployments declaran Prometheus en código.
     fn emit_prometheus_prelude(&mut self) {
-        if !self.has_http {
+        if !self.has_http || !self.uses_prometheus_export {
             return;
         }
         self.emit(PROMETHEUS_PRELUDE);
@@ -26957,16 +27028,23 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // user (incluso antes de los handlers HTTP / cron / state).
         // No-op si `uses_logging == false`.
         self.emit_log_init_call();
-        // Fase 12.3.iter2.Tier3 — init del recorder Prometheus si el
-        // compile-time flag (`@server(prometheus=true)`) o el env var
-        // (`FITZ_PROMETHEUS=1`) lo piden. El gate dual queda dentro
-        // del helper para paridad bit-a-bit con el runtime intérprete.
-        writeln!(
-            &mut self.output,
-            "    __fitz_init_prometheus({});",
-            cfg.prometheus_enabled
-        )
-        .unwrap();
+        // v0.13.1 — init del recorder Prometheus solo se emite cuando
+        // el programa declara `@server(prometheus=true)` literal. El
+        // preludio del helper `__fitz_init_prometheus` está gateado
+        // por el mismo flag en `emit_prometheus_prelude`. Antes (Tier3
+        // original) el init se emitía siempre con HTTP para habilitar
+        // el path env var `FITZ_PROMETHEUS=1` en runtime; ese path
+        // queda eliminado en v0.13.1 para que `metrics-exporter-prometheus`
+        // no se linkee en programas que no usan Prometheus (cierre de
+        // la deuda "Smoke gating de deps emitidas").
+        if self.uses_prometheus_export {
+            writeln!(
+                &mut self.output,
+                "    __fitz_init_prometheus({});",
+                cfg.prometheus_enabled
+            )
+            .unwrap();
+        }
         // Emitimos los main_stmts que NO son state (no están en
         // state_var_types). Los que sí son state ya viven en
         // thread_local — re-emitirlos como locales acá sería redundante.
@@ -27195,13 +27273,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             )
             .unwrap();
         }
-        // Fase 12.3.iter2.Tier3 — auto-mount /metrics si el handle está
-        // instalado (runtime check). El gate dual ya quedó codificado en
-        // `__fitz_prometheus_should_init` que `gen_http_main` invocó
-        // ANTES de construir el Router, así que cuando llegamos acá el
-        // handle ya está o no según corresponda. Mismo patrón que /docs/
-        // healthz: si el user declaró su propio @get("/metrics"), gana.
-        if !user_paths.contains("/metrics") {
+        // v0.13.1 — auto-mount /metrics SOLO cuando el programa
+        // declara `@server(prometheus=true)` literal. El helper
+        // `__fitz_prometheus_route()` ya no existe en el código
+        // generado sin opt-in (cierre de la deuda "Smoke gating de
+        // deps emitidas"). Si el user declaró su propio @get("/metrics"),
+        // gana — mismo patrón que /docs/healthz.
+        if self.uses_prometheus_export && !user_paths.contains("/metrics") {
             self.emit_indent();
             self.emit("    .merge(__fitz_prometheus_route())\n");
         }
@@ -32980,6 +33058,7 @@ mod tests {
         // feature `time` (sin axum).
         let toml = cargo_toml_for(
             "foo", false, true, false, false, false, false, false, false, false, false, false,
+            false,
         );
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
@@ -32989,7 +33068,7 @@ mod tests {
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
         let toml = cargo_toml_for(
-            "foo", true, true, false, false, false, false, false, false, false, false, false,
+            "foo", true, true, false, false, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
@@ -33000,6 +33079,7 @@ mod tests {
     fn cargo_toml_sin_async_sin_http_es_minimal() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false,
         );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
@@ -33019,6 +33099,7 @@ mod tests {
         // tracing + tracing-subscriber + chrono + serde_json.
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, true, false, false, false, false,
+            false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -33052,7 +33133,7 @@ mod tests {
         // uses_logging + uses_jobs ambos true → chrono solo se emite
         // una vez (lo emite jobs_lines; logging_lines lo skipea).
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, true, true, false, false, false, false,
+            "foo", false, false, false, false, false, true, true, false, false, false, false, false,
         );
         let count_chrono = toml.matches("chrono = ").count();
         assert!(
@@ -33067,6 +33148,7 @@ mod tests {
     fn cargo_toml_sin_logging_no_incluye_tracing() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false,
         );
         assert!(
             !toml.contains("tracing"),
@@ -33079,7 +33161,7 @@ mod tests {
     fn cargo_toml_logging_con_http_no_duplica_serde_json() {
         // HTTP ya trae serde_json; logging_lines NO debe duplicar.
         let toml = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false, false,
         );
         let count = toml.matches("serde_json = ").count();
         assert!(
@@ -33101,6 +33183,7 @@ mod tests {
         // si `uses_logging`).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, true, false, false, false,
+            false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -33123,6 +33206,7 @@ mod tests {
     fn cargo_toml_sin_trace_metric_no_incluye_tracing_ni_metrics() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false,
         );
         assert!(!toml.contains("tracing"), "no debería incluir tracing");
         assert!(!toml.contains("metrics"), "no debería incluir metrics");
@@ -33345,13 +33429,60 @@ mod tests {
     }
 
     #[test]
-    fn tier3_codegen_http_emite_prometheus_prelude_y_init_call_falso_por_default() {
-        // Fase 12.3.iter2.Tier3 — programas HTTP siempre traen el
-        // PROMETHEUS_PRELUDE (handle + init + route) para habilitar el
-        // dual gate (compile-time flag + env var FITZ_PROMETHEUS). Sin
-        // `@server(prometheus=true)`, el init se llama con `false` y
-        // sin env var el recorder no se instala.
+    fn tier3_codegen_http_sin_prometheus_no_emite_prelude_ni_dep() {
+        // v0.13.1 — gating refinado del deuda "Smoke gating de deps
+        // emitidas". Programas HTTP SIN `@server(prometheus=true)`
+        // literal NO traen el PROMETHEUS_PRELUDE ni la dep
+        // `metrics-exporter-prometheus`. Antes (Tier3 original) el
+        // preludio se emitía siempre con has_http para habilitar el
+        // path env var `FITZ_PROMETHEUS=1` en runtime, pero el smoke
+        // compile_e2e pagaba el cold-compile de la dep en ~290
+        // ejemplos. Trade-off: el env var override deja de
+        // funcionar — production deployments declaran Prometheus
+        // en código.
         let src = "@get(\"/x\")\nfn h() -> Str => \"ok\"\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            !code.contains("__FITZ_PROMETHEUS_HANDLE"),
+            "NO debería emitir static __FITZ_PROMETHEUS_HANDLE sin opt-in: {}",
+            code
+        );
+        assert!(
+            !code.contains("fn __fitz_init_prometheus("),
+            "NO debería emitir helper __fitz_init_prometheus sin opt-in: {}",
+            code
+        );
+        assert!(
+            !code.contains("__fitz_prometheus_route"),
+            "NO debería emitir __fitz_prometheus_route sin opt-in: {}",
+            code
+        );
+        // Cargo.toml emitido (uses_prometheus_export=false) NO incluye la dep.
+        // Args: (stem, has_http, uses_async, uses_python, uses_auth,
+        // uses_ws, uses_jobs, uses_logging, uses_trace_metric,
+        // uses_db, uses_fitz_value, uses_date_or_uuid,
+        // uses_prometheus_export).
+        let cargo = cargo_toml_for(
+            "foo", true, false, false, false, false, false, true, false, false, false, false, false,
+        );
+        assert!(
+            !cargo.contains("metrics-exporter-prometheus"),
+            "Cargo.toml NO debe incluir metrics-exporter-prometheus sin opt-in: {}",
+            cargo
+        );
+    }
+
+    #[test]
+    fn tier3_codegen_http_con_prometheus_true_emite_prelude_y_dep() {
+        // v0.13.1 — gating refinado. Con `@server(prometheus=true)`
+        // literal el codegen emite TODO el preludio Prometheus
+        // (handle + init + route) + la dep `metrics-exporter-prometheus`
+        // al Cargo.toml. El compile-time flag dispara
+        // `__fitz_init_prometheus(true)` que instala el recorder al
+        // boot; el `__fitz_prometheus_route()` mounta `/metrics`
+        // sobre el axum Router.
+        let src =
+            "@server(3000, prometheus=true)\nfn cfg() => 0\n@get(\"/x\")\nfn h() -> Str => \"ok\"\n";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
         assert!(
             code.contains("__FITZ_PROMETHEUS_HANDLE"),
@@ -33364,45 +33495,67 @@ mod tests {
             code
         );
         assert!(
-            code.contains("__fitz_init_prometheus(false);"),
-            "esperaba init call con false (default sin @server(prometheus=true)): {}",
+            code.contains("__fitz_init_prometheus(true);"),
+            "esperaba init call con true: {}",
             code
         );
-        // El sub-Router con /metrics se merge sin condicional — el
-        // helper retorna empty Router si el handle no está instalado.
         assert!(
             code.contains(".merge(__fitz_prometheus_route())"),
             "esperaba .merge(__fitz_prometheus_route()) en el Router: {}",
             code
         );
-    }
-
-    #[test]
-    fn tier3_codegen_http_con_prometheus_true_emite_init_call_true() {
-        // Con `@server(prometheus=true)`, el compile-time flag dispara
-        // `__fitz_init_prometheus(true)`. El runtime instala el
-        // recorder + el `__fitz_prometheus_route()` mounta `/metrics`.
-        let src =
-            "@server(3000, prometheus=true)\nfn cfg() => 0\n@get(\"/x\")\nfn h() -> Str => \"ok\"\n";
-        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
-        assert!(
-            code.contains("__fitz_init_prometheus(true);"),
-            "esperaba init call con true: {}",
-            code
-        );
-        // Cargo.toml debe incluir la dep cuando has_http + uses_logging.
+        // Cargo.toml emitido (uses_prometheus_export=true) incluye la dep.
         // Args: (stem, has_http, uses_async, uses_python, uses_auth,
-        // uses_ws, uses_jobs, uses_logging, uses_db, uses_fitz_value,
-        // uses_date_or_uuid). En el codegen real `uses_logging`
-        // auto-promueve a true cuando `has_http` es true.
+        // uses_ws, uses_jobs, uses_logging, uses_trace_metric,
+        // uses_db, uses_fitz_value, uses_date_or_uuid,
+        // uses_prometheus_export).
         let cargo = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false, true,
         );
         assert!(
             cargo.contains("metrics-exporter-prometheus"),
-            "Cargo.toml HTTP debe incluir metrics-exporter-prometheus: {}",
+            "Cargo.toml HTTP+Prometheus debe incluir metrics-exporter-prometheus: {}",
             cargo
         );
+    }
+
+    #[test]
+    fn v0_13_1_program_uses_prometheus_export_detecta_kwarg_true() {
+        // v0.13.1 — el detector pure-function devuelve true cuando
+        // alguna fn top-level tiene `@server(prometheus=true)`
+        // literal. Tolerante a otros kwargs en el decorator.
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        let src =
+            "@server(3000, prometheus=true)\nfn cfg() => 0\n@get(\"/x\")\nfn h() -> Str => \"ok\"\n";
+        let tokens = tokenize(src).expect("tokenize ok");
+        let program = parse(tokens).expect("parse ok");
+        assert!(
+            program_uses_prometheus_export(&program),
+            "esperaba true sobre @server(prometheus=true)"
+        );
+    }
+
+    #[test]
+    fn v0_13_1_program_uses_prometheus_export_no_dispara_sin_kwarg() {
+        // Programa HTTP sin `@server(prometheus=...)` o con `false`
+        // explícito NO dispara el detector.
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        for src in [
+            "@get(\"/x\")\nfn h() -> Str => \"ok\"\n",
+            "@server(3000)\nfn cfg() => 0\n@get(\"/x\")\nfn h() -> Str => \"ok\"\n",
+            "@server(3000, prometheus=false)\nfn cfg() => 0\n@get(\"/x\")\nfn h() -> Str => \"ok\"\n",
+            "@server(3000, observability=true)\nfn cfg() => 0\n",
+        ] {
+            let tokens = tokenize(src).expect("tokenize ok");
+            let program = parse(tokens).expect("parse ok");
+            assert!(
+                !program_uses_prometheus_export(&program),
+                "NO debería disparar sobre: {}",
+                src
+            );
+        }
     }
 
     #[test]
@@ -33474,7 +33627,7 @@ mod tests {
         // uses_date_or_uuid). HTTP + logging activos disparan el bloque
         // que emite las deps OTel + metrics + uuid + chrono + tracing.
         let cargo = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false, false,
         );
         assert!(
             cargo.contains("opentelemetry-otlp"),
@@ -33540,6 +33693,7 @@ mod tests {
         // con `abi3-py310` + `auto-initialize`.
         let toml = cargo_toml_for(
             "foo", false, false, true, false, false, false, false, false, false, false, false,
+            false,
         );
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
@@ -33558,7 +33712,7 @@ mod tests {
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
         let toml = cargo_toml_for(
-            "foo", true, false, true, false, false, false, false, false, false, false, false,
+            "foo", true, false, true, false, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
@@ -33569,6 +33723,7 @@ mod tests {
     fn cargo_toml_sin_python_no_incluye_pyo3() {
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, false, false, false, false, false,
+            false,
         );
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
@@ -38799,6 +38954,7 @@ mod tests {
     fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
+            false,
         );
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
@@ -38812,6 +38968,7 @@ mod tests {
         // Cron-only mode necesita `signal` para ctrl_c.
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
+            false,
         );
         assert!(
             toml.contains("\"signal\""),
@@ -38828,7 +38985,7 @@ mod tests {
         // propio `tokio::signal::ctrl_c()` dentro de
         // `__fitz_shutdown_signal`, así que necesita feature `signal`.
         let toml = cargo_toml_for(
-            "app", true, false, false, false, false, true, false, false, false, false, false,
+            "app", true, false, false, false, false, true, false, false, false, false, false, false,
         );
         assert!(toml.contains("cron"));
         assert!(
@@ -39478,6 +39635,7 @@ mod tests {
         // existentes).
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, true, false, false,
+            false,
         );
         assert!(
             toml.contains("sha2 = \"0.10\""),
@@ -39532,6 +39690,7 @@ mod tests {
     fn codegen_db_cargo_toml_sin_db_no_suma_deps() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
+            false,
         );
         assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
         assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
@@ -40729,7 +40888,7 @@ mod tests {
         // tanto uses_db como uses_fitz_value. Cargo.toml debe incluir
         // serde_json con preserve_order.
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, false, false, false, true, true, false,
+            "app", false, false, false, false, false, false, false, false, true, true, false, false,
         );
         assert!(
             toml.contains("serde_json"),

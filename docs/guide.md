@@ -12407,16 +12407,28 @@ mismo** que muestra Jaeger/Tempo. Querys cross-pipeline tipo
 ### 33.4. `/metrics` Prometheus opt-in
 
 Para users que prefieren Prometheus scrape sobre OTLP push,
-activá el endpoint con kwarg o env var:
+activá el endpoint con el kwarg `prometheus=true` sobre el
+`@server`:
 
 ```fitz
 @server(3000, prometheus=true)
 fn cfg() => 0
 ```
 
-```bash
-FITZ_PROMETHEUS=1 ./mi-app   # runtime override sin recompilar
-```
+> **Cambio en v0.13.1**: el path env var `FITZ_PROMETHEUS=1`
+> como override en runtime **ya no funciona**. El binario tiene
+> que declarar `@server(prometheus=true)` literal en código —
+> el codegen revisa el AST en compile-time para decidir si
+> linkear o no `metrics-exporter-prometheus`. La razón: la dep
+> + sus transitivos (`prometheus`, `indexmap`, `protobuf`)
+> sumaban ~5 min al smoke `compile_e2e` en CI Linux porque se
+> linkeaba en cualquier programa con HTTP, no solo en los que
+> exportan Prometheus. Trade-off aceptado: production deployments
+> declaran Prometheus en código (es la convención normal de
+> Kubernetes + scrape configs); el env var override era nice-to
+> -have que no justificaba el costo de CI. Ver
+> `docs/deudas-post-5b.md` → "Smoke compile_e2e — gating de
+> deps emitidas" para el detalle técnico.
 
 Cuando activo, Fitz instala `PrometheusBuilder` como recorder
 global del crate `metrics`. Los Counter/Histogram que YA emite
@@ -12733,7 +12745,9 @@ services:
       OTEL_TRACES_SAMPLER_ARG: "0.1"   # 10% sampling
       RUST_LOG: "info"
       FITZ_LOG_FORMAT: "json"
-      FITZ_PROMETHEUS: "1"             # endpoint /metrics activo
+      # Nota: `FITZ_PROMETHEUS=1` ya NO funciona como runtime
+      # override desde v0.13.1. Para activar `/metrics`, declarar
+      # `@server(3000, prometheus=true)` en el código fuente.
 ```
 
 **Limitaciones conocidas de Fase 12.4** (deuda residual visible):
@@ -13303,7 +13317,9 @@ Resumen para deployment:
   `OTEL_SERVICE_NAME` y `OTEL_TRACES_SAMPLER_ARG`, los spans y logs
   van al backend (Jaeger, Tempo, Honeycomb, Datadog, etc.).
 - **Endpoint `/metrics` Prometheus** → activable con
-  `@server(prometheus=true)` o env var `FITZ_PROMETHEUS=1`.
+  `@server(prometheus=true)` literal en código. Desde v0.13.1
+  el path env var `FITZ_PROMETHEUS=1` ya no funciona como
+  override de runtime (ver cap 33.4).
 
 ### 35.5. Dockerfile + compose autogenerados (Fase 12.4)
 
@@ -13407,7 +13423,9 @@ OTEL_SERVICE_NAME=mi-app-prod
 OTEL_TRACES_SAMPLER_ARG=0.1
 RUST_LOG=info
 FITZ_LOG_FORMAT=json
-FITZ_PROMETHEUS=1
+# FITZ_PROMETHEUS=1   # removido en v0.13.1 — Prometheus se
+                     # activa con @server(prometheus=true)
+                     # literal en el código (ver cap 33.4).
 DB_USER=postgres
 DB_PASS=$(openssl rand -hex 32)
 DB_HOST=db
