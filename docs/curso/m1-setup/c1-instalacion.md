@@ -489,6 +489,38 @@ un issue.
 - Estás en la carpeta correcta? `ls` (Linux/macOS) o `dir` (Windows)
   para confirmar que `hola.fitz` aparece.
 
+**GitHub Copilot sugiere sintaxis que no es de Fitz (ej. `\(var)`)**
+
+Copilot conoce miles de lenguajes pero Fitz es nuevo y está poco
+representado en su training. A veces sugiere sintaxis de Swift
+(`print("Hola, \(lugar)!")`), Kotlin o Rust que se "parece" a Fitz
+pero el parser rechaza. La interpolación correcta en Fitz es estilo
+Python f-string / TypeScript template literal: `{var}` directo,
+sin backslash.
+
+```fitz
+// ❌ Sintaxis de Swift (rechazada por Fitz)
+print("Hola, \(lugar)!")
+
+// ✓ Sintaxis correcta de Fitz
+print("Hola, {lugar}!")
+```
+
+Mientras el ecosistema crece y Copilot aprende, lo más simple es
+desactivarlo solo para archivos `.fitz`. Agregá a tu `settings.json`
+de VSCode (`Ctrl+Shift+P` → "Preferences: Open User Settings (JSON)"):
+
+```json
+"github.copilot.enable": {
+  "*": true,
+  "fitz": false
+}
+```
+
+Con esto, Copilot sigue activo en Python/TS/Rust/etc, pero no en
+`.fitz`. El LSP de Fitz cubre highlighting, hover, go-to-definition
+y autocomplete contextual nativo del lenguaje.
+
 ---
 
 ## Lo que viene en C2
