@@ -159,6 +159,14 @@ fn error_to_diagnostic(err: &FitzError, source: Option<&str>) -> Diagnostic {
 /// guarda solo el último escrito — heredado de F16. En la práctica
 /// el tipo del Expr más "grande" suele ser lo que el usuario quiere
 /// ver al hover.
+///
+/// **v0.13.2 — encoding del `character`**: esta función espera
+/// `character` en **chars Unicode del lexer** (no UTF-16 code units
+/// como llegan del cliente LSP). El caller responsable es el backend
+/// del bin (`src/bin/fitz-lsp.rs`), que traduce `position.character`
+/// del cliente con `utf16_to_unicode_char(text, line, char_utf16)`
+/// antes de llamar aquí. Para código sin chars del SMP (todo el código
+/// real en práctica) la traducción es la identidad.
 pub fn hover_for_position(type_info: &TypeInfo, line: u32, character: u32) -> Option<&Type> {
     // LSP 0-based → Fitz 1-based.
     let target_line = (line as usize) + 1;
@@ -267,6 +275,13 @@ fn try_table_create_sql(ty: &Type, env: &TypeEnv, program: &crate::ast::Program)
 /// El span devuelto apunta a la posición de la declaración (1-based
 /// Fitz). El caller lo convierte a `Range` LSP (0-based) vía
 /// `make_definition_location`.
+///
+/// **v0.13.2 — encoding del `character`**: esta función espera
+/// `character` en **chars Unicode del lexer** (no UTF-16 code units
+/// como llegan del cliente LSP). El caller responsable es el backend
+/// del bin (`src/bin/fitz-lsp.rs`), que traduce `position.character`
+/// del cliente con `utf16_to_unicode_char(text, line, char_utf16)`
+/// antes de llamar aquí. Mismo trade-off que `hover_for_position`.
 pub fn definition_for_position(
     def_info: &DefinitionInfo,
     line: u32,
@@ -808,11 +823,21 @@ fn detect_completion_context(text: &str, line: u32, character: u32) -> Option<Co
             if recv_name.starts_with('.') || recv_name.ends_with('.') || recv_name.contains("..") {
                 // No es un chain válido — fallback ScopeLevel.
             } else {
-                let (recv_line_lsp, recv_col_lsp) = offset_to_position(text, j);
+                let (recv_line_lsp, recv_col_lsp_utf16) = offset_to_position(text, j);
+                // v0.13.2 — `offset_to_position` retorna UTF-16 code
+                // units (default LSP), pero el lookup heurístico
+                // contra `TypeInfo` indexa por chars Unicode del
+                // lexer. Traducimos antes de armar el AfterDot. Para
+                // recv_name ASCII (regla del lexer: identificadores
+                // ASCII only) la diferencia solo aparece si la línea
+                // tiene chars SMP ANTES del identifier (raro: comment
+                // con emoji + ident, o string + ident, etc.).
+                let recv_col_unicode =
+                    utf16_to_unicode_char(text, recv_line_lsp, recv_col_lsp_utf16);
                 return Some(CompletionContext::AfterDot {
                     recv_name,
                     recv_line: (recv_line_lsp as usize) + 1,
-                    recv_col: (recv_col_lsp as usize) + 1,
+                    recv_col: (recv_col_unicode as usize) + 1,
                 });
             }
         }
@@ -917,38 +942,46 @@ fn detect_from_import_list_context(text: &str, line: u32, character: u32) -> Opt
 /// bytes dentro del `text`. Devuelve `None` si la posición está más
 /// allá del fin del texto.
 ///
-/// **v0.9.51** — usa **chars Unicode** (equivalente a `len_utf16 ==
-/// 1`) para `character`, alineado con `positionEncoding: "utf-8"`
-/// que el server declara en `capabilities.position_encoding`. El
-/// cliente respeta esa negociación y manda offsets en bytes UTF-8
-/// (chars Unicode para ASCII + BMP; los chars del SMP suman
-/// `len_utf8()` bytes pero el cursor del cliente los cuenta como
-/// 1 unit en UTF-8 también).
+/// **v0.13.2** — cuenta **UTF-16 code units** (default del spec LSP
+/// para `positionEncoding`). El `character` que llega del cliente
+/// VSCode es el offset en UTF-16 code units desde el inicio de la
+/// línea, y esta función lo traduce a byte offset UTF-8 dentro del
+/// texto. Para chars del Supplementary Multilingual Plane (emoji,
+/// símbolos matemáticos avanzados) `ch.len_utf16() == 2` (surrogate
+/// pair); para todo el resto (ASCII + BMP) `len_utf16() == 1`.
 ///
-/// Decisión técnica: mantener consistencia con `TypeEnv`/`TypeInfo`/
-/// `DefinitionInfo` que indexan por chars Unicode 1-based del
-/// lexer (`column += 1` por char no-newline en `lexer.rs::advance`).
-/// Pre-fix asumía implícitamente UTF-8 sin declararlo en capabilities;
-/// clientes que negocian UTF-16 default rompían con multi-byte
-/// chars (emoji, etc.). Post-fix: capability explícita + tests
-/// con multi-byte chars.
+/// Historia: v0.9.51 contaba chars Unicode (equivalente a `len_utf16
+/// == 1`) y el server anunciaba `positionEncoding: utf-8`. Eso se
+/// rompió contra `vscode-languageclient@9.0.1` que hard-codea
+/// `general.positionEncodings = ['utf-16']` (client.js:1370) y
+/// rechaza cualquier encoding del server distinto de `utf-16` en
+/// `client.js:835`. El handshake de la extensión 0.13.1 fallaba con
+/// "Unsupported position encoding (utf-8)" antes de poder hablar
+/// JSON-RPC, dejando la extensión inservible en VSCode fresh. v0.13.2
+/// migra el counting a UTF-16 code units (compatible con cualquier
+/// cliente LSP estándar) y cierra la deuda completa.
+///
+/// Tolerancia: si `character` cae en medio de un surrogate pair
+/// (cliente mal comportado), usamos `>=` para retornar el offset al
+/// final del char inválido en lugar de None. VSCode no genera ese
+/// caso en práctica.
 fn position_to_offset(text: &str, line: u32, character: u32) -> Option<usize> {
     let mut offset = 0usize;
     let mut current_line = 0u32;
-    let mut current_char = 0u32;
+    let mut current_utf16 = 0u32;
     for ch in text.chars() {
-        if current_line == line && current_char == character {
+        if current_line == line && current_utf16 >= character {
             return Some(offset);
         }
         if ch == '\n' {
             current_line += 1;
-            current_char = 0;
+            current_utf16 = 0;
         } else {
-            current_char += 1;
+            current_utf16 += ch.len_utf16() as u32;
         }
         offset += ch.len_utf8();
     }
-    if current_line == line && current_char == character {
+    if current_line == line && current_utf16 >= character {
         return Some(offset);
     }
     None
@@ -956,10 +989,12 @@ fn position_to_offset(text: &str, line: u32, character: u32) -> Option<usize> {
 
 /// Inverso de `position_to_offset` — usado para localizar la posición
 /// LSP de un punto en el texto dado en bytes (típicamente el start de
-/// un receiver para hacer lookup en TypeInfo).
+/// un receiver para hacer lookup en TypeInfo). El `character`
+/// retornado son **UTF-16 code units** (default del spec LSP),
+/// paralelo a `position_to_offset`.
 fn offset_to_position(text: &str, offset: usize) -> (u32, u32) {
     let mut current_line = 0u32;
-    let mut current_char = 0u32;
+    let mut current_utf16 = 0u32;
     let mut current_offset = 0usize;
     for ch in text.chars() {
         if current_offset >= offset {
@@ -967,15 +1002,58 @@ fn offset_to_position(text: &str, offset: usize) -> (u32, u32) {
         }
         if ch == '\n' {
             current_line += 1;
-            current_char = 0;
+            current_utf16 = 0;
         } else {
-            // v0.9.51 — chars Unicode (paralelo a `position_to_offset`,
-            // alineado con `positionEncoding: "utf-8"`).
-            current_char += 1;
+            current_utf16 += ch.len_utf16() as u32;
         }
         current_offset += ch.len_utf8();
     }
-    (current_line, current_char)
+    (current_line, current_utf16)
+}
+
+/// **v0.13.2** — Convierte un `character` LSP del cliente (UTF-16 code
+/// units, default del spec) a chars Unicode 1-based del lexer, dado el
+/// `text` del documento. Necesario porque `TypeInfo` y `DefinitionInfo`
+/// indexan por chars Unicode (`column += 1` por char no-newline en
+/// `lexer.rs::advance`) mientras que el cliente LSP estándar manda
+/// posiciones en UTF-16 code units.
+///
+/// Para ASCII + BMP — todo el código real (identificadores ASCII por
+/// reglas del lexer, strings normales) — `ch.len_utf16() == 1` y esta
+/// función es la identidad. Para chars del Supplementary Multilingual
+/// Plane (emoji, símbolos matemáticos avanzados) donde
+/// `ch.len_utf16() == 2`, "colapsa" el surrogate pair a 1 char Unicode.
+///
+/// Si `char_utf16` cae en medio de un surrogate pair (cliente mal
+/// comportado — VSCode no genera ese caso), retorna el char_unicode al
+/// final del surrogate (la posición "después del char inválido"), que
+/// es lo más útil para el lookup heurístico subsecuente.
+///
+/// Es `pub` porque el backend del bin (`src/bin/fitz-lsp.rs`) la usa
+/// para traducir `position.character` del cliente antes de llamar a
+/// `hover_for_position` / `definition_for_position`, que esperan chars
+/// Unicode del lexer.
+pub fn utf16_to_unicode_char(text: &str, line: u32, char_utf16: u32) -> u32 {
+    let mut current_line = 0u32;
+    let mut current_utf16 = 0u32;
+    let mut current_unicode = 0u32;
+    for ch in text.chars() {
+        if current_line == line && current_utf16 >= char_utf16 {
+            return current_unicode;
+        }
+        if ch == '\n' {
+            if current_line == line {
+                return current_unicode;
+            }
+            current_line += 1;
+            current_utf16 = 0;
+            current_unicode = 0;
+        } else {
+            current_utf16 += ch.len_utf16() as u32;
+            current_unicode += 1;
+        }
+    }
+    current_unicode
 }
 
 /// Caracteres válidos a mitad de un identificador Fitz: alfanuméricos
@@ -3198,6 +3276,43 @@ mod tests {
     }
 
     #[test]
+    fn detect_context_after_dot_traduce_recv_col_con_smp_antes() {
+        // v0.13.2 — comment con emoji + receiver + dot. El cliente
+        // manda cursor en col_utf16 = offset post-`.` en UTF-16.
+        // `detect_completion_context` debe armar AfterDot con recv_col
+        // en chars Unicode (para lookup en TypeInfo del lexer), no
+        // en UTF-16 units. La traducción interna usa el helper
+        // `utf16_to_unicode_char`.
+        //
+        // Texto: `// 🎉 obj.`
+        //   col_unicode: 0  1  2  3      4  5  6  7  8
+        //                /  /     emoji        o  b  j  .
+        //   col_utf16:   0  1  2  3-4    5  6  7  8  9  10
+        //
+        // Cursor justo después del `.` → char_utf16 = 10.
+        // Receiver `obj` empieza en char_unicode = 5 → Fitz 1-based 6.
+        // Sin la traducción interna, daría recv_col = 7 (utf16
+        // post-emoji + 1), que NO matchea el SpanKey del lexer.
+        let text = "// 🎉 obj.";
+        let ctx = detect_completion_context(text, 0, 10).unwrap();
+        match ctx {
+            CompletionContext::AfterDot {
+                recv_name,
+                recv_line,
+                recv_col,
+            } => {
+                assert_eq!(recv_name, "obj");
+                assert_eq!(recv_line, 1);
+                assert_eq!(
+                    recv_col, 6,
+                    "recv_col en chars Unicode 1-based (no UTF-16) post-traducción"
+                );
+            }
+            other => panic!("esperaba AfterDot, dio {other:?}"),
+        }
+    }
+
+    #[test]
     fn detect_context_after_dot_con_prefix_partial() {
         // `obj.fo` con cursor al final → el usuario ya tipeó "fo" del
         // método. El context sigue siendo AfterDot; VSCode filtra por
@@ -3219,27 +3334,51 @@ mod tests {
     // ---- v0.9.51 Mini-tanda J — UTF-8 position + F15 recovery sub-stmt ----
 
     #[test]
-    fn position_to_offset_cuenta_chars_unicode_no_utf16_code_units() {
-        // El cliente respeta la capability `positionEncoding: utf-8`
-        // del server (v0.9.51). Char Unicode = 1 unit en UTF-8.
-        // Caso 1: ASCII puro — col 6 apunta al `=`.
+    fn position_to_offset_cuenta_utf16_code_units_no_chars_unicode() {
+        // v0.13.2 — el server omite `positionEncoding` (default LSP =
+        // UTF-16). `position_to_offset` cuenta UTF-16 code units para
+        // coincidir con lo que VSCode manda.
+        // Caso 1: ASCII puro — col 6 apunta al `=`. Para ASCII,
+        // char_utf16 == char_unicode == byte_offset.
         let text = "let x = 42";
         let offset = position_to_offset(text, 0, 6).expect("offset válido");
         assert_eq!(&text[offset..offset + 1], "=", "col 6 en ASCII → `=`");
-        // Caso 2: con emoji 😀 (4 bytes UTF-8, 2 code units UTF-16, 1 char
-        // Unicode). El comentario empieza en col 0 = `/`, el emoji en col
-        // 3. Sumar 1 al cursor pasa por el emoji entero (NO 2).
+        // Caso 2: con emoji 😀 (4 bytes UTF-8, 2 UTF-16 code units, 1 char
+        // Unicode). El comentario empieza en col_utf16 0 = `/`, `/` en
+        // col_utf16 1, ` ` en col_utf16 2, emoji ocupa col_utf16 3-4
+        // (surrogate pair), ` ` en col_utf16 5.
         let text = "// 😀 hola";
-        let offset = position_to_offset(text, 0, 4).expect("offset válido tras emoji");
-        // Tras `// `, el emoji ocupa 1 char Unicode pero 4 bytes UTF-8.
-        // Cursor en col 4 (post-emoji) → byte offset = 3 + 4 = 7.
-        assert_eq!(offset, 7, "offset esperado tras emoji = 7 bytes UTF-8");
+        // Cursor en col_utf16 5 (justo después del emoji + espacio) →
+        // byte offset = `// ` (3) + emoji UTF-8 (4) = 7.
+        let offset = position_to_offset(text, 0, 5).expect("offset válido tras emoji");
+        assert_eq!(
+            offset, 7,
+            "offset esperado tras emoji + espacio = 7 bytes UTF-8 (col_utf16 5)"
+        );
+        // Cursor en col_utf16 3 (inicio del surrogate pair del emoji) →
+        // byte offset = 3 (justo después del `// `, sobre el emoji).
+        let offset = position_to_offset(text, 0, 3).expect("offset válido sobre el emoji");
+        assert_eq!(offset, 3, "col_utf16 3 = inicio del emoji → byte offset 3");
     }
 
     #[test]
-    fn offset_to_position_cuenta_chars_unicode_paralelo_a_position_to_offset() {
-        // Round-trip: offset → position → offset debe devolver el mismo
-        // offset (siempre que el offset esté en char boundary).
+    fn position_to_offset_tolera_mid_surrogate() {
+        // v0.13.2 — si el cliente manda position en medio de un
+        // surrogate pair (col_utf16 == 4 dentro de "// 😀"), nuestro
+        // counting usa `>=` y retorna el offset al FINAL del char
+        // inválido. Cliente bien comportado (VSCode) no genera ese
+        // caso, pero queremos tolerancia defensiva en lugar de None.
+        let text = "// 😀 hola";
+        // col_utf16 4 = medio del surrogate pair. Después del emoji
+        // (que termina en col_utf16 5), el offset bytes es 7.
+        let offset = position_to_offset(text, 0, 4).expect("mid-surrogate tolera con >=");
+        assert_eq!(offset, 7, "mid-surrogate → offset post-emoji");
+    }
+
+    #[test]
+    fn offset_to_position_cuenta_utf16_paralelo_a_position_to_offset() {
+        // Round-trip: offset → position (UTF-16) → offset debe devolver
+        // el mismo offset (siempre que el offset esté en char boundary).
         let text = "let x = 1\nlet y: Str = \"😀\"\n";
         let original_offset = text.find('y').unwrap();
         let (line, character) = offset_to_position(text, original_offset);
@@ -3248,6 +3387,77 @@ mod tests {
             recovered, original_offset,
             "round-trip offset → position → offset debe ser idempotente"
         );
+    }
+
+    #[test]
+    fn offset_to_position_emoji_retorna_utf16_units() {
+        // v0.13.2 — `offset_to_position` retorna char_utf16 (no
+        // char_unicode). Para `"🎉a"`, offset del `a` (byte 4) debe
+        // retornar (0, 2) porque 🎉 ocupa 2 UTF-16 units.
+        let text = "🎉a";
+        let offset_a = text.find('a').unwrap();
+        let (line, character) = offset_to_position(text, offset_a);
+        assert_eq!(line, 0, "misma línea");
+        assert_eq!(character, 2, "`a` está en char_utf16 2 (post-emoji)");
+    }
+
+    #[test]
+    fn utf16_to_unicode_char_identidad_para_ascii() {
+        // Para ASCII puro, char_utf16 == char_unicode.
+        let text = "let x = 42";
+        for col_utf16 in [0u32, 4, 6, 9, 10] {
+            assert_eq!(
+                utf16_to_unicode_char(text, 0, col_utf16),
+                col_utf16,
+                "ASCII puro: utf16 {col_utf16} → unicode {col_utf16}",
+            );
+        }
+    }
+
+    #[test]
+    fn utf16_to_unicode_char_colapsa_smp() {
+        // Para chars del Supplementary Multilingual Plane (emoji),
+        // 1 char Unicode = 2 UTF-16 code units. El helper colapsa.
+        let text = "// 🎉 hola";
+        // Mapeo esperado:
+        //   col_unicode: 0  1  2  3      4  5  6  7  8  9
+        //                /  /     emoji        h  o  l  a
+        //   col_utf16:   0  1  2  3-4    5  6  7  8  9  10
+        assert_eq!(
+            utf16_to_unicode_char(text, 0, 0),
+            0,
+            "col_utf16 0 → unicode 0"
+        );
+        assert_eq!(
+            utf16_to_unicode_char(text, 0, 3),
+            3,
+            "inicio emoji surrogate"
+        );
+        assert_eq!(
+            utf16_to_unicode_char(text, 0, 5),
+            4,
+            "post-emoji → unicode 4"
+        );
+        assert_eq!(
+            utf16_to_unicode_char(text, 0, 10),
+            9,
+            "fin de línea → unicode 9"
+        );
+    }
+
+    #[test]
+    fn utf16_to_unicode_char_multilinea() {
+        // Cada línea resetea el contador.
+        let text = "🎉\nlet x = 42";
+        // Línea 0: solo el emoji (utf16 0..2, unicode 0..1).
+        assert_eq!(
+            utf16_to_unicode_char(text, 0, 2),
+            1,
+            "fin línea 0 post-emoji"
+        );
+        // Línea 1: ASCII puro.
+        assert_eq!(utf16_to_unicode_char(text, 1, 4), 4, "línea 1, col_utf16 4");
+        assert_eq!(utf16_to_unicode_char(text, 1, 0), 0, "línea 1, col_utf16 0");
     }
 
     #[test]

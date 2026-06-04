@@ -25,8 +25,8 @@ use tower_lsp::lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, MessageType, OneOf, PositionEncodingKind,
-    ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    InitializeResult, InitializedParams, MessageType, OneOf, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -35,6 +35,7 @@ use fitz::lsp::{
     check_source_with_types, completion_at_position_with_uri, definition_for_position,
     fitz_errors_to_diagnostics_with_source, hover_for_position,
     make_definition_location_with_source, make_hover_with_range, resolve_cross_module_definition,
+    utf16_to_unicode_char,
 };
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
@@ -111,17 +112,36 @@ impl LanguageServer for Backend {
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
             capabilities: ServerCapabilities {
-                // v0.9.51 — declaramos `positionEncoding: utf-8` (en
-                // lugar del default UTF-16 del spec LSP). Razón:
-                // mantener consistencia con `TypeEnv`/`TypeInfo`/
-                // `DefinitionInfo` que indexan por chars Unicode
-                // 1-based del lexer (`column += 1` por char no-newline
-                // en `lexer.rs::advance`). Antes asumíamos
-                // implícitamente UTF-8 sin declararlo — clientes que
-                // negociaban UTF-16 default rompían con multi-byte
-                // chars (emoji, símbolos matemáticos). VSCode + tower-lsp
-                // soportan utf-8 desde LSP 3.17 (2022).
-                position_encoding: Some(PositionEncodingKind::UTF8),
+                // v0.13.2 — omitimos `position_encoding` para que el
+                // cliente asuma el default UTF-16 del spec LSP. El
+                // intento de v0.9.51 de anunciar `utf-8` se rompió
+                // contra `vscode-languageclient@9.0.1`, que hard-codea
+                // `generalCapabilities.positionEncodings = ['utf-16']`
+                // (client.js:1370) y rechaza cualquier encoding del
+                // server distinto de `utf-16` o `undefined`
+                // (client.js:835). El handshake fallaba con
+                // "Unsupported position encoding (utf-8)" antes de
+                // poder hablar JSON-RPC, dejando la extensión 0.13.1
+                // inservible en VSCode fresh.
+                //
+                // Migración completa: `position_to_offset` /
+                // `offset_to_position` en `src/lsp.rs` ahora cuentan
+                // UTF-16 code units (vía `ch.len_utf16()`) para
+                // coincidir con el spec. Para el lookup en
+                // `TypeInfo` / `DefinitionInfo` que sigue indexado
+                // por chars Unicode del lexer, los handlers `hover` /
+                // `goto_definition` traducen `pos.character` con
+                // `utf16_to_unicode_char(text, line, char_utf16)`
+                // antes de llamar a `hover_for_position` /
+                // `definition_for_position`. Soporta chars del
+                // Supplementary Multilingual Plane (emoji, símbolos
+                // matemáticos avanzados) sin off-by-one. Deuda
+                // residual cosmética: `make_definition_location` y
+                // `ident_range_from_def` retornan Range LSP en chars
+                // Unicode en lugar de UTF-16 — pero como las líneas
+                // de def son siempre ASCII en la parte ANTES del
+                // ident (keywords + identifiers son ASCII por reglas
+                // del lexer), char_unicode == char_utf16 en práctica.
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
@@ -208,10 +228,18 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
+        // v0.13.2 — `pos.character` llega del cliente como UTF-16
+        // code units (default del spec LSP). `hover_for_position` y
+        // `make_hover_with_range` esperan chars Unicode (TypeInfo
+        // indexa por chars del lexer, `ident_range_at_position` usa
+        // `Vec<char>`). Traducimos una vez con el helper y pasamos
+        // el char_unicode a ambas. Para código sin SMP (todo en la
+        // práctica) la traducción es la identidad.
+        let char_unicode = utf16_to_unicode_char(&state.text, pos.line, pos.character);
         // LSPy — hover con Range del símbolo bajo el cursor para
         // que VSCode highlightee el token en lugar de solo mostrar
         // el tooltip aislado.
-        let hover = hover_for_position(&state.type_info, pos.line, pos.character).map(|ty| {
+        let hover = hover_for_position(&state.type_info, pos.line, char_unicode).map(|ty| {
             // v0.10.32 (Tier D.2) — pasamos `program` para que el LSP
             // pueda augmentar el hover con el CREATE TABLE SQL si el
             // tipo es un `@table` type.
@@ -221,7 +249,7 @@ impl LanguageServer for Backend {
                 &state.program,
                 &state.text,
                 pos.line,
-                pos.character,
+                char_unicode,
             )
         });
         Ok(hover)
@@ -245,15 +273,19 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        let Some(def_span) = definition_for_position(&state.def_info, pos.line, pos.character)
+        // v0.13.2 — traducimos UTF-16 → chars Unicode una vez (mismo
+        // motivo que en `hover`). `definition_for_position` busca en
+        // DefinitionInfo indexado por chars Unicode del lexer;
+        // `ident_under_cursor` usa `Vec<char>` y `char_idx` directo.
+        let char_unicode = utf16_to_unicode_char(&state.text, pos.line, pos.character);
+        let Some(def_span) = definition_for_position(&state.def_info, pos.line, char_unicode)
         else {
             return Ok(None);
         };
         // Intentar cross-module resolution si el def_span coincide con
         // un Stmt::Import / Stmt::FromImport del program. Extraemos el
         // nombre del ident bajo el cursor de la línea del documento.
-        let target_name =
-            ident_under_cursor(&state.text, pos.line as usize, pos.character as usize);
+        let target_name = ident_under_cursor(&state.text, pos.line as usize, char_unicode as usize);
         let cross = target_name
             .as_deref()
             .and_then(|name| resolve_cross_module_definition(&state.program, &uri, def_span, name));

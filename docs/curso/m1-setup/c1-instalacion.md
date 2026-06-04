@@ -417,6 +417,58 @@ límite. Soluciones:
   al PATH del User pero la terminal abierta no lo ve hasta
   cerrar y reabrir.
 
+**Windows: `vcruntime140.dll no se encuentra` al correr `fitz` o crash
+del LSP**
+
+Síntomas:
+
+- `fitz --version` falla con un popup "no se encuentra
+  vcruntime140.dll".
+- La extensión VSCode reporta "Fitz Language Server crashed N times" +
+  "couldn't create connection to server" + "Server initialization
+  failed".
+
+Causa: los binarios `fitz.exe` y `fitz-lsp.exe` están compilados con
+la toolchain MSVC de Rust y dynamic-linkean contra el runtime de
+Visual C++. En Windows fresh (sin Visual Studio ni apps que lo
+traigan) el DLL falta y los dos binarios se caen al instante. El LSP
+muere antes de poder hablar con VSCode, por eso el cliente ve
+"couldn't create connection".
+
+Fix: instalá el **Microsoft Visual C++ Redistributable (x64)** desde
+Microsoft (gratuito, ~15 MB, no requiere restart):
+
+https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+Después:
+
+1. Abrí una terminal nueva, probá `fitz --version`.
+2. En VSCode: `Ctrl+Shift+P` → "Developer: Reload Window".
+3. Abrí cualquier `.fitz` y verificá highlighting + hover.
+
+**Extensión 0.13.1: `Unsupported position encoding (utf-8)` (fixed en
+0.13.2)**
+
+Síntoma (solo en 0.13.1):
+
+```
+[Error] Server initialization failed.
+Error: Unsupported position encoding (utf-8) received from server
+Fitz Language Server
+```
+
+Esto era un bug del LSP server: anunciaba `positionEncoding: utf-8`
+en su handshake `initialize`, pero `vscode-languageclient@9` solo
+acepta `utf-16` por default y rechazaba la conexión antes de hablar
+JSON-RPC. **El binario `fitz.exe` no estaba afectado** — `fitz run`,
+`fitz build`, `fitz check` funcionaban normal; solo se rompía la
+extensión VSCode.
+
+Fix: actualizá a **0.13.2 o superior**. Bajá el `.vsix` nuevo del
+[release de GitHub](https://github.com/Thegreekman76/fitz/releases) y
+reinstalá la extensión. Si estás en 0.13.2+ y ves este error, abrí
+un issue.
+
 **La extensión está instalada pero no hay highlighting**
 
 - Verificá que el archivo terminó en `.fitz` (la extensión se activa

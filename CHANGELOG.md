@@ -11,6 +11,94 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.13.2] — 2026-06-04 — Bugfix LSP: positionEncoding UTF-16 (extensión 0.13.1 inservible)
+
+**Bug crítico** descubierto durante el curso M1.C1: la extensión
+VSCode 0.13.1 no podía conectarse al language server en VSCode
+fresh. Síntoma reportado por el usuario:
+
+```
+Error: Unsupported position encoding (utf-8) received from server
+Fitz Language Server
+[Error] The Fitz Language Server crashed 5 times in 3 minutes.
+```
+
+**Causa**: v0.9.51 declaró `position_encoding: utf-8` en
+`capabilities` del initialize response del server. El cliente
+`vscode-languageclient@9.0.1` hard-codea
+`generalCapabilities.positionEncodings = ['utf-16']` en
+`client.js:1370` y rechaza cualquier encoding del server distinto
+de `utf-16` o `undefined` en `client.js:835`. El handshake fallaba
+ANTES de poder hablar JSON-RPC. El binario `fitz.exe` no estaba
+afectado — `fitz run`/`build`/`check` funcionaban normal; solo
+rompía la extensión.
+
+**Fix completo** (Opción B — no quedó deuda):
+
+- **Server**: omite `position_encoding` en `capabilities`
+  (`src/bin/fitz-lsp.rs:124`). Cliente asume UTF-16 default.
+- **`position_to_offset` / `offset_to_position`** (`src/lsp.rs`):
+  migrados de contar chars Unicode a contar **UTF-16 code units**
+  vía `ch.len_utf16()`. Tolerancia defensiva con `>=` para
+  cliente mal comportado que mande position en medio de surrogate
+  pair (VSCode no genera ese caso pero queremos defensa).
+- **Helper nuevo `utf16_to_unicode_char(text, line, char_utf16) -> u32`**
+  (pub, exportado): traduce el `character` del cliente (UTF-16)
+  a chars Unicode 1-based del lexer. Necesario porque
+  `TypeInfo`/`DefinitionInfo` siguen indexados por chars Unicode
+  (`lexer.rs::advance` cuenta así).
+- **Handlers del backend** (`src/bin/fitz-lsp.rs`): `hover` y
+  `goto_definition` traducen `pos.character` con el helper antes
+  de llamar a `hover_for_position` / `definition_for_position` /
+  `ident_under_cursor`.
+- **`detect_completion_context`**: traduce `recv_col` interno
+  después de `offset_to_position` antes de armar
+  `CompletionContext::AfterDot`, así el lookup en TypeInfo (que
+  indexa por chars Unicode) funciona cuando hay SMP en la línea
+  antes del receiver.
+
+**Tests nuevos** (`src/lsp.rs::tests`):
+
+- `position_to_offset_cuenta_utf16_code_units_no_chars_unicode`
+  (reemplaza al test legacy `position_to_offset_cuenta_chars_unicode_no_utf16_code_units`).
+- `position_to_offset_tolera_mid_surrogate`.
+- `offset_to_position_emoji_retorna_utf16_units`.
+- `utf16_to_unicode_char_identidad_para_ascii`.
+- `utf16_to_unicode_char_colapsa_smp`.
+- `utf16_to_unicode_char_multilinea`.
+- `detect_context_after_dot_traduce_recv_col_con_smp_antes`.
+
+Soporta chars del Supplementary Multilingual Plane (emoji,
+símbolos matemáticos avanzados) sin off-by-one en hover/
+definition/completion. **Deuda "UTF-16 position strict" CERRADA
+completa** (no se re-abre).
+
+**Deuda residual cosmética** (NO afecta navegación funcional):
+
+- `make_definition_location` y `ident_range_from_def` retornan
+  `Range` LSP con char en chars Unicode (no UTF-16). En la
+  práctica char_unicode == char_utf16 en líneas de def porque
+  keywords + identifiers son ASCII por reglas del lexer. Solo
+  difiere si hay SMP en la parte ANTES del identifier (raro:
+  comment con emoji + un `let` en la misma línea, lo cual no es
+  sintaxis válida porque `//` desencadena comentario hasta fin de
+  línea).
+
+**Docs**:
+
+- Cap C1 del curso M1 (`docs/curso/m1-setup/c1-instalacion.md`)
+  suma DOS entradas de troubleshooting:
+  - `vcruntime140.dll no se encuentra` (VC++ Redistributable) —
+    afecta tanto `fitz.exe` como `fitz-lsp.exe` en Windows
+    fresh.
+  - `Unsupported position encoding (utf-8)` — bug específico
+    de 0.13.1, fix en 0.13.2, instruye actualizar.
+
+**Tests al cierre v0.13.2**: 3121 lib tests (+8 vs v0.13.1: 7
+nuevos del UTF-16 + 1 invertido) + 112 LSP + 360 compile_e2e + 3
+openapi. `cargo fmt --all --check` + `cargo clippy --lib --tests
+--bins --features lsp -- -D warnings` limpios.
+
 ## [v0.13.1] — 2026-06-04 — Smoke gating de deps emitidas (deuda boring cerrada)
 
 **Cierre de la deuda residual "Smoke compile_e2e — gating de deps

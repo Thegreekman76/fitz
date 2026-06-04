@@ -9947,6 +9947,77 @@ cambios (decorators caen bajo `@<ident>` genérico).
 para deploy targets `fly`/`railway`/`k8s`). Sin presión
 inmediata.
 
+### v0.13.2 (2026-06-04) — Bugfix LSP: positionEncoding UTF-16 (extensión 0.13.1 inservible)
+
+Bug crítico descubierto durante el curso M1.C1 reportado por un
+usuario haciendo la instalación: la extensión VSCode 0.13.1 no
+podía conectarse al language server en VSCode fresh con error
+`Unsupported position encoding (utf-8)` y la frase "Fitz Language
+Server crashed 5 times in 3 minutes".
+
+**Causa**: v0.9.51 declaró `position_encoding: utf-8` en
+`capabilities` del initialize response. El cliente
+`vscode-languageclient@9.0.1` hard-codea
+`generalCapabilities.positionEncodings = ['utf-16']`
+(`client.js:1370`) y rechaza cualquier encoding distinto de
+`utf-16`/`undefined` (`client.js:835`). Handshake fallaba antes
+de poder hablar JSON-RPC. El binario `fitz.exe` no estaba
+afectado — `fitz run`/`build`/`check` funcionaban normal; solo
+rompía la extensión.
+
+**Fix completo** (Opción B — sin deuda residual):
+
+- Server omite `position_encoding` (default LSP = UTF-16).
+- `position_to_offset` / `offset_to_position` (`src/lsp.rs`)
+  migrados de contar chars Unicode a UTF-16 code units vía
+  `ch.len_utf16()`. Tolerancia defensiva con `>=` para
+  mid-surrogate de cliente mal comportado (VSCode no genera
+  ese caso).
+- Helper nuevo `utf16_to_unicode_char(text, line, char_utf16) -> u32`
+  (pub) traduce el `character` del cliente a chars Unicode
+  1-based del lexer. Necesario porque `TypeInfo` /
+  `DefinitionInfo` siguen indexados por chars Unicode (heredado
+  de F16 + `lexer.rs::advance`).
+- Backend handlers (`fitz-lsp.rs`): `hover` y `goto_definition`
+  traducen `pos.character` con el helper antes de llamar a
+  `hover_for_position` / `definition_for_position` /
+  `ident_under_cursor` / `make_hover_with_range`.
+- `detect_completion_context` traduce `recv_col` interno post-
+  `offset_to_position` antes de armar
+  `CompletionContext::AfterDot`, así el lookup en TypeInfo
+  funciona aunque haya SMP en la línea antes del receiver.
+
+**Tests nuevos** (`src/lsp.rs::tests`): 7 tests nuevos (el viejo
+`position_to_offset_cuenta_chars_unicode_no_utf16_code_units`
+invertido a `_cuenta_utf16_code_units_no_chars_unicode`, +
+`_tolera_mid_surrogate`, `offset_to_position_emoji_retorna_utf16_units`,
+`utf16_to_unicode_char_identidad_para_ascii`,
+`utf16_to_unicode_char_colapsa_smp`,
+`utf16_to_unicode_char_multilinea`,
+`detect_context_after_dot_traduce_recv_col_con_smp_antes`).
+
+Soporta chars del Supplementary Multilingual Plane (emoji,
+símbolos matemáticos avanzados) sin off-by-one en hover/
+definition/completion. **Deuda "UTF-16 position strict" CERRADA
+por completo** — no se re-abre.
+
+**Deuda residual cosmética** (NO afecta navegación funcional):
+`make_definition_location` y `ident_range_from_def` retornan
+`Range` LSP con char en chars Unicode (no UTF-16). En práctica
+char_unicode == char_utf16 en líneas de def porque keywords +
+identifiers son ASCII por reglas del lexer (deuda menor
+documentada en `docs/deudas-post-5b.md`).
+
+**Docs**: cap C1 del curso M1 suma dos entradas de
+troubleshooting: `vcruntime140.dll no se encuentra` (VC++ Redist
+falta en Windows fresh, afecta ambos binarios) y
+`Unsupported position encoding (utf-8)` (bug específico 0.13.1,
+fix en 0.13.2).
+
+**Tests al cierre v0.13.2**: 3121 lib (+8 vs v0.13.1) + 112 LSP +
+360 compile_e2e + 3 openapi. fmt + clippy `--lib --tests --bins
+--features lsp -- -D warnings` limpios.
+
 ### v0.13.1 (2026-06-04) — Smoke gating de deps emitidas (deuda boring cerrada)
 
 Refinamiento del Cargo.toml emitido por `cargo_toml_for` para que
