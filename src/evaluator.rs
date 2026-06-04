@@ -280,6 +280,9 @@ pub fn builtin_names() -> &'static [&'static str] {
         "env",
         "env_or",
         "load_env",
+        // Fase 12.8 — feature flags built-in (manifest [flags] + env vars).
+        "flag",
+        "flags",
         // 10.8.7 (v0.10.8) — broadcast HTTP → WS cross-handler.
         "ws_broadcast",
         // v0.10.24 — tipos built-in con constructors estáticos como
@@ -350,6 +353,7 @@ fn process_decorator(
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
     required_roles: &[String],
+    flag_name: Option<String>,
     handler: &Value,
     env: &EnvRef,
     fn_def_span: Span,
@@ -367,6 +371,7 @@ fn process_decorator(
             cors_config,
             auth_spec,
             required_roles,
+            flag_name,
             handler,
             env,
         );
@@ -387,6 +392,7 @@ fn process_decorator(
             cors_config,
             auth_spec,
             required_roles,
+            flag_name,
             handler,
             env,
         );
@@ -411,6 +417,23 @@ fn process_decorator(
     // de los 3 viola la firma del MVP (`@test fn nombre() { ... }`).
     if deco.name == "test" {
         return register_test(deco, fn_name, params, handler, fn_def_span);
+    }
+
+    // Fase 12.7 — `@trace(name="X")` y `@metric(name="X")` son
+    // **no-op en el intérprete**. Diseño honesto del MVP: el
+    // intérprete es para `fitz run` (dev local), donde el OTel
+    // collector típicamente NO está activo y el span/métrica no se
+    // exporta a ningún lado. La instrumentación real vive en
+    // `fitz build` (codegen 12.7.b) que emite `tracing::span!` +
+    // `metrics::counter!`/`histogram!` alrededor del body de la fn.
+    //
+    // El checker (12.7) ya validó shape sintáctico (kwargs `name=...`
+    // Str literal, sin args positionals, sin apilamiento sobre
+    // handlers HTTP/WS). Acá solo aceptamos el decorator como válido
+    // para que el evaluador no falle. Paralelo a `@background` que
+    // también es marcador.
+    if deco.name == "trace" || deco.name == "metric" {
+        return Ok(());
     }
 
     // Fase 9.w.1.c — `@auth_provider`: registra la fn como provider de
@@ -1003,6 +1026,23 @@ fn collect_required_roles(
         roles.push(role);
     }
     Ok(roles)
+}
+
+/// Fase 12.8 — Extrae el flag name de `@flag("name")` si está apilado
+/// sobre la fn. Paralelo a `collect_route_auth`/`collect_required_roles`.
+/// El checker ya validó shape (1 arg Str literal, sin kwargs), así que
+/// acá hacemos un best-effort lookup; si encuentra algo raro lo deja
+/// silencioso (el checker abortó antes).
+fn collect_route_flag(decorators: &[Decorator]) -> Option<String> {
+    for deco in decorators {
+        if deco.name != "flag" {
+            continue;
+        }
+        if let Some(crate::ast::Expr::Str(s, _)) = deco.args.first() {
+            return Some(s.clone());
+        }
+    }
+    None
 }
 
 /// Fase 13 (v0.11.0) — Procesa `@command("name", desc="...")` sobre
@@ -1675,6 +1715,7 @@ fn register_http_route(
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
     required_roles: &[String],
+    flag_name: Option<String>,
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -1947,6 +1988,7 @@ fn register_http_route(
         cors: cors_config.clone(),
         auth: auth_spec,
         required_roles: required_roles.to_vec(),
+        flag_name,
         auth_user_param_name,
         is_ws: false,
         ws_conn_param_name: None,
@@ -1982,6 +2024,7 @@ fn register_ws_route(
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     auth_spec: crate::http::AuthSpec,
     required_roles: &[String],
+    flag_name: Option<String>,
     handler: &Value,
     _env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -2129,6 +2172,7 @@ fn register_ws_route(
         cors: cors_config.clone(),
         auth: auth_spec,
         required_roles: required_roles.to_vec(),
+        flag_name,
         auth_user_param_name,
         is_ws: true,
         ws_conn_param_name,
@@ -2949,6 +2993,8 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // apilados. Implica auth (mismo gate que `@authenticated`/
             // `@admin`).
             let required_roles = collect_required_roles(decorators, name)?;
+            // Fase 12.8 — recolectar `@flag("name")` (opcional, único).
+            let flag_name = collect_route_flag(decorators);
             // Fase 9.w.2 — `@ws` también cuenta como handler HTTP para
             // el chequeo de `@authenticated`/`@admin`/`@requires`
             // apilados (auth pre-upgrade es analógo al HTTP wrapper).
@@ -2976,6 +3022,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     || deco.name == "authenticated"
                     || deco.name == "admin"
                     || deco.name == "requires"
+                    || deco.name == "flag"
                 {
                     continue; // ya procesado por sus `collect_*`
                 }
@@ -2989,6 +3036,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     &collected_cors,
                     auth_spec,
                     &required_roles,
+                    flag_name.clone(),
                     &func,
                     &env,
                     *span,
@@ -10993,6 +11041,39 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_config,
         },
     );
+    // Fase 12.8 — Feature flags built-in. `flag(name) -> Bool` global +
+    // módulo `flags` con `is_enabled(name)` (alias) y `list()`. Defaults
+    // del manifest `[flags]` cargados al boot via `set_flag_defaults`,
+    // override runtime via env vars `FITZ_FLAG_<UPPERCASE>`.
+    env.lock().define(
+        "flag",
+        Value::Builtin {
+            name: "flag",
+            func: builtin_flag,
+        },
+    );
+    let flags_env = Environment::new();
+    flags_env.lock().define(
+        "is_enabled",
+        Value::Builtin {
+            name: "is_enabled",
+            func: builtin_flags_is_enabled,
+        },
+    );
+    flags_env.lock().define(
+        "list",
+        Value::Builtin {
+            name: "list",
+            func: builtin_flags_list,
+        },
+    );
+    env.lock().define(
+        "flags",
+        Value::Module {
+            name: "flags".into(),
+            env: flags_env,
+        },
+    );
     // Fase 9.z.2.a — assertion builtins. Siempre disponibles (igual
     // que `print`/`len`/`sleep`/`cors`); su semántica es la misma
     // dentro o fuera de `@test`. Una aserción fallida emite
@@ -17093,6 +17174,207 @@ fn builtin_config(args: &[Value]) -> FitzResult<Value> {
         }
     };
     Ok(coerced)
+}
+
+// ---------------------------------------------------------------
+// Fase 12.8 — Feature flags built-in: `flag(name)` + módulo `flags`.
+//
+// Registry global con dos fuentes de truth:
+//   (a) defaults del manifest (cargados al boot via
+//       `set_flag_defaults`) — sub-paso 12.8.b.
+//   (b) override runtime via env vars `FITZ_FLAG_<UPPERCASE_NAME>`,
+//       leídas perezosamente con cache local. Soporta valores
+//       `1`/`0`/`true`/`false`/`yes`/`no`/`on`/`off`.
+//
+// API runtime:
+//   - `flag(name: Str) -> Bool` (builtin global): consulta el registry.
+//   - `flags.is_enabled(name: Str) -> Bool`: alias funcional.
+//   - `flags.list() -> List<Str>`: nombres de flags conocidos (manifest
+//     + env vars detectadas en el boot).
+//
+// Semántica `@flag("name")` (decorator): el wrapper de routing (HTTP/WS)
+// chequea el registry al request; si la flag está off, retorna 404. Las
+// fns regulares con `@flag` también se wrappean en codegen y evaluator —
+// la doc del cap 33b de la guía explica los casos por return type.
+//
+// Default cuando NO está en el registry: `false` (fail-safe, los flags
+// se activan opt-in).
+
+static FLAG_REGISTRY: std::sync::OnceLock<parking_lot::Mutex<FlagRegistry>> =
+    std::sync::OnceLock::new();
+
+#[derive(Debug, Default, Clone)]
+struct FlagRegistry {
+    /// Defaults declarados en el manifest (`fitz.toml [flags]`).
+    defaults: std::collections::HashMap<String, bool>,
+    /// Cache de lookups runtime para evitar tocar el environment cada
+    /// call. Invalidate manualmente con `clear_flag_cache` (testing).
+    cache: std::collections::HashMap<String, bool>,
+}
+
+fn flag_registry() -> &'static parking_lot::Mutex<FlagRegistry> {
+    FLAG_REGISTRY.get_or_init(|| parking_lot::Mutex::new(FlagRegistry::default()))
+}
+
+/// Sub-paso 12.8.b: cargar defaults del manifest. Llamado al boot
+/// desde `main.rs` antes del eval. Se llama múltiples veces sin
+/// problema (overwrite total).
+pub fn set_flag_defaults(defaults: std::collections::HashMap<String, bool>) {
+    let mut reg = flag_registry().lock();
+    reg.defaults = defaults;
+    reg.cache.clear();
+}
+
+/// Limpia el cache. Usado en tests; en producción los flags se setean
+/// al boot y no cambian durante el lifetime del proceso (env vars son
+/// inmutables sin re-spawn).
+#[allow(dead_code)]
+pub fn clear_flag_cache() {
+    let mut reg = flag_registry().lock();
+    reg.cache.clear();
+}
+
+/// Convierte el flag name al env var equivalente: uppercase + replace
+/// `-` con `_`, prefijo `FITZ_FLAG_`. Ej: `new-checkout` → `FITZ_FLAG_NEW_CHECKOUT`.
+fn flag_env_name(flag: &str) -> String {
+    let upper = flag.to_uppercase().replace('-', "_");
+    format!("FITZ_FLAG_{}", upper)
+}
+
+/// Parse de un valor env: true/1/yes/on → true; false/0/no/off → false;
+/// cualquier otro → None (cae al default del manifest).
+fn parse_flag_env_value(raw: &str) -> Option<bool> {
+    match raw.trim().to_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => Some(true),
+        "false" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Resuelve el estado de un flag: env var > manifest default > `false`.
+/// API pública para que `http.rs` y `codegen` consulten directo.
+pub fn is_flag_enabled(name: &str) -> bool {
+    let mut reg = flag_registry().lock();
+    if let Some(cached) = reg.cache.get(name) {
+        return *cached;
+    }
+    let result = match std::env::var(flag_env_name(name)) {
+        Ok(v) => parse_flag_env_value(&v)
+            .unwrap_or_else(|| reg.defaults.get(name).copied().unwrap_or(false)),
+        Err(_) => reg.defaults.get(name).copied().unwrap_or(false),
+    };
+    reg.cache.insert(name.to_string(), result);
+    result
+}
+
+/// Lista los flags conocidos: manifest defaults + env vars detectadas.
+/// Útil para debug + dashboards.
+fn list_known_flags() -> Vec<String> {
+    let reg = flag_registry().lock();
+    let mut names: std::collections::BTreeSet<String> = reg.defaults.keys().cloned().collect();
+    drop(reg);
+    // Suma flags expuestos via env vars `FITZ_FLAG_*`.
+    for (key, _val) in std::env::vars() {
+        if let Some(suffix) = key.strip_prefix("FITZ_FLAG_") {
+            // Convertir back a kebab-case-ish: lowercase, `_` queda como `_`
+            // (no podemos distinguir orig `-` de `_` sin info extra).
+            names.insert(suffix.to_lowercase());
+        }
+    }
+    names.into_iter().collect()
+}
+
+fn builtin_flag(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`flag(name)` espera 1 argumento (Str), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let name = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`flag(name)` espera Str como arg, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    Ok(Value::Bool(is_flag_enabled(&name)))
+}
+
+fn builtin_flags_is_enabled(args: &[Value]) -> FitzResult<Value> {
+    // Alias funcional de `flag(name)`. Sintaxis: `flags.is_enabled("name")`.
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`flags.is_enabled(name)` espera 1 argumento (Str), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let name = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`flags.is_enabled(name)` espera Str como arg, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    Ok(Value::Bool(is_flag_enabled(&name)))
+}
+
+fn builtin_flags_list(args: &[Value]) -> FitzResult<Value> {
+    if !args.is_empty() {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`flags.list()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let names = list_known_flags();
+    let list: Vec<Value> = names.into_iter().map(Value::Str).collect();
+    Ok(Value::List(std::sync::Arc::new(parking_lot::Mutex::new(
+        list,
+    ))))
 }
 
 fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
@@ -31320,6 +31602,176 @@ let r = match n {
         // validar que el dispatch ORM acepta `.delete` syntactically).
         let _ = res;
     }
+
+    // ---- Fase 12.8 — feature flags built-in ----
+    //
+    // El registry de flags es un global static (`FLAG_REGISTRY`) que
+    // las tests parallel mutarían simultaneous. Mutex local serializa
+    // las tests que tocan el registry — la alternativa de combinar
+    // todo en un solo test inflaría el log de errores. La política
+    // es lock al inicio + clear al final para no leak entre tests.
+    // clippy::await_holding_lock se permite acá porque cada test usa
+    // tokio current_thread runtime independiente — el lock no cruza
+    // tasks reales, solo serializa el orden de ejecución cross-test.
+    use std::sync::Mutex as StdMutex;
+    static FLAG_TEST_LOCK: StdMutex<()> = StdMutex::new(());
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_flag_builtin_default_false_sin_env_var_ni_manifest() {
+        let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        super::set_flag_defaults(std::collections::HashMap::new());
+        super::clear_flag_cache();
+        unsafe {
+            std::env::remove_var("FITZ_FLAG_FITZ_TEST_FLAG_DEFAULT");
+        }
+        let src = "let v = flag(\"fitz-test-flag-default\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("v").unwrap(), Value::Bool(false));
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_flag_builtin_env_var_override_true() {
+        let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        super::set_flag_defaults(std::collections::HashMap::new());
+        super::clear_flag_cache();
+        unsafe {
+            std::env::set_var("FITZ_FLAG_FITZ_TEST_OVERRIDE", "true");
+        }
+        let src = "let v = flag(\"fitz-test-override\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("v").unwrap(), Value::Bool(true));
+        unsafe {
+            std::env::remove_var("FITZ_FLAG_FITZ_TEST_OVERRIDE");
+        }
+        super::clear_flag_cache();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_flag_builtin_manifest_default_se_aplica() {
+        let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        super::clear_flag_cache();
+        unsafe {
+            std::env::remove_var("FITZ_FLAG_FITZ_TEST_MANIFEST_DEFAULT");
+        }
+        let mut defaults = std::collections::HashMap::new();
+        defaults.insert("fitz-test-manifest-default".to_string(), true);
+        super::set_flag_defaults(defaults);
+        let src = "let v = flag(\"fitz-test-manifest-default\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("v").unwrap(), Value::Bool(true));
+        super::set_flag_defaults(std::collections::HashMap::new());
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_flag_env_var_gana_a_manifest_default() {
+        let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        super::clear_flag_cache();
+        let mut defaults = std::collections::HashMap::new();
+        defaults.insert("fitz-test-override-manifest".to_string(), true);
+        super::set_flag_defaults(defaults);
+        unsafe {
+            std::env::set_var("FITZ_FLAG_FITZ_TEST_OVERRIDE_MANIFEST", "false");
+        }
+        let src = "let v = flag(\"fitz-test-override-manifest\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("v").unwrap(), Value::Bool(false));
+        unsafe {
+            std::env::remove_var("FITZ_FLAG_FITZ_TEST_OVERRIDE_MANIFEST");
+        }
+        super::set_flag_defaults(std::collections::HashMap::new());
+        super::clear_flag_cache();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_flags_is_enabled_alias_de_flag() {
+        let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        super::clear_flag_cache();
+        unsafe {
+            std::env::remove_var("FITZ_FLAG_FITZ_TEST_ALIAS");
+        }
+        let mut defaults = std::collections::HashMap::new();
+        defaults.insert("fitz-test-alias".to_string(), true);
+        super::set_flag_defaults(defaults);
+        let src = "let v = flags.is_enabled(\"fitz-test-alias\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("v").unwrap(), Value::Bool(true));
+        super::set_flag_defaults(std::collections::HashMap::new());
+        super::clear_flag_cache();
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_flags_list_devuelve_manifest_keys_y_env_vars() {
+        let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        super::clear_flag_cache();
+        let mut defaults = std::collections::HashMap::new();
+        defaults.insert("alpha".to_string(), true);
+        defaults.insert("beta".to_string(), false);
+        super::set_flag_defaults(defaults);
+        unsafe {
+            std::env::set_var("FITZ_FLAG_GAMMA", "1");
+        }
+        let src = "let v = flags.list()";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let v = env.lock().get("v").unwrap();
+        let list = match v {
+            Value::List(l) => l,
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        let names: Vec<String> = list
+            .lock()
+            .iter()
+            .map(|v| match v {
+                Value::Str(s) => s.clone(),
+                _ => panic!("esperaba Str en list"),
+            })
+            .collect();
+        // alpha + beta del manifest + gamma del env var.
+        assert!(names.contains(&"alpha".to_string()));
+        assert!(names.contains(&"beta".to_string()));
+        assert!(names.contains(&"gamma".to_string()));
+        unsafe {
+            std::env::remove_var("FITZ_FLAG_GAMMA");
+        }
+        super::set_flag_defaults(std::collections::HashMap::new());
+        super::clear_flag_cache();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_parse_flag_env_value_acepta_variantes() {
+        for &raw in &["true", "1", "yes", "on", "TRUE", "True", "YES"] {
+            assert_eq!(super::parse_flag_env_value(raw), Some(true), "raw={}", raw);
+        }
+        for &raw in &["false", "0", "no", "off", "FALSE"] {
+            assert_eq!(super::parse_flag_env_value(raw), Some(false), "raw={}", raw);
+        }
+        for &raw in &["", "xyz", "maybe"] {
+            assert_eq!(super::parse_flag_env_value(raw), None, "raw={}", raw);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_12_8_flag_env_name_formato_correcto() {
+        assert_eq!(super::flag_env_name("foo"), "FITZ_FLAG_FOO");
+        assert_eq!(
+            super::flag_env_name("new-checkout"),
+            "FITZ_FLAG_NEW_CHECKOUT"
+        );
+        assert_eq!(super::flag_env_name("dark_mode"), "FITZ_FLAG_DARK_MODE");
+    }
+
+    // ---- Fase 10.4 — ORM delete con guard `.where(...)` ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_delete_sin_where_es_error_explicito_via_dispatch_directo() {

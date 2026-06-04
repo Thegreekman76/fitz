@@ -5,8 +5,8 @@
 // duplicada). Acá solo importamos lo que el CLI consume.
 
 use fitz::{
-    ast, codegen, cron_jobs, db, docker, error, evaluator, fmt, http, launcher_template, lexer,
-    lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, testing, types,
+    ast, codegen, cron_jobs, db, deploy, docker, error, evaluator, fmt, http, launcher_template,
+    lexer, lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, testing, types,
 };
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
@@ -287,6 +287,39 @@ enum Commands {
     /// `postgres:16-alpine` con healthcheck.
     #[command(subcommand)]
     Docker(DockerCmd),
+
+    /// Fase 12.6 — Orchestrator de deployment. Thin wrapper sobre
+    /// `docker build/push` o `docker compose up` según el target
+    /// seleccionado. Targets MVP: `docker` (build + push) y `compose`
+    /// (up local). Targets futuros como `fly`/`railway`/`k8s` quedan
+    /// como deuda visible — para esos, correr los CLIs directo.
+    #[command(subcommand)]
+    Deploy(DeployCmd),
+}
+
+#[derive(Subcommand)]
+enum DeployCmd {
+    /// Build + push de la imagen Docker. `docker build -t <tag> .`
+    /// seguido de `docker push <tag>`. Default tag = `<pkg-name>:latest`.
+    /// Aborta si no hay Dockerfile (sugiere `fitz docker init`).
+    Docker {
+        /// Tag de la imagen. Default: `<package.name>:latest`.
+        #[arg(long)]
+        tag: Option<String>,
+        /// Saltar el `docker push` (solo build local, útil sin registry).
+        #[arg(long)]
+        no_push: bool,
+    },
+    /// Levanta el stack con `docker compose up -d --build`. Aborta si
+    /// no hay `docker-compose.yml` (sugiere `fitz docker init`).
+    Compose {
+        /// Correr en foreground (sin `-d`).
+        #[arg(long)]
+        no_detach: bool,
+        /// No re-buildear las imágenes (sin `--build`).
+        #[arg(long)]
+        no_build: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -558,6 +591,7 @@ fn main() {
                     .join(filename)
             });
             let dep_registry = dep_registry_from(&resolved);
+            let flag_defaults = flag_defaults_from(&resolved);
             // Fase 8.c: --bundle-pip implica --bundle-python.
             // Fase 8.c (cosecha): --bundle-pip-requirements también.
             // Cualquiera de los tres rutea al pipeline de bundling.
@@ -566,11 +600,17 @@ fn main() {
                     &resolved.entry,
                     override_dest.as_deref(),
                     dep_registry,
+                    flag_defaults,
                     bundle_pip,
                     bundle_pip_requirements,
                 );
             } else {
-                build_file(&resolved.entry, override_dest.as_deref(), dep_registry);
+                build_file(
+                    &resolved.entry,
+                    override_dest.as_deref(),
+                    dep_registry,
+                    flag_defaults,
+                );
             }
         }
         Commands::Check { file } => {
@@ -678,6 +718,13 @@ fn main() {
         Commands::Docker(sub) => match sub {
             DockerCmd::Init { force } => docker_init_cmd(force),
             DockerCmd::Build { tag } => docker_build_cmd(tag),
+        },
+        Commands::Deploy(sub) => match sub {
+            DeployCmd::Docker { tag, no_push } => deploy_docker_cmd(tag, no_push),
+            DeployCmd::Compose {
+                no_detach,
+                no_build,
+            } => deploy_compose_cmd(no_detach, no_build),
         },
     }
 }
@@ -788,6 +835,18 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
             std::process::exit(1);
         });
 
+    // Fase 12.8 — cargar defaults de feature flags al registry runtime.
+    // Idempotente, se llama una vez por proceso. Sin manifest (single-file
+    // mode), el registry queda vacío y todas las flags caen al default
+    // `false` salvo override env var. La conversión BTreeMap→HashMap es
+    // O(N) sobre N flags declarados (típico < 50).
+    let flag_defaults: std::collections::HashMap<String, bool> = manifest
+        .flags
+        .iter()
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    evaluator::set_flag_defaults(flag_defaults);
+
     ResolvedEntry {
         entry,
         manifest_ctx: Some(ManifestCtx {
@@ -809,6 +868,17 @@ fn dep_registry_from(resolved: &ResolvedEntry) -> manifest::DepRegistry {
     match &resolved.manifest_ctx {
         Some(ctx) => manifest::build_dep_registry(&ctx.resolved_deps),
         None => manifest::DepRegistry::new(),
+    }
+}
+
+/// Fase 12.8 — devuelve los flag defaults del manifest (sección
+/// `[flags]`). Empty map en single-file mode o cuando el manifest no
+/// declara flags. El codegen los embebe en el binario generado al boot
+/// (paralelo a `evaluator::set_flag_defaults` para `fitz run`).
+fn flag_defaults_from(resolved: &ResolvedEntry) -> std::collections::BTreeMap<String, bool> {
+    match &resolved.manifest_ctx {
+        Some(ctx) => ctx.manifest.flags.clone(),
+        None => std::collections::BTreeMap::new(),
     }
 }
 
@@ -1339,6 +1409,7 @@ fn build_file(
     path: &PathBuf,
     override_dest: Option<&std::path::Path>,
     dep_registry: manifest::DepRegistry,
+    flag_defaults: std::collections::BTreeMap<String, bool>,
 ) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
@@ -1408,7 +1479,16 @@ fn build_file(
 
     // Codegen a Cargo project. Mini-tanda Hpx.2 — TypeInfo del checker
     // se pasa al codegen para inferir return types de fns sin anotar.
-    let project = match codegen::generate_project(path, &program, &env, &types, dep_registry) {
+    // Fase 12.8 — flag_defaults del manifest se embeben en main.rs
+    // generado vía `__fitz_flag_init(...)` al boot.
+    let project = match codegen::generate_project(
+        path,
+        &program,
+        &env,
+        &types,
+        dep_registry,
+        flag_defaults,
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("✗ codegen: {}", e);
@@ -1592,6 +1672,7 @@ fn build_file_with_bundle(
     path: &PathBuf,
     override_dest: Option<&std::path::Path>,
     dep_registry: manifest::DepRegistry,
+    flag_defaults: std::collections::BTreeMap<String, bool>,
     bundle_pip: Vec<String>,
     bundle_pip_requirements: Vec<PathBuf>,
 ) {
@@ -1711,7 +1792,14 @@ fn build_file_with_bundle(
     };
 
     // --- Codegen + escribir Cargo project del real binary ---
-    let project = match codegen::generate_project(path, &program, &env, &types, dep_registry) {
+    let project = match codegen::generate_project(
+        path,
+        &program,
+        &env,
+        &types,
+        dep_registry,
+        flag_defaults,
+    ) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("✗ codegen: {}", e);
@@ -4519,6 +4607,113 @@ fn docker_build_cmd(tag: Option<String>) {
                 "✗ no se pudo invocar `docker build`: {e}. ¿Está Docker instalado y \
                  corriendo? (`docker --version` para verificar)"
             );
+            std::process::exit(1);
+        }
+    }
+}
+
+// =================================================================
+// Fase 12.6 — Handlers de `fitz deploy <subcomando>`
+// =================================================================
+
+/// `fitz deploy docker [--tag X] [--no-push]` — build + push de la
+/// imagen Docker. Thin wrapper sobre `docker build/push` que toma el
+/// tag desde el `package.name` por default.
+fn deploy_docker_cmd(tag: Option<String>, no_push: bool) {
+    let resolved = resolve_entry(None);
+    let ctx = match resolved.manifest_ctx {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "✗ `fitz deploy docker` requiere un proyecto Fitz con `fitz.toml`. \
+                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let options = deploy::DeployOptions {
+        tag,
+        no_push,
+        no_detach: false,
+        no_build: false,
+    };
+
+    println!(
+        "▶ fitz deploy docker — proyecto `{}` en `{}`",
+        ctx.manifest.package.name,
+        ctx.manifest_dir.display(),
+    );
+
+    match deploy::run_deploy(
+        deploy::DeployTarget::Docker,
+        &ctx.manifest,
+        &ctx.manifest_dir,
+        &options,
+    ) {
+        Ok(result) => {
+            println!();
+            println!(
+                "✓ deploy OK — {} comando(s) ejecutado(s)",
+                result.commands.len()
+            );
+            for cmd in &result.commands {
+                println!("  - {} {}", cmd.bin, cmd.args.join(" "));
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    }
+}
+
+/// `fitz deploy compose [--no-detach] [--no-build]` — `docker compose up`
+/// con flags configurables.
+fn deploy_compose_cmd(no_detach: bool, no_build: bool) {
+    let resolved = resolve_entry(None);
+    let ctx = match resolved.manifest_ctx {
+        Some(c) => c,
+        None => {
+            eprintln!(
+                "✗ `fitz deploy compose` requiere un proyecto Fitz con `fitz.toml`. \
+                 Creá uno con `fitz new <nombre>` o `fitz init` primero."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let options = deploy::DeployOptions {
+        tag: None,
+        no_push: false,
+        no_detach,
+        no_build,
+    };
+
+    println!(
+        "▶ fitz deploy compose — proyecto `{}` en `{}`",
+        ctx.manifest.package.name,
+        ctx.manifest_dir.display(),
+    );
+
+    match deploy::run_deploy(
+        deploy::DeployTarget::Compose,
+        &ctx.manifest,
+        &ctx.manifest_dir,
+        &options,
+    ) {
+        Ok(result) => {
+            println!();
+            println!(
+                "✓ deploy OK — {} comando(s) ejecutado(s)",
+                result.commands.len()
+            );
+            for cmd in &result.commands {
+                println!("  - {} {}", cmd.bin, cmd.args.join(" "));
+            }
+        }
+        Err(e) => {
+            eprintln!("✗ {e}");
             std::process::exit(1);
         }
     }

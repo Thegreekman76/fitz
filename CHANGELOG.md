@@ -11,12 +11,82 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-**Curso `Fitz de 0 a experto` cerrado entero (8 módulos / 41 caps)**:
-M7 nuevo dedicado a Interop Python (3 caps) + M8 (Producción y
-deployment, ex-M7) ampliado con un cap nuevo (M8.C5) sobre deploy
-real de apps con interop. **Fase 12 ENTERA + 9.w.1.iter2 ENTERA**
-siguen CERRADAS desde 2026-06-03. Próximo norte: Fase 13+ (visión
-post-Fase 12) según demanda real. Tier 2 de Fase 12.3 (bridge métricas
+## [v0.13.0] — 2026-06-04 — Fase 12 Tier 2: `fitz deploy` (12.6) + `@trace`/`@metric` (12.7) + `@flag` / `flag()` (12.8)
+
+**Release coordinado de las 3 sub-fases del Tier 2 de Fase 12**:
+
+- **Fase 12.6 — `fitz deploy <target>` orchestrator**. Sub-comando
+  nuevo en CLI, thin wrappers sobre `docker build`/`compose up`.
+  Soporta `docker` (build + push opt-out con `--no-push`) y
+  `compose` (up local; `--no-detach`/`--no-build` opt-outs).
+  Requiere `Dockerfile` (o `docker-compose.yml`) en el manifest
+  dir — sugiere `fitz docker init` si falta. Propaga exit codes
+  para CI. Módulo nuevo `src/deploy.rs` (~430 LoC + 7 unit + 5
+  cli_e2e tests).
+
+- **Fase 12.7 — `@trace(name="X")` y `@metric(name="X")` sobre
+  fns user**. Decorators apilables sobre funciones business
+  logic (rechazados sobre HTTP/WS — la auto-instrumentation
+  Fase 12.3 cubre esos casos). `@trace` abre un
+  `tracing::info_span!` que envuelve cada call; `@metric`
+  registra `<name>_duration_seconds` (histogram) +
+  `<name>_calls_total` (counter) al Drop del scope vía
+  `__FitzMetricGuard` RAII (funciona con `return X` explícito sin
+  código muerto). Kwarg `name=` opcional sobre cada uno
+  (fallback al nombre de la fn). Paridad bit-a-bit `fitz run`
+  (no-op honesto — el evaluator ignora los decorators) ↔
+  `fitz build` (instrumentación real con `tracing` + `metrics`
+  crates linkeados). Cap 33.5 nuevo en la guía + ejemplo
+  runnable `examples/guide/34-trace-metric.fitz`.
+
+- **Fase 12.8 — `@flag("name")` + `flag(name) -> Bool` +
+  módulo `flags`**. Feature flags built-in con dos fuentes:
+  sección `[flags]` en `fitz.toml` (defaults compile-time) +
+  env vars `FITZ_FLAG_<UPPERCASE>` (override runtime). Default
+  `false` (fail-safe). El decorator `@flag` sobre HTTP/WS
+  handlers retorna 404 si la flag está off — gate hot path
+  ANTES de middlewares/auth. `flag(name)` y `flags.is_enabled`
+  para branches dentro del código; `flags.list()` enumera
+  flags conocidos (manifest + env vars). Paridad bit-a-bit
+  `fitz run` ↔ `fitz build` (registry estático con `OnceLock`
+  en codegen + cache lookup). Cap 33.11 nuevo en la guía +
+  ejemplo runnable `examples/guide/34b-feature-flags.fitz`.
+
+**Decisiones técnicas del Tier 2**:
+- Deploy targets MVP: solo docker + compose (no fly/railway —
+  diferidos a Fase 13+ por demanda real).
+- `@trace`/`@metric` exclusivos para fns user; HTTP/WS handlers
+  ya tienen auto-instrumentation Fase 12.3 (rechazo estático
+  con mensaje claro citando el sub-paso anterior).
+- `@flag` como gate de fn entera. Default `false` opt-in (todos
+  los flags requieren opt-in explícito). Defaults compile-time
+  baked-in al binario via `__fitz_flag_init(...)` al boot.
+
+**Builtins nuevos disponibles globalmente**: `flag(name)`,
+`flags.is_enabled(name)`, `flags.list()`. Pre-registrados en el
+scope del checker como `Type::Any` (mismo patrón que `jwt`/
+`hash`/`auth`).
+
+**Extensión VSCode v0.13.0**: LSP completions sumadas
+(`@trace`/`@metric`/`@flag` decorators, `flag()` builtin,
+`flags.X` after-dot). Grammar TextMate sin cambios (decorators
+matchean `@<ident>` genérico).
+
+**Tests al cierre**: 3001 unit (+44 nuevos: 8 evaluator flag +
+9 checker flag + 4 trace/metric codegen + 3 manifest flags + 4
+codegen Cargo.toml flag/trace_metric + 14 LSP + 2 E2E compile
+flag) + 112 LSP + 360 compile_e2e (+2 nuevos: 34b-feature-flags
++ 34-trace-metric + smoke verde) + 3 openapi. Total acumulado
++ unit. `cargo fmt --all --check` + `cargo clippy --lib --tests
+--bins -- -D warnings` limpios.
+
+**Curso `Fitz de 0 a experto` cerrado entero (8 módulos / 41 caps)**
+(de v0.12.7): M7 dedicado a Interop Python (3 caps) + M8
+(Producción y deployment) con M8.C5 sobre deploy real de apps
+con interop. **Fase 12 ENTERA + 9.w.1.iter2 ENTERA** CERRADAS.
+
+**Próximo norte**: Fase 13+ (orquestación distribuida, multi-tenant,
+o demanda real concreta). Tier 2 de Fase 12.3 (bridge métricas
 OTel) sigue bloqueado por release del crate.
 
 ## [v0.12.7] — 2026-06-03 — Curso M7 nuevo (Interop Python) + M8 ampliado (M7→M8 renumber + C5 nuevo)

@@ -46,6 +46,19 @@ pub struct Manifest {
     pub lib: Option<Lib>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
+    /// Fase 12.8 — Feature flags declaradas en el manifest. Sección
+    /// `[flags]` mapea `flag-name = bool` para defaults compile-time.
+    /// Override runtime via env vars `FITZ_FLAG_<UPPERCASE>`.
+    /// Ejemplo TOML:
+    /// ```toml
+    /// [flags]
+    /// new-checkout = false
+    /// dark-mode = true
+    /// ```
+    /// El binario cargado por `fitz run`/`build` lee esta sección al
+    /// boot y la pasa a `evaluator::set_flag_defaults`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub flags: BTreeMap<String, bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -236,6 +249,7 @@ impl Manifest {
             }),
             lib: None,
             dependencies: BTreeMap::new(),
+            flags: BTreeMap::new(),
         })
     }
 
@@ -826,6 +840,60 @@ http-helpers = "0.3.2"
             Dependency::Version(v) => assert_eq!(v, "1.0.0"),
             other => panic!("se esperaba Version, fue {other:?}"),
         }
+    }
+
+    // ---- Fase 12.8 — sección [flags] ----
+
+    #[test]
+    fn flags_seccion_vacia_o_ausente_default_empty_map() {
+        let toml_text = r#"
+[package]
+name = "mi-app"
+version = "0.1.0"
+edition = "2026"
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert!(m.flags.is_empty());
+    }
+
+    #[test]
+    fn flags_seccion_parsea_pares_bool() {
+        let toml_text = r#"
+[package]
+name = "mi-app"
+version = "0.1.0"
+edition = "2026"
+
+[flags]
+new-checkout = false
+dark-mode = true
+beta_feature = true
+"#;
+        let m = Manifest::parse(toml_text).unwrap();
+        assert_eq!(m.flags.len(), 3);
+        assert_eq!(m.flags.get("new-checkout").copied(), Some(false));
+        assert_eq!(m.flags.get("dark-mode").copied(), Some(true));
+        assert_eq!(m.flags.get("beta_feature").copied(), Some(true));
+    }
+
+    #[test]
+    fn flags_no_bool_value_es_error_de_parse() {
+        // TOML strict: el campo `[flags]` espera bool, si el value es
+        // string falla con parse error claro.
+        let toml_text = r#"
+[package]
+name = "mi-app"
+version = "0.1.0"
+edition = "2026"
+
+[flags]
+foo = "yes"
+"#;
+        let err = Manifest::parse(toml_text).unwrap_err();
+        assert!(
+            matches!(err, ManifestError::Parse(_)),
+            "esperaba ManifestError::Parse, fue {err:?}"
+        );
     }
 
     #[test]

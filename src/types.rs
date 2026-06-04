@@ -3204,6 +3204,33 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Fase 12.8 — `flag(name: Str) -> Bool` (builtin global) +
+        // `flags` (módulo con `is_enabled(name)` y `list()`). Feature
+        // flags built-in con defaults configurables via manifest
+        // `[flags]` y env vars `FITZ_FLAG_<NAME>`. Mismo patrón Type::Any
+        // que jwt/hash/auth para que el field access + calls caigan a
+        // gradual; los builtins runtime validan shape con mensajes
+        // claros.
+        self.scopes[0].insert(
+            "flag".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        self.scopes[0].insert(
+            "flags".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // Fase 12.3.a.1 — módulo `log` siempre disponible. Mismo patrón
         // que `jwt`/`hash`/`db`: tipa como `Type::Any`. La firma exacta
         // (`fn log.info(msg: Str, **kwargs) -> Null`) tiene kwargs
@@ -8547,6 +8574,20 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // CLI-marshallables (Str/Int/Float/Bool/Str?), y que el return
             // sea Int (exit code).
             check_command_decorator(ctx, fn_name, params, &ret, decorators, *fn_span);
+            // Fase 12.7 — `@trace(name="X")` y `@metric(name="X")`
+            // sobre fns user (business logic). Rechaza apilamiento
+            // sobre handlers HTTP (auto-instrumentation 12.3 cubre).
+            // Acepta solo kwarg `name` opcional.
+            check_trace_metric_decorators(ctx, fn_name, decorators, *fn_span);
+            // Fase 12.8 — `@flag("name")` gate de fn entera. Valida shape
+            // sintáctico: 1 arg positional Str literal (el flag name), sin
+            // kwargs. Apilable sobre cualquier fn (HTTP/WS/regular). Cuando
+            // está activo, el runtime y codegen wrappean la invocación
+            // chequeando el registry (env var `FITZ_FLAG_<NAME>` o default
+            // del manifest); si la flag está off, los handlers HTTP/WS
+            // retornan 404, las fns normales retornan Null/default según
+            // return type.
+            check_flag_decorator(ctx, fn_name, decorators, *fn_span);
             ctx.push_scope();
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
@@ -10349,25 +10390,244 @@ fn check_background_decorator(
     }
 }
 
-/// Fase 12.1.a — `@healthz`/`@readyz` declaran probes K8s estilo.
-/// El runtime y el codegen auto-mount `GET /healthz` y `GET /readyz`
-/// cuando estos decorators están declarados (paralelo a
-/// `/openapi.json` autoregistrado).
+// Fase 12.1.a — `@healthz`/`@readyz` declaran probes K8s estilo.
+// El runtime y el codegen auto-mount `GET /healthz` y `GET /readyz`
+// cuando estos decorators están declarados (paralelo a
+// `/openapi.json` autoregistrado).
+//
+// **Reglas validadas** (idénticas para `@healthz` y `@readyz`):
+// - Sin args ni kwargs (`@healthz` puro, opcionalmente con `()` vacío).
+// - Singleton: máximo uno por programa.
+// - Sin params (las probes no reciben input).
+// - Return type: `Bool` / `Result<Null>` / `Result<Bool>`. Si la fn
+//   es `async fn`, los Future de los anteriores también.
+// - NO combinable con `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
+//   `@background`/`@auth_provider`/`@authenticated`/`@admin`/`@test`/
+//   `@command`. Las probes son rutas auto-mounted; el handler NO
+//   debe ser HTTP normal ni job ni test.
+//
+// Errores van directo a `ctx.errors`. El singleton se trackea en
+// `ctx.healthz_first` y `ctx.readyz_first` (Some al ver el primero).
+
+/// Fase 12.7 — valida `@trace(name="X")` y `@metric(name="X")` sobre
+/// fns user (business logic). Apilables entre sí. Rechaza
+/// apilamiento sobre `@get`/`@post`/`@put`/`@delete`/`@ws` con error
+/// claro citando que la auto-instrumentation de Fase 12.3 (spans HTTP
+/// automáticos + métricas) ya cubre ese caso.
 ///
-/// **Reglas validadas** (idénticas para `@healthz` y `@readyz`):
-/// - Sin args ni kwargs (`@healthz` puro, opcionalmente con `()`
-///   vacío).
-/// - Singleton: máximo uno por programa.
-/// - Sin params (las probes no reciben input).
-/// - Return type: `Bool` / `Result<Null>` / `Result<Bool>`. Si la fn
-///   es `async fn`, los Future de los anteriores también.
-/// - NO combinable con `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
-///   `@background`/`@auth_provider`/`@authenticated`/`@admin`/`@test`/
-///   `@command`. Las probes son rutas auto-mounted; el handler NO
-///   debe ser HTTP normal ni job ni test.
+/// Sintaxis aceptada:
+///   `@trace` — span con `<fn_name>` como name.
+///   `@trace(name="custom")` — override del name del span.
+///   `@metric` — Counter + Histogram con `<fn_name>` como name.
+///   `@metric(name="custom")` — override.
 ///
-/// Errores van directo a `ctx.errors`. El singleton se trackea en
-/// `ctx.healthz_first` y `ctx.readyz_first` (Some al ver el primero).
+/// Sin args positionals. Sin otros kwargs en el MVP.
+fn check_trace_metric_decorators(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let mut has_trace = false;
+    let mut has_metric = false;
+    for deco in decorators {
+        let kind = match deco.name.as_str() {
+            "trace" => "trace",
+            "metric" => "metric",
+            _ => continue,
+        };
+        if kind == "trace" {
+            if has_trace {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@trace sobre fn '{}': duplicado en decorators apilados (un solo @trace por fn).",
+                        fn_name,
+                    ),
+                ));
+                continue;
+            }
+            has_trace = true;
+        } else {
+            if has_metric {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@metric sobre fn '{}': duplicado en decorators apilados (un solo @metric por fn).",
+                        fn_name,
+                    ),
+                ));
+                continue;
+            }
+            has_metric = true;
+        }
+        // 1) Sin args positionals.
+        if !deco.args.is_empty() {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{} sobre fn '{}': no acepta args positionals. Sintaxis: `@{}` o `@{}(name=\"X\")`.",
+                    kind, fn_name, kind, kind,
+                ),
+            ));
+            continue;
+        }
+        // 2) Solo kwarg `name="X"` (Str literal) opcional.
+        for (k, v) in &deco.kwargs {
+            if k != "name" {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@{} sobre fn '{}': kwarg desconocido '{}'. Solo `name=\"X\"` está soportado en el MVP.",
+                        kind, fn_name, k,
+                    ),
+                ));
+                continue;
+            }
+            if !matches!(v, Expr::Str(_, _)) {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@{} sobre fn '{}': el kwarg `name` debe ser Str literal.",
+                        kind, fn_name,
+                    ),
+                ));
+            }
+        }
+    }
+    // 3) Rechazar apilamiento sobre handlers HTTP/WS (auto-instrumentation
+    // 12.3 ya cubre esos casos).
+    if has_trace || has_metric {
+        let is_http_handler = decorators
+            .iter()
+            .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete" | "ws"));
+        if is_http_handler {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "fn '{}': `@trace`/`@metric` NO se apilan sobre handlers HTTP/WS (`@get`/`@post`/`@put`/`@delete`/`@ws`). La auto-instrumentation de Fase 12.3 (spans HTTP + métricas) ya cubre esos casos. Usá `@trace`/`@metric` sobre fns de business logic adentro del handler.",
+                    fn_name,
+                ),
+            ));
+        }
+    }
+}
+
+/// Fase 12.8 — valida shape de `@flag("name")`: 1 arg positional Str
+/// literal (el flag name), sin kwargs, sin duplicados. Apilable sobre
+/// cualquier fn. El nombre del flag se valida no-vacío + chars
+/// `[a-zA-Z0-9_-]`. La semántica runtime (404 para HTTP/WS, no-op para
+/// fns regulares) la implementa el wrapper de routing en `http.rs` y
+/// el codegen del wrapper en `codegen.rs`.
+fn check_flag_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let mut seen = false;
+    for deco in decorators {
+        if deco.name != "flag" {
+            continue;
+        }
+        if seen {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@flag sobre fn '{}': duplicado en decorators apilados (un solo @flag por fn).",
+                    fn_name,
+                ),
+            ));
+            continue;
+        }
+        seen = true;
+        // 1) Exactamente un arg positional.
+        if deco.args.len() != 1 {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@flag sobre fn '{}': esperaba 1 arg positional (`@flag(\"flag-name\")`), recibió {}.",
+                    fn_name,
+                    deco.args.len(),
+                ),
+            ));
+            continue;
+        }
+        // 2) El arg debe ser Str literal.
+        let name = match &deco.args[0] {
+            Expr::Str(s, _) => s.clone(),
+            _ => {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@flag sobre fn '{}': el flag name debe ser Str literal.",
+                        fn_name,
+                    ),
+                ));
+                continue;
+            }
+        };
+        // 3) No-vacío + chars válidos.
+        if name.is_empty() {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@flag sobre fn '{}': el flag name no puede ser vacío.",
+                    fn_name
+                ),
+            ));
+            continue;
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@flag sobre fn '{}': flag name '{}' inválido. Solo chars [a-zA-Z0-9_-] permitidos.",
+                    fn_name, name,
+                ),
+            ));
+            continue;
+        }
+        // 4) Sin kwargs en MVP.
+        if !deco.kwargs.is_empty() {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@flag sobre fn '{}': kwargs no soportados en el MVP. Sintaxis: `@flag(\"flag-name\")`.",
+                    fn_name,
+                ),
+            ));
+        }
+    }
+}
+
 fn check_health_decorators(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -15977,6 +16237,81 @@ print(total)
         assert_auth_err(src, "falta param de tipo");
     }
 
+    // ----- Fase 12.7 — @trace/@metric (instrumentation explícita) -----
+
+    #[test]
+    fn trace_sin_args_ni_kwargs_compila_limpio() {
+        let src = "@trace\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn trace_con_kwarg_name_str_literal_compila_limpio() {
+        let src = "@trace(name=\"calc_doble\")\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn trace_con_arg_positional_es_error() {
+        let src = "@trace(\"name\")\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_err(src, "no acepta args positionals");
+    }
+
+    #[test]
+    fn trace_con_kwarg_desconocido_es_error() {
+        let src = "@trace(level=\"info\")\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_err(src, "kwarg desconocido");
+    }
+
+    #[test]
+    fn trace_con_name_no_str_literal_es_error() {
+        let src = "@trace(name=42)\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_err(src, "Str literal");
+    }
+
+    #[test]
+    fn trace_duplicado_apilado_es_error() {
+        let src = "@trace\n@trace(name=\"otro\")\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_err(src, "duplicado");
+    }
+
+    #[test]
+    fn trace_apilable_con_metric_compila_limpio() {
+        let src = "@trace\n@metric\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn trace_sobre_get_handler_es_error() {
+        // Auto-instrumentation 12.3 ya cubre handlers HTTP.
+        let src = "@trace\n@get(\"/x\")\nfn h() -> Str => \"ok\"";
+        assert_auth_err(src, "auto-instrumentation");
+    }
+
+    #[test]
+    fn metric_sobre_post_handler_es_error() {
+        let src = "@metric\n@post(\"/x\")\nfn h(body: Str) -> Str => body";
+        assert_auth_err(src, "auto-instrumentation");
+    }
+
+    #[test]
+    fn metric_sin_args_ni_kwargs_compila_limpio() {
+        let src = "@metric\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn metric_con_arg_positional_es_error() {
+        let src = "@metric(\"name\")\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_err(src, "no acepta args positionals");
+    }
+
+    #[test]
+    fn metric_duplicado_apilado_es_error() {
+        let src = "@metric\n@metric\nfn calc(x: Int) -> Int => x * 2";
+        assert_auth_err(src, "duplicado");
+    }
+
     #[test]
     fn auth_provider_con_role_field_nullable_no_basta_para_admin() {
         // El campo `role` debe ser `Str` (no nullable). Si es `Str?`,
@@ -17792,5 +18127,92 @@ print(total)
             .iter()
             .any(|e| e.message.contains("Str") || e.message.contains("Int"));
         assert!(matched, "esperaba error de tipo en arg, fue: {:?}", errs);
+    }
+
+    // ---- Fase 12.8 — @flag decorator checker ----
+
+    #[test]
+    fn flag_decorator_shape_valido_compila_limpio() {
+        assert_ok("@flag(\"new-checkout\")\nfn f() -> Int { return 1 }");
+        assert_ok("@flag(\"dark_mode\")\nfn g() -> Int { return 1 }");
+        assert_ok("@flag(\"a1_b2\")\nfn h() -> Int { return 1 }");
+    }
+
+    #[test]
+    fn flag_decorator_sin_args_es_error() {
+        assert_error_with(
+            "@flag()\nfn f() -> Int { return 1 }",
+            &["@flag", "1 arg positional"],
+        );
+    }
+
+    #[test]
+    fn flag_decorator_con_dos_args_es_error() {
+        assert_error_with(
+            "@flag(\"a\", \"b\")\nfn f() -> Int { return 1 }",
+            &["@flag", "1 arg positional"],
+        );
+    }
+
+    #[test]
+    fn flag_decorator_arg_no_str_literal_es_error() {
+        assert_error_with(
+            "@flag(123)\nfn f() -> Int { return 1 }",
+            &["@flag", "Str literal"],
+        );
+    }
+
+    #[test]
+    fn flag_decorator_nombre_vacio_es_error() {
+        assert_error_with(
+            "@flag(\"\")\nfn f() -> Int { return 1 }",
+            &["@flag", "no puede ser vacío"],
+        );
+    }
+
+    #[test]
+    fn flag_decorator_chars_invalidos_es_error() {
+        assert_error_with(
+            "@flag(\"foo!\")\nfn f() -> Int { return 1 }",
+            &["@flag", "inválido"],
+        );
+    }
+
+    #[test]
+    fn flag_decorator_duplicado_es_error() {
+        assert_error_with(
+            "@flag(\"a\")\n@flag(\"b\")\nfn f() -> Int { return 1 }",
+            &["@flag", "duplicado"],
+        );
+    }
+
+    #[test]
+    fn flag_decorator_con_kwargs_es_error() {
+        assert_error_with(
+            "@flag(\"x\", level=\"info\")\nfn f() -> Int { return 1 }",
+            &["@flag", "kwargs"],
+        );
+    }
+
+    #[test]
+    fn flag_decorator_apilable_sobre_http_handler() {
+        // El decorator @flag NO está restringido a fns regulares —
+        // es válido sobre handlers HTTP/WS. Esa combinación es
+        // exactamente el caso 90% (gate de feature en una ruta).
+        assert_ok(
+            "@flag(\"new-checkout\")\n\
+             @get(\"/v2/checkout\")\n\
+             fn v2() -> Map<Str, Str> { return {\"ok\": \"yes\"} }",
+        );
+    }
+
+    #[test]
+    fn flag_builtin_se_resuelve_como_any() {
+        // `flag(...)` está en el global scope como Type::Any (mismo
+        // patrón que jwt/hash/auth) — los calls no se chequean static
+        // pero el binding existe.
+        assert_ok("let v = flag(\"foo\")");
+        assert_ok("let v = flags.is_enabled(\"foo\")");
+        assert_ok("let v = flags.list()");
     }
 }

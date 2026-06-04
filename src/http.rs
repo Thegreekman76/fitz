@@ -164,6 +164,15 @@ pub struct RouteSpec {
     /// menos uno (OR sobre los valores; AND sobre múltiples decorators
     /// sería incoherente porque el user solo tiene UN role).
     pub required_roles: Vec<String>,
+    /// Fase 12.8 — Feature flag que gate-ea la ruta. `Some("flag-name")`
+    /// cuando el handler tiene `@flag("flag-name")`; `None` cuando no.
+    /// El wrapper consulta el registry runtime (`is_flag_enabled`) en
+    /// cada request — si el flag está off, retorna 404 con
+    /// `{"error": "feature disabled"}` ANTES de correr middlewares/auth.
+    /// La defensa profunda (404 en runtime aunque la ruta esté
+    /// registrada) preserva la posibilidad de toggle dinámico via env
+    /// vars sin restart.
+    pub flag_name: Option<String>,
     /// Fase 9.w.1.c — Nombre del param del handler donde inyectar el
     /// `user` retornado por el `@auth_provider`. `Some(name)` cuando
     /// `auth != None` y el handler declaró un param de tipo `User`
@@ -2498,6 +2507,22 @@ fn build_ws_method_router(
                         .into_response();
                 }
             };
+            // Fase 12.8 — gate por feature flag en el handshake WS.
+            // Si la flag está off, devolver 404 ANTES del upgrade
+            // (paralelo a HTTP).
+            if let Some(name) = route.flag_name.as_ref() {
+                if !crate::evaluator::is_flag_enabled(name) {
+                    let body = serde_json::json!({
+                        "error": format!("feature '{}' disabled", name)
+                    });
+                    return (
+                        StatusCode::NOT_FOUND,
+                        [(axum::http::header::CONTENT_TYPE, "application/json")],
+                        body.to_string(),
+                    )
+                        .into_response();
+                }
+            }
             let mut raw_headers = headers_to_map(&headers);
             // 9.w.2-ws-auth-browser: extraer bearer token del header
             // `Sec-WebSocket-Protocol` cuando el cliente envió un
@@ -2880,6 +2905,29 @@ async fn dispatch_request(
         Some(route) => (route.method.as_str(), route.path.clone()),
         None => ("UNKNOWN", String::new()),
     };
+
+    // Fase 12.8 — gate por feature flag. Si el handler tiene
+    // `@flag("name")` y el flag está off en el registry runtime,
+    // cortar acá con 404. Decisión arquitectónica: chequeo ANTES
+    // de auth/middlewares (la ruta "no existe" desde el punto de
+    // vista del cliente, no se filtra info de schemas/auth). El
+    // observability/access log siguen activos para auditoría.
+    let flag_blocked: Option<String> = registry
+        .routes
+        .get(route_idx)
+        .and_then(|r| r.flag_name.as_ref())
+        .filter(|name| !crate::evaluator::is_flag_enabled(name))
+        .cloned();
+    if let Some(name) = flag_blocked {
+        let body = serde_json::json!({"error": format!("feature '{}' disabled", name)});
+        let mut response = Response::new(body.to_string().into());
+        *response.status_mut() = StatusCode::NOT_FOUND;
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static("application/json"),
+        );
+        return response;
+    }
 
     // Fase 12.3.b.5 — opt-out con `@server(observability=false)`.
     // Cuando está deshabilitada, bypaseamos TODO el wrapper de
@@ -7077,6 +7125,7 @@ mod tests {
                 cors: None,
                 auth: AuthSpec::None,
                 required_roles: Vec::new(),
+                flag_name: None,
                 auth_user_param_name: None,
                 is_ws: false,
                 ws_conn_param_name: None,
@@ -7173,6 +7222,7 @@ mod tests {
             cors: None,
             auth: AuthSpec::None,
             required_roles: Vec::new(),
+            flag_name: None,
             auth_user_param_name: None,
             is_ws: false,
             ws_conn_param_name: None,

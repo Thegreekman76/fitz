@@ -1,0 +1,49 @@
+// Cap 33.5 — Trace y métricas manuales con @trace/@metric.
+//
+// Fase 12.7 (v0.13.0) — instrumentación opcional sobre fns
+// business logic. La auto-instrumentation HTTP de Fase 12.3 cubre
+// cada request automáticamente; @trace/@metric te permiten nombrar
+// spans + registrar histogram/counter para fns CUSTOM que el
+// access log no separa.
+//
+// Decisiones de diseño:
+//   - Solo sobre fns user (NO HTTP/WS — el checker lo rechaza).
+//   - kwarg `name=` opcional sobre cada decorator.
+//   - Apilables: @trace + @metric sobre la misma fn.
+//   - Paridad bit-a-bit `fitz run` ↔ `fitz build`. En el
+//     intérprete son no-op honesto (sin backend real); en
+//     `fitz build` el span entra y las métricas se registran.
+//
+// Correr:
+//   fitz run examples/guide/34-trace-metric.fitz
+//   fitz build examples/guide/34-trace-metric.fitz
+//   ./34-trace-metric.exe   # o ./34-trace-metric en Unix
+
+// Fn business logic candidata: cálculo no trivial, vale la pena
+// medir su distribución de duración + nombrar el span.
+@trace(name="risk_score_span")
+@metric(name="risk_score")
+fn evaluar_riesgo(score: Int) -> Float {
+    return score * 1.5
+}
+
+// Solo trace: span dedicado en Jaeger/Tempo, sin métricas.
+// Sin kwarg name=, el span se llama como la fn (`validar_email`).
+@trace
+fn validar_email(email: Str) -> Bool {
+    return email.contains("@")
+}
+
+// Solo metric: histogram + counter sin span dedicado.
+// (logs adentro siguen heredando el trace_id del span padre HTTP
+// si la fn se llama desde un handler).
+@metric
+fn calcular_precio(base: Int, descuento: Int) -> Int {
+    return base - descuento
+}
+
+let r = evaluar_riesgo(80)
+let e = validar_email("ada@fitz.dev")
+let p = calcular_precio(1000, 150)
+
+print("risk={r} email_ok={e} precio={p}")

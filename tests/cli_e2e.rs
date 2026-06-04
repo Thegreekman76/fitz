@@ -2157,3 +2157,69 @@ fn docker_build_sin_manifest_aborta() {
         "stderr inesperado: {stderr}",
     );
 }
+
+// =================================================================
+// Fase 12.6 — `fitz deploy <docker|compose>`
+// =================================================================
+
+#[test]
+fn deploy_docker_sin_dockerfile_aborta_con_sugerencia() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = make_docker_project(tmp.path(), "no-dockerfile", "print(\"hola\")\n");
+
+    let (_stdout, stderr, code) = run_fitz(&["deploy", "docker"], &project);
+    assert_ne!(code, 0);
+    // El error puede ser MissingDockerfile (si docker está instalado y
+    // pasamos el pre-flight check) o DockerNotInstalled (sin docker en
+    // PATH). Cualquiera de los dos es correcto.
+    assert!(
+        stderr.contains("Dockerfile") || stderr.contains("docker"),
+        "stderr inesperado: {stderr}",
+    );
+}
+
+#[test]
+fn deploy_compose_sin_compose_file_aborta_con_sugerencia() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = make_docker_project(tmp.path(), "no-compose", "print(\"hola\")\n");
+
+    let (_stdout, stderr, code) = run_fitz(&["deploy", "compose"], &project);
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("docker-compose.yml")
+            || stderr.contains("docker")
+            || stderr.contains("compose"),
+        "stderr inesperado: {stderr}",
+    );
+}
+
+#[test]
+fn deploy_docker_sin_manifest_aborta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["deploy", "docker"], tmp.path());
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("fitz.toml") || stderr.contains("fitz new"),
+        "stderr inesperado: {stderr}",
+    );
+}
+
+#[test]
+fn deploy_compose_sin_manifest_aborta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["deploy", "compose"], tmp.path());
+    assert_ne!(code, 0);
+    assert!(
+        stderr.contains("fitz.toml") || stderr.contains("fitz new"),
+        "stderr inesperado: {stderr}",
+    );
+}
+
+#[test]
+fn deploy_help_lista_docker_y_compose() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (stdout, _stderr, code) = run_fitz(&["deploy", "--help"], tmp.path());
+    assert_eq!(code, 0);
+    assert!(stdout.contains("docker"));
+    assert!(stdout.contains("compose"));
+}

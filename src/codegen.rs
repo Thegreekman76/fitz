@@ -105,6 +105,7 @@ pub fn generate_project(
     env: &TypeEnv,
     type_info: &crate::types::TypeInfo,
     dep_registry: crate::manifest::DepRegistry,
+    flag_defaults: std::collections::BTreeMap<String, bool>,
 ) -> Result<ProjectArtifacts, FitzError> {
     let raw_stem = src_path
         .file_stem()
@@ -255,11 +256,30 @@ pub fn generate_project(
     let uses_date_or_uuid =
         program_uses_date_or_uuid(program) || loader.modules.iter().any(|m| m.uses_date_or_uuid);
 
+    // Fase 12.7 — `@trace`/`@metric` sobre fns user (MVP solo detecta
+    // en el main; cross-module queda como deuda menor).
+    let uses_trace_metric = program_uses_trace_metric(program);
+
+    // Fase 12.8 — feature flags: detecta `@flag(...)` o builtins
+    // `flag(...)`/`flags.X(...)`. El programa siempre puede usar el
+    // builtin aunque no haya defaults declarados, así que también
+    // activamos `uses_flags=true` cuando `flag_defaults` no esté vacío
+    // (el binario debe poder cargar los defaults al boot).
+    let uses_flags = program_uses_flags(program) || !flag_defaults.is_empty();
+
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
     // importados con sus fields completos.
-    let main_rs = generate_main_rs(program, env, type_info, &loader, &python_imports)?;
+    let main_rs = generate_main_rs(
+        program,
+        env,
+        type_info,
+        &loader,
+        &python_imports,
+        uses_flags,
+        &flag_defaults,
+    )?;
 
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
@@ -273,6 +293,7 @@ pub fn generate_project(
             uses_ws,
             uses_jobs,
             uses_logging,
+            uses_trace_metric,
             uses_db,
             uses_fitz_value,
             uses_date_or_uuid,
@@ -534,17 +555,174 @@ fn program_uses_ws_broadcast(program: &Program) -> bool {
     program.iter().any(stmt_uses_wsb)
 }
 
-/// Fase 9.w.3 — detecta si el programa usa jobs (`@cron`/`@background`
-/// o llamadas a `spawn(...)`). Si hay cualquiera, sumamos el crate
-/// `cron` y los helpers de scheduling al binario. Sin features de
-/// jobs, el binario default queda sin deps extra.
+// Fase 9.w.3 — detecta si el programa usa jobs (`@cron`/`@background`
+// o llamadas a `spawn(...)`). Si hay cualquiera, sumamos el crate
+// `cron` y los helpers de scheduling al binario. Sin features de
+// jobs, el binario default queda sin deps extra.
+//
+// Detección:
+// - Cualquier FnDef con decorator `@cron` o `@background`.
+// - Cualquier llamada a `spawn(...)` adentro de cualquier expr/stmt
+//   (walk recursivo paralelo a `program_uses_auth`). El walk pierde
+//   shadowing de `spawn` user-defined — el codegen del callsite
+//   chequea eso al emitir.
+
+/// Fase 12.7 — `true` si alguna fn top-level del programa tiene
+/// `@trace` o `@metric` adentro de sus decorators. Habilita la emisión
+/// del wrap de instrumentación en `gen_top_fn` y suma `tracing`/
+/// `metrics` al Cargo.toml emitido cuando no había HTTP que ya los
+/// trajera.
+fn program_uses_trace_metric(program: &Program) -> bool {
+    program.iter().any(|stmt| match stmt {
+        Stmt::FnDef { decorators, .. } => decorators
+            .iter()
+            .any(|d| d.name == "trace" || d.name == "metric"),
+        _ => false,
+    })
+}
+
+/// Fase 12.8 — `true` si el programa usa feature flags vía:
+/// (a) decorator `@flag("name")` sobre alguna fn, o
+/// (b) builtin global `flag(name)`, o
+/// (c) módulo `flags.is_enabled(name)` / `flags.list()`.
+/// Activa la emisión del preludio `__FitzFlagRegistry` + helpers en
+/// el binario generado, y suma defaults del manifest al boot.
 ///
-/// Detección:
-/// - Cualquier FnDef con decorator `@cron` o `@background`.
-/// - Cualquier llamada a `spawn(...)` adentro de cualquier expr/stmt
-///   (walk recursivo paralelo a `program_uses_auth`). El walk pierde
-///   shadowing de `spawn` user-defined — el codegen del callsite
-///   chequea eso al emitir.
+/// Implementación: detecta `@flag` en decorators top-level. Para
+/// detección de calls a `flag(...)`/`flags.X(...)` adentro de
+/// expresiones, hace un walk amplio (paralelo a `program_uses_jobs`)
+/// pero suficiente para el caso 90% — si el programa usa flags via
+/// HTTP handler decorator + queries puntuales en el body, ambos casos
+/// se capturan. Falsos negativos en cierras anidaciones raras quedan
+/// como deuda menor (workaround: usar @flag en alguna fn top-level).
+fn program_uses_flags(program: &Program) -> bool {
+    // Path 1: decorator @flag en algún FnDef top-level (recursivo
+    // sobre FnDefs anidadas via walk_top_level_fns no es necesario —
+    // los decorators solo aplican a fns top-level).
+    if program.iter().any(|stmt| match stmt {
+        Stmt::FnDef { decorators, .. } => decorators.iter().any(|d| d.name == "flag"),
+        _ => false,
+    }) {
+        return true;
+    }
+    // Path 2 + 3: presencia de `flag(...)` o `flags.X(...)` en
+    // cualquier Expr del programa. Walk simple stmt → expr.
+    fn expr_uses_flags(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    if name == "flag" {
+                        return true;
+                    }
+                }
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
+                    if (field == "is_enabled" || field == "list")
+                        && matches!(object.as_ref(), Expr::Ident(n, _) if n == "flags")
+                    {
+                        return true;
+                    }
+                }
+                expr_uses_flags(callee) || args.iter().any(expr_uses_flags)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_flags(left) || expr_uses_flags(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_flags(operand),
+            Expr::Field { object, .. } => expr_uses_flags(object),
+            Expr::Index { object, index, .. } => expr_uses_flags(object) || expr_uses_flags(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
+                expr_uses_flags(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_flags(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_flags(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_flags(start) || expr_uses_flags(end),
+            Expr::List(items, _) => items.iter().any(expr_uses_flags),
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
+                expr_uses_flags(condition)
+                    || then.iter().any(stmt_uses_flags)
+                    || else_
+                        .as_ref()
+                        .is_some_and(|e| e.iter().any(stmt_uses_flags))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_flags),
+            Expr::Match { value, arms, .. } => {
+                expr_uses_flags(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_flags))
+            }
+            Expr::Await(inner, _) | Expr::Try(inner, _) => expr_uses_flags(inner),
+            _ => false,
+        }
+    }
+    fn stmt_uses_flags(s: &Stmt) -> bool {
+        match s {
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => expr_uses_flags(e),
+            Stmt::Assign { value, .. } => expr_uses_flags(value),
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_flags(condition) || body.iter().any(stmt_uses_flags),
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_flags),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_flags(iter) || body.iter().any(stmt_uses_flags)
+            }
+            Stmt::FnDef {
+                body, decorators, ..
+            } => decorators.iter().any(|d| d.name == "flag") || body.iter().any(stmt_uses_flags),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_flags(status) || body.as_ref().is_some_and(expr_uses_flags)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_flags)
+}
+
+/// Fase 12.7 — extrae nombres custom de los kwargs `name="X"` de
+/// `@trace` y `@metric`. Cuando no hay kwarg, usa `fn_name` como
+/// fallback. Devuelve `None` si no hay ninguno de los dos decoradores.
+#[derive(Debug, Clone)]
+struct TraceMetricInfo {
+    trace_name: Option<String>,
+    metric_name: Option<String>,
+}
+
+fn extract_trace_metric_info(decorators: &[Decorator], fn_name: &str) -> Option<TraceMetricInfo> {
+    let mut trace_name = None;
+    let mut metric_name = None;
+    for d in decorators {
+        let kind = match d.name.as_str() {
+            "trace" => "trace",
+            "metric" => "metric",
+            _ => continue,
+        };
+        let custom = d.kwargs.iter().find_map(|(k, v)| {
+            if k == "name" {
+                if let Expr::Str(s, _) = v {
+                    return Some(s.clone());
+                }
+            }
+            None
+        });
+        let resolved = custom.unwrap_or_else(|| fn_name.to_string());
+        if kind == "trace" {
+            trace_name = Some(resolved);
+        } else {
+            metric_name = Some(resolved);
+        }
+    }
+    if trace_name.is_none() && metric_name.is_none() {
+        None
+    } else {
+        Some(TraceMetricInfo {
+            trace_name,
+            metric_name,
+        })
+    }
+}
+
 fn program_uses_jobs(program: &Program) -> bool {
     use crate::ast::StrPart;
     fn expr_uses_spawn(e: &Expr) -> bool {
@@ -2420,6 +2598,7 @@ fn cargo_toml_for(
     uses_ws: bool,
     uses_jobs: bool,
     uses_logging: bool,
+    uses_trace_metric: bool,
     uses_db: bool,
     uses_fitz_value: bool,
     uses_date_or_uuid: bool,
@@ -2512,6 +2691,7 @@ fn cargo_toml_for(
         || uses_auth
         || uses_jobs
         || uses_logging
+        || uses_trace_metric
         || uses_db
         || uses_date_or_uuid;
     if !needs_deps_section {
@@ -2664,11 +2844,20 @@ fn cargo_toml_for(
     // ya emitieron chrono, evitamos duplicar la entry. `serde_json` ya
     // está en HTTP/auth/db cuando aplican; emitimos solo si NO está en
     // ninguno (ej: programa CLI puro con `log.info(..., key: 42)`).
-    let logging_lines = if uses_logging {
-        let mut s = String::from(
-            "tracing = \"0.1\"\n\
-             tracing-subscriber = { version = \"0.3\", default-features = false, features = [\"env-filter\", \"std\", \"fmt\"] }\n",
-        );
+    // Fase 12.7 — `tracing` también se necesita si hay `@trace` (que
+    // emite `tracing::info_span!`); el `tracing-subscriber` solo si
+    // `uses_logging` (el span sin subscriber instalado es noop, no
+    // queremos pagar la dep). `metrics` se necesita si hay `@metric`
+    // o si `has_http` (Fase 12.3.b.4).
+    let needs_tracing = uses_logging || uses_trace_metric;
+    let needs_metrics = has_http || uses_trace_metric;
+    let logging_lines = if needs_tracing {
+        let mut s = String::from("tracing = \"0.1\"\n");
+        if uses_logging {
+            s.push_str(
+                "tracing-subscriber = { version = \"0.3\", default-features = false, features = [\"env-filter\", \"std\", \"fmt\"] }\n",
+            );
+        }
         if !uses_jobs && !uses_date_or_uuid {
             s.push_str(
                 "chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n",
@@ -2689,7 +2878,7 @@ fn cargo_toml_for(
         // dispatch HTTP del binario generado. Solo cuando hay HTTP —
         // programas CLI puros con `log.X(...)` no instalan ningún
         // recorder ni necesitan la dep.
-        if has_http {
+        if needs_metrics {
             s.push_str("metrics = \"0.24\"\n");
         }
         // Fase 12.3.c.2 — `opentelemetry` + `opentelemetry_sdk` +
@@ -4380,7 +4569,19 @@ pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzErr
     // se reusa el que ya computó el checker en main.rs.
     let (_env_ignored, type_info, _defs, _errs) = crate::types::check_program(program);
     let _ = _env_ignored;
-    generate_main_rs(program, env, &type_info, &loader, &python_imports)
+    // Fase 12.8 — test path no pasa flags por param; detecta solo
+    // por AST y emite con defaults vacíos.
+    let uses_flags = program_uses_flags(program);
+    let flag_defaults = std::collections::BTreeMap::new();
+    generate_main_rs(
+        program,
+        env,
+        &type_info,
+        &loader,
+        &python_imports,
+        uses_flags,
+        &flag_defaults,
+    )
 }
 
 /// Genera el `src/main.rs` del Cargo project. Si hay módulos cargados,
@@ -4394,6 +4595,8 @@ fn generate_main_rs(
     type_info: &crate::types::TypeInfo,
     loader: &ModuleLoader,
     python_imports: &[PythonImport],
+    uses_flags: bool,
+    flag_defaults: &std::collections::BTreeMap<String, bool>,
 ) -> Result<String, FitzError> {
     // Fase 8.7.1 — los imports Python se separan acá y se procesan
     // como bindings PyO3 (NO van al loader). El validador ya corrió
@@ -4436,6 +4639,10 @@ fn generate_main_rs(
     let uses_logging = program_uses_logging(program)
         || has_http
         || loader.modules.iter().any(|m| m.uses_logging || m.has_http);
+    // Fase 12.7 — `@trace`/`@metric` sobre fns user. MVP solo detecta
+    // en el main; cross-module queda como deuda menor (workaround:
+    // declarar la fn instrumentada en el main).
+    let uses_trace_metric = program_uses_trace_metric(program);
     // W8 (v0.10.7) — uses_db transitivo: si algún módulo cargado
     // declara `@table` types o usa db, el main emite el preludio db
     // entero para que los `use crate::__fitz_db_*` de los módulos
@@ -4469,6 +4676,9 @@ fn generate_main_rs(
     ctx.uses_ws = uses_ws;
     ctx.uses_jobs = uses_jobs;
     ctx.uses_logging = uses_logging;
+    ctx.uses_trace_metric = uses_trace_metric;
+    ctx.uses_flags = uses_flags;
+    ctx.flag_defaults = flag_defaults.clone();
     ctx.uses_db = uses_db;
     ctx.uses_date_or_uuid = uses_date_or_uuid;
     // 10.8.7 (v0.10.8) — pre-scan del builtin `ws_broadcast(endpoint, msg)`
@@ -4652,7 +4862,13 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                         // `tz`/`retry` (background). El checker validó shape.
                         if !matches!(
                             d.name.as_str(),
-                            "server" | "header" | "command" | "cron" | "background"
+                            "server"
+                                | "header"
+                                | "command"
+                                | "cron"
+                                | "background"
+                                | "trace"
+                                | "metric"
                         ) {
                             if let Some((key, _)) = d.kwargs.first() {
                                 return Err(FitzError::new(
@@ -4725,6 +4941,19 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // (9.w.3.a) ya validó shape + conflictos.
                             "cron" => cron_decos = true,
                             "background" => {}
+                            // Fase 12.7 — `@trace`/`@metric` son
+                            // marcadores que el wrap de `gen_top_fn`
+                            // procesa via `extract_trace_metric_info`.
+                            // Acá solo los aceptamos como decoradores
+                            // válidos del partition (sin cambiar la
+                            // categoría http/ws/cron/etc).
+                            "trace" | "metric" => {}
+                            // Fase 12.8 — `@flag("name")` es marcador
+                            // que `resolve_handler_signature` (HTTP) y
+                            // `gen_ws_handler_wrapper` (WS) procesan
+                            // via `flag_name`. Acá solo lo aceptamos
+                            // como decorator válido del partition.
+                            "flag" => {}
                             // Fase 13 (v0.11.0) — `@command("name", desc=)`.
                             // La fn va a `cli_fns` (para emitir dispatch
                             // desde argv) Y a `top_fns` (para emitir la fn
@@ -4776,7 +5005,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@ws/@server/@header/@middleware/@auth_provider/@authenticated/@admin/@cron/@background/@command/@test/@healthz/@readyz)",
+                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@ws/@server/@header/@middleware/@auth_provider/@authenticated/@admin/@cron/@background/@command/@test/@healthz/@readyz/@trace/@metric/@flag)",
                                         other, name
                                     ),
                                 ));
@@ -4955,6 +5184,17 @@ fn emit_main_rs_body(
     // `log.info(...)` también lo activan. Sin uses_logging, no se
     // emiten deps tracing al Cargo.toml ni helpers al main.
     ctx.emit_logging_prelude();
+    // Fase 12.7 — preludio del guard RAII para @trace/@metric. Emite
+    // `struct __FitzMetricGuard` + `impl Drop` que registra histogram
+    // + counter al salir del scope (incluso con `return X` explícito,
+    // Rust corre Drop antes de retornar). Solo cuando `uses_trace_metric`
+    // — programas sin esos decoradores no pagan el preludio.
+    ctx.emit_trace_metric_prelude();
+    // Fase 12.8 — preludio del registry de feature flags + helpers
+    // `__fitz_is_flag_enabled`/`__fitz_flag_init`/`__fitz_flags_list`.
+    // Solo cuando `uses_flags` — programas sin `@flag`/`flag()`/`flags.X()`
+    // no pagan el preludio ni el init call.
+    ctx.emit_flag_prelude();
     // Fase 12.3.c.2 — preludio del OTLP exporter: `__fitz_otel_init` +
     // `__fitz_otel_is_enabled` + `__fitz_otel_tracer`. Solo cuando hay
     // HTTP (programas CLI puros no necesitan tracing distribuido).
@@ -5959,6 +6199,21 @@ struct CodegenCtx<'a> {
     /// `__fitz_log_init()` adentro del main generado. Cuando es false,
     /// el binario no paga deps de tracing/tracing-subscriber.
     uses_logging: bool,
+    /// Fase 12.7: `true` si el programa tiene alguna fn con
+    /// `@trace`/`@metric`. Habilita la emisión del wrap
+    /// (`tracing::span!`, `metrics::histogram!`, `metrics::counter!`)
+    /// alrededor del body y suma `tracing`/`metrics` al Cargo.toml
+    /// emitido cuando no había HTTP que ya los traía.
+    uses_trace_metric: bool,
+    /// Fase 12.8: `true` si el programa usa feature flags (`@flag(...)`,
+    /// builtin `flag(...)`, módulo `flags.X(...)`). Habilita emisión
+    /// del preludio `__FitzFlagRegistry` + helpers + el init call
+    /// con defaults del manifest al boot.
+    uses_flags: bool,
+    /// Fase 12.8: defaults del manifest `[flags]` que el codegen
+    /// embebe en el `__fitz_flag_init(...)` al boot. Vacío en
+    /// single-file mode o cuando el manifest no declara flags.
+    flag_defaults: std::collections::BTreeMap<String, bool>,
     /// Fase 10.1.c: `true` si el programa usa el módulo `db` (driver
     /// Postgres puro). Habilita emisión del `mod __fitz_db_runtime;`
     /// + preludio `__FitzDbConn`/`__FitzPgValue`/`__IntoPgValue`
@@ -6146,6 +6401,11 @@ struct HandlerSig {
     /// `auth != None`; `None` cuando no hay auth. Identificado por
     /// regla "leftover" (el param que no es path/query/header).
     auth_user_param_name: Option<String>,
+    /// Fase 12.8 — feature flag que gate-ea la ruta. `Some("flag-name")`
+    /// cuando el handler tiene `@flag("flag-name")`; `None` cuando no.
+    /// El wrapper emite un check temprano que devuelve 404 si el flag
+    /// está off (paralelo al `dispatch_request` del intérprete).
+    flag_name: Option<String>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -6189,6 +6449,9 @@ impl<'a> CodegenCtx<'a> {
             uses_ws_broadcast: false,
             uses_jobs: false,
             uses_logging: false,
+            uses_trace_metric: false,
+            uses_flags: false,
+            flag_defaults: std::collections::BTreeMap::new(),
             uses_db: false,
             uses_date_or_uuid: false,
             cron_jobs_info: Vec::new(),
@@ -7524,6 +7787,135 @@ impl __FitzRetryConfig {
     /// El emit_main_rs_body lo llama después de auth/jobs/db para que
     /// las fns top-level del usuario puedan referenciarlo sin `use`
     /// extra.
+    /// Fase 12.7 — guard RAII para @trace/@metric. Registra
+    /// `metrics::histogram!(format!("{name}_duration_seconds"))` +
+    /// `metrics::counter!(format!("{name}_calls_total"))` al Drop.
+    /// El guard se declara DESPUÉS del span entered (cuando hay @trace),
+    /// y Drop corre en reverso → guard Drop primero (con span activo,
+    /// las métricas heredan trace_id), luego span Drop (sale del scope).
+    fn emit_trace_metric_prelude(&mut self) {
+        if !self.uses_trace_metric {
+            return;
+        }
+        self.emit(
+            "\n// --- 12.7: guard RAII para @trace/@metric (records on Drop) ---\n\
+             struct __FitzMetricGuard {\n\
+             \x20   name: &'static str,\n\
+             \x20   start: std::time::Instant,\n\
+             }\n\
+             impl Drop for __FitzMetricGuard {\n\
+             \x20   fn drop(&mut self) {\n\
+             \x20       let elapsed = self.start.elapsed().as_secs_f64();\n\
+             \x20       metrics::histogram!(format!(\"{}_duration_seconds\", self.name)).record(elapsed);\n\
+             \x20       metrics::counter!(format!(\"{}_calls_total\", self.name)).increment(1);\n\
+             \x20   }\n\
+             }\n",
+        );
+    }
+
+    /// Fase 12.8 — registry de feature flags. Static OnceLock con
+    /// defaults del manifest + env var override (`FITZ_FLAG_<NAME>`).
+    /// Helpers `__fitz_is_flag_enabled` (consulta) + `__fitz_flag_init`
+    /// (init con defaults baked-in al boot) + `__fitz_flags_list`
+    /// (lista flags conocidos). El init se invoca al INICIO del main
+    /// generado (antes de cualquier stmt del usuario).
+    fn emit_flag_prelude(&mut self) {
+        if !self.uses_flags {
+            return;
+        }
+        self.emit(
+            "\n// --- 12.8: registry de feature flags + builtins flag()/flags.X ---\n\
+             struct __FitzFlagRegistry {\n\
+             \x20   defaults: std::collections::HashMap<String, bool>,\n\
+             \x20   cache: std::sync::Mutex<std::collections::HashMap<String, bool>>,\n\
+             }\n\
+             static __FITZ_FLAG_REGISTRY: std::sync::OnceLock<__FitzFlagRegistry> = std::sync::OnceLock::new();\n\
+             fn __fitz_flag_env_name(flag: &str) -> String {\n\
+             \x20   format!(\"FITZ_FLAG_{}\", flag.to_uppercase().replace('-', \"_\"))\n\
+             }\n\
+             fn __fitz_parse_flag_env(raw: &str) -> Option<bool> {\n\
+             \x20   match raw.trim().to_lowercase().as_str() {\n\
+             \x20       \"true\" | \"1\" | \"yes\" | \"on\" => Some(true),\n\
+             \x20       \"false\" | \"0\" | \"no\" | \"off\" => Some(false),\n\
+             \x20       _ => None,\n\
+             \x20   }\n\
+             }\n\
+             fn __fitz_is_flag_enabled(name: &str) -> bool {\n\
+             \x20   if let Some(reg) = __FITZ_FLAG_REGISTRY.get() {\n\
+             \x20       if let Ok(cache) = reg.cache.lock() {\n\
+             \x20           if let Some(c) = cache.get(name) {\n\
+             \x20               return *c;\n\
+             \x20           }\n\
+             \x20       }\n\
+             \x20       let result = match std::env::var(__fitz_flag_env_name(name)).ok().and_then(|v| __fitz_parse_flag_env(&v)) {\n\
+             \x20           Some(v) => v,\n\
+             \x20           None => reg.defaults.get(name).copied().unwrap_or(false),\n\
+             \x20       };\n\
+             \x20       if let Ok(mut cache) = reg.cache.lock() {\n\
+             \x20           cache.insert(name.to_string(), result);\n\
+             \x20       }\n\
+             \x20       result\n\
+             \x20   } else {\n\
+             \x20       std::env::var(__fitz_flag_env_name(name)).ok().and_then(|v| __fitz_parse_flag_env(&v)).unwrap_or(false)\n\
+             \x20   }\n\
+             }\n\
+             fn __fitz_flag_init(defaults: std::collections::HashMap<String, bool>) {\n\
+             \x20   let _ = __FITZ_FLAG_REGISTRY.set(__FitzFlagRegistry {\n\
+             \x20       defaults,\n\
+             \x20       cache: std::sync::Mutex::new(std::collections::HashMap::new()),\n\
+             \x20   });\n\
+             }\n\
+             fn __fitz_flags_list() -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {\n\
+             \x20   use std::collections::BTreeSet;\n\
+             \x20   let mut names: BTreeSet<String> = BTreeSet::new();\n\
+             \x20   if let Some(reg) = __FITZ_FLAG_REGISTRY.get() {\n\
+             \x20       for k in reg.defaults.keys() {\n\
+             \x20           names.insert(k.clone());\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   for (key, _) in std::env::vars() {\n\
+             \x20       if let Some(suffix) = key.strip_prefix(\"FITZ_FLAG_\") {\n\
+             \x20           names.insert(suffix.to_lowercase());\n\
+             \x20       }\n\
+             \x20   }\n\
+             \x20   std::sync::Arc::new(std::sync::Mutex::new(names.into_iter().collect()))\n\
+             }\n",
+        );
+    }
+
+    /// Fase 12.8 — emite la llamada `__fitz_flag_init(defaults)` al
+    /// inicio del main generado, con los defaults del manifest baked
+    /// in como literales. Se llama una vez por proceso (idempotente).
+    fn emit_flag_init_call(&mut self) {
+        if !self.uses_flags {
+            return;
+        }
+        self.emit_indent();
+        if self.flag_defaults.is_empty() {
+            self.emit("__fitz_flag_init(std::collections::HashMap::new());\n");
+            return;
+        }
+        // Clone defaults para liberar el préstamo de `self` antes de
+        // llamar `emit_indent`/`emit` que toman &mut self. BTreeMap
+        // garantiza orden determinístico — clave para builds
+        // reproducibles bit-a-bit.
+        let defaults: Vec<(String, bool)> = self
+            .flag_defaults
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect();
+        self.emit("__fitz_flag_init(std::collections::HashMap::from([\n");
+        self.indent += 1;
+        for (k, v) in &defaults {
+            self.emit_indent();
+            use std::fmt::Write;
+            writeln!(&mut self.output, "(\"{}\".to_string(), {}),", k, v).unwrap();
+        }
+        self.indent -= 1;
+        self.emit_indent();
+        self.emit("]));\n");
+    }
+
     fn emit_logging_prelude(&mut self) {
         if !self.uses_logging {
             return;
@@ -9055,6 +9447,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // Fase 12.3.a.3 — init del logger ANTES de cualquier stmt del
         // user. No-op si `uses_logging == false`.
         self.emit_log_init_call();
+        // Fase 12.8 — init del registry de feature flags ANTES de
+        // cualquier stmt del user, con defaults del manifest baked-in.
+        // No-op si `uses_flags == false`.
+        self.emit_flag_init_call();
         // Fase 9.w.3.c — registrar cron jobs ANTES de los stmts del
         // usuario. Los jobs corren en `tokio::spawn` independientes;
         // el main puede seguir con sus stmts. Si hay cron-only mode
@@ -11211,6 +11607,35 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // que envuelve en Some(...).)
         self.response_mode = has_return_status || is_middleware_post;
         self.in_middleware_fn = is_middleware;
+
+        // Fase 12.7 — instrumentación @trace/@metric vía Drop guard +
+        // EnteredSpan. RAII garantiza que el orden Drop sea inverso al
+        // de declaración: el guard se dropea ANTES del span, así las
+        // métricas se registran mientras el span sigue activo. Patrón
+        // amigable con `return X` explícito — el código se ejecuta en
+        // el path de salida sin requerir wrap-down después del body.
+        let trace_info = extract_trace_metric_info(decorators, name);
+        if let Some(info) = &trace_info {
+            if let Some(span_name) = &info.trace_name {
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "let __fitz_instr_span = tracing::info_span!(\"{}\").entered();",
+                    span_name,
+                )
+                .unwrap();
+            }
+            if let Some(metric_name) = &info.metric_name {
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "let _fitz_instr_guard = __FitzMetricGuard {{ name: \"{}\", start: std::time::Instant::now() }};",
+                    metric_name,
+                )
+                .unwrap();
+            }
+        }
+
         for stmt in body {
             self.gen_stmt_in_fn(stmt, &emit_ret)?;
         }
@@ -13285,6 +13710,42 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     ("auth", "cleanup_expired") => {
                         return self.gen_auth_cleanup_expired(args, call_span);
                     }
+                    // Fase 12.8 — `flags.is_enabled(name)` y `flags.list()`.
+                    // El preludio emite los helpers `__fitz_is_flag_enabled`
+                    // (acepta &str) + `__fitz_flags_list()` (devuelve
+                    // `Arc<Mutex<Vec<String>>>`).
+                    ("flags", "is_enabled") => {
+                        if args.len() != 1 {
+                            return Err(self.err_at(
+                                call_span,
+                                format!(
+                                    "`flags.is_enabled(name)` espera 1 argumento (Str), recibió {}",
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        let (k_code, k_ty) = self.gen_expr(&args[0])?;
+                        let k_coerced = coerce(&k_code, &k_ty, &Type::Str, self.env);
+                        return Ok((
+                            format!("__fitz_is_flag_enabled(&{})", k_coerced),
+                            Type::Bool,
+                        ));
+                    }
+                    ("flags", "list") => {
+                        if !args.is_empty() {
+                            return Err(self.err_at(
+                                call_span,
+                                format!(
+                                    "`flags.list()` no acepta argumentos, recibió {}",
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        return Ok((
+                            "__fitz_flags_list()".to_string(),
+                            Type::List(Box::new(Type::Str)),
+                        ));
+                    }
                     // Fase 12.3.a.3 — `log.info/warn/error/debug(...)`
                     // se traduce al helper preludio
                     // `__fitz_log_<level>(msg, &[(k, val), ...])`.
@@ -13714,6 +14175,27 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
             };
             return Ok((code, d_ty));
+        }
+        // Fase 12.8 — builtin global `flag(name: Str) -> Bool`.
+        // Si el usuario definió una fn `flag` propia, `fn_sigs` la
+        // captura antes y el builtin no dispara — misma política que
+        // `len`/`secret`/etc.
+        if name == "flag" && !self.is_user_callable(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`flag(name)` espera 1 argumento (Str), recibió {}",
+                        args.len()
+                    ),
+                ));
+            }
+            let (k_code, k_ty) = self.gen_expr(&args[0])?;
+            let k_coerced = coerce(&k_code, &k_ty, &Type::Str, self.env);
+            return Ok((
+                format!("__fitz_is_flag_enabled(&{})", k_coerced),
+                Type::Bool,
+            ));
         }
         // Fase 6.6: builtin `sleep(ms: Int) -> Future<Null>`. Si el
         // usuario definió una fn `sleep` propia, `fn_sigs` la captura
@@ -24539,6 +25021,26 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     fn gen_http_handler_wrapper(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
         let sig = self.resolve_handler_signature(stmt)?;
         self.emit_axum_extractors(&sig)?;
+        // Fase 12.8 — gate por feature flag ANTES de cualquier wrap de
+        // observability/middlewares/auth. Si el flag está off, devolver
+        // 404 inmediato sin abrir el span del request. Paralelo
+        // bit-a-bit a `dispatch_request` del intérprete.
+        if let Some(fname) = sig.flag_name.as_ref() {
+            let fname_lit = rust_str_literal(fname);
+            writeln!(
+                &mut self.output,
+                "    if !__fitz_is_flag_enabled({}) {{\n        \
+                 let __body = serde_json::json!({{\"error\": format!(\"feature '{{}}' disabled\", {})}});\n        \
+                 let mut __resp = axum::response::Response::new(__body.to_string().into());\n        \
+                 *__resp.status_mut() = axum::http::StatusCode::NOT_FOUND;\n        \
+                 __resp.headers_mut().insert(\n            \
+                 axum::http::header::CONTENT_TYPE,\n            \
+                 axum::http::HeaderValue::from_static(\"application/json\"),\n        );\n        \
+                 return __resp;\n    }}",
+                fname_lit, fname_lit
+            )
+            .unwrap();
+        }
         // Fase 12.3.b.5 — opt-out con `@server(observability=false)`:
         // si el flag está apagado, NO emitimos el prelude del scope ni
         // el wrap del cuerpo. El body corre bare-metal y se cierra con
@@ -24736,6 +25238,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // Resolver auth desde decorators (paralelo a HandlerSig).
         let mut auth = crate::http::AuthSpec::None;
         let mut required_roles: Vec<String> = Vec::new();
+        let mut flag_name: Option<String> = None;
         for d in decorators {
             match d.name.as_str() {
                 "authenticated" if auth == crate::http::AuthSpec::None => {
@@ -24747,6 +25250,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         if !required_roles.contains(role) {
                             required_roles.push(role.clone());
                         }
+                    }
+                }
+                // Fase 12.8 — feature flag sobre @ws.
+                "flag" => {
+                    if let [Expr::Str(fname, _)] = d.args.as_slice() {
+                        flag_name = Some(fname.clone());
                     }
                 }
                 _ => {}
@@ -24802,6 +25311,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.emit("    __hmap: axum::http::HeaderMap,\n");
         self.emit(") -> axum::response::Response {\n");
         self.emit("    use axum::response::IntoResponse;\n");
+
+        // Fase 12.8 — gate por feature flag en el handshake WS.
+        // Devolvemos 404 ANTES del upgrade si el flag está off.
+        // Paralelo bit-a-bit al `build_ws_method_router` del intérprete.
+        if let Some(fname) = flag_name.as_ref() {
+            let fname_lit = rust_str_literal(fname);
+            writeln!(
+                &mut self.output,
+                "    if !__fitz_is_flag_enabled({}) {{\n        \
+                 let __body = serde_json::json!({{\"error\": format!(\"feature '{{}}' disabled\", {})}});\n        \
+                 return (\n            \
+                 axum::http::StatusCode::NOT_FOUND,\n            \
+                 [(axum::http::header::CONTENT_TYPE, \"application/json\")],\n            \
+                 __body.to_string(),\n        ).into_response();\n    }}",
+                fname_lit, fname_lit,
+            )
+            .unwrap();
+        }
 
         // 9.w.2-ws-auth-browser — extraer subprotocol `bearer.<token>`
         // (si presente) ANTES del auth pre-upgrade. La extracción
@@ -25261,6 +25788,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // separado del user.
         let mut auth = crate::http::AuthSpec::None;
         let mut required_roles: Vec<String> = Vec::new();
+        let mut flag_name: Option<String> = None;
         for d in decorators {
             match d.name.as_str() {
                 "authenticated" if auth == crate::http::AuthSpec::None => {
@@ -25274,6 +25802,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         if !required_roles.contains(role) {
                             required_roles.push(role.clone());
                         }
+                    }
+                }
+                // Fase 12.8 — feature flag de la ruta. El checker validó
+                // shape (1 arg Str literal); acá lo extraemos best-effort.
+                "flag" => {
+                    if let [Expr::Str(fname, _)] = d.args.as_slice() {
+                        flag_name = Some(fname.clone());
                     }
                 }
                 _ => {}
@@ -25443,6 +25978,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             auth,
             required_roles,
             auth_user_param_name,
+            flag_name,
         })
     }
 
@@ -32353,6 +32889,7 @@ mod tests {
             &env,
             &types_info,
             crate::manifest::DepRegistry::new(),
+            std::collections::BTreeMap::new(),
         )
         .expect("generate_project OK");
         // Buscar el utils.rs entre los mod_files emitidos por el loader.
@@ -32442,7 +32979,7 @@ mod tests {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
         let toml = cargo_toml_for(
-            "foo", false, true, false, false, false, false, false, false, false, false,
+            "foo", false, true, false, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
@@ -32452,7 +32989,7 @@ mod tests {
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
         let toml = cargo_toml_for(
-            "foo", true, true, false, false, false, false, false, false, false, false,
+            "foo", true, true, false, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
@@ -32462,7 +32999,7 @@ mod tests {
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, false, false, false,
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
         );
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
@@ -32481,7 +33018,7 @@ mod tests {
         // Programa CLI con `log.info(...)` → Cargo.toml suma
         // tracing + tracing-subscriber + chrono + serde_json.
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, true, false, false, false,
+            "foo", false, false, false, false, false, false, true, false, false, false, false,
         );
         assert!(
             toml.contains("tracing = \"0.1\""),
@@ -32515,7 +33052,7 @@ mod tests {
         // uses_logging + uses_jobs ambos true → chrono solo se emite
         // una vez (lo emite jobs_lines; logging_lines lo skipea).
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, true, true, false, false, false,
+            "foo", false, false, false, false, false, true, true, false, false, false, false,
         );
         let count_chrono = toml.matches("chrono = ").count();
         assert!(
@@ -32529,7 +33066,7 @@ mod tests {
     #[test]
     fn cargo_toml_sin_logging_no_incluye_tracing() {
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, false, false, false,
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
         );
         assert!(
             !toml.contains("tracing"),
@@ -32542,7 +33079,7 @@ mod tests {
     fn cargo_toml_logging_con_http_no_duplica_serde_json() {
         // HTTP ya trae serde_json; logging_lines NO debe duplicar.
         let toml = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false,
         );
         let count = toml.matches("serde_json = ").count();
         assert!(
@@ -32552,6 +33089,83 @@ mod tests {
             toml
         );
     }
+
+    // ---------------------------------------------------------------
+    // Fase 12.7 — @trace/@metric paridad codegen
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn cargo_toml_con_trace_metric_incluye_tracing_y_metrics() {
+        // Programa CLI con `@trace`/`@metric` → Cargo.toml suma
+        // tracing + metrics. NO emite tracing-subscriber (eso solo
+        // si `uses_logging`).
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, true, false, false, false,
+        );
+        assert!(
+            toml.contains("tracing = \"0.1\""),
+            "esperaba tracing en deps: {}",
+            toml
+        );
+        assert!(
+            toml.contains("metrics = \"0.24\""),
+            "esperaba metrics en deps: {}",
+            toml
+        );
+        assert!(
+            !toml.contains("tracing-subscriber"),
+            "no debería incluir tracing-subscriber (sin uses_logging): {}",
+            toml
+        );
+    }
+
+    #[test]
+    fn cargo_toml_sin_trace_metric_no_incluye_tracing_ni_metrics() {
+        let toml = cargo_toml_for(
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
+        );
+        assert!(!toml.contains("tracing"), "no debería incluir tracing");
+        assert!(!toml.contains("metrics"), "no debería incluir metrics");
+    }
+
+    #[test]
+    fn extract_trace_metric_info_lee_kwarg_name_y_fallbackea_a_fn_name() {
+        use crate::ast::{Decorator, Expr, Span};
+        let deco_trace_custom = Decorator {
+            name: "trace".to_string(),
+            args: vec![],
+            kwargs: vec![(
+                "name".to_string(),
+                Expr::Str("custom_span".to_string(), Span::ZERO),
+            )],
+        };
+        let info = extract_trace_metric_info(&[deco_trace_custom], "fn_real").unwrap();
+        assert_eq!(info.trace_name.as_deref(), Some("custom_span"));
+        assert!(info.metric_name.is_none());
+
+        let deco_metric_bare = Decorator {
+            name: "metric".to_string(),
+            args: vec![],
+            kwargs: vec![],
+        };
+        let info2 = extract_trace_metric_info(&[deco_metric_bare], "fn_real").unwrap();
+        assert_eq!(info2.metric_name.as_deref(), Some("fn_real"));
+        assert!(info2.trace_name.is_none());
+    }
+
+    #[test]
+    fn program_uses_trace_metric_detecta_decorador_sobre_fn() {
+        let src = "@trace fn f() { return 1 }";
+        let program = parse(tokenize(src).unwrap()).unwrap();
+        assert!(program_uses_trace_metric(&program));
+        let src2 = "fn g() { return 1 }";
+        let program2 = parse(tokenize(src2).unwrap()).unwrap();
+        assert!(!program_uses_trace_metric(&program2));
+    }
+
+    // ---------------------------------------------------------------
+    // Fase 12.3.a.3 — codegen del módulo `log`
+    // ---------------------------------------------------------------
 
     #[test]
     fn program_uses_logging_detecta_log_info() {
@@ -32782,7 +33396,7 @@ mod tests {
         // uses_date_or_uuid). En el codegen real `uses_logging`
         // auto-promueve a true cuando `has_http` es true.
         let cargo = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false,
         );
         assert!(
             cargo.contains("metrics-exporter-prometheus"),
@@ -32860,7 +33474,7 @@ mod tests {
         // uses_date_or_uuid). HTTP + logging activos disparan el bloque
         // que emite las deps OTel + metrics + uuid + chrono + tracing.
         let cargo = cargo_toml_for(
-            "foo", true, false, false, false, false, false, true, false, false, false,
+            "foo", true, false, false, false, false, false, true, false, false, false, false,
         );
         assert!(
             cargo.contains("opentelemetry-otlp"),
@@ -32925,7 +33539,7 @@ mod tests {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
         let toml = cargo_toml_for(
-            "foo", false, false, true, false, false, false, false, false, false, false,
+            "foo", false, false, true, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
@@ -32944,7 +33558,7 @@ mod tests {
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
         let toml = cargo_toml_for(
-            "foo", true, false, true, false, false, false, false, false, false, false,
+            "foo", true, false, true, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
@@ -32954,7 +33568,7 @@ mod tests {
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
         let toml = cargo_toml_for(
-            "foo", true, false, false, false, false, false, false, false, false, false,
+            "foo", true, false, false, false, false, false, false, false, false, false, false,
         );
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
@@ -36726,6 +37340,7 @@ mod tests {
             &env,
             &types_info,
             crate::manifest::DepRegistry::new(),
+            std::collections::BTreeMap::new(),
         )
         .unwrap();
         assert!(
@@ -36758,6 +37373,7 @@ mod tests {
             &env,
             &types_info,
             crate::manifest::DepRegistry::new(),
+            std::collections::BTreeMap::new(),
         )
         .unwrap();
         assert!(
@@ -38182,7 +38798,7 @@ mod tests {
     #[test]
     fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, true, false, false, false, false,
+            "app", false, false, false, false, false, true, false, false, false, false, false,
         );
         assert!(toml.contains("cron = \"0.12\""));
         assert!(toml.contains("chrono = "));
@@ -38195,7 +38811,7 @@ mod tests {
     fn cargo_toml_jobs_sin_http_incluye_signal_feature() {
         // Cron-only mode necesita `signal` para ctrl_c.
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, true, false, false, false, false,
+            "app", false, false, false, false, false, true, false, false, false, false, false,
         );
         assert!(
             toml.contains("\"signal\""),
@@ -38212,7 +38828,7 @@ mod tests {
         // propio `tokio::signal::ctrl_c()` dentro de
         // `__fitz_shutdown_signal`, así que necesita feature `signal`.
         let toml = cargo_toml_for(
-            "app", true, false, false, false, false, true, false, false, false, false,
+            "app", true, false, false, false, false, true, false, false, false, false, false,
         );
         assert!(toml.contains("cron"));
         assert!(
@@ -38861,7 +39477,7 @@ mod tests {
         // Usamos `cargo_toml_for` directo (paralelo a los tests
         // existentes).
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, true, false, false,
+            "foo", false, false, false, false, false, false, false, false, true, false, false,
         );
         assert!(
             toml.contains("sha2 = \"0.10\""),
@@ -38915,7 +39531,7 @@ mod tests {
     #[test]
     fn codegen_db_cargo_toml_sin_db_no_suma_deps() {
         let toml = cargo_toml_for(
-            "foo", false, false, false, false, false, false, false, false, false, false,
+            "foo", false, false, false, false, false, false, false, false, false, false, false,
         );
         assert!(!toml.contains("sha2"), "sha2 no debería estar sin db");
         assert!(!toml.contains("hmac"), "hmac no debería estar sin db");
@@ -40113,7 +40729,7 @@ mod tests {
         // tanto uses_db como uses_fitz_value. Cargo.toml debe incluir
         // serde_json con preserve_order.
         let toml = cargo_toml_for(
-            "app", false, false, false, false, false, false, false, true, true, false,
+            "app", false, false, false, false, false, false, false, false, true, true, false,
         );
         assert!(
             toml.contains("serde_json"),

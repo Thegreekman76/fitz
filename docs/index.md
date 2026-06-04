@@ -190,10 +190,21 @@ Extensions. Detalle en
   (12.5).
 - **9.w.1.iter2.a** (v0.12.4) — RBAC custom con `@requires("role")`
   apilable. Mensaje 403 enriquecido con role actual + requeridos.
+- **9.w.1.iter2.b** (v0.12.6) — Token blacklist + refresh con
+  módulo built-in `auth` (`auth.blacklist`/`auth.is_blacklisted`/
+  `auth.cleanup_expired`). Tabla auto-creada idempotente.
+- **Fase 12 Tier 2** (v0.13.0) — **CERRADO en bloque coordinado**:
+  `fitz deploy <docker|compose>` (12.6 — sub-comando con thin
+  wrappers sobre `docker build`/`compose up`); decoradores
+  explícitos `@trace(name="X")` y `@metric(name="X")` sobre fns
+  user con paridad bit-a-bit `fitz run` ↔ `fitz build` (12.7);
+  feature flags built-in `@flag("name")` + `flag(name) -> Bool`
+  + módulo `flags` con manifest `[flags]` y override por env
+  var `FITZ_FLAG_<UPPERCASE>` (12.8).
 
-**Próximo norte**: 9.w.1.iter2.b (token blacklist + refresh —
-sub-iter futuro) o Fase 13+ (visión post-Fase 12 — `fitz deploy`
-orchestrator, feature flags built-in) según demanda real.
+**Próximo norte**: Fase 13+ (orquestación distribuida, multi-tenant,
+o plugin architecture para deploy targets `fly`/`railway`/`k8s`)
+según demanda real. Sin presión inmediata.
 
 ---
 

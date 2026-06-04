@@ -26,6 +26,7 @@ pub mod cli; // Fase 13 (v0.11.0) — CLI builder nativo (`@command`)
 pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario
 pub mod cron_jobs; // Fase 9.w.3 — registry + scheduler de jobs `@cron`
 pub mod db; // Fase 10.1 — driver Postgres puro (wire protocol + SCRAM-SHA-256 + tipos OID)
+pub mod deploy; // Fase 12.6 — `fitz deploy <docker|compose>` orchestrator
 pub mod docker; // Fase 12.4 — `fitz docker init` (Dockerfile + .dockerignore + docker-compose.yml)
 pub mod env; // Fase 2.4 — entornos / scopes
 pub mod error; // manejo de errores del compilador

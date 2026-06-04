@@ -12444,7 +12444,89 @@ gana** (solo UN recorder global de `metrics` permitido). El
 OTel exporter de spans/logs sigue funcionando; solo las métricas
 van a Prometheus en vez de OTLP.
 
-### 33.5. Patrón canónico — stack completo
+### 33.5. `@trace` y `@metric` — instrumentación manual (Fase 12.7)
+
+La auto-instrumentation HTTP de Fase 12.3 cubre cada request con
+span + access log + métricas, sin tocar nada. Para funciones
+**business logic** que querés medir o nombrar como spans
+dedicados, Fitz tiene dos decoradores sobre fns user:
+
+```fitz
+@trace(name="risk_score")
+@metric(name="risk")
+fn evaluar_riesgo(perfil: Perfil) -> Float {
+    return perfil.score * 1.5
+}
+```
+
+- **`@trace(name="X")`** abre un `tracing::info_span!("X")` que
+  envuelve cada call. Logs emitidos adentro de la fn (con
+  `log.info(...)`) heredan automáticamente el `trace_id`/`span_id`
+  del span padre.
+- **`@metric(name="X")`** registra dos métricas por call:
+  - `X_duration_seconds` (histogram) — distribución de la duración.
+  - `X_calls_total` (counter) — total de invocaciones.
+
+Sin el kwarg `name=` se usa el nombre de la fn. Son apilables —
+podés tener `@trace + @metric` sobre la misma fn. El kwarg
+`name=` es opcional sobre cada uno, así que `@trace fn calc()`
+con `@metric` produce span `calc` + métricas `calc_duration_seconds`
+y `calc_calls_total`.
+
+```fitz
+@trace
+fn just_trace(s: Str) -> Str { return s }
+
+@metric
+fn just_metric(n: Int) -> Int { return n + 1 }
+```
+
+**Cuándo usarlos**:
+- Sobre fns que cuestan tiempo (queries custom, validaciones
+  pesadas, transformaciones de datos) — el histogram te muestra
+  P50/P95/P99 en Grafana.
+- Sobre paths críticos del business que el access log del request
+  no separa (típico: `validate_payment` adentro de un POST /orders).
+- Para correlacionar logs cross-handler — el span nombrado aparece
+  como parent en Jaeger/Tempo.
+
+**Cuándo NO**:
+- Sobre HTTP/WS handlers (`@get`/`@post`/etc) — el checker rechaza
+  el stack, porque la auto-instrumentation Fase 12.3 ya cubre esos
+  casos con span + access log + métricas. Apilar duplicaría el
+  trabajo y confundiría el backend.
+- Sobre fns triviales (un return de un literal) — el overhead del
+  span entered + Drop guard es ~µs, despreciable, pero el ruido
+  en el backend molesta.
+
+**Costo runtime**:
+- Cero si NO hay subscriber `tracing` instalado (programa CLI puro
+  sin `log.X(...)` ni HTTP) — el span macro expande a no-op.
+- ~µs por call cuando hay subscriber — RAII guard que registra
+  métricas al Drop. Funciona con `return X` explícito sin código
+  muerto (Rust corre Drop antes de retornar).
+
+**Paridad** `fitz run` ↔ `fitz build`:
+- En el intérprete, los decoradores son **no-op honesto**: el
+  checker valida el shape (kwarg `name=`, no positional, no
+  stacking con HTTP), el evaluator los procesa silenciosamente.
+  Ningún backend real recibe nada — es exclusivamente para tipar
+  consistentemente con el modo compilado.
+- En `fitz build` la instrumentación es real: el span entra, las
+  métricas se registran, el subscriber `tracing` instalado por
+  Fase 12.3 (cuando hay HTTP) las routea.
+
+```bash
+$ fitz build calc.fitz
+$ ./calc.exe
+# stderr: span events de tracing si OTEL_EXPORTER_OTLP_ENDPOINT
+# /metrics: histogram calc_duration_seconds + counter calc_calls_total
+# (si @server(prometheus=true))
+```
+
+Ejemplo runnable: `examples/guide/34-trace-metric.fitz`.
+
+### 33.6. Patrón canónico — stack completo
 
 Lo que armás en una app de producción típica:
 
@@ -12484,7 +12566,7 @@ a stderr con `trace_id` (que Loki indexa), y `/metrics` se
 puede scrapear con Prometheus. Todo correlacionado, todo
 out-of-the-box.
 
-### 33.6. Recetas comunes
+### 33.7. Recetas comunes
 
 **Capturar contexto custom adentro de un span**:
 
@@ -12535,15 +12617,14 @@ async fn ready(db: DbConn) -> Result<Bool> {
 }
 ```
 
-### 33.7. Qué NO hace Fitz (y por qué)
+### 33.8. Qué NO hace Fitz (y por qué)
 
-- **Tracing manual de spans hijos** dentro de un handler — el
-  span root del request es automático, pero abrir spans
-  anidados (por ejemplo, `span("db query")` adentro de una fn)
-  requiere API que aún no expuso el lenguaje. Workaround:
-  los logs adentro del request heredan el `trace_id`, así que
-  podés filtrar por `trace_id` en el backend para ver toda la
-  cadena del request.
+- **Spans anidados ad-hoc** adentro de una fn — `@trace` abre un
+  span sobre toda la fn, pero NO hay API para abrir un span
+  hijo en una sub-sección (por ejemplo, `span("db query"): { ... }`
+  envolviendo solo unas líneas). Workaround: extraé la sección a
+  una fn dedicada y poneles `@trace` arriba. Los logs heredan el
+  `trace_id` igual.
 - **Bridge métricas OTel** (deuda residual #1 de Fase 12.3).
   Las métricas van a Prometheus si `prometheus=true`, o no
   van a ningún lado si `prometheus=false` (Counter/Histogram
@@ -12558,17 +12639,18 @@ async fn ready(db: DbConn) -> Result<Bool> {
   CLI puros emiten a stderr únicamente. Refinable cuando entre
   demanda.
 
-### 33.8. Lo que viene
+### 33.9. Lo que viene
 
 - Cap dedicado de OTel queda pendiente de actualizar cuando
   cierre Tier 2 (bridge métricas OTel). Mientras tanto, este cap
   documenta el feature completo end-to-end con el workaround
   Prometheus.
-- Sub-fase futura: API explícita para abrir spans hijos
-  (`@span("name") fn ...` o similar) cuando el lenguaje sume
-  primitivas adicionales para tracing manual.
+- Spans hijos ad-hoc adentro de fns: la API actual con `@trace`
+  envuelve la fn entera. Sub-sección que abra/cierre un span
+  sólo sobre unas líneas queda como deuda menor (workaround:
+  extraer la sección a fn dedicada y ponerle `@trace`).
 
-### 33.9. Deployment — `fitz docker init` + `fitz docker build` (Fase 12.4)
+### 33.10. Deployment — `fitz docker init` + `fitz docker build` (Fase 12.4)
 
 Para llevar todo el stack (HTTP + logs + spans + métricas + DB) a
 producción dentro de un container, Fitz tiene dos sub-comandos:
@@ -12672,6 +12754,135 @@ services:
 - **`fitz docker build` thin**: sin `--push`/`--platform`/`--no-cache`.
   Para CI multi-platform con `docker buildx`, correr `docker build`
   directo.
+
+### 33.11. Feature flags con `@flag`, `flag()` y `flags.*` (Fase 12.8)
+
+Tercera pieza del Tier 2 de Fase 12 (deploy + `@trace`/`@metric` +
+flags). El decorator `@flag("name")` gate-a una fn entera; el
+builtin `flag("name") -> Bool` consulta el registry desde cualquier
+expresión.
+
+```fitz
+@flag("new-checkout")
+@get("/v2/checkout")
+fn v2_checkout() -> Map<Str, Str> {
+    return {"status": "ok", "version": "v2"}
+}
+
+@get("/v1/checkout")
+fn v1_checkout() -> Map<Str, Str> {
+    return {"status": "ok", "version": "v1"}
+}
+
+fn main() {
+    if flag("dark-mode") {
+        print("dark mode activado")
+    }
+    print("flags conocidas: {flags.list()}")
+}
+```
+
+**Cómo se configuran**:
+
+1. **Sección `[flags]` en `fitz.toml`** — defaults compile-time:
+   ```toml
+   [flags]
+   new-checkout = false
+   dark-mode = true
+   beta-feature = false
+   ```
+   El runtime (`fitz run`) y el binario nativo (`fitz build`) leen
+   esta sección al boot. Defaults baked-in al binario; cambiarlos
+   exige recompilar.
+
+2. **Env vars `FITZ_FLAG_<UPPERCASE>`** — override runtime sin
+   recompilar:
+   ```bash
+   FITZ_FLAG_NEW_CHECKOUT=true ./mi-app
+   FITZ_FLAG_DARK_MODE=false ./mi-app
+   ```
+   La env var gana al default del manifest. Valores aceptados:
+   `true`/`1`/`yes`/`on` y `false`/`0`/`no`/`off` (case-insensitive).
+   Cualquier otro string → cae al default.
+
+3. **Default `false`** — sin manifest ni env var, los flags están
+   desactivados (política fail-safe: features nuevas opt-in).
+
+**Semántica del decorator** `@flag("name")`:
+- Sobre **HTTP handlers** (`@get`/`@post`/`@put`/`@delete`) o **WS
+  handlers** (`@ws`): si el flag está off, el wrapper retorna **404**
+  con `{"error": "feature 'name' disabled"}` antes de tocar
+  middlewares, auth, body parsing. Hot path.
+- Sobre **fns regulares**: el decorator NO altera el cuerpo en el
+  MVP — el bloqueo se hace declarativo via `flag(name)` dentro de la
+  fn. (Patrón canónico: combiná `@flag` con HTTP para gate routes,
+  o usá `if flag(name)` puntual adentro del código.)
+
+**Builtins**:
+
+```fitz
+flag("name") -> Bool                          // alias funcional
+flags.is_enabled("name") -> Bool              // identico a flag()
+flags.list() -> List<Str>                     // nombres conocidos
+```
+
+`flags.list()` devuelve todos los flags conocidos en orden
+alfabético (BTreeSet interno): defaults del manifest + flags
+detectados via env vars `FITZ_FLAG_*` (lowercase del suffix). Útil
+para dashboards admin o debug.
+
+**Cuándo usarlos**:
+- **Canary releases** — `@flag("new-payment-flow")` sobre la ruta
+  v2; flag off en producción, on en staging, on para % de tráfico
+  via env var por instance.
+- **Kill switches** — `@flag("expensive-feature")` que apagás vía
+  env var sin redeploy si la feature tira el sistema.
+- **A/B testing** declarativo — toggleás por instance o por env
+  variable la versión del handler.
+- **Beta gated** — features que solo internal users ven hasta que
+  estén listas. Combinable con `@admin`/`@requires` para gate por
+  role + flag al mismo tiempo.
+
+**Paridad bit-a-bit** `fitz run` ↔ `fitz build`:
+- Intérprete: registro global cargado en `resolve_entry` desde
+  `manifest.flags`, override por env var, cache lookup.
+- Binario nativo: registro estático `__FitzFlagRegistry` con
+  `OnceLock`, defaults baked-in via `__fitz_flag_init(...)` al main,
+  mismo lookup + cache.
+- Ambos modos retornan los mismos resultados para el mismo manifest
+  + env vars + flag name.
+
+**Combinable con todo el stack**:
+
+```fitz
+@flag("new-checkout")
+@requires("editor")
+@authenticated
+@post("/v2/checkout")
+async fn v2(body: CheckoutInput, user: User) -> Result<Receipt> {
+    // body parseado, user authenticated + role=editor, flag on
+    return Ok(process_checkout(body, user))
+}
+```
+
+Si la flag está off → 404 inmediato (ANTES de cualquier check de
+auth). Si la flag está on pero el user no tiene role `editor` → 403.
+Si la flag está on, user role OK pero no auth → 401.
+
+**Lo que NO está en el MVP**:
+- **Flags scoped por user/request** — el flag es global por
+  proceso. Para Patrones tipo "30% de tráfico" o "solo users beta",
+  consultá un servicio externo (LaunchDarkly/Unleash/Flagsmith)
+  desde el handler.
+- **Hot-reload de flags sin restart** — los flags son inmutables
+  durante el lifetime del proceso. Cambio de env var requiere
+  reinicio. Mitigable wrappando consultas con TTL si aparece
+  demanda real.
+- **Decorator @flag sobre fns regulares (no HTTP/WS)** — el shape
+  está validado pero la semántica del MVP es no-op: usá
+  `if flag(name)` dentro del cuerpo de la fn para gating manual.
+
+Ejemplo runnable: `examples/guide/34b-feature-flags.fitz`.
 
 ---
 
@@ -13019,7 +13230,7 @@ Las dos fns deben retornar `Bool`. Si retornan `false`, el endpoint
 devuelve `503 Service Unavailable`. El `Drain` para readyz se activa
 automático al recibir SIGTERM.
 
-**Detalle completo**: cap 33.5 de esta misma guía (Observability
+**Detalle completo**: cap 33.6 de esta misma guía (Observability
 incluye los detalles del SpanContext y los headers OTel-compatibles
 que `/healthz` también propaga).
 
@@ -13122,7 +13333,7 @@ $ fitz docker build --tag mi-api:v1.0
 ✓ build OK — `mi-api:v1.0`
 ```
 
-Detalle completo en [cap 33.9](#339-deployment--fitz-docker-init--fitz-docker-build-fase-124).
+Detalle completo en [cap 33.10](#3310-deployment--fitz-docker-init--fitz-docker-build-fase-124).
 
 ### 35.6. Ejemplo runnable: API de producción end-to-end
 
@@ -13264,14 +13475,15 @@ visible documentada:
   + tabla `fitz_token_blacklist` (sub-iter 9.w.1.iter2.b pendiente).
   Hasta entonces los handlers `/auth/logout` y `/auth/refresh` se
   escriben a mano.
-- **`@trace`/`@metric` explícitos** — auto-instrumentation HTTP del
-  MVP cubre el 80%. Si querés spans nombrados sobre fns business
-  logic, queda como Fase 12.7 diferida.
+- **Spans hijos ad-hoc** dentro de una fn — `@trace` (Fase 12.7,
+  v0.13.0) cubre fns enteras. Spans que envuelvan solo unas líneas
+  adentro de la fn quedan como deuda menor. Workaround: extraer
+  la sección a una fn dedicada con `@trace` arriba.
 - **Feature flags** — `@flag("name") fn ...` + `flag("name") -> Bool`
   + config via TOML/env. Sin demanda concreta, diferido a Fase 12.8.
 - **Healthcheck HTTP en distroless** — el compose smart solo emite
   healthcheck cuando hay wget disponible (slim-bookworm), porque
-  distroless no tiene shell. Workaround documentado en cap 33.9
+  distroless no tiene shell. Workaround documentado en cap 33.10
   (cambiar runtime o agregar sidecar).
 - **CPython embebido en `fitz build`** — `--bundle-python` ya está
   cerrado (cap 21.11), `--bundle-pip` para paquetes pip externos

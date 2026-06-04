@@ -1,0 +1,41 @@
+// Cap 33.11 — Feature flags con @flag/flag()/flags.list() (Fase 12.8).
+//
+// Pieza Tier 2 (junto con deploy + @trace/@metric) — feature flags
+// built-in con dos fuentes: manifest `[flags]` (defaults compile-time)
+// + env vars `FITZ_FLAG_<UPPERCASE>` (override runtime).
+//
+// Semántica clave:
+//   - Default `false` (fail-safe: features opt-in).
+//   - @flag sobre HTTP/WS handler → 404 si la flag está off.
+//   - flag() / flags.is_enabled() para branches dentro del código.
+//   - flags.list() devuelve los flags conocidos (manifest + env vars).
+//
+// Cómo correrlo:
+//   fitz run examples/guide/34b-feature-flags.fitz
+//   fitz build examples/guide/34b-feature-flags.fitz && ./34b-feature-flags
+//   FITZ_FLAG_DARK_MODE=true fitz run examples/guide/34b-feature-flags.fitz
+
+// Flag global usado adentro de una fn regular.
+fn render_header() -> Str {
+    if flag("dark-mode") {
+        return "[dark] Fitz CLI"
+    }
+    return "Fitz CLI"
+}
+
+// Lista de flags conocidos al boot — útil para debug.
+fn print_known() {
+    let known = flags.list()
+    print("flags conocidas: {known}")
+}
+
+// Verificación funcional usando `flags.is_enabled` (alias de flag()).
+fn is_beta_enabled() -> Bool {
+    return flags.is_enabled("beta-feature")
+}
+
+// Top-level: el intérprete corre stmts top-level secuencialmente.
+print(render_header())
+print_known()
+let beta = is_beta_enabled()
+print("beta-feature: {beta}")

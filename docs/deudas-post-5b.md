@@ -3001,17 +3001,111 @@ deps emitidas en smoke (ABIERTO).
 
 - **9.w.1.iter2.b** — Token blacklist + refresh con builtins
   `auth.blacklist`/`auth.is_blacklisted` + tabla
-  `fitz_token_blacklist` auto-creada.
-- **Fase 12.6** — `fitz deploy` orchestrator (docker/compose/fly/
-  railway/k8s con plugin architecture).
-- **Fase 12.7** — `@trace`/`@metric` decoradores explícitos sobre fns
-  business logic.
-- **Fase 12.8** — Feature flags built-in (`@flag("name")` +
-  `flag("name") -> Bool`).
+  `fitz_token_blacklist` auto-creada (CERRADO v0.12.6).
+- **Fase 12.6** — `fitz deploy` orchestrator — **CERRADO v0.13.0**
+  con targets `docker`/`compose`. Targets `fly`/`railway`/`k8s`
+  con plugin architecture diferidos a Fase 13+ por demanda real.
+- **Fase 12.7** — `@trace`/`@metric` decoradores explícitos sobre
+  fns business logic — **CERRADO v0.13.0**. Paridad bit-a-bit
+  `fitz run` (no-op honesto) ↔ `fitz build` (instrumentación real
+  con `tracing`+`metrics`). Cap 33.5 nuevo en guía.
+- **Fase 12.8** — Feature flags built-in — **CERRADO v0.13.0**.
+  `@flag("name")` + `flag(name) -> Bool` + módulo `flags`.
+  Manifest `[flags]` + env var override. Cap 33.11 nuevo en guía.
 
 **Detalle técnico completo**: `docs/roadmap.md` → "Fase 12.5" con
 sub-pasos detallados, y `docs/guide.md` → cap 35 para la vista
 integradora.
+
+## Fase 12 Tier 2 — `fitz deploy` + `@trace`/`@metric` + `@flag` — **CERRADO 2026-06-04 (v0.13.0)**
+
+**Cierra el Tier 2 entero de Fase 12**: los tres sub-pasos
+diferidos en v0.12.5 (deploy + observability decoradores + feature
+flags) cierran en bloque coordinado al detectar suficiente demanda
+interna para arrancar Fase 13+ post-Tier2 sin deudas pendientes.
+
+**Lo que entra al release v0.13.0**:
+
+1. **Fase 12.6 — `fitz deploy <target>`** (módulo nuevo
+   `src/deploy.rs` ~430 LoC). Thin wrappers sobre `docker
+   build`/`compose up`. Sólo `docker` y `compose` en MVP (fly/
+   railway/k8s diferidos). Opt-outs: `--no-push`/`--no-detach`/
+   `--no-build`. Aborta con sugerencia clara si falta el archivo
+   esperado (recomienda `fitz docker init`). Propaga exit code
+   para CI. 7 unit + 5 cli_e2e tests.
+
+2. **Fase 12.7 — `@trace(name="X")` + `@metric(name="X")`**
+   sobre fns user. Apilables (un `@trace` + un `@metric` sobre
+   la misma fn) pero NO sobre HTTP/WS handlers (auto-instrumentation
+   Fase 12.3 ya los cubre; el checker rechaza estáticamente
+   con mensaje claro). Kwarg `name=` opcional, fallback al nombre
+   de la fn. **Decisión técnica clave**: emit con `__FitzMetricGuard`
+   RAII (registra histogram + counter al Drop) en lugar de
+   wrap-down después del body — funciona correctamente con
+   `return X` explícito sin código muerto. Paridad bit-a-bit
+   `fitz run` (no-op honesto) ↔ `fitz build` (instrumentación
+   real con `tracing` + `metrics` crates). Cap 33.5 nuevo en
+   `docs/guide.md` + ejemplo `examples/guide/34-trace-metric.fitz`.
+
+3. **Fase 12.8 — `@flag("name")` + `flag(name) -> Bool` +
+   módulo `flags`**. Tres APIs paralelas: (a) decorator sobre
+   HTTP/WS handlers que retorna 404 si la flag está off — gate
+   hot path ANTES de middlewares/auth/coerciones (orden idéntico
+   al runtime `dispatch_request`); (b) builtin global `flag(name)
+   -> Bool` para branches programáticos dentro del código; (c)
+   módulo `flags` con `is_enabled(name)` (alias) y `list()`
+   (enumera flags conocidos en orden BTreeSet — manifest +
+   env vars). Dos fuentes: sección `[flags]` en `fitz.toml`
+   (defaults compile-time, baked-in al binario via
+   `__fitz_flag_init(...)` al boot) + env vars
+   `FITZ_FLAG_<UPPERCASE>` (override runtime sin recompilar).
+   **Default `false`** (fail-safe — features nuevas opt-in).
+   Paridad bit-a-bit con registry estático `OnceLock` + cache
+   lookup. Cap 33.11 nuevo en `docs/guide.md` + ejemplo
+   `examples/guide/34b-feature-flags.fitz`.
+
+**Tests al cierre v0.13.0**: 3001 unit (+44 nuevos: 8 evaluator
+flag + 9 checker flag + 4 trace/metric codegen + 3 manifest
+flags + 4 codegen Cargo.toml flag/trace_metric + 14 LSP + 2
+E2E compile flag) + 112 LSP + 360 compile_e2e (+2 ejemplos
+nuevos: 34-trace-metric.fitz + 34b-feature-flags.fitz + smoke
+verde) + 3 openapi. `cargo fmt --all --check` + `cargo clippy
+--lib --tests --bins -- -D warnings` limpios.
+
+**Extensión VSCode bumpeada a 0.13.0**: LSP completions
+sumadas para `@trace`/`@metric`/`@flag` decorators (snippets
+con kwarg `name=`/arg posicional), `flag()` global builtin,
+`flags.X` after-dot. Grammar TextMate sin cambios (decorators
+matchean `@<ident>` genérico).
+
+**Deudas residuales derivadas (NO bloquean Fase 13+)**:
+
+- **Deploy targets `fly`/`railway`/`k8s`** — plugin architecture
+  pendiente, MVP cubre los dos targets de demanda real
+  (`docker`/`compose`). Cuando entre demanda, los nuevos
+  targets son extensión del enum `DeployTarget` + handler
+  dedicado.
+- **Spans hijos ad-hoc dentro de una fn** — `@trace` envuelve
+  la fn entera. Para gate-ar solo unas líneas con un span
+  dedicado, workaround: extraer la sección a una fn dedicada
+  con `@trace` arriba. Sub-paso futuro de la spec: bloque
+  `span("name"): { ... }` si entra demanda.
+- **`@flag` sobre fns regulares (no HTTP/WS)** — el shape se
+  acepta pero la semántica MVP es no-op (el body se ejecuta
+  igual). Patrón canónico: usar `if flag(name)` dentro del
+  body para gating manual. Refinable a "early return Null" si
+  entra demanda concreta.
+- **Flags scoped por user/request o por % de tráfico** — el
+  flag es global por proceso. Para A/B testing por % de
+  tráfico o segmentación por user, integración con
+  LaunchDarkly/Unleash/Flagsmith via call HTTP desde el
+  handler (workaround documentado en cap 33.11).
+- **Hot-reload de flags sin restart** — flags son inmutables
+  durante el lifetime del proceso. Cambio de env var requiere
+  reinicio. TTL-wrapped lookups quedan diferidos.
+- **Bridge métricas OTel** (Tier 2 de Fase 12.3, no del Tier 2
+  general) — sigue BLOQUEADO esperando release del crate
+  `metrics-exporter-opentelemetry` con `opentelemetry_sdk 0.32`.
 
 ## Fase 9.w.1.iter2.b — Token blacklist (auth nativa cerrada) — **CERRADO 2026-06-03**
 

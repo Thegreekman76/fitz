@@ -12,8 +12,8 @@ use crate::parser::parse_with_recovery;
 use crate::types::{check_program, DefinitionInfo, Type, TypeEnv, TypeInfo};
 
 use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, Hover, HoverContents,
-    Location, MarkupContent, MarkupKind, Position, Range, Url,
+    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, Documentation, Hover,
+    HoverContents, InsertTextFormat, Location, MarkupContent, MarkupKind, Position, Range, Url,
 };
 
 /// Pipeline LSP-style sobre `source`: tokeniza, parsea con recovery,
@@ -1166,6 +1166,26 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "@command(name, desc=) — declara fn como comando CLI",
             "El binario producido por `fitz build` parsea argv y dispatcha. Return type debe ser Int (exit code). Params sin default = positional args; con default = flags. Bool con default false → flag bool.",
         ),
+        // Fase 12.7 — Observability decorators sobre fns user.
+        (
+            "trace",
+            "trace(name=\"${1:span_name}\")",
+            "@trace(name=) — abre un tracing::span por cada call",
+            "Sobre fns user (no HTTP/WS — auto-instrumentation Fase 12.3 cubre). Sin name, usa el nombre de la fn. Cero overhead si no hay subscriber instalado. Combinable con @metric.",
+        ),
+        (
+            "metric",
+            "metric(name=\"${1:metric_name}\")",
+            "@metric(name=) — registra histogram + counter por call",
+            "Sobre fns user (no HTTP/WS). Emite `<name>_duration_seconds` (histogram) y `<name>_calls_total` (counter) al Drop del scope. Sin name, usa el nombre de la fn. Combinable con @trace.",
+        ),
+        // Fase 12.8 — Feature flag decorator sobre fns.
+        (
+            "flag",
+            "flag(\"${1:flag-name}\")",
+            "@flag(\"name\") — gate la fn por feature flag",
+            "Sobre HTTP/WS handlers o fns regulares. Si la flag está off (default), HTTP/WS retornan 404. Defaults en `fitz.toml [flags]`; override runtime con env var `FITZ_FLAG_<UPPERCASE>`. Combinable con auth + RBAC.",
+        ),
         // ORM
         (
             "table",
@@ -1330,6 +1350,13 @@ fn after_dot_completions(
         // Resolvemos por nombre acá.
         "db" => {
             return method_items(&[("connect", "async fn(url: Str) -> Result<DbConn>".into())]);
+        }
+        // Fase 12.8 — módulo built-in `flags` (feature flags).
+        "flags" => {
+            return method_items(&[
+                ("is_enabled", "fn(name: Str) -> Bool".into()),
+                ("list", "fn() -> List<Str>".into()),
+            ]);
         }
         _ => {}
     }
@@ -2728,6 +2755,11 @@ fn scope_level_completions(
             "log",
             "module: info, warn, error, debug (structured logging)",
         ),
+        // Fase 12.8 — Feature flags built-in.
+        (
+            "flags",
+            "module: is_enabled, list (feature flags con manifest [flags] + env var override)",
+        ),
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -2736,6 +2768,19 @@ fn scope_level_completions(
             ..CompletionItem::default()
         });
     }
+    // Fase 12.8 — `flag(name) -> Bool` global builtin (paralelo a
+    // `secret`/`config`/`env`/etc).
+    items.push(CompletionItem {
+        label: "flag".into(),
+        insert_text: Some("flag(\"${1:flag-name}\")".into()),
+        insert_text_format: Some(InsertTextFormat::SNIPPET),
+        kind: Some(CompletionItemKind::FUNCTION),
+        detail: Some("flag(name: Str) -> Bool".into()),
+        documentation: Some(Documentation::String(
+            "Consulta el registry de feature flags. Defaults del manifest `[flags]` + env var override `FITZ_FLAG_<UPPERCASE>`. Default `false` si no está registrada.".into(),
+        )),
+        ..CompletionItem::default()
+    });
 
     // Tipos built-in: visibles como nombres en posición de anotación.
     for name in [

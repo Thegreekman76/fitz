@@ -2852,6 +2852,13 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     // ejemplo end-to-end que combina @server + @auth_provider + @admin +
     // @requires + @healthz + secret() + config() + log.info estructurado.
     "35-deploy.fitz",
+    // v0.13.0 (Fase 12.7) — Cap 33.5 "@trace y @metric — instrumentación
+    // manual": fns user con `@trace(name="X")` + `@metric(name="X")`
+    // emiten span + histogram + counter al Drop del scope.
+    "34-trace-metric.fitz",
+    // v0.13.0 (Fase 12.8) — Cap 33.11 "Feature flags": @flag + flag() +
+    // flags.is_enabled + flags.list. Defaults manifest + env var override.
+    "34b-feature-flags.fitz",
 ];
 
 #[test]
@@ -11694,4 +11701,67 @@ fn health() -> Str => \"ok\"\n\
                      // En vez de leer main.rs (que el binario fitz lo borra al limpiar),
                      // ya validamos lo importante: compila sin errores. Los helpers se
                      // verifican por integración (build success).
+}
+
+// Fase 12.8 — feature flags built-in. Validamos que el binario emite el
+// preludio `__FitzFlagRegistry`, el init call con defaults baked-in, y
+// que `flag()`/`flags.is_enabled()`/`flags.list()` retornan los valores
+// correctos según defaults + env var override.
+#[test]
+fn fase_12_8_feature_flags_compilan_y_corren_default_false() {
+    let src = "\
+let v = flag(\"my-flag\")
+print(\"my-flag: {v}\")
+";
+    let (stdout, code) = build_and_run("fase_12_8_feature_flags_default", src);
+    assert_eq!(code, 0, "exit no fue 0; stdout: {}", stdout);
+    assert_eq!(stdout.trim(), "my-flag: false");
+}
+
+#[test]
+fn fase_12_8_flags_list_codegen_devuelve_env_var_detectada() {
+    // Sin manifest mode, los defaults compile-time están vacíos.
+    // Pero `flags.list()` enumera env vars `FITZ_FLAG_*`. Para evitar
+    // pollución de otros tests / env del shell, este test valida solo
+    // el shape (no entries específicas).
+    let src = "\
+let xs = flags.list()
+print(\"is_list: {len(xs) >= 0}\")
+";
+    let (stdout, code) = build_and_run("fase_12_8_flags_list_codegen", src);
+    assert_eq!(code, 0, "exit no fue 0; stdout: {}", stdout);
+    assert!(stdout.contains("is_list: true"), "stdout: {}", stdout);
+}
+
+// Fase 12.7.b — `@trace`/`@metric` sobre fns user emiten un guard RAII
+// + `tracing::info_span!` que registran métricas al Drop. Validamos que
+// el programa compila con `cargo build` (los crates `tracing`/`metrics`
+// se linkean OK), corre standalone, y produce el output esperado.
+#[test]
+fn fase_12_7_trace_metric_decorators_compilan_y_corren() {
+    let src = "\
+@trace(name=\"calc_span\")
+@metric(name=\"calc_metric\")
+fn calc(x: Int) -> Int {
+    return x * 2
+}
+
+@metric
+fn just_metric(y: Int) -> Int {
+    return y + 10
+}
+
+@trace
+fn just_trace(z: Str) -> Str {
+    return z
+}
+
+let a = calc(21)
+let b = just_metric(5)
+let c = just_trace(\"hola\")
+print(\"a={a} b={b} c={c}\")
+";
+    let (stdout, code) = build_and_run("fase_12_7_trace_metric_decorators", src);
+    assert_eq!(code, 0, "exit no fue 0; stdout: {}", stdout);
+    assert_eq!(stdout.trim(), "a=42 b=15 c=hola");
 }

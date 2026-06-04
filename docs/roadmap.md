@@ -9884,18 +9884,68 @@ guía + M7 entero) + 1 ejemplo runnable + 2 sub-comandos CLI nuevos
 (`fitz docker init` + `fitz docker build` de Fase 12.4) + tabla
 auth refinada con `@requires` (Fase 9.w.1.iter2.a paralela).
 
-### Tier 2 — diferido a iter2 si aparece demanda
+### Tier 2 — CERRADO en bloque coordinado v0.13.0 (2026-06-04)
 
-- **12.6 — `fitz deploy` orchestrator** — un comando que ejecuta
-  el deployment según target. Targets MVP: `docker` (build +
-  push), `compose` (up local). Extendibles: `fly`, `railway`,
-  `k8s`. Plugin architecture pendiente.
-- **12.7 — `@trace`/`@metric` decoradores explícitos** — sobre
-  fns arbitrarias del business logic. Auto-instrumentation HTTP
-  del MVP cubre el 80% del valor.
-- **12.8 — Feature flags built-in** — `@flag("name")` +
-  `flag("name") -> Bool` + config via TOML/env. Sin demanda
-  real, diferido.
+Los tres sub-pasos del Tier 2 cerraron juntos en un release
+coordinado tras detectar suficiente demanda interna para
+justificar el bloque entero. Plan original cumplido al 100%.
+
+- **12.6 — `fitz deploy` orchestrator** ✅ CERRADO. Sub-comando
+  nuevo `fitz deploy <target>` en CLI. Targets MVP: `docker`
+  (build + push opt-out con `--no-push`) y `compose` (up local;
+  `--no-detach`/`--no-build` opt-outs). Thin wrappers sobre
+  `docker build` + `docker compose up`. Aborta con sugerencia
+  clara si falta `Dockerfile`/`docker-compose.yml` (recomienda
+  `fitz docker init`). Propaga exit codes para CI. Targets
+  extendibles (`fly`, `railway`, `k8s`) quedan diferidos a
+  Fase 13+ por demanda real. Módulo nuevo `src/deploy.rs`
+  (~430 LoC + 7 unit + 5 cli_e2e tests).
+
+- **12.7 — `@trace`/`@metric` decoradores explícitos** ✅
+  CERRADO. Decorators apilables sobre fns user (rechazados
+  sobre HTTP/WS — auto-instrumentation Fase 12.3 cubre esos
+  casos con span + access log + métricas automáticos).
+  `@trace(name="X")` abre `tracing::info_span!("X")`;
+  `@metric(name="X")` registra `<name>_duration_seconds`
+  (histogram) + `<name>_calls_total` (counter) al Drop del
+  scope vía `__FitzMetricGuard` RAII (funciona con `return X`
+  explícito sin código muerto). Kwarg `name=` opcional sobre
+  cada uno (fallback al nombre de la fn). Paridad bit-a-bit
+  `fitz run` (no-op honesto en evaluator) ↔ `fitz build`
+  (instrumentación real con `tracing`+`metrics` crates
+  linkeados). Cap 33.5 nuevo en guía + ejemplo runnable
+  `examples/guide/34-trace-metric.fitz`.
+
+- **12.8 — Feature flags built-in** ✅ CERRADO. Tres piezas:
+  (a) decorator `@flag("name")` sobre HTTP/WS handlers que
+  retorna 404 si la flag está off (gate hot path antes de
+  middlewares/auth); (b) builtin global `flag(name) -> Bool`
+  para branches dentro del código; (c) módulo `flags` con
+  `is_enabled(name)` (alias) y `list()` (enumera flags
+  conocidos en orden BTreeSet). Dos fuentes: sección
+  `[flags]` en `fitz.toml` (defaults compile-time, baked-in
+  al binario via `__fitz_flag_init(...)` al boot) + env vars
+  `FITZ_FLAG_<UPPERCASE>` (override runtime sin recompilar,
+  acepta `1`/`0`/`true`/`false`/`yes`/`no`/`on`/`off`).
+  Default `false` (fail-safe — features opt-in). Paridad
+  bit-a-bit `fitz run` ↔ `fitz build` con registry estático
+  `OnceLock` + cache lookup. Cap 33.11 nuevo en guía +
+  ejemplo runnable `examples/guide/34b-feature-flags.fitz`.
+
+**Tests al cierre v0.13.0**: 3001 unit (+44 nuevos) + 112 LSP
++ 360 compile_e2e (+2 ejemplos guía nuevos + smoke verde) + 3
+openapi. `cargo fmt --all --check` + `cargo clippy --lib
+--tests --bins -- -D warnings` limpios.
+
+**Extensión VSCode bumpeada a 0.13.0**: LSP completions
+sumadas para `@trace`/`@metric`/`@flag` decorators, `flag()`
+global builtin, `flags.X` after-dot. Grammar TextMate sin
+cambios (decorators caen bajo `@<ident>` genérico).
+
+**Próximo norte post-Tier2**: Fase 13+ según demanda real
+(orquestación distribuida, multi-tenant, plugin architecture
+para deploy targets `fly`/`railway`/`k8s`). Sin presión
+inmediata.
 
 ### Resumen de archivos del lenguaje a tocar
 
