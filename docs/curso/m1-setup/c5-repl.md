@@ -302,12 +302,19 @@ expresión **sin evaluarla**.
 ```
 
 ```
-:type [1, 2, 3].map(fn(x) => x * 10)
+:type [1, 2, 3].map(fn(x: Int) => x * 10)
 ```
 
 ```
 :: List<Int>
 ```
+
+> **Nota**: el param `x: Int` es explícito porque Fitz no propaga
+> el tipo del receptor `List<Int>` hacia el callback automáticamente
+> todavía (eso requeriría inferencia bidireccional, ver `docs/deudas-post-5b.md`
+> → L2). Sin la anotación, `fn(x) => x * 10` infiere `x: Any` y el
+> resultado tipa como `List<Any>`. El runtime sí calcula `x * 10`
+> correctamente — solo es una limitación del checker estático.
 
 ```
 :type "hola"
@@ -420,10 +427,11 @@ vivo.
 
 ### Demo
 
-Crealo:
+Crealo en `src/helpers.fitz` (dentro del proyecto donde arrancaste
+`fitz repl`):
 
 ```fitz
-// helpers.fitz
+// src/helpers.fitz
 let pi = 3.14159
 fn area(r: Float) -> Float => pi * r * r
 fn perimetro(r: Float) -> Float => 2.0 * pi * r
@@ -432,12 +440,17 @@ fn perimetro(r: Float) -> Float => 2.0 * pi * r
 Desde el REPL:
 
 ```
-:load /tmp/helpers.fitz
+:load src/helpers.fitz
 ```
 
 ```
-✓ cargado /tmp/helpers.fitz
+✓ cargado <ruta absoluta del archivo>
 ```
+
+> **Tip cross-OS**: usar paths **relativos al directorio donde
+> arrancaste el REPL** (`src/helpers.fitz`) es la forma más
+> portable. Paths absolutos estilo Unix (`/tmp/...`) no funcionan
+> en Windows — ahí resuelven a `D:/tmp/...` que casi nunca existe.
 
 Notá que `:load` también **ejecuta los stmts top-level** (en
 este caso, el `let pi` se evaluó). Las fns quedan disponibles:
@@ -489,7 +502,7 @@ Definido en el scope:
 ### Si el archivo tiene errores
 
 ```
-:load /tmp/broken.fitz
+:load src/broken.fitz
 ```
 
 ```
@@ -660,7 +673,7 @@ n * n
 ```
 
 ```
-:type [1, 2, 3].map(fn(x) => x + 1)
+:type [1, 2, 3].map(fn(x: Int) => x + 1)
 ```
 
 ```

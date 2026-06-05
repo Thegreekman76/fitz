@@ -2711,7 +2711,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // extras del dict se ignoran (Python suele devolver más
             // campos de los necesarios).
             let v = match target {
-                AssignTarget::Ident(_) => match type_ {
+                AssignTarget::Ident(_, _) => match type_ {
                     Some(annot) => coerce_to_annotation(annot, v, env.clone()).await?,
                     None => v,
                 },
@@ -2724,7 +2724,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 AssignTarget::Index { .. } => v,
             };
             match target {
-                AssignTarget::Ident(name) => {
+                AssignTarget::Ident(name, _) => {
                     // Borrows separados: `has` toma borrow inmutable, lo
                     // soltamos antes de pedir un borrow mutable.
                     let already_defined = env.lock().has(name);
@@ -19189,7 +19189,7 @@ mod tests {
     async fn assign_define_variable_nueva_en_scope_local() {
         let env = Environment::new();
         let stmt = Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(42, Span::ZERO),
             span: Span::ZERO,
@@ -19205,7 +19205,7 @@ mod tests {
         env.lock().define("x", Value::Int(1));
 
         let stmt = Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(99, Span::ZERO),
             span: Span::ZERO,
@@ -19222,7 +19222,7 @@ mod tests {
 
         let child = Environment::new_child(global.clone());
         let stmt = Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(42, Span::ZERO),
             span: Span::ZERO,
@@ -19239,7 +19239,7 @@ mod tests {
         let child = Environment::new_child(global.clone());
 
         let stmt = Stmt::Assign {
-            target: AssignTarget::Ident("nueva".into()),
+            target: AssignTarget::Ident("nueva".into(), Span::default()),
             type_: None,
             value: Expr::Int(7, Span::ZERO),
             span: Span::ZERO,
@@ -19257,7 +19257,7 @@ mod tests {
         // sin checks en runtime todavía).
         let env = Environment::new();
         let stmt = Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: Some(TypeExpr::named("Int")),
             value: Expr::Str("soy un string".into(), Span::ZERO),
             span: Span::ZERO,
@@ -19662,7 +19662,7 @@ mod tests {
         let env = Environment::new();
         let body = vec![
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -19809,7 +19809,7 @@ mod tests {
                     span: Span::ZERO,
                 },
                 vec![Stmt::Assign {
-                    target: AssignTarget::Ident("y".into()),
+                    target: AssignTarget::Ident("y".into(), Span::default()),
                     type_: None,
                     value: Expr::Int(99, Span::ZERO),
                     span: Span::ZERO,
@@ -19846,7 +19846,7 @@ mod tests {
         // let r = if true { 42 } else { 0 }
         let env = Environment::new();
         let stmt = Stmt::Assign {
-            target: AssignTarget::Ident("r".into()),
+            target: AssignTarget::Ident("r".into(), Span::default()),
             type_: None,
             value: if_expr(
                 Expr::Bool(true, Span::ZERO),
@@ -20319,7 +20319,7 @@ print(_)\n";
             },
             body: vec![
                 Stmt::Assign {
-                    target: AssignTarget::Ident("total".into()),
+                    target: AssignTarget::Ident("total".into(), Span::default()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -20330,7 +20330,7 @@ print(_)\n";
                     span: Span::ZERO,
                 },
                 Stmt::Assign {
-                    target: AssignTarget::Ident("i".into()),
+                    target: AssignTarget::Ident("i".into(), Span::default()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -20356,7 +20356,7 @@ print(_)\n";
         let stmt = Stmt::While {
             condition: Expr::Bool(false, Span::ZERO),
             body: vec![Stmt::Assign {
-                target: AssignTarget::Ident("counter".into()),
+                target: AssignTarget::Ident("counter".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(99, Span::ZERO),
                 span: Span::ZERO,
@@ -20378,7 +20378,7 @@ print(_)\n";
             condition: Expr::Bool(true, Span::ZERO),
             body: vec![
                 Stmt::Assign {
-                    target: AssignTarget::Ident("i".into()),
+                    target: AssignTarget::Ident("i".into(), Span::default()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -20431,7 +20431,7 @@ print(_)\n";
             },
             body: vec![
                 Stmt::Assign {
-                    target: AssignTarget::Ident("i".into()),
+                    target: AssignTarget::Ident("i".into(), Span::default()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -20456,7 +20456,7 @@ print(_)\n";
                     Span::ZERO,
                 ),
                 Stmt::Assign {
-                    target: AssignTarget::Ident("total".into()),
+                    target: AssignTarget::Ident("total".into(), Span::default()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -20504,7 +20504,7 @@ print(_)\n";
         let stmt = Stmt::Loop {
             body: vec![
                 Stmt::Assign {
-                    target: AssignTarget::Ident("count".into()),
+                    target: AssignTarget::Ident("count".into(), Span::default()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -20691,13 +20691,13 @@ print(_)\n";
         //   30
         let program = vec![
             Stmt::Assign {
-                target: AssignTarget::Ident("name".into()),
+                target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
                 span: Span::ZERO,
             },
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -20798,7 +20798,7 @@ print(factorial(5))
         // end-to-end. La salida real se ve con `cargo run -- run examples/hello.fitz`.
         let program = vec![
             Stmt::Assign {
-                target: AssignTarget::Ident("name".into()),
+                target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Patagonia".into(), Span::ZERO),
                 span: Span::ZERO,
@@ -22471,7 +22471,7 @@ let r = match n {
         let env = Environment::new();
         let body = vec![
             Stmt::Assign {
-                target: AssignTarget::Ident("_".into()),
+                target: AssignTarget::Ident("_".into(), Span::default()),
                 type_: None,
                 value: Expr::Try(
                     Box::new(Expr::Err(

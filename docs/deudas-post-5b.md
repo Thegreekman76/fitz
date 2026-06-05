@@ -3375,3 +3375,633 @@ opcionales):
 `docs/curso-plan.md` con la nota de actualización 2026-06-03, y
 los 3+5 caps en `docs/curso/m7-python-interop/` +
 `docs/curso/m8-produccion-deploy/`.
+
+## Fixes pendientes de la extensión VSCode / LSP — **ABIERTO 2026-06-05**
+
+Backlog vivo de bugs **y features faltantes** descubiertos en la
+experiencia de editing real (VSCode + extensión Fitz). El autor los va
+a ir sumando a medida que los encuentre durante el curso `Fitz de 0 a
+experto` y trabajo cotidiano. Cada entry trae síntoma/qué + causa/cómo
++ fix propuesto + impacto/costo.
+
+### V1 — Spans incorrectos dentro de string interpolation — **CERRADO 2026-06-05**
+
+**Fix aplicado**: walker recursivo `shift_expr_spans` ([src/parser.rs:3328](src/parser.rs#L3328))
+ajusta los `Span` de cada nodo del Expr resultante del sub-parser de
+StrInterp para que apunten al source original (no al sub-texto aislado).
+Reusa nuevo helper `Expr::span_mut()` ([src/ast.rs:318](src/ast.rs#L318))
+paralelo al `span()` existente. 4 unit tests en `parser::tests::v1_*`
+cubren Ident/BinOp/Call/Field dentro de StrInterp.
+
+Validación end-to-end con el bug reportado por el alumno:
+`{altitud_m + altitud_a}` con `Int + Str` ahora reporta error en
+"línea 5:31" (donde está el `+`) en vez de "línea 1:1".
+
+**Deuda residual menor** (NO bloquea uso real): el walker NO recursa
+en `Stmt` adentro de `FnExpr.body`/`Loop.body`/`If.then`/etc. ni en
+`Pattern`/`TypeExpr`. En la práctica, FnExpr inline adentro de un
+StrInterp es extremadamente raro. Si entra demanda, sumamos walker
+para Stmt en otro sub-paso.
+
+---
+
+#### (Descripción original — para referencia)
+
+**Síntoma 1 — hover devuelve `Str` en vez del tipo real del ident**:
+
+```fitz
+let altitud_m = 350
+print("   altitud: {altitud_m} m")
+```
+
+Hover sobre `altitud_m` dentro del `print(...)` muestra `Str` en lugar
+de `Int`. Funcionalmente todo anda — el evaluator y el checker tipan
+`altitud_m` como `Int` (validable con `{altitud_m + altitud_a}` que
+da suma numérica). Solo el LSP miente.
+
+**Síntoma 2 — error de checker se reporta en la línea/col equivocada**:
+
+```fitz
+let lugar = "Patagonia"                                        # ← squiggle rojo aparece acá
+let altitud_m = 350
+let altitud_a = "350"
+print("   altitud: {altitud_m + altitud_a} m")                 # ← el error real está acá
+```
+
+El mensaje del checker es correcto (`el operador \`+\` no acepta \`Int\` y \`Str\``)
+pero el squiggle rojo cae en la línea 1 col 1 en vez de en el `+` real.
+
+**Causa raíz común**: el parser, al ver `{expr}` dentro de un string
+interpolado, arranca un sub-parser sobre el texto aislado (`"altitud_m + altitud_a"`).
+Ese sub-parser tokeniza desde `line=1, col=1` y solo ajusta los `line/column`
+de los **errores** del sub-parse (vía `sub_col_base`). Los `Span` de los
+`Expr` exitosos que produce el sub-parser quedan con `line=1` y `col`
+relativa al sub-texto, no a la fuente original.
+
+Por eso:
+
+- En `TypeInfo` el `Ident("altitud_m")` interno se registra con
+  `SpanKey(1, 1)` en vez de `(5, 21)`. La heurística "max col ≤ cursor
+  en la misma línea" de `hover_for_position` no lo encuentra y devuelve
+  el tipo del `StrInterp` entero (`Str`).
+- En diagnostics, el `e.span()` del `BinOp` interno apunta a `(1, 1)`,
+  así que el squiggle rojo cae en línea 1.
+
+**Archivo afectado**: [src/parser.rs:3219-3229](src/parser.rs#L3219-L3229)
+(función que parsea el StrInterp; el `sub_parser.expression()` no
+post-procesa los spans).
+
+**Fix propuesto** (~30 LoC, una sola sesión):
+
+1. Walker recursivo `shift_expr_spans(expr: &mut Expr, line: usize, col_base: usize)`
+   que reescribe `e.set_span(Span { line, column: col_base + col.saturating_sub(1) })`
+   para cada nodo del Expr.
+2. Llamarlo justo después de `let expr = sub_parser.expression()?;` con
+   `line = line` (la línea del source original) y `col_base = sub_col_base`.
+3. Test E2E que valida hover sobre `altitud_m` dentro de StrInterp
+   devuelve `Int`, y otro que valida que `Int + Str` adentro de StrInterp
+   se reporta en la línea/col correcta.
+
+**Impacto**: alto en DX. Cualquier ident usado dentro de un `print("{x}")`
+queda invisible al hover y los errores de tipos dentro de interpolaciones
+se reportan mal ubicados. Patrón muy común en código real.
+
+**Side benefit del fix**: go-to-definition desde dentro de un StrInterp
+también queda bien (hoy seguramente apunta al primer token del archivo o
+falla silenciosamente).
+
+### V2 — Hover sobre el nombre de variable en `let X = ...` — **CERRADO 2026-06-05**
+
+**Fix aplicado**: `AssignTarget::Ident` ahora lleva un `Span` propio
+del token Ident del LHS ([src/ast.rs:519](src/ast.rs#L519)). El parser
+captura el span via nuevo helper `expect_ident_with_span`
+([src/parser.rs:185](src/parser.rs#L185)). El checker registra el
+tipo del binding bajo el span del LHS en `TypeInfo`
+([src/types.rs:8252](src/types.rs#L8252)) — para anotaciones explícitas
+usa el tipo declarado, no el inferido. 4 unit tests en
+`types::tests::v2_*` cubren los 4 casos del cap M1.C5 del curso
+(nombre/edad/activa/latitud + nullable explícito).
+
+Hover sobre `let edad = 200` ahora muestra `Int` sobre `edad`
+(antes solo aparecía sobre `200`).
+
+**Cierra parcialmente la deuda S1**: el paralelo en `Param` /
+`For.var` / `MatchArm.pattern` sigue pendiente — mismo patrón
+arquitectural, sub-paso futuro independiente.
+
+---
+
+#### (Descripción original — para referencia)
+
+**Síntoma**: en
+
+```fitz
+let nombre = "Patagonia"
+let edad = 200
+let activa = true
+let latitud = -49.32
+let datos: Int? = null
+```
+
+el curso dice "pasá el mouse sobre cada variable → ves su tipo
+inferido". En la práctica:
+
+- Hover sobre `"Patagonia"` (el literal) → `Str` ✓.
+- Hover sobre `200` → `Int` ✓.
+- Hover sobre `nombre`/`edad`/`activa`/`latitud`/`datos` (el **nombre**
+  de la variable, LHS del `let`) → **no muestra nada**.
+
+El usuario espera que hover sobre cualquier variable muestre su tipo
+inferido (lo que TypeScript / rust-analyzer hacen). Hoy solo aparece
+el tipo si pasás el mouse sobre el valor del RHS.
+
+**Causa**: `AssignTarget::Ident(String)` en
+[src/ast.rs:466-468](src/ast.rs#L466-L468) no tiene `Span` propio — es
+solo el nombre. El checker en `Stmt::Assign` infiere el tipo del
+`value` (RHS) y lo registra en `TypeInfo` con el span del valor, pero
+**no** registra el ident del LHS. Resultado: `hover_for_position` no
+encuentra nada cuando el cursor está sobre `nombre`/`edad`/etc.
+
+Esta es una manifestación visible de la deuda **S1** ya identificada en
+el proyecto (`AssignTarget::Ident`/`Param`/`For.var`/`MatchArm.pattern`
+sin span propio, hoy usan el span del stmt contenedor o nada).
+
+**Fix propuesto**:
+
+1. AST: `AssignTarget::Ident(String, Span)`. Migrar parser para que
+   pase el `Span` del token del ident.
+2. Checker: en `Stmt::Assign` con `target = AssignTarget::Ident(name, span)`,
+   después de `let ty = infer_expr(ctx, value)`, agregar
+   `ctx.type_info.record(span, ty.clone())` para que el LHS también
+   aparezca en TypeInfo.
+3. Mismos cambios paralelos en `Param`, `For.var`,
+   `MatchArm.pattern` (cierra S1 entera).
+4. Tests E2E sobre hover en LHS de `let` para los 5 casos del curso
+   (nombre/edad/activa/latitud/datos con anotación explícita).
+
+**Impacto**: alto en DX y especialmente en el curso. La primera
+sección del cap 2/3 del curso (`Inferencia de tipos via hover`)
+asume este comportamiento. Hoy hay un drift entre lo que enseña el
+curso y lo que el LSP hace.
+
+**Side benefit del fix**: completion contextual scope-level
+también puede usar los spans para emitir Range exacto del symbol,
+y go-to-definition desde otros usos del binding apunta al ident,
+no al stmt entero.
+
+### V3 — Formatting on save (`textDocument/formatting`) — **CERRADO 2026-06-05**
+
+**Fix aplicado**: capability `document_formatting_provider: true`
+anunciada en `initialize` + handler `formatting` en
+[src/bin/fitz-lsp.rs](src/bin/fitz-lsp.rs#L325) que delega a
+`fitz::fmt::format_source` y emite UN `TextEdit` con el documento
+entero reformateado. Sobre doc con error de parser, devuelve `null`
+silencioso — no aborta el save. Helper `end_position_utf16` calcula
+el range del final del doc en UTF-16 (default LSP).
+
+2 E2E tests nuevos en `tests/lsp_e2e.rs::v3_formatting_*` validan:
+(a) capability anunciada + doc no-formateado emite TextEdit con
+código formateado (tabs → 4 espacios), (b) doc roto retorna `null`
+sin error.
+
+VSCode con `"editor.formatOnSave": true` ahora dispara `fitz fmt`
+automático al guardar — sin necesidad de configurar formatter
+externo.
+
+---
+
+#### (Descripción original — para referencia)
+
+**Qué falta**: hoy `fitz fmt` funciona como CLI (Fase 9.z.1) y como
+formatter externo si el usuario configura `editor.formatOnSave = true`
++ `"[fitz]": { "editor.defaultFormatter": "..." }` apuntando al binario.
+Pero el LSP no implementa `textDocument/formatting` ni
+`textDocument/rangeFormatting`, así que VSCode no lo detecta como
+formatter nativo de la extensión.
+
+**Síntoma**: el usuario instala la extensión Fitz, activa "format on
+save" en VSCode, y nada pasa al guardar un `.fitz` — tiene que correr
+`fitz fmt` a mano en la terminal o configurar el binario externo.
+
+**Cómo**: el módulo `fitz::fmt` ya expone una API pura
+`format_source(source: &str) -> Result<String, FmtError>`. Falta:
+
+1. Capability `formatting_provider: Some(OneOf::Left(true))` en
+   `initialize` response del bin LSP.
+2. Handler `formatting(&self, params: DocumentFormattingParams)` que
+   lee `state.text` del documento, llama `fitz::fmt::format_source(&state.text)`,
+   y devuelve `Vec<TextEdit>` con UN solo edit que reemplaza el doc
+   entero (rango `(0,0)..(last_line, last_col)` → nuevo texto). Es el
+   patrón estándar para formatters non-incremental.
+3. Manejo de errores: si `fmt` falla (código con error de parser),
+   devolver `Ok(vec![])` silencioso — no abortar el save.
+
+**Costo**: 1 día. Plumbing puro. 2-3 unit tests del round-trip
+(`format_source` ya tiene su propia suite).
+
+**Impacto**: alto en DX cotidiana. "format on save" es lo primero que
+el dev configura al adoptar un lenguaje nuevo. Hoy hay drift entre lo
+que el ecosistema espera y lo que la extensión ofrece.
+
+### V4 — Signature help (`textDocument/signatureHelp`) — **CERRADO 2026-06-05**
+
+**Fix aplicado**: capability `signature_help_provider` con trigger
+chars `(` y `,` anunciada en `initialize`. Handler `signature_help`
+en [src/bin/fitz-lsp.rs](src/bin/fitz-lsp.rs#L356) delega a
+`signature_help_at_position` ([src/lsp.rs](src/lsp.rs#L2997)) que
+combina dos helpers nuevos:
+
+- `find_call_context(text, line, char)`: walkback heurístico contando
+  `(`/`)` y `,` para encontrar el `Call` enclosing + index del param
+  actual.
+- `signature_help_for_call(program, name, active_param)`: busca la
+  `Stmt::FnDef` top-level por nombre y construye `SignatureInformation`
+  con label `fn nombre(p1: T1, p2: T2) -> R` + `ParameterInformation`
+  con offsets a cada param.
+
+2 E2E tests nuevos en `tests/lsp_e2e.rs::v4_*` validan:
+(a) cursor en `add(|` con `fn add(a: Int, b: Int) -> Int` → label
+correcta + `activeParameter = 0`, (b) cursor en `add(5, |` →
+`activeParameter = 1`.
+
+**Limitaciones del MVP** (deuda menor):
+
+- Solo cubre fns user-defined del programa. Builtins (`print`, `len`,
+  módulos `jwt`/`hash`/etc.) y method calls (`xs.map(`) no muestran
+  signature — los builtins tipan como `Type::Any` gradual y las
+  signatures de métodos viven en `infer_*_method` por tipo del receptor.
+- Walkback no respeta strings ni comments. Caso raro:
+  `f("texto, con coma|")` puede contar mal `,`.
+
+---
+
+#### (Descripción original — para referencia)
+
+**Qué falta**: cuando el usuario tipea `f(` o `f(a, ` el LSP debería
+mostrar un popup con la firma de `f` y resaltar el param actual. Hoy
+no hay implementación — el usuario tiene que recordar la firma o
+hacer hover sobre la fn (que muestra el tipo pero no la firma posicional).
+
+**Síntoma**: especialmente molesto en handlers HTTP con varios params
+y kwargs (`@get("/users/{id}") fn show(id: Int, ...)`) y en builtins
+con firmas complejas (`hash.password(plaintext: Str) -> Str`,
+`jwt.encode(payload: Map<Str, Str>, secret: Str, alg: Str?) -> Str`).
+El alumno del curso M5 (auth) lo va a sentir.
+
+**Cómo**:
+
+1. Capability `signature_help_provider: Some(SignatureHelpOptions {
+   trigger_characters: Some(vec!["(".into(), ",".into()]), ... })`.
+2. Handler `signature_help(&self, params: SignatureHelpParams)`:
+   - Walkear hacia atrás desde el cursor para encontrar el `Call`
+     enclosing — heurística sobre `state.text` (contar `(` no balanceados).
+   - Lookup del callee por nombre en `TypeEnv` (fns top-level / builtins).
+     Si es method call (`xs.map(`), resolver el método sobre el tipo del
+     receptor — el `TypeInfo` ya tiene el tipo.
+   - Construir `SignatureInformation` con `label = "fn nombre(p1: T1, p2: T2) -> R"`,
+     `parameters = [ParameterInformation per param]`, `active_parameter`
+     = count de `,` entre el `(` y el cursor.
+3. Reusar el helper `Type::display` para renderear cada tipo.
+
+**Costo**: 2 días. Lo más complejo es el walkback heurístico (parser
+parcial es overkill para MVP). El catálogo de signatures ya está
+todo en `TypeEnv` + builtins pre-registrados.
+
+**Impacto**: alto en código que llama a fns con muchos params (auth,
+DB queries con kwargs, OpenAPI handlers). Bonus pedagógico — el alumno
+descubre la API de los builtins sin abrir la guía.
+
+### V5 — Autocomplete tras `from X import` — **YA ESTABA CERRADO en v0.9.47** (2026-06-05 audit)
+
+**Hallazgo del audit pre-implementación (2026-06-05)**: al arrancar
+el Bloque 1 de fixes, descubrimos que esta feature **ya estaba
+implementada** desde v0.9.47. El backlog estaba con drift — esta
+entrada quedó como pendiente por error, sin auditar el código actual.
+
+**Verificación**: `src/lsp.rs` ya tiene:
+
+- `CompletionContext::FromImportList { mod_path }` ([src/lsp.rs:652](src/lsp.rs#L652))
+- `detect_from_import_list_context` ([src/lsp.rs:863](src/lsp.rs#L863))
+- `from_import_completions(doc_uri, mod_path)` ([src/lsp.rs:540](src/lsp.rs#L540))
+
+Y el handler `completion` del bin (`src/bin/fitz-lsp.rs:312-336`) ya
+llama a `completion_at_position_with_uri` pasando el `doc_uri`, lo que
+permite resolver el archivo del módulo target y enumerar sus exports.
+
+**Acción**: marcar como CERRADO. La entrada se mantiene para registro
+histórico del audit.
+
+---
+
+#### (Descripción original — para referencia)
+
+**Qué falta**: al tipear `from mod import |` (cursor después de `import `),
+el LSP debería sugerir los símbolos `pub` exportados por `mod`. Hoy
+no hay nada — la lista está vacía y el usuario tiene que abrir el
+archivo del módulo para saber qué exportar.
+
+**Síntoma**: gap visible en los caps de módulos del curso (M3+) y en
+boilerplates multi-archivo. El usuario tipea `from models import |`
+y necesita memoria fotográfica de qué types/fns/consts hay en `models.fitz`.
+
+**Cómo**:
+
+1. Detección del contexto en `detect_completion_context`: walk hacia
+   atrás desde el cursor sobre la línea actual, matchear pattern
+   `from <ident> import [<ident>(,)]*<cursor>`. Nueva variante del
+   enum `CompletionContext::AfterFromImport { module: String }`.
+2. Resolver el módulo: reusar `ModuleLoader::load(module, base_dir)`
+   que ya carga + cachea. Si el módulo falla parsing parcial OK
+   (resolución best-effort).
+3. Enumerar exports: walker sobre el `Program` del módulo cargado,
+   coleccionar `Stmt::FnDef`/`Stmt::TypeDef`/`Stmt::Assign` top-level
+   con visibility `pub` (que en Fitz es implícito — todo top-level
+   es exportable). Filtrar los ya importados de la lista actual del
+   `from ... import a, b, |` para no sugerir duplicados.
+4. Emitir `CompletionItem` con kind apropiado (`Function`, `Class`
+   para types, `Constant` para `let` top-level con RHS literal) +
+   detail con la firma corta.
+
+**Costo**: 1 semana. Lo más caro: parser parcial robusto del `from X import a, b, |` mientras está en construcción (línea sintácticamente
+inválida). Alternativa pragmática: regex sobre la línea para extraer
+`module_name` + lista de imports ya escritos. Cubre 95% del caso real.
+
+**Impacto**: cierra el gap más visible del autocomplete. Hoy after-dot
+funciona, scope-level funciona, pero `from X import |` no sugiere
+nada — inconsistencia que el alumno nota inmediatamente.
+
+**Deuda residual derivada**: cuando llegue cross-module go-to-def
+completo, este completion puede reusar la misma infra de resolución.
+
+## Fixes pendientes del lenguaje (descubiertos en el curso) — **ABIERTO 2026-06-05**
+
+Backlog hermano del de LSP. Acá van bugs y features del **lenguaje**
+(lexer / parser / evaluator / codegen) que aparecen mientras el autor
+sigue el curso `Fitz de 0 a experto`. Distinción con el backlog del
+LSP: estos requieren cambio del compilador, no solo de la extensión.
+
+### L1 — `;` como separador de stmts — **CERRADO 2026-06-05**
+
+**Fix aplicado**: el lexer ahora reconoce `;` como token y lo emite
+como `Token::Newline` ([src/lexer.rs:1188](src/lexer.rs#L1188)) —
+cero cambios al parser/AST. El parser ya tolera Newlines repetidos
+como separator único, así que `;\n` no duplica stmts. 5 unit tests
+en `lexer::tests::l1_*` cubren el caso solo, dos exprs con `;`,
+`;\n` real, `;` adentro de strings (preservado literal), `;`
+adentro de comentarios (consumido como parte del comment).
+
+Validación end-to-end:
+
+- `fitz run` sobre archivo con `let x = 5; let y = 10` funciona.
+- REPL: `1 + 1; 2 + 2` → `= 4` (solo el último valor imprime —
+  exactamente el comportamiento que prometía el cap M1.C5 del curso).
+
+**Side effect** del fix por diseño: el `;` no se preserva en el AST.
+El formatter `fitz fmt` reescribe `1 + 1; 2 + 2` como dos líneas
+separadas, lo que es exactamente la convención canónica de Fitz.
+
+**Acción derivada**: el cap M1.C5 del curso restauró la sección
+"Múltiples expresiones por línea" (que se había sacado como fix
+temporal). La guía también revirtió el call-out "Fitz no tiene punto
+y coma" — ahora dice "el `;` es separator opcional entre stmts —
+newline lo cubre en casi todos los casos", alineado con la decisión
+de diseño #5 ("punto y coma opcional, como en Go").
+
+---
+
+#### (Descripción original — para referencia)
+
+**Qué falta**: hoy el lexer NO reconoce `;` como token válido. Cualquier
+intento de escribir `1 + 1; 2 + 2` aborta con `Carácter inesperado: ';'`.
+La decisión de diseño #5 del proyecto (`CLAUDE.md`) dice *"Punto y coma
+opcional — como en Go, el parser maneja ambigüedades"*, pero la
+implementación real es: solo newlines separan stmts, no hay soporte
+de `;` para nada.
+
+**Síntoma**: especialmente molesto en el **REPL** donde el alumno quiere
+encadenar varias expresiones cortas en una sola línea (`let x = 5; x * 2`,
+`1 + 1; 2 + 2`). En `.fitz` files también es útil para one-liners
+densos (debugging, scripts cortos).
+
+**Caso reportado por el alumno del curso (2026-06-05)**:
+
+```
+fitz> 1 + 1; 2 + 2
+✗ Error en línea 1:6 — Carácter inesperado: ';'
+```
+
+**Fix mientras tanto (aplicado 2026-06-05)**: el cap M1.C5 del curso
+y la guía se corrigieron para no mencionar `;`. El alumno ya no choca
+con drift entre docs y realidad.
+
+**Fix propuesto** (~2-3 horas):
+
+1. **Lexer**: agregar branch para `';'` que emita `Token::Semicolon`
+   (variante nueva del enum `Token`). El span lleva línea/col del `;`.
+2. **Parser**: en los puntos donde hoy se acepta `Token::Newline` como
+   terminador de stmt (loop principal del programa, body de fn, body
+   de bloques), aceptar también `Token::Semicolon` con misma semántica.
+   Sin cambios al AST — el `;` es solo terminator, no se preserva.
+3. **Tests**: unit del lexer (`;` produce token, span correcto), unit
+   del parser (`let x = 5; let y = 10` produce 2 Stmt::Assign, `1 + 1; 2 + 2`
+   en bloque produce 2 Stmt::Expr), E2E en REPL (`1 + 1; 2 + 2` imprime
+   solo `= 4`), E2E compile (`fitz run` de archivo con `;` corre OK).
+4. **Decisión semántica del REPL**: si la línea termina con `;` después
+   de la última expresión (`1 + 1;`), ¿imprime el valor o no? Recomendación:
+   sí imprimir — el `;` es solo separator opcional, no marca "descartar".
+5. **Restaurar la sección "Múltiples expresiones por línea"** en
+   `docs/curso/m1-setup/c5-repl.md` cuando esto cierre.
+6. **Refinar la guía** (`docs/guide.md` línea ~3531): hoy dice "Fitz
+   no tiene punto y coma". Cuando cierre, ajustar a "El `;` es separator
+   opcional entre stmts — newline lo cubre en casi todos los casos".
+
+**Costo**: 2-3 horas. Cambio chico pero invasivo en el parser (afecta
+todos los call sites de `expect_newline_or_eof`). Tests E2E son
+decisivos para validar que no se rompa nada existente.
+
+**Impacto**: medio. La mayoría del código Fitz nunca usa `;` (newlines
+alcanzan), pero destrabar el REPL para chains de expresiones cortas
+es alto valor pedagógico y ergonómico. Cierra el drift histórico con
+la decisión de diseño #5.
+
+**Side benefit**: alinea la realidad con la frase "como en Go" del
+documento de decisiones. Hoy esa frase es aspiracional, no descriptiva.
+
+### L2 — Inferencia bidireccional de tipos en callbacks de métodos built-in (2026-06-05)
+
+**Qué falta**: hoy el checker hace inferencia solo **bottom-up**
+(synthesis). Cuando el alumno escribe:
+
+```fitz
+[1, 2, 3].map(fn(x) => x * 10)
+```
+
+el FnExpr `fn(x) => x * 10` se sintetiza primero sin contexto del
+receptor: `x` queda como `Any` (sin anotación, no hay propagación),
+`x * 10` con `BinOp(Any, Int)` tipa como `Any`, `ret = Any`. Después
+`.map` ve el callback `Function { params: [Any], ret: Any }` e instancia
+`U = Any`. Resultado: `List<Any>`.
+
+**Síntoma reportado por el alumno (2026-06-05)**:
+
+```
+fitz> :type [1, 2, 3].map(fn(x) => x * 10)
+:: List<Any>
+```
+
+El curso M1.C5 prometía `:: List<Int>` (drift entre lo enseñado y
+lo real). El runtime SÍ calcula `x * 10` correctamente (la evaluación
+es dinámica), pero el checker estático no puede saber que `x` es `Int`
+sin que el alumno lo anote.
+
+**Fix mientras tanto (aplicado 2026-06-05)**: el cap M1.C5 del curso
+se corrigió para usar `fn(x: Int) => x * 10` con anotación explícita.
+Una nota corta debajo del ejemplo cita esta deuda. Idem en el segundo
+ejemplo del cap (línea 650+).
+
+**Fix propuesto** (~1-2 semanas):
+
+1. **Two-pass para method calls con callback**: cuando `Expr::Call`
+   tiene callee `Expr::Field` y el método resuelto pertenece a la
+   tabla built-in con signature paramétrica (`List<T>.map(fn(T) -> U)`),
+   PRIMERO resolver T del receptor, DESPUÉS propagar T a los params
+   sin anotación del FnExpr arg.
+2. **Modificar `infer_list_method` / `infer_map_method`** en `types.rs`:
+   en vez de sintetizar el callback con su contexto vacío, recibir
+   un `expected_param_types: Vec<Type>` derivado de la signature del
+   método y pasarlo al wrapper de `synthesize_fn_expr`.
+3. **Wrapper de `Expr::FnExpr`**: aceptar opcional `expected_types`
+   y, para cada param sin anotación, usar el expected como tipo del
+   binding en el scope del body. El `lub` del ret también puede
+   beneficiarse pero NO es necesario para el MVP.
+4. **Tests**: `xs.map(fn(x) => x * 10)` sobre `List<Int>` tipa
+   `List<Int>`; sobre `List<Str>` tipa `List<Str>` cuando el body es
+   válido; `xs.filter(fn(x) => x > 0)` sobre `List<Int>` tipa
+   `List<Int>` con `ret = Bool` validado; param CON anotación
+   incompatible con T del receptor sigue siendo error (no se sobreescribe
+   silenciosamente).
+5. **Restaurar el ejemplo del curso** (`fn(x) => x * 10` sin anotación)
+   y quitar la nota cuando esto cierre.
+
+**Costo**: 1-2 semanas. No es trivial — toca el orden de visita del
+checker (synthesis vs checking modes) y abre la pregunta de si querés
+extender bidireccional a otros casos (anonymous fn como var, fn como
+param de fn user, etc.). Recomendable acotar el MVP a callbacks de
+métodos built-in con templates conocidos.
+
+**Impacto**: medio-alto pedagógico. Cierra el case más común donde
+el alumno espera "Fitz infiera como TS/Rust hacen" y se choca con
+`Any`. Cubre patrón canónico `.map`/`.filter`/`.find` que aparece en
+todos los caps de Listas/Loops/Higher-order.
+
+**Riesgo**: cambio invasivo del checker. Tests E2E sobre todos los
+ejemplos de la guía + cursos antes/después son decisivos.
+
+### L3 — `:load` con paths absolutos estilo Unix no funciona en Windows (2026-06-05)
+
+**Qué pasa**: hoy en el REPL, `:load /tmp/helpers.fitz` resuelve a
+`D:/tmp/helpers.fitz` (o `C:/tmp/...` según el drive del cwd) en
+Windows. El path absoluto estilo Unix se reinterpreta contra el drive
+actual y casi nunca existe.
+
+**Caso reportado por el alumno (2026-06-05)**:
+
+```
+fitz> :load /tmp/helpers.fitz
+✗ no se pudo leer `D:/tmp/helpers.fitz`: ... (os error 2)
+fitz> :load /src/helpers.fitz
+✗ no se pudo leer `D:/src/helpers.fitz`: ... (os error 3)
+fitz> :load src/helpers.fitz
+✓ cargado D:\CURSO_FITTZ\micosa\src/helpers.fitz
+```
+
+**Causa**: `std::fs::read_to_string` en Windows interpreta `/tmp/...`
+como path relativo al drive del cwd. Es comportamiento estándar de
+la API de Rust + Windows, no un bug propio de Fitz. Pero la **UX del
+curso** asume Unix.
+
+**Fix mientras tanto (aplicado 2026-06-05)**: el cap M1.C5 Paso 8 se
+cambió para usar `:load src/helpers.fitz` (relativo al cwd del REPL)
+que funciona idéntico en Linux/macOS/Windows. Se sumó un "Tip cross-OS"
+explicando por qué evitar paths absolutos Unix en los ejemplos.
+
+**Opciones de fix permanente**:
+
+1. **No hacer nada** (mantener el fix de docs): el `:load` con paths
+   relativos es la convención portable y ya está documentada. Paths
+   absolutos siguen siendo válidos para usuarios power que saben qué
+   están haciendo. **Recomendado**.
+2. **Detectar `/path/...` en Windows y emitir warning**: si el primer
+   char es `/` y estamos en Windows, sugerir `Para paths absolutos en
+   Windows usá D:/...; para portabilidad usá paths relativos`. Costo
+   muy chico (5 LoC en el handler de `:load`).
+3. **Mapear `/tmp/` → `%TEMP%`** en Windows como conveniencia: NO
+   recomendado, demasiado magic, rompe expectativas en otros paths
+   Unix-style.
+
+**Recomendación**: opción 1 (cerrar como "by design + docs corregidas").
+Si llega demanda real, opción 2.
+
+**Impacto**: bajo desde que las docs están corregidas. Pre-fix, el
+alumno Windows se chocaba inmediatamente en el Paso 8 del cap M1.C5.
+
+### L4 — Strings con delimitador `'...'` no existen (curso prometía) (2026-06-05)
+
+**Qué pasa**: el cap M2.C1 del curso documentaba que Fitz soporta
+strings con dos delimitadores (`"..."` y `'...'`), con escapes
+paralelos (`\"` para uno y `\'` para el otro). En la realidad, **solo**
+`"..."` es string en Fitz. El `'` se reserva para **labels** en
+`break`/`continue` de loops anidados (`'outer: loop { break 'outer }`).
+
+**Caso reportado por el alumno (2026-06-05)**:
+
+```
+print('\'comillas\'')             // 'comillas'
+```
+
+```
+Error en línea 10:7 — se esperaba un identificador después de `'` (label)
+```
+
+El lexer ([src/lexer.rs:1229-1252](src/lexer.rs#L1229-L1252)) ve `'`
+y arranca un `Token::Label(name)` — necesita un ident detrás, lo que
+falla con cualquier escape o char no-ident.
+
+**Fix mientras tanto (aplicado 2026-06-05)**: cap M2.C1 corregido —
+eliminada la fila de la tabla de escapes (`\'`), eliminada la línea
+del demo (`print('\'comillas\'')`) y la línea del output (`'comillas'`),
+y agregado un call-out explícito *"Fitz usa **solo** `"..."` como
+delimitador de strings. El char `'` se reserva para **labels** de
+`break`/`continue` en loops anidados"*. La guía y `syntax-spec.md` ya
+estaban consistentes — el drift estaba solo en el cap del curso.
+
+**Opciones de fix permanente**:
+
+1. **No hacer nada (cerrar como by design)**: mantener `"..."` como
+   único delim, `'` reservado para labels. Convención clara, sin
+   ambigüedades. Curso ya está corregido. **Recomendado**.
+2. **Soportar `'...'` como string alternativo con desambiguación**:
+   el lexer al ver `'` mira el char siguiente — si es alfa válido
+   para ident, es label; si no, es string. Problema: `'a'` sería
+   ambiguo (label `'a` vs string `'a'`). Costo medio + UX confusa.
+   No recomendado.
+3. **`'...'` como char literal (Rust-style)**: `'a'` sería un char
+   de 1 byte. No encaja con el modelo de Fitz (no hay tipo `Char`
+   separado de `Str`). Requiere agregar el tipo entero. Gran feature,
+   fuera de scope.
+
+**Recomendación**: opción 1. Cerrar como "by design". El curso
+corregido refleja la realidad. El alumno que viene de Python/JS
+necesita el call-out explícito para no asumir simetría.
+
+**Impacto**: bajo desde que el cap está corregido. Pre-fix, el alumno
+del curso M2.C1 se chocaba al copiar el demo de escapes.
+
+**Side note — bug colateral del cap**: el demo del cap M2.C1 incluía
+`print("emoji: 🏔 🌍")` y `print("CJK: 名前は何ですか?")` antes de
+los strings con `'`. En la captura del alumno, el `fitz run` solo
+imprime las primeras dos líneas válidas (`cirílico` y `matemático`)
+y aborta en la línea 10 sin llegar a los emojis ni CJK. El runtime
+SÍ soporta UTF-8 multibyte; lo que aborta es el parser por el `'`.
+Una vez aplicado el fix, todos los `print(...)` van a correr OK.
+

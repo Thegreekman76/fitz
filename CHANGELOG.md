@@ -11,6 +11,141 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.14.0] — 2026-06-05 — Bloque 1 LSP+lenguaje: format on save + `;` separator + spans StrInterp + hover LHS + signature help
+
+**Mini-fase intensiva descubierta durante el curso M1**: el alumno
+(el autor) reportó 5 bugs/features faltantes al recorrer los caps
+M1.C1, M1.C5, M2.C1. Cada uno generó una entrada en el backlog
+nuevo de
+[`docs/deudas-post-5b.md`](docs/deudas-post-5b.md#fixes-pendientes-de-la-extensión-vscode--lsp)
+("Fixes pendientes de la extensión VSCode / LSP" + "Fixes pendientes
+del lenguaje (descubiertos en el curso)"). Esta release cierra
+**4 de los 5** en una sola pasada coordinada de tests + commit.
+
+### LSP — features nuevas
+
+- **V3 — Format on save** (`textDocument/formatting`). Capability
+  `document_formatting_provider: true` + handler en
+  [`src/bin/fitz-lsp.rs`](src/bin/fitz-lsp.rs) que delega a
+  `fitz::fmt::format_source` y emite UN `TextEdit` con el doc
+  reformateado. Sobre doc con error de parser retorna `null`
+  silencioso. Helper `end_position_utf16` calcula range del final
+  del doc. VSCode con `editor.formatOnSave: true` ahora dispara
+  `fitz fmt` automático.
+- **V4 — Signature help** (`textDocument/signatureHelp`).
+  Capability con trigger chars `(` y `,`. Tipear `f(` o `f(a, `
+  muestra popup con label `fn f(p1: T1, p2: T2) -> R` y resalta el
+  param actual. MVP cubre fns user-defined del programa; builtins
+  y method calls quedan como deuda menor. Helpers nuevos en
+  [`src/lsp.rs`](src/lsp.rs) — `find_call_context` (walkback heurístico
+  contando `(`/`)` y `,`) y `signature_help_for_call`.
+
+### LSP — bugs cerrados
+
+- **V1 — Spans incorrectos dentro de string interpolation**. Hover
+  sobre identificador en `print("{x}")` mostraba `Str` (el tipo del
+  StrInterp entero) en vez del tipo del identificador. Errores de
+  checker dentro de `{...}` se reportaban en línea 1 col 1.
+  Causa: el sub-parser de StrInterp ajustaba columnas de errores via
+  `sub_col_base` pero NO los `Span` de los `Expr` exitosos.
+  Fix: walker recursivo `shift_expr_spans` en
+  [`src/parser.rs`](src/parser.rs) + nuevo helper
+  `Expr::span_mut()` en [`src/ast.rs`](src/ast.rs) paralelo al
+  `span()` existente.
+- **V2 — Hover sobre el nombre de variable en `let X = ...` no
+  mostraba nada**. Solo aparecía el tipo si el mouse caía sobre el
+  RHS. Causa: `AssignTarget::Ident(String)` no tenía `Span` propio
+  — el checker no podía registrar el tipo del LHS en `TypeInfo`.
+  Fix: `AssignTarget::Ident` ahora lleva `Span` propio del token
+  Ident ([`src/ast.rs`](src/ast.rs)). Parser captura via nuevo
+  helper `expect_ident_with_span`. Checker registra el tipo del
+  binding bajo el span del LHS — para anotaciones explícitas usa
+  el tipo declarado. Cierra parcialmente la deuda S1
+  (`Param`/`For.var`/`MatchArm.pattern` siguen pendientes —
+  sub-pasos futuros independientes).
+- **V5 — Autocomplete tras `from X import` — audit**. Marcada
+  como pendiente en el backlog por error; el audit pre-implementación
+  confirmó que ya estaba implementada desde v0.9.47
+  (`CompletionContext::FromImportList` + `from_import_completions`
+  + handler `completion` con `doc_uri`). Sin código nuevo —
+  solo cleanup del backlog.
+
+### Lenguaje — features nuevas
+
+- **L1 — `;` como separador opcional de stmts**. Cierra el drift
+  histórico con la decisión de diseño #5 del proyecto ("punto y
+  coma opcional, como en Go"): el lenguaje pre-v0.14.0 rechazaba
+  `;` como `Carácter inesperado`. Fix mínimo: lexer emite
+  `Token::Newline` cuando ve `;` ([`src/lexer.rs`](src/lexer.rs))
+  — cero cambios al parser/AST. Strings y comments preservan `;`
+  literal sin interpretarlo. El formatter `fitz fmt` reescribe
+  `1 + 1; 2 + 2` como dos líneas separadas (convención canónica).
+  Validación end-to-end:
+  ```
+  fitz> 1 + 1; 2 + 2
+  = 4
+  ```
+  Exactamente el comportamiento que el cap M1.C5 del curso prometía.
+
+### Docs
+
+- Cap M1.C5 del curso restauró la sección "Múltiples expresiones
+  por línea" (que se había sacado como fix temporal mientras L1
+  estaba abierto).
+- Cap M2.C1 del curso corregido en sesión anterior: la fila
+  `\'` de la tabla de escapes y el demo `print('\'comillas\'')`
+  fueron removidos, y se agregó un call-out *"Fitz usa **solo**
+  `"..."` como delimitador. El `'` se reserva para labels de
+  `break`/`continue`"* (deuda **L4** marcada como **by design**).
+- Guía: la frase ambigua *"No hace falta `;`"* en el cap de tipos
+  custom se actualizó a *"el `;` es separator opcional entre
+  stmts — newline lo cubre en casi todos los casos"*, alineado
+  con la decisión #5 ahora que L1 está cerrado.
+- Cap M1.C5 corregido en sesión anterior: dos ejemplos de
+  `:type [1, 2, 3].map(fn(x) => ...)` ahora usan `fn(x: Int) =>`
+  con nota corta explicando la limitación del checker (deuda
+  **L2** documentada). El Paso 8 (`:load`) ahora usa
+  `:load src/helpers.fitz` consistentemente (portable cross-OS;
+  deuda **L3** marcada como **by design**).
+- [`docs/deudas-post-5b.md`](docs/deudas-post-5b.md) sumó dos
+  secciones nuevas: *"Fixes pendientes de la extensión VSCode /
+  LSP"* (V1-V5) y *"Fixes pendientes del lenguaje (descubiertos
+  en el curso)"* (L1-L4). Backlog vivo para próximos hallazgos.
+
+### Tests
+
+- **+9 unit tests nuevos**: 4 en `parser::tests::v1_*` (spans
+  StrInterp), 4 en `types::tests::v2_*` (hover LHS de `let`), 5 en
+  `lexer::tests::l1_*` (`;` semantics).
+- **+4 E2E LSP nuevos**: 2 V3 (format on save happy path + doc
+  roto silencioso), 2 V4 (signature help con active_param=0 y =1).
+- **Total al cierre**: 3134 unit + 8 LSP E2E (+13 vs v0.13.2).
+
+### Deuda residual derivada (NO bloquea Bloque 2)
+
+- **L2 — Inferencia bidireccional de tipos en callbacks**
+  (`xs.map(fn(x) => x * 10)` tipa como `List<Any>` en vez de
+  `List<Int>`). Workaround: anotar `fn(x: Int) =>`. Costo del fix:
+  1-2 semanas, cambio invasivo del checker (synthesis vs
+  checking modes). Documentada en backlog.
+- **V1 walker no recursa en Stmts** adentro de `FnExpr.body` /
+  `Loop.body` / `If.then`. Caso raro en interpolaciones.
+- **V2 cierra solo `AssignTarget::Ident`**; `Param` / `For.var`
+  / `MatchArm.pattern` siguen sin span propio (deuda S1, paralelo).
+- **V4 cubre solo fns user-defined**. Builtins (`print`, `len`,
+  módulos `jwt`/`hash`/etc.) y method calls (`xs.map(`) quedan
+  pendientes — la mayoría de los builtins tipan como `Type::Any`
+  gradual, las signatures concretas viven en `infer_*_method`
+  por tipo del receptor.
+
+### Versión
+
+- `Cargo.toml`: **v0.13.2 → v0.14.0** (minor bump por features
+  nuevas significativas + cambio invasivo de `AssignTarget::Ident`).
+- Extensión VSCode: **0.13.2 → 0.14.0** + `.vsix` regenerado para
+  exponer las nuevas capabilities (`signatureHelpProvider`,
+  `documentFormattingProvider`).
+
 ## [v0.13.2] — 2026-06-04 — Bugfix LSP: positionEncoding UTF-16 (extensión 0.13.1 inservible)
 
 **Bug crítico** descubierto durante el curso M1.C1: la extensión

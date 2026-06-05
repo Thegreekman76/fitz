@@ -661,7 +661,7 @@ fn fmt_assign(
     // El AST no preserva si había `let` keyword. Recuperamos del
     // source — deuda documentada en el header del módulo.
     let has_let = match target {
-        AssignTarget::Ident(_) => stmt_has_let_keyword(ctx.source, span),
+        AssignTarget::Ident(_, _) => stmt_has_let_keyword(ctx.source, span),
         AssignTarget::Field { .. } => false, // `obj.f = v` nunca lleva let
         AssignTarget::Index { .. } => false, // `xs[i] = v` nunca lleva let
     };
@@ -680,7 +680,7 @@ fn fmt_assign(
 
 fn fmt_assign_target(ctx: &mut FmtCtx, target: &AssignTarget) {
     match target {
-        AssignTarget::Ident(n) => ctx.write(n),
+        AssignTarget::Ident(n, _) => ctx.write(n),
         AssignTarget::Field { object, field } => {
             fmt_expr(ctx, object);
             ctx.write(".");

@@ -13,7 +13,8 @@ use crate::types::{check_program, DefinitionInfo, Type, TypeEnv, TypeInfo};
 
 use tower_lsp::lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, Documentation, Hover,
-    HoverContents, InsertTextFormat, Location, MarkupContent, MarkupKind, Position, Range, Url,
+    HoverContents, InsertTextFormat, Location, MarkupContent, MarkupKind, ParameterInformation,
+    ParameterLabel, Position, Range, SignatureHelp, SignatureInformation, Url,
 };
 
 /// Pipeline LSP-style sobre `source`: tokeniza, parsea con recovery,
@@ -516,7 +517,7 @@ fn find_top_level_decl(program: &Program, name: &str) -> Option<Span> {
             Stmt::FnDef { name: n, span, .. } if n == name => return Some(*span),
             Stmt::TypeDef { name: n, span, .. } if n == name => return Some(*span),
             Stmt::Assign {
-                target: AssignTarget::Ident(n),
+                target: AssignTarget::Ident(n, _),
                 span,
                 ..
             } if n == name => {
@@ -608,7 +609,7 @@ pub fn from_import_completions(doc_uri: &Url, mod_path: &[String]) -> Vec<Comple
                 });
             }
             Stmt::Assign {
-                target: AssignTarget::Ident(name),
+                target: AssignTarget::Ident(name, _),
                 ..
             } => {
                 items.push(CompletionItem {
@@ -1493,7 +1494,7 @@ fn after_dot_completions(
     let recv_type = recv_type.or_else(|| {
         program.iter().find_map(|stmt| {
             if let Stmt::Assign {
-                target: crate::ast::AssignTarget::Ident(name),
+                target: crate::ast::AssignTarget::Ident(name, _),
                 value,
                 ..
             } = stmt
@@ -2604,7 +2605,7 @@ fn collect_let_bindings_before(
             break;
         }
         if let Stmt::Assign {
-            target: crate::ast::AssignTarget::Ident(name),
+            target: crate::ast::AssignTarget::Ident(name, _),
             ..
         } = stmt
         {
@@ -2651,7 +2652,7 @@ fn scope_level_completions(
     for stmt in program {
         match stmt {
             Stmt::Assign {
-                target: crate::ast::AssignTarget::Ident(name),
+                target: crate::ast::AssignTarget::Ident(name, _),
                 ..
             } => {
                 items.push(CompletionItem {
@@ -2898,6 +2899,150 @@ fn scope_level_completions(
     let _ = type_env; // silencia warning hasta que use type_env aquí.
 
     items
+}
+
+// ---------------------------------------------------------------------------
+// V4 (2026-06-05) — Signature help (`textDocument/signatureHelp`)
+// ---------------------------------------------------------------------------
+
+/// V4 — busca el contexto de un `Call` enclosing al cursor. Walkea hacia
+/// atrás contando `(`/`)` para encontrar un `(` no balanceado. Antes del
+/// `(`, extrae el nombre del callee (identifier alphanum + `_`). Cuenta
+/// las `,` a depth 0 entre el `(` y el cursor para el `active_parameter`.
+///
+/// Devuelve `(callee_name, active_param_index)` o `None` si:
+/// - No hay `(` enclosing antes del cursor.
+/// - El `(` no está precedido por un identifier (ej. `(1 + 2)` agrupación).
+/// - El cursor está dentro de un string literal o comment (no detectados —
+///   deuda menor del MVP).
+///
+/// Limitaciones del MVP:
+/// - No considera method calls `xs.map(|cursor)` (solo `f(|cursor)`).
+/// - No respeta strings ni comments — `f("hola, mundo|")` puede confundir
+///   el conteo si hay paréntesis dentro del string.
+fn find_call_context(text: &str, line: u32, character: u32) -> Option<(String, u32)> {
+    let offset = position_to_offset(text, line, character)?;
+    let bytes = text.as_bytes();
+    let mut depth: i32 = 0;
+    let mut commas_at_depth_0: u32 = 0;
+    let mut i = offset;
+    while i > 0 {
+        i -= 1;
+        let b = bytes[i];
+        match b {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' if depth == 0 => {
+                // Encontramos el `(` enclosing. Extraemos el callee hacia atrás.
+                let mut j = i;
+                // Saltar whitespace entre el ident y el `(`.
+                while j > 0 && matches!(bytes[j - 1], b' ' | b'\t') {
+                    j -= 1;
+                }
+                // Leer ident hacia atrás.
+                let id_end = j;
+                while j > 0 && is_ident_continue(bytes[j - 1]) {
+                    j -= 1;
+                }
+                if j == id_end {
+                    return None; // No hay ident — es un paren de agrupación.
+                }
+                // Verificar que NO arranca con dígito.
+                if bytes[j].is_ascii_digit() {
+                    return None;
+                }
+                let name = std::str::from_utf8(&bytes[j..id_end]).ok()?.to_string();
+                return Some((name, commas_at_depth_0));
+            }
+            b'(' | b'[' | b'{' => depth -= 1,
+            b',' if depth == 0 => commas_at_depth_0 += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// V4 — construye un `SignatureHelp` para un Call con callee `name`.
+/// Busca en el `Program` un `Stmt::FnDef` top-level con ese nombre y
+/// renderea su firma. `active_param` indica qué parámetro está bajo el
+/// cursor (0-based).
+///
+/// MVP: solo cubre fns top-level del programa actual. Builtins
+/// (`print`, `len`, módulos `jwt`/`hash`/etc.) no aparecen — quedan
+/// como deuda menor (la mayoría de los builtins tipan como `Type::Any`
+/// gradual, las signatures concretas viven en `infer_*_method` por
+/// tipo).
+pub fn signature_help_for_call(
+    program: &Program,
+    name: &str,
+    active_param: u32,
+) -> Option<SignatureHelp> {
+    for stmt in program {
+        if let Stmt::FnDef {
+            name: fn_name,
+            params,
+            return_type,
+            ..
+        } = stmt
+        {
+            if fn_name != name {
+                continue;
+            }
+            // Construir label: `fn nombre(p1: T1, p2: T2) -> R`.
+            // Y Vec<ParameterInformation> con label de cada param.
+            let mut label = format!("fn {}(", name);
+            let mut parameters = Vec::with_capacity(params.len());
+            for (i, p) in params.iter().enumerate() {
+                if i > 0 {
+                    label.push_str(", ");
+                }
+                let p_start = label.len() as u32;
+                label.push_str(&p.name);
+                if let Some(t) = &p.type_ {
+                    label.push_str(": ");
+                    label.push_str(&t.display_name());
+                }
+                let p_end = label.len() as u32;
+                parameters.push(ParameterInformation {
+                    label: ParameterLabel::LabelOffsets([p_start, p_end]),
+                    documentation: None,
+                });
+            }
+            label.push(')');
+            if let Some(rt) = return_type {
+                label.push_str(" -> ");
+                label.push_str(&rt.display_name());
+            }
+            let n_params = parameters.len() as u32;
+            return Some(SignatureHelp {
+                signatures: vec![SignatureInformation {
+                    label,
+                    documentation: None,
+                    parameters: Some(parameters),
+                    active_parameter: None,
+                }],
+                active_signature: Some(0),
+                // Clamp para que no se vaya del rango (el usuario puede
+                // estar tipeando más args de los que la fn acepta — el
+                // checker emite el error, el LSP solo no destaca nada).
+                active_parameter: Some(active_param.min(n_params.saturating_sub(1))),
+            });
+        }
+    }
+    None
+}
+
+/// V4 — orquestador del handler `signature_help`. Pure-function:
+/// detecta el call enclosing en el `text` y resuelve la signature
+/// contra el `Program`. Devuelve `None` si no hay call o si el callee
+/// no es una fn top-level conocida.
+pub fn signature_help_at_position(
+    text: &str,
+    program: &Program,
+    line: u32,
+    character: u32,
+) -> Option<SignatureHelp> {
+    let (name, active) = find_call_context(text, line, character)?;
+    signature_help_for_call(program, &name, active)
 }
 
 #[cfg(test)]

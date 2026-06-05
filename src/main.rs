@@ -5453,7 +5453,7 @@ async fn run_fitz_migration_callback(
     };
     let await_expr = ast::Expr::Await(Box::new(call_expr), ast::Span::ZERO);
     let assign_stmt = ast::Stmt::Assign {
-        target: ast::AssignTarget::Ident("__fitz_mig_result".to_string()),
+        target: ast::AssignTarget::Ident("__fitz_mig_result".to_string(), ast::Span::ZERO),
         type_: None,
         value: await_expr,
         span: ast::Span::ZERO,

@@ -1185,6 +1185,20 @@ impl Lexer {
                 self.advance();
                 Token::Comma
             }
+            ';' => {
+                // L1 (2026-06-05) — `;` como separador opcional de stmts.
+                // Decisión de diseño #5 del proyecto: "punto y coma opcional,
+                // como en Go". Implementación pragmática: el lexer emite
+                // `Token::Newline` (no un token nuevo) para que el parser
+                // trate `;` exactamente como newline, sin cambios upstream.
+                // Trade-off: el `;` literal no se preserva en el AST — el
+                // formatter `fitz fmt` re-emite cada stmt en su propia línea,
+                // así `1 + 1; 2 + 2` se reescribe como dos líneas separadas.
+                // Cierra el drift histórico entre la decisión #5 y la realidad
+                // del lexer pre-L1 (que rechazaba `;` como char inesperado).
+                self.advance();
+                Token::Newline
+            }
             ':' => {
                 self.advance();
                 Token::Colon
@@ -2179,5 +2193,68 @@ print("Hola, {name}!")"#;
         assert_eq!(first_token_of("0"), Token::Int(0));
         assert_eq!(first_token_of("007"), Token::Int(7));
         assert_eq!(first_token_of("0.5"), Token::Float(0.5));
+    }
+
+    // L1 (2026-06-05) — `;` como separador opcional de stmts. El lexer
+    // emite `Token::Newline` para que el parser lo trate idéntico a un
+    // newline real. Cierra la deuda histórica de "punto y coma opcional
+    // como en Go" (decisión de diseño #5).
+
+    #[test]
+    fn l1_semicolon_emite_newline() {
+        // `;` solo → un Newline + EOF.
+        assert_eq!(toks(";"), vec![Token::Newline, Token::EOF]);
+    }
+
+    #[test]
+    fn l1_dos_exprs_separadas_por_semicolon_producen_dos_stmts_via_newline() {
+        // `1 + 1; 2 + 2` debe producir tokens equivalentes a
+        // `1 + 1\n2 + 2`. El parser luego los lee como 2 stmts.
+        let got = toks("1 + 1; 2 + 2");
+        let expected = vec![
+            Token::Int(1),
+            Token::Plus,
+            Token::Int(1),
+            Token::Newline,
+            Token::Int(2),
+            Token::Plus,
+            Token::Int(2),
+            Token::EOF,
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn l1_semicolon_seguido_de_newline_real_no_duplica_newlines_en_parser() {
+        // `1;\n2` produce dos Newlines consecutivos (uno del `;`, otro
+        // del `\n` real). El parser ya tolera Newlines repetidos como
+        // separador único — chequeado en el smoke `recovery_*` y al
+        // parsear bloques. Acá solo validamos el shape del lexer.
+        let got = toks("1;\n2");
+        let expected = vec![
+            Token::Int(1),
+            Token::Newline,
+            Token::Newline,
+            Token::Int(2),
+            Token::EOF,
+        ];
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn l1_semicolon_adentro_de_string_no_se_interpreta() {
+        // Strings preservan `;` como char literal — el lexer solo lo
+        // intercepta a nivel top-level del scanner, no adentro de un
+        // string literal (que tiene su propia state machine).
+        let got = toks(r#""hola;mundo""#);
+        assert_eq!(got, vec![Token::Str("hola;mundo".into()), Token::EOF]);
+    }
+
+    #[test]
+    fn l1_semicolon_adentro_de_comentario_se_consume_como_parte_del_comment() {
+        // `// hola; mundo` se consume entero como comment line —
+        // sigue siendo un solo Newline al final.
+        let got = toks("// hola; mundo\n42");
+        assert_eq!(got, vec![Token::Newline, Token::Int(42), Token::EOF]);
     }
 }

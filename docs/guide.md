@@ -3528,8 +3528,9 @@ type User {
 
 Notas sobre la sintaxis:
 
-- Los campos se separan con **newline** (o con coma, también). No hace
-  falta `;`.
+- Los campos se separan con **newline** (o con coma, también). En el
+  resto del lenguaje, el `;` es separator opcional entre stmts —
+  newline lo cubre en casi todos los casos.
 - Cada campo declara `nombre: Tipo`.
 - Un `?` después del tipo lo marca como **nullable** (el campo puede
   ser `null`). Esto solo se permite hoy en campos de `type`, todavía

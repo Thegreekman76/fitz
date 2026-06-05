@@ -278,10 +278,15 @@ Lista completa:
 | `\r` | carriage return (0x0D) |
 | `\0` | null byte (0x00) |
 | `\\` | backslash literal (`\`) |
-| `\"` | comilla doble (cuando el delim es `"`) |
-| `\'` | comilla simple (cuando el delim es `'`) |
+| `\"` | comilla doble (delim de string) |
 | `\{` | llave izquierda literal (no inicia interpolación) |
 | `\}` | llave derecha literal |
+
+> **Importante**: Fitz usa **solo** `"..."` como delimitador de strings.
+> No existe la sintaxis `'...'` para strings (a diferencia de Python o
+> JavaScript). El char `'` se reserva para **labels** de
+> `break`/`continue` en loops anidados (`'outer: loop { ... break 'outer }`),
+> ver M2.C4.
 | `\xNN` | byte específico (2 dígitos hex). Ej: `\x41` → `A` |
 | `\u{XXXX}` | Codepoint Unicode (hex variable). Ej: `\u{1F3D4}` → `🏔` |
 
@@ -292,7 +297,6 @@ print("línea 1\nlínea 2")        // \n
 print("col1\tcol2\tcol3")         // \t
 print("\\")                       // \
 print("\"comillas\"")             // "comillas"
-print('\'comillas\'')             // 'comillas'
 print("\u{0041}")                 // A (U+0041)
 print("\u{1F3D4}")                // 🏔 (U+1F3D4 mountain)
 print("\x41")                     // A (byte 0x41)
@@ -307,7 +311,6 @@ línea 2
 col1	col2	col3
 \
 "comillas"
-'comillas'
 A
 🏔
 A

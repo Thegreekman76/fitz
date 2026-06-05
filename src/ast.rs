@@ -312,6 +312,47 @@ impl Expr {
             Expr::Error(s) => *s,
         }
     }
+
+    /// V1 (2026-06-05) — versión mutable de `span()`. Devuelve referencia
+    /// mutable al `Span` de cualquier variante. Usado por `shift_expr_spans`
+    /// en `parser.rs` para corregir los spans del Expr resultante del
+    /// sub-parser de string interpolation (ver V1 en `docs/deudas-post-5b.md`).
+    pub fn span_mut(&mut self) -> &mut Span {
+        match self {
+            Expr::Int(_, s) => s,
+            Expr::Float(_, s) => s,
+            Expr::Str(_, s) => s,
+            Expr::StrInterp(_, s) => s,
+            Expr::Bool(_, s) => s,
+            Expr::Null(s) => s,
+            Expr::Bytes(_, s) => s,
+            Expr::Ident(_, s) => s,
+            Expr::BinOp { span, .. } => span,
+            Expr::UnaryOp { span, .. } => span,
+            Expr::Call { span, .. } => span,
+            Expr::NamedArg { span, .. } => span,
+            Expr::FnExpr { span, .. } => span,
+            Expr::Field { span, .. } => span,
+            Expr::Index { span, .. } => span,
+            Expr::Slice { span, .. } => span,
+            Expr::Tuple(_, span) => span,
+            Expr::TupleField { span, .. } => span,
+            Expr::Loop { span, .. } => span,
+            Expr::List(_, s) => s,
+            Expr::ListComp { span, .. } => span,
+            Expr::MapComp { span, .. } => span,
+            Expr::Map(_, s) => s,
+            Expr::Range { span, .. } => span,
+            Expr::If { span, .. } => span,
+            Expr::Match { span, .. } => span,
+            Expr::StructLit { span, .. } => span,
+            Expr::Ok(_, s) => s,
+            Expr::Err(_, s) => s,
+            Expr::Try(_, s) => s,
+            Expr::Await(_, s) => s,
+            Expr::Error(s) => s,
+        }
+    }
 }
 
 /// Pieza de un string con interpolación.
@@ -465,7 +506,16 @@ impl FormatKind {
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssignTarget {
     /// `x = ...` — declaración o reasignación de una variable.
-    Ident(String),
+    ///
+    /// V2 (2026-06-05) — el segundo campo es el `Span` del token Ident
+    /// del LHS (el nombre de la variable en `let nombre = ...`). El
+    /// checker lo usa para registrar el tipo del binding en `TypeInfo`
+    /// y habilitar hover sobre el nombre de la variable, no solo sobre
+    /// el RHS. Cierra parcialmente la deuda S1 (`AssignTarget::Ident` /
+    /// `Param` / `For.var` / `MatchArm.pattern` sin span propio).
+    /// `Span::PartialEq` es siempre-true así que esto no rompe los
+    /// tests estructurales del AST.
+    Ident(String, Span),
     /// `objeto.campo = ...` — mutación de un campo de una `Instance`.
     /// `object` es cualquier expresión que evalúe a `Value::Instance`;
     /// el evaluador chequea esto en runtime y emite error si no.
@@ -1055,14 +1105,14 @@ mod tests {
         let program: Program = vec![
             // name = "Fitz"
             Stmt::Assign {
-                target: AssignTarget::Ident("name".into()),
+                target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
                 span: Span::ZERO,
             },
             // x = 10 + 5
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -1579,13 +1629,13 @@ mod tests {
     fn assign_target_admite_ident_y_field() {
         // `x = 1` — target Ident.
         let s1 = Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: Expr::Int(1, Span::ZERO),
             span: Span::ZERO,
         };
         if let Stmt::Assign { target, .. } = s1 {
-            assert_eq!(target, AssignTarget::Ident("x".into()));
+            assert_eq!(target, AssignTarget::Ident("x".into(), Span::default()));
         } else {
             panic!("se esperaba Assign");
         }

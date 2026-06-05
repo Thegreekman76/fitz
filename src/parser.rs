@@ -173,6 +173,16 @@ impl Parser {
         Ok(name)
     }
 
+    /// V2 (2026-06-05) — variante de `expect_ident` que también devuelve
+    /// el `Span` del token Ident. Usado al construir `AssignTarget::Ident`
+    /// para que el checker pueda registrar el tipo del binding bajo el
+    /// span del LHS y habilitar hover sobre el nombre de la variable.
+    fn expect_ident_with_span(&mut self, message: impl Into<String>) -> FitzResult<(String, Span)> {
+        let span = self.cur_span();
+        let name = self.expect_ident(message)?;
+        Ok((name, span))
+    }
+
     /// Consume runs de `Newline`. Usar antes de cada elemento dentro
     /// de listas (args, fields, arms) y antes de cada sentencia dentro
     /// de un bloque. Entre tokens de una expresión, los newlines
@@ -1240,12 +1250,13 @@ impl Parser {
                 span,
             });
         }
-        let name = self.expect_ident("se esperaba nombre de variable después de 'let'")?;
+        let (name, name_span) =
+            self.expect_ident_with_span("se esperaba nombre de variable después de 'let'")?;
         let type_ = self.parse_optional_type_annotation()?;
         self.expect(&Token::Eq, "se esperaba '=' en la declaración")?;
         let value = self.expression()?;
         Ok(Stmt::Assign {
-            target: AssignTarget::Ident(name),
+            target: AssignTarget::Ident(name, name_span),
             type_,
             value,
             span,
@@ -1270,8 +1281,8 @@ impl Parser {
         // Caso 2: `Ident : Tipo = expr`. La anotación solo se acepta
         // sobre un identificador pelado.
         if matches!(self.peek(), Token::Colon) {
-            let name = match lhs {
-                Expr::Ident(n, _) => n,
+            let (name, name_span) = match lhs {
+                Expr::Ident(n, ispan) => (n, ispan),
                 _ => {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
@@ -1284,7 +1295,7 @@ impl Parser {
             self.expect(&Token::Eq, "se esperaba '=' en la asignación")?;
             let value = self.expression()?;
             return Ok(Stmt::Assign {
-                target: AssignTarget::Ident(name),
+                target: AssignTarget::Ident(name, name_span),
                 type_: Some(type_),
                 value,
                 span,
@@ -1295,7 +1306,7 @@ impl Parser {
         if self.eat(&Token::Eq) {
             let value = self.expression()?;
             let target = match lhs {
-                Expr::Ident(n, _) => AssignTarget::Ident(n),
+                Expr::Ident(n, ispan) => AssignTarget::Ident(n, ispan),
                 Expr::Field { object, field, .. } => AssignTarget::Field { object, field },
                 // R.1.3 — `xs[i] = v` y `m["k"] = v` (mini-fase R).
                 // El parser ya construyó `Expr::Index { object, index }`
@@ -1344,7 +1355,9 @@ impl Parser {
             self.advance(); // consume el token `+=`/etc.
             let rhs = self.expression()?;
             let (target, target_as_expr) = match lhs {
-                Expr::Ident(n, ispan) => (AssignTarget::Ident(n.clone()), Expr::Ident(n, ispan)),
+                Expr::Ident(n, ispan) => {
+                    (AssignTarget::Ident(n.clone(), ispan), Expr::Ident(n, ispan))
+                }
                 Expr::Field {
                     object,
                     field,
@@ -3222,11 +3235,23 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                 e
             })?;
             let mut sub_parser = Parser::new(sub_tokens);
-            let expr = sub_parser.expression().map_err(|mut e| {
+            let mut expr = sub_parser.expression().map_err(|mut e| {
                 e.line = line;
                 e.column = sub_col_base + e.column.saturating_sub(1);
                 e
             })?;
+            // V1 (2026-06-05) — ajustar spans del sub-Expr al source
+            // original. Sin este paso, los spans del Expr resultante
+            // arrastran `line=1, col=N` del sub-tokenizer (que arranca
+            // desde el inicio del `expr_src` aislado). Eso rompía
+            // hover y diagnostics adentro de string interpolation:
+            //   - Hover sobre `{altitud_m}` devolvía `Str` (el tipo del
+            //     StrInterp entero) porque el span del Ident interno
+            //     quedaba en col=1 y perdía la heurística "max col ≤ cursor".
+            //   - Error de checker en `{a + b}` con `Int + Str` se
+            //     reportaba en línea 1:1 en vez de la línea real.
+            // Ver `docs/deudas-post-5b.md` → V1.
+            shift_expr_spans(&mut expr, line, sub_col_base);
             // No debe quedar nada después de la expresión (más allá
             // del EOF que pone el lexer).
             if !sub_parser.is_at_end() {
@@ -3288,6 +3313,147 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
             })
             .collect();
         Ok(Expr::Str(combined, str_span))
+    }
+}
+
+/// V1 (2026-06-05) — walker recursivo que reescribe los `Span` del
+/// `Expr` resultante del sub-parser de string interpolation para que
+/// apunten al source original en vez de al sub-texto aislado.
+///
+/// Para cada `Span` no-ZERO del Expr (y todos sus sub-Exprs):
+///
+/// ```text
+/// new_span.line   = line               (línea del source original)
+/// new_span.column = sub_col_base + (old.column - 1)
+/// ```
+///
+/// `Span::ZERO` (sentinel `0:0` para nodos sintéticos) se preserva tal
+/// cual — no se desplaza.
+///
+/// **Alcance**: walkea solo `Expr` y sub-`Expr` (incluyendo args de
+/// Call, branches de If, arms de Match, etc.). Stmts adentro de
+/// `FnExpr.body`/`Loop.body`/etc., Patterns de Match y TypeExprs NO se
+/// walkean — quedan como deuda residual menor. En la práctica, el 99%
+/// de las interpolaciones son `{ident}`, `{a + b}`, `{f(x)}`, `{x.field}`
+/// que no involucran Stmts/Patterns/TypeExprs.
+fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
+    // Reescribir el span del nodo actual (si no es ZERO).
+    {
+        let s = expr.span_mut();
+        if s.column > 0 {
+            s.line = line;
+            s.column = sub_col_base + s.column.saturating_sub(1);
+        }
+    }
+    // Recursar en sub-Exprs según la variante.
+    match expr {
+        // Literales sin sub-Exprs.
+        Expr::Int(_, _)
+        | Expr::Float(_, _)
+        | Expr::Str(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Null(_)
+        | Expr::Bytes(_, _)
+        | Expr::Ident(_, _)
+        | Expr::Error(_) => {}
+        // StrInterp anidado (raro pero posible): walkear cada Expr de
+        // los parts. Cada uno fue parseado por sub-sub-parser con su
+        // propia base; al llegar acá ya tuvieron su propio shift.
+        // Lo dejamos como no-op para no doble-shiftear.
+        Expr::StrInterp(_, _) => {}
+        Expr::BinOp { left, right, .. } => {
+            shift_expr_spans(left, line, sub_col_base);
+            shift_expr_spans(right, line, sub_col_base);
+        }
+        Expr::UnaryOp { operand, .. } => {
+            shift_expr_spans(operand, line, sub_col_base);
+        }
+        Expr::Call { callee, args, .. } => {
+            shift_expr_spans(callee, line, sub_col_base);
+            for a in args {
+                shift_expr_spans(a, line, sub_col_base);
+            }
+        }
+        Expr::NamedArg { value, .. } => {
+            shift_expr_spans(value, line, sub_col_base);
+        }
+        Expr::FnExpr { body, .. } => {
+            // body: Vec<Stmt> — deuda residual (no walkeamos Stmts).
+            // En la práctica, FnExpr inline adentro de un StrInterp es
+            // extremadamente raro. Si entra demanda, sumamos walker
+            // para Stmt en otro sub-paso.
+            let _ = body;
+        }
+        Expr::Field { object, .. } => {
+            shift_expr_spans(object, line, sub_col_base);
+        }
+        Expr::Index { object, index, .. } => {
+            shift_expr_spans(object, line, sub_col_base);
+            shift_expr_spans(index, line, sub_col_base);
+        }
+        Expr::Slice {
+            object, start, end, ..
+        } => {
+            shift_expr_spans(object, line, sub_col_base);
+            if let Some(s) = start.as_mut() {
+                shift_expr_spans(s, line, sub_col_base);
+            }
+            if let Some(e) = end.as_mut() {
+                shift_expr_spans(e, line, sub_col_base);
+            }
+        }
+        Expr::Tuple(items, _) => {
+            for it in items {
+                shift_expr_spans(it, line, sub_col_base);
+            }
+        }
+        Expr::TupleField { tuple, .. } => {
+            shift_expr_spans(tuple, line, sub_col_base);
+        }
+        Expr::Loop { .. } => {
+            // body: Vec<Stmt> — deuda residual igual que FnExpr.
+        }
+        Expr::List(items, _) => {
+            for it in items {
+                shift_expr_spans(it, line, sub_col_base);
+            }
+        }
+        Expr::ListComp { .. } | Expr::MapComp { .. } => {
+            // Compuesta — deuda residual menor (caso muy raro en interp).
+        }
+        Expr::Map(pairs, _) => {
+            for (k, v) in pairs {
+                shift_expr_spans(k, line, sub_col_base);
+                shift_expr_spans(v, line, sub_col_base);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            shift_expr_spans(start, line, sub_col_base);
+            shift_expr_spans(end, line, sub_col_base);
+        }
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            shift_expr_spans(condition, line, sub_col_base);
+            // then/else son Vec<Stmt> — deuda residual.
+            let _ = then;
+            let _ = else_;
+        }
+        Expr::Match { value, .. } => {
+            shift_expr_spans(value, line, sub_col_base);
+            // arms son Vec<MatchArm> con Pattern + body — deuda residual.
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, value) in fields {
+                shift_expr_spans(value, line, sub_col_base);
+            }
+        }
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
+            shift_expr_spans(inner, line, sub_col_base);
+        }
     }
 }
 
@@ -4632,7 +4798,7 @@ mod tests {
         assert_eq!(
             parse_one_stmt("let x = 42"),
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(42, Span::ZERO),
                 span: Span::ZERO
@@ -4645,7 +4811,7 @@ mod tests {
         assert_eq!(
             parse_one_stmt("let x: Int = 42"),
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: Some(TypeExpr::named("Int")),
                 value: Expr::Int(42, Span::ZERO),
                 span: Span::ZERO
@@ -4658,7 +4824,7 @@ mod tests {
         assert_eq!(
             parse_one_stmt("x = 42"),
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(42, Span::ZERO),
                 span: Span::ZERO
@@ -4671,7 +4837,7 @@ mod tests {
         assert_eq!(
             parse_one_stmt("name: Str = \"Fitz\""),
             Stmt::Assign {
-                target: AssignTarget::Ident("name".into()),
+                target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: Some(TypeExpr::named("Str")),
                 value: Expr::Str("Fitz".into(), Span::ZERO),
                 span: Span::ZERO
@@ -4685,7 +4851,7 @@ mod tests {
         assert_eq!(
             parse_one_stmt("x = 10 + 5"),
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -5100,7 +5266,7 @@ mod tests {
         assert_eq!(
             program[0],
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::Int(1, Span::ZERO),
                 span: Span::ZERO
@@ -5262,7 +5428,7 @@ mod tests {
                 return_type: None,
                 body: vec![
                     Stmt::Assign {
-                        target: AssignTarget::Ident("x".into()),
+                        target: AssignTarget::Ident("x".into(), Span::default()),
                         type_: None,
                         value: Expr::BinOp {
                             op: BinOpKind::Mul,
@@ -5677,7 +5843,7 @@ mod tests {
         let stmt = parse_one_stmt(r#"status = if active { "on" } else { "off" }"#);
         match stmt {
             Stmt::Assign {
-                target: AssignTarget::Ident(name),
+                target: AssignTarget::Ident(name, _),
                 value: Expr::If { .. },
                 ..
             } => {
@@ -6152,7 +6318,7 @@ mod tests {
         assert_eq!(
             program[0],
             Stmt::Assign {
-                target: AssignTarget::Ident("name".into()),
+                target: AssignTarget::Ident("name".into(), Span::default()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
                 span: Span::ZERO
@@ -6163,7 +6329,7 @@ mod tests {
         assert_eq!(
             program[1],
             Stmt::Assign {
-                target: AssignTarget::Ident("x".into()),
+                target: AssignTarget::Ident("x".into(), Span::default()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -6615,7 +6781,7 @@ mod tests {
         assert_eq!(
             stmt,
             Stmt::Assign {
-                target: AssignTarget::Ident("xs".into()),
+                target: AssignTarget::Ident("xs".into(), Span::default()),
                 type_: None,
                 value: Expr::List(
                     vec![
@@ -6637,7 +6803,7 @@ mod tests {
         assert_eq!(
             stmt,
             Stmt::Assign {
-                target: AssignTarget::Ident("m".into()),
+                target: AssignTarget::Ident("m".into(), Span::default()),
                 type_: None,
                 value: Expr::Map(
                     vec![
@@ -7045,7 +7211,7 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Assign {
-                target: AssignTarget::Ident(name),
+                target: AssignTarget::Ident(name, _),
                 value,
                 ..
             } => {
@@ -8299,7 +8465,7 @@ mod tests {
         assert!(matches!(
             stmts[1],
             Stmt::Assign {
-                target: AssignTarget::Ident(ref n), ..
+                target: AssignTarget::Ident(ref n, _), ..
             } if n == "y"
         ));
     }
@@ -8317,7 +8483,7 @@ mod tests {
         assert!(matches!(
             stmts[2],
             Stmt::Assign {
-                target: AssignTarget::Ident(ref n), ..
+                target: AssignTarget::Ident(ref n, _), ..
             } if n == "c"
         ));
     }
@@ -8337,7 +8503,7 @@ mod tests {
                 assert!(matches!(
                     then[1],
                     Stmt::Assign {
-                        target: AssignTarget::Ident(ref n), ..
+                        target: AssignTarget::Ident(ref n, _), ..
                     } if n == "b"
                 ));
             }
@@ -8418,7 +8584,7 @@ mod tests {
         assert!(matches!(
             stmts[1],
             Stmt::Assign {
-                target: AssignTarget::Ident(ref n), ..
+                target: AssignTarget::Ident(ref n, _), ..
             } if n == "b"
         ));
     }
@@ -9046,5 +9212,123 @@ mod tests {
             !msg.is_empty(),
             "esperaba mensaje no vacío para anidación mal balanceada"
         );
+    }
+
+    // ---- V1 (2026-06-05) — spans correctos adentro de StrInterp ----
+
+    /// Extrae el primer `Expr::StrInterp` del `Program` y devuelve sus
+    /// parts. Helper de los tests V1.
+    fn first_strinterp_parts(src: &str) -> Vec<StrPart> {
+        let tokens = tokenize(src).expect("debe tokenizar");
+        let program = parse(tokens).expect("debe parsear");
+        for stmt in program {
+            match stmt {
+                Stmt::Expr(Expr::Call { args, .. }, _) => {
+                    for a in args {
+                        if let Expr::StrInterp(parts, _) = a {
+                            return parts;
+                        }
+                    }
+                }
+                Stmt::Assign {
+                    value: Expr::StrInterp(parts, _),
+                    ..
+                } => return parts,
+                _ => {}
+            }
+        }
+        panic!("no se encontró StrInterp en el program");
+    }
+
+    #[test]
+    fn v1_ident_dentro_de_strinterp_tiene_span_real_no_col_1() {
+        // `print("hola {nombre}!")` — el span del Ident("nombre") debe
+        // ser (1, 14), NO (1, 1) (que era el bug pre-V1).
+        let parts = first_strinterp_parts("print(\"hola {nombre}!\")\n");
+        let ident = parts
+            .iter()
+            .find_map(|p| match p {
+                StrPart::Expr(e, _) => Some(e),
+                _ => None,
+            })
+            .expect("debe haber un StrPart::Expr");
+        let span = ident.span();
+        assert_eq!(
+            span.line, 1,
+            "span.line del Ident interno debería ser 1, fue {}",
+            span.line
+        );
+        // El `{` está en col 13 (después de `print("hola `), el `n` de
+        // `nombre` arranca en col 14.
+        assert_eq!(
+            span.column, 14,
+            "span.column del Ident interno debería ser 14, fue {}",
+            span.column
+        );
+    }
+
+    #[test]
+    fn v1_binop_dentro_de_strinterp_recursa_a_operandos() {
+        // `print("v: {a + b}")` — el span del BinOp y sus operandos
+        // (Ident a, Ident b) tienen que apuntar al source real.
+        let parts = first_strinterp_parts("print(\"v: {a + b}\")\n");
+        let expr = parts
+            .iter()
+            .find_map(|p| match p {
+                StrPart::Expr(e, _) => Some(e),
+                _ => None,
+            })
+            .expect("debe haber un StrPart::Expr");
+        match expr {
+            Expr::BinOp { left, right, .. } => {
+                // `a` está en col 12, `b` en col 16.
+                assert_eq!(left.span().line, 1);
+                assert_eq!(left.span().column, 12, "col de `a`");
+                assert_eq!(right.span().line, 1);
+                assert_eq!(right.span().column, 16, "col de `b`");
+            }
+            other => panic!("esperaba BinOp, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn v1_call_dentro_de_strinterp_walkea_callee_y_args() {
+        // `print("v: {f(x)}")` — Call.callee y Call.args walkean.
+        let parts = first_strinterp_parts("print(\"v: {f(x)}\")\n");
+        let expr = parts
+            .iter()
+            .find_map(|p| match p {
+                StrPart::Expr(e, _) => Some(e),
+                _ => None,
+            })
+            .expect("debe haber un StrPart::Expr");
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                // `f` está en col 12, `x` en col 14.
+                assert_eq!(callee.span().column, 12);
+                assert_eq!(args.first().expect("un arg").span().column, 14);
+            }
+            other => panic!("esperaba Call, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn v1_field_access_dentro_de_strinterp_walkea_object() {
+        // `print("name: {u.name}")` — Field.object walkea.
+        let parts = first_strinterp_parts("print(\"name: {u.name}\")\n");
+        let expr = parts
+            .iter()
+            .find_map(|p| match p {
+                StrPart::Expr(e, _) => Some(e),
+                _ => None,
+            })
+            .expect("debe haber un StrPart::Expr");
+        match expr {
+            Expr::Field { object, .. } => {
+                // `u` está en col 15.
+                assert_eq!(object.span().column, 15);
+            }
+            other => panic!("esperaba Field, recibió {:?}", other),
+        }
     }
 }

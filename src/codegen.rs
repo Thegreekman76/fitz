@@ -1897,7 +1897,7 @@ fn detect_shared_state(program: &Program) -> (Vec<String>, HashMap<String, Vec<S
     let mut order: Vec<String> = Vec::new();
     for s in program {
         if let Stmt::Assign {
-            target: AssignTarget::Ident(name),
+            target: AssignTarget::Ident(name, _),
             ..
         } = s
         {
@@ -1961,7 +1961,7 @@ fn collect_f12_hoists<'a>(program: &'a Program, main_stmts: &[&'a Stmt]) -> Vec<
     let mut counts: HashMap<String, usize> = HashMap::new();
     for s in main_stmts {
         if let Stmt::Assign {
-            target: AssignTarget::Ident(name),
+            target: AssignTarget::Ident(name, _),
             ..
         } = s
         {
@@ -1971,7 +1971,7 @@ fn collect_f12_hoists<'a>(program: &'a Program, main_stmts: &[&'a Stmt]) -> Vec<
     let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
     for s in main_stmts {
         if let Stmt::Assign {
-            target: AssignTarget::Ident(name),
+            target: AssignTarget::Ident(name, _),
             value,
             ..
         } = s
@@ -2006,7 +2006,7 @@ fn collect_f12_hoists<'a>(program: &'a Program, main_stmts: &[&'a Stmt]) -> Vec<
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for s in main_stmts {
         if let Stmt::Assign {
-            target: AssignTarget::Ident(name),
+            target: AssignTarget::Ident(name, _),
             ..
         } = s
         {
@@ -2220,7 +2220,7 @@ fn walk_stmt_for_state_refs(
         Stmt::Assign { target, value, .. } => {
             walk_expr_for_state_refs(value, candidates, locals, refs);
             match target {
-                AssignTarget::Ident(name) => {
+                AssignTarget::Ident(name, _) => {
                     locals.insert(name.clone());
                 }
                 AssignTarget::Field { object, .. } => {
@@ -4464,7 +4464,7 @@ fn collect_module_sigs(
                 ..
             } => {
                 // Solo bindings simples a un Ident.
-                let AssignTarget::Ident(name) = target else {
+                let AssignTarget::Ident(name, _) = target else {
                     return Err(loader_err(
                         "el módulo no soporta asignación a campo a nivel top \
                          (solo `let X = <expr>`)"
@@ -5159,7 +5159,7 @@ fn resolve_state_var_types(
     // acá porque el ctx ya tiene los tipos custom pre-registrados.
     for s in main_stmts {
         if let Stmt::Assign {
-            target: AssignTarget::Ident(name),
+            target: AssignTarget::Ident(name, _),
             type_,
             value,
             ..
@@ -9549,7 +9549,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // un tipo Rust distinto).
         for stmt in stmts {
             if let Stmt::Assign {
-                target: AssignTarget::Ident(name),
+                target: AssignTarget::Ident(name, _),
                 ..
             } = stmt
             {
@@ -10537,7 +10537,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             else {
                 continue;
             };
-            let AssignTarget::Ident(name) = target else {
+            let AssignTarget::Ident(name, _) = target else {
                 continue;
             };
             let ty = match type_ {
@@ -11962,7 +11962,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         value: &Expr,
     ) -> Result<(), FitzError> {
         let name = match target {
-            AssignTarget::Ident(n) => n,
+            AssignTarget::Ident(n, _) => n,
             AssignTarget::Field { object, field } => {
                 return self.gen_field_assign(object, field, value);
             }
@@ -12078,7 +12078,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         else {
             unreachable!("gen_main_hoisted_let solo se llama sobre Stmt::Assign");
         };
-        let AssignTarget::Ident(name) = target else {
+        let AssignTarget::Ident(name, _) = target else {
             unreachable!("collect_f12_hoists ya filtró por Ident");
         };
 
@@ -12153,7 +12153,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         else {
             unreachable!("gen_module_top_let solo se llama sobre Stmt::Assign");
         };
-        let AssignTarget::Ident(name) = target else {
+        let AssignTarget::Ident(name, _) = target else {
             return Err(self.err_at(
                 stmt_span,
                 "asignación a campo a nivel top de módulo: no soportada (solo `let X = <expr>`)",
@@ -26850,7 +26850,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if !self.state_var_types.is_empty() {
             for s in main_stmts {
                 if let Stmt::Assign {
-                    target: AssignTarget::Ident(name),
+                    target: AssignTarget::Ident(name, _),
                     value,
                     ..
                 } = s
@@ -27050,7 +27050,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // thread_local — re-emitirlos como locales acá sería redundante.
         for s in main_stmts {
             if let Stmt::Assign {
-                target: AssignTarget::Ident(name),
+                target: AssignTarget::Ident(name, _),
                 ..
             } = s
             {
@@ -29628,7 +29628,7 @@ fn collect_captures_stmt(
         }
         Stmt::Assign { target, value, .. } => {
             collect_captures_expr(value, params, locals, ctx, seen, out);
-            if let AssignTarget::Ident(name) = target {
+            if let AssignTarget::Ident(name, _) = target {
                 // El binding local se materializa después de evaluar
                 // la RHS — el orden importa si el RHS referencia el
                 // propio name (shadowing recursivo no soportado, pero

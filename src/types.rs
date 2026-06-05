@@ -8249,7 +8249,16 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             span,
         } => {
             let value_ty = infer_expr(ctx, value);
-            if let AssignTarget::Ident(name) = target {
+            if let AssignTarget::Ident(name, target_span) = target {
+                // V2 (2026-06-05) — registrar el tipo del binding bajo
+                // el span del LHS Ident en TypeInfo. Habilita hover
+                // sobre el nombre de la variable (no solo sobre el RHS).
+                // Para anotaciones explícitas (`let x: Int = ...`), el
+                // tipo declarado prevalece sobre el inferido — eso lo
+                // resuelve el match siguiente. Acá usamos el tipo final
+                // determinado abajo (no `value_ty` directo) — por eso
+                // el record lo hacemos DESPUÉS del match, no antes.
+                let final_ty: Type;
                 match type_ {
                     Some(ann) => {
                         let declared = resolve_type_expr(ann, ctx.types).unwrap_or(Type::Any);
@@ -8269,7 +8278,8 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         // `def_span = span` del Stmt::Assign: en caso de
                         // reasignación, go-to-def salta al ÚLTIMO
                         // binding stmt (semántica simplificada del MVP).
-                        ctx.declare_var_annotated(name.clone(), declared, *span);
+                        ctx.declare_var_annotated(name.clone(), declared.clone(), *span);
+                        final_ty = declared;
                     }
                     None => {
                         // Sin anotación nueva: si la variable ya existe
@@ -8293,14 +8303,18 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                 }
                                 // Conservamos el binding anotado — la
                                 // reasignación no relaja el tipo.
-                                ctx.declare_var_annotated(name.clone(), existing_ty, *span);
+                                ctx.declare_var_annotated(name.clone(), existing_ty.clone(), *span);
+                                final_ty = existing_ty;
                             }
                             _ => {
-                                ctx.declare_var(name.clone(), value_ty, *span);
+                                ctx.declare_var(name.clone(), value_ty.clone(), *span);
+                                final_ty = value_ty.clone();
                             }
                         }
                     }
                 }
+                // V2 — record final del LHS bajo su span propio.
+                ctx.type_info.record(*target_span, final_ty);
             }
             // AssignTarget::Field { object, field }: validar que el
             // receptor es un tipo nominal con ese campo y que el tipo
@@ -11932,7 +11946,7 @@ mod tests {
                 span: Span::ZERO,
             },
             Stmt::Assign {
-                target: AssignTarget::Ident("v".into()),
+                target: AssignTarget::Ident("v".into(), Span::default()),
                 type_: Some(TE::Nullable(Box::new(TE::named("X")))),
                 value: Expr::Null(Span::ZERO),
                 span: Span::ZERO,
@@ -15080,7 +15094,7 @@ mod tests {
         // true) hace que no haya error de tipo.
         use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let program = vec![Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: Some(TypeExpr::Named("Int".into())),
             value: AstExpr::Error(Span::ZERO),
             span: Span::ZERO,
@@ -15250,7 +15264,7 @@ let v = match r {
         // evitar colisiones entre sintéticos.
         use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let program = vec![Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: AstExpr::Int(42, Span::ZERO),
             span: Span::ZERO,
@@ -15278,7 +15292,7 @@ let v = match r {
         use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let span = Span::new(7, 11); // span arbitrario "known"
         let program = vec![Stmt::Assign {
-            target: AssignTarget::Ident("x".into()),
+            target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
             value: AstExpr::Error(span),
             span,
@@ -18214,5 +18228,57 @@ print(total)
         assert_ok("let v = flag(\"foo\")");
         assert_ok("let v = flags.is_enabled(\"foo\")");
         assert_ok("let v = flags.list()");
+    }
+
+    // ---- V2 (2026-06-05) — hover sobre LHS de `let` registra tipo ----
+
+    /// Helper de los tests V2 — parsea + chequea y devuelve el `TypeInfo`
+    /// para hacer lookups por `(line, column)` del LHS de un `let`.
+    fn types_at_position(src: &str, line: usize, column: usize) -> Option<Type> {
+        let tokens = tokenize(src).expect("tokenize");
+        let program = parse(tokens).expect("parse");
+        let (_env, type_info, _def, _errs) = check_program(&program);
+        let key = SpanKey(line, column);
+        let result = type_info
+            .iter()
+            .find(|(k, _)| **k == key)
+            .map(|(_, t)| t.clone());
+        result
+    }
+
+    #[test]
+    fn v2_hover_sobre_lhs_de_let_sin_anotacion_registra_tipo_inferido() {
+        // `let edad = 200` — span del LHS `edad` está en (1, 5).
+        let ty = types_at_position("let edad = 200\n", 1, 5);
+        assert_eq!(ty, Some(Type::Int), "hover sobre `edad` debe ser Int");
+    }
+
+    #[test]
+    fn v2_hover_sobre_lhs_de_let_con_anotacion_registra_tipo_declarado() {
+        // `let datos: Int? = null` — span del LHS `datos` en (1, 5).
+        // El tipo registrado debe ser Nullable(Int) (el declarado),
+        // no Null (el inferido del RHS).
+        let ty = types_at_position("let datos: Int? = null\n", 1, 5);
+        match ty {
+            Some(Type::Nullable(inner)) => {
+                assert_eq!(*inner, Type::Int, "esperaba Nullable(Int)");
+            }
+            other => panic!("esperaba Nullable(Int), recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn v2_hover_sobre_lhs_de_let_str_y_float_funciona() {
+        let ty = types_at_position("let nombre = \"Patagonia\"\n", 1, 5);
+        assert_eq!(ty, Some(Type::Str));
+
+        let ty = types_at_position("let latitud = -49.32\n", 1, 5);
+        assert_eq!(ty, Some(Type::Float));
+    }
+
+    #[test]
+    fn v2_hover_sobre_lhs_de_let_bool_funciona() {
+        let ty = types_at_position("let activa = true\n", 1, 5);
+        assert_eq!(ty, Some(Type::Bool));
     }
 }

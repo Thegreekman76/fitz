@@ -23,10 +23,11 @@ use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::{
     CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
-    InitializeResult, InitializedParams, MessageType, OneOf, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DocumentFormattingParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, MessageType, OneOf, Position, Range,
+    ServerCapabilities, ServerInfo, SignatureHelp, SignatureHelpOptions, SignatureHelpParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
@@ -35,7 +36,7 @@ use fitz::lsp::{
     check_source_with_types, completion_at_position_with_uri, definition_for_position,
     fitz_errors_to_diagnostics_with_source, hover_for_position,
     make_definition_location_with_source, make_hover_with_range, resolve_cross_module_definition,
-    utf16_to_unicode_char,
+    signature_help_at_position, utf16_to_unicode_char,
 };
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
@@ -168,6 +169,23 @@ impl LanguageServer for Backend {
                     trigger_characters: Some(vec![".".into(), "@".into()]),
                     resolve_provider: Some(false),
                     ..CompletionOptions::default()
+                }),
+                // V3 (2026-06-05) — anunciamos `textDocument/formatting`
+                // delegando al formatter `fitz fmt` ya existente
+                // (`src/fmt.rs::format_source`). El cliente VSCode con
+                // `editor.formatOnSave = true` invoca el handler `formatting`
+                // al guardar. Sin esto, el usuario tenía que correr `fitz fmt`
+                // a mano o configurar un formatter externo apuntando al binario.
+                document_formatting_provider: Some(OneOf::Left(true)),
+                // V4 (2026-06-05) — anunciamos `textDocument/signatureHelp`
+                // con trigger chars `(` y `,`. Al tipear `f(` o `f(a, `
+                // el cliente invoca el handler que muestra la firma de la
+                // fn top-level con el param actual resaltado. MVP: solo
+                // fns user-defined del programa; builtins quedan deuda menor.
+                signature_help_provider: Some(SignatureHelpOptions {
+                    trigger_characters: Some(vec!["(".into(), ",".into()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: Default::default(),
                 }),
                 ..ServerCapabilities::default()
             },
@@ -334,6 +352,104 @@ impl LanguageServer for Backend {
         );
         Ok(Some(CompletionResponse::Array(items)))
     }
+
+    /// V3 (2026-06-05) — `textDocument/formatting`. Delega al formatter
+    /// pure-function `fitz::fmt::format_source` que ya existe (Fase 9.z.1)
+    /// y devuelve UN `TextEdit` que reemplaza el documento entero
+    /// (`(0,0)..(end_of_doc)` → texto formateado). Si el doc tiene
+    /// errores de parser, `format_source` retorna `Err` y devolvemos
+    /// `Ok(None)` silencioso — no abortamos el save del usuario.
+    ///
+    /// Patrón estándar para formatters non-incremental (rust-analyzer,
+    /// black, prettier hacen igual). Usamos `TextDocumentSyncKind::FULL`
+    /// así que el `state.text` siempre tiene el contenido completo.
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> LspResult<Option<Vec<TextEdit>>> {
+        let uri = params.text_document.uri;
+        let documents = self.documents.lock();
+        let state = match documents.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let formatted = match fitz::fmt::format_source(&state.text) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        };
+        // Si el output coincide bit-a-bit con el input, no emitimos
+        // edits — evita marcar el doc como modificado por save sin
+        // cambios reales.
+        if formatted == state.text {
+            return Ok(Some(Vec::new()));
+        }
+        // Range del doc entero: desde (0,0) hasta (last_line, last_col).
+        // Posiciones en UTF-16 code units (LSP default). Para el final
+        // del doc, calculamos last_line + last_col del state.text.
+        let (end_line, end_char_utf16) = end_position_utf16(&state.text);
+        let edit = TextEdit {
+            range: Range {
+                start: Position::new(0, 0),
+                end: Position::new(end_line, end_char_utf16),
+            },
+            new_text: formatted,
+        };
+        Ok(Some(vec![edit]))
+    }
+
+    /// V4 (2026-06-05) — `textDocument/signatureHelp`. Detecta el `Call`
+    /// enclosing en el documento, identifica el callee por nombre y
+    /// resuelve la signature contra fns top-level del `Program`. MVP:
+    /// solo fns user-defined; builtins y method calls quedan como deuda
+    /// menor.
+    ///
+    /// Heurística del walkback: cuenta `(`/`)` para encontrar el `(` no
+    /// balanceado del call enclosing, y `,` a depth 0 para el
+    /// `active_parameter`. No respeta strings ni comments (deuda menor
+    /// — patrón raro en práctica).
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> LspResult<Option<SignatureHelp>> {
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let documents = self.documents.lock();
+        let state = match documents.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        // v0.13.2 — UTF-16 → chars Unicode una vez (mismo motivo que en
+        // `hover`/`goto_definition`).
+        let char_unicode = utf16_to_unicode_char(&state.text, pos.line, pos.character);
+        Ok(signature_help_at_position(
+            &state.text,
+            &state.program,
+            pos.line,
+            char_unicode,
+        ))
+    }
+}
+
+/// V3 (2026-06-05) — calcula la `Position` LSP del final del documento
+/// en UTF-16 code units (default del spec LSP). Devuelve
+/// `(last_line, last_col_utf16)` apuntando ANTES del último char
+/// emitido (o `(0, 0)` para doc vacío). Sigue la convención del LSP
+/// donde el `end` de un Range es exclusivo.
+fn end_position_utf16(text: &str) -> (u32, u32) {
+    if text.is_empty() {
+        return (0, 0);
+    }
+    let mut line: u32 = 0;
+    let mut col_utf16: u32 = 0;
+    for ch in text.chars() {
+        if ch == '\n' {
+            line += 1;
+            col_utf16 = 0;
+        } else {
+            col_utf16 += ch.len_utf16() as u32;
+        }
+    }
+    (line, col_utf16)
 }
 
 /// Mini-tanda LSPx — extrae el identificador (run de chars alphanum +

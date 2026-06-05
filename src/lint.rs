@@ -381,7 +381,7 @@ fn check_unused_var_in_stmt(
 ) {
     match stmt {
         Stmt::Assign {
-            target: AssignTarget::Ident(name),
+            target: AssignTarget::Ident(name, _),
             span,
             ..
         } if !name.starts_with('_') && !uses.contains(name) => {

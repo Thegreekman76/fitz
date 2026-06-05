@@ -168,7 +168,7 @@ pub fn collect_top_level_int_consts(
     for s in program {
         if let Stmt::Assign { target, value, .. } = s {
             // Solo bindings simples `let X = ...` (no field assign).
-            let crate::ast::AssignTarget::Ident(name) = target else {
+            let crate::ast::AssignTarget::Ident(name, _) = target else {
                 continue;
             };
             // OAPI-Expr — usa `resolve_status_value` que ahora acepta

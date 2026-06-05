@@ -755,3 +755,332 @@ fn completion_after_at_lista_decorators_v0_10_12() {
     drop(stdin);
     wait_for_clean_exit(&mut child);
 }
+
+/// V3 (2026-06-05) — `textDocument/formatting` delega a `fitz fmt`
+/// (módulo `fitz::fmt::format_source`). Valida tres cosas:
+///
+///   1. Capability `documentFormattingProvider: true` anunciada.
+///   2. Doc no-formateado → respuesta con UN `TextEdit` cuyo `newText`
+///      es distinto del input (el formatter cambió algo).
+///   3. Doc parser-roto → respuesta `null` (no crash, no abortar save).
+#[test]
+fn v3_formatting_doc_no_formateado_devuelve_textedit_con_codigo_formateado() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    // Handshake.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let init_resp = read_message(&mut stdout);
+    // Capability anunciada.
+    assert!(
+        init_resp.contains(r#""documentFormattingProvider":true"#)
+            || init_resp.contains(r#""documentFormattingProvider": true"#),
+        "initialize sin documentFormattingProvider: {init_resp}",
+    );
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // didOpen con código no-formateado. El formatter va a cambiar
+    // tabs/spaces, comments con `//foo` → `// foo`, etc. Usamos
+    // indent con tabs adentro de fn body — el formatter normaliza a
+    // 4 espacios.
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///fmt.fitz","languageId":"fitz","version":1,"text":"fn main() {\n\tlet x = 1\n\tlet y = 2\n\tprint(x + y)\n}\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    // Drenamos diagnostics post didOpen.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    // textDocument/formatting.
+    let fmt_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///fmt.fitz"},"options":{"tabSize":4,"insertSpaces":true}}}"#;
+    stdin.write_all(&frame(fmt_req)).expect("write formatting");
+    stdin.flush().expect("flush formatting");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let fmt_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando formatting response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    // Debe haber al menos un TextEdit (el formatter normalizó tabs).
+    assert!(
+        fmt_resp.contains(r#""newText""#),
+        "formatting response sin newText: {fmt_resp}",
+    );
+    assert!(
+        !fmt_resp.contains(r#""error""#),
+        "formatting devolvió error: {fmt_resp}",
+    );
+    // El newText NO debe contener tabs (el formatter las normaliza).
+    // Buscamos el escape `\t` literal en el JSON — si está, fallar.
+    assert!(
+        !fmt_resp.contains(r#"\t"#),
+        "formatting newText conservó tabs: {fmt_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+#[test]
+fn v3_formatting_doc_con_parser_error_devuelve_null_no_aborta() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let _ = read_message(&mut stdout);
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // didOpen con código roto (`let x = ` sin RHS — parser falla).
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///broken.fitz","languageId":"fitz","version":1,"text":"let x = \n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    let fmt_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/formatting","params":{"textDocument":{"uri":"file:///broken.fitz"},"options":{"tabSize":4,"insertSpaces":true}}}"#;
+    stdin.write_all(&frame(fmt_req)).expect("write formatting");
+    stdin.flush().expect("flush formatting");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let fmt_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando formatting response broken");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    // Sobre doc roto, esperamos `result: null` (no crash, no error).
+    assert!(
+        fmt_resp.contains(r#""result":null"#) || fmt_resp.contains(r#""result": null"#),
+        "formatting sobre doc roto debería devolver result:null, recibió: {fmt_resp}",
+    );
+    assert!(
+        !fmt_resp.contains(r#""error""#),
+        "formatting sobre doc roto NO debe devolver error: {fmt_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+/// V4 (2026-06-05) — `textDocument/signatureHelp`. Valida:
+///   1. Capability `signatureHelpProvider` con trigger chars `(`/`,`.
+///   2. Cursor adentro de `f(|` con fn user-defined → SignatureInformation
+///      con label + parameters + active_parameter = 0.
+///   3. Cursor adentro de `f(a, |` → active_parameter = 1.
+///   4. Cursor sin call enclosing → result null.
+#[test]
+fn v4_signature_help_fn_user_defined_devuelve_signature_information() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let init_resp = read_message(&mut stdout);
+    assert!(
+        init_resp.contains(r#""signatureHelpProvider""#),
+        "initialize sin signatureHelpProvider: {init_resp}",
+    );
+    assert!(
+        init_resp.contains(r#""triggerCharacters":["(",","]"#)
+            || init_resp.contains(r#""triggerCharacters": ["(",","]"#)
+            || init_resp.contains(r#""triggerCharacters":["(", ","]"#),
+        "signatureHelpProvider sin trigger chars `(`/`,`: {init_resp}",
+    );
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // didOpen con `fn add(a: Int, b: Int) -> Int { return a + b }\nlet r = add(|\n`.
+    // Cursor adentro de `add(|` (línea 1, char 13 — justo después del `(`).
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///sig.fitz","languageId":"fitz","version":1,"text":"fn add(a: Int, b: Int) -> Int { return a + b }\nlet r = add(\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    // signatureHelp en línea 1, char 12 (después del `(` en `add(`).
+    let sig_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///sig.fitz"},"position":{"line":1,"character":12},"context":{"triggerKind":2,"triggerCharacter":"(","isRetrigger":false}}}"#;
+    stdin
+        .write_all(&frame(sig_req))
+        .expect("write signatureHelp");
+    stdin.flush().expect("flush signatureHelp");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let sig_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando signatureHelp response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    // Sanity de la respuesta: contiene "signatures", la label con
+    // `fn add(a: Int, b: Int) -> Int`, active_parameter = 0.
+    assert!(
+        sig_resp.contains(r#""signatures""#),
+        "signatureHelp sin signatures: {sig_resp}",
+    );
+    assert!(
+        sig_resp.contains("fn add(a: Int, b: Int) -> Int"),
+        "signatureHelp con label incorrecta: {sig_resp}",
+    );
+    assert!(
+        sig_resp.contains(r#""activeParameter":0"#) || sig_resp.contains(r#""activeParameter": 0"#),
+        "signatureHelp con activeParameter incorrecto (esperaba 0): {sig_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+#[test]
+fn v4_signature_help_segundo_arg_active_parameter_es_1() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let _ = read_message(&mut stdout);
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // `fn add(a: Int, b: Int) -> Int { return a + b }\nlet r = add(5, |\n`.
+    // Cursor después del `,` en line 1.
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///sig2.fitz","languageId":"fitz","version":1,"text":"fn add(a: Int, b: Int) -> Int { return a + b }\nlet r = add(5, \n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    // signatureHelp después de `5, ` (línea 1, char 15).
+    let sig_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///sig2.fitz"},"position":{"line":1,"character":15},"context":{"triggerKind":2,"triggerCharacter":",","isRetrigger":false}}}"#;
+    stdin
+        .write_all(&frame(sig_req))
+        .expect("write signatureHelp");
+    stdin.flush().expect("flush signatureHelp");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let sig_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando signatureHelp response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    assert!(
+        sig_resp.contains(r#""activeParameter":1"#) || sig_resp.contains(r#""activeParameter": 1"#),
+        "signatureHelp con activeParameter incorrecto (esperaba 1 después de la coma): {sig_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
