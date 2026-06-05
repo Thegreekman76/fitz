@@ -3487,7 +3487,54 @@ Hover sobre `let edad = 200` ahora muestra `Int` sobre `edad`
 
 **Cierra parcialmente la deuda S1**: el paralelo en `Param` /
 `For.var` / `MatchArm.pattern` sigue pendiente — mismo patrón
-arquitectural, sub-paso futuro independiente.
+arquitectural, sub-paso futuro independiente. **Update 2026-06-05**:
+S1 completa cerrada en v0.14.2 — `Param.name_span`, `Pattern::Ident(name, span)`,
+`Pattern::OkBinding(name, span)`, `Pattern::ErrBinding(name, span)`
+todos con span propio + checker registra tipos en `TypeInfo` bajo
+esos spans. Ver entry v0.14.2 del CHANGELOG y nueva sección S1
+en este backlog.
+
+### S1 (deuda histórica) — Spans propios para Param / Pattern bindings — **CERRADO 2026-06-05 (v0.14.2)**
+
+**Hallazgo histórico**: la deuda S1 era el paralelo del V2 que cerró
+`AssignTarget::Ident`. Faltaban spans propios en `Param.name` (params
+de fn), `Pattern::Ident` (var de `for` + binding genérico de match)
+y `Pattern::OkBinding`/`ErrBinding` (bindings del unwrap de Result).
+Sin esos spans, el checker no podía registrar los tipos en
+`TypeInfo` bajo el lugar correcto y el LSP no mostraba nada al hover
+sobre el nombre del param/binding.
+
+**Casos cubiertos en v0.14.2**:
+
+- Hover sobre `n` en `fn double(n: Int) => n * 2` → `Int`.
+- Hover sobre `x` en `fn f(x) => x + 1` → `Any` (sin anotación).
+- Hover sobre `i` en `for i in 0..10` → `Int`.
+- Hover sobre `n` en `match x { Ok(n) => n + 1 }` → tipo inner del
+  Result.
+- Hover sobre `amount` en métodos custom (`type T { fn m(amount: Int) }`) → `Int`.
+
+**Implementación**:
+
+- AST: `Param` suma `name_span: Span`. `Pattern::Ident(String)` →
+  `Pattern::Ident(String, Span)` (idem `OkBinding`, `ErrBinding`).
+- Parser: captura el span via `expect_ident_with_span` (helper V2
+  reusado).
+- Checker: en `bind_pattern`, `bind_for_pattern_in_checker`,
+  handlers de `FnDef`/`FnExpr`/`Method`, usa `name_span`/`ident_span`
+  como `def_span` (con fallback al span del nodo contenedor cuando
+  el span es ZERO en nodos sintéticos de tests) Y registra el tipo
+  en `TypeInfo` bajo ese span.
+
+**Tests** (5 unit en `types::tests::s1_*`): param anotado/sin anotar,
+var del for sobre range, binding Ok(n), param de método custom.
+
+**Side effect**: el sed bulk para arreglar los call sites de patrones
+literales en tests tocó ~40 sites (Pattern::Ident, OkBinding,
+ErrBinding) + ~22 Param constructors. Cambios mecánicos sin lógica
+nueva. Total ~1700 LoC de diff, mayoría tests.
+
+**Cierra la deuda S1 entera del proyecto** — paralelo natural del V2,
+mismo patrón arquitectural.
 
 ---
 
@@ -3827,7 +3874,67 @@ la decisión de diseño #5.
 **Side benefit**: alinea la realidad con la frase "como en Go" del
 documento de decisiones. Hoy esa frase es aspiracional, no descriptiva.
 
-### L2 — Inferencia bidireccional de tipos en callbacks de métodos built-in (2026-06-05)
+### L2 — Inferencia bidireccional de callbacks en métodos built-in — **CERRADO 2026-06-05**
+
+**Fix aplicado** (alcance acotado al caso 90%): el checker propaga
+el T del receptor a los params SIN anotación del callback cuando el
+método es uno de los built-in con template paramétrico conocido sobre
+`List<T>` (`.map`/`.filter`/`.find`/`.any`/`.all`/`.count`/`.find_index`/
+`.flat_map`).
+
+**Implementación**:
+
+- Nuevo helper `expected_callback_param_for_builtin_method(obj_ty, method) -> Option<Vec<Type>>`
+  ([src/types.rs](src/types.rs#L4997)). Para `List<T>` + cualquiera de
+  los métodos cubiertos, devuelve `Some(vec![T])`. Otros casos (Map
+  higher-order, Str, custom Nominal) → `None` (no rompe la lógica
+  existente).
+- `CheckCtx` gana stack `fn_expr_param_hints: Vec<Option<Vec<Type>>>`
+  para soportar nested callbacks sin contaminación. El call site del
+  método empuja el hint ANTES de sintetizar el arg si es un FnExpr
+  directo.
+- Handler de `Expr::FnExpr` ([src/types.rs](src/types.rs#L4470))
+  consume el top del stack al entrar. Para cada param: si tiene
+  anotación explícita, la anotación gana; si no, usa el hint en vez
+  de `Type::Any`.
+
+**Tests** (6 unit en `types::tests::l2_*`):
+
+- `[1, 2, 3].map(fn(x) => x * 10)` → `List<Int>` ✓ (caso pedagógico).
+- `[1, 2, 3].filter(fn(x) => x > 0)` → `List<Int>` con `Bool` validado.
+- `["a", "b"].map(fn(s) => s.upper())` → `List<Str>`.
+- Param con anotación explícita (`fn(x: Float) => x * 2.0` sobre
+  `List<Int>`) → `List<Float>` (anotación gana).
+- `.find(fn(x) => x == 2)` → `Result<Int>`.
+- Nested callbacks (`xs.map(fn(x) => [x].map(fn(y) => y * 2))`) → cada
+  uno recibe su propio hint sin contaminación.
+
+**Acción derivada**: el cap M1.C5 del curso restauró el ejemplo
+original `:type [1, 2, 3].map(fn(x) => x * 10)` → `:: List<Int>` y
+removió la nota sobre la limitación (que ya no aplica). El cap suma
+una explicación corta sobre la inferencia bidireccional y cuándo
+gana la anotación explícita.
+
+**Deuda residual derivada de L2** (NO bloquea uso real):
+
+- **Map<K, V> higher-order**: hoy `infer_map_method` no expone
+  callbacks (solo get/has/keys/values/len). Cuando llegue, agregar
+  el caso al helper devolviendo `Some(vec![K, V])`.
+- **Inferencia bidireccional GENERAL**: el alcance del fix es
+  callbacks de métodos built-in conocidos. Casos no cubiertos —
+  ej. fn user-defined con param `Function`, FnExpr asignada a var
+  con anotación de Function — siguen sintetizando params sin
+  anotación como `Any`. Refactor invasivo del checker (1-2 semanas)
+  si entra demanda real.
+- **`flat_map` con ret type del callback**: `flat_map` exige
+  `fn(T) -> List<U>` y luego sintetiza U del ret. El hint actual
+  propaga solo T (el param). Validar si el alumno escribe
+  `.flat_map(fn(x) => [x, x+1])` y necesita inferencia del U también.
+  En la práctica el U se sintetiza desde el body sin hint adicional.
+
+---
+
+#### (Descripción original — para referencia)
 
 **Qué falta**: hoy el checker hace inferencia solo **bottom-up**
 (synthesis). Cuando el alumno escribe:

@@ -489,7 +489,7 @@ fn lint_useless_match(program: &Program, findings: &mut Vec<LintFinding>) {
             if let Expr::Match { arms, span, .. } = expr {
                 if arms.len() == 1 {
                     let is_catchall =
-                        matches!(arms[0].pattern, Pattern::Wildcard | Pattern::Ident(_));
+                        matches!(arms[0].pattern, Pattern::Wildcard | Pattern::Ident(_, _));
                     if is_catchall {
                         findings.push(LintFinding {
                             name: "useless_match",

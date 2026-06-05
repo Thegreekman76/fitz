@@ -11,6 +11,159 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.14.2] — 2026-06-05 — Bloque 3: deuda S1 cerrada — hover sobre params, vars de for y bindings de match
+
+**Cierra la deuda histórica S1 del proyecto** — paralelo natural del
+V2 que cerró `AssignTarget::Ident`. Sin S1, el LSP no mostraba nada
+al hover sobre nombres de params (`fn f(x: Int)` → hover sobre `x`),
+vars de loops (`for i in 0..10` → hover sobre `i`), o bindings de
+match (`match x { Ok(n) => ... }` → hover sobre `n`). El alumno del
+curso lo iba a chocar inmediatamente al entrar a M2 (funciones) y
+M3 (loops + match).
+
+### Lenguaje — AST extendido
+
+- `Param` suma `name_span: Span` (paralelo a `AssignTarget::Ident(name, span)` del V2).
+- `Pattern::Ident(String)` → `Pattern::Ident(String, Span)`.
+- `Pattern::OkBinding(String)` → `Pattern::OkBinding(String, Span)`.
+- `Pattern::ErrBinding(String)` → `Pattern::ErrBinding(String, Span)`.
+
+`Span::PartialEq` sigue siendo siempre-true, así que los tests
+estructurales del AST no se rompen.
+
+### Implementación
+
+- **Parser**: reusa el helper `expect_ident_with_span` introducido
+  en V2 para capturar el span del token Ident de cada param/binding.
+- **Checker**: los 4 sitios donde se bindean params/patterns ahora
+  registran el tipo en `TypeInfo` bajo el span propio:
+  - `infer_expr` para `Expr::FnExpr` (callback inline).
+  - Handler de `Stmt::FnDef` (fns top-level).
+  - Handler de método custom de `type` con `m.params`.
+  - `bind_pattern` (match arms).
+  - `bind_for_pattern_in_checker` (var del for).
+- **Fallback ZERO**: si el span del nodo es `Span::ZERO` (param /
+  pattern sintético en tests), usa el span del nodo contenedor como
+  antes — backwards-compat con tests viejos.
+
+### Tests
+
+- **+5 unit tests** en `types::tests::s1_*`:
+  - `fn double(n: Int) => n * 2` → hover sobre `n` da `Int`.
+  - `fn f(x) => x + 1` → hover sobre `x` sin anotación da `Any`.
+  - `for i in 0..10` → hover sobre `i` da `Int`.
+  - `match Ok(42) { Ok(n) => n }` → hover sobre `n` da `Int` (inner).
+  - Método custom `type T { fn m(amount: Int) }` → hover sobre `amount`
+    da `Int`.
+- **Total al cierre**: 3027 unit + 10 LSP E2E + smoke 360 verde.
+- Clippy `--lib --tests --bins --features lsp -- -D warnings` limpio.
+
+### Side effects del cambio de AST
+
+- Los call sites de patrones literales en tests del parser/evaluator/
+  http/cli sumaron ~40 actualizaciones (Pattern::Ident, OkBinding,
+  ErrBinding con `Span::default()`) y los constructores de `Param`
+  ~22 (campo nuevo `name_span: Span::default()`). Cambios mecánicos
+  con sed/perl, sin lógica nueva.
+
+### Deuda residual derivada
+
+Ninguna mayor. La deuda S1 era el complemento de V2 y queda cerrada
+por completo. Casos visibles del LSP que siguen pendientes:
+
+- **`Pattern::Tuple` recursivo**: hover sobre `a` en `for (a, b) in xs`
+  funciona porque el walker llama `bind_pattern` recursivamente sobre
+  cada slot. ✓
+- **`Pattern::Or` sin bindings**: por contrato del parser, los
+  or-patterns rechazan bindings adentro. No hay nada que registrar.
+
+### Versión
+
+- `Cargo.toml`: **v0.14.1 → v0.14.2** (patch — cambio invasivo del
+  AST sin breaking del lenguaje del usuario, solo de tests internos).
+- Extensión VSCode: **0.14.1 → 0.14.2** + `.vsix` regenerado.
+
+## [v0.14.1] — 2026-06-05 — Bloque 2: inferencia bidireccional en callbacks de métodos built-in (L2)
+
+**Mini-fase acotada al caso 90%**: el plan original de L2 estimaba
+1-2 semanas para inferencia bidireccional GENERAL, pero el caso
+pedagógico del curso (`xs.map(fn(x) => x * 10)` → `List<Int>` sin
+anotar) se cierra con un cambio puntual en el dispatch de método
+built-in. Costo real: ~2-3h, ~140 LoC + 6 unit tests.
+
+### Lenguaje — feature
+
+- **L2 — Inferencia bidireccional de callbacks en métodos built-in**.
+  El checker propaga el `T` del receptor a los params SIN anotación
+  del callback cuando el método es uno de los built-in con template
+  paramétrico conocido sobre `List<T>` (`.map`/`.filter`/`.find`/
+  `.any`/`.all`/`.count`/`.find_index`/`.flat_map`).
+
+  **Antes** (v0.14.0):
+  ```
+  fitz> :type [1, 2, 3].map(fn(x) => x * 10)
+  :: List<Any>     ← x quedaba como Any sin anotación
+  ```
+
+  **Después** (v0.14.1):
+  ```
+  fitz> :type [1, 2, 3].map(fn(x) => x * 10)
+  :: List<Int>     ← x se infiere como Int del receptor
+  ```
+
+  Param CON anotación explícita gana siempre — `fn(x: Float) =>` sobre
+  `List<Int>` mantiene el comportamiento previo.
+
+### Implementación
+
+- Nuevo helper `expected_callback_param_for_builtin_method(obj_ty, method) -> Option<Vec<Type>>`
+  en [`src/types.rs`](src/types.rs).
+- `CheckCtx` gana stack `fn_expr_param_hints: Vec<Option<Vec<Type>>>`
+  para soportar nested callbacks sin contaminación.
+- El call site del método empuja el hint ANTES de sintetizar cada
+  arg si es un FnExpr directo. El handler de `Expr::FnExpr` consume
+  el top del stack al entrar.
+
+### Docs
+
+- Cap M1.C5 del curso ([docs/curso/m1-setup/c5-repl.md](docs/curso/m1-setup/c5-repl.md))
+  restauró el ejemplo original `fn(x) => x * 10` (sin anotación) y
+  removió la nota sobre la limitación (que ya no aplica). Suma una
+  explicación corta sobre la inferencia bidireccional y cuándo gana
+  la anotación explícita.
+
+### Tests
+
+- **+6 unit tests** en `types::tests::l2_*`:
+  - Caso pedagógico (`map` sobre `List<Int>` sin anotar).
+  - `filter` con `ret: Bool` validado.
+  - Propagación a métodos del param (`s.upper()` requiere `s: Str`).
+  - Anotación explícita gana sobre hint.
+  - `find` devuelve `Result<T>` con T inferido.
+  - Nested callbacks sin contaminación (`xs.map(fn(x) => [x].map(fn(y) => y*2))`).
+- **Total al cierre**: 3022 unit + 10 LSP E2E + smoke 360 verde.
+- Clippy `--lib --tests --bins --features lsp -- -D warnings` limpio.
+
+### Deuda residual derivada de L2
+
+- **Map<K, V> higher-order**: hoy `infer_map_method` no expone
+  callbacks (solo get/has/keys/values/len). Cuando lleguen
+  filter/find sobre entries, agregar el caso al helper devolviendo
+  `Some(vec![K, V])`.
+- **Inferencia bidireccional GENERAL**: el alcance del fix es
+  callbacks de métodos built-in conocidos. Casos no cubiertos —
+  fn user-defined con param `Function`, FnExpr asignada a var con
+  anotación de Function — siguen sintetizando params sin anotación
+  como `Any`. Refactor invasivo del checker (1-2 semanas) si entra
+  demanda real.
+
+### Versión
+
+- `Cargo.toml`: **v0.14.0 → v0.14.1** (patch — feature acotada,
+  estrictamente backward-compat: lo que antes tipaba `List<Any>` ahora
+  tipa `List<T>`, y `Any` es compatible con cualquier `T`).
+- Extensión VSCode: **0.14.0 → 0.14.1** + `.vsix` regenerado.
+
 ## [v0.14.0] — 2026-06-05 — Bloque 1 LSP+lenguaje: format on save + `;` separator + spans StrInterp + hover LHS + signature help
 
 **Mini-fase intensiva descubierta durante el curso M1**: el alumno

@@ -2562,7 +2562,7 @@ fn collect_local_bindings_at(stmts: &[Stmt], cursor_line: usize, items: &mut Vec
                 // idents del pattern (Ident, Wildcard, Tuple).
                 use crate::ast::Pattern;
                 let add_pat = |pat: &Pattern, out: &mut Vec<CompletionItem>| {
-                    if let Pattern::Ident(name) = pat {
+                    if let Pattern::Ident(name, _) = pat {
                         out.push(CompletionItem {
                             label: name.clone(),
                             kind: Some(CompletionItemKind::VARIABLE),
@@ -2570,7 +2570,7 @@ fn collect_local_bindings_at(stmts: &[Stmt], cursor_line: usize, items: &mut Vec
                         });
                     } else if let Pattern::Tuple(subs) = pat {
                         for sub in subs {
-                            if let Pattern::Ident(name) = sub {
+                            if let Pattern::Ident(name, _) = sub {
                                 out.push(CompletionItem {
                                     label: name.clone(),
                                     kind: Some(CompletionItemKind::VARIABLE),

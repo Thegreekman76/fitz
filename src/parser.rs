@@ -1818,7 +1818,8 @@ impl Parser {
                     }
                     false
                 };
-            let name = self.expect_ident("se esperaba nombre de parámetro")?;
+            let (name, name_span) =
+                self.expect_ident_with_span("se esperaba nombre de parámetro")?;
             let type_ = self.parse_optional_type_annotation()?;
             // Fp — default value `= <expr>`. Varargs no admite default.
             let default = if matches!(self.peek(), Token::Eq) {
@@ -1867,6 +1868,7 @@ impl Parser {
                 type_,
                 default,
                 varargs,
+                name_span,
             });
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
@@ -2181,7 +2183,7 @@ impl Parser {
         for sub in &subs {
             if matches!(
                 sub,
-                Pattern::Ident(_) | Pattern::OkBinding(_) | Pattern::ErrBinding(_)
+                Pattern::Ident(_, _) | Pattern::OkBinding(_, _) | Pattern::ErrBinding(_, _)
             ) {
                 return Err(self.error(
                     ErrorKind::InvalidSyntax,
@@ -2286,25 +2288,26 @@ impl Parser {
                     &Token::LParen,
                     "se esperaba '(' después de Ok/Err en patrón",
                 )?;
-                let binding =
-                    self.expect_ident("se esperaba identificador para el binding de Ok/Err")?;
+                let (binding, binding_span) = self.expect_ident_with_span(
+                    "se esperaba identificador para el binding de Ok/Err",
+                )?;
                 self.expect(&Token::RParen, "se esperaba ')' al final del patrón Ok/Err")?;
                 // `_` adentro es wildcard (no bindea): cierra deuda
                 // vieja de 3.3 donde `_` se bindeaba como var.
                 return Ok(match (is_ok, binding.as_str()) {
                     (true, "_") => Pattern::OkWildcard,
                     (false, "_") => Pattern::ErrWildcard,
-                    (true, _) => Pattern::OkBinding(binding),
-                    (false, _) => Pattern::ErrBinding(binding),
+                    (true, _) => Pattern::OkBinding(binding, binding_span),
+                    (false, _) => Pattern::ErrBinding(binding, binding_span),
                 });
             }
         }
         // Caso general: identificador o wildcard.
-        let name = self.expect_ident("se esperaba patrón")?;
+        let (name, name_span) = self.expect_ident_with_span("se esperaba patrón")?;
         if name == "_" {
             Ok(Pattern::Wildcard)
         } else {
-            Ok(Pattern::Ident(name))
+            Ok(Pattern::Ident(name, name_span))
         }
     }
 
@@ -5334,7 +5337,8 @@ mod tests {
                     name: "n".into(),
                     type_: None,
                     default: None,
-                    varargs: false
+                    varargs: false,
+                    name_span: Span::default(),
                 }],
                 return_type: None,
                 body: vec![Stmt::Return(
@@ -5365,6 +5369,7 @@ mod tests {
                     type_: Some(TypeExpr::named("Int")),
                     default: None,
                     varargs: false,
+                    name_span: Span::default(),
                 }],
                 return_type: Some(TypeExpr::named("Int")),
                 body: vec![Stmt::Return(
@@ -5394,7 +5399,8 @@ mod tests {
                     name: "name".into(),
                     type_: None,
                     default: None,
-                    varargs: false
+                    varargs: false,
+                    name_span: Span::default(),
                 }],
                 return_type: None,
                 body: vec![Stmt::Expr(
@@ -5423,7 +5429,8 @@ mod tests {
                     name: "n".into(),
                     type_: None,
                     default: None,
-                    varargs: false
+                    varargs: false,
+                    name_span: Span::default(),
                 }],
                 return_type: None,
                 body: vec![
@@ -5875,7 +5882,10 @@ mod tests {
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
-                assert_eq!(arms[0].pattern, Pattern::Ident("foo".into()));
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Ident("foo".into(), Span::default())
+                );
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
@@ -5889,8 +5899,14 @@ mod tests {
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
-                assert_eq!(arms[0].pattern, Pattern::OkBinding("u".into()));
-                assert_eq!(arms[1].pattern, Pattern::ErrBinding("e".into()));
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::OkBinding("u".into(), Span::default())
+                );
+                assert_eq!(
+                    arms[1].pattern,
+                    Pattern::ErrBinding("e".into(), Span::default())
+                );
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
         }
@@ -6370,7 +6386,8 @@ mod tests {
                     name: "n".into(),
                     type_: None,
                     default: None,
-                    varargs: false
+                    varargs: false,
+                    name_span: Span::default(),
                 }],
                 return_type: None,
                 body: vec![Stmt::Return(
@@ -6828,7 +6845,7 @@ mod tests {
         assert_eq!(
             stmt,
             Stmt::For {
-                var: Pattern::Ident("x".into()),
+                var: Pattern::Ident("x".into(), Span::default()),
                 iter: Expr::Ident("xs".into(), Span::ZERO),
                 body: vec![Stmt::Expr(
                     Expr::Call {
@@ -6852,7 +6869,7 @@ mod tests {
             Stmt::For {
                 var, iter, body, ..
             } => {
-                assert_eq!(var, Pattern::Ident("i".into()));
+                assert_eq!(var, Pattern::Ident("i".into(), Span::default()));
                 assert_eq!(
                     iter,
                     Expr::Range {
@@ -7133,7 +7150,7 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
-                assert_eq!(arms[0].pattern, Pattern::Ident("x".into()));
+                assert_eq!(arms[0].pattern, Pattern::Ident("x".into(), Span::default()));
                 assert!(arms[0].guard.is_some());
                 assert!(arms[1].guard.is_none());
             }
@@ -7147,7 +7164,10 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
-                assert_eq!(arms[0].pattern, Pattern::OkBinding("v".into()));
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::OkBinding("v".into(), Span::default())
+                );
                 assert!(arms[0].guard.is_some());
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
@@ -7755,7 +7775,7 @@ mod tests {
             Stmt::For {
                 var, iter, body, ..
             } => {
-                assert_eq!(var, Pattern::Ident("u".into()));
+                assert_eq!(var, Pattern::Ident("u".into(), Span::default()));
                 assert!(matches!(iter, Expr::List(_, _)));
                 assert_eq!(body.len(), 1);
             }
@@ -7901,8 +7921,14 @@ mod tests {
                 Expr::Ok(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)
             );
             assert_eq!(arms.len(), 2);
-            assert_eq!(arms[0].pattern, Pattern::OkBinding("v".into()));
-            assert_eq!(arms[1].pattern, Pattern::ErrBinding("e".into()));
+            assert_eq!(
+                arms[0].pattern,
+                Pattern::OkBinding("v".into(), Span::default())
+            );
+            assert_eq!(
+                arms[1].pattern,
+                Pattern::ErrBinding("e".into(), Span::default())
+            );
         } else {
             panic!("se esperaba un match");
         }
@@ -8626,7 +8652,7 @@ mod tests {
                 ..
             } => {
                 assert!(matches!(*expr, Expr::Ident(ref n, _) if n == "x"));
-                assert!(matches!(var, Pattern::Ident(ref n) if n == "x"));
+                assert!(matches!(var, Pattern::Ident(ref n, _) if n == "x"));
                 assert!(matches!(*iter, Expr::Ident(ref n, _) if n == "xs"));
                 assert!(filter.is_none());
             }
@@ -8642,8 +8668,8 @@ mod tests {
             Expr::ListComp { var, .. } => {
                 if let Pattern::Tuple(subs) = var {
                     assert_eq!(subs.len(), 2);
-                    assert!(matches!(subs[0], Pattern::Ident(ref n) if n == "a"));
-                    assert!(matches!(subs[1], Pattern::Ident(ref n) if n == "b"));
+                    assert!(matches!(subs[0], Pattern::Ident(ref n, _) if n == "a"));
+                    assert!(matches!(subs[1], Pattern::Ident(ref n, _) if n == "b"));
                 } else {
                     panic!("esperaba Pattern::Tuple, vio {:?}", var);
                 }
@@ -8773,8 +8799,8 @@ mod tests {
             Stmt::For { var, .. } => match var {
                 Pattern::Tuple(subs) => {
                     assert_eq!(subs.len(), 2);
-                    assert!(matches!(subs[0], Pattern::Ident(ref n) if n == "k"));
-                    assert!(matches!(subs[1], Pattern::Ident(ref n) if n == "v"));
+                    assert!(matches!(subs[0], Pattern::Ident(ref n, _) if n == "k"));
+                    assert!(matches!(subs[1], Pattern::Ident(ref n, _) if n == "v"));
                 }
                 other => panic!("esperaba Pattern::Tuple, dio {:?}", other),
             },
@@ -8800,7 +8826,7 @@ mod tests {
         let stmt = parse_one_stmt("for x in xs { print(x) }");
         match stmt {
             Stmt::For { var, .. } => {
-                assert_eq!(var, Pattern::Ident("x".into()));
+                assert_eq!(var, Pattern::Ident("x".into(), Span::default()));
             }
             other => panic!("esperaba Stmt::For, dio {:?}", other),
         }

@@ -3397,7 +3397,7 @@ fn label_matches(signal_label: &Option<String>, loop_label: &Option<String>) -> 
 fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> EvalResult<()> {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(name) => {
+        Pattern::Ident(name, _) => {
             env.lock().define(name.clone(), value);
             Ok(())
         }
@@ -3642,7 +3642,7 @@ fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
         (Pattern::Bool(p), Value::Bool(vv)) if p == vv => Some(None),
         (Pattern::Null, Value::Null) => Some(None),
         (Pattern::Wildcard, _) => Some(None),
-        (Pattern::Ident(name), _) => Some(Some((name.clone(), v.clone()))),
+        (Pattern::Ident(name, _), _) => Some(Some((name.clone(), v.clone()))),
         (
             Pattern::Range {
                 start,
@@ -3651,10 +3651,10 @@ fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
             },
             Value::Int(vv),
         ) if start <= vv && (if *inclusive { vv <= end } else { vv < end }) => Some(None),
-        (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
+        (Pattern::OkBinding(name, _), Value::Result(ResultVariant::Ok(inner))) => {
             Some(Some((name.clone(), (**inner).clone())))
         }
-        (Pattern::ErrBinding(name), Value::Result(ResultVariant::Err(inner))) => {
+        (Pattern::ErrBinding(name, _), Value::Result(ResultVariant::Err(inner))) => {
             Some(Some((name.clone(), (**inner).clone())))
         }
         (Pattern::OkWildcard, Value::Result(ResultVariant::Ok(_))) => Some(None),
@@ -3700,13 +3700,13 @@ fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
 /// haberse chequeado con `match_pattern` antes).
 fn bind_tuple_pattern(pat: &Pattern, v: &Value, env: EnvRef) {
     match (pat, v) {
-        (Pattern::Ident(name), _) => {
+        (Pattern::Ident(name, _), _) => {
             env.lock().define(name.clone(), v.clone());
         }
-        (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
+        (Pattern::OkBinding(name, _), Value::Result(ResultVariant::Ok(inner))) => {
             env.lock().define(name.clone(), (**inner).clone());
         }
-        (Pattern::ErrBinding(name), Value::Result(ResultVariant::Err(inner))) => {
+        (Pattern::ErrBinding(name, _), Value::Result(ResultVariant::Err(inner))) => {
             env.lock().define(name.clone(), (**inner).clone());
         }
         (Pattern::Tuple(subs), Value::Tuple(items)) => {
@@ -19431,6 +19431,7 @@ mod tests {
                     type_: None,
                     default: None,
                     varargs: false,
+                    name_span: Span::default(),
                 })
                 .collect(),
             return_type: None,
@@ -19946,7 +19947,7 @@ mod tests {
         let e = Expr::Match {
             value: Box::new(Expr::Int(42, Span::ZERO)),
             arms: vec![match_arm(
-                Pattern::Ident("n".into()),
+                Pattern::Ident("n".into(), Span::default()),
                 Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
@@ -19969,7 +19970,7 @@ mod tests {
             value: Box::new(Expr::Str("hola".into(), Span::ZERO)),
             arms: vec![
                 match_arm(
-                    Pattern::Ident("x".into()),
+                    Pattern::Ident("x".into(), Span::default()),
                     Expr::StrInterp(
                         vec![
                             StrPart::Lit("primer arm: ".into()),
@@ -19998,7 +19999,7 @@ mod tests {
         let e = Expr::Match {
             value: Box::new(Expr::Int(7, Span::ZERO)),
             arms: vec![match_arm(
-                Pattern::Ident("n".into()),
+                Pattern::Ident("n".into(), Span::default()),
                 Expr::Ident("n".into(), Span::ZERO),
             )],
             span: Span::ZERO,
@@ -20016,7 +20017,7 @@ mod tests {
             value: Box::new(Expr::Ok(Box::new(Expr::Int(5, Span::ZERO)), Span::ZERO)),
             arms: vec![
                 match_arm(
-                    Pattern::OkBinding("v".into()),
+                    Pattern::OkBinding("v".into(), Span::default()),
                     Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("v".into(), Span::ZERO)),
@@ -20024,7 +20025,10 @@ mod tests {
                         span: Span::ZERO,
                     },
                 ),
-                match_arm(Pattern::ErrBinding("e".into()), Expr::Int(-1, Span::ZERO)),
+                match_arm(
+                    Pattern::ErrBinding("e".into(), Span::default()),
+                    Expr::Int(-1, Span::ZERO),
+                ),
             ],
             span: Span::ZERO,
         };
@@ -20041,11 +20045,11 @@ mod tests {
             )),
             arms: vec![
                 match_arm(
-                    Pattern::OkBinding("v".into()),
+                    Pattern::OkBinding("v".into(), Span::default()),
                     Expr::Str("ok".into(), Span::ZERO),
                 ),
                 match_arm(
-                    Pattern::ErrBinding("e".into()),
+                    Pattern::ErrBinding("e".into(), Span::default()),
                     Expr::Ident("e".into(), Span::ZERO),
                 ),
             ],
@@ -20061,7 +20065,7 @@ mod tests {
             value: Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)),
             arms: vec![
                 match_arm(
-                    Pattern::OkBinding("v".into()),
+                    Pattern::OkBinding("v".into(), Span::default()),
                     Expr::Str("ok".into(), Span::ZERO),
                 ),
                 match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
@@ -20078,7 +20082,7 @@ mod tests {
             value: Box::new(Expr::Int(5, Span::ZERO)),
             arms: vec![
                 match_arm(
-                    Pattern::OkBinding("v".into()),
+                    Pattern::OkBinding("v".into(), Span::default()),
                     Expr::Str("ok".into(), Span::ZERO),
                 ),
                 match_arm(Pattern::Wildcard, Expr::Str("no-result".into(), Span::ZERO)),
@@ -20116,7 +20120,7 @@ mod tests {
             )),
             arms: vec![
                 match_arm(
-                    Pattern::OkBinding("v".into()),
+                    Pattern::OkBinding("v".into(), Span::default()),
                     Expr::Str("ok".into(), Span::ZERO),
                 ),
                 match_arm(Pattern::ErrWildcard, Expr::Str("falló".into(), Span::ZERO)),
@@ -20267,7 +20271,7 @@ print(_)\n";
             arms: vec![
                 match_arm(Pattern::Int(1), Expr::Str("uno".into(), Span::ZERO)),
                 match_arm(
-                    Pattern::Ident("n".into()),
+                    Pattern::Ident("n".into(), Span::default()),
                     Expr::StrInterp(
                         vec![
                             StrPart::Lit("default ".into()),
@@ -22598,6 +22602,7 @@ let r = match n {
                 type_: None,
                 default: None,
                 varargs: false,
+                name_span: Span::default(),
             }],
             body: vec![Stmt::Return(
                 Expr::BinOp {

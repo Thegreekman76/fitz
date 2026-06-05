@@ -302,19 +302,19 @@ expresión **sin evaluarla**.
 ```
 
 ```
-:type [1, 2, 3].map(fn(x: Int) => x * 10)
+:type [1, 2, 3].map(fn(x) => x * 10)
 ```
 
 ```
 :: List<Int>
 ```
 
-> **Nota**: el param `x: Int` es explícito porque Fitz no propaga
-> el tipo del receptor `List<Int>` hacia el callback automáticamente
-> todavía (eso requeriría inferencia bidireccional, ver `docs/deudas-post-5b.md`
-> → L2). Sin la anotación, `fn(x) => x * 10` infiere `x: Any` y el
-> resultado tipa como `List<Any>`. El runtime sí calcula `x * 10`
-> correctamente — solo es una limitación del checker estático.
+Notá que **no hace falta anotar `x: Int`**: el checker propaga el
+tipo del receptor `List<Int>` al param del callback automáticamente
+(inferencia bidireccional sobre métodos built-in con templates
+paramétricos — `.map`/`.filter`/`.find`/etc.). Si el param tiene
+anotación explícita incompatible con el receptor, la anotación gana
+y el checker emite el error correspondiente.
 
 ```
 :type "hola"
@@ -673,7 +673,7 @@ n * n
 ```
 
 ```
-:type [1, 2, 3].map(fn(x: Int) => x + 1)
+:type [1, 2, 3].map(fn(x) => x + 1)
 ```
 
 ```

@@ -643,7 +643,7 @@ fn coerce_arg_value(p: &Param, raw: Option<&str>) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{Param, TypeExpr};
+    use crate::ast::{Param, Span, TypeExpr};
 
     fn param(name: &str, ty: &str, has_default: bool) -> Param {
         Param {
@@ -658,6 +658,7 @@ mod tests {
                 None
             },
             varargs: false,
+            name_span: Span::default(),
         }
     }
 

@@ -2169,7 +2169,7 @@ fn expr_uses_try(expr: &Expr) -> bool {
 fn collect_pattern_idents(pat: &crate::ast::Pattern) -> Vec<String> {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(name) => vec![name.clone()],
+        Pattern::Ident(name, _) => vec![name.clone()],
         Pattern::Wildcard => Vec::new(),
         Pattern::Tuple(subs) => subs.iter().flat_map(collect_pattern_idents).collect(),
         _ => Vec::new(),
@@ -2188,7 +2188,7 @@ fn pattern_to_simple_binding(
 ) -> Result<(String, Vec<(String, Type)>), String> {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(name) => Ok((name.clone(), vec![(name.clone(), ty.clone())])),
+        Pattern::Ident(name, _) => Ok((name.clone(), vec![(name.clone(), ty.clone())])),
         Pattern::Wildcard => Ok(("_".into(), Vec::new())),
         Pattern::Tuple(_) => Err(
             "el codegen del `for` con tuple pattern requiere un Pattern::Tuple manejado por el caller"
@@ -2289,7 +2289,7 @@ fn collect_pattern_names(
 ) {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(name) | Pattern::OkBinding(name) | Pattern::ErrBinding(name) => {
+        Pattern::Ident(name, _) | Pattern::OkBinding(name, _) | Pattern::ErrBinding(name, _) => {
             locals.insert(name.clone());
         }
         Pattern::Tuple(subs) => {
@@ -11925,7 +11925,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     ) -> Result<String, FitzError> {
         use crate::ast::Pattern;
         match pat {
-            Pattern::Ident(name) => {
+            Pattern::Ident(name, _) => {
                 self.declare_var(name.clone(), ty.clone());
                 Ok(name.clone())
             }
@@ -12722,7 +12722,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // Snapshot para evitar re-entrancia si el body muta el container.
         //
         // Patrones aceptados como `var`:
-        //   - Pattern::Ident(name) — bindea cada elemento.
+        //   - Pattern::Ident(name, _) — bindea cada elemento.
         //   - Pattern::Wildcard — ignora cada elemento (emite `_`).
         //   - Pattern::Tuple(subs) — destructura cada elemento como tupla.
         use crate::ast::Pattern;
@@ -23323,7 +23323,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Ok(("_".to_string(), None))
                 }
             }
-            Pattern::Ident(name) => {
+            Pattern::Ident(name, _) => {
                 // W2 (v0.10.6) — Nullable refinement. Si el scrutinee
                 // es `T?` (`Option<T>` en Rust), el binding desnulla:
                 // pattern `Some(name)` y `name` se declara como `T`
@@ -23339,12 +23339,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 }
             }
             Pattern::Wildcard => Ok(("_".to_string(), None)),
-            Pattern::OkBinding(name) => {
+            Pattern::OkBinding(name, _) => {
                 let bind_ty = ok_inner_ty.clone().unwrap_or(Type::Any);
                 self.declare_var(name.clone(), bind_ty);
                 Ok((format!("Ok({})", name), None))
             }
-            Pattern::ErrBinding(name) => {
+            Pattern::ErrBinding(name, _) => {
                 // Mini-tanda Re+ — `Err(e)` tipa con el E del
                 // `Result { ok, err }` del scrutinee. Pre-Re+ siempre
                 // era Str (default); ahora puede ser Int/Instance/etc.
@@ -23460,7 +23460,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             Pattern::ErrWildcard => Ok(format!("matches!({}, Err(_))", bind_name)),
             // Los siguientes están vetados por el parser para
             // or-patterns. Si llegan acá, es un bug del parser.
-            Pattern::Ident(_) | Pattern::OkBinding(_) | Pattern::ErrBinding(_) => {
+            Pattern::Ident(_, _) | Pattern::OkBinding(_, _) | Pattern::ErrBinding(_, _) => {
                 Err(FitzError::new(
                     crate::error::ErrorKind::InvalidSyntax,
                     0, 0,
@@ -30307,9 +30307,9 @@ fn update_arm_coverage(
 ) {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(_) | Pattern::Wildcard => *has_catch_all = true,
-        Pattern::OkBinding(_) | Pattern::OkWildcard => *has_ok = true,
-        Pattern::ErrBinding(_) | Pattern::ErrWildcard => *has_err = true,
+        Pattern::Ident(_, _) | Pattern::Wildcard => *has_catch_all = true,
+        Pattern::OkBinding(_, _) | Pattern::OkWildcard => *has_ok = true,
+        Pattern::ErrBinding(_, _) | Pattern::ErrWildcard => *has_err = true,
         Pattern::Or(subs) => {
             for sub in subs {
                 update_arm_coverage(sub, has_catch_all, has_ok, has_err);
@@ -32275,7 +32275,7 @@ fn check_method_arity(method: &str, args: &[Expr], expected: usize) -> Result<()
 fn pattern_is_pure_irrefutable(pat: &crate::ast::Pattern) -> bool {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(_) | Pattern::Wildcard => true,
+        Pattern::Ident(_, _) | Pattern::Wildcard => true,
         Pattern::Tuple(subs) => subs.iter().all(pattern_is_pure_irrefutable),
         _ => false,
     }
@@ -32288,7 +32288,7 @@ fn pattern_is_pure_irrefutable(pat: &crate::ast::Pattern) -> bool {
 fn collect_pattern_bindings(pat: &crate::ast::Pattern, out: &mut Vec<String>) {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(n) | Pattern::OkBinding(n) | Pattern::ErrBinding(n) => {
+        Pattern::Ident(n, _) | Pattern::OkBinding(n, _) | Pattern::ErrBinding(n, _) => {
             out.push(n.clone());
         }
         Pattern::Tuple(subs) => {

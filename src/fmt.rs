@@ -1229,14 +1229,14 @@ fn fmt_pattern(ctx: &mut FmtCtx, pat: &Pattern) {
         Pattern::Str(s) => ctx.write(&format_str_literal(s)),
         Pattern::Bool(b) => ctx.write(if *b { "true" } else { "false" }),
         Pattern::Null => ctx.write("null"),
-        Pattern::Ident(name) => ctx.write(name),
+        Pattern::Ident(name, _) => ctx.write(name),
         Pattern::Wildcard => ctx.write("_"),
-        Pattern::OkBinding(n) => {
+        Pattern::OkBinding(n, _) => {
             ctx.write("Ok(");
             ctx.write(n);
             ctx.write(")");
         }
-        Pattern::ErrBinding(n) => {
+        Pattern::ErrBinding(n, _) => {
             ctx.write("Err(");
             ctx.write(n);
             ctx.write(")");

@@ -2980,6 +2980,23 @@ struct CheckCtx<'a> {
     /// `instancia._field` de la misma clase). `None` en top-level
     /// (script global, fn top-level, fn anónima escapada).
     current_type: Option<TypeId>,
+    /// L2 (2026-06-05) — Stack de "hints" para inferencia bidireccional
+    /// de tipos de params en `Expr::FnExpr` sin anotación. Cada elemento
+    /// corresponde al próximo `infer_expr` que va a procesar un FnExpr,
+    /// y opcionalmente provee los tipos esperados de sus params.
+    ///
+    /// Setup actual: solo se usa para callbacks de métodos built-in con
+    /// templates paramétricos conocidos (`.map`/`.filter`/`.find`/etc.
+    /// sobre `List<T>` y `Map<K,V>`). El call site del método empuja un
+    /// hint con el T del receptor ANTES de sintetizar el callback, y el
+    /// handler de `Expr::FnExpr` lo consume al pop. Si el hint está
+    /// presente Y el param NO tiene anotación, se usa el hint en vez de
+    /// `Type::Any` para bindear el param en el scope del body.
+    ///
+    /// Stack en vez de un solo Option porque un FnExpr puede contener
+    /// otro FnExpr en su body (nested callbacks). En la práctica casi
+    /// siempre tiene 0 o 1 elemento; el stack lo hace robusto.
+    fn_expr_param_hints: Vec<Option<Vec<Type>>>,
 }
 
 impl<'a> CheckCtx<'a> {
@@ -3002,6 +3019,7 @@ impl<'a> CheckCtx<'a> {
             type_info: TypeInfo::new(),
             def_info: DefinitionInfo::new(),
             current_type: None,
+            fn_expr_param_hints: Vec::new(),
         };
         ctx.register_builtins();
         ctx
@@ -4225,11 +4243,34 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // real. Si el receiver es built-in (List/Map/Str), el
                 // checker tipa el value adentro del NamedArg y delega
                 // al dispatcher general — el runtime emite error claro.
+                // L2 (2026-06-05) — Inferencia bidireccional en
+                // callbacks de métodos built-in. Si el arg es directamente
+                // un `Expr::FnExpr` y el método tiene template paramétrico
+                // conocido (`.map`/`.filter`/etc. sobre `List<T>` y
+                // `Map<K,V>`), empujamos un hint con los tipos esperados
+                // de los params ANTES de sintetizar el callback. El
+                // handler de `Expr::FnExpr` (`fn_expr_param_hints.pop()`)
+                // consume el hint exactamente una vez. Push y pop
+                // quedan balanceados porque solo empujamos cuando el arg
+                // ES un FnExpr directo (que siempre va a popear). Args
+                // wrappeados en `NamedArg` también funcionan — el wrapper
+                // delega a `infer_expr(value)` que entra al handler.
                 let args_ty: Vec<Type> = args
                     .iter()
-                    .map(|a| match a {
-                        Expr::NamedArg { value, .. } => infer_expr(ctx, value),
-                        other => infer_expr(ctx, other),
+                    .map(|a| {
+                        let inner = match a {
+                            Expr::NamedArg { value, .. } => value.as_ref(),
+                            other => other,
+                        };
+                        let is_fn_expr = matches!(inner, Expr::FnExpr { .. });
+                        if is_fn_expr {
+                            let hint = expected_callback_param_for_builtin_method(&obj_ty, field);
+                            ctx.fn_expr_param_hints.push(hint);
+                        }
+                        match a {
+                            Expr::NamedArg { value, .. } => infer_expr(ctx, value),
+                            other => infer_expr(ctx, other),
+                        }
                     })
                     .collect();
                 // 8.4: receptor PyAny — el método se invoca cruzando
@@ -4429,9 +4470,24 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // R.2.4 (F3): break/continue NO escapan FnExpr (closures).
             let saved_loop_depth = ctx.loop_depth;
             ctx.loop_depth = 0;
+            // L2 (2026-06-05) — consumir hint de inferencia bidireccional
+            // si lo hay (puesto por el call site de un método built-in con
+            // template paramétrico conocido). Para cada param SIN anotación,
+            // usamos el tipo del hint en vez de `Type::Any`. Param CON
+            // anotación explícita gana siempre (no se sobrescribe).
+            let hint = ctx.fn_expr_param_hints.pop().flatten();
             let param_types: Vec<Type> = params
                 .iter()
-                .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
+                .enumerate()
+                .map(|(i, p)| {
+                    if p.type_.is_some() {
+                        ann_to_type(p.type_.as_ref(), ctx.types)
+                    } else if let Some(hint_types) = hint.as_ref() {
+                        hint_types.get(i).cloned().unwrap_or(Type::Any)
+                    } else {
+                        Type::Any
+                    }
+                })
                 .collect();
             for (p, t) in params.iter().zip(param_types.iter()) {
                 // Fp.2 — varargs: adentro del body, el binding tipa
@@ -4441,11 +4497,22 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 } else {
                     t.clone()
                 };
-                // Sin span propio en `Param` (deuda S1), aproximamos
-                // con el span del FnExpr contenedor: hover/go-to-def
-                // sobre un uso del param salta al `fn(...)` que lo
-                // declara.
-                ctx.declare_var(p.name.clone(), bind_ty, *span);
+                // S1 (2026-06-05) — `Param` ahora tiene `name_span`
+                // propio. Si está presente (no ZERO), lo usamos como
+                // def_span del binding y registramos el tipo en
+                // TypeInfo para habilitar hover sobre el nombre del
+                // param en la firma del FnExpr. Fallback al span del
+                // FnExpr contenedor si name_span es ZERO (param
+                // sintético en tests).
+                let def_span = if p.name_span.column > 0 {
+                    p.name_span
+                } else {
+                    *span
+                };
+                ctx.declare_var(p.name.clone(), bind_ty.clone(), def_span);
+                if p.name_span.column > 0 {
+                    ctx.type_info.record(p.name_span, bind_ty);
+                }
             }
             check_block(ctx, body);
             ctx.loop_depth = saved_loop_depth;
@@ -4586,7 +4653,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // - Scrutinee debe ser `Type::Nullable(T)`.
             // - Algún arm previo debe tener `Pattern::Null`. Un
             //   `Pattern::Or` que contenga Null también cubre.
-            // - Solo refinamos `Pattern::Ident(_)` (incluido el caso
+            // - Solo refinamos `Pattern::Ident(_, _)` (incluido el caso
             //   `_`/wildcard que no bindea pero igual no rompe).
             // - Tuples/OkBinding/ErrBinding NO se refinan en MVP.
             let refined_inner: Option<Type> = match &scrutinee {
@@ -4612,7 +4679,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // Solo aplica a Pattern::Ident sobre scrutinee Nullable
                 // cuando un arm previo ya cubrió Null.
                 let scrutinee_for_binding = match (&arm.pattern, &refined_inner) {
-                    (crate::ast::Pattern::Ident(_), Some(inner)) if null_cubierto_previamente => {
+                    (crate::ast::Pattern::Ident(_, _), Some(inner))
+                        if null_cubierto_previamente =>
+                    {
                         inner.clone()
                     }
                     _ => scrutinee.clone(),
@@ -4935,6 +5004,40 @@ fn unify_returns(types: &[Type]) -> Type {
         result = lub(&result, t);
     }
     result
+}
+
+/// L2 (2026-06-05) — Inferencia bidireccional de callbacks.
+/// Para un método built-in con template paramétrico conocido,
+/// devuelve los tipos esperados de los params del callback.
+///
+/// Casos cubiertos en el MVP:
+///
+/// - `List<T>.map/filter/find/any/all/count/find_index/flat_map(fn(T) -> ...)`
+///   → `Some(vec![T])`.
+/// - `Map<K, V>.filter/find/any/all/count(fn(K, V) -> Bool)` (si existieran;
+///   hoy no están registrados en `infer_map_method`) → `Some(vec![K, V])`.
+/// - Otros métodos / receptores → `None`.
+///
+/// El call site empuja el hint al `ctx.fn_expr_param_hints` antes de
+/// sintetizar el arg. El handler de `Expr::FnExpr` lo consume al pop:
+/// para params SIN anotación usa el hint; para params CON anotación
+/// la anotación gana siempre (no se sobrescribe).
+fn expected_callback_param_for_builtin_method(obj_ty: &Type, method: &str) -> Option<Vec<Type>> {
+    match obj_ty {
+        Type::List(elem_ty) => match method {
+            // Todos toman `fn(T) -> ...` — propagamos T como expected.
+            "map" | "filter" | "find" | "any" | "all" | "count" | "find_index" | "flat_map" => {
+                Some(vec![(**elem_ty).clone()])
+            }
+            _ => None,
+        },
+        // `Map<K, V>` no expone hoy métodos higher-order en
+        // `infer_map_method` (solo get/has/keys/values/len). Si llegan
+        // en el futuro (filter/find/etc. sobre entries), agregar acá
+        // con shape `fn(K, V) -> ...` → `Some(vec![K, V])`.
+        Type::Map(_, _) => None,
+        _ => None,
+    }
 }
 
 /// Despacho del checker para método built-in. Recibe el tipo del
@@ -7678,9 +7781,9 @@ fn update_result_coverage(
 ) {
     use crate::ast::Pattern;
     match pat {
-        Pattern::OkBinding(_) | Pattern::OkWildcard => *has_ok = true,
-        Pattern::ErrBinding(_) | Pattern::ErrWildcard => *has_err = true,
-        Pattern::Wildcard | Pattern::Ident(_) => *has_catchall = true,
+        Pattern::OkBinding(_, _) | Pattern::OkWildcard => *has_ok = true,
+        Pattern::ErrBinding(_, _) | Pattern::ErrWildcard => *has_err = true,
+        Pattern::Wildcard | Pattern::Ident(_, _) => *has_catchall = true,
         Pattern::Or(subs) => {
             for sub in subs {
                 update_result_coverage(sub, has_ok, has_err, has_catchall);
@@ -7737,8 +7840,18 @@ fn bind_for_pattern_in_checker(
 ) {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(name) => {
-            ctx.declare_var(name.clone(), elem_ty.clone(), fallback_span);
+        Pattern::Ident(name, ident_span) => {
+            // S1 (2026-06-05) — span propio del pattern como def_span +
+            // registro en TypeInfo para hover sobre el var del for.
+            let def_span = if ident_span.column > 0 {
+                *ident_span
+            } else {
+                fallback_span
+            };
+            ctx.declare_var(name.clone(), elem_ty.clone(), def_span);
+            if ident_span.column > 0 {
+                ctx.type_info.record(*ident_span, elem_ty.clone());
+            }
         }
         Pattern::Wildcard => {
             // Sin binding — el elemento se descarta.
@@ -7908,18 +8021,40 @@ fn pattern_cubre_null(pat: &crate::ast::Pattern) -> bool {
 fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type, arm_span: Span) {
     use crate::ast::Pattern;
     match pat {
-        Pattern::Ident(name) => {
-            ctx.declare_var(name.clone(), scrutinee.clone(), arm_span);
+        Pattern::Ident(name, ident_span) => {
+            // S1 (2026-06-05) — usar el span propio del pattern como
+            // def_span (en vez del arm_span aproximado) y registrar el
+            // tipo en TypeInfo para habilitar hover sobre el nombre del
+            // binding (`i` en `for i in 0..10`, `n` en `match x { Ok(n) => n }`).
+            // Si el span del pattern es ZERO (pattern sintético), usa
+            // arm_span como fallback.
+            let def_span = if ident_span.column > 0 {
+                *ident_span
+            } else {
+                arm_span
+            };
+            ctx.declare_var(name.clone(), scrutinee.clone(), def_span);
+            if ident_span.column > 0 {
+                ctx.type_info.record(*ident_span, scrutinee.clone());
+            }
         }
-        Pattern::OkBinding(name) => {
+        Pattern::OkBinding(name, ident_span) => {
             // `Ok(x)` desempaca `Result<T>` — x es T.
             let inner = match scrutinee {
                 Type::Result { ok: t, err: _ } => (**t).clone(),
                 _ => Type::Any,
             };
-            ctx.declare_var(name.clone(), inner, arm_span);
+            let def_span = if ident_span.column > 0 {
+                *ident_span
+            } else {
+                arm_span
+            };
+            ctx.declare_var(name.clone(), inner.clone(), def_span);
+            if ident_span.column > 0 {
+                ctx.type_info.record(*ident_span, inner);
+            }
         }
-        Pattern::ErrBinding(name) => {
+        Pattern::ErrBinding(name, ident_span) => {
             // Mini-tanda Re+ — `Err(e)` desempaca `Result<T, E>` y `e`
             // queda con el tipo E inferido. Para Result legacy (sin E
             // explícito, default Str) o cualquier Any, fallback a la
@@ -7928,7 +8063,15 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type,
                 Type::Result { ok: _, err: e } => (**e).clone(),
                 _ => Type::Any,
             };
-            ctx.declare_var(name.clone(), inner, arm_span);
+            let def_span = if ident_span.column > 0 {
+                *ident_span
+            } else {
+                arm_span
+            };
+            ctx.declare_var(name.clone(), inner.clone(), def_span);
+            if ident_span.column > 0 {
+                ctx.type_info.record(*ident_span, inner);
+            }
         }
         Pattern::Wildcard
         | Pattern::OkWildcard
@@ -8622,10 +8765,19 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 } else {
                     elem_ty
                 };
-                // Sin span propio en `Param` (deuda S1), aproximamos
-                // con el span del FnDef. go-to-def sobre el uso del
-                // param salta a la línea de la fn.
-                ctx.declare_var(p.name.clone(), pty, *fn_span);
+                // S1 (2026-06-05) — `Param` ahora tiene `name_span` propio.
+                // Lo usamos como def_span y registramos el tipo en TypeInfo
+                // (hover sobre el nombre del param funciona). Fallback a
+                // fn_span si name_span es ZERO (params sintéticos).
+                let def_span = if p.name_span.column > 0 {
+                    p.name_span
+                } else {
+                    *fn_span
+                };
+                ctx.declare_var(p.name.clone(), pty.clone(), def_span);
+                if p.name_span.column > 0 {
+                    ctx.type_info.record(p.name_span, pty);
+                }
             }
             check_block(ctx, body);
             ctx.loop_depth = saved_loop_depth;
@@ -9011,7 +9163,16 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
             // entrar a la misma var).
             for p in &m.params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
-                ctx.declare_var(p.name.clone(), pty, m.span);
+                // S1 (2026-06-05) — usar p.name_span si está presente.
+                let def_span = if p.name_span.column > 0 {
+                    p.name_span
+                } else {
+                    m.span
+                };
+                ctx.declare_var(p.name.clone(), pty.clone(), def_span);
+                if p.name_span.column > 0 {
+                    ctx.type_info.record(p.name_span, pty);
+                }
             }
             check_block(ctx, &m.body);
             ctx.current_type = saved_current_type;
@@ -11938,6 +12099,7 @@ mod tests {
                     type_: Some(TE::named("X")),
                     default: None,
                     varargs: false,
+                    name_span: Span::default(),
                 }],
                 return_type: None,
                 body: vec![],
@@ -18280,5 +18442,193 @@ print(total)
     fn v2_hover_sobre_lhs_de_let_bool_funciona() {
         let ty = types_at_position("let activa = true\n", 1, 5);
         assert_eq!(ty, Some(Type::Bool));
+    }
+
+    // ---- L2 (2026-06-05) — Inferencia bidireccional de callbacks ----
+
+    /// Helper L2 — extrae el tipo del último `Stmt::Assign` del `Program`
+    /// para tests del shape `let r = <expr>`. Usamos `lookup_binding`
+    /// porque `TypeInfo` graba el tipo del valor en su span, no en el
+    /// nombre de la variable.
+    fn type_of_last_let(src: &str) -> Option<Type> {
+        let tokens = tokenize(src).expect("tokenize");
+        let program = parse(tokens).expect("parse");
+        let (env, _types_info, _def, _errs) = check_program(&program);
+        // El binding de la última var top-level lo recupera el TypeEnv
+        // global. Como `check_program` no expone bindings,
+        // re-implementamos un mini check con `CheckCtx` para alcanzar
+        // `lookup_binding`.
+        let mut ctx = CheckCtx::new(&env);
+        for stmt in &program {
+            check_stmt(&mut ctx, stmt);
+        }
+        // Buscar el último `let X = ...` y consultar su binding.
+        let mut last_name = None;
+        for stmt in &program {
+            if let Stmt::Assign {
+                target: AssignTarget::Ident(name, _),
+                ..
+            } = stmt
+            {
+                last_name = Some(name.clone());
+            }
+        }
+        let n = last_name?;
+        ctx.lookup_binding(&n).map(|b| b.ty.clone())
+    }
+
+    #[test]
+    fn l2_map_sobre_list_int_sin_anotar_callback_tipa_como_list_int() {
+        // Caso pedagógico del cap M1.C5 del curso. Antes de L2 esto
+        // tipaba como `List<Any>` porque `x` quedaba como `Any` sin
+        // anotación, y `Any * Int` también es `Any`. Ahora L2 propaga
+        // el `Int` del receptor al callback.
+        let ty = type_of_last_let("let r = [1, 2, 3].map(fn(x) => x * 10)\n");
+        match ty {
+            Some(Type::List(inner)) => assert_eq!(
+                *inner,
+                Type::Int,
+                "esperaba List<Int>, recibió List<{:?}>",
+                inner
+            ),
+            other => panic!("esperaba List<Int>, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn l2_filter_sobre_list_int_sin_anotar_tipa_callback_int_y_ret_bool() {
+        // `xs.filter(fn(x) => x > 0)` sobre `List<Int>` debe tipar
+        // `List<Int>` (filter preserva el T). Adentro del callback,
+        // `x > 0` requiere `x: Int` (Int vs Int OK).
+        let ty = type_of_last_let("let r = [1, 2, 3].filter(fn(x) => x > 0)\n");
+        match ty {
+            Some(Type::List(inner)) => assert_eq!(*inner, Type::Int),
+            other => panic!("esperaba List<Int>, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn l2_map_sobre_list_str_propaga_a_metodos_str() {
+        // `xs.map(fn(s) => s.upper())` sobre `List<Str>` debe tipar
+        // `List<Str>` — el `.upper()` requiere que `s: Str`. Si L2
+        // no propagara, `s: Any` y el resultado sería `List<Any>`.
+        let ty = type_of_last_let("let r = [\"a\", \"b\"].map(fn(s) => s.upper())\n");
+        match ty {
+            Some(Type::List(inner)) => assert_eq!(*inner, Type::Str),
+            other => panic!("esperaba List<Str>, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn l2_param_con_anotacion_explicita_gana_sobre_hint() {
+        // Si el alumno anota `fn(x: Float) => ...` sobre `List<Int>`,
+        // la anotación gana. El tipo del callback param es Float (no
+        // Int del hint). Eso puede dispararse como error si el body
+        // hace algo incompatible, pero el tipo del retorno depende de
+        // la anotación.
+        let ty = type_of_last_let("let r = [1, 2, 3].map(fn(x: Float) => x * 2.0)\n");
+        match ty {
+            Some(Type::List(inner)) => assert_eq!(
+                *inner,
+                Type::Float,
+                "esperaba List<Float> (anotación explícita gana), recibió List<{:?}>",
+                inner
+            ),
+            other => panic!("esperaba List<Float>, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn l2_find_sobre_list_int_tipa_callback_y_devuelve_result_int() {
+        // `xs.find(fn(x) => x == 2)` sobre `List<Int>` → `Result<Int>`.
+        let ty = type_of_last_let("let r = [1, 2, 3].find(fn(x) => x == 2)\n");
+        match ty {
+            Some(Type::Result { ok, .. }) => assert_eq!(*ok, Type::Int),
+            other => panic!("esperaba Result<Int>, recibió {:?}", other),
+        }
+    }
+
+    // ---- S1 (2026-06-05) — spans propios para Param/Pattern ----
+
+    #[test]
+    fn s1_hover_sobre_param_de_fn_def_muestra_tipo_anotado() {
+        // `fn double(n: Int) => n * 2` — span del param `n` en col 11.
+        // El checker debería registrar `Int` bajo ese span en TypeInfo.
+        let ty = types_at_position("fn double(n: Int) => n * 2\n", 1, 11);
+        assert_eq!(ty, Some(Type::Int), "hover sobre `n` (param) debe ser Int");
+    }
+
+    #[test]
+    fn s1_hover_sobre_param_sin_anotacion_muestra_any() {
+        // `fn f(x) => x + 1` — sin anotación, x: Any.
+        let ty = types_at_position("fn f(x) => x + 1\n", 1, 6);
+        assert_eq!(ty, Some(Type::Any), "param sin anotación tipa como Any");
+    }
+
+    #[test]
+    fn s1_hover_sobre_var_de_for_in_range_muestra_int() {
+        // `for i in 0..10 { print(i) }` — span del `i` en col 5.
+        // El range produce Int, el pattern Ident bindea como Int.
+        // Recordá que `for` actualmente expande a un `Stmt::For`
+        // donde `var: Pattern` ya tiene `Pattern::Ident(name, span)`.
+        let ty = types_at_position("for i in 0..10 { print(i) }\n", 1, 5);
+        assert_eq!(
+            ty,
+            Some(Type::Int),
+            "hover sobre `i` del for debe ser Int (item del range)"
+        );
+    }
+
+    #[test]
+    fn s1_hover_sobre_binding_de_match_ok_muestra_inner_type() {
+        // `match Ok(42) { Ok(n) => n, Err(_) => 0 }` — span del `n` en
+        // `Ok(n)`. n debe tipar como Int (inner del Result).
+        // El span del `n` es donde aparece el ident `n` adentro del
+        // paréntesis del pattern.
+        let src = "let r: Int = match Ok(42) { Ok(n) => n, Err(_) => 0 }\n";
+        // Posición del `n` en `Ok(n)`: col 32.
+        let ty = types_at_position(src, 1, 32);
+        assert_eq!(
+            ty,
+            Some(Type::Int),
+            "hover sobre `n` del binding Ok(n) debe ser Int"
+        );
+    }
+
+    #[test]
+    fn s1_hover_sobre_param_de_metodo_custom_funciona() {
+        // Método `double` sobre `type Counter { val: Int }`.
+        let src = "\
+type Counter { val: Int = 0 }
+type Counter {
+    fn double(amount: Int) -> Int => amount * 2
+}
+let c = Counter { }
+let r = c.double(5)
+";
+        // Span del param `amount: Int` en la línea 3, col 15.
+        let ty = types_at_position(src, 3, 15);
+        assert_eq!(ty, Some(Type::Int), "hover sobre `amount` debe ser Int");
+    }
+
+    #[test]
+    fn l2_nested_callbacks_no_se_contaminan() {
+        // FnExpr anidado: el hint del externo no debe "filtrar" al
+        // interno. Caso: `xs.map(fn(x) => [x, x+1].map(fn(y) => y * 2))`.
+        // El interno `fn(y)` recibe hint `Int` del receptor `[x, x+1]`,
+        // no del callback externo.
+        let ty = type_of_last_let("let r = [1, 2].map(fn(x) => [x, x + 1].map(fn(y) => y * 2))\n");
+        match ty {
+            Some(Type::List(outer)) => match outer.as_ref() {
+                Type::List(inner) => assert_eq!(
+                    **inner,
+                    Type::Int,
+                    "esperaba List<List<Int>>, recibió List<List<{:?}>>",
+                    inner
+                ),
+                other => panic!("esperaba List<List<Int>>, recibió List<{:?}>", other),
+            },
+            other => panic!("esperaba List<List<Int>>, recibió {:?}", other),
+        }
     }
 }

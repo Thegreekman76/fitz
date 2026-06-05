@@ -836,6 +836,15 @@ pub struct Param {
     pub type_: Option<TypeExpr>,
     pub default: Option<Expr>,
     pub varargs: bool,
+    /// S1 (2026-06-05) — span del token Ident del nombre del param.
+    /// `Span::ZERO` para params sintéticos (tests / nodos construidos
+    /// a mano sin posición). Lo consume el checker para registrar el
+    /// tipo del binding bajo este span en `TypeInfo` y habilitar hover
+    /// sobre el nombre del param adentro de la firma de una fn.
+    ///
+    /// `Span::PartialEq` es siempre-true así que esto no afecta los
+    /// tests estructurales del AST que comparan `Param`s.
+    pub name_span: Span,
 }
 
 /// Campo de un `type`. El tipo es obligatorio dentro de un struct.
@@ -1012,15 +1021,23 @@ pub enum Pattern {
     /// `null` — matchea si el valor es Null.
     Null,
     /// `nombre` — siempre matchea, bindea el valor a ese nombre.
-    Ident(String),
+    ///
+    /// S1 (2026-06-05) — el `Span` es del token Ident del pattern,
+    /// usado por el checker para registrar el tipo del binding en
+    /// `TypeInfo` (hover sobre `i` en `for i in 0..10`, `n` en
+    /// `match x { Ok(n) => n }`, etc.). `Span::PartialEq` es
+    /// siempre-true así que esto no afecta tests estructurales.
+    Ident(String, Span),
     /// `_` — siempre matchea, sin binding.
     Wildcard,
     /// `Ok(x)` — matchea cualquier `Result::Ok(...)` y bindea el
-    /// inner como `x`.
-    OkBinding(String),
+    /// inner como `x`. S1 (2026-06-05) — `Span` del token Ident
+    /// adentro del paréntesis.
+    OkBinding(String, Span),
     /// `Err(e)` — matchea cualquier `Result::Err(...)` y bindea el
-    /// inner como `e`.
-    ErrBinding(String),
+    /// inner como `e`. S1 (2026-06-05) — `Span` del token Ident
+    /// adentro del paréntesis.
+    ErrBinding(String, Span),
     /// `Ok(_)` — matchea cualquier `Result::Ok(...)` sin bindear
     /// (no ensucia el scope con una var llamada `_`).
     OkWildcard,
@@ -1146,6 +1163,7 @@ mod tests {
                     type_: None,
                     default: None,
                     varargs: false,
+                    name_span: Span::default(),
                 }],
                 return_type: None,
                 body: vec![Stmt::Return(
@@ -1294,7 +1312,7 @@ mod tests {
     fn for_stmt_envuelve_var_iter_y_body() {
         // `for x in xs { print(x) }`
         let f = Stmt::For {
-            var: Pattern::Ident("x".into()),
+            var: Pattern::Ident("x".into(), Span::default()),
             iter: Expr::Ident("xs".into(), Span::ZERO),
             body: vec![Stmt::Expr(
                 Expr::Call {
@@ -1311,7 +1329,7 @@ mod tests {
             Stmt::For {
                 var, iter, body, ..
             } => {
-                assert_eq!(var, Pattern::Ident("x".into()));
+                assert_eq!(var, Pattern::Ident("x".into(), Span::default()));
                 assert_eq!(iter, Expr::Ident("xs".into(), Span::ZERO));
                 assert_eq!(body.len(), 1);
             }
@@ -1473,6 +1491,7 @@ mod tests {
                 type_: None,
                 default: None,
                 varargs: false,
+                name_span: Span::default(),
             }],
             body: vec![Stmt::Return(
                 Expr::BinOp {
