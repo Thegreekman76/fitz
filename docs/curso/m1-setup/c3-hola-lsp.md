@@ -498,23 +498,28 @@ sobre símbolos importados.
 
 | Feature | Estado | Notas |
 |---|---|---|
-| Hover | ✅ | Funciona en expresiones; limitado en refinement de match |
+| Hover | ✅ | Funciona sobre expresiones, params, vars de loops, bindings de match (S1 desde v0.14.2) |
 | Autocomplete scope-level | ✅ | NO es scope-aware estricto (deuda) |
 | Autocomplete after-dot | ✅ | Solo primer nivel garantizado; chains heurísticas |
-| Autocomplete tras `from X import ` | ❌ | Deuda — no sugiere símbolos del módulo remoto |
+| Autocomplete tras `from X import ` | ✅ | Sugiere símbolos `pub` del módulo remoto (desde v0.9.47) |
 | Diagnostics live | ✅ | Multi-error con recovery |
 | Go-to-definition | ✅ | Local OK; cross-module limitado |
-| Find references | ❌ | No implementado |
-| Rename symbol | ❌ | No implementado |
-| Signature help | ❌ | No implementado (mostrar la firma mientras escribís args) |
-| Code actions / Quick fixes | ❌ | No implementado |
-| Formatting on save | ⚠️ | Funciona via `editor.formatOnSave` si configurás `fitz fmt` como formatter externo |
-| Refactorings | ❌ | No implementado |
+| Find references | ❌ | No implementado (deuda roadmap) |
+| Rename symbol | ❌ | No implementado (deuda roadmap) |
+| Signature help | ✅ | Fns user-defined + builtins (`print`/`len`/...) + métodos sobre `List<T>`/`Map<K,V>`/`Str` (desde v0.15.0) |
+| Code actions / Quick fixes | ❌ | No implementado (deuda roadmap) |
+| Formatting on save | ✅ | `editor.formatOnSave: true` dispara `fitz fmt` automático (desde v0.14.0) |
+| **Debugging interactivo** (breakpoints, step, watch) | ❌ | **DAP** no implementado — workaround: `print`, REPL `:type`/`:env`, diagnostics LSP (deuda V6 roadmap, ~2 semanas estimadas) |
+| Refactorings | ❌ | No implementado (deuda roadmap) |
 
-> **El LSP está al nivel de un "MVP useful"** — cubre lo
-> esencial diario (escribir, ver errores, navegar). Las features
-> avanzadas (find refs, rename) son deuda priorizada en el
-> roadmap del lenguaje.
+> **El LSP está al nivel de "MVP fuerte"** — cubre toda la
+> experiencia diaria de editing (escribir, ver errores, navegar,
+> formatear, ver firmas mientras tipeás args). Las features
+> avanzadas (find refs, rename, code actions, debugging interactivo)
+> son deuda priorizada en el roadmap del lenguaje. El gap más
+> visible vs Python/JS hoy es **debugging interactivo en VSCode**
+> — la deuda **V6 (Debug Adapter Protocol)** del backlog cubre
+> exactamente eso.
 
 ---
 

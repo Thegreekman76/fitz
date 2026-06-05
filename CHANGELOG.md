@@ -11,6 +11,113 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.0] — 2026-06-05 — Bloque 4: V4 expandido (signature help para builtins + method calls) + L2 expandido (inferencia bidireccional para `Fn`)
+
+**Mini-fase combinada** que extiende dos features previas a sus
+casos pedagógicos completos. Cierra los gaps visibles del LSP en
+método chains (`xs.map(...)`) y de la inferencia para callbacks
+asignados a vars o pasados a fns user-defined con `Fn(...) -> ...`.
+
+### LSP — V4 expandido
+
+Antes (v0.14.0): signature help solo cubría fns user-defined del
+programa. Builtins y method calls quedaban sin popup.
+
+Ahora (v0.15.0):
+
+- **Builtins globales**: catálogo cerrado de signatures en
+  [`src/lsp.rs::BUILTIN_SIGS`](src/lsp.rs) cubre `print`, `len`,
+  `sleep`, `env`, `env_or`, `load_env`, `flag`, `spawn`, `config`,
+  `secret`, `bytes`. Tipear `len(` abre popup con `fn len(x: Any) -> Int`.
+- **Method calls** sobre `List<T>` / `Map<K,V>` / `Str`: catálogo
+  paralelo (`LIST_METHOD_SIGS`, `MAP_METHOD_SIGS`, `STR_METHOD_SIGS`)
+  con shapes genéricos (`fn map(f: fn(T) -> U) -> List<U>`, etc.).
+  Tipear `xs.map(` con `xs = [1, 2, 3]` abre popup con la firma del método.
+- **Heurística del receiver**: `infer_builtin_receiver_kind` walka
+  el `Program` buscando un `Stmt::Assign` top-level con el nombre
+  del receiver, y matchea por shape estructural del value (Expr::List
+  → "List", Expr::Map → "Map", Expr::Str → "Str"). MVP simple sin
+  pasar por el checker entero.
+- **`CallContext` enum** nuevo (`Function` vs `Method`) en
+  [`src/lsp.rs`](src/lsp.rs) reemplaza el `(String, u32)` previo.
+  El walkback de `find_call_context` detecta el `.` antes del `(`
+  para identificar method calls vs function calls.
+
+### Lenguaje — L2 expandido
+
+Antes (v0.14.1): inferencia bidireccional solo en callbacks de
+métodos built-in con templates paramétricos (`List<T>.map/filter/...`).
+
+Ahora (v0.15.0):
+
+- **Fn user-defined con param `Fn(...) -> ...`**: si el callee es un
+  `Stmt::FnDef` con un param que tipa como `Type::Function { params, .. }`,
+  el call site propaga los `params` como hint al arg correspondiente
+  si es FnExpr. Caso canónico:
+
+  ```fitz
+  fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
+  apply(fn(n) => n * 2, 5)   // n se infiere como Int desde el param `f`
+  ```
+
+- **`let f: Fn(...) -> ... = fn(...) => ...`**: si la anotación del
+  let resuelve a `Type::Function { params, .. }` y el RHS es un FnExpr,
+  los `params` se propagan como hint:
+
+  ```fitz
+  let f: Fn(Int) -> Int = fn(n) => n * 2   // n se infiere como Int
+  ```
+
+- **Implementación**: reusa el stack `ctx.fn_expr_param_hints` introducido
+  en v0.14.1. Push al entrar al arg/value FnExpr, pop al entrar al
+  handler de `Expr::FnExpr`. Sin cambios al AST.
+
+### Tests
+
+- **+3 LSP E2E** en `tests/lsp_e2e.rs::v4_*`:
+  - `len(` → popup con `fn len(x: Any) -> Int`.
+  - `xs.map(` con `xs = [1, 2, 3]` → popup con `fn map(f: fn(T) -> U) -> List<U>`.
+  - `s.len(` con `s = "hola"` → popup con `fn len() -> Int`.
+- **+3 unit tests** en `types::tests::l2x_*`:
+  - `let f: Fn(Int) -> Int = fn(n) => n * 2` compila sin errores.
+  - `apply(fn(n) => n * 2, 5)` con `apply(f: Fn(Int) -> Int, x: Int)` compila sin errores.
+  - Anotación explícita incompatible (`fn(n: Str) =>` sobre `Fn(Int) -> Int`) emite error.
+- **Total al cierre**: 3030 unit + 13 LSP E2E + smoke 360 verde.
+- Clippy `--lib --tests --bins --features lsp -- -D warnings` limpio.
+
+### Backlog
+
+- **V4 expandido** marcado como CERRADO en
+  [`docs/deudas-post-5b.md`](docs/deudas-post-5b.md).
+- **L2 expandido** marcado como CERRADO.
+- **V6 — Debug Adapter Protocol (DAP)** sumado al backlog como deuda
+  futura (~2 semanas). Sin DAP, debugging interactivo en VSCode
+  (breakpoints, step in/over/out, watch) no está disponible —
+  workarounds: `print`, REPL con `:type`/`:env`, diagnostics LSP.
+
+### Deuda residual derivada
+
+- **V4 — receivers no-Ident**: hoy `infer_builtin_receiver_kind` solo
+  cubre `<ident>.method(...)`. Para `<expr>.method(...)` (ej.
+  `xs[0].method`, `f().method`) el receiver no se identifica y no hay
+  signature help. Refinable con walkback más profundo o uso de
+  TypeInfo del LSP.
+- **V4 — métodos de tipos custom**: solo cubre List/Map/Str
+  built-in. Métodos custom de `type Foo` quedan pendientes.
+- **L2 — método custom con param Fn**: la inferencia bidireccional
+  no se dispara cuando el callee es un método custom de `type` que
+  recibe un callback. Caso raro hasta que tipos custom expongan
+  método higher-order canónicamente.
+
+### Versión
+
+- `Cargo.toml`: **v0.14.2 → v0.15.0** (minor — features nuevas
+  significativas en LSP + checker; aprovechamos para reconciliar el
+  release confuso de v0.14.0/v0.14.2 donde los binarios del workflow
+  tenían el código de uno con el tag del otro).
+- Extensión VSCode: **0.14.2 → 0.15.0** + `.vsix` regenerado con
+  `server/fitz-lsp.exe` v0.15.0.
+
 ## [v0.14.2] — 2026-06-05 — Bloque 3: deuda S1 cerrada — hover sobre params, vars de for y bindings de match
 
 **Cierra la deuda histórica S1 del proyecto** — paralelo natural del

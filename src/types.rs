@@ -4325,11 +4325,46 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // real ocurre en `infer_call_with_named_args` cuando el
             // callee es un Ident resoluble.
             let callee_ty = infer_expr(ctx, callee);
+            // L2 expandido (2026-06-05) — Inferencia bidireccional
+            // desde callees user-defined con param Function. Si el
+            // callee tipa como `Function { params, ret }` y un arg es
+            // FnExpr cuyo param-i correspondiente es a su vez
+            // `Function { params: cb_params, .. }`, propagamos los
+            // `cb_params` como hint al FnExpr. Cubre el caso canónico:
+            //
+            //     fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
+            //     apply(fn(n) => n * 2, 5)   // n se infiere como Int
+            //
+            // Stack-based como L2 original — el handler de Expr::FnExpr
+            // hace pop al entrar.
+            let callee_param_types: Option<Vec<Type>> = match &callee_ty {
+                Type::Function { params, .. } => Some(params.clone()),
+                _ => None,
+            };
             let args_ty: Vec<Type> = args
                 .iter()
-                .map(|a| match a {
-                    Expr::NamedArg { value, .. } => infer_expr(ctx, value),
-                    other => infer_expr(ctx, other),
+                .enumerate()
+                .map(|(i, a)| {
+                    let inner = match a {
+                        Expr::NamedArg { value, .. } => value.as_ref(),
+                        other => other,
+                    };
+                    if matches!(inner, Expr::FnExpr { .. }) {
+                        let hint = callee_param_types
+                            .as_ref()
+                            .and_then(|pt| pt.get(i))
+                            .and_then(|t| match t {
+                                Type::Function {
+                                    params: cb_params, ..
+                                } => Some(cb_params.clone()),
+                                _ => None,
+                            });
+                        ctx.fn_expr_param_hints.push(hint);
+                    }
+                    match a {
+                        Expr::NamedArg { value, .. } => infer_expr(ctx, value),
+                        other => infer_expr(ctx, other),
+                    }
                 })
                 .collect();
             match callee_ty {
@@ -8391,6 +8426,23 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             value,
             span,
         } => {
+            // L2 expandido (2026-06-05) — Inferencia bidireccional
+            // desde anotaciones `Fn(T1, T2) -> R` en `let f: Fn(...) -> ... = fn(...) => ...`.
+            // Si la anotación resuelve a `Type::Function { params, .. }`
+            // y el RHS es directamente un FnExpr, empujamos los params
+            // del Function como hint ANTES de sintetizar el RHS. El
+            // handler de Expr::FnExpr lo consume al pop, propagando
+            // los tipos esperados a los params sin anotación del FnExpr.
+            if matches!(value, Expr::FnExpr { .. }) {
+                if let Some(ann) = type_ {
+                    let declared_for_hint = resolve_type_expr(ann, ctx.types).unwrap_or(Type::Any);
+                    let hint = match declared_for_hint {
+                        Type::Function { params, .. } => Some(params),
+                        _ => None,
+                    };
+                    ctx.fn_expr_param_hints.push(hint);
+                }
+            }
             let value_ty = infer_expr(ctx, value);
             if let AssignTarget::Ident(name, target_span) = target {
                 // V2 (2026-06-05) — registrar el tipo del binding bajo
@@ -18546,6 +18598,61 @@ print(total)
             Some(Type::Result { ok, .. }) => assert_eq!(*ok, Type::Int),
             other => panic!("esperaba Result<Int>, recibió {:?}", other),
         }
+    }
+
+    // ---- L2 expandido (2026-06-05) — inferencia bidireccional para Fn ----
+
+    #[test]
+    fn l2x_let_con_anotacion_fn_propaga_a_fnexpr_sin_anotacion() {
+        // `let f: Fn(Int) -> Int = fn(n) => n * 2` — el param `n` del
+        // FnExpr debe inferirse como Int desde la anotación del let.
+        let src = "let f: Fn(Int) -> Int = fn(n) => n * 2\n";
+        let tokens = tokenize(src).expect("tokenize");
+        let program = parse(tokens).expect("parse");
+        let (env, _ti, _di, errs) = check_program(&program);
+        // No debe haber errores — n: Int * 2: Int → Int, compatible con Fn(Int) -> Int.
+        assert!(
+            errs.is_empty(),
+            "esperaba sin errores, recibió: {:?}",
+            errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        let _ = env;
+    }
+
+    #[test]
+    fn l2x_fn_user_defined_con_param_fn_propaga_a_arg_fnexpr() {
+        // `fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
+        //  let r = apply(fn(n) => n * 2, 5)` — el `n` del callback se
+        // debe inferir como Int desde el param `f: Fn(Int) -> Int`.
+        let src = "\
+fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
+let r = apply(fn(n) => n * 2, 5)
+";
+        let tokens = tokenize(src).expect("tokenize");
+        let program = parse(tokens).expect("parse");
+        let (env, _ti, _di, errs) = check_program(&program);
+        assert!(
+            errs.is_empty(),
+            "esperaba sin errores con inferencia bidireccional, recibió: {:?}",
+            errs.iter().map(|e| e.message.clone()).collect::<Vec<_>>()
+        );
+        let _ = env;
+    }
+
+    #[test]
+    fn l2x_anotacion_explicita_del_fnexpr_gana_sobre_hint() {
+        // Si el FnExpr tiene anotación explícita del param que no es
+        // compatible con la anotación del let, el checker emite error.
+        // `let f: Fn(Int) -> Int = fn(n: Str) => n.upper()` — error
+        // porque Fn(Str) -> Str no es compatible con Fn(Int) -> Int.
+        let src = "let f: Fn(Int) -> Int = fn(n: Str) => n.upper()\n";
+        let tokens = tokenize(src).expect("tokenize");
+        let program = parse(tokens).expect("parse");
+        let (_env, _ti, _di, errs) = check_program(&program);
+        assert!(
+            !errs.is_empty(),
+            "esperaba error por anotación incompatible, recibió 0"
+        );
     }
 
     // ---- S1 (2026-06-05) — spans propios para Param/Pattern ----

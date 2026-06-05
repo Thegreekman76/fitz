@@ -246,20 +246,33 @@ recursión pesada, convertir a loop iterativo.
 Una fn puede tomar otra fn como argumento:
 
 ```fitz
-fn aplicar(f, x: Int) -> Int {
+fn aplicar(f: Fn(Int) -> Int, x: Int) -> Int {
     return f(x)
 }
 
 fn cuadrado(n: Int) -> Int => n * n
 
-print(aplicar(cuadrado, 7))      // 49
-print(aplicar(fn(n) => n + 100, 5))   // 105
+print(aplicar(cuadrado, 7))             // 49
+print(aplicar(fn(n) => n + 100, 5))     // 105
 ```
 
-> **Limitación del MVP**: el tipo de `f` **no se puede anotar**
-> como `fn(Int) -> Int` (parser todavía no acepta tipos
-> funcionales como anotación de param). Por ahora, dejá el param
-> sin anotar (gradual) o usá `Any`.
+El tipo `Fn(Int) -> Int` se lee como "una fn que recibe un Int y
+devuelve un Int". `Fn` es **una keyword** del lenguaje (no un tipo
+nominal). Acepta cero o más params: `Fn() -> Str`, `Fn(Int, Str) -> Bool`,
+etc. El return type es obligatorio en la sintaxis.
+
+> **Inferencia bidireccional (desde v0.15.0)**: notá que el callback
+> `fn(n) => n + 100` no anota `n: Int`. El checker lo infiere del
+> tipo del param `f: Fn(Int) -> Int` — el `Int` del primer slot del
+> `Fn(...)` se propaga al param `n` del callback. Si querés anotar
+> explícitamente, podés (`fn(n: Int) => ...`); la anotación gana
+> sobre el hint del receptor.
+
+> **Alternativa gradual** (más laxa, sin chequeo de tipo): si no
+> anotás `f` (`fn aplicar(f, x: Int)`), el checker trata `f` como
+> `Any` — el call funciona pero perdés el chequeo estático de aridad
+> y tipos. Útil para prototipos rápidos; en código de producción
+> preferí siempre anotar.
 
 ### El callback puede ser inline (`fn(x) => ...`)
 

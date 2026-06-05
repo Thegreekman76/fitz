@@ -1084,3 +1084,205 @@ fn v4_signature_help_segundo_arg_active_parameter_es_1() {
     drop(stdin);
     wait_for_clean_exit(&mut child);
 }
+
+/// V4 expandido (2026-06-05) — signature help para builtins globales
+/// (`len`, `print`, etc.). Catálogo en `src/lsp.rs::BUILTIN_SIGS`.
+#[test]
+fn v4_signature_help_builtin_len_devuelve_signature_del_catalogo() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let _ = read_message(&mut stdout);
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///bi.fitz","languageId":"fitz","version":1,"text":"let n = len(\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    let sig_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///bi.fitz"},"position":{"line":0,"character":12},"context":{"triggerKind":2,"triggerCharacter":"(","isRetrigger":false}}}"#;
+    stdin
+        .write_all(&frame(sig_req))
+        .expect("write signatureHelp");
+    stdin.flush().expect("flush signatureHelp");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let sig_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando signatureHelp response builtin");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    assert!(
+        sig_resp.contains("fn len(x: Any) -> Int"),
+        "signatureHelp builtin len con label incorrecta: {sig_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+/// V4 expandido — signature help para method call sobre `List<T>`.
+#[test]
+fn v4_signature_help_method_list_map_devuelve_signature_del_catalogo() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let _ = read_message(&mut stdout);
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///mt.fitz","languageId":"fitz","version":1,"text":"let xs = [1, 2, 3]\nlet r = xs.map(\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen list.map");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    let sig_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///mt.fitz"},"position":{"line":1,"character":15},"context":{"triggerKind":2,"triggerCharacter":"(","isRetrigger":false}}}"#;
+    stdin
+        .write_all(&frame(sig_req))
+        .expect("write signatureHelp");
+    stdin.flush().expect("flush signatureHelp");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let sig_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando signatureHelp response list.map");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    assert!(
+        sig_resp.contains("fn map(f: fn(T) -> U) -> List<U>"),
+        "signatureHelp method .map() con label incorrecta: {sig_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+/// V4 expandido — method call sobre Str (`s.upper()`, `s.len()`).
+#[test]
+fn v4_signature_help_method_str_devuelve_signature_del_catalogo() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let _ = read_message(&mut stdout);
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///st.fitz","languageId":"fitz","version":1,"text":"let s = \"hola\"\nlet n = s.len(\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen str.len");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    let sig_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/signatureHelp","params":{"textDocument":{"uri":"file:///st.fitz"},"position":{"line":1,"character":14},"context":{"triggerKind":2,"triggerCharacter":"(","isRetrigger":false}}}"#;
+    stdin
+        .write_all(&frame(sig_req))
+        .expect("write signatureHelp");
+    stdin.flush().expect("flush signatureHelp");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let sig_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando signatureHelp response str.len");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    assert!(
+        sig_resp.contains("fn len() -> Int"),
+        "signatureHelp method .len() sobre Str con label incorrecta: {sig_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}

@@ -3650,7 +3650,34 @@ save" en VSCode, y nada pasa al guardar un `.fitz` — tiene que correr
 el dev configura al adoptar un lenguaje nuevo. Hoy hay drift entre lo
 que el ecosistema espera y lo que la extensión ofrece.
 
-### V4 — Signature help (`textDocument/signatureHelp`) — **CERRADO 2026-06-05**
+### V4 — Signature help — MVP **CERRADO 2026-06-05** + **EXPANDIDO 2026-06-05 (v0.15.0)**
+
+**v0.15.0 — V4 expandido**: el MVP cubría solo fns user-defined del
+programa. v0.15.0 suma:
+
+- **Builtins globales**: catálogo `BUILTIN_SIGS` con 11 builtins comunes
+  (`print`, `len`, `sleep`, `env`, `env_or`, `load_env`, `flag`, `spawn`,
+  `config`, `secret`, `bytes`). Tipear `len(` abre popup con
+  `fn len(x: Any) -> Int`.
+- **Method calls** sobre `List<T>` / `Map<K,V>` / `Str`: catálogos
+  paralelos (`LIST_METHOD_SIGS`, `MAP_METHOD_SIGS`, `STR_METHOD_SIGS`).
+  Tipear `xs.map(` con `xs = [1, 2, 3]` muestra la firma del método.
+- **`CallContext` enum** nuevo (`Function` vs `Method`) reemplaza
+  el `(String, u32)` previo. Walkback identifica `.` antes del `(`.
+- **Heurística `infer_builtin_receiver_kind`**: walka el `Program`
+  matcheando el value asignado al receiver por shape estructural.
+
+3 E2E tests nuevos en `tests/lsp_e2e.rs::v4_*` validan builtins
++ method calls sobre List + Str.
+
+**Deuda residual** (NO bloquea):
+
+- Receivers no-Ident (`xs[0].method`, `f().method`) no se identifican.
+- Métodos custom de `type Foo` quedan pendientes.
+
+---
+
+#### (Descripción original — para referencia)
 
 **Fix aplicado**: capability `signature_help_provider` con trigger
 chars `(` y `,` anunciada en `initialize`. Handler `signature_help`
@@ -3787,6 +3814,75 @@ Backlog hermano del de LSP. Acá van bugs y features del **lenguaje**
 sigue el curso `Fitz de 0 a experto`. Distinción con el backlog del
 LSP: estos requieren cambio del compilador, no solo de la extensión.
 
+### V6 — Debugging interactivo en VSCode (Debug Adapter Protocol) — **ABIERTO 2026-06-05**
+
+**Qué falta**: Fitz hoy tiene LSP (diagnostics + hover + goto-def +
+completion + signature help + format on save) pero **no tiene
+debugging interactivo**. El alumno no puede:
+
+- Clickear el gutter para poner breakpoints.
+- Pausar la ejecución y inspeccionar variables.
+- Step in / over / out.
+- Watch expressions.
+- Ver el call stack en el panel de Debug.
+
+**Workarounds disponibles hoy**:
+
+| Técnica | Cómo |
+|---|---|
+| `print` con interpolación | `print("x = {x}, n = {n}")` |
+| **REPL interactivo** | `fitz repl` + `:load src/main.fitz` + llamar fns con valores reales |
+| `:type <expr>` | Inspeccionar tipos sin ejecutar |
+| `:env` | Ver todos los bindings del scope actual |
+| Diagnostics LSP | El checker estático captura type mismatches antes de correr |
+
+**Fix propuesto** (~2 semanas):
+
+1. **Bin `fitz-dap` nuevo** (paralelo a `fitz-lsp`, feature gated `dap`).
+   Implementa el protocolo DAP de Microsoft (JSON-RPC similar al LSP
+   pero con shape distinto — request/response/event).
+2. **Evaluator instrumentado** con:
+   - Tabla de breakpoints por archivo + línea.
+   - Hook al entrar a cada Stmt: check breakpoint, si está activo
+     pausar (mecanismo via `tokio::sync::Notify` + state machine).
+   - Step in/over/out: contar profundidad de fn calls + comparar.
+   - Inspect: serializar `Value` actual de cada var del scope a JSON.
+3. **Extensión VSCode** suma:
+   - `debuggers` entry en `package.json` (lenguaje fitz, programa
+     `fitz`, tipo `fitz`).
+   - Template `launch.json` con configuración base
+     (`type: fitz`, `program: ${workspaceFolder}/src/main.fitz`).
+   - `LiveBuild` para spawnear `fitz-dap` al arrancar debug session.
+4. **Tests**: E2E que simula un cliente DAP, pone breakpoint, ejecuta
+   programa, valida que paramos en el breakpoint + variables expuestas
+   correctas. Similar a los E2E del LSP pero sobre DAP.
+5. **Cap nuevo del curso M7 (Producción)**: "Debugging en VSCode con
+   breakpoints + watch expressions". Cierra el gap pedagógico vs
+   Python/JS donde debugging es ciudadano primera.
+
+**Decisiones técnicas pendientes**:
+
+- (a) ¿`fitz build` también soporta debug info? Sería un breaking change
+  del codegen (`cargo build --debug` → simbolos), o un flag opt-in
+  (`fitz build --debug`). Sin esto, debugging solo funciona con
+  `fitz run` (intérprete).
+- (b) ¿Hot reload integrado con debugging? VSCode soporta restart de
+  debug session — combinar con `fitz dev` sería poderoso pero
+  invasivo.
+- (c) ¿Conditional breakpoints? El alumno los va a esperar
+  (`break if x > 10`). Requiere evaluar expresiones Fitz en el
+  contexto del breakpoint — interpretable pero adds complejidad.
+
+**Impacto**: alto en DX. Es el gap más grande vs Python/JS para
+proyectos no triviales. Pedagógicamente es el cierre natural del
+módulo de producción del curso.
+
+**Riesgo**: el evaluator hoy es `#[async_recursion]` sobre `eval_expr`
+/ `eval_stmt`. Instrumentar con breakpoints sin meter overhead en el
+hot path (cuando NO hay debug session activa) requiere thoughtful
+design — atomic bool global + branchless skip, o feature flag
+condicional.
+
 ### L1 — `;` como separador de stmts — **CERRADO 2026-06-05**
 
 **Fix aplicado**: el lexer ahora reconoce `;` como token y lo emite
@@ -3874,7 +3970,44 @@ la decisión de diseño #5.
 **Side benefit**: alinea la realidad con la frase "como en Go" del
 documento de decisiones. Hoy esa frase es aspiracional, no descriptiva.
 
-### L2 — Inferencia bidireccional de callbacks en métodos built-in — **CERRADO 2026-06-05**
+### L2 — Inferencia bidireccional — MVP **CERRADO 2026-06-05** + **EXPANDIDO 2026-06-05 (v0.15.0)**
+
+**v0.15.0 — L2 expandido**: el MVP solo cubría callbacks de métodos
+built-in (`List<T>.map/filter/find/...`). v0.15.0 suma:
+
+- **Fn user-defined con param `Fn(...) -> ...`**:
+
+  ```fitz
+  fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
+  apply(fn(n) => n * 2, 5)   // n: Int sin anotar
+  ```
+
+  Implementado en `Expr::Call` cuando `callee_ty` es
+  `Type::Function { params, .. }` — propaga los `params` como hint
+  al arg correspondiente si es FnExpr.
+
+- **`let f: Fn(...) -> ... = fn(...) => ...`**:
+
+  ```fitz
+  let f: Fn(Int) -> Int = fn(n) => n * 2   // n: Int sin anotar
+  ```
+
+  Implementado en `Stmt::Assign` cuando hay anotación + RHS es FnExpr.
+  Resuelve la anotación a Type, si es `Function` extrae los `params`
+  y los empuja al hint stack ANTES de sintetizar el RHS.
+
+3 unit tests nuevos en `types::tests::l2x_*`.
+
+**Reusa el mismo mecanismo `ctx.fn_expr_param_hints` introducido en
+v0.14.1** — sin cambios al AST.
+
+**Deuda residual** (NO bloquea): inferencia bidireccional para método
+custom con param Fn no se dispara (caso raro hasta que tipos custom
+expongan métodos higher-order canónicamente).
+
+---
+
+#### (Descripción original — para referencia)
 
 **Fix aplicado** (alcance acotado al caso 90%): el checker propaga
 el T del receptor a los params SIN anotación del callback cuando el

@@ -5,7 +5,7 @@
 // unit-testeable: cargo no soporta bien `#[cfg(test)]` en `src/bin/*.rs`.
 // El bin `src/bin/fitz-lsp.rs` consume esto vía `use fitz::lsp::...`.
 
-use crate::ast::{Program, Span, Stmt};
+use crate::ast::{Expr, Program, Span, Stmt};
 use crate::error::FitzError;
 use crate::lexer::tokenize;
 use crate::parser::parse_with_recovery;
@@ -2905,22 +2905,31 @@ fn scope_level_completions(
 // V4 (2026-06-05) — Signature help (`textDocument/signatureHelp`)
 // ---------------------------------------------------------------------------
 
-/// V4 — busca el contexto de un `Call` enclosing al cursor. Walkea hacia
-/// atrás contando `(`/`)` para encontrar un `(` no balanceado. Antes del
-/// `(`, extrae el nombre del callee (identifier alphanum + `_`). Cuenta
-/// las `,` a depth 0 entre el `(` y el cursor para el `active_parameter`.
+/// V4 expandido (2026-06-05) — contexto del `Call` enclosing al cursor.
+/// El walkback identifica si es un call de fn (`f(...)`) o un método
+/// (`<receiver>.method(...)`).
 ///
-/// Devuelve `(callee_name, active_param_index)` o `None` si:
-/// - No hay `(` enclosing antes del cursor.
-/// - El `(` no está precedido por un identifier (ej. `(1 + 2)` agrupación).
-/// - El cursor está dentro de un string literal o comment (no detectados —
-///   deuda menor del MVP).
+/// Devuelto por `find_call_context` junto al index del param activo
+/// (contando `,` a depth 0 entre el `(` y el cursor).
 ///
-/// Limitaciones del MVP:
-/// - No considera method calls `xs.map(|cursor)` (solo `f(|cursor)`).
-/// - No respeta strings ni comments — `f("hola, mundo|")` puede confundir
-///   el conteo si hay paréntesis dentro del string.
-fn find_call_context(text: &str, line: u32, character: u32) -> Option<(String, u32)> {
+/// **Limitaciones**: no respeta strings ni comments — `f("hola, mundo|")`
+/// puede contar mal `,` adentro del string. Caso raro en práctica.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CallContext {
+    /// `f(...)` — fn user-defined o builtin global.
+    Function { name: String },
+    /// `<receiver>.method(...)` — method call. MVP solo soporta
+    /// `<ident>.method(...)` (receiver Ident). Para receivers más
+    /// complejos (`xs[0].method`, `f().method`), el walkback degrada
+    /// a `Function { name: method }` que falla el lookup salvo que
+    /// coincida con una fn user-defined del mismo nombre.
+    Method {
+        receiver_name: String,
+        method: String,
+    },
+}
+
+fn find_call_context(text: &str, line: u32, character: u32) -> Option<(CallContext, u32)> {
     let offset = position_to_offset(text, line, character)?;
     let bytes = text.as_bytes();
     let mut depth: i32 = 0;
@@ -2938,7 +2947,7 @@ fn find_call_context(text: &str, line: u32, character: u32) -> Option<(String, u
                 while j > 0 && matches!(bytes[j - 1], b' ' | b'\t') {
                     j -= 1;
                 }
-                // Leer ident hacia atrás.
+                // Leer ident hacia atrás (callee/method).
                 let id_end = j;
                 while j > 0 && is_ident_continue(bytes[j - 1]) {
                     j -= 1;
@@ -2946,12 +2955,45 @@ fn find_call_context(text: &str, line: u32, character: u32) -> Option<(String, u
                 if j == id_end {
                     return None; // No hay ident — es un paren de agrupación.
                 }
-                // Verificar que NO arranca con dígito.
                 if bytes[j].is_ascii_digit() {
                     return None;
                 }
-                let name = std::str::from_utf8(&bytes[j..id_end]).ok()?.to_string();
-                return Some((name, commas_at_depth_0));
+                let callee_name = std::str::from_utf8(&bytes[j..id_end]).ok()?.to_string();
+                // V4 expandido — detectar si es method call: ver si hay
+                // un `.` antes del callee (con whitespace opcional).
+                let mut k = j;
+                while k > 0 && matches!(bytes[k - 1], b' ' | b'\t') {
+                    k -= 1;
+                }
+                if k > 0 && bytes[k - 1] == b'.' {
+                    // Method call. Walkback al receiver — MVP solo Ident.
+                    let mut m = k - 1; // antes del `.`
+                    while m > 0 && matches!(bytes[m - 1], b' ' | b'\t') {
+                        m -= 1;
+                    }
+                    let recv_end = m;
+                    while m > 0 && is_ident_continue(bytes[m - 1]) {
+                        m -= 1;
+                    }
+                    if m < recv_end && !bytes[m].is_ascii_digit() {
+                        let receiver_name =
+                            std::str::from_utf8(&bytes[m..recv_end]).ok()?.to_string();
+                        return Some((
+                            CallContext::Method {
+                                receiver_name,
+                                method: callee_name,
+                            },
+                            commas_at_depth_0,
+                        ));
+                    }
+                    // Receiver no es un Ident simple — fallback a Function
+                    // con el name del método. Probablemente no resuelve,
+                    // pero al menos no crashea.
+                }
+                return Some((
+                    CallContext::Function { name: callee_name },
+                    commas_at_depth_0,
+                ));
             }
             b'(' | b'[' | b'{' => depth -= 1,
             b',' if depth == 0 => commas_at_depth_0 += 1,
@@ -2959,6 +3001,183 @@ fn find_call_context(text: &str, line: u32, character: u32) -> Option<(String, u
         }
     }
     None
+}
+
+/// V4 expandido — catálogo de signatures de builtins globales. Cubre
+/// los más comunes del curso M1/M2/M3. Los builtins gradualmente
+/// tipados como `Type::Any` no tienen signature concreta en el
+/// TypeEnv — el catálogo es la única fuente de verdad para signature
+/// help.
+///
+/// Formato: `(name, label, param_labels)`.
+/// `label` es el texto completo `fn name(...) -> R` mostrado en el popup.
+/// `param_labels` son las sub-strings que corresponden a cada param —
+/// el LSP las usa para resaltar el param activo via `LabelOffsets`.
+const BUILTIN_SIGS: &[(&str, &str, &[&str])] = &[
+    (
+        "print",
+        "fn print(value: Any, ...) -> Null",
+        &["value: Any", "..."],
+    ),
+    ("len", "fn len(x: Any) -> Int", &["x: Any"]),
+    ("sleep", "fn sleep(ms: Int) -> Future<Null>", &["ms: Int"]),
+    ("env", "fn env(key: Str) -> Result<Str>", &["key: Str"]),
+    (
+        "env_or",
+        "fn env_or(key: Str, default: Str) -> Str",
+        &["key: Str", "default: Str"],
+    ),
+    (
+        "load_env",
+        "fn load_env(path: Str) -> Result<Null>",
+        &["path: Str"],
+    ),
+    ("flag", "fn flag(name: Str) -> Bool", &["name: Str"]),
+    ("spawn", "fn spawn(call) -> Future<T>", &["call"]),
+    (
+        "config",
+        "fn config(key: Str, default: Any) -> Any",
+        &["key: Str", "default: Any"],
+    ),
+    (
+        "secret",
+        "fn secret(key: Str) -> Secret<Str>",
+        &["key: Str"],
+    ),
+    ("bytes", "fn bytes(value: Str) -> Bytes", &["value: Str"]),
+];
+
+/// V4 expandido — catálogo de signatures de métodos built-in sobre
+/// `List<T>`. Espejo de `infer_list_method` del checker. Los métodos
+/// con templates (`map`, `filter`, `find`, etc.) muestran el shape
+/// genérico con `T`/`U` — el alumno entiende por contexto.
+const LIST_METHOD_SIGS: &[(&str, &str, &[&str])] = &[
+    ("push", "fn push(value: T) -> Null", &["value: T"]),
+    ("pop", "fn pop() -> T", &[]),
+    ("len", "fn len() -> Int", &[]),
+    (
+        "map",
+        "fn map(f: fn(T) -> U) -> List<U>",
+        &["f: fn(T) -> U"],
+    ),
+    (
+        "filter",
+        "fn filter(f: fn(T) -> Bool) -> List<T>",
+        &["f: fn(T) -> Bool"],
+    ),
+    (
+        "find",
+        "fn find(f: fn(T) -> Bool) -> Result<T>",
+        &["f: fn(T) -> Bool"],
+    ),
+    (
+        "any",
+        "fn any(f: fn(T) -> Bool) -> Bool",
+        &["f: fn(T) -> Bool"],
+    ),
+    (
+        "all",
+        "fn all(f: fn(T) -> Bool) -> Bool",
+        &["f: fn(T) -> Bool"],
+    ),
+    (
+        "count",
+        "fn count(f: fn(T) -> Bool) -> Int",
+        &["f: fn(T) -> Bool"],
+    ),
+    (
+        "find_index",
+        "fn find_index(f: fn(T) -> Bool) -> Result<Int>",
+        &["f: fn(T) -> Bool"],
+    ),
+    (
+        "flat_map",
+        "fn flat_map(f: fn(T) -> List<U>) -> List<U>",
+        &["f: fn(T) -> List<U>"],
+    ),
+];
+
+/// V4 expandido — catálogo de signatures de métodos built-in sobre `Map<K, V>`.
+const MAP_METHOD_SIGS: &[(&str, &str, &[&str])] = &[
+    ("get", "fn get(key: K) -> Result<V>", &["key: K"]),
+    ("has", "fn has(key: K) -> Bool", &["key: K"]),
+    ("keys", "fn keys() -> List<K>", &[]),
+    ("values", "fn values() -> List<V>", &[]),
+    ("len", "fn len() -> Int", &[]),
+];
+
+/// V4 expandido — catálogo de signatures de métodos built-in sobre `Str`.
+const STR_METHOD_SIGS: &[(&str, &str, &[&str])] = &[
+    ("len", "fn len() -> Int", &[]),
+    ("upper", "fn upper() -> Str", &[]),
+    ("lower", "fn lower() -> Str", &[]),
+];
+
+/// V4 expandido — heurística simple para inferir el "kind" de un
+/// receiver Ident sin pasar por el checker entero. Walkea el `Program`
+/// buscando un `Stmt::Assign { target: Ident(receiver_name), value }`
+/// top-level y matchea el `value` por shape estructural.
+///
+/// Devuelve `Some("List" | "Map" | "Str")` o `None` si no se puede
+/// determinar (var no encontrada, value compuesto, etc.).
+///
+/// MVP: solo cubre los 3 tipos built-in con method dispatch. Tipos
+/// custom (`type Foo`) quedan deuda futura.
+fn infer_builtin_receiver_kind(program: &Program, receiver_name: &str) -> Option<&'static str> {
+    for stmt in program {
+        if let Stmt::Assign {
+            target: crate::ast::AssignTarget::Ident(n, _),
+            value,
+            ..
+        } = stmt
+        {
+            if n == receiver_name {
+                return match value {
+                    Expr::List(_, _) | Expr::ListComp { .. } => Some("List"),
+                    Expr::Map(_, _) | Expr::MapComp { .. } => Some("Map"),
+                    Expr::Str(_, _) | Expr::StrInterp(_, _) => Some("Str"),
+                    // Otros casos: no podemos inferir sin checker
+                    // completo. Deuda menor.
+                    _ => None,
+                };
+            }
+        }
+    }
+    None
+}
+
+/// V4 expandido — construye SignatureHelp desde una entrada del
+/// catálogo de builtins/methods.
+fn signature_from_catalog(label: &str, param_labels: &[&str], active_param: u32) -> SignatureHelp {
+    let mut parameters = Vec::with_capacity(param_labels.len());
+    for plabel in param_labels {
+        // Buscar el offset del param label en el label completo.
+        if let Some(start) = label.find(plabel) {
+            let start_u32 = start as u32;
+            let end_u32 = (start + plabel.len()) as u32;
+            parameters.push(ParameterInformation {
+                label: ParameterLabel::LabelOffsets([start_u32, end_u32]),
+                documentation: None,
+            });
+        } else {
+            // Fallback: label como string si no se encuentra offset.
+            parameters.push(ParameterInformation {
+                label: ParameterLabel::Simple((*plabel).to_string()),
+                documentation: None,
+            });
+        }
+    }
+    let n_params = parameters.len() as u32;
+    SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: label.to_string(),
+            documentation: None,
+            parameters: Some(parameters),
+            active_parameter: None,
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active_param.min(n_params.saturating_sub(1))),
+    }
 }
 
 /// V4 — construye un `SignatureHelp` para un Call con callee `name`.
@@ -3035,14 +3254,57 @@ pub fn signature_help_for_call(
 /// detecta el call enclosing en el `text` y resuelve la signature
 /// contra el `Program`. Devuelve `None` si no hay call o si el callee
 /// no es una fn top-level conocida.
+///
+/// V4 expandido (2026-06-05) — dispatcher por kind de call:
+///
+/// 1. `CallContext::Function { name }`:
+///    - Primero busca fn user-defined en el `Program`.
+///    - Después busca en el catálogo de builtins (`print`, `len`, etc.).
+/// 2. `CallContext::Method { receiver_name, method }`:
+///    - Determina el "kind" del receiver via `infer_builtin_receiver_kind`
+///      (`List`/`Map`/`Str` por shape estructural del value asignado).
+///    - Busca la signature del método en el catálogo correspondiente.
 pub fn signature_help_at_position(
     text: &str,
     program: &Program,
     line: u32,
     character: u32,
 ) -> Option<SignatureHelp> {
-    let (name, active) = find_call_context(text, line, character)?;
-    signature_help_for_call(program, &name, active)
+    let (ctx, active) = find_call_context(text, line, character)?;
+    match ctx {
+        CallContext::Function { name } => {
+            // 1. Buscar fn user-defined en el Program.
+            if let Some(sig) = signature_help_for_call(program, &name, active) {
+                return Some(sig);
+            }
+            // 2. Catálogo de builtins.
+            for (bname, label, param_labels) in BUILTIN_SIGS {
+                if *bname == name {
+                    return Some(signature_from_catalog(label, param_labels, active));
+                }
+            }
+            None
+        }
+        CallContext::Method {
+            receiver_name,
+            method,
+        } => {
+            // Determinar el tipo del receiver via shape estructural.
+            let kind = infer_builtin_receiver_kind(program, &receiver_name)?;
+            let catalog = match kind {
+                "List" => LIST_METHOD_SIGS,
+                "Map" => MAP_METHOD_SIGS,
+                "Str" => STR_METHOD_SIGS,
+                _ => return None,
+            };
+            for (mname, label, param_labels) in catalog {
+                if *mname == method {
+                    return Some(signature_from_catalog(label, param_labels, active));
+                }
+            }
+            None
+        }
+    }
 }
 
 #[cfg(test)]

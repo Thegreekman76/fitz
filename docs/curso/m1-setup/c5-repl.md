@@ -311,10 +311,30 @@ expresión **sin evaluarla**.
 
 Notá que **no hace falta anotar `x: Int`**: el checker propaga el
 tipo del receptor `List<Int>` al param del callback automáticamente
-(inferencia bidireccional sobre métodos built-in con templates
-paramétricos — `.map`/`.filter`/`.find`/etc.). Si el param tiene
-anotación explícita incompatible con el receptor, la anotación gana
-y el checker emite el error correspondiente.
+(inferencia bidireccional). Cubre tres casos canónicos:
+
+1. **Callbacks de métodos built-in con templates paramétricos**
+   (`.map`/`.filter`/`.find`/`.any`/`.all`/etc. sobre `List<T>`):
+
+    ```fitz
+    [1, 2, 3].map(fn(x) => x * 10)   // x: Int inferido
+    ```
+
+2. **Args FnExpr a fns user-defined con param `Fn(...) -> ...`**:
+
+    ```fitz
+    fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
+    apply(fn(n) => n * 2, 5)          // n: Int inferido
+    ```
+
+3. **RHS FnExpr de `let` con anotación `Fn(...) -> ...`**:
+
+    ```fitz
+    let f: Fn(Int) -> Int = fn(n) => n * 2   // n: Int inferido
+    ```
+
+Si el param tiene anotación explícita incompatible con el hint,
+la anotación gana y el checker emite el error correspondiente.
 
 ```
 :type "hola"
