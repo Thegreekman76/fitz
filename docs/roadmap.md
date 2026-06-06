@@ -37,7 +37,7 @@
 2. **Tier C + D** (~17h): operadores SQL faltantes (ts_rank, expression indexes, JSON || merge) + DX/LSP (completion ORM methods en .where, hover @table → CREATE TABLE).
 3. **Tier E** (días-semanas, expansión del lenguaje): Decimal/Numeric, async streaming cursor-based, COPY FROM/TO, LISTEN/NOTIFY tipado, window functions, CTE/WITH, UNION/INTERSECT/EXCEPT.
 
-Alternativas no-ORM: nuevos boilerplates Dockerizados, contenido educativo (curso `Fitz de 0 a experto`), Fase 11 (frontend en `.fitz`), Fase 12 (deployment ciudadano primera clase), Fase 13 (CLI builder nativo).
+Alternativas no-ORM: nuevos boilerplates Dockerizados, contenido educativo (curso `Fitz de 0 a experto`), **Fase 11 (frontend en `.fitz`)** — única fase grande pendiente del roadmap, V6 (DAP — debugging interactivo en VSCode), deudas residuales menores del LSP/checker. Fases 12 (deployment) y 13 (CLI builder) ya están cerradas (v0.12.5+v0.13.0 y v0.11.0 respectivamente).
 
 Detalle exhaustivo de cada cierre en [`CHANGELOG.md`](../CHANGELOG.md) y deudas residuales en [`docs/deudas-post-5b.md`](deudas-post-5b.md).
 
@@ -9288,15 +9288,27 @@ release v0.10.17):
 
 ## Visión post-Fase 10 — Fase 11+ 🔮
 
-**Estado: especulativo.** Estas fases no están comprometidas en
-el orden — son la visión a largo plazo del proyecto. Cada una
-requiere su propia ronda de diseño antes de arrancar. Sirven hoy
-como **norte direccional**: las decisiones de Fase 10 (DB nativa)
-se evalúan contra "¿esto encaja con la visión de 11/12/13?".
+**Estado al cierre v0.15.0 (2026-06-05)**: de las 3 fases
+originalmente especulativas de esta sección, **2 ya cerraron**:
+
+- ✅ **Fase 12 (Deployment ciudadano)** — CERRADA en v0.12.5 + v0.13.0.
+- ✅ **Fase 13 (CLI builder)** — CERRADA en v0.11.0 + v0.11.1.
+- 🔮 **Fase 11 (Frontend en `.fitz`)** — sigue como visión a futuro,
+  no arrancada.
+
+Las secciones de Fase 12 y 13 abajo se mantienen como **referencia
+histórica** del diseño + cierre. La parte realmente especulativa del
+roadmap se reduce hoy a:
+
+| Item futuro | Estimación |
+|---|---|
+| Fase 11 (Frontend `.fitz` SFC + SSR) | meses, requiere ronda de diseño |
+| V6 (DAP — debugging interactivo VSCode) | ~2 semanas, anotada en backlog |
+| Fase 12.6+ targets extra (`fitz deploy fly/railway/k8s`) | 1-2 semanas por target |
+| Deuda residual técnica menor | ver `docs/deudas-post-5b.md` |
 
 > **Fase 10 (Stack DB nativo + ORM declarativo)** salió de esta
-> sección porque tiene **diseño cerrado** y está planificada con
-> sub-pasos detallados. Ver la sección dedicada **Fase 10 — Stack
+> sección al cerrar — ver la sección dedicada **Fase 10 — Stack
 > DB nativo + ORM declarativo** arriba.
 
 ### Fase 11 — Frontend en `.fitz` (SFC + SSR)
@@ -9333,9 +9345,16 @@ completas.
 **Inspiración**: Vue SFC + Svelte + Solid + Phoenix LiveView +
 HTMX. Mezcla de las mejores ideas.
 
-### Fase 12 — Deployment ciudadano primera clase
+### Fase 12 — Deployment ciudadano primera clase ✅ CERRADA (v0.12.5 + v0.13.0)
 
-**Promesa**: del repo a producción en 1 comando. El binario de
+> **Estado al cierre (2026-06-04)**: Fase 12 **completa** vive en
+> producción desde v0.13.0. **Tier 1** cerrado en v0.12.5 con cap
+> 35 entero + curso M7 + cierre formal. **Tier 2** cerrado en
+> v0.13.0 (`fitz deploy` + `@trace`/`@metric` + `@flag`/`flag()`).
+> Detalle por sub-fase abajo. El texto histórico de esta sección
+> describe el diseño y el plan tal como se ejecutó.
+
+**Promesa cumplida**: del repo a producción en 1 comando. El binario de
 `fitz build` no solo corre — es **deployable end-to-end** sin
 pegar mil archivos YAML / scripts shell / Dockerfile manuales.
 Health checks built-in, graceful shutdown automático, secrets
@@ -9343,10 +9362,17 @@ manageables con tipos opacos, observability auto-instrumentada
 con OpenTelemetry estándar, Dockerfile generado del shape del
 programa. Cero `helm install` para infra básica.
 
-**Estado**: planificada con MVP comprometido. Desbloquea el
-**cap M7 entero del curso** que está en espera. Pre-reqs:
-ninguno bloqueante (SIGTERM via `tokio::signal::ctrl_c` ya
+**Estado histórico al planificar**: planificada con MVP comprometido.
+Desbloquea el **cap M7 entero del curso** que estaba en espera.
+Pre-reqs: ninguno bloqueante (SIGTERM via `tokio::signal::ctrl_c` ya
 disponible; runtime multi-thread post-F17 cubre concurrencia).
+
+**Deuda residual derivada de Fase 12** (NO bloquea uso real):
+
+- **`fitz deploy` targets extra**: hoy solo `docker` y `compose`.
+  Targets `fly`/`railway`/`k8s` quedan como deuda visible documentada
+  — para esos, correr los CLIs directo. Estimación por target:
+  1-2 semanas.
 
 ### Scope MVP (Tier 1) — sub-fases 12.1-12.5
 
@@ -10097,49 +10123,85 @@ proporciona mayor mejora absoluta — el cold-compile de
 **Inspiración**: fly.io DX, Vercel deployment, Datadog
 instrumentation as code.
 
-### Fase 13 — CLI builder nativo
+### Fase 13 — CLI builder nativo ✅ CERRADA (v0.11.0 + v0.11.1)
 
-**Promesa**: Fitz no es solo para servicios web — también para
+> **Estado al cierre (2026-06-01)**: Fase 13 completa vive en
+> producción desde v0.11.0. Polish menor (short flags + Bool=true
+> negation + List<Str> variadic) cerrado en v0.11.1. Detalle
+> exhaustivo en el CHANGELOG.
+
+**Promesa cumplida**: Fitz no es solo para servicios web — también para
 scripts CLI con la misma ergonomía.
 
-- **`@command("greet")`** decorator + autogeneración de `--help`:
-  ```fitz
-  @command("greet")
-  @arg("name", help="A quién saludar")
-  @flag("loud", short="l", help="MAYÚSCULAS")
-  fn greet(name: Str, loud: Bool = false) {
-      let msg = if (loud) { "HOLA, {name}!" } else { "Hola, {name}" }
-      print(msg)
-  }
-  ```
-- Sin imports — typer/click/clap built-in.
+**Sintaxis canónica IMPLEMENTADA** (sin `@arg`/`@flag` separados —
+**convención del default** lo cubre):
+
+```fitz
+@command("greet", desc="Greet a person")
+fn greet(name: Str, loud: Bool = false, count: Int = 1) -> Int {
+    let n = count
+    while n > 0 {
+        if loud { print("HELLO, {name}!") } else { print("hello, {name}") }
+        n = n - 1
+    }
+    return 0
+}
+```
+
+Convención:
+
+- Param **sin default** → positional arg requerido (`mybin <name>`).
+- Param **con default** → flag opcional (`--loud`, `--count 3`).
+- `Bool = false` → flag bool. `Int/Float/Str = X` → flag con valor.
+
+Help autogenerado (`mybin --help`, `mybin <cmd> --help`), exit codes
+POSIX, multi-command dispatch, paridad bit-a-bit `fitz run` ↔ `fitz build`.
+Sin imports — `clap`/`typer`/`click` no son necesarios.
 
 **Por qué importa**: amplía el público de Fitz a "devs que
 escriben scripts en Python/Bash" — un mercado más amplio que
 solo web.
 
+**Decisión de diseño**: la sintaxis ORIGINAL del roadmap mencionaba
+`@arg("name", help="...")` y `@flag("loud", short="l")` como
+decorators separados. Al implementar, decidimos que la **convención
+del default cubre el 90% del caso** sin verbosidad extra (vs Click
+que exige `@click.argument`/`@click.option` por cada param). Short
+flags se auto-derivan (`--loud` → `-l`) con detección de conflictos.
+`@arg`/`@flag` separados quedan como deuda menor si aparece presión.
+
 **Inspiración**: typer (Python), clap (Rust), cobra (Go).
 
-### Por qué este orden
+### Por qué este orden — retrospectiva al cierre v0.15.0
 
-1. **Package manager primero** (Fase 9.y, cerrada) — pre-requisito
+1. ✅ **Package manager primero** (Fase 9.y, cerrada) — pre-requisito
    de todo lo demás. Sin manifest no hay tests con discovery, sin
    deps no hay ecosystem.
-2. **DX completo** (Fase 9.z, cerrada) — segunda capa de tooling.
+2. ✅ **DX completo** (Fase 9.z, cerrada) — segunda capa de tooling.
    Necesita el manifest del package manager pero no más.
-3. **Stack web first-class** (Fase 9.w, MVP cerrado) — primera
+3. ✅ **Stack web first-class** (Fase 9.w, MVP cerrado) — primera
    extensión al lenguaje core post-tooling. Aprovecha el momentum
    del LSP + package manager + DX para meter features grandes.
-4. **Fase 10 (DB)** — planificada con diseño cerrado (ver sección
-   dedicada arriba). Próximo norte comprometido. Necesaria antes
-   de Fase 11 (frontend) porque sin DB el "stack completo" no
-   tiene sustancia.
-5. **Fase 11 (Frontend)** — la apuesta más grande. Requiere todo
-   lo anterior maduro.
-6. **Fase 12 (Deploy)** — cierra el ciclo. Mejor con el
-   ecosistema ya vivo.
-7. **Fase 13 (CLI)** — opcional, amplía nicho. Puede adelantarse
-   si aparece presión.
+4. ✅ **Fase 10 (DB nativo + ORM)** — cerrada, vive en producción.
+   La pieza más grande del proyecto. Destrabó el "stack completo"
+   para validar Fitz como lenguaje de apps full.
+5. 🔮 **Fase 11 (Frontend en `.fitz`)** — la apuesta más grande.
+   Sigue sin arrancar. Requiere ronda de diseño dedicada — pre-reqs
+   ya están todos cerrados.
+6. ✅ **Fase 12 (Deployment ciudadano primera clase)** — cerrada en
+   v0.12.5 (Tier 1: healthz + Secret + observability + Docker) +
+   v0.13.0 (Tier 2: `fitz deploy` + `@trace`/`@metric` + `@flag`).
+7. ✅ **Fase 13 (CLI builder)** — cerrada en v0.11.0 (adelantada
+   respecto al plan original — entró antes que Fase 12 por
+   coincidencia de bandwidth).
+
+**Hito real al cierre v0.15.0**: el lenguaje tiene **stack web
+first-class** (HTTP + WS + auth + middleware + OpenAPI + jobs +
+ORM nativo) + **stack CLI first-class** (`@command`) + **producción
+ciudadana primera** (healthz/readyz + Secret + observability OTel +
+`fitz docker init/build` + `fitz deploy`) + **interop Python** +
+**LSP MVP fuerte**. La única pieza grande que falta es **Fase 11
+(Frontend)**.
 
 ---
 
