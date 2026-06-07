@@ -1,0 +1,475 @@
+// TaskHub C4 — CRUD + relations + WebSocket en vivo por project.
+//
+// Estado al cerrar el cap C4:
+// - @has_many("Task", via="project_id", on_delete="cascade") en Project + tasks: List<Task>
+// - @belongs_to("Project", on_delete="cascade") en Task.project_id + project: Project? companion
+// - CRUD: POST/GET /api/projects + GET /api/projects/{id} con .preload("tasks")
+// - Task CRUD: POST /api/projects/{project_id}/tasks + PUT /api/tasks/{id}
+// - @ws("/ws/projects/{id}") con WsConn<TaskEvent> + broadcast simétrico
+// - Limitación MVP: HTTP handler NO triggerea broadcast (documentado en cap)
+//
+// Sin cambios al schema vs C2 — solo decorators de relations
+// (las FK constraints ya están en la migration con ON DELETE CASCADE).
+
+// ───────────────────────────────────────────────
+// Schema del dominio con relations declaradas
+// ───────────────────────────────────────────────
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    @hidden password_hash: Str = ""
+    role: Str = "member"
+    created_at: DateTime
+}
+
+@table("tasks") type Task {
+    @primary id: Int = 0
+    @belongs_to("Project", on_delete="cascade") project_id: Int
+    title: Str
+    description: Str = ""
+    status: Str = "todo"
+    priority: Int = 3
+    assignee_id: Int?
+    due_date: Date?
+    ai_suggested_priority: Int?
+    created_at: DateTime
+    project: Project?           // companion virtual para BelongsTo
+}
+
+@table("projects") type Project {
+    @primary id: Int = 0
+    name: Str
+    description: Str = ""
+    owner_id: Int
+    created_at: DateTime
+    @has_many("Task", via="project_id", on_delete="cascade") tasks: List<Task> = []
+}
+
+@table("comments") type Comment {
+    @primary id: Int = 0
+    task_id: Int
+    user_id: Int
+    body: Str
+    created_at: DateTime
+}
+
+// ───────────────────────────────────────────────
+// Conexión a la DB + JWT secret
+// ───────────────────────────────────────────────
+
+let db_result = db.connect(env_or("DATABASE_URL", "")).await
+let JWT_SECRET = env_or("JWT_SECRET", "dev-secret-cambiame")
+
+// ───────────────────────────────────────────────
+// Tipos auxiliares
+// ───────────────────────────────────────────────
+
+type RegisterInput {
+    email: Str
+    password: Str
+}
+
+type LoginInput {
+    email: Str
+    password: Str
+}
+
+type LoginResponse {
+    token: Str
+}
+
+type PromoteInput {
+    new_role: Str
+}
+
+type StatsResponse {
+    total_users: Int
+    total_projects: Int
+    total_tasks: Int
+}
+
+type HealthResponse {
+    status: Str
+    version: Str
+}
+
+type CreateProjectInput {
+    name: Str
+    description: Str = ""
+}
+
+type CreateTaskInput {
+    title: Str
+    description: Str = ""
+    priority: Int = 3
+    assignee_id: Int?
+    due_date: Date?
+}
+
+// UpdateTaskInput usa sentinels ("" / 0) en lugar de nullables
+// para que el handler pueda armar un changes: Map<Str, Any>
+// con if simples — el match con side effects en arms tiene
+// trade-offs sintácticos que no necesitamos pagar acá. Trade-off
+// del sentinel: no podés explícitamente clear assignee_id a null
+// via este endpoint (queda como deuda menor).
+type UpdateTaskInput {
+    title: Str = ""
+    description: Str = ""
+    status: Str = ""
+    priority: Int = 0
+    assignee_id: Int = 0
+}
+
+// Frame del WebSocket para broadcast en vivo.
+// project_id permite que el cliente filtre eventos del board que
+// está viendo. Single global channel limitation — ver cap C4 § Paso 9.
+type TaskEvent {
+    kind: Str           // "created" / "updated" / "deleted" / "connected"
+    task_id: Int
+    project_id: Int     // ← cliente filtra por este field
+    status: Str = ""
+    user_email: Str = ""
+}
+
+// ───────────────────────────────────────────────
+// Helpers privados
+// ───────────────────────────────────────────────
+
+async fn find_user_by_email(email: Str) -> Result<User> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    return User.where(fn(u) => u.email == email).first(conn).await
+}
+
+// ───────────────────────────────────────────────
+// @auth_provider
+// ───────────────────────────────────────────────
+
+@auth_provider
+async fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let auth: Str = match headers.get("authorization") {
+        Ok(v) => v,
+        Err(_) => return Err("falta header Authorization"),
+    }
+    let parts = auth.split(" ")
+    if (parts.len() != 2) {
+        return Err("Authorization debe ser 'Bearer <token>'")
+    }
+    if (parts[0] != "Bearer") {
+        return Err("scheme debe ser Bearer")
+    }
+    let token = parts[1]
+
+    let claims = jwt.decode(token, JWT_SECRET)?
+    let email: Str = match claims.get("email") {
+        Ok(v) => v,
+        Err(_) => return Err("token sin claim email"),
+    }
+
+    return find_user_by_email(email).await
+}
+
+// ───────────────────────────────────────────────
+// Endpoints públicos
+// ───────────────────────────────────────────────
+
+@get("/healthz")
+fn healthz() -> HealthResponse {
+    return HealthResponse {
+        status: "ok",
+        version: "0.1.0-c4"
+    }
+}
+
+@post("/auth/register")
+async fn register(input: RegisterInput) -> Result<User> {
+    if (input.email == "" or input.password == "") {
+        return Err("email y password son obligatorios")
+    }
+    if (input.password.len() < 8) {
+        return Err("password debe tener al menos 8 caracteres")
+    }
+
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+
+    let existing = User.where(fn(u) => u.email == input.email).first(conn).await
+    match existing {
+        Ok(_)  => return Err("email ya registrado"),
+        Err(_) => 0,
+    }
+
+    let pw_hash = hash.password(input.password)
+    let new_user = User.insert(conn, User {
+        id: 0,
+        email: input.email,
+        password_hash: pw_hash,
+        role: "member",
+        created_at: DateTime.now(),
+    }).await?
+
+    return Ok(new_user)
+}
+
+@post("/auth/login")
+async fn login(creds: LoginInput) -> Result<LoginResponse> {
+    let user: User = match find_user_by_email(creds.email).await {
+        Ok(u) => u,
+        Err(_) => return Err("credenciales inválidas"),
+    }
+    if (not hash.verify(creds.password, user.password_hash)) {
+        return Err("credenciales inválidas")
+    }
+    let claims = {
+        "email": user.email,
+        "role": user.role,
+    }
+    let token = jwt.encode(claims, JWT_SECRET)
+    return Ok(LoginResponse { token: token })
+}
+
+// ───────────────────────────────────────────────
+// Endpoints autenticados (auth + admin)
+// ───────────────────────────────────────────────
+
+@authenticated
+@get("/me")
+fn me(user: User) -> User => user
+
+@requires("admin")
+@get("/users")
+async fn list_users_admin(user: User) -> Result<List<User>> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    return User.all(conn).await
+}
+
+@requires("admin")
+@post("/users/{id}/promote")
+async fn promote_user(id: Int, input: PromoteInput, user: User) -> Result<User> {
+    if (input.new_role != "admin" and input.new_role != "owner" and input.new_role != "member") {
+        return Err("new_role debe ser 'admin', 'owner' o 'member'")
+    }
+
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+
+    let updated_count = User.where(fn(u) => u.id == id)
+        .update(conn, { "role": input.new_role })
+        .await?
+
+    if (updated_count == 0) {
+        return Err("user con id={id} no existe")
+    }
+
+    return User.where(fn(u) => u.id == id).first(conn).await
+}
+
+@requires("admin")
+@requires("owner")
+@get("/stats")
+async fn stats(user: User) -> Result<StatsResponse> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    let users_count = User.count(conn).await?
+    let projects_count = Project.count(conn).await?
+    let tasks_count = Task.count(conn).await?
+    return Ok(StatsResponse {
+        total_users: users_count,
+        total_projects: projects_count,
+        total_tasks: tasks_count,
+    })
+}
+
+// ───────────────────────────────────────────────
+// Projects CRUD
+// ───────────────────────────────────────────────
+
+@authenticated
+@post("/projects")
+async fn create_project(input: CreateProjectInput, user: User) -> Result<Project> {
+    if (input.name == "") {
+        return Err("name no puede estar vacío")
+    }
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    let new_project = Project.insert(conn, Project {
+        id: 0,
+        name: input.name,
+        description: input.description,
+        owner_id: user.id,
+        created_at: DateTime.now(),
+        tasks: [],
+    }).await?
+    return Ok(new_project)
+}
+
+@authenticated
+@get("/projects")
+async fn list_projects(user: User) -> Result<List<Project>> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    if (user.role == "admin") {
+        return Project.all(conn).await
+    }
+    return Project.where(fn(p) => p.owner_id == user.id).all(conn).await
+}
+
+@authenticated
+@get("/projects/{id}")
+async fn get_project(id: Int, user: User) -> Result<Project> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    let project = Project.where(fn(p) => p.id == id)
+        .preload("tasks")
+        .first(conn)
+        .await?
+    if (user.role != "admin" and project.owner_id != user.id) {
+        return Err("no podés ver este project")
+    }
+    return Ok(project)
+}
+
+// ───────────────────────────────────────────────
+// Tasks CRUD
+// ───────────────────────────────────────────────
+
+@authenticated
+@post("/projects/{project_id}/tasks")
+async fn create_task(
+    project_id: Int,
+    input: CreateTaskInput,
+    user: User
+) -> Result<Task> {
+    if (input.title == "") {
+        return Err("title no puede estar vacío")
+    }
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    let project = Project.where(fn(p) => p.id == project_id).first(conn).await?
+    if (user.role != "admin" and project.owner_id != user.id) {
+        return Err("no podés agregar tasks a este project")
+    }
+    let new_task = Task.insert(conn, Task {
+        id: 0,
+        project_id: project_id,
+        title: input.title,
+        description: input.description,
+        status: "todo",
+        priority: input.priority,
+        assignee_id: input.assignee_id,
+        due_date: input.due_date,
+        ai_suggested_priority: null,
+        created_at: DateTime.now(),
+        project: null,
+    }).await?
+    return Ok(new_task)
+}
+
+@authenticated
+@put("/tasks/{id}")
+async fn update_task(
+    id: Int,
+    input: UpdateTaskInput,
+    user: User
+) -> Result<Task> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    let task = Task.where(fn(t) => t.id == id)
+        .preload("project")
+        .first(conn)
+        .await?
+    let project: Project = match task.project {
+        null => return Err("project del task no encontrado"),
+        p    => p,
+    }
+    let is_owner = (user.role == "admin") or (project.owner_id == user.id)
+    // Pattern para nullable: `null` y `<ident>` (refined al inner T).
+    // NO usar `Some(a)` — esa es la sintaxis para Result.
+    let is_assignee = match task.assignee_id {
+        null => false,
+        a    => a == user.id,
+    }
+    if (not is_owner and not is_assignee) {
+        return Err("no podés modificar este task")
+    }
+    // Build incremental del changes con sentinels.
+    let changes: Map<Str, Any> = {}
+    if (input.title != "")       { changes["title"] = input.title }
+    if (input.description != "") { changes["description"] = input.description }
+    if (input.status != "")      { changes["status"] = input.status }
+    if (input.priority != 0)     { changes["priority"] = input.priority }
+    if (input.assignee_id != 0)  { changes["assignee_id"] = input.assignee_id }
+    let _ = Task.where(fn(t) => t.id == id).update(conn, changes).await?
+    return Task.where(fn(t) => t.id == id).first(conn).await
+}
+
+// ───────────────────────────────────────────────
+// WebSocket: broadcast en vivo por project
+// ───────────────────────────────────────────────
+
+// Limitación del lenguaje (v0.15.x): `@ws("/path")` solo acepta
+// Str literal — no soporta path params estilo `/ws/projects/{id}`
+// como sí lo hacen los handlers HTTP. Workaround: un único canal
+// global `/ws/events`, cada frame incluye `project_id` para que
+// el cliente filtre. La filtración server-side por project_id
+// requiere subscription tracking adentro del handler (futuro).
+@authenticated
+@ws("/ws/events")
+async fn task_events(conn: WsConn<TaskEvent>, user: User) -> Null {
+    let welcome = TaskEvent {
+        kind: "connected",
+        task_id: 0,
+        project_id: 0,
+        status: "",
+        user_email: "system",
+    }
+    let _ = conn.send(welcome)
+
+    loop {
+        match conn.recv() {
+            Ok(msg) => {
+                let stamped = TaskEvent {
+                    kind: msg.kind,
+                    task_id: msg.task_id,
+                    project_id: msg.project_id,
+                    status: msg.status,
+                    user_email: user.email,
+                }
+                let _ = conn.broadcast(stamped)
+            }
+            Err(_) => return null,
+        }
+    }
+    return null
+}
+
+// ───────────────────────────────────────────────
+// Entry
+// ───────────────────────────────────────────────
+
+@server(8080, ws_heartbeat_secs=30)
+fn main() => 0
+
+print("TaskHub C4 — CRUD + WS activos, escuchando en :8080")

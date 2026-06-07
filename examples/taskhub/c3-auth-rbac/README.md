@@ -129,11 +129,11 @@ docker compose down -v
 
 ## Qué viene
 
-**[Cap C4 — CRUD + relations + WebSocket en vivo por project](../../../docs/taskhub/c4-crud-relations-ws.md)**
-(próximamente — en desarrollo). Sumamos los CRUD de
-projects/tasks/comments con `@belongs_to` / `@has_many` para
-navigation methods + eager loading + WebSocket por project para
-broadcast de cambios en vivo.
+**[Cap C4 — CRUD + relations + WebSocket en vivo por project](../../../docs/taskhub/c4-crud-relations-ws.md)**.
+Sumamos los CRUD de projects/tasks con `@belongs_to` /
+`@has_many` para navigation methods + eager loading con
+`.preload(...)` + WebSocket por project para broadcast de cambios
+en vivo + limitación honesta del MVP del lenguaje.
 
 ## Troubleshooting
 

@@ -1,0 +1,95 @@
+services:
+  # ────────────────────────────────────────────────────────
+  # SERVICE 1 — app (el binario Fitz)
+  # ────────────────────────────────────────────────────────
+  app:
+    build: .
+    container_name: taskhub-app
+    expose:
+      - "8080"
+    environment:
+      DATABASE_URL: postgres://taskhub:${DB_PASSWORD:?DB_PASSWORD requerido}@db:5432/taskhub?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET requerido}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      OTEL_SERVICE_NAME: taskhub
+      RUST_LOG: info
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "test -e /proc/1/exe || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────
+  # SERVICE 2 — db (Postgres)
+  # ────────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: taskhub-db
+    environment:
+      POSTGRES_USER: taskhub
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD requerido}
+      POSTGRES_DB: taskhub
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskhub -d taskhub"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────
+  # SERVICE 3 — prometheus
+  # ────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: taskhub-prometheus
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    ports:
+      - "9090:9090"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────
+  # SERVICE 4 — jaeger (incluye OTel collector built-in)
+  # ────────────────────────────────────────────────────────
+  otel-collector:
+    image: jaegertracing/all-in-one:1.62
+    container_name: taskhub-jaeger
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"
+      - "4317:4317"
+      - "4318:4318"
+    restart: unless-stopped
+
+  # ────────────────────────────────────────────────────────
+  # SERVICE 5 — nginx
+  # ────────────────────────────────────────────────────────
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: taskhub-nginx
+    ports:
+      - "8000:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
+    depends_on:
+      - app
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  prom_data:

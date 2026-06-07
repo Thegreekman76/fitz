@@ -684,8 +684,7 @@ construyen sobre esto.
 
 ## Próximo cap
 
-**C4 — CRUD + relations + WebSocket en vivo por project**
-(próximamente — en desarrollo).
+**[C4 — CRUD + relations + WebSocket en vivo por project](c4-crud-relations-ws.md)**.
 
 Vamos a sumar los CRUD de projects + tasks + comments con
 relations (`@belongs_to` / `@has_many` para navigation methods),

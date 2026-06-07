@@ -11,6 +11,120 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.6] — 2026-06-07 — TaskHub C4: CRUD + relations + WebSocket en vivo
+
+Cuarto cap de **Construyendo TaskHub**. Sobre el auth + RBAC del
+C3 sumamos el **corazón funcional del producto**: CRUD HTTP para
+projects + tasks con `@belongs_to` / `@has_many` decorators +
+companion fields + `.preload("tasks")` para eager loading sin
+N+1, y un canal WebSocket global tipado con `WsConn<TaskEvent>` +
+broadcast simétrico que demuestra updates en vivo entre múltiples
+clientes. El cap documenta **dos limitaciones honestas del MVP**
+del lenguaje y muestra los workarounds canónicos.
+
+### Cap C4 entregado
+
+- **[`docs/taskhub/c4-crud-relations-ws.md`](docs/taskhub/c4-crud-relations-ws.md)**
+  (~1000 LoC) — 10 pasos cubriendo: sumar `@has_many("Task",
+  via="project_id", on_delete="cascade") tasks: List<Task> = []`
+  en Project + `@belongs_to("Project", on_delete="cascade")
+  project_id: Int` + companion `project: Project?` en Task (sin
+  migration — las FK constraints ya están con ON DELETE CASCADE
+  en `initial_schema.sql` del C2), tipos auxiliares con
+  **sentinels** (`Str = ""`, `Int = 0`) en `UpdateTaskInput`,
+  `POST /api/projects` con `owner_id = user.id`, `GET /api/projects`
+  con scope por rol (admin bypass, otros con WHERE `owner_id =
+  user.id`), `GET /api/projects/{id}` con `.preload("tasks")` para
+  eager load, `POST /api/projects/{project_id}/tasks` con
+  verificación de ownership, `PUT /api/tasks/{id}` con triple
+  scope (admin OR owner OR assignee) + nullable refinement en
+  match arm (patrón `null` + bare ident, NO `Some(a)`), canal
+  WebSocket global `@authenticated @ws("/ws/events")` con
+  `WsConn<TaskEvent>` + filtrado client-side por `project_id`,
+  tests end-to-end con curl + wscat.
+- **Dos limitaciones del MVP documentadas honestamente**:
+  1. **HTTP handlers no triggerean broadcasts WS**: `conn.broadcast`
+     solo funciona desde dentro de un handler `@ws`. Patrón
+     canónico: cliente que mutó por HTTP **también** emite un
+     frame WS para informar a otros. Futura API global
+     `Ws.broadcast(endpoint, event)` cubrirá el caso.
+  2. **`@ws` no acepta path params**: `@ws("/path")` exige Str
+     literal. Patrón canónico: canal global + cada frame incluye
+     identificador (`project_id`) + filtrado client-side. Futuro
+     soporte de path params o subscription tracking server-side.
+- Bar editorial: header + mermaid + tabla comparativa con
+  Rails ActiveRecord + ActionCable / Django ORM + Channels /
+  Sequelize + Socket.IO / TypeORM + ws (con rows específicos
+  sobre relations declarativas + eager loading + WS auth en
+  handshake + frame typing + AsyncAPI auto + heartbeat),
+  validación checklist con 11 items, troubleshooting con 6
+  casos.
+
+### Ejemplo runnable
+
+`examples/taskhub/c4-crud-relations-ws/` — estado del proyecto al
+cerrar C4. Copia de C3 con:
+
+- **`src/main.fitz`** extendido con: `@has_many` + `@belongs_to` +
+  companion fields en Project/Task, 4 tipos auxiliares nuevos
+  (`CreateProjectInput`, `CreateTaskInput`, `UpdateTaskInput`,
+  `TaskEvent` con `project_id`), 5 handlers HTTP nuevos
+  (create_project, list_projects, get_project, create_task,
+  update_task), 1 handler WS (`task_events`) con marshaling
+  automático JSON ↔ TaskEvent. `@server(8080, ws_heartbeat_secs=30)`
+  activa ping/pong automático.
+- **Sin cambios al schema** — relations son decisión de código.
+- README dedicado con setup + validación end-to-end (curl + wscat)
+  + nota sobre la limitación del MVP.
+
+### Descubrimientos hechos durante la implementación
+
+Tres ajustes al cap doc + ejemplo después de correr `fitz check`:
+
+1. **Match arms con side effects + `;` separator no compilan**.
+   El boilerplate `api-orm-full/src/posts.fitz` evita el problema
+   usando sentinels (`Str = ""`, `Int = 0`) en lugar de nullables
+   en `UpdateInput`, con `if (field != "") { changes[...] = ... }`
+   adentro del handler. Adoptado el patrón.
+2. **`@ws("/path")` exige Str literal**: el checker rechaza
+   `@ws("/ws/projects/{id}")` con mensaje *"el argumento debe ser
+   un Str literal (path)"*. Refactorizado a canal global
+   `@ws("/ws/events")` + `project_id` en el frame + filtrado
+   client-side.
+3. **Nullable match pattern: `null` + bare ident, NO `Some(a)`**.
+   El refinement de nullables en match arms (heredado del
+   CLAUDE.md Pattern::Ident sobre Nullable) usa
+   `match x { null => ..., a => ... }` donde `a` está refinada
+   al inner `T`. `Some(a)` es para Result, no para nullable.
+
+### Cross-refs actualizados
+
+- **`mkdocs.yml`**: nav del tab suma entry C4.
+- **`docs/taskhub/index.md`**: tabla del roadmap actualiza C4 con
+  link real + descripción ampliada mencionando la limitación
+  honesta.
+- **`docs/taskhub/c3-auth-rbac.md`**: "Próximo cap" linkea al C4.
+- **`examples/taskhub/c3-auth-rbac/README.md`**: "Qué viene"
+  linkea al C4.
+
+### Validación
+
+- `mkdocs build` non-strict: 22.57s, sin warnings nuevos sobre
+  los archivos TaskHub.
+- `fitz check examples/taskhub/c4-crud-relations-ws/src/main.fitz`
+  → "sin errores de tipo". El programa con `@has_many` +
+  `@belongs_to` + companion fields + `.preload(...)` + canal WS
+  global + 5 handlers HTTP + 1 handler WS + nullable refinement
+  pasa el checker en bloque.
+- Smoke real end-to-end NO automatizado — requiere Docker +
+  migrations + admin bootstrap manual + 3 users + multi-terminal
+  wscat. Documentado paso a paso en el README + cap.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al stack —
+release v0.15.6 patch 100% docs/material pedagógico.
+
 ## [v0.15.5] — 2026-06-07 — TaskHub C3: Auth con RBAC custom de 3 roles apilables
 
 Tercer cap de **Construyendo TaskHub**. Sobre el schema del C2
