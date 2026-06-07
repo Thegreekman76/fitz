@@ -1,0 +1,21 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Scrape del propio Prometheus (sanity check).
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Scrape de TaskHub.
+  # En C1 el endpoint /metrics no existe — Prometheus loguea
+  # "connection refused" cada 15s. Esperado.
+  # En C7 activamos @server(prometheus=true) y el target queda UP.
+  - job_name: taskhub
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["app:8080"]
+        labels:
+          service: taskhub
+          env: dev

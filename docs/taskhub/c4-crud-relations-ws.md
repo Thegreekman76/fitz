@@ -809,8 +809,7 @@ real (C7) va a consumir estos endpoints**.
 
 ## Próximo cap
 
-**C5 — Cron + background jobs con persistencia** (próximamente —
-en desarrollo).
+**[C5 — Cron + background jobs con persistencia](c5-cron-jobs-persistencia.md)**.
 
 Vamos a sumar un **cron job nocturno** que limpia tasks `done`
 con más de 90 días + envía emails recordatorios de tasks con

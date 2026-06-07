@@ -11,6 +11,105 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.7] — 2026-06-07 — TaskHub C5: Cron + background jobs con persistencia
+
+Quinto cap de **Construyendo TaskHub**. Sobre el CRUD + WS del
+C4 sumamos **cron + background + spawn + persistencia** — el cap
+que **borra Celery del compose**. Sin Celery, sin Redis, sin
+worker separados: todo vive en el binario con `tokio` scheduler
++ tablas `fitz_cron_jobs` + `fitz_cron_runs` auto-creadas en
+Postgres. Diferenciador estructural fuerte vs stacks típicos
+Python+Celery+Redis (que suman ~450 MB al compose).
+
+### Cap C5 entregado
+
+- **[`docs/taskhub/c5-cron-jobs-persistencia.md`](docs/taskhub/c5-cron-jobs-persistencia.md)**
+  (~950 LoC) — 6 pasos cubriendo: `@cron("0 0 3 * * *", tz="UTC",
+  retry={max:3, backoff:"exponential", initial_secs:30,
+  max_secs:300}, store=db_result) async fn cleanup_old_tasks()`
+  (cron handler sin params, accede `db_result` del closure scope),
+  `@cron("0 0 9 * * *", tz="UTC", retry={..., backoff:"linear"},
+  store=db_result) async fn daily_due_reminders()` (busca tasks
+  con `due_date` próxima + dispara `spawn(send_due_reminder(...))`
+  por cada una), `@background async fn send_due_reminder(task_id:
+  Int) -> Null` (mock email envío con print + integración futura
+  con SendGrid/Postmark/SES), `spawn(send_due_reminder(new_task.id))`
+  desde `POST /api/projects/{id}/tasks` cuando `due_date != null`,
+  endpoint admin `GET /api/jobs` con `db.query` crudo +
+  typed accessors (`r.get_str(...)?` / `r.get_int(...)?`) leyendo
+  `fitz_cron_runs`, tests end-to-end con forzar el cron a
+  schedule corto para validación. Bar editorial: header + mermaid
+  + tabla comparativa con Python+Celery / Node+bull / Spring+Quartz
+  / Rails+Sidekiq (rows sobre services compose, imagen total,
+  broker externo, setup scheduler, workers, persistencia retry
+  TZ catch-up cron-only mode), validación checklist con 9 items,
+  troubleshooting con 5 casos (incluido el `fitz_cron_runs` crece
+  sin parar — soluciona con otro cron de cleanup del audit log).
+
+### Ejemplo runnable
+
+`examples/taskhub/c5-cron-jobs-persistencia/` — estado del proyecto
+al cerrar C5. Copia de C4 con:
+
+- **`src/main.fitz`** extendido con: 2 `@cron` handlers,
+  `@background async fn send_due_reminder`, `JobRun` type +
+  `GET /jobs` admin endpoint con SQL crudo, modificación al
+  `create_task` handler para disparar `spawn(...)` cuando
+  `due_date != null`. Total `main.fitz` ahora ~600 LoC integrando
+  el stack completo.
+- **Sin cambios al schema ni migration**. Las tablas
+  `fitz_cron_jobs` + `fitz_cron_runs` se crean automáticamente al
+  boot del scheduler (idempotente con `CREATE TABLE IF NOT EXISTS`).
+- README dedicado con setup + validación + sección "Forzar
+  ejecución de cron para testing" + 3 descubrimientos del checker
+  documentados.
+
+### 3 descubrimientos del checker durante la implementación
+
+El cap C5 obligó a aprender 3 restricciones del MVP no obvias —
+documentadas en el cap doc + README:
+
+1. **`@cron` handlers no aceptan params**. Signature exacta es
+   `async fn () -> Result<Null>`. El kwarg `store=db_result` es
+   para PERSISTENCIA DE METADATA DE RUNS, NO para inyectar `db`
+   en el handler. Para acceder a la DB, el handler hace
+   `let conn = match db_result { Ok(c) => c, Err(_) => return ... }`
+   desde el closure scope.
+2. **Strings multi-línea no compilan**. SQL queries largas van
+   en una sola línea o se concatenan con `+` (también en una
+   sola línea — concatenación multi-línea tampoco funciona).
+3. **Closures multi-línea no compilan**. `fn(t) => predicate`
+   debe estar en una sola línea. WHERE complejos como
+   `t.due_date != null and t.due_date >= today and ...` van
+   inline con `and`/`or`.
+
+### Cross-refs actualizados
+
+- **`mkdocs.yml`**: nav del tab suma entry C5.
+- **`docs/taskhub/index.md`**: tabla del roadmap C5 con link real
+  + descripción ampliada (sin Celery, sin Redis).
+- **`docs/taskhub/c4-crud-relations-ws.md`**: "Próximo cap" linkea
+  al C5.
+- **`examples/taskhub/c4-crud-relations-ws/README.md`**: "Qué
+  viene" linkea al C5.
+
+### Validación
+
+- `mkdocs build` non-strict: 15.25s, sin warnings nuevos sobre
+  los archivos TaskHub.
+- `fitz check examples/taskhub/c5-cron-jobs-persistencia/src/main.fitz`
+  → "sin errores de tipo". El programa con 2 `@cron` + 1
+  `@background` + `spawn(...)` + endpoint admin con SQL crudo +
+  typed accessors pasa el checker en bloque.
+- Smoke real end-to-end NO automatizado — requiere Docker +
+  scheduler corriendo + esperar a las 3am o forzar schedule
+  corto. Documentado paso a paso en README + cap.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al stack —
+release v0.15.7 patch 100% docs/material pedagógico.
+
 ## [v0.15.6] — 2026-06-07 — TaskHub C4: CRUD + relations + WebSocket en vivo
 
 Cuarto cap de **Construyendo TaskHub**. Sobre el auth + RBAC del

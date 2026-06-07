@@ -166,11 +166,12 @@ docker compose down -v    # resetea schema + users + projects
 
 ## Qué viene
 
-**Cap C5 — Cron + background jobs con persistencia**
-(próximamente — en desarrollo). Sumamos un `@cron("0 0 3 * * *")`
-nocturno con `store=db` que limpia tasks `done` viejas + envía
-recordatorios de tasks con due_date próxima. **Sin Celery, sin
-Redis** — `@cron` + `@background` viven en el binario.
+**[Cap C5 — Cron + background jobs con persistencia](../../../docs/taskhub/c5-cron-jobs-persistencia.md)**.
+Sumamos 2 `@cron` (cleanup nocturno + daily reminders matutinos)
+con `store=db_result` para persistencia, `@background async fn`
+para fire-and-forget desde handlers, y endpoint admin
+`GET /api/jobs`. **Sin Celery, sin Redis** — `@cron` +
+`@background` viven en el binario.
 
 ## Troubleshooting
 

@@ -1,0 +1,15 @@
+# Build artifacts
+target/
+*.exe
+*.pdb
+
+# Env files (nunca commitear secrets)
+.env
+.env.local
+
+# IDE
+.idea/
+.vscode/
+
+# Logs locales
+*.log
