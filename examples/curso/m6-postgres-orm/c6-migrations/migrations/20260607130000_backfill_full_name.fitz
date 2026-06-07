@@ -1,0 +1,41 @@
+// Data migration nativa en .fitz — agrega el column `full_name`
+// y hace backfill condicional desde `email` para los users
+// existentes.
+//
+// Convención: `async fn migrate(db: DbConn) -> Result<Null>`
+// con la firma exacta. Opcionalmente `async fn rollback(db)`
+// para que `fitz db rollback` funcione.
+//
+// El runner inyecta `db` pre-bindeado al env del script — no
+// hace falta `db.connect(...)` adentro.
+
+async fn migrate(db: DbConn) -> Result<Null> {
+    // 1. Agregamos la columna nullable primero.
+    let _ = db.exec(
+        "ALTER TABLE users ADD COLUMN full_name text NOT NULL DEFAULT ''",
+        []
+    ).await?
+
+    // 2. Backfill: para cada user sin full_name seteado,
+    //    derivamos del email (la mayoría de los users tendrán
+    //    el email completo como display name).
+    match db.query("SELECT id, email FROM users WHERE full_name = ''", []).await {
+        Ok(rows) => {
+            for r in rows {
+                let id: Int = r.get_int("id")?
+                let email: Str = r.get_str("email")?
+                let _ = db.exec(
+                    "UPDATE users SET full_name = $1 WHERE id = $2",
+                    [email, id],
+                ).await?
+            }
+            return Ok(null)
+        }
+        Err(e) => return Err(e),
+    }
+}
+
+async fn rollback(db: DbConn) -> Result<Null> {
+    let _ = db.exec("ALTER TABLE users DROP COLUMN full_name", []).await?
+    return Ok(null)
+}

@@ -1,10 +1,11 @@
 # Curso `Fitz de 0 a experto` — Plan
 
-**Estado**: M1-M8 completos (cerrados al 2026-06-03). M7 (Interop
-Python) se sumó tras Fase 12.5 al detectar que el plan original no lo
-cubría como módulo dedicado — el ex-M7 (Producción y deployment) se
-renumeró a M8 y se le agregó un cap nuevo (M8.C5) sobre deploy real
-de apps con interop. El contenido vive en
+**Estado**: M1-M8 completos (cerrados al 2026-06-03; M6 crece a 7 caps
+con C6 nuevo de migraciones, 2026-06-07). M7 (Interop Python) se sumó
+tras Fase 12.5 al detectar que el plan original no lo cubría como
+módulo dedicado — el ex-M7 (Producción y deployment) se renumeró a M8
+y se le agregó un cap nuevo (M8.C5) sobre deploy real de apps con
+interop. **Total: 8 módulos / 42 capítulos**. El contenido vive en
 [`docs/curso/`](curso/index.md).
 
 > **Actualización 2026-06-03 (al cerrar M7+M8)**: cinco ajustes
@@ -38,7 +39,28 @@ de apps con interop. El contenido vive en
 >    real de apps con interop Python") cubre `--bundle-python` +
 >    `--bundle-pip` + Dockerfile bundleado — específicamente para
 >    apps salidas de M7 que necesitan distribución sin Python en
->    destino. Total final del curso: **8 módulos / 41 capítulos**.
+>    destino. Total con esta vuelta: **8 módulos / 41 capítulos**.
+
+> **Actualización 2026-06-07 (M6.C6 — Migraciones con `fitz db`)**:
+> el plan original (v0.9.x) tenía la cap C29 "Migraciones" como
+> sub-paso dedicado de M6. Al delivery del curso (v0.10.x) se omitió
+> y los caps C1 y C2 del módulo levantaban un disclaimer explícito
+> ("out of scope del curso; ver DB y ORM § 26.c"). Al avanzar al
+> planning de un proyecto capstone post-curso (TaskHub, ver
+> [docs/roadmap.md](roadmap.md)) detectamos que el curso entero
+> NUNCA demuestra el workflow real de `fitz db` aunque el feature
+> está 100% implementado (10 sub-comandos: `diff`/`migrate`/
+> `status`/`new`/`rollback`/`check`/`history`/`squash`/`stamp`/
+> `inspect`) y exhaustivamente documentado en `docs/db-orm.md` §26.c.
+>
+> Decisión (2026-06-07): insertar M6.C6 NUEVO ("Migraciones con
+> `fitz db`") entre el cap de tipos avanzados (C5) y el capstone
+> del módulo, levantando los dos disclaimers de C1 y C2. El
+> capstone (ahora M6.C7) mantiene el patrón idempotente al boot
+> deliberadamente — está enfocado en integrar el stack web entero,
+> el workflow versionado vive en el cap dedicado anterior. M6 crece
+> de 6 a 7 caps, curso de 41 a 42. Sin cambios de código del
+> lenguaje (release v0.15.1 patch 100% docs/curso).
 
 ---
 
@@ -285,7 +307,9 @@ Mapping completo al estado actual de la guía (post-v0.11.1):
 | C24 Auth | `@auth_provider`/`@authenticated`/JWT/Argon2 | §28 |
 | C25 WS | `@ws`/`WsConn<T>`/broadcast/AsyncAPI | §29 |
 | C26 Cron | `@cron`/`@background`/`spawn` | §30 |
-| C27-C32 ORM nativo capstone | Postgres + `@table` + migraciones + CRUD + Docker | §31 Postgres + ORM + [DB y ORM exhaustivo](db-orm.md) |
+| C27-C31 ORM nativo (setup, @table, writes, relations, tipos avanzados) | Postgres + `@table` + CRUD + jsonb/arrays/Date | §31 Postgres + ORM + [DB y ORM exhaustivo](db-orm.md) |
+| **M6.C6 Migraciones con `fitz db`** (nuevo 2026-06-07) | `new`/`diff`/`migrate`/`rollback`/`status`/`history`/`check`/`stamp`/`inspect`/`squash` + `.fitz` data migrations | [DB y ORM § 26.c](db-orm.md#26c-migraciones-automaticas-v01016) |
+| M6.C7 Capstone | Notas con tiempo real (auth + ORM + WS + cron + Docker) | §31 + ejemplo `examples/guide/31b-orm-crud-http.fitz` |
 | **M7.C1-C3 Interop Python** (nuevo) | Setup venv + `from python import` + numpy/pandas + SQLAlchemy async | §21 entero (15 sub-secciones) |
 | M8.C1 Distribución avanzada | Binarios standalone + cross-compile + `--bundle-python` | §20 fitz build + §21.11 |
 | M8.C2 Observability | logs + spans + métricas + OTLP | §33 Observability |

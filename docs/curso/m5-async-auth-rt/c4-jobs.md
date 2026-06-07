@@ -790,14 +790,15 @@ con esto: `Map<Str, Any>` ↔ jsonb, arrays nativos `List<T>` ↔
 `T[]`, JSON operators directos sobre `.where(...)`, navigation
 methods generados, etc.
 
-M6 cubre 6 capítulos:
+M6 cubre 7 capítulos:
 
 - **[C1 — Setup Postgres + `db.connect` + driver crudo](../m6-postgres-orm/c1-setup-driver-crudo.md)**
 - **[C2 — `@table`, `@primary` y lecturas tipadas](../m6-postgres-orm/c2-table-decoradores-reads.md)**
 - **[C3 — Writes + QueryBuilder chain + agregados](../m6-postgres-orm/c3-writes-querybuilder-agregados.md)**
 - **[C4 — Relations + navigation + eager loading](../m6-postgres-orm/c4-relations-navigation-preload.md)**
 - **[C5 — Tipos avanzados: jsonb, arrays, Date/DateTime/Uuid](../m6-postgres-orm/c5-tipos-avanzados.md)**
-- **[C6 — Capstone: app CRUD completa con auth + ORM + WS + cron + Docker](../m6-postgres-orm/c6-capstone-crud-completo.md)**
+- **[C6 — Migraciones con `fitz db`](../m6-postgres-orm/c6-migraciones-fitz-db.md)**
+- **[C7 — Capstone: app CRUD completa con auth + ORM + WS + cron + Docker](../m6-postgres-orm/c7-capstone-crud-completo.md)**
 
 Es el bloque más ambicioso del curso porque integra **TODO lo
 visto** en una app production-ready end-to-end. Arrancá con

@@ -41,15 +41,18 @@ asume VSCode para los screenshots ASCII.
 | M3 — Módulos y organización | 5 | ✅ cerrado (C1-C5) |
 | M4 — HTTP first-class | 5 | ✅ cerrado (C1-C5) |
 | M5 — Async, auth, real-time | 4 | ✅ cerrado (C1-C4) |
-| M6 — Capstone Postgres + ORM nativo | 6 | ✅ cerrado (C1-C6) |
+| M6 — Capstone Postgres + ORM nativo | 7 | ✅ cerrado (C1-C7) |
 | M7 — Interop Python | 3 | ✅ cerrado (C1-C3) |
 | M8 — Producción y deployment | 5 | ✅ cerrado (C1-C5) |
 
-Total: **8 módulos, 41 capítulos**. Cada módulo es **unidad releasable
+Total: **8 módulos, 42 capítulos**. Cada módulo es **unidad releasable
 independiente** — no hace falta esperar que esté todo para empezar.
-M7 (Interop Python) se sumó después de cerrar el plan original M1-M7
-para cubrir el ecosistema Python como puente; el M8 anterior (Producción
-y deployment) se renumeró.
+M6 creció a 7 caps al sumar **M6.C6 — Migraciones con `fitz db`**
+(v0.13.3) que cierra el gap del workflow versionado que antes
+quedaba como "out of scope del curso". M7 (Interop Python) se sumó
+después de cerrar el plan original M1-M7 para cubrir el ecosistema
+Python como puente; el M8 anterior (Producción y deployment) se
+renumeró.
 
 ## M1 — Setup y primer programa
 
@@ -142,15 +145,18 @@ Requisito explícito: M5 completo.
 - **[C3 — Writes (`.insert`/`.update`/`.delete`) + QueryBuilder + agregados](m6-postgres-orm/c3-writes-querybuilder-agregados.md)**
 - **[C4 — Relations + navigation methods + eager loading](m6-postgres-orm/c4-relations-navigation-preload.md)**
 - **[C5 — Tipos avanzados: jsonb, arrays, Date/DateTime/Uuid](m6-postgres-orm/c5-tipos-avanzados.md)**
-- **[C6 — Capstone: app CRUD completa con auth + ORM + WS + cron + Docker](m6-postgres-orm/c6-capstone-crud-completo.md)**
+- **[C6 — Migraciones con `fitz db`](m6-postgres-orm/c6-migraciones-fitz-db.md)**
+- **[C7 — Capstone: app CRUD completa con auth + ORM + WS + cron + Docker](m6-postgres-orm/c7-capstone-crud-completo.md)**
 
 **Entregable del módulo**: una **app real production-ready** que
 integra TODO lo del curso — auth con JWT + Argon2id, ORM con
 relations sobre Postgres, WebSocket para notificaciones,
 cron jobs con persistencia, OpenAPI + AsyncAPI auto, todo en un
-binario standalone de ~30 MB con su `docker-compose.yml`.
-**Sin `pip install`, sin `npm install`, sin `requirements.txt`,
-sin `package.json`** — deploy = un binario.
+binario standalone de ~30 MB con su `docker-compose.yml`,
+**y workflow versionado de migraciones con `fitz db`** para
+cambios de schema en producción. **Sin `pip install`, sin
+`npm install`, sin `requirements.txt`, sin `package.json`,
+sin `alembic upgrade`** — deploy = un binario.
 
 ## M7 — Interop Python
 

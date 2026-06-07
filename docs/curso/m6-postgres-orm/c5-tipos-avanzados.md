@@ -700,10 +700,12 @@ Llegaste al final del cap. Lo que cubriste:
 - Full-text search con `.matches("query")` y `.plainto_matches`
   + ranking con `.rank("query")`.
 
-**Próximo cap**: [M6.C6 — Capstone: app CRUD completa con
-auth + ORM + WS + cron + Docker](c6-capstone-crud-completo.md).
-Vamos a integrar **todo lo de M1-M6** en una app real:
-servidor HTTP con handlers tipados + auth con JWT + WebSockets
-para notificaciones en tiempo real + cron job de mantenimiento
-+ ORM con relations + Postgres en Docker. Cero cargo add, cero
-pip install, deploy = un binario.
+**Próximo cap**: [M6.C6 — Migraciones con `fitz db`](c6-migraciones-fitz-db.md).
+Cerramos el hueco que dejamos abierto en C1 y C2 ("para migrations
+reales hay un subcomando, lo vemos más adelante") con el workflow
+completo end-to-end: `new` → editar `@table` → `diff > file.sql`
+→ `migrate` → `status` → `rollback`, drift check para CI con
+`fitz db check`, data migrations en `.fitz` nativas para
+backfills condicionales, e `inspect` + `stamp` para adoptar DBs
+legacy. Después del C6, el [C7 — Capstone](c7-capstone-crud-completo.md)
+integra TODO en una app real production-ready.

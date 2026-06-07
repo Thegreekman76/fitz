@@ -168,7 +168,8 @@ nav:
           - 'C3 — Writes + QueryBuilder + agregados': curso/m6-postgres-orm/c3-writes-querybuilder-agregados.md
           - 'C4 — Relations + navigation + N+1': curso/m6-postgres-orm/c4-relations-navigation-preload.md
           - 'C5 — Tipos avanzados (jsonb, arrays, Date)': curso/m6-postgres-orm/c5-tipos-avanzados.md
-          - 'C6 — Capstone: app CRUD completa': curso/m6-postgres-orm/c6-capstone-crud-completo.md
+          - 'C6 — Migraciones con fitz db': curso/m6-postgres-orm/c6-migraciones-fitz-db.md
+          - 'C7 — Capstone: app CRUD completa': curso/m6-postgres-orm/c7-capstone-crud-completo.md
       - 'M7 — Interop Python':
           - 'C1 — Setup venv + from python import + casos simples': curso/m7-python-interop/c1-setup-imports.md
           - 'C2 — numpy + pandas reales (data analysis)': curso/m7-python-interop/c2-numpy-pandas-data-analysis.md

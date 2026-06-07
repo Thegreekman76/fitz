@@ -2,7 +2,7 @@
 
 **Pre-requisitos**: [M7.C3 — SQLAlchemy interop + cuándo NO usarlo](../m7-python-interop/c3-sqlalchemy-async-vs-orm-nativo.md)
 (o, si decidiste saltarte M7 porque tu stack no toca Python, alcanza con
-[M6.C6 — capstone CRUD completo](../m6-postgres-orm/c6-capstone-crud-completo.md)).
+[M6.C7 — capstone CRUD completo](../m6-postgres-orm/c7-capstone-crud-completo.md)).
 Tenés una app real cerrada (auth + ORM + WS + cron + Docker). Ahora vamos
 a sacarla del laptop y meterla en otras plataformas, con binarios que
 funcionen **sin instalar Fitz ni Rust ni Python en el destino**.

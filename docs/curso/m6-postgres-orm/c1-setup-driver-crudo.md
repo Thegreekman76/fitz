@@ -226,8 +226,11 @@ print(main().await)
    O guardarlo como `let` separado de varios bloques.
 
 3. **`CREATE TABLE IF NOT EXISTS` al boot** es el patrón
-   idempotente recomendado para el MVP. En producción avanzada,
-   migraciones reales — pero para empezar, esto cubre el 90%.
+   idempotente más simple y cubre dev local + apps chicas. Para
+   cambios de schema versionados (agregar/borrar columns en
+   producción, rollback, audit log, drift check para CI), Fitz
+   tiene un subcomando dedicado `fitz db` con workflow completo
+   — lo vemos en [M6.C6 — Migraciones con `fitz db`](c6-migraciones-fitz-db.md).
 
 ### Tipos de parámetros aceptados
 

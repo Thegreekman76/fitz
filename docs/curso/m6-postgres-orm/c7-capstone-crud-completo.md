@@ -179,10 +179,16 @@ async fn ensure_schema(db: DbConn) -> Result<Null> {
 }
 ```
 
-**Patrón canónico**: `CREATE TABLE IF NOT EXISTS` al boot.
-Para migrations reales con diff/apply, hay un sub-comando
-`fitz db diff/migrate` (out of scope del curso; ver
-[DB y ORM § 26.c](../../db-orm.md#26c-migraciones-automaticas-v01016)).
+**Por qué `CREATE TABLE IF NOT EXISTS` y no `fitz db migrate` acá**:
+el capstone se enfoca en **integrar el stack web entero** (auth +
+ORM + WS + cron + Docker) en una sola app. El workflow versionado
+con `fitz db diff`/`migrate`/`rollback`/`status` ya lo viste en
+[M6.C6 — Migraciones con `fitz db`](c6-migraciones-fitz-db.md), así
+que acá mantenemos el patrón idempotente más simple para no repetir
+material. **En proyectos reales más allá del capstone, el workflow
+`fitz db` es la herramienta default** — referenciá el cap C6 y
+[DB y ORM § 26.c](../../db-orm.md#26c-migraciones-automaticas-v01016)
+cuando lo apliques.
 
 ---
 
@@ -619,6 +625,12 @@ Llegaste al final del cap **y del módulo M6**. **Felicidades**.
 - **M6.C5** — jsonb (`metadata: Map<Str, Any>`) + arrays
   (`tags: List<Str>`) + `DateTime.now()` + aritmética
   (`.subtract_days(30)`).
+- **M6.C6** — workflow `fitz db diff`/`migrate`/`rollback`/
+  `status`/`history`/`check` para versionar cambios de schema
+  en producción. Acá usamos `CREATE TABLE IF NOT EXISTS` al
+  boot para enfocarnos en la integración del stack web, pero
+  el workflow versionado es la herramienta default en proyectos
+  más allá del MVP.
 
 ### Diferenciadores que justifican el approach
 
@@ -662,9 +674,14 @@ nativo**. Sabés:
   `.contains_json`, `.path_int`), array operators
   (`.has`, `.contains_all`, `.contained_in`), full-text search
   (`.matches`, `.plainto_matches`, `.rank`) (**C5**).
+- ✅ Versionar cambios de schema con `fitz db new`/`diff`/
+  `migrate`/`rollback`/`status`/`history`/`check`, escribir
+  data migrations nativas en `.fitz` con `async fn migrate(db)`,
+  bloquear drift en CI con `fitz db check`, adoptar DBs legacy
+  con `fitz db inspect` + `stamp` (**C6**).
 - ✅ Integrar **todo el curso** en una app real con auth + ORM
   + WS + cron + Docker, deployable como un binario standalone
-  de ~30 MB (**C6**) ← acá.
+  de ~30 MB (**C7**) ← acá.
 
 ### Comparativa final con el stack típico
 
@@ -682,21 +699,33 @@ nativo**. Sabés:
 | Static binary | ❌ | ⚠ pkg hack | ✅ jar (~50-100MB) | ✅ ~30MB |
 | Docker image | ~80-150 MB | ~150-250 MB | ~200-400 MB | ~30 MB |
 
-## Qué viene en M7 — Producción y deployment
+## Qué viene en M7 y M8
 
-A partir del próximo módulo entramos al **lado operacional**
-serio:
+A partir del próximo módulo el curso se abre en dos ramas
+opcionales según tu caso de uso:
 
-- **C1** — Distribución avanzada: `fitz build --bundle-python` +
-  cross-compile multi-target.
-- **C2** — Observability: `@trace`/`@metric` builtins + export
-  a Prometheus/Grafana.
-- **C3** — Secrets management + feature flags.
-- **C4** — Deploy avanzado: Kubernetes + healthchecks
-  + readiness/liveness probes + zero-downtime.
+**[M7 — Interop Python](../m7-python-interop/c1-setup-imports.md)** (3 caps):
 
-M7 está **en espera de Fase 12** del lenguaje. Cuando esté
-listo, los caps van a aparecer en el [índice del curso](../index.md).
+- **C1** — Setup venv + `from python import` + casos simples.
+- **C2** — numpy + pandas reales para data analysis.
+- **C3** — SQLAlchemy interop + bridge async + matriz de
+  decisión vs ORM nativo.
+
+Si tu app necesita usar paquetes Python (data science, ML,
+SQLAlchemy contra una DB legacy), M7 es el puente. Si solo
+necesitás el stack Fitz nativo, podés saltar directo a M8.
+
+**[M8 — Producción y deployment](../m8-produccion-deploy/c1-distribucion-binarios.md)** (5 caps):
+
+- **C1** — Distribución avanzada: binarios standalone +
+  cross-compile multi-platform.
+- **C2** — Observability: logs + spans + métricas + OTel.
+- **C3** — Secrets management: `secret()` + `config()` +
+  `Secret<T>`.
+- **C4** — Deploy avanzado: `fitz docker init/build` +
+  healthz/readyz + K8s + 12-factor.
+- **C5** — Deploy de apps con interop Python: `fitz build
+  --bundle-python` + `--bundle-pip`.
 
 Mientras tanto, podés **shippear lo que ya tenés** — el
 capstone de M6 es production-ready. Mucha gente NO necesita

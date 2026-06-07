@@ -11,6 +11,110 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.1] — 2026-06-07 — Curso M6.C6 nuevo: Migraciones con `fitz db`
+
+Release 100% docs/curso sin cambios de código del lenguaje. **Cierra
+un gap pedagógico conocido del curso**: M6.C1 y M6.C2 levantaban un
+disclaimer explícito *"para migrations reales con diff/apply hay un
+subcomando `fitz db diff/migrate` (out of scope del curso)"* aunque
+el feature está 100% implementado (10 sub-comandos: `diff`, `migrate`,
+`status`, `new`, `rollback`, `check`, `history`, `squash`, `stamp`,
+`inspect`) y exhaustivamente documentado en
+[`docs/db-orm.md` § 26.c](docs/db-orm.md#26c-migraciones-automaticas-v01016).
+
+### Cap nuevo
+
+- **[M6.C6 — Migraciones con `fitz db`](docs/curso/m6-postgres-orm/c6-migraciones-fitz-db.md)**
+  (~900 LoC) — walk-through del workflow completo end-to-end:
+  - Setup proyecto + Postgres en compose
+  - Workflow canónico: `new` → editar `@table` → `diff > file.sql`
+    → `migrate` → `status`
+  - Cambio de schema + segunda migration con `ALTER TABLE`
+  - `fitz db rollback` con sección `-- DOWN`
+  - `fitz db history` (audit log)
+  - `fitz db check` con ejemplo de GitHub Actions para CI
+  - Migraciones nativas en `.fitz` con `async fn migrate(db)` para
+    backfills condicionales
+  - `fitz db inspect` + `stamp` para adoptar DBs legacy
+  - `fitz db migrate --sql` para handoff a DBA (offline SQL)
+  - `fitz db squash <from> <to>` para limpieza histórica
+  - Renames seguros con `@renamed_from` decorator transient
+- Bar editorial de M6 (header con pre-requisitos + objetivo + por
+  qué importa, mermaid del flujo, tabla comparativa con Alembic /
+  TypeORM / Flyway / Diesel, 12 pasos numerados, troubleshooting,
+  cheat sheet, validación checklist).
+- **Ejemplo runnable** `examples/curso/m6-postgres-orm/c6-migrations/`
+  con `fitz.toml` + `docker-compose.yml` + `src/main.fitz` con schema
+  final + 3 migrations (2 `.sql` con UP/DOWN + 1 `.fitz` con backfill
+  condicional usando typed accessors `r.get_int(...)?` /
+  `r.get_str(...)?`) + README con setup + smoke completo del
+  workflow + caveats.
+
+### Cambios estructurales del módulo M6
+
+- **Capstone renombrado**: `c6-capstone-crud-completo.md` →
+  `c7-capstone-crud-completo.md` (con `git mv` para preservar
+  history). M6 crece de 6 a 7 caps; curso entero de 41 a 42.
+- **Disclaimers levantados** en
+  [M6.C1#L228-230](docs/curso/m6-postgres-orm/c1-setup-driver-crudo.md#L228)
+  y [M6.C2#L206-210](docs/curso/m6-postgres-orm/c2-table-decoradores-reads.md#L206):
+  ya no dicen "out of scope" — apuntan al cap C6 nuevo como
+  referencia.
+- **Nota explicativa en el capstone (M6.C7)** sobre por qué mantiene
+  `CREATE TABLE IF NOT EXISTS` al boot deliberadamente (foco en
+  integración del stack web; el workflow versionado vive en C6).
+- **Cross-refs actualizados**:
+  - [M5.C4#L800](docs/curso/m5-async-auth-rt/c4-jobs.md#L800): lista
+    de M6 ahora 7 caps con C6 (migraciones) + C7 (capstone)
+    renumerado.
+  - [M7.C1#L3](docs/curso/m7-python-interop/c1-setup-imports.md#L3)
+    y [M8.C1#L5](docs/curso/m8-produccion-deploy/c1-distribucion-binarios.md#L5):
+    pre-requisito apunta a M6.C7 (no C6).
+  - "Capstone integra todo el curso" (M6.C7) suma bullet de M6.C6.
+  - "Cerraste el módulo M6" (M6.C7) suma bullet ✅ de C6 + renumera
+    el "← acá" a C7.
+- **Sección "Qué viene M7"** del capstone reescrita: M7 ahora es
+  Interop Python y M8 es Producción/deployment (la versión vieja
+  apuntaba a M7 = Producción, stale post-v0.12.5).
+
+### Docs estructurales
+
+- `docs/curso/index.md`: tabla "Estado del curso" actualiza M6 de 6
+  a 7 caps, total de 41 a 42; sección M6 suma entry C6 (migraciones)
+  + renombra C6 → C7 capstone; entregable del módulo menciona el
+  workflow versionado.
+- `mkdocs.yml`: nav del M6 suma entry C6 (migraciones) + renombra
+  C6 → C7.
+- `docs/curso-plan.md`: header del estado refleja M6 7 caps + total
+  42; nota nueva "Actualización 2026-06-07" detalla la decisión + por
+  qué se omitió en el delivery original; tabla "Mapping curso →
+  guide.md" suma fila M6.C6 + reagrupa C27-C31 (sin migraciones).
+
+### Notas técnicas detectadas durante el cierre
+
+- **API de `DbRow`**: el ejemplo del backfill `.fitz` originalmente
+  usaba `r.get("col")` genérico — `fitz check` lo rechaza con error
+  claro citando que la API tipada es `r.get_int(col)?` / `r.get_str(col)?`
+  / etc. Fix aplicado al ejemplo y al cap. **Deuda residual menor**:
+  [`docs/db-orm.md` § 26.c](docs/db-orm.md) (la referencia
+  exhaustiva del ORM) tiene en una sub-sección el snippet usando
+  `r.get(...)` — no es esta entrega, queda como deuda para una
+  pasada de barrida sobre db-orm.md.
+
+### Validación
+
+- `mkdocs build` non-strict: completa en 18.15s sin warnings nuevos
+  sobre el cap C6 nuevo ni sobre el C7 renombrado. Los 98 warnings
+  pre-existentes (anchors stale de `guide.md` / `db-orm.md` / otros
+  caps de cursos) son independientes.
+- `fitz check examples/curso/m6-postgres-orm/c6-migrations/src/main.fitz`
+  → "sin errores de tipo".
+- `fitz check examples/curso/m6-postgres-orm/c6-migrations/migrations/20260607130000_backfill_full_name.fitz`
+  → "sin errores de tipo".
+- Smoke real contra Postgres NO automatizado en CI (requiere
+  `FITZ_TEST_PG_URL` y workflow de varios pasos). Documentado en el
+  README del ejemplo para reproducir manual.
+
 ## [v0.15.0] — 2026-06-05 — Bloque 4: V4 expandido (signature help para builtins + method calls) + L2 expandido (inferencia bidireccional para `Fn`)
 
 **Mini-fase combinada** que extiende dos features previas a sus

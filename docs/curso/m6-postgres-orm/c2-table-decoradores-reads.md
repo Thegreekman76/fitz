@@ -205,8 +205,9 @@ strings ISO 8601 envueltos) — los vemos en M6.C5.
 
 **Importante**: el ORM **no crea la tabla automáticamente** en
 MVP. Vos corrés `CREATE TABLE` con `db.exec(...)` al boot
-(patrón idempotente del cap C1) o `fitz db diff`/`migrate` (
-features avanzadas, no cubiertas en M6).
+(patrón idempotente del cap C1) o el workflow versionado con
+`fitz db diff`/`migrate` (visto en detalle en
+[M6.C6 — Migraciones con `fitz db`](c6-migraciones-fitz-db.md)).
 
 ---
 

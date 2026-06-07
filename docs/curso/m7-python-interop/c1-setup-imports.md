@@ -1,6 +1,6 @@
 # M7.C1 — Setup venv + `from python import` + casos simples
 
-**Pre-requisitos**: [M6.C6 — capstone CRUD completo](../m6-postgres-orm/c6-capstone-crud-completo.md).
+**Pre-requisitos**: [M6.C7 — capstone CRUD completo](../m6-postgres-orm/c7-capstone-crud-completo.md).
 Tenés una app real cerrada con el stack web entero de Fitz nativo. Ahora
 abrimos una puerta lateral: **importar Python**. Para entender por qué
 importa, M6 cerrado ayuda — vas a saber exactamente cuándo conviene

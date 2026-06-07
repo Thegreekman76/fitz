@@ -1,0 +1,25 @@
+// Estado final del schema después de aplicar las migrations
+// en `migrations/`. Cada cambio en este archivo dispara una
+// migration nueva via `fitz db diff`.
+//
+// El programa en sí solo verifica que las migrations corrieron
+// imprimiendo el count de users — no es un server real (eso es
+// el capstone C7). Acá el foco es el workflow de schema.
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    name: Str = ""
+    email_verified: Bool = false
+    full_name: Str = ""
+}
+
+async fn count_users(db: DbConn) -> Result<Int> {
+    return User.count(db).await
+}
+
+fn main() => 0
+
+print("Schema declarado en migrations-demo.")
+print("Verificá las migrations con: fitz db status")
+print("Aplicá con: fitz db migrate")
