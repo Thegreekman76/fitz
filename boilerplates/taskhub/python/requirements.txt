@@ -1,0 +1,3 @@
+# Opcional — solo si querés que el LLM real funcione.
+# Sin esto, suggest_priority cae a la heurística pura Python.
+openai>=1.0,<2.0

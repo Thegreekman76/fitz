@@ -188,6 +188,7 @@ nav:
       - 'C4 — CRUD + relations + WebSocket por project': taskhub/c4-crud-relations-ws.md
       - 'C5 — Cron + background + persistencia': taskhub/c5-cron-jobs-persistencia.md
       - 'C6 — Interop Python (priorización IA)': taskhub/c6-interop-python-llm.md
+      - 'C7 — Observability + frontend + deploy': taskhub/c7-observability-frontend-deploy.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

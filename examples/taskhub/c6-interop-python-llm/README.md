@@ -154,8 +154,8 @@ docker compose down -v    # resetea TODO
 
 ## Qué viene
 
-**Cap C7 — Observability + frontend + deploy production**
-(próximamente — en desarrollo). El cap final:
+**[Cap C7 — Observability + frontend + deploy production](../../../docs/taskhub/c7-observability-frontend-deploy.md)**.
+El cap final del proyecto:
 
 - `@server(prometheus=true)` para `/metrics`.
 - Frontend vanilla JS funcional (kanban con drag&drop).

@@ -1,0 +1,21 @@
+# Build artifacts
+target/
+*.exe
+*.pdb
+
+# Env files (nunca commitear secrets)
+.env
+.env.local
+
+# Python (nuevo en C6)
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.idea/
+.vscode/
+
+# Logs locales
+*.log

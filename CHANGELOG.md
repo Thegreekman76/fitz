@@ -11,6 +11,145 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.9] — 2026-06-07 — TaskHub C7 + cierre del proyecto entero + boilerplates/taskhub publicado
+
+**Cap final del proyecto Construyendo TaskHub** (7 caps cerrados
+entre C1-C7) + publicación del boilerplate descargable
+`boilerplates/taskhub/` (11mo boilerplate del repo, el más
+completo, showcase del stack único de Fitz integrado).
+
+### Cap C7 entregado
+
+- **[`docs/taskhub/c7-observability-frontend-deploy.md`](docs/taskhub/c7-observability-frontend-deploy.md)**
+  (~1100 LoC) — 8 pasos cubriendo: activar
+  `@server(prometheus=true)` para `/metrics` scrapeable +
+  Prometheus UI target UP, validar OTel tracing en Jaeger UI
+  (spans automáticos por request HTTP + handlers cron/background
+  con `user.id`/`user.role` extraído del `@auth_provider`),
+  `@healthz fn check_db_alive() -> Bool` + `@readyz fn
+  check_ready_for_traffic() -> Bool` auto-mount-ed con check
+  real contra `db_result.is_closed()` + SIGTERM drain
+  automático (readyz pasa a 503 al recibir SIGTERM, K8s deja de
+  rutear), frontend vanilla JS funcional (~500 LoC sin
+  frameworks ni build): `index.html` + `style.css` + `api.js`
+  (wrappers fetch con Bearer) + `ws.js` (cliente WebSocket con
+  reconexión auto) + `app.js` (router por hash + login screen
+  + projects list + board kanban con drag&drop HTML5 + live
+  updates WS), `nginx.conf` con `try_files $uri $uri/
+  /index.html` para SPA routing, Dockerfile final con Path A
+  (`fitz build --bundle-python --bundle-pip openai` + base
+  distroless ~50 MB) y Path B fallback documentado
+  (python:3.12-slim ~250 MB), publicación al boilerplate como
+  cierre del proyecto. Bar editorial: header de cierre +
+  mermaid completo + tabla comparativa con Python+FastAPI /
+  Node+Express+pm2 / Spring Boot (10 rows incluyendo image
+  size, cold start, memory idle, prometheus auto, OTel auto,
+  healthz/readyz, SIGTERM drain, frontend bundling,
+  single-binary, 12-factor), validación checklist con 8 items,
+  troubleshooting con 7 casos, cierre del proyecto con stack
+  integrado en TaskHub (7 caps en tabla), comparativa final vs
+  stack típico (10 métricas), ideas para fork.
+
+### Ejemplo runnable C7
+
+`examples/taskhub/c7-observability-frontend-deploy/` — estado
+final del proyecto. Copia de C6 con:
+
+- **`src/main.fitz`**: `@healthz`/`@readyz` con check real de DB
+  + `@server(8080, ws_heartbeat_secs=30, prometheus=true)`.
+  ~720 LoC integrando el stack completo final.
+- **`frontend/`** completo: `index.html` + `assets/style.css`
+  + `assets/api.js` + `assets/ws.js` + `assets/app.js` (~500
+  LoC total vanilla JS). Login + projects + board kanban
+  drag&drop + WS reconnect + live refresh.
+- **`Dockerfile`** con Path A activo (bundling + distroless ~50
+  MB) y Path B comentado como fallback (~250 MB).
+
+### Boilerplate publicado
+
+**`boilerplates/taskhub/`** — copia del C7 con README dedicado
+de ~250 LoC enfocado en "clonalo y arrancá" (sin material
+pedagógico):
+
+- Tabla del stack incluido (11 piezas: HTTP, Auth, RBAC, ORM,
+  Migrations, WS, Cron, Interop Python, Observability,
+  Frontend, Deploy).
+- Quickstart con `git clone` + `cp .env.example .env` +
+  `docker compose up -d --build` + bootstrap admin = TaskHub
+  corriendo en ~30s.
+- Tabla del compose con 5 services + endpoints accesibles.
+- Modelo de datos con FK constraints + indexes.
+- 3 roles (admin/owner/member) con flow de promote manual.
+- Cron jobs incluidos + GET /api/jobs audit log.
+- Interop Python sweet spot (LLM con fallback heurística).
+- Ideas para fork (cambio de dominio, más roles, otros LLMs,
+  email real, billing).
+- Links al material pedagógico Construyendo TaskHub para
+  entender cada pieza.
+- Limitaciones honestas del MVP (path params en @ws, broadcast
+  HTTP→WS, bundling alternativos, sync Python).
+- Comparativa con FastAPI+Celery / Express+bull / Spring Boot
+  (10 métricas).
+
+`boilerplates/README.md` actualizado de "10 boilerplates" a "11
+boilerplates" con entry `taskhub 🏔️` marcado como **"Showcase
+final: stack único de Fitz completo"**.
+
+### Cierre del proyecto Construyendo TaskHub
+
+**7 caps cerrados entre 2026-06-07** (todos en una sesión
+intensiva):
+
+- C1 — Setup Docker-first (5 services del compose).
+- C2 — Schema + workflow `fitz db` versionado.
+- C3 — Auth con RBAC custom (3 roles apilables).
+- C4 — CRUD + relations + WebSocket en vivo.
+- C5 — Cron + background jobs con persistencia.
+- C6 — Interop Python con LLM.
+- C7 — Observability + frontend + deploy production + boilerplate.
+
+**Total proyecto**: ~7000 LoC docs/caps + ~3000 LoC ejemplos
+runnable + boilerplate completo. **Único showcase pedagógico
+del stack entero de Fitz** integrado en una app real
+production-ready (~50 MB image con bundling, ~330 MB compose
+total).
+
+### Cross-refs actualizados
+
+- **`mkdocs.yml`**: nav del tab suma entry C7. Tab
+  "Construyendo TaskHub" ahora completo con index + 7 caps.
+- **`docs/taskhub/index.md`**: tabla del roadmap C7 + Post-C7
+  marcados como CERRADOS, con link real al boilerplate.
+- **`docs/taskhub/c6-interop-python-llm.md`**: "Próximo cap"
+  linkea al C7 real.
+- **`examples/taskhub/c6-interop-python-llm/README.md`**: "Qué
+  viene" linkea al C7.
+- **`boilerplates/README.md`**: tabla actualizada de "10
+  boilerplates" a "11 boilerplates" con entry taskhub destacado
+  con 🏔️.
+
+### Validación
+
+- `mkdocs build` non-strict: 16.62s, sin warnings nuevos sobre
+  los archivos TaskHub (una warning sobre anchor stale a
+  `guide.md#33-observability` — pre-existente del patrón del
+  resto del sitio).
+- `fitz check examples/taskhub/c7-observability-frontend-deploy/src/main.fitz`
+  → "sin errores de tipo". El programa con
+  `@server(prometheus=true)` + `@healthz`/`@readyz` + todo el
+  stack acumulado de los 6 caps anteriores pasa el checker
+  estático.
+- Smoke real end-to-end NO automatizado — requiere Docker +
+  Path A del bundling funcionando (toolchain con
+  `--features python` + `--bundle-python` + `--bundle-pip`).
+  Path B fallback documentado para entornos donde Path A falla.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al stack —
+release v0.15.9 patch 100% docs/material pedagógico + boilerplate
+nuevo.
+
 ## [v0.15.8] — 2026-06-07 — TaskHub C6: Interop Python con LLM (priorización IA)
 
 Sexto cap de **Construyendo TaskHub**. **El cap más diferenciador

@@ -677,8 +677,7 @@ Python. **Solo falta el deploy production** (C7).
 
 ## Próximo cap
 
-**C7 — Observability completa + frontend + deploy production**
-(próximamente — en desarrollo).
+**[C7 — Observability completa + frontend + deploy production](c7-observability-frontend-deploy.md)**.
 
 El cap final. Vamos a:
 
