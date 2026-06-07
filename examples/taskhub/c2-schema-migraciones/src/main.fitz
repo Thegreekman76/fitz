@@ -1,0 +1,92 @@
+// TaskHub C2 — Schema declarado + workflow fitz db end-to-end.
+//
+// Estado al cerrar el cap C2:
+// - 4 @table type del dominio declarados (User, Project, Task, Comment).
+// - db.connect() top-level con DATABASE_URL del compose.
+// - Endpoint smoke GET /api/users que devuelve lista vacía (valida
+//   end-to-end que el binario habla con la DB y nginx proxea OK).
+// - /healthz devuelve version 0.1.0-c2.
+//
+// El @belongs_to + @has_many + navigation methods llegan en C4.
+// Las FK constraints en este cap se declaran a mano en el SQL de
+// las migrations (REFERENCES + ON DELETE CASCADE / SET NULL).
+
+// ───────────────────────────────────────────────
+// Schema del dominio (4 tablas)
+// ───────────────────────────────────────────────
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    password_hash: Str = ""
+    role: Str = "member"      // admin / owner / member (validado en C3)
+    created_at: DateTime
+}
+
+@table("projects") type Project {
+    @primary id: Int = 0
+    name: Str
+    description: Str = ""
+    owner_id: Int             // FK → users.id (constraint en migration)
+    created_at: DateTime
+}
+
+@table("tasks") type Task {
+    @primary id: Int = 0
+    project_id: Int           // FK → projects.id
+    title: Str
+    description: Str = ""
+    status: Str = "todo"      // todo / doing / done
+    priority: Int = 3         // 1-5
+    assignee_id: Int?         // FK nullable → users.id
+    due_date: Date?
+    ai_suggested_priority: Int?  // cache del C6
+    created_at: DateTime
+}
+
+@table("comments") type Comment {
+    @primary id: Int = 0
+    task_id: Int              // FK → tasks.id
+    user_id: Int              // FK → users.id (autor del comment)
+    body: Str
+    created_at: DateTime
+}
+
+// ───────────────────────────────────────────────
+// Conexión a la DB
+// ───────────────────────────────────────────────
+
+let db_result = db.connect(env_or("DATABASE_URL", "")).await
+
+// ───────────────────────────────────────────────
+// Endpoints
+// ───────────────────────────────────────────────
+
+type HealthResponse {
+    status: Str
+    version: Str
+}
+
+@get("/healthz")
+fn healthz() -> HealthResponse {
+    return HealthResponse {
+        status: "ok",
+        version: "0.1.0-c2"
+    }
+}
+
+// Smoke endpoint para validar que el binario habla con la DB.
+// En C4 lo vamos a transformar en un GET autenticado scoped al user.
+@get("/users")
+async fn list_users() -> Result<List<User>> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    return User.all(conn).await
+}
+
+@server(8080)
+fn main() => 0
+
+print("TaskHub C2 — schema declarado, escuchando en :8080")

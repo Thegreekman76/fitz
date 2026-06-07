@@ -183,6 +183,7 @@ nav:
   - 'Construyendo TaskHub':
       - taskhub/index.md
       - 'C1 — Setup Docker-first': taskhub/c1-setup-docker-first.md
+      - 'C2 — Schema + workflow fitz db': taskhub/c2-schema-migraciones.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

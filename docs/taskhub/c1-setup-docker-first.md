@@ -745,7 +745,7 @@ arranca desde este estado.
 
 ## Próximo cap
 
-**C2 — Schema + workflow `fitz db` end-to-end** (próximamente — en desarrollo)
+**[C2 — Schema + workflow `fitz db` end-to-end](c2-schema-migraciones.md)**
 
 Vamos a declarar los **4 `@table type`** del dominio (`User`,
 `Project`, `Task`, `Comment`), generar la primera migration con

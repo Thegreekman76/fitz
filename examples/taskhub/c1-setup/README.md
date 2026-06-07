@@ -78,10 +78,11 @@ docker compose down -v
 
 ## Qué viene
 
-**Cap C2 — Schema + workflow `fitz db`** (próximamente — en
-desarrollo). Declaramos los 4 `@table type` del dominio (`User`,
-`Project`, `Task`, `Comment`) y generamos la primera migration
-con `fitz db new` + `diff` + `migrate`.
+**[Cap C2 — Schema + workflow `fitz db`](../../../docs/taskhub/c2-schema-migraciones.md)**.
+Declaramos los 4 `@table type` del dominio (`User`, `Project`,
+`Task`, `Comment`) y generamos la primera migration con `fitz db
+new` + `diff` + `migrate`, con FK constraints + indexes + workflow
+CI con drift check.
 
 ## Troubleshooting
 

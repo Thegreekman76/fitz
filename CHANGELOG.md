@@ -11,6 +11,105 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.4] — 2026-06-07 — TaskHub C2: Schema + workflow `fitz db` end-to-end
+
+Segundo cap de **Construyendo TaskHub** (proyecto integrador
+post-curso). Sobre el setup Docker-first del C1 sumamos el schema
+del dominio (4 `@table type`) + el workflow versionado completo
+de `fitz db` aplicado en un setup Docker-first real + CI con
+drift check.
+
+### Cap C2 entregado
+
+- **[`docs/taskhub/c2-schema-migraciones.md`](docs/taskhub/c2-schema-migraciones.md)**
+  (~880 LoC) — 9 pasos cubriendo: declaración de los 4 `@table type`
+  (User / Project / Task / Comment con sus tipos primitivos +
+  nullables + defaults), conexión a la DB con `db.connect()`
+  top-level + endpoint smoke `GET /api/users`, helper `dev-env.sh`
+  para exportar `DATABASE_URL` apuntando al `db` expuesto en
+  `localhost:5432`, workflow canónico (`fitz db new` → editar
+  `@table` → `fitz db diff` → editar UP/DOWN + agregar FK constraints
+  + indexes manualmente → `fitz db migrate`), verificación contra
+  Postgres con `psql`, **rebuild del binario** con `docker compose
+  up -d --build app` para incorporar el schema declarado, cambio
+  de schema posterior (agregar `Task.estimated_hours: Int = 0`) +
+  segunda migration + rollback, `fitz db history` para audit log,
+  **drift check en CI con GitHub Actions** (job con service
+  container Postgres + `fitz db migrate` + `fitz db check`).
+- Bar editorial del curso: header con pre-reqs + objetivo + por qué
+  importa, mermaid del flujo, tabla "Por qué Fitz es distinto" vs
+  Alembic / TypeORM en setup Docker-first (incluye row específico
+  sobre rebuild del binario tras schema change), validación
+  checklist con 8 items, troubleshooting con 5 casos típicos
+  (drift falso, `connection refused`, 500 en `/api/users`, rollback
+  sin DOWN, builds lentos).
+
+### Ejemplo runnable
+
+`examples/taskhub/c2-schema-migraciones/` — estado del proyecto al
+cerrar el cap C2. Copia de `examples/taskhub/c1-setup/` con:
+
+- **`src/main.fitz`** extendido (4 `@table type` + `db.connect()`
+  top-level + endpoint smoke `GET /users` con `User.all(db)`).
+- **`migrations/20260607130000_initial_schema.sql`** — primera
+  migration con `CREATE TABLE` para los 4 types + FK constraints
+  (`REFERENCES ... ON DELETE CASCADE` / `SET NULL`) + 5 indexes
+  recomendados + sección `-- DOWN` con `DROP TABLE` en orden inverso.
+- **`dev-env.sh`** — helper script que source-ás para exportar
+  `DATABASE_URL` desde el `.env` del compose hacia tu shell del host.
+- **`.github/workflows/ci.yml`** — workflow de drift check con
+  service container Postgres + `fitz db migrate` + `fitz db check`.
+- README dedicado con setup desde cero + validación end-to-end +
+  demo del workflow de cambio de schema + cross-link al cap.
+
+### Decisiones técnicas tomadas
+
+- **`fitz db` corre desde el host, no adentro del container**
+  (distroless sin shell). Requiere `DATABASE_URL` apuntando a
+  `localhost:5432`. El compose ya expone ese puerto del `db`.
+- **4 `@table type` declarados SIN `@belongs_to`** todavía. Las
+  navigation methods + `@has_many` + `@belongs_to` llegan en C4.
+  En C2 las FK constraints van en SQL manual de las migrations
+  (`REFERENCES ... ON DELETE CASCADE`).
+- **Workflow Docker-first explícito**: después de cada
+  `fitz db migrate` hace falta `docker compose up -d --build app`
+  para que el binario incorpore el schema declarado. El binario
+  no tiene runtime reflection — el schema está hard-coded al
+  compile time del `fitz build`.
+- **`created_at: DateTime` sin `@db_default("NOW()")`** — los
+  INSERTs van a tener que pasar `DateTime.now()` explícito en C4.
+  Decisión pragmática para mantener el cap C2 enfocado en el
+  workflow de migrations.
+
+### Cross-refs actualizados
+
+- **`mkdocs.yml`**: nav del tab "Construyendo TaskHub" suma entry
+  C2.
+- **`docs/taskhub/index.md`**: tabla del roadmap actualiza C2 de
+  "(próximamente)" a link al cap.
+- **`docs/taskhub/c1-setup-docker-first.md`**: sección "Próximo cap"
+  ahora linkea al C2 real (en vez del placeholder "(próximamente —
+  en desarrollo)").
+- **`examples/taskhub/c1-setup/README.md`**: "Qué viene" linkea al
+  cap C2 + describe brevemente.
+
+### Validación
+
+- `mkdocs build` non-strict: 17.83s, sin warnings nuevos sobre los
+  archivos TaskHub.
+- `fitz check examples/taskhub/c2-schema-migraciones/src/main.fitz`
+  → "sin errores de tipo". El schema declarado con los 4
+  `@table type` + `db.connect()` async top-level + endpoint con
+  `User.all(db).await` pasa el checker.
+- Smoke real end-to-end NO automatizado — requiere Docker + las
+  migrations aplicadas. Documentado paso a paso en el README del
+  ejemplo + el cap para reproducir manual.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al stack —
+release v0.15.4 patch 100% docs/material pedagógico.
+
 ## [v0.15.3] — 2026-06-07 — Construyendo TaskHub: nuevo tab proyecto integrador + cap C1 (Setup Docker-first)
 
 Iniciativa nueva en docs/. **TaskHub** es un **proyecto integrador
