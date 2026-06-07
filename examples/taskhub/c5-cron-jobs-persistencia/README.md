@@ -154,12 +154,13 @@ docker compose down -v    # resetea TODO
 
 ## Qué viene
 
-**Cap C6 — Interop Python: priorización IA con LLM**
-(próximamente — en desarrollo). Endpoint
-`POST /api/tasks/{id}/suggest-priority` que invoca un LLM via
-interop Python (OpenAI / Anthropic compatible, o fallback
-heurístico local). Cache del resultado en
-`ai_suggested_priority`.
+**[Cap C6 — Interop Python: priorización IA con LLM](../../../docs/taskhub/c6-interop-python-llm.md)**.
+Módulo Python `priority.py` con LLM (OpenAI gpt-4o-mini opcional)
++ fallback heurística por keywords. Endpoint
+`POST /api/tasks/{id}/suggest-priority` con `match Result<Int>`.
+Cache en `task.ai_suggested_priority`. **Cambia base Docker** de
+distroless a `python:3.12-slim-bookworm` (C7 optimiza con
+`--bundle-python`).
 
 ## Troubleshooting
 

@@ -11,6 +11,123 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.8] — 2026-06-07 — TaskHub C6: Interop Python con LLM (priorización IA)
+
+Sexto cap de **Construyendo TaskHub**. **El cap más diferenciador
+del ecosistema**: integra un módulo Python real (`priority.py`)
+desde el binario nativo Fitz, demostrando el patrón **`from
+python import` + `match Result<Int>`** para handle de errores
+Python en compile-time. El módulo decide internamente entre LLM
+real (OpenAI gpt-4o-mini) si `OPENAI_API_KEY` está set, o
+heurística por keywords como fallback puro Python — la complejidad
+del fallback vive donde están las libs (Python), Fitz solo consume
+el resultado tipado.
+
+### Cap C6 entregado
+
+- **[`docs/taskhub/c6-interop-python-llm.md`](docs/taskhub/c6-interop-python-llm.md)**
+  (~1000 LoC) — 10 pasos cubriendo: pre-requisitos
+  (Python 3.10+ local + `cargo build --release --features python`
+  para el binario fitz, OpenAI API key opcional), `python/priority.py`
+  con `suggest_priority(title, description) -> int` que decide
+  LLM-vs-heurística adentro de Python, `python/requirements.txt`
+  con `openai>=1.0` opcional, `from python import priority` al
+  tope de `main.fitz` + handler `POST /api/tasks/{id}/suggest-priority`
+  con scope check (admin / owner / assignee) y `match Result<Int>
+  { Ok(p) => p, Err(_) => 3 }` como fallback de emergencia, cache
+  en `task.ai_suggested_priority` (field ya declarado desde C2 sin
+  migration nueva), Dockerfile actualizado a
+  `python:3.12-slim-bookworm` (image ~150 MB → ~250 MB, C7
+  optimiza con `--bundle-python`), docker-compose con
+  `OPENAI_API_KEY` env opcional, validación local + en Docker con
+  curl. Bar editorial: header + mermaid + tabla comparativa con
+  Python+FastAPI / Node+Express / Spring+langchain4j / Rails+ruby-openai
+  (rows sobre ecosistema libs LLM, llamar lib externa, manejo de
+  excepciones, compile-time check del shape, distribución binario,
+  latency, async support, fallback), validación checklist con 10
+  items, troubleshooting con 6 casos.
+
+### Ejemplo runnable
+
+`examples/taskhub/c6-interop-python-llm/` — estado del proyecto al
+cerrar C6. Copia de C5 con:
+
+- **`python/priority.py`** + **`python/requirements.txt`** —
+  módulo nuevo con LLM + heurística + decisión interna.
+- **`src/main.fitz`** extendido con: `from python import priority`
+  + handler `suggest_task_priority` con scope check + `match
+  Result<Int>` + cache en DB. `main.fitz` ahora ~670 LoC.
+- **`Dockerfile`** actualizado a `python:3.12-slim-bookworm` con
+  `PYTHONPATH=/app/python` + `pip install -r requirements.txt`.
+- **`docker-compose.yml`** suma `OPENAI_API_KEY: ${OPENAI_API_KEY:-}`
+  con default vacío al service `app`.
+- **`.env.example`** documenta `OPENAI_API_KEY` opcional con
+  comentarios sobre costo (~$0.0001/call) y latency (~500ms-1s).
+- **`.gitignore`** suma `.venv/`, `__pycache__/`, `*.pyc`, `*.pyo`.
+- README dedicado con setup local (venv) + setup Docker +
+  validación con dos tasks de prioridades distintas (urgent → 5,
+  refactor → 2) + trade-offs honestos.
+
+### Decisiones técnicas tomadas
+
+- **Decisión LLM vs heurística dentro de Python**: el módulo
+  `priority.py` chequea `OPENAI_API_KEY` internamente. Si está,
+  intenta el LLM; si falla (network, rate limit, parse), cae a
+  heurística. Fitz solo conoce el entry point `suggest_priority(...)`.
+  Esto evita refactorear el handler Fitz a `?.await` async
+  (limitación heredada del MVP — `let fut = py_call()?; fut.await`
+  no compila por la deuda residual de Fase 8.7).
+- **`match Result<Int>` con fallback de emergencia**: si Python
+  mismo falla (módulo no instalado, ImportError, etc.), el match
+  cae a `3` (medium). Esto significa que **el endpoint nunca
+  rompe** — el peor caso es una sugerencia subóptima.
+- **Sin migration nueva**: el field `ai_suggested_priority: Int?`
+  fue declarado en C2 previendo este cap.
+- **Sync Python (no async)**: el cap simplifica el patrón usando
+  `def` en lugar de `async def`. La versión async con `?.await`
+  queda documentada como refinamiento futuro (refactor del
+  módulo a `async def` con `import httpx` en lugar de openai
+  sync).
+- **Image size 150 → 250 MB**: trade-off honesto del cap.
+  Documentado upfront + referenciado el C7 para `--bundle-python`
+  que optimiza a ~50 MB con base distroless.
+- **Builder image `ghcr.io/thegreekman76/fitz:python`** asumido:
+  si la variante no existe pre-built, workaround documentado es
+  build local + COPY del binario al Dockerfile.
+- **Fallback heurístico por keywords**: 5 niveles (urgent/asap/
+  critical/blocker/p0 → 5, bug/fix/error/crash/broken → 4,
+  refactor/cleanup/test/docs/comment → 2, default → 3). Simple
+  pero funcional para el cap.
+
+### Cross-refs actualizados
+
+- **`mkdocs.yml`**: nav del tab suma entry C6.
+- **`docs/taskhub/index.md`**: tabla del roadmap C6 con link real
+  + descripción ampliada (diferenciador único).
+- **`docs/taskhub/c5-cron-jobs-persistencia.md`**: "Próximo cap"
+  linkea al C6 real.
+- **`examples/taskhub/c5-cron-jobs-persistencia/README.md`**: "Qué
+  viene" linkea al C6.
+
+### Validación
+
+- `mkdocs build` non-strict: 19.76s, sin warnings nuevos sobre
+  los archivos TaskHub.
+- `fitz check examples/taskhub/c6-interop-python-llm/src/main.fitz`
+  → "sin errores de tipo". El programa con `from python import
+  priority` + handler con `match Result<Int>` pasa el checker
+  estático **incluso sin feature python habilitado en el binario**
+  (el checker es estático; el guard real es en runtime/codegen
+  per Fase 8.1.2).
+- Smoke real end-to-end NO automatizado — requiere Docker +
+  Python feature en el binario + venv local con openai instalado
+  (opcional). Documentado paso a paso en README + cap.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al stack —
+release v0.15.8 patch 100% docs/material pedagógico.
+
 ## [v0.15.7] — 2026-06-07 — TaskHub C5: Cron + background jobs con persistencia
 
 Quinto cap de **Construyendo TaskHub**. Sobre el CRUD + WS del

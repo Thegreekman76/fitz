@@ -586,8 +586,7 @@ deploy production.
 
 ## Próximo cap
 
-**C6 — Interop Python: priorización IA con LLM** (próximamente —
-en desarrollo).
+**[C6 — Interop Python: priorización IA con LLM](c6-interop-python-llm.md)**.
 
 Vamos a sumar un endpoint `POST /api/tasks/{id}/suggest-priority`
 que invoca un **LLM via interop Python** (OpenAI / Anthropic

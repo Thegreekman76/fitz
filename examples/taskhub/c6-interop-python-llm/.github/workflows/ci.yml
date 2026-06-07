@@ -1,0 +1,38 @@
+name: ci
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  schema-drift:
+    runs-on: ubuntu-latest
+    services:
+      db:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: taskhub
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: taskhub
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://taskhub:ci@localhost:5432/taskhub?sslmode=disable
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Fitz
+        run: |
+          curl -fsSL https://fitzlang.org/install.sh | sh
+          echo "$HOME/.fitz/bin" >> $GITHUB_PATH
+
+      - name: Apply migrations
+        run: fitz db migrate
+
+      - name: Schema drift check
+        run: fitz db check
