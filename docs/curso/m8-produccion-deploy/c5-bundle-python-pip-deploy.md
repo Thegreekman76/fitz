@@ -603,6 +603,17 @@ Repaso final:
 
 **¿Qué sigue?**:
 
+- **Probá el proyecto integrador** — el curso te enseñó cada
+  feature aislada y armaste el capstone del módulo M6. **El
+  siguiente paso natural** es ver cómo TODO el stack se integra
+  en un proyecto más ambicioso:
+  **[Construyendo TaskHub](../../taskhub/index.md)**, un Trello
+  colaborativo en vivo Dockerizado desde el día 1 con los 5
+  services del compose (app + Postgres + Prometheus + Jaeger +
+  nginx), RBAC custom de 3 roles, WebSocket por board, cron jobs
+  persistentes, interop Python con LLM para priorización IA,
+  frontend vanilla JS y observability completa. **Es la app más
+  ambiciosa del material pedagógico de Fitz**.
 - **Construí algo**: tomá uno de los [boilerplates](https://github.com/Thegreekman76/fitz/tree/main/boilerplates).
 - **Contribuí**: el repo está abierto. Issues etiquetados de "good
   first issue" para arrancar.

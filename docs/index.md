@@ -100,6 +100,7 @@ Detalle, metodología y "cómo reproducir" en
 ## Por dónde arrancar
 
 [Curso de 0 a experto →](curso/index.md){ .md-button .md-button--primary }
+[Construyendo TaskHub →](taskhub/index.md){ .md-button }
 [Guía completa →](guide.md){ .md-button }
 [DB y ORM →](db-orm.md){ .md-button }
 [Benchmarks →](benchmarks.md){ .md-button }
@@ -108,11 +109,21 @@ Detalle, metodología y "cómo reproducir" en
 [GitHub →](https://github.com/Thegreekman76/fitz){ .md-button }
 
 El **[curso `Fitz de 0 a experto`](curso/index.md)** es la entrada
-recomendada si arrancás de cero. Te lleva paso a paso desde la
-instalación hasta una app real con HTTP + auth + Postgres, con un
-proyecto que crece capítulo a capítulo. M1 (setup) y M2 (tipos y
-funciones) están cerrados (13 caps, ~9k LoC); M3 (módulos) recién
-cerrado; M4-M7 en construcción.
+recomendada si arrancás de cero (8 módulos / 42 caps, M1-M8 cerrados).
+Te lleva paso a paso desde la instalación hasta una app real con
+HTTP + auth + Postgres + Docker + observability, con un proyecto
+que crece capítulo a capítulo.
+
+**[Construyendo TaskHub](taskhub/index.md)** es el **proyecto
+integrador post-curso**: un Trello colaborativo en vivo Dockerizado
+desde el día 1 con los 5 services del compose (app + Postgres +
+Prometheus + Jaeger + nginx), RBAC custom de 3 roles, WebSocket por
+board, cron jobs persistentes, interop Python con LLM para
+priorización IA, frontend vanilla JS y observability completa. **Es
+la app más ambiciosa del material pedagógico de Fitz** — pensada
+para quien terminó el curso y quiere ver el stack entero integrado,
+o para quien ya conoce Fitz y necesita ver un proyecto real
+end-to-end.
 
 La **guía** cubre 34 capítulos con ejemplos runnable en
 [`examples/guide/`](https://github.com/Thegreekman76/fitz/tree/main/examples/guide):

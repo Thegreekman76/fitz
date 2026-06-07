@@ -11,6 +11,123 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.3] — 2026-06-07 — Construyendo TaskHub: nuevo tab proyecto integrador + cap C1 (Setup Docker-first)
+
+Iniciativa nueva en docs/. **TaskHub** es un **proyecto integrador
+post-curso** — un Trello colaborativo en vivo Dockerizado desde el
+día 1 que demuestra el stack único de Fitz funcionando junto
+(auth + RBAC custom + ORM + migraciones reales + WebSocket + cron
+persistente + interop Python para IA + observability completa con
+Prometheus/Jaeger + frontend vanilla JS). Pensado para tres
+audiencias: quien terminó el curso M1-M8 y quiere ver todo
+integrado, quien ya conoce Fitz y necesita un proyecto serio
+end-to-end, y quien evalúa Fitz para producción.
+
+**Decisión estructural confirmada con el autor**: tab top-level
+**separado del curso** (no M9 del curso) — el curso es producto
+cerrado de 8 módulos / 42 caps; TaskHub es producto distinto con
+identidad propia. Mejor marketing en la home (tres rutas: aprender
+desde cero / ver proyecto real / referencia exhaustiva).
+
+### Cap C1 — Setup Docker-first (entregado)
+
+- **[`docs/taskhub/index.md`](docs/taskhub/index.md)** (~280 LoC)
+  — overview del proyecto, mermaid del stack, comparativa contra
+  M6.C7 capstone (qué pieza extra integra TaskHub), descripción
+  del modelo de datos (4 tipos: User/Project/Task/Comment),
+  funcionalidades end-to-end, roadmap de los 7 caps + post-C7
+  (publicación como boilerplate descargable), pre-requisitos,
+  cómo seguir el proyecto, comparativa final con stacks típicos.
+- **[`docs/taskhub/c1-setup-docker-first.md`](docs/taskhub/c1-setup-docker-first.md)**
+  (~880 LoC) — 10 pasos cubriendo: estructura del proyecto,
+  `fitz.toml` + `main.fitz` minimal que responde `/healthz`,
+  Dockerfile multi-stage con distroless (~30 MB final),
+  `docker-compose.yml` con 5 services (app + Postgres +
+  Prometheus + Jaeger + nginx) con healthchecks y `depends_on`,
+  `nginx.conf` con proxy `/api/*` (HTTP) + `/ws/*` (WebSocket
+  upgrade) + serve estático del frontend, `prometheus.yml` con
+  scrape config (taskhub target DOWN hasta C7 — esperado),
+  Jaeger `all-in-one` con OTel collector built-in (sin config
+  file), frontend `index.html` placeholder validable visual,
+  `.env.example` + `.gitignore`, primera vuelta + validación
+  end-to-end de cada service, validación checklist,
+  troubleshooting con 5 casos típicos. Bar editorial del curso
+  (header con pre-reqs + objetivo + por qué importa, tabla
+  comparativa "Por qué Fitz es distinto", troubleshooting,
+  cierre con "Lo que cubriste" + próximo cap).
+- **Ejemplo runnable** `examples/taskhub/c1-setup/` con 11
+  archivos: `fitz.toml`, `Dockerfile`, `docker-compose.yml`,
+  `src/main.fitz`, `nginx/nginx.conf`, `prometheus/prometheus.yml`,
+  `frontend/index.html`, `.env.example`, `.gitignore`,
+  `migrations/.gitkeep`, `README.md`. Listo para `cp .env.example
+  .env` + editar passwords + `docker compose up -d --build` y
+  los 5 services arriba en ~30s.
+
+### Roadmap de caps siguientes (declarado en el index)
+
+- **C2** — Schema + workflow `fitz db` end-to-end (declarás
+  `@table type` para User/Project/Task/Comment + workflow real
+  con cambios de schema posteriores + `rollback` + CI drift
+  check).
+- **C3** — Auth con RBAC custom (3 roles apilables: admin /
+  owner / member) + JWT + Argon2id + tests por rol.
+- **C4** — CRUD + relations + WebSocket en vivo por project.
+- **C5** — Cron + background jobs con `store=db` persistente.
+- **C6** — Interop Python para priorización IA (LLM + fallback
+  heurístico).
+- **C7** — Observability completa + frontend + deploy
+  production.
+- **Post-C7** — Extracción del estado final a
+  `boilerplates/taskhub/` (al lado de los 9 boilerplates
+  existentes) con README dedicado, para que cualquiera pueda
+  probar TaskHub sin pasar por los 7 caps. **Decisión del autor**:
+  publicar como boilerplate descargable hace que la app sea
+  testeable sin el curriculum completo.
+
+### Estructura docs/
+
+- `docs/taskhub/` — nuevo directorio paralelo a `docs/curso/`
+  con `index.md` + `c1-setup-docker-first.md`. Los 6 caps
+  restantes (C2-C7) se agregan en sesiones siguientes.
+- `examples/taskhub/c1-setup/` — primer ejemplo runnable.
+  Convención `examples/taskhub/cN-tema/` igual que
+  `examples/curso/`.
+
+### Integración con el resto del sitio
+
+- **`mkdocs.yml`**: entry nuevo top-level **"Construyendo
+  TaskHub"** entre el curso y la sección "DB y ORM". El tab
+  tiene `index.md` + `c1-setup-docker-first.md` (los caps
+  futuros se suman a medida que se cierran).
+- **`docs/index.md`** (home del sitio): suma botón
+  "Construyendo TaskHub" entre el curso y la guía. Párrafo
+  descriptivo después del bloque del curso explica el
+  posicionamiento (proyecto integrador post-curso, comparativa
+  con M6.C7 capstone, audiencias).
+- **`docs/curso/m8-produccion-deploy/c5-bundle-python-pip-deploy.md`**
+  (último cap del curso): sección "¿Qué sigue?" suma TaskHub
+  como primer ítem ("el siguiente paso natural" después del
+  curso entero).
+
+### Validación
+
+- `mkdocs build` non-strict: 35.82s, sin warnings nuevos sobre
+  los archivos de TaskHub (después de fixear placeholders al C2
+  que aún no existe como link).
+- `fitz check examples/taskhub/c1-setup/src/main.fitz` → "sin
+  errores de tipo".
+- `docker compose config -f examples/taskhub/c1-setup/docker-compose.yml`
+  (con env vars dummy) → parsea correcto los 5 services con
+  todas las env vars resueltas.
+- Smoke real `docker compose up -d --build` NO automatizado —
+  requiere Docker + ~30s + descarga de imágenes la primera vez.
+  Documentado en el README del ejemplo para reproducir manual.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al stack — esta
+entrega es 100% docs/material pedagógico. Release v0.15.3 patch.
+
 ## [v0.15.2] — 2026-06-07 — Drift cleanup: API real de `DbRow` en docs/curso M6.C1 + docs/db-orm.md
 
 Follow-up de v0.15.1. Mientras escribíamos el cap nuevo M6.C6 detectamos

@@ -1,0 +1,23 @@
+// TaskHub — entry point (C1: setup Docker-first).
+//
+// En C1 solo respondemos /healthz para validar que el binario
+// arranca y nginx puede pegarle a través del proxy. El resto del
+// API llega en los caps siguientes.
+
+type HealthResponse {
+    status: Str
+    version: Str
+}
+
+@get("/healthz")
+fn healthz() -> HealthResponse {
+    return HealthResponse {
+        status: "ok",
+        version: "0.1.0-c1"
+    }
+}
+
+@server(8080)
+fn main() => 0
+
+print("TaskHub C1 — escuchando en :8080")
