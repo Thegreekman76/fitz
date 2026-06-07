@@ -1,0 +1,269 @@
+// TaskHub C3 — Auth con RBAC custom de 3 roles apilables.
+//
+// Estado al cerrar el cap C3:
+// - @hidden en User.password_hash (no aparece en JSON responses).
+// - @auth_provider que valida Bearer JWT contra DB.
+// - POST /api/auth/register (público, role default: member).
+// - POST /api/auth/login (público, devuelve JWT HS256).
+// - GET /api/me (@authenticated).
+// - GET /api/users (@requires("admin")).
+// - POST /api/users/{id}/promote (@requires("admin")).
+// - GET /api/stats (@requires("admin") @requires("owner") apilable).
+//
+// Bootstrap del primer admin: manual via psql (Paso 10 del cap).
+
+// ───────────────────────────────────────────────
+// Schema del dominio (4 tablas)
+// ───────────────────────────────────────────────
+
+@table("users") type User {
+    @primary id: Int = 0
+    email: Str
+    @hidden password_hash: Str = ""    // ← NUEVO en C3
+    role: Str = "member"               // admin / owner / member
+    created_at: DateTime
+}
+
+@table("projects") type Project {
+    @primary id: Int = 0
+    name: Str
+    description: Str = ""
+    owner_id: Int
+    created_at: DateTime
+}
+
+@table("tasks") type Task {
+    @primary id: Int = 0
+    project_id: Int
+    title: Str
+    description: Str = ""
+    status: Str = "todo"
+    priority: Int = 3
+    assignee_id: Int?
+    due_date: Date?
+    ai_suggested_priority: Int?
+    created_at: DateTime
+}
+
+@table("comments") type Comment {
+    @primary id: Int = 0
+    task_id: Int
+    user_id: Int
+    body: Str
+    created_at: DateTime
+}
+
+// ───────────────────────────────────────────────
+// Conexión a la DB + JWT secret
+// ───────────────────────────────────────────────
+
+let db_result = db.connect(env_or("DATABASE_URL", "")).await
+let JWT_SECRET = env_or("JWT_SECRET", "dev-secret-cambiame")
+
+// ───────────────────────────────────────────────
+// Tipos auxiliares del flow de auth
+// ───────────────────────────────────────────────
+
+type RegisterInput {
+    email: Str
+    password: Str
+}
+
+type LoginInput {
+    email: Str
+    password: Str
+}
+
+type LoginResponse {
+    token: Str
+}
+
+type PromoteInput {
+    new_role: Str    // "admin" / "owner" / "member"
+}
+
+type StatsResponse {
+    total_users: Int
+    total_projects: Int
+    total_tasks: Int
+}
+
+type HealthResponse {
+    status: Str
+    version: Str
+}
+
+// ───────────────────────────────────────────────
+// Helper privado para lookup por email
+// ───────────────────────────────────────────────
+
+async fn find_user_by_email(email: Str) -> Result<User> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    return User.where(fn(u) => u.email == email).first(conn).await
+}
+
+// ───────────────────────────────────────────────
+// @auth_provider: valida Bearer + lookup contra DB
+// ───────────────────────────────────────────────
+
+@auth_provider
+async fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let auth: Str = match headers.get("authorization") {
+        Ok(v) => v,
+        Err(_) => return Err("falta header Authorization"),
+    }
+    let parts = auth.split(" ")
+    if (parts.len() != 2) {
+        return Err("Authorization debe ser 'Bearer <token>'")
+    }
+    if (parts[0] != "Bearer") {
+        return Err("scheme debe ser Bearer")
+    }
+    let token = parts[1]
+
+    let claims = jwt.decode(token, JWT_SECRET)?
+    let email: Str = match claims.get("email") {
+        Ok(v) => v,
+        Err(_) => return Err("token sin claim email"),
+    }
+
+    // Lookup contra DB, no contra el claim — un demote surte
+    // efecto inmediato sin esperar al expiry del token.
+    return find_user_by_email(email).await
+}
+
+// ───────────────────────────────────────────────
+// Endpoints públicos
+// ───────────────────────────────────────────────
+
+@get("/healthz")
+fn healthz() -> HealthResponse {
+    return HealthResponse {
+        status: "ok",
+        version: "0.1.0-c3"
+    }
+}
+
+@post("/auth/register")
+async fn register(input: RegisterInput) -> Result<User> {
+    if (input.email == "" or input.password == "") {
+        return Err("email y password son obligatorios")
+    }
+    if (input.password.len() < 8) {
+        return Err("password debe tener al menos 8 caracteres")
+    }
+
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+
+    // Check de unicidad antes del INSERT (mensaje user-friendly).
+    let existing = User.where(fn(u) => u.email == input.email).first(conn).await
+    match existing {
+        Ok(_)  => return Err("email ya registrado"),
+        Err(_) => 0,
+    }
+
+    let pw_hash = hash.password(input.password)
+    let new_user = User.insert(conn, User {
+        id: 0,
+        email: input.email,
+        password_hash: pw_hash,
+        role: "member",
+        created_at: DateTime.now(),
+    }).await?
+
+    return Ok(new_user)
+}
+
+@post("/auth/login")
+async fn login(creds: LoginInput) -> Result<LoginResponse> {
+    let user: User = match find_user_by_email(creds.email).await {
+        Ok(u) => u,
+        Err(_) => return Err("credenciales inválidas"),
+    }
+    if (not hash.verify(creds.password, user.password_hash)) {
+        return Err("credenciales inválidas")
+    }
+    let claims = {
+        "email": user.email,
+        "role": user.role,
+    }
+    let token = jwt.encode(claims, JWT_SECRET)
+    return Ok(LoginResponse { token: token })
+}
+
+// ───────────────────────────────────────────────
+// Endpoints autenticados
+// ───────────────────────────────────────────────
+
+@authenticated
+@get("/me")
+fn me(user: User) -> User => user
+
+@requires("admin")
+@get("/users")
+async fn list_users_admin(user: User) -> Result<List<User>> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+    return User.all(conn).await
+}
+
+@requires("admin")
+@post("/users/{id}/promote")
+async fn promote_user(id: Int, input: PromoteInput, user: User) -> Result<User> {
+    if (input.new_role != "admin" and input.new_role != "owner" and input.new_role != "member") {
+        return Err("new_role debe ser 'admin', 'owner' o 'member'")
+    }
+
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+
+    let updated_count = User.where(fn(u) => u.id == id)
+        .update(conn, { "role": input.new_role })
+        .await?
+
+    if (updated_count == 0) {
+        return Err("user con id={id} no existe")
+    }
+
+    return User.where(fn(u) => u.id == id).first(conn).await
+}
+
+// Demo de @requires apilable (OR): admin O owner.
+@requires("admin")
+@requires("owner")
+@get("/stats")
+async fn stats(user: User) -> Result<StatsResponse> {
+    let conn = match db_result {
+        Ok(c) => c,
+        Err(_) => return Err("db no disponible"),
+    }
+
+    let users_count = User.count(conn).await?
+    let projects_count = Project.count(conn).await?
+    let tasks_count = Task.count(conn).await?
+
+    return Ok(StatsResponse {
+        total_users: users_count,
+        total_projects: projects_count,
+        total_tasks: tasks_count,
+    })
+}
+
+// ───────────────────────────────────────────────
+// Entry
+// ───────────────────────────────────────────────
+
+@server(8080)
+fn main() => 0
+
+print("TaskHub C3 — auth + RBAC activos, escuchando en :8080")

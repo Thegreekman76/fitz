@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TaskHub — En construcción</title>
+    <style>
+        body {
+            font-family: -apple-system, system-ui, sans-serif;
+            max-width: 600px;
+            margin: 4rem auto;
+            padding: 0 1rem;
+            color: #2c3e50;
+            line-height: 1.5;
+        }
+        h1 { color: #ce412b; margin-bottom: 0.5rem; }
+        h2 { margin-top: 2rem; color: #34495e; }
+        code {
+            background: #f4f4f4;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-size: 0.9em;
+        }
+        .badge {
+            display: inline-block;
+            background: #e8f5e9;
+            color: #2e7d32;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.85em;
+        }
+        ul li { margin: 0.3rem 0; }
+        a { color: #ce412b; }
+    </style>
+</head>
+<body>
+    <h1>TaskHub</h1>
+    <p class="badge">v0.1.0-c1 — Setup Docker-first</p>
+    <p>
+        El compose con los 5 services está corriendo. El frontend
+        real llega en el cap C7 — por ahora este placeholder
+        confirma que <strong>nginx → frontend</strong> funciona.
+    </p>
+    <h2>Verificá los services</h2>
+    <ul>
+        <li><a href="/healthz">/healthz</a> — debería devolver
+            <code>{"status":"ok","version":"0.1.0-c1"}</code></li>
+        <li><a href="http://localhost:9090" target="_blank">
+            Prometheus UI :9090</a></li>
+        <li><a href="http://localhost:16686" target="_blank">
+            Jaeger UI :16686</a></li>
+    </ul>
+    <p>
+        Cuando termines TaskHub vas a tener acá un board kanban
+        con drag &amp; drop, login con JWT, y notificaciones en
+        vivo por WebSocket.
+    </p>
+</body>
+</html>

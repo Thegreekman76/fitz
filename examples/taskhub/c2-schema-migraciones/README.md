@@ -134,10 +134,10 @@ docker compose down -v
 
 ## Qué viene
 
-**Cap C3 — Auth con RBAC custom: 3 roles apilables**
-(próximamente — en desarrollo). Sumamos register + login con JWT +
-Argon2id, `@auth_provider`, y `@requires("admin")` /
-`@requires("owner")` / `@requires("member")` sobre los handlers.
+**[Cap C3 — Auth con RBAC custom: 3 roles apilables](../../../docs/taskhub/c3-auth-rbac.md)**.
+Sumamos register + login con JWT + Argon2id, `@auth_provider`, y
+`@requires("admin")` / `@requires("owner")` / `@requires("member")`
+sobre los handlers — con semántica OR apilable.
 
 ## Troubleshooting
 

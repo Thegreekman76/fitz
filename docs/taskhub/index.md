@@ -127,7 +127,7 @@ post-TaskHub.
 |---|---|---|
 | **[C1](c1-setup-docker-first.md)** | Setup Docker-first: los 5 services del compose | `docker compose up -d` levanta app vacía + Postgres + Prometheus + Jaeger + nginx. Tour de qué hace cada uno. Validación con healthchecks. |
 | **[C2](c2-schema-migraciones.md)** | Schema + workflow `fitz db` end-to-end | Declarás `@table type` para User/Project/Task/Comment + workflow real: `fitz db new initial` → `diff > file.sql` → `migrate`. Cambio de schema posterior + `rollback`. `fitz db check` en CI con GitHub Actions. |
-| **C3** | Auth con RBAC custom: 3 roles apilables | Register + login con JWT + Argon2id. `@auth_provider` + `@authenticated` + `@requires("admin"\|"owner"\|"member")`. Endpoints protegidos. Tests de cada rol. |
+| **[C3](c3-auth-rbac.md)** | Auth con RBAC custom: 3 roles apilables | Register + login con JWT + Argon2id. `@auth_provider` + `@authenticated` + `@requires("admin"\|"owner"\|"member")` apilable (semántica OR). Endpoints protegidos + bootstrap del primer admin + tests por cada rol con curl. |
 | **C4** | CRUD + relations + WebSocket en vivo | Handlers `@get/@post/@put/@delete` para projects + tasks + comments. Relations + eager loading. `@ws("/ws/projects/{id}")` para broadcast de cambios. |
 | **C5** | Cron + background jobs con persistencia | `@cron("0 0 3 * * *")` para cleanup nocturno + envío de reminders. `@background` para tareas largas. `store=db` para persistencia entre reinicios. |
 | **C6** | Interop Python: IA para priorización | `from python import` LLM client (OpenAI o local). Bridge async con `<py_call>?.await`. Cache del resultado en columna. Fallback heurístico si Python falla. |

@@ -184,6 +184,7 @@ nav:
       - taskhub/index.md
       - 'C1 — Setup Docker-first': taskhub/c1-setup-docker-first.md
       - 'C2 — Schema + workflow fitz db': taskhub/c2-schema-migraciones.md
+      - 'C3 — Auth con RBAC custom (3 roles)': taskhub/c3-auth-rbac.md
   - 'DB y ORM': db-orm.md
   - 'Benchmarks': benchmarks.md
   - Roadmap:

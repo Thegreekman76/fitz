@@ -11,6 +11,114 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.5] — 2026-06-07 — TaskHub C3: Auth con RBAC custom de 3 roles apilables
+
+Tercer cap de **Construyendo TaskHub**. Sobre el schema del C2
+sumamos auth nativa con JWT + Argon2id + `@auth_provider`
+singleton + `@authenticated` / `@requires("admin"|"owner"|"member")`
+apilable (semántica OR) — todo demostrado end-to-end con tests por
+rol usando curl. El RBAC custom es **un diferencial fuerte del
+lenguaje** vs Spring Security / FastAPI / Express donde se resuelve
+con middleware ad-hoc o dependency injection runtime.
+
+### Cap C3 entregado
+
+- **[`docs/taskhub/c3-auth-rbac.md`](docs/taskhub/c3-auth-rbac.md)**
+  (~880 LoC) — 11 pasos cubriendo: `@hidden` decorator sobre
+  `User.password_hash` (column sigue en DB pero no aparece en JSON
+  responses), tipos auxiliares (`RegisterInput`, `LoginInput`,
+  `LoginResponse`, `PromoteInput`, `StatsResponse`) separados del
+  shape DB, `@auth_provider async fn check_token(headers)` que
+  valida el Bearer JWT contra la DB (lookup por email contra el
+  UNIQUE index — un demote surte efecto inmediato sin esperar al
+  expiry del token), `POST /api/auth/register` con `hash.password`
+  Argon2id + validación temprana + check de unicidad antes del
+  INSERT, `POST /api/auth/login` con `hash.verify` + `jwt.encode`
+  HS256 + mismo mensaje "credenciales inválidas" para evitar
+  enumeración de usuarios, `GET /api/me` con `@authenticated`
+  (handler de una línea), `GET /api/users` y
+  `POST /api/users/{id}/promote` con `@requires("admin")`,
+  `GET /api/stats` con `@requires("admin") @requires("owner")`
+  apilable (demo de semántica OR), bootstrap manual del primer
+  admin via `psql UPDATE`, tests end-to-end con curl validando
+  cada rol contra cada endpoint. Bar editorial: header + mermaid
+  + tabla comparativa con Spring Security / FastAPI custom decorator
+  / Express + middleware (incluye rows específicos sobre validación
+  estática del checker, hide password, hierarchies de roles),
+  validación checklist con 12 items, troubleshooting con 5 casos.
+
+### Ejemplo runnable
+
+`examples/taskhub/c3-auth-rbac/` — estado del proyecto al cerrar
+C3. Copia de C2 con:
+
+- **`src/main.fitz`** extendido con: `@hidden` en password_hash,
+  6 tipos auxiliares nuevos, helper `find_user_by_email`,
+  `@auth_provider async fn check_token`, 6 handlers nuevos
+  (register / login / me / list_users_admin / promote_user /
+  stats) más el `/healthz` existente. **Sin cambios al schema**
+  — `@hidden` es decisión de código.
+- README dedicado con setup desde cero + validación end-to-end
+  con curl (registro de admin + bootstrap manual + login + tests
+  por cada rol + demo del apilable `@requires("admin") @requires("owner")`).
+
+### Decisiones técnicas tomadas
+
+- **`@auth_provider async fn`** (no bare `fn`) — el provider hace
+  query a DB con `.await` adentro. Singleton del programa
+  (checker rechaza dos providers).
+- **JWT claims `Map<Str, Str>` con `email` + `role` snapshot**.
+  El provider revalida `role` contra DB en cada request
+  (security against stale claims) — el snapshot del claim sirve
+  para debug del JWT en jwt.io, no para decidir RBAC.
+- **`@hidden` en `password_hash`** — el field sigue en DB
+  (column `text NOT NULL DEFAULT ''`) pero el codegen del
+  `__ToFitzJson` lo omite. Sin migration necesaria.
+- **Bootstrap del primer admin manual via `psql UPDATE`** — el
+  chicken-and-egg de "necesitás admin para crear admin" se
+  resuelve una sola vez en la vida del proyecto. Refinamiento
+  futuro: `.fitz` migration nativa que lee `INITIAL_ADMIN_EMAIL`
+  env var y eleva ese user al boot.
+- **`@requires("admin") @requires("owner")` apilable = OR**. Un
+  user tiene **un solo `role: Str`** (no lista), pedir AND
+  sería incoherente. Para hierarchies más complejas (membership
+  en N grupos) → tabla relacional `user_roles` + JOIN, fuera del
+  scope del RBAC declarativo.
+- **Mismo mensaje "credenciales inválidas"** en login para email
+  inexistente y password wrong — mitigation contra enumeración
+  de usuarios (estándar en stacks production).
+
+### Cross-refs actualizados
+
+- **`mkdocs.yml`**: nav del tab suma entry C3.
+- **`docs/taskhub/index.md`**: tabla del roadmap actualiza C3 de
+  "(próximamente)" a link al cap + descripción ampliada.
+- **`docs/taskhub/c2-schema-migraciones.md`**: "Próximo cap"
+  linkea al C3 real.
+- **`examples/taskhub/c2-schema-migraciones/README.md`**: "Qué
+  viene" linkea al cap C3 + descripción.
+
+### Validación
+
+- `mkdocs build` non-strict: 17.99s, sin warnings nuevos sobre
+  los archivos TaskHub.
+- `fitz check examples/taskhub/c3-auth-rbac/src/main.fitz` →
+  "sin errores de tipo". El programa con auth completo +
+  `@requires` apilable + tipos auxiliares + helpers + 7 handlers
+  pasa el checker en bloque. **El checker valida el shape exacto
+  del `@auth_provider`** (signature `Map<Str, Str> -> Result<User>`),
+  exige `role: Str` no nullable en `User`, rechaza duplicados de
+  `@requires("admin")` en handlers apilados, y conoce qué endpoints
+  están detrás de cada rol.
+- Smoke real end-to-end NO automatizado — requiere Docker + las
+  migrations aplicadas + admin bootstrap manual. Documentado paso
+  a paso en el README + el cap.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al stack —
+release v0.15.5 patch 100% docs/material pedagógico.
+
 ## [v0.15.4] — 2026-06-07 — TaskHub C2: Schema + workflow `fitz db` end-to-end
 
 Segundo cap de **Construyendo TaskHub** (proyecto integrador

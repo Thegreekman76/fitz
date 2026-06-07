@@ -782,8 +782,7 @@ cualquier cambio futuro pasa por el workflow versionado.
 
 ## Próximo cap
 
-**C3 — Auth con RBAC custom: 3 roles apilables** (próximamente —
-en desarrollo).
+**[C3 — Auth con RBAC custom: 3 roles apilables](c3-auth-rbac.md)**.
 
 Vamos a sumar register + login con JWT + Argon2id, declarar el
 `@auth_provider`, y aplicar `@authenticated` + `@requires("admin")` /
