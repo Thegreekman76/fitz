@@ -21,8 +21,7 @@ visible + observability live + deploy bundleado.
    documentado si el bundling no anda.
 5. **Publicación como boilerplate descargable**
    `boilerplates/taskhub/` al lado de los 9 boilerplates
-   existentes — para que cualquiera clone + `docker compose up
-   -d --build` y tenga TaskHub corriendo en 30s.
+   existentes — para que cualquiera clone + `docker compose up -d --build` y tenga TaskHub corriendo en 30s.
 
 **Por qué importa**: este es **el cierre del proyecto**. C1-C6
 construyeron la app pieza a pieza; C7 la deja **deployable a
@@ -32,8 +31,9 @@ que alguien que no quiera hacer los 7 caps simplemente clone el
 boilerplate.
 
 **Cross-link**: [Cap 33 de la guía — Observability](../guide.md#33-observability)
-+ [Cap 35 de la guía — Deployment ciudadano primera clase](../guide.md#35-deployment-ciudadano-primera-clase)
-+ [Curso M8.C2-C5](../curso/m8-produccion-deploy/c1-distribucion-binarios.md).
+
+- [Cap 35 de la guía — Deployment ciudadano primera clase](../guide.md#35-deployment-ciudadano-primera-clase)
+- [Curso M8.C2-C5](../curso/m8-produccion-deploy/c1-distribucion-binarios.md).
 
 ---
 
@@ -56,18 +56,18 @@ flowchart LR
 
 ## Por qué Fitz es distinto en deployment
 
-| Feature | Python+FastAPI+uvicorn | Node+Express+pm2 | Spring Boot | **Fitz TaskHub (C7)** |
-|---|---|---|---|---|
-| Image Docker final | ~200-400 MB | ~150-300 MB | ~300-500 MB | **~50 MB** (con bundling) o ~250 MB (sin) |
-| Cold start | 2-5s | 1-2s | 10-30s | **50-100ms** |
-| Memory idle | 120-200 MB | 80-120 MB | 250-400 MB | **20-40 MB** |
-| Prometheus `/metrics` | extras: `prometheus-fastapi-instrumentator` | extras: `prom-client` | extras: `micrometer` | **`@server(prometheus=true)` built-in** |
-| OTel tracing | extras: `opentelemetry-instrumentation-fastapi` | extras: `@opentelemetry/sdk-trace-node` | extras: `opentelemetry-spring-boot` | **env var `OTEL_EXPORTER_OTLP_ENDPOINT` y listo** |
-| `/healthz` + `/readyz` auto | manual con `@app.get("/healthz")` | manual | extras: `spring-boot-actuator` | **`@healthz fn` + `@readyz fn` decorators** |
-| SIGTERM drain auto | manual `signal.signal(SIGTERM, ...)` | pm2 graceful reload | Spring's GracefulShutdown bean | **automático**: SIGTERM → readyz devuelve 503 → drain |
-| Frontend bundling | webpack / vite separado | webpack / vite separado | webpack o thymeleaf | **vanilla JS servido por nginx, sin build** (mismo binario) |
-| Single-binary deploy | ❌ (Python interp + libs) | ❌ (node + node_modules) | ✅ jar (50-200 MB) | ✅ **~50 MB con bundling** |
-| 12-factor compliance | manual cada uno | manual cada uno | parcial | **built-in todo** ([cap 35.6](../guide.md#35-deployment-ciudadano-primera-clase)) |
+| Feature                     | Python+FastAPI+uvicorn                         | Node+Express+pm2                       | Spring Boot                        | **Fitz TaskHub (C7)**                                                             |
+| --------------------------- | ---------------------------------------------- | -------------------------------------- | ---------------------------------- | --------------------------------------------------------------------------------- |
+| Image Docker final          | ~200-400 MB                                    | ~150-300 MB                            | ~300-500 MB                        | **~50 MB** (con bundling) o ~250 MB (sin)                                         |
+| Cold start                  | 2-5s                                           | 1-2s                                   | 10-30s                             | **50-100ms**                                                                      |
+| Memory idle                 | 120-200 MB                                     | 80-120 MB                              | 250-400 MB                         | **20-40 MB**                                                                      |
+| Prometheus `/metrics`       | extras:`prometheus-fastapi-instrumentator`     | extras:`prom-client`                   | extras:`micrometer`                | **`@server(prometheus=true)` built-in**                                           |
+| OTel tracing                | extras:`opentelemetry-instrumentation-fastapi` | extras:`@opentelemetry/sdk-trace-node` | extras:`opentelemetry-spring-boot` | **env var `OTEL_EXPORTER_OTLP_ENDPOINT` y listo**                                 |
+| `/healthz` + `/readyz` auto | manual con `@app.get("/healthz")`              | manual                                 | extras:`spring-boot-actuator`      | **`@healthz fn` + `@readyz fn` decorators**                                       |
+| SIGTERM drain auto          | manual `signal.signal(SIGTERM, ...)`           | pm2 graceful reload                    | Spring's GracefulShutdown bean     | **automático**: SIGTERM → readyz devuelve 503 → drain                             |
+| Frontend bundling           | webpack / vite separado                        | webpack / vite separado                | webpack o thymeleaf                | **vanilla JS servido por nginx, sin build** (mismo binario)                       |
+| Single-binary deploy        | ❌ (Python interp + libs)                      | ❌ (node + node_modules)               | ✅ jar (50-200 MB)                 | ✅**~50 MB con bundling**                                                         |
+| 12-factor compliance        | manual cada uno                                | manual cada uno                        | parcial                            | **built-in todo** ([cap 35.6](../guide.md#35-deployment-ciudadano-primera-clase)) |
 
 **Diferencial estructural**: el binario de TaskHub al cierre del
 C7 es **portable, autónomo, observable, drainable**. **Sin SDK
@@ -206,8 +206,7 @@ fn check_ready_for_traffic() -> Bool {
 **Detalles**:
 
 - **`@healthz fn ... -> Bool`** — el decorator auto-mount-ea el
-  endpoint `/healthz`. Si la fn devuelve `true`, response `200
-  OK`; si `false`, `503 Service Unavailable`.
+  endpoint `/healthz`. Si la fn devuelve `true`, response `200 OK`; si `false`, `503 Service Unavailable`.
 - **Override del `@get("/healthz")` simple del C1-C6** — el
   decorator `@healthz` tiene prioridad sobre cualquier handler
   manual con el mismo path. Podés borrar el handler manual del
@@ -266,16 +265,16 @@ routing client-side por hash.
 ```html
 <!DOCTYPE html>
 <html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>TaskHub</title>
-    <link rel="stylesheet" href="/assets/style.css">
-</head>
-<body>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
     <header>
-        <h1>TaskHub</h1>
-        <nav id="nav"></nav>
+      <h1>TaskHub</h1>
+      <nav id="nav"></nav>
     </header>
 
     <main id="app"></main>
@@ -283,136 +282,155 @@ routing client-side por hash.
     <script src="/assets/api.js"></script>
     <script src="/assets/ws.js"></script>
     <script src="/assets/app.js"></script>
-</body>
+  </body>
 </html>
 ```
 
 ### `frontend/assets/style.css`
 
 ```css
-* { box-sizing: border-box; margin: 0; padding: 0; }
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
 
 body {
-    font-family: -apple-system, system-ui, sans-serif;
-    color: #2c3e50;
-    background: #f4f6f8;
-    line-height: 1.5;
+  font-family: -apple-system, system-ui, sans-serif;
+  color: #2c3e50;
+  background: #f4f6f8;
+  line-height: 1.5;
 }
 
 header {
-    background: #ce412b;
-    color: white;
-    padding: 1rem 2rem;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
+  background: #ce412b;
+  color: white;
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
-header h1 { font-size: 1.5rem; }
+header h1 {
+  font-size: 1.5rem;
+}
 
-nav a, nav button {
-    background: rgba(255,255,255,0.2);
-    color: white;
-    padding: 0.5rem 1rem;
-    border: none;
-    border-radius: 4px;
-    text-decoration: none;
-    cursor: pointer;
-    margin-left: 0.5rem;
+nav a,
+nav button {
+  background: rgba(255, 255, 255, 0.2);
+  color: white;
+  padding: 0.5rem 1rem;
+  border: none;
+  border-radius: 4px;
+  text-decoration: none;
+  cursor: pointer;
+  margin-left: 0.5rem;
 }
 
 main {
-    max-width: 1200px;
-    margin: 2rem auto;
-    padding: 0 1rem;
+  max-width: 1200px;
+  margin: 2rem auto;
+  padding: 0 1rem;
 }
 
 form {
-    background: white;
-    padding: 2rem;
-    border-radius: 8px;
-    max-width: 400px;
-    margin: 0 auto;
+  background: white;
+  padding: 2rem;
+  border-radius: 8px;
+  max-width: 400px;
+  margin: 0 auto;
 }
 
-form h2 { margin-bottom: 1rem; }
+form h2 {
+  margin-bottom: 1rem;
+}
 
 form label {
-    display: block;
-    margin-top: 1rem;
-    font-weight: 600;
+  display: block;
+  margin-top: 1rem;
+  font-weight: 600;
 }
 
-form input, form textarea {
-    width: 100%;
-    padding: 0.5rem;
-    border: 1px solid #ddd;
-    border-radius: 4px;
-    font-size: 1rem;
+form input,
+form textarea {
+  width: 100%;
+  padding: 0.5rem;
+  border: 1px solid #ddd;
+  border-radius: 4px;
+  font-size: 1rem;
 }
 
 form button {
-    margin-top: 1rem;
-    padding: 0.75rem 2rem;
-    background: #ce412b;
-    color: white;
-    border: none;
-    border-radius: 4px;
-    font-size: 1rem;
-    cursor: pointer;
+  margin-top: 1rem;
+  padding: 0.75rem 2rem;
+  background: #ce412b;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-size: 1rem;
+  cursor: pointer;
 }
 
 .board {
-    display: grid;
-    grid-template-columns: repeat(3, 1fr);
-    gap: 1rem;
-    margin-top: 2rem;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  margin-top: 2rem;
 }
 
 .column {
-    background: white;
-    padding: 1rem;
-    border-radius: 8px;
+  background: white;
+  padding: 1rem;
+  border-radius: 8px;
 }
 
 .column h3 {
-    text-transform: uppercase;
-    font-size: 0.85rem;
-    color: #888;
-    margin-bottom: 1rem;
+  text-transform: uppercase;
+  font-size: 0.85rem;
+  color: #888;
+  margin-bottom: 1rem;
 }
 
 .task {
-    background: #f4f6f8;
-    padding: 0.75rem;
-    border-radius: 4px;
-    margin-bottom: 0.5rem;
-    cursor: grab;
+  background: #f4f6f8;
+  padding: 0.75rem;
+  border-radius: 4px;
+  margin-bottom: 0.5rem;
+  cursor: grab;
 }
 
-.task strong { display: block; margin-bottom: 0.25rem; }
+.task strong {
+  display: block;
+  margin-bottom: 0.25rem;
+}
 
 .task .priority {
-    display: inline-block;
-    padding: 2px 6px;
-    background: #ce412b;
-    color: white;
-    border-radius: 3px;
-    font-size: 0.75rem;
+  display: inline-block;
+  padding: 2px 6px;
+  background: #ce412b;
+  color: white;
+  border-radius: 3px;
+  font-size: 0.75rem;
 }
 
 .projects-list a {
-    display: block;
-    background: white;
-    padding: 1rem;
-    margin-bottom: 0.5rem;
-    border-radius: 8px;
-    text-decoration: none;
-    color: #2c3e50;
+  display: block;
+  background: white;
+  padding: 1rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  text-decoration: none;
+  color: #2c3e50;
 }
 
-.error { color: #c0392b; margin-top: 1rem; }
-.success { color: #27ae60; margin-top: 1rem; }
+.error {
+  color: #c0392b;
+  margin-top: 1rem;
+}
+.success {
+  color: #27ae60;
+  margin-top: 1rem;
+}
 ```
 
 ### `frontend/assets/api.js`
@@ -421,37 +439,45 @@ form button {
 // api.js — wrappers de fetch con Bearer auth.
 
 const API = {
-    token: localStorage.getItem("taskhub_token") || null,
+  token: localStorage.getItem("taskhub_token") || null,
 
-    setToken(t) {
-        this.token = t;
-        if (t) localStorage.setItem("taskhub_token", t);
-        else localStorage.removeItem("taskhub_token");
-    },
+  setToken(t) {
+    this.token = t;
+    if (t) localStorage.setItem("taskhub_token", t);
+    else localStorage.removeItem("taskhub_token");
+  },
 
-    async req(method, path, body) {
-        const opts = {
-            method,
-            headers: { "Content-Type": "application/json" },
-        };
-        if (this.token) opts.headers["Authorization"] = `Bearer ${this.token}`;
-        if (body) opts.body = JSON.stringify(body);
+  async req(method, path, body) {
+    const opts = {
+      method,
+      headers: { "Content-Type": "application/json" },
+    };
+    if (this.token) opts.headers["Authorization"] = `Bearer ${this.token}`;
+    if (body) opts.body = JSON.stringify(body);
 
-        const resp = await fetch(`/api${path}`, opts);
-        if (resp.status === 401) {
-            this.setToken(null);
-            location.hash = "#login";
-            throw new Error("no auth");
-        }
-        const data = await resp.json();
-        if (!resp.ok) throw new Error(data.error || "request fallido");
-        return data;
-    },
+    const resp = await fetch(`/api${path}`, opts);
+    if (resp.status === 401) {
+      this.setToken(null);
+      location.hash = "#login";
+      throw new Error("no auth");
+    }
+    const data = await resp.json();
+    if (!resp.ok) throw new Error(data.error || "request fallido");
+    return data;
+  },
 
-    get(path)         { return this.req("GET", path); },
-    post(path, body)  { return this.req("POST", path, body); },
-    put(path, body)   { return this.req("PUT", path, body); },
-    del(path)         { return this.req("DELETE", path); },
+  get(path) {
+    return this.req("GET", path);
+  },
+  post(path, body) {
+    return this.req("POST", path, body);
+  },
+  put(path, body) {
+    return this.req("PUT", path, body);
+  },
+  del(path) {
+    return this.req("DELETE", path);
+  },
 };
 ```
 
@@ -461,34 +487,36 @@ const API = {
 // ws.js — cliente WebSocket simple.
 
 const WS = {
-    socket: null,
-    listeners: [],
+  socket: null,
+  listeners: [],
 
-    connect() {
-        if (this.socket) return;
-        const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        this.socket = new WebSocket(
-            `${proto}//${location.host}/ws/events`,
-            `bearer.${API.token}`
-        );
-        this.socket.onmessage = (ev) => {
-            const msg = JSON.parse(ev.data);
-            this.listeners.forEach((cb) => cb(msg));
-        };
-        this.socket.onclose = () => {
-            this.socket = null;
-            // Reconnect después de 2s si todavía estamos logueados.
-            if (API.token) setTimeout(() => this.connect(), 2000);
-        };
-    },
+  connect() {
+    if (this.socket) return;
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    this.socket = new WebSocket(
+      `${proto}//${location.host}/ws/events`,
+      `bearer.${API.token}`,
+    );
+    this.socket.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      this.listeners.forEach((cb) => cb(msg));
+    };
+    this.socket.onclose = () => {
+      this.socket = null;
+      // Reconnect después de 2s si todavía estamos logueados.
+      if (API.token) setTimeout(() => this.connect(), 2000);
+    };
+  },
 
-    on(cb) { this.listeners.push(cb); },
+  on(cb) {
+    this.listeners.push(cb);
+  },
 
-    send(msg) {
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-            this.socket.send(JSON.stringify(msg));
-        }
-    },
+  send(msg) {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(msg));
+    }
+  },
 };
 ```
 
@@ -501,34 +529,34 @@ const APP = document.getElementById("app");
 const NAV = document.getElementById("nav");
 
 function route() {
-    const hash = location.hash || "#login";
-    if (hash === "#login") return renderLogin();
-    if (hash === "#projects") return renderProjects();
-    const m = hash.match(/^#projects\/(\d+)$/);
-    if (m) return renderBoard(parseInt(m[1]));
-    return renderLogin();
+  const hash = location.hash || "#login";
+  if (hash === "#login") return renderLogin();
+  if (hash === "#projects") return renderProjects();
+  const m = hash.match(/^#projects\/(\d+)$/);
+  if (m) return renderBoard(parseInt(m[1]));
+  return renderLogin();
 }
 
 function renderNav() {
-    NAV.innerHTML = "";
-    if (API.token) {
-        const a = document.createElement("a");
-        a.href = "#projects";
-        a.textContent = "Projects";
-        NAV.appendChild(a);
+  NAV.innerHTML = "";
+  if (API.token) {
+    const a = document.createElement("a");
+    a.href = "#projects";
+    a.textContent = "Projects";
+    NAV.appendChild(a);
 
-        const b = document.createElement("button");
-        b.textContent = "Logout";
-        b.onclick = () => {
-            API.setToken(null);
-            location.hash = "#login";
-        };
-        NAV.appendChild(b);
-    }
+    const b = document.createElement("button");
+    b.textContent = "Logout";
+    b.onclick = () => {
+      API.setToken(null);
+      location.hash = "#login";
+    };
+    NAV.appendChild(b);
+  }
 }
 
 function renderLogin() {
-    APP.innerHTML = `
+  APP.innerHTML = `
         <form id="login-form">
             <h2>Login</h2>
             <label>Email</label>
@@ -539,27 +567,27 @@ function renderLogin() {
             <p class="error" id="err"></p>
         </form>
     `;
-    document.getElementById("login-form").onsubmit = async (e) => {
-        e.preventDefault();
-        const email = document.getElementById("email").value;
-        const password = document.getElementById("password").value;
-        try {
-            const { token } = await API.post("/auth/login", { email, password });
-            API.setToken(token);
-            WS.connect();
-            location.hash = "#projects";
-        } catch (err) {
-            document.getElementById("err").textContent = err.message;
-        }
-    };
-    renderNav();
+  document.getElementById("login-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const email = document.getElementById("email").value;
+    const password = document.getElementById("password").value;
+    try {
+      const { token } = await API.post("/auth/login", { email, password });
+      API.setToken(token);
+      WS.connect();
+      location.hash = "#projects";
+    } catch (err) {
+      document.getElementById("err").textContent = err.message;
+    }
+  };
+  renderNav();
 }
 
 async function renderProjects() {
-    if (!API.token) return location.hash = "#login";
-    try {
-        const projects = await API.get("/projects");
-        APP.innerHTML = `
+  if (!API.token) return (location.hash = "#login");
+  try {
+    const projects = await API.get("/projects");
+    APP.innerHTML = `
             <h2>Mis projects</h2>
             <form id="new-project">
                 <label>Nuevo project</label>
@@ -568,34 +596,34 @@ async function renderProjects() {
             </form>
             <div class="projects-list" id="list"></div>
         `;
-        const list = document.getElementById("list");
-        if (projects.length === 0) {
-            list.innerHTML = "<p>Sin projects todavía.</p>";
-        } else {
-            projects.forEach(p => {
-                const a = document.createElement("a");
-                a.href = `#projects/${p.id}`;
-                a.innerHTML = `<strong>${p.name}</strong><br><small>${p.description || ""}</small>`;
-                list.appendChild(a);
-            });
-        }
-        document.getElementById("new-project").onsubmit = async (e) => {
-            e.preventDefault();
-            const name = document.getElementById("proj-name").value;
-            await API.post("/projects", { name });
-            renderProjects();
-        };
-    } catch (err) {
-        APP.innerHTML = `<p class="error">${err.message}</p>`;
+    const list = document.getElementById("list");
+    if (projects.length === 0) {
+      list.innerHTML = "<p>Sin projects todavía.</p>";
+    } else {
+      projects.forEach((p) => {
+        const a = document.createElement("a");
+        a.href = `#projects/${p.id}`;
+        a.innerHTML = `<strong>${p.name}</strong><br><small>${p.description || ""}</small>`;
+        list.appendChild(a);
+      });
     }
-    renderNav();
+    document.getElementById("new-project").onsubmit = async (e) => {
+      e.preventDefault();
+      const name = document.getElementById("proj-name").value;
+      await API.post("/projects", { name });
+      renderProjects();
+    };
+  } catch (err) {
+    APP.innerHTML = `<p class="error">${err.message}</p>`;
+  }
+  renderNav();
 }
 
 async function renderBoard(id) {
-    if (!API.token) return location.hash = "#login";
-    try {
-        const project = await API.get(`/projects/${id}`);
-        APP.innerHTML = `
+  if (!API.token) return (location.hash = "#login");
+  try {
+    const project = await API.get(`/projects/${id}`);
+    APP.innerHTML = `
             <h2>${project.name}</h2>
             <form id="new-task">
                 <label>Nueva task</label>
@@ -617,68 +645,68 @@ async function renderBoard(id) {
                 </div>
             </div>
         `;
-        renderTasks(project.tasks);
+    renderTasks(project.tasks);
 
-        document.getElementById("new-task").onsubmit = async (e) => {
-            e.preventDefault();
-            const title = document.getElementById("task-title").value;
-            await API.post(`/projects/${id}/tasks`, { title });
-            renderBoard(id);
-        };
+    document.getElementById("new-task").onsubmit = async (e) => {
+      e.preventDefault();
+      const title = document.getElementById("task-title").value;
+      await API.post(`/projects/${id}/tasks`, { title });
+      renderBoard(id);
+    };
 
-        // Listener WS para updates en vivo.
-        WS.on((msg) => {
-            if (msg.project_id !== id) return;
-            renderBoard(id);
-        });
-    } catch (err) {
-        APP.innerHTML = `<p class="error">${err.message}</p>`;
-    }
-    renderNav();
+    // Listener WS para updates en vivo.
+    WS.on((msg) => {
+      if (msg.project_id !== id) return;
+      renderBoard(id);
+    });
+  } catch (err) {
+    APP.innerHTML = `<p class="error">${err.message}</p>`;
+  }
+  renderNav();
 }
 
 function renderTasks(tasks) {
-    document.getElementById("col-todo").innerHTML = "";
-    document.getElementById("col-doing").innerHTML = "";
-    document.getElementById("col-done").innerHTML = "";
-    tasks.forEach((t) => {
-        const div = document.createElement("div");
-        div.className = "task";
-        div.dataset.id = t.id;
-        div.draggable = true;
-        div.innerHTML = `
+  document.getElementById("col-todo").innerHTML = "";
+  document.getElementById("col-doing").innerHTML = "";
+  document.getElementById("col-done").innerHTML = "";
+  tasks.forEach((t) => {
+    const div = document.createElement("div");
+    div.className = "task";
+    div.dataset.id = t.id;
+    div.draggable = true;
+    div.innerHTML = `
             <strong>${t.title}</strong>
             <span class="priority">P${t.priority}</span>
         `;
-        div.ondragstart = (e) => e.dataTransfer.setData("task_id", t.id);
-        document.getElementById(`col-${t.status}`).appendChild(div);
-    });
-    document.querySelectorAll(".column").forEach((col) => {
-        col.ondragover = (e) => e.preventDefault();
-        col.ondrop = async (e) => {
-            e.preventDefault();
-            const taskId = parseInt(e.dataTransfer.getData("task_id"));
-            const status = col.dataset.status;
-            const project_id = parseInt(location.hash.match(/(\d+)/)[1]);
-            await API.put(`/tasks/${taskId}`, { status });
-            // Broadcast WS para que otros clientes refresquen.
-            WS.send({
-                kind: "updated",
-                task_id: taskId,
-                project_id,
-                status,
-                user_email: ""
-            });
-            const project = await API.get(`/projects/${project_id}`);
-            renderTasks(project.tasks);
-        };
-    });
+    div.ondragstart = (e) => e.dataTransfer.setData("task_id", t.id);
+    document.getElementById(`col-${t.status}`).appendChild(div);
+  });
+  document.querySelectorAll(".column").forEach((col) => {
+    col.ondragover = (e) => e.preventDefault();
+    col.ondrop = async (e) => {
+      e.preventDefault();
+      const taskId = parseInt(e.dataTransfer.getData("task_id"));
+      const status = col.dataset.status;
+      const project_id = parseInt(location.hash.match(/(\d+)/)[1]);
+      await API.put(`/tasks/${taskId}`, { status });
+      // Broadcast WS para que otros clientes refresquen.
+      WS.send({
+        kind: "updated",
+        task_id: taskId,
+        project_id,
+        status,
+        user_email: "",
+      });
+      const project = await API.get(`/projects/${project_id}`);
+      renderTasks(project.tasks);
+    };
+  });
 }
 
 window.addEventListener("hashchange", route);
 window.addEventListener("load", () => {
-    if (API.token) WS.connect();
-    route();
+  if (API.token) WS.connect();
+  route();
 });
 ```
 
@@ -872,8 +900,7 @@ y **el más completo** — el showcase del stack entero.
 
 ### `@server(prometheus=true)` no activa `/metrics`
 
-Verificá que el binario fue rebuildeado (`docker compose up -d
---build app`). El kwarg `prometheus=true` es **compile-time** —
+Verificá que el binario fue rebuildeado (`docker compose up -d --build app`). El kwarg `prometheus=true` es **compile-time** —
 cambios en `@server(...)` requieren rebuild.
 
 ### Prometheus muestra `taskhub` target DOWN
@@ -919,8 +946,7 @@ Si querés feedback de progreso: `docker compose up --build` sin
 ### Drag & drop no actualiza la task
 
 DevTools → Network: verificá que `PUT /api/tasks/<id>` se envía
-con `{"status":"doing"}`. Si responde 500, mirá `docker compose
-logs app`.
+con `{"status":"doing"}`. Si responde 500, mirá `docker compose logs app`.
 
 ---
 
@@ -931,31 +957,31 @@ TaskHub** y por tanto el proyecto entero.
 
 ### Stack único de Fitz integrado en TaskHub (C1 → C7)
 
-| Pieza | Cap | Diferenciador |
-|---|---|---|
-| Docker-first 5 services | C1 | Compose con app + db + prometheus + jaeger + nginx desde día 1 |
-| `fitz db diff/migrate` versionado | C2 | Workflow real de migrations con `_fitz_migrations` audit |
-| Auth + RBAC 3 roles apilables | C3 | `@auth_provider` + `@requires` apilable validado por checker |
-| ORM + relations + WS | C4 | `@has_many` + `.preload(...)` + `WsConn<T>` tipado |
-| Cron + background sin Celery/Redis | C5 | `@cron(store=db_result)` + `@background` + `spawn` + persistencia auto |
-| Interop Python con LLM | C6 | `from python import` + `match Result<Int>` con fallback |
-| Observability + frontend + bundling | C7 | `@server(prometheus=true)` + `@healthz` + frontend vanilla + ~50 MB |
+| Pieza                               | Cap | Diferenciador                                                          |
+| ----------------------------------- | --- | ---------------------------------------------------------------------- |
+| Docker-first 5 services             | C1  | Compose con app + db + prometheus + jaeger + nginx desde día 1         |
+| `fitz db diff/migrate` versionado   | C2  | Workflow real de migrations con `_fitz_migrations` audit               |
+| Auth + RBAC 3 roles apilables       | C3  | `@auth_provider` + `@requires` apilable validado por checker           |
+| ORM + relations + WS                | C4  | `@has_many` + `.preload(...)` + `WsConn<T>` tipado                     |
+| Cron + background sin Celery/Redis  | C5  | `@cron(store=db_result)` + `@background` + `spawn` + persistencia auto |
+| Interop Python con LLM              | C6  | `from python import` + `match Result<Int>` con fallback                |
+| Observability + frontend + bundling | C7  | `@server(prometheus=true)` + `@healthz` + frontend vanilla + ~50 MB    |
 
 ### Comparativa final vs stack típico
 
-| Métrica | Python+FastAPI+Celery+Redis | Node+Express+bull+Redis | Spring Boot | **Fitz TaskHub final** |
-|---|---|---|---|---|
-| Services en compose | 6-7 (app + worker + beat + redis + db + nginx + flower opt) | 5 (app + worker + redis + db + nginx) | 3 (app + db + nginx) | **5 (app + db + prometheus + jaeger + nginx)** |
-| Image total compose | ~800 MB | ~700 MB | ~600 MB | **~330 MB** (con bundling) |
-| Boot full stack | 60-90s | 30-60s | 60-120s | **20-30s** |
-| Memory idle full | 600-900 MB | 400-600 MB | 800-1200 MB | **80-150 MB** |
-| Deps en el binario app | 20-40 pip packages | 100+ npm packages | 30-80 jar deps | **0** (todo built-in) |
-| OpenAPI auto | ✅ FastAPI | extras: swagger-ui | extras: springdoc | ✅ built-in |
-| AsyncAPI auto WS | ❌ | ❌ | ❌ | ✅ built-in |
-| Migrations | Alembic | typeorm-cli | Flyway | **`fitz db` built-in** |
-| Auth + RBAC built-in | extras: passlib + jose | extras: jsonwebtoken + bcrypt | spring-security | **built-in** |
-| Cron sin broker | ❌ | ❌ | `@Scheduled` | **`@cron` built-in** |
-| Interop Python | nativo | ❌ | ❌ | **`from python import` built-in** |
+| Métrica                | Python+FastAPI+Celery+Redis                                 | Node+Express+bull+Redis               | Spring Boot          | **Fitz TaskHub final**                         |
+| ---------------------- | ----------------------------------------------------------- | ------------------------------------- | -------------------- | ---------------------------------------------- |
+| Services en compose    | 6-7 (app + worker + beat + redis + db + nginx + flower opt) | 5 (app + worker + redis + db + nginx) | 3 (app + db + nginx) | **5 (app + db + prometheus + jaeger + nginx)** |
+| Image total compose    | ~800 MB                                                     | ~700 MB                               | ~600 MB              | **~330 MB** (con bundling)                     |
+| Boot full stack        | 60-90s                                                      | 30-60s                                | 60-120s              | **20-30s**                                     |
+| Memory idle full       | 600-900 MB                                                  | 400-600 MB                            | 800-1200 MB          | **80-150 MB**                                  |
+| Deps en el binario app | 20-40 pip packages                                          | 100+ npm packages                     | 30-80 jar deps       | **0** (todo built-in)                          |
+| OpenAPI auto           | ✅ FastAPI                                                  | extras: swagger-ui                    | extras: springdoc    | ✅ built-in                                    |
+| AsyncAPI auto WS       | ❌                                                          | ❌                                    | ❌                   | ✅ built-in                                    |
+| Migrations             | Alembic                                                     | typeorm-cli                           | Flyway               | **`fitz db` built-in**                         |
+| Auth + RBAC built-in   | extras: passlib + jose                                      | extras: jsonwebtoken + bcrypt         | spring-security      | **built-in**                                   |
+| Cron sin broker        | ❌                                                          | ❌                                    | `@Scheduled`         | **`@cron` built-in**                           |
+| Interop Python         | nativo                                                      | ❌                                    | ❌                   | **`from python import` built-in**              |
 
 ### Lo que ganaste
 
@@ -1016,6 +1042,6 @@ entendés cada pieza del puzzle.
 bienvenidos en
 [github.com/Thegreekman76/fitz](https://github.com/Thegreekman76/fitz).
 
-🏔️ Te debo un café si nos cruzamos en El Chaltén.
+🏔️ Te debo una cerveza si nos cruzamos en El Chaltén.
 
-— Martin (autor de Fitz)
+— Martin TheGreekMan (autor de Fitz)
