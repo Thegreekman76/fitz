@@ -272,7 +272,7 @@ async fn main() -> Result<Str> {
     let rows = db.query("SELECT id, name, age FROM users WHERE age > $1", [30]).await?
     print("rows = {len(rows)}")
 
-    // Cada row es Map<Str, Any> — acceso por nombre de columna.
+    // Cada row es `DbRow` — accesos tipados con `.get_int/str/...`.
     let r = rows[0]
     print("primero: {r}")
 
@@ -289,35 +289,52 @@ rows = 1
 primero: {"id": 1, "name": "ada", "age": 35}
 ```
 
-**Acceso a campos del row** — dos formas:
+**Acceso a campos del row** — typed accessors con `?` para
+desempacar el `Result<T>`:
 
 ```fitz
 let r = rows[0]
 
-// Acceso directo Map-style (devuelve `Any`).
-let raw = r["name"]              // Any
-
-// Con anotación de tipo, Fitz coerce el value al tipo declarado.
-let name: Str = r["name"]        // Str
-let age: Int = r["age"]          // Int
-let user_id: Int = r["user_id"]  // Int
-
-// `.get(col)` devuelve `Result<Any>` si querés desempacar con `?`.
-let alt = r.get("name")?
+let id: Int    = r.get_int("id")?
+let name: Str  = r.get_str("name")?
+let age: Int   = r.get_int("age")?
 ```
 
-**El patrón canónico para handlers HTTP** que devuelven rows
-crudos: declarar el response como `List<Map<Str, Any>>` y dejar
-que el codegen serialize a JSON automático (cada row pasa a `{
-"col": val, ... }`).
+Métodos disponibles sobre `DbRow` (v0.10.22+):
+
+| Método | Retorna | Cuándo falla |
+|---|---|---|
+| `r.get_int(col)` | `Result<Int>` | NULL, columna no existe, o el tipo PG no es int |
+| `r.get_str(col)` | `Result<Str>` | NULL, no existe; acepta `text`/`varchar`/`uuid`/`json`/etc. |
+| `r.get_float(col)` | `Result<Float>` | NULL, no existe, o el tipo PG no es float |
+| `r.get_bool(col)` | `Result<Bool>` | NULL, no existe, o el tipo PG no es bool |
+| `r.len()` | `Int` | nunca falla — cantidad de cols |
+
+**Por qué tipado**: en runtime Postgres distingue `int8` vs `text`
+vs `bool`. Si pedís `r.get_int("name")` cuando `name` es text, el
+`?` propaga `Err("col 'name' no es int")` y queda explícito en el
+flujo. Sin las typed accessors tendrías que castear a mano (y
+si te equivocás, panic runtime opaco).
+
+**Cuándo NO necesitás esto**: el patrón normal para handlers HTTP
+es declarar el response como `List<Map<Str, Any>>` directo y dejar
+que el codegen serialize a JSON automático — cada row pasa a
+`{"col": val, ...}` sin que toques los typed accessors:
+
+```fitz
+@get("/users")
+async fn list_users() -> Result<List<Map<Str, Any>>> {
+    return db.query("SELECT id, name, age FROM users", []).await
+}
+```
 
 ### Loop sobre filas
 
 ```fitz
 let rows = db.query("SELECT name, age FROM users ORDER BY age", []).await?
 for row in rows {
-    let name: Str = row["name"]
-    let age: Int = row["age"]
+    let name: Str = row.get_str("name")?
+    let age: Int = row.get_int("age")?
     print("{name} tiene {age}")
 }
 ```
@@ -435,7 +452,7 @@ async fn count() -> Result<Int> {
     }
     let rows = conn.query("SELECT COUNT(*)::bigint AS n FROM users", []).await?
     let r = rows[0]
-    let n: Int = r["n"]
+    let n: Int = r.get_int("n")?
     return Ok(n)
 }
 ```
@@ -469,7 +486,7 @@ async fn main() -> Result<Str> {
 
     let rows = db.query("SELECT id, msg FROM hello ORDER BY id DESC LIMIT 1", []).await?
     let r = rows[0]
-    let msg: Str = r["msg"]
+    let msg: Str = r.get_str("msg")?
     print("último row: {msg}")
 
     return Ok("OK")
@@ -544,18 +561,27 @@ soporta strings multilínea raw — opciones:
 3. Escape `\n` adentro del string (raro para SQL — el lexer no
    parseará el `\n` como newline real, lo dejará literal).
 
-### `db.query` retorna un row pero `r["col"]` es `Any` (no Int/Str)
+### `db.query` retorna rows pero `r["col"]` no compila
 
-Esperado. `r["col"]` siempre tipa `Any` en el checker. **Con
-anotación**, Fitz coerce el value:
+El checker reporta `el tipo `DbRow` no soporta indexing con `[]``.
+A diferencia de `Map<Str, Any>`, `DbRow` es un wrapper opaco con
+**accessors tipados** explícitos para forzarte a pensar el tipo
+de cada columna en compile-time:
 
 ```fitz
-let raw = r["age"]             // Any
-let age: Int = r["age"]        // Int (coercionado)
+// ❌ NO compila
+let name = r["name"]
+
+// ✅ Patrón correcto
+let name: Str = r.get_str("name")?
+let age: Int  = r.get_int("age")?
 ```
 
-Sin anotación, podés operar en runtime (`r["age"] + 1` funciona)
-pero el checker no te ayuda con typos del nombre de la columna.
+Razón de diseño: en Postgres los tipos son estrictos en runtime
+(int8 ≠ text ≠ jsonb). Forzando el accessor tipado el checker
+te avisa cuando el tipo declarado del binding no matchea el del
+accessor, y el `?` te obliga a manejar el caso `Err` cuando la
+columna es NULL, falta, o tiene tipo PG distinto.
 
 ### Connect lento en el primer query (no en `connect`)
 

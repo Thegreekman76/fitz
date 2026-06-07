@@ -11,6 +11,78 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.2] — 2026-06-07 — Drift cleanup: API real de `DbRow` en docs/curso M6.C1 + docs/db-orm.md
+
+Follow-up de v0.15.1. Mientras escribíamos el cap nuevo M6.C6 detectamos
+que **el snippet de `.fitz` migration en `docs/db-orm.md` § 26.c usaba
+`r.get(...)` genérico** (no soportado por el checker). Una barrida más
+amplia descubrió que **el cap M6.C1 enseñaba dos APIs inexistentes**:
+indexing `r["col"]` y `r.get(col)?` con `Result<Any>`. Ambas son
+rechazadas por el checker hace tiempo (error claro: *"el tipo `DbRow`
+no tiene el método `get` (soportados: get_int, get_str, get_float,
+get_bool, len)"*). La API real, ya consolidada en `docs/guide.md`
+y `docs/db-orm.md` §3, es **typed accessors con `?`**:
+`r.get_int("col")?` / `r.get_str("col")?` / `r.get_float("col")?` /
+`r.get_bool("col")?` / `r.len()`.
+
+### Archivos actualizados
+
+- **[`docs/curso/m6-postgres-orm/c1-setup-driver-crudo.md`](docs/curso/m6-postgres-orm/c1-setup-driver-crudo.md)**
+  (8 referencias stale corregidas):
+  - Comentario L275: *"Cada row es Map<Str, Any>"* → *"Cada row es
+    `DbRow` — accesos tipados con `.get_int/str/...`"*.
+  - Sección "Acceso a campos del row" L292-323 reescrita entera: tabla
+    de métodos con shape (`get_int`/`get_str`/`get_float`/`get_bool`/`len`),
+    razón de diseño explícita ("tipos PG estrictos en runtime, el `?` te
+    obliga a manejar NULL/missing"), cuándo NO hace falta (el patrón
+    `List<Map<Str, Any>>` para handlers HTTP sigue siendo válido — el
+    codegen serialize cada DbRow al JSON).
+  - Loop sub-sección L335-339: `row.get_str("name")?` / `row.get_int("age")?`.
+  - COUNT example L450 (`/users/count` handler): `r.get_int("n")?`.
+  - Validation script L484: `r.get_str("msg")?`.
+  - Troubleshooting "Acceso `r['col']` no compila" L547+: ahora documenta
+    el error real del checker + por qué la API es tipada (decisión de
+    diseño consciente, no limitación).
+- **[`docs/db-orm.md`](docs/db-orm.md)** (2 referencias stale corregidas):
+  - L2820 (sección "Migraciones manuales versionadas"):
+    `applied.map(fn(r) => r["version"])` → `applied.map(fn(r) => r.get_str("version")?)`.
+    El `?` propaga adentro del callback de `.map` — patrón limpio.
+  - L3305-3320 (sección 26.c — snippet de `.fitz` migration con backfill):
+    `r.get("id")` / `r.get("first_name")` / `r.get("last_name")` →
+    `r.get_int("id")?` / `r.get_str("first_name")?` / `r.get_str("last_name")?`
+    con anotaciones de tipo explícitas (`let id: Int = ...`).
+
+### Verificación de cobertura
+
+- `grep` sobre `r["` + `r.get(` en `docs/` y `examples/` confirma cero
+  ocurrencias stale post-fix. Las que quedan son **Map.get** legítimo
+  (`headers.get("authorization")?` en M5.C2 / M5.C2 troubleshooting,
+  `posts_by_user.get(p.user_id)` en M6.C4 — todos sobre `Map<K,V>`, no
+  DbRow) o **JSONB column `.get(key)`** (operador de extracción text que
+  el ORM emite como `column->>$1`, NO es DbRow — vive en db-orm.md
+  §13 y siguientes).
+- `docs/guide.md` ya usaba el patrón correcto (L11233-11234 — typed
+  accessors con `?`). Sin cambios.
+- `examples/curso/m6-postgres-orm/c6-migrations/` (creado en v0.15.1)
+  ya usa el patrón correcto. Sin cambios.
+- Snippet sintético con los 5 patrones corregidos pasa `fitz check`
+  sin errores de tipo.
+
+### Validación
+
+- `mkdocs build` non-strict: 30.13s, sin warnings nuevos sobre los
+  archivos tocados (los pre-existentes de 98 sobre anchors stale son
+  independientes).
+- `fitz check examples/curso/m6-postgres-orm/c6-migrations/src/main.fitz`
+  + el `.fitz` migration → ambos verdes.
+
+### Sin cambios
+
+Sin cambios de código del lenguaje, sin cambios al checker, sin cambios
+a la API real — esta entrega solo **alinea los docs con lo que el
+binario `fitz` ya hace desde v0.10.22**. Release v0.15.2 patch 100%
+docs.
+
 ## [v0.15.1] — 2026-06-07 — Curso M6.C6 nuevo: Migraciones con `fitz db`
 
 Release 100% docs/curso sin cambios de código del lenguaje. **Cierra

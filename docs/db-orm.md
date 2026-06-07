@@ -2817,7 +2817,7 @@ async fn run_migrations(db: DbConn) -> Result<Null> {
     )", []).await?
 
     let applied = db.query("SELECT version FROM schema_migrations", []).await?
-    let applied_versions = applied.map(fn(r) => r["version"])
+    let applied_versions = applied.map(fn(r) => r.get_str("version")?)
 
     // 001_initial.sql
     if not applied_versions.has("001_initial") {
@@ -3305,9 +3305,9 @@ async fn migrate(db: DbConn) -> Result<Null> {
     match db.query("SELECT id, first_name, last_name FROM users WHERE full_name IS NULL", []).await {
         Ok(rows) => {
             for r in rows {
-                let id = r.get("id")
-                let first = r.get("first_name")
-                let last = r.get("last_name")
+                let id: Int = r.get_int("id")?
+                let first: Str = r.get_str("first_name")?
+                let last: Str = r.get_str("last_name")?
                 let _ = db.exec(
                     "UPDATE users SET full_name = $1 || ' ' || $2 WHERE id = $3",
                     [first, last, id],
