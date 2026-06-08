@@ -4,6 +4,223 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🔴 DEUDAS URGENTES — Smoke E2E TaskHub Dockerizado (2026-06-08)
+
+Dos bugs reales del lenguaje encontrados al hacer el smoke E2E con
+`docker compose up` sobre `boilerplates/taskhub`. Ambos son
+reproducibles fuera del TaskHub y afectan cualquier programa Fitz
+que use el patrón correspondiente. **Marcadas URGENTES** porque el
+TaskHub es el showcase del stack completo + Fase 12 (observability)
+y los próximos boilerplates Dockerizados con cron y stack OTel van
+a chocar con los mismos issues.
+
+### 🔴 URGENTE-1 — `init_storage` de `@cron` con persistencia: race condition en CREATE TABLE
+
+**Síntoma reproducible**: dos o más `@cron("...", store=db_result)`
+adentro del mismo programa. Al boot del binario, uno de los jobs
+aborta con:
+
+```
+🕐 cron job 'X' no pudo inicializar storage, abortando task:
+  ERROR [23505]: duplicate key value violates unique constraint
+  "pg_type_typname_nsp_index"
+  [sql: CREATE TABLE IF NOT EXISTS fitz_cron_jobs (...)]
+```
+
+El otro job arranca normal. Resultado: el cron que aborta nunca
+corre — silent failure parcial del scheduler.
+
+**Reproducción mínima** (cualquier programa con ≥2 `@cron`
+persistentes):
+
+```fitz
+let db_result = db.connect(env_or("DATABASE_URL", "")).await
+
+@cron("0 0 * * * *", store=db_result)
+async fn job_a() -> Result<Null> { return Ok(null) }
+
+@cron("0 0 * * * *", store=db_result)
+async fn job_b() -> Result<Null> { return Ok(null) }
+
+@server(8080, "0.0.0.0")
+fn main() => 0
+```
+
+**Causa real** (verificado en código, no hipótesis):
+[`src/cron_jobs.rs:615-624`](../src/cron_jobs.rs#L615-L624) —
+`run_cron_job` ejecuta `init_storage(&conn).await` **por cada job
+spawneado**, sin coordinación. Los N jobs se lanzan en paralelo con
+`tokio::spawn(__fitz_run_cron_job(...))` desde
+`emit_cron_job_spawns` del codegen, y los N corren
+`CREATE TABLE IF NOT EXISTS fitz_cron_jobs` simultáneo. Postgres
+tiene una race condition documentada en su catálogo de tipos
+(`pg_type`) cuando dos sesiones intentan crear la misma tabla al
+mismo tiempo — el `IF NOT EXISTS` checkea la existencia ANTES de
+intentar el INSERT al catálogo, pero entre el check y el insert hay
+una ventana. Postgres NO serializa los CREATE TABLE
+internamente con un lock de catálogo a nivel de "esta tabla", solo
+el SET de catálogo entero (race en pg_type específicamente).
+
+**Por qué el `init_storage` no es idempotente bajo concurrencia**:
+es idempotente bajo el modelo SQL (`IF NOT EXISTS`), pero el
+chequeo CREATE TABLE de Postgres no es transaccional contra
+operaciones paralelas del mismo objeto. Bug documentado upstream
+en [postgres-archives](https://www.postgresql.org/message-id/16664-2dca8df8c8893db4%40postgresql.org)
+desde ~2020. Patrón conocido y la solución estándar es serializar
+el CREATE con un advisory lock.
+
+**Fix sugerido** (~20 LoC, mini-fase dedicada):
+
+Opción A — `OnceCell<Result<(), String>>` en `cron_jobs.rs`:
+
+```rust
+static INIT_STORAGE_ONCE: tokio::sync::OnceCell<Result<(), String>>
+    = tokio::sync::OnceCell::const_new();
+
+async fn ensure_storage_initialized(
+    conn: &DbConnHandle,
+) -> Result<(), String> {
+    INIT_STORAGE_ONCE
+        .get_or_init(|| async {
+            init_storage(conn).await
+        })
+        .await
+        .clone()
+}
+```
+
+Reemplazar la llamada directa en `run_cron_job:618` por
+`ensure_storage_initialized(&conn).await`. El primer job que llega
+ejecuta el init; los demás esperan al `OnceCell` y reusan el
+resultado. Sin race, sin overhead extra después del primer init.
+
+Opción B — `pg_advisory_xact_lock(hash('fitz_cron_init'))` antes
+del CREATE TABLE. Permite múltiples instancias del binario en
+paralelo (lock compartido a nivel DB, no a nivel proceso). Más
+robusto que A si en algún momento se corren múltiples instancias.
+
+**Recomendación**: Opción A para el MVP (cubre 99% del caso —
+binario único). Opción B si aparece deploy multi-instancia con
+crons coordinados.
+
+**Tests E2E requeridos**: `tests/cron_jobs_real_postgres.rs` debe
+sumar test con 3 `@cron` simultáneos contra Postgres real. Hoy los
+tests E2E usan UN solo job — el bug nunca se manifestó en CI.
+
+**Validación del fix**: re-run del smoke E2E TaskHub con 2 crons
+debe arrancar ambos sin error de `pg_type_typname_nsp_index`.
+
+---
+
+### 🔴 URGENTE-2 — `@server(host=...)` no acepta sintaxis kwarg (API asimétrica)
+
+**Síntoma**: el patrón canónico para Dockerizar exige bindear a
+`0.0.0.0` (no `127.0.0.1` que es el default). El user intenta:
+
+```fitz
+@server(8080, host="0.0.0.0", ws_heartbeat_secs=30, prometheus=true)
+fn main() => 0
+```
+
+El codegen aborta con:
+
+```
+✗ codegen: Error — @server: kwarg 'host' no reconocido. Soportados:
+  docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs,
+  observability, prometheus.
+```
+
+Workaround actual — pasar `host` como **2do positional**:
+
+```fitz
+@server(8080, "0.0.0.0", ws_heartbeat_secs=30, prometheus=true)
+```
+
+Funciona, pero es API inconsistente. Todos los otros parámetros del
+decorator son kwargs nombrados (`ws_heartbeat_secs`,
+`shutdown_timeout_secs`, etc.) — solo `port` y `host` son
+positionals. El user que ya conoce el patrón kwarg del resto del
+decorator espera lo mismo para `host` y se rompe.
+
+**Causa real** (verificado en código):
+[`src/evaluator.rs:1335-1401`](../src/evaluator.rs#L1335-L1401) —
+`register_server_config` itera `deco.args` (positionals)
+explícitamente buscando `args[0]` (port) y `args[1]` (host). El
+loop posterior sobre `deco.kwargs` mapea solo a `docs`,
+`api_version`, `ws_heartbeat_secs`, `shutdown_timeout_secs`,
+`observability`, `prometheus`. **`host` jamás aparece en el switch
+de kwargs**.
+
+**Por qué importa para el patrón Dockerizado**:
+
+- Default `127.0.0.1` es decisión correcta por seguridad (igual que
+  FastAPI exige `--host 0.0.0.0` explícito).
+- Pero los boilerplates Dockerizados (TaskHub + 8 más) **siempre**
+  explicitan `"0.0.0.0"`.
+- El user que viene de cap 28 / cap 33 de la guía aprende a usar
+  kwargs `prometheus=true`, `docs=false`, etc. y asume que `host`
+  es kwarg también — falla silenciosamente.
+- Especialmente confuso porque el mensaje de error lista los
+  kwargs soportados y `host` NO está. El user descubre el workaround
+  positional por leer otros boilerplates, no por la documentación.
+
+**Fix sugerido** (~30 LoC + tests + doc update):
+
+Aceptar `host` como kwarg además de positional. Adentro de
+`register_server_config`, después del loop de positionals, agregar
+una rama nueva al match de kwargs:
+
+```rust
+"host" => match value_expr {
+    Expr::Str(s, _) => {
+        // Validamos misma regla que el positional
+        if s.parse::<std::net::IpAddr>().is_err() {
+            return Err(err(format!(
+                "@server sobre fn '{}': host '{}' no es IP válida",
+                fn_name, s,
+            )));
+        }
+        // Si también vino como positional, error de conflicto
+        // (igual que Python: TypeError con doble especificación).
+        config.host = s.clone();
+    }
+    other => return Err(err(...)),
+},
+"port" => match value_expr {
+    Expr::Int(n, _) => { /* idem */ }
+    ...
+},
+```
+
+Y validación de conflicto: si vienen positionals + kwargs para el
+mismo parámetro, error claro. Patrón estándar de Python args parsing.
+
+**Paridad bit-a-bit codegen**: mismo helper
+`parse_build_server_args` en `src/codegen.rs` debe aceptar el
+kwarg también.
+
+**Tests requeridos**:
+- `@server(8080, host="0.0.0.0")` compila y bindea OK
+- `@server(port=8080, host="0.0.0.0")` (ambos kwargs) compila OK
+- `@server(8080, "127.0.0.1", host="0.0.0.0")` rechaza con conflicto
+- Tests del intérprete + codegen + cap 17 de la guía actualizado
+
+**Validación del fix**: re-write TaskHub a `@server(8080, host="0.0.0.0", ws_heartbeat_secs=30, prometheus=true)` y compila/corre bit-a-bit igual.
+
+**Por qué NO es de prioridad menor**:
+
+El error es altamente confuso para el user — el mensaje lista
+explícitamente los kwargs soportados sin mencionar `host`, lo que
+sugiere que `host` simplemente no existe como configurable. Solo
+por leer otros boilerplates o `src/evaluator.rs` el user descubre
+que sí, pero como positional. Es exactamente el tipo de detalle
+que hace ver al lenguaje como "inacabado" en una primera impresión.
+Fix barato y de alto impacto en developer experience.
+
+---
+
+
+
 ## Codegen interop Python + ORM completo — TaskHub blockers (2026-06-08)
 
 Mini-fase descubierta al smoke-testear `boilerplates/taskhub`

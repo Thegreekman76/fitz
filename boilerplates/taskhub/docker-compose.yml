@@ -10,7 +10,11 @@ services:
     environment:
       DATABASE_URL: postgres://taskhub:${DB_PASSWORD:?DB_PASSWORD requerido}@db:5432/taskhub?sslmode=disable
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET requerido}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # OTel: el binario habla OTLP HTTP/proto (feature "http-proto" del
+      # crate opentelemetry-otlp, ver src/codegen.rs:33176-33178). El
+      # puerto :4318 es OTLP HTTP de Jaeger; :4317 es OTLP gRPC y NO
+      # funciona porque el cliente del binario es HTTP-only.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: taskhub
       RUST_LOG: info
       # NUEVO en C6 — vacío = heurística pura Python.
@@ -18,12 +22,17 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Healthcheck real contra /healthz del binario. El entrypoint corre
+    # `fitz db migrate` antes de exec del taskhub, así que start_period
+    # acomoda el tiempo de migración + el bind al 8080. curl viene
+    # instalado en el runtime stage del Dockerfile (apt-get install
+    # curl) — python:3.12-slim NO lo trae por default.
     healthcheck:
-      test: ["CMD-SHELL", "test -e /proc/1/exe || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 3
-      start_period: 5s
+      start_period: 30s
     restart: unless-stopped
 
   # ────────────────────────────────────────────────────────
@@ -65,9 +74,11 @@ services:
 
   # ────────────────────────────────────────────────────────
   # SERVICE 4 — jaeger (incluye OTel collector built-in)
+  # Tag pinneado a 1.76.0 (release estable de oct 2025). Tags <1.65
+  # ya no están disponibles en Docker Hub al 2026-06.
   # ────────────────────────────────────────────────────────
   otel-collector:
-    image: jaegertracing/all-in-one:1.62
+    image: jaegertracing/all-in-one:1.76.0
     container_name: taskhub-jaeger
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
