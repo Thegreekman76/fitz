@@ -175,7 +175,7 @@ type TaskEvent {
 // ───────────────────────────────────────────────
 
 async fn find_user_by_email(email: Str) -> Result<User> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -231,7 +231,7 @@ async fn register(input: RegisterInput) -> Result<User> {
         return Err("password debe tener al menos 8 caracteres")
     }
 
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -282,7 +282,7 @@ fn me(user: User) -> User => user
 @requires("admin")
 @get("/users")
 async fn list_users_admin(user: User) -> Result<List<User>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -296,7 +296,7 @@ async fn promote_user(id: Int, input: PromoteInput, user: User) -> Result<User> 
         return Err("new_role debe ser 'admin', 'owner' o 'member'")
     }
 
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -316,7 +316,7 @@ async fn promote_user(id: Int, input: PromoteInput, user: User) -> Result<User> 
 @requires("owner")
 @get("/stats")
 async fn stats(user: User) -> Result<StatsResponse> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -340,7 +340,7 @@ async fn create_project(input: CreateProjectInput, user: User) -> Result<Project
     if (input.name == "") {
         return Err("name no puede estar vacío")
     }
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -358,7 +358,7 @@ async fn create_project(input: CreateProjectInput, user: User) -> Result<Project
 @authenticated
 @get("/projects")
 async fn list_projects(user: User) -> Result<List<Project>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -371,7 +371,7 @@ async fn list_projects(user: User) -> Result<List<Project>> {
 @authenticated
 @get("/projects/{id}")
 async fn get_project(id: Int, user: User) -> Result<Project> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -399,7 +399,7 @@ async fn create_task(
     if (input.title == "") {
         return Err("title no puede estar vacío")
     }
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -441,7 +441,7 @@ async fn update_task(
     input: UpdateTaskInput,
     user: User
 ) -> Result<Task> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -527,7 +527,7 @@ async fn task_events(conn: WsConn<TaskEvent>, user: User) -> Null {
       retry={max: 3, backoff: "exponential", initial_secs: 30, max_secs: 300},
       store=db_result)
 async fn cleanup_old_tasks() -> Result<Null> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -544,7 +544,7 @@ async fn cleanup_old_tasks() -> Result<Null> {
       retry={max: 2, backoff: "linear", initial_secs: 60, max_secs: 120},
       store=db_result)
 async fn daily_due_reminders() -> Result<Null> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -568,7 +568,7 @@ async fn daily_due_reminders() -> Result<Null> {
 
 @background
 async fn send_due_reminder(task_id: Int) -> Null {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return null,
     }
@@ -606,7 +606,7 @@ type JobRun {
 @requires("admin")
 @get("/jobs")
 async fn list_job_runs(user: User) -> Result<List<JobRun>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -638,7 +638,7 @@ async fn list_job_runs(user: User) -> Result<List<JobRun>> {
 @authenticated
 @post("/tasks/{id}/suggest-priority")
 async fn suggest_task_priority(id: Int, user: User) -> Result<Task> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -663,8 +663,14 @@ async fn suggest_task_priority(id: Int, user: User) -> Result<Task> {
     }
 
     // Llamada al módulo Python (Result<Int> automático por Fase 8.3).
+    // Workaround codegen: la coerción PyAny → Int adentro de match arms
+    // no se aplica automáticamente, hacemos un let intermedio anotado
+    // que dispara la coerción de Fase 8.4 dentro del arm Ok.
     let suggested: Int = match priority.suggest_priority(task.title, task.description) {
-        Ok(p)  => p,
+        Ok(p)  => {
+            let v: Int = p
+            v
+        },
         Err(_) => 3,    // fallback de emergencia si Python falla
     }
 
@@ -682,20 +688,24 @@ async fn suggest_task_priority(id: Int, user: User) -> Result<Task> {
 
 // @healthz + @readyz con check real de la DB (auto-mount,
 // override del @get("/healthz") simple de los caps anteriores).
+// `c.is_closed()` retorna `Future<Bool>`, por eso las fns son async
+// y hacen `.await` explícito antes del `not`.
 @healthz
-fn check_db_alive() -> Bool {
-    return match db_result {
-        Ok(c)  => not c.is_closed(),
-        Err(_) => false,
+async fn check_db_alive() -> Bool {
+    let conn: DbConn = match db_result {
+        Ok(c)  => c,
+        Err(_) => return false,
     }
+    return not conn.is_closed().await
 }
 
 @readyz
-fn check_ready_for_traffic() -> Bool {
-    return match db_result {
-        Ok(c)  => not c.is_closed(),
-        Err(_) => false,
+async fn check_ready_for_traffic() -> Bool {
+    let conn: DbConn = match db_result {
+        Ok(c)  => c,
+        Err(_) => return false,
     }
+    return not conn.is_closed().await
 }
 
 @server(8080, ws_heartbeat_secs=30, prometheus=true)

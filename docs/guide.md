@@ -13228,10 +13228,16 @@ pod viejo antes de matarlo.
 prioriza sobre el auto-mount default. Patrón canónico:
 
 ```fitz
+// `conn.is_closed()` retorna `Future<Bool>` — por eso la fn es async
+// y hace `.await` explícito. Asume `let conn_result = db.connect(...).await`
+// top-level referenciado por handlers HTTP.
 @healthz
-fn check_db_alive() -> Bool {
-    // True si la DB responde a SELECT 1, false si no.
-    return db.is_closed() == false
+async fn check_db_alive() -> Bool {
+    let conn: DbConn = match conn_result {
+        Ok(c)  => c,
+        Err(_) => return false,
+    }
+    return not conn.is_closed().await
 }
 
 @readyz

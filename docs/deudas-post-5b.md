@@ -71,28 +71,143 @@ codegen no infiere el tipo desde el match arm `Ok(t) => t`**. Si
 aparece presión, mini-fase futura puede inferir el tipo del Result
 inner en el codegen.
 
-### Blocker REMAINING — `db_result` no en scope para `@background`/`@cron` (post-2026-06-08)
+### Mini-fase post-2026-06-08 — `LazyLock<.await>` + `spawn(fn(arg))` capture-by-move (CERRADA v0.15.12)
 
-Cuando `@background async fn send_due_reminder(task_id)` o
-`@cron async fn cleanup_old_tasks()` referencian `db_result` (el
-binding top-level `let db_result = db.connect(...).await`), el
-codegen emite el handler como `pub async fn` separado pero NO
-incluye `db_result` en su scope. **rustc rompe con `error[E0425]:
-cannot find value 'db_result' in this scope`**.
+Los **2 blockers** que quedaron al cierre de v0.15.11 (TaskHub baja
+de 21 → 2 errores rustc) eran bugs pre-existentes del codegen que
+aparecieron al destrabar los 19 anteriores (efecto cascade
+unblocking). Ambos cerrados en v0.15.12 — TaskHub `fitz build`
+exit 0, binario 9.7 MB, healthz/readyz/metrics validados end-to-end.
 
-Workaround usado hoy (otros boilerplates): cada handler hace
-`db.connect(url).await?` adentro propio (reusa el pool por la
-cache de `connect_url`). Trade-off: cada handler necesita conocer
-la URL.
+**Blocker 1 — `LazyLock<T>` con `.await` en init (E0728) → `OnceCell<T>`**
 
-**Fix futuro**: `@background`/`@cron` handlers necesitan acceso
-al scope global del módulo, igual que los handlers HTTP. El
-codegen ya hace esto para handlers `@get`/`@post`/etc — la
-solución es replicar el wiring para `@background`/`@cron`. Mini-fase
-estimada ~50 LoC + 4-5 tests unitarios.
+Trigger: `let X = <expr>.await` top-level + handlers HTTP/WS/cron
+que consumen X. El codegen lo hoisteaba a `static __FITZ_STATE_X:
+LazyLock<T> = LazyLock::new(|| <expr>.await)` cuyo closure es sync
+— rustc emitía `error[E0728]: await is only allowed inside async`.
 
-**Bloquea**: smoke real end-to-end del boilerplate TaskHub. El
-resto del stack está fixeado.
+Fix v0.15.12: helper `expr_contains_await(e)` recursivo detecta
+async init en `resolve_state_var_types`, llena
+`state_var_async: HashMap<String, bool>` en `CodegenCtx`.
+`gen_http_main` dispatch entre dos paths según el flag:
+
+- **Sync** (caso típico `let users = []`): mantiene path LazyLock
+  bit-a-bit idéntico — `static X: LazyLock<T> = LazyLock::new(|| init);`
+  + materialización `(*X).clone()`. Zero cambio.
+- **Async** (caso `let db_result = db.connect(url).await`): emite
+  `static X: tokio::sync::OnceCell<T> = OnceCell::const_new();` +
+  init eager en el body del `async fn main()` antes de spawn/serve
+  via `{ let __init: T = init; X.set(__init).expect("..."); }`.
+  Materialización en `gen_top_fn` + `emit_cron_job_spawns` cambia a
+  `X.get().expect("...").clone()`.
+
+Mismo costo runtime (Arc clone, no contenido).
+
+**Blocker 2 — `spawn(fn(arg))` movía vars del outer (E0382) → shadow-clone preventivo**
+
+Trigger: `let _ = spawn(send_due_reminder(new_task.id))` seguido por
+uso de `new_task` después. El `tokio::spawn(async move { ... })`
+capturaba `new_task` por valor moviéndolo al closure; el caller
+después rompía con `error[E0382]: use of moved value`.
+
+Fix v0.15.12: helper `collect_idents_in_expr(e, &mut HashSet)`
+recursivo recolecta idents del scope outer en inner_args. `gen_spawn_call`
+emite `let <name> = <name>.clone();` para cada ident filtrado por
+`var_in_any_scope` (descarta fns/builtins/types — no clonables, no
+necesarios) ANTES del `tokio::spawn`. El `async move` captura los
+shadow clones; el outer scope sigue accesible.
+
+Output esperado para el caso TaskHub:
+
+```rust
+{
+    let new_task = new_task.clone();  // shadow
+    let __jh = tokio::spawn(async move {
+        send_due_reminder(new_task.lock().unwrap().id).await
+    });
+    Box::pin(async move { __jh.await.unwrap() })
+}
+```
+
+**Tests nuevos al cierre v0.15.12**: 6 unit tests dedicados (`v0_15_12_*`)
++ 1 actualizado (`v0_15_11_*` shape OnceCell). Sin regresión en 3037
+unit + 99 smoke guide + 360 compile_e2e + 3 openapi. fmt + clippy
+limpios. Smoke real TaskHub verde end-to-end.
+
+**Deudas residuales heredadas de v0.15.11 (NO bloquean)** — siguen
+abiertas como refinamientos menores del codegen/checker:
+
+1. Inferencia del Result inner en match con un arm que aborta
+   (`return Err(...)`) — workaround: anotación explícita
+   `let conn: DbConn = match db_result { ... }`.
+2. Checker no detecta `!Future<Bool>` como olvido de `.await` —
+   workaround: `.await` explícito.
+3. Coerción PyAny → primitivo adentro de match arm no se propaga
+   desde anotación del `let` contenedor — workaround: shadow var
+   tipada adentro del arm.
+
+Cada una con workaround trivial, ninguna bloquea uso real. Mini-fase
+futura si entra demanda concreta.
+
+### Mini-fase post-2026-06-08 — `(&db_result).into_store()` no resuelve en `__main_inner` (CERRADA v0.15.11)
+
+Diagnóstico inicial (sesión anterior) decía "`db_result` no en
+scope para `@background`/`@cron`". **Investigación 2026-06-08
+descubrió que el bug real es distinto**: los handlers
+`@background`/`@cron` SÍ ven `db_result` (vía la materialización
+local que `gen_top_fn` hace para state vars referenciados,
+líneas 11738-11764 de `src/codegen.rs`).
+
+**El bug real**: el bloque de `tokio::spawn(__fitz_run_cron_job(...))`
+emitido por `emit_cron_job_spawns` dentro de `__main_inner` (o
+`fn main` en modo cron-only) emitía `store: (&db_result).into_store()`
+usando el nombre de usuario. Pero `db_result` está hoisteado a
+`static __FITZ_STATE_DB_RESULT` cuando algún handler también lo
+consume (caso típico TaskHub: HTTP handlers + `@cron(store=db_result)`
+combinan). En el cuerpo de `__main_inner` no existe el local
+`db_result`, sólo el static — y rustc rompe con `error[E0425]:
+cannot find value 'db_result' in this scope`.
+
+**Fix (v0.15.11)**: `emit_cron_job_spawns` materializa los state
+vars referenciados como `store_var` ANTES del loop de spawns con
+`let db_result: T = (*__FITZ_STATE_DB_RESULT).clone();` (mismo
+patrón que el body de `gen_top_fn` líneas 11738-11764). Lista
+deduplicada (si N jobs usan el mismo store var, una sola
+materialización). Sin overhead — `Arc::clone` y nada más. Test
+unitario nuevo `v0_15_11_cron_store_kwarg_con_state_var_materializa_local_antes_de_spawn`
+candea la regresión.
+
+**Sub-fix simultáneo** en `boilerplates/taskhub/src/main.fitz`
+para destrabar el smoke real del boilerplate:
+
+1. **17 sitios `let conn = match db_result { ... }`** → anotación
+   explícita `let conn: DbConn = match db_result { ... }`. Sin
+   la anotación el codegen tipa `conn` como `T?` (Nullable) y
+   declara la variable como `Option<__FitzDbConn>` aunque ambos
+   arms devuelven `__FitzDbConn` plano. **Deuda residual del
+   codegen** (no nueva — ya documentada como "bug derivado del
+   cap C4"): el codegen no infiere el inner del Result desde el
+   match arm `Ok(c) => c` cuando el otro arm aborta con `return`.
+
+2. **`@healthz fn check_db_alive() -> Bool` → `@healthz async fn
+   check_db_alive() -> Bool`** + `.await` sobre `c.is_closed()`.
+   El método `is_closed()` retorna `Future<Bool>` (paridad
+   intérprete + codegen, ver `src/codegen.rs` línea 16565). El
+   checker NO detectó que el `!Future<Bool>` era inválido.
+   Mismo fix para `@readyz fn check_ready_for_traffic`. **Deuda
+   menor del checker**: aceptar `!` sobre tipo `Future<Bool>`
+   sin emitir error de "se olvidó `.await`".
+
+3. **`let suggested: Int = match priority.suggest_priority(...) {
+   Ok(p) => p, ... }`** → introducir `let v: Int = p` adentro
+   del arm para forzar coerción PyAny → Int de Fase 8.4.
+   **Deuda menor del codegen**: la coerción PyAny → primitivo
+   adentro de match arms con anotación destino en el `let`
+   contenedor no se propaga al arm. El intérprete sí lo hace.
+
+Las tres deudas del codegen/checker son refinamientos no-bloqueantes
+— los workarounds son triviales y el patrón canónico del boilerplate
+queda como ejemplo de "los 3 patches" para futuros usuarios.
 
 ### Pre-existente — M7.C1 app.fitz (`examples/curso/m7-python-interop/c1-setup/app.fitz`)
 

@@ -161,9 +161,20 @@ disparó pero el server sigue terminando requests en vuelo).
 "ready", usá los decoradores dedicados:
 
 ```fitz
+// Asumimos `let conn_result = db.connect(env_or("DATABASE_URL", "")).await`
+// declarado top-level y referenciado por los handlers HTTP.
+//
+// `conn.is_closed()` retorna `Future<Bool>` — por eso la fn es async
+// y hace `.await` explícito. La anotación `let conn: DbConn` evita
+// que el codegen infiera mal el tipo del binding (deuda menor del
+// inferenciador post-match).
 @healthz
-fn db_alive() -> Bool {
-    return db.is_closed() == false
+async fn db_alive() -> Bool {
+    let conn: DbConn = match conn_result {
+        Ok(c)  => c,
+        Err(_) => return false,
+    }
+    return not conn.is_closed().await
 }
 
 @readyz

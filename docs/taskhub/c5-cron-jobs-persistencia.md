@@ -87,7 +87,7 @@ Editás `src/main.fitz`. Sumás al final:
       retry={max: 3, backoff: "exponential", initial_secs: 30, max_secs: 300},
       store=db_result)
 async fn cleanup_old_tasks() -> Result<Null> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -151,7 +151,7 @@ Sumás al final del archivo:
       retry={max: 2, backoff: "linear", initial_secs: 60, max_secs: 120},
       store=db_result)
 async fn daily_due_reminders() -> Result<Null> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -202,7 +202,7 @@ async fn daily_due_reminders() -> Result<Null> {
 ```fitz
 @background
 async fn send_due_reminder(task_id: Int) -> Null {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return null,
     }
@@ -269,7 +269,7 @@ async fn create_task(
     if (input.title == "") {
         return Err("title no puede estar vacío")
     }
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -339,7 +339,7 @@ type JobRun {
 @requires("admin")
 @get("/jobs")
 async fn list_job_runs(user: User) -> Result<List<JobRun>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }

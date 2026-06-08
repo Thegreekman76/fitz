@@ -134,7 +134,7 @@ let JWT_SECRET = env_or("JWT_SECRET", "dev-secret-cambiame")
 
 // Helper para lookup por email (el UNIQUE index hace que sea barato).
 async fn find_user_by_email(email: Str) -> Result<User> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -199,7 +199,7 @@ async fn register(input: RegisterInput) -> Result<User> {
         return Err("password debe tener al menos 8 caracteres")
     }
 
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -304,7 +304,7 @@ omite el hash automáticamente.
 @requires("admin")
 @get("/users")
 async fn list_users_admin(user: User) -> Result<List<User>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -337,7 +337,7 @@ async fn promote_user(id: Int, input: PromoteInput, user: User) -> Result<User> 
         return Err("new_role debe ser 'admin', 'owner' o 'member'")
     }
 
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -385,7 +385,7 @@ type StatsResponse {
 @requires("owner")
 @get("/stats")
 async fn stats(user: User) -> Result<StatsResponse> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }

@@ -256,7 +256,7 @@ Al final (antes del `@server`) sumás el handler:
 @authenticated
 @post("/tasks/{id}/suggest-priority")
 async fn suggest_task_priority(id: Int, user: User) -> Result<Task> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -286,9 +286,18 @@ async fn suggest_task_priority(id: Int, user: User) -> Result<Task> {
     // priority.suggest_priority(title, desc) devuelve Result<Int>.
     // - Ok(p) si Python OK (LLM o heurística adentro de Python).
     // - Err si excepción Python no capturada o si Python no anda.
+    //
+    // Workaround codegen: la coerción `PyAny → Int` adentro de match
+    // arms no se aplica automáticamente desde la anotación destino
+    // del `let` contenedor (el intérprete sí lo hace, paridad pendiente).
+    // Hacemos un `let v: Int = p` dentro del arm Ok para forzar la
+    // coerción de Fase 8.4 (`__fitz_py_extract_i64`).
     // ───────────────────────────────────────────────
     let suggested: Int = match priority.suggest_priority(task.title, task.description) {
-        Ok(p)  => p,
+        Ok(p)  => {
+            let v: Int = p
+            v
+        },
         Err(_) => 3,    // fallback de emergencia si Python mismo falla
     }
 

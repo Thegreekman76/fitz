@@ -223,7 +223,7 @@ fn check_token(headers: Map<Str, Str>) -> Result<User> {
     let claims = jwt.decode(parts[1], SECRET)?
     let email = claims["email"]
 
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("DB no disponible"),
     }
@@ -232,7 +232,7 @@ fn check_token(headers: Map<Str, Str>) -> Result<User> {
 
 @post("/register")
 async fn register(body: RegisterInput) -> Result<User> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(e) => return Err("DB error: {e}"),
     }
@@ -249,7 +249,7 @@ async fn register(body: RegisterInput) -> Result<User> {
 
 @post("/login")
 async fn login(body: LoginInput) -> LoginResponse {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return 503 { "error": "DB no disponible" },
     }
@@ -283,7 +283,7 @@ async fn login(body: LoginInput) -> LoginResponse {
 @authenticated
 @get("/notes")
 async fn list_notes(user: User) -> Result<List<Note>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("DB no disponible"),
     }
@@ -296,7 +296,7 @@ async fn list_notes(user: User) -> Result<List<Note>> {
 @authenticated
 @get("/notes/{id}")
 async fn get_note(id: Int, user: User) -> Result<Note> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("DB no disponible"),
     }
@@ -306,7 +306,7 @@ async fn get_note(id: Int, user: User) -> Result<Note> {
 @authenticated
 @post("/notes")
 async fn create_note(input: NoteInput, user: User) -> Result<Note> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("DB no disponible"),
     }
@@ -338,7 +338,7 @@ async fn create_note(input: NoteInput, user: User) -> Result<Note> {
 @authenticated
 @put("/notes/{id}")
 async fn update_note(id: Int, input: NoteUpdate, user: User) -> Result<Int> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("DB no disponible"),
     }
@@ -351,7 +351,7 @@ async fn update_note(id: Int, input: NoteUpdate, user: User) -> Result<Int> {
 @authenticated
 @delete("/notes/{id}")
 async fn delete_note(id: Int, user: User) -> Result<Int> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("DB no disponible"),
     }
@@ -425,7 +425,7 @@ async fn notify_subscribers(event: NoteEvent) -> Null {
       tz="UTC",
       retry={max: 2, backoff: "exponential", initial_secs: 5, max_secs: 60})
 async fn cleanup_archived() -> Result<Null> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("DB no disponible"),
     }

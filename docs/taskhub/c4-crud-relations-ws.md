@@ -236,7 +236,7 @@ async fn create_project(input: CreateProjectInput, user: User) -> Result<Project
         return Err("name no puede estar vacío")
     }
 
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -271,7 +271,7 @@ async fn create_project(input: CreateProjectInput, user: User) -> Result<Project
 @authenticated
 @get("/projects")
 async fn list_projects(user: User) -> Result<List<Project>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -303,7 +303,7 @@ async fn list_projects(user: User) -> Result<List<Project>> {
 @authenticated
 @get("/projects/{id}")
 async fn get_project(id: Int, user: User) -> Result<Project> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -368,7 +368,7 @@ async fn create_task(
         return Err("title no puede estar vacío")
     }
 
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }
@@ -422,7 +422,7 @@ async fn update_task(
     input: UpdateTaskInput,
     user: User
 ) -> Result<Task> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }

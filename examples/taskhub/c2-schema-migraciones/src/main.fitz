@@ -79,7 +79,7 @@ fn healthz() -> HealthResponse {
 // En C4 lo vamos a transformar en un GET autenticado scoped al user.
 @get("/users")
 async fn list_users() -> Result<List<User>> {
-    let conn = match db_result {
+    let conn: DbConn = match db_result {
         Ok(c) => c,
         Err(_) => return Err("db no disponible"),
     }

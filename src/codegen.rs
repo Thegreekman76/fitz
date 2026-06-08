@@ -1272,6 +1272,202 @@ fn program_uses_date_or_uuid(program: &Program) -> bool {
     program.iter().any(stmt_uses)
 }
 
+/// v0.15.12 — `true` si la expresión `e` contiene algún `Expr::Await`
+/// adentro (recursivamente). Lo usa `resolve_state_var_types` para
+/// detectar state vars top-level cuya init requiere `.await` — caso
+/// canónico `let db_result = db.connect(url).await`. Cuando es true,
+/// `gen_http_main` emite `tokio::sync::OnceCell<T>` en lugar de
+/// `LazyLock<T>` (el closure de LazyLock es sync — `.await` adentro
+/// no compila), e inicializa eagerly en el `async fn main()` antes
+/// de cualquier spawn/serve.
+fn expr_contains_await(e: &Expr) -> bool {
+    use crate::ast::StrPart;
+    match e {
+        Expr::Await(_, _) => true,
+        Expr::Call { callee, args, .. } => {
+            expr_contains_await(callee) || args.iter().any(expr_contains_await)
+        }
+        Expr::BinOp { left, right, .. } => expr_contains_await(left) || expr_contains_await(right),
+        Expr::UnaryOp { operand, .. } => expr_contains_await(operand),
+        Expr::Field { object, .. } => expr_contains_await(object),
+        Expr::Index { object, index, .. } => {
+            expr_contains_await(object) || expr_contains_await(index)
+        }
+        Expr::Slice {
+            object, start, end, ..
+        } => {
+            expr_contains_await(object)
+                || start.as_deref().is_some_and(expr_contains_await)
+                || end.as_deref().is_some_and(expr_contains_await)
+        }
+        Expr::Range { start, end, .. } => expr_contains_await(start) || expr_contains_await(end),
+        Expr::List(items, _) => items.iter().any(expr_contains_await),
+        Expr::ListComp {
+            expr,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
+            expr_contains_await(expr)
+                || expr_contains_await(iter)
+                || extra_clauses.iter().any(|(_, it)| expr_contains_await(it))
+                || filter.as_deref().is_some_and(expr_contains_await)
+        }
+        Expr::MapComp {
+            key,
+            value,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
+            expr_contains_await(key)
+                || expr_contains_await(value)
+                || expr_contains_await(iter)
+                || extra_clauses.iter().any(|(_, it)| expr_contains_await(it))
+                || filter.as_deref().is_some_and(expr_contains_await)
+        }
+        Expr::Map(pairs, _) => pairs
+            .iter()
+            .any(|(k, v)| expr_contains_await(k) || expr_contains_await(v)),
+        Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_contains_await(v)),
+        Expr::Tuple(items, _) => items.iter().any(expr_contains_await),
+        Expr::TupleField { tuple, .. } => expr_contains_await(tuple),
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
+            expr_contains_await(condition)
+                || then.iter().any(stmt_contains_await)
+                || else_
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(stmt_contains_await))
+        }
+        Expr::Match { value, arms, .. } => {
+            expr_contains_await(value)
+                || arms.iter().any(|a| a.body.iter().any(stmt_contains_await))
+        }
+        // FnExpr define un scope async/sync propio — su body no propaga
+        // .await al contenedor. Tratamos como opaque (no descendemos).
+        Expr::FnExpr { .. } => false,
+        Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+            StrPart::Lit(_) => false,
+            StrPart::Expr(inner, _) => expr_contains_await(inner),
+        }),
+        Expr::Loop { body, .. } => body.iter().any(stmt_contains_await),
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => {
+            expr_contains_await(inner)
+        }
+        Expr::NamedArg { value, .. } => expr_contains_await(value),
+        _ => false,
+    }
+}
+
+fn stmt_contains_await(s: &Stmt) -> bool {
+    match s {
+        Stmt::Assign { value, .. } => expr_contains_await(value),
+        Stmt::Expr(e, _) => expr_contains_await(e),
+        Stmt::Return(e, _) => expr_contains_await(e),
+        Stmt::ReturnStatus { status, body, .. } => {
+            expr_contains_await(status) || body.as_ref().is_some_and(expr_contains_await)
+        }
+        Stmt::While {
+            condition, body, ..
+        } => expr_contains_await(condition) || body.iter().any(stmt_contains_await),
+        Stmt::Loop { body, .. } => body.iter().any(stmt_contains_await),
+        Stmt::For { iter, body, .. } => {
+            expr_contains_await(iter) || body.iter().any(stmt_contains_await)
+        }
+        // FnDef adentro de un Stmt cuenta como scope async propio — no
+        // propaga al contenedor.
+        Stmt::FnDef { .. } | Stmt::TypeDef { .. } => false,
+        Stmt::Destructure { value, .. } => expr_contains_await(value),
+        Stmt::Break(..) | Stmt::Continue(..) | Stmt::Error(_) => false,
+        Stmt::Import { .. } | Stmt::FromImport { .. } => false,
+    }
+}
+
+/// v0.15.12 — recolecta todos los `Expr::Ident(name)` que aparecen
+/// adentro de `e` (recursivamente). Lo usa `gen_spawn_call` para
+/// identificar qué vars del scope outer toca el inner call y emitir
+/// shadow-clones antes del `async move` que captura por valor — sin
+/// esos clones, el `tokio::spawn(async move { ... })` mueve los vars
+/// al closure y el caller obtiene E0382 al usarlos después.
+fn collect_idents_in_expr(e: &Expr, out: &mut std::collections::HashSet<String>) {
+    use crate::ast::StrPart;
+    match e {
+        Expr::Ident(name, _) => {
+            out.insert(name.clone());
+        }
+        Expr::Call { callee, args, .. } => {
+            collect_idents_in_expr(callee, out);
+            for a in args {
+                collect_idents_in_expr(a, out);
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            collect_idents_in_expr(left, out);
+            collect_idents_in_expr(right, out);
+        }
+        Expr::UnaryOp { operand, .. } => collect_idents_in_expr(operand, out),
+        Expr::Field { object, .. } => collect_idents_in_expr(object, out),
+        Expr::Index { object, index, .. } => {
+            collect_idents_in_expr(object, out);
+            collect_idents_in_expr(index, out);
+        }
+        Expr::Slice {
+            object, start, end, ..
+        } => {
+            collect_idents_in_expr(object, out);
+            if let Some(s) = start.as_deref() {
+                collect_idents_in_expr(s, out);
+            }
+            if let Some(x) = end.as_deref() {
+                collect_idents_in_expr(x, out);
+            }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_idents_in_expr(start, out);
+            collect_idents_in_expr(end, out);
+        }
+        Expr::List(items, _) | Expr::Tuple(items, _) => {
+            for it in items {
+                collect_idents_in_expr(it, out);
+            }
+        }
+        Expr::Map(pairs, _) => {
+            for (k, v) in pairs {
+                collect_idents_in_expr(k, out);
+                collect_idents_in_expr(v, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                collect_idents_in_expr(v, out);
+            }
+        }
+        Expr::TupleField { tuple, .. } => collect_idents_in_expr(tuple, out),
+        Expr::StrInterp(parts, _) => {
+            for p in parts {
+                if let StrPart::Expr(inner, _) = p {
+                    collect_idents_in_expr(inner, out);
+                }
+            }
+        }
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
+            collect_idents_in_expr(inner, out)
+        }
+        Expr::NamedArg { value, .. } => collect_idents_in_expr(value, out),
+        // No descendemos a If/Match/Loop/FnExpr/ListComp/MapComp: rara
+        // vez aparecen como args literales de spawn(...); si lo hacen
+        // y rompen, sumamos los casos puntuales.
+        _ => {}
+    }
+}
+
 /// 9.w.3.iter2.d — `true` si el programa declara al menos una fn
 /// `@cron(..., store=<ident>)`. Cuando esto está activo, el codegen
 /// debe linkear el driver db (uses_db = true) porque los helpers SQL
@@ -5192,6 +5388,15 @@ fn resolve_state_var_types(
                     }
                 };
                 ctx.state_var_types.insert(name.clone(), resolved);
+                // v0.15.12 — detección de state vars cuya init usa
+                // `.await`. Caso canónico TaskHub:
+                // `let db_result = db.connect(url).await` que múltiples
+                // handlers HTTP + jobs cron consumen. `gen_http_main`
+                // emite `OnceCell` en lugar de `LazyLock` para estos
+                // y los inicializa eagerly en el `async fn main()`.
+                if expr_contains_await(value) {
+                    ctx.state_var_async.insert(name.clone(), true);
+                }
             }
         }
     }
@@ -6133,6 +6338,17 @@ struct CodegenCtx<'a> {
     /// El tokio runtime queda `flavor = "current_thread"` para que el
     /// thread_local actúe como global de verdad.
     state_var_types: HashMap<String, Type>,
+    /// v0.15.12: `true` para state vars cuya RHS contiene `.await`
+    /// (caso canónico TaskHub: `let db_result = db.connect(url).await`).
+    /// Cuando es true, `gen_http_main` emite
+    /// `static __FITZ_STATE_X: tokio::sync::OnceCell<T> = OnceCell::const_new();`
+    /// (en lugar de `LazyLock<T>` cuyo closure es sync — `.await` no
+    /// compila) e inicializa eagerly en el `async fn main()` antes de
+    /// cualquier spawn/serve. La materialización en handlers/cron pasa
+    /// de `(*X).clone()` a `X.get().expect("OnceCell no inicializada").clone()`.
+    /// Indexado por nombre; el resto de los state vars (sync) no
+    /// aparecen en este map.
+    state_var_async: HashMap<String, bool>,
     /// F11: para cada fn (top-level, helper, o handler), los nombres
     /// de los state vars que su body referencia directo. Lo usamos al
     /// inicio del body para emitir `let <name> = __FITZ_STATE_<NAME>
@@ -6490,6 +6706,7 @@ impl<'a> CodegenCtx<'a> {
             ret_stack: Vec::new(),
             break_value_stack: Vec::new(),
             state_var_types: HashMap::new(),
+            state_var_async: HashMap::new(),
             fn_state_deps: HashMap::new(),
             response_mode: false,
             in_middleware_fn: false,
@@ -7704,6 +7921,47 @@ impl<'a> CodegenCtx<'a> {
         // generado incluye campo `store` (path persistente) o no (simple).
         // El path simple omite el field completo para no tocar la struct.
         let any_persistent = jobs.iter().any(|j| j.store_var.is_some());
+        // v0.15.11 — TaskHub fix: cuando `@cron(..., store=X)` referencia
+        // un nombre que el codegen hoisteó a `static __FITZ_STATE_X`
+        // (caso típico: `let db_result = db.connect(...).await` top-level
+        // que múltiples handlers consumen), el cuerpo de
+        // `__main_inner`/`fn main` NO tiene un local llamado `X` —
+        // sólo existe el static. El `(&X).into_store()` que se emite
+        // abajo rompe con `error[E0425]: cannot find value 'X' in this
+        // scope`. Materializamos los state vars referenciados como
+        // locales acá (mismo patrón que el body de `gen_top_fn` líneas
+        // 11738-11764) ANTES de los spawns para que la referencia
+        // resuelva.
+        let mut state_vars_needed: Vec<String> = jobs
+            .iter()
+            .filter_map(|j| j.store_var.clone())
+            .filter(|name| self.state_var_types.contains_key(name))
+            .collect();
+        state_vars_needed.sort();
+        state_vars_needed.dedup();
+        for name in &state_vars_needed {
+            let ty = self
+                .state_var_types
+                .get(name)
+                .cloned()
+                .expect("filtrado arriba garantiza Some");
+            let static_name = state_var_static_name(name);
+            let rust_ty = rust_type_for(&ty, self.env)?;
+            let is_async_init = self.state_var_async.get(name).copied().unwrap_or(false);
+            if is_async_init {
+                // v0.15.12: OnceCell-backed — el init eager corre
+                // antes en el async fn main. Acá sólo materializamos.
+                self.emit(&format!(
+                    "    let {}: {} = {}.get().expect(\"state var `{}` no inicializada (bug del codegen)\").clone();\n",
+                    name, rust_ty, static_name, name
+                ));
+            } else {
+                self.emit(&format!(
+                    "    let {}: {} = (*{}).clone();\n",
+                    name, rust_ty, static_name
+                ));
+            }
+        }
         for job in &jobs {
             let escaped_expr = rust_str_literal(&job.expr);
             let escaped_name = rust_str_literal(&job.fn_name);
@@ -11752,13 +12010,27 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 })?;
                 let static_name = state_var_static_name(dep_name);
                 let rust_ty = rust_type_for(&ty, self.env)?;
+                let is_async_init = self.state_var_async.get(dep_name).copied().unwrap_or(false);
                 self.emit_indent();
-                writeln!(
-                    &mut self.output,
-                    "let mut {}: {} = (*{}).clone();",
-                    dep_name, rust_ty, static_name
-                )
-                .unwrap();
+                if is_async_init {
+                    // v0.15.12: OnceCell-backed (init eager en async fn
+                    // main). `.get().expect(...)` retorna `&T` y luego
+                    // clonamos para preservar el Arc clone (mismo costo
+                    // que el patrón LazyLock — clona Arc no contenido).
+                    writeln!(
+                        &mut self.output,
+                        "let mut {}: {} = {}.get().expect(\"state var `{}` no inicializada (bug del codegen)\").clone();",
+                        dep_name, rust_ty, static_name, dep_name
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        &mut self.output,
+                        "let mut {}: {} = (*{}).clone();",
+                        dep_name, rust_ty, static_name
+                    )
+                    .unwrap();
+                }
                 self.declare_var(dep_name.clone(), ty);
             }
         }
@@ -14620,6 +14892,35 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         } else {
             format!("{}({})", target_name, args_code.join(", "))
         };
+        // v0.15.12 — shadow-clone de vars locales referenciadas por
+        // el inner call. Sin esto, el `tokio::spawn(async move { ... })`
+        // captura por valor cada ident del scope outer, moviéndolo al
+        // closure; el caller que lo necesite después rompe con E0382.
+        // Caso canónico TaskHub:
+        //     let _ = spawn(send_due_reminder(new_task.id))
+        //     return ... new_task ...   // <-- E0382: usado tras move
+        // Solución: emitir `let <name> = <name>.clone();` para cada
+        // ident del scope local antes del `tokio::spawn`. El `async move`
+        // captura el shadow (clon barato — Arc::clone) y el outer
+        // scope sigue accesible. Identificamos los idents recorriendo
+        // los inner_args ANTES de coercionarlos (los Idents puros como
+        // `new_task` aparecen ahí). Filtramos por `var_in_any_scope` para
+        // descartar fns/builtins/types/módulos (que no son clonables y
+        // no harían falta).
+        let mut shadow_idents: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for arg in inner_args {
+            collect_idents_in_expr(arg, &mut shadow_idents);
+        }
+        let mut shadow_decls = String::new();
+        // Orden determinista del output.
+        let mut sorted: Vec<String> = shadow_idents
+            .into_iter()
+            .filter(|n| self.var_in_any_scope(n))
+            .collect();
+        sorted.sort();
+        for name in &sorted {
+            shadow_decls.push_str(&format!("let {} = {}.clone(); ", name, name));
+        }
         // El JoinHandle resuelve a `Result<T, JoinError>`. `.unwrap()`
         // panic si la task panicó — paralelo a `tokio::spawn` semántico.
         // El `Box::pin(...)` envuelve para que case con el tipo
@@ -14627,9 +14928,11 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // para `Future<T>` Fitz.
         let code = format!(
             "{{ \
+                {shadow}\
                 let __jh = tokio::spawn(async move {{ {inner} }}); \
                 Box::pin(async move {{ __jh.await.unwrap() }}) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> \
             }}",
+            shadow = shadow_decls,
             inner = inner_call,
         );
         Ok((code, final_ret_type))
@@ -26979,6 +27282,19 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // entre workers tokio. El `(*X).clone()` que materializa los
         // handlers solo clona el Arc (~ns), no el contenido — alias
         // preservado, mutaciones visibles entre requests.
+        //
+        // v0.15.12: state vars cuya init contiene `.await` (caso
+        // canónico `let db_result = db.connect(url).await`) usan
+        // `tokio::sync::OnceCell<T>` en lugar de `LazyLock<T>` —
+        // LazyLock cierra con closure sync que no acepta `.await`.
+        // Para esos, el static se declara con `OnceCell::const_new()`
+        // (zero-overhead) y la inicialización se hace **eagerly** en
+        // el body del `async fn main()` justo después de log/prometheus
+        // init y antes de cualquier handler/spawn/serve, vía
+        // `__FITZ_STATE_X.set(<init>.await coerced).expect(...)`. Los
+        // inits se guardan en `async_state_inits` para emitirlos cuando
+        // estemos generando el body de `main`.
+        let mut async_state_inits: Vec<(String, Type, String)> = Vec::new();
         if !self.state_var_types.is_empty() {
             for s in main_stmts {
                 if let Stmt::Assign {
@@ -26990,16 +27306,33 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     if let Some(ty) = self.state_var_types.get(name).cloned() {
                         let static_name = state_var_static_name(name);
                         let rust_ty = rust_type_for(&ty, self.env)?;
+                        let is_async_init =
+                            self.state_var_async.get(name).copied().unwrap_or(false);
                         let (init_code, init_ty) = self.gen_expr(value)?;
                         let coerced = coerce(&init_code, &init_ty, &ty, self.env);
-                        writeln!(
-                            &mut self.output,
-                            "static {}: std::sync::LazyLock<{}> = \
-                             std::sync::LazyLock::new(|| {});",
-                            static_name, rust_ty, coerced
-                        )
-                        .unwrap();
-                        self.emit("\n");
+                        if is_async_init {
+                            // `OnceCell::const_new()` permite declarar
+                            // el static sin init eager — el set explícito
+                            // viene en el body del `async fn main()`.
+                            writeln!(
+                                &mut self.output,
+                                "static {}: tokio::sync::OnceCell<{}> = \
+                                 tokio::sync::OnceCell::const_new();",
+                                static_name, rust_ty
+                            )
+                            .unwrap();
+                            self.emit("\n");
+                            async_state_inits.push((name.clone(), ty, coerced));
+                        } else {
+                            writeln!(
+                                &mut self.output,
+                                "static {}: std::sync::LazyLock<{}> = \
+                                 std::sync::LazyLock::new(|| {});",
+                                static_name, rust_ty, coerced
+                            )
+                            .unwrap();
+                            self.emit("\n");
+                        }
                     }
                 }
             }
@@ -27174,6 +27507,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 &mut self.output,
                 "    __fitz_init_prometheus({});",
                 cfg.prometheus_enabled
+            )
+            .unwrap();
+        }
+        // v0.15.12 — init **eager** de los state vars cuya RHS contiene
+        // `.await` (caso canónico `let db_result = db.connect(url)
+        // .await`). Va ANTES de los main_stmts del usuario para que
+        // otros stmts top-level puedan referenciar el state, y antes
+        // del Router para que los handlers tengan el OnceCell ya
+        // inicializado en el primer request. El `__FITZ_STATE_X.set(...)`
+        // panic-ea si se llama dos veces; acá sólo se llama una vez
+        // por var (boot del proceso).
+        for (name, ty, init_expr) in &async_state_inits {
+            let static_name = state_var_static_name(name);
+            let rust_ty = rust_type_for(ty, self.env)?;
+            writeln!(
+                &mut self.output,
+                "    {{ let __init: {} = {}; {}.set(__init).expect(\"state var `{}` ya inicializada (bug del codegen)\"); }}",
+                rust_ty, init_expr, static_name, name
             )
             .unwrap();
         }
@@ -39156,6 +39507,264 @@ mod tests {
         assert!(
             code.contains("tokio::signal::ctrl_c().await"),
             "esperaba bloqueo con ctrl_c en cron-only main"
+        );
+    }
+
+    #[test]
+    fn v0_15_11_cron_store_kwarg_con_state_var_materializa_local_antes_de_spawn() {
+        // v0.15.11 — Regresión del bug descubierto en boilerplate TaskHub.
+        // Cuando `@cron(..., store=X)` referencia un binding top-level que
+        // ALGÚN handler también consume (caso típico: `let db_result =
+        // db.connect(...).await` usado por handlers HTTP y por crons),
+        // el codegen lo hoistea a `static __FITZ_STATE_DB_RESULT`. El
+        // spawn block en `__main_inner` referencia `db_result` por nombre
+        // de usuario — necesita materialización local previa al spawn.
+        //
+        // v0.15.12 — el init contiene `.await` → state var pasa de
+        // `LazyLock` a `tokio::sync::OnceCell`. La materialización
+        // local cambia de `(*X).clone()` a `X.get().expect(...).clone()`.
+        let src = "let db_result = db.connect(env_or(\"DATABASE_URL\", \"\")).await\n\
+                   @cron(\"0 0 * * *\", store=db_result)\n\
+                   async fn cleanup() -> Result<Null> { return Ok(null) }\n\
+                   @get(\"/healthz\")\n\
+                   async fn healthz() -> Str {\n\
+                       let _ = db_result\n\
+                       return \"ok\"\n\
+                   }\n\
+                   @server(8080)\n\
+                   fn main() => 0\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El state var debe haberse hoisteado a static (OnceCell post-v0.15.12).
+        assert!(
+            code.contains("static __FITZ_STATE_DB_RESULT"),
+            "esperaba state var hoisteada a `static __FITZ_STATE_DB_RESULT`"
+        );
+        // La materialización local debe venir ANTES del spawn block.
+        let materialize_idx = code.find("let db_result: Result<__FitzDbConn, String> = __FITZ_STATE_DB_RESULT.get()")
+            .or_else(|| code.find("let db_result"))
+            .expect("esperaba `let db_result = __FITZ_STATE_DB_RESULT.get().expect(...).clone();` en __main_inner");
+        let spawn_idx = code
+            .find("tokio::spawn(__fitz_run_cron_job")
+            .expect("esperaba `tokio::spawn(__fitz_run_cron_job(...))` en __main_inner");
+        assert!(
+            materialize_idx < spawn_idx,
+            "esperaba que la materialización de `db_result` precediera al spawn del cron"
+        );
+        // El spawn debe usar el nombre local (no el static directamente).
+        assert!(
+            code.contains("(&db_result).into_store()"),
+            "esperaba `(&db_result).into_store()` después de la materialización"
+        );
+    }
+
+    #[test]
+    fn v0_15_12_state_var_con_await_usa_oncecell_e_init_eager() {
+        // v0.15.12 — Bug pre-existente del TaskHub: `let db_result =
+        // db.connect(url).await` top-level con HTTP handlers que lo
+        // consumen hoisteaba a `LazyLock<T> = LazyLock::new(|| init)`
+        // donde init contenía `.await` → rustc E0728: `await` is only
+        // allowed inside `async` functions and blocks.
+        //
+        // Fix: detectar `.await` en la RHS via `expr_contains_await`,
+        // emitir `tokio::sync::OnceCell::const_new()` para el static
+        // e inicializar eagerly en el body del `async fn main()`.
+        let src = "let db = db.connect(\"postgres://x\").await\n\
+                   @get(\"/healthz\")\n\
+                   async fn healthz() -> Str {\n\
+                       let _ = db\n\
+                       return \"ok\"\n\
+                   }\n\
+                   @server(8080)\n\
+                   fn main() => 0\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // 1) El static debe ser OnceCell (no LazyLock).
+        assert!(
+            code.contains("static __FITZ_STATE_DB : tokio :: sync :: OnceCell")
+                || code.contains("static __FITZ_STATE_DB: tokio::sync::OnceCell"),
+            "esperaba `static __FITZ_STATE_DB: tokio::sync::OnceCell<...>`, got:\n{}",
+            code
+        );
+        // 2) El init eager con `.set(...)` debe estar en el body del main.
+        assert!(
+            code.contains("__FITZ_STATE_DB.set(__init)")
+                || code.contains("__FITZ_STATE_DB . set (__init)"),
+            "esperaba `__FITZ_STATE_DB.set(__init).expect(...)` en el body del async fn main(), got:\n{}",
+            code
+        );
+        // 3) La materialización en el handler debe usar `get().expect(...).clone()`.
+        assert!(
+            code.contains("__FITZ_STATE_DB.get()") || code.contains("__FITZ_STATE_DB . get ()"),
+            "esperaba `__FITZ_STATE_DB.get().expect(...).clone()` en el body del handler, got:\n{}",
+            code
+        );
+        // 4) NO debe quedar el patrón viejo LazyLock con .await adentro
+        //    (el bug original).
+        assert!(
+            !code.contains("LazyLock::new(|| (__fitz_db_connect"),
+            "esperaba que NO hubiera LazyLock con `.await` adentro (regresión del bug), got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn v0_15_12_state_var_sin_await_sigue_usando_lazylock() {
+        // v0.15.12 — el path canónico LazyLock se preserva cuando la
+        // init NO contiene `.await`. Caso típico: state HTTP con una
+        // lista compartida (`let users = []`).
+        let src = "let users: List<Str> = []\n\
+                   @get(\"/users\")\n\
+                   fn list_users() -> List<Str> {\n\
+                       return users\n\
+                   }\n\
+                   @server(8080)\n\
+                   fn main() => 0\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El path LazyLock se preserva (no es async init).
+        assert!(
+            code.contains("static __FITZ_STATE_USERS : std :: sync :: LazyLock")
+                || code.contains("static __FITZ_STATE_USERS: std::sync::LazyLock"),
+            "esperaba `static __FITZ_STATE_USERS: std::sync::LazyLock<...>`, got:\n{}",
+            code
+        );
+        // Materialización vieja también.
+        assert!(
+            code.contains("(*__FITZ_STATE_USERS).clone()")
+                || code.contains("(* __FITZ_STATE_USERS) . clone ()"),
+            "esperaba `(*__FITZ_STATE_USERS).clone()` (sync path), got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn v0_15_12_expr_contains_await_detecta_await_anidado() {
+        // Smoke test del helper `expr_contains_await`. Cubre los casos
+        // canónicos: await directo, await dentro de Try, await dentro
+        // de Call.callee/args, await dentro de BinOp/UnaryOp.
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+
+        fn extract_first_assign_value(src: &str) -> Expr {
+            let tokens = tokenize(src).expect("lex");
+            let program = parse(tokens).expect("parse");
+            for stmt in &program {
+                if let Stmt::Assign { value, .. } = stmt {
+                    return value.clone();
+                }
+            }
+            panic!("no encontré Stmt::Assign en: {}", src);
+        }
+
+        // True cases
+        let cases_await = [
+            "let x = foo().await",      // directo
+            "let x = (foo()?).await",   // dentro de Try
+            "let x = bar(foo().await)", // dentro de Call.args
+            "let x = foo().await + 1",  // dentro de BinOp.left
+            "let x = 1 + foo().await",  // dentro de BinOp.right
+            "let x = -foo().await",     // dentro de UnaryOp
+        ];
+        for src in cases_await {
+            let value = extract_first_assign_value(src);
+            assert!(
+                expr_contains_await(&value),
+                "esperaba que `{}` contuviera .await",
+                src
+            );
+        }
+
+        // False cases (sin .await)
+        let cases_no_await = [
+            "let x = 42",
+            "let x = foo()",
+            "let x = foo() + bar()",
+            "let x = [1, 2, 3]",
+        ];
+        for src in cases_no_await {
+            let value = extract_first_assign_value(src);
+            assert!(
+                !expr_contains_await(&value),
+                "esperaba que `{}` NO contuviera .await",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn v0_15_12_spawn_clona_vars_outer_antes_del_async_move() {
+        // v0.15.12 — Bug pre-existente del TaskHub: cuando el inner
+        // call de `spawn(...)` referencia un var del scope outer que
+        // el caller también usa después, el `async move` del
+        // `tokio::spawn` mueve el var y el caller rompe con E0382.
+        //
+        // Fix: identificar idents del scope local en los inner_args
+        // y emitir `let <name> = <name>.clone();` ANTES del
+        // `tokio::spawn(async move { ... })`. El shadow se captura
+        // por el closure; el outer scope sigue accesible.
+        let src = "@background\n\
+                   async fn send_due_reminder(id: Int) -> Null { return null }\n\
+                   async fn caller(new_id: Int) -> Int {\n\
+                       let _ = spawn(send_due_reminder(new_id))\n\
+                       return new_id\n\
+                   }\n\
+                   print(\"hi\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El shadow `let new_id = new_id.clone();` debe aparecer ANTES
+        // de `tokio::spawn(async move`.
+        let shadow_idx = code
+            .find("let new_id = new_id . clone ()")
+            .or_else(|| code.find("let new_id = new_id.clone()"))
+            .expect("esperaba shadow `let new_id = new_id.clone()` antes del spawn");
+        let spawn_idx = code
+            .find("tokio :: spawn (async move")
+            .or_else(|| code.find("tokio::spawn(async move"))
+            .expect("esperaba `tokio::spawn(async move ...)`");
+        assert!(
+            shadow_idx < spawn_idx,
+            "esperaba que el shadow clone precediera al tokio::spawn"
+        );
+    }
+
+    #[test]
+    fn v0_15_12_spawn_sin_args_no_emite_shadow_clones() {
+        // Sin args, no hay nada que shadowear — el codegen no debe
+        // emitir clones vacíos ni nada raro.
+        let src = "@background\n\
+                   fn beat() -> Null { return null }\n\
+                   async fn caller() -> Null {\n\
+                       let _ = spawn(beat())\n\
+                       return null\n\
+                   }\n\
+                   print(\"hi\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El spawn sigue ahí, sin pre-clones.
+        assert!(
+            code.contains("tokio :: spawn (async move") || code.contains("tokio::spawn(async move"),
+            "esperaba `tokio::spawn(async move ...)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn v0_15_12_spawn_no_clona_idents_que_son_fn_nombradas() {
+        // Si el arg es una fn top-level (`@background`), su nombre
+        // NO debe aparecer como shadow clone — no es una var local
+        // del scope. El filtro `var_in_any_scope` descarta los nombres
+        // de fns.
+        let src = "@background\n\
+                   fn helper(n: Int) -> Int { return n }\n\
+                   @background\n\
+                   async fn job(n: Int) -> Int { return helper(n) }\n\
+                   async fn caller() -> Int {\n\
+                       let _ = spawn(job(42))\n\
+                       return 0\n\
+                   }\n\
+                   print(\"hi\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // `job` no debe shadowearse (es fn, no var).
+        assert!(
+            !code.contains("let job = job . clone ()") && !code.contains("let job = job.clone()"),
+            "no esperaba shadow clone del nombre de fn `job`, got:\n{}",
+            code
         );
     }
 

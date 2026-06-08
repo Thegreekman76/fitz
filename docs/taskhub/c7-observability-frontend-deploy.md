@@ -180,26 +180,30 @@ funcionar — **zero overhead cuando no hay endpoint OTel**.
 Sumás al `src/main.fitz`:
 
 ```fitz
+// `c.is_closed()` retorna `Future<Bool>` (paridad intérprete + codegen),
+// por eso las fns son `async` y hacen `.await` explícito antes del `not`.
 @healthz
-fn check_db_alive() -> Bool {
+async fn check_db_alive() -> Bool {
     // Devuelve true si la DB está accesible.
     // Si db.connect() falló al boot, db_result es Err — el
     // health check refleja eso devolviendo false.
-    return match db_result {
-        Ok(c)  => not c.is_closed(),
-        Err(_) => false,
+    let conn: DbConn = match db_result {
+        Ok(c)  => c,
+        Err(_) => return false,
     }
+    return not conn.is_closed().await
 }
 
 @readyz
-fn check_ready_for_traffic() -> Bool {
+async fn check_ready_for_traffic() -> Bool {
     // Mismo check para el MVP. En producción podrías refinar
     // chequeando que el cache está warm, que las migraciones
     // corrieron, etc.
-    return match db_result {
-        Ok(c)  => not c.is_closed(),
-        Err(_) => false,
+    let conn: DbConn = match db_result {
+        Ok(c)  => c,
+        Err(_) => return false,
     }
+    return not conn.is_closed().await
 }
 ```
 
