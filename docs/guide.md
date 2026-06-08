@@ -6921,25 +6921,41 @@ por ejemplo.
 ### `@server(port, host)` — configurar el server
 
 Por default el server escucha en `127.0.0.1:3000`. Para cambiar
-puerto o host, decorá una fn con `@server`:
+puerto o host, decorá una fn con `@server`. Se admiten dos formatos
+equivalentes:
 
 ```fitz
+// Formato positional — clásico, conciso.
 @server(8080, "0.0.0.0")
 fn main() => 0
+```
 
-@get("/")
-fn index() => "escuchando en todas las interfaces"
+```fitz
+// Formato kwarg (v0.15.13+) — más explícito, recomendado para
+// boilerplates Dockerizados donde el host="0.0.0.0" es el detalle
+// crítico que el lector busca.
+@server(port=8080, host="0.0.0.0")
+fn main() => 0
 ```
 
 Reglas:
 
-- Args positional: primero `port: Int`, después `host: Str`. Cualquiera
+- **Positional**: primero `port: Int`, después `host: Str`. Cualquiera
   se puede omitir (`@server(8080)` deja el host default).
+- **Kwarg** (v0.15.13+): `port=<Int>` y `host=<Str>` aceptan el mismo
+  tipo y validación. Pasados **dos veces** (positional + kwarg) →
+  error claro estilo Python (`"port pasado dos veces"`).
 - `port` tiene que estar en `[1, 65535]`. Fuera → error al registrar.
 - `host` tiene que parsear como **IP literal** (IPv4 o IPv6). No
   hay resolución DNS — `"localhost"` no funciona, usar
   `"127.0.0.1"`.
 - Solo un `@server` por programa. Dos → error con el config previo.
+
+**Para Docker**: el default `127.0.0.1` solo acepta conexiones
+loopback del mismo container. Para que el port forwarding desde
+el host (o el proxy reverso de nginx) funcione, hay que bindear
+explícitamente a `"0.0.0.0"`. Es el patrón de todos los boilerplates
+Dockerizados del repo (`boilerplates/api-*` + `boilerplates/taskhub`).
 
 La fn que decora `@server` queda definida en el env como cualquier
 otra: no se ejecuta automáticamente. La convención es ponerlo

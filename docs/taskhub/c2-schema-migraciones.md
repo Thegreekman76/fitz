@@ -148,7 +148,8 @@ async fn list_users() -> Result<List<User>> {
     return User.all(conn).await
 }
 
-@server(8080)
+// Mismo @server que C1 (con host="0.0.0.0" para Docker).
+@server(port=8080, host="0.0.0.0")
 fn main() => 0
 
 print("TaskHub C2 — schema declarado, escuchando en :8080")

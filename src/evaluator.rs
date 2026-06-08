@@ -1355,6 +1355,14 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
     // Arrancamos del default y vamos sobreescribiendo.
     let mut config = ServerConfig::default_addr();
 
+    // v0.15.13 — flags que recuerdan si port/host vinieron como
+    // positional. El loop de kwargs los chequea para detectar
+    // doble-especificación (`@server(8080, port=9090)` o
+    // `@server(8080, "0.0.0.0", host="1.2.3.4")`). Patrón estándar
+    // de Python: TypeError si el caller pasa el mismo arg dos veces.
+    let mut port_set_via_positional = false;
+    let mut host_set_via_positional = false;
+
     if let Some(port_expr) = deco.args.first() {
         match port_expr {
             Expr::Int(n, _) => {
@@ -1365,6 +1373,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
                 config.port = *n as u16;
+                port_set_via_positional = true;
             }
             other => {
                 return Err(err(format!(
@@ -1389,6 +1398,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
                 config.host = s.clone();
+                host_set_via_positional = true;
             }
             other => {
                 return Err(err(format!(
@@ -1402,9 +1412,73 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
 
     // 7.4: kwargs aceptados por @server. `docs: Bool` (opt-out de
     // /openapi.json y /docs). Q.2: `api_version: Str` (override del
-    // info.version del schema OpenAPI). Cualquier otro kwarg es error.
+    // info.version del schema OpenAPI).
+    //
+    // v0.15.13 — cierre URGENTE-2: `port` y `host` también admiten
+    // sintaxis kwarg además de positional. Patrón canónico
+    // recomendado para Dockerizar: `@server(host="0.0.0.0",
+    // port=8080, prometheus=true)`. Más explícito que mezclar
+    // positionals con kwargs.
+    //
+    // Cualquier otro kwarg es error.
     for (key, value_expr) in &deco.kwargs {
         match key.as_str() {
+            // v0.15.13 — `port` y `host` como kwargs. Si ya vinieron
+            // como positional, error de conflicto claro (estilo Python
+            // TypeError "got multiple values for argument 'port'").
+            "port" => {
+                if port_set_via_positional {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': port pasado dos veces (positional + kwarg 'port'). \
+                         Usá uno solo de los dos formatos.",
+                        fn_name,
+                    )));
+                }
+                match value_expr {
+                    Expr::Int(n, _) => {
+                        if *n < 1 || *n > 65535 {
+                            return Err(err(format!(
+                                "@server sobre fn '{}': port {} fuera de rango (debe estar entre 1 y 65535)",
+                                fn_name, n,
+                            )));
+                        }
+                        config.port = *n as u16;
+                    }
+                    other => {
+                        return Err(err(format!(
+                            "@server sobre fn '{}': el kwarg 'port' debe ser Int literal, recibió {:?}",
+                            fn_name, other,
+                        )));
+                    }
+                }
+            }
+            "host" => {
+                if host_set_via_positional {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': host pasado dos veces (positional + kwarg 'host'). \
+                         Usá uno solo de los dos formatos.",
+                        fn_name,
+                    )));
+                }
+                match value_expr {
+                    Expr::Str(s, _) => {
+                        if s.parse::<std::net::IpAddr>().is_err() {
+                            return Err(err(format!(
+                                "@server sobre fn '{}': host '{}' no es una IP válida \
+                                 (esperado IPv4 o IPv6 literal, sin resolver DNS)",
+                                fn_name, s,
+                            )));
+                        }
+                        config.host = s.clone();
+                    }
+                    other => {
+                        return Err(err(format!(
+                            "@server sobre fn '{}': el kwarg 'host' debe ser Str literal, recibió {:?}",
+                            fn_name, other,
+                        )));
+                    }
+                }
+            }
             "docs" => match value_expr {
                 Expr::Bool(b, _) => {
                     config.enable_docs = *b;
@@ -1514,7 +1588,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
             other => {
                 return Err(err(format!(
                     "@server sobre fn '{}': kwarg '{}' no reconocido. \
-                     Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
+                     Soportados: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
                     fn_name, other,
                 )));
             }
@@ -26735,11 +26809,159 @@ let r = match n {
         let (res, _) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
+        // v0.15.13 — el mensaje ahora cita también `port` y `host`
+        // porque admitimos kwargs para esos parámetros (URGENTE-2).
         assert!(
             err.message.contains("foo")
+                && err.message.contains("port")
+                && err.message.contains("host")
                 && err.message.contains("docs")
                 && err.message.contains("api_version")
                 && err.message.contains("ws_heartbeat_secs"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // v0.15.13 — URGENTE-2: @server(host=, port=) como kwargs.
+    // ───────────────────────────────────────────────────────────────
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_host_kwarg_solo_aplica_y_port_default() {
+        // Bug original: `@server(host="0.0.0.0")` daba
+        // "kwarg 'host' no reconocido". Tras el fix debe parsear OK.
+        let src = "\
+            @server(host=\"0.0.0.0\")\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        assert!(res.is_ok(), "esperaba @server(host=...) OK, got: {:?}", res);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_port_kwarg_solo_aplica() {
+        let src = "\
+            @server(port=9090)\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        assert!(res.is_ok(), "esperaba @server(port=...) OK, got: {:?}", res);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_port_y_host_kwargs_mixed_con_otros() {
+        // Patrón canónico recomendado para Dockerizar:
+        // @server(port=8080, host="0.0.0.0", prometheus=true)
+        let src = "\
+            @server(port=8080, host=\"0.0.0.0\", prometheus=true, ws_heartbeat_secs=30)\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        assert!(
+            res.is_ok(),
+            "esperaba el mix port+host+prometheus+ws OK, got: {:?}",
+            res
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_port_positional_mas_host_kwarg_funciona() {
+        // Caso intermedio: port positional + host kwarg. La razón:
+        // el user que viene de @server(8080) muchas veces solo quiere
+        // sumar host="0.0.0.0" sin tocar el orden del port.
+        let src = "\
+            @server(8080, host=\"0.0.0.0\")\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        assert!(
+            res.is_ok(),
+            "esperaba @server(8080, host=...) OK, got: {:?}",
+            res
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_port_doble_positional_mas_kwarg_es_error() {
+        // Conflicto: port pasado dos veces — error claro estilo Python.
+        let src = "\
+            @server(8080, port=9090)\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("port") && err.message.contains("dos veces"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_host_doble_positional_mas_kwarg_es_error() {
+        let src = "\
+            @server(8080, \"127.0.0.1\", host=\"0.0.0.0\")\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("host") && err.message.contains("dos veces"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_host_kwarg_no_str_es_error() {
+        let src = "\
+            @server(host=42)\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("host") && err.message.contains("Str literal"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_port_kwarg_fuera_de_rango_es_error() {
+        let src = "\
+            @server(port=99999)\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("port") && err.message.contains("fuera de rango"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn v0_15_13_server_host_kwarg_ip_invalida_es_error() {
+        let src = "\
+            @server(host=\"not-an-ip\")\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("not-an-ip") && err.message.contains("IP"),
             "mensaje inesperado: {}",
             err.message,
         );

@@ -387,27 +387,54 @@ OPENAI_API_KEY=
 ## Paso 7 — `Dockerfile` actualizado
 
 ```dockerfile
-# Stage 1 — build con el toolchain de Fitz (compilado con
-# --features python).
-# Asumimos que `ghcr.io/thegreekman76/fitz:latest-python` existe (variante
-# con feature `python` habilitada). Si no, compilás localmente con
-# `cargo build --release --features python` y copiás el binario.
-FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
+# Stage 1A — extraer binario fitz con feature python desde la
+# imagen oficial. La imagen `:latest-python` viene con fitz
+# `--features python` compilado y libpython3.12 dev headers, pero
+# NO trae cargo (es runtime image, no builder). Por eso extraemos
+# solo el binario y armamos el builder real a mano abajo.
+FROM ghcr.io/thegreekman76/fitz:latest-python AS fitz_source
+
+# Stage 1B — builder con Python 3.12 + Rust toolchain.
+# Necesitamos cargo para `fitz build` (que internamente invoca
+# `cargo build --release`). python:3.12-trixie es Debian 13 con
+# GLIBC 2.41 — match obligatorio del binario fitz que se linkea
+# contra esa libc (extraído arriba). bookworm (Debian 12) trae
+# GLIBC 2.36 y el binario fitz directamente no arranca.
+FROM python:3.12-trixie AS builder
+
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.95.0 --profile minimal
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Binario fitz extraído del :latest-python (tiene feature python).
+COPY --from=fitz_source /usr/local/bin/fitz /usr/local/bin/fitz
 
 WORKDIR /build
 COPY fitz.toml .
 COPY src/ ./src/
 COPY migrations/ ./migrations/
+COPY python/ ./python/
 
+# fitz build invoca cargo internamente; el binario producido linkea
+# pyo3 + libpython3.12 (mismo runtime stage abajo).
 RUN fitz build
 
-# Stage 2 — runtime con Python.
-# Cambio importante vs C1-C5: base con libpython linkeable
-# (la binaria de C6 fue buildeada con --features python).
-# Image final ~250 MB vs ~150 MB de C1-C5. Trade-off.
-FROM python:3.12-slim-bookworm AS runtime
+# Stage 2 — runtime con python:3.12-slim-trixie (libpython3.12 +
+# GLIBC 2.41 — match del builder). curl para healthcheck HTTP.
+FROM python:3.12-slim-trixie AS runtime
 
 WORKDIR /app
+
+# curl: healthcheck contra /healthz (python:3.12-slim NO trae curl).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
 
 # Instalar pip deps (openai opcional).
 COPY python/requirements.txt /app/python/requirements.txt
@@ -431,25 +458,29 @@ ENTRYPOINT ["/app/taskhub"]
 
 **Cambios respecto al Dockerfile de C1**:
 
-- **Base image stage 1**: `ghcr.io/thegreekman76/fitz:latest-python` (con
-  feature `python`). **Si esta imagen no existe**, alternativas:
-  - Compilar `fitz` localmente con `cargo build --release --features
-    python` y copiar el binario:
-    ```dockerfile
-    COPY ./fitz-with-python /app/fitz
-    ```
-  - Build multi-stage el toolchain en el Dockerfile (lento — agrega
-    ~5min de cargo build a la primera vuelta).
-- **Base image stage 2**: `python:3.12-slim-bookworm` en lugar
-  de `distroless/cc-debian12`. La distroless no tiene libpython y
+- **Builder de C1 era `:latest`** (que SÍ trae cargo + rustc + fitz
+  sin feature python — runtime image válida como builder). En C6
+  necesitamos feature `python` en el binario producido (`from python
+  import priority` requiere pyo3 linkeado).
+- **`:latest-python` NO trae cargo** — solo el binario fitz +
+  libpython + Python 3.12 (es runtime image, no builder). Por eso
+  extraemos solo el binario fitz desde un stage `fitz_source` y
+  armamos el builder real con `python:3.12-trixie + rustup`.
+- **GLIBC mismatch**: `bookworm` (Debian 12) trae GLIBC 2.36; el
+  binario fitz se linkea contra GLIBC 2.41 (Debian 13 / trixie).
+  Por eso ambos stages usan trixie — sino el binario directamente
+  no arranca con error `GLIBC_2.39 not found`.
+- **Stage 2 runtime**: `python:3.12-slim-trixie` en lugar de
+  `distroless/cc-debian12`. La distroless no tiene libpython y
   rompe el binario al boot.
 - **`pip install -r requirements.txt`** — opcional, solo necesario
-  si querés el LLM real. La heurística pura funciona sin pip
-  install (módulo `os` es stdlib).
+  si querés el LLM real. La heurística pura funciona sin pip install.
 - **`COPY python/priority.py`** + **`PYTHONPATH=/app/python`** —
   para que `from python import priority` resuelva.
-- **Image size**: ~250 MB vs ~150 MB de C1-C5. El cap C7 cubre
-  cómo bajarlo con `fitz build --bundle-python`.
+- **Image size**: ~280 MB vs ~150 MB de C1-C5. El cap C7 cubre
+  cómo bajarlo con `fitz build --bundle-python` (Path A aspirational
+  cuando el toolchain Docker se publique con cargo + python-build-
+  standalone).
 
 ---
 
@@ -467,7 +498,8 @@ services:
     environment:
       DATABASE_URL: postgres://taskhub:${DB_PASSWORD:?DB_PASSWORD requerido}@db:5432/taskhub?sslmode=disable
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET requerido}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # OTLP HTTP (:4318), no gRPC (:4317). Detalle del cap C1.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: taskhub
       RUST_LOG: info
       # NUEVO en C6 — vacío = heurística pura Python.

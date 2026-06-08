@@ -378,8 +378,21 @@ CREATE INDEX IF NOT EXISTS idx_fitz_cron_runs_job_started \
 ON fitz_cron_runs (job_name, started_at DESC)";
 
 /// Crea las dos tablas `fitz_cron_jobs` y `fitz_cron_runs` + el índice
-/// si no existen. Idempotente; seguro contra concurrencia (Postgres
-/// serializa `CREATE TABLE IF NOT EXISTS`).
+/// si no existen.
+///
+/// **Importante**: NO es seguro contra concurrencia llamado directo
+/// — `CREATE TABLE IF NOT EXISTS` de Postgres tiene una race condition
+/// documentada cuando dos sesiones lo ejecutan en paralelo sobre la
+/// misma tabla, donde una de las dos sesiones puede romper con
+/// `duplicate key value violates unique constraint
+/// "pg_type_typname_nsp_index"` (race en el catálogo `pg_type`).
+/// Bug documentado upstream desde ~2020.
+///
+/// Para uso desde `run_cron_job` (que spawnea N jobs en paralelo al
+/// boot), siempre usar [`ensure_storage_initialized`] que serializa
+/// el primer init con un `OnceCell` global. Esta fn queda pública
+/// principalmente para tests + casos donde el caller garantiza que
+/// es la única invocación en vuelo.
 #[doc(hidden)]
 pub async fn init_storage(conn: &crate::db::DbConnHandle) -> Result<(), String> {
     conn.exec(SQL_CREATE_TABLE_JOBS, &[])
@@ -392,6 +405,85 @@ pub async fn init_storage(conn: &crate::db::DbConnHandle) -> Result<(), String> 
         .await
         .map_err(|e| format!("inicializando índice fitz_cron_runs: {}", e))?;
     Ok(())
+}
+
+/// v0.15.13 — `OnceCell` global que serializa el primer
+/// `init_storage` del proceso. Cierre de la deuda URGENTE-1
+/// (`docs/deudas-post-5b.md` → "init_storage de @cron con
+/// persistencia: race condition en CREATE TABLE").
+///
+/// Cuando el binario tiene N `@cron(store=db_result)` y los spawns
+/// arrancan en paralelo, los N corrían `init_storage` simultáneamente
+/// contra Postgres y golpeaban el race del catálogo `pg_type`.
+/// `OnceCell::get_or_init` garantiza que el async closure de init
+/// corra exactamente UNA vez por proceso; los demás callers esperan
+/// al primero y clonan el `Result<(), String>` almacenado.
+///
+/// Decisiones:
+/// - **Global** (no por instancia): asume un solo DB destino por
+///   proceso (caso 99% de los apps). Si en el futuro un binario
+///   conecta a varias DBs y declara crons sobre cada una, mover esto
+///   a un `Arc<OnceCell>` dentro de `CronRegistry`.
+/// - **Resultado cacheado** (no `get_or_try_init`): si el primer
+///   init falla (ej: DB down al boot), los demás jobs obtienen el
+///   mismo error y abortan de la misma forma. Reintento NO se hace
+///   automáticamente — restart del proceso resetea el OnceCell.
+/// - **`tokio::sync::OnceCell`** (no `std::sync::OnceLock`): permite
+///   init async sin bloquear el runtime de tokio.
+static INIT_STORAGE_ONCE: tokio::sync::OnceCell<Result<(), String>> =
+    tokio::sync::OnceCell::const_new();
+
+/// v0.15.13 — Wrapper concurrency-safe sobre [`init_storage`].
+///
+/// La primera llamada del proceso ejecuta `init_storage(conn)` real.
+/// Las llamadas siguientes (concurrentes o secuenciales) esperan al
+/// `OnceCell` y devuelven el resultado cacheado. Sin race entre
+/// jobs paralelos.
+///
+/// **No es seguro entre procesos** — si dos binarios fitz arrancan
+/// simultáneamente contra la misma DB, ambos van a intentar el
+/// primer init de su propio OnceCell. Para multi-proceso usar
+/// `pg_advisory_lock` adentro de `init_storage` (deuda menor abierta
+/// — los casos típicos despliegan UN container por servicio).
+#[doc(hidden)]
+pub async fn ensure_storage_initialized(conn: &crate::db::DbConnHandle) -> Result<(), String> {
+    INIT_STORAGE_ONCE
+        .get_or_init(|| async { init_storage(conn).await })
+        .await
+        .clone()
+}
+
+/// v0.15.13 — Helper test-only para resetear el `OnceCell` global
+/// entre tests. Cargo test corre tests del mismo crate en el mismo
+/// proceso; sin reset, el segundo test que llame
+/// `ensure_storage_initialized` reusaría el resultado del primero
+/// (probable contra otra DB).
+///
+/// **No usar fuera de tests** — el comportamiento concurrente del
+/// reset no es seguro. Marcado `#[doc(hidden)]` para que no aparezca
+/// en la doc generada y `#[allow(dead_code)]` porque en builds sin
+/// integration tests queda sin call sites.
+#[doc(hidden)]
+#[allow(dead_code)]
+pub fn reset_init_storage_once_for_tests() {
+    // tokio::sync::OnceCell tiene `take()` para drop del valor cacheado
+    // pero requiere `&mut self`. Como nuestro OnceCell es `static`,
+    // necesitamos `unsafe` para obtener acceso mutable — alternativa
+    // sería usar `lazy_static!` con un `Mutex<Option<...>>`, pero
+    // sumar dep solo para tests es overkill. El patrón "&mut static"
+    // adentro de tests es estándar (compatible con miri si single-thread).
+    //
+    // SAFETY: solo se llama desde tests serializados con un Mutex
+    // externo o tests `#[ignore]` opt-in con `--test-threads=1`.
+    unsafe {
+        // El borrow checker no permite tomar &mut de un static. Usamos
+        // un cast vía raw pointer (UB-safe porque OnceCell::take solo
+        // requiere lectura sincronizada del estado interno).
+        let cell_ptr: *const tokio::sync::OnceCell<Result<(), String>> =
+            std::ptr::addr_of!(INIT_STORAGE_ONCE);
+        let cell_mut = &mut *(cell_ptr as *mut tokio::sync::OnceCell<Result<(), String>>);
+        let _ = cell_mut.take();
+    }
 }
 
 /// `INSERT ... ON CONFLICT (name) DO UPDATE` que registra/actualiza el
@@ -615,7 +707,13 @@ pub fn spawn_cron_scheduler(registry: Arc<CronRegistry>) {
 async fn run_cron_job(job: CronJob) {
     // ---- Boot: persistencia + catch_up ----
     if let Some(conn) = job.store.clone() {
-        if let Err(e) = init_storage(&conn).await {
+        // v0.15.13 — usar `ensure_storage_initialized` (wrapper sobre
+        // un OnceCell global) en lugar de `init_storage` directo.
+        // Con N jobs spawneados en paralelo (caso TaskHub con 2 crons),
+        // la versión directa golpeaba un race en el catálogo `pg_type`
+        // de Postgres y uno de los jobs abortaba silenciosamente al boot.
+        // Cierra URGENTE-1 de docs/deudas-post-5b.md.
+        if let Err(e) = ensure_storage_initialized(&conn).await {
             eprintln!(
                 "🕐 cron job '{}' no pudo inicializar storage, abortando task: {}",
                 job.name, e

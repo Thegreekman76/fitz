@@ -83,9 +83,12 @@ típica de los stacks vecinos.
 Editás `src/main.fitz` y cambiás:
 
 ```fitz
-@server(8080, ws_heartbeat_secs=30, prometheus=true)
+@server(port=8080, host="0.0.0.0", ws_heartbeat_secs=30, prometheus=true)
 fn main() => 0
 ```
+
+(`host="0.0.0.0"` viene desde C1 — necesario para Docker. La
+sintaxis kwarg `port=`/`host=` está disponible desde v0.15.13.)
 
 **El kwarg `prometheus=true` activa**:
 
@@ -751,11 +754,39 @@ client-side.
 
 ---
 
-## Paso 6 — `Dockerfile` final con bundling (Path A — ideal)
+## Paso 6 — `Dockerfile` final multi-stage (real, lo que el boilerplate publica)
+
+El Dockerfile del boilerplate publicado usa Python 3.12 en el runtime
+porque el interop con `priority.py` necesita libpython al runtime. La
+versión "bundling" (Path A — distroless de ~50 MB con CPython + pip
+empaquetados al binario) queda como aspirational hasta que el
+toolchain Docker se publique con cargo + python-build-standalone
+out of the box (deuda CI documentada — ver `docs/deudas-post-5b.md`).
 
 ```dockerfile
-# Stage 1 — build con bundling.
-FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
+# Stage 1A — extraer binario fitz con feature python desde la imagen
+# oficial. La imagen `:latest-python` viene con fitz `--features
+# python` compilado y libpython3.12 dev headers.
+FROM ghcr.io/thegreekman76/fitz:latest-python AS fitz_source
+
+# Stage 1B — builder con Python 3.12 + Rust toolchain.
+# `:latest-python` NO trae cargo (es runtime image), por eso necesitamos
+# armar el builder a mano con python:3.12-trixie (GLIBC 2.41 — match
+# del binario fitz que se linkea contra esa lib) + rustup.
+FROM python:3.12-trixie AS builder
+
+ENV CARGO_HOME=/usr/local/cargo
+ENV RUSTUP_HOME=/usr/local/rustup
+ENV PATH=/usr/local/cargo/bin:$PATH
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.95.0 --profile minimal
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Binario fitz extraído del :latest-python (tiene feature python).
+COPY --from=fitz_source /usr/local/bin/fitz /usr/local/bin/fitz
 
 WORKDIR /build
 COPY fitz.toml .
@@ -763,26 +794,93 @@ COPY src/ ./src/
 COPY migrations/ ./migrations/
 COPY python/ ./python/
 
-# fitz build con bundling: empaca CPython 3.14 + openai pip
-# package adentro del binario.
-RUN fitz build --bundle-python --bundle-pip openai
+# `fitz build` invoca cargo internamente para producir el binario nativo.
+RUN fitz build
 
-# Stage 2 — runtime distroless (vuelve al C1).
-FROM gcr.io/distroless/cc-debian12 AS runtime
+# Stage 2 — runtime con Python 3.12-slim-trixie (necesario por interop
+# Python al runtime + GLIBC ≥ 2.39 que el binario producido requiere).
+FROM python:3.12-slim-trixie AS runtime
 
 WORKDIR /app
+
+# postgresql-client: pg_isready en entrypoint.sh para esperar a db.
+# curl: healthcheck HTTP contra /healthz (python:3.12-slim NO trae curl).
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends postgresql-client curl && \
+    rm -rf /var/lib/apt/lists/*
+
+# Python deps del interop (priority.py usa openai opcional).
+COPY python/requirements.txt /app/python/requirements.txt
+RUN pip install --no-cache-dir -r /app/python/requirements.txt
+
+# Binario fitz también en runtime para correr `fitz db migrate` al
+# boot via entrypoint.sh.
+COPY --from=fitz_source /usr/local/bin/fitz /usr/local/bin/fitz
+
+# El binario taskhub producido + assets.
 COPY --from=builder /build/target/release/taskhub /app/taskhub
+COPY migrations/ /app/migrations/
+COPY fitz.toml /app/fitz.toml
+COPY python/priority.py /app/python/priority.py
 
+# Entrypoint: corre migrations + arranca el binario.
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
+
+ENV PYTHONPATH=/app/python
 EXPOSE 8080
-USER nonroot:nonroot
 
-ENTRYPOINT ["/app/taskhub"]
+ENTRYPOINT ["/app/entrypoint.sh"]
 ```
 
-**Image final**: ~50 MB.
+**`entrypoint.sh`** (al lado del Dockerfile):
 
-- Distroless base: ~22 MB.
-- Binario `taskhub` con CPython + openai bundleados: ~28 MB.
+```bash
+#!/bin/sh
+# Espera a postgres + corre migrations + exec del binario.
+set -eu
+
+DB_HOST=${DB_HOST:-db}
+DB_USER=${DB_USER:-taskhub}
+DB_NAME=${DB_NAME:-taskhub}
+
+echo "[entrypoint] esperando a postgres en ${DB_HOST}:5432..."
+for i in $(seq 1 30); do
+    if pg_isready -h "$DB_HOST" -p 5432 -U "$DB_USER" -d "$DB_NAME" -q; then
+        echo "[entrypoint] postgres ready en intento $i"
+        break
+    fi
+    [ "$i" -eq 30 ] && { echo "[entrypoint] postgres no respondió"; exit 1; }
+    sleep 1
+done
+
+echo "[entrypoint] aplicando migrations con 'fitz db migrate'..."
+cd /app
+fitz db migrate || { echo "[entrypoint] migrate falló"; exit 2; }
+echo "[entrypoint] migrations OK"
+
+exec /app/taskhub
+```
+
+**Healthcheck del compose** (actualizar de C1):
+
+```yaml
+app:
+  # ...
+  healthcheck:
+    test: ["CMD-SHELL", "curl -fsS http://localhost:8080/healthz || exit 1"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 30s  # acomoda el tiempo de pg_isready + fitz db migrate
+```
+
+**Image final**: ~280 MB.
+
+- Python 3.12-slim-trixie base: ~150 MB
+- pip install openai + deps: ~100 MB
+- Binario taskhub: ~10 MB
+- libs sistema (postgresql-client + curl): ~20 MB
 
 **Compará con stacks típicos**:
 
@@ -790,16 +888,24 @@ ENTRYPOINT ["/app/taskhub"]
 - Node+Express+TypeORM+bull+Redis: ~500 MB compose total.
 - Spring Boot + Hibernate + Quartz: ~400 MB compose total.
 
-### Path B — fallback sin bundling
+TaskHub al ~280 MB es ~2x más liviano que los stacks típicos a pesar
+de incluir CPython 3.12 + openai al runtime.
 
-Si `fitz build --bundle-python --bundle-pip openai` falla (por
-ejemplo, el toolchain `ghcr.io/thegreekman76/fitz:latest-python` no
-está pre-built para tu arquitectura), fallback al Dockerfile
-del C6 con base `python:3.12-slim-bookworm`. **Image ~250 MB**
-en lugar de ~50 MB — sigue siendo deployable, solo más grande.
+### Path A aspirational — bundling completo (futuro)
 
-**Documentamos las dos paths para honestidad** — el cap se cierra
-con cualquiera de las dos.
+`fitz build --bundle-python --bundle-pip openai` produce un binario
+de ~28 MB con CPython 3.14 + openai pip empaquetados adentro. El
+runtime entonces puede ser **distroless** (~22 MB base + 28 MB
+binario = ~50 MB total).
+
+**Por qué no lo usamos hoy en el boilerplate publicado**: el comando
+`fitz build --bundle-python` requiere `python-build-standalone` (de
+Astral) instalado + cargo en el builder. La imagen
+`ghcr.io/thegreekman76/fitz:latest-python` actual NO trae ninguno
+de los dos (es runtime, no builder). Cuando el workflow de release
+publique una imagen `:latest-python-builder` con cargo + el toolchain
+de bundling, el Dockerfile se simplifica al Path A de ~50 MB
+distroless. Deuda CI documentada.
 
 ---
 

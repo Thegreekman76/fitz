@@ -1140,7 +1140,14 @@ fn decorator_completions() -> Vec<CompletionItem> {
             "server",
             "server(${1:3000})",
             "@server(port, host?, ws_heartbeat_secs?, ...)",
-            "Configura el listener HTTP. Args: port, host (default \"127.0.0.1\"). Kwargs: docs (default true), api_version, ws_heartbeat_secs (default 30), shutdown_timeout_secs (default 30), observability (default true, 12.3.b.5), prometheus (default false, 12.3.iter2.Tier3 — opt-in del endpoint /metrics; en `fitz build` v0.13.1+ el flag DEBE ser literal en código, el env var `FITZ_PROMETHEUS=1` ya no override-a en runtime).",
+            "Configura el listener HTTP.\n\n\
+             **Args positionals**: `port` (Int 1-65535), `host` (Str IP literal, default \"127.0.0.1\").\n\n\
+             **Kwargs**: `port=<Int>`, `host=<Str>` (v0.15.13+ — mismos parámetros que los positionals, conflicto si se pasan ambos), \
+             `docs=<Bool>` (default true), `api_version=<Str>`, \
+             `ws_heartbeat_secs=<Int>` (default 30), `shutdown_timeout_secs=<Int>` (default 30), \
+             `observability=<Bool>` (default true), `prometheus=<Bool>` (default false — opt-in del endpoint /metrics).\n\n\
+             **Patrón canónico Docker**: `@server(host=\"0.0.0.0\", port=8080, prometheus=true)`. \
+             El default `127.0.0.1` no acepta conexiones desde la red Docker.",
         ),
         (
             "header",

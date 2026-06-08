@@ -16,8 +16,8 @@
 //! `fitz_cron_runs` por `job_name` antes y después para idempotencia.
 
 use fitz::cron_jobs::{
-    init_storage, read_last_run_at, record_run_finish, record_run_start, update_job_last_run,
-    upsert_job_row,
+    ensure_storage_initialized, init_storage, read_last_run_at, record_run_finish,
+    record_run_start, update_job_last_run, upsert_job_row,
 };
 use fitz::db::{connect_url, DbConnHandle, PgValue};
 use std::sync::Arc;
@@ -284,6 +284,123 @@ async fn iter2_read_last_run_at_para_job_inexistente_es_none() {
         .await
         .expect("query OK aunque no haya fila");
     assert!(res.is_none(), "esperaba None, fue {:?}", res);
+
+    conn.close().await.unwrap();
+}
+
+// ───────────────────────────────────────────────────────────────────
+// v0.15.13 — URGENTE-1: cron init_storage race condition (CERRADA)
+// ───────────────────────────────────────────────────────────────────
+
+/// v0.15.13 — Reproduce el race original que ROMPE con `init_storage`
+/// directo cuando N tareas paralelas lo invocan contra una DB sin las
+/// tablas creadas. Postgres tiene race condition documentada en
+/// `pg_type_typname_nsp_index` cuando dos sesiones corren
+/// `CREATE TABLE IF NOT EXISTS` simultáneo.
+///
+/// NOTA: este test es "best-effort" — el race no se manifiesta SIEMPRE
+/// (depende del scheduler). Para hacerlo determinístico usamos 10
+/// tareas paralelas y dropeamos las tablas antes para forzar el
+/// path "tabla no existe" en todas. Sin el fix, al menos 1 de las 10
+/// suele fallar. Con el fix (`ensure_storage_initialized`), las 10
+/// completan OK.
+#[tokio::test]
+#[ignore]
+async fn v0_15_13_ensure_storage_initialized_evita_race_con_10_paralelos() {
+    // Setup: connect + drop tablas para forzar el path "no existe".
+    let conn = Arc::new(connect_url(&pg_url()).await.expect("connect"));
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_runs", &[]).await;
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_jobs", &[]).await;
+
+    // Reset del OnceCell global para que el primer call de este test
+    // sí dispare el init (sino reusa el del test anterior).
+    fitz::cron_jobs::reset_init_storage_once_for_tests();
+
+    // Lanzar 10 tareas paralelas que llaman a `ensure_storage_initialized`
+    // simultáneo. Sin el fix, al menos una rompía con
+    // "pg_type_typname_nsp_index" cuando todos cargaban
+    // `init_storage` directo. Con el fix, solo el primero corre el
+    // CREATE TABLE real; los otros 9 esperan y reusan el resultado.
+    let mut handles = Vec::with_capacity(10);
+    for i in 0..10 {
+        let conn_clone = Arc::clone(&conn);
+        handles.push(tokio::spawn(async move {
+            let r = ensure_storage_initialized(&conn_clone).await;
+            (i, r)
+        }));
+    }
+
+    let mut failures = Vec::new();
+    for h in handles {
+        let (i, result) = h.await.expect("task no panicó");
+        if let Err(e) = result {
+            failures.push((i, e));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "esperaba 10 inits OK, fallaron: {:?}",
+        failures
+    );
+
+    // Verifica que las tablas existen tras el init paralelo.
+    let _ = conn
+        .exec("SELECT 1 FROM fitz_cron_jobs LIMIT 0", &[])
+        .await
+        .expect("fitz_cron_jobs existe");
+    let _ = conn
+        .exec("SELECT 1 FROM fitz_cron_runs LIMIT 0", &[])
+        .await
+        .expect("fitz_cron_runs existe");
+
+    // Cleanup.
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_runs", &[]).await;
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_jobs", &[]).await;
+    Arc::try_unwrap(conn)
+        .expect("último Arc")
+        .close()
+        .await
+        .unwrap();
+}
+
+/// v0.15.13 — Sanity check: si `ensure_storage_initialized` falla la
+/// primera vez (ej: connection rota), los demás callers reciben el
+/// mismo error sin reintento. Cierre del comportamiento del OnceCell:
+/// el resultado se cachea (sea Ok o Err) — el restart del proceso
+/// es lo que resetea.
+///
+/// Este test SIMULA el caso usando el reset del OnceCell entre las
+/// dos invocaciones para verificar la idempotencia del happy path.
+/// El path de error es harder to test sin matar la connection —
+/// queda como deuda menor (testeable refactorizando `init_storage`
+/// con dependency injection).
+#[tokio::test]
+#[ignore]
+async fn v0_15_13_ensure_storage_initialized_cachea_resultado_segundo_call_no_corre_create_table() {
+    let conn = connect_url(&pg_url()).await.expect("connect");
+
+    fitz::cron_jobs::reset_init_storage_once_for_tests();
+    ensure_storage_initialized(&conn)
+        .await
+        .expect("primer init OK");
+
+    // Tras el primer call, el OnceCell guarda Ok(()) — el segundo call
+    // NO ejecuta CREATE TABLE de nuevo. Verificamos esto borrando las
+    // tablas y confirmando que la segunda invocación devuelve OK (el
+    // resultado cacheado del primer call, sin re-ejecutar SQL).
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_runs", &[]).await;
+    let _ = conn.exec("DROP TABLE IF EXISTS fitz_cron_jobs", &[]).await;
+
+    ensure_storage_initialized(&conn)
+        .await
+        .expect("segundo init reusa cache, no toca DB");
+
+    // Confirmar que las tablas siguen droppeadas (no las re-creó).
+    let res = conn.exec("SELECT 1 FROM fitz_cron_jobs LIMIT 0", &[]).await;
+    assert!(
+        res.is_err(),
+        "fitz_cron_jobs debería seguir droppeada (el segundo init reusó cache), pero existe"
+    );
 
     conn.close().await.unwrap();
 }

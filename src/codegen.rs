@@ -5929,6 +5929,10 @@ fn parse_server_decorator(
             ),
         ));
     }
+    // v0.15.13 — flags de doble-especificación positional/kwarg
+    // (cierre URGENTE-2). Paralelo bit-a-bit al evaluator.
+    let mut port_set_via_positional = false;
+    let mut host_set_via_positional = false;
     if let Some(port_expr) = args.first() {
         let Expr::Int(n, _) = port_expr else {
             return Err(FitzError::new(
@@ -5947,6 +5951,7 @@ fn parse_server_decorator(
             ));
         }
         cfg.port = *n as u16;
+        port_set_via_positional = true;
     }
     if let Some(host_expr) = args.get(1) {
         let Expr::Str(s, _) = host_expr else {
@@ -5960,10 +5965,68 @@ fn parse_server_decorator(
         // No validamos IP acá: rustc no puede hacerlo en compile time.
         // El parse se hace en runtime; si falla, axum/tokio reportarán.
         cfg.host = s.clone();
+        host_set_via_positional = true;
     }
     // Fase 7.5: kwargs `docs: Bool`. Mini-fase Q.2: `api_version: Str`.
+    // v0.15.13 — `port` y `host` también admiten kwarg (cierre URGENTE-2).
     for (key, value_expr) in kwargs {
         match key.as_str() {
+            "port" => {
+                if port_set_via_positional {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        "@server: port pasado dos veces (positional + kwarg 'port'). \
+                         Usá uno solo de los dos formatos."
+                            .to_string(),
+                    ));
+                }
+                let Expr::Int(n, _) = value_expr else {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'port' debe ser Int literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                };
+                if *n < 1 || *n > 65535 {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!("@server: port fuera de rango [1, 65535]: {}", n),
+                    ));
+                }
+                cfg.port = *n as u16;
+            }
+            "host" => {
+                if host_set_via_positional {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        "@server: host pasado dos veces (positional + kwarg 'host'). \
+                         Usá uno solo de los dos formatos."
+                            .to_string(),
+                    ));
+                }
+                let Expr::Str(s, _) = value_expr else {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'host' debe ser Str literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                };
+                cfg.host = s.clone();
+            }
             "docs" => {
                 let Expr::Bool(b, _) = value_expr else {
                     return Err(FitzError::new(
@@ -6103,7 +6166,7 @@ fn parse_server_decorator(
                     0,
                     0,
                     format!(
-                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
+                        "@server: kwarg '{}' no reconocido. Soportados: port, host, docs, api_version, ws_heartbeat_secs, shutdown_timeout_secs, observability, prometheus.",
                         other
                     ),
                 ));
@@ -37813,6 +37876,73 @@ mod tests {
         assert!(
             err.message.contains("version") && err.message.contains("reconocido"),
             "esperaba mensaje sobre kwarg desconocido, fue: {}",
+            err.message
+        );
+    }
+
+    // ───────────────────────────────────────────────────────────────
+    // v0.15.13 — URGENTE-2: @server(host=, port=) kwargs en codegen.
+    // ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn v0_15_13_server_host_kwarg_solo_codegen_emite_bind_correcto() {
+        let src = "@server(host=\"0.0.0.0\") fn main() => 0\n\
+                   @get(\"/\") fn h() -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El binario emite `bind("0.0.0.0:<port>")` con default port 3000.
+        assert!(
+            code.contains("0.0.0.0:3000") || code.contains("0.0.0.0 : 3000"),
+            "esperaba bind a 0.0.0.0:3000 con host kwarg solo, got:\n{}",
+            &code[..code.len().min(2000)]
+        );
+    }
+
+    #[test]
+    fn v0_15_13_server_port_kwarg_solo_codegen_emite_bind_correcto() {
+        let src = "@server(port=9090) fn main() => 0\n\
+                   @get(\"/\") fn h() -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // bind a 127.0.0.1:9090 (default host) con port kwarg.
+        assert!(
+            code.contains("127.0.0.1:9090") || code.contains("127.0.0.1 : 9090"),
+            "esperaba bind a 127.0.0.1:9090 con port kwarg solo, got:\n{}",
+            &code[..code.len().min(2000)]
+        );
+    }
+
+    #[test]
+    fn v0_15_13_server_port_y_host_kwargs_mixed_codegen() {
+        // Patrón canónico Dockerizado en codegen.
+        let src = "@server(port=8080, host=\"0.0.0.0\", prometheus=true) fn main() => 0\n\
+                   @get(\"/\") fn h() -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("0.0.0.0:8080") || code.contains("0.0.0.0 : 8080"),
+            "esperaba bind a 0.0.0.0:8080, got:\n{}",
+            &code[..code.len().min(2000)]
+        );
+    }
+
+    #[test]
+    fn v0_15_13_server_port_doble_positional_mas_kwarg_codegen_es_error() {
+        let src = "@server(8080, port=9090) fn main() => 0\n\
+                   @get(\"/\") fn h() -> Str => \"ok\"";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("port") && err.message.contains("dos veces"),
+            "mensaje inesperado: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn v0_15_13_server_host_doble_positional_mas_kwarg_codegen_es_error() {
+        let src = "@server(8080, \"127.0.0.1\", host=\"0.0.0.0\") fn main() => 0\n\
+                   @get(\"/\") fn h() -> Str => \"ok\"";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("host") && err.message.contains("dos veces"),
+            "mensaje inesperado: {}",
             err.message
         );
     }

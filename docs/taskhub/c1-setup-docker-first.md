@@ -134,7 +134,7 @@ fn healthz() -> HealthResponse {
     }
 }
 
-@server(8080)
+@server(port=8080, host="0.0.0.0")
 fn main() => 0
 
 print("TaskHub C1 — escuchando en :8080")
@@ -142,8 +142,13 @@ print("TaskHub C1 — escuchando en :8080")
 
 **Detalles**:
 
-- **`@server(8080)`** — el binario escucha en el puerto 8080
-  dentro del container. nginx hace el proxy desde el host.
+- **`@server(port=8080, host="0.0.0.0")`** — el binario escucha
+  en el puerto 8080 dentro del container, bindeado a `0.0.0.0`
+  (todas las interfaces). El default `127.0.0.1` no funciona en
+  Docker porque solo acepta conexiones loopback del MISMO
+  container — nginx (en otro container) no podría alcanzarlo.
+  La sintaxis kwarg `port=`/`host=` es equivalente a positional
+  `@server(8080, "0.0.0.0")` y disponible desde v0.15.13.
 - **`/healthz`** es lo que Docker usa para el healthcheck. Tiene
   que ser **idempotente** (sin side effects), **rápido**
   (<100ms), y **no requiere auth**.
@@ -209,7 +214,11 @@ services:
     environment:
       DATABASE_URL: postgres://taskhub:${DB_PASSWORD:?DB_PASSWORD requerido}@db:5432/taskhub?sslmode=disable
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET requerido}
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      # OTLP HTTP/proto en `:4318`. El binario fitz habla OTLP HTTP
+      # (feature `http-proto` del crate `opentelemetry-otlp`), NO gRPC.
+      # `:4317` es el puerto gRPC de Jaeger — apuntar ahí hace que los
+      # spans se descarten silenciosamente.
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
       OTEL_SERVICE_NAME: taskhub
       RUST_LOG: info
     depends_on:
@@ -267,11 +276,15 @@ services:
   # ────────────────────────────────────────────────────────
   # SERVICE 4 — jaeger + otel-collector (tracing distribuido)
   # ────────────────────────────────────────────────────────
-  # Jaeger 2.x incluye OTel collector built-in en el mismo
-  # binario. Un solo container, recibe traces via OTLP gRPC en
-  # 4317, las visualiza en su UI en 16686.
+  # Jaeger incluye OTel collector built-in en el mismo binario.
+  # Un solo container, recibe traces via OTLP HTTP en :4318 (el
+  # binario fitz habla HTTP/proto, no gRPC) o OTLP gRPC en :4317,
+  # las visualiza en su UI en :16686.
+  #
+  # Tag pinneado a 1.76.0 (release estable). Tags < 1.65 ya no
+  # están publicados en Docker Hub al 2026-06.
   otel-collector:
-    image: jaegertracing/all-in-one:1.62
+    image: jaegertracing/all-in-one:1.76.0
     container_name: taskhub-jaeger
     environment:
       COLLECTOR_OTLP_ENABLED: "true"
@@ -320,9 +333,11 @@ volumes:
   podemos reemplazar por un healthcheck HTTP real — pero requiere
   un mini-probe bundleado (deuda documentada en
   [`docs/guide.md` cap 35](../guide.md)).
-- **`OTEL_EXPORTER_OTLP_ENDPOINT`** apunta a `otel-collector:4317`
-  via DNS interno de compose. El binario emite traces a Jaeger
-  automáticamente cuando esta env var está seteada (Fitz Fase 12.3).
+- **`OTEL_EXPORTER_OTLP_ENDPOINT`** apunta a `otel-collector:4318`
+  (puerto OTLP HTTP) via DNS interno de compose. El binario fitz
+  emite traces a Jaeger automáticamente cuando esta env var está
+  seteada (Fitz Fase 12.3). **NO usar `:4317`** — ese es el puerto
+  gRPC, y el cliente OTLP de fitz es HTTP/proto, no gRPC.
 
 ---
 

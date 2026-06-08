@@ -4,17 +4,17 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
-## 🔴 DEUDAS URGENTES — Smoke E2E TaskHub Dockerizado (2026-06-08)
+## 🔴 DEUDAS URGENTES — Smoke E2E TaskHub Dockerizado (2026-06-08) — **AMBAS CERRADAS v0.15.13**
 
 Dos bugs reales del lenguaje encontrados al hacer el smoke E2E con
 `docker compose up` sobre `boilerplates/taskhub`. Ambos son
 reproducibles fuera del TaskHub y afectan cualquier programa Fitz
-que use el patrón correspondiente. **Marcadas URGENTES** porque el
-TaskHub es el showcase del stack completo + Fase 12 (observability)
-y los próximos boilerplates Dockerizados con cron y stack OTel van
-a chocar con los mismos issues.
+que use el patrón correspondiente.
 
-### 🔴 URGENTE-1 — `init_storage` de `@cron` con persistencia: race condition en CREATE TABLE
+**Estado al 2026-06-08**: AMBAS CERRADAS en v0.15.13 con tests
+unit + E2E reales contra Postgres + smoke real del TaskHub.
+
+### ✅ URGENTE-1 — `init_storage` de `@cron` con persistencia: race condition en CREATE TABLE (CERRADA v0.15.13)
 
 **Síntoma reproducible**: dos o más `@cron("...", store=db_result)`
 adentro del mismo programa. Al boot del binario, uno de los jobs
@@ -103,16 +103,55 @@ robusto que A si en algún momento se corren múltiples instancias.
 binario único). Opción B si aparece deploy multi-instancia con
 crons coordinados.
 
-**Tests E2E requeridos**: `tests/cron_jobs_real_postgres.rs` debe
-sumar test con 3 `@cron` simultáneos contra Postgres real. Hoy los
-tests E2E usan UN solo job — el bug nunca se manifestó en CI.
+**Fix implementado en v0.15.13** ([commit](.))
 
-**Validación del fix**: re-run del smoke E2E TaskHub con 2 crons
-debe arrancar ambos sin error de `pg_type_typname_nsp_index`.
+- Nuevo `tokio::sync::OnceCell<Result<(), String>>` global en
+  `src/cron_jobs.rs::INIT_STORAGE_ONCE`.
+- Nuevo wrapper `pub async fn ensure_storage_initialized(conn)`
+  que llama `INIT_STORAGE_ONCE.get_or_init(...)` — solo el primer
+  caller del proceso ejecuta `init_storage` real, los demás
+  reciben el `Result` clonado.
+- `run_cron_job:618` ahora llama a `ensure_storage_initialized`
+  (en lugar del `init_storage` directo). Comentario actualizado
+  en `init_storage` advirtiendo que NO es seguro para uso paralelo
+  directo.
+- Helper test-only `reset_init_storage_once_for_tests()` con
+  `#[doc(hidden)]` (no `#[cfg(test)]` porque los integration tests
+  necesitan llamarlo desde otro crate).
+
+**Tests E2E reales contra Postgres** (`tests/cron_jobs_real_postgres.rs`,
+opt-in con `FITZ_TEST_PG_URL`):
+
+- `v0_15_13_ensure_storage_initialized_evita_race_con_10_paralelos`:
+  10 `tokio::spawn` concurrentes invocan `ensure_storage_initialized`.
+  Sin el fix al menos uno rompía con `pg_type_typname_nsp_index`;
+  con el fix los 10 completan OK.
+- `v0_15_13_ensure_storage_initialized_cachea_resultado_segundo_call_no_corre_create_table`:
+  tras el primer init, drop manual de las tablas + segundo call
+  retorna OK (reusa cache, NO re-ejecuta SQL) — verificable
+  consultando que la tabla NO fue re-creada.
+
+**Validado contra Postgres 15 local**: 2/2 tests verdes con
+`FITZ_TEST_PG_URL`.
+
+**Smoke real TaskHub**: tras el fix + restart, ambos crons
+(`daily_due_reminders` + `cleanup_old_tasks`) arrancan sin error.
+
+**Limitaciones pendientes (deuda menor abierta)**:
+
+- **Multi-proceso**: el OnceCell es por proceso. Si dos binarios
+  fitz arrancan simultáneamente contra la misma DB, ambos pueden
+  golpear el race de Postgres. Fix futuro: sumar
+  `pg_advisory_xact_lock` adentro de `init_storage` antes del
+  CREATE TABLE. NO se hizo en v0.15.13 porque el caso típico
+  despliega UN container por servicio.
+- **Si el primer init falla** (ej: DB down al boot), todos los
+  jobs futuros reciben el mismo error sin reintento. Restart del
+  proceso es lo que destraba. Patrón aceptado para el MVP.
 
 ---
 
-### 🔴 URGENTE-2 — `@server(host=...)` no acepta sintaxis kwarg (API asimétrica)
+### ✅ URGENTE-2 — `@server(host=...)` no acepta sintaxis kwarg (CERRADA v0.15.13)
 
 **Síntoma**: el patrón canónico para Dockerizar exige bindear a
 `0.0.0.0` (no `127.0.0.1` que es el default). El user intenta:
@@ -205,17 +244,54 @@ kwarg también.
 - `@server(8080, "127.0.0.1", host="0.0.0.0")` rechaza con conflicto
 - Tests del intérprete + codegen + cap 17 de la guía actualizado
 
-**Validación del fix**: re-write TaskHub a `@server(8080, host="0.0.0.0", ws_heartbeat_secs=30, prometheus=true)` y compila/corre bit-a-bit igual.
+**Fix implementado en v0.15.13** ([commit](.))
 
-**Por qué NO es de prioridad menor**:
+Cambios paralelos bit-a-bit en evaluator y codegen:
 
-El error es altamente confuso para el user — el mensaje lista
-explícitamente los kwargs soportados sin mencionar `host`, lo que
-sugiere que `host` simplemente no existe como configurable. Solo
-por leer otros boilerplates o `src/evaluator.rs` el user descubre
-que sí, pero como positional. Es exactamente el tipo de detalle
-que hace ver al lenguaje como "inacabado" en una primera impresión.
-Fix barato y de alto impacto en developer experience.
+**`src/evaluator.rs::register_server_config`** (~50 LoC):
+
+- Flags `port_set_via_positional` y `host_set_via_positional` para
+  detectar doble-especificación.
+- Match de kwargs gana ramas `"port"` y `"host"` con error claro
+  estilo Python ("port pasado dos veces") si ya vino positional.
+- Reuso de la validación existente (port en `[1, 65535]`, host como
+  IP literal parseable).
+- Mensaje de error de kwarg desconocido actualizado para citar
+  `port, host, docs, api_version, ws_heartbeat_secs,
+  shutdown_timeout_secs, observability, prometheus`.
+
+**`src/codegen.rs::parse_server_decorator`** (~50 LoC paralelo):
+
+Mismo cambio bit-a-bit en `fitz build`. El comportamiento del
+binario nativo es idéntico al intérprete.
+
+**Tests**:
+
+- **9 unit tests evaluator** (`v0_15_13_server_*`): host kwarg solo,
+  port kwarg solo, mixed con otros kwargs, port positional + host
+  kwarg, doble port (positional + kwarg) error, doble host error,
+  host kwarg no-str error, port kwarg fuera de rango error, host
+  kwarg IP inválida error.
+- **5 unit tests codegen** (`v0_15_13_server_*`): host kwarg
+  emite `0.0.0.0:3000`, port kwarg emite `127.0.0.1:9090`, mixed
+  emite `0.0.0.0:8080`, conflictos rechazados.
+- **Test viejo `server_kwarg_desconocido_lista_docs_y_api_version`**
+  actualizado al mensaje nuevo (incluye `port` y `host`).
+
+**Patrón canónico nuevo** (recomendado, equivalente a positionals):
+
+```fitz
+@server(port=8080, host="0.0.0.0", prometheus=true)
+fn main() => 0
+```
+
+Más claro que mezclar positionals con kwargs. Los positionals
+siguen funcionando para backward-compat.
+
+**Smoke real TaskHub**: tras el fix, cambiar
+`@server(8080, "0.0.0.0", ws_heartbeat_secs=30, prometheus=true)`
+por `@server(port=8080, host="0.0.0.0", ws_heartbeat_secs=30,
+prometheus=true)` compila/corre bit-a-bit igual.
 
 ---
 

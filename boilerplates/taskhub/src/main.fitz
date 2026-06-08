@@ -708,16 +708,15 @@ async fn check_ready_for_traffic() -> Bool {
     return not conn.is_closed().await
 }
 
-// @server con host="0.0.0.0" positional — necesario para Docker.
-// El default (127.0.0.1) solo acepta conexiones del MISMO container
-// (loopback de la red Docker del container), así que ni nginx ni el
-// host pueden alcanzar al app. Patrón canónico de los otros 8
-// boilerplates Dockerizados.
+// @server con host="0.0.0.0" — necesario para Docker. El default
+// (127.0.0.1) solo acepta conexiones del MISMO container (loopback
+// de la red Docker), así que ni nginx ni el host pueden alcanzar
+// al app.
 //
-// Sobre la sintaxis positional vs kwarg: `host=` como kwarg está
-// abierto como deuda urgente del lenguaje en docs/deudas-post-5b.md
-// (sección URGENTE-2). Por ahora va positional.
-@server(8080, "0.0.0.0", ws_heartbeat_secs=30, prometheus=true)
+// Sintaxis kwarg (v0.15.13+): equivalente a `@server(8080, "0.0.0.0",
+// ws_heartbeat_secs=30, prometheus=true)`. Más explícito porque
+// nombra cada parámetro.
+@server(port=8080, host="0.0.0.0", ws_heartbeat_secs=30, prometheus=true)
 fn main() => 0
 
 print("TaskHub C5 — HTTP + WS + cron + background activos, escuchando en :8080")

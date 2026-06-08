@@ -390,10 +390,30 @@ fn main() => 0
 fn main() => 0
 ```
 
-| Posición | Tipo | Default | Validación |
+Desde **v0.15.13** también admite la sintaxis **kwarg** equivalente:
+
+```fitz
+@server(port=8080, host="0.0.0.0")
+fn main() => 0
+```
+
+Es el mismo decorator — los nombres `port` y `host` matchean los
+parámetros positionals. Más explícito; preferido para boilerplates
+Dockerizados donde el `host="0.0.0.0"` es lo crítico que el lector
+busca.
+
+| Param | Tipo | Default | Validación |
 |---|---|---|---|
-| 1ra (port) | `Int` | `3000` | rango `[1, 65535]`, fuera → error al registrar |
-| 2da (host) | `Str` | `"127.0.0.1"` | tiene que parsear como IP literal IPv4/IPv6 |
+| `port` (1ra pos / kwarg) | `Int` | `3000` | rango `[1, 65535]`, fuera → error al registrar |
+| `host` (2da pos / kwarg) | `Str` | `"127.0.0.1"` | tiene que parsear como IP literal IPv4/IPv6 |
+
+**Conflicto positional + kwarg**: si pasás el mismo parámetro dos
+veces (`@server(8080, port=9090)`), error claro estilo Python:
+
+```
+✗ @server: port pasado dos veces (positional + kwarg 'port').
+   Usá uno solo de los dos formatos.
+```
 
 ### Por qué `"0.0.0.0"` y no `"localhost"`
 
