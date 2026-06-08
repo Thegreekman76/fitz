@@ -9,11 +9,12 @@
 //
 // Run:
 //   source venv/bin/activate
-//   fitz-python run app.fitz
+//   fitz run app.fitz
 //
 // Probar:
 //   curl localhost:3000/circle/5.0
 //   curl localhost:3000/timestamp
+//   curl localhost:3000/echo
 
 from python import math
 from python import json
@@ -21,8 +22,11 @@ from python import datetime
 
 @get("/circle/{radius}")
 fn circle_area(radius: Float) -> Map<Str, Any> {
-    let area = math.pi * radius * radius
-    let circumference = 2.0 * math.pi * radius
+    // math.pi es PyAny — la anotación `let pi: Float = ...`
+    // dispara la coerción auto-primitive PyAny → Float (Fase 8.4).
+    let pi: Float = math.pi
+    let area = pi * radius * radius
+    let circumference = 2.0 * pi * radius
     return {
         "radius": radius,
         "area": area,
@@ -31,18 +35,21 @@ fn circle_area(radius: Float) -> Map<Str, Any> {
 }
 
 @get("/timestamp")
-fn timestamp() -> Map<Str, Any> {
-    let now = datetime.datetime.now()
-    return {
-        "iso": now.isoformat(),
-        "year": now.year,
-        "month": now.month,
-        "day": now.day
-    }
+fn timestamp() -> Result<Map<Str, Any>> {
+    // Toda call Python se envuelve en Result<T> (Fase 8.3).
+    // `?` propaga el Err si el call Python explota.
+    // El handler retorna Result<Map<Str, Any>> para poder usar `?`.
+    let now = datetime.datetime.now()?
+    let iso = now.isoformat()?
+    return Ok({
+        "iso": iso
+    })
 }
 
 @get("/echo")
-fn echo() -> Str {
+fn echo() -> Result<Str> {
+    // json.dumps(payload) devuelve Result<Str> automático.
+    // El handler retorna Result<Str> para propagar con return directo.
     let payload = {"app": "demo-python-interop", "version": "v1.0"}
     return json.dumps(payload)
 }

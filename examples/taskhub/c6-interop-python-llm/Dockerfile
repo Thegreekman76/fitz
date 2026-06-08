@@ -1,6 +1,6 @@
 # Stage 1 — build con el toolchain de Fitz (asumiendo variante
 # con --features python; si no, build local y copiar binario).
-FROM ghcr.io/thegreekman76/fitz:python AS builder
+FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
 
 WORKDIR /build
 COPY fitz.toml .

@@ -380,10 +380,10 @@ OPENAI_API_KEY=
 ```dockerfile
 # Stage 1 — build con el toolchain de Fitz (compilado con
 # --features python).
-# Asumimos que `ghcr.io/thegreekman76/fitz:python` existe (variante
+# Asumimos que `ghcr.io/thegreekman76/fitz:latest-python` existe (variante
 # con feature `python` habilitada). Si no, compilás localmente con
 # `cargo build --release --features python` y copiás el binario.
-FROM ghcr.io/thegreekman76/fitz:python AS builder
+FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
 
 WORKDIR /build
 COPY fitz.toml .
@@ -422,7 +422,7 @@ ENTRYPOINT ["/app/taskhub"]
 
 **Cambios respecto al Dockerfile de C1**:
 
-- **Base image stage 1**: `ghcr.io/thegreekman76/fitz:python` (con
+- **Base image stage 1**: `ghcr.io/thegreekman76/fitz:latest-python` (con
   feature `python`). **Si esta imagen no existe**, alternativas:
   - Compilar `fitz` localmente con `cargo build --release --features
     python` y copiar el binario:
@@ -595,7 +595,7 @@ cargo build --release --features python
 
 O usá `fitz run --features python` si el subcomando lo soporta.
 
-### `docker compose up` falla con `image not found ghcr.io/thegreekman76/fitz:python`
+### `docker compose up` falla con `image not found ghcr.io/thegreekman76/fitz:latest-python`
 
 La imagen pre-built con feature python puede no existir todavía.
 Workaround: build local de fitz con `--features python` + copy

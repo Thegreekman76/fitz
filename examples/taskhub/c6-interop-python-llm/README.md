@@ -20,7 +20,7 @@ cron + background del C5 sumamos:
   `python:3.12-slim-bookworm` (~150 MB → ~250 MB; C7 optimiza
   con `--bundle-python`).
 - `Dockerfile` base builder: `ghcr.io/thegreekman76/fitz:latest`
-  → `ghcr.io/thegreekman76/fitz:python` (asumido — workaround si
+  → `ghcr.io/thegreekman76/fitz:latest-python` (asumido — workaround si
   no existe abajo).
 - `docker-compose.yml` pasa `OPENAI_API_KEY` con default vacío.
 - `.env.example` documenta `OPENAI_API_KEY` opcional.

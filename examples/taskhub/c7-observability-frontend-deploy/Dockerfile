@@ -1,10 +1,10 @@
 # Stage 1 — build con bundling (Path A — ideal, image ~50 MB).
-# Asume ghcr.io/thegreekman76/fitz:python con --features python +
+# Asume ghcr.io/thegreekman76/fitz:latest-python con --features python +
 # --bundle-python + --bundle-pip funcionando out of the box.
 #
 # Path B fallback (sin bundling, image ~250 MB): comentá el bloque
 # de abajo y descomentá el bloque Path B al final.
-FROM ghcr.io/thegreekman76/fitz:python AS builder
+FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
 
 WORKDIR /build
 COPY fitz.toml .

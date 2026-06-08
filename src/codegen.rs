@@ -7125,6 +7125,30 @@ impl<'a> CodegenCtx<'a> {
              Ok(self.0.clone_ref(py))\n    \
              }\n\
              }\n\n\
+             // Date/DateTime/Uuid built-ins → str canonical (paralelo al patrón\n    \
+             // del ORM: timestamptz se serializa como ISO 8601, uuid como string\n    \
+             // canonical, date como YYYY-MM-DD).\n\
+             impl __FitzToPy for chrono::NaiveDate {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let s = self.format(\"%Y-%m-%d\").to_string();\n        \
+             let bound = s.as_str().into_pyobject(py).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(bound.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             impl __FitzToPy for chrono::DateTime<chrono::Utc> {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let s = self.to_rfc3339();\n        \
+             let bound = s.as_str().into_pyobject(py).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(bound.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             impl __FitzToPy for uuid::Uuid {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let s = self.to_string();\n        \
+             let bound = s.as_str().into_pyobject(py).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(bound.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
              // 8.7.2: los nominales `type Foo = Arc<Mutex<FooData>>`\n    \
              // tienen su impl específico emitido por `gen_type_def`\n    \
              // (impl __FitzToPy for FooData + wrapper sobre Arc<Mutex>).\n    \
@@ -10860,7 +10884,18 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // (Fase 8.7.1 transitiva-bis, v0.9.44) que se ejecuta después
         // de emitir los tipos locales.
         if self.uses_python && matches!(self.mode, GenMode::Main) {
-            self.gen_python_helpers_for_type(name, &sig)?;
+            // W17-paralelo (v0.15.10+) — lookup del TableMetadata local
+            // cuando el type tiene `@table`, para que el helper
+            // `__fitz_py_to_instance_<Name>` skipee fields virtuales
+            // (`@has_many`/companion BelongsTo). Sin esto, un `@belongs_to`
+            // con companion field (`user: User?`) fallaba en codegen
+            // interop con "inner type compuesto no soportado".
+            let meta_opt = self
+                .env
+                .lookup(name)
+                .and_then(|id| self.table_metadata_for(id))
+                .cloned();
+            self.gen_python_helpers_for_type(name, &sig, meta_opt.as_ref())?;
         }
         // Fase 10.b.3 — `impl __FromFitzDbRow for FooData` cuando el
         // type lleva `@table`. Fields virtuales (`@has_one`/`@has_many`)
@@ -10964,7 +10999,12 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     /// `__fitz_py_to_list_<Name>` (PyList → List<Instance>). Reusable
     /// para tipos locales del main Y para tipos definidos en módulos
     /// transitivos (`emit_python_helpers_for_imported_types`).
-    fn gen_python_helpers_for_type(&mut self, name: &str, sig: &TypeSig) -> Result<(), FitzError> {
+    fn gen_python_helpers_for_type(
+        &mut self,
+        name: &str,
+        sig: &TypeSig,
+        meta: Option<&crate::types::TableMetadata>,
+    ) -> Result<(), FitzError> {
         let data_name = format!("{}Data", name);
         write!(
             &mut self.output,
@@ -11010,7 +11050,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         // nullable handling); el segundo itera un PyList y llama al
         // primero por item. Wireados en `coerce(PyAny, Nominal)` y
         // `coerce(PyAny, List(Nominal))`.
-        self.gen_fitz_py_to_instance_helper(name, sig)?;
+        self.gen_fitz_py_to_instance_helper(name, sig, meta)?;
         self.gen_fitz_py_to_list_helper(name)?;
         Ok(())
     }
@@ -11173,7 +11213,10 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     self.gen_type_http_impls_for_sig_with_meta(type_name, &remapped_sig, meta)?;
                 }
                 if do_python {
-                    self.gen_python_helpers_for_type(type_name, &remapped_sig)?;
+                    // W17-paralelo (v0.15.10+) — pasar TableMetadata
+                    // del módulo origen igual que `do_http`.
+                    let py_meta = m.table_metadata.get(type_name);
+                    self.gen_python_helpers_for_type(type_name, &remapped_sig, py_meta)?;
                 }
                 emitted.insert(type_name.clone());
             }
@@ -11199,7 +11242,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         &mut self,
         name: &str,
         sig: &TypeSig,
+        meta: Option<&crate::types::TableMetadata>,
     ) -> Result<(), FitzError> {
+        // W17-paralelo: virtual fields (companion BelongsTo,
+        // `@has_many`, `@has_one`) NO se extraen del PyDict — son
+        // sentinels del ORM, no datos que vengan de Python. Se
+        // inicializan con `Default::default()` en el struct literal.
+        let is_virtual = |fname: &str| -> bool { meta.is_some_and(|m| m.is_virtual_field(fname)) };
         let data_name = format!("{}Data", name);
         // Fase 8.7.1 transitiva-bis (v0.9.44) — `pub(crate)` para que
         // módulos transitivos puedan referenciarlo como
@@ -11220,6 +11269,9 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         )
         .unwrap();
         for f in &sig.fields {
+            if is_virtual(&f.name) {
+                continue;
+            }
             let field_extract = self.py_field_extract_code(name, f)?;
             writeln!(
                 &mut self.output,
@@ -11235,12 +11287,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         )
         .unwrap();
         for f in &sig.fields {
-            writeln!(
-                &mut self.output,
-                "            {}: __field_{},",
-                f.name, f.name
-            )
-            .unwrap();
+            if is_virtual(&f.name) {
+                // Virtual field — inicializá con default. Las relations
+                // virtuales (`@has_many`/companion BelongsTo) no llegan
+                // desde Python, son sentinels del ORM.
+                writeln!(
+                    &mut self.output,
+                    "            {}: Default::default(),",
+                    f.name
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    &mut self.output,
+                    "            {}: __field_{},",
+                    f.name, f.name
+                )
+                .unwrap();
+            }
         }
         self.emit("        }))\n");
         self.emit("    })\n");
@@ -11302,6 +11366,24 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             ),
             Type::Bool => format!(
                 "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: no es bool Python\"))",
+                f = field_name, t = type_name
+            ),
+            // Date/DateTime/Uuid: el Python side los manda como str
+            // (paralelo a __FitzToPy que serializa como str ISO 8601 /
+            // canonical UUID). Parseamos al tipo Rust nativo.
+            Type::Date => format!(
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Date): no es str Python\")); \
+                 chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Date): str `{{}}` no parsea como YYYY-MM-DD\", __s)) }}",
+                f = field_name, t = type_name
+            ),
+            Type::DateTime => format!(
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (DateTime): no es str Python\")); \
+                 chrono::DateTime::parse_from_rfc3339(&__s).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (DateTime): str `{{}}` no parsea como RFC 3339\", __s)) }}",
+                f = field_name, t = type_name
+            ),
+            Type::Uuid => format!(
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Uuid): no es str Python\")); \
+                 uuid::Uuid::parse_str(&__s).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (Uuid): str `{{}}` no parsea como UUID canonical\", __s)) }}",
                 f = field_name, t = type_name
             ),
             Type::Nullable(inner) => {
@@ -11391,6 +11473,23 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             ),
             Type::Bool => format!(
                 "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Bool): no es bool\"))",
+                f = field_name, t = type_name
+            ),
+            // Date/DateTime/Uuid en nullable — mismo patrón que el caso
+            // no-nullable (str canonical desde Python, parsea a Rust).
+            Type::Date => format!(
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Date): no es str\")); \
+                 chrono::NaiveDate::parse_from_str(&__s, \"%Y-%m-%d\").unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Date): str `{{}}` no parsea como YYYY-MM-DD\", __s)) }}",
+                f = field_name, t = type_name
+            ),
+            Type::DateTime => format!(
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable DateTime): no es str\")); \
+                 chrono::DateTime::parse_from_rfc3339(&__s).map(|d| d.with_timezone(&chrono::Utc)).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable DateTime): str `{{}}` no parsea como RFC 3339\", __s)) }}",
+                f = field_name, t = type_name
+            ),
+            Type::Uuid => format!(
+                "{{ let __s: String = __item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Uuid): no es str\")); \
+                 uuid::Uuid::parse_str(&__s).unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Uuid): str `{{}}` no parsea como UUID canonical\", __s)) }}",
                 f = field_name, t = type_name
             ),
             _ => {
@@ -19302,6 +19401,25 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Bool, recibió otro tipo\")), }}",
                         f = f.name,
                     ),
+                    // Date/DateTime/Uuid en `.update(db, Map var)`: el
+                    // user los pasa como Str canonical (ISO 8601 /
+                    // RFC 3339 / UUID canonical). El driver acepta
+                    // __FitzPgValue::Text para los tres (paralelo a
+                    // `impl __IntoPgValue for chrono::NaiveDate/
+                    // DateTime<Utc>/uuid::Uuid` que también lo serializa
+                    // como Text).
+                    Type::Date => format!(
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Date como Str ISO 8601, recibió otro tipo\")), }}",
+                        f = f.name,
+                    ),
+                    Type::DateTime => format!(
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera DateTime como Str RFC 3339, recibió otro tipo\")), }}",
+                        f = f.name,
+                    ),
+                    Type::Uuid => format!(
+                        "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Uuid como Str canonical, recibió otro tipo\")), }}",
+                        f = f.name,
+                    ),
                     Type::Nullable(inner) => {
                         // Mismo dispatch que el inner type, pero acepta Null.
                         match inner.as_ref() {
@@ -19319,6 +19437,20 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             ),
                             Type::Bool => format!(
                                 "match __v {{ __FitzValue::Bool(b) => __FitzPgValue::Bool(*b), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Bool?, recibió otro tipo\")), }}",
+                                f = f.name,
+                            ),
+                            // Date?/DateTime?/Uuid? — mismo patrón que el
+                            // no-nullable: Str canonical o Null.
+                            Type::Date => format!(
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Date? como Str ISO 8601, recibió otro tipo\")), }}",
+                                f = f.name,
+                            ),
+                            Type::DateTime => format!(
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera DateTime? como Str RFC 3339, recibió otro tipo\")), }}",
+                                f = f.name,
+                            ),
+                            Type::Uuid => format!(
+                                "match __v {{ __FitzValue::Str(s) => __FitzPgValue::Text(s.clone()), __FitzValue::Null => __FitzPgValue::Null, _ => return Err(format!(\"`.update`: field `{f}` espera Uuid? como Str canonical, recibió otro tipo\")), }}",
                                 f = f.name,
                             ),
                             _ => return Err(self.err(format!(

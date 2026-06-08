@@ -109,7 +109,7 @@ El `Dockerfile` viene con **Path A** activo (bundling, image
 distroless ~50 MB):
 
 ```dockerfile
-FROM ghcr.io/thegreekman76/fitz:python AS builder
+FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
 RUN fitz build --bundle-python --bundle-pip openai
 
 FROM gcr.io/distroless/cc-debian12 AS runtime

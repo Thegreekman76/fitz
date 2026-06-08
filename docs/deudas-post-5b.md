@@ -4,6 +4,126 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## Codegen interop Python + ORM completo — TaskHub blockers (2026-06-08)
+
+Mini-fase descubierta al smoke-testear `boilerplates/taskhub`
+(showcase del stack completo). El boilerplate combina por primera
+vez **ORM con `DateTime`/`Date`/`Uuid` + interop Python +
+`@background`/`@cron` + relations virtuales** en un solo programa,
+exponiendo gaps del codegen que no se manifiestan en stacks
+individuales (los 10 boilerplates anteriores andan OK).
+
+### Fix aplicado (CERRADO 2026-06-08 en source local, pendiente bump)
+
+5 mejoras al codegen `src/codegen.rs` (~115 LoC nuevas):
+
+1. **`impl __FitzToPy` para `chrono::NaiveDate` / `DateTime<Utc>` / `uuid::Uuid`**
+   en el preludio Python. Serializan a Python `str` canonical
+   (ISO 8601 `YYYY-MM-DD` / RFC 3339 / UUID canonical). Antes los
+   types Fitz `Date`/`DateTime`/`Uuid` no tenían impl y rustc
+   rompía al intentar `self.created_at.__fitz_to_py(...)`.
+2. **Branches `Date`/`DateTime`/`Uuid` en `py_field_extract_arms`**
+   (Python → Fitz, no-nullable). Parsean Python `str` al type
+   Rust nativo (`NaiveDate::parse_from_str(s, "%Y-%m-%d")` /
+   `DateTime::parse_from_rfc3339(s).with_timezone(&Utc)` /
+   `Uuid::parse_str(s)`).
+3. **Mismos branches en `py_inner_extract_for_nullable`**
+   (cubre `Date?`/`DateTime?`/`Uuid?` nullable). Antes el `_`
+   branch rechazaba con "field `X` de tipo `Y` (nullable): inner
+   type compuesto no soportado todavía".
+4. **Skip de virtual fields en `gen_fitz_py_to_instance_helper`**
+   (W17 paralelo, v0.10.7 hizo lo mismo para `__FromFitzJson`/
+   `__ToFitzJson`): companion fields BelongsTo / `@has_many` /
+   `@has_one` se inicializan con `Default::default()` en el
+   struct literal en lugar de intentar extraerlos del PyDict
+   (son sentinels del ORM, no datos que vengan de Python).
+   `gen_python_helpers_for_type` y `gen_fitz_py_to_instance_helper`
+   ahora aceptan `meta: Option<&TableMetadata>` análogamente a
+   `gen_type_http_impls_for_sig_with_meta`.
+5. **Branches `Date`/`DateTime`/`Uuid` en `.update(db, Map var)`**
+   runtime match (~30 LoC en line 19387+). Acepta `__FitzValue::Str(s)`
+   y emite `__FitzPgValue::Text(s.clone())` paralelo a cómo
+   `impl __IntoPgValue for chrono::NaiveDate` ya hace.
+
+**Validación**: cargo test --lib 3121 verdes, 0 failed. Cero
+regresiones sobre 10 boilerplates + 99 guide examples.
+
+### Bug derivado del cap C5 (TaskHub) — fixeado en boilerplate
+
+El cap C5 del proyecto Construyendo TaskHub usaba `db.query(sql, [])`
+(módulo) en el endpoint admin `GET /api/jobs` cuando debería ser
+`conn.query(sql, [])` (la connection bindeada). El intérprete lo
+permitía (dispatch implícito sobre conn global) pero el codegen
+solo soporta `db.connect`. **Inconsistencia intérprete vs codegen
+documentada como deuda secundaria** — no aplica al fix del codegen,
+pero el cap C5 + ejemplo + boilerplate están corregidos a
+`conn.query(...)`.
+
+### Bug derivado del cap C4 — workaround documentado
+
+El cap C4 (background fn) usaba `match Task.where(...).first(conn).await { Ok(t) => t, ... }`
+sin anotación explícita del tipo de `t`. El codegen rechazaba el
+field access `task.assignee_id` posterior con *"field access sobre
+`T?`: solo se soporta sobre instancias de tipos custom"*. Workaround:
+agregar anotación explícita `let task: Task = match ... { Ok(t) => t, ... }`.
+**Deuda menor del codegen — el checker entiende el patrón pero el
+codegen no infiere el tipo desde el match arm `Ok(t) => t`**. Si
+aparece presión, mini-fase futura puede inferir el tipo del Result
+inner en el codegen.
+
+### Blocker REMAINING — `db_result` no en scope para `@background`/`@cron` (post-2026-06-08)
+
+Cuando `@background async fn send_due_reminder(task_id)` o
+`@cron async fn cleanup_old_tasks()` referencian `db_result` (el
+binding top-level `let db_result = db.connect(...).await`), el
+codegen emite el handler como `pub async fn` separado pero NO
+incluye `db_result` en su scope. **rustc rompe con `error[E0425]:
+cannot find value 'db_result' in this scope`**.
+
+Workaround usado hoy (otros boilerplates): cada handler hace
+`db.connect(url).await?` adentro propio (reusa el pool por la
+cache de `connect_url`). Trade-off: cada handler necesita conocer
+la URL.
+
+**Fix futuro**: `@background`/`@cron` handlers necesitan acceso
+al scope global del módulo, igual que los handlers HTTP. El
+codegen ya hace esto para handlers `@get`/`@post`/etc — la
+solución es replicar el wiring para `@background`/`@cron`. Mini-fase
+estimada ~50 LoC + 4-5 tests unitarios.
+
+**Bloquea**: smoke real end-to-end del boilerplate TaskHub. El
+resto del stack está fixeado.
+
+### Pre-existente — M7.C1 app.fitz (`examples/curso/m7-python-interop/c1-setup/app.fitz`)
+
+4 errores del checker independientes del fix interop:
+
+```
+Error 24:24 — operador * espera operandos numéricos, recibió PyAny y Float
+Error 25:29 — operador * espera operandos numéricos, recibió Float y PyAny
+Error 37:29 — el tipo Result<Any> no tiene el método isoformat
+Error 47:5  — return devuelve Result<Any> pero la función declara Str
+```
+
+Pre-existente (no relacionado con mi fix de codegen). Deuda
+del cap M7 — el ejemplo del cap probablemente quedó stale tras
+cambios al checker sobre `PyAny` arithmetic + `isoformat` method
+discovery. Mini-fase separada del cap.
+
+### Verificación de tooling local
+
+- Toolchain `:latest-python` de GHCR existe y publica OK (verificado
+  con `docker manifest inspect` + `docker run --rm <img> fitz --version`
+  devuelve `0.15.0`). **Falsa alarma** del primer smoke — era
+  imagen local cacheada vieja. Forzar re-pull con
+  `docker image rm <img> + docker pull <img>` resuelve.
+- CI release.yml job `docker-image-python` (líneas 363-445) corre
+  OK en cada release tag, publica `:vX.Y.Z-python` + `:latest-python`
+  para `linux/amd64`. Verificado en run de v0.15.0 (4m 9s,
+  completed).
+
+---
+
 > **Estado de ejecución**: ruta A (quick wins) cerrada — clippy limpio,
 > helpers, validaciones; B.1 (span en Stmt) cerrada — los errores
 > stmt-level del checker ya citan línea/columna reales en lugar de

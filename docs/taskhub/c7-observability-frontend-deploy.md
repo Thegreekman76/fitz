@@ -751,7 +751,7 @@ client-side.
 
 ```dockerfile
 # Stage 1 — build con bundling.
-FROM ghcr.io/thegreekman76/fitz:python AS builder
+FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
 
 WORKDIR /build
 COPY fitz.toml .
@@ -789,7 +789,7 @@ ENTRYPOINT ["/app/taskhub"]
 ### Path B — fallback sin bundling
 
 Si `fitz build --bundle-python --bundle-pip openai` falla (por
-ejemplo, el toolchain `ghcr.io/thegreekman76/fitz:python` no
+ejemplo, el toolchain `ghcr.io/thegreekman76/fitz:latest-python` no
 está pre-built para tu arquitectura), fallback al Dockerfile
 del C6 con base `python:3.12-slim-bookworm`. **Image ~250 MB**
 en lugar de ~50 MB — sigue siendo deployable, solo más grande.
@@ -932,7 +932,7 @@ cambios en `@server(...)` requieren rebuild.
 
 ### `fitz build --bundle-python` falla con `image not found`
 
-La variante `ghcr.io/thegreekman76/fitz:python` con feature
+La variante `ghcr.io/thegreekman76/fitz:latest-python` con feature
 python puede no estar pre-built. Fallback: **Path B** del
 Dockerfile del C6 (`python:3.12-slim-bookworm` runtime).
 

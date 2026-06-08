@@ -572,15 +572,15 @@ async fn send_due_reminder(task_id: Int) -> Null {
         Ok(c) => c,
         Err(_) => return null,
     }
-    let task = match Task.where(fn(t) => t.id == task_id).first(conn).await {
+    let task: Task = match Task.where(fn(t) => t.id == task_id).first(conn).await {
         Ok(t)  => t,
         Err(_) => return null,
     }
-    let assignee_id = match task.assignee_id {
+    let assignee_id: Int = match task.assignee_id {
         null => return null,
         a    => a,
     }
-    let user = match User.where(fn(u) => u.id == assignee_id).first(conn).await {
+    let user: User = match User.where(fn(u) => u.id == assignee_id).first(conn).await {
         Ok(u)  => u,
         Err(_) => return null,
     }
@@ -611,10 +611,10 @@ async fn list_job_runs(user: User) -> Result<List<JobRun>> {
         Err(_) => return Err("db no disponible"),
     }
 
-    // db.query crudo porque fitz_cron_runs la maneja el scheduler
+    // conn.query crudo porque fitz_cron_runs la maneja el scheduler
     // internamente (no la declaramos como @table).
     let sql = "SELECT job_name, started_at::text AS started_at, COALESCE(finished_at::text, '') AS finished_at, status, attempt, COALESCE(error, '') AS error FROM fitz_cron_runs ORDER BY started_at DESC LIMIT 50"
-    let rows = db.query(sql, []).await?
+    let rows = conn.query(sql, []).await?
 
     let runs: List<JobRun> = []
     for r in rows {

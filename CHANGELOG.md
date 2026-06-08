@@ -11,6 +11,122 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.10] — 2026-06-08 — Codegen interop Python + ORM: Date/DateTime/Uuid + skip virtuales (deuda TaskHub parcial)
+
+**Mini-fase del codegen** descubierta al smoke-testear el
+boilerplate `taskhub` (showcase del stack completo). El
+boilerplate combina por primera vez **ORM con Date/DateTime/Uuid +
+interop Python + relations virtuales + cron/background** en un
+solo programa, exponiendo gaps del codegen que no se manifiestan
+en los 10 boilerplates anteriores. **5 fixes coordinados al
+codegen + 1 fix de cap doc**.
+
+### Fix del codegen (`src/codegen.rs`, ~115 LoC nuevas)
+
+1. **`impl __FitzToPy` para `chrono::NaiveDate` / `DateTime<Utc>` /
+   `uuid::Uuid`** en el preludio Python (línea ~7128+). Serializan
+   a Python `str` canonical (ISO 8601 `YYYY-MM-DD` / RFC 3339 /
+   UUID canonical). Antes el preludio solo tenía `i64`/`f64`/
+   `bool`/`String`/`()`/`__FitzPyObject` — los types Fitz
+   `Date`/`DateTime`/`Uuid` no tenían impl y rustc rompía al
+   intentar `self.created_at.__fitz_to_py(...)` adentro del
+   `gen_python_helpers_for_type`.
+2. **Branches `Date`/`DateTime`/`Uuid` en `py_field_extract_arms`**
+   (Python → Fitz, no-nullable). Parsean Python `str` al type
+   Rust nativo (`NaiveDate::parse_from_str(&s, "%Y-%m-%d")` /
+   `DateTime::parse_from_rfc3339(&s).map(|d| d.with_timezone(&Utc))` /
+   `Uuid::parse_str(&s)`).
+3. **Mismas branches en `py_inner_extract_for_nullable`**
+   (cubre `Date?`/`DateTime?`/`Uuid?`). Antes el `_ => Err(...)`
+   rechazaba con *"field `X` de tipo `Y` (nullable): inner type
+   compuesto no soportado todavía"*.
+4. **Skip de virtual fields en `gen_fitz_py_to_instance_helper`**
+   (W17 paralelo — v0.10.7 hizo lo mismo para `__FromFitzJson`/
+   `__ToFitzJson`). Companion fields BelongsTo / `@has_many` /
+   `@has_one` se inicializan con `Default::default()` en el
+   struct literal en lugar de intentar extraerlos del PyDict
+   (son sentinels del ORM, no datos que vengan de Python).
+   `gen_python_helpers_for_type` + `gen_fitz_py_to_instance_helper`
+   ahora aceptan `meta: Option<&TableMetadata>` análogamente a
+   `gen_type_http_impls_for_sig_with_meta`. Dos call sites
+   actualizados (local types en `gen_type_def` + cross-module
+   en `emit_python_helpers_for_imported_types`).
+5. **Branches `Date`/`DateTime`/`Uuid` en `.update(db, Map var)`**
+   runtime match (~30 LoC en líneas 19387+). Acepta
+   `__FitzValue::Str(s)` y emite `__FitzPgValue::Text(s.clone())`
+   paralelo a cómo `impl __IntoPgValue for chrono::NaiveDate`
+   ya hace en `emit_date_uuid_db_prelude`. Cubre tanto Date/
+   DateTime/Uuid no-nullable como `Date?`/`DateTime?`/`Uuid?`.
+
+### Fix M7.C1 app.fitz (pre-existente roto descubierto en smoke)
+
+`examples/curso/m7-python-interop/c1-setup/app.fitz` tenía 4
+errores del checker post-Fase 8.3 que no se actualizaron cuando
+el wrap de `Result<T>` automático sobre calls Python aterrizó.
+Reescrito con los patrones canónicos:
+
+- `let pi: Float = math.pi` para coerción auto-primitive PyAny → Float.
+- `let now = datetime.datetime.now()?` + `now.isoformat()?` para
+  propagar excepciones Python (handler retorna `Result<Map<...>>`).
+- `return json.dumps(payload)` directo (handler retorna `Result<Str>`).
+
+### Validación
+
+- `cargo test --release --lib --features python -- --test-threads=2`:
+  **3121 unit tests verdes, 0 failed**.
+- `fitz check` sobre **10 boilerplates** existentes: **10/10
+  verdes**.
+- `fitz check` sobre **99 guide examples**: **99/99 verdes**.
+- `fitz check` sobre **5 curso examples**: **5/5 verdes** (después
+  del fix M7.C1).
+- `fitz build` sobre `boilerplates/taskhub`: sigue bloqueado por
+  **otra deuda independiente** (`db_result` no en scope para
+  `@background`/`@cron` handlers — error `E0425` de rustc cuando
+  el handler async fn referencia el binding top-level). **No es
+  regresión de este fix** — preexistía y se manifiesta porque
+  TaskHub es el primer programa que combina @background/@cron con
+  state global. Documentado en
+  [`docs/deudas-post-5b.md`](docs/deudas-post-5b.md) como blocker
+  separado.
+
+### Verificación del CI ghcr.io (falsa alarma inicial)
+
+Primer smoke local sugería que `ghcr.io/thegreekman76/fitz:latest-python`
+estaba desactualizada (rechazaba sintaxis de v0.10.30+). **Era
+imagen Docker local cacheada vieja**. Forzar `docker image rm` +
+`docker pull` resuelve — la imagen GHCR está al día con v0.15.0
+(verificado con `docker run --rm <img> fitz --version`).
+CI release.yml job `docker-image-python` corre OK en cada release
+tag (4m 9s en v0.15.0). No requiere fix del CI.
+
+### Bug doc de TaskHub C5 — fixeado en boilerplate
+
+El cap C5 del proyecto Construyendo TaskHub usaba `db.query(sql, [])`
+(módulo `db`) en el endpoint admin `GET /api/jobs` cuando debería
+ser `conn.query(sql, [])` (la connection bindeada). El intérprete
+lo permitía pero el codegen solo soporta `db.connect`. Fixeado en
+`boilerplates/taskhub/src/main.fitz`. **Deuda secundaria
+documentada**: inconsistencia intérprete vs codegen sobre
+`module.method` dispatch.
+
+### Bug doc de TaskHub C4 — workaround documentado
+
+Background fn usaba `match Task.where(...).first(conn).await { Ok(t) => t, ... }`
+sin anotación explícita del tipo. El codegen rechaza el field
+access posterior con *"field access sobre `T?`: solo se soporta
+sobre instancias de tipos custom"*. Workaround: anotación
+explícita `let task: Task = match ...`. Fixeado en el boilerplate.
+**Deuda menor del codegen**: el checker entiende el patrón
+`Ok(t) => t` pero el codegen no infiere el tipo desde el match
+arm.
+
+### Sin breaking changes
+
+100% aditivo. Cero regresiones sobre tests + boilerplates + guide
++ curso. Sin cambios al lenguaje user-facing (los types Date/
+DateTime/Uuid + interop Python siguen igual — solo se amplían
+los casos que el codegen acepta).
+
 ## [v0.15.9] — 2026-06-07 — TaskHub C7 + cierre del proyecto entero + boilerplates/taskhub publicado
 
 **Cap final del proyecto Construyendo TaskHub** (7 caps cerrados
@@ -230,7 +346,7 @@ cerrar C6. Copia de C5 con:
 - **Image size 150 → 250 MB**: trade-off honesto del cap.
   Documentado upfront + referenciado el C7 para `--bundle-python`
   que optimiza a ~50 MB con base distroless.
-- **Builder image `ghcr.io/thegreekman76/fitz:python`** asumido:
+- **Builder image `ghcr.io/thegreekman76/fitz:latest-python`** asumido:
   si la variante no existe pre-built, workaround documentado es
   build local + COPY del binario al Dockerfile.
 - **Fallback heurístico por keywords**: 5 niveles (urgent/asap/
