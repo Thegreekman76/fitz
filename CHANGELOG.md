@@ -11,6 +11,172 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
+## [v0.15.14] — 2026-06-09 — Codegen: OnceCell paralelo en `__fitz_cron_init_storage` del binario nativo
+
+**Fix de la falla descubierta IN VIVO en el smoke E2E real del TaskHub
+con docker compose tras el release v0.15.13** (commit `4761768`).
+
+El v0.15.13 cerró la deuda URGENTE-1 (cron `init_storage` race
+condition contra Postgres `pg_type_typname_nsp_index`) pero el fix
+cubrió SOLO el camino del intérprete (`src/cron_jobs.rs::INIT_STORAGE_ONCE`).
+**El binario producido por `fitz build` corre código emitido por el
+codegen (`src/codegen.rs::SQL_HELPERS_PRELUDE`) que tiene su propio
+`__fitz_cron_init_storage` paralelo SIN OnceCell** — por lo tanto, los
+N jobs persistentes spawneados al boot del binario seguían golpeando
+el race de Postgres, y uno de los crons abortaba silenciosamente
+(silent partial failure del scheduler).
+
+**Detección**: smoke E2E real con `docker compose up` sobre
+`boilerplates/taskhub` el 2026-06-09. Tras el release v0.15.13 y el
+re-build del binario taskhub con la imagen `:v0.15.13-python` del CI,
+los logs del app al boot mostraron exactamente el mismo error:
+
+```
+🕐 Fitz scheduler arrancado con 2 job(s) cron
+   @cron  cleanup_old_tasks (0 0 3 * * *)
+   @cron  daily_due_reminders (0 0 9 * * *)
+🕐 cron job 'daily_due_reminders' init storage falló, abortando:
+   ERROR [23505]: duplicate key value violates unique constraint
+   "pg_type_typname_nsp_index"
+   [sql: CREATE TABLE IF NOT EXISTS fitz_cron_jobs (...)]
+```
+
+**Fix v0.15.14**: paralelo bit-a-bit del fix v0.15.13 agregado al
+`SQL_HELPERS_PRELUDE` del codegen (`src/codegen.rs`). El binario
+producido ahora emite:
+
+- `static __FITZ_CRON_INIT_STORAGE_ONCE: tokio::sync::OnceCell<Result<(), String>>` global.
+- `__fitz_cron_init_storage_inner(conn)` — helper real con los 3
+  `CREATE TABLE IF NOT EXISTS` (renombrado del viejo `__fitz_cron_init_storage`).
+- `__fitz_cron_init_storage(conn)` — wrapper que invoca
+  `__FITZ_CRON_INIT_STORAGE_ONCE.get_or_init(|| async { __fitz_cron_init_storage_inner(conn).await }).await.clone()`.
+
+Los call sites en `run_cron_job` emitido siguen invocando
+`__fitz_cron_init_storage` (transparente — el wrapper tiene la misma
+firma). Sin cambios al cargo_toml emitido: `tokio::sync::OnceCell`
+requiere feature `sync`, que ya se incluye cuando `uses_db = true`
+(activado por `@cron(store=db)`).
+
+**Lección aprendida del proceso**: todo fix a la lógica del scheduler
+de cron debe sumar test E2E del codegen path — compilar un programa
+con N crons + ejecutar el binario producido contra Postgres real +
+verificar que no rompe. Los tests E2E v0.15.13 cubrían el path del
+intérprete (`tests/cron_jobs_real_postgres.rs`), pero el binario
+nativo era ciego al test runner. **Esa brecha fue lo que dejó pasar
+el bug residual** — documentada en `docs/deudas-post-5b.md` URGENTE-1
+como "Mejora futura del proceso".
+
+**Test nuevo del codegen** (sin requerir Postgres real):
+`v0_15_14_codegen_cron_persistent_emite_oncecell_para_init_storage`
+en `src/codegen.rs::tests`. Verifica que el preludio emitido contiene
+`__FITZ_CRON_INIT_STORAGE_ONCE`, `tokio::sync::OnceCell`,
+`get_or_init`, y `__fitz_cron_init_storage_inner`.
+
+**Total al cierre v0.15.14**: cargo test --lib 3052 verde (+1 nuevo).
+cargo fmt + clippy `--lib --tests --bins -- -D warnings` limpios.
+
+**Smoke E2E real con docker compose pendiente del release CI** —
+una vez `:latest-python` actualice a v0.15.14, se re-verifica con
+el TaskHub que AMBOS crons arrancan sin el error del catálogo
+`pg_type`.
+
+## [v0.15.13] — 2026-06-08 — Lenguaje: cron `init_storage` OnceCell + `@server(host=, port=)` kwargs
+
+**Cierre de las 2 deudas URGENTES** documentadas tras el smoke E2E
+del TaskHub Dockerizado (commit `4761768`).
+
+**URGENTE-1 — cron `init_storage` race condition** (parcialmente
+cerrada en v0.15.13, completada en v0.15.14):
+
+`tokio::sync::OnceCell<Result<(), String>>` global en
+`src/cron_jobs.rs::INIT_STORAGE_ONCE` + wrapper
+`ensure_storage_initialized(conn)` que serializa el primer init
+del proceso. `run_cron_job` ahora llama al wrapper en lugar de
+`init_storage` directo. Helper test-only
+`reset_init_storage_once_for_tests` con `#[doc(hidden)]` (no
+`#[cfg(test)]` porque los integration tests lo necesitan
+desde otro crate).
+
+**Limitación descubierta post-release** (cerrada en v0.15.14): el
+fix v0.15.13 cubrió SOLO el camino del intérprete. El codegen
+(`src/codegen.rs::SQL_HELPERS_PRELUDE`) tiene su propio
+`__fitz_cron_init_storage` paralelo que NO usaba OnceCell —
+detectado in vivo en el smoke E2E con docker compose. Cierre
+completo en v0.15.14 con el OnceCell paralelo en el preludio del
+codegen.
+
+**Tests E2E reales contra Postgres** (`tests/cron_jobs_real_postgres.rs`,
+opt-in con `FITZ_TEST_PG_URL`):
+
+- `v0_15_13_ensure_storage_initialized_evita_race_con_10_paralelos`:
+  10 tareas concurrentes invocan `ensure_storage_initialized`. Sin
+  el fix al menos una rompía con `pg_type_typname_nsp_index`; con
+  el fix las 10 completan OK.
+- `v0_15_13_ensure_storage_initialized_cachea_resultado_segundo_call_no_corre_create_table`:
+  tras el primer init, drop manual de las tablas + segundo call
+  retorna OK (reusa cache, no re-ejecuta SQL).
+
+Ambos verdes contra Postgres 15 local.
+
+**URGENTE-2 — `@server(host=..., port=...)` no aceptaba kwarg**:
+
+Cambios paralelos bit-a-bit en evaluator + codegen:
+
+- `src/evaluator.rs::register_server_config`: ramas `"port"` y
+  `"host"` nuevas en el match de kwargs con detección de
+  doble-especificación estilo Python ("port pasado dos veces").
+  Flags `port_set_via_positional` y `host_set_via_positional`
+  para detectar conflicto. Mensaje de kwarg desconocido
+  actualizado para citar `port, host, ...`.
+- `src/codegen.rs::parse_server_decorator`: mismo cambio bit-a-bit.
+
+**Patrón canónico nuevo** (recomendado para Dockerizar):
+
+```fitz
+@server(port=8080, host="0.0.0.0", prometheus=true)
+fn main() => 0
+```
+
+Equivalente a `@server(8080, "0.0.0.0", prometheus=true)` (positionals
+siguen funcionando para backward-compat).
+
+**Tests nuevos**:
+
+- 9 unit tests evaluator (`v0_15_13_server_*`): host kwarg solo,
+  port kwarg solo, mixed, port positional + host kwarg, doble port
+  error, doble host error, host kwarg no-str, port fuera de rango,
+  host IP inválida.
+- 5 unit tests codegen (`v0_15_13_server_*`): emisión correcta
+  para los casos canónicos + conflictos rechazados.
+- Test viejo `server_kwarg_desconocido_lista_docs_y_api_version`
+  actualizado al mensaje nuevo (incluye `port, host`).
+
+**Docs sincronizadas con el lenguaje + el boilerplate**:
+
+- `docs/deudas-post-5b.md`: ambas a CERRADO con detalle.
+- `docs/guide.md` cap 17: sintaxis kwarg + conflicto + nota Docker
+  explícita.
+- `docs/curso/m4-http/c1-verbos-server.md`: kwarg + ejemplo error.
+- `docs/blog/3-deploy-fitz-{one-command-en,un-comando-es}.md`:
+  snippet del "real service" actualizado al patrón kwarg canónico.
+- `docs/taskhub/c1-c7`: sincronizados con el boilerplate publicado
+  (@server kwarg + OTel `:4318` + Jaeger `:1.76.0` + Dockerfile
+  multi-stage real + entrypoint.sh con `fitz db migrate` al boot +
+  healthcheck `curl /healthz` real).
+- `src/lsp.rs`: completion `@server` documenta los kwargs nuevos
+  + patrón canónico Docker.
+- `boilerplates/taskhub/src/main.fitz`: refactor al patrón kwarg.
+
+**Tests al cierre v0.15.13**:
+
+- cargo test --lib: 3051 verde (+14 nuevos: 9 evaluator + 5 codegen).
+- cargo test --test cron_jobs_real_postgres v0_15_13 -- --ignored
+  contra Postgres 15 local: 2 verdes.
+- cargo test --test compile_e2e --release: 99 ejemplos guide verdes
+  (617s).
+- cargo fmt + cargo clippy: limpios.
+- fitz check sobre TaskHub con sintaxis kwarg: verde.
+
 ## [v0.15.12] — 2026-06-08 — Codegen: state vars con `.await` + spawn shadow-clones (TaskHub a CERO errores)
 
 **Cierre completo del boilerplate TaskHub**: `fitz build` baja de los

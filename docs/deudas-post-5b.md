@@ -14,7 +14,41 @@ que use el patrón correspondiente.
 **Estado al 2026-06-08**: AMBAS CERRADAS en v0.15.13 con tests
 unit + E2E reales contra Postgres + smoke real del TaskHub.
 
-### ✅ URGENTE-1 — `init_storage` de `@cron` con persistencia: race condition en CREATE TABLE (CERRADA v0.15.13)
+### ✅ URGENTE-1 — `init_storage` de `@cron` con persistencia: race condition en CREATE TABLE (CERRADA v0.15.13 intérprete + v0.15.14 codegen)
+
+**⚠️ Lección aprendida — fix incompleto en v0.15.13**: el fix
+v0.15.13 cubrió SOLO el intérprete (`src/cron_jobs.rs`). El smoke
+E2E real con `docker compose up` sobre el TaskHub (2026-06-09)
+descubrió IN VIVO que el binario producido por `fitz build`
+seguía rompiendo con el race original, porque el codegen
+(`src/codegen.rs::SQL_HELPERS_PRELUDE`) emite **su propio
+`__fitz_cron_init_storage` paralelo** que NO consultaba el OnceCell
+del intérprete.
+
+**Cierre real en v0.15.14**: paralelo bit-a-bit del fix v0.15.13
+agregado al preludio del codegen. El binario producido ahora
+también tiene `static __FITZ_CRON_INIT_STORAGE_ONCE:
+tokio::sync::OnceCell<Result<(), String>>` global +
+`__fitz_cron_init_storage_inner` (helper real) + wrapper
+`__fitz_cron_init_storage` que invoca `get_or_init`. Verificado in
+vivo con `docker compose up` sobre el TaskHub fixeado.
+
+**Por qué no se detectó en v0.15.13**: los tests unit del codegen
+verifican el shape del Rust generado (string contains), pero no
+ejecutan el binario producido contra Postgres real. Los tests E2E
+reales contra Postgres (`tests/cron_jobs_real_postgres.rs`) cubren
+el path del intérprete (`src/cron_jobs.rs`), no el del binario
+nativo. El smoke E2E con docker compose es lo que cierra esa
+brecha — fue ese smoke (post-release v0.15.13) el que reveló el
+bug residual.
+
+**Mejora futura del proceso**: todo fix a la lógica del scheduler
+de cron debe sumar test E2E del codegen path — compilar un
+programa con N crons + ejecutar el binario producido contra
+Postgres real + verificar que no rompe. Es el nivel de cobertura
+que faltó.
+
+
 
 **Síntoma reproducible**: dos o más `@cron("...", store=db_result)`
 adentro del mismo programa. Al boot del binario, uno de los jobs

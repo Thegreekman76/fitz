@@ -29332,7 +29332,19 @@ const __FITZ_SQL_CREATE_RUNS: &str = "CREATE TABLE IF NOT EXISTS fitz_cron_runs 
 
 const __FITZ_SQL_CREATE_INDEX_RUNS: &str = "CREATE INDEX IF NOT EXISTS idx_fitz_cron_runs_job_started ON fitz_cron_runs (job_name, started_at DESC)";
 
-pub(crate) async fn __fitz_cron_init_storage(conn: &__FitzDbConn) -> Result<(), String> {
+// v0.15.14 — OnceCell global que serializa el primer init de las
+// tablas del scheduler. Sin esto, N jobs spawneados en paralelo al
+// boot golpean el race del catálogo `pg_type` de Postgres cuando
+// los N corren `CREATE TABLE IF NOT EXISTS` simultáneo. Paralelo
+// bit-a-bit al fix de `src/cron_jobs.rs::INIT_STORAGE_ONCE` del
+// intérprete (v0.15.13 cubrió solo `fitz run`; el binario producido
+// por `fitz build` corre código emitido por el codegen que tiene
+// SU PROPIO `__fitz_cron_init_storage`, ergo necesita su OnceCell
+// paralelo). Cierre URGENTE-1 (codegen path).
+static __FITZ_CRON_INIT_STORAGE_ONCE: tokio::sync::OnceCell<Result<(), String>> =
+    tokio::sync::OnceCell::const_new();
+
+pub(crate) async fn __fitz_cron_init_storage_inner(conn: &__FitzDbConn) -> Result<(), String> {
     conn.exec(__FITZ_SQL_CREATE_JOBS, &[]).await
         .map_err(|e| format!("inicializando tabla fitz_cron_jobs: {}", e))?;
     conn.exec(__FITZ_SQL_CREATE_RUNS, &[]).await
@@ -29340,6 +29352,17 @@ pub(crate) async fn __fitz_cron_init_storage(conn: &__FitzDbConn) -> Result<(), 
     conn.exec(__FITZ_SQL_CREATE_INDEX_RUNS, &[]).await
         .map_err(|e| format!("inicializando índice fitz_cron_runs: {}", e))?;
     Ok(())
+}
+
+// v0.15.14 — Wrapper concurrency-safe. La primera invocación del
+// proceso ejecuta el init real; las siguientes (concurrentes o no)
+// reusan el `Result` cacheado. Sin race entre jobs paralelos al
+// boot del binario nativo.
+pub(crate) async fn __fitz_cron_init_storage(conn: &__FitzDbConn) -> Result<(), String> {
+    __FITZ_CRON_INIT_STORAGE_ONCE
+        .get_or_init(|| async { __fitz_cron_init_storage_inner(conn).await })
+        .await
+        .clone()
 }
 
 pub(crate) async fn __fitz_cron_upsert_job_row(conn: &__FitzDbConn, name: &str, schedule: &str, tz_name: &str) -> Result<(), String> {
@@ -39604,6 +39627,47 @@ mod tests {
         assert!(
             toml.contains("\"signal\""),
             "post-12.1.c HTTP también necesita feature `signal` para shutdown_signal del main generado"
+        );
+    }
+
+    // v0.15.14 — URGENTE-1 codegen path: el binario producido por
+    // `fitz build` con N `@cron(store=db)` también necesita el OnceCell
+    // que serializa el primer init de las tablas, sino N jobs paralelos
+    // golpean el race del catálogo pg_type de Postgres al boot.
+    // Paralelo bit-a-bit al fix de `src/cron_jobs.rs::INIT_STORAGE_ONCE`
+    // del intérprete (v0.15.13 cubrió solo `fitz run`).
+    #[test]
+    fn v0_15_14_codegen_cron_persistent_emite_oncecell_para_init_storage() {
+        // Programa con @cron persistente — fuerza emisión del
+        // SQL_HELPERS_PRELUDE que contiene `__fitz_cron_init_storage`.
+        let src = "let db_result = db.connect(\"postgres://test\").await\n\
+                   @cron(\"0 0 * * *\", store=db_result)\n\
+                   async fn cleanup() -> Result<Null> { return Ok(null) }\n\
+                   @cron(\"0 0 3 * * *\", store=db_result)\n\
+                   async fn another() -> Result<Null> { return Ok(null) }\n\
+                   @server(8080)\n\
+                   fn main() => 0\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+
+        // El preludio debe contener el OnceCell global.
+        assert!(
+            code.contains("__FITZ_CRON_INIT_STORAGE_ONCE")
+                && code.contains("tokio::sync::OnceCell"),
+            "esperaba `static __FITZ_CRON_INIT_STORAGE_ONCE: tokio::sync::OnceCell<...>` en el preludio, got code length {}",
+            code.len()
+        );
+
+        // El wrapper `__fitz_cron_init_storage` debe llamar `get_or_init`.
+        assert!(
+            code.contains("__FITZ_CRON_INIT_STORAGE_ONCE") && code.contains("get_or_init"),
+            "esperaba wrapper que invoca `get_or_init` sobre el OnceCell, got code length {}",
+            code.len()
+        );
+
+        // El inner real se renombró a `__fitz_cron_init_storage_inner`.
+        assert!(
+            code.contains("__fitz_cron_init_storage_inner"),
+            "esperaba helper inner `__fitz_cron_init_storage_inner` que hace los CREATE TABLE reales"
         );
     }
 
