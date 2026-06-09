@@ -124,7 +124,12 @@ async function renderBoard(id) {
                 </div>
             </div>
         `;
-        renderTasks(project.tasks);
+        // El codegen del ORM omite los virtual fields (@has_many)
+        // del JSON cuando la lista preloaded está vacía — trade-off
+        // documentado en src/codegen.rs:25160. El cliente DEBE
+        // defensar con `|| []`. Sin esto, project.tasks es undefined
+        // y forEach rompe en projects sin tasks.
+        renderTasks(project.tasks || []);
 
         document.getElementById("new-task").onsubmit = async (e) => {
             e.preventDefault();
@@ -182,7 +187,12 @@ function wireDragAndDrop(projectId) {
                     user_email: "",
                 });
                 const project = await API.get(`/projects/${projectId}`);
-                renderTasks(project.tasks);
+                // El codegen del ORM omite los virtual fields (@has_many)
+                // del JSON cuando la lista preloaded está vacía — trade-off
+                // documentado en src/codegen.rs:25160. El cliente DEBE
+                // defensar con `|| []`. Sin esto, project.tasks es undefined
+                // y forEach rompe en projects sin tasks.
+                renderTasks(project.tasks || []);
             } catch (err) {
                 console.error("update fallido", err);
             }

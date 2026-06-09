@@ -4,6 +4,66 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+## 🟢 NO es deuda — trade-off documentado del ORM JSON serializer (analizado 2026-06-09, no requiere fix del lenguaje)
+
+**Contexto**: durante el smoke E2E del TaskHub post-v0.15.14, el
+frontend rompió con `Cannot read properties of undefined (reading
+'forEach')` al abrir un project con 0 tasks. La causa: el endpoint
+`GET /projects/{id}` con `.preload("tasks")` retorna JSON sin el
+campo `tasks` cuando la lista preloaded está vacía.
+
+**Verificación del codegen** (`src/codegen.rs:25160-25203`,
+v0.10.8 fix #7):
+
+```rust
+// Tradeoff aceptado: una lista vacía legítima (post sin
+// comments) NO se distingue de "no preloaded". El user que
+// necesite distinguir esos casos puede usar un handler
+// dedicado (`GET /posts/{id}/comments`) en lugar de eager
+// loading.
+if is_virtual(&f.name) {
+    match relation_kind {
+        Some(HasMany) => {
+            // Arc<Mutex<Vec<T>>> — emit si NO está vacía.
+            writeln!(...,
+                "if !__is_empty {{ __obj.insert(\"{name}\".to_string(), ...); }}"
+            )
+        }
+        Some(HasOne) | Some(BelongsToCompanion) => {
+            // Option<T> — emit si Some.
+        }
+    }
+}
+```
+
+**Decisión de diseño DELIBERADA**: el codegen no tiene flag
+`was_preloaded` per-instancia (sería ~struct overhead) y elige
+"lista vacía = asumimos no preloaded" como heurística pragmática.
+El comentario in-code lo cita explícitamente con el workaround
+sugerido para casos que necesiten distinguir "preloaded con 0
+rows" vs "no preloaded".
+
+**Conclusión sobre la "deuda"**:
+
+- **El lenguaje NO tiene bug** — el codegen hace exactamente lo
+  que documenta hacer.
+- **El cliente DEBE defensar** — `project.tasks || []` es el
+  patrón correcto que el codegen asume del consumidor cuando
+  el field puede o no estar presente.
+- **El frontend del TaskHub TENÍA bug** — asumía `project.tasks`
+  siempre presente sin defensa. Fixeado en
+  `boilerplates/taskhub/frontend/assets/app.js` con comentario
+  in-line que cita esta decisión del codegen.
+- **Mejora del cap C4 del curso TaskHub** (deuda de docs, no
+  del lenguaje): debería citar el trade-off del codegen +
+  mostrar el patrón defensivo del cliente como pattern canónico
+  cuando se usa `.preload()`.
+
+Caso archivado — el análisis quedó documentado para que futuras
+sesiones no vuelvan a marcar esto como "deuda del lenguaje".
+
+
+
 ## 🔴 DEUDAS URGENTES — Smoke E2E TaskHub Dockerizado (2026-06-08) — **AMBAS CERRADAS v0.15.13**
 
 Dos bugs reales del lenguaje encontrados al hacer el smoke E2E con

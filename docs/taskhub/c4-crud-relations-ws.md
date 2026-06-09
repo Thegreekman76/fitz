@@ -352,6 +352,60 @@ async fn get_project(id: Int, user: User) -> Result<Project> {
   }
   ```
 
+### ⚠️ Trade-off del JSON serializer con `.preload()` vacío
+
+Si el project NO tiene tasks (project recién creado, o vacío
+después de borrar todas), el response **OMITE el campo `tasks`
+completamente** en lugar de emitir `"tasks": []`:
+
+```json
+// project CON tasks → field presente
+{"id": 5, "name": "Mi project", ..., "tasks": [{...}, {...}]}
+
+// project SIN tasks → field AUSENTE
+{"id": 6, "name": "Vacío", ..., "owner_id": 1, "created_at": "..."}
+```
+
+**Por qué**: el codegen del ORM
+([`src/codegen.rs:25160-25203`](https://github.com/Thegreekman76/fitz/blob/main/src/codegen.rs#L25160)
+en v0.10.8 fix #7) tomó una decisión deliberada:
+
+> _"Tradeoff aceptado: una lista vacía legítima (post sin
+> comments) NO se distingue de 'no preloaded'. El user que
+> necesite distinguir esos casos puede usar un handler dedicado
+> (`GET /posts/{id}/comments`) en lugar de eager loading."_
+
+El codegen NO tiene un flag `was_preloaded` per-instancia (sería
+overhead extra del struct), entonces usa la heurística **"lista
+vacía = no preloaded → omitir del JSON"**.
+
+**Implicancia para el cliente**: defensar SIEMPRE con `|| []`
+(o `?? []`, o type `tasks?: Task[]` en TypeScript). Patrón
+canónico en el frontend del TaskHub (cap C7):
+
+```javascript
+// CORRECTO — defensa explícita
+renderTasks(project.tasks || []);
+
+// INCORRECTO — rompe con "Cannot read properties of undefined"
+//             cuando el project no tiene tasks
+renderTasks(project.tasks);
+```
+
+**Si necesitás distinguir** "preloaded con 0 rows" vs "no preloaded"
+(caso raro), endpoint dedicado en lugar de eager loading:
+
+```fitz
+@get("/projects/{id}/tasks")
+async fn list_project_tasks(id: Int, user: User) -> Result<List<Task>> {
+    let conn = match db_result { Ok(c) => c, _ => return Err("db") }
+    return Task.where(fn(t) => t.project_id == id).all(conn).await
+}
+```
+
+Acá `[]` siempre se serializa como array vacío explícito porque
+el return type es `List<Task>`, no un virtual field de relation.
+
 ---
 
 ## Paso 6 — `POST /api/projects/{project_id}/tasks`

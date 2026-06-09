@@ -347,6 +347,15 @@ volumes:
 events { worker_connections 1024; }
 
 http {
+    # Cargar la tabla de mime types estándar de nginx. Sin esto,
+    # nginx sirve TODO con Content-Type: text/plain (default cuando
+    # no conoce el mime type del archivo). Los browsers reciben
+    # `style.css` con text/plain y RECHAZAN aplicar estilos —
+    # el frontend se ve sin formato. Bug típico descubierto en
+    # smoke real del TaskHub si se omite esta línea.
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
     upstream taskhub_app {
         server app:8080;
     }

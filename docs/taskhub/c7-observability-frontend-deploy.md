@@ -652,7 +652,13 @@ async function renderBoard(id) {
                 </div>
             </div>
         `;
-    renderTasks(project.tasks);
+    // El codegen del ORM omite los virtual fields (@has_many)
+    // del JSON cuando la lista preloaded está vacía — trade-off
+    // documentado en src/codegen.rs:25160 y explicado en el cap
+    // C4. El cliente DEBE defensar con `|| []`. Sin esto,
+    // project.tasks es undefined cuando el project no tiene tasks
+    // y forEach rompe con "Cannot read properties of undefined".
+    renderTasks(project.tasks || []);
 
     document.getElementById("new-task").onsubmit = async (e) => {
       e.preventDefault();
@@ -705,7 +711,8 @@ function renderTasks(tasks) {
         user_email: "",
       });
       const project = await API.get(`/projects/${project_id}`);
-      renderTasks(project.tasks);
+      // Defensa con `|| []` por el trade-off del ORM (cap C4).
+      renderTasks(project.tasks || []);
     };
   });
 }
@@ -734,23 +741,40 @@ window.addEventListener("load", () => {
 
 ---
 
-## Paso 5 — `nginx.conf` validación para SPA
+## Paso 5 — `nginx.conf` validación para SPA + mime types
 
-El `nginx.conf` del C1 ya tiene `try_files $uri $uri/ /index.html`
-para soportar SPA routing. **Sin cambios**. Verificá:
+El `nginx.conf` del C1 ya tiene dos cosas críticas para que el
+frontend funcione: el `include /etc/nginx/mime.types;` para
+servir `.css`/`.js` con el Content-Type correcto, y el
+`try_files` para soportar SPA routing.
+
+**Sin cambios respecto al C1**. Verificá:
 
 ```nginx
-location / {
-    root /usr/share/nginx/html;
-    index index.html;
-    try_files $uri $uri/ /index.html;
+http {
+    # Bloque crítico para que el browser aplique CSS y ejecute JS.
+    # Sin esto, todo se sirve con text/plain → browser rechaza
+    # aplicar estilos.
+    include /etc/nginx/mime.types;
+    default_type application/octet-stream;
+
+    # ...
+
+    location / {
+        root /usr/share/nginx/html;
+        index index.html;
+        try_files $uri $uri/ /index.html;
+    }
 }
 ```
 
-El `try_files` hace que `/projects/5` (un hash route del cliente,
-pero si el user lo carga directo, no existe el archivo
-`/projects/5.html`) caiga al `index.html` que ejecuta el router
-client-side.
+- **`include mime.types`** — sin este include, `style.css` viaja
+  al browser como `Content-Type: text/plain` y los estilos NO
+  se aplican. Bug típico al armar nginx desde cero.
+- **`try_files $uri $uri/ /index.html`** hace que `/projects/5`
+  (un hash route del cliente, pero si el user lo carga directo,
+  no existe el archivo `/projects/5.html`) caiga al `index.html`
+  que ejecuta el router client-side.
 
 ---
 
