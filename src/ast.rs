@@ -1,39 +1,39 @@
-// ast.rs — Fase 2.2
+// ast.rs — Phase 2.2
 //
-// Define las estructuras de datos que representan un programa en memoria.
-// El parser construye este árbol a partir de los tokens; el evaluador lo
-// recorre para ejecutar.
+// Defines the data structures that represent a program in memory.
+// The parser builds this tree from the tokens; the evaluator walks
+// it to execute.
 //
-// Convenciones:
-//  - `Expr` produce un valor (tiene tipo).
-//  - `Stmt` produce un efecto (no necesariamente tiene valor).
-//  - Las recursiones se hacen con `Box<Expr>` porque Rust necesita tamaño
-//    conocido en compile-time para los enums.
+// Conventions:
+//  - `Expr` produces a value (has a type).
+//  - `Stmt` produces an effect (does not necessarily have a value).
+//  - Recursion uses `Box<Expr>` because Rust needs compile-time
+//    known sizes for enums.
 
-/// Una expresión: produce un valor.
+/// An expression: produces a value.
 ///
-/// Cada variante carga su `Span` (posición en el source) como último
-/// componente. Para nodos sintéticos producidos por el parser o por
-/// tests, el span puede ser `Span::ZERO`. La comparación de `Span` es
-/// trivial (siempre igual) — ver `impl PartialEq for Span` — así los
-/// `assert_eq!` sobre `Expr` no se rompen por diferencias de posición.
+/// Every variant carries its `Span` (source position) as the last
+/// component. For synthetic nodes produced by the parser or tests,
+/// the span may be `Span::ZERO`. `Span` comparison is trivial
+/// (always equal) — see `impl PartialEq for Span` — so `assert_eq!`s
+/// on `Expr` do not break because of position differences.
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::enum_variant_names)]
 pub enum Expr {
-    // ---------- literales ----------
+    // ---------- literals ----------
     Int(i64, Span),
     Float(f64, Span),
     Str(String, Span),
     StrInterp(Vec<StrPart>, Span),
     Bool(bool, Span),
     Null(Span),
-    /// Mini-tanda Bytes — literal de bytes `b"..."`.
+    /// Mini-batch Bytes — bytes literal `b"..."`.
     Bytes(Vec<u8>, Span),
 
-    /// Referencia a un identificador (variable, parámetro, función, etc.).
+    /// Reference to an identifier (variable, parameter, function, etc.).
     Ident(String, Span),
 
-    /// Operación binaria. `span` apunta al operador.
+    /// Binary operation. `span` points at the operator.
     BinOp {
         op: BinOpKind,
         left: Box<Expr>,
@@ -41,42 +41,43 @@ pub enum Expr {
         span: Span,
     },
 
-    /// Negación numérica `-x`. `span` apunta al `-`.
+    /// Numeric negation `-x`. `span` points at the `-`.
     UnaryOp {
         op: UnaryOpKind,
         operand: Box<Expr>,
         span: Span,
     },
 
-    /// Llamada `callee(arg1, ...)`. `span` apunta al `(`.
-    /// Method calls: `callee` es `Expr::Field`. `Ok(...)`/`Err(...)`
-    /// los reemplaza el parser por `Expr::Ok`/`Expr::Err`.
+    /// Call `callee(arg1, ...)`. `span` points at the `(`.
+    /// Method calls: `callee` is `Expr::Field`. `Ok(...)`/`Err(...)`
+    /// are rewritten by the parser to `Expr::Ok`/`Expr::Err`.
     ///
-    /// Mini-tanda Fp.3 — named args: los args nombrados (`name: value`)
-    /// aparecen como `Expr::NamedArg { name, value }` adentro de `args`.
-    /// Los positionals son cualquier otra variante. La regla canónica:
-    /// positionals primero, named después. El parser lo valida.
+    /// Mini-batch Fp.3 — named args: named args (`name: value`)
+    /// appear as `Expr::NamedArg { name, value }` inside `args`.
+    /// Positionals are any other variant. Canonical rule: positionals
+    /// first, named after. The parser validates this.
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
         span: Span,
     },
 
-    /// Mini-tanda Fp.3 — argumento nombrado en una llamada
-    /// (`greet(name: "Fitz")`). Solo válido adentro de `Call.args`.
-    /// El checker/evaluator/codegen lo des-azucara mapeando `name` a la
-    /// posición del param correspondiente; los `value` se reordenan.
+    /// Mini-batch Fp.3 — named argument in a call
+    /// (`greet(name: "Fitz")`). Only valid inside `Call.args`. The
+    /// checker/evaluator/codegen desugar it by mapping `name` to the
+    /// matching param position; the `value`s get reordered.
     NamedArg {
         name: String,
         value: Box<Expr>,
         span: Span,
     },
 
-    /// Función anónima `fn(x) => ...` o `fn(x) { ... }`. La flecha la
-    /// convierte el parser a `body: vec![Stmt::Return(expr, ...)]`.
-    /// Mini-tanda Async-cl — el prefijo `async fn(...)` marca el closure
-    /// como async; el body puede usar `.await` y la fn devuelve un
-    /// `Future<T>` que el caller debe `.await`ar.
+    /// Anonymous function `fn(x) => ...` or `fn(x) { ... }`. The
+    /// arrow form is rewritten by the parser to
+    /// `body: vec![Stmt::Return(expr, ...)]`. Mini-batch Async-cl —
+    /// the `async fn(...)` prefix marks the closure as async; the
+    /// body can use `.await` and the fn returns a `Future<T>` that
+    /// the caller must `.await`.
     FnExpr {
         params: Vec<Param>,
         body: Vec<Stmt>,
@@ -84,14 +85,14 @@ pub enum Expr {
         span: Span,
     },
 
-    /// Acceso a campo `objeto.campo`. `span` apunta al `.`.
+    /// Field access `object.field`. `span` points at the `.`.
     Field {
         object: Box<Expr>,
         field: String,
         span: Span,
     },
 
-    /// Indexing postfix `objeto[indice]`. `span` apunta al `[`.
+    /// Postfix indexing `object[index]`. `span` points at the `[`.
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
@@ -99,11 +100,11 @@ pub enum Expr {
     },
 
     /// Slicing `xs[a..b]`, `xs[..b]`, `xs[a..]`, `xs[..]`,
-    /// `xs[a..=b]` (I.2, mini-tanda I). Devuelve una copia.
-    /// `start: None` → desde el principio; `end: None` → hasta el
-    /// final. Out-of-range se clampea (estilo Python, no panic).
-    /// Soporta receivers `List<T>` (devuelve `List<T>`) y `Str`
-    /// (devuelve `Str`).
+    /// `xs[a..=b]` (I.2, mini-batch I). Returns a copy.
+    /// `start: None` → from the start; `end: None` → to the end.
+    /// Out-of-range gets clamped (Python style, no panic). Supports
+    /// `List<T>` receivers (returns `List<T>`) and `Str` (returns
+    /// `Str`).
     Slice {
         object: Box<Expr>,
         start: Option<Box<Expr>>,
@@ -112,101 +113,103 @@ pub enum Expr {
         span: Span,
     },
 
-    /// Lista literal `[1, 2, 3]`, `[]`. Anidable.
+    /// List literal `[1, 2, 3]`, `[]`. Nestable.
     List(Vec<Expr>, Span),
 
-    /// List comprehension (mini-tanda C). `[expr for var in iter]` o
-    /// `[expr for var in iter if filter]`. AST node dedicado (no
-    /// desazucarado a `.map()`) para que el fmt preserve la sintaxis
-    /// original y los errores del checker apunten al `for` real.
+    /// List comprehension (mini-batch C). `[expr for var in iter]` or
+    /// `[expr for var in iter if filter]`. Dedicated AST node (not
+    /// desugared to `.map()`) so fmt preserves the original syntax
+    /// and checker errors point at the actual `for`.
     ///
-    /// Cobertura post-Cmp+:
-    ///   - `iter` puede ser `List<T>` o `Range` (misma semántica que
+    /// Post-Cmp+ coverage:
+    ///   - `iter` may be `List<T>` or `Range` (same semantics as
     ///     `for ... in`).
-    ///   - `var` es un Pattern (Ident, Wildcard, Tuple para destructure).
-    ///   - Filter inline opcional con `if cond`.
-    ///   - Múltiples `for` clauses (cartesian product) via `extra_clauses`.
+    ///   - `var` is a Pattern (Ident, Wildcard, Tuple for destructure).
+    ///   - Inline `if cond` filter is optional.
+    ///   - Multiple `for` clauses (cartesian product) via `extra_clauses`.
     ListComp {
-        /// La expresión que se evalúa por cada iteración y se acumula
-        /// en la lista resultado.
+        /// Expression evaluated for each iteration and accumulated
+        /// into the result list.
         expr: Box<Expr>,
-        /// Binding del PRIMER for. Pattern (Ident/Wildcard/Tuple).
+        /// Binding of the FIRST for. Pattern (Ident/Wildcard/Tuple).
         var: crate::ast::Pattern,
-        /// Iterable del primer for: `List<T>` o `Range`.
+        /// Iterable of the first for: `List<T>` or `Range`.
         iter: Box<Expr>,
-        /// Mini-tanda Cmp+ — `for` clauses adicionales para cartesian
-        /// product: `[expr for a in xs for b in ys]`. Cada elemento
-        /// es `(pattern, iter)`. Vacío en el caso single-for.
+        /// Mini-batch Cmp+ — additional `for` clauses for cartesian
+        /// product: `[expr for a in xs for b in ys]`. Each element
+        /// is `(pattern, iter)`. Empty for the single-for case.
         extra_clauses: Vec<(crate::ast::Pattern, Expr)>,
-        /// Filtro opcional `if cond` al final. Se evalúa adentro del
-        /// loop más interno; si retorna false, esa combinación se skipea.
+        /// Optional `if cond` filter at the end. Evaluated inside
+        /// the innermost loop; if it returns false, that combination
+        /// is skipped.
         filter: Option<Box<Expr>>,
         span: Span,
     },
 
-    /// Mini-tanda Cmp+ — Map comprehension `{k: v for x in xs}`.
-    /// Análogo de ListComp pero produce un `Map<K, V>` con expresiones
-    /// separadas para key y value. Soporta múltiples `for` clauses
-    /// (cartesian product) y filter opcional. Last-write-wins en
-    /// duplicados (paralelo a la conversión `List.to_map`).
+    /// Mini-batch Cmp+ — Map comprehension `{k: v for x in xs}`.
+    /// Analogous to ListComp but produces a `Map<K, V>` with
+    /// separate expressions for key and value. Supports multiple
+    /// `for` clauses (cartesian product) and an optional filter.
+    /// Last-write-wins on duplicates (parallel to the `List.to_map`
+    /// conversion).
     MapComp {
-        /// Expresión que se evalúa para la KEY del par.
+        /// Expression evaluated for the KEY of the pair.
         key: Box<Expr>,
-        /// Expresión que se evalúa para el VALUE del par.
+        /// Expression evaluated for the VALUE of the pair.
         value: Box<Expr>,
-        /// Binding del primer for.
+        /// Binding of the first for.
         var: crate::ast::Pattern,
-        /// Iterable del primer for.
+        /// Iterable of the first for.
         iter: Box<Expr>,
-        /// Clauses adicionales (cartesian product).
+        /// Additional clauses (cartesian product).
         extra_clauses: Vec<(crate::ast::Pattern, Expr)>,
-        /// Filter opcional.
+        /// Optional filter.
         filter: Option<Box<Expr>>,
         span: Span,
     },
 
-    /// Mapa literal `{"k": v, ...}`, `{}`. Preserva orden de inserción.
+    /// Map literal `{"k": v, ...}`, `{}`. Preserves insertion order.
     Map(Vec<(Expr, Expr)>, Span),
 
-    /// Tupla literal (mini-tanda T post-I). `(e1, e2, e3, ...)`.
-    /// Casos especiales del parser:
-    ///   - `()` → tupla vacía (unidad).
-    ///   - `(e,)` → tupla de 1 elemento (trailing comma obligatoria).
-    ///   - `(e)` → solo paréntesis de agrupación, NO una tupla.
-    ///   - `(e1, e2)` y siguientes → tupla.
+    /// Tuple literal (mini-batch T post-I). `(e1, e2, e3, ...)`.
+    /// Special cases in the parser:
+    ///   - `()` → empty tuple (unit).
+    ///   - `(e,)` → 1-element tuple (trailing comma required).
+    ///   - `(e)` → grouping parens only, NOT a tuple.
+    ///   - `(e1, e2)` and beyond → tuple.
     ///
-    /// Heterogéneas naturalmente: cada slot tiene su propio tipo.
+    /// Heterogeneous by nature: each slot has its own type.
     Tuple(Vec<Expr>, Span),
 
-    /// Acceso a un campo de tupla por índice: `t.0`, `t.1`. El parser
-    /// detecta `<expr>.<int_literal>` en postfix y emite esto en lugar
-    /// de `Expr::Field` (que requiere identificador).
+    /// Access to a tuple field by index: `t.0`, `t.1`. The parser
+    /// detects `<expr>.<int_literal>` in postfix and emits this
+    /// instead of `Expr::Field` (which requires an identifier).
     TupleField {
         tuple: Box<Expr>,
         index: usize,
         span: Span,
     },
 
-    /// `loop { body }` como expresión (mini-tanda L). El valor de
-    /// la expresión es el `<v>` del primer `break <v>` que dispara.
-    /// `break` sin valor → `Null`. Útil para retry loops y polling:
-    /// `let result = loop { if cond { break value } }`.
-    /// Distinto de `Stmt::Loop` (statement) — el evaluator descarta
-    /// el value en statement-mode.
+    /// `loop { body }` as an expression (mini-batch L). The value of
+    /// the expression is the `<v>` of the first `break <v>` that
+    /// fires. `break` without a value → `Null`. Useful for retry
+    /// loops and polling: `let result = loop { if cond { break value } }`.
+    /// Distinct from `Stmt::Loop` (statement) — the evaluator
+    /// discards the value in statement mode.
     Loop {
         body: Vec<Stmt>,
-        /// Mini-tanda L — label opcional `'outer:` antes de `loop`.
-        /// Si está, `break 'outer` adentro lo targetea
-        /// específicamente. Sin label, break matchea este loop solo
-        /// si es el más cercano.
+        /// Mini-batch L — optional label `'outer:` before `loop`.
+        /// If present, `break 'outer` inside targets it
+        /// specifically. Without a label, `break` matches this loop
+        /// only if it is the nearest one.
         label: Option<String>,
         span: Span,
     },
 
-    /// Rango `start..end` (exclusivo) o `start..=end` (inclusivo).
-    /// `span` apunta al `..` o `..=`. El flag `inclusive` lo aporta
-    /// R.1.4 (mini-fase R) — default `false` mantiene los call sites
-    /// existentes.
+    /// Range `start..end` (exclusive) or `start..=end` (inclusive).
+    /// `span` points at `..` or `..=`. The `inclusive` flag was
+    /// added by R.1.4 (mini-phase R) — default `false` keeps the
+    /// existing call sites compatible.
     Range {
         start: Box<Expr>,
         end: Box<Expr>,
@@ -214,7 +217,7 @@ pub enum Expr {
         span: Span,
     },
 
-    /// `if cond { then } else { else_ }`. Usable como expresión.
+    /// `if cond { then } else { else_ }`. Usable as an expression.
     If {
         condition: Box<Expr>,
         then: Vec<Stmt>,
@@ -229,52 +232,53 @@ pub enum Expr {
         span: Span,
     },
 
-    /// Instanciación `User { id: 1, name: "x" }`.
+    /// Instantiation `User { id: 1, name: "x" }`.
     StructLit {
         type_name: String,
         fields: Vec<(String, Expr)>,
         span: Span,
     },
 
-    /// Constructor `Ok(expr)`. Keyword contextual.
+    /// Constructor `Ok(expr)`. Contextual keyword.
     Ok(Box<Expr>, Span),
-    /// Constructor `Err(expr)`. Keyword contextual.
+    /// Constructor `Err(expr)`. Contextual keyword.
     Err(Box<Expr>, Span),
-    /// Operador postfix `expr?`. `span` apunta al `?`.
+    /// Postfix operator `expr?`. `span` points at the `?`.
     Try(Box<Expr>, Span),
 
-    /// Operador postfix `expr.await`. Introducido en Fase 6.1.
-    /// `span` apunta al `.` (paralelo a `Field`).
+    /// Postfix operator `expr.await`. Introduced in Phase 6.1.
+    /// `span` points at the `.` (parallel to `Field`).
     ///
-    /// La keyword `await` ya la tokeniza el lexer como `Token::Await`.
-    /// Solo legal adentro de `async fn` — la validación entra en 6.2
-    /// (checker). En 6.1 el evaluator y el codegen emiten un error
-    /// explícito apuntando al sub-paso que lo completará.
+    /// The `await` keyword is already tokenised by the lexer as
+    /// `Token::Await`. Only legal inside an `async fn` — the
+    /// validation lands in 6.2 (checker). In 6.1 the evaluator and
+    /// codegen emit an explicit error pointing at the sub-step
+    /// that will complete it.
     Await(Box<Expr>, Span),
 
-    /// Marcador de "acá había una expresión que no pudo parsearse".
-    /// Solo lo produce `parse_with_recovery` (Fase 9.0.1, F15); la API
-    /// strict `parse` nunca lo emite. El span apunta al token donde se
-    /// detectó el problema. Los errores reales van en la lista paralela
-    /// `Vec<FitzError>` que retorna `parse_with_recovery`; este nodo
-    /// existe solo para que el AST mantenga su forma estructural (un
-    /// cuerpo de fn con un stmt roto sigue siendo un `Vec<Stmt>` válido,
-    /// una llamada con un arg roto sigue siendo un `Call` con la
-    /// cantidad esperada de args). Checker, evaluator y codegen tratan
-    /// este nodo como silenciado: el checker no emite errores derivados
-    /// (sintetiza `Type::Any`), evaluator y codegen abortan con
-    /// `FitzError` defensivo (no panic) porque la CLI strict nunca
-    /// debería verlos.
+    /// Marker for "an expression that could not be parsed here".
+    /// Only produced by `parse_with_recovery` (Phase 9.0.1, F15);
+    /// the strict `parse` API never emits it. The span points at
+    /// the token where the problem was detected. The real errors
+    /// land in the parallel `Vec<FitzError>` returned by
+    /// `parse_with_recovery`; this node exists only so the AST
+    /// keeps its structural shape (a fn body with a broken stmt is
+    /// still a valid `Vec<Stmt>`, a call with a broken arg is still
+    /// a `Call` with the expected number of args). Checker,
+    /// evaluator and codegen treat this node as silenced: the
+    /// checker emits no derived errors (synthesises `Type::Any`);
+    /// evaluator and codegen abort with a defensive `FitzError`
+    /// (no panic) because the strict CLI should never see them.
     ///
-    /// `#[allow(dead_code)]` porque en 9.0.1 solo se construye desde el
-    /// parser (a través de `Stmt::Error`); `Expr::Error` sub-stmt llega
-    /// con recovery sub-expression más adelante.
+    /// `#[allow(dead_code)]` because in 9.0.1 it is only built
+    /// from the parser (via `Stmt::Error`); `Expr::Error` at the
+    /// sub-stmt level arrives with sub-expression recovery later.
     #[allow(dead_code)]
     Error(Span),
 }
 
 impl Expr {
-    /// Devuelve el span de cualquier variante. Paralelo a `Stmt::span()`.
+    /// Returns the span of any variant. Parallel to `Stmt::span()`.
     #[allow(dead_code)]
     pub fn span(&self) -> Span {
         match self {
@@ -313,10 +317,11 @@ impl Expr {
         }
     }
 
-    /// V1 (2026-06-05) — versión mutable de `span()`. Devuelve referencia
-    /// mutable al `Span` de cualquier variante. Usado por `shift_expr_spans`
-    /// en `parser.rs` para corregir los spans del Expr resultante del
-    /// sub-parser de string interpolation (ver V1 en `docs/deudas-post-5b.md`).
+    /// V1 (2026-06-05) — mutable version of `span()`. Returns a
+    /// mutable reference to the `Span` of any variant. Used by
+    /// `shift_expr_spans` in `parser.rs` to fix up the spans of the
+    /// Expr produced by the string-interpolation sub-parser (see
+    /// V1 in `docs/deudas-post-5b.md`).
     pub fn span_mut(&mut self) -> &mut Span {
         match self {
             Expr::Int(_, s) => s,
@@ -355,23 +360,23 @@ impl Expr {
     }
 }
 
-/// Pieza de un string con interpolación.
-/// Ej: `"Hola, {name}!"` se descompone en
+/// Piece of a string with interpolation. E.g. `"Hola, {name}!"`
+/// decomposes into
 /// `[Lit("Hola, "), Expr(Ident("name"), None), Lit("!")]`.
 ///
-/// Mini-tanda Fm — el segundo campo de `Expr` es el `FormatSpec` opcional
-/// extraído del `:spec` tras el expr en `{x:.2f}`. `None` indica "usar
-/// formato Display por default".
+/// Mini-batch Fm — the second field of `Expr` is the optional
+/// `FormatSpec` extracted from the `:spec` after the expr in
+/// `{x:.2f}`. `None` means "use the default Display format".
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
-    /// Texto literal.
+    /// Literal text.
     Lit(String),
-    /// Expresión interpolada con formato opcional.
+    /// Interpolated expression with optional format.
     Expr(Expr, Option<FormatSpec>),
 }
 
-/// Mini-tanda Fm — Format spec inspirado en Python `{x:[fill]align[sign]
-/// [#][0][width][grouping][.precision][type]}`.
+/// Mini-batch Fm — Format spec inspired by Python's
+/// `{x:[fill]align[sign][#][0][width][grouping][.precision][type]}`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct FormatSpec {
     pub fill: Option<char>,
@@ -419,9 +424,9 @@ pub enum FormatKind {
 }
 
 impl FormatSpec {
-    /// Reconstruye la sintaxis source del spec: `[fill]align[sign]
-    /// [#][0][width][grouping][.prec][type]`. Usado por `fitz fmt`
-    /// para preservar el spec en el output.
+    /// Reconstructs the spec's source syntax:
+    /// `[fill]align[sign][#][0][width][grouping][.prec][type]`. Used
+    /// by `fitz fmt` to preserve the spec in the output.
     pub fn to_source(&self) -> String {
         use std::fmt::Write;
         let mut out = String::new();
@@ -498,46 +503,48 @@ impl FormatKind {
     }
 }
 
-/// Destino de una asignación: a qué se le está asignando.
+/// Assignment target: what is being assigned to.
 ///
-/// Hasta 3.3 solo soportábamos asignación a un identificador. En 3.4
-/// abrimos asignación a campo (`user.name = "x"`) para destrabar mutación
-/// de instancias.
+/// Until 3.3 we only supported assignment to an identifier. In 3.4
+/// we opened assignment to a field (`user.name = "x"`) to unlock
+/// instance mutation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssignTarget {
-    /// `x = ...` — declaración o reasignación de una variable.
+    /// `x = ...` — variable declaration or reassignment.
     ///
-    /// V2 (2026-06-05) — el segundo campo es el `Span` del token Ident
-    /// del LHS (el nombre de la variable en `let nombre = ...`). El
-    /// checker lo usa para registrar el tipo del binding en `TypeInfo`
-    /// y habilitar hover sobre el nombre de la variable, no solo sobre
-    /// el RHS. Cierra parcialmente la deuda S1 (`AssignTarget::Ident` /
-    /// `Param` / `For.var` / `MatchArm.pattern` sin span propio).
-    /// `Span::PartialEq` es siempre-true así que esto no rompe los
-    /// tests estructurales del AST.
+    /// V2 (2026-06-05) — the second field is the `Span` of the LHS
+    /// Ident token (the variable name in `let name = ...`). The
+    /// checker uses it to register the binding type in `TypeInfo`
+    /// and enable hover over the variable name, not just over the
+    /// RHS. Partially closes the S1 debt (`AssignTarget::Ident` /
+    /// `Param` / `For.var` / `MatchArm.pattern` without their own
+    /// span). `Span::PartialEq` is always-true so this does not
+    /// break the AST structural tests.
     Ident(String, Span),
-    /// `objeto.campo = ...` — mutación de un campo de una `Instance`.
-    /// `object` es cualquier expresión que evalúe a `Value::Instance`;
-    /// el evaluador chequea esto en runtime y emite error si no.
+    /// `object.field = ...` — mutation of an `Instance` field.
+    /// `object` is any expression that evaluates to a
+    /// `Value::Instance`; the evaluator checks this at runtime and
+    /// emits an error if not.
     Field { object: Box<Expr>, field: String },
-    /// `objeto[indice] = ...` — asignación a índice de `List` o `Map`
-    /// (R.1.3, mini-fase R). Para `List`, el índice tiene que ser
-    /// `Int` en rango; out-of-bounds → error runtime. Para `Map`, la
-    /// clave puede ser cualquier tipo hashable; si ya existe se
-    /// sobreescribe, si no, se inserta preservando insertion order.
+    /// `object[index] = ...` — assignment to a `List` or `Map`
+    /// index (R.1.3, mini-phase R). For `List`, the index must be
+    /// an `Int` in range; out-of-bounds → runtime error. For `Map`,
+    /// the key can be any hashable type; if it already exists it is
+    /// overwritten, otherwise it is inserted preserving insertion
+    /// order.
     Index { object: Box<Expr>, index: Box<Expr> },
 }
 
-/// Posición de un nodo del AST en el archivo fuente. La acompaña a
-/// cada `Stmt` desde B.1 — sirve para enriquecer los mensajes de
-/// error del checker/evaluador con línea y columna reales (antes
-/// quedaban siempre en `0:0`).
+/// Position of an AST node in the source file. Attached to every
+/// `Stmt` since B.1 — it enriches checker/evaluator error messages
+/// with real line and column (before that they always showed up as
+/// `0:0`).
 ///
-/// Para nodos sintéticos (construidos por el parser sin un token
-/// concreto, p.ej. el cuerpo flecha de `fn f(x) => x * 2` que se
-/// convierte a `Return`), o para nodos de tests, usamos
-/// `Span::default()` (= `Span::ZERO`, ambos campos a 0). El sitio
-/// que reporta error chequea `is_known()` antes de citar posición.
+/// For synthetic nodes (built by the parser without a concrete
+/// token, e.g. the arrow body of `fn f(x) => x * 2` rewritten into
+/// `Return`), or for test nodes, we use `Span::default()`
+/// (= `Span::ZERO`, both fields at 0). The site reporting the error
+/// checks `is_known()` before quoting the position.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Span {
     pub line: usize,
@@ -551,26 +558,25 @@ impl Span {
         Span { line, column }
     }
 
-    /// `true` si el span apunta a una posición real (no fue
-    /// completado con `default()`). Lo usan los formatters de error
-    /// para decidir si citan línea/columna o solo el mensaje.
-    /// Mantenido como API pública para uso futuro en
-    /// `FitzError::Display`.
+    /// `true` if the span points at a real position (was not filled
+    /// in via `default()`). Used by error formatters to decide
+    /// whether to quote line/column or just the message. Kept as a
+    /// public API for future use in `FitzError::Display`.
     #[allow(dead_code)]
     pub fn is_known(&self) -> bool {
         self.line != 0 || self.column != 0
     }
 }
 
-/// `Span` se compara como **siempre igual** a sí mismo. Razón: los
-/// tests del AST/parser/evaluator usan `assert_eq!` sobre `Stmt` y
-/// `Expr` construyendo nodos literales con `Span::ZERO`, contra
-/// nodos producidos por el parser con spans reales. Si la comparación
-/// fuera estructural sobre `line`/`column`, ~30 tests deberían
-/// duplicar la lógica del parser para predecir las posiciones — sin
-/// valor real (los tests miran estructura, no posición). Cuando hace
-/// falta validar la posición, se compara explícitamente `span.line`
-/// y `span.column` (ver tests dedicados de span en parser y checker).
+/// `Span` compares as **always equal** to itself. Reason: the AST /
+/// parser / evaluator tests use `assert_eq!` on `Stmt` and `Expr`
+/// building literal nodes with `Span::ZERO`, against nodes produced
+/// by the parser with real spans. If the comparison were structural
+/// over `line`/`column`, ~30 tests would have to duplicate the
+/// parser logic to predict positions — with no real value (the
+/// tests look at structure, not position). When the position needs
+/// to be validated, we compare `span.line` and `span.column`
+/// explicitly (see the dedicated span tests in parser and checker).
 impl PartialEq for Span {
     fn eq(&self, _other: &Self) -> bool {
         true
@@ -578,14 +584,15 @@ impl PartialEq for Span {
 }
 impl Eq for Span {}
 
-/// Una sentencia: ejecuta un efecto, opcionalmente produce un valor.
+/// A statement: runs an effect, optionally produces a value.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// Asignación / declaración. Ej: `x = 42`, `name: Str = "Fitz"`,
-    /// `user.name = "Otro"`. En Fitz no diferenciamos `let x = ...` de
-    /// `x = ...` a nivel AST. La anotación de tipo `type_` solo es
-    /// válida cuando `target` es `Ident` (asignar a un campo no admite
-    /// reanotar el tipo); el parser lo enforcea.
+    /// Assignment / declaration. E.g. `x = 42`, `name: Str = "Fitz"`,
+    /// `user.name = "Otro"`. In Fitz we do not differentiate `let x
+    /// = ...` from `x = ...` at the AST level. The `type_`
+    /// annotation is only valid when `target` is `Ident` (assigning
+    /// to a field does not allow re-annotating the type); the
+    /// parser enforces that.
     Assign {
         target: AssignTarget,
         type_: Option<TypeExpr>,
@@ -593,10 +600,11 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `let (a, b) = expr` — destructuring de tupla (mini-tanda T).
-    /// Solo aplica con `let` (declaración). Evaluator declara `a` y
-    /// `b` en el env actual; cada nombre puede ser `_` (ignorar).
-    /// Pattern admite nesting: `let ((x, y), z) = ...`.
+    /// `let (a, b) = expr` — tuple destructuring (mini-batch T).
+    /// Only applies with `let` (declaration). The evaluator declares
+    /// `a` and `b` in the current env; every name can be `_`
+    /// (ignore). Pattern supports nesting:
+    /// `let ((x, y), z) = ...`.
     Destructure {
         pattern: Pattern,
         value: Expr,
@@ -606,13 +614,13 @@ pub enum Stmt {
     /// `return expr`.
     Return(Expr, Span),
 
-    /// `return <status> <body?>` — return con status code HTTP custom.
-    /// Solo válido adentro de handlers HTTP (fn con decorator `@get`/
-    /// `@post`/`@put`/`@delete`); el checker rechaza el resto. El
-    /// `body` es opcional para casos como `return 204` (No Content).
-    /// El span apunta al `return` keyword.
+    /// `return <status> <body?>` — return with a custom HTTP status
+    /// code. Only valid inside HTTP handlers (fn with a decorator
+    /// `@get`/`@post`/`@put`/`@delete`); the checker rejects the
+    /// rest. `body` is optional for cases like `return 204` (No
+    /// Content). The span points at the `return` keyword.
     ///
-    /// Sintaxis del spec: `return 401 { message: "no autorizado" }`,
+    /// Spec syntax: `return 401 { message: "no autorizado" }`,
     /// `return 204`, `return 200 user`.
     ReturnStatus {
         status: Expr,
@@ -620,18 +628,19 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// Una expresión usada como sentencia (típicamente una llamada).
+    /// An expression used as a statement (typically a call).
     Expr(Expr, Span),
 
-    /// Definición de función. Soporta forma de bloque y forma de flecha
-    /// (`fn f(n) => n * 2`) — esta última la convierte el parser a
-    /// `body: vec![Stmt::Return(Expr, Span::ZERO)]`.
+    /// Function definition. Supports the block form and the arrow
+    /// form (`fn f(n) => n * 2`) — the parser rewrites the arrow
+    /// into `body: vec![Stmt::Return(Expr, Span::ZERO)]`.
     ///
-    /// `decorators` lista los `@deco(args...)` que envuelven la función,
-    /// en el orden en que aparecen en el código fuente. El parser solo
-    /// los acumula; la semántica (qué hace cada decorator) la decide el
-    /// evaluador despachando por `Decorator.name`. Para una función sin
-    /// decoradores el vector está vacío.
+    /// `decorators` lists the `@deco(args...)` wrapping the
+    /// function, in the order they appear in the source. The
+    /// parser only accumulates them; the semantics (what each
+    /// decorator does) is the evaluator's job, dispatching on
+    /// `Decorator.name`. A function without decorators has an
+    /// empty vector.
     FnDef {
         name: String,
         params: Vec<Param>,
@@ -642,16 +651,17 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// Definición de tipo custom: `type User { id: Int, name: Str }`.
-    /// R.3 (mini-fase R) suma `methods: Vec<MethodDef>` — métodos
-    /// custom sobre el tipo. Fields y métodos se mezclan en cualquier
-    /// orden adentro del `{}` del `type`.
+    /// Definition of a custom type: `type User { id: Int, name: Str }`.
+    /// R.3 (mini-phase R) adds `methods: Vec<MethodDef>` — custom
+    /// methods on the type. Fields and methods mix in any order
+    /// inside the `type`'s `{}`.
     ///
-    /// Fase 10.3.a suma `decorators` al type (`@table("users")` para
-    /// el ORM) y `decorators` por field (`@primary`, `@column(...)`,
-    /// `@unique`, `@index`). Los decoradores se parsean siempre — el
-    /// checker decide cuáles son válidos según el contexto. Programas
-    /// sin ORM no usan ningún decorator y el campo queda vacío.
+    /// Phase 10.3.a adds `decorators` on the type (`@table("users")`
+    /// for the ORM) and `decorators` per field (`@primary`,
+    /// `@column(...)`, `@unique`, `@index`). Decorators are always
+    /// parsed — the checker decides which are valid by context.
+    /// Programs without ORM use no decorators and the field stays
+    /// empty.
     TypeDef {
         name: String,
         decorators: Vec<Decorator>,
@@ -660,21 +670,23 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `break [label] [<expr>]` dentro de loop/while/for.
-    /// Mini-tanda L:
-    ///   - `value` opcional para `loop` como expresión (`break v`).
-    ///   - `label` opcional para targetear un loop específico
-    ///     anidado (`break 'outer`). Sin label → matchea el loop
-    ///     más cercano.
+    /// `break [label] [<expr>]` inside loop/while/for.
+    /// Mini-batch L:
+    ///   - `value` optional for `loop` as an expression
+    ///     (`break v`).
+    ///   - `label` optional to target a specific nested loop
+    ///     (`break 'outer`). Without a label → matches the nearest
+    ///     loop.
     Break(Option<Expr>, Option<String>, Span),
 
-    /// `continue [label]` dentro de loop/while/for. Sin label →
-    /// continúa el loop más cercano.
+    /// `continue [label]` inside loop/while/for. Without a label →
+    /// continues the nearest loop.
     Continue(Option<String>, Span),
 
-    /// `while cond { body }`. Itera mientras `cond` evalúe a `Bool(true)`.
-    /// `break` corta el loop; `continue` salta a la próxima iteración.
-    /// `label` (mini-tanda L) opcional para `break 'outer`.
+    /// `while cond { body }`. Iterates while `cond` evaluates to
+    /// `Bool(true)`. `break` exits the loop; `continue` jumps to
+    /// the next iteration. `label` (mini-batch L) optional for
+    /// `break 'outer`.
     While {
         condition: Expr,
         body: Vec<Stmt>,
@@ -682,22 +694,23 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `loop { body }` — loop infinito. Solo se sale con `break` (o `return`).
-    /// `label` (mini-tanda L) opcional para `break 'outer`.
+    /// `loop { body }` — infinite loop. Exits only with `break` (or
+    /// `return`). `label` (mini-batch L) optional for `break
+    /// 'outer`.
     Loop {
         body: Vec<Stmt>,
         label: Option<String>,
         span: Span,
     },
 
-    /// `for var in iter { body }`. `iter` se evalúa una vez al entrar
-    /// y debe ser iterable (List, Range, o Map). `var` es un `Pattern`
-    /// que se matchea contra cada elemento del iter en cada iteración.
-    /// Mini-tanda Md: el Pattern destraba `for (k, v) in m` sobre Map
-    /// (Pattern::Tuple), `for _ in 0..10` (Pattern::Wildcard), además
-    /// del clásico `for x in xs` (Pattern::Ident).
-    /// `break`/`continue` funcionan igual que en `while`.
-    /// `label` (mini-tanda L) opcional para `break 'outer`.
+    /// `for var in iter { body }`. `iter` is evaluated once on
+    /// entry and must be iterable (List, Range, or Map). `var` is a
+    /// `Pattern` matched against every element of the iter on each
+    /// iteration. Mini-batch Md: the Pattern unlocks
+    /// `for (k, v) in m` over Map (Pattern::Tuple), `for _ in 0..10`
+    /// (Pattern::Wildcard), in addition to the classic `for x in
+    /// xs` (Pattern::Ident). `break`/`continue` behave like in
+    /// `while`. `label` (mini-batch L) optional for `break 'outer`.
     For {
         var: Pattern,
         iter: Expr,
@@ -706,52 +719,54 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `import foo` o `import foo.bar.baz` — carga un módulo desde
-    /// disco y lo expone en el scope actual como `Value::Module` bajo
-    /// el ÚLTIMO segmento del path (`import foo.bar` → binding `bar`).
-    /// Resolución: relativo al archivo importer, `foo.bar` → `./foo/bar.fitz`.
+    /// `import foo` or `import foo.bar.baz` — loads a module from
+    /// disk and exposes it in the current scope as a `Value::Module`
+    /// under the LAST segment of the path (`import foo.bar` →
+    /// binding `bar`). Resolution: relative to the importer's file,
+    /// `foo.bar` → `./foo/bar.fitz`.
     ///
-    /// Para acceder a algo adentro: `bar.fn(...)`. Para traer nombres
-    /// directos al scope, usar `Stmt::FromImport`.
+    /// To access something inside: `bar.fn(...)`. To bring names
+    /// directly into the scope, use `Stmt::FromImport`.
     Import {
-        /// Segmentos del path en orden. Siempre tiene al menos un elemento.
+        /// Path segments in order. Always has at least one element.
         path: Vec<String>,
-        /// PreF8.4: `import foo as f` — el namespace se bindea como `f`
-        /// en lugar del último segmento del path. `None` si no hay alias.
+        /// PreF8.4: `import foo as f` — the namespace is bound as
+        /// `f` instead of the last path segment. `None` if no
+        /// alias.
         alias: Option<String>,
         span: Span,
     },
 
-    /// `from foo import a, b, c` o `from foo.bar import x` — carga el
-    /// módulo y bindea cada nombre listado en el scope actual. El módulo
-    /// no queda expuesto como tal.
+    /// `from foo import a, b, c` or `from foo.bar import x` — loads
+    /// the module and binds every listed name in the current scope.
+    /// The module is not exposed as such.
     ///
-    /// El parser garantiza que `names` no esté vacío.
+    /// The parser guarantees `names` is non-empty.
     ///
-    /// PreF8.4: cada entry de `names` es `(nombre_original, alias_opcional)`.
-    /// `from foo import bar as b` → `[("bar", Some("b"))]`. Sin alias,
-    /// la segunda componente es `None` y el binding usa el nombre
-    /// original.
+    /// PreF8.4: every `names` entry is `(original_name,
+    /// optional_alias)`. `from foo import bar as b` →
+    /// `[("bar", Some("b"))]`. Without an alias, the second
+    /// component is `None` and the binding uses the original name.
     FromImport {
         path: Vec<String>,
         names: Vec<(String, Option<String>)>,
         span: Span,
     },
 
-    /// Marcador de "acá había una sentencia que no pudo parsearse".
-    /// Paralelo a `Expr::Error`: solo lo produce `parse_with_recovery`
-    /// (Fase 9.0.1, F15). El span apunta al token donde se detectó el
-    /// problema. Los detalles del error viven en la lista paralela
-    /// `Vec<FitzError>` que retorna `parse_with_recovery`. Esta variante
-    /// mantiene la forma del `Program`/cuerpo de bloque cuando hay
-    /// errores recuperados.
+    /// Marker for "a statement that could not be parsed here".
+    /// Parallel to `Expr::Error`: only produced by
+    /// `parse_with_recovery` (Phase 9.0.1, F15). The span points at
+    /// the token where the problem was detected. The error details
+    /// live in the parallel `Vec<FitzError>` returned by
+    /// `parse_with_recovery`. This variant keeps the shape of the
+    /// `Program` / block body when there are recovered errors.
     Error(Span),
 }
 
 impl Stmt {
-    /// Devuelve el span de cualquier variante. Helper para los sitios
-    /// que reportan errores sobre un stmt sin matchear por variante.
-    /// Mantenido como API pública para tests y uso futuro.
+    /// Returns the span of any variant. Helper for the sites that
+    /// report errors on a stmt without matching by variant. Kept as
+    /// a public API for tests and future use.
     #[allow(dead_code)]
     pub fn span(&self) -> Span {
         match self {
@@ -780,11 +795,11 @@ pub enum BinOpKind {
     Sub,
     Mul,
     Div,
-    /// R.1.2 — operador módulo (`%`). Solo válido sobre `Int`
-    /// en MVP. Semántica euclidean: el resultado tiene siempre
-    /// el mismo signo del divisor (paralelo a Python, distinto
-    /// del `%` Rust que es truncate-toward-zero). `n % 0` →
-    /// error runtime claro.
+    /// R.1.2 — modulo operator (`%`). Only valid on `Int` in MVP.
+    /// Euclidean semantics: the result always has the same sign as
+    /// the divisor (parallel to Python, different from Rust's `%`
+    /// which is truncate-toward-zero). `n % 0` → clear runtime
+    /// error.
     Mod,
     Eq,
     NotEq,
@@ -794,13 +809,13 @@ pub enum BinOpKind {
     GtEq,
     And,
     Or,
-    /// Mini-tanda Xor — `a xor b` lógico (paralelo a `and`/`or`).
-    /// Solo válido sobre `Bool`. Equivalente a `a != b` sobre Bool
-    /// pero más declarativo.
+    /// Mini-batch Xor — logical `a xor b` (parallel to `and`/`or`).
+    /// Only valid on `Bool`. Equivalent to `a != b` on Bool but
+    /// more declarative.
     Xor,
-    /// Mini-tanda Bits — operadores bit-a-bit sobre `Int`. El
-    /// checker rechaza cualquier otro tipo. Shifts `<<`/`>>` con
-    /// RHS negativo o >= 64 → error de runtime.
+    /// Mini-batch Bits — bitwise operators on `Int`. The checker
+    /// rejects any other type. Shifts `<<`/`>>` with negative RHS
+    /// or >= 64 → runtime error.
     BitAnd,
     BitOr,
     BitXor,
@@ -810,49 +825,50 @@ pub enum BinOpKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOpKind {
-    /// Negación numérica: `-x`.
+    /// Numeric negation: `-x`.
     Neg,
-    /// Negación lógica: `not x` (R.1.1, mini-fase R). Solo válido
-    /// sobre `Bool`; el checker rechaza cualquier otro tipo.
+    /// Logical negation: `not x` (R.1.1, mini-phase R). Only valid
+    /// on `Bool`; the checker rejects any other type.
     Not,
-    /// Mini-tanda Bits — NOT bit-a-bit `~x`. Solo `Int`.
+    /// Mini-batch Bits — bitwise NOT `~x`. Only `Int`.
     BitNot,
 }
 
-/// Parámetro formal de una función. El tipo es opcional (tipado
-/// gradual). `default` (mini-tanda Fp): expresión a usar cuando el
-/// caller no provee este arg. Si un param tiene default, todos los
-/// posteriores también (regla Python). El parser y el checker lo
-/// validan.
+/// Formal parameter of a function. The type is optional (gradual
+/// typing). `default` (mini-batch Fp): expression to use when the
+/// caller does not provide this arg. If a param has a default, every
+/// later one must too (Python rule). The parser and the checker
+/// validate this.
 ///
-/// `varargs` (mini-tanda Fp.2): si `true`, el param es variádico
-/// (`fn sum(...xs: Int)`). Recolecta todos los args extra del call
-/// en una `List<T>`. Solo el ÚLTIMO param puede ser varargs;
-/// mutex con `default` (un varargs no puede tener default). El parser
-/// lo valida.
+/// `varargs` (mini-batch Fp.2): if `true`, the param is variadic
+/// (`fn sum(...xs: Int)`). Collects every extra call arg into a
+/// `List<T>`. Only the LAST param can be varargs; mutually exclusive
+/// with `default` (a varargs cannot have a default). The parser
+/// validates this.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub type_: Option<TypeExpr>,
     pub default: Option<Expr>,
     pub varargs: bool,
-    /// S1 (2026-06-05) — span del token Ident del nombre del param.
-    /// `Span::ZERO` para params sintéticos (tests / nodos construidos
-    /// a mano sin posición). Lo consume el checker para registrar el
-    /// tipo del binding bajo este span en `TypeInfo` y habilitar hover
-    /// sobre el nombre del param adentro de la firma de una fn.
+    /// S1 (2026-06-05) — span of the Ident token of the param name.
+    /// `Span::ZERO` for synthetic params (tests / hand-built nodes
+    /// with no position). The checker consumes it to register the
+    /// binding's type under this span in `TypeInfo` and enable
+    /// hover over the param name inside a fn signature.
     ///
-    /// `Span::PartialEq` es siempre-true así que esto no afecta los
-    /// tests estructurales del AST que comparan `Param`s.
+    /// `Span::PartialEq` is always-true, so this does not affect
+    /// the AST structural tests that compare `Param`s.
     pub name_span: Span,
 }
 
-/// Campo de un `type`. El tipo es obligatorio dentro de un struct.
-/// La nullabilidad (`T?`) se modela adentro del `TypeExpr` como
-/// `TypeExpr::Nullable(...)`, no como un flag aparte.
+/// Field of a `type`. The type is mandatory inside a struct.
+/// Nullability (`T?`) is modelled inside `TypeExpr` as
+/// `TypeExpr::Nullable(...)`, not as a separate flag.
 ///
-/// Fase 10.3.a — `decorators` permite `@primary`, `@column(name=...)`,
-/// `@unique`, `@index` por field. Para tipos no-ORM, queda vacío.
+/// Phase 10.3.a — `decorators` enables `@primary`,
+/// `@column(name=...)`, `@unique`, `@index` per field. For non-ORM
+/// types it stays empty.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
@@ -861,25 +877,25 @@ pub struct Field {
     pub decorators: Vec<Decorator>,
 }
 
-/// Método custom adentro de un `type` (R.3, mini-fase R).
+/// Custom method inside a `type` (R.3, mini-phase R).
 ///
-/// Diseño "opción A" — los **fields** del tipo son visibles como
-/// variables locales en el body del método (sin prefijo `self`).
-/// Más cercano a Python/Ruby/Crystal que a Rust. Trade-off: si el
-/// método declara un local con el mismo nombre que un field, el
-/// local gana (documentado como caveat).
+/// "Option A" design — the type's **fields** are visible as local
+/// variables in the method body (without a `self` prefix). Closer
+/// to Python/Ruby/Crystal than to Rust. Trade-off: if the method
+/// declares a local with the same name as a field, the local wins
+/// (documented as a caveat).
 ///
 /// MVP:
-///  - No tiene decoradores (`@get`/`@server`/etc. son para fns
-///    top-level con dispatch HTTP; los métodos no encajan).
-///  - Visibilidad: todos public en MVP. `pub fn` queda como deuda.
-///  - Sin operator overloading.
+///  - No decorators (`@get`/`@server`/etc. are for top-level fns
+///    with HTTP dispatch; methods do not fit).
+///  - Visibility: all public in MVP. `pub fn` is left as debt.
+///  - No operator overloading.
 ///
-/// **Mini-tanda St**: `is_static` distingue métodos estáticos
-/// (`static fn make() -> X` invocados como `X.make()`) de métodos
-/// de instancia (`fn greet()` invocados como `instance.greet()`).
-/// Los estáticos no reciben los fields como locales — son
-/// constructores / factories / utilidades del tipo.
+/// **Mini-batch St**: `is_static` distinguishes static methods
+/// (`static fn make() -> X` invoked as `X.make()`) from instance
+/// methods (`fn greet()` invoked as `instance.greet()`). Static
+/// methods do not receive the fields as locals — they are
+/// constructors / factories / type utilities.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDef {
     pub name: String,
@@ -887,56 +903,56 @@ pub struct MethodDef {
     pub return_type: Option<TypeExpr>,
     pub body: Vec<Stmt>,
     pub is_async: bool,
-    /// Mini-tanda St — `true` si el método es estático
-    /// (`static fn ...` declarado en el `type` body).
+    /// Mini-batch St — `true` if the method is static
+    /// (`static fn ...` declared in the `type` body).
     pub is_static: bool,
     pub span: Span,
 }
 
-/// Una expresión de tipo en una anotación. Es el AST que produce el
-/// parser cuando ve algo como `Int`, `List<Int>`, `Map<Str, User>`,
-/// `Result<List<User>>`, `User?`. No tiene resolución todavía: el
-/// `Named(...)` puede referirse a un built-in (`Int`, `Str`, ...),
-/// a un tipo declarado por el usuario, o a uno importado. El checker
-/// (Fase 5.2) es quien valida que cada nombre exista y que la aridad
-/// de los genéricos sea correcta.
+/// A type expression in an annotation. The AST the parser produces
+/// when it sees something like `Int`, `List<Int>`, `Map<Str, User>`,
+/// `Result<List<User>>`, `User?`. No resolution yet: `Named(...)`
+/// may refer to a built-in (`Int`, `Str`, ...), a user-declared
+/// type, or an imported one. The checker (Phase 5.2) validates that
+/// each name exists and that the generic arities are correct.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeExpr {
-    /// Nombre simple: `Int`, `Str`, `User`.
+    /// Simple name: `Int`, `Str`, `User`.
     Named(String),
-    /// Genérico aplicado: `List<Int>`, `Map<Str, User>`, `Result<T>`.
-    /// `args` siempre tiene al menos un elemento (`Foo<>` es error de
-    /// parser).
+    /// Applied generic: `List<Int>`, `Map<Str, User>`, `Result<T>`.
+    /// `args` always has at least one element (`Foo<>` is a parser
+    /// error).
     Generic { name: String, args: Vec<TypeExpr> },
-    /// Sufijo `?`: el valor puede ser ese tipo o `Null`. `User?` →
+    /// `?` suffix: the value can be that type or `Null`. `User?` →
     /// `Nullable(Box(Named("User")))`. `List<Int>?` →
     /// `Nullable(Box(Generic { name: "List", args: [Named("Int")] }))`.
     Nullable(Box<TypeExpr>),
-    /// Tipo función: `Fn(T1, T2) -> U`. Modela un valor invocable con
-    /// los parámetros y retorno indicados. La keyword `Fn` no es un
-    /// tipo nominal del lenguaje: el parser la reconoce de forma
-    /// dedicada cuando ve `Fn` seguido de `(`. `Fn() -> U` es válido
-    /// (cero params). El retorno es obligatorio en la sintaxis para
-    /// evitar ambigüedad con `Fn(...)` como expresión.
+    /// Function type: `Fn(T1, T2) -> U`. Models a value that can be
+    /// invoked with the given parameters and return. The `Fn`
+    /// keyword is not a nominal type of the language: the parser
+    /// recognises it in a dedicated path when it sees `Fn` followed
+    /// by `(`. `Fn() -> U` is valid (zero params). The return is
+    /// mandatory in the syntax to avoid ambiguity with `Fn(...)` as
+    /// an expression.
     Function {
         params: Vec<TypeExpr>,
         ret: Box<TypeExpr>,
     },
-    /// Tipo tupla `(T1, T2, ...)` (mini-tanda T). Heterogénea por
-    /// definición. Vec vacío = tipo "unit" `()` (la tupla vacía).
+    /// Tuple type `(T1, T2, ...)` (mini-batch T). Heterogeneous by
+    /// definition. Empty Vec = the "unit" type `()` (empty tuple).
     Tuple(Vec<TypeExpr>),
 }
 
 impl TypeExpr {
-    /// Atajo para los call sites más comunes (tests, builtins).
-    /// Mantenido como API pública para tests futuros.
+    /// Shortcut for the most common call sites (tests, builtins).
+    /// Kept as a public API for future tests.
     #[allow(dead_code)]
     pub fn named(s: impl Into<String>) -> Self {
         TypeExpr::Named(s.into())
     }
 
-    /// Reproduce la forma escrita en el fuente. Usado en errores y en
-    /// el runtime HTTP para mostrar el tipo declarado.
+    /// Reproduces the form written in source. Used in error messages
+    /// and in the HTTP runtime to show the declared type.
     pub fn display_name(&self) -> String {
         match self {
             TypeExpr::Named(name) => name.clone(),
@@ -960,9 +976,9 @@ impl TypeExpr {
         }
     }
 
-    /// Nombre "cabeza" del tipo, ignorando nullables y argumentos
-    /// genéricos. Útil para el runtime HTTP cuando necesita resolver
-    /// un nombre de tipo declarado en el env del importer.
+    /// "Head" name of the type, ignoring nullables and generic
+    /// arguments. Useful for the HTTP runtime when it needs to
+    /// resolve a declared type name in the importer's env.
     /// `User?` → `"User"`, `List<Int>` → `"List"`,
     /// `Result<List<User>>` → `"Result"`.
     pub fn head_name(&self) -> &str {
@@ -975,7 +991,8 @@ impl TypeExpr {
         }
     }
 
-    /// `true` si el tipo es `T?` (admite `Null` además del tipo base).
+    /// `true` if the type is `T?` (accepts `Null` in addition to the
+    /// base type).
     pub fn is_nullable(&self) -> bool {
         matches!(self, TypeExpr::Nullable(_))
     }
@@ -987,105 +1004,109 @@ impl std::fmt::Display for TypeExpr {
     }
 }
 
-/// Brazo de un `match`: patrón → expresión.
+/// Arm of a `match`: pattern → expression.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
-    /// Guard opcional `if <cond>` después del pattern (R.2.2). El
-    /// arm matchea si el pattern matchea Y el guard evalúa a `true`.
-    /// Arms con guard NO cuentan para exhaustividad de Result
-    /// (paralelo a Rust) — el checker exige catch-all explícito.
+    /// Optional guard `if <cond>` after the pattern (R.2.2). The
+    /// arm matches if the pattern matches AND the guard evaluates
+    /// to `true`. Arms with a guard do NOT count for Result
+    /// exhaustiveness (parallel to Rust) — the checker requires an
+    /// explicit catch-all.
     pub guard: Option<Expr>,
-    /// Cuerpo del arm. Sp.2 (post-Fp+Sp) — `Vec<Stmt>` en vez de `Expr`,
-    /// paralelo a `Expr::If.then`. El "valor" del arm es el último
-    /// `Stmt::Expr` (si lo hay) o `Null`. `return`/`break`/`continue`
-    /// adentro de un arm propagan al fn/loop contenedor como cualquier
-    /// otro statement.
+    /// Arm body. Sp.2 (post-Fp+Sp) — `Vec<Stmt>` instead of `Expr`,
+    /// parallel to `Expr::If.then`. The arm's "value" is the last
+    /// `Stmt::Expr` (if any) or `Null`. `return`/`break`/`continue`
+    /// inside an arm propagate to the containing fn/loop like any
+    /// other statement.
     ///
-    /// Sintaxis del parser:
-    ///   - `pat => expr` se desazucara a `vec![Stmt::Expr(expr)]` (1 elem).
-    ///   - `pat => { stmts }` se desazucara al stmt list del bloque.
-    ///   - `pat => return X` / `break` / `continue` se desazucara al
-    ///     `Stmt::Return(X)` / `Stmt::Break` / `Stmt::Continue` directo.
+    /// Parser syntax:
+    ///   - `pat => expr` desugars to `vec![Stmt::Expr(expr)]` (1 elem).
+    ///   - `pat => { stmts }` desugars to the block's stmt list.
+    ///   - `pat => return X` / `break` / `continue` desugars to
+    ///     `Stmt::Return(X)` / `Stmt::Break` / `Stmt::Continue`
+    ///     directly.
     pub body: Vec<Stmt>,
 }
 
-/// Patrones para `match`.
+/// Patterns for `match`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
-    /// `42` — matchea si el valor es ese int exacto. Igual para float/str/bool.
+    /// `42` — matches if the value is that exact int. Same for
+    /// float/str/bool.
     Int(i64),
     Float(f64),
     Str(String),
     Bool(bool),
-    /// `null` — matchea si el valor es Null.
+    /// `null` — matches if the value is Null.
     Null,
-    /// `nombre` — siempre matchea, bindea el valor a ese nombre.
+    /// `name` — always matches, binds the value to that name.
     ///
-    /// S1 (2026-06-05) — el `Span` es del token Ident del pattern,
-    /// usado por el checker para registrar el tipo del binding en
-    /// `TypeInfo` (hover sobre `i` en `for i in 0..10`, `n` en
-    /// `match x { Ok(n) => n }`, etc.). `Span::PartialEq` es
-    /// siempre-true así que esto no afecta tests estructurales.
+    /// S1 (2026-06-05) — the `Span` is the pattern's Ident token,
+    /// used by the checker to register the binding type in
+    /// `TypeInfo` (hover over `i` in `for i in 0..10`, `n` in
+    /// `match x { Ok(n) => n }`, etc.). `Span::PartialEq` is
+    /// always-true so this does not affect structural tests.
     Ident(String, Span),
-    /// `_` — siempre matchea, sin binding.
+    /// `_` — always matches, no binding.
     Wildcard,
-    /// `Ok(x)` — matchea cualquier `Result::Ok(...)` y bindea el
-    /// inner como `x`. S1 (2026-06-05) — `Span` del token Ident
-    /// adentro del paréntesis.
+    /// `Ok(x)` — matches any `Result::Ok(...)` and binds the inner
+    /// as `x`. S1 (2026-06-05) — `Span` of the Ident token inside
+    /// the parens.
     OkBinding(String, Span),
-    /// `Err(e)` — matchea cualquier `Result::Err(...)` y bindea el
-    /// inner como `e`. S1 (2026-06-05) — `Span` del token Ident
-    /// adentro del paréntesis.
+    /// `Err(e)` — matches any `Result::Err(...)` and binds the
+    /// inner as `e`. S1 (2026-06-05) — `Span` of the Ident token
+    /// inside the parens.
     ErrBinding(String, Span),
-    /// `Ok(_)` — matchea cualquier `Result::Ok(...)` sin bindear
-    /// (no ensucia el scope con una var llamada `_`).
+    /// `Ok(_)` — matches any `Result::Ok(...)` without binding
+    /// (does not pollute the scope with a var named `_`).
     OkWildcard,
-    /// `Err(_)` — matchea cualquier `Result::Err(...)` sin bindear.
+    /// `Err(_)` — matches any `Result::Err(...)` without binding.
     ErrWildcard,
-    /// `start..end` (exclusivo) o `start..=end` (inclusivo) —
-    /// matchea si el valor es Int y `start <= v < end` (o `<= end`).
-    /// Solo Int por ahora (Float complica la representación discreta).
-    /// `inclusive` aportado por R.1.4 (mini-fase R).
+    /// `start..end` (exclusive) or `start..=end` (inclusive) —
+    /// matches if the value is Int and `start <= v < end` (or `<=
+    /// end`). Int-only for now (Float complicates the discrete
+    /// representation). `inclusive` was added by R.1.4 (mini-phase
+    /// R).
     Range {
         start: i64,
         end: i64,
         inclusive: bool,
     },
-    /// `(p1, p2, ...)` — matchea si el valor es una tupla de la
-    /// misma longitud y cada sub-patrón matchea su slot
-    /// (mini-tanda T). Tupla vacía `()` matchea solo `Tuple([])`.
-    /// Cada sub-pattern puede ser cualquier `Pattern` (incluido
-    /// otro `Tuple` para nested destructuring).
+    /// `(p1, p2, ...)` — matches if the value is a tuple of the
+    /// same length and every sub-pattern matches its slot
+    /// (mini-batch T). The empty tuple `()` matches only
+    /// `Tuple([])`. Each sub-pattern can be any `Pattern`
+    /// (including another `Tuple` for nested destructuring).
     Tuple(Vec<Pattern>),
-    /// `pat1 | pat2 | pat3` — matchea si CUALQUIERA de los
-    /// sub-patrones matchea. R.2.1 (mini-fase R).
+    /// `pat1 | pat2 | pat3` — matches if ANY of the sub-patterns
+    /// matches. R.2.1 (mini-phase R).
     ///
-    /// Restricciones del MVP (paralelas a Rust):
-    ///  - **Sin bindings** adentro de or-patterns. Ni `Ident(x)`,
-    ///    ni `Ok(x)`, ni `Err(e)` — el parser los rechaza con
-    ///    error claro. `Pattern::Wildcard`, `OkWildcard` y
-    ///    `ErrWildcard` sí están permitidos.
-    ///  - Garantía: la lista tiene 2+ elementos; un único `pat`
-    ///    se mantiene como pattern simple, no envuelto en `Or`.
+    /// MVP restrictions (parallel to Rust):
+    ///  - **No bindings** inside or-patterns. Neither `Ident(x)`,
+    ///    nor `Ok(x)`, nor `Err(e)` — the parser rejects them with
+    ///    a clear error. `Pattern::Wildcard`, `OkWildcard` and
+    ///    `ErrWildcard` are allowed.
+    ///  - Guarantee: the list has 2+ elements; a single `pat`
+    ///    stays as a plain pattern, not wrapped in `Or`.
     Or(Vec<Pattern>),
 }
 
-/// Decorador aplicado a una `Stmt::FnDef`: `@nombre(args..., key=value...)`.
+/// Decorator applied to a `Stmt::FnDef`: `@name(args..., key=value...)`.
 ///
-/// En 4.1 el parser solo acumula decoradores; el evaluador es quien
-/// despacha por nombre (`@get`/`@post`/`@put`/`@delete` registran rutas
-/// HTTP cuando llegue 4.2, `@server` configura el runtime, cualquier
-/// otro → error explícito "decorator desconocido"). Args son
-/// expresiones cualquiera, validadas en runtime por el decorator
-/// específico (ej.: `@get` exige un único `Str` con la ruta).
+/// In 4.1 the parser only accumulates decorators; the evaluator
+/// dispatches by name (`@get`/`@post`/`@put`/`@delete` register HTTP
+/// routes when 4.2 lands, `@server` configures the runtime, any
+/// other → explicit "unknown decorator" error). Args are arbitrary
+/// expressions, validated at runtime by the specific decorator
+/// (e.g. `@get` requires a single `Str` with the path).
 ///
-/// En 7.0 sumamos `kwargs` para soportar `@deco(pos1, key=value)`. Los
-/// kwargs van **después** de los positionals; el parser rechaza el
-/// orden inverso. Cada decorator decide si los acepta — hoy
-/// (mientras 7.4 no aterriza) `@get/@post/@put/@delete/@server`
-/// emiten error si reciben kwargs. Esto cambia cuando 7.4 cierre y
-/// `@server` acepte `docs: Bool`.
+/// In 7.0 we added `kwargs` to support `@deco(pos1, key=value)`.
+/// Kwargs go **after** the positionals; the parser rejects the
+/// reverse order. Each decorator decides whether it accepts them —
+/// today (while 7.4 has not landed)
+/// `@get/@post/@put/@delete/@server` emit an error on kwargs. That
+/// changes once 7.4 closes and `@server` accepts `docs: Bool`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decorator {
     pub name: String,
@@ -1093,7 +1114,7 @@ pub struct Decorator {
     pub kwargs: Vec<(String, Expr)>,
 }
 
-/// Un programa Fitz es una lista de sentencias.
+/// A Fitz program is a list of statements.
 pub type Program = Vec<Stmt>;
 
 // ---------------------------------------------------------------------------
@@ -1104,7 +1125,7 @@ pub type Program = Vec<Stmt>;
 mod tests {
     use super::*;
 
-    /// Construye a mano el AST equivalente al programa:
+    /// Builds by hand the AST equivalent to the program:
     ///
     /// ```fitz
     /// name = "Fitz"
@@ -1114,9 +1135,9 @@ mod tests {
     /// print(double(x))
     /// ```
     ///
-    /// Sirve como prueba de que el AST puede representar el criterio de
-    /// éxito de la Fase 2, y como referencia de qué tiene que producir el
-    /// parser cuando lo implementemos.
+    /// Acts as proof that the AST can represent the Phase 2 success
+    /// criterion, and as a reference for what the parser has to
+    /// produce once it is implemented.
     #[test]
     fn can_represent_phase2_success_program() {
         let program: Program = vec![
@@ -1196,7 +1217,7 @@ mod tests {
 
         assert_eq!(program.len(), 5);
 
-        // Verificación puntual: la 4ta sentencia es la fn def de `double`.
+        // Spot check: the 4th statement is the fn def of `double`.
         match &program[3] {
             Stmt::FnDef {
                 name, params, body, ..
@@ -1222,7 +1243,8 @@ mod tests {
 
     #[test]
     fn ast_supports_break_and_continue_inside_loops() {
-        // Stmt::Break y Stmt::Continue son sentencias por sí mismas.
+        // Stmt::Break and Stmt::Continue are statements in their
+        // own right.
         let stmts: Vec<Stmt> = vec![
             Stmt::Break(None, None, Span::ZERO),
             Stmt::Continue(None, Span::ZERO),
@@ -1339,7 +1361,7 @@ mod tests {
 
     #[test]
     fn pattern_range_guarda_extremos_como_int() {
-        // `match n { 0..10 => "chico", _ => "grande" }` — solo el patrón.
+        // `match n { 0..10 => "chico", _ => "grande" }` — the pattern only.
         let p = Pattern::Range {
             start: 0,
             end: 10,
@@ -1386,7 +1408,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Result (Fase 3, paso 3: Result + Ok/Err + `?`)
+    // Tests — Result (Phase 3, step 3: Result + Ok/Err + `?`)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1421,7 +1443,7 @@ mod tests {
 
     #[test]
     fn try_y_ctors_son_componibles() {
-        // `Ok(get(id)?)` — un `?` adentro de un constructor `Ok`.
+        // `Ok(get(id)?)` — a `?` inside an `Ok` constructor.
         let e = Expr::Ok(
             Box::new(Expr::Try(
                 Box::new(Expr::Call {
@@ -1458,12 +1480,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Fase 3, paso 4 (funciones anónimas + method calls + mutación)
+    // Tests — Phase 3, step 4 (anonymous functions + method calls + mutation)
     // -----------------------------------------------------------------------
 
     #[test]
     fn call_admite_callee_como_expresion() {
-        // `xs.map(f)` → Call con callee = Field { object: xs, field: "map" }.
+        // `xs.map(f)` → Call with callee = Field { object: xs, field: "map" }.
         let call = Expr::Call {
             callee: Box::new(Expr::Field {
                 object: Box::new(Expr::Ident("xs".into(), Span::ZERO)),
@@ -1484,7 +1506,7 @@ mod tests {
 
     #[test]
     fn fn_expr_envuelve_params_y_body() {
-        // `fn(x) => x * 2` — versión sin nombre.
+        // `fn(x) => x * 2` — nameless version.
         let fnexpr = Expr::FnExpr {
             params: vec![Param {
                 name: "x".into(),
@@ -1517,7 +1539,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Fase 3, paso 5 (módulos / import)
+    // Tests — Phase 3, step 5 (modules / import)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1557,7 +1579,7 @@ mod tests {
 
     #[test]
     fn from_import_guarda_path_y_nombres() {
-        // `from utils import slugify, parse` — sin aliases.
+        // `from utils import slugify, parse` — no aliases.
         let s = Stmt::FromImport {
             path: vec!["utils".into()],
             names: vec![("slugify".into(), None), ("parse".into(), None)],
@@ -1576,12 +1598,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Fase 4, paso 4.1 (decoradores genéricos sobre FnDef)
+    // Tests — Phase 4, step 4.1 (generic decorators over FnDef)
     // -----------------------------------------------------------------------
 
     #[test]
     fn decorator_guarda_nombre_y_args() {
-        // `@get("/users/{id}")` — un decorator con un arg string.
+        // `@get("/users/{id}")` — a decorator with a string arg.
         let d = Decorator {
             name: "get".into(),
             args: vec![Expr::Str("/users/{id}".into(), Span::ZERO)],
@@ -1595,7 +1617,8 @@ mod tests {
 
     #[test]
     fn fndef_default_sin_decorators_vector_vacio() {
-        // Una fn declarada sin `@...` arriba debe tener `decorators` vacío.
+        // A fn declared without `@...` on top should have an empty
+        // `decorators` vector.
         let f = Stmt::FnDef {
             name: "f".into(),
             params: vec![],
@@ -1614,7 +1637,7 @@ mod tests {
 
     #[test]
     fn fndef_admite_varios_decorators_en_orden() {
-        // `@get("/x") @auth("admin") fn h() {}` — dos decoradores apilados.
+        // `@get("/x") @auth("admin") fn h() {}` — two stacked decorators.
         let f = Stmt::FnDef {
             name: "h".into(),
             params: vec![],
@@ -1646,7 +1669,7 @@ mod tests {
 
     #[test]
     fn assign_target_admite_ident_y_field() {
-        // `x = 1` — target Ident.
+        // `x = 1` — Ident target.
         let s1 = Stmt::Assign {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
@@ -1659,7 +1682,7 @@ mod tests {
             panic!("se esperaba Assign");
         }
 
-        // `user.name = "x"` — target Field.
+        // `user.name = "x"` — Field target.
         let s2 = Stmt::Assign {
             target: AssignTarget::Field {
                 object: Box::new(Expr::Ident("user".into(), Span::ZERO)),
@@ -1682,7 +1705,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — TypeExpr (Fase 5, paso 5.1)
+    // Tests — TypeExpr (Phase 5, step 5.1)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1738,7 +1761,7 @@ mod tests {
         let n = TypeExpr::Nullable(Box::new(g));
         assert_eq!(n.head_name(), "List");
 
-        // Nullable de Nullable cae al fondo.
+        // Nullable of Nullable falls to the bottom.
         let nn = TypeExpr::Nullable(Box::new(TypeExpr::Nullable(Box::new(TypeExpr::named(
             "Int",
         )))));
@@ -1749,7 +1772,7 @@ mod tests {
     fn type_expr_is_nullable_solo_a_nivel_top() {
         assert!(!TypeExpr::named("Int").is_nullable());
         assert!(TypeExpr::Nullable(Box::new(TypeExpr::named("Int"))).is_nullable());
-        // `List<Int?>` no es nullable en sí; el campo interno sí.
+        // `List<Int?>` is not nullable itself; the inner field is.
         let outer = TypeExpr::Generic {
             name: "List".into(),
             args: vec![TypeExpr::Nullable(Box::new(TypeExpr::named("Int")))],

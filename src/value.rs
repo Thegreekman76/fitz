@@ -1,31 +1,33 @@
-// value.rs — Fase 2.4 (Shared migrado a Arc<Mutex<>> en F17.2)
+// value.rs — Phase 2.4 (Shared migrated to Arc<Mutex<>> in F17.2)
 //
-// Representación de valores en runtime. Un programa Fitz se evalúa a un árbol
-// de `Value`s. Esta es la moneda con la que opera el evaluador.
+// Runtime value representation. A Fitz program evaluates down to a tree
+// of `Value`s. This is the currency the evaluator operates on.
 //
-// Notas de diseño:
-//  - Los floats e ints se promueven mutuamente en operaciones (1 + 1.0 == 2.0)
-//    igual que en Python. Acá solo definimos los datos; la promoción la hace
-//    el evaluador.
-//  - `Display` muestra los valores como los vería el usuario al hacer `print`.
-//    Strings van sin comillas, floats siempre con `.0` si no tienen decimales
-//    (para distinguirlos visualmente de ints).
-//  - `PartialEq` está implementado a mano porque la comparación entre Int y
-//    Float requiere coerción (1 == 1.0 → true). Si lo derivamos, esa igualdad
-//    daría false.
-//  - `Value::Function` guarda un handle (`EnvRef`) al environment donde la
-//    función fue definida. Esto crea una dependencia mutua value↔env, pero
-//    Rust la acepta porque `Arc<Mutex<>>` es una indirección: el tamaño
-//    de `Value` no depende del tamaño de `Environment`.
-//  - **F17.2**: `Shared<T>` migrado de `Rc<RefCell<T>>` a
-//    `Arc<parking_lot::Mutex<T>>`. El cambio es transparente para los call
-//    sites que usaban `.borrow()`/`.borrow_mut()` → ambos pasan a `.lock()`
-//    (parking_lot::Mutex no distingue lectura de escritura).
-//  - **F17.3**: `Value` ya es `Send` post-F17.2 (los contenedores son
-//    `Arc<Mutex<>>`) y el evaluator pasó a `#[async_recursion]` sin
-//    `(?Send)`. `FitzFuture` carga `+ Send` ahora. Queda F17.4 para
-//    switchear el runtime tokio a `rt-multi-thread` y F17.5 para
-//    eliminar el bridge HTTP mpsc/oneshot.
+// Design notes:
+//  - Floats and ints promote to each other in operations (1 + 1.0 == 2.0)
+//    just like in Python. Here we only define the data; promotion lives
+//    in the evaluator.
+//  - `Display` shows values as the user would see them with `print`.
+//    Strings come out without quotes; floats always carry `.0` when
+//    they have no decimals (to tell them apart visually from ints).
+//  - `PartialEq` is implemented by hand because the Int↔Float
+//    comparison needs coercion (1 == 1.0 → true). Deriving it would
+//    make that equality return false.
+//  - `Value::Function` keeps a handle (`EnvRef`) to the environment
+//    where the function was defined. This creates a mutual
+//    value↔env dependency, but Rust accepts it because
+//    `Arc<Mutex<>>` is an indirection: the size of `Value` does
+//    not depend on the size of `Environment`.
+//  - **F17.2**: `Shared<T>` migrated from `Rc<RefCell<T>>` to
+//    `Arc<parking_lot::Mutex<T>>`. The change is transparent for the
+//    call sites that used `.borrow()`/`.borrow_mut()` — both now map
+//    to `.lock()` (parking_lot::Mutex does not distinguish reads
+//    from writes).
+//  - **F17.3**: `Value` is already `Send` post-F17.2 (the containers
+//    are `Arc<Mutex<>>`) and the evaluator moved to `#[async_recursion]`
+//    without `(?Send)`. `FitzFuture` now carries `+ Send`. F17.4 is
+//    left for switching the tokio runtime to `rt-multi-thread`, and
+//    F17.5 for removing the HTTP mpsc/oneshot bridge.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -37,28 +39,29 @@ use crate::ast::{Field, Param, Stmt};
 use crate::env::EnvRef;
 use crate::error::FitzResult;
 
-/// Future pendiente del evaluator. Se construye al llamar una `async fn`
-/// Fitz sin `.await` (guardar el future suelto) o desde builtins async
-/// como `sleep`. `.await` lo desempaca al `FitzResult<Value>` interno.
+/// Pending evaluator future. It is built when calling a Fitz `async fn`
+/// without `.await` (storing the bare future) or from async builtins
+/// like `sleep`. `.await` unpacks it into the inner `FitzResult<Value>`.
 ///
-/// **`+ Send` post-F17.3**: el evaluator pasó a `#[async_recursion]` sin
-/// `(?Send)`. Eso pide que cada future del eval sea `Send`, lo que se
-/// propaga acá: los `Value::Future` que el lenguaje expone también
-/// tienen que cargar un future `Send`. La condición se cumple porque
-/// los contenedores compartidos (`Shared<T>` = `Arc<Mutex<T>>`,
-/// `EnvRef`) ya son `Send` post-F17.2, y el resto de los capturados
-/// del eval (`Vec<Stmt>`, `Param`, `Value` shallow) ya cumplían el
-/// bound de antes. Habilita `tokio::spawn` y `rt-multi-thread`.
+/// **`+ Send` post-F17.3**: the evaluator moved to `#[async_recursion]`
+/// without `(?Send)`. That requires every eval future to be `Send`,
+/// and the requirement propagates here: the `Value::Future`s the
+/// language exposes must also carry a `Send` future. The bound holds
+/// because the shared containers (`Shared<T>` = `Arc<Mutex<T>>`,
+/// `EnvRef`) are already `Send` post-F17.2, and the rest of the
+/// captures from the eval (`Vec<Stmt>`, `Param`, shallow `Value`)
+/// already met the bound. This unlocks `tokio::spawn` and
+/// `rt-multi-thread`.
 pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>> + Send>>;
 
-/// Mini-tanda Mw-Wrap — wrapper opaco para el callback de
-/// `Value::NativeFn`. El `Arc` permite clone barato (los `Value` se
-/// clonan a lo largo del pipeline). Send + Sync para fluir a través
-/// de tokio runtimes multi-thread (post-F17.4). El input es
-/// `Vec<Value>` para uniformar con la convención del resto de las
-/// llamadas (aridad 0 = vec vacío); para `next: Fn() -> Response`
-/// siempre llega vacío. Wrapper struct (no type alias) para poder
-/// implementar `Debug` (el `dyn Fn` no lo deriva).
+/// Mini-batch Mw-Wrap — opaque wrapper for the `Value::NativeFn`
+/// callback. The `Arc` allows cheap cloning (the `Value`s get cloned
+/// along the pipeline). Send + Sync to flow across multi-thread tokio
+/// runtimes (post-F17.4). The input is `Vec<Value>` for uniformity
+/// with the rest of the call convention (arity 0 = empty vec); for
+/// `next: Fn() -> Response` it is always empty. Wrapper struct (not a
+/// type alias) so we can implement `Debug` (the `dyn Fn` does not
+/// derive it).
 #[derive(Clone)]
 pub struct NativeAsyncFn(pub Arc<dyn Fn(Vec<Value>) -> FitzFuture + Send + Sync>);
 
@@ -68,92 +71,94 @@ impl std::fmt::Debug for NativeAsyncFn {
     }
 }
 
-/// Wrapper sobre el future pendiente que aporta `Debug` manual. El
-/// `dyn Future` no implementa `Debug` así que no podemos derivarlo
-/// en `Value`. La celda envuelve `Option<...>` para que `.take()`
-/// extraiga el future al hacer `.await` sin clonar (los futures se
-/// consumen una sola vez).
+/// Wrapper around the pending future that supplies a manual `Debug`.
+/// The `dyn Future` does not implement `Debug`, so we cannot derive
+/// it on `Value`. The cell wraps `Option<...>` so `.take()` extracts
+/// the future when `.await`ing without cloning (futures are consumed
+/// once).
 ///
-/// **F17.2-3**: usa `Arc<Mutex<>>` igual que el resto de `Shared<T>`.
-/// Como `FitzFuture` carga `+ Send` post-F17.3, `Mutex<Option<FitzFuture>>`
-/// es `Send + Sync` y `FutureCell` es Send — un `Value::Future` puede
-/// viajar entre tareas tokio cuando el runtime sea `rt-multi-thread`
-/// (F17.4).
+/// **F17.2-3**: uses `Arc<Mutex<>>` like the rest of `Shared<T>`.
+/// Since `FitzFuture` carries `+ Send` post-F17.3, `Mutex<Option<FitzFuture>>`
+/// is `Send + Sync` and `FutureCell` is Send — a `Value::Future` can
+/// travel across tokio tasks once the runtime becomes
+/// `rt-multi-thread` (F17.4).
 pub struct FutureCell(pub Arc<Mutex<Option<FitzFuture>>>);
 
-/// Fase 9.w.2 — Handle opaco a una conexión WebSocket abierta. Lo
-/// construye el runtime HTTP tras el upgrade HTTP→WS y se inyecta al
-/// handler `@ws("/path")` como `Value::WsConn(Arc<WsConnHandle>)`.
+/// Phase 9.w.2 — Opaque handle to an open WebSocket connection. The
+/// HTTP runtime builds it after the HTTP→WS upgrade and injects it
+/// into the `@ws("/path")` handler as `Value::WsConn(Arc<WsConnHandle>)`.
 ///
-/// Diseño:
-///   - `rx`: read half del WebSocket (axum SplitStream). `recv()` lo
-///     locka, awaitea el próximo frame, parsea contra T.
-///   - `outbox_tx`: un mpsc channel del conn que un "writer task"
-///     drena → empuja al sink del socket. `send(msg)` y
-///     `broadcast(msg)` empujan al outbox sin contender por el sink.
-///   - `broadcaster`: shared handle al registry per-endpoint. Permite
-///     que `broadcast(msg)` itere los outboxes de TODOS los conns
-///     vivos del endpoint (incluyendo el sender — convención
-///     Socket.IO/Phoenix).
-///   - `endpoint`: path del decorator `@ws("/x")`. Scope del broadcast.
-///   - `conn_id`: id único del conn dentro del broadcaster, para
-///     unregister al cerrar.
-///   - `closed`: flag atomic que `close()` setea. Métodos chequean
-///     antes de cualquier operación para fail-fast con `Err` claro.
+/// Design:
+///   - `rx`: read half of the WebSocket (axum SplitStream). `recv()`
+///     locks it, awaits the next frame, parses against T.
+///   - `outbox_tx`: a per-conn mpsc channel that a "writer task"
+///     drains → pushes to the socket sink. `send(msg)` and
+///     `broadcast(msg)` push to the outbox without contending on
+///     the sink.
+///   - `broadcaster`: shared handle to the per-endpoint registry. It
+///     lets `broadcast(msg)` iterate the outboxes of ALL live conns
+///     on the endpoint (including the sender — Socket.IO/Phoenix
+///     convention).
+///   - `endpoint`: the `@ws("/x")` decorator path. Broadcast scope.
+///   - `conn_id`: unique id of the conn inside the broadcaster, used
+///     for unregister on close.
+///   - `closed`: atomic flag set by `close()`. Methods check it
+///     before any operation for fail-fast with a clear `Err`.
 ///
-/// El tipo concreto vive en `http.rs` para evitar leak de tipos
-/// axum/tokio-tungstenite a `value.rs`. Acá lo declaramos como `dyn`
-/// opaco con los métodos mínimos que el evaluator/codegen necesitan
-/// dispatcheable.
+/// The concrete type lives in `http.rs` to avoid leaking axum /
+/// tokio-tungstenite types into `value.rs`. Here we declare it as an
+/// opaque `dyn` with the minimum methods the evaluator/codegen need
+/// to dispatch.
 ///
-/// Solo existe en runtime — Display imprime `<ws-conn>`, type_name
-/// `WsConn`, JSON serialization rechaza (la conn no es marshalleable
-/// a JSON; el `T` que ella transporta sí lo es individualmente).
+/// Only exists at runtime — Display prints `<ws-conn>`, type_name
+/// `WsConn`, JSON serialisation rejects it (the conn is not
+/// marshallable to JSON; the `T` it carries individually is).
 pub struct WsConnHandle {
-    /// Path del endpoint (e.g. `"/chat"`).
+    /// Endpoint path (e.g. `"/chat"`).
     pub endpoint: String,
-    /// Id único del conn dentro del broadcaster. Único hasta restart
-    /// del server. AtomicU64 garantiza no-colisión bajo concurrencia.
+    /// Unique id of the conn inside the broadcaster. Unique until the
+    /// server restarts. AtomicU64 guarantees non-collision under
+    /// concurrency.
     pub conn_id: u64,
-    /// Read half del WebSocket. `recv()` lo locka mientras espera el
-    /// próximo frame; durante ese tiempo `send`/`broadcast` siguen
-    /// libres (locks separados).
+    /// Read half of the WebSocket. `recv()` locks it while it waits
+    /// for the next frame; during that time `send`/`broadcast` stay
+    /// free (separate locks).
     ///
-    /// Usamos `tokio::sync::Mutex` (no `parking_lot::Mutex`) porque
-    /// `recv()` necesita sostener el lock a través de un `.await`
-    /// — solo `tokio::sync::Mutex` garantiza `MutexGuard: Send` para
-    /// uso en futures `Send`. El resto del codebase usa parking_lot
-    /// para locks sync, pero acá el patrón es async-aware.
+    /// We use `tokio::sync::Mutex` (not `parking_lot::Mutex`) because
+    /// `recv()` needs to hold the lock across an `.await` — only
+    /// `tokio::sync::Mutex` guarantees `MutexGuard: Send` for use in
+    /// `Send` futures. The rest of the codebase uses parking_lot for
+    /// sync locks, but here the pattern is async-aware.
     pub rx: Arc<tokio::sync::Mutex<WsReadStream>>,
-    /// Outbox del conn. `send(msg)` y los `broadcast(msg)` de OTROS
-    /// conns escriben acá; un writer task drena → empuja al sink del
-    /// socket. Unbounded para no bloquear el handler.
+    /// Conn outbox. `send(msg)` from this conn and `broadcast(msg)`
+    /// from OTHER conns write here; a writer task drains → pushes to
+    /// the socket sink. Unbounded so it does not block the handler.
     pub outbox_tx: tokio::sync::mpsc::UnboundedSender<WsOutMessage>,
-    /// Flag atomic — `true` cuando el conn se cerró (handler retornó,
-    /// `close()` invocado, o el writer task detectó el sink cerrado).
-    /// Los métodos del conn lo chequean al entrar para fail-fast.
+    /// Atomic flag — `true` once the conn closed (handler returned,
+    /// `close()` invoked, or the writer task detected the sink
+    /// closed). The conn methods check it on entry for fail-fast.
     pub closed: Arc<std::sync::atomic::AtomicBool>,
-    /// Handle al broadcaster compartido (per `HttpRegistry`). Permite
-    /// que `broadcast(msg)` busque los outboxes del endpoint sin
-    /// pasar por `HttpRegistry`.
+    /// Handle to the shared broadcaster (per `HttpRegistry`). Lets
+    /// `broadcast(msg)` look up the endpoint's outboxes without going
+    /// through `HttpRegistry`.
     pub broadcaster: Arc<dyn WsBroadcasterTrait + Send + Sync>,
-    /// Fase 9.w.2 — TypeExpr del T en `WsConn<T>`. `recv()` lo usa
-    /// para coercer `Map` recibidos a `Instance` cuando T es nominal
-    /// (paralelo a la coerción 8.4.3 sobre `Stmt::Assign`). `None`
-    /// para conns construidos en tests sin contexto de tipo.
+    /// Phase 9.w.2 — TypeExpr of T in `WsConn<T>`. `recv()` uses it
+    /// to coerce incoming `Map`s into `Instance` when T is nominal
+    /// (parallel to the 8.4.3 coercion in `Stmt::Assign`). `None`
+    /// for conns built in tests with no type context.
     ///
-    /// 9.w.2-wsconn-bidir (v0.9.38): `recv_type` y `send_type` pueden
-    /// diferir para canales asimétricos (`WsConn<In, Out>`). `recv()`
-    /// usa `recv_type` para deserializar/coercer; `send()`/`broadcast()`
-    /// usan `send_type` para detectar modo binary vs text JSON. Para
-    /// `WsConn<T>` simétrico, los dos son `Some(T)` con el mismo
+    /// 9.w.2-wsconn-bidir (v0.9.38): `recv_type` and `send_type` can
+    /// differ for asymmetric channels (`WsConn<In, Out>`). `recv()`
+    /// uses `recv_type` to deserialise/coerce; `send()`/`broadcast()`
+    /// use `send_type` to choose between binary mode and JSON text.
+    /// For a symmetric `WsConn<T>`, both are `Some(T)` with the same
     /// TypeExpr.
     pub msg_type: Option<crate::ast::TypeExpr>,
     pub send_type: Option<crate::ast::TypeExpr>,
-    /// Fase 9.w.2 — EnvRef del scope donde se declaró el handler.
-    /// Necesario para resolver `msg_type` cuando `T` es nominal (el
-    /// `Value::Type` del nominal vive en el env). `Arc<Mutex<>>`
-    /// — clon barato.
+    /// Phase 9.w.2 — EnvRef of the scope where the handler was
+    /// declared. Needed to resolve `msg_type` when `T` is nominal
+    /// (the nominal's `Value::Type` lives in the env). `Arc<Mutex<>>`
+    /// — cheap clone.
     pub env: EnvRef,
 }
 
@@ -170,49 +175,51 @@ impl std::fmt::Debug for WsConnHandle {
     }
 }
 
-/// Alias para el read half — typedef interno para no leakear el tipo
-/// concreto `axum::extract::ws::WebSocket`'s SplitStream a value.rs.
-/// El struct concreto vive en `http.rs` y se castea a `Box<dyn>` o
-/// se almacena como tipo concreto vía generics en el handler.
+/// Alias for the read half — internal typedef so we do not leak the
+/// concrete `axum::extract::ws::WebSocket`'s SplitStream into
+/// value.rs. The concrete struct lives in `http.rs` and is cast to
+/// `Box<dyn>` or stored as a concrete type via generics in the handler.
 ///
-/// Decisión MVP: usamos un trait object para abstraerlo. El read
-/// half concreto se castea al impl `WsReadStreamImpl` definido en
-/// http.rs. Esto evita que `value.rs` dependa de `axum` directo.
+/// MVP decision: we use a trait object to abstract it. The concrete
+/// read half is cast to the `WsReadStreamImpl` impl defined in
+/// http.rs. This stops `value.rs` from depending on `axum` directly.
 pub type WsReadStream = Box<dyn WsReadStreamTrait + Send + Unpin>;
 
-/// Frame entrante leído por el read half. Distingue text (modo
-/// JSON-marshalled, default para `WsConn<T>` con T ≠ Bytes) de
-/// binary (modo raw, exclusivo de `WsConn<Bytes>` — 9.w.2-binary-frames).
+/// Incoming frame read by the read half. Distinguishes text (JSON-
+/// marshalled mode, the default for `WsConn<T>` with T ≠ Bytes) from
+/// binary (raw mode, exclusive to `WsConn<Bytes>` —
+/// 9.w.2-binary-frames).
 ///
-/// El read stream NUNCA filtra entre text y binary: ambos se exponen
-/// al evaluator/codegen, que discrimina según el T declarado en el
-/// `WsConn<T>` del handler. Mismatch (T=Str pero llega Binary, o T=Bytes
-/// pero llega Text) → `Err` claro desde el método del conn (`recv()`).
+/// The read stream NEVER filters between text and binary: both are
+/// exposed to the evaluator/codegen, which discriminates based on
+/// the T declared in the handler's `WsConn<T>`. A mismatch (T=Str
+/// but Binary arrives, or T=Bytes but Text arrives) → clear `Err`
+/// from the conn method (`recv()`).
 ///
-/// Ping/Pong/Close los maneja la stack axum/tungstenite por debajo;
-/// nunca se exponen acá.
+/// Ping/Pong/Close are handled by the axum/tungstenite stack
+/// underneath; they are never exposed here.
 #[derive(Debug, Clone)]
 pub enum IncomingFrame {
-    /// Text frame UTF-8. `recv()` con T ≠ Bytes lo parsea como JSON y
-    /// coerce al T declarado.
+    /// UTF-8 text frame. `recv()` with T ≠ Bytes parses it as JSON
+    /// and coerces it to the declared T.
     Text(String),
-    /// Binary frame raw. `recv()` con T = Bytes lo expone como
+    /// Raw binary frame. `recv()` with T = Bytes exposes it as
     /// `Value::Bytes(...)`.
     Binary(Vec<u8>),
 }
 
-/// Trait del read half — abstracción para no leakear axum tipos.
-/// Define solo lo que necesita `recv()`: leer un frame (text o binary)
-/// o detectar close.
+/// Trait for the read half — abstraction so we do not leak axum
+/// types. Only defines what `recv()` needs: read a frame (text or
+/// binary) or detect close.
 pub trait WsReadStreamTrait {
-    /// Lee el próximo frame. Devuelve:
+    /// Reads the next frame. Returns:
     ///   - `Ok(Some(IncomingFrame::Text(s)))` — text frame.
     ///   - `Ok(Some(IncomingFrame::Binary(bs)))` — binary frame.
-    ///   - `Ok(None)` — close frame; el conn cerró ordenadamente.
-    ///   - `Err(msg)` — error de transporte.
+    ///   - `Ok(None)` — close frame; the conn closed cleanly.
+    ///   - `Err(msg)` — transport error.
     ///
-    /// Ping/Pong: el impl los maneja internamente (axum auto-replies;
-    /// los descartamos en el loop interno).
+    /// Ping/Pong: the impl handles them internally (axum auto-
+    /// replies; we drop them in the internal loop).
     fn next_frame<'a>(
         &'a mut self,
     ) -> std::pin::Pin<
@@ -220,43 +227,46 @@ pub trait WsReadStreamTrait {
     >;
 }
 
-/// Mensaje "outbox" — texto, bytes o señal de cierre. El writer task
-/// del conn lo consume y lo traduce al frame axum correspondiente.
+/// "Outbox" message — text, bytes, or close signal. The conn's
+/// writer task consumes it and translates it into the matching axum
+/// frame.
 #[derive(Debug, Clone)]
 pub enum WsOutMessage {
-    /// Frame text con `payload` (JSON serialization del T cuando T ≠ Bytes).
+    /// Text frame with `payload` (JSON serialisation of T when T ≠ Bytes).
     Text(String),
-    /// 9.w.2-binary-frames — frame binario raw. Construido por
-    /// `WsConn<Bytes>.send(...)` / `.broadcast(...)`. El writer task lo
-    /// traduce a `axum::extract::ws::Message::Binary(...)`.
+    /// 9.w.2-binary-frames — raw binary frame. Built by
+    /// `WsConn<Bytes>.send(...)` / `.broadcast(...)`. The writer task
+    /// translates it to `axum::extract::ws::Message::Binary(...)`.
     Binary(Vec<u8>),
-    /// Pedido de cierre. El writer task lo procesa y termina.
+    /// Close request. The writer task processes it and exits.
     Close,
-    /// Fase 9.w.2.e — heartbeat ping. El writer task lo traduce a
-    /// `axum::extract::ws::Message::Ping(...)`. Si el sink.send() falla,
-    /// el writer task termina y `closed` se setea (lo cual el heartbeat
-    /// task también detecta en su próxima iteración).
+    /// Phase 9.w.2.e — heartbeat ping. The writer task translates it
+    /// to `axum::extract::ws::Message::Ping(...)`. If sink.send()
+    /// fails, the writer task exits and `closed` is set (which the
+    /// heartbeat task also detects on its next iteration).
     Ping,
 }
 
-/// Trait del broadcaster — abstracción que `WsConnHandle.broadcaster`
-/// implementa. Para evitar que `value.rs` dependa de `http.rs` (que
-/// es donde vive el broadcaster concreto), exponemos los métodos
-/// `broadcast_text` y `broadcast_binary` (9.w.2-binary-frames separó
-/// los dos para mantener tipo y evitar un enum extra en la API).
+/// Trait for the broadcaster — abstraction that
+/// `WsConnHandle.broadcaster` implements. To stop `value.rs` from
+/// depending on `http.rs` (where the concrete broadcaster lives),
+/// we expose `broadcast_text` and `broadcast_binary`
+/// (9.w.2-binary-frames split the two to keep types and avoid an
+/// extra enum in the API).
 ///
-/// El runtime construye un broadcaster compartido por `HttpRegistry`
-/// (`Arc<WsBroadcaster>`), lo registra en cada `WsConnHandle`, y
-/// `broadcast(msg)` del lado del usuario delega al método que
-/// corresponda según el T del `WsConn`.
+/// The runtime builds a shared broadcaster per `HttpRegistry`
+/// (`Arc<WsBroadcaster>`), registers it on every `WsConnHandle`, and
+/// the user-side `broadcast(msg)` delegates to the matching method
+/// based on the `WsConn`'s T.
 pub trait WsBroadcasterTrait {
-    /// Envía `payload` (text frame) al outbox de TODOS los conns
-    /// vivos en `endpoint`, incluyendo el conn que invocó (convención
-    /// Socket.IO/Phoenix). Conns con outbox cerrado se ignoran
-    /// silenciosamente (cleanup lazy).
+    /// Sends `payload` (text frame) to the outbox of EVERY live conn
+    /// on `endpoint`, including the conn that invoked
+    /// (Socket.IO/Phoenix convention). Conns with a closed outbox
+    /// are silently ignored (lazy cleanup).
     fn broadcast_text(&self, endpoint: &str, payload: String);
-    /// 9.w.2-binary-frames — variante binaria. Mismo modelo "broadcast
-    /// a todos del endpoint incluyendo sender" que `broadcast_text`.
+    /// 9.w.2-binary-frames — binary variant. Same "broadcast to
+    /// everyone on the endpoint including the sender" model as
+    /// `broadcast_text`.
     fn broadcast_binary(&self, endpoint: &str, payload: Vec<u8>);
 }
 
@@ -277,43 +287,46 @@ impl std::fmt::Debug for FutureCell {
     }
 }
 
-/// Alias para colecciones compartidas por referencia. Las listas, los
-/// mapas y los campos de una instancia viven detrás de
-/// `Arc<parking_lot::Mutex<>>`: `Arc` permite alias (la misma colección
-/// visible desde múltiples variables/campos/argumentos) y `Mutex` permite
-/// mutar a través del alias. Es la misma semántica que objetos en Python
-/// y JS pero ya thread-safe — habilitará paralelismo real entre tareas
-/// Fitz una vez que F17.3 cierre y quitemos `(?Send)` del async_recursion.
+/// Alias for collections shared by reference. Lists, maps and the
+/// fields of an instance live behind `Arc<parking_lot::Mutex<>>`:
+/// `Arc` allows aliasing (the same collection visible from multiple
+/// variables/fields/arguments) and `Mutex` allows mutation through
+/// the alias. Same semantics as objects in Python and JS but already
+/// thread-safe — it will enable real parallelism between Fitz tasks
+/// once F17.3 closes and we drop `(?Send)` from async_recursion.
 ///
-/// `Value::clone()` clona el `Arc` (barato), no el contenido — todas las
-/// copias miran el mismo dato. Eso es lo que destraba `xs.push(...)`,
-/// `user.name = "x"` y demás formas de mutación.
+/// `Value::clone()` clones the `Arc` (cheap), not the contents —
+/// every copy sees the same data. That is what enables `xs.push(...)`,
+/// `user.name = "x"` and every other form of mutation.
 ///
-/// **F17.2**: migrado de `Rc<RefCell<T>>` a `Arc<parking_lot::Mutex<T>>`.
-/// `.borrow()` y `.borrow_mut()` se mapean ambos a `.lock()` —
-/// parking_lot no distingue lectura de escritura (si en algún hot path
-/// las lecturas concurrentes ganan el costo extra, evaluamos `RwLock`).
+/// **F17.2**: migrated from `Rc<RefCell<T>>` to
+/// `Arc<parking_lot::Mutex<T>>`. `.borrow()` and `.borrow_mut()`
+/// both map to `.lock()` — parking_lot does not distinguish reads
+/// from writes (if a hot path with concurrent reads eats the extra
+/// cost, we evaluate `RwLock`).
 pub type Shared<T> = Arc<Mutex<T>>;
 
-/// Constructor del wrapper compartido. Usar siempre `shared(x)` en lugar
-/// de `Arc::new(Mutex::new(x))` directo, para que el patrón quede uniforme.
+/// Constructor for the shared wrapper. Always use `shared(x)` instead
+/// of `Arc::new(Mutex::new(x))` directly so the pattern stays
+/// uniform.
 pub fn shared<T>(value: T) -> Shared<T> {
     Arc::new(Mutex::new(value))
 }
 
-/// Handle opaco a un objeto Python (módulo, función, instancia, etc.) —
-/// solo existe cuando el binario `fitz` se compila con la feature
-/// `python` (Fase 8.1+). Envuelve `Py<PyAny>` de PyO3 en un `Arc` para
-/// que `Value::clone()` quede O(1) sin tomar el GIL: el `Arc` cuenta
-/// las copias del handle a nivel Rust, y solo cuando el último handle
-/// se dropea PyO3 toma el GIL para decrementar el refcount Python.
+/// Opaque handle to a Python object (module, function, instance,
+/// etc.) — only exists when the `fitz` binary is built with the
+/// `python` feature (Phase 8.1+). Wraps PyO3's `Py<PyAny>` in an
+/// `Arc` so `Value::clone()` is O(1) without taking the GIL: the
+/// `Arc` counts the Rust-side handle copies, and only when the last
+/// handle drops does PyO3 take the GIL to decrement the Python
+/// refcount.
 ///
-/// La igualdad es por identidad del objeto Python (`Py::as_ptr()`),
-/// igual que para `Value::Module` y `Value::Function`. Dos handles
-/// distintos al mismo módulo importado son iguales.
+/// Equality is by Python-object identity (`Py::as_ptr()`), same as
+/// `Value::Module` and `Value::Function`. Two distinct handles to
+/// the same imported module compare equal.
 ///
-/// Debug manual (Py<PyAny> no implementa Debug) — produce
-/// `PyObjectHandle(<python object>)` sin tocar Python.
+/// Manual Debug (Py<PyAny> does not implement Debug) — produces
+/// `PyObjectHandle(<python object>)` without touching Python.
 #[cfg(feature = "python")]
 pub struct PyObjectHandle(pub Arc<pyo3::Py<pyo3::PyAny>>);
 
@@ -333,39 +346,41 @@ impl std::fmt::Debug for PyObjectHandle {
 
 #[cfg(feature = "python")]
 impl PyObjectHandle {
-    /// Construye un handle a partir de un `Py<PyAny>` ya adquirido
-    /// (por ejemplo, el retorno de `PyModule::import` adentro de un
-    /// `Python::with_gil`). El caller mantiene la responsabilidad de
-    /// haber tomado el GIL para obtener el `Py<PyAny>` original; este
-    /// constructor solo envuelve.
+    /// Builds a handle from an already-acquired `Py<PyAny>` (e.g.
+    /// the return of `PyModule::import` inside a `Python::with_gil`).
+    /// The caller keeps the responsibility of having taken the GIL
+    /// to obtain the original `Py<PyAny>`; this constructor only
+    /// wraps.
     ///
-    /// `dead_code` allow: la variante `Value::PyObject` y este
-    /// constructor aún no se usan en 8.1.1 (solo placeholder); el
-    /// loader Python en `evaluator::load_module` los consume en 8.1.2.
+    /// `dead_code` allow: the `Value::PyObject` variant and this
+    /// constructor are not used in 8.1.1 yet (placeholder only); the
+    /// Python loader in `evaluator::load_module` consumes them in
+    /// 8.1.2.
     #[allow(dead_code)]
     pub fn new(obj: pyo3::Py<pyo3::PyAny>) -> Self {
         PyObjectHandle(Arc::new(obj))
     }
 }
 
-/// Fase 12.2.a — Wrapper del inner de `Value::Secret` con `Debug`
-/// custom que redacta. Existe como tipo dedicado (en vez de
-/// `Box<Value>` directo) para que el `derive(Debug)` de `Value`
-/// propague la redacción automáticamente — sin esto, el inner se
-/// pinta crudo en cualquier `format!("{:?}", value)` y leakea el
-/// secret a logs/panics. `PartialEq` deriva delegando al inner.
+/// Phase 12.2.a — Wrapper for the inner of `Value::Secret` with a
+/// custom `Debug` that redacts. It exists as a dedicated type
+/// (instead of `Box<Value>` directly) so the `derive(Debug)` on
+/// `Value` propagates the redaction automatically — without this,
+/// the inner gets printed raw in any `format!("{:?}", value)` and
+/// leaks the secret to logs/panics. `PartialEq` is derived,
+/// delegating to the inner.
 #[derive(Clone, PartialEq)]
 pub struct SecretInner(pub Box<Value>);
 
 impl std::fmt::Debug for SecretInner {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // NO mostrar el inner — esa es la regla. El `Debug` del Value
-        // que envuelve un Secret pinta `Secret(<redacted>)`.
+        // Do NOT show the inner — that is the rule. The `Debug` of
+        // the Value that wraps a Secret prints `Secret(<redacted>)`.
         write!(f, "<redacted>")
     }
 }
 
-/// Un valor en runtime.
+/// A runtime value.
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
@@ -374,39 +389,42 @@ pub enum Value {
     Bool(bool),
     Null,
 
-    /// Mini-tanda Bytes — secuencia de bytes binarios. Construido vía
-    /// literal `b"..."` con escapes hex (`\xHH`) o vía builtin
-    /// `bytes_from_str(s)`. Inmutable de hecho (no se expone `push`
-    /// para mantener el modelo simple). Clone es O(n).
+    /// Mini-batch Bytes — binary byte sequence. Built via the
+    /// `b"..."` literal with hex escapes (`\xHH`) or via the builtin
+    /// `bytes_from_str(s)`. Immutable in practice (no `push` is
+    /// exposed, to keep the model simple). Clone is O(n).
     Bytes(Vec<u8>),
 
-    /// Mini-tanda Mw-Wrap — función nativa async construida por el
-    /// runtime y pasada como Value al usuario. Hoy se usa solo para
-    /// el `next` callable de los wrap-style middlewares: el chain
-    /// runner construye un `NativeFn` que captura el resto de la
-    /// chain + el handler y lo pasa al middleware, que decide cuándo
-    /// invocarlo (antes/después del handler, condicionalmente,
-    /// midiendo tiempo, etc.). Send + Sync para que pueda fluir a
-    /// través de tokio runtimes.
+    /// Mini-batch Mw-Wrap — async native function built by the
+    /// runtime and passed as a Value to the user. Today it is used
+    /// only for the `next` callable of wrap-style middlewares: the
+    /// chain runner builds a `NativeFn` capturing the rest of the
+    /// chain + the handler and hands it to the middleware, which
+    /// decides when to invoke it (before/after the handler,
+    /// conditionally, measuring time, etc.). Send + Sync so it can
+    /// flow across tokio runtimes.
     NativeFn(NativeAsyncFn),
 
-    /// Función nativa implementada en Rust (ej: `print`).
-    /// La firma recibe los args ya evaluados y devuelve un valor o error.
+    /// Native function implemented in Rust (e.g. `print`).
+    /// The signature receives already-evaluated args and returns a
+    /// value or error.
     Builtin {
         name: &'static str,
         func: fn(&[Value]) -> FitzResult<Value>,
     },
 
-    /// Función definida por el usuario. Guarda sus parámetros, su cuerpo,
-    /// y un handle al env donde fue definida. Ese handle es el "closure":
-    /// al llamar la función creamos un scope hijo de ese env, no del caller.
-    /// Eso le da acceso a las variables del lugar donde se definió.
+    /// User-defined function. Stores its parameters, its body, and a
+    /// handle to the env where it was defined. That handle is the
+    /// "closure": when calling the function we create a child scope
+    /// of that env, not of the caller. That gives access to the
+    /// variables of the place where it was defined.
     ///
-    /// `is_async` (Fase 6.4): replica el flag del `Stmt::FnDef` original.
-    /// `FnExpr` siempre lo marca como `false` (no se soportan async fn
-    /// anónimas hoy). El dispatcher de llamadas lo consulta: si una fn
-    /// async se llama sin `.await`, devuelve un `Value::Future` que
-    /// envuelve la evaluación del body; con `.await` desempaca al T.
+    /// `is_async` (Phase 6.4): mirrors the flag of the original
+    /// `Stmt::FnDef`. `FnExpr` always marks it as `false` (anonymous
+    /// async fns are not supported today). The call dispatcher
+    /// checks it: if an async fn is called without `.await`, it
+    /// returns a `Value::Future` wrapping the body evaluation; with
+    /// `.await` it unpacks to T.
     Function {
         params: Vec<Param>,
         body: Vec<Stmt>,
@@ -414,268 +432,279 @@ pub enum Value {
         is_async: bool,
     },
 
-    /// Tipo custom definido por el usuario (`type User { id: Int }`).
-    /// Por ahora es un marcador inerte: existe en el env para que el nombre
-    /// del tipo pueda resolverse, pero sin struct literals no se puede
-    /// instanciar. Se vuelve útil en Fase 3 (instanciación, field access).
+    /// User-defined custom type (`type User { id: Int }`).
+    /// For now it is an inert marker: it lives in the env so the
+    /// type name can resolve, but without struct literals it cannot
+    /// be instantiated. It becomes useful in Phase 3 (instantiation,
+    /// field access).
     ///
-    /// PreF8.3: `resolved_defaults` queda vacío para tipos definidos en el
-    /// archivo actual (sus defaults se evalúan lazy cada vez que se
-    /// instancia, con el env del call site). Para tipos importados desde
-    /// otro módulo, el loader pre-evalúa los `Field.default` en el env de
-    /// origen y los materializa acá. El struct lit prefiere
-    /// `resolved_defaults` antes de caer al `Field.default` como Expr,
-    /// para que un default importado pueda referenciar consts u otros
-    /// símbolos del módulo de origen sin que el importer los tenga que
-    /// re-importar.
+    /// PreF8.3: `resolved_defaults` stays empty for types defined
+    /// in the current file (their defaults are evaluated lazily on
+    /// every instantiation, with the call-site env). For types
+    /// imported from another module, the loader pre-evaluates the
+    /// `Field.default`s in the origin env and materialises them
+    /// here. The struct literal prefers `resolved_defaults` before
+    /// falling back to `Field.default` as Expr, so an imported
+    /// default can reference consts or other symbols from the
+    /// origin module without the importer having to re-import them.
     Type {
         name: String,
         fields: Vec<Field>,
         resolved_defaults: Vec<(String, Value)>,
-        /// R.3 (mini-fase R) — métodos custom declarados en el `type`.
-        /// El dispatch sobre `Value::Instance` busca primero por
-        /// nombre acá; si no existe, cae a los métodos built-in.
+        /// R.3 (mini-phase R) — custom methods declared inside the
+        /// `type`. Dispatch on `Value::Instance` looks them up by
+        /// name here first; if not found, it falls back to the
+        /// built-in methods.
         methods: Vec<crate::ast::MethodDef>,
-        /// Fase 10.3.b — metadata ORM cacheada: si el type tiene
-        /// `@table(...)`, contiene el nombre SQL + primary field +
-        /// column overrides. `None` para types Fitz normales sin
-        /// `@table`. El evaluator la populariza al ver `Stmt::TypeDef`
-        /// llamando `process_table_decorators` del checker.
+        /// Phase 10.3.b — cached ORM metadata: if the type has
+        /// `@table(...)`, contains the SQL name + primary field +
+        /// column overrides. `None` for normal Fitz types without
+        /// `@table`. The evaluator populates it on `Stmt::TypeDef`
+        /// by calling the checker's `process_table_decorators`.
         ///
-        /// Cachear acá (en lugar de re-consultar `TypeEnv`) le da al
-        /// runtime acceso a la metadata sin atravesar el checker —
-        /// importante porque el evaluator solo tiene `EnvRef`, no
-        /// `TypeEnv`.
+        /// Caching here (instead of re-querying `TypeEnv`) gives the
+        /// runtime access to the metadata without going through the
+        /// checker — important because the evaluator only has
+        /// `EnvRef`, not `TypeEnv`.
         ///
-        /// `Box` para mantener el tamaño del enum chico (TableMetadata
-        /// pesa ~100 bytes; sin Box infla todo Value y dispara
-        /// `clippy::result_large_err` en cientos de signatures que
-        /// devuelven `Result<_, EvalSignal>`).
+        /// `Box` to keep the enum size small (TableMetadata weighs
+        /// ~100 bytes; without Box it bloats every Value and trips
+        /// `clippy::result_large_err` on hundreds of signatures
+        /// returning `Result<_, EvalSignal>`).
         table_metadata: Option<Box<crate::types::TableMetadata>>,
     },
 
-    /// Tupla en runtime (mini-tanda T). Heterogénea, tamaño fijo
-    /// conocido en compile-time. NO compartida por referencia
-    /// (semántica de valor — clonar la tupla clona cada slot). El
-    /// orden es el de declaración; el acceso es por índice
-    /// (`Expr::TupleField`) o por destructuring (Pattern::Tuple).
+    /// Runtime tuple (mini-batch T). Heterogeneous, fixed size known
+    /// at compile time. NOT shared by reference (value semantics —
+    /// cloning the tuple clones every slot). The order matches the
+    /// declaration; access is by index (`Expr::TupleField`) or by
+    /// destructuring (Pattern::Tuple).
     Tuple(Vec<Value>),
 
-    /// Lista en runtime. Compartida por referencia (`Shared<T>` =
-    /// `Arc<Mutex<>>` post-F17.2) para que `xs.push(...)`, pasar la lista
-    /// a una función, o guardarla en un campo de instancia hablen del
-    /// mismo dato. Construir con `Value::new_list(vec)`.
+    /// Runtime list. Shared by reference (`Shared<T>` =
+    /// `Arc<Mutex<>>` post-F17.2) so `xs.push(...)`, passing the
+    /// list to a function, or storing it in an instance field all
+    /// talk about the same data. Build with `Value::new_list(vec)`.
     List(Shared<Vec<Value>>),
 
-    /// Mapa en runtime. `Vec<(K, V)>` en vez de `HashMap` por dos razones:
-    ///  - preserva el orden de inserción (importa para `print` y para
-    ///    iteración futura).
-    ///  - acepta claves no-hash sin complicar `Value`. Acceso es O(n);
-    ///    optimizable más adelante cuando importe.
+    /// Runtime map. `Vec<(K, V)>` instead of `HashMap` for two
+    /// reasons:
+    ///  - preserves insertion order (matters for `print` and for
+    ///    future iteration).
+    ///  - accepts non-hashable keys without complicating `Value`.
+    ///    Access is O(n); optimisable later when it matters.
     ///
-    /// Compartido por referencia, mismo criterio que `List`.
+    /// Shared by reference, same criterion as `List`.
     Map(Shared<Vec<(Value, Value)>>),
 
-    /// Rango exclusivo de Int. Iterable. Por ahora solo Int (Float
-    /// no tiene una semántica discreta clara para iteración).
+    /// Exclusive Int range. Iterable. Int-only for now (Float has no
+    /// clear discrete semantics for iteration).
     Range {
         start: i64,
         end: i64,
     },
 
-    /// Instancia de un tipo custom: el resultado de evaluar un struct
-    /// literal `User { id: 1, name: "x" }`. Guarda el nombre del tipo
-    /// (para `Display` y mensajes de error) y los pares `(campo,
-    /// valor)` en orden de declaración del `type`.
+    /// Instance of a custom type: the result of evaluating a struct
+    /// literal `User { id: 1, name: "x" }`. Stores the type name
+    /// (for `Display` and error messages) and the `(field, value)`
+    /// pairs in the order the `type` declared them.
     ///
-    /// El orden es estable: el evaluador lo arma siguiendo la lista
-    /// de campos del `Value::Type`, no la del literal. Eso garantiza
-    /// que dos instancias del mismo tipo se imprimen igual aunque el
-    /// usuario haya tipeado los campos en otro orden.
+    /// Order is stable: the evaluator builds it following the
+    /// `Value::Type` field list, not the literal's. That guarantees
+    /// two instances of the same type print the same even if the
+    /// user typed the fields in a different order.
     ///
-    /// `fields` va compartido (`Shared<T>` = `Arc<Mutex<>>` post-F17.2)
-    /// para destrabar `user.name = "x"`: la mutación se ve a través de
-    /// cualquier alias a esta instancia. Construir con
+    /// `fields` is shared (`Shared<T>` = `Arc<Mutex<>>` post-F17.2)
+    /// so `user.name = "x"` works: the mutation is visible through
+    /// any alias to this instance. Build with
     /// `Value::new_instance(...)`.
     Instance {
         type_name: String,
         fields: Shared<Vec<(String, Value)>>,
     },
 
-    /// Sum type built-in `Result`: representa el desenlace de una
-    /// operación que pudo fallar. Variante exitosa o de error, cada
-    /// una con un valor cualquiera adentro.
+    /// Built-in sum type `Result`: represents the outcome of an
+    /// operation that may have failed. Success or error variant,
+    /// each carrying any value inside.
     ///
-    /// Se modela con variante propia (no como `Instance`) porque
-    /// `Result` es sum type, no product type: tiene alternativas, no
-    /// campos. La reglas de Display, igualdad y matching tendrían que
-    /// ser especiales si lo reusáramos sobre `Instance`; mejor un tipo
-    /// dedicado.
+    /// Modelled with its own variant (not as `Instance`) because
+    /// `Result` is a sum type, not a product type: it has
+    /// alternatives, not fields. The Display, equality and matching
+    /// rules would have to be special if we reused it on
+    /// `Instance`; a dedicated type is better.
     Result(ResultVariant),
 
-    /// Módulo cargado desde otro archivo. Resultado de un `import` que
-    /// expone el módulo entero como namespace: `import utils` bindea
-    /// un `Value::Module` bajo el nombre `utils`, y `utils.foo()`
-    /// resuelve `foo` en el env del módulo.
+    /// Module loaded from another file. Result of an `import` that
+    /// exposes the whole module as a namespace: `import utils`
+    /// binds a `Value::Module` under the name `utils`, and
+    /// `utils.foo()` resolves `foo` inside the module env.
     ///
-    /// `name` es el último segmento del path original (`import sub.foo`
-    /// → `name = "foo"`), útil para Display y mensajes de error.
+    /// `name` is the last segment of the original path (`import
+    /// sub.foo` → `name = "foo"`), useful for Display and error
+    /// messages.
     ///
-    /// `env` es el environment donde se evaluó el body del módulo. El
-    /// loader lo congela ahí: las top-level definitions (let, fn, type)
-    /// del archivo viven en ese env y son visibles vía field access.
-    /// La igualdad es por identidad del `Rc` (dos `Value::Module` son
-    /// iguales si comparten el mismo env — sirve para detectar que dos
-    /// imports del mismo archivo dieron el mismo módulo).
+    /// `env` is the environment where the module body was
+    /// evaluated. The loader freezes it there: the file's top-level
+    /// definitions (let, fn, type) live in that env and are visible
+    /// via field access. Equality is by `Rc` identity (two
+    /// `Value::Module`s are equal if they share the same env — used
+    /// to detect that two imports of the same file yielded the same
+    /// module).
     Module {
         name: String,
         env: EnvRef,
     },
 
-    /// Response HTTP con status code custom. Solo aparece como
-    /// producto de un `return <Int> { ... }` adentro de un handler;
-    /// el runtime HTTP (en `http.rs`) lo intercepta en
-    /// `value_to_outcome` para emitir el `HandlerOutcome` con el
-    /// status y body que pidió el usuario. Fuera de context HTTP
-    /// es opaco — no se puede serializar a JSON ni se imprime, y
-    /// el checker rechaza `Stmt::ReturnStatus` fuera de handlers.
+    /// HTTP response with a custom status code. Only appears as the
+    /// product of a `return <Int> { ... }` inside a handler; the
+    /// HTTP runtime (in `http.rs`) intercepts it in
+    /// `value_to_outcome` to emit a `HandlerOutcome` with the
+    /// status and body the user asked for. Outside an HTTP context
+    /// it is opaque — it cannot be JSON-serialised or printed, and
+    /// the checker rejects `Stmt::ReturnStatus` outside handlers.
     ///
-    /// Sin variante `Pair`: el body queda como `Box<Value>` para
-    /// reusar el camino existente de serialización. `body = None`
-    /// se reserva para 204 No Content (hoy el parser exige body;
-    /// el campo es opcional para preparar esa extensión).
+    /// No `Pair` variant: the body stays as `Box<Value>` to reuse
+    /// the existing serialisation path. `body = None` is reserved
+    /// for 204 No Content (today the parser requires a body; the
+    /// field is optional to prepare that extension).
     HttpResponse {
         status: u16,
         body: Option<Box<Value>>,
     },
 
-    /// Configuración CORS opaca, producto del built-in `cors(...)`
-    /// (mini-fase MW.2). Se usa como argumento de `@middleware(cors(...))`
-    /// sobre un handler HTTP; el evaluador la detecta y la guarda en el
-    /// slot `RouteSpec.cors` (no entra a la chain de middlewares user-fn).
-    /// Fuera de ese context es opaca: no se puede imprimir ni
-    /// serializar — usar `cors(...)` como expresión suelta no tiene
-    /// sentido y el código que lo intenta recibe error claro.
+    /// Opaque CORS configuration, product of the `cors(...)` builtin
+    /// (mini-phase MW.2). Used as an argument of
+    /// `@middleware(cors(...))` on an HTTP handler; the evaluator
+    /// detects it and stores it in the `RouteSpec.cors` slot (it
+    /// does not enter the user-fn middleware chain). Outside that
+    /// context it is opaque: it cannot be printed or serialised —
+    /// using `cors(...)` as a bare expression makes no sense, and
+    /// code that tries gets a clear error.
     ///
-    /// `Arc<CorsConfig>` (inmutable post-build): el config viaja al thread
-    /// tokio para configurar el preflight handler de axum, así que tiene
-    /// que ser `Send + Sync`. El payload (`String`s y `Vec<String>`) ya
-    /// cumple eso. Post-F17 el resto de `Shared<T>` también es `Arc<Mutex>`
-    /// — este caso sigue sin `Mutex` porque el config es read-only.
+    /// `Arc<CorsConfig>` (immutable post-build): the config travels
+    /// to the tokio thread to configure axum's preflight handler,
+    /// so it has to be `Send + Sync`. The payload (`String`s and
+    /// `Vec<String>`) already satisfies that. Post-F17 the rest of
+    /// `Shared<T>` is also `Arc<Mutex>` — this case stays without
+    /// `Mutex` because the config is read-only.
     CorsConfig(Arc<crate::http::CorsConfig>),
 
-    /// Future pendiente introducido en Fase 6.4. Se construye cuando
-    /// se llama una `async fn` Fitz sin `.await` (guardar el future
-    /// suelto en una variable) o desde builtins async (`sleep`).
-    /// `Expr::Await` lo desempaca; consumirlo dos veces es un panic
-    /// del intérprete (futures se await-ean una sola vez).
+    /// Pending future introduced in Phase 6.4. It is built when a
+    /// Fitz `async fn` is called without `.await` (storing the bare
+    /// future in a variable) or from async builtins (`sleep`).
+    /// `Expr::Await` unpacks it; consuming it twice is an
+    /// interpreter panic (futures are awaited once).
     ///
-    /// Envuelto en `FutureCell` (`Arc<Mutex<Option<...>>>`) por dos
-    /// razones: (a) `Value: Clone` y los `Pin<Box<dyn Future>>` no
-    /// son Clone — el `Arc` da clone barato y comparte la celda;
-    /// (b) el `Option` permite extraer el future al hacer `.await`
-    /// sin clonar (mover con `.take()`), preservando la regla
-    /// "un future se await una sola vez".
+    /// Wrapped in `FutureCell` (`Arc<Mutex<Option<...>>>`) for two
+    /// reasons: (a) `Value: Clone` and `Pin<Box<dyn Future>>` is
+    /// not Clone — the `Arc` gives cheap cloning and shares the
+    /// cell; (b) the `Option` lets us extract the future on
+    /// `.await` without cloning (move with `.take()`), preserving
+    /// the "a future is awaited once" rule.
     Future(FutureCell),
 
-    /// Fase 12.2.a — `Secret<T>` valor opaco con auto-redaction.
-    /// Producido por el builtin `secret("KEY")` que lee env var /
-    /// mounted file `/run/secrets/<KEY>` / `.env` (precedencia). El
-    /// inner T se guarda envuelto en `SecretInner` cuyo `Debug` emite
-    /// `<redacted>` — el `derive(Debug)` de `Value` propaga esa
-    /// redacción al `Debug` del enum entero. El `Display` del Value
-    /// (impl manual abajo) emite `<redacted Secret<T>>`.
+    /// Phase 12.2.a — `Secret<T>` opaque value with auto-redaction.
+    /// Produced by the `secret("KEY")` builtin which reads env var
+    /// / mounted file `/run/secrets/<KEY>` / `.env` (precedence).
+    /// The inner T is stored wrapped in `SecretInner` whose `Debug`
+    /// emits `<redacted>` — the `derive(Debug)` on `Value`
+    /// propagates that redaction to the whole enum's `Debug`. The
+    /// Value's `Display` (manual impl below) emits
+    /// `<redacted Secret<T>>`.
     ///
-    /// `.expose() -> T` desempaca explícito el inner (dispatch en
-    /// `evaluator::dispatch_method`). Es la única forma de obtener
-    /// el valor crudo — `print(secret)` y `Debug` están bloqueados.
-    /// Serialization a JSON también rechaza con error explícito en
-    /// `crate::http::value_to_json` (12.2.b refinará el codegen
-    /// emit para alcanzar paridad bit-a-bit).
+    /// `.expose() -> T` explicitly unpacks the inner (dispatched in
+    /// `evaluator::dispatch_method`). It is the only way to get the
+    /// raw value — `print(secret)` and `Debug` are blocked. JSON
+    /// serialisation also rejects it with an explicit error in
+    /// `crate::http::value_to_json` (12.2.b will refine codegen
+    /// emit to reach bit-for-bit parity).
     ///
-    /// `PartialEq` (impl manual abajo) compara los inner: dos
-    /// `Secret<Str>` son iguales si su contenido lo es — útil para
-    /// validar passwords contra hashes en MVP.
+    /// `PartialEq` (manual impl below) compares the inners: two
+    /// `Secret<Str>`s are equal if their contents are — useful for
+    /// validating passwords against hashes in MVP.
     Secret(SecretInner),
 
-    /// Objeto Python opaco — solo existe con la feature `python`.
-    /// Producido por el loader `from python import <mod>` (Fase 8.1.2)
-    /// y por accesos a atributos / llamadas que devuelven objetos
-    /// no-primitivos (8.1.3+). En 8.1 los primitivos (Int/Float/Str/
-    /// Bool/None) se auto-coercionan a `Value` nativos en el cruce,
-    /// así que `Value::PyObject` envuelve módulos, funciones, clases,
-    /// instancias y demás callables/contenedores opacos. El
-    /// marshaling de tipos compuestos (List/Map/Instance) llega en 8.2.
+    /// Opaque Python object — only exists with the `python` feature.
+    /// Produced by the `from python import <mod>` loader
+    /// (Phase 8.1.2) and by attribute accesses / calls that return
+    /// non-primitive objects (8.1.3+). In 8.1 primitives
+    /// (Int/Float/Str/Bool/None) auto-coerce to native `Value`s on
+    /// crossing, so `Value::PyObject` wraps modules, functions,
+    /// classes, instances and other opaque callables/containers.
+    /// Marshalling of composite types (List/Map/Instance) lands in
+    /// 8.2.
     ///
-    /// `dead_code` allow: en 8.1.1 la variante existe como placeholder
-    /// (Display/PartialEq/type_name preparados); el constructor real
-    /// llega en 8.1.2 cuando `evaluator::load_module` rutea a Python.
+    /// `dead_code` allow: in 8.1.1 the variant exists as a
+    /// placeholder (Display/PartialEq/type_name ready); the real
+    /// constructor lands in 8.1.2 when `evaluator::load_module`
+    /// routes to Python.
     #[cfg(feature = "python")]
     #[allow(dead_code)]
     PyObject(PyObjectHandle),
 
-    /// Fase 9.w.2 — Conexión WebSocket abierta. El runtime HTTP la
-    /// construye tras el upgrade HTTP→WS y la inyecta como argumento
-    /// del handler `@ws("/path")`. Opaco para el usuario: solo se
-    /// accede vía los 4 métodos paramétricos del checker (`recv`/
-    /// `send`/`broadcast`/`close`).
+    /// Phase 9.w.2 — Open WebSocket connection. The HTTP runtime
+    /// builds it after the HTTP→WS upgrade and injects it as the
+    /// argument of the `@ws("/path")` handler. Opaque to the user:
+    /// it is only accessed via the 4 parametric methods of the
+    /// checker (`recv`/`send`/`broadcast`/`close`).
     ///
-    /// Igualdad por identidad del `Arc` — dos referencias al mismo
-    /// conn comparten state; conns distintos son siempre distintos.
-    /// No serializable a JSON (ver `value_to_json` en `http.rs` —
-    /// rechaza con mensaje claro). Display: `<ws-conn>`.
+    /// Equality by `Arc` identity — two references to the same
+    /// conn share state; distinct conns are always different. Not
+    /// JSON-serialisable (see `value_to_json` in `http.rs` — it
+    /// rejects with a clear message). Display: `<ws-conn>`.
     WsConn(Arc<WsConnHandle>),
 
-    /// Fase 10.1.b — Conexión Postgres abierta. Producida por el
-    /// builtin `db.connect(url).await` y consumida vía los métodos
-    /// `query/exec/close` despachados por `dispatch_method`. Opaco
-    /// para el usuario: igual que WsConn, solo se accede vía métodos
-    /// específicos del driver (`src/db.rs`).
+    /// Phase 10.1.b — Open Postgres connection. Produced by the
+    /// `db.connect(url).await` builtin and consumed via the
+    /// `query/exec/close` methods dispatched by `dispatch_method`.
+    /// Opaque to the user: just like WsConn, it is only accessed
+    /// via driver-specific methods (`src/db.rs`).
     ///
-    /// Igualdad por identidad del `Arc` — paralelo a WsConn. No
-    /// serializable a JSON (es un handle a un recurso del sistema,
-    /// no un valor). Display: `<db-conn user@host/db>` con el URL
-    /// redacted (sin password).
+    /// Equality by `Arc` identity — parallel to WsConn. Not
+    /// JSON-serialisable (it is a handle to a system resource,
+    /// not a value). Display: `<db-conn user@host/db>` with the
+    /// URL redacted (no password).
     DbConn(Arc<crate::db::DbConnHandle>),
 
-    /// Fase 10.3.b2 — builder de queries ORM acumulando state.
-    /// Producido por `User.where(closure)` y consumido por
-    /// `.all(db)`/`.first(db)`/`.count(db)`. Inmutable: cada call
-    /// al chain devuelve un QueryBuilder NUEVO con el state
-    /// acumulado (semántica functional).
+    /// Phase 10.3.b2 — ORM query builder accumulating state.
+    /// Produced by `User.where(closure)` and consumed by
+    /// `.all(db)`/`.first(db)`/`.count(db)`. Immutable: every chain
+    /// call returns a NEW QueryBuilder with the accumulated state
+    /// (functional semantics).
     ///
-    /// El struct concreto (`QueryBuilderState`) vive en
-    /// `evaluator.rs`. Lo envolvemos en `Arc<dyn Any + Send + Sync>`
-    /// para evitar `evaluator → value → evaluator` ciclo en los
-    /// imports (`evaluator` ya depende de `value`; no podemos
-    /// referenciar `evaluator::QueryBuilderState` desde acá). El
-    /// downcast vive en `dispatch_method` cuando recibe el value
-    /// como receiver.
+    /// The concrete struct (`QueryBuilderState`) lives in
+    /// `evaluator.rs`. We wrap it in `Arc<dyn Any + Send + Sync>`
+    /// to avoid the `evaluator → value → evaluator` import cycle
+    /// (`evaluator` already depends on `value`; we cannot
+    /// reference `evaluator::QueryBuilderState` from here). The
+    /// downcast lives in `dispatch_method` when the value arrives
+    /// as the receiver.
     ///
-    /// Igualdad por identidad del `Arc`. Opaco para el user; sin
-    /// Display ni serialización a JSON.
+    /// Equality by `Arc` identity. Opaque to the user; no Display
+    /// or JSON serialisation.
     QueryBuilder(Arc<dyn std::any::Any + Send + Sync>),
 
-    /// v0.10.24 — fecha sin hora ni tz. Wrapper sobre `chrono::NaiveDate`.
-    /// Construido vía `Date.today()` / `Date.parse("2026-05-30")`.
-    /// Display: ISO 8601 `YYYY-MM-DD`. Igualdad estructural (chrono
-    /// impl PartialEq).
+    /// v0.10.24 — date with no time or tz. Wrapper around
+    /// `chrono::NaiveDate`. Built via `Date.today()` /
+    /// `Date.parse("2026-05-30")`. Display: ISO 8601
+    /// `YYYY-MM-DD`. Structural equality (chrono impls PartialEq).
     Date(chrono::NaiveDate),
 
-    /// v0.10.24 — fecha + hora + tz (siempre UTC en MVP). Wrapper
-    /// sobre `chrono::DateTime<chrono::Utc>`. Display: ISO 8601
-    /// `YYYY-MM-DDTHH:MM:SSZ`. Igualdad estructural.
+    /// v0.10.24 — date + time + tz (always UTC in MVP). Wrapper
+    /// around `chrono::DateTime<chrono::Utc>`. Display: ISO 8601
+    /// `YYYY-MM-DDTHH:MM:SSZ`. Structural equality.
     DateTime(chrono::DateTime<chrono::Utc>),
 
-    /// v0.10.24 — UUID. Wrapper sobre `uuid::Uuid`. Construido vía
-    /// `Uuid.v4()` (random) o `Uuid.parse("...")`. Display: formato
-    /// canonical `xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx` (lowercase,
-    /// con guiones). Igualdad estructural.
+    /// v0.10.24 — UUID. Wrapper around `uuid::Uuid`. Built via
+    /// `Uuid.v4()` (random) or `Uuid.parse("...")`. Display:
+    /// canonical format `xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx`
+    /// (lowercase, with dashes). Structural equality.
     Uuid(uuid::Uuid),
 }
 
-/// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
-/// recursivo de tamaño infinito (mismo truco que `Box<Expr>` en el AST).
+/// `Value::Result` variant. Uses `Box<Value>` to avoid an
+/// infinitely-sized recursive enum (same trick as `Box<Expr>` in
+/// the AST).
 #[derive(Debug, Clone)]
 pub enum ResultVariant {
     Ok(Box<Value>),
@@ -683,22 +712,22 @@ pub enum ResultVariant {
 }
 
 impl Value {
-    /// Crea un `Value::List` a partir de un `Vec<Value>`. Envolvé siempre
-    /// con este constructor para mantener el wrapping `Shared<T>` =
-    /// `Arc<Mutex<>>` (post-F17.2) uniforme y no esparcir
-    /// `Arc::new(Mutex::new(...))` por todos lados.
+    /// Builds a `Value::List` from a `Vec<Value>`. Always wrap with
+    /// this constructor to keep the `Shared<T>` =
+    /// `Arc<Mutex<>>` (post-F17.2) wrapping uniform and avoid
+    /// scattering `Arc::new(Mutex::new(...))` everywhere.
     pub fn new_list(items: Vec<Value>) -> Value {
         Value::List(shared(items))
     }
 
-    /// Crea un `Value::Map` a partir de un `Vec<(Value, Value)>`.
+    /// Builds a `Value::Map` from a `Vec<(Value, Value)>`.
     pub fn new_map(pairs: Vec<(Value, Value)>) -> Value {
         Value::Map(shared(pairs))
     }
 
-    /// Crea un `Value::Instance` a partir del nombre del tipo y los
-    /// pares `(campo, valor)`. El orden importa: el evaluador lo arma
-    /// siguiendo la declaración del `type`.
+    /// Builds a `Value::Instance` from the type name and the
+    /// `(field, value)` pairs. The order matters: the evaluator
+    /// builds it following the `type` declaration.
     pub fn new_instance(type_name: String, fields: Vec<(String, Value)>) -> Value {
         Value::Instance {
             type_name,
@@ -706,16 +735,16 @@ impl Value {
         }
     }
 
-    /// Crea un `Value::Future` envolviendo un future Rust nativo.
-    /// Usado por `builtin_sleep` y por el dispatcher de async fn Fitz
-    /// al llamar sin `.await`. El future se ejecuta una sola vez:
-    /// cuando `Expr::Await` lo desempaca, el `Option` queda en `None`
-    /// y un segundo `.await` paniquea.
+    /// Builds a `Value::Future` wrapping a native Rust future. Used
+    /// by `builtin_sleep` and by the Fitz async fn dispatcher when
+    /// called without `.await`. The future runs once: when
+    /// `Expr::Await` unpacks it, the `Option` becomes `None` and a
+    /// second `.await` panics.
     pub fn new_future(fut: FitzFuture) -> Value {
         Value::Future(FutureCell(Arc::new(Mutex::new(Some(fut)))))
     }
 
-    /// Nombre del tipo, para mensajes de error.
+    /// Type name, for error messages.
     pub fn type_name(&self) -> &'static str {
         match self {
             Value::Int(_) => "Int",
@@ -756,8 +785,9 @@ impl std::fmt::Display for Value {
         match self {
             Value::Int(n) => write!(f, "{}", n),
             Value::Float(x) => {
-                // Si no tiene parte decimal, agregamos `.0` para que se vea
-                // distinto a un Int. `3.0` → "3.0", `3.14` → "3.14".
+                // If it has no decimal part we add `.0` so it looks
+                // different from an Int. `3.0` → "3.0", `3.14` →
+                // "3.14".
                 if x.fract() == 0.0 && x.is_finite() {
                     write!(f, "{:.1}", x)
                 } else {
@@ -768,11 +798,12 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{}", b),
             Value::Null => write!(f, "null"),
             Value::Bytes(bs) => {
-                // Mini-tanda Bytes — formato `b"..."` paralelo a
-                // Rust. ASCII printable + escapes comunes (`\n`, `\r`,
-                // `\t`, `\\`, `\"`) salen tal cual; el resto va como
-                // `\xHH`. Mismo criterio que Rust's
-                // `<[u8] as Debug>` para el contenido entre comillas.
+                // Mini-batch Bytes — `b"..."` format parallel to
+                // Rust. Printable ASCII + common escapes (`\n`,
+                // `\r`, `\t`, `\\`, `\"`) come through as-is; the
+                // rest go as `\xHH`. Same criterion as Rust's
+                // `<[u8] as Debug>` for the contents between
+                // quotes.
                 write!(f, "b\"")?;
                 for &b in bs.iter() {
                     match b {
@@ -791,11 +822,11 @@ impl std::fmt::Display for Value {
             Value::Function { .. } => write!(f, "<function>"),
             Value::Type { name, .. } => write!(f, "<type {}>", name),
             Value::List(items) => {
-                // Para strings, mostramos comillas adentro de la lista
-                // (es la representación, no salida directa de `print`).
-                // Ej: `[1, "hola", 2]`. Distinto del Display de `Str`
-                // suelto, que va sin comillas porque ese caso es para
-                // salida final.
+                // For strings we show quotes inside the list (it is
+                // the representation, not the direct `print`
+                // output). E.g. `[1, "hola", 2]`. Different from
+                // the bare-Str Display, which has no quotes
+                // because that case is final output.
                 let items = items.lock();
                 write!(f, "[")?;
                 for (i, v) in items.iter().enumerate() {
@@ -820,10 +851,11 @@ impl std::fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Tuple(items) => {
-                // Tupla: `(1, "x", true)`. Strings con comillas adentro
-                // (mismo criterio que List/Map/Instance). Single-element
-                // tuple lleva trailing comma: `(42,)` para distinguir
-                // de `(42)` (paréntesis de agrupación).
+                // Tuple: `(1, "x", true)`. Strings with quotes
+                // inside (same criterion as List/Map/Instance). A
+                // single-element tuple carries a trailing comma:
+                // `(42,)` to distinguish it from `(42)` (grouping
+                // parens).
                 write!(f, "(")?;
                 for (i, v) in items.iter().enumerate() {
                     if i > 0 {
@@ -838,9 +870,9 @@ impl std::fmt::Display for Value {
             }
             Value::Range { start, end } => write!(f, "{}..{}", start, end),
             Value::Instance { type_name, fields } => {
-                // Formato: `User { id: 1, name: "x" }`. Strings con
-                // comillas adentro (mismo criterio que List/Map), para
-                // distinguir `42` de `"42"` a simple vista.
+                // Format: `User { id: 1, name: "x" }`. Strings with
+                // quotes inside (same criterion as List/Map), so
+                // `42` and `"42"` can be told apart at a glance.
                 let fields = fields.lock();
                 write!(f, "{} {{", type_name)?;
                 for (i, (k, v)) in fields.iter().enumerate() {
@@ -876,17 +908,18 @@ impl std::fmt::Display for Value {
             },
             Value::CorsConfig(_) => write!(f, "<cors-config>"),
             Value::Future(_) => write!(f, "<future>"),
-            // Fase 12.2.a — Display redacta el inner para prevenir
-            // leaks accidentales en logs/print. La única forma de
-            // acceder al valor crudo es vía `.expose()` explícito.
+            // Phase 12.2.a — Display redacts the inner to prevent
+            // accidental leaks in logs/print. The only way to
+            // access the raw value is via explicit `.expose()`.
             Value::Secret(_) => write!(f, "<redacted Secret>"),
             Value::WsConn(_) => write!(f, "<ws-conn>"),
             Value::DbConn(h) => write!(f, "<db-conn {}>", h.url_redacted),
             Value::QueryBuilder(_) => write!(f, "<query-builder>"),
-            // v0.10.24 — Display canonical ISO 8601 / UUID. Sin
-            // wrapper como `<date 2026-05-30>` porque estos values son
-            // user-facing (se imprimen, se interpolan, van a JSON sin
-            // wrap). Mismo formato que su `to_str()` instance method.
+            // v0.10.24 — canonical ISO 8601 / UUID Display. No
+            // wrapper like `<date 2026-05-30>` because these values
+            // are user-facing (they get printed, interpolated, sent
+            // to JSON without wrap). Same format as their
+            // `to_str()` instance method.
             Value::Date(d) => write!(f, "{}", d.format("%Y-%m-%d")),
             Value::DateTime(dt) => write!(f, "{}", dt.format("%Y-%m-%dT%H:%M:%SZ")),
             Value::Uuid(u) => write!(f, "{}", u),
@@ -897,10 +930,10 @@ impl std::fmt::Display for Value {
     }
 }
 
-/// Representación "inline" de un Value cuando aparece adentro de otro
-/// (lista, mapa). Los strings llevan comillas para distinguir
-/// `[1, "2"]` de `[1, 2]` — es lectura, no impresión final. El resto
-/// delega en `Display` normal.
+/// "Inline" representation of a Value when it appears inside another
+/// (list, map). Strings get quotes so we can tell `[1, "2"]` apart
+/// from `[1, 2]` — it is for reading, not for final printing. The
+/// rest defers to the normal `Display`.
 fn write_inline_value(f: &mut std::fmt::Formatter, v: &Value) -> std::fmt::Result {
     match v {
         Value::Str(s) => write!(f, "\"{}\"", s),
@@ -908,8 +941,9 @@ fn write_inline_value(f: &mut std::fmt::Formatter, v: &Value) -> std::fmt::Resul
     }
 }
 
-/// Igualdad con coerción Int↔Float. El resto de combinaciones devuelven false.
-/// Esto define la semántica de `==` en Fitz (la usa el evaluador en BinOp::Eq).
+/// Equality with Int↔Float coercion. Every other combination returns
+/// false. This defines the semantics of `==` in Fitz (used by the
+/// evaluator in BinOp::Eq).
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
@@ -920,28 +954,31 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
-            // Bytes: comparación byte a byte.
+            // Bytes: byte-by-byte comparison.
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
-            // List y Map se comparan estructuralmente, elemento a elemento.
-            // La igualdad recursiva delega en esta misma impl, así que Int↔Float
-            // coerciona también adentro de listas y mapas. Si los dos `Arc`
-            // apuntan al mismo dato (alias del mismo origen), `Arc::ptr_eq`
-            // es shortcut barato; si no, comparamos el contenido lockeando.
+            // List and Map are compared structurally, element by
+            // element. The recursive equality delegates back to
+            // this impl, so the Int↔Float coercion also works
+            // inside lists and maps. If the two `Arc`s point at
+            // the same data (alias from the same origin),
+            // `Arc::ptr_eq` is a cheap shortcut; otherwise we
+            // compare the contents under the lock.
             (Value::List(a), Value::List(b)) => Arc::ptr_eq(a, b) || *a.lock() == *b.lock(),
             (Value::Map(a), Value::Map(b)) => Arc::ptr_eq(a, b) || *a.lock() == *b.lock(),
-            // Tuples (mini-tanda T): comparación estructural por
-            // longitud y elementos. La coerción Int↔Float vale
-            // recursivamente vía esta misma impl.
+            // Tuples (mini-batch T): structural comparison by length
+            // and elements. The Int↔Float coercion applies
+            // recursively via this same impl.
             (Value::Tuple(a), Value::Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
             }
             (Value::Range { start: s1, end: e1 }, Value::Range { start: s2, end: e2 }) => {
                 s1 == s2 && e1 == e2
             }
-            // Instancias se comparan estructuralmente: mismo tipo y mismo
-            // contenido de campos (con el mismo orden, que está garantizado
-            // por el evaluador porque sigue la declaración del `type`).
-            // La coerción Int↔Float vale recursivamente vía esta misma impl.
+            // Instances are compared structurally: same type and
+            // same field contents (with the same order, which is
+            // guaranteed by the evaluator because it follows the
+            // `type` declaration). The Int↔Float coercion applies
+            // recursively via this same impl.
             (
                 Value::Instance {
                     type_name: t1,
@@ -952,44 +989,46 @@ impl PartialEq for Value {
                     fields: f2,
                 },
             ) => t1 == t2 && (Arc::ptr_eq(f1, f2) || *f1.lock() == *f2.lock()),
-            // Result se compara variante por variante, recursivamente.
-            // Misma coerción Int↔Float adentro vía esta misma impl.
+            // Result is compared variant by variant, recursively.
+            // Same Int↔Float coercion inside, via this impl.
             (Value::Result(a), Value::Result(b)) => match (a, b) {
                 (ResultVariant::Ok(va), ResultVariant::Ok(vb)) => va == vb,
                 (ResultVariant::Err(va), ResultVariant::Err(vb)) => va == vb,
                 _ => false,
             },
-            // Módulos se comparan por identidad del env (mismo Arc). El
-            // loader cachea por path canonicalizado, así que dos
-            // imports del mismo archivo dan dos `Value::Module` con el
-            // mismo `Arc<Mutex<Environment>>`. Estructural no tiene
-            // sentido — el env puede contener funciones y otros
-            // valores no-comparables.
+            // Modules are compared by env identity (same Arc). The
+            // loader caches by canonical path, so two imports of
+            // the same file produce two `Value::Module`s with the
+            // same `Arc<Mutex<Environment>>`. Structural equality
+            // makes no sense — the env can hold functions and
+            // other non-comparable values.
             (Value::Module { env: e1, .. }, Value::Module { env: e2, .. }) => Arc::ptr_eq(e1, e2),
-            // PyObject se compara por identidad del objeto Python
-            // (`Py::as_ptr()` da el `*mut PyObject` subyacente, que es
-            // único por objeto vivo). Dos handles a `math` importado dos
-            // veces son iguales — Python cachea los imports igual que
-            // nuestro `Value::Module` cachea por path canonicalizado.
-            // No hace falta tomar el GIL para leer el puntero.
+            // PyObject is compared by Python-object identity
+            // (`Py::as_ptr()` gives the underlying `*mut PyObject`,
+            // which is unique per live object). Two handles to a
+            // twice-imported `math` are equal — Python caches
+            // imports the same way our `Value::Module` caches by
+            // canonical path. We do not need to take the GIL to
+            // read the pointer.
             #[cfg(feature = "python")]
             (Value::PyObject(a), Value::PyObject(b)) => a.0.as_ptr() == b.0.as_ptr(),
-            // WsConn — igualdad por identidad del Arc. Dos handles al
-            // mismo conn comparten state; conns distintos jamás son
-            // iguales estructuralmente (sockets distintos, broadcaster
-            // entries distintas).
+            // WsConn — equality by `Arc` identity. Two handles to
+            // the same conn share state; distinct conns are never
+            // structurally equal (distinct sockets, distinct
+            // broadcaster entries).
             (Value::WsConn(a), Value::WsConn(b)) => Arc::ptr_eq(a, b),
-            // Fase 12.2.a — Secret: igualdad delegando al inner.
-            // Permite validar credenciales (`stored == provided`) sin
-            // exposer el contenido. La comparación es estructural;
-            // un constant-time refinement queda como deuda menor
-            // (relevante para timing attacks en validación de hashes).
+            // Phase 12.2.a — Secret: equality delegated to the
+            // inner. Lets us validate credentials
+            // (`stored == provided`) without exposing the contents.
+            // The comparison is structural; a constant-time
+            // refinement is left as minor debt (relevant for
+            // timing attacks on hash validation).
             (Value::Secret(a), Value::Secret(b)) => a == b,
-            // Igualdad por identidad del Arc — paralelo a WsConn.
+            // Equality by `Arc` identity — parallel to WsConn.
             (Value::DbConn(a), Value::DbConn(b)) => Arc::ptr_eq(a, b),
-            // Mismo criterio para QueryBuilder.
+            // Same criterion for QueryBuilder.
             (Value::QueryBuilder(a), Value::QueryBuilder(b)) => Arc::ptr_eq(a, b),
-            // Funciones no se comparan por valor — siempre desiguales.
+            // Functions are not compared by value — always unequal.
             _ => false,
         }
     }
@@ -1000,7 +1039,7 @@ impl PartialEq for Value {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
+#[allow(clippy::approx_constant)] // 3.14 in tests is a generic Float, not PI.
 mod tests {
     use super::*;
 
@@ -1023,7 +1062,7 @@ mod tests {
 
     #[test]
     fn display_str_sin_comillas() {
-        // print("hola") debe mostrar `hola`, no `"hola"`.
+        // print("hola") should show `hola`, not `"hola"`.
         assert_eq!(Value::Str("hola".into()).to_string(), "hola");
     }
 
@@ -1048,7 +1087,7 @@ mod tests {
         assert_eq!(Value::Bytes(vec![]).type_name(), "Bytes");
     }
 
-    // ---- Mini-tanda Bytes ----
+    // ---- Mini-batch Bytes ----
 
     #[test]
     fn bytes_display_ascii_printable() {
@@ -1080,14 +1119,15 @@ mod tests {
 
     #[test]
     fn bytes_distinto_de_str_aunque_mismo_contenido() {
-        // Bytes("hola") y Str("hola") son tipos distintos — PartialEq
-        // devuelve false (paralelo a Int vs Str).
+        // Bytes("hola") and Str("hola") are distinct types —
+        // PartialEq returns false (parallel to Int vs Str).
         assert_ne!(Value::Bytes(b"hola".to_vec()), Value::Str("hola".into()));
     }
 
     #[test]
     fn igualdad_int_y_float_se_coerciona() {
-        // En Fitz, `1 == 1.0` es true. Esto refleja la promoción Int↔Float.
+        // In Fitz, `1 == 1.0` is true. Reflects the Int↔Float
+        // promotion.
         assert_eq!(Value::Int(1), Value::Float(1.0));
         assert_eq!(Value::Float(2.0), Value::Int(2));
     }
@@ -1111,7 +1151,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — List, Map, Range (Fase 3, paso 1)
+    // Tests — List, Map, Range (Phase 3, step 1)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1127,8 +1167,8 @@ mod tests {
 
     #[test]
     fn display_list_strings_van_con_comillas_dentro() {
-        // Strings sueltos van sin comillas (print), pero adentro de
-        // una lista llevan comillas para que se distinga `1` de `"1"`.
+        // Bare strings carry no quotes (print), but inside a list
+        // they carry quotes so `1` and `"1"` can be told apart.
         let v = Value::new_list(vec![
             Value::Int(1),
             Value::Str("hola".into()),
@@ -1186,7 +1226,8 @@ mod tests {
 
     #[test]
     fn igualdad_list_coerciona_int_float_adentro() {
-        // [1, 2] == [1.0, 2.0] — la coerción Int↔Float vale adentro de listas.
+        // [1, 2] == [1.0, 2.0] — the Int↔Float coercion applies
+        // inside lists.
         let a = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
         let b = Value::new_list(vec![Value::Float(1.0), Value::Float(2.0)]);
         assert_eq!(a, b);
@@ -1203,8 +1244,8 @@ mod tests {
 
     #[test]
     fn igualdad_map_sensible_al_orden() {
-        // Como usamos Vec<(K,V)>, orden importa para igualdad. Esto es
-        // consistente con cómo lo imprimimos (preservando orden).
+        // Since we use Vec<(K,V)>, order matters for equality. This
+        // is consistent with how we print them (preserving order).
         let a = Value::new_map(vec![
             (Value::Str("a".into()), Value::Int(1)),
             (Value::Str("b".into()), Value::Int(2)),
@@ -1239,7 +1280,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Instance (Fase 3, paso 2: tipos custom instanciables)
+    // Tests — Instance (Phase 3, step 2: instantiable custom types)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -1263,7 +1304,7 @@ mod tests {
                 ("name".into(), Value::Str("Fitz".into())),
             ],
         );
-        // Strings llevan comillas adentro, igual que en List/Map.
+        // Strings carry quotes inside, same as List/Map.
         assert_eq!(i.to_string(), "User { id: 1, name: \"Fitz\" }");
     }
 
@@ -1287,14 +1328,14 @@ mod tests {
 
     #[test]
     fn igualdad_instance_distinto_type_name_es_false() {
-        // Misma forma de campos, distinto tipo → no son iguales.
+        // Same field shape, different type → not equal.
         let a = Value::new_instance("User".into(), vec![("id".into(), Value::Int(1))]);
         let b = Value::new_instance("Admin".into(), vec![("id".into(), Value::Int(1))]);
         assert_ne!(a, b);
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Result (Fase 3, paso 3: Result + Ok/Err + `?`)
+    // Tests — Result (Phase 3, step 3: Result + Ok/Err + `?`)
     // -----------------------------------------------------------------------
 
     fn ok(v: Value) -> Value {
@@ -1313,7 +1354,7 @@ mod tests {
 
     #[test]
     fn display_ok_envuelve_inner() {
-        // Mismo criterio que List/Map: strings adentro llevan comillas.
+        // Same criterion as List/Map: strings inside carry quotes.
         assert_eq!(ok(Value::Int(42)).to_string(), "Ok(42)");
         assert_eq!(ok(Value::Str("hola".into())).to_string(), "Ok(\"hola\")");
     }
@@ -1326,7 +1367,7 @@ mod tests {
 
     #[test]
     fn display_result_anidado() {
-        // Ok(Err("x")) — improbable pero legal estructuralmente.
+        // Ok(Err("x")) — unlikely but structurally legal.
         let inner = err(Value::Str("x".into()));
         assert_eq!(ok(inner).to_string(), "Ok(Err(\"x\"))");
     }
@@ -1350,7 +1391,7 @@ mod tests {
 
     #[test]
     fn igualdad_result_coerciona_int_float_adentro() {
-        // La coerción Int↔Float vale recursivamente dentro del inner.
+        // The Int↔Float coercion applies recursively inside the inner.
         assert_eq!(ok(Value::Int(1)), ok(Value::Float(1.0)));
     }
 
@@ -1361,7 +1402,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Module (Fase 3, paso 5: módulos / import)
+    // Tests — Module (Phase 3, step 5: modules / import)
     // -----------------------------------------------------------------------
 
     use crate::env::Environment;
@@ -1388,8 +1429,8 @@ mod tests {
 
     #[test]
     fn igualdad_module_es_por_identidad_del_env() {
-        // Mismo env → iguales. Esto modela "el mismo archivo importado
-        // dos veces es el mismo módulo".
+        // Same env → equal. Models "the same file imported twice
+        // is the same module".
         let env = Environment::new();
         let m1 = Value::Module {
             name: "utils".into(),
@@ -1401,7 +1442,7 @@ mod tests {
         };
         assert_eq!(m1, m2);
 
-        // Distinto env → desiguales aunque el nombre coincida.
+        // Different env → unequal even if the name matches.
         let other_env = Environment::new();
         let m3 = Value::Module {
             name: "utils".into(),
