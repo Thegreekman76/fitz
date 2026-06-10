@@ -1,32 +1,32 @@
-// lexer.rs — Fase 2.1
+// lexer.rs — Phase 2.1
 //
-// El lexer convierte el código fuente en una lista de tokens con posición.
+// The lexer turns source code into a list of tokens with positions.
 //
-// Ejemplo:
+// Example:
 //   input:  "let x = 42 + 1"
 //   output: [Let, Ident("x"), Eq, Int(42), Plus, Int(1), EOF]
 //
-// El newline se emite como token (no se trata como whitespace) porque Fitz
-// usa salto de línea como separador opcional de sentencias — el parser
-// decide cuándo es relevante.
+// Newlines are emitted as tokens (not treated as whitespace) because Fitz
+// uses line breaks as an optional statement separator — the parser decides
+// when they matter.
 
 use crate::error::{ErrorKind, FitzError, FitzResult};
 
-/// Tipo de token. La info de línea/columna va aparte, en `TokenWithPos`.
+/// Token kind. Line/column info lives separately, in `TokenWithPos`.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::upper_case_acronyms)] // EOF es el nombre canónico.
+#[allow(clippy::upper_case_acronyms)] // EOF is the canonical name.
 pub enum Token {
-    // Literales
+    // Literals
     Int(i64),
     Float(f64),
     Str(String),
-    /// Mini-tanda Bytes — literal binario `b"..."`. Bytes crudo,
-    /// soporta escapes `\xHH` además de los comunes (`\n`/`\r`/`\t`/
-    /// `\\`/`\"`/`\0`). Interpolación `{...}` NO se permite (los
-    /// bytes literales son fijos).
+    /// Mini-batch Bytes — binary literal `b"..."`. Raw bytes,
+    /// supports `\xHH` escapes in addition to the common ones
+    /// (`\n`/`\r`/`\t`/`\\`/`\"`/`\0`). Interpolation `{...}` is
+    /// NOT allowed (byte literals are fixed).
     Bytes(Vec<u8>),
 
-    // Identificadores y keywords
+    // Identifiers and keywords
     Ident(String),
     Fn,
     Async,
@@ -51,16 +51,16 @@ pub enum Token {
     Continue,
     And,
     Or,
-    Xor,    // Mini-tanda Xor — `a xor b` lógico (Bool ^ Bool, paralelo a `or`/`and`)
-    Not,    // R.1.1 — `not <expr>` negación lógica prefix
-    Static, // Mini-tanda St — `static fn ...` adentro de `type` body
+    Xor,    // Mini-batch Xor — logical `a xor b` (Bool ^ Bool, parallel to `or`/`and`)
+    Not,    // R.1.1 — `not <expr>` prefix logical negation
+    Static, // Mini-batch St — `static fn ...` inside a `type` body
 
-    // Operadores
+    // Operators
     Plus,     // +
     Minus,    // -
     Star,     // *
     Slash,    // /
-    Percent,  // % — operador módulo (R.1.2)
+    Percent,  // % — modulo operator (R.1.2)
     PlusEq,   // += (R.2.3)
     MinusEq,  // -= (R.2.3)
     StarEq,   // *= (R.2.3)
@@ -76,9 +76,9 @@ pub enum Token {
     FatArrow, // =>
     Question, // ?
     DotDot,   // ..
-    DotDotEq, // ..= (R.1.4: rangos inclusivos)
+    DotDotEq, // ..= (R.1.4: inclusive ranges)
 
-    // Delimitadores
+    // Delimiters
     LParen,   // (
     RParen,   // )
     LBrace,   // {
@@ -88,28 +88,28 @@ pub enum Token {
     Comma,    // ,
     Colon,    // :
     Dot,      // .
-    At,       // @ — prefijo de decoradores: @get, @post, @server, ...
-    Pipe,     // | — separador de or-patterns en `match` (R.2.1); OR bit-a-bit (mini-tanda Bits)
-    // Operadores bit-a-bit (mini-tanda Bits).
-    Amp,   // & — AND bit-a-bit
-    Caret, // ^ — XOR bit-a-bit
+    At,       // @ — decorator prefix: @get, @post, @server, ...
+    Pipe,     // | — or-pattern separator in `match` (R.2.1); bitwise OR (mini-batch Bits)
+    // Bitwise operators (mini-batch Bits).
+    Amp,   // & — bitwise AND
+    Caret, // ^ — bitwise XOR
     Shl,   // << — shift left
     Shr,   // >> — shift right
-    Tilde, // ~ — NOT bit-a-bit (unario)
-    // Operadores bit-a-bit compuestos (mini-tanda Cmp).
+    Tilde, // ~ — bitwise NOT (unary)
+    // Compound bitwise operators (mini-batch Cmp).
     AmpEq,         // &=
     PipeEq,        // |=
     CaretEq,       // ^=
     ShlEq,         // <<=
     ShrEq,         // >>=
-    Label(String), // 'name — labels en break/continue (mini-tanda L)
+    Label(String), // 'name — labels for break/continue (mini-batch L)
 
-    // Especiales
+    // Special
     Newline,
     EOF,
 }
 
-/// Token con su posición en el código fuente. Es lo que devuelve `tokenize`.
+/// Token with its position in the source. This is what `tokenize` returns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TokenWithPos {
     pub token: Token,
@@ -128,27 +128,27 @@ impl TokenWithPos {
 }
 
 // ---------------------------------------------------------------------------
-// Trivia — Fase 9.z.1.b (formatter comment preservation)
+// Trivia — Phase 9.z.1.b (formatter comment preservation)
 //
-// El lexer normalmente strippea comentarios y blank lines: el AST no los
-// necesita y el resto del pipeline tampoco. Pero el formatter SÍ los
-// necesita para preservar el código del usuario al reescribir. Trivia
-// es el side-channel que `tokenize_with_trivia` retorna: tokens van
-// por un lado, comments + blank lines por el otro. El parser sigue
-// usando solo los tokens, así que el AST no se contamina.
+// The lexer normally strips comments and blank lines: the AST doesn't need
+// them and neither does the rest of the pipeline. But the formatter DOES
+// need them to preserve the user's code when rewriting. Trivia is the
+// side-channel that `tokenize_with_trivia` returns: tokens on one side,
+// comments + blank lines on the other. The parser keeps using only the
+// tokens, so the AST stays clean.
 // ---------------------------------------------------------------------------
 
-/// Tipo de comentario capturado. Fitz solo tiene `//` (line) y
-/// `/* */` (block). El formatter los emite diferente.
+/// Captured comment kind. Fitz only has `//` (line) and `/* */` (block).
+/// The formatter emits them differently.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CommentKind {
     Line,
     Block,
 }
 
-/// Comentario capturado del source. La `text` NO incluye el prefijo
-/// (`//` o `/*`) ni el sufijo (`*/` para block). Posición es 1-based
-/// e indica dónde arranca el delimitador de apertura.
+/// Comment captured from the source. `text` does NOT include the prefix
+/// (`//` or `/*`) nor the suffix (`*/` for block). Position is 1-based
+/// and points to where the opening delimiter starts.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Comment {
     pub text: String,
@@ -157,39 +157,39 @@ pub struct Comment {
     pub kind: CommentKind,
 }
 
-/// Side-channel del lexer: todo lo que el lexer normalmente
-/// descartaría pero que el formatter necesita preservar.
+/// Lexer side-channel: everything the lexer would normally
+/// discard but the formatter needs to preserve.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Trivia {
-    /// Comments en orden de aparición.
+    /// Comments in source order.
     pub comments: Vec<Comment>,
-    /// Números de línea (1-based) que estaban completamente vacías
-    /// en el source. NO incluye líneas que contienen solo un
-    /// comentario — esas están representadas via `comments`.
+    /// Line numbers (1-based) that were completely empty in the
+    /// source. Does NOT include lines that contain only a comment
+    /// — those are represented via `comments`.
     pub blank_lines: Vec<usize>,
 }
 
-/// Estado interno del escaneo. Privado al módulo.
+/// Internal scanning state. Module-private.
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
     line: usize,
     column: usize,
-    /// Si está activo, el lexer captura comments y blank lines en
-    /// `trivia` (Fase 9.z.1.b). Inactivo por default — la `tokenize`
-    /// rápida sigue siendo zero-overhead.
+    /// When active, the lexer captures comments and blank lines
+    /// into `trivia` (Phase 9.z.1.b). Off by default — the fast
+    /// `tokenize` stays zero-overhead.
     collect_trivia: bool,
     trivia: Trivia,
-    /// Flags por línea para detectar blank lines correctamente
-    /// (líneas con solo whitespace cuentan como blank; líneas con
-    /// comentario NO). Se resetean al consumir un `\n`.
+    /// Per-line flags to detect blank lines correctly (lines with
+    /// only whitespace count as blank; lines with a comment do
+    /// NOT). Reset when consuming a `\n`.
     line_had_code: bool,
     line_had_comment: bool,
-    /// Mini-tanda T — `true` justo después de emitir `Token::Dot`.
-    /// `read_number` lo consulta para NO entrar a modo float
-    /// cuando ve `<dígitos>.<dígito>` precedido de Dot: `t.0.0`
-    /// debe tokenizar como `Ident("t") Dot Int(0) Dot Int(0)`,
-    /// no como `Ident("t") Dot Float(0.0)`.
+    /// Mini-batch T — `true` right after emitting `Token::Dot`.
+    /// `read_number` checks it so it does NOT enter float mode
+    /// when seeing `<digits>.<digit>` preceded by Dot: `t.0.0`
+    /// must tokenize as `Ident("t") Dot Int(0) Dot Int(0)`, not
+    /// as `Ident("t") Dot Float(0.0)`.
     prev_was_dot: bool,
 }
 
@@ -214,22 +214,22 @@ impl Lexer {
         l
     }
 
-    /// Char actual sin consumir. None si llegamos al final.
+    /// Current char without consuming. None if we've reached the end.
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
     }
 
-    /// Char siguiente (pos + 1) sin consumir.
+    /// Next char (pos + 1) without consuming.
     fn peek_next(&self) -> Option<char> {
         self.chars.get(self.pos + 1).copied()
     }
 
-    /// Consume el char actual y actualiza línea/columna.
+    /// Consume the current char and update line/column.
     ///
-    /// **Fase 9.z.1.b**: al cruzar un `\n`, si la línea que
-    /// estamos cerrando no tuvo ningún token NI comment (es decir,
-    /// solo whitespace), la registramos como blank_line en `trivia`.
-    /// Comments-only lines no son blanks.
+    /// **Phase 9.z.1.b**: when crossing a `\n`, if the line we're
+    /// closing had no token AND no comment (i.e. only whitespace),
+    /// we record it as a blank_line in `trivia`. Comments-only
+    /// lines are not blanks.
     fn advance(&mut self) -> Option<char> {
         let c = self.peek()?;
         self.pos += 1;
@@ -247,7 +247,7 @@ impl Lexer {
         Some(c)
     }
 
-    /// Salta espacios, tabs y comentarios. NO salta '\n' (ese es token).
+    /// Skip spaces, tabs and comments. Does NOT skip '\n' (that's a token).
     fn skip_whitespace_and_comments(&mut self) -> FitzResult<()> {
         loop {
             match self.peek() {
@@ -255,7 +255,7 @@ impl Lexer {
                     self.advance();
                 }
                 Some('/') if self.peek_next() == Some('/') => {
-                    // comentario de línea — consumimos hasta el '\n' (sin incluirlo)
+                    // line comment — consume up to '\n' (not including it)
                     let start_line = self.line;
                     let start_col = self.column;
                     self.advance(); // '/'
@@ -323,29 +323,29 @@ impl Lexer {
         Ok(())
     }
 
-    /// Lee un número. Decide entre Int y Float según haya un '.' seguido
-    /// de dígito o notación científica (`e`/`E`).
+    /// Read a number. Picks Int vs Float based on whether there is a '.'
+    /// followed by a digit, or scientific notation (`e`/`E`).
     ///
-    /// Cuidado: en `0..10` el '..' es operador de rango, NO punto decimal.
+    /// Watch out: in `0..10` the '..' is a range operator, NOT a decimal point.
     ///
-    /// **Mini-tanda Núm**: soporta separadores `_` entre dígitos
-    /// (`1_000_000`, `3.14_15`) y notación científica `e`/`E` con
-    /// exponente opcionalmente firmado (`3.14e2`, `1e-10`, `2.5E+3`).
-    /// Reglas:
-    ///   - `_` solo entre dígitos. Inválido: `_1`, `1_`, `1__0`.
-    ///   - `e`/`E` siempre produce Float (incluso `1e10`).
-    ///   - El exponente puede llevar `+`/`-` opcional y al menos un
-    ///     dígito (`1e`, `1e+` → error).
-    ///   - Separadores también permitidos en el exponente (`1e1_0`).
+    /// **Mini-batch Núm**: supports `_` digit separators (`1_000_000`,
+    /// `3.14_15`) and scientific notation `e`/`E` with an optionally
+    /// signed exponent (`3.14e2`, `1e-10`, `2.5E+3`).
+    /// Rules:
+    ///   - `_` only between digits. Invalid: `_1`, `1_`, `1__0`.
+    ///   - `e`/`E` always yields a Float (even `1e10`).
+    ///   - The exponent may carry an optional `+`/`-` and at least
+    ///     one digit (`1e`, `1e+` → error).
+    ///   - Separators also allowed inside the exponent (`1e1_0`).
     fn read_number(&mut self) -> FitzResult<Token> {
         let start_line = self.line;
         let start_col = self.column;
 
-        // Mini-tanda Lit — literales hex/binario/octal con prefijos
-        // `0x`/`0b`/`0o`. Mini-tanda Cmp — también aceptamos las
-        // mayúsculas `0X`/`0B`/`0O` (Python-compat). El char actual
-        // debe ser `0` y el siguiente el prefijo. Si NO matchea,
-        // caemos al flujo decimal de abajo.
+        // Mini-batch Lit — hex/binary/octal literals with prefixes
+        // `0x`/`0b`/`0o`. Mini-batch Cmp — we also accept the
+        // uppercase variants `0X`/`0B`/`0O` (Python-compat). The
+        // current char must be `0` and the next one the prefix.
+        // If it doesn't match, we fall through to the decimal flow.
         if self.peek() == Some('0') && !self.prev_was_dot {
             match self.peek_next() {
                 Some('x') | Some('X') => {
@@ -362,33 +362,33 @@ impl Lexer {
         }
 
         let start_pos = self.pos;
-        // Helper: lee dígitos + underscores intercalados. Devuelve error
-        // si encuentra `_` huérfano (`1__`, termina en `_`).
+        // Helper: read digits + interleaved underscores. Returns an error
+        // if it finds an orphan `_` (`1__`, ending in `_`).
         self.read_digit_run(start_line, start_col)?;
 
-        // Mini-tanda T — si venimos justo después de `Dot` (tuple
-        // field access encadenado como `t.0.0`), NO entramos a modo
-        // float. El `0` de `t.0` se cierra como Int, y el `.0`
-        // siguiente arrancará un nuevo Int por el mismo camino.
+        // Mini-batch T — if we come right after a `Dot` (tuple field
+        // access chain like `t.0.0`), do NOT enter float mode. The
+        // `0` of `t.0` closes as Int, and the following `.0` will
+        // start a new Int through the same path.
         let has_fraction = !self.prev_was_dot
             && self.peek() == Some('.')
             && self.peek_next().is_some_and(|c| c.is_ascii_digit());
         let mut is_float = false;
 
         if has_fraction {
-            self.advance(); // consumir '.'
-            self.advance(); // consumir primer dígito de la parte fraccional
+            self.advance(); // consume '.'
+            self.advance(); // consume first digit of the fractional part
             self.read_digit_run(start_line, start_col)?;
             is_float = true;
         }
 
-        // Notación científica `e`/`E` con exponente opcionalmente firmado.
+        // Scientific notation `e`/`E` with an optionally signed exponent.
         if matches!(self.peek(), Some('e') | Some('E')) {
             self.advance(); // consume `e`/`E`
             if matches!(self.peek(), Some('+') | Some('-')) {
                 self.advance();
             }
-            // Al menos un dígito después del signo.
+            // At least one digit after the sign.
             match self.peek() {
                 Some(c) if c.is_ascii_digit() => {
                     self.advance();
@@ -406,7 +406,7 @@ impl Lexer {
             is_float = true;
         }
 
-        // Parse final: limpiar `_` y convertir.
+        // Final parse: strip `_` and convert.
         let raw: String = self.chars[start_pos..self.pos].iter().collect();
         let clean: String = raw.chars().filter(|c| *c != '_').collect();
         if is_float {
@@ -432,10 +432,10 @@ impl Lexer {
         }
     }
 
-    /// Mini-tanda Lit — lee un literal con prefijo de radix (hex `0x`,
-    /// binario `0b`, octal `0o`). Soporta separadores `_` entre dígitos.
-    /// Produce `Token::Int`. Overflow sobre `i64` o dígitos vacíos →
-    /// error claro del lexer.
+    /// Mini-batch Lit — read a literal with a radix prefix (hex `0x`,
+    /// binary `0b`, octal `0o`). Supports `_` digit separators.
+    /// Produces `Token::Int`. `i64` overflow or empty digits → a
+    /// clear lexer error.
     fn read_radix_number(
         &mut self,
         radix: u32,
@@ -444,7 +444,7 @@ impl Lexer {
         col: usize,
     ) -> FitzResult<Token> {
         self.advance(); // consume '0'
-        self.advance(); // consume prefijo ('x'/'b'/'o')
+        self.advance(); // consume prefix ('x'/'b'/'o')
         let digit_start = self.pos;
         loop {
             match self.peek() {
@@ -452,7 +452,7 @@ impl Lexer {
                     self.advance();
                 }
                 Some('_') => {
-                    // Después de `_` exige dígito válido para la base.
+                    // After `_` require a valid digit for the base.
                     if !self.peek_next().is_some_and(|n| n.is_digit(radix)) {
                         return Err(FitzError::new(
                             ErrorKind::InvalidSyntax,
@@ -490,18 +490,19 @@ impl Lexer {
         Ok(Token::Int(n))
     }
 
-    /// Mini-tanda Núm — lee una secuencia de `digit (_ digit)*`. Permite
-    /// `_` entre dígitos pero rechaza `__` consecutivos o un `_` al final.
-    /// El primer dígito YA está consumido por el caller; este helper sigue
-    /// hasta el primer char que no sea digit/underscore.
+    /// Mini-batch Núm — read a `digit (_ digit)*` sequence. Allows
+    /// `_` between digits but rejects consecutive `__` or a trailing
+    /// `_`. The first digit is ALREADY consumed by the caller; this
+    /// helper continues up to the first char that is not digit/underscore.
     fn read_digit_run(&mut self, line: usize, col: usize) -> FitzResult<()> {
         while let Some(c) = self.peek() {
             if c.is_ascii_digit() {
                 self.advance();
             } else if c == '_' {
-                // El char anterior es lo último consumido — un dígito
-                // (porque el loop solo avanza con digits o '_' previo
-                // validado). Pero después del `_` exigimos otro dígito.
+                // The previous char is the last thing consumed — a
+                // digit (because the loop only advances on digits
+                // or a previously validated `_`). But after the `_`
+                // we require another digit.
                 if !self.peek_next().is_some_and(|n| n.is_ascii_digit()) {
                     return Err(FitzError::new(
                         ErrorKind::InvalidSyntax,
@@ -518,19 +519,19 @@ impl Lexer {
         Ok(())
     }
 
-    /// Lee un string entre comillas. Soporta escapes básicos: \n \t \r \\ \" \{ \}
-    /// La interpolación `"Hola {name}"` se deja "cruda" en el contenido — el
-    /// parser/evaluador la procesa más tarde.
+    /// Read a string between quotes. Supports basic escapes: \n \t \r \\ \" \{ \}
+    /// The interpolation `"Hello {name}"` is left "raw" in the content
+    /// — the parser/evaluator processes it later.
     ///
-    /// **R.1.5 (mini-fase R)**: además del modo "comilla simple", soporta
-    /// **triple-quote** `"""..."""` para strings multilínea. Si tras el
-    /// primer `"` vienen dos `"` más, entramos a modo triple: newlines
-    /// son válidos adentro y el cierre es `"""` (tres comillas seguidas).
-    /// Interpolación `{expr}` sigue funcionando igual.
-    /// F9 — Procesa `\u{XXXX}`: 1 a 6 dígitos hex entre llaves,
-    /// interpretados como un codepoint Unicode escalar. Rechaza
-    /// surrogates (D800-DFFF) y valores > U+10FFFF. La `\` y la `u`
-    /// ya fueron consumidas por el caller.
+    /// **R.1.5 (mini-phase R)**: besides the "single-quote" mode, supports
+    /// **triple-quote** `"""..."""` for multiline strings. If two more `"`
+    /// follow the first `"`, we enter triple mode: newlines are valid
+    /// inside and the closer is `"""` (three quotes in a row).
+    /// `{expr}` interpolation works the same.
+    /// F9 — Processes `\u{XXXX}`: 1 to 6 hex digits between braces,
+    /// interpreted as a Unicode scalar codepoint. Rejects surrogates
+    /// (D800-DFFF) and values > U+10FFFF. The `\` and the `u` were
+    /// already consumed by the caller.
     fn read_unicode_escape(&mut self) -> FitzResult<char> {
         let start_line = self.line;
         let start_col = self.column;
@@ -608,9 +609,9 @@ impl Lexer {
         })
     }
 
-    /// F9 — Procesa `\xXX`: exactamente 2 dígitos hex, interpretados
-    /// como un byte ASCII (0x00-0x7F). Codepoints > 0x7F se rechazan
-    /// (paralelo a Rust). Caller ya consumió `\` y `x`.
+    /// F9 — Processes `\xXX`: exactly 2 hex digits, interpreted as
+    /// an ASCII byte (0x00-0x7F). Codepoints > 0x7F are rejected
+    /// (parallel to Rust). The caller already consumed `\` and `x`.
     fn read_hex_byte_escape(&mut self) -> FitzResult<char> {
         let start_line = self.line;
         let start_col = self.column;
@@ -668,11 +669,11 @@ impl Lexer {
     fn read_string(&mut self) -> FitzResult<Token> {
         let start_line = self.line;
         let start_col = self.column;
-        self.advance(); // consumir comilla de apertura "
+        self.advance(); // consume opening quote "
 
-        // R.1.5 — modo triple-quote. Si los próximos dos chars también
-        // son `"`, estamos en `"""..."""`. Los consumimos y delegamos
-        // a la lectura multilínea.
+        // R.1.5 — triple-quote mode. If the next two chars are also
+        // `"`, we're in `"""..."""`. Consume them and delegate to the
+        // multiline reader.
         if self.peek() == Some('"') && self.peek_next() == Some('"') {
             self.advance();
             self.advance();
@@ -694,17 +695,18 @@ impl Lexer {
                         Some('r') => s.push('\r'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
-                        // F9 — escapes extendidos:
+                        // F9 — extended escapes:
                         Some('0') => s.push('\0'),
                         Some('b') => s.push('\u{0008}'), // backspace
                         Some('u') => s.push(self.read_unicode_escape()?),
                         Some('x') => s.push(self.read_hex_byte_escape()?),
-                        // '\{' y '\}' se PRESERVAN literalmente en el
-                        // contenido del Token::Str (con la barra).
-                        // El parser, al construir la expresión de
-                        // string, distingue `{` (inicio de
-                        // interpolación) de `\{` (literal). Si los
-                        // resolviéramos acá, se perdería la distinción.
+                        // '\{' and '\}' are PRESERVED literally in
+                        // the Token::Str content (with the backslash).
+                        // The parser, when building the string
+                        // expression, distinguishes `{` (start of
+                        // interpolation) from `\{` (literal). If we
+                        // resolved them here, that distinction would
+                        // be lost.
                         Some('{') => {
                             s.push('\\');
                             s.push('{');
@@ -756,26 +758,26 @@ impl Lexer {
         }
     }
 
-    /// R.1.5 — lee el contenido de un string multilínea `"""..."""`.
-    /// Las tres comillas iniciales ya fueron consumidas. Diferencias
+    /// R.1.5 — reads the contents of a multiline string `"""..."""`.
+    /// The three opening quotes were already consumed. Differences
     /// vs `read_string`:
     ///
-    /// - **Newlines** son válidos adentro (se preservan en el
-    ///   contenido tal cual, sin requerir `\n`).
-    /// - **Cierre** es `"""` (tres comillas seguidas).
-    /// - Las **comillas simples y dobles aisladas** dentro del string
-    ///   se preservan literalmente; solo cierran cuando aparecen 3
-    ///   seguidas.
-    /// - Mismos escapes que strings normales (`\n`, `\t`, `\\`, `\"`,
-    ///   `\{`, `\}`). Útil si necesitás `"""` literal adentro:
+    /// - **Newlines** are valid inside (preserved in the content
+    ///   as-is, without requiring `\n`).
+    /// - **Closer** is `"""` (three quotes in a row).
+    /// - **Isolated single and double quotes** inside the string
+    ///   are preserved literally; they only close when 3 appear
+    ///   in a row.
+    /// - Same escapes as normal strings (`\n`, `\t`, `\\`, `\"`,
+    ///   `\{`, `\}`). Useful if you need a literal `"""` inside:
     ///   `\"""`.
-    /// - **Interpolación** `{expr}` sigue funcionando — el contenido
-    ///   se pasa "crudo" al parser igual que en strings normales.
+    /// - **Interpolation** `{expr}` keeps working — the content is
+    ///   handed "raw" to the parser just like in normal strings.
     fn read_triple_string(&mut self, start_line: usize, start_col: usize) -> FitzResult<Token> {
         let mut s = String::new();
         loop {
-            // Detectar cierre `"""`: si el char actual y los dos
-            // siguientes son `"`, terminamos.
+            // Detect the closer `"""`: if the current char and the
+            // next two are `"`, we're done.
             if self.peek() == Some('"')
                 && self.peek_next() == Some('"')
                 && self.chars.get(self.pos + 2).copied() == Some('"')
@@ -794,7 +796,7 @@ impl Lexer {
                         Some('r') => s.push('\r'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
-                        // F9 — escapes extendidos (paralelos a read_string):
+                        // F9 — extended escapes (parallel to read_string):
                         Some('0') => s.push('\0'),
                         Some('b') => s.push('\u{0008}'),
                         Some('u') => s.push(self.read_unicode_escape()?),
@@ -825,8 +827,8 @@ impl Lexer {
                         }
                     }
                 }
-                // Newline LITERAL — válido adentro de triple-quote.
-                // Se preserva tal cual en el contenido.
+                // LITERAL newline — valid inside triple-quote. Preserved
+                // as-is in the content.
                 Some(c) => {
                     s.push(c);
                     self.advance();
@@ -843,7 +845,7 @@ impl Lexer {
         }
     }
 
-    /// Lee un identificador (letras + dígitos + '_') y decide si es keyword.
+    /// Read an identifier (letters + digits + '_') and decide if it's a keyword.
     fn read_identifier_or_keyword(&mut self) -> Token {
         let start_pos = self.pos;
         while let Some(c) = self.peek() {
@@ -885,16 +887,16 @@ impl Lexer {
         }
     }
 
-    /// Mini-tanda Bytes — lee un literal `b"..."`. Asume que el
-    /// caller ya verificó que el current char es `b` y el siguiente
-    /// es `"`. Soporta los escapes comunes (`\n`/`\r`/`\t`/`\0`/
-    /// `\\`/`\"`) más `\xHH` (byte hex de 2 dígitos). NO soporta
-    /// interpolación `{...}` (los bytes literales son fijos). Cada
-    /// char Unicode se codifica como sus bytes UTF-8 (matchea el
-    /// comportamiento de Rust `b"..."` cuando el source tiene chars
-    /// no-ASCII — Rust en realidad rechaza eso; Fitz es más permisivo).
+    /// Mini-batch Bytes — read a `b"..."` literal. Assumes the caller
+    /// already checked that the current char is `b` and the next is
+    /// `"`. Supports the common escapes (`\n`/`\r`/`\t`/`\0`/`\\`/`\"`)
+    /// plus `\xHH` (2-digit hex byte). Does NOT support `{...}`
+    /// interpolation (byte literals are fixed). Each Unicode char is
+    /// encoded as its UTF-8 bytes (matches Rust's `b"..."` behavior
+    /// when the source has non-ASCII chars — Rust actually rejects
+    /// that; Fitz is more permissive).
     fn read_bytes_literal(&mut self) -> FitzResult<Token> {
-        // Consumir `b` y la comilla de apertura.
+        // Consume `b` and the opening quote.
         self.advance();
         self.advance();
         let mut out: Vec<u8> = Vec::new();
@@ -941,7 +943,7 @@ impl Lexer {
                         }
                         Some('x') => {
                             self.advance();
-                            // Leer 2 dígitos hex.
+                            // Read 2 hex digits.
                             let h1 = self.peek().ok_or_else(|| {
                                 FitzError::new(
                                     crate::error::ErrorKind::InvalidSyntax,
@@ -997,7 +999,7 @@ impl Lexer {
                 }
                 Some(c) => {
                     self.advance();
-                    // Codificar el char Unicode como bytes UTF-8.
+                    // Encode the Unicode char as UTF-8 bytes.
                     let mut buf = [0u8; 4];
                     let encoded = c.encode_utf8(&mut buf);
                     out.extend_from_slice(encoded.as_bytes());
@@ -1006,7 +1008,7 @@ impl Lexer {
         }
     }
 
-    /// Obtiene el siguiente token, o None si terminamos.
+    /// Get the next token, or None if we're done.
     fn next_token(&mut self) -> FitzResult<Option<TokenWithPos>> {
         self.skip_whitespace_and_comments()?;
         let line = self.line;
@@ -1022,7 +1024,7 @@ impl Lexer {
                 Token::Newline
             }
             '+' => {
-                // R.2.3 — `+=` para asignación compuesta.
+                // R.2.3 — `+=` for compound assignment.
                 self.advance();
                 if self.peek() == Some('=') {
                     self.advance();
@@ -1038,7 +1040,7 @@ impl Lexer {
                         self.advance();
                         Token::Arrow
                     }
-                    // R.2.3 — `-=` para asignación compuesta.
+                    // R.2.3 — `-=` for compound assignment.
                     Some('=') => {
                         self.advance();
                         Token::MinusEq
@@ -1047,7 +1049,7 @@ impl Lexer {
                 }
             }
             '*' => {
-                // R.2.3 — `*=` para asignación compuesta.
+                // R.2.3 — `*=` for compound assignment.
                 self.advance();
                 if self.peek() == Some('=') {
                     self.advance();
@@ -1057,7 +1059,7 @@ impl Lexer {
                 }
             }
             '/' => {
-                // R.2.3 — `/=` para asignación compuesta.
+                // R.2.3 — `/=` for compound assignment.
                 self.advance();
                 if self.peek() == Some('=') {
                     self.advance();
@@ -1067,8 +1069,8 @@ impl Lexer {
                 }
             }
             '%' => {
-                // R.1.2 — operador módulo. Single char, sin
-                // variantes compuestas (%= llega con R.2.3).
+                // R.1.2 — modulo operator. Single char, no compound
+                // variants (%= lands with R.2.3).
                 self.advance();
                 Token::Percent
             }
@@ -1106,7 +1108,7 @@ impl Lexer {
                     self.advance();
                     Token::LtEq
                 } else if self.peek() == Some('<') {
-                    // Mini-tanda Bits — `<<` shift left. Cmp: `<<=`.
+                    // Mini-batch Bits — `<<` shift left. Cmp: `<<=`.
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
@@ -1124,7 +1126,7 @@ impl Lexer {
                     self.advance();
                     Token::GtEq
                 } else if self.peek() == Some('>') {
-                    // Mini-tanda Bits — `>>` shift right. Cmp: `>>=`.
+                    // Mini-batch Bits — `>>` shift right. Cmp: `>>=`.
                     self.advance();
                     if self.peek() == Some('=') {
                         self.advance();
@@ -1144,9 +1146,9 @@ impl Lexer {
                 self.advance();
                 if self.peek() == Some('.') {
                     self.advance();
-                    // R.1.4: `..=` para rangos inclusivos. El check de
-                    // `..` viene primero, después miramos si el char
-                    // siguiente es `=` para upgrade a DotDotEq.
+                    // R.1.4: `..=` for inclusive ranges. The `..` check
+                    // comes first, then we look at the next char for
+                    // `=` to upgrade to DotDotEq.
                     if self.peek() == Some('=') {
                         self.advance();
                         Token::DotDotEq
@@ -1186,16 +1188,17 @@ impl Lexer {
                 Token::Comma
             }
             ';' => {
-                // L1 (2026-06-05) — `;` como separador opcional de stmts.
-                // Decisión de diseño #5 del proyecto: "punto y coma opcional,
-                // como en Go". Implementación pragmática: el lexer emite
-                // `Token::Newline` (no un token nuevo) para que el parser
-                // trate `;` exactamente como newline, sin cambios upstream.
-                // Trade-off: el `;` literal no se preserva en el AST — el
-                // formatter `fitz fmt` re-emite cada stmt en su propia línea,
-                // así `1 + 1; 2 + 2` se reescribe como dos líneas separadas.
-                // Cierra el drift histórico entre la decisión #5 y la realidad
-                // del lexer pre-L1 (que rechazaba `;` como char inesperado).
+                // L1 (2026-06-05) — `;` as optional stmt separator.
+                // Project design decision #5: "optional semicolons, like
+                // in Go". Pragmatic implementation: the lexer emits
+                // `Token::Newline` (not a new token) so the parser
+                // treats `;` exactly like newline, with no upstream
+                // changes. Trade-off: the literal `;` is not preserved
+                // in the AST — `fitz fmt` re-emits each stmt on its own
+                // line, so `1 + 1; 2 + 2` is rewritten as two separate
+                // lines. Closes the historical drift between decision
+                // #5 and the pre-L1 lexer (which rejected `;` as an
+                // unexpected char).
                 self.advance();
                 Token::Newline
             }
@@ -1204,11 +1207,11 @@ impl Lexer {
                 Token::Colon
             }
             '|' => {
-                // R.2.1 — separador de or-patterns en `match`. Mini-tanda
-                // Bits: el mismo Token::Pipe se usa como OR bit-a-bit;
-                // el parser distingue por contexto (expression nivel
-                // bitwise vs arm de match). Cmp: `|=` para asignación
-                // compuesta bit-a-bit.
+                // R.2.1 — or-pattern separator in `match`. Mini-batch
+                // Bits: the same Token::Pipe is used as bitwise OR;
+                // the parser distinguishes by context (expression at
+                // bitwise level vs match arm). Cmp: `|=` for compound
+                // bitwise assignment.
                 self.advance();
                 if self.peek() == Some('=') {
                     self.advance();
@@ -1217,7 +1220,7 @@ impl Lexer {
                     Token::Pipe
                 }
             }
-            // Mini-tanda Bits — `&`, `^`, `~`. Cmp: `&=` y `^=`.
+            // Mini-batch Bits — `&`, `^`, `~`. Cmp: `&=` and `^=`.
             '&' => {
                 self.advance();
                 if self.peek() == Some('=') {
@@ -1241,10 +1244,10 @@ impl Lexer {
                 Token::Tilde
             }
             '\'' => {
-                // Mini-tanda L — label `'name` para break/continue.
-                // Fitz no tiene char literales con `'x'`, así que el
-                // apóstrofe siempre arranca una label. Después del
-                // apóstrofe esperamos identificador.
+                // Mini-batch L — `'name` label for break/continue.
+                // Fitz has no char literals with `'x'`, so the
+                // apostrophe always starts a label. After the
+                // apostrophe we expect an identifier.
                 self.advance(); // consume `'`
                 let start_pos = self.pos;
                 while let Some(c) = self.peek() {
@@ -1271,8 +1274,8 @@ impl Lexer {
             }
             '"' => self.read_string()?,
             c if c.is_ascii_digit() => self.read_number()?,
-            // Mini-tanda Bytes — `b"..."` antes que identifiers,
-            // porque `b` solo es ident si NO le sigue una comilla.
+            // Mini-batch Bytes — `b"..."` before identifiers, because
+            // a lone `b` is only an ident if NOT followed by a quote.
             'b' if self.peek_next() == Some('"') => self.read_bytes_literal()?,
             c if c.is_alphabetic() || c == '_' => self.read_identifier_or_keyword(),
             other => {
@@ -1286,9 +1289,9 @@ impl Lexer {
             }
         };
 
-        // Fase 9.z.1.b — marcar la línea como "tuvo código" para
-        // que `\n` no la cuente como blank. Newline NO marca código
-        // (sino, ninguna línea sería blank).
+        // Phase 9.z.1.b — mark the line as "had code" so that `\n`
+        // doesn't count it as blank. Newline does NOT mark code
+        // (otherwise no line would be blank).
         if self.collect_trivia && !matches!(token, Token::Newline) {
             self.line_had_code = true;
         }
@@ -1297,14 +1300,14 @@ impl Lexer {
     }
 }
 
-/// Convierte código fuente en una lista de tokens con posición.
-/// Siempre termina con un `Token::EOF`.
+/// Convert source code into a list of tokens with positions. Always
+/// terminates with a `Token::EOF`.
 pub fn tokenize(source: &str) -> FitzResult<Vec<TokenWithPos>> {
     let mut lexer = Lexer::new(source);
     let mut tokens = Vec::new();
     while let Some(tok) = lexer.next_token()? {
-        // Mini-tanda T — guardar si emitimos Dot para que el próximo
-        // `read_number` no entre a modo float (caso `t.0.0`).
+        // Mini-batch T — remember whether we just emitted Dot so the
+        // next `read_number` doesn't enter float mode (case `t.0.0`).
         lexer.prev_was_dot = matches!(tok.token, Token::Dot);
         tokens.push(tok);
     }
@@ -1312,14 +1315,14 @@ pub fn tokenize(source: &str) -> FitzResult<Vec<TokenWithPos>> {
     Ok(tokens)
 }
 
-/// Fase 9.z.1.b — variante de `tokenize` que ADEMÁS captura
-/// comentarios y blank lines como `Trivia` side-channel. Consumida
-/// por el formatter (`fitz fmt`) para preservar comments + blank
-/// lines del usuario al reescribir.
+/// Phase 9.z.1.b — variant of `tokenize` that ALSO captures comments
+/// and blank lines as a `Trivia` side-channel. Consumed by the
+/// formatter (`fitz fmt`) to preserve the user's comments + blank
+/// lines when rewriting.
 ///
-/// Cualquier otro consumidor del lexer (parser, LSP, etc.) sigue
-/// usando `tokenize` y obtiene zero overhead. La `Trivia` no se
-/// inyecta en el AST.
+/// Any other lexer consumer (parser, LSP, etc.) keeps using
+/// `tokenize` and pays zero overhead. The `Trivia` is not injected
+/// into the AST.
 pub fn tokenize_with_trivia(source: &str) -> FitzResult<(Vec<TokenWithPos>, Trivia)> {
     let mut lexer = Lexer::new_with_trivia(source);
     let mut tokens = Vec::new();
@@ -1336,11 +1339,11 @@ pub fn tokenize_with_trivia(source: &str) -> FitzResult<(Vec<TokenWithPos>, Triv
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
+#[allow(clippy::approx_constant)] // 3.14 in tests is a generic Float, not PI.
 mod tests {
     use super::*;
 
-    /// Helper: tokeniza y devuelve solo los `Token` (sin posiciones).
+    /// Helper: tokenize and return only the `Token`s (no positions).
     fn toks(src: &str) -> Vec<Token> {
         tokenize(src)
             .expect("la fuente debe tokenizar sin error")
@@ -1412,18 +1415,18 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda F8 — identificadores no-ASCII (Unicode) ----
+    // ---- Mini-batch F8 — non-ASCII (Unicode) identifiers ----
 
     #[test]
     fn f8_identifiers_griegos_y_simbolos_matematicos() {
-        // `π`, `σ`, etc. — letras griegas. is_alphabetic devuelve true.
+        // `π`, `σ`, etc. — Greek letters. is_alphabetic returns true.
         assert_eq!(toks("π"), vec![Token::Ident("π".into()), Token::EOF],);
         assert_eq!(toks("σ"), vec![Token::Ident("σ".into()), Token::EOF],);
     }
 
     #[test]
     fn f8_identifiers_con_acentos_y_n_tilde() {
-        // Tipico de español: `función`, `niño`, `café`.
+        // Typical Spanish: `función`, `niño`, `café`.
         for ident in ["función", "niño", "café", "año"] {
             assert_eq!(
                 toks(ident),
@@ -1436,7 +1439,7 @@ mod tests {
 
     #[test]
     fn f8_identifiers_cjk() {
-        // Japonés / chino / coreano. is_alphabetic los acepta.
+        // Japanese / Chinese / Korean. is_alphabetic accepts them.
         for ident in ["名前", "用户", "이름"] {
             assert_eq!(
                 toks(ident),
@@ -1454,7 +1457,7 @@ mod tests {
 
     #[test]
     fn f8_identifiers_mixto_unicode_y_ascii() {
-        // Combinar Unicode + ASCII + `_` también funciona.
+        // Combining Unicode + ASCII + `_` also works.
         assert_eq!(
             toks("user_名"),
             vec![Token::Ident("user_名".into()), Token::EOF],
@@ -1465,7 +1468,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Bytes — literal `b"..."` ----
+    // ---- Mini-batch Bytes — `b"..."` literal ----
 
     #[test]
     fn bytes_literal_ascii_basico() {
@@ -1501,8 +1504,8 @@ mod tests {
 
     #[test]
     fn bytes_literal_ident_b_sin_comilla_sigue_siendo_ident() {
-        // `b` solo (sin comilla) es un identificador normal, no
-        // disparador de literal de bytes.
+        // A lone `b` (without a quote) is a normal identifier, not
+        // a bytes-literal trigger.
         assert_eq!(
             toks("b + 1"),
             vec![
@@ -1516,8 +1519,8 @@ mod tests {
 
     #[test]
     fn bytes_literal_unicode_via_utf8() {
-        // Char Unicode en el source: se codifica como bytes UTF-8.
-        // `ñ` es 2 bytes (0xc3, 0xb1).
+        // Unicode char in the source: encoded as UTF-8 bytes.
+        // `ñ` is 2 bytes (0xc3, 0xb1).
         assert_eq!(
             toks("b\"ñ\""),
             vec![Token::Bytes(vec![0xc3, 0xb1]), Token::EOF]
@@ -1526,7 +1529,7 @@ mod tests {
 
     #[test]
     fn bytes_literal_escape_invalido_es_error() {
-        // `\z` no es un escape soportado → error claro.
+        // `\z` is not a supported escape → clear error.
         let err = tokenize(r#"b"\z""#).unwrap_err();
         assert!(
             err.message.contains("escape") && err.message.contains("no soportado"),
@@ -1537,8 +1540,8 @@ mod tests {
 
     #[test]
     fn f8_emojis_son_rechazados() {
-        // Los emojis no son `is_alphabetic` (Unicode Symbol, no Letter)
-        // — el lexer los rechaza con UnexpectedChar.
+        // Emojis are not `is_alphabetic` (Unicode Symbol, not Letter)
+        // — the lexer rejects them with UnexpectedChar.
         let err = tokenize("🚀").unwrap_err();
         assert!(
             matches!(err.kind, ErrorKind::UnexpectedChar('🚀')),
@@ -1549,11 +1552,11 @@ mod tests {
 
     #[test]
     fn f8_digitos_unicode_no_pueden_arrancar_identifier() {
-        // Igual que ASCII: un identificador no puede arrancar con
-        // dígito (ni ASCII ni Unicode). `٢` (árabe-índico 2) sí es
-        // is_numeric, pero el lexer entra a `read_number` para todo
-        // lo que arranque con dígito ASCII. Para dígitos no-ASCII,
-        // el lexer corta porque no son `is_alphabetic` ni dígito ASCII.
+        // Same as ASCII: an identifier can't start with a digit (ASCII
+        // or Unicode). `٢` (Arabic-Indic 2) IS is_numeric, but the
+        // lexer enters `read_number` only for things that start with
+        // an ASCII digit. For non-ASCII digits, the lexer bails out
+        // because they're neither `is_alphabetic` nor an ASCII digit.
         let err = tokenize("٢").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedChar(_)));
     }
@@ -1593,7 +1596,7 @@ mod tests {
         );
     }
 
-    // ---- R.1.5 — strings multilínea `"""..."""` (mini-fase R) ----
+    // ---- R.1.5 — multiline strings `"""..."""` (mini-phase R) ----
 
     #[test]
     fn triple_string_simple() {
@@ -1618,8 +1621,8 @@ mod tests {
 
     #[test]
     fn triple_string_con_comilla_doble_interna_se_preserva() {
-        // `"""a "b" c"""` → contenido `a "b" c`. La comilla interna
-        // sola no cierra; solo `"""` consecutivas cierran.
+        // `"""a "b" c"""` → content `a "b" c`. A lone inner quote
+        // doesn't close; only `"""` in a row closes.
         let src = "\"\"\"a \"b\" c\"\"\"";
         assert_eq!(toks(src), vec![Token::Str("a \"b\" c".into()), Token::EOF],);
     }
@@ -1642,14 +1645,14 @@ mod tests {
 
     #[test]
     fn interpolation_braces_stay_in_string_content() {
-        // El lexer NO interpola — deja "{name}" tal cual; el parser/eval lo manejará.
+        // The lexer does NOT interpolate — it leaves "{name}" as-is; the parser/eval handles it.
         assert_eq!(
             toks(r#""Hola, {name}!""#),
             vec![Token::Str("Hola, {name}!".into()), Token::EOF]
         );
     }
 
-    // ---- F9 — escapes extendidos (\u, \x, \0, \b) ----
+    // ---- F9 — extended escapes (\u, \x, \0, \b) ----
 
     #[test]
     fn f9_escape_null_y_backspace() {
@@ -1666,7 +1669,7 @@ mod tests {
 
     #[test]
     fn f9_escape_unicode_basic_y_extendido() {
-        // BMP: `\u{00E9}` = 'é'. Suplementario: `\u{1F600}` = 😀.
+        // BMP: `\u{00E9}` = 'é'. Supplementary: `\u{1F600}` = 😀.
         assert_eq!(
             toks(r#""caf\u{00E9}""#),
             vec![Token::Str("café".into()), Token::EOF]
@@ -1675,12 +1678,12 @@ mod tests {
             toks(r#""\u{1F600}""#),
             vec![Token::Str("😀".into()), Token::EOF]
         );
-        // Lowercase hex también vale.
+        // Lowercase hex also works.
         assert_eq!(
             toks(r#""\u{00e9}""#),
             vec![Token::Str("é".into()), Token::EOF]
         );
-        // 1 dígito hex es suficiente.
+        // 1 hex digit is enough.
         assert_eq!(
             toks(r#""\u{A}""#),
             vec![Token::Str("\n".into()), Token::EOF]
@@ -1699,8 +1702,8 @@ mod tests {
 
     #[test]
     fn f9_escape_unicode_sin_cerrar_es_error() {
-        // `"` aparece antes del `}` → el lexer pega contra un char no-hex
-        // (la `"`) y reporta dígito inválido en `\u{...}`.
+        // `"` appears before `}` → the lexer hits a non-hex char
+        // (the `"`) and reports an invalid digit inside `\u{...}`.
         let err = tokenize(r#""\u{ABC""#).unwrap_err();
         assert!(
             err.message.contains("hex inválido") || err.message.contains("Dígito hex inválido"),
@@ -1711,8 +1714,8 @@ mod tests {
 
     #[test]
     fn f9_escape_unicode_surrogate_rechazado() {
-        // U+D800 es el primer code point surrogate alto, inválido como
-        // escalar Unicode.
+        // U+D800 is the first high-surrogate code point, invalid as a
+        // Unicode scalar.
         let err = tokenize(r#""\u{D800}""#).unwrap_err();
         assert!(
             err.message.contains("escalar"),
@@ -1723,7 +1726,7 @@ mod tests {
 
     #[test]
     fn f9_escape_unicode_too_long_es_error() {
-        // 7 dígitos hex exceden el máximo permitido (6, hasta 10FFFF).
+        // 7 hex digits exceed the allowed maximum (6, up to 10FFFF).
         let err = tokenize(r#""\u{1234567}""#).unwrap_err();
         assert!(
             err.message.contains("6 dígitos") || err.message.contains("10FFFF"),
@@ -1734,7 +1737,7 @@ mod tests {
 
     #[test]
     fn f9_escape_hex_byte_ascii() {
-        // `\x41` = 'A', `\x7F` = DEL (límite ASCII).
+        // `\x41` = 'A', `\x7F` = DEL (ASCII limit).
         assert_eq!(
             toks(r#""\x41BC""#),
             vec![Token::Str("ABC".into()), Token::EOF]
@@ -1747,7 +1750,7 @@ mod tests {
 
     #[test]
     fn f9_escape_hex_byte_fuera_de_ascii_rechazado() {
-        // `\x80` y arriba no son ASCII; rechazo explícito sugerendo \u{...}.
+        // `\x80` and above are not ASCII; explicit rejection suggesting \u{...}.
         let err = tokenize(r#""\x80""#).unwrap_err();
         assert!(
             err.message.contains("ASCII") && err.message.contains("\\u"),
@@ -1768,17 +1771,17 @@ mod tests {
 
     #[test]
     fn f9_escapes_extendidos_funcionan_en_triple_string() {
-        // Los mismos escapes (\u/\x/\0/\b) funcionan en `"""..."""`.
+        // The same escapes (\u/\x/\0/\b) work inside `"""..."""`.
         let src = "\"\"\"\\u{00E9}-\\x41-\\0\"\"\"";
         assert_eq!(toks(src), vec![Token::Str("é-A-\0".into()), Token::EOF]);
     }
 
     #[test]
     fn escaped_braces_are_preserved_literally() {
-        // '\{' y '\}' deben llegar al parser con la barra intacta,
-        // así el parser distingue '{name}' (interpolación) de '\{name\}'
-        // (literal). Si el lexer los desescapara acá, se perdería esa
-        // distinción.
+        // '\{' and '\}' must reach the parser with the backslash
+        // intact, so the parser can distinguish '{name}' (interpolation)
+        // from '\{name\}' (literal). If the lexer un-escaped them
+        // here, that distinction would be lost.
         assert_eq!(
             toks(r#""hola \{name\}""#),
             vec![Token::Str(r"hola \{name\}".into()), Token::EOF]
@@ -1878,7 +1881,7 @@ mod tests {
 
     #[test]
     fn hello_fitz_example() {
-        // Equivalente al examples/hello.fitz (sin el emoji para mantener el test corto)
+        // Equivalent to examples/hello.fitz (without the emoji to keep the test short)
         let src = r#"name = "Patagonia"
 print("Hola, {name}!")"#;
         let result: Vec<Token> = toks(src);
@@ -1898,16 +1901,16 @@ print("Hola, {name}!")"#;
         );
     }
 
-    // ---- Fase 9.z.1.b — trivia (comments + blank lines) ----
+    // ---- Phase 9.z.1.b — trivia (comments + blank lines) ----
 
     #[test]
     fn tokenize_default_no_captura_trivia() {
-        // El `tokenize` rápido no debe gastar memoria en trivia.
-        // El test confirma indirectamente que el lexer no se ralentiza
-        // (no hay un side-table que llenar).
+        // The fast `tokenize` must not spend memory on trivia. The test
+        // indirectly confirms that the lexer is not slowed down (there
+        // is no side-table to populate).
         let _ = tokenize("// comentario\nlet x = 1\n").unwrap();
-        // Nada que assertear directamente — tokenize no expone trivia.
-        // El test garantiza que la API sigue siendo zero-overhead.
+        // Nothing to assert directly — tokenize does not expose trivia.
+        // The test guarantees the API stays zero-overhead.
     }
 
     #[test]
@@ -1916,7 +1919,7 @@ print("Hola, {name}!")"#;
         assert_eq!(trivia.comments.len(), 1);
         let c = &trivia.comments[0];
         assert_eq!(c.kind, CommentKind::Line);
-        assert_eq!(c.text, " hola"); // sin el `//`, con el espacio
+        assert_eq!(c.text, " hola"); // without the `//`, with the space
         assert_eq!(c.line, 1);
         assert_eq!(c.column, 1);
     }
@@ -1928,7 +1931,7 @@ print("Hola, {name}!")"#;
         let c = &trivia.comments[0];
         assert_eq!(c.text, " explicación");
         assert_eq!(c.line, 1);
-        // El `//` arranca en columna 11 (después de `let x = 1 `).
+        // The `//` starts at column 11 (after `let x = 1 `).
         assert!(c.column > 1);
     }
 
@@ -1946,7 +1949,7 @@ print("Hola, {name}!")"#;
     fn tokenize_with_trivia_captura_blank_lines() {
         let src = "let x = 1\n\nlet y = 2\n\n\nlet z = 3\n";
         let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
-        // Líneas blank: 2 (entre x y y), 4 y 5 (entre y y z).
+        // Blank lines: 2 (between x and y), 4 and 5 (between y and z).
         assert_eq!(trivia.blank_lines, vec![2, 4, 5]);
     }
 
@@ -1986,10 +1989,10 @@ print("Hola, {name}!")"#;
     }
 
     // ---------------------------------------------------------------
-    // Mini-tanda Núm — separadores `_` + notación científica.
+    // Mini-batch Núm — `_` separators + scientific notation.
     // ---------------------------------------------------------------
 
-    /// Helper: tokeniza una sola expresión y devuelve el primer token.
+    /// Helper: tokenize a single expression and return the first token.
     fn first_token_of(src: &str) -> Token {
         let toks = tokenize(src).expect("debe tokenizar");
         toks.into_iter().next().expect("al menos un token").token
@@ -2030,7 +2033,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn num_separador_en_exponente() {
-        // `1e1_0` → `1e10` tras limpiar separadores.
+        // `1e1_0` → `1e10` after stripping separators.
         assert_eq!(first_token_of("1e1_0"), Token::Float(1e10));
         assert_eq!(first_token_of("1_000e1_0"), Token::Float(1000e10));
     }
@@ -2044,18 +2047,18 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn num_int_clasico_sigue_funcionando() {
-        // Regresión — sin separadores ni notación cientifica, mismo
-        // resultado que antes.
+        // Regression — without separators or scientific notation, same
+        // result as before.
         assert_eq!(first_token_of("42"), Token::Int(42));
         assert_eq!(first_token_of("3.14"), Token::Float(3.14));
     }
 
     #[test]
     fn num_tuple_field_access_no_se_confunde_con_separador() {
-        // `t.0` produce Ident("t"), Dot, Int(0) — no se confunde con
-        // ningún parseo de separador. `t.0.0` (acceso a tuple anidado)
-        // sigue funcionando: la flag prev_was_dot fuerza Int en lugar
-        // de Float.
+        // `t.0` produces Ident("t"), Dot, Int(0) — it is not confused
+        // with any separator parsing. `t.0.0` (nested tuple access)
+        // keeps working: the prev_was_dot flag forces Int instead of
+        // Float.
         use Token::*;
         let toks: Vec<Token> = tokenize("t.0.0")
             .unwrap()
@@ -2070,12 +2073,12 @@ print("Hola, {name}!")"#;
     }
 
     // ---------------------------------------------------------------
-    // Mini-tanda Lit — literales hex / binario / octal.
+    // Mini-batch Lit — hex / binary / octal literals.
     // ---------------------------------------------------------------
 
     #[test]
     fn lit_hex_basico_lower_y_upper_case() {
-        // Los dígitos hex son case-insensitive (paralelo a Rust/Python).
+        // Hex digits are case-insensitive (parallel to Rust/Python).
         assert_eq!(first_token_of("0xFF"), Token::Int(255));
         assert_eq!(first_token_of("0xff"), Token::Int(255));
         assert_eq!(first_token_of("0xCAFE"), Token::Int(0xCAFE));
@@ -2092,7 +2095,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn lit_separadores_en_hex_bin_oct() {
-        // `_` entre dígitos válidos para cada base.
+        // `_` between valid digits for each base.
         assert_eq!(first_token_of("0xDEAD_BEEF"), Token::Int(0xDEAD_BEEF));
         assert_eq!(first_token_of("0b1010_1010"), Token::Int(0b1010_1010));
         assert_eq!(first_token_of("0o7_5_5"), Token::Int(0o755));
@@ -2100,7 +2103,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn lit_sin_digitos_tras_prefijo_es_error() {
-        // `0x`, `0b`, `0o` solos sin dígitos.
+        // `0x`, `0b`, `0o` alone without digits.
         assert!(tokenize("0x").is_err());
         assert!(tokenize("0b").is_err());
         assert!(tokenize("0o").is_err());
@@ -2108,19 +2111,19 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn lit_digito_invalido_para_la_base_corta_el_literal() {
-        // `0b2` lexea `0b` + ... pero no hay '2' válido en binario.
-        // El lexer corta tras el '0' del prefijo, dispara error "sin
-        // dígitos tras prefijo".
+        // `0b2` lexes `0b` + ... but there is no valid '2' in binary.
+        // The lexer bails after the prefix's '0', firing a "no digits
+        // after prefix" error.
         assert!(tokenize("0b2").is_err());
-        // `0o9` mismo case: `9` no es octal válido.
+        // `0o9` same case: `9` is not a valid octal digit.
         assert!(tokenize("0o9").is_err());
     }
 
     #[test]
     fn lit_overflow_es_error_explicito() {
-        // i64::MAX = 0x7FFF_FFFF_FFFF_FFFF (positivo). Un nibble más → overflow.
+        // i64::MAX = 0x7FFF_FFFF_FFFF_FFFF (positive). One more nibble → overflow.
         assert!(tokenize("0xFFFFFFFFFFFFFFFF").is_err());
-        // Binario equivalente.
+        // Equivalent in binary.
         assert!(
             tokenize("0b11111111111111111111111111111111111111111111111111111111111111111")
                 .is_err()
@@ -2134,7 +2137,7 @@ print("Hola, {name}!")"#;
     }
 
     // ---------------------------------------------------------------
-    // Mini-tanda Cmp — compuestos bit-a-bit + prefijos mayúscula.
+    // Mini-batch Cmp — compound bitwise + uppercase prefixes.
     // ---------------------------------------------------------------
 
     #[test]
@@ -2145,7 +2148,7 @@ print("Hola, {name}!")"#;
             .into_iter()
             .map(|t| t.token)
             .collect();
-        // Verifico los tokens compuestos.
+        // Verify the compound tokens.
         assert!(toks.contains(&AmpEq));
         assert!(toks.contains(&PipeEq));
         assert!(toks.contains(&CaretEq));
@@ -2155,8 +2158,8 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn cmp_prefijos_mayuscula_hex_bin_oct() {
-        // Mini-tanda Cmp — `0X`/`0B`/`0O` (mayúscula) valen igual que
-        // las minúsculas.
+        // Mini-batch Cmp — `0X`/`0B`/`0O` (uppercase) work the same
+        // as the lowercase variants.
         assert_eq!(first_token_of("0XFF"), Token::Int(255));
         assert_eq!(first_token_of("0B1010"), Token::Int(10));
         assert_eq!(first_token_of("0O755"), Token::Int(0o755));
@@ -2164,7 +2167,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn cmp_token_amp_solo_sigue_funcionando() {
-        // Regresión: `&` solo (sin `=` después) sigue siendo Token::Amp.
+        // Regression: a lone `&` (without `=` after) is still Token::Amp.
         let toks: Vec<Token> = tokenize("a & b")
             .unwrap()
             .into_iter()
@@ -2176,7 +2179,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn cmp_shl_solo_sigue_funcionando() {
-        // Regresión: `<<` solo sigue siendo Token::Shl.
+        // Regression: a lone `<<` is still Token::Shl.
         let toks: Vec<Token> = tokenize("a << 2")
             .unwrap()
             .into_iter()
@@ -2188,28 +2191,28 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn lit_decimal_clasico_sigue_funcionando() {
-        // Regresión: nada que arranca con `0` que no tiene prefijo
-        // hex/bin/oct se sigue parseando como decimal.
+        // Regression: anything that starts with `0` without a hex/bin/oct
+        // prefix is still parsed as decimal.
         assert_eq!(first_token_of("0"), Token::Int(0));
         assert_eq!(first_token_of("007"), Token::Int(7));
         assert_eq!(first_token_of("0.5"), Token::Float(0.5));
     }
 
-    // L1 (2026-06-05) — `;` como separador opcional de stmts. El lexer
-    // emite `Token::Newline` para que el parser lo trate idéntico a un
-    // newline real. Cierra la deuda histórica de "punto y coma opcional
-    // como en Go" (decisión de diseño #5).
+    // L1 (2026-06-05) — `;` as optional stmt separator. The lexer
+    // emits `Token::Newline` so the parser treats it identically to a
+    // real newline. Closes the historical "optional semicolons like in
+    // Go" debt (design decision #5).
 
     #[test]
     fn l1_semicolon_emite_newline() {
-        // `;` solo → un Newline + EOF.
+        // a lone `;` → one Newline + EOF.
         assert_eq!(toks(";"), vec![Token::Newline, Token::EOF]);
     }
 
     #[test]
     fn l1_dos_exprs_separadas_por_semicolon_producen_dos_stmts_via_newline() {
-        // `1 + 1; 2 + 2` debe producir tokens equivalentes a
-        // `1 + 1\n2 + 2`. El parser luego los lee como 2 stmts.
+        // `1 + 1; 2 + 2` must produce tokens equivalent to
+        // `1 + 1\n2 + 2`. The parser then reads them as 2 stmts.
         let got = toks("1 + 1; 2 + 2");
         let expected = vec![
             Token::Int(1),
@@ -2226,10 +2229,11 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn l1_semicolon_seguido_de_newline_real_no_duplica_newlines_en_parser() {
-        // `1;\n2` produce dos Newlines consecutivos (uno del `;`, otro
-        // del `\n` real). El parser ya tolera Newlines repetidos como
-        // separador único — chequeado en el smoke `recovery_*` y al
-        // parsear bloques. Acá solo validamos el shape del lexer.
+        // `1;\n2` produces two consecutive Newlines (one from `;`, one
+        // from the real `\n`). The parser already tolerates repeated
+        // Newlines as a single separator — checked by the `recovery_*`
+        // smoke and while parsing blocks. Here we only validate the
+        // lexer shape.
         let got = toks("1;\n2");
         let expected = vec![
             Token::Int(1),
@@ -2243,17 +2247,17 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn l1_semicolon_adentro_de_string_no_se_interpreta() {
-        // Strings preservan `;` como char literal — el lexer solo lo
-        // intercepta a nivel top-level del scanner, no adentro de un
-        // string literal (que tiene su propia state machine).
+        // Strings preserve `;` as a literal char — the lexer only
+        // intercepts it at the scanner's top level, not inside a string
+        // literal (which has its own state machine).
         let got = toks(r#""hola;mundo""#);
         assert_eq!(got, vec![Token::Str("hola;mundo".into()), Token::EOF]);
     }
 
     #[test]
     fn l1_semicolon_adentro_de_comentario_se_consume_como_parte_del_comment() {
-        // `// hola; mundo` se consume entero como comment line —
-        // sigue siendo un solo Newline al final.
+        // `// hola; mundo` is consumed entirely as a line comment —
+        // there is still only a single Newline at the end.
         let got = toks("// hola; mundo\n42");
         assert_eq!(got, vec![Token::Newline, Token::Int(42), Token::EOF]);
     }
