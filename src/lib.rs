@@ -1,74 +1,76 @@
-// lib.rs — Crate library de Fitz.
+// lib.rs — Fitz crate library.
 //
-// El crate `fitz` se publica como library + binarios (`fitz`, `fitz-lsp`).
-// Los módulos viven acá; los bins (en `src/main.rs` y `src/bin/*.rs`)
-// los consumen vía `use fitz::...`.
+// The `fitz` crate ships as a library + binaries (`fitz`, `fitz-lsp`).
+// The modules live here; the bins (in `src/main.rs` and `src/bin/*.rs`)
+// consume them via `use fitz::...`.
 //
-// Refactor introducido en Fase 9.x.1.b: hasta entonces `fitz` era
-// bin-only y `src/main.rs` declaraba los módulos directamente. Para que
-// el bin nuevo `fitz-lsp` pueda reusar `lexer`/`parser`/`types` sin
-// re-compilar todo el crate dos veces, los módulos se mueven a la lib
-// y los bins se migran a `use fitz::...`.
+// Refactor introduced in Phase 9.x.1.b: until then `fitz` was bin-only
+// and `src/main.rs` declared the modules directly. So the new bin
+// `fitz-lsp` can reuse `lexer`/`parser`/`types` without recompiling
+// the whole crate twice, the modules move into the lib and the bins
+// migrate to `use fitz::...`.
 
-// Fase 10.3.b1 — `EvalSignal` es 128 bytes exactos por el shape de
-// `Break(Value, Option<String>)` (Value pesa 104B). Clippy considera
-// >= 128 bytes como "Err-variant very large" y dispara en cientos de
-// signatures `Result<_, EvalSignal>`. Box-ear el Value adentro de
-// Break no resuelve porque `Error(FitzError)` ya pesa 112B y mantiene
-// el size del enum cerca del threshold. Allow a nivel crate es la
-// forma estándar en proyectos Rust con tipos de error grandes
-// intencionales por diseño del lenguaje.
+// Phase 10.3.b1 — `EvalSignal` is exactly 128 bytes because of the
+// shape of `Break(Value, Option<String>)` (Value weighs 104 B).
+// Clippy treats anything >= 128 bytes as "Err-variant very large"
+// and fires across hundreds of `Result<_, EvalSignal>` signatures.
+// Boxing the Value inside Break does not help because
+// `Error(FitzError)` already weighs 112 B and keeps the enum size
+// near the threshold. A crate-level allow is the standard form in
+// Rust projects with large error types that are intentional by
+// language design.
 #![allow(clippy::result_large_err)]
 
-pub mod ast; // Fase 2.2 — definición del AST
-pub mod asyncapi; // Fase 9.w.2.d — generador AsyncAPI 3.0 (WebSockets)
-pub mod cli; // Fase 13 (v0.11.0) — CLI builder nativo (`@command`)
-pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario
-pub mod cron_jobs; // Fase 9.w.3 — registry + scheduler de jobs `@cron`
-pub mod db; // Fase 10.1 — driver Postgres puro (wire protocol + SCRAM-SHA-256 + tipos OID)
-pub mod deploy; // Fase 12.6 — `fitz deploy <docker|compose>` orchestrator
-pub mod docker; // Fase 12.4 — `fitz docker init` (Dockerfile + .dockerignore + docker-compose.yml)
-pub mod env; // Fase 2.4 — entornos / scopes
-pub mod error; // manejo de errores del compilador
-pub mod evaluator; // Fase 2.4 — ejecución
-pub mod fmt; // Fase 9.z.1 — formatter `fitz fmt` (pretty-printer del AST)
-pub mod format; // Mini-tanda Fm — aplicación de FormatSpec en runtime
-pub mod git_dep; // Fase 9.y.3.c — git deps + cache local
-pub mod http; // Fase 4 — HTTP nativo (registry + runtime)
-pub mod launcher_template; // Fase 8.b.3 — template del launcher para `--bundle-python`
-pub mod lexer; // Fase 2.1 — tokenización
+pub mod ast; // Phase 2.2 — AST definition
+pub mod asyncapi; // Phase 9.w.2.d — AsyncAPI 3.0 generator (WebSockets)
+pub mod cli; // Phase 13 (v0.11.0) — native CLI builder (`@command`)
+pub mod codegen; // Phase 5b.1 — transpile AST → Rust → binary
+pub mod cron_jobs; // Phase 9.w.3 — registry + scheduler for `@cron` jobs
+pub mod db; // Phase 10.1 — pure Postgres driver (wire protocol + SCRAM-SHA-256 + OID types)
+pub mod deploy; // Phase 12.6 — `fitz deploy <docker|compose>` orchestrator
+pub mod docker; // Phase 12.4 — `fitz docker init` (Dockerfile + .dockerignore + docker-compose.yml)
+pub mod env; // Phase 2.4 — environments / scopes
+pub mod error; // compiler error handling
+pub mod evaluator; // Phase 2.4 — execution
+pub mod fmt; // Phase 9.z.1 — `fitz fmt` formatter (AST pretty-printer)
+pub mod format; // Mini-batch Fm — runtime FormatSpec application
+pub mod git_dep; // Phase 9.y.3.c — git deps + local cache
+pub mod http; // Phase 4 — native HTTP (registry + runtime)
+pub mod launcher_template; // Phase 8.b.3 — launcher template for `--bundle-python`
+pub mod lexer; // Phase 2.1 — tokenisation
 pub mod lint;
-pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
-pub mod logging; // Fase 12.3.a.2 — structured logging built-in (JSON + pretty + tracing)
-pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
-pub mod migrations; // Fase 10.6 — migraciones automáticas ORM (introspect + diff + emit)
-pub mod observability; // Fase 12.3.c.1 — OTLP exporter para spans HTTP
-pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
-pub mod parser; // Fase 2.3 — construcción del AST
-pub mod pbs; // Fase 8.b.1 — python-build-standalone download + cache para `--bundle-python`
-pub mod pyi_loader; // 8-pyi.B (v0.9.57) — auto-pickup de stubs .pyi adyacentes
-pub mod pyi_stub; // pyi-stubs (v0.9.39) — parser .pyi (subset PEP 484/561)
-pub mod testing; // Fase 9.z.2 — testing built-in (registry + @test + asserts)
-pub mod types; // Fase 5.2 — sistema de tipos resuelto + checker base
-pub mod value; // Fase 2.4 — valores en runtime // Fase 9.z.5 — `fitz lint` (4 lints + suppression)
+pub mod lockfile; // Phase 9.y.3.a — `fitz.lock` lockfile (path deps)
+pub mod logging; // Phase 12.3.a.2 — built-in structured logging (JSON + pretty + tracing)
+pub mod manifest; // Phase 9.y.1 — `fitz.toml` package-manager manifest
+pub mod migrations; // Phase 10.6 — automatic ORM migrations (introspect + diff + emit)
+pub mod observability; // Phase 12.3.c.1 — OTLP exporter for HTTP spans
+pub mod openapi; // Phase 7.1 — OpenAPI 3.1 generator
+pub mod parser; // Phase 2.3 — AST construction
+pub mod pbs; // Phase 8.b.1 — python-build-standalone download + cache for `--bundle-python`
+pub mod pyi_loader; // 8-pyi.B (v0.9.57) — auto pickup of adjacent .pyi stubs
+pub mod pyi_stub; // pyi-stubs (v0.9.39) — .pyi parser (PEP 484/561 subset)
+pub mod testing; // Phase 9.z.2 — built-in testing (registry + @test + asserts)
+pub mod types; // Phase 5.2 — resolved type system + base checker
+pub mod value; // Phase 2.4 — runtime values // Phase 9.z.5 — `fitz lint` (4 lints + suppression)
 
-// Fase 8.1.2 — interop Python via PyO3 (feature opt-in `python`).
-// El módulo envuelve `Python::with_gil` + `py.import(...)` y produce
-// `Value::PyObject` para que el evaluator rutee `from python import X`
-// al runtime CPython embebido. Sin la feature el módulo no existe;
-// `evaluator::load_module` emite error claro citando el flag de build.
+// Phase 8.1.2 — Python interop via PyO3 (opt-in `python` feature).
+// The module wraps `Python::with_gil` + `py.import(...)` and produces
+// `Value::PyObject` so the evaluator routes `from python import X` to
+// the embedded CPython runtime. Without the feature the module does
+// not exist; `evaluator::load_module` emits a clear error citing the
+// build flag.
 #[cfg(feature = "python")]
 pub mod py_interop;
 
-// Fase 8.5 — `fitz py-types`: introspecciona modelos SQLAlchemy en un
-// archivo Python y emite los `type` Fitz correspondientes a stdout o
-// archivo. Comparte el runtime CPython con `py_interop` (in-process,
-// no subprocess) para reusar el GIL + dep PyO3 ya disponible.
+// Phase 8.5 — `fitz py-types`: introspects SQLAlchemy models in a
+// Python file and emits the matching Fitz `type`s to stdout or a
+// file. Shares the CPython runtime with `py_interop` (in-process,
+// not a subprocess) to reuse the GIL + the PyO3 dep already available.
 #[cfg(feature = "python")]
 pub mod py_types;
 
-// Fase 9.x.1.b — Lógica del LSP server (pipeline LSP-style + helper
-// FitzError → Diagnostic). Vive en la lib (no en `src/bin/fitz-lsp.rs`)
-// para que sea unit-testeable. Feature-gated paralelo a `tower-lsp`.
+// Phase 9.x.1.b — LSP server logic (LSP-style pipeline + FitzError →
+// Diagnostic helper). Lives in the lib (not in `src/bin/fitz-lsp.rs`)
+// so it can be unit-tested. Feature-gated in parallel to `tower-lsp`.
 #[cfg(feature = "lsp")]
 pub mod lsp;

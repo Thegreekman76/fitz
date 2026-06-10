@@ -1,9 +1,9 @@
-// error.rs — Errores del compilador/intérprete de Fitz
+// error.rs — Compiler / interpreter errors for Fitz.
 //
-// Los errores deben ser útiles. Siempre incluir:
-// - Qué salió mal
-// - Dónde (línea y columna)
-// - Cómo arreglarlo (cuando sea posible)
+// Errors must be useful. Always include:
+// - What went wrong
+// - Where (line and column)
+// - How to fix it (when possible)
 
 #[derive(Debug)]
 pub struct FitzError {
@@ -14,25 +14,25 @@ pub struct FitzError {
     pub hint: Option<String>,
 }
 
-// Las variantes y sus payloads documentan los tipos de error que el
-// compilador/runtime puede emitir. Los campos no se leen vía accesor
-// (se ven solo por Debug), pero son parte de la API: distinguen
-// `UndefinedVariable("foo")` de `UndefinedFunction("bar")` al
-// inspeccionar errores en tests y al imprimir con `{:?}`.
+// The variants and their payloads document the error kinds that the
+// compiler/runtime can emit. The fields are not read through accessors
+// (only via Debug), but they are part of the API: they distinguish
+// `UndefinedVariable("foo")` from `UndefinedFunction("bar")` when
+// inspecting errors in tests and when printing with `{:?}`.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub enum ErrorKind {
-    // Errores de lexer
+    // Lexer errors
     UnexpectedChar(char),
     UnterminatedString,
     UnterminatedComment,
 
-    // Errores de parser
+    // Parser errors
     UnexpectedToken,
     MissingClosingBrace,
     InvalidSyntax,
 
-    // Errores de evaluador
+    // Evaluator errors
     UndefinedVariable(String),
     UndefinedFunction(String),
     TypeMismatch { expected: String, found: String },
@@ -43,7 +43,7 @@ pub enum ErrorKind {
     ContinueOutsideLoop,
     WrongArgCount { expected: usize, found: usize },
 
-    // Errores del checker estático (Fase 5)
+    // Static checker errors (Phase 5)
     TypeError,
 }
 
@@ -63,23 +63,23 @@ impl FitzError {
         self
     }
 
-    // ---- U1 (v0.10.13) — constructores helper para los 3 patterns
-    //                    de error más frecuentes ----
+    // ---- U1 (v0.10.13) — helper constructors for the 3 most
+    //                    frequent error patterns ----
     //
-    // Antes los call sites del evaluator/checker/codegen formateaban
-    // mensajes inconsistentes ("no tiene método X" vs "el tipo X no
-    // soporta" vs "espera N args" vs "espera N argumentos"). Estos
-    // helpers fijan el wording canónico y reducen duplicación.
+    // Previously the evaluator/checker/codegen call sites formatted
+    // inconsistent messages ("no tiene método X" vs "el tipo X no
+    // soporta" vs "espera N args" vs "espera N argumentos"). These
+    // helpers pin the canonical wording and reduce duplication.
     //
-    // Migración: en cada nuevo error, preferir uno de estos
-    // constructores. Migración de call sites existentes es
-    // incremental — los mensajes que ya estaban no cambian de shape
-    // (asegurando que tests que matchean substrings sigan verdes).
+    // Migration: for every new error, prefer one of these
+    // constructors. Migration of existing call sites is incremental
+    // — messages already in place keep their shape (so tests
+    // matching substrings stay green).
 
     /// "el tipo `<type_name>` no tiene un método llamado `<method>`".
-    /// Para el receptor `xs.foo()` donde `foo` no existe en el tipo
-    /// del receptor (List/Map/Str/Nominal). Ejemplo: dispatch_method
-    /// en el evaluator cuando llega un nombre desconocido.
+    /// For the receiver `xs.foo()` where `foo` does not exist in the
+    /// receiver type (List/Map/Str/Nominal). Example: dispatch_method
+    /// in the evaluator when an unknown name arrives.
     pub fn method_not_found(line: usize, column: usize, type_name: &str, method: &str) -> Self {
         FitzError::new(
             ErrorKind::TypeError,
@@ -93,7 +93,7 @@ impl FitzError {
     }
 
     /// "la función `<name>` espera <expected> argumento(s), recibió
-    /// <found>". Pluralización implícita por el `(s)`.
+    /// <found>". Pluralisation implied by the `(s)`.
     pub fn wrong_arity(
         line: usize,
         column: usize,
@@ -113,10 +113,9 @@ impl FitzError {
     }
 
     /// "<context>: esperaba `<expected>`, recibió `<found>`". `context`
-    /// es una etiqueta corta del lugar donde el mismatch ocurrió
-    /// (ej. "el arg 1 de `add`", "el campo `email` del struct lit",
-    /// "el return de `me`"). Wording uniforme con backticks alrededor
-    /// de los tipos.
+    /// is a short label of where the mismatch happened (e.g. "el arg
+    /// 1 de `add`", "el campo `email` del struct lit", "el return de
+    /// `me`"). Uniform wording with backticks around the types.
     pub fn type_mismatch(
         line: usize,
         column: usize,
@@ -138,10 +137,10 @@ impl FitzError {
 
 impl std::fmt::Display for FitzError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        // line == 0 && column == 0 indica "sin posición" — algunos
-        // errores del evaluator y todos los del checker estático
-        // todavía no llevan línea/columna (el AST no las propaga).
-        // En ese caso, omitimos el prefijo para no mentir.
+        // line == 0 && column == 0 indicates "no position" — some
+        // evaluator errors and all static-checker errors still do
+        // not carry a line/column (the AST does not propagate them).
+        // In that case we drop the prefix so we do not lie.
         if self.line == 0 && self.column == 0 {
             write!(f, "Error — {}", self.message)?;
         } else {

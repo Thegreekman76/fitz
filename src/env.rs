@@ -1,38 +1,40 @@
-// env.rs — Fase 2.4 (EnvRef migrado a Arc<Mutex<>> en F17.2)
+// env.rs — Phase 2.4 (EnvRef migrated to Arc<Mutex<>> in F17.2)
 //
-// Environment: el almacén de variables del intérprete. Es una cadena de
-// scopes encadenados, cada uno con un mapa nombre→valor y un puntero a su
-// scope padre.
+// Environment: the interpreter's variable store. A chain of linked
+// scopes, each with a name→value map and a pointer to its parent.
 //
-//     global ←─ función outer ←─ función inner
+//     global ←─ outer function ←─ inner function
 //
-// Lookups van hacia arriba en la cadena hasta encontrar la variable o
-// llegar al global.
+// Lookups walk up the chain until they find the variable or reach the
+// global scope.
 //
-// Por qué `Arc<parking_lot::Mutex<Environment>>` (F17.2):
-//  - `Arc` permite compartir el mismo environment desde múltiples lugares
-//    y entre threads — clave para closures (la función "captura" un handle
-//    al env donde fue definida) y para destrabar `Send` en `Value::Function`
-//    (handlers HTTP axum exigen `Send + 'static`).
-//  - `parking_lot::Mutex` da mutabilidad interior thread-safe. Elegido sobre
-//    `std::sync::Mutex` porque es más rápido sin contención (~10ns vs ~30ns)
-//    y no envenena en panic. No distingue lecturas/escrituras (un solo
-//    `.lock()` para ambos casos), mismo modelo que el RefCell que reemplaza.
-//  - El precio: cada acceso es `env.lock()` y libera el guard al salir del
-//    scope. Doble `.lock()` en el mismo thread → deadlock (parking_lot::Mutex
-//    NO es reentrante). Política: tomar el lock para el menor scope posible
-//    y soltarlo antes de cualquier llamada recursiva o `.await`.
-//  - Antes de F17.2: `Rc<RefCell<>>` — single-threaded, runtime-checked.
-//    El doble borrow_mut panic-ueaba en runtime; ahora deadlock-ea (riesgo
-//    equivalente, distinto síntoma). El audit de re-entrancia se hizo en
-//    F17.2 sobre `eval_call` y `Environment::assign/get/has`.
+// Why `Arc<parking_lot::Mutex<Environment>>` (F17.2):
+//  - `Arc` lets the same environment be shared from multiple places and
+//    across threads — key for closures (the function "captures" a handle
+//    to the env where it was defined) and to unblock `Send` on
+//    `Value::Function` (axum HTTP handlers require `Send + 'static`).
+//  - `parking_lot::Mutex` provides thread-safe interior mutability.
+//    Chosen over `std::sync::Mutex` because it is faster without
+//    contention (~10 ns vs ~30 ns) and does not poison on panic. It
+//    does not distinguish reads from writes (a single `.lock()` for
+//    both cases), same model as the RefCell it replaces.
+//  - The price: every access is `env.lock()` and the guard is released
+//    when the scope ends. Double `.lock()` on the same thread →
+//    deadlock (parking_lot::Mutex is NOT reentrant). Policy: take the
+//    lock for the smallest possible scope and release it before any
+//    recursive call or `.await`.
+//  - Before F17.2: `Rc<RefCell<>>` — single-threaded, runtime-checked.
+//    Double borrow_mut used to panic at runtime; now it deadlocks
+//    (equivalent risk, different symptom). The re-entrancy audit was
+//    done in F17.2 over `eval_call` and `Environment::assign/get/has`.
 //
-// Política de Assign (la decide el evaluador, no env):
-//  - Si la variable existe en algún scope visible → reasignar ahí (`assign`).
-//  - Si no existe → crear local (`define`).
-//  Esto permite reasignar variables del scope padre sin sintaxis especial,
-//  pero crear locales nuevos cuando hace falta. Si más adelante esto trae
-//  confusión (ej: closures que mutan accidentalmente al padre) lo revisamos.
+// Assign policy (decided by the evaluator, not by env):
+//  - If the variable exists in some visible scope → reassign there (`assign`).
+//  - If it does not exist → create local (`define`).
+//  This allows reassigning variables from the parent scope without
+//  special syntax, while still creating new locals when needed. If this
+//  ever causes confusion (e.g. closures accidentally mutating the
+//  parent) we will revisit.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,18 +43,18 @@ use parking_lot::Mutex;
 
 use crate::value::Value;
 
-/// Un alcance de variables con puntero opcional al scope padre.
+/// A variable scope with an optional pointer to the parent scope.
 #[derive(Debug)]
 pub struct Environment {
     vars: HashMap<String, Value>,
     parent: Option<Arc<Mutex<Environment>>>,
 }
 
-/// Alias para abreviar las firmas: un handle compartido y mutable al env.
+/// Shorthand alias for the signatures: a shared, mutable handle to the env.
 pub type EnvRef = Arc<Mutex<Environment>>;
 
 impl Environment {
-    /// Crea un environment raíz, sin padre. Típicamente uno solo por programa.
+    /// Creates a root environment, with no parent. Typically one per program.
     pub fn new() -> EnvRef {
         Arc::new(Mutex::new(Environment {
             vars: HashMap::new(),
@@ -60,7 +62,7 @@ impl Environment {
         }))
     }
 
-    /// Crea un scope hijo de `parent`. Usado al entrar a una función o bloque.
+    /// Creates a child scope of `parent`. Used when entering a function or block.
     pub fn new_child(parent: EnvRef) -> EnvRef {
         Arc::new(Mutex::new(Environment {
             vars: HashMap::new(),
@@ -68,15 +70,17 @@ impl Environment {
         }))
     }
 
-    /// Define una variable en el scope actual. Si ya existía en este scope,
-    /// la sobreescribe (shadowing local). No toca scopes padres.
+    /// Defines a variable in the current scope. If it already existed in
+    /// this scope, it is overwritten (local shadowing). Parent scopes are
+    /// not touched.
     pub fn define(&mut self, name: impl Into<String>, value: Value) {
         self.vars.insert(name.into(), value);
     }
 
-    /// Busca una variable subiendo por la cadena de scopes. Devuelve un clon
-    /// del valor (los `Value` son baratos de clonar: enteros, floats, bools,
-    /// y strings con clone "heavy" solo para Str — aceptable por ahora).
+    /// Looks up a variable by walking up the chain of scopes. Returns a
+    /// clone of the value (`Value`s are cheap to clone: ints, floats,
+    /// bools, and strings with a "heavy" clone only for Str — acceptable
+    /// for now).
     pub fn get(&self, name: &str) -> Option<Value> {
         if let Some(v) = self.vars.get(name) {
             return Some(v.clone());
@@ -84,7 +88,7 @@ impl Environment {
         self.parent.as_ref().and_then(|p| p.lock().get(name))
     }
 
-    /// `true` si la variable existe en este scope o en cualquier ancestro.
+    /// `true` if the variable exists in this scope or in any ancestor.
     pub fn has(&self, name: &str) -> bool {
         if self.vars.contains_key(name) {
             return true;
@@ -92,27 +96,28 @@ impl Environment {
         self.parent.as_ref().is_some_and(|p| p.lock().has(name))
     }
 
-    /// Lista los nombres definidos en el scope actual (sin recursar al
-    /// padre). Para el REPL: muestra los bindings que el usuario creó
-    /// en su sesión, separados de los builtins (`print`, `len`, etc.)
-    /// que viven en el mismo scope raíz. El caller hace el filtrado.
-    /// Devuelve ordenado alfabéticamente para output predecible.
+    /// Lists the names defined in the current scope (without recursing
+    /// into the parent). Used by the REPL: it shows the bindings the
+    /// user created in their session, separated from the builtins
+    /// (`print`, `len`, etc.) that live in the same root scope. The
+    /// caller does the filtering. Returns the names sorted
+    /// alphabetically for predictable output.
     pub fn local_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.vars.keys().cloned().collect();
         names.sort();
         names
     }
 
-    /// Reasigna una variable existente. Busca en la cadena de scopes y la
-    /// reescribe en el scope donde fue definida. Devuelve `Err(())` si la
-    /// variable no existe en ningún scope visible — el evaluador convierte
-    /// ese error en `FitzError::UndefinedVariable`.
+    /// Reassigns an existing variable. Walks the chain of scopes and
+    /// rewrites it in the scope where it was defined. Returns `Err(())`
+    /// if the variable does not exist in any visible scope — the
+    /// evaluator turns that error into `FitzError::UndefinedVariable`.
     //
-    // `Result<(), ()>` es un sentinel intencional (no portamos info extra
-    // en el `Err`, el caller la enriquece con `FitzError`). El lint
-    // `clippy::result_unit_err` aparece desde clippy 1.95, expuesto por
-    // el refactor lib+bin de Fase 9.x.1.b. Refactorizar a un newtype
-    // error queda como deuda menor — sin valor inmediato.
+    // `Result<(), ()>` is an intentional sentinel (we carry no extra
+    // info in the `Err`, the caller enriches it with `FitzError`). The
+    // `clippy::result_unit_err` lint appears from clippy 1.95 onwards,
+    // exposed by the lib+bin refactor of Phase 9.x.1.b. Refactoring to
+    // a newtype error is left as minor debt — no immediate value.
     #[allow(clippy::result_unit_err)]
     pub fn assign(&mut self, name: &str, value: Value) -> Result<(), ()> {
         if self.vars.contains_key(name) {
@@ -159,7 +164,7 @@ mod tests {
 
     #[test]
     fn child_puede_sombrear_al_padre_con_define() {
-        // define() siempre escribe local — sombrea al padre.
+        // define() always writes local — it shadows the parent.
         let global = Environment::new();
         global.lock().define("x", Value::Int(1));
 
@@ -167,20 +172,20 @@ mod tests {
         child.lock().define("x", Value::Int(99));
 
         assert_eq!(child.lock().get("x"), Some(Value::Int(99)));
-        // El padre sigue intacto.
+        // The parent stays untouched.
         assert_eq!(global.lock().get("x"), Some(Value::Int(1)));
     }
 
     #[test]
     fn assign_desde_child_reasigna_en_el_padre() {
-        // assign() busca en la cadena. Reescribe donde la variable existe.
+        // assign() walks the chain. It rewrites where the variable exists.
         let global = Environment::new();
         global.lock().define("x", Value::Int(1));
 
         let child = Environment::new_child(global.clone());
         child.lock().assign("x", Value::Int(2)).unwrap();
 
-        // El cambio se ve tanto en el child como en el padre.
+        // The change is visible both in the child and in the parent.
         assert_eq!(child.lock().get("x"), Some(Value::Int(2)));
         assert_eq!(global.lock().get("x"), Some(Value::Int(2)));
     }
@@ -211,7 +216,7 @@ mod tests {
 
     #[test]
     fn assign_actualiza_solo_el_scope_correcto() {
-        // global.x existe, middle.y existe. Desde leaf, reasigno ambas.
+        // global.x exists, middle.y exists. From leaf, reassign both.
         let global = Environment::new();
         global.lock().define("x", Value::Int(10));
 
@@ -225,14 +230,14 @@ mod tests {
 
         assert_eq!(global.lock().get("x"), Some(Value::Int(100)));
         assert_eq!(middle.lock().get("y"), Some(Value::Int(200)));
-        // No hay variables locales en leaf.
+        // No local variables in leaf.
         assert_eq!(leaf.lock().vars.len(), 0);
     }
 
     #[test]
     fn shadowing_local_no_afecta_lookups_del_padre_hacia_arriba() {
-        // Si child sombrea x, el padre no se ve afectado al hacer get desde
-        // un hermano del child.
+        // If a child shadows x, the parent is not affected when a
+        // sibling of that child runs get.
         let global = Environment::new();
         global.lock().define("x", Value::Int(1));
 
@@ -240,7 +245,7 @@ mod tests {
         child_a.lock().define("x", Value::Int(99));
 
         let child_b = Environment::new_child(global.clone());
-        // child_b no sombrea — ve el x del global.
+        // child_b does not shadow — it sees x from the global scope.
         assert_eq!(child_b.lock().get("x"), Some(Value::Int(1)));
     }
 }
