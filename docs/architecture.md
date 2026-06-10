@@ -7,11 +7,15 @@ nativo, o un test reportado). Es la referencia para entender el
 compilador desde adentro; para aprender el lenguaje desde afuera, ver
 [docs/guide.md](guide.md).
 
-> **Estado**: este doc cubre hasta el cierre de **Fase 9.z entera**
-> (formatter + test + dev + repl + lint, mayo 2026). Refresh
-> sincronizado con el estado del repo. Cuando avancemos en Fase 9.w
-> (stack web first-class) o las features de Fase 10+, este doc se
-> actualiza junto.
+> **Estado**: este doc cubre hasta el cierre de **Fase 12 entera +
+> Fase 8.b/8.c + TaskHub** (v0.15.x, junio 2026). Refresh sincronizado
+> con el estado del repo. Incluye Fase 9.w MVP (auth + WS + cron) y
+> sus iteraciones 2 (RBAC + persistencia de jobs), Fase 10 entera
+> (driver Postgres puro + ORM + migrations), Fase 12 (healthz/readyz
+> + Secret + observability OTel + Docker + deploy + @trace/@metric/
+> @flag), Fase 8.b/8.c (CPython embebido + paquetes pip bundleados),
+> y el CLI builder (Fase 13). Cuando avancemos a Fase 13+ o más allá,
+> este doc se actualiza junto.
 
 ## Pipeline en una imagen
 
@@ -23,34 +27,46 @@ flowchart TD
     Parser --> AST["Program = Vec&lt;Stmt&gt;<br/>(ast.rs)"]
     AST --> Checker["<b>types.rs</b><br/>check_program<br/>(resolver + chequear)"]
     Checker -->|errores| Abort["✗ stderr + exit 1"]
-    Checker -->|OK + TypeEnv + TypeInfo| Fork{"subcomando<br/>de fitz"}
+    Checker -->|OK + TypeEnv + TypeInfo + DefinitionInfo| Fork{"subcomando<br/>de fitz"}
 
     Fork -->|fitz check| OK["✓ sin errores de tipo"]
 
-    Fork -->|fitz run<br/>fitz test<br/>fitz repl<br/>fitz dev| Eval["<b>evaluator.rs</b><br/>ejecutar AST<br/>(env.rs + value.rs)"]
+    Fork -->|fitz run<br/>fitz test<br/>fitz repl<br/>fitz dev| Eval["<b>evaluator.rs</b><br/>ejecutar AST<br/>(env.rs + value.rs<br/>+ cron_jobs.rs)"]
     Eval -->|rutas HTTP registradas| Http["<b>http.rs</b><br/>axum + tokio<br/>multi-thread"]
-    Eval -->|sin rutas HTTP| StdOut["stdout / output / test report"]
+    Eval -->|rutas WS (@ws)| Ws["<b>http.rs + asyncapi.rs</b><br/>WsConn&lt;T&gt; + AsyncAPI 3.0"]
+    Eval -->|jobs @cron| Cron["<b>cron_jobs.rs</b><br/>scheduler tokio::spawn<br/>+ persistencia DB opt-in"]
+    Eval -->|sin rutas| StdOut["stdout / output / test report"]
+    Http -->|/openapi.json + /docs| Openapi["<b>openapi.rs</b><br/>schema OpenAPI 3.1"]
+    Http -->|/healthz + /readyz + /metrics| HealthMetrics["healthz/readyz<br/>+ Prometheus"]
+    Http -->|spans + logs + métricas| Otel["<b>observability.rs + logging.rs</b><br/>OTLP exporter + structured JSON"]
     Http --> Server["servidor en host:port"]
 
     Fork -->|fitz build| Codegen["<b>codegen.rs</b><br/>AST + TypeEnv → Rust"]
     Codegen --> Project["Cargo project en<br/>target/fitz-build/&lt;stem&gt;/"]
     Project --> Cargo["cargo build --release"]
     Cargo --> Bin["binario nativo<br/>(adyacente al .fitz<br/>o en target/release/)"]
+    Cargo -->|--bundle-python/--bundle-pip| Launcher["<b>launcher_template.rs<br/>+ pbs.rs</b><br/>CPython + pip embebidos"]
 
-    Fork -->|fitz openapi| OpenApi["<b>openapi.rs</b><br/>schema OpenAPI 3.1"]
+    Fork -->|fitz openapi| OpenApiCmd["<b>openapi.rs</b><br/>standalone schema"]
     Fork -->|fitz fmt| Fmt["<b>fmt.rs</b><br/>pretty-printer"]
     Fork -->|fitz lint| Lint["<b>lint.rs</b><br/>linter de patrones"]
+    Fork -->|fitz test| Test["<b>testing.rs</b><br/>registry de @test fns"]
     Fork -->|fitz db &lt;sub&gt;| Db["<b>migrations.rs</b><br/>schema diff + introspect"]
     Db -->|diff/migrate/inspect| Driver["<b>db.rs</b><br/>driver Postgres puro<br/>(wire v3.0 + TLS + pool)"]
     Driver --> Postgres[("Postgres real")]
     Db -->|new/squash/stamp| FileSystem["archivos .sql/.fitz<br/>en migrations/"]
+    Fork -->|fitz docker init/build| Docker["<b>docker.rs</b><br/>Dockerfile + compose<br/>autogenerados"]
+    Fork -->|fitz deploy| Deploy["<b>deploy.rs</b><br/>thin wrapper sobre<br/>docker/compose"]
+    Fork -->|fitz py-types<br/>fitz py-stubs| PyTools["<b>py_types.rs<br/>+ pyi_stub.rs</b><br/>SQLAlchemy → Fitz<br/>+ stubs .pyi"]
+    Fork -->|fitz new<br/>fitz init<br/>fitz add/remove/update| Pm["<b>manifest.rs<br/>+ lockfile.rs<br/>+ git_dep.rs</b><br/>package manager"]
+    Pm --> Toml["fitz.toml + fitz.lock"]
 
     classDef good fill:#dff5dd,stroke:#3a8a3a
     classDef bad fill:#fcdede,stroke:#a33
     classDef input fill:#e0e8ff,stroke:#446
     classDef external fill:#fff5dd,stroke:#aa8
     class Source input
-    class OK,StdOut,Server,Bin,OpenApi,Fmt,Lint,FileSystem good
+    class OK,StdOut,Server,Bin,OpenApiCmd,Fmt,Lint,Test,FileSystem,Toml,Launcher,HealthMetrics,Otel,Docker,Deploy,Ws,Cron,PyTools good
     class Abort bad
     class Postgres external
 ```
@@ -59,65 +75,85 @@ ASCII fallback (mismo diagrama, sin colores, para terminales y editores
 que no rendericen mermaid):
 
 ```
-                    archivo .fitz
-                          │
-                          ▼
-                    ┌──────────┐
-                    │ lexer.rs │   tokenizar
-                    └────┬─────┘
-                         ▼
-                    Vec<Token>
-                         │
-                         ▼
-                    ┌───────────┐
-                    │ parser.rs │  precedencia + estructura
-                    │  (ast.rs) │  (Program = Vec<Stmt>)
-                    └────┬──────┘
-                         ▼
-                       Program
-                         │
-                         ▼
-                    ┌──────────┐
-                    │ types.rs │  resolver + check
-                    └────┬─────┘
-                         │
-       ┌─────────┬───────┼───────┬──────────┬─────────┬───────┬──────┐
-       ▼         ▼       ▼       ▼          ▼         ▼       ▼      ▼
-   fitz check  run/  build   openapi      fmt       lint  fitz db  (errs)
-              test/         (openapi.rs) (fmt.rs) (lint.rs) <sub>    │
-              dev/                                            │      ▼
-              repl                                            │   exit 1
-              │            │                                  ▼
-              ▼            ▼                          migrations.rs
-       evaluator.rs   codegen.rs                     diff + introspect
-       env.rs+value   target/fitz-build/                      │
-              │            ▼                                  ▼
-       ┌──────┴───┐    cargo build --release              db.rs
-       ▼          ▼          │                         Postgres puro
-    CLI puro  http.rs        ▼                         (wire v3.0
-    (stdout)  axum+tokio   binario                      + TLS + pool)
-              multi-thread adyacente al                       │
-              (1 runtime)  .fitz o en                         ▼
-              │            target/release/                Postgres
-              ▼
-           servidor
+                              archivo .fitz
+                                    │
+                                    ▼
+                              ┌──────────┐
+                              │ lexer.rs │   tokenizar
+                              └────┬─────┘
+                                   ▼
+                              Vec<Token>
+                                   │
+                                   ▼
+                              ┌───────────┐
+                              │ parser.rs │  precedencia + estructura
+                              │  (ast.rs) │  (Program = Vec<Stmt>)
+                              └────┬──────┘
+                                   ▼
+                                Program
+                                   │
+                                   ▼
+                              ┌──────────┐
+                              │ types.rs │  resolver + check
+                              └────┬─────┘
+                                   │ (TypeEnv + TypeInfo + DefinitionInfo)
+                                   │
+   ┌───────┬──────┬───────┬───────┬┴──────┬───────┬─────────┬─────────┬──────┐
+   ▼       ▼      ▼       ▼       ▼       ▼       ▼         ▼         ▼      ▼
+ check   run/   build  openapi  fmt     lint    test    db <sub>   docker  deploy
+        test/         openapi  fmt.rs  lint.rs testing  migrations docker  deploy
+        dev/           .rs                      .rs     .rs        .rs     .rs
+        repl                                                                │
+          │              │                                                  │
+          ▼              ▼                                                  ▼
+   evaluator.rs       codegen.rs                                    wrapper
+   env.rs+value       Cargo project                                docker/
+   cron_jobs.rs       │                                            compose
+   testing.rs         ▼
+        │         cargo build --release
+        │             │
+   ┌────┴───────────┐ ▼
+   ▼    ▼   ▼      ┌──────────┐
+  CLI  http  cron  │ binario  │ (+ launcher_template + pbs si
+ stdout axum sched │ standalone│  --bundle-python/--bundle-pip)
+       tokio  │   └──────────┘
+       multi  │
+       thread │
+       │     │
+       ▼     ▼
+   servidor  jobs
+   + /healthz/readyz/metrics
+   + /openapi.json + /docs
+   + /asyncapi.json (si hay @ws)
+   + logs estructurados (logging.rs)
+   + spans OTel (observability.rs)
+       │
+       ▼
+   Postgres (db.rs driver puro: wire v3.0 + TLS + pool)
 ```
 
 ## Los flujos del CLI
 
-El CLI ([main.rs](../src/main.rs)) tiene **27 sub-comandos** (17
-top-level + 10 sub-comandos `db ...`) agrupados en **6 familias**.
-Todos comparten el front-end (lexer → parser → checker) cuando
-trabajan con código Fitz; después se bifurcan:
+El CLI ([main.rs](../src/main.rs)) tiene **33 sub-comandos**
+(19 top-level + 10 sub-comandos `db ...` + 2 `docker ...` + 2
+`deploy ...`) agrupados en **8 familias**. Todos comparten el
+front-end (lexer → parser → checker) cuando trabajan con código
+Fitz; después se bifurcan:
 
 **Familia 1 — Pipeline core del lenguaje**:
 - **`fitz run [archivo]`** — Chequea tipos en modo strict (flag
   `--no-typecheck` lo baja a warning) y ejecuta el AST con el
   evaluator. Sin args, busca `fitz.toml` y corre `[bin].main`.
-  Si el programa registró rutas HTTP, arranca el servidor.
+  Si el programa registró rutas HTTP / WS / `@cron`, arranca el
+  servidor / scheduler.
 - **`fitz build [archivo]`** — Chequea strict (sin escape), genera
   Cargo project, invoca `cargo build --release`, copia binario.
   Sin args, manifest mode + output a `target/release/<pkg-name>`.
+  Flags Fase 8.b/8.c: `--bundle-python` + `--bundle-pip <PACKAGE>`
+  (repetible) + `--bundle-pip-requirements <FILE>` (repetible)
+  para embeber CPython 3.14.x via python-build-standalone y
+  paquetes pip preinstalados (binarios standalone que NO requieren
+  Python en el destino).
 - **`fitz check [archivo]`** — Lexea + parsea + chequea tipos.
   Reporta errores y termina (útil para editores / CI).
 - **`fitz openapi <archivo>`** — Emite schema OpenAPI 3.1 a stdout
@@ -146,13 +182,19 @@ trabajan con código Fitz; después se bifurcan:
 
 **Familia 4 — Interop Python (Fase 8, feature `python`)**:
 - **`fitz py-types <archivo.py>`** — Genera `type` Fitz desde modelos
-  SQLAlchemy.
+  SQLAlchemy (introspección via duck typing sobre `__table__.columns`).
 - **`fitz py-stubs <archivo.py>`** — Genera stubs `.pyi` desde Fitz.
+- **Auto-pickup de stubs** (Fase 8-pyi.B, no es sub-comando): cuando
+  el programa tiene `from python import foo`, el loader busca
+  `<base_dir>/foo.pyi` adyacente y registra nominales declarados al
+  `TypeEnv` antes del checker — el user puede escribir
+  `let u: User = requests.fetch(...)?` con `User` declarado en
+  `requests.pyi` y el checker lo resuelve.
 
-**Familia 5 — DB / migrations / ORM (Fase 10 + Tier S v0.10.28)**:
-- **`fitz db diff [--file] [--out]`** — Compara el schema declarado
-  (`@table` types del programa) vs el real de la DB, emite SQL DDL
-  con los cambios (CREATE/ALTER/DROP TABLE, ADD/DROP COLUMN, etc.).
+**Familia 5 — DB / migrations / ORM (Fase 10 + Tier S v0.10.28-29)**:
+- **`fitz db diff [--file] [--out] [--check-destructive] [--allow-destructive]`**
+  — Compara schema declarado vs DB real y emite DDL. Clasifica cada
+  change como Safe/Risky/Destructive (v0.10.31 Tier A.1).
 - **`fitz db migrate [--dry-run] [--sql]`** — Aplica migrations
   pendientes contra la DB. Tracking idempotente via tabla
   `_fitz_migrations`.
@@ -161,19 +203,39 @@ trabajan con código Fitz; después se bifurcan:
   timestamp prefix.
 - **`fitz db rollback [--count N]`** — Revierte las últimas N
   migrations (usa el bloque `-- DOWN`).
-- **`fitz db check [--file]`** — Valida que el schema declarado +
-  migrations queden consistentes (lint estático sin tocar DB).
+- **`fitz db check [--file]`** — Valida consistencia schema +
+  migrations sin tocar DB.
 - **`fitz db history`** — Lista migrations applied con timestamps.
 - **`fitz db squash <from> <to>`** — Combina migrations en una.
 - **`fitz db stamp <version> | --all`** — Marca migration(s) como
   applied SIN ejecutar SQL (adopt legacy DB).
 - **`fitz db inspect [--schema | --all-schemas | --table | --json]`**
-  (v0.10.28 + `--all-schemas` v0.10.29) — Introspect del schema
-  **real** con vista texto + JSON machine-readable.
+  — Introspect del schema **real** con vista texto + JSON
+  machine-readable.
 
 **Familia 6 — Editor support (Fase 9.x, feature `lsp`)**:
-- **`fitz-lsp`** (bin separado, no sub-comando) — Language server sobre
-  tower-lsp. Consumido por la extensión VSCode.
+- **`fitz-lsp`** (bin separado en `src/bin/fitz-lsp.rs`, no
+  sub-comando) — Language server sobre tower-lsp. Consumido por la
+  extensión VSCode (`editors/vscode/`).
+
+**Familia 7 — Docker stack (Fase 12.4)**:
+- **`fitz docker init [--force]`** — Genera `Dockerfile` multi-stage
+  + `.dockerignore` + `docker-compose.yml` smart en el directorio
+  del manifest. Detección AST-only del entry point para decidir
+  `EXPOSE <port>` (si hay `@server(N)`) + service `postgres:16-alpine`
+  con healthcheck (si hay `db.connect(...)`). Sub-paso 12.4.b suma
+  fallback `python:3.12-slim-bookworm` cuando hay interop Python +
+  `restart: unless-stopped` cuando hay `@cron`.
+- **`fitz docker build [--tag <X>]`** — Thin wrapper sobre
+  `docker build` que usa el Dockerfile del manifest_dir y tag-ea con
+  `<package.name>:latest` (override con `--tag`).
+
+**Familia 8 — Deploy orchestrator (Fase 12.6)**:
+- **`fitz deploy docker [--tag <X>] [--no-push]`** — `docker build`
+  + `docker push` con tag derivado del manifest. Targets MVP solo
+  docker y compose; `fly`/`railway`/`k8s` quedan como deuda visible.
+- **`fitz deploy compose [--no-detach] [--no-build]`** — Thin wrapper
+  sobre `docker compose up -d --build`.
 
 ## Módulos en src/
 
@@ -322,7 +384,7 @@ APIs públicas que consumen los sub-comandos:
 - `build_runtime` para construir el tokio current_thread runtime
   compartido por todos los sub-comandos async.
 
-### http.rs — runtime HTTP
+### http.rs — runtime HTTP + WebSockets + healthz/metrics
 
 Activa la capa HTTP nativa. Post-F17.5 ya no hay bridge
 `mpsc/oneshot` ni `std::thread` separado para tokio — un solo
@@ -332,32 +394,78 @@ axum, y los handlers axum invocan al evaluator directamente sobre
 
 Componentes:
 - `HttpRegistry`: tabla de rutas (`method`, `path_template`,
-  `handler`, `RouteMeta`, `middlewares`, `cors`). Thread-local
-  + `parking_lot::Mutex` para registry activo.
+  `handler`, `RouteMeta`, `middlewares`, `cors`, `required_roles`,
+  `is_ws`, `ws_msg_type`). Thread-local + `parking_lot::Mutex`
+  para registry activo. Incluye `ws_broadcaster: Arc<WsBroadcaster>`
+  para fan-out de WebSockets y `cron_registry: Arc<CronRegistry>`
+  para que el lifecycle compartido entre HTTP server y scheduler
+  cron reuse el mismo runtime tokio.
 - `serve(registry, program, addr)`: construye `Arc<HttpRegistry>`
   + `axum::Router` + `TcpListener`, llama `axum::serve` con
-  graceful shutdown. Precomputa el schema OpenAPI eager (Fase 7)
-  y lo sirve en `/openapi.json` + Scalar UI en `/docs`.
+  graceful shutdown (SIGTERM drain con 30s + readyz → 503).
+  Precomputa el schema OpenAPI + AsyncAPI eager y los sirve en
+  `/openapi.json` + Scalar UI en `/docs` + `/asyncapi.json`.
 - `build_router(metas, registry, openapi_schema)`: arma el
-  `Router` con un closure por ruta + CORS preflight (mini-fase
-  MW) + middleware chain.
+  `Router` con un closure por ruta + CORS preflight + middleware
+  chain. Auto-mount de `/healthz` + `/readyz` (Fase 12.1) y
+  `/metrics` Prometheus (Fase 12.3.iter2.Tier3) con override si
+  el user declara handlers homónimos.
+- **WebSockets** (Fase 9.w.2): `build_ws_method_router` con
+  `WebSocketUpgrade` extractor + auth pre-upgrade (401/403 sin
+  abrir el socket) + heartbeat ping/pong opcional via
+  `@server(ws_heartbeat_secs=N)`. `WsConn<T>` con métodos
+  `recv`/`send`/`broadcast`/`close` marshaling JSON automático
+  contra el `type T` declarado.
+- **Auth nativa** (Fase 9.w.1): `dispatch_request` ejecuta
+  `@auth_provider` antes de body parsing si la ruta tiene
+  `@authenticated`/`@admin`/`@requires("role")`. Provider devuelve
+  `Result<User>` → 401 si Err, 403 si admin/role no matchea.
 - `MiddlewareKind::{Pre, Post}` + `MiddlewareSpec.kind`: mini-tanda
   Mw.next clasifica middlewares por aridad. Pre (1 arg) corre antes
   del handler con semántica gate-only; Post (2 args
-  `(Request, Response)`) corre después del handler en reverse order
-  para modificar la response. `run_middleware_chain` filtra Pre;
-  `run_post_middlewares` corre los Post tras el handler.
-- `parse_urlencoded_body`: mini-tanda MP parsea
-  `application/x-www-form-urlencoded` body como `Value::Map<Str, Str>`.
-  Soporte de Content-Type 415 estricto para no-JSON/no-urlencoded.
+  `(Request, Response)`) corre después del handler en reverse order.
+- `parse_urlencoded_body`: parsea `application/x-www-form-urlencoded`
+  body como `Value::Map<Str, Str>`. Content-Type 415 estricto.
 - `value_to_json` / `json_to_value` / `json_to_instance`:
   traducen entre `Value` y `serde_json::Value`. Con schema (`type`
   declarado), `json_to_instance` valida campos / aplica defaults /
-  rechaza extras (→ 400).
+  rechaza extras (→ 400). `Value::Secret` se redacta a `"***"`.
 - `parse_path_template` / `coerce_path_param`: extraen path params
   + query params (post-F7) tipados.
-- `ServerConfig`: `@server(port, host, docs=Bool,
-  api_version="X")`. Default `127.0.0.1:3000`.
+- `ServerConfig`: `@server(port, host, docs=Bool, api_version="X",
+  observability=Bool, prometheus=Bool, ws_heartbeat_secs=N)`.
+  Default `127.0.0.1:3000`.
+
+### asyncapi.rs — generador AsyncAPI 3.0 (Fase 9.w.2.d)
+
+Paralelo a `openapi.rs` pero para handlers `@ws("/path")`. Emite
+channels + operations receive/send + securitySchemes.bearerAuth
+cuando hay auth. `channels_from_registry` (runtime, consumido por
+`serve`) y `pseudo_channels_from_ast` (build-time, consumido por
+`codegen.rs` para embeber el schema bit-a-bit en el binario).
+`BTreeMap` para orden determinístico. Sirve en `/asyncapi.json`
+cuando hay handlers `@ws`.
+
+### cron_jobs.rs — scheduler de jobs `@cron` + `@background` (Fase 9.w.3)
+
+`CronJob` (handler + Schedule parseado + tz + retry + catch_up +
+store opcional para persistencia) + `CronRegistry` (paralelo a
+`HttpRegistry`, vive como `cron_registry: Arc<CronRegistry>`
+adentro). `spawn_cron_scheduler` arranca un `tokio::spawn` por
+job con loop `sleep_until(next_tick) → invoke_with_retry`.
+
+Persistencia (Fase 9.w.3.iter2): cuando el job declara
+`store=<db_binding>`, crea tablas `fitz_cron_jobs` + `fitz_cron_runs`
+auto via `CREATE TABLE IF NOT EXISTS` al boot del scheduler;
+persiste cada attempt con status `running`/`ok`/`retrying`/`failed`;
+opt-in `catch_up=true` ejecuta UN run inmediato al boot si hubo
+missed runs (no N — evita spam). Race condition de CREATE TABLE
+serializada con `tokio::sync::OnceCell` global (`v0.15.13` fix +
+paralelo en codegen v0.15.14).
+
+`spawn(fn_call)` fire-and-forget integrado con el mismo modelo:
+`tokio::spawn(invoke)` envuelve el JoinHandle en `Value::Future`,
+permite `await` o discard.
 
 ### codegen.rs — transpile a Rust
 
@@ -631,7 +739,7 @@ Pipeline pure-function en `check_source_with_types(text) ->
 en `src/bin/fitz-lsp.rs` (también feature-gated). El cliente VSCode
 en `editors/vscode/` lo invoca como subprocess.
 
-### py_interop.rs / py_types.rs — Interop Python (Fase 8, feature `python`)
+### py_interop.rs / py_types.rs / pyi_loader.rs / pyi_stub.rs — Interop Python (Fase 8, feature `python`)
 
 Feature-gated detrás de `cargo build --features python`. Linkea
 contra CPython 3.10+ via [PyO3](https://pyo3.rs) (`abi3-py310`,
@@ -648,6 +756,127 @@ corutinas + bridge tokio↔asyncio via `tokio::spawn_blocking` +
 `py_types.rs` (Fase 8.5) implementa `fitz py-types`:
 introspección de modelos SQLAlchemy via duck typing sobre
 `__table__.columns`, emite `type` Fitz correspondientes.
+
+`pyi_stub.rs` (v0.9.39) — Parser de stubs `.pyi` Python (PEP 484/561).
+Scope MVP: top-level `def`/`class`/vars con anotaciones, type
+expressions `int|str|float|bool|list[T]|dict[K,V]|Optional[T]`,
+`Union[T, None]`, etc.
+
+`pyi_loader.rs` (Fase 8-pyi.B, v0.9.57) — Auto-pickup de stubs
+`.pyi` adyacentes al `.fitz` raíz. Cuando el programa contiene
+`from python import foo`, el loader busca `<base_dir>/foo.pyi` y, si
+existe, parsea con `pyi_stub::parse_stub` y registra los nominales
+declarados en el `TypeEnv` ANTES del checker. Silent fallback: si
+no existe, el binding sigue como `Type::PyAny` opaco.
+
+### logging.rs — Structured logging built-in (Fase 12.3.a)
+
+Implementa `log.info`/`log.warn`/`log.error`/`log.debug` con kwargs
+heterogéneos (Int/Float/Str/Bool/Null/Secret/List/Map). Output JSON
+flat a stderr (containers/CI/redirección) o pretty con ANSI colors
+(TTY). Override explícito via `FITZ_LOG_FORMAT=json|pretty`. Filter
+via `RUST_LOG` (default `info`). Redacción recursiva de
+`Value::Secret` en List/Map. `SpanContext` (trace_id 32 hex /
+span_id 16 hex) atravesando `tokio::task_local!` para correlación
+multi-thread; los logs adentro de un handler HTTP heredan
+automático el trace_id del request.
+
+### observability.rs — OTLP exporter para spans HTTP (Fase 12.3.c)
+
+Cuando `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada, conecta los
+spans que abre `dispatch_request` (12.3.b) a un backend OTel real
+(Jaeger, Tempo, Honeycomb, Datadog). Sin esa var, `init_otel()` es
+no-op silencioso — zero overhead. Env vars OTel-standard:
+`OTEL_SERVICE_NAME` (default `fitz-app`),
+`OTEL_TRACES_SAMPLER_ARG` (ratio `0.0..1.0`, default `1.0`).
+Iter2.a (v0.12.1) derivó `trace_id`/`span_id` del span OTel
+cuando está activo para correlación bit-a-bit Fitz↔OTel: el
+mismo trace_id aparece en logs stderr y en el backend OTel.
+Iter2.Tier3 (v0.12.2) sumó endpoint `/metrics` Prometheus via
+`metrics-exporter-prometheus` con dual gate
+`@server(prometheus=true)` (compile-time) o `FITZ_PROMETHEUS=1`
+(runtime). Iter2.Tier2 (bridge métricas OTel) **bloqueado** por
+release del crate `metrics-exporter-opentelemetry` compatible con
+`opentelemetry_sdk 0.32` — Prometheus pull cubre el caso 90%
+mientras tanto.
+
+### docker.rs — `fitz docker init` + `fitz docker build` (Fase 12.4)
+
+Sub-comando `fitz docker init` que genera 3 archivos en el
+directorio del manifest: `Dockerfile` multi-stage (builder con
+imagen oficial `ghcr.io/thegreekman76/fitz:<tag>` que invoca
+`fitz build`, runtime `gcr.io/distroless/cc-debian12` o
+`python:3.12-slim-bookworm` si hay interop Python),
+`.dockerignore`, y `docker-compose.yml` smart. Detección AST-only
+del entry point (`@server(N)` → `EXPOSE` + `ports:`,
+`db.connect(...)` → service `postgres:16-alpine` + healthcheck,
+`@cron` → `restart: unless-stopped`, `from python import` →
+runtime swap). Política skip-por-default + `--force`. Bonus
+`fitz docker build [--tag X]` thin wrapper sobre
+`docker build -t <tag> .`.
+
+### deploy.rs — `fitz deploy <target>` orchestrator (Fase 12.6)
+
+Thin wrapper sobre `docker build/push` y `docker compose up`
+según target. Targets MVP: `docker` (build + push con `--no-push`
+opcional) y `compose` (up local con `--no-detach`/`--no-build`).
+Aborta si falta Dockerfile/compose.yml (sugiere
+`fitz docker init`). Targets `fly`/`railway`/`k8s` quedan como
+deuda visible — para esos, correr los CLIs directo. Detección
+AST-only del entry point para validar que el proyecto está listo.
+NO toca codegen (no emite código Rust).
+
+### launcher_template.rs — Launcher para `--bundle-python` (Fase 8.b)
+
+Cuando `fitz build --bundle-python` está activo, el output NO es
+el binario "real" directo, sino un **launcher** Rust standalone
+que lleva embebidos:
+1. El tarball PBS (CPython 3.14.x install_only_stripped) via
+   `include_bytes!`.
+2. El "real binary" (transpile estándar con feature `python`,
+   linkea libpython).
+
+En primer run, el launcher extrae todo a `$TMPDIR/fitz-py-<hash>/`,
+setea `PYTHONHOME` + `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/
+`PATH`, y `exec`/spawn-and-wait del real binary. Sentinel
+`.extracted` marca completitud; runs subsecuentes reusan el dir.
+Timing observado Windows 11 SSD: cold ~5 s, warm ~50 ms.
+
+Sub-paso 8.c suma `--bundle-pip <PACKAGE>` (repetible) +
+`--bundle-pip-requirements <FILE>`: pip packages se preinstalan
+en venv temporal y se empaquetan en tarball secundario también
+embebido. Cache key (FNV-1a hash sobre bundle_pip args +
+requirements file contents) con sidecar `inputs_hash` para reuso.
+
+### pbs.rs — python-build-standalone downloader (Fase 8.b)
+
+Descarga el tarball `install_only_stripped` de la release pinned
+(constante `PBS_RELEASE`, bump manual c/3-6 meses) para el triple
+destino y lo guarda en `<cache>/pbs/<tarball-name>` (cache global
+compartido entre builds, default `~/.fitz/cache/`, override con
+`FITZ_CACHE_DIR`). Builds reproducibles (misma política que
+`Cargo.lock`). CPython 3.14.x dentro del rango `abi3-py310`.
+
+### cli.rs — CLI builder nativo (Fase 13)
+
+`@command("name", desc="...")` sobre una fn declara un comando
+CLI. El binario producido por `fitz build` parsea `std::env::args()`
+y dispatcha al comando matcheante. Convención de params:
+sin default → positional arg requerido (`mybin <name>`); con
+default → flag opcional (`--name <value>`); Bool con default
+`false` → flag bool (`--loud`). Help autogenerado con
+`mybin --help` + `mybin <cmd> --help`. El intérprete `fitz run`
+también puede correr CLI programs.
+
+### format.rs — `FormatSpec` aplicado a un `Value` (mini-tanda Fm)
+
+Implementa la semántica completa de format spec estilo Python
+sobre `Value`: width, alignment, fill, sign, alternate form,
+grouping (`,`/`_`), precision, type chars (`b`/`c`/`d`/`e`/`E`/
+`f`/`F`/`g`/`G`/`o`/`s`/`x`/`X`/`%`). Entry point
+`format_value_with_spec(value, spec) -> Result<String, String>`
+con mensaje legible si tipo y spec son incompatibles. Consumido
+por la sintaxis `"{x:>10.2f}"` en strings interpolados.
 
 ### error.rs — manejo de errores
 
@@ -674,19 +903,33 @@ del proyecto que vale aclarar:
   desarrollo, scripts). El codegen también consume el AST + TypeEnv
   directamente. Cuando hizo falta info tipada por nodo (LSP hover,
   REPL `:type`), se sumó como **side-table indexado por span**
-  (`TypeInfo` de F16) en lugar de un IR formal — más barato.
+  (`TypeInfo`/`DefinitionInfo` de F16) en lugar de un IR formal —
+  más barato.
 
 - **`http.rs` está separado del evaluator** porque la interacción
   tokio/axum es lo suficientemente compleja para vivir aparte y
   porque permite que el evaluator no dependa de `tokio` para sus
   paths sync. Post-F17 ya no hay bridge entre intérprete y server;
-  todo corre en un solo runtime tokio multi-thread.
+  todo corre en un solo runtime tokio multi-thread. WebSockets
+  (Fase 9.w.2) y cron jobs (Fase 9.w.3) viven en el MISMO registry
+  + runtime, compartiendo el `Arc<HttpRegistry>` — un programa
+  con HTTP + WS + cron arranca un único proceso con todos los
+  subsistemas coordinados.
 
 - **El codegen produce un Cargo project, no un solo `.rs` + invocación
   de `rustc`.** Los imports cross-archivo necesitan `mod`, los
   decoradores HTTP necesitan dependencias externas, y cargo cachea
   builds incrementales. Trade-off conocido: la primera compilación
   cuesta ~1-2 s extra vs `rustc` directo.
+
+- **Paridad bit-a-bit `fitz run` ↔ `fitz build` es contrato del
+  lenguaje, no implementación.** Cada feature (HTTP, WS, auth, ORM,
+  cron, interop Python, observability) tiene su path tanto en
+  `evaluator.rs` como en `codegen.rs`, y los tests E2E
+  (`compile_e2e`) validan que el output coincide carácter por
+  carácter. Las divergencias (ej. `fitz build` no soporta state
+  compartido pre-F11) son errores de codegen explícitos con mensaje
+  citando el sub-paso futuro, no silent fallbacks.
 
 - **Features opcionales (`python`, `lsp`) son cargo features**, no
   binarios separados ni crates aparte. La razón: el cuerpo del
@@ -696,9 +939,42 @@ del proyecto que vale aclarar:
   hay un bin separado para `fitz-lsp` (`required-features = ["lsp"]`)
   para que `cargo build` default sin features no arrastre tower-lsp.
 
-- **Package manager y DX (Fase 9.y/9.z) son módulos hermanos, no
-  capas del compilador**. `manifest.rs`, `lockfile.rs`, `git_dep.rs`,
-  `fmt.rs`, `testing.rs`, `lint.rs` operan sobre el filesystem y el
-  AST, pero no son parte del pipeline core lexer→parser→checker→
+- **`--bundle-python` produce un launcher, no el binario directo**
+  ([launcher_template.rs](../src/launcher_template.rs)). Embeber
+  CPython en un binario standalone que no requiere Python en el
+  destino exige extraer el runtime a un dir cache + setear env vars
+  antes del exec — eso vive en un thin Rust binary aparte que
+  envuelve el binario "real" emitido por el codegen estándar. El
+  pattern es el mismo que Datasette usa para distribuir aplicaciones
+  Python como CLIs portables.
+
+- **Observability es opt-in por env vars, no por flag del lenguaje.**
+  `OTEL_EXPORTER_OTLP_ENDPOINT` ausente → `init_otel()` es no-op
+  silencioso. `RUST_LOG` ausente → logs solo a nivel `info`+.
+  `FITZ_PROMETHEUS=1` o `@server(prometheus=true)` activan
+  `/metrics`. Trade-off: opt-out de access logs HTTP automático
+  requiere `@server(observability=false)` explícito (deuda residual
+  ABIERTA: gating de deps OTel emitidas cuando el programa no las
+  usa — hoy se linkean siempre que hay handlers HTTP).
+
+- **Package manager, DX, Docker stack, deploy y CLI builder son
+  módulos hermanos, no capas del compilador**. `manifest.rs`,
+  `lockfile.rs`, `git_dep.rs`, `fmt.rs`, `testing.rs`, `lint.rs`,
+  `docker.rs`, `deploy.rs`, `cli.rs` operan sobre el filesystem y
+  el AST, pero no son parte del pipeline core lexer→parser→checker→
   eval/codegen. `main.rs` los invoca según sub-comando; no hay
   acoplamiento profundo entre ellos.
+
+- **El driver Postgres es puro Rust, sin libpq.** [db.rs](../src/db.rs)
+  implementa el wire protocol v3.0 + SCRAM-SHA-256 + TLS (rustls) +
+  pool de conexiones desde cero, sin `tokio-postgres`/`sqlx`/`diesel`.
+  Razón: control completo del marshaling Fitz `Value` ↔ `PgValue`
+  (incluyendo arrays con NULL adentro, JSONB libre vs `Map<Str, T>`
+  concreto, Date/DateTime/Uuid como tipos nativos), y promesa "cero
+  deps externas para features intrínsecas". El ORM declarativo
+  (`@table`/`@primary`/`@column`/`@belongs_to`/`@has_many`) vive
+  encima — los decoradores se procesan en `types.rs` poblando
+  `TableMetadata`, el SQL builder en `evaluator.rs` (`.where`
+  closures translateadas a SQL parametrizado) + `codegen.rs`
+  (paridad). [migrations.rs](../src/migrations.rs) consume el
+  driver para introspect/diff/migrate.
