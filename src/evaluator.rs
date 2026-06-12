@@ -1,22 +1,22 @@
-// evaluator.rs — Fase 2.4
+// evaluator.rs — Phase 2.4
 //
-// Recorre el AST y produce efectos (imprimir, mutar variables) y valores.
+// Walks the AST and produces effects (printing, mutating variables) and values.
 //
-// Estructura interna:
+// Internal structure:
 //
-//  ┌──────────────┐   programa
-//  │ eval(...).await    │ ──────────► env global + register_builtins
+//  ┌──────────────┐   program
+//  │ eval(...).await    │ ──────────► global env + register_builtins
 //  └──────┬───────┘
-//         │ por cada Stmt
+//         │ per Stmt
 //         ▼
 //  ┌──────────────┐         ┌──────────────┐
 //  │ eval_stmt    │ ◀──────►│ eval_expr    │
 //  └──────────────┘         └──────────────┘
 //
-// Control de flujo y errores comparten un mismo canal: `EvalSignal`. Esto
-// nos permite usar `?` para propagar tanto errores reales como un `return`
-// que tiene que escalar hasta el caller de la función. El truco lo tomé de
-// Crafting Interpreters; en Rust funciona naturalmente con `Result`.
+// Control flow and errors share a single channel: `EvalSignal`. This lets
+// us use `?` to propagate both real errors and a `return` that needs to
+// escalate up to the caller of the function. Trick borrowed from
+// Crafting Interpreters; in Rust it works naturally with `Result`.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -42,30 +42,30 @@ use crate::parser::parse;
 use crate::value::{ResultVariant, Value};
 
 // ---------------------------------------------------------------------------
-// EvalSignal — el canal único de "salida no normal" de eval_stmt/eval_expr.
+// EvalSignal — the single channel for "non-normal exit" of eval_stmt/eval_expr.
 // ---------------------------------------------------------------------------
 
-/// Una interrupción del flujo normal de evaluación. Cubre dos cosas en una:
-///  - errores reales del programa (`Error`)
-///  - control de flujo no local (`Return`, `Break`, `Continue`)
+/// An interruption of the normal evaluation flow. Covers two things in one:
+///  - real program errors (`Error`)
+///  - non-local control flow (`Return`, `Break`, `Continue`)
 ///
-/// Cuando una función llama a otra, el caller espera convertir
-/// `Err(Return(v))` en `Ok(v)`. Cuando un loop captura un `break`, convierte
-/// `Err(Break)` en una salida normal. Cualquier otra cosa se propaga.
+/// When a function calls another, the caller expects to convert
+/// `Err(Return(v))` into `Ok(v)`. When a loop catches a `break`, it converts
+/// `Err(Break)` into a normal exit. Anything else propagates.
 #[derive(Debug)]
 pub enum EvalSignal {
     Error(FitzError),
     Return(Value),
-    /// Mini-tanda L: `break <v>` lleva el valor. `break` solo →
-    /// `Value::Null`. El `label` opcional targetea un loop
-    /// específico anidado (`break 'outer`); el loop runner
-    /// chequea si el label matchea y propaga si no.
+    /// Mini-batch L: `break <v>` carries the value. Bare `break` →
+    /// `Value::Null`. The optional `label` targets a specific
+    /// nested loop (`break 'outer`); the loop runner checks
+    /// whether the label matches and propagates if not.
     Break(Value, Option<String>),
     Continue(Option<String>),
 }
 
-/// `From<FitzError>` permite hacer `return Err(error.into())` o usar `?`
-/// directamente cuando una función auxiliar devuelve `FitzResult`.
+/// `From<FitzError>` enables `return Err(error.into())` or using `?`
+/// directly when a helper function returns `FitzResult`.
 impl From<FitzError> for EvalSignal {
     fn from(e: FitzError) -> Self {
         EvalSignal::Error(e)
@@ -78,41 +78,41 @@ pub type EvalResult<T> = Result<T, EvalSignal>;
 // Entry point
 // ---------------------------------------------------------------------------
 
-/// Ejecuta un programa. Construye el env global, registra builtins, e itera
-/// las sentencias del programa.
+/// Runs a program. Builds the global env, registers builtins, and iterates
+/// over the program's statements.
 ///
-/// El `base_dir` por defecto es el cwd actual del proceso — sirve para
-/// resolver imports relativos a archivos del proyecto cuando se ejecuta
-/// el binario sin contexto adicional. Para programas cargados desde un
-/// archivo `.fitz` específico, usar `eval_with_base` con el directorio
-/// del archivo.
+/// `base_dir` defaults to the process's current cwd — used to resolve
+/// imports relative to project files when running the binary without
+/// extra context. For programs loaded from a specific `.fitz` file,
+/// use `eval_with_base` with the file's directory.
 ///
-/// Signals "huérfanos" (`return`/`break`/`continue` fuera de su contexto)
-/// se convierten acá en errores del usuario.
+/// "Orphan" signals (`return`/`break`/`continue` outside their context)
+/// are converted here into user errors.
 ///
-/// Fase 6.4: `eval` y `eval_with_base` son `async fn` — para contextos
-/// con runtime tokio ya activo (tests `#[tokio::test]`, llamados desde
-/// otra `async fn`, etc.). Para CLI entry-points sync (main.rs) está
-/// la variante `eval_with_base_sync` que arma el runtime y bloquea.
+/// Phase 6.4: `eval` and `eval_with_base` are `async fn` — for contexts
+/// with a tokio runtime already active (tests with `#[tokio::test]`,
+/// callers from another `async fn`, etc.). For sync CLI entry points
+/// (main.rs) there's the `eval_with_base_sync` variant that builds
+/// the runtime and blocks.
 ///
-/// `dead_code` allow: hoy `main.rs` siempre usa `eval_with_base_sync`
-/// con el directorio del archivo. Lo dejamos como API pública por
-/// simetría y para tests de smoke.
+/// `dead_code` allow: today `main.rs` always uses `eval_with_base_sync`
+/// with the file's directory. We keep this as a public API for symmetry
+/// and for smoke tests.
 #[allow(dead_code)]
 pub async fn eval(program: Program) -> FitzResult<()> {
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     eval_with_base(program, base_dir).await
 }
 
-/// Fase 9.z.2.b — corre un test descubierto por `fitz test`. Invoca
-/// el handler con 0 args y, si era `async`, await-ea el `Value::Future`
-/// resultante para forzar la ejecución del body. Cualquier `FitzError`
-/// o `EvalSignal` se devuelve como `Err(FitzError)` — el runner lo
-/// formatea para reportar el test como FAILED.
+/// Phase 9.z.2.b — runs a test discovered by `fitz test`. Invokes the
+/// handler with 0 args and, if it was `async`, awaits the resulting
+/// `Value::Future` to force execution of the body. Any `FitzError`
+/// or `EvalSignal` is returned as `Err(FitzError)` — the runner
+/// formats it to report the test as FAILED.
 ///
-/// `name` se usa cosméticamente en mensajes de error de aridad
-/// (`invoke_value` lo cita); el runner luego prefija con
-/// `<source_file>::` si aplica.
+/// `name` is used cosmetically in arity error messages
+/// (`invoke_value` cites it); the runner then prefixes with
+/// `<source_file>::` if applicable.
 pub async fn run_test_handler(handler: Value, is_async: bool, name: &str) -> Result<(), FitzError> {
     let value = invoke_value(handler, vec![], name, Span::ZERO)
         .await
@@ -122,10 +122,10 @@ pub async fn run_test_handler(handler: Value, is_async: bool, name: &str) -> Res
         return Ok(());
     }
 
-    // Test era `async fn`: el invoke produjo un Future. Lo
-    // consumimos acá para que la espera real ocurra antes de que el
-    // runner reporte resultado. Política idéntica a `Expr::Await`
-    // del evaluator (consumo único vía `cell.0.lock().take()`).
+    // Test was `async fn`: the invoke produced a Future. We
+    // consume it here so the real wait happens before the
+    // runner reports a result. Policy identical to `Expr::Await`
+    // in the evaluator (single consumption via `cell.0.lock().take()`).
     match value {
         Value::Future(cell) => {
             let fut = cell.0.lock().take();
@@ -158,31 +158,31 @@ pub async fn run_test_handler(handler: Value, is_async: bool, name: &str) -> Res
     }
 }
 
-/// Versión async de `eval` que recibe explícitamente el directorio raíz
-/// para resolver `import`s relativos. Para uso desde contextos async
-/// (tests con `#[tokio::test]`, handlers HTTP, otros async fns).
+/// Async variant of `eval` that explicitly receives the root directory
+/// to resolve relative `import`s. For use from async contexts (tests
+/// with `#[tokio::test]`, HTTP handlers, other async fns).
 ///
-/// Si tu programa importa deps registradas en `fitz.toml`, usá
-/// `eval_with_base_and_deps` para que el loader resuelva `from <dep>
-/// import X` contra el `lib_entry` correcto (Fase 9.y.3.b). Esta
-/// versión asume "sin deps" (registry vacío).
+/// If your program imports deps registered in `fitz.toml`, use
+/// `eval_with_base_and_deps` so the loader resolves `from <dep>
+/// import X` against the correct `lib_entry` (Phase 9.y.3.b). This
+/// variant assumes "no deps" (empty registry).
 pub async fn eval_with_base(program: Program, base_dir: PathBuf) -> FitzResult<()> {
     eval_with_base_and_deps(program, base_dir, crate::manifest::DepRegistry::new()).await
 }
 
-/// Fase 9.y.3.b — variante de `eval_with_base` que recibe el
-/// `dep_registry` resuelto del `fitz.toml`. Lo consume el loader para
-/// que `from <dep-name> import X` resuelva al `lib_entry` absoluto en
-/// vez de fallback a path relativo del importer.
+/// Phase 9.y.3.b — variant of `eval_with_base` that receives the
+/// `dep_registry` resolved from `fitz.toml`. The loader consumes it so
+/// `from <dep-name> import X` resolves to the absolute `lib_entry`
+/// instead of falling back to a relative path from the importer.
 pub async fn eval_with_base_and_deps(
     program: Program,
     base_dir: PathBuf,
     dep_registry: crate::manifest::DepRegistry,
 ) -> FitzResult<()> {
     install_loader(base_dir, dep_registry);
-    // Guard para des-instalar el loader siempre — incluso ante panic.
-    // Si el programa termina por error, igual queremos limpiar el
-    // thread_local así un siguiente `eval` arranca limpio.
+    // Guard to always uninstall the loader — even on panic.
+    // If the program ends with an error, we still want to clean up the
+    // thread_local so a subsequent `eval` starts fresh.
     let _guard = LoaderGuard;
 
     let env = Environment::new();
@@ -196,22 +196,22 @@ pub async fn eval_with_base_and_deps(
     Ok(())
 }
 
-/// Fase 9.z.4 — evalúa un programa contra un env existente (compartido
-/// entre líneas del REPL). A diferencia de `eval_with_base_and_deps`,
-/// NO crea un env nuevo ni registra builtins — el caller mantiene un
-/// `EnvRef` propio que persiste entre invocaciones.
+/// Phase 9.z.4 — evaluates a program against an existing env (shared
+/// across REPL lines). Unlike `eval_with_base_and_deps`, does NOT
+/// create a new env nor register builtins — the caller keeps its
+/// own `EnvRef` that persists across invocations.
 ///
-/// Devuelve el `Value` resultante del último stmt (útil para el REPL:
-/// cuando el usuario tipea `1 + 2` el parser lo convierte en
-/// `Stmt::Expr` y queremos imprimir `Value::Int(3)`). Para `Stmt::Assign`,
-/// `Stmt::FnDef`, etc. el valor es `Value::Null`. Si el programa
-/// está vacío, también `Value::Null`.
+/// Returns the `Value` resulting from the last stmt (useful for the REPL:
+/// when the user types `1 + 2` the parser converts it to
+/// `Stmt::Expr` and we want to print `Value::Int(3)`). For `Stmt::Assign`,
+/// `Stmt::FnDef`, etc. the value is `Value::Null`. If the program
+/// is empty, also `Value::Null`.
 ///
-/// Sí instala/desinstala el loader (`install_loader`/`LoaderGuard`)
-/// cada vez para que `import` funcione. Cache del loader se pierde
-/// entre llamadas (deuda menor; cargas múltiples de un mismo módulo
-/// re-ejecutan). Para el caso REPL común (intérprete interactivo,
-/// pocos imports), aceptable.
+/// Does install/uninstall the loader (`install_loader`/`LoaderGuard`)
+/// each time so `import` works. Loader cache is lost between calls
+/// (minor debt; multiple loads of the same module re-execute). For
+/// the common REPL case (interactive interpreter, few imports),
+/// acceptable.
 pub async fn eval_program_with_env(
     program: Program,
     base_dir: PathBuf,
@@ -230,19 +230,19 @@ pub async fn eval_program_with_env(
     Ok(last)
 }
 
-/// Fase 9.z.4 — crea un env nuevo + registra builtins. Wrapper público
-/// para que el REPL (en `main.rs`) pueda armar su scope inicial sin
-/// exponer `register_builtins` por separado.
+/// Phase 9.z.4 — creates a new env + registers builtins. Public wrapper
+/// so the REPL (in `main.rs`) can build its initial scope without
+/// exposing `register_builtins` separately.
 pub fn new_repl_env() -> EnvRef {
     let env = Environment::new();
     register_builtins(&env);
     env
 }
 
-/// Fase 9.z.4 — lista los nombres de los builtins registrados por
-/// `register_builtins`. El REPL los usa para filtrar `:env` (mostrar
-/// solo lo que el usuario definió, no los builtins built-in del
-/// lenguaje). Mantener sincronizado con `register_builtins`.
+/// Phase 9.z.4 — lists the names of the builtins registered by
+/// `register_builtins`. The REPL uses them to filter `:env` (showing
+/// only what the user defined, not the language's built-in
+/// builtins). Keep in sync with `register_builtins`.
 pub fn builtin_names() -> &'static [&'static str] {
     &[
         "print",
@@ -253,13 +253,13 @@ pub fn builtin_names() -> &'static [&'static str] {
         "assert_eq",
         "assert_ne",
         "assert_throws",
-        // Mini-tanda Bits-extras — ops sobre Int como builtins globales.
+        // Mini-batch Bits-extras — ops on Int as global builtins.
         "popcount",
         "leading_zeros",
         "trailing_zeros",
         "rotate_left",
         "rotate_right",
-        // Mini-tanda Math — builtins matemáticos.
+        // Mini-batch Math — math builtins.
         "abs",
         "min",
         "max",
@@ -269,23 +269,23 @@ pub fn builtin_names() -> &'static [&'static str] {
         "floor",
         "round",
         "clamp",
-        // Fase 9.w.1.b — `jwt` y `hash` como Value::Module pre-registrados.
-        // El REPL los filtra con `:env`; el LSP los lista en completions.
+        // Phase 9.w.1.b — `jwt` and `hash` as pre-registered Value::Module.
+        // The REPL filters them with `:env`; the LSP lists them in completions.
         "jwt",
         "hash",
-        // Fase 9.w.1.iter2.b — `auth` con blacklist/is_blacklisted/cleanup_expired
-        // (tabla `fitz_token_blacklist` auto-creada al primer call).
+        // Phase 9.w.1.iter2.b — `auth` with blacklist/is_blacklisted/cleanup_expired
+        // (table `fitz_token_blacklist` auto-created on first call).
         "auth",
-        // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates).
+        // Env builtin mini-phase (2026-05-22, Step 3 post-boilerplates).
         "env",
         "env_or",
         "load_env",
-        // Fase 12.8 — feature flags built-in (manifest [flags] + env vars).
+        // Phase 12.8 — built-in feature flags (manifest [flags] + env vars).
         "flag",
         "flags",
         // 10.8.7 (v0.10.8) — broadcast HTTP → WS cross-handler.
         "ws_broadcast",
-        // v0.10.24 — tipos built-in con constructors estáticos como
+        // v0.10.24 — built-in types with static constructors as
         // Value::Module (Date.today/parse/from_ymd, DateTime.now/parse/
         // from_timestamp, Uuid.v4/parse/nil).
         "Date",
@@ -294,18 +294,18 @@ pub fn builtin_names() -> &'static [&'static str] {
     ]
 }
 
-/// Wrapper sync de `eval_with_base` para CLI entry-points (main.rs).
-/// Arma un runtime tokio `current_thread` (single-threaded por F17)
-/// y bloquea sobre el future. Si ya estás adentro de un runtime, usá
-/// `eval_with_base(...).await` directo.
+/// Sync wrapper of `eval_with_base` for CLI entry-points (main.rs).
+/// Builds a tokio `current_thread` runtime (single-threaded by F17)
+/// and blocks on the future. If you're already inside a runtime, use
+/// `eval_with_base(...).await` directly.
 pub fn eval_with_base_sync(program: Program, base_dir: PathBuf) -> FitzResult<()> {
     eval_with_base_and_deps_sync(program, base_dir, crate::manifest::DepRegistry::new())
 }
 
-/// Fase 9.y.3.b — wrapper sync de `eval_with_base_and_deps` para
-/// el CLI cuando `fitz run` corre adentro de un proyecto Fitz con
-/// `[dependencies]`. El `dep_registry` viene construido por
-/// `manifest::build_dep_registry` desde el `ManifestCtx`.
+/// Phase 9.y.3.b — sync wrapper of `eval_with_base_and_deps` for
+/// the CLI when `fitz run` runs inside a Fitz project with
+/// `[dependencies]`. The `dep_registry` comes built by
+/// `manifest::build_dep_registry` from the `ManifestCtx`.
 pub fn eval_with_base_and_deps_sync(
     program: Program,
     base_dir: PathBuf,
@@ -315,8 +315,8 @@ pub fn eval_with_base_and_deps_sync(
     runtime.block_on(eval_with_base_and_deps(program, base_dir, dep_registry))
 }
 
-/// Construye el runtime tokio `current_thread` que comparten el
-/// evaluator async y el server HTTP. Single-threaded por F17.
+/// Builds the tokio `current_thread` runtime shared by the
+/// async evaluator and the HTTP server. Single-threaded by F17.
 pub fn build_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -325,21 +325,21 @@ pub fn build_runtime() -> tokio::runtime::Runtime {
 }
 
 // ---------------------------------------------------------------------------
-// Decorators — pre-procesamiento de `@nombre(args)` sobre `Stmt::FnDef`.
+// Decorators — pre-processing of `@name(args)` over `Stmt::FnDef`.
 //
-// El parser solo acumula decorators; acá decidimos qué hace cada uno.
-// Política:
+// The parser only accumulates decorators; here we decide what each one does.
+// Policy:
 //
-//   - `@get` / `@post` / `@put` / `@delete`: validan args (1 path) y
-//     registran una `RouteSpec` en el `HttpRegistry` activo. Si no hay
-//     registry activo (eval embebido, REPL, test sin server), error
-//     explícito con sugerencia de qué hacer.
-//   - Cualquier otro nombre: error explícito. `@server` entra en 4.4;
-//     decoradores custom no están planeados hasta Fase 5+.
+//   - `@get` / `@post` / `@put` / `@delete`: validate args (1 path) and
+//     register a `RouteSpec` in the active `HttpRegistry`. If there is no
+//     active registry (embedded eval, REPL, test without server), explicit
+//     error with suggestion on what to do.
+//   - Any other name: explicit error. `@server` lands in 4.4;
+//     custom decorators are not planned until Phase 5+.
 //
-// El handler se pasa ya construido como `Value::Function` para que el
-// registry lo guarde sin tener que reconstruirlo (clones de `Rc` son
-// baratos; el `closure: EnvRef` mantiene viva el env del módulo).
+// The handler is passed already built as `Value::Function` so the
+// registry stores it without having to rebuild it (`Rc` clones are
+// cheap; the `closure: EnvRef` keeps the module env alive).
 // ---------------------------------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
@@ -358,7 +358,7 @@ fn process_decorator(
     env: &EnvRef,
     fn_def_span: Span,
 ) -> Result<(), EvalSignal> {
-    // ¿Es un decorator HTTP conocido?
+    // Is it a known HTTP decorator?
     if let Some(method) = HttpMethod::from_decorator_name(&deco.name) {
         return register_http_route(
             method,
@@ -377,10 +377,10 @@ fn process_decorator(
         );
     }
 
-    // Fase 9.w.2 — `@ws("/path")`: registra una ruta WebSocket. El
-    // handshake inicial es GET HTTP estándar, pero el dispatch en
-    // `build_router` se bifurca por `is_ws` y termina con
-    // `WebSocketUpgrade::on_upgrade` en lugar del HTTP dispatcher.
+    // Phase 9.w.2 — `@ws("/path")`: registers a WebSocket route. The
+    // initial handshake is standard HTTP GET, but the dispatch in
+    // `build_router` branches on `is_ws` and ends with
+    // `WebSocketUpgrade::on_upgrade` instead of the HTTP dispatcher.
     if deco.name == "ws" {
         return register_ws_route(
             deco,
@@ -398,93 +398,93 @@ fn process_decorator(
         );
     }
 
-    // `@server(port?, host?)`: configura el server. La fn que decora
-    // queda en el env como cualquier otra (el patrón típico es
-    // ponerlo arriba de `fn main()`).
+    // `@server(port?, host?)`: configures the server. The fn it decorates
+    // remains in the env like any other (the typical pattern is
+    // to put it above `fn main()`).
     if deco.name == "server" {
         return register_server_config(deco, fn_name);
     }
 
-    // `@test`: registra la fn en el `TestRegistry` activo (Fase
-    // 9.z.2.a). **Diseño asimétrico vs `@server`**: si no hay
-    // registry activo (caso típico de `fitz run`), el decorator es
-    // **no-op silencioso** — paralelo a `#[cfg(test)]` de Rust, las
-    // fns `@test` se ignoran fuera del runner. El sub-comando
-    // `fitz test` (9.z.2.b) instala el registry vía
-    // `with_active_test_registry` antes de evaluar.
+    // `@test`: registers the fn in the active `TestRegistry` (Phase
+    // 9.z.2.a). **Asymmetric design vs `@server`**: if there is no
+    // active registry (typical case of `fitz run`), the decorator is
+    // **silent no-op** — parallel to Rust's `#[cfg(test)]`, the
+    // `@test` fns are ignored outside the runner. The sub-command
+    // `fitz test` (9.z.2.b) installs the registry via
+    // `with_active_test_registry` before evaluating.
     //
-    // Validaciones acá: sin args, sin kwargs, sin params. Cualquiera
-    // de los 3 viola la firma del MVP (`@test fn nombre() { ... }`).
+    // Validations here: no args, no kwargs, no params. Any one
+    // of the 3 violates the MVP signature (`@test fn name() { ... }`).
     if deco.name == "test" {
         return register_test(deco, fn_name, params, handler, fn_def_span);
     }
 
-    // Fase 12.7 — `@trace(name="X")` y `@metric(name="X")` son
-    // **no-op en el intérprete**. Diseño honesto del MVP: el
-    // intérprete es para `fitz run` (dev local), donde el OTel
-    // collector típicamente NO está activo y el span/métrica no se
-    // exporta a ningún lado. La instrumentación real vive en
-    // `fitz build` (codegen 12.7.b) que emite `tracing::span!` +
-    // `metrics::counter!`/`histogram!` alrededor del body de la fn.
+    // Phase 12.7 — `@trace(name="X")` and `@metric(name="X")` are
+    // **no-op in the interpreter**. Honest MVP design: the
+    // interpreter is for `fitz run` (local dev), where the OTel
+    // collector typically is NOT active and the span/metric is not
+    // exported anywhere. The real instrumentation lives in
+    // `fitz build` (codegen 12.7.b) which emits `tracing::span!` +
+    // `metrics::counter!`/`histogram!` around the fn body.
     //
-    // El checker (12.7) ya validó shape sintáctico (kwargs `name=...`
-    // Str literal, sin args positionals, sin apilamiento sobre
-    // handlers HTTP/WS). Acá solo aceptamos el decorator como válido
-    // para que el evaluador no falle. Paralelo a `@background` que
-    // también es marcador.
+    // The checker (12.7) already validated syntactic shape (kwargs `name=...`
+    // Str literal, no positional args, no stacking over
+    // HTTP/WS handlers). Here we only accept the decorator as valid
+    // so the evaluator does not fail. Parallel to `@background` which
+    // is also a marker.
     if deco.name == "trace" || deco.name == "metric" {
         return Ok(());
     }
 
-    // Fase 9.w.1.c — `@auth_provider`: registra la fn como provider de
-    // auth en el HttpRegistry activo. Solo aplica en contexto HTTP
-    // (debe haber un registry — caso típico `fitz run` del archivo);
-    // en otros contextos error explícito. El checker (9.w.1.a) ya
-    // validó signature (`fn(Map<Str,Str>) -> Result<User>`) y unicidad
-    // estáticamente; replicamos defensivamente acá.
+    // Phase 9.w.1.c — `@auth_provider`: registers the fn as auth
+    // provider in the active HttpRegistry. Only applies in HTTP context
+    // (there must be a registry — typical case `fitz run` of the file);
+    // in other contexts explicit error. The checker (9.w.1.a) already
+    // validated signature (`fn(Map<Str,Str>) -> Result<User>`) and uniqueness
+    // statically; we replicate defensively here.
     if deco.name == "auth_provider" {
         return register_auth_provider(deco, fn_name, return_type, handler, fn_def_span);
     }
 
-    // Fase 9.w.3 — `@cron("expr")`: registra la fn como cron job en el
-    // CronRegistry adentro del HttpRegistry. El scheduler arranca
-    // cuando levanta `serve()` (junto con axum) o cuando el cron-only
-    // mode toma el control (`run_scheduler_only`). El checker ya validó
-    // shape (arg Str, sin params, return Null/Result, conflictos);
-    // acá validamos sintaxis del cron expression vía la crate `cron`.
+    // Phase 9.w.3 — `@cron("expr")`: registers the fn as cron job in the
+    // CronRegistry inside the HttpRegistry. The scheduler starts
+    // when `serve()` is brought up (together with axum) or when the cron-only
+    // mode takes control (`run_scheduler_only`). The checker already validated
+    // shape (Str arg, no params, return Null/Result, conflicts);
+    // here we validate the cron expression syntax via the `cron` crate.
     if deco.name == "cron" {
         return register_cron_job(deco, fn_name, handler, env, fn_def_span);
     }
 
-    // Fase 9.w.3 — `@background`: marca la fn como autorizada para
-    // `spawn(...)`. NO requiere registro adicional en runtime — el
-    // checker (9.w.3.a) ya validó. La fn queda definida en el env
-    // como cualquier otra; el callsite `spawn(call)` la invoca via
-    // `tokio::spawn`. Decorator no-op en runtime.
+    // Phase 9.w.3 — `@background`: marks the fn as authorized for
+    // `spawn(...)`. Does NOT require additional registration at runtime — the
+    // checker (9.w.3.a) already validated it. The fn remains defined in the env
+    // like any other; the callsite `spawn(call)` invokes it via
+    // `tokio::spawn`. No-op decorator at runtime.
     if deco.name == "background" {
         return Ok(());
     }
 
-    // Fase 12.1.b — `@healthz` y `@readyz`: K8s liveness/readiness
-    // probes. Registramos el handler en el slot dedicado del
-    // HttpRegistry; el auto-mount de `build_router_with_asyncapi`
-    // lo dispatcha en `GET /healthz` o `GET /readyz`. El checker
-    // (12.1.a) ya validó shape (sin args/kwargs/params, singleton,
-    // sin conflictos); replicamos defensivamente.
+    // Phase 12.1.b — `@healthz` and `@readyz`: K8s liveness/readiness
+    // probes. We register the handler in the dedicated slot of the
+    // HttpRegistry; the auto-mount of `build_router_with_asyncapi`
+    // dispatches it on `GET /healthz` or `GET /readyz`. The checker
+    // (12.1.a) already validated shape (no args/kwargs/params, singleton,
+    // no conflicts); we replicate defensively.
     if deco.name == "healthz" || deco.name == "readyz" {
         return register_health_handler(deco, fn_name, handler, fn_def_span);
     }
 
-    // Fase 13 (v0.11.0) — `@command("name", desc="...")`: registra la
-    // fn como comando CLI. El checker ya validó shape (return Int,
-    // params Str/Int/Float/Bool, sin conflictos). Acá la registramos
-    // en el `CliRegistry` global para que el main del intérprete o
-    // del binario emitido por `fitz build` la dispatchee desde argv.
+    // Phase 13 (v0.11.0) — `@command("name", desc="...")`: registers the
+    // fn as a CLI command. The checker already validated shape (return Int,
+    // params Str/Int/Float/Bool, no conflicts). Here we register it
+    // in the global `CliRegistry` so the main of the interpreter or
+    // of the binary emitted by `fitz build` dispatches it from argv.
     if deco.name == "command" {
         return register_cli_command(deco, fn_name, params, handler);
     }
 
-    // Decorador desconocido. Mensaje listo para guiar al usuario.
+    // Unknown decorator. Message ready to guide the user.
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::InvalidSyntax,
         0,
@@ -497,22 +497,22 @@ fn process_decorator(
     )))
 }
 
-/// Fase 12.1.b — Procesa `@healthz` o `@readyz` sobre una `Stmt::FnDef`.
-/// El checker (12.1.a) ya validó shape estáticamente; acá replicamos
-/// defensivamente: sin args/kwargs, singleton, HttpRegistry activo.
+/// Phase 12.1.b — Processes `@healthz` or `@readyz` over a `Stmt::FnDef`.
+/// The checker (12.1.a) already validated shape statically; here we
+/// defensively re-check: no args/kwargs, singleton, active HttpRegistry.
 ///
-/// Si todo OK, registra el `HealthCheckHandle` en el slot dedicado
-/// del registry (`healthz_handler` o `readyz_handler`). El auto-mount
-/// en `build_router_with_asyncapi` lo dispatcha en `GET /healthz` o
-/// `GET /readyz` invocando este handler con `invoke_value` + mapeo
-/// del retorno a status.
+/// If all OK, registers the `HealthCheckHandle` in the registry's
+/// dedicated slot (`healthz_handler` or `readyz_handler`). The auto-mount
+/// in `build_router_with_asyncapi` dispatches it on `GET /healthz` or
+/// `GET /readyz` by invoking this handler with `invoke_value` + mapping
+/// the return to a status.
 fn register_health_handler(
     deco: &Decorator,
     fn_name: &str,
     handler: &Value,
     fn_def_span: Span,
 ) -> Result<(), EvalSignal> {
-    let kind = deco.name.as_str(); // "healthz" o "readyz"
+    let kind = deco.name.as_str(); // "healthz" or "readyz"
     let err = |msg: String| {
         EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
@@ -521,14 +521,14 @@ fn register_health_handler(
             msg,
         ))
     };
-    // 1) Sin args ni kwargs (el checker ya lo validó; defensa).
+    // 1) No args nor kwargs (the checker already validated; defense).
     if !deco.args.is_empty() || !deco.kwargs.is_empty() {
         return Err(err(format!(
             "@{kind} sobre fn '{fn_name}': no admite args ni kwargs."
         )));
     }
-    // 2) `handler` debe ser una Value::Function. El caller siempre nos
-    //    pasa la fn resuelta del env; defensa por si cambia.
+    // 2) `handler` must be a Value::Function. The caller always passes
+    //    us the fn resolved from the env; defense in case it changes.
     let Value::Function { is_async, .. } = handler else {
         return Err(err(format!(
             "@{kind} sobre fn '{fn_name}': el handler no es una fn (bug del dispatcher)."
@@ -539,10 +539,10 @@ fn register_health_handler(
         handler: handler.clone(),
         is_async: *is_async,
     };
-    // 3) Gate: HttpRegistry activo. Mismo modelo que
-    //    `register_auth_provider`: si no hay registry, el programa
-    //    está en un contexto sin HTTP (REPL/eval embebido) → error
-    //    claro citando que el decorator solo aplica a programas HTTP.
+    // 3) Gate: active HttpRegistry. Same model as
+    //    `register_auth_provider`: if there's no registry, the program
+    //    is in a non-HTTP context (REPL/embedded eval) → clear error
+    //    citing that the decorator only applies to HTTP programs.
     match crate::http::set_health_handler(kind, handle) {
         Ok(()) => Ok(()),
         Err(crate::http::SetHealthHandlerError::NoRegistry) => Err(err(format!(
@@ -556,18 +556,18 @@ fn register_health_handler(
     }
 }
 
-/// Fase 9.w.1.c — Procesa el decorator `@auth_provider` sobre una
-/// `Stmt::FnDef`. Valida que:
-/// - El decorator no tiene args ni kwargs (paralelo a `@test`).
-/// - El handler es un `Value::Function` (siempre cierto desde
+/// Phase 9.w.1.c — Processes the `@auth_provider` decorator over a
+/// `Stmt::FnDef`. Validates that:
+/// - The decorator has no args nor kwargs (parallel to `@test`).
+/// - The handler is a `Value::Function` (always true coming from
 ///   `Stmt::FnDef`).
-/// - Hay un `HttpRegistry` activo (mismo gate que los handlers HTTP).
-/// - No hay otro `@auth_provider` ya registrado (singleton — el
-///   checker valida estáticamente; replicamos defensivamente).
+/// - There's an active `HttpRegistry` (same gate as HTTP handlers).
+/// - No other `@auth_provider` is already registered (singleton — the
+///   checker validates statically; we re-check defensively).
 ///
-/// Si todo OK, suma el `AuthProviderHandle` al registry. La fn que
-/// decora también se define en el env como cualquier otra (lo hace el
-/// caller, no este helper).
+/// If all OK, adds the `AuthProviderHandle` to the registry. The
+/// decorated fn is also defined in the env like any other (done by
+/// the caller, not this helper).
 fn register_auth_provider(
     deco: &Decorator,
     fn_name: &str,
@@ -598,13 +598,13 @@ fn register_auth_provider(
             fn_name,
         )));
     }
-    // W14 (v0.10.10) — extraer el nombre del tipo `T` del `Result<T>`
-    // para que el dispatcher de handlers protegidos pueda identificar
-    // el param "user" por tipo (no por posición). El checker (9.w.1.a)
-    // ya garantiza shape `Result<T>` con T nominal; acá replicamos el
-    // parsing defensivamente. Sin annotation o shape inválido →
-    // fallback "User" string vacío que dispara la regla del primer
-    // leftover (comportamiento pre-W14, conservador).
+    // W14 (v0.10.10) — extract the `T` type name from `Result<T>`
+    // so the protected-handler dispatcher can identify the "user"
+    // param by type (not by position). The checker (9.w.1.a)
+    // already guarantees `Result<T>` shape with T nominal; here we
+    // defensively re-parse it. Without annotation or invalid shape →
+    // empty "User" string fallback that triggers the first-leftover
+    // rule (pre-W14 behavior, conservative).
     let user_type_name = return_type
         .as_ref()
         .and_then(|t| match t {
@@ -634,17 +634,17 @@ fn register_auth_provider(
     Ok(())
 }
 
-/// Fase 9.w.3 — Procesa el decorator `@cron("expr")` sobre una
-/// `Stmt::FnDef`. El checker (9.w.3.a) ya validó shape (arg Str, sin
-/// params, return Null/Result, conflictos con otros decorators). Acá
-/// validamos la sintaxis del cron expression vía la crate `cron` y
-/// registramos el job en el CronRegistry del registry activo.
+/// Phase 9.w.3 — Processes the `@cron("expr")` decorator over a
+/// `Stmt::FnDef`. The checker (9.w.3.a) already validated shape (Str arg,
+/// no params, Null/Result return, conflicts with other decorators). Here
+/// we validate the cron expression syntax via the `cron` crate and
+/// register the job in the active registry's CronRegistry.
 ///
-/// Sin registry activo (caso `fitz run` de un script sin contexto
-/// HTTP) → error claro. El caller (`eval_with_base_and_deps`)
-/// instala el registry para CUALQUIER programa con handlers HTTP
-/// o cron jobs; si el programa no tiene ninguno, el registry no se
-/// instala y los decorators de runtime fallan.
+/// Without an active registry (case of `fitz run` on a script without
+/// HTTP context) → clear error. The caller (`eval_with_base_and_deps`)
+/// installs the registry for ANY program with HTTP handlers or cron
+/// jobs; if the program has neither, the registry isn't installed
+/// and runtime decorators fail.
 fn register_cron_job(
     deco: &Decorator,
     fn_name: &str,
@@ -660,8 +660,8 @@ fn register_cron_job(
             msg,
         ))
     };
-    // Extraer el cron expression — el checker validó que es 1 arg
-    // Str literal. Acá replicamos defensivamente.
+    // Extract the cron expression — the checker validated it's 1
+    // Str literal arg. We re-check defensively here.
     if deco.args.len() != 1 {
         return Err(err(format!(
             "@cron sobre fn '{}': espera exactamente 1 argumento positional (cron expression Str).",
@@ -677,9 +677,9 @@ fn register_cron_job(
             )));
         }
     };
-    // 9.w.3.iter2 — parsea los kwargs opcionales (tz/retry/catch_up/store).
-    // El checker (9.w.3.iter2.a) ya validó shape sintáctico; acá
-    // convertimos a valores runtime y resolvemos `store` contra el env.
+    // 9.w.3.iter2 — parse optional kwargs (tz/retry/catch_up/store).
+    // The checker (9.w.3.iter2.a) already validated syntactic shape; here
+    // we convert to runtime values and resolve `store` against the env.
     let options = parse_cron_job_options(deco, fn_name, env).map_err(&err)?;
     let is_async = matches!(handler, Value::Function { is_async: true, .. });
     crate::http::register_cron_job(
@@ -693,9 +693,9 @@ fn register_cron_job(
     .map_err(err)
 }
 
-/// 9.w.3.iter2 — Convierte los kwargs del `Decorator` (validados por el
-/// checker) a `CronJobOptions`. Valida valores que el checker no puede
-/// (IANA tz real, resolución de `store=db` contra el env).
+/// 9.w.3.iter2 — Converts the `Decorator`'s kwargs (validated by the
+/// checker) to `CronJobOptions`. Validates values the checker cannot
+/// (real IANA tz, resolution of `store=db` against the env).
 fn parse_cron_job_options(
     deco: &Decorator,
     fn_name: &str,
@@ -753,9 +753,9 @@ fn parse_cron_job_options(
     Ok(options)
 }
 
-/// 9.w.3.iter2 — Convierte un `Expr::Map` literal de `retry={...}` a
-/// `RetryConfig`. El checker garantiza que llegan solo keys conocidas
-/// con shape correcto; los defaults faltantes se completan acá.
+/// 9.w.3.iter2 — Converts an `Expr::Map` literal of `retry={...}` to
+/// `RetryConfig`. The checker guarantees only known keys with correct
+/// shape arrive; missing defaults are filled in here.
 fn parse_retry_kwarg(
     expr: &Expr,
     deco_name: &str,
@@ -853,19 +853,19 @@ fn parse_retry_kwarg(
     Ok(cfg)
 }
 
-/// 9.w.3.iter2 — Resuelve `store=<expr>` contra el env y verifica que
-/// sea un `Value::DbConn`. El checker solo valida que la expr no sea
-/// `null`; el chequeo de tipo real ocurre acá en runtime.
+/// 9.w.3.iter2 — Resolves `store=<expr>` against the env and verifies
+/// it's a `Value::DbConn`. The checker only validates the expr isn't
+/// `null`; the real type check happens here at runtime.
 fn resolve_store_kwarg(
     expr: &Expr,
     deco_name: &str,
     fn_name: &str,
     env: &EnvRef,
 ) -> Result<std::sync::Arc<crate::db::DbConnHandle>, String> {
-    // Para `store=db` con `db` un binding del scope, lo más típico es
-    // un `Expr::Ident`. Para `store=registry.db` admitimos field access
-    // — extraemos vía `env.get(name)` para Ident y delegamos al
-    // evaluator para casos complejos vía un mini-eval.
+    // For `store=db` with `db` a scope binding, the most typical form
+    // is an `Expr::Ident`. For `store=registry.db` we accept field access
+    // — we extract via `env.get(name)` for Ident and delegate to the
+    // evaluator for complex cases via a mini-eval.
     let value = match expr {
         Expr::Ident(name, _) => env.lock().get(name).ok_or_else(|| {
             format!(
@@ -882,11 +882,11 @@ fn resolve_store_kwarg(
             ));
         }
     };
-    // 9.w.3.iter2 — paridad con el trait `__FitzCronStoreFrom` del
-    // codegen: aceptamos `Value::DbConn` directo (caso desempaquetado
-    // con `match`) o `Value::Result(Ok(DbConn))` (caso idiomático
-    // `let db = db.connect(...).await` sin `?` top-level). Si la conn
-    // falló al inicio (`Err`), error claro citando el motivo.
+    // 9.w.3.iter2 — parity with codegen's `__FitzCronStoreFrom` trait:
+    // we accept `Value::DbConn` directly (case unwrapped with `match`)
+    // or `Value::Result(Ok(DbConn))` (idiomatic `let db = db.connect(...).await`
+    // without top-level `?`). If the conn failed at the start (`Err`),
+    // clear error citing the reason.
     match value {
         Value::DbConn(handle) => Ok(handle),
         Value::Result(crate::value::ResultVariant::Ok(inner)) => match *inner {
@@ -918,9 +918,9 @@ fn resolve_store_kwarg(
     }
 }
 
-/// 9.w.3.iter2 — Variante runtime de `extract_int_literal` (existe una
-/// paralela en el checker). Reconoce `Expr::Int(n)` directo y
-/// `UnaryOp { Neg, Int(n) }` (parser emite negativos así).
+/// 9.w.3.iter2 — Runtime variant of `extract_int_literal` (parallel
+/// helper exists in the checker). Recognizes `Expr::Int(n)` directly
+/// and `UnaryOp { Neg, Int(n) }` (parser emits negatives that way).
 fn extract_int_literal_runtime(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Int(n, _) => Some(*n),
@@ -936,12 +936,12 @@ fn extract_int_literal_runtime(expr: &Expr) -> Option<i64> {
     }
 }
 
-/// Fase 9.w.1.c — Recolecta la política de auth de un FnDef inspeccionando
-/// sus decorators. `@admin` gana sobre `@authenticated` (admin implica
-/// authenticated). Sin decorators de auth → `None` (handler público).
+/// Phase 9.w.1.c — Collects auth policy of a FnDef by inspecting its
+/// decorators. `@admin` wins over `@authenticated` (admin implies
+/// authenticated). Without auth decorators → `None` (public handler).
 ///
-/// Valida que `@authenticated`/`@admin` no traigan args/kwargs (paralelo
-/// al checker — defensivo en runtime).
+/// Validates that `@authenticated`/`@admin` carry no args/kwargs (parallel
+/// to the checker — defensive at runtime).
 fn collect_route_auth(
     decorators: &[Decorator],
     fn_name: &str,
@@ -976,14 +976,13 @@ fn collect_route_auth(
     Ok(spec)
 }
 
-/// Fase 9.w.1.iter2.a — Recolecta los roles requeridos por
-/// `@requires("role")` decorators apilados sobre el handler. Cada
-/// `@requires("X")` exige `X` como un valor válido del `user.role`.
-/// Múltiples `@requires` apilados = OR sobre los valores. El checker
-/// 9.w.1.iter2.a valida shape (Str literal, sin kwargs, sólo sobre
-/// handlers HTTP, exige `role: Str` en el User type); acá replicamos
-/// defensivamente el shape sintáctico para que el evaluator no panic
-/// si recibe AST mal formado.
+/// Phase 9.w.1.iter2.a — Collects the roles required by `@requires("role")`
+/// decorators stacked on the handler. Each `@requires("X")` demands `X`
+/// as a valid value of `user.role`. Multiple stacked `@requires` = OR
+/// over the values. The 9.w.1.iter2.a checker validates shape (Str
+/// literal, no kwargs, only on HTTP handlers, requires `role: Str` in
+/// the User type); here we re-check the syntactic shape defensively so
+/// the evaluator doesn't panic on malformed AST.
 fn collect_required_roles(
     decorators: &[Decorator],
     fn_name: &str,
@@ -1028,11 +1027,11 @@ fn collect_required_roles(
     Ok(roles)
 }
 
-/// Fase 12.8 — Extrae el flag name de `@flag("name")` si está apilado
-/// sobre la fn. Paralelo a `collect_route_auth`/`collect_required_roles`.
-/// El checker ya validó shape (1 arg Str literal, sin kwargs), así que
-/// acá hacemos un best-effort lookup; si encuentra algo raro lo deja
-/// silencioso (el checker abortó antes).
+/// Phase 12.8 — Extracts the flag name from `@flag("name")` if stacked
+/// on the fn. Parallel to `collect_route_auth`/`collect_required_roles`.
+/// The checker already validated shape (1 Str literal arg, no kwargs), so
+/// here we just do a best-effort lookup; if something weird shows up we
+/// stay silent (the checker aborted earlier).
 fn collect_route_flag(decorators: &[Decorator]) -> Option<String> {
     for deco in decorators {
         if deco.name != "flag" {
@@ -1045,25 +1044,25 @@ fn collect_route_flag(decorators: &[Decorator]) -> Option<String> {
     None
 }
 
-/// Fase 13 (v0.11.0) — Procesa `@command("name", desc="...")` sobre
-/// una `Stmt::FnDef`. Extrae name + desc, los registra junto con
-/// los params y el handler en el `CliRegistry` activo. Sin registry
-/// activo, no-op silencioso (paralelo a `@test` — los comandos solo
-/// se materializan cuando `main.rs` instala el registry pre-eval).
+/// Phase 13 (v0.11.0) — Processes `@command("name", desc="...")` on
+/// a `Stmt::FnDef`. Extracts name + desc and registers them along
+/// with the params and handler into the active `CliRegistry`. Without
+/// an active registry, silent no-op (parallel to `@test` — commands
+/// only materialize when `main.rs` installs the registry pre-eval).
 fn register_cli_command(
     deco: &Decorator,
     fn_name: &str,
     params: &[Param],
     handler: &Value,
 ) -> Result<(), EvalSignal> {
-    // El checker validó shape (args/kwargs/conflictos/tipos); replicamos
-    // defensivamente solo lo crítico (nombre del comando como Str).
+    // The checker validated shape (args/kwargs/conflicts/types); here
+    // we re-check defensively only what's critical (command name as Str).
     let cmd_name = match deco.args.first() {
         Some(crate::ast::Expr::Str(s, _)) => s.clone(),
         _ => {
-            // El checker ya emitió error; en `fitz run` con
-            // `--no-typecheck` podríamos llegar acá sin el error. Sigue
-            // con no-op silencioso para no bloquear el eval del resto.
+            // The checker already emitted the error; under `fitz run`
+            // with `--no-typecheck` we could land here without it. Keep
+            // going as silent no-op so the rest of eval isn't blocked.
             return Ok(());
         }
     };
@@ -1082,7 +1081,7 @@ fn register_cli_command(
         params: params.to_vec(),
         handler: handler.clone(),
     };
-    // Registry activo → push. Sin registry → no-op (idéntico a @test).
+    // Active registry → push. Without registry → no-op (same as @test).
     with_active_cli_registry(|opt| match opt {
         Some(reg) => match reg.register(cmd) {
             Ok(()) => Ok(()),
@@ -1097,16 +1096,16 @@ fn register_cli_command(
     })
 }
 
-/// Procesa `@test` sobre una `Stmt::FnDef` (Fase 9.z.2.a). Valida la
-/// firma del MVP (sin args, sin kwargs, sin params) y, si hay un
-/// `TestRegistry` activo, empuja un `TestSpec`. Sin registry activo
-/// (caso `fitz run`), no-op silencioso — los tests se descubren solo
-/// cuando el sub-comando `fitz test` instala el registry.
+/// Processes `@test` on a `Stmt::FnDef` (Phase 9.z.2.a). Validates the
+/// MVP signature (no args, no kwargs, no params) and, if a
+/// `TestRegistry` is active, pushes a `TestSpec`. Without an active
+/// registry (the `fitz run` case), silent no-op — tests are discovered
+/// only when the `fitz test` sub-command installs the registry.
 ///
-/// El `is_async` viaja en el `handler` (que es siempre
-/// `Value::Function` construido por `Stmt::FnDef` arriba). Lo
-/// extraemos para que el runner de 9.z.2.b sepa si invocar sync o
-/// await-ear el `Value::Future` resultante.
+/// `is_async` rides on `handler` (which is always `Value::Function`
+/// built by the `Stmt::FnDef` above). We extract it so the 9.z.2.b
+/// runner knows whether to invoke sync or await the resulting
+/// `Value::Future`.
 fn register_test(
     deco: &Decorator,
     fn_name: &str,
@@ -1149,15 +1148,15 @@ fn register_test(
         )));
     }
 
-    // Sin registry activo → no-op silencioso (modo `fitz run`).
-    // `fitz test` instala el registry antes de evaluar para capturar.
+    // No active registry → silent no-op (`fitz run` mode).
+    // `fitz test` installs the registry before eval to capture.
     if !crate::testing::has_active_test_registry() {
         return Ok(());
     }
 
-    // Extraer `is_async` del handler. El handler siempre es
-    // `Value::Function` (construido por `Stmt::FnDef`); cualquier
-    // otra cosa es bug del evaluator.
+    // Extract `is_async` from the handler. The handler is always
+    // `Value::Function` (built by `Stmt::FnDef`); anything else is
+    // an evaluator bug.
     let is_async = match handler {
         Value::Function { is_async, .. } => *is_async,
         _ => unreachable!(
@@ -1176,15 +1175,15 @@ fn register_test(
     Ok(())
 }
 
-/// Recolecta los `@header(name="X")` declarados sobre un handler
-/// (Fase 7.6). Valida:
-///   - kwarg `name: Str` no vacío.
-///   - Existe un param Fitz con el nombre derivado
+/// Collects `@header(name="X")` decorators declared on a handler
+/// (Phase 7.6). Validates:
+///   - kwarg `name: Str` non-empty.
+///   - A Fitz param exists with the derived name
 ///     (lowercase + `-` → `_`).
-///   - El param Fitz es `Str` o `Str?` (otros tipos: error claro).
-///   - No hay dos `@header` con el mismo `name`.
+///   - The Fitz param is `Str` or `Str?` (other types: clear error).
+///   - No two `@header` share the same `name`.
 ///
-/// Si la fn no tiene decoradores `@header`, devuelve `vec![]`.
+/// If the fn has no `@header` decorators, returns `vec![]`.
 fn collect_headers(
     decorators: &[Decorator],
     fn_name: &str,
@@ -1197,7 +1196,7 @@ fn collect_headers(
         if deco.name != "header" {
             continue;
         }
-        // @header no acepta args posicionales (todo va por kwarg).
+        // @header rejects positional args (everything goes via kwarg).
         if !deco.args.is_empty() {
             return Err(err(format!(
                 "@header sobre fn '{}': no admite args posicionales. \
@@ -1231,10 +1230,10 @@ fn collect_headers(
                 )));
             }
         };
-        // Mini-fase Q.1: `into="alias"` opcional permite mapear a un
-        // param con nombre distinto al derivado por convención.
-        // Útil para headers con caracteres no idiomáticos en Fitz
-        // (`X-Forwarded-For` → param `forwarded_for` no es muy lindo).
+        // Mini-phase Q.1: optional `into="alias"` allows mapping to a
+        // param whose name differs from the one derived by convention.
+        // Useful for headers with characters that aren't idiomatic in
+        // Fitz (`X-Forwarded-For` → param `forwarded_for` isn't pretty).
         let into_kw = deco.kwargs.iter().find(|(k, _)| k == "into");
         let into_alias: Option<String> = match into_kw {
             Some((_, Expr::Str(s, _))) if !s.is_empty() => Some(s.clone()),
@@ -1252,7 +1251,7 @@ fn collect_headers(
             }
             None => None,
         };
-        // Kwargs extra: rechazar para no comerse typos silenciosamente.
+        // Extra kwargs: reject so we don't silently swallow typos.
         if let Some((k, _)) = deco.kwargs.iter().find(|(k, _)| k != "name" && k != "into") {
             return Err(err(format!(
                 "@header sobre fn '{}': kwarg '{}' no reconocido. Soportados: name, into.",
@@ -1262,7 +1261,7 @@ fn collect_headers(
         let param_name = into_alias
             .clone()
             .unwrap_or_else(|| http_name.to_lowercase().replace('-', "_"));
-        // Validar que el param exista en la fn y sea Str o Str?.
+        // Check that the param exists on the fn and is Str or Str?.
         let Some(p) = params.iter().find(|p| p.name == param_name) else {
             return Err(err(format!(
                 "@header(name=\"{}\"{}) sobre fn '{}': el handler no tiene un param llamado '{}'{}",
@@ -1328,10 +1327,10 @@ fn collect_headers(
     Ok(headers)
 }
 
-/// Procesa `@server(port?, host?)`. Args positionals; cualquiera
-/// puede omitirse y se aplica el default correspondiente. La
-/// validación de uniqueness (un solo `@server` por programa) la
-/// hace `http::set_server_config`.
+/// Processes `@server(port?, host?)`. Positional args; either one can
+/// be omitted and the corresponding default applies. Uniqueness
+/// validation (only one `@server` per program) is handled by
+/// `http::set_server_config`.
 fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSignal> {
     let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
@@ -1352,14 +1351,14 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
         )));
     }
 
-    // Arrancamos del default y vamos sobreescribiendo.
+    // Start from the default and override as we go.
     let mut config = ServerConfig::default_addr();
 
-    // v0.15.13 — flags que recuerdan si port/host vinieron como
-    // positional. El loop de kwargs los chequea para detectar
-    // doble-especificación (`@server(8080, port=9090)` o
-    // `@server(8080, "0.0.0.0", host="1.2.3.4")`). Patrón estándar
-    // de Python: TypeError si el caller pasa el mismo arg dos veces.
+    // v0.15.13 — flags that remember whether port/host arrived as
+    // positionals. The kwargs loop checks them to detect double-
+    // specification (`@server(8080, port=9090)` or
+    // `@server(8080, "0.0.0.0", host="1.2.3.4")`). Standard Python
+    // pattern: TypeError if the caller passes the same arg twice.
     let mut port_set_via_positional = false;
     let mut host_set_via_positional = false;
 
@@ -1388,8 +1387,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
     if let Some(host_expr) = deco.args.get(1) {
         match host_expr {
             Expr::Str(s, _) => {
-                // Validamos en el momento del registro para no
-                // diferirlo a la hora de levantar el server.
+                // We validate at registration time instead of deferring
+                // it to when the server is brought up.
                 if s.parse::<std::net::IpAddr>().is_err() {
                     return Err(err(format!(
                         "@server sobre fn '{}': host '{}' no es una IP válida \
@@ -1410,22 +1409,23 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
         }
     }
 
-    // 7.4: kwargs aceptados por @server. `docs: Bool` (opt-out de
-    // /openapi.json y /docs). Q.2: `api_version: Str` (override del
-    // info.version del schema OpenAPI).
+    // 7.4: kwargs accepted by @server. `docs: Bool` (opt-out of
+    // /openapi.json and /docs). Q.2: `api_version: Str` (override of
+    // the OpenAPI schema's info.version).
     //
-    // v0.15.13 — cierre URGENTE-2: `port` y `host` también admiten
-    // sintaxis kwarg además de positional. Patrón canónico
-    // recomendado para Dockerizar: `@server(host="0.0.0.0",
-    // port=8080, prometheus=true)`. Más explícito que mezclar
-    // positionals con kwargs.
+    // v0.15.13 — URGENT-2 close-out: `port` and `host` also accept
+    // kwarg syntax beyond positional. Recommended canonical pattern
+    // for Dockerizing: `@server(host="0.0.0.0", port=8080,
+    // prometheus=true)`. More explicit than mixing positionals with
+    // kwargs.
     //
-    // Cualquier otro kwarg es error.
+    // Any other kwarg is an error.
     for (key, value_expr) in &deco.kwargs {
         match key.as_str() {
-            // v0.15.13 — `port` y `host` como kwargs. Si ya vinieron
-            // como positional, error de conflicto claro (estilo Python
-            // TypeError "got multiple values for argument 'port'").
+            // v0.15.13 — `port` and `host` as kwargs. If they already
+            // arrived positionally, raise a clear conflict error
+            // (Python-style TypeError "got multiple values for
+            // argument 'port'").
             "port" => {
                 if port_set_via_positional {
                     return Err(err(format!(
@@ -1509,8 +1509,8 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
-            // Fase 9.w.2.e — heartbeat ping/pong intervalo en segundos
-            // para conexiones WebSocket. `0` desactiva. Default 30.
+            // Phase 9.w.2.e — heartbeat ping/pong interval in seconds
+            // for WebSocket connections. `0` disables. Default 30.
             "ws_heartbeat_secs" => match value_expr {
                 Expr::Int(n, _) if *n >= 0 => {
                     config.ws_heartbeat_secs = *n as u64;
@@ -1528,9 +1528,9 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
-            // Fase 12.1.b — tiempo máximo en segundos del graceful
-            // shutdown tras SIGTERM/Ctrl-C. `0` desactiva el grace
-            // period. Default 30 (alineado con K8s
+            // Phase 12.1.b — max graceful shutdown time in seconds
+            // after SIGTERM/Ctrl-C. `0` disables the grace period.
+            // Default 30 (aligned with K8s
             // `terminationGracePeriodSeconds`).
             "shutdown_timeout_secs" => match value_expr {
                 Expr::Int(n, _) if *n >= 0 => {
@@ -1549,11 +1549,11 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
-            // Fase 12.3.b.5 — opt-out de la instrumentación HTTP
-            // automática (span context + access log + métricas).
-            // Default `true` (instrumentación activa). `false` skipea
-            // TODO el wrapper de instrumentación — handlers corren
-            // bare-metal, cero overhead por request.
+            // Phase 12.3.b.5 — opt-out of the automatic HTTP
+            // instrumentation (span context + access log + metrics).
+            // Default `true` (instrumentation active). `false` skips
+            // the ENTIRE instrumentation wrapper — handlers run
+            // bare-metal, zero per-request overhead.
             "observability" => match value_expr {
                 Expr::Bool(b, _) => {
                     config.observability_enabled = *b;
@@ -1566,13 +1566,13 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
-            // Fase 12.3.iter2.Tier3 — opt-in del endpoint `/metrics`
-            // Prometheus. Default `false` (recorder no instalado, ruta
-            // no montada). `true` activa: PrometheusBuilder como
-            // recorder global + auto-mount `GET /metrics`. Env var
-            // `FITZ_PROMETHEUS=1`/`true`/`yes` también lo activa
-            // (override sobre el flag en runtime — útil en producción
-            // sin recompilar).
+            // Phase 12.3.iter2.Tier3 — opt-in of the Prometheus
+            // `/metrics` endpoint. Default `false` (recorder not
+            // installed, route not mounted). `true` activates:
+            // PrometheusBuilder as global recorder + auto-mount
+            // `GET /metrics`. Env var `FITZ_PROMETHEUS=1`/`true`/`yes`
+            // also activates it (runtime flag override — useful in
+            // production without recompiling).
             "prometheus" => match value_expr {
                 Expr::Bool(b, _) => {
                     config.prometheus_enabled = *b;
@@ -1606,51 +1606,52 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
     Ok(())
 }
 
-/// Recolecta los `@middleware(...)` declarados sobre un handler. La
-/// pasada distingue dos kinds de middleware:
+/// Collects `@middleware(...)` decorators declared on a handler. The
+/// pass distinguishes two middleware kinds:
 ///
-///   - **User-fn (MW.1)**: la expresión evalúa a `Value::Function`.
-///     Se acumula en la chain `Vec<MiddlewareSpec>` que corre en
-///     orden top-down antes del handler. Gate-only: el retorno
-///     determina si se continúa la cadena o se cortocircuita.
+///   - **User-fn (MW.1)**: the expression evaluates to
+///     `Value::Function`. Accumulated in the `Vec<MiddlewareSpec>`
+///     chain that runs top-down before the handler. Gate-only: the
+///     return value decides whether the chain continues or short-
+///     circuits.
 ///
-///   - **CORS (MW.2)**: la expresión evalúa a `Value::CorsConfig`,
-///     producto del built-in `cors(...)`. Se guarda en un slot
-///     dedicado `Option<Arc<CorsConfig>>` que `RouteSpec.cors`
-///     consume — no entra a la chain. Máximo uno por ruta;
-///     declararlo dos veces es error claro.
+///   - **CORS (MW.2)**: the expression evaluates to
+///     `Value::CorsConfig`, produced by the `cors(...)` built-in.
+///     Stored in a dedicated `Option<Arc<CorsConfig>>` slot consumed
+///     by `RouteSpec.cors` — it does NOT enter the chain. At most one
+///     per route; declaring it twice is a clear error.
 ///
-/// Otros valores (Int, Str, Instance, etc.) → error con mensaje
-/// listo para guiar al usuario.
+/// Other values (Int, Str, Instance, etc.) → error with a message
+/// ready to guide the user.
 ///
-/// Validaciones adicionales:
-///   - `@middleware` solo antes del decorator de ruta.
-///   - Exactamente un arg posicional. Sin kwargs.
-///   - El caller chequea que aplique solo sobre handlers HTTP
-///     (paralelo a `collect_headers`).
+/// Additional validations:
+///   - `@middleware` only before the route decorator.
+///   - Exactly one positional arg. No kwargs.
+///   - The caller checks that it only applies to HTTP handlers
+///     (parallel to `collect_headers`).
 ///
-/// Async porque ahora evalúa la expresión del arg con `eval_expr`
-/// (necesario para que `cors(allow_origin="*")` y cualquier factoría
-/// que devuelva Function tipen).
-/// Mini-tanda Mw-Wrap — clasifica un middleware de 2 argumentos como
-/// Post o Wrap según el tipo del segundo parámetro:
-/// - `Fn(...) -> ...` (cualquier signature de función) → **Wrap**.
-///   El middleware controla la invocación del handler via `next()`.
-/// - Cualquier otro tipo (`Response`, sin anotar, etc.) → **Post**.
-///   El middleware corre después del handler y recibe la response.
+/// Async because it evaluates the arg expression with `eval_expr`
+/// (needed so `cors(allow_origin="*")` and any factory returning
+/// Function type-check).
+/// Mini-batch Mw-Wrap — classifies a 2-arg middleware as Post or Wrap
+/// based on the second param's type:
+/// - `Fn(...) -> ...` (any function signature) → **Wrap**. The
+///   middleware controls handler invocation via `next()`.
+/// - Any other type (`Response`, unannotated, etc.) → **Post**. The
+///   middleware runs after the handler and receives the response.
 ///
-/// Si el usuario quiere un Post explícito con un segundo param de
-/// tipo `Fn(...)` (raro), debe usar otro nombre o anotar como
-/// `Response` para evitar la auto-clasificación a Wrap.
+/// If the user wants an explicit Post with a 2nd param of type
+/// `Fn(...)` (rare), they should use another name or annotate as
+/// `Response` to avoid the auto-classification to Wrap.
 pub(crate) fn classify_2_arg_middleware(
     second_param: &crate::ast::Param,
 ) -> crate::http::MiddlewareKind {
     use crate::ast::TypeExpr;
     if let Some(ty) = &second_param.type_ {
-        // Recursar adentro de Nullable por simetría con otros walkers.
-        // `Fn(...) -> ...` se parsea como TypeExpr::Generic con head "Fn"
-        // O como TypeExpr::Function (depende del parser; cubrimos ambos
-        // por defensa).
+        // Recurse inside Nullable for symmetry with other walkers.
+        // `Fn(...) -> ...` is parsed as TypeExpr::Generic with head "Fn"
+        // OR as TypeExpr::Function (depends on the parser; we cover
+        // both defensively).
         fn is_fn_type(t: &TypeExpr) -> bool {
             match t {
                 TypeExpr::Function { .. } => true,
@@ -1691,7 +1692,7 @@ async fn collect_middlewares(
         if deco.name != "middleware" {
             continue;
         }
-        // Orden: `@middleware` solo antes del decorator de ruta.
+        // Order: `@middleware` only before the route decorator.
         if saw_route_decorator {
             return Err(err(format!(
                 "@middleware sobre fn '{}': debe apilarse ANTES del decorator de ruta \
@@ -1713,13 +1714,12 @@ async fn collect_middlewares(
                 deco.args.len(),
             )));
         }
-        // Evaluar la expresión: puede ser un Ident (fn previa), un
-        // Call (`cors(...)`, o una factoría user-fn), una field
-        // expression, etc.
+        // Evaluate the expression: can be an Ident (prior fn), a Call
+        // (`cors(...)` or a user-fn factory), a field expression, etc.
         let value = eval_expr(&deco.args[0], env.clone()).await?;
-        // Para nombre legible en mensajes: si fue un Ident, usar el
-        // nombre tal cual; si fue un Call de cors, "cors"; cualquier
-        // otra cosa, una etiqueta de fallback.
+        // For readable names in messages: if it was an Ident, use the
+        // name as-is; if it was a cors Call, "cors"; anything else, a
+        // fallback label.
         let label = match &deco.args[0] {
             Expr::Ident(n, _) => n.clone(),
             Expr::Call { callee, .. } => match callee.as_ref() {
@@ -1730,10 +1730,10 @@ async fn collect_middlewares(
         };
         match value {
             Value::Function { ref params, .. } => {
-                // Mw.next — detectar kind por aridad:
-                //   1 arg → Pre (gate-only, clásico).
-                //   2 args → Post o Wrap, según tipo del 2do param:
-                //     - `Response` (o sin anotar) → Post (post-process).
+                // Mw.next — detect kind by arity:
+                //   1 arg → Pre (gate-only, classic).
+                //   2 args → Post or Wrap, based on the 2nd param's type:
+                //     - `Response` (or unannotated) → Post (post-process).
                 //     - `Fn() -> Response` → Wrap (Mw-Wrap).
                 let kind = match params.len() {
                     1 => crate::http::MiddlewareKind::Pre,
@@ -1793,12 +1793,11 @@ fn register_http_route(
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
-    // Helper local para mantener los mensajes consistentes.
+    // Local helper to keep messages consistent.
     let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
-    // 7.0: ningún decorator HTTP de ruta acepta kwargs todavía. El
-    // soporte para headers (7.6) podría sumarlos; por ahora corte
-    // explícito.
+    // 7.0: no HTTP route decorator accepts kwargs yet. Header
+    // support (7.6) may add them; for now, explicit cutoff.
     if let Some((key, _)) = deco.kwargs.first() {
         return Err(err(format!(
             "@{} sobre fn '{}': los argumentos por nombre (recibió '{}=...') \
@@ -1807,7 +1806,7 @@ fn register_http_route(
         )));
     }
 
-    // Validación 1: el decorator HTTP necesita un único arg con el path.
+    // Validation 1: HTTP decorator needs exactly one arg (the path).
     if deco.args.len() != 1 {
         return Err(err(format!(
             "@{}(...) sobre fn '{}' espera un único argumento (la ruta), \
@@ -1818,7 +1817,7 @@ fn register_http_route(
         )));
     }
 
-    // Validación 2: el path se puede traducir a template de axum.
+    // Validation 2: the path translates to an axum template.
     let template = parse_path_template(&deco.args[0]).map_err(|e| {
         err(format!(
             "@{} sobre fn '{}': {}",
@@ -1828,9 +1827,9 @@ fn register_http_route(
         ))
     })?;
 
-    // Validación 3: cada path param tiene que estar declarado como
-    // parámetro del handler. Eso garantiza que el handler reciba un
-    // valor por cada `{x}` y simplifica el dispatch.
+    // Validation 3: every path param must be declared as a handler
+    // parameter. This guarantees the handler receives a value for
+    // every `{x}` and simplifies dispatch.
     for param_name in &template.params {
         if !params.iter().any(|p| &p.name == param_name) {
             return Err(err(format!(
@@ -1841,9 +1840,9 @@ fn register_http_route(
         }
     }
 
-    // Validación 4: hay un registry activo. Sin él, el evaluator está
-    // corriendo afuera de `fitz run` (REPL, test, eval embebido) y los
-    // decorators HTTP no tienen dónde registrarse.
+    // Validation 4: there's an active registry. Without one, the
+    // evaluator is running outside `fitz run` (REPL, test, embedded
+    // eval) and HTTP decorators have nowhere to register.
     if !has_active_registry() {
         return Err(err(format!(
             "@{} sobre fn '{}': no hay servidor HTTP activo en este contexto. \
@@ -1853,10 +1852,10 @@ fn register_http_route(
         )));
     }
 
-    // Validar que cada query_param del template tenga un param Fitz
-    // correspondiente con el mismo nombre. Si el template dice
-    // `?limit={limit}` pero el handler no declara `limit`, es un bug
-    // del usuario — error claro.
+    // Validate that every query_param in the template has a matching
+    // Fitz param with the same name. If the template says
+    // `?limit={limit}` but the handler doesn't declare `limit`, it's
+    // a user bug — clear error.
     for qname in &template.query_params {
         if !params.iter().any(|p| &p.name == qname) {
             return Err(err(format!(
@@ -1867,26 +1866,26 @@ fn register_http_route(
         }
     }
 
-    // Fase 9.w.1.c — identificar el param donde inyectar el `user`
-    // tras autenticación exitosa. Si `auth_spec != None`, validamos
-    // que el `@auth_provider` esté ya registrado (orden de declaración
-    // requerido: provider antes que cualquier handler que lo use).
-    // El checker (9.w.1.a) ya validó signatures estáticamente; acá
-    // identificamos el slot del user.
+    // Phase 9.w.1.c — identify the param where the `user` is injected
+    // after successful auth. If `auth_spec != None`, validate that the
+    // `@auth_provider` is already registered (required declaration
+    // order: provider before any handler that uses it). The checker
+    // (9.w.1.a) already validated signatures statically; here we
+    // identify the user slot.
     //
-    // W14 (v0.10.10) — identificación por TIPO: comparamos la
-    // anotación del param contra el `user_type_name` registrado por
-    // el `@auth_provider` (extraído de su `Result<T>` al momento de
-    // registrar). Esto destraba handlers protegidos con body +
-    // user juntos (`fn create(body: PostInput, user: User) -> Post`).
-    // Si hay anotación matcheable → user param. El resto de los
-    // leftovers pueden ser body (limitado a uno por el chequeo de
-    // body_param más abajo).
+    // W14 (v0.10.10) — identification by TYPE: we compare each param's
+    // annotation against the `user_type_name` registered by the
+    // `@auth_provider` (extracted from its `Result<T>` at registration
+    // time). This unblocks protected handlers with body + user
+    // together (`fn create(body: PostInput, user: User) -> Post`).
+    // If there's a matchable annotation → user param. The remaining
+    // leftovers can be body (limited to one via the body_param check
+    // below).
     //
-    // Fallback (sin user_type_name registrado, o múltiples params del
-    // mismo type) → regla del primer leftover (comportamiento pre-W14,
-    // conservador). El caso "varios params del tipo User" lo rechaza
-    // el chequeo de unicidad abajo.
+    // Fallback (no user_type_name registered, or multiple params of
+    // the same type) → first-leftover rule (pre-W14 behavior,
+    // conservative). The "several params of type User" case is
+    // rejected by the uniqueness check below.
     let has_auth_decorator = auth_spec != crate::http::AuthSpec::None || !required_roles.is_empty();
     let auth_user_param_name: Option<String> = if has_auth_decorator {
         if !crate::http::has_auth_provider() {
@@ -1906,15 +1905,16 @@ fn register_http_route(
             })
             .collect();
         if candidates.is_empty() {
-            // No debería pasar — el checker valida que haya un param User.
+            // Shouldn't happen — the checker validates that a User param exists.
             return Err(err(format!(
                 "@{} sobre fn '{}': falta param del tipo `User` (inyectado tras autenticación exitosa).",
                 deco.name, fn_name,
             )));
         }
         let user_type_name = crate::http::get_auth_provider_user_type_name();
-        // Match por tipo: el param cuya anotación.head_name() == user_type_name
-        // gana como user. Skip si user_type_name está vacío (fallback).
+        // Match by type: the param whose annotation.head_name() ==
+        // user_type_name wins as user. Skip if user_type_name is empty
+        // (fallback).
         let by_type: Vec<&&Param> = if user_type_name.is_empty() {
             Vec::new()
         } else {
@@ -1930,10 +1930,10 @@ fn register_http_route(
         };
         match by_type.len() {
             0 => {
-                // Sin match por tipo. Si hay un solo candidato, lo
-                // tomamos como user (comportamiento pre-W14 — útil
-                // cuando el param no tiene anotación o el provider no
-                // registró user_type_name). Si hay >1, error claro.
+                // No match by type. If there's only one candidate, we
+                // take it as user (pre-W14 behavior — useful when the
+                // param has no annotation or the provider didn't
+                // register user_type_name). If >1, clear error.
                 if candidates.len() == 1 {
                     Some(candidates[0].name.clone())
                 } else {
@@ -1970,23 +1970,23 @@ fn register_http_route(
         None
     };
 
-    // Identificar el body param: cualquier parámetro que NO esté ni en
-    // template.params (path), ni en template.query_params (query), ni
-    // sea un header declarado, ni sea el param de auth (9.w.1.c).
-    // Máximo uno por handler.
+    // Identify the body param: any parameter that's NOT in
+    // template.params (path), NOT in template.query_params (query),
+    // NOT a declared header, and NOT the auth param (9.w.1.c).
+    // At most one per handler.
     let mut body_param: Option<BodyParam> = None;
     for p in params {
         if template.params.contains(&p.name) {
-            continue; // es path param
+            continue; // it's a path param
         }
         if template.query_params.contains(&p.name) {
-            continue; // es query param
+            continue; // it's a query param
         }
         if headers.iter().any(|h| h.param_name == p.name) {
-            continue; // es header (Fase 7.6)
+            continue; // it's a header (Phase 7.6)
         }
         if auth_user_param_name.as_deref() == Some(p.name.as_str()) {
-            continue; // es el user inyectado por auth (9.w.1.c)
+            continue; // it's the user injected by auth (9.w.1.c)
         }
         if body_param.is_some() {
             return Err(err(format!(
@@ -1995,13 +1995,14 @@ fn register_http_route(
                 deco.name, fn_name, p.name,
             )));
         }
-        // Resolver el tipo declarado, si lo hay y es un `type` custom
-        // del programa. Para tipos compuestos (`UserInput?`, `List<X>`,
-        // etc.) la resolución usa la cabeza del `TypeExpr`. Si la
-        // anotación es un primitivo (`Int`, `Str`, ...), un tipo que el
-        // env no conoce, o no hay anotación, `declared_type` queda en
-        // `None` y el runtime deserializa como `Value` libre
-        // (Map/List/primitivos).
+        // Resolve the declared type, if there is one and it's a
+        // custom `type` from the program. For composite types
+        // (`UserInput?`, `List<X>`, etc.), resolution uses the head
+        // of the `TypeExpr`. If the annotation is a primitive
+        // (`Int`, `Str`, ...), a type the env doesn't know, or
+        // there's no annotation, `declared_type` stays `None` and
+        // the runtime deserializes as a free `Value` (Map/List/
+        // primitive).
         let declared_type = p
             .type_
             .as_ref()
@@ -2016,11 +2017,11 @@ fn register_http_route(
         });
     }
 
-    // Empacar tipos de parámetros en el orden declarado del handler.
-    // Esto le sirve al runtime para coercionar path params crudos al
-    // tipo Fitz correcto antes de invocar al handler. Pasamos el nombre
-    // cabeza del tipo (sin genéricos ni `?`) porque `coerce_path_param`
-    // solo soporta primitivos.
+    // Pack param types in the handler's declared order. The runtime
+    // uses this to coerce raw path params to the correct Fitz type
+    // before invoking the handler. We pass the head name of the type
+    // (no generics, no `?`) because `coerce_path_param` only supports
+    // primitives.
     let param_types: Vec<(String, Option<String>, bool)> = params
         .iter()
         .map(|p| {
@@ -2032,20 +2033,20 @@ fn register_http_route(
         })
         .collect();
 
-    // TypeExpr completos por param, en orden. Aditivo: el dispatch
-    // HTTP usa `param_types` (head names); el generador OpenAPI (7.1)
-    // consume estos TypeExpr íntegros.
+    // Full TypeExpr per param, in order. Additive: the HTTP dispatch
+    // uses `param_types` (head names); the OpenAPI generator (7.1)
+    // consumes these full TypeExprs.
     let param_type_exprs: Vec<(String, Option<TypeExpr>)> = params
         .iter()
         .map(|p| (p.name.clone(), p.type_.clone()))
         .collect();
 
-    // MW.2: separar `cors(...)` del resto de middlewares. El
-    // `collect_middlewares` ya distinguió kinds y nos pasa la cors
-    // (opcional, máximo una por ruta) por afuera. Para mantener
-    // compat con el llamador, lo extraemos acá vía un slot Option.
-    // (La separación efectiva en `collect_middlewares` se hace en
-    // ese mismo lugar — acá solo recibimos middlewares.)
+    // MW.2: separate `cors(...)` from the rest of the middlewares.
+    // `collect_middlewares` already distinguished kinds and hands us
+    // the cors (optional, at most one per route) on the side. To keep
+    // caller compat, we extract it here via an Option slot. (The
+    // actual separation happens inside `collect_middlewares` — here
+    // we only receive middlewares.)
     push_route(RouteSpec {
         method,
         path: template.path,
@@ -2073,20 +2074,20 @@ fn register_http_route(
     Ok(())
 }
 
-/// Fase 9.w.2 — Registra un handler `@ws("/path")` como WebSocket
-/// route en el `HttpRegistry`. Paralelo a `register_http_route` pero
-/// con menos validaciones del path (no hay path params dinámicos en
-/// WS — el path es exact match), y con detección del param
-/// `WsConn<T>` para inyectarlo en runtime.
+/// Phase 9.w.2 — Registers an `@ws("/path")` handler as a WebSocket
+/// route on the `HttpRegistry`. Parallel to `register_http_route` but
+/// with fewer path validations (WS has no dynamic path params — the
+/// path is exact match), and with detection of the `WsConn<T>` param
+/// so it can be injected at runtime.
 ///
-/// El checker (9.w.2.a `check_ws_handler`) ya validó:
-///   - Decorator con 1 arg Str sin kwargs.
-///   - Handler `async fn`.
-///   - Exactamente 1 param `WsConn<T>` con T concreto.
-///   - +1 param User si hay `@authenticated`/`@admin`.
+/// The checker (9.w.2.a `check_ws_handler`) already validated:
+///   - Decorator with 1 Str arg, no kwargs.
+///   - Handler is `async fn`.
+///   - Exactly 1 `WsConn<T>` param with concrete T.
+///   - +1 User param if there's `@authenticated`/`@admin`.
 ///
-/// Acá replicamos chequeos básicos defensivamente (el evaluator
-/// puede correr sin checker si el usuario forzó `--no-typecheck`).
+/// Here we re-check basic shape defensively (the evaluator can run
+/// without the checker if the user forced `--no-typecheck`).
 #[allow(clippy::too_many_arguments)]
 fn register_ws_route(
     deco: &Decorator,
@@ -2104,7 +2105,7 @@ fn register_ws_route(
 ) -> Result<(), EvalSignal> {
     let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
-    // El decorator `@ws` no admite kwargs.
+    // The `@ws` decorator does not accept kwargs.
     if let Some((key, _)) = deco.kwargs.first() {
         return Err(err(format!(
             "@ws sobre fn '{}': los argumentos por nombre (recibió '{}=...') \
@@ -2112,7 +2113,7 @@ fn register_ws_route(
             fn_name, key,
         )));
     }
-    // Espera 1 arg: el path.
+    // Expects 1 arg: the path.
     if deco.args.len() != 1 {
         return Err(err(format!(
             "@ws(...) sobre fn '{}' espera un único argumento (la ruta), \
@@ -2140,8 +2141,8 @@ fn register_ws_route(
         )));
     }
 
-    // Auth: si declara @authenticated/@admin, el provider debe estar
-    // registrado (mismo gate que HTTP routes).
+    // Auth: if it declares @authenticated/@admin, the provider must
+    // already be registered (same gate as HTTP routes).
     if auth_spec != crate::http::AuthSpec::None && !crate::http::has_auth_provider() {
         return Err(err(format!(
             "@ws sobre fn '{}': la ruta declara `@authenticated`/`@admin` pero \
@@ -2151,11 +2152,11 @@ fn register_ws_route(
         )));
     }
 
-    // Identificar el param `WsConn<T>` o `WsConn<In, Out>` por shape
-    // del TypeExpr. El checker (9.w.2.a) ya validó que exista
-    // exactamente uno; acá lo localizamos por nombre para guardarlo
-    // en `RouteSpec`. 9.w.2-wsconn-bidir: aceptamos aridad 1 (simétrico,
-    // recv == send) y aridad 2 (asimétrico, recv = In, send = Out).
+    // Identify the `WsConn<T>` or `WsConn<In, Out>` param by
+    // TypeExpr shape. The checker (9.w.2.a) already validated that
+    // exactly one exists; here we locate it by name to save in
+    // `RouteSpec`. 9.w.2-wsconn-bidir: accept arity 1 (symmetric,
+    // recv == send) and arity 2 (asymmetric, recv = In, send = Out).
     let mut ws_conn_param_name: Option<String> = None;
     let mut ws_msg_type: Option<TypeExpr> = None;
     let mut ws_send_type: Option<TypeExpr> = None;
@@ -2185,10 +2186,11 @@ fn register_ws_route(
         )));
     }
 
-    // Si hay auth, identificar el user param por regla "leftover"
-    // (paralelo a register_http_route). En WS NO hay path/query/body
-    // params, solo headers + WsConn + (optional) user. Así que el
-    // user es el "leftover" entre los params no-WsConn-no-header.
+    // If there's auth, identify the user param by the "leftover" rule
+    // (parallel to register_http_route). In WS there are no path/
+    // query/body params — only headers + WsConn + (optional) user.
+    // So the user is the "leftover" among non-WsConn, non-header
+    // params.
     let auth_user_param_name: Option<String> = if auth_spec != crate::http::AuthSpec::None {
         let candidates: Vec<&Param> = params
             .iter()
@@ -2231,7 +2233,7 @@ fn register_ws_route(
         .collect();
 
     push_route(RouteSpec {
-        method: HttpMethod::Get, // upgrade handshake es GET HTTP
+        method: HttpMethod::Get, // upgrade handshake is HTTP GET
         path: path_str,
         path_params: vec![],
         query_params: vec![],
@@ -2258,76 +2260,77 @@ fn register_ws_route(
 }
 
 // ---------------------------------------------------------------------------
-// Loader — carga de módulos `.fitz` desde disco. Estado almacenado en un
-// thread_local para no tener que enhebrar un parámetro extra por todas las
-// firmas de eval_stmt/eval_expr.
+// Loader — loads `.fitz` modules from disk. State held in a thread_local
+// so we don't have to thread an extra parameter through every signature
+// of eval_stmt/eval_expr.
 //
-// Política de carga:
-//  - Eager: cuando el evaluator ve `import foo`, carga, lexea, parsea y
-//    evalúa `foo.fitz` antes de seguir con la siguiente sentencia.
-//  - Cache por path canonicalizado: importar dos veces el mismo archivo
-//    no re-evalúa side effects.
-//  - Detección de ciclos: stack `loading` con los paths actualmente en
-//    proceso de carga; si reaparece, error explícito.
-//  - `base_dir`: directorio donde se buscan los archivos relativos.
-//    Cambia temporalmente al cargar un módulo (al padre del propio
-//    módulo) para que los `import`s anidados sean relativos al módulo
-//    que los hace, no al archivo raíz. Se restaura al volver.
+// Loading policy:
+//  - Eager: when the evaluator sees `import foo`, it loads, lexes,
+//    parses, and evaluates `foo.fitz` before continuing with the next
+//    statement.
+//  - Cache by canonicalized path: importing the same file twice does
+//    not re-evaluate its side effects.
+//  - Cycle detection: a `loading` stack with paths currently being
+//    loaded; if a path reappears, explicit error.
+//  - `base_dir`: directory where relative files are searched. Changes
+//    temporarily when loading a module (to its own parent) so nested
+//    `import`s resolve relative to the module performing the import,
+//    not the root file. Restored on exit.
 // ---------------------------------------------------------------------------
 
 struct Loader {
     base_dir: PathBuf,
-    /// Mini-fase loader-absoluto (2026-05-22, Paso 4 post-boilerplates) —
-    /// "import root" estable a lo largo de toda la vida del loader,
-    /// fijado al `base_dir` inicial (parent del entry file pasado a
-    /// `eval_with_base`). Mientras `base_dir` cambia adentro de cada
-    /// nested module load para preservar imports relativos al importer
-    /// (cap 16 de la guía), `import_root` queda fijo y sirve como
-    /// fallback cuando la resolución relativa no encuentra el archivo.
+    /// Mini-phase loader-absolute (2026-05-22, Step 4 post-boilerplates) —
+    /// stable "import root" for the loader's whole lifetime, fixed to
+    /// the initial `base_dir` (parent of the entry file passed to
+    /// `eval_with_base`). While `base_dir` changes inside each nested
+    /// module load to preserve imports relative to the importer
+    /// (guide chap 16), `import_root` stays fixed and acts as a
+    /// fallback when relative resolution doesn't find the file.
     ///
-    /// Caso típico: `data/users.fitz` hace `from types.user import User`.
-    /// `base_dir` adentro de ese load es `<root>/src/data/`. La
-    /// resolución relativa da `<root>/src/data/types/user.fitz` que no
-    /// existe. El fallback prueba `<root>/src/types/user.fitz` (relativo
-    /// a `import_root = <root>/src/`) y ese sí existe.
+    /// Typical case: `data/users.fitz` does `from types.user import User`.
+    /// `base_dir` inside that load is `<root>/src/data/`. Relative
+    /// resolution gives `<root>/src/data/types/user.fitz` which
+    /// doesn't exist. The fallback tries `<root>/src/types/user.fitz`
+    /// (relative to `import_root = <root>/src/`) and that one exists.
     import_root: PathBuf,
     loading: Vec<PathBuf>,
     cache: HashMap<PathBuf, Value>,
-    /// Fase 9.y.3.b — registry de deps del proyecto raíz (`fitz.toml`
-    /// del importer principal). `from <name> import X` con `<name>`
-    /// en este map resuelve directo a `<lib_entry>.fitz` en vez de
-    /// fallback a path relativo. Permanece estable durante toda la
-    /// vida del loader (no se modifica en nested loads — los módulos
-    /// que cargamos no pueden re-bind el registry).
+    /// Phase 9.y.3.b — dep registry of the root project (`fitz.toml`
+    /// of the main importer). `from <name> import X` with `<name>` in
+    /// this map resolves directly to `<lib_entry>.fitz` instead of
+    /// falling back to a relative path. Stays stable for the whole
+    /// loader lifetime (not modified by nested loads — modules we
+    /// load cannot re-bind the registry).
     dep_registry: crate::manifest::DepRegistry,
 }
 
 thread_local! {
     static LOADER: RefCell<Option<Loader>> = const { RefCell::new(None) };
-    /// Fase 13 (v0.11.0) — CliRegistry activo. Poblado por el
-    /// evaluator cuando procesa `@command` decorators; consultado
-    /// por `main.rs` para detectar modo CLI y dispatchear desde
-    /// `std::env::args()`. Mismo patrón que `LOADER` y
+    /// Phase 13 (v0.11.0) — active CliRegistry. Populated by the
+    /// evaluator when it processes `@command` decorators; consulted
+    /// by `main.rs` to detect CLI mode and dispatch from
+    /// `std::env::args()`. Same pattern as `LOADER` and
     /// `CURRENT_TEST_REGISTRY`.
     static CLI_REGISTRY: RefCell<Option<std::sync::Arc<crate::cli::CliRegistry>>> = const { RefCell::new(None) };
 }
 
-/// Fase 13 — instala un CliRegistry compartido en el thread actual.
-/// Cualquier `@command` procesado durante `eval` poblará el registry.
+/// Phase 13 — installs a shared CliRegistry on the current thread.
+/// Any `@command` processed during `eval` will populate the registry.
 pub fn install_cli_registry(reg: std::sync::Arc<crate::cli::CliRegistry>) {
     CLI_REGISTRY.with(|cell| {
         *cell.borrow_mut() = Some(reg);
     });
 }
 
-/// Fase 13 — desinstala el CliRegistry del thread actual.
+/// Phase 13 — uninstalls the CliRegistry from the current thread.
 pub fn uninstall_cli_registry() {
     CLI_REGISTRY.with(|cell| {
         *cell.borrow_mut() = None;
     });
 }
 
-/// Fase 13 — accede al CliRegistry activo. Devuelve None si no hay.
+/// Phase 13 — accesses the active CliRegistry. Returns None if absent.
 pub fn with_active_cli_registry<F, R>(f: F) -> R
 where
     F: FnOnce(Option<&std::sync::Arc<crate::cli::CliRegistry>>) -> R,
@@ -2337,10 +2340,11 @@ where
 
 fn install_loader(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) {
     LOADER.with(|cell| {
-        // Mini-fase loader-absoluto (Paso 4 post-boilerplates) — el
-        // `import_root` se fija al `base_dir` inicial (parent del entry
-        // file) y NO se modifica en nested loads. Sirve como fallback
-        // para imports que no resuelven relativos al importer.
+        // Mini-phase loader-absolute (Step 4 post-boilerplates) — the
+        // `import_root` is fixed to the initial `base_dir` (parent of
+        // the entry file) and is NOT modified by nested loads. Acts
+        // as a fallback for imports that don't resolve relative to
+        // the importer.
         *cell.borrow_mut() = Some(Loader {
             base_dir: base_dir.clone(),
             import_root: base_dir,
@@ -2357,8 +2361,8 @@ fn uninstall_loader() {
     });
 }
 
-/// Drop guard: garantiza que `uninstall_loader` se ejecute al salir del
-/// scope de `eval_with_base` aunque haya un panic o un early return.
+/// Drop guard: guarantees `uninstall_loader` runs when leaving the
+/// scope of `eval_with_base` even on panic or early return.
 struct LoaderGuard;
 impl Drop for LoaderGuard {
     fn drop(&mut self) {
@@ -2366,25 +2370,24 @@ impl Drop for LoaderGuard {
     }
 }
 
-/// Resuelve los segmentos del path al archivo correspondiente.
+/// Resolves the path segments to the corresponding file.
 ///
-/// **Fase 9.y.3.b — orden de resolución**:
-/// 1. Si `segments` es de un solo nombre y matchea una key del
-///    `dep_registry` del loader, devolvemos el `lib_entry` absoluto
-///    de la dep directamente.
-/// 2. Si no, fallback a path relativo al `base_dir` actual del loader:
-///    `["foo"]` → `<base>/foo.fitz`; `["sub", "foo"]` →
+/// **Phase 9.y.3.b — resolution order**:
+/// 1. If `segments` is a single name matching a key in the loader's
+///    `dep_registry`, return the dep's absolute `lib_entry` directly.
+/// 2. Otherwise, fall back to a path relative to the loader's current
+///    `base_dir`: `["foo"]` → `<base>/foo.fitz`; `["sub", "foo"]` →
 ///    `<base>/sub/foo.fitz`.
 ///
-/// Decisión: las deps shadowean archivos locales con el mismo nombre
-/// (si tenés `[dependencies] utils = { ... }` y un `utils.fitz` local,
-/// gana la dep). Comportamiento explícito por design — la dep es
-/// declaración primaria de intención.
+/// Decision: deps shadow local files with the same name (if you have
+/// `[dependencies] utils = { ... }` and a local `utils.fitz`, the dep
+/// wins). Explicit behavior by design — the dep is the primary
+/// intention declaration.
 ///
-/// No verifica existencia — el caller hace `canonicalize`, que falla
-/// con un mensaje útil si el archivo no está.
+/// Does not check existence — the caller does `canonicalize`, which
+/// fails with a useful message if the file is missing.
 fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
-    // Step 1 — dep registry shortcut (Fase 9.y.3.b). Una sola entrada.
+    // Step 1 — dep registry shortcut (Phase 9.y.3.b). A single entry.
     let dep_hit = LOADER.with(|cell| {
         let borrow = cell.borrow();
         let loader = borrow.as_ref()?;
@@ -2397,14 +2400,15 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
         return Ok(vec![lib_entry]);
     }
 
-    // Step 2 — candidatos por orden de prioridad: relativo al
-    // `base_dir` (importer actual) y, si no existe, relativo al
-    // `import_root` (parent del entry file, estable durante toda la
-    // vida del loader). Mini-fase loader-absoluto (Paso 4):
-    // backward-compat preservado — el path relativo se intenta PRIMERO,
-    // así proyectos que ya funcionan con imports relativos siguen igual.
-    // El fallback `import_root` cubre el caso típico de `data/foo.fitz`
-    // que importa `from types.bar` esperando resolver al hermano.
+    // Step 2 — candidates in priority order: relative to `base_dir`
+    // (current importer), and if it doesn't exist, relative to
+    // `import_root` (parent of the entry file, stable for the whole
+    // loader lifetime). Mini-phase loader-absolute (Step 4):
+    // backward-compat preserved — the relative path is tried FIRST,
+    // so projects that already work with relative imports stay the
+    // same. The `import_root` fallback covers the typical case of
+    // `data/foo.fitz` doing `from types.bar` and expecting it to
+    // resolve to the sibling.
     let (base_dir, import_root) = LOADER
         .with(|cell| {
             let borrow = cell.borrow();
@@ -2436,9 +2440,9 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
     let mut candidates = Vec::with_capacity(2);
     let relative = build_path(&base_dir);
     candidates.push(relative);
-    // Solo agregamos el fallback `import_root` si es distinto al
-    // base_dir actual (top-level imports desde el entry file ya
-    // tienen base_dir == import_root, no duplicamos).
+    // Only add the `import_root` fallback if it differs from the
+    // current base_dir (top-level imports from the entry file already
+    // have base_dir == import_root, no need to duplicate).
     if base_dir != import_root {
         let absolute = build_path(&import_root);
         candidates.push(absolute);
@@ -2446,24 +2450,24 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
     Ok(candidates)
 }
 
-/// Carga un módulo: resuelve el path, chequea cache y ciclos, lee, parsea
-/// y evalúa el archivo en un env aislado, lo devuelve como
+/// Loads a module: resolves the path, checks cache and cycles, reads,
+/// parses, and evaluates the file in an isolated env, returns it as
 /// `Value::Module`.
 ///
-/// Esta función es reentrante: si el módulo cargado tiene `import` propios,
-/// `eval_stmt` los maneja recursivamente y termina volviendo acá. Mantenemos
-/// el invariante de no tener borrows vivos del `LOADER` cuando entramos a
-/// `eval_stmt` — cada operación sobre el loader se hace en un bloque chico
-/// que termina antes de la recursión.
+/// This function is reentrant: if the loaded module has its own
+/// `import`s, `eval_stmt` handles them recursively and ends up back
+/// here. We maintain the invariant of not holding live borrows of
+/// `LOADER` when entering `eval_stmt` — every loader operation lives
+/// inside a small block that closes before recursion.
 #[async_recursion]
 async fn load_module(segments: &[String]) -> EvalResult<Value> {
     let candidates = resolve_module_path(segments)?;
 
-    // Mini-fase loader-absoluto (Paso 4 post-boilerplates): probar cada
-    // candidato en orden (relativo al importer primero, después
-    // relativo al import_root). El primero que canonicalize OK gana.
-    // Si todos fallan, error citando el path relativo (primer
-    // candidato) para preservar el mensaje histórico.
+    // Mini-phase loader-absolute (Step 4 post-boilerplates): try each
+    // candidate in order (relative to the importer first, then
+    // relative to import_root). The first one that canonicalizes OK
+    // wins. If all fail, error citing the relative path (first
+    // candidate) to preserve the historical message.
     let mut canonical_opt: Option<PathBuf> = None;
     for cand in &candidates {
         if let Ok(p) = fs::canonicalize(cand) {
@@ -2487,9 +2491,9 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         }
     };
 
-    // Cache hit: el mismo archivo importado de nuevo devuelve el mismo
-    // `Value::Module` (mismo `Arc<Mutex<Environment>>` adentro). No
-    // re-evalúa el body.
+    // Cache hit: the same file imported again returns the same
+    // `Value::Module` (same `Arc<Mutex<Environment>>` inside). Body
+    // not re-evaluated.
     if let Some(cached) = LOADER.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -2498,8 +2502,8 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         return Ok(cached);
     }
 
-    // Detección de ciclos: si el archivo ya está en el stack de "loading",
-    // estamos volviendo a entrar antes de haber terminado.
+    // Cycle detection: if the file is already on the "loading" stack,
+    // we're reentering before having finished.
     let cycle = LOADER.with(|cell| {
         cell.borrow()
             .as_ref()
@@ -2530,8 +2534,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         )));
     }
 
-    // Leer + lexear + parsear el archivo. Cualquier error de esas etapas
-    // se propaga.
+    // Read + lex + parse the file. Errors from any stage propagate.
     let source = match fs::read_to_string(&canonical) {
         Ok(s) => s,
         Err(e) => {
@@ -2546,9 +2549,9 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     let tokens = tokenize(&source).map_err(EvalSignal::Error)?;
     let module_program = parse(tokens).map_err(EvalSignal::Error)?;
 
-    // Apilar este path como "cargando" y cambiar el base_dir al padre
-    // del módulo, para que sus propios `import`s resuelvan relativos a
-    // su ubicación. Guardamos el `prev_base` para restaurarlo al volver.
+    // Push this path as "loading" and switch the base_dir to the
+    // module's parent so its own `import`s resolve relative to its
+    // location. Save `prev_base` to restore on return.
     let new_base = canonical
         .parent()
         .map(|p| p.to_path_buf())
@@ -2560,27 +2563,27 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         std::mem::replace(&mut loader.base_dir, new_base)
     });
 
-    // Env aislado para el módulo. Registramos builtins también acá: la
-    // intención es que un módulo pueda llamar a `print`, `len`, etc.
-    // sin que el archivo importer tenga que re-exportarlos.
+    // Isolated env for the module. Register builtins here too: the
+    // intent is that a module can call `print`, `len`, etc. without
+    // the importing file having to re-export them.
     let module_env = Environment::new();
     register_builtins(&module_env);
 
-    // Evaluar las sentencias del módulo. Si alguna falla, igual restauramos
-    // el estado del loader antes de propagar el error.
+    // Evaluate the module's statements. If any fails, we still restore
+    // the loader state before propagating the error.
     //
-    // Fase 6.4: el closure sync `(|| { ... })()` quedó incompatible con
-    // las llamadas async (`async closure` no es estable). Reemplazado
-    // por un async block que se await-ea inmediatamente.
+    // Phase 6.4: the sync `(|| { ... })()` closure became incompatible
+    // with async calls (`async closure` is not stable). Replaced by an
+    // async block awaited immediately.
     //
-    // Fase 9.z.2.b: durante la eval del body del módulo, sobreescribimos
-    // el `CURRENT_TEST_SOURCE` con el filename del módulo (`lib.fitz`).
-    // Así los `@test fn` declarados en módulos importados quedan
-    // etiquetados con su archivo declarante real, no con el del archivo
-    // que disparó el import. `with_test_source_async` restaura el label
-    // previo al salir, sin afectar el flujo normal cuando no hay test
-    // runner activo. Usamos `file_name()` (no canonical completo) por
-    // legibilidad — el path absoluto es ruidoso en el output.
+    // Phase 9.z.2.b: while evaluating the module body, override
+    // `CURRENT_TEST_SOURCE` with the module's filename (`lib.fitz`)
+    // so `@test fn` declared in imported modules end up tagged with
+    // their actual declaring file, not the one that triggered the
+    // import. `with_test_source_async` restores the previous label
+    // on exit, with no impact on normal flow when no test runner is
+    // active. We use `file_name()` (not the full canonical) for
+    // readability — the absolute path is noisy in output.
     let module_label = canonical
         .file_name()
         .and_then(|n| n.to_str())
@@ -2595,7 +2598,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         })
         .await;
 
-    // Restaurar estado del loader.
+    // Restore loader state.
     LOADER.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let loader = borrow.as_mut().expect("loader instalado");
@@ -2605,12 +2608,12 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
 
     eval_result?;
 
-    // PreF8.3: pre-evaluar los defaults de cada `Value::Type` del módulo
-    // en el env del módulo, para que un struct lit sobre un tipo
-    // importado pueda usar defaults que referencien símbolos del módulo
-    // (consts, otros types) sin que el importer los tenga que
-    // re-importar. Tipos definidos en el archivo principal NO pasan
-    // por acá; sus defaults se siguen evaluando lazy.
+    // PreF8.3: pre-evaluate the defaults of each `Value::Type` of the
+    // module inside the module's env, so a struct lit on an imported
+    // type can use defaults that reference module symbols (consts,
+    // other types) without the importer having to re-import them.
+    // Types defined in the main file do NOT go through here; their
+    // defaults are still evaluated lazily.
     let typedef_names: Vec<String> = module_program
         .iter()
         .filter_map(|s| match s {
@@ -2647,16 +2650,16 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         module_env.lock().define(type_name, new_type);
     }
 
-    // Construir el `Value::Module`. El nombre visible es el último
-    // segmento del path (el `binding name`).
+    // Build the `Value::Module`. The visible name is the last
+    // path segment (the `binding name`).
     let name = segments.last().cloned().unwrap_or_default();
     let module = Value::Module {
         name,
         env: module_env,
     };
 
-    // Cachear por path canonicalizado. Un segundo import del mismo
-    // archivo, aun bajo un alias distinto, devuelve este mismo Rc.
+    // Cache by canonicalized path. A second import of the same file,
+    // even under a different alias, returns this same Rc.
     LOADER.with(|cell| {
         if let Some(loader) = cell.borrow_mut().as_mut() {
             loader.cache.insert(canonical, module.clone());
@@ -2666,45 +2669,45 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     Ok(module)
 }
 
-/// Render compacto de un path absoluto para mensajes de error de ciclo.
-/// En Windows, `canonicalize` produce paths UNC (`\\?\C:\...`); los
-/// limpiamos para que el usuario vea `C:\...` directo.
+/// Compact render of an absolute path for cycle error messages.
+/// On Windows, `canonicalize` produces UNC paths (`\\?\C:\...`); we
+/// clean them up so the user sees `C:\...` directly.
 fn display_module_path(p: &Path) -> String {
     let s = p.display().to_string();
     s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or(s)
 }
 
-/// Invoca un handler HTTP. Wrapper público sobre `invoke_value` que el
-/// runtime HTTP usa por cada request: recibe el `Value::Function`
-/// registrado y los args ya construidos (path params coercionados al
-/// tipo declarado del handler), devuelve el `Value` que retornó el
-/// handler o un `FitzError` con contexto.
+/// Invokes an HTTP handler. Public wrapper around `invoke_value` used
+/// by the HTTP runtime per request: receives the registered
+/// `Value::Function` and pre-built args (path params coerced to the
+/// handler's declared type) and returns the `Value` the handler
+/// returned, or a `FitzError` with context.
 ///
-/// La traducción de ese `Value` a status + body JSON la hace el
-/// módulo `http` (`value_to_outcome`), no este wrapper. Acá solo
-/// ejecutamos el handler.
+/// The translation from that `Value` to status + JSON body is done by
+/// the `http` module (`value_to_outcome`), not this wrapper. Here we
+/// only run the handler.
 pub async fn call_handler(
     handler: Value,
     args: Vec<Value>,
     handler_name: &str,
 ) -> FitzResult<Value> {
-    // El handler HTTP no tiene posición sintáctica directa — viene del
-    // server runtime, no de una llamada en el source. Span::ZERO está
-    // bien acá; el FitzError::Display omite la posición.
+    // The HTTP handler has no direct syntactic position — it comes
+    // from the server runtime, not a source-level call. Span::ZERO is
+    // fine here; FitzError::Display omits the position.
     invoke_value(handler, args, handler_name, Span::ZERO)
         .await
         .map_err(signal_to_error)
 }
 
-/// Convierte un signal sin contexto en un `FitzError` legible.
+/// Converts a context-less signal into a readable `FitzError`.
 fn signal_to_error(signal: EvalSignal) -> FitzError {
     match signal {
         EvalSignal::Error(e) => e,
-        // Mini-tanda Err+ — el operador `?` produce `Return(Result(Err))`
-        // para propagar al contenedor. Cuando ese signal escapa hasta el
-        // top-level (no hay fn que lo capture), damos un mensaje
-        // específico mostrando el value del Err. Mucho más útil que el
-        // genérico "`return` fuera de función".
+        // Mini-batch Err+ — the `?` operator produces
+        // `Return(Result(Err))` to propagate to the container. When
+        // that signal escapes up to the top-level (no fn captures
+        // it), we give a specific message showing the Err's value.
+        // Much more useful than the generic "`return` outside fn".
         EvalSignal::Return(Value::Result(ResultVariant::Err(e))) => FitzError::new(
             ErrorKind::InvalidSyntax,
             0,
@@ -2733,9 +2736,10 @@ fn signal_to_error(signal: EvalSignal) -> FitzError {
 }
 
 // ---------------------------------------------------------------------------
-// eval_stmt — evalúa una sentencia. Devuelve un valor para que `if` y otros
-// constructos-bloque puedan usarse como expresión: el valor de un bloque es
-// el valor del último stmt evaluado (o `Null` si fue sentencia-puro).
+// eval_stmt — evaluates a statement. Returns a value so `if` and other
+// block-shaped constructs can be used as expressions: a block's value
+// is the value of the last evaluated stmt (or `Null` if it was a pure
+// statement).
 // ---------------------------------------------------------------------------
 
 #[async_recursion]
@@ -2743,10 +2747,10 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
     match stmt {
         Stmt::Expr(expr, _) => eval_expr(expr, env).await,
 
-        // Mini-tanda T — destructuring de tupla. Evaluamos el RHS y
-        // validamos longitud + shape contra el pattern; si matchea,
-        // aplicamos los bindings al env actual (no scope hijo —
-        // semántica de `let` regular).
+        // Mini-batch T — tuple destructuring. Evaluate the RHS and
+        // validate length + shape against the pattern; if it matches,
+        // apply the bindings to the current env (no child scope —
+        // regular `let` semantics).
         Stmt::Destructure { pattern, value, span } => {
             let v = eval_expr(value, env.clone()).await?;
             if match_pattern(pattern, &v).is_none() {
@@ -2763,44 +2767,45 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Null)
         }
 
-        // `x = value`, `x: Tipo = value`, o `obj.campo = value`. La anotación
-        // de tipo se ignora en runtime — tipado gradual, los checks de tipos
-        // los hará un type-checker estático más adelante.
+        // `x = value`, `x: Type = value`, or `obj.field = value`. The
+        // type annotation is ignored at runtime — gradual typing,
+        // type checks are done by a static type-checker later.
         //
-        // Dos formas según el target:
-        //  - `Ident`: si la variable ya existe en algún scope visible,
-        //    reasignar ahí; si no, crear local (ver env.rs).
-        //  - `Field`: evaluamos el objeto receptor (tiene que ser
-        //    `Value::Instance`), validamos que el campo exista, y mutamos
-        //    la celda compartida `Arc<Mutex<...>>` de `fields`.
+        // Two shapes by target:
+        //  - `Ident`: if the variable already exists in any visible
+        //    scope, reassign there; else create a local (see env.rs).
+        //  - `Field`: evaluate the receiver object (must be
+        //    `Value::Instance`), validate the field exists, and mutate
+        //    the shared `Arc<Mutex<...>>` `fields` cell.
         Stmt::Assign { target, type_, value, span: _ } => {
             let v = eval_expr(value, env.clone()).await?;
-            // Fase 8.4.3: cuando hay anotación de tipo nominal y el RHS
-            // es un `Value::Map` (típicamente un dict Python coercionado
-            // a Map en 8.2.2), intentamos coercer Map → Instance.
-            // Habilita el patrón canónico del roadmap:
+            // Phase 8.4.3: when there's a nominal type annotation and
+            // the RHS is a `Value::Map` (typically a Python dict
+            // coerced to Map in 8.2.2), try to coerce Map → Instance.
+            // Enables the canonical roadmap pattern:
             //   let row: User = py_call(...)?
-            // El runtime valida que el dict tiene los campos requeridos
-            // por el tipo y aplica defaults/nullables si faltan; campos
-            // extras del dict se ignoran (Python suele devolver más
-            // campos de los necesarios).
+            // The runtime validates that the dict has the type's
+            // required fields and applies defaults/nullables when
+            // missing; extra fields in the dict are ignored (Python
+            // often returns more fields than needed).
             let v = match target {
                 AssignTarget::Ident(_, _) => match type_ {
                     Some(annot) => coerce_to_annotation(annot, v, env.clone()).await?,
                     None => v,
                 },
-                // Para `obj.field = ...` no aplicamos esta coerción
-                // (la anotación del field está en el `type` declarado,
-                // que el evaluator hoy no valida en runtime — gradual).
+                // For `obj.field = ...` we don't apply this coercion
+                // (the field's annotation lives in the declared
+                // `type`, which the evaluator doesn't currently
+                // validate at runtime — gradual).
                 AssignTarget::Field { .. } => v,
-                // Para `xs[i] = v` la anotación de tipo del binding
-                // no aplica (es indexing, no declaración).
+                // For `xs[i] = v` the binding's type annotation does
+                // not apply (it's indexing, not declaration).
                 AssignTarget::Index { .. } => v,
             };
             match target {
                 AssignTarget::Ident(name, _) => {
-                    // Borrows separados: `has` toma borrow inmutable, lo
-                    // soltamos antes de pedir un borrow mutable.
+                    // Separate borrows: `has` takes an immutable
+                    // borrow, drop it before requesting a mutable one.
                     let already_defined = env.lock().has(name);
                     if already_defined {
                         env.lock()
@@ -2835,7 +2840,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                             *slot_value = v;
                         }
                         None => {
-                            // Capturamos type_name fuera del borrow para el mensaje.
+                            // Capture type_name outside the borrow for the message.
                             let type_name = match &receiver {
                                 Value::Instance { type_name, .. } => type_name.clone(),
                                 _ => unreachable!(),
@@ -2852,9 +2857,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                         }
                     }
                 }
-                // R.1.3 — `xs[i] = v` / `m["k"] = v`. Dispatch sobre
-                // tipo del receptor en runtime: List (bounds check)
-                // o Map (insert/replace preservando insertion order).
+                // R.1.3 — `xs[i] = v` / `m["k"] = v`. Dispatch on
+                // receiver type at runtime: List (bounds check) or
+                // Map (insert/replace preserving insertion order).
                 AssignTarget::Index { object, index } => {
                     let receiver = eval_expr(object, env.clone()).await?;
                     let idx_value = eval_expr(index, env.clone()).await?;
@@ -2878,7 +2883,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                             };
                             let mut borrowed = items.lock();
                             let len = borrowed.len() as i64;
-                            // I.1 — mismo wrap negativo que en lectura.
+                            // I.1 — same negative wrap as for reading.
                             let effective = if idx < 0 { len + idx } else { idx };
                             if effective < 0 || effective >= len {
                                 drop(borrowed);
@@ -2894,10 +2899,10 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                             borrowed[effective as usize] = v;
                         }
                         Value::Map(pairs) => {
-                            // Linear search por la clave (mismo modelo
-                            // que `m.get` y la igualdad de Value). Si
-                            // existe, sobreescribir el slot — preserva
-                            // insertion order. Si no, push al final.
+                            // Linear search by key (same model as
+                            // `m.get` and Value equality). If it
+                            // exists, overwrite the slot — preserves
+                            // insertion order. Otherwise, push to end.
                             let mut borrowed = pairs.lock();
                             let mut found = false;
                             for (k, slot) in borrowed.iter_mut() {
@@ -2930,21 +2935,23 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Null)
         }
 
-        // `return expr` — evalúa el valor y lo emite como signal. El handler
-        // de Call lo intercepta y lo convierte en valor de retorno. Si nadie
-        // lo intercepta, llega al top level y se reporta como error.
+        // `return expr` — evaluate the value and emit it as a signal.
+        // The Call handler intercepts it and turns it into the return
+        // value. If nobody intercepts, it reaches top-level and is
+        // reported as an error.
         Stmt::Return(expr, _) => {
             let v = eval_expr(expr, env).await?;
             Err(EvalSignal::Return(v))
         }
 
-        // `return <status> <body?>` — return con status code HTTP custom.
-        // Evalúa el status (debe ser Int en rango u16) y el body opcional,
-        // empaqueta como `Value::HttpResponse` y lo emite por el mismo
-        // signal de Return. El runtime HTTP (en `http.rs`) lo intercepta
-        // y emite la response con el status pedido. Fuera de un handler
-        // HTTP el signal sube hasta top-level y reporta error como
-        // cualquier return huérfano — el checker debería haberlo rechazado.
+        // `return <status> <body?>` — return with a custom HTTP status
+        // code. Evaluate the status (must be Int in u16 range) and the
+        // optional body, pack as `Value::HttpResponse` and emit via
+        // the same Return signal. The HTTP runtime (in `http.rs`)
+        // intercepts it and emits the response with the requested
+        // status. Outside an HTTP handler the signal bubbles up to
+        // top-level and reports an error like any orphan return —
+        // the checker should have rejected it.
         Stmt::ReturnStatus { status, body, span } => {
             let status_v = eval_expr(status, env.clone()).await?;
             let Value::Int(n) = status_v else {
@@ -2976,28 +2983,32 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             }))
         }
 
-        // `fn name(params) -> ret { body }`. Construye un `Value::Function`
-        // capturando el env actual como closure y lo registra con `define`.
+        // `fn name(params) -> ret { body }`. Builds a `Value::Function`
+        // capturing the current env as closure and registers it via
+        // `define`.
         //
-        // El orden importa para recursión: como `closure` y el env donde se
-        // hace `define` son el MISMO Rc, el body de la función "ve" su
-        // propia definición — puede llamarse a sí misma sin hacer nada extra.
+        // Order matters for recursion: since `closure` and the env
+        // where `define` is called are the SAME Rc, the function's
+        // body "sees" its own definition — it can call itself with
+        // no extra work.
         //
-        // `return_type` se ignora en runtime: el checker estático (Fase
-        // 5a) lo valida y el evaluator no re-chequea. `is_async` SÍ
-        // viaja con la fn (captura en `Value::Function { is_async }`
-        // abajo) — Fase 6 (Async nativo) lo consume al despachar
-        // calls a fns async, decidiendo si esperar el Future
-        // resultante. F5 audit (2026-05-27) ratifica el cierre: el
-        // comentario original "se ignora" quedó stale post-Fase 6.
+        // `return_type` is ignored at runtime: the static checker
+        // (Phase 5a) validates it and the evaluator does not re-check.
+        // `is_async` DOES travel with the fn (captured in
+        // `Value::Function { is_async }` below) — Phase 6 (Async
+        // native) consumes it when dispatching calls to async fns,
+        // deciding whether to await the resulting Future. F5 audit
+        // (2026-05-27) confirms the close-out: the original "ignored"
+        // comment became stale post-Phase 6.
         //
-        // `decorators`: si los hay, los procesamos antes de definir la
-        // función. Los decoradores HTTP (`@get`/`@post`/`@put`/`@delete`)
-        // requieren un `HttpRegistry` activo en el thread_local (instalado
-        // por `main.rs` antes de evaluar). Sin registry, error explícito
-        // — los tests y el REPL evalúan sin HTTP. Cualquier decorator no
-        // HTTP también es error: `@server` (4.4) y otros entran cuando
-        // los implementemos.
+        // `decorators`: if any are present, they're processed before
+        // the function is defined. HTTP decorators
+        // (`@get`/`@post`/`@put`/`@delete`) require an active
+        // `HttpRegistry` in the thread_local (installed by `main.rs`
+        // before eval). Without a registry, explicit error — tests
+        // and the REPL eval without HTTP. Any non-HTTP decorator is
+        // also an error: `@server` (4.4) and others land when we
+        // implement them.
         Stmt::FnDef { name, params, return_type, body, is_async, decorators, span } => {
             let func = Value::Function {
                 params: params.clone(),
@@ -3006,19 +3017,20 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 is_async: *is_async,
             };
 
-            // Procesar decorators ANTES de definir la fn en el env. Si
-            // alguno falla, no queremos un binding mitad-registrado.
-            // Pasamos el env actual para que el resolver del decorator
-            // pueda mirar el `type` declarado de un parámetro body
-            // (los `type` ya fueron registrados en este mismo env). El
-            // `return_type` viaja para que el handler HTTP lo almacene
-            // en `RouteSpec` (insumo del generador OpenAPI, 7.1).
+            // Process decorators BEFORE defining the fn in the env.
+            // If any fails, we don't want a half-registered binding.
+            // We pass the current env so the decorator resolver can
+            // look up the declared `type` of a body parameter (the
+            // `type`s were registered in this same env). The
+            // `return_type` travels so the HTTP handler stores it in
+            // `RouteSpec` (input for the OpenAPI generator, 7.1).
             //
-            // Fase 7.6: primero recolectamos los `@header(...)` (que NO
-            // son decoradores "principales", solo aportan metadata), y
-            // los pasamos al decorator de ruta cuando lo procesemos.
-            // Validamos también que `@header` no aparezca sin un
-            // decorator HTTP de ruta (sería un no-op confuso).
+            // Phase 7.6: first collect the `@header(...)` decorators
+            // (which are NOT "primary" decorators, only contribute
+            // metadata), and pass them to the route decorator when
+            // we process it. Also validate that `@header` doesn't
+            // appear without an HTTP route decorator (would be a
+            // confusing no-op).
             let collected_headers = collect_headers(decorators, name, params)?;
             if !collected_headers.is_empty()
                 && !decorators
@@ -3036,10 +3048,10 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ),
                 )));
             }
-            // Mini-fase MW.1/MW.2: recolectar `@middleware(...)`. Una
-            // sola pasada distingue user-fns (chain gate-only, MW.1) de
-            // `cors(...)` (slot dedicado, MW.2). Como headers, solo
-            // aplica sobre handlers HTTP de ruta.
+            // Mini-phase MW.1/MW.2: collect `@middleware(...)`. A
+            // single pass distinguishes user-fns (gate-only chain,
+            // MW.1) from `cors(...)` (dedicated slot, MW.2). Like
+            // headers, it only applies to HTTP route handlers.
             let (collected_middlewares, collected_cors) =
                 collect_middlewares(decorators, name, &env).await?;
             if (!collected_middlewares.is_empty() || collected_cors.is_some())
@@ -3058,20 +3070,20 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ),
                 )));
             }
-            // Fase 9.w.1.c — recolectar `@authenticated`/`@admin` en un
-            // único `AuthSpec`. Solo aplica sobre handlers HTTP de ruta;
-            // si aparecen sin un `@get`/`@post`/`@put`/`@delete`, error
-            // claro (paralelo a `@header`/`@middleware`).
+            // Phase 9.w.1.c — collect `@authenticated`/`@admin` into a
+            // single `AuthSpec`. Only applies to HTTP route handlers;
+            // if they appear without a `@get`/`@post`/`@put`/`@delete`,
+            // clear error (parallel to `@header`/`@middleware`).
             let auth_spec = collect_route_auth(decorators, name)?;
-            // Fase 9.w.1.iter2.a — recolectar `@requires("role")`
-            // apilados. Implica auth (mismo gate que `@authenticated`/
-            // `@admin`).
+            // Phase 9.w.1.iter2.a — collect stacked `@requires("role")`.
+            // Implies auth (same gate as `@authenticated`/`@admin`).
             let required_roles = collect_required_roles(decorators, name)?;
-            // Fase 12.8 — recolectar `@flag("name")` (opcional, único).
+            // Phase 12.8 — collect `@flag("name")` (optional, unique).
             let flag_name = collect_route_flag(decorators);
-            // Fase 9.w.2 — `@ws` también cuenta como handler HTTP para
-            // el chequeo de `@authenticated`/`@admin`/`@requires`
-            // apilados (auth pre-upgrade es analógo al HTTP wrapper).
+            // Phase 9.w.2 — `@ws` also counts as an HTTP handler for
+            // the check of stacked `@authenticated`/`@admin`/
+            // `@requires` (pre-upgrade auth is analogous to the HTTP
+            // wrapper).
             let has_auth_decorator =
                 auth_spec != crate::http::AuthSpec::None || !required_roles.is_empty();
             if has_auth_decorator
@@ -3098,7 +3110,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     || deco.name == "requires"
                     || deco.name == "flag"
                 {
-                    continue; // ya procesado por sus `collect_*`
+                    continue; // already processed by its `collect_*`
                 }
                 process_decorator(
                     deco,
@@ -3121,9 +3133,10 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Null)
         }
 
-        // `type Name { campo1: T1, ... }`. Por ahora solo registramos el
-        // tipo en el env como un valor inerte. La instanciación (`User { id: 1 }`)
-        // y el field access requieren extensiones del AST (Fase 3).
+        // `type Name { field1: T1, ... }`. For now we just register
+        // the type in the env as an inert value. Instantiation
+        // (`User { id: 1 }`) and field access require AST extensions
+        // (Phase 3).
         Stmt::TypeDef {
             name,
             fields,
@@ -3131,22 +3144,23 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             decorators,
             span,
         } => {
-            // PreF8.3: tipos locales arrancan con `resolved_defaults` vacío.
-            // Sus `Field.default` se siguen evaluando lazy en cada struct
-            // lit con el env del call site. Solo los tipos cargados desde
-            // un módulo (vía `load_module`) tienen los defaults pre-
-            // evaluados — esa pre-evaluación se hace en un post-pass al
-            // terminar de ejecutar las stmts del módulo, ahí ya están
-            // disponibles todos los símbolos del módulo en su env.
+            // PreF8.3: local types start with empty `resolved_defaults`.
+            // Their `Field.default` are still evaluated lazily on
+            // each struct lit using the call site's env. Only types
+            // loaded from a module (via `load_module`) have their
+            // defaults pre-evaluated — that pre-evaluation happens in
+            // a post-pass when the module's stmts finish executing,
+            // by which time all module symbols are available in its
+            // env.
             //
-            // R.3: los métodos se copian al `Value::Type` para
-            // dispatch posterior sobre `Value::Instance`.
+            // R.3: methods are copied to the `Value::Type` for later
+            // dispatch on `Value::Instance`.
             //
-            // Fase 10.3.b — si el type lleva decoradores ORM
-            // (`@table`/`@primary`/etc.), populamos `table_metadata`
-            // llamando al mismo procesador del checker para que la
-            // info quede coherente entre las dos capas. Errores se
-            // descartan acá: el checker (vuelta 2.6) ya los reportó.
+            // Phase 10.3.b — if the type carries ORM decorators
+            // (`@table`/`@primary`/etc.), populate `table_metadata`
+            // by calling the same checker processor so the info stays
+            // coherent between the two layers. Errors are discarded
+            // here: the checker (round 2.6) already reported them.
             let table_metadata = if decorators.is_empty()
                 && fields.iter().all(|f| f.decorators.is_empty())
             {
@@ -3168,8 +3182,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Null)
         }
         Stmt::Break(value_expr, label, _) => {
-            // Mini-tanda L: evaluamos el valor si está, default Null.
-            // El label se propaga vía `EvalSignal::Break(v, label)`.
+            // Mini-batch L: evaluate the value if present, default
+            // Null. The label propagates via
+            // `EvalSignal::Break(v, label)`.
             let v = if let Some(e) = value_expr {
                 eval_expr(e, env).await?
             } else {
@@ -3179,41 +3194,44 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         }
         Stmt::Continue(label, _) => Err(EvalSignal::Continue(label.clone())),
 
-        // `for var in iter { body }` — evalúa `iter` una sola vez al
-        // entrar, después itera. `var` se redefine en el env actual en
-        // cada iteración (no creamos scope nuevo, consistente con la
-        // política de bloques de Fitz: las variables del cuerpo persisten).
+        // `for var in iter { body }` — evaluate `iter` exactly once
+        // on entry, then iterate. `var` is redefined in the current
+        // env on each iteration (no new scope, consistent with Fitz's
+        // block policy: body variables persist).
         //
-        // Iterables soportados:
-        //  - List: itera los elementos en orden.
-        //  - Range: itera los Int de start a end-1.
-        //  - Map: aún no (necesita el tipo `Pair`/`entry`; deuda abierta).
-        //  - Otros: type error explícito.
-        // Mini-tanda Md: `var` es ahora un Pattern. Maneja:
-        //   - `for x in xs` → Pattern::Ident bindea cada elem.
-        //   - `for _ in 0..10` → Pattern::Wildcard ignora cada elem.
-        //   - `for (k, v) in m` → Pattern::Tuple destructura.
-        //   - `for kv in m` → Pattern::Ident bindea como `Value::Tuple([k, v])`.
+        // Supported iterables:
+        //  - List: iterates elements in order.
+        //  - Range: iterates Ints from start to end-1.
+        //  - Map: not yet (needs a `Pair`/`entry` type; open debt).
+        //  - Others: explicit type error.
+        // Mini-batch Md: `var` is now a Pattern. Handles:
+        //   - `for x in xs` → Pattern::Ident binds each elem.
+        //   - `for _ in 0..10` → Pattern::Wildcard ignores each elem.
+        //   - `for (k, v) in m` → Pattern::Tuple destructures.
+        //   - `for kv in m` → Pattern::Ident binds as
+        //     `Value::Tuple([k, v])`.
         Stmt::For { var, iter, body, label, span: _ } => {
             let iter_v = eval_expr(iter, env.clone()).await?;
-            // F17.3: materializamos a `Vec<Value>` en lugar de
-            // `Box<dyn Iterator>` porque el `dyn Iterator` no es `Send` y
-            // el future del for cruza `.await` (con `#[async_recursion]`
-            // sin `?Send` el bound es obligatorio). El Vec ya estaba
-            // siendo construido como snapshot para evitar re-entrancia
-            // sobre la lista — el cambio solo materializa el caso `Range`.
+            // F17.3: materialize to `Vec<Value>` instead of
+            // `Box<dyn Iterator>` because `dyn Iterator` is not `Send`
+            // and the for's future crosses `.await` (with
+            // `#[async_recursion]` without `?Send`, the bound is
+            // mandatory). The Vec was already being built as a
+            // snapshot to avoid re-entrancy over the list — the
+            // change only materializes the `Range` case.
             let items: Vec<Value> = match iter_v {
-                // La lista va por referencia compartida (`Arc<Mutex<>>`).
-                // Para iterar tomamos un snapshot del Vec (cloneando los
-                // valores): si el body muta la lista misma, el iterator
-                // ya tiene su copia y no se altera a mitad de iteración.
-                // Eso evita problemas estilo "modifying a list while
-                // iterating" sin renunciar a mutación.
+                // The list comes by shared reference
+                // (`Arc<Mutex<>>`). To iterate we take a snapshot of
+                // the Vec (cloning values): if the body mutates the
+                // list itself, the iterator already has its copy and
+                // isn't disturbed mid-iteration. This avoids
+                // "modifying a list while iterating" problems
+                // without giving up mutation.
                 Value::List(items) => items.lock().clone(),
                 Value::Range { start, end } => (start..end).map(Value::Int).collect(),
-                // Mini-tanda Md: Map iterable como Vec<Tuple([K, V])>.
-                // El orden de inserción se preserva (Map de Fitz usa Vec
-                // internamente). Snapshot para evitar re-entrancia.
+                // Mini-batch Md: Map iterable as Vec<Tuple([K, V])>.
+                // Insertion order is preserved (Fitz's Map uses Vec
+                // internally). Snapshot to avoid re-entrancy.
                 Value::Map(entries) => entries
                     .lock()
                     .iter()
@@ -3235,20 +3253,20 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 bind_for_pattern(var, item, &env)?;
                 match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
-                    LoopControl::Break(_) => break, // value descartado en statement-mode
+                    LoopControl::Break(_) => break, // value discarded in statement-mode
                     LoopControl::Propagate(signal) => return Err(signal),
                 }
             }
             Ok(Value::Null)
         }
 
-        // `while cond { body }`. La cond se evalúa antes de cada iteración.
-        // Tiene que ser Bool; otros tipos → type error.
+        // `while cond { body }`. The cond is evaluated before each
+        // iteration. Must be Bool; other types → type error.
         //
-        // Captura `Break` y `Continue` como signals — `Break` termina el
-        // loop, `Continue` salta a la siguiente iteración. Errors y
-        // `Return` se propagan al caller (un return dentro de un while
-        // dentro de una función rompe ambos hasta la función).
+        // Captures `Break` and `Continue` as signals — `Break` ends
+        // the loop, `Continue` jumps to the next iteration. Errors
+        // and `Return` propagate to the caller (a return inside a
+        // while inside a function breaks both up to the function).
         Stmt::While { condition, body, label, span: _ } => {
             loop {
                 let cond_v = eval_expr(condition, env.clone()).await?;
@@ -3271,34 +3289,36 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 }
                 match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
-                    LoopControl::Break(_) => break, // value descartado en statement-mode
+                    LoopControl::Break(_) => break, // value discarded in statement-mode
                     LoopControl::Propagate(signal) => return Err(signal),
                 }
             }
             Ok(Value::Null)
         }
 
-        // `loop { body }` — itera para siempre. Solo `break` o `return`
-        // pueden sacarte.
+        // `loop { body }` — loops forever. Only `break` or `return`
+        // can get you out.
         Stmt::Loop { body, label, span: _ } => {
             loop {
                 match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
-                    LoopControl::Break(_) => break, // value descartado en statement-mode
+                    LoopControl::Break(_) => break, // value discarded in statement-mode
                     LoopControl::Propagate(signal) => return Err(signal),
                 }
             }
             Ok(Value::Null)
         }
 
-        // `import foo` / `import sub.foo` — carga el módulo y lo expone
-        // bajo el ÚLTIMO segmento del path (`sub.foo` → binding `foo`).
-        // Para field access (`foo.bar`) ver `eval_expr` sobre `Expr::Field`;
-        // para method calls (`foo.bar()`) ver `dispatch_method`.
+        // `import foo` / `import sub.foo` — loads the module and
+        // exposes it under the LAST path segment (`sub.foo` → binding
+        // `foo`). For field access (`foo.bar`) see `eval_expr` on
+        // `Expr::Field`; for method calls (`foo.bar()`) see
+        // `dispatch_method`.
         //
-        // Fase 8.1.2: si el path arranca con `python`, ruteamos al loader
-        // Python. Hoy `import python.X` no se soporta — la forma canónica
-        // es `from python import X`. Cerramos esta rama con error claro.
+        // Phase 8.1.2: if the path starts with `python`, route to the
+        // Python loader. Today `import python.X` is not supported —
+        // the canonical form is `from python import X`. We close this
+        // branch with a clear error.
         Stmt::Import { path, alias, span: _ } => {
             if path.first().map(|s| s.as_str()) == Some("python") {
                 return Err(EvalSignal::Error(FitzError::new(
@@ -3309,8 +3329,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 )));
             }
             let module = load_module(path).await?;
-            // PreF8.4: si hay alias (`import foo as f`), bindeamos
-            // bajo el alias. Sin alias, bajo el último segmento del path.
+            // PreF8.4: if there's an alias (`import foo as f`), bind
+            // under the alias. Without alias, under the last path
+            // segment.
             let binding_name = alias.clone().unwrap_or_else(|| {
                 path.last()
                     .cloned()
@@ -3320,19 +3341,19 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Null)
         }
 
-        // `from foo import a, b, c` — carga el módulo y bindea cada
-        // nombre directo al scope actual. Si el módulo no expone
-        // alguno de los nombres pedidos, error explícito citando cuál
-        // falta y desde qué módulo.
+        // `from foo import a, b, c` — loads the module and binds each
+        // name directly into the current scope. If the module doesn't
+        // expose one of the requested names, explicit error citing
+        // which is missing and from which module.
         //
-        // PreF8.4: cada entry es `(name, alias?)`. El lookup en el
-        // módulo se hace por `name`; el binding en el scope local
-        // usa `alias` si está, si no `name`.
+        // PreF8.4: each entry is `(name, alias?)`. Module lookup uses
+        // `name`; local-scope binding uses `alias` if present, else
+        // `name`.
         //
-        // Fase 8.1.2: si el path es `python`, ruteamos al loader CPython
-        // embebido. Cada `name` se importa como módulo top-level Python
-        // independiente. Sin la feature `python`, el helper emite error
-        // claro citando el flag de build.
+        // Phase 8.1.2: if the path is `python`, route to the embedded
+        // CPython loader. Each `name` is imported as an independent
+        // top-level Python module. Without the `python` feature, the
+        // helper emits a clear error citing the build flag.
         Stmt::FromImport { path, names, span: _ } => {
             if path.first().map(|s| s.as_str()) == Some("python") {
                 return eval_python_from_import(path, names, env).await;
@@ -3340,7 +3361,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             let module = load_module(path).await?;
             let module_env = match &module {
                 Value::Module { env, .. } => env.clone(),
-                _ => unreachable!("load_module siempre devuelve Value::Module"),
+                _ => unreachable!("load_module always returns Value::Module"),
             };
             let module_label = path
                 .last()
@@ -3362,12 +3383,12 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             }
             Ok(Value::Null)
         }
-        // Fase 9.0.1 (F15): `Stmt::Error` solo lo produce
-        // `parse_with_recovery` (modo recovery del parser para tooling
-        // externo). La CLI strict (`fitz run`/`build`/`check`) usa
-        // `parse()`, que aborta al primer error de parser — nunca
-        // produce `Stmt::Error`. Defensa en profundidad: si llegamos
-        // acá es un bug del compilador, no del programa del usuario.
+        // Phase 9.0.1 (F15): `Stmt::Error` is only produced by
+        // `parse_with_recovery` (parser recovery mode for external
+        // tooling). Strict CLI (`fitz run`/`build`/`check`) uses
+        // `parse()`, which aborts at the first parser error — it
+        // never produces `Stmt::Error`. Defense in depth: if we get
+        // here it's a compiler bug, not a user-program bug.
         Stmt::Error(span) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
@@ -3377,19 +3398,20 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
     }
 }
 
-/// Fase 8.1.2 — handler para `from python import X[, Y as z]`. Vive
-/// fuera de `eval_stmt` para que el `#[cfg]` switching de la feature
-/// `python` quede acotado a una sola fn.
+/// Phase 8.1.2 — handler for `from python import X[, Y as z]`. Lives
+/// outside `eval_stmt` so the `#[cfg]` switching of the `python`
+/// feature stays scoped to a single fn.
 ///
-/// Reglas en 8.1.2:
-/// - El path tiene que ser exactamente `["python"]`. `from python.X
-///   import Y` se rechaza con mensaje claro (deuda menor: importar
-///   submódulos directamente; workaround actual: `from python import
-///   X` y acceder a `Y` via field access, lo cual llega en 8.1.3).
-/// - Cada `name` se importa como módulo Python top-level via
+/// Rules in 8.1.2:
+/// - The path must be exactly `["python"]`. `from python.X import Y`
+///   is rejected with a clear message (minor debt: import submodules
+///   directly; current workaround: `from python import X` and access
+///   `Y` via field access, which lands in 8.1.3).
+/// - Each `name` is imported as a top-level Python module via
 ///   `py_interop::import_module(name)`.
-/// - El binding local respeta el alias `as` si está, sino usa el nombre
-///   original (mismo criterio que `Stmt::FromImport` Fitz).
+/// - The local binding honors the `as` alias if present, otherwise
+///   uses the original name (same criterion as Fitz's
+///   `Stmt::FromImport`).
 #[cfg(feature = "python")]
 async fn eval_python_from_import(
     path: &[String],
@@ -3417,10 +3439,10 @@ async fn eval_python_from_import(
     Ok(Value::Null)
 }
 
-/// Stub sin-feature: `from python import ...` aborta con mensaje que
-/// cita exactamente cómo recompilar para habilitar la interop. La
-/// promesa "binario `fitz` default standalone" exige que este path
-/// devuelva error claro en lugar de panic o fallback silencioso.
+/// Feature-off stub: `from python import ...` aborts with a message
+/// citing exactly how to recompile to enable interop. The "default
+/// standalone `fitz` binary" promise requires this path to return a
+/// clear error instead of panic or silent fallback.
 #[cfg(not(feature = "python"))]
 async fn eval_python_from_import(
     _path: &[String],
@@ -3438,22 +3460,25 @@ async fn eval_python_from_import(
     )))
 }
 
-/// Resultado de correr el cuerpo de un loop una vez. Convierte signals de
-/// control de flujo en una decisión local (seguir / salir / propagar).
+/// Result of running a loop body once. Converts control-flow signals
+/// into a local decision (continue / exit / propagate).
 enum LoopControl {
     Continue,
-    /// Mini-tanda L: `break <v>` lleva el valor. En statement-mode
-    /// el caller lo descarta; en `Expr::Loop` lo devuelve.
+    /// Mini-batch L: `break <v>` carries the value. In
+    /// statement-mode the caller discards it; in `Expr::Loop` it's
+    /// returned.
     Break(Value),
     Propagate(EvalSignal),
 }
 
-/// Mini-tanda L — `label_matches(signal_label, loop_label)` decide si
-/// el loop actual debe capturar el signal o propagarlo arriba.
+/// Mini-batch L — `label_matches(signal_label, loop_label)` decides
+/// whether the current loop should capture the signal or propagate
+/// it upward.
 ///
-///  - `signal_label = None` → matchea cualquier loop (caso default
-///    `break` sin label = loop más cercano).
-///  - `signal_label = Some(l)` → solo matchea si `loop_label == Some(l)`.
+///  - `signal_label = None` → matches any loop (default `break`
+///    without label = nearest loop).
+///  - `signal_label = Some(l)` → only matches if
+///    `loop_label == Some(l)`.
 fn label_matches(signal_label: &Option<String>, loop_label: &Option<String>) -> bool {
     match signal_label {
         None => true,
@@ -3464,10 +3489,10 @@ fn label_matches(signal_label: &Option<String>, loop_label: &Option<String>) -> 
     }
 }
 
-/// Mini-tanda Md — Bindea un Pattern del for contra un Value en el
-/// env actual. Cubre Ident, Wildcard, Tuple (recursivo). Otros
-/// patterns NO deberían llegar acá — el checker los rechaza, pero
-/// si lo hacen igual, devolvemos un error de runtime claro.
+/// Mini-batch Md — Binds a for's Pattern against a Value in the
+/// current env. Covers Ident, Wildcard, Tuple (recursive). Other
+/// patterns should NOT land here — the checker rejects them, but if
+/// they do, we return a clear runtime error.
 fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> EvalResult<()> {
     use crate::ast::Pattern;
     match pat {
@@ -3521,10 +3546,10 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
     }
 }
 
-/// Mini-tanda Cmp+ — Helper recursivo que recorre los `for` clauses
-/// de una list comprehension (cartesian product) y aplica el `expr`
-/// en el nivel más interno. El filter (si está) se evalúa adentro
-/// del último loop, antes del expr final. Devuelve la lista final.
+/// Mini-batch Cmp+ — Recursive helper that walks the `for` clauses
+/// of a list comprehension (cartesian product) and applies `expr` at
+/// the innermost level. The filter (if any) is evaluated inside the
+/// last loop, before the final expr. Returns the final list.
 #[async_recursion]
 async fn run_list_comp(
     expr: &Expr,
@@ -3533,7 +3558,7 @@ async fn run_list_comp(
     env: EnvRef,
 ) -> EvalResult<Vec<Value>> {
     if clauses.is_empty() {
-        // Nivel más interno: evaluar filter (si está) y el expr.
+        // Innermost level: evaluate filter (if any) and the expr.
         if let Some(f) = filter {
             let fv = eval_expr(f, env.clone()).await?;
             match fv {
@@ -3590,9 +3615,9 @@ async fn run_list_comp(
     Ok(out)
 }
 
-/// Mini-tanda Cmp+ — análogo de `run_list_comp` para map comprehensions.
-/// Construye un `Vec<(Value, Value)>` con last-write-wins en duplicados
-/// (mismo approach que `List.to_map`).
+/// Mini-batch Cmp+ — analog of `run_list_comp` for map comprehensions.
+/// Builds a `Vec<(Value, Value)>` with last-write-wins on duplicates
+/// (same approach as `List.to_map`).
 #[async_recursion]
 async fn run_map_comp(
     key_expr: &Expr,
@@ -3654,7 +3679,7 @@ async fn run_map_comp(
         let child = Environment::new_child(env.clone());
         bind_for_pattern(var, item, &child)?;
         let sub = run_map_comp(key_expr, value_expr, &clauses[1..], filter, child).await?;
-        // Last-write-wins: sobreescribimos keys existentes.
+        // Last-write-wins: overwrite existing keys.
         for (k, v) in sub {
             if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &k) {
                 slot.1 = v;
@@ -3666,10 +3691,10 @@ async fn run_map_comp(
     Ok(out)
 }
 
-/// Ejecuta los stmts del body en orden. Si alguno emite `Break` o `Continue`,
-/// los traduce a control local SI el label matchea el del loop owner; sino
-/// propaga arriba. Cualquier otro signal (Error, Return) sube como
-/// `Propagate`.
+/// Runs the body's stmts in order. If any emits `Break` or `Continue`,
+/// translate them to local control IF the label matches the loop
+/// owner's; otherwise propagate upward. Any other signal (Error,
+/// Return) bubbles as `Propagate`.
 #[async_recursion]
 async fn run_loop_body(body: &[Stmt], env: EnvRef, loop_label: Option<String>) -> LoopControl {
     for stmt in body {
@@ -3694,18 +3719,18 @@ async fn run_loop_body(body: &[Stmt], env: EnvRef, loop_label: Option<String>) -
 }
 
 // ---------------------------------------------------------------------------
-// match_pattern — chequea si un Pattern matchea un Value.
+// match_pattern — checks whether a Pattern matches a Value.
 //
-// Resultado:
-//   None             → no matcheó, probar el siguiente arm.
-//   Some(None)       → matcheó sin binding (literal/wildcard/range/Or
-//                      cuyo branch ganador no bindea).
-//   Some(Some((n, v))) → matcheó y bindea `v` a `n` (Ident/Ok/Err).
+// Result:
+//   None             → didn't match, try the next arm.
+//   Some(None)       → matched without binding (literal/wildcard/
+//                      range/Or whose winning branch doesn't bind).
+//   Some(Some((n, v))) → matched and binds `v` to `n` (Ident/Ok/Err).
 //
-// Para `Pattern::Or`, probamos cada sub-pattern en orden y devolvemos el
-// primer match. Los sub-patterns de un Or no bindean por contrato del
-// parser (rechaza Ident/OkBinding/ErrBinding adentro), así que el
-// resultado siempre es `Some(None)` cuando alguno matchea.
+// For `Pattern::Or`, we try each sub-pattern in order and return the
+// first match. Or sub-patterns don't bind by parser contract (it
+// rejects Ident/OkBinding/ErrBinding inside), so the result is
+// always `Some(None)` when any matches.
 // ---------------------------------------------------------------------------
 
 fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
@@ -3741,37 +3766,37 @@ fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
             }
             None
         }
-        // Tuples (mini-tanda T): matchea por longitud + cada slot.
-        // Acumula múltiples bindings — el caller fields un Vec
-        // pero la API actual solo soporta uno. Workaround: usamos
-        // un helper que aplica todos los bindings al env.
-        // Para la API actual `Option<Option<(String, Value)>>`,
-        // necesitamos representar múltiples bindings. Cambiamos
-        // el modelo: el caller ahora hace el bind via
-        // `bind_pattern_into_env` cuando es Tuple.
+        // Tuples (mini-batch T): match by length + each slot.
+        // Accumulates multiple bindings — the caller takes a Vec but
+        // the current API only supports one. Workaround: use a
+        // helper that applies all bindings to the env. For the
+        // current API `Option<Option<(String, Value)>>` we'd need
+        // to represent multiple bindings. We change the model: the
+        // caller now does the bind via `bind_pattern_into_env` when
+        // it's Tuple.
         (Pattern::Tuple(subs), Value::Tuple(items)) => {
             if subs.len() != items.len() {
                 return None;
             }
-            // Recursamos en cada slot. Si algún sub no matchea,
-            // toda la tupla falla.
+            // Recurse on each slot. If any sub doesn't match, the
+            // whole tuple fails.
             for (s, v) in subs.iter().zip(items.iter()) {
                 match_pattern(s, v)?;
             }
-            // Acá devolvemos `Some(None)` porque la API solo
-            // permite un binding. Los bindings reales del tuple
-            // se aplican en el caller via `bind_tuple_pattern`.
+            // Here we return `Some(None)` because the API only
+            // allows one binding. The actual tuple bindings are
+            // applied by the caller via `bind_tuple_pattern`.
             Some(None)
         }
         _ => None,
     }
 }
 
-/// Mini-tanda T — aplica todos los bindings de un Pattern al env
-/// dado. Para tuple patterns recursea en cada slot. Para
-/// Ident/Ok/Err captura el valor. Para wildcards/literales no
-/// hace nada. Precondición: el pattern matchea el value (debe
-/// haberse chequeado con `match_pattern` antes).
+/// Mini-batch T — applies all bindings of a Pattern to the given env.
+/// For tuple patterns it recurses on each slot. For Ident/Ok/Err it
+/// captures the value. For wildcards/literals it does nothing.
+/// Precondition: the pattern matches the value (must have been
+/// checked with `match_pattern` first).
 fn bind_tuple_pattern(pat: &Pattern, v: &Value, env: EnvRef) {
     match (pat, v) {
         (Pattern::Ident(name, _), _) => {
@@ -3788,20 +3813,20 @@ fn bind_tuple_pattern(pat: &Pattern, v: &Value, env: EnvRef) {
                 bind_tuple_pattern(s, v, env.clone());
             }
         }
-        // El resto (literales, Wildcard, OkWildcard, ErrWildcard,
-        // Range, Or) no bindean.
+        // The rest (literals, Wildcard, OkWildcard, ErrWildcard,
+        // Range, Or) don't bind.
         _ => {}
     }
 }
 
 // ---------------------------------------------------------------------------
-// eval_expr — evalúa una expresión a un Value.
+// eval_expr — evaluates an expression to a Value.
 // ---------------------------------------------------------------------------
 
-/// Fase 13 (v0.11.0) — wrapper público para evaluar una expresión
-/// individual desde fuera del módulo. Usado por `dispatch_cli` para
-/// resolver los defaults de los params de un `@command` handler
-/// cuando la flag no se pasó en argv.
+/// Phase 13 (v0.11.0) — public wrapper to evaluate a single expression
+/// from outside the module. Used by `dispatch_cli` to resolve the
+/// defaults of a `@command` handler's params when the flag wasn't
+/// passed in argv.
 pub async fn eval_expr_for_default(expr: &crate::ast::Expr, env: EnvRef) -> Result<Value, String> {
     eval_expr(expr, env)
         .await
@@ -3812,9 +3837,9 @@ pub async fn eval_expr_for_default(expr: &crate::ast::Expr, env: EnvRef) -> Resu
 async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
     let span = expr.span();
     match expr {
-        // Fp.3 — NamedArg solo es válido adentro de Call.args; el
-        // dispatcher de Call lo procesa antes de invocar el value.
-        // Verlo en eval_expr indica AST mal formado.
+        // Fp.3 — NamedArg is only valid inside Call.args; the Call
+        // dispatcher processes it before invoking the value. Seeing
+        // it in eval_expr means malformed AST.
         Expr::NamedArg { name, .. } => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeError,
             span.line, span.column,
@@ -3824,18 +3849,19 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             ),
         ))),
 
-        // Literales — el valor está embebido en el AST.
+        // Literals — the value is embedded in the AST.
         Expr::Int(n, _) => Ok(Value::Int(*n)),
         Expr::Float(x, _) => Ok(Value::Float(*x)),
         Expr::Str(s, _) => Ok(Value::Str(s.clone())),
         Expr::Bool(b, _) => Ok(Value::Bool(*b)),
         Expr::Null(_) => Ok(Value::Null),
-        // Mini-tanda Bytes — literal `b"..."`.
+        // Mini-batch Bytes — `b"..."` literal.
         Expr::Bytes(bs, _) => Ok(Value::Bytes(bs.clone())),
 
-        // Mini-tanda L — `loop { body }` como expresión. El valor es
-        // el `<v>` del primer `break <v>` que dispara. `break` sin
-        // valor → `Null`. Otros signals (Return, Error) suben.
+        // Mini-batch L — `loop { body }` as expression. The value is
+        // the `<v>` of the first `break <v>` that fires. `break`
+        // without value → `Null`. Other signals (Return, Error)
+        // bubble up.
         Expr::Loop { body, label, .. } => {
             loop {
                 match run_loop_body(body, env.clone(), label.clone()).await {
@@ -3846,7 +3872,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             }
         }
 
-        // Tuples (mini-tanda T) — eval cada slot y armamos el Value.
+        // Tuples (mini-batch T) — eval each slot and build the Value.
         Expr::Tuple(items, _) => {
             let mut vals = Vec::with_capacity(items.len());
             for e in items {
@@ -3883,7 +3909,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             }
         }
 
-        // Identificador — lookup encadenado en la cadena de scopes.
+        // Identifier — chained lookup in the scope chain.
         Expr::Ident(name, _) => env.lock().get(name).ok_or_else(|| {
             EvalSignal::Error(FitzError::new(
                 ErrorKind::UndefinedVariable(name.clone()),
@@ -3892,8 +3918,9 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             ))
         }),
 
-        // And/Or hacen short-circuit: no evaluamos `right` salvo que haga
-        // falta. El resto de BinOps evalúan ambos lados antes de combinar.
+        // And/Or short-circuit: we don't evaluate `right` unless we
+        // have to. The rest of the BinOps evaluate both sides before
+        // combining.
         Expr::BinOp { op, left, right, span }
             if matches!(op, BinOpKind::And | BinOpKind::Or | BinOpKind::Xor) =>
         {
@@ -3910,10 +3937,11 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             eval_unary(op, v, *span)
         }
 
-        // String con interpolación: cada `StrPart::Expr` se evalúa y se
-        // convierte a string vía `Display`. Los `Lit` van tal cual.
-        // Mini-tanda Fm: si la parte tiene `FormatSpec`, lo aplicamos
-        // con `format_value_with_spec`; sino usamos el Display default.
+        // String with interpolation: each `StrPart::Expr` is
+        // evaluated and converted to string via `Display`. `Lit`
+        // parts go through as-is. Mini-batch Fm: if the part has a
+        // `FormatSpec`, apply it via `format_value_with_spec`;
+        // otherwise use the default Display.
         Expr::StrInterp(parts, _) => {
             let mut result = String::new();
             for part in parts {
@@ -3942,22 +3970,24 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Str(result))
         }
 
-        // Llamada a función. Dos caminos según la forma sintáctica del
-        // callee:
-        //  - `Expr::Field { object, field, .. }` → method call. Evaluamos el
-        //    receptor y consultamos la tabla de métodos built-in del
-        //    evaluador para el tipo del receptor. Si no hay método, caemos
-        //    al field access normal y eso emite error de "no es invocable".
-        //  - cualquier otra cosa → llamada normal. Evaluamos el callee y
-        //    esperamos `Value::Function` o `Value::Builtin`.
+        // Function call. Two paths based on the callee's syntactic
+        // shape:
+        //  - `Expr::Field { object, field, .. }` → method call.
+        //    Evaluate the receiver and consult the evaluator's
+        //    built-in method table for the receiver's type. If
+        //    there's no method, fall back to normal field access and
+        //    that emits "not callable" error.
+        //  - anything else → normal call. Evaluate the callee and
+        //    expect `Value::Function` or `Value::Builtin`.
         Expr::Call { callee, args, span } => eval_call(callee, args, env, *span).await,
 
-        // `fn(x) => x * 2` o `fn(x) { return x * 2 }` — función anónima.
-        // Se evalúa a `Value::Function` con el env actual como closure,
-        // igual que un `Stmt::FnDef`, pero sin nombre ni binding en el env.
-        // Mini-tanda Async-cl — `async fn(...)` propaga `is_async = true`,
-        // habilitando `.await` adentro y haciendo que la invocación
-        // devuelva `Value::Future` perezoso (paralelo a fn nombradas async).
+        // `fn(x) => x * 2` or `fn(x) { return x * 2 }` — anonymous
+        // function. Evaluates to `Value::Function` with the current
+        // env as closure, like a `Stmt::FnDef` but with no name or
+        // binding in the env. Mini-batch Async-cl — `async fn(...)`
+        // propagates `is_async = true`, enabling `.await` inside and
+        // making the invocation return a lazy `Value::Future`
+        // (parallel to named async fns).
         Expr::FnExpr { params, body, is_async, .. } => Ok(Value::Function {
             params: params.clone(),
             body: body.clone(),
@@ -3965,12 +3995,12 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             is_async: *is_async,
         }),
 
-        // `obj.campo` — acceso a campo de instancia de tipo custom, o
-        // a un export de un módulo importado. Para receptores no-Instance
-        // y no-Module (List, Map, Str, etc.), el camino habitual es el
-        // method dispatch (`xs.map(...)`), que va por la rama `Expr::Call`
-        // con callee `Field`. El field access "pelado" sobre primitivos
-        // no tiene semántica útil hoy.
+        // `obj.field` — access to a field of a custom-type instance,
+        // or to an export of an imported module. For non-Instance and
+        // non-Module receivers (List, Map, Str, etc.), the usual path
+        // is method dispatch (`xs.map(...)`), which goes through
+        // the `Expr::Call` branch with callee `Field`. Bare field
+        // access on primitives has no useful semantics today.
         Expr::Field { object, field, .. } => {
             let obj = eval_expr(object, env).await?;
             match obj {
@@ -4003,19 +4033,20 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         ))
                     })
                 }
-                // Fase 8.1.3 — `Value::PyObject(.field)` baja a CPython
-                // via `getattr`. La auto-coerción primitiva la hace
-                // `py_interop::get_attr`: primitivos vuelven como
-                // `Value` nativos (Int/Float/Str/Bool/Null), tipos
-                // compuestos como `Value::PyObject` opaco para
-                // chaining (`math.sqrt(16)` será válido en 8.1.4).
+                // Phase 8.1.3 — `Value::PyObject(.field)` drops to
+                // CPython via `getattr`. Primitive auto-coercion is
+                // done by `py_interop::get_attr`: primitives come
+                // back as native `Value` (Int/Float/Str/Bool/Null),
+                // composite types as opaque `Value::PyObject` for
+                // chaining (`math.sqrt(16)` will be valid in 8.1.4).
                 #[cfg(feature = "python")]
                 Value::PyObject(handle) => {
                     crate::py_interop::get_attr(&handle, field).map_err(|mut e| {
-                        // El `py_err_to_fitz` setea línea/columna 0 porque
-                        // se ejecuta sin contexto del AST. Sobrescribimos
-                        // con el span del field access para que el error
-                        // apunte al sitio del `.attr` en el source Fitz.
+                        // `py_err_to_fitz` sets line/column to 0
+                        // because it runs without AST context. We
+                        // overwrite with the field access span so
+                        // the error points at the `.attr` site in
+                        // the Fitz source.
                         if e.line == 0 && e.column == 0 {
                             e.line = span.line;
                             e.column = span.column;
@@ -4039,28 +4070,28 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             }
         }
 
-        // `User { id: 1, name: "x" }` — instanciación de un tipo custom.
+        // `User { id: 1, name: "x" }` — instantiation of a custom type.
         //
-        // Validación en runtime (no en parse, porque el `type` puede
-        // declararse después en el archivo o venir de otro scope):
-        //  1. Resolver `type_name` en el env: tiene que existir y ser
-        //     un `Value::Type`. Otro caso → error explícito.
-        //  2. Detectar campos extra en el literal (no declarados en el
-        //     `type`).
-        //  3. Para cada campo declarado, en orden de declaración:
-        //      a. Si el literal lo provee, usar ese valor.
-        //      b. Si no y tiene `default`, evaluar el default en el env
-        //         de la INSTANCIACIÓN (no el de la declaración del
-        //         tipo) — los defaults son típicamente literales y
-        //         este criterio es más predecible.
-        //      c. Si no y es `nullable`, usar `Null`.
-        //      d. Si no, error: falta el campo.
-        //  4. Las anotaciones de tipo NO se chequean en runtime
-        //     (tipado gradual; el chequeo estático llega en Fase 5).
+        // Runtime validation (not at parse, because the `type` can be
+        // declared later in the file or come from another scope):
+        //  1. Resolve `type_name` in the env: it must exist and be a
+        //     `Value::Type`. Anything else → explicit error.
+        //  2. Detect extra fields in the literal (not declared in
+        //     the `type`).
+        //  3. For each declared field, in declaration order:
+        //      a. If the literal provides it, use that value.
+        //      b. Otherwise, if it has a `default`, evaluate the
+        //         default in the INSTANTIATION env (not the type's
+        //         declaration env) — defaults are typically literals
+        //         and this criterion is more predictable.
+        //      c. Otherwise, if `nullable`, use `Null`.
+        //      d. Otherwise, error: missing field.
+        //  4. Type annotations are NOT checked at runtime (gradual
+        //     typing; static checking comes in Phase 5).
         //
-        // El orden de los campos en la instancia sigue la declaración
-        // del `type`, no el del literal — eso garantiza un `Display`
-        // estable y comparaciones estructurales consistentes.
+        // The order of fields in the instance follows the `type`'s
+        // declaration, not the literal's — that guarantees a stable
+        // `Display` and consistent structural comparisons.
         Expr::StructLit { type_name, fields, .. } => {
             let ty = env.lock().get(type_name).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
@@ -4087,12 +4118,12 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 }
             };
 
-            // Detectar campos extra: cada nombre del literal tiene que
-            // estar entre los declarados.
+            // Detect extra fields: each literal name must appear in
+            // the declared set.
             for (provided_name, value_expr) in fields {
                 if !declared.iter().any(|f| f.name == *provided_name) {
-                    // Apuntamos al valor del campo extra — más útil que
-                    // el inicio del struct literal.
+                    // Point at the extra field's value — more useful
+                    // than the start of the struct literal.
                     let fs = value_expr.span();
                     return Err(EvalSignal::Error(FitzError::new(
                         ErrorKind::InvalidSyntax,
@@ -4105,14 +4136,16 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 }
             }
 
-            // Armar la instancia en orden de declaración. Para cada
-            // campo declarado: usar el del literal si está; si no,
-            // default; si no, null si es nullable; si no, error.
+            // Build the instance in declaration order. For each
+            // declared field: use the literal's value if present;
+            // otherwise the default; otherwise null if nullable;
+            // otherwise error.
             //
-            // PreF8.3: el default puede venir pre-evaluado (tipos
-            // importados — el loader ya los materializó en el env del
-            // módulo de origen) o como Expr (tipos locales — evaluación
-            // lazy en cada struct lit con el env del call site).
+            // PreF8.3: the default can come pre-evaluated (imported
+            // types — the loader already materialized them in the
+            // origin module's env) or as an Expr (local types —
+            // lazy evaluation on each struct lit using the call
+            // site's env).
             let mut instance_fields: Vec<(String, Value)> =
                 Vec::with_capacity(declared.len());
             for f in &declared {
@@ -4141,17 +4174,17 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 };
                 instance_fields.push((f.name.clone(), value));
             }
-            // PreF8.4: usamos el nombre canónico del Value::Type (el
-            // del archivo donde el `type` se declaró), NO el `type_name`
-            // del literal sintáctico. Con `from foo import User as P`,
-            // `P { ... }` produce una instancia cuyo Display dice
-            // "User { ... }" — paridad con `fitz build` (donde
-            // `P` es un alias de `User` en Rust y el `Display` está
-            // implementado sobre `UserData` con el nombre original).
+            // PreF8.4: use the canonical Value::Type name (the one
+            // from the file where the `type` was declared), NOT the
+            // literal's syntactic `type_name`. With `from foo import
+            // User as P`, `P { ... }` produces an instance whose
+            // Display says "User { ... }" — parity with `fitz build`
+            // (where `P` is a Rust alias of `User` and `Display` is
+            // implemented on `UserData` with the original name).
             Ok(Value::new_instance(declared_type_name, instance_fields))
         }
 
-        // `[e1, e2, ...]` — evaluamos los elementos en orden.
+        // `[e1, e2, ...]` — evaluate the elements in order.
         Expr::List(items, _) => {
             let mut values = Vec::with_capacity(items.len());
             for item in items {
@@ -4160,13 +4193,14 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::new_list(values))
         }
 
-        // Mini-tanda C + Cmp+ — `[expr for var in iter ([for ...]*) [if cond]?]`.
-        // Multi-for clauses producen cartesian product. Cada `for` abre
-        // un env hijo dedicado (estilo Python — el var no escapa al
-        // caller). El filter (si está) se evalúa en el loop más interno.
+        // Mini-batch C + Cmp+ — `[expr for var in iter ([for ...]*)
+        // [if cond]?]`. Multi-for clauses produce a cartesian
+        // product. Each `for` opens a dedicated child env
+        // (Python-style — the var doesn't escape to the caller).
+        // The filter (if any) is evaluated in the innermost loop.
         Expr::ListComp { expr, var, iter, extra_clauses, filter, span: _ } => {
-            // Armamos un Vec<(Pattern, Expr)> con el primer clause +
-            // los extras y delegamos al helper recursivo.
+            // Build a Vec<(Pattern, Expr)> with the first clause +
+            // the extras and delegate to the recursive helper.
             let mut all_clauses: Vec<(crate::ast::Pattern, Expr)> =
                 Vec::with_capacity(1 + extra_clauses.len());
             all_clauses.push((var.clone(), (**iter).clone()));
@@ -4177,10 +4211,10 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::new_list(result))
         }
 
-        // Mini-tanda Cmp+ — `{key: value for ...}`. Análogo a ListComp
-        // pero produce un `Map<K, V>`. Last-write-wins en duplicados
-        // (mismo approach que `List.to_map`). Soporta múltiples `for`
-        // clauses + filter opcional.
+        // Mini-batch Cmp+ — `{key: value for ...}`. Analog of
+        // ListComp but produces a `Map<K, V>`. Last-write-wins on
+        // duplicates (same approach as `List.to_map`). Supports
+        // multiple `for` clauses + optional filter.
         Expr::MapComp { key, value, var, iter, extra_clauses, filter, span: _ } => {
             let mut all_clauses: Vec<(crate::ast::Pattern, Expr)> =
                 Vec::with_capacity(1 + extra_clauses.len());
@@ -4192,8 +4226,8 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::new_map(pairs))
         }
 
-        // `{k1: v1, ...}` — evaluamos cada par en orden (clave, valor).
-        // El orden de inserción se preserva en el Vec resultante.
+        // `{k1: v1, ...}` — evaluate each pair in order (key, value).
+        // Insertion order is preserved in the resulting Vec.
         Expr::Map(pairs, _) => {
             let mut entries = Vec::with_capacity(pairs.len());
             for (k_expr, v_expr) in pairs {
@@ -4204,34 +4238,34 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::new_map(entries))
         }
 
-        // `start..end` — ambos extremos tienen que ser Int (no hay rangos
-        // de Float). El rango se materializa como `Value::Range`; la
-        // iteración real (cuando se usa en `for`) ocurre en Stmt::For.
+        // `start..end` — both ends must be Int (no Float ranges).
+        // The range materializes as `Value::Range`; actual iteration
+        // (when used in `for`) happens in Stmt::For.
         Expr::Range { start, end, inclusive, .. } => {
             let s_v = eval_expr(start, env.clone()).await?;
             let e_v = eval_expr(end, env).await?;
             let s = expect_int_for_range(&s_v, "inicio", start.span())?;
             let e = expect_int_for_range(&e_v, "fin", end.span())?;
-            // R.1.4: para rangos inclusivos, "promovemos" a la
-            // representación exclusiva sumando 1 al end. Así
-            // `Value::Range` no necesita un flag nuevo; el for loop
-            // sigue iterando `start..end` exclusivo. Caveat: si
-            // `end == i64::MAX`, overflow — edge case raro,
-            // documentado.
+            // R.1.4: for inclusive ranges, "promote" to the exclusive
+            // representation by adding 1 to `end`. That way
+            // `Value::Range` doesn't need a new flag; the for loop
+            // keeps iterating exclusive `start..end`. Caveat: if
+            // `end == i64::MAX`, overflow — rare edge case,
+            // documented.
             let e_final = if *inclusive { e.saturating_add(1) } else { e };
             Ok(Value::Range { start: s, end: e_final })
         }
 
-        // `obj[idx]` — indexing. Dispatch por tipo del objeto.
+        // `obj[idx]` — indexing. Dispatch by object type.
         Expr::Index { object, index, span } => {
             let obj = eval_expr(object, env.clone()).await?;
             let idx = eval_expr(index, env).await?;
             eval_index(&obj, &idx, *span)
         }
 
-        // I.2 (mini-tanda I) — slicing `xs[a..b]`, `xs[..b]`,
-        // `xs[a..]`, `xs[..]`, `xs[a..=b]`. Out-of-range se clampea
-        // (estilo Python). Soporta receivers List<T> y Str.
+        // I.2 (mini-batch I) — slicing `xs[a..b]`, `xs[..b]`,
+        // `xs[a..]`, `xs[..]`, `xs[a..=b]`. Out-of-range is clamped
+        // (Python-style). Supports List<T> and Str receivers.
         Expr::Slice { object, start, end, inclusive, span } => {
             let obj = eval_expr(object, env.clone()).await?;
             let start_v = if let Some(s) = start {
@@ -4247,13 +4281,13 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             eval_slice(&obj, start_v.as_ref(), end_v.as_ref(), *inclusive, *span)
         }
 
-        // `if cond { then } else { else_ }`. Funciona como expresión: su
-        // valor es el del último stmt del bloque ejecutado. Sin else y cond
-        // falsa → Null.
+        // `if cond { then } else { else_ }`. Works as an expression:
+        // its value is the value of the last stmt of the executed
+        // block. No else and false cond → Null.
         //
-        // Los bloques NO crean scope nuevo — variables declaradas adentro
-        // persisten en el scope contenedor (estilo Python). Deuda explícita
-        // si después esto trae sorpresas.
+        // Blocks do NOT create a new scope — variables declared
+        // inside persist in the containing scope (Python-style).
+        // Explicit debt if this brings surprises later.
         Expr::If { condition, then, else_, .. } => {
             let cond_v = eval_expr(condition, env.clone()).await?;
             let cond_bool = match cond_v {
@@ -4283,20 +4317,23 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             }
         }
 
-        // `match value { pat1 => body1, pat2 => body2, ... }`. Recorre los
-        // arms en orden y devuelve el body del primero que matchee.
+        // `match value { pat1 => body1, pat2 => body2, ... }`. Walks
+        // arms in order and returns the body of the first that
+        // matches.
         //
-        // Patrones soportados:
-        //  - `Ident(name)`: siempre matchea, bindea el valor entero a `name`.
-        //  - `Wildcard`: siempre matchea, sin binding.
-        //  - Literales (`Int`, `Float`, `Str`, `Bool`, `Null`): matchean por
-        //    igualdad estructural.
-        //  - `Range { start, end }`: matchea Int en [start, end).
-        //  - `Ok(name)` / `Err(name)`: matchean solo contra `Value::Result`
-        //    de la variante correspondiente y bindean el inner a `name`.
+        // Supported patterns:
+        //  - `Ident(name)`: always matches, binds the whole value to
+        //    `name`.
+        //  - `Wildcard`: always matches, no binding.
+        //  - Literals (`Int`, `Float`, `Str`, `Bool`, `Null`): match
+        //    by structural equality.
+        //  - `Range { start, end }`: matches Int in [start, end).
+        //  - `Ok(name)` / `Err(name)`: match only against
+        //    `Value::Result` of the corresponding variant and bind
+        //    the inner to `name`.
         //
-        // Cada arm con binding crea un scope hijo para que la variable no
-        // contamine el scope contenedor.
+        // Each arm with a binding creates a child scope so the
+        // variable doesn't pollute the containing scope.
         Expr::Match { value, arms, .. } => {
             let v = eval_expr(value, env.clone()).await?;
 
@@ -4305,15 +4342,15 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     continue;
                 };
 
-                // R.2.2 — guard `if cond`. Crear un scope hijo (para
-                // que el binding del pattern sea visible en el guard)
-                // y evaluar la condición. Si NO matchea, pasamos al
-                // siguiente arm — el binding queda descartado con el
-                // scope.
-                // Mini-tanda T — para tuple patterns aplicamos todos
-                // los bindings via `bind_tuple_pattern`. Para los
-                // patterns "simples" (Ident/Ok/Err binding) la API
-                // ya devolvió `Some(Some(name, value))`.
+                // R.2.2 — `if cond` guard. Create a child scope (so
+                // the pattern's binding is visible in the guard) and
+                // evaluate the condition. If it doesn't match, move
+                // on to the next arm — the binding gets discarded
+                // along with the scope.
+                // Mini-batch T — for tuple patterns apply all
+                // bindings via `bind_tuple_pattern`. For "simple"
+                // patterns (Ident/Ok/Err binding) the API already
+                // returned `Some(Some(name, value))`.
                 let arm_env = if matches!(&arm.pattern, Pattern::Tuple(_)) {
                     let child = Environment::new_child(env.clone());
                     bind_tuple_pattern(&arm.pattern, &v, child.clone());
@@ -4345,11 +4382,12 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     }
                 }
 
-                // Sp.2 — body es Vec<Stmt>. Ejecutamos en orden; el
-                // valor del arm es el valor del último Stmt::Expr (si
-                // los hay), o Null en su defecto. Stmt::Return/Break/
-                // Continue propagan como EvalSignal — el match no los
-                // captura, suben al fn/loop contenedor.
+                // Sp.2 — body is Vec<Stmt>. Execute in order; the
+                // arm's value is the value of the last Stmt::Expr
+                // (if any), else Null. Stmt::Return/Break/Continue
+                // propagate as EvalSignal — the match doesn't
+                // capture them, they bubble up to the containing
+                // fn/loop.
                 let body_env = if binding.is_some() || matches!(&arm.pattern, Pattern::Tuple(_)) {
                     arm_env
                 } else {
@@ -4370,8 +4408,8 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 return Ok(last_value);
             }
 
-            // Ningún arm matcheó. Con Ident/Wildcard presentes es imposible;
-            // ocurre típicamente con Ok/Err mal cubiertos.
+            // No arm matched. Impossible with Ident/Wildcard present;
+            // typically happens with poorly-covered Ok/Err.
             Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
                 span.line, span.column,
@@ -4379,41 +4417,43 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             )))
         }
 
-        // `Ok(inner)` — constructor de la variante exitosa de Result.
-        // Evaluamos el inner y lo envolvemos.
+        // `Ok(inner)` — constructor for Result's success variant.
+        // Evaluate the inner and wrap it.
         Expr::Ok(inner, _) => {
             let v = eval_expr(inner, env).await?;
             Ok(Value::Result(ResultVariant::Ok(Box::new(v))))
         }
 
-        // `Err(inner)` — constructor de la variante de error.
+        // `Err(inner)` — constructor for the error variant.
         Expr::Err(inner, _) => {
             let v = eval_expr(inner, env).await?;
             Ok(Value::Result(ResultVariant::Err(Box::new(v))))
         }
 
-        // `expr?` — operador de propagación de errores.
+        // `expr?` — error propagation operator.
         //
-        // Semántica:
-        //  - Ok(v)  → la expresión vale `v` (desempaqueta).
-        //  - Err(e) → corta la función contenedora devolviendo Err(e) sin
-        //    ejecutar el resto. Se emite vía `EvalSignal::Return(...)`,
-        //    que `eval_call` captura y convierte en el valor de retorno.
-        //  - Cualquier otro tipo → error de runtime explícito.
+        // Semantics:
+        //  - Ok(v)  → the expression is worth `v` (unwraps).
+        //  - Err(e) → cuts the containing function returning Err(e)
+        //    without running the rest. Emitted via
+        //    `EvalSignal::Return(...)`, which `eval_call` catches
+        //    and turns into the return value.
+        //  - Any other type → explicit runtime error.
         //
-        // Si `?` se evalúa fuera de una función, el `Return` sintetizado
-        // burbujea hasta `eval` y se reporta como "`return` solo puede
-        // usarse adentro de una función". Mensaje genérico (deuda
-        // explícita; mejora pendiente con un signal dedicado).
-        // `.await` desempaca un `Value::Future`. El checker 6.2 valida
-        // estáticamente que el operando sea `Future<T>` y que estemos
-        // adentro de una `async fn`; este path es la implementación
-        // dinámica.
+        // If `?` is evaluated outside a function, the synthesized
+        // `Return` bubbles up to `eval` and is reported as "`return`
+        // can only be used inside a function". Generic message
+        // (explicit debt; planned improvement with a dedicated
+        // signal).
+        // `.await` unwraps a `Value::Future`. Checker 6.2 statically
+        // validates that the operand is `Future<T>` and that we're
+        // inside an `async fn`; this path is the dynamic
+        // implementation.
         //
-        // Política: un future se consume una sola vez. El `Option`
-        // adentro de `FutureCell` nos deja extraer el `Pin<Box<>>` con
-        // `.take()` sin clonar; un segundo `.await` sobre el mismo
-        // `Value::Future` paniquea con error explícito.
+        // Policy: a future is consumed exactly once. The `Option`
+        // inside `FutureCell` lets us extract the `Pin<Box<>>` with
+        // `.take()` without cloning; a second `.await` on the same
+        // `Value::Future` panics with an explicit error.
         Expr::Await(inner, await_span) => {
             let v = eval_expr(inner, env).await?;
             match v {
@@ -4463,9 +4503,9 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             }
         }
 
-        // Fase 9.0.1 (F15): paralelo a `Stmt::Error` — defensa contra
-        // un bug del compilador. La CLI strict nunca debería ver este
-        // nodo; solo `parse_with_recovery` lo produce.
+        // Phase 9.0.1 (F15): parallel to `Stmt::Error` — defense
+        // against a compiler bug. The strict CLI should never see
+        // this node; only `parse_with_recovery` produces it.
         Expr::Error(_) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
@@ -4475,11 +4515,11 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
     }
 }
 
-/// Evalúa una secuencia de sentencias en el env dado (sin crear scope
-/// nuevo) y devuelve el valor de la última. Bloque vacío → Null.
+/// Evaluates a sequence of statements in the given env (no new scope)
+/// and returns the value of the last one. Empty block → Null.
 ///
-/// Los signals (Return/Break/Continue/Error) se propagan: si un stmt los
-/// emite, el resto del bloque no se ejecuta.
+/// Signals (Return/Break/Continue/Error) propagate: if a stmt emits
+/// one, the rest of the block does not execute.
 #[async_recursion]
 async fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
     let mut last = Value::Null;
@@ -4489,25 +4529,26 @@ async fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
     Ok(last)
 }
 
-/// Resolver de llamadas. Despacha según la forma sintáctica del callee:
+/// Call resolver. Dispatches by the callee's syntactic shape:
 ///
-///  - `Expr::Field { object, field, .. }` → method call. Evalúa el receptor,
-///    los args, y consulta la tabla de métodos built-in
-///    (`dispatch_method`). Si el receptor es una instancia y el "método"
-///    no existe en la tabla, caemos al field access (por si el usuario
-///    guardó una función en un campo) y lo invocamos.
-///  - cualquier otra expresión → llamada normal. Evalúa el callee y
-///    despacha sobre `Value::Builtin` / `Value::Function`.
+///  - `Expr::Field { object, field, .. }` → method call. Evaluate
+///    the receiver and the args, then consult the built-in method
+///    table (`dispatch_method`). If the receiver is an instance and
+///    the "method" doesn't exist in the table, fall back to field
+///    access (in case the user stored a function in a field) and
+///    invoke it.
+///  - any other expression → normal call. Evaluate the callee and
+///    dispatch on `Value::Builtin` / `Value::Function`.
 ///
-/// El identificador para mensajes de error se deriva de la forma del
-/// callee: `Expr::Ident(n, _)` → `"n"`, otro → `"<expr>"`.
+/// The identifier for error messages is derived from the callee's
+/// shape: `Expr::Ident(n, _)` → `"n"`, otherwise → `"<expr>"`.
 #[async_recursion]
 async fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> EvalResult<Value> {
     // Method call.
     if let Expr::Field { object, field, .. } = callee {
         let receiver = eval_expr(object, env.clone()).await?;
-        // Fp.3 — extraer args con/sin nombre. El dispatch del método
-        // reordena por nombre al resolver el método target.
+        // Fp.3 — extract args with/without name. The method dispatch
+        // reorders by name when resolving the target method.
         let mut named_args: Vec<(Option<String>, Value)> = Vec::with_capacity(args.len());
         for arg in args {
             let (name, value_expr) = match arg {
@@ -4520,33 +4561,34 @@ async fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> Eva
         return dispatch_method_named(receiver, field, named_args, env, span).await;
     }
 
-    // Fase 9.w.3 — dispatch especial para `spawn(fn_call)`. El checker
-    // (9.w.3.a) validó: 1 arg que es `Expr::Call` literal a fn
-    // `@background`. Acá lo que hacemos es:
-    //   1. Resolver el callee del inner call al `Value::Function` real
-    //      en el env (lookup por nombre).
-    //   2. Evaluar los args del inner call.
-    //   3. `tokio::spawn` un task que invoca el handler con esos args.
-    //      Si la fn es async, el invoke devuelve `Value::Future` que
-    //      awaiteamos adentro del task. Si es sync, el invoke devuelve
-    //      el value directo y el task termina inmediatamente.
-    //   4. Wrappear el `JoinHandle` en un `Value::Future` para que el
-    //      caller pueda `.await`-earlo o ignorarlo (fire-and-forget).
+    // Phase 9.w.3 — special dispatch for `spawn(fn_call)`. The checker
+    // (9.w.3.a) validated: 1 arg that's a literal `Expr::Call` to a
+    // `@background` fn. Here we:
+    //   1. Resolve the inner call's callee to the actual
+    //      `Value::Function` in the env (lookup by name).
+    //   2. Evaluate the inner call's args.
+    //   3. `tokio::spawn` a task that invokes the handler with those
+    //      args. If the fn is async, the invoke returns
+    //      `Value::Future` which we await inside the task. If sync,
+    //      the invoke returns the value directly and the task
+    //      finishes immediately.
+    //   4. Wrap the `JoinHandle` in a `Value::Future` so the caller
+    //      can `.await` it or ignore it (fire-and-forget).
     //
-    // El dispatch dispara solo cuando `spawn` no fue shadowed por una
-    // fn user-defined: chequeamos via `env.lookup` que la binding sea
-    // un Builtin (no Function user-defined).
+    // The dispatch only fires when `spawn` wasn't shadowed by a
+    // user-defined fn: we check via `env.lookup` that the binding is
+    // a Builtin (not a user-defined Function).
     if let Expr::Ident(name, _) = callee {
         if name == "spawn" && is_spawn_builtin(&env) {
             return eval_spawn_call(args, env, span).await;
         }
     }
 
-    // Llamada normal.
+    // Normal call.
     let callee_value = eval_expr(callee, env.clone()).await?;
-    // Fp.3 — args con/sin nombre. La resolución de nombres → posiciones
-    // ocurre en `invoke_value_named` después de evaluar args y conocer
-    // el target (Value::Function tiene los param names).
+    // Fp.3 — args with/without name. Name → position resolution
+    // happens in `invoke_value_named` after evaluating args and
+    // knowing the target (Value::Function carries the param names).
     let mut named_args: Vec<(Option<String>, Value)> = Vec::with_capacity(args.len());
     for arg in args {
         let (name, value_expr) = match arg {
@@ -4560,14 +4602,13 @@ async fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> Eva
     invoke_value_named(callee_value, named_args, &display_name, span).await
 }
 
-/// Fp.3 — reordena `named_args` (mezcla de positionals y named) a una
-/// Vec<Value> posicional respetando los nombres de `param_names`. La
-/// regla: positionals primero (sin nombre), después los named (cada uno
-/// al slot de su nombre). Slots no cubiertos quedan `None` para que el
-/// caller los llene con defaults.
+/// Fp.3 — reorders `named_args` (mix of positionals and named) into a
+/// positional Vec<Value> respecting the names in `param_names`. Rule:
+/// positionals first (no name), then named ones (each into its named
+/// slot). Uncovered slots stay `None` so the caller can fill defaults.
 ///
-/// Errores: nombre duplicado, nombre desconocido, named "sobreescribe"
-/// a un positional ya provisto.
+/// Errors: duplicate name, unknown name, named "overrides" an
+/// already-provided positional.
 fn resolve_named_args(
     named_args: Vec<(Option<String>, Value)>,
     param_names: &[String],
@@ -4580,7 +4621,7 @@ fn resolve_named_args(
     for (name_opt, value) in named_args {
         if let Some(name) = name_opt {
             after_named = true;
-            // Buscar el index del param por nombre.
+            // Look up the param index by name.
             let idx = param_names.iter().position(|p| p == &name).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeError,
@@ -4592,8 +4633,8 @@ fn resolve_named_args(
                     ),
                 ))
             })?;
-            // Si el slot ya está ocupado por un positional previo o
-            // por otro named con el mismo nombre, error claro.
+            // If the slot is already filled by a previous positional
+            // or another named with the same name, clear error.
             if slots[idx].is_some() {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeError,
@@ -4616,9 +4657,9 @@ fn resolve_named_args(
                 )));
             }
             if next_positional >= param_names.len() {
-                // Más positionals que params — el invocador lo va a
-                // detectar después como exceso de args. Lo dejamos pasar
-                // acá y el chequeo de aridad final reporta.
+                // More positionals than params — the invoker will
+                // catch it later as excess args. We let it through
+                // here; the final arity check reports.
                 slots.push(Some(value));
                 next_positional += 1;
             } else {
@@ -4630,9 +4671,9 @@ fn resolve_named_args(
     Ok(slots)
 }
 
-/// Devuelve un nombre legible para usar en mensajes de error de una
-/// llamada. Para callees con nombre (`Ident`) usa el nombre; para todo
-/// lo demás usa un placeholder.
+/// Returns a readable name for use in call error messages. For named
+/// callees (`Ident`) uses the name; for everything else uses a
+/// placeholder.
 fn callee_display_name(callee: &Expr) -> String {
     match callee {
         Expr::Ident(n, _) => n.clone(),
@@ -4640,10 +4681,10 @@ fn callee_display_name(callee: &Expr) -> String {
     }
 }
 
-/// Fp.3 — versión de `invoke_value` que acepta args con/sin nombre.
-/// Para `Value::Function`, los nombres se mapean a posiciones según
-/// los `params` de la fn. Para builtins y PyObject (sin info de
-/// nombres), rechaza named args con error claro.
+/// Fp.3 — version of `invoke_value` that accepts args with/without
+/// name. For `Value::Function`, names map to positions via the fn's
+/// `params`. For builtins and PyObject (no name info), reject named
+/// args with a clear error.
 async fn invoke_value_named(
     value: Value,
     named_args: Vec<(Option<String>, Value)>,
@@ -4651,13 +4692,14 @@ async fn invoke_value_named(
     span: Span,
 ) -> EvalResult<Value> {
     let has_named = named_args.iter().any(|(n, _)| n.is_some());
-    // Caso rápido: si no hay nombres, delegar al path posicional clásico.
+    // Fast path: if there are no names, delegate to the classic
+    // positional path.
     if !has_named {
         let positional: Vec<Value> = named_args.into_iter().map(|(_, v)| v).collect();
         return invoke_value(value, positional, display_name, span).await;
     }
-    // Hay nombres — el callee debe ser una Fitz Function con params
-    // conocidos.
+    // There are names — the callee must be a Fitz Function with
+    // known params.
     match value {
         Value::Function {
             params,
@@ -4667,10 +4709,10 @@ async fn invoke_value_named(
         } => {
             let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
             let slots = resolve_named_args(named_args, &param_names, display_name, span)?;
-            // Reconstruir Vec<Value> rellenando defaults para los None.
+            // Rebuild Vec<Value> filling defaults for the `None` slots.
             let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
             if has_varargs {
-                // Varargs + named args no compatibles en MVP.
+                // Varargs + named args not compatible in the MVP.
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeError,
                     span.line,
@@ -4687,7 +4729,7 @@ async fn invoke_value_named(
                 let value = match &slots[i] {
                     Some(v) => v.clone(),
                     None => {
-                        // Rellenar con default.
+                        // Fill with default.
                         let de = param.default.as_ref().ok_or_else(|| {
                             EvalSignal::Error(FitzError::new(
                                 ErrorKind::WrongArgCount {
@@ -4707,7 +4749,7 @@ async fn invoke_value_named(
                 };
                 call_env.lock().define(param.name.clone(), value);
             }
-            // Mismo path que invoke_value: ejecutar body sync o async.
+            // Same path as invoke_value: run body sync or async.
             if is_async {
                 let owned_body = body;
                 let display_owned = display_name.to_string();
@@ -4752,19 +4794,19 @@ async fn invoke_value_named(
     }
 }
 
-/// v0.10.31 (Tier A.3 + A.9) — kwarg-aware dispatch para built-ins
-/// que soportan argumentos nombrados:
+/// v0.10.31 (Tier A.3 + A.9) — kwarg-aware dispatch for built-ins
+/// that support named arguments:
 ///
-/// - `db.connect(url, max_conns=N)` — pool size opt-in (override de
-///   la env var `FITZ_DB_MAX_CONNS`).
+/// - `db.connect(url, max_conns=N)` — opt-in pool size (override of
+///   the `FITZ_DB_MAX_CONNS` env var).
 /// - `DbConn.transaction(closure, isolation="SERIALIZABLE"|"REPEATABLE READ"|
-///   "READ COMMITTED"|"READ UNCOMMITTED")` — isolation level del outer BEGIN.
+///   "READ COMMITTED"|"READ UNCOMMITTED")` — isolation level of the outer BEGIN.
 ///
-/// Devuelve:
-/// - `Ok(Some(v))` → manejamos el call con esos kwargs, devuelve `v`.
-/// - `Ok(None)` → no es ningún built-in conocido, caller cae al
-///   path normal (method custom / error).
-/// - `Err(e)` → error de validación (kwarg desconocido, tipo malo,
+/// Returns:
+/// - `Ok(Some(v))` → we handled the call with those kwargs, returns `v`.
+/// - `Ok(None)` → not a known built-in, caller falls back to the
+///   normal path (custom method / error).
+/// - `Err(e)` → validation error (unknown kwarg, bad type,
 ///   missing positional, etc.).
 fn dispatch_builtin_kwargs(
     receiver: Value,
@@ -4772,11 +4814,11 @@ fn dispatch_builtin_kwargs(
     named_args: &[(Option<String>, Value)],
     span: Span,
 ) -> EvalResult<Option<Value>> {
-    // Fase 12.3.a.1 — Caso 0: log.{info,warn,error,debug}(msg, k=v, ...)
-    // Path con kwargs. El path sin kwargs (`log.info("solo msg")`) cae
-    // en `dispatch_method` clásico → `func(&[Value::Str(...)])` →
-    // `builtin_log_<level>`. Acá manejamos kwargs heterogéneos
-    // (Int/Float/Str/Bool/Secret) que viajan como key-value pairs.
+    // Phase 12.3.a.1 — Case 0: log.{info,warn,error,debug}(msg, k=v, ...)
+    // Path with kwargs. The path without kwargs (`log.info("just msg")`)
+    // falls into the classical `dispatch_method` → `func(&[Value::Str(...)])`
+    // → `builtin_log_<level>`. Here we handle heterogeneous kwargs
+    // (Int/Float/Str/Bool/Secret) traveling as key-value pairs.
     if let Value::Module { name, .. } = &receiver {
         if name == "log" && matches!(method, "info" | "warn" | "error" | "debug") {
             let display = format!("log.{}", method);
@@ -4816,19 +4858,18 @@ fn dispatch_builtin_kwargs(
                         }
                     }
                     Some(key_name) => {
-                        // Kwargs reservados — los emite el logger
-                        // automáticamente. Permitir override silencioso
-                        // ensucia el shape del registro y rompe
-                        // herramientas downstream (Loki/Datadog query).
+                        // Reserved kwargs — the logger emits them
+                        // automatically. Allowing silent override
+                        // pollutes the record shape and breaks
+                        // downstream tooling (Loki/Datadog query).
                         //
-                        // Fase 12.3.b.1 — `trace_id`/`span_id` se suman
-                        // al set de reservados: los inyecta el sink
-                        // automáticamente desde el SpanContext activo
-                        // (via `with_span_context(...)`). Permitir
-                        // override quiebra la correlación entre logs y
-                        // spans, y por convención OTel los IDs son
-                        // controlados por la instrumentación, no por
-                        // el código del usuario.
+                        // Phase 12.3.b.1 — `trace_id`/`span_id` join
+                        // the reserved set: the sink injects them
+                        // automatically from the active SpanContext
+                        // (via `with_span_context(...)`). Allowing
+                        // override breaks log↔span correlation, and
+                        // by OTel convention the IDs are controlled
+                        // by instrumentation, not by user code.
                         if matches!(
                             key_name,
                             "level" | "msg" | "timestamp" | "trace_id" | "span_id"
@@ -4843,11 +4884,11 @@ fn dispatch_builtin_kwargs(
                                 ),
                             )));
                         }
-                        // Validar shape del value: primitivos + Secret.
-                        // En 12.3.a.1 también aceptamos List/Map para
-                        // forward-compat con 12.3.a.2 (el JSON nested
-                        // los soporta) — el output stub los renderea
-                        // con Display.
+                        // Validate value shape: primitives + Secret.
+                        // In 12.3.a.1 we also accept List/Map for
+                        // forward-compat with 12.3.a.2 (nested JSON
+                        // supports them) — the output stub renders
+                        // them with Display.
                         match value {
                             Value::Int(_)
                             | Value::Float(_)
@@ -4890,7 +4931,7 @@ fn dispatch_builtin_kwargs(
         }
     }
 
-    // Caso 1: db.connect(url, max_conns=N)
+    // Case 1: db.connect(url, max_conns=N)
     if let Value::Module { name, .. } = &receiver {
         if name == "db" && method == "connect" {
             let mut url: Option<String> = None;
@@ -4975,23 +5016,24 @@ fn dispatch_builtin_kwargs(
                         .to_string(),
                 ))
             })?;
-            // Lanzar el connect con max_conns override. Si max_conns
-            // está, lo seteamos via env var temporal antes del connect
-            // (mecanismo más simple sin refactorear `connect_url`).
-            // Decisión: el efecto es per-process via std::env::set_var,
-            // que afecta connects futuros también. Aceptable: el user
-            // que pasa max_conns explícito quiere ese valor para todos
-            // los pools subsequentes hasta que el process termine.
+            // Fire connect with max_conns override. If max_conns
+            // is present, we set it via a temporary env var before
+            // the connect (simpler mechanism without refactoring
+            // `connect_url`). Decision: the effect is per-process
+            // via std::env::set_var, which also affects future
+            // connects. Acceptable: a user passing max_conns
+            // explicitly wants that value for all subsequent pools
+            // until the process terminates.
             let max_conns_opt = max_conns;
             let fut: crate::value::FitzFuture = Box::pin(async move {
                 if let Some(n) = max_conns_opt {
-                    // SAFETY: este set_var corre antes de cualquier
-                    // connect (porque connect_url lee la env var via
-                    // LazyLock al primer use). Si el user llama
-                    // db.connect(..., max_conns=20) DESPUÉS de un
-                    // db.connect(url) que ya cacheó el max_conns
-                    // default, el override NO aplica (deuda menor —
-                    // documentada en docs/db-orm.md).
+                    // SAFETY: this set_var runs before any connect
+                    // (since connect_url reads the env var via
+                    // LazyLock on first use). If the user calls
+                    // db.connect(..., max_conns=20) AFTER a prior
+                    // db.connect(url) that already cached the default
+                    // max_conns, the override does NOT apply (minor
+                    // debt — documented in docs/db-orm.md).
                     unsafe {
                         std::env::set_var("FITZ_DB_MAX_CONNS", n.to_string());
                     }
@@ -5009,7 +5051,7 @@ fn dispatch_builtin_kwargs(
         }
     }
 
-    // Caso 2: DbConn.transaction(closure, isolation="...")
+    // Case 2: DbConn.transaction(closure, isolation="...")
     if let Value::DbConn(handle) = &receiver {
         if method == "transaction" {
             let mut callback: Option<Value> = None;
@@ -5043,8 +5085,8 @@ fn dispatch_builtin_kwargs(
                                 )));
                             }
                         };
-                        // Whitelist defensive: Postgres acepta solo
-                        // estos 4 niveles + opcional READ ONLY/WRITE.
+                        // Defensive whitelist: Postgres accepts only
+                        // these 4 levels + optional READ ONLY/WRITE.
                         let upper = s.to_uppercase();
                         let valid = matches!(
                             upper.as_str(),
@@ -5104,11 +5146,11 @@ fn dispatch_builtin_kwargs(
     Ok(None)
 }
 
-/// Fp.3 — método con args nombrados. Solo soporta métodos custom (R.3)
-/// y estáticos — los métodos built-in de List/Map/Str no tienen nombres
-/// de params expuestos. Si todos los args son posicionales, delega al
-/// path clásico. v0.10.31 — soporta también kwargs sobre los built-ins
-/// `db.connect` (max_conns) y `DbConn.transaction` (isolation) via
+/// Fp.3 — method with named args. Only supports custom methods (R.3)
+/// and static methods — the built-in methods on List/Map/Str do not
+/// expose param names. If all args are positional, delegates to the
+/// classical path. v0.10.31 — also supports kwargs on the built-ins
+/// `db.connect` (max_conns) and `DbConn.transaction` (isolation) via
 /// `dispatch_builtin_kwargs`.
 #[async_recursion]
 async fn dispatch_method_named(
@@ -5123,17 +5165,17 @@ async fn dispatch_method_named(
         let positional: Vec<Value> = named_args.into_iter().map(|(_, v)| v).collect();
         return dispatch_method(receiver, method, positional, env, span).await;
     }
-    // v0.10.31 (Tier A.3 + A.9) — kwargs sobre built-ins específicos.
-    // `db.connect(url, max_conns=N)` y `DbConn.transaction(closure,
-    // isolation="...")` aceptan kwargs nombrados. Otros built-ins
-    // siguen rechazando.
+    // v0.10.31 (Tier A.3 + A.9) — kwargs on specific built-ins.
+    // `db.connect(url, max_conns=N)` and `DbConn.transaction(closure,
+    // isolation="...")` accept named kwargs. Other built-ins still
+    // reject them.
     if let Some(handled) = dispatch_builtin_kwargs(receiver.clone(), method, &named_args, span)? {
         return Ok(handled);
     }
-    // Hay nombres — buscar método custom o estático con param names.
+    // There are names — look up a custom or static method with param names.
     let method_def_opt: Option<crate::ast::MethodDef> = match &receiver {
         Value::Instance { type_name, .. } => {
-            // Buscar el `Value::Type` por nombre canónico en el env.
+            // Look up the `Value::Type` by canonical name in the env.
             let tname = type_name.clone();
             let type_val = env.lock().get(&tname);
             match type_val {
@@ -5178,9 +5220,9 @@ async fn dispatch_method_named(
             ),
         )));
     }
-    // Construir args posicionales rellenando con defaults.
+    // Build positional args filling with defaults.
     let mut positional: Vec<Value> = Vec::with_capacity(method_def.params.len());
-    // Necesitamos un env para evaluar defaults — usamos el del caller.
+    // We need an env to evaluate defaults — we use the caller's.
     let temp_env = Environment::new_child(env.clone());
     for (i, param) in method_def.params.iter().enumerate() {
         let v = match &slots[i] {
@@ -5209,11 +5251,12 @@ async fn dispatch_method_named(
     }
 }
 
-/// Fase 9.w.3 — stub del builtin `spawn`. Nunca debería ejecutarse:
-/// el dispatch real intercepta en `eval_call` ANTES de invocar el
-/// builtin (necesita capturar el inner call AST sin eager-evaluation).
-/// Si llega acá, hubo un bug en el dispatch o el usuario hizo
-/// algo como `let s = spawn; s(...)` (que no soportamos en MVP).
+/// Phase 9.w.3 — stub of the `spawn` builtin. Should never execute:
+/// the real dispatch intercepts in `eval_call` BEFORE invoking the
+/// builtin (it needs to capture the inner call AST without eager
+/// evaluation). If we land here, it was either a dispatch bug or the
+/// user did something like `let s = spawn; s(...)` (which we do not
+/// support in MVP).
 fn builtin_spawn_stub(_args: &[Value]) -> FitzResult<Value> {
     Err(FitzError::new(
         ErrorKind::InvalidSyntax,
@@ -5226,10 +5269,10 @@ fn builtin_spawn_stub(_args: &[Value]) -> FitzResult<Value> {
     ))
 }
 
-/// Fase 9.w.3 — `true` si la binding "spawn" en el env actual es el
-/// Builtin (no fue shadowed por una fn user-defined). El callsite
-/// `spawn(...)` solo activa el dispatch especial cuando este check
-/// retorna `true`.
+/// Phase 9.w.3 — `true` if the "spawn" binding in the current env is
+/// the Builtin (not shadowed by a user-defined fn). The `spawn(...)`
+/// callsite only activates the special dispatch when this check
+/// returns `true`.
 fn is_spawn_builtin(env: &EnvRef) -> bool {
     matches!(
         env.lock().get("spawn"),
@@ -5237,19 +5280,19 @@ fn is_spawn_builtin(env: &EnvRef) -> bool {
     )
 }
 
-/// Fase 9.w.3 — implementación del dispatch especial de `spawn(call)`.
-/// Asume que el caller ya validó (vía `is_spawn_builtin`) que `spawn`
-/// no fue shadowed. El checker (9.w.3.a) ya validó que `args[0]` es
-/// `Expr::Call` literal con callee Ident → fn `@background`; replicamos
-/// defensivamente en runtime para mensajes claros si alguien evita el
-/// checker (`fitz run --no-typecheck`).
+/// Phase 9.w.3 — implementation of the special `spawn(call)` dispatch.
+/// Assumes the caller already validated (via `is_spawn_builtin`) that
+/// `spawn` was not shadowed. The checker (9.w.3.a) already validated
+/// that `args[0]` is a literal `Expr::Call` with callee Ident → fn
+/// `@background`; we replicate defensively at runtime for clear
+/// messages if someone bypasses the checker (`fitz run --no-typecheck`).
 ///
-/// El task spawneado por `tokio::spawn` ejecuta el invoke real. Si la
-/// fn target es async, el invoke retorna `Value::Future` y el task
-/// awaitea adentro. El JoinHandle se envuelve en un `Value::Future`
-/// para que el caller pueda `.await`-earlo o descartarlo. Descartar
-/// el Future deja la task ejecutándose detached (fire-and-forget) —
-/// idéntico a `tokio::spawn(...)` en Rust sin guardar el JoinHandle.
+/// The task spawned by `tokio::spawn` executes the actual invoke. If
+/// the target fn is async, the invoke returns `Value::Future` and the
+/// task awaits inside. The JoinHandle is wrapped in a `Value::Future`
+/// so the caller can `.await` it or discard it. Discarding the Future
+/// leaves the task running detached (fire-and-forget) — identical to
+/// `tokio::spawn(...)` in Rust without keeping the JoinHandle.
 async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<Value> {
     use crate::value::{FitzFuture, FutureCell};
     use parking_lot::Mutex;
@@ -5269,8 +5312,8 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
             args.len()
         )));
     }
-    // El arg debe ser `Expr::Call` literal — el checker garantiza eso.
-    // NamedArg unwrap por uniformidad con el resto del eval_call path.
+    // The arg must be a literal `Expr::Call` — the checker guarantees it.
+    // NamedArg unwrap for uniformity with the rest of the eval_call path.
     let (inner_callee, inner_args) = match &args[0] {
         Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
         Expr::NamedArg { value, .. } => match value.as_ref() {
@@ -5297,15 +5340,15 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
             ));
         }
     };
-    // Resolvemos el `Value::Function` real en el env. Si la fn no
-    // existe → error claro (puede pasar con `fitz run --no-typecheck`).
+    // We resolve the actual `Value::Function` in the env. If the fn
+    // does not exist → clear error (can happen with `fitz run --no-typecheck`).
     let handler = env.lock().get(&fn_name).ok_or_else(|| {
         err(format!(
             "spawn: la fn `{}` no existe en este scope.",
             fn_name
         ))
     })?;
-    // Evaluamos los args del inner call.
+    // Evaluate the args of the inner call.
     let mut arg_values: Vec<Value> = Vec::with_capacity(inner_args.len());
     for a in inner_args {
         let v = match a {
@@ -5314,16 +5357,16 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
         };
         arg_values.push(v);
     }
-    // Spawneamos el invoke en un task tokio. El JoinHandle se envuelve
-    // en `Value::Future` para que el caller pueda awaitearlo.
+    // We spawn the invoke on a tokio task. The JoinHandle is wrapped
+    // in `Value::Future` so the caller can await it.
     let handler_clone = handler;
     let fn_name_clone = fn_name.clone();
     let join_handle = tokio::spawn(async move {
         match invoke_value(handler_clone, arg_values, &fn_name_clone, Span::ZERO).await {
             Ok(value) => {
-                // Si la fn target era async, el value es un Future —
-                // lo awaiteamos adentro del task para que la corutina
-                // efectivamente corra.
+                // If the target fn was async, the value is a Future —
+                // we await it inside the task so the coroutine actually
+                // runs.
                 if let Value::Future(cell) = value {
                     let inner = cell.0.lock().take();
                     if let Some(future) = inner {
@@ -5346,9 +5389,9 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
             },
         }
     });
-    // Wrappear el JoinHandle en un `Value::Future`. El Future Fitz
-    // resuelve cuando la task termina; si el caller no `.await`-ea,
-    // la task sigue corriendo detached (fire-and-forget).
+    // Wrap the JoinHandle in a `Value::Future`. The Fitz Future
+    // resolves when the task finishes; if the caller does not `.await`
+    // it, the task keeps running detached (fire-and-forget).
     let fut: FitzFuture = Box::pin(async move {
         match join_handle.await {
             Ok(result) => result,
@@ -5363,8 +5406,8 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
     Ok(Value::Future(FutureCell(Arc::new(Mutex::new(Some(fut))))))
 }
 
-/// Invoca un valor que ya sabemos que tiene que ser una función. Maneja
-/// builtins, user-defined functions y errores de "no es invocable".
+/// Invokes a value that we already know must be a function. Handles
+/// builtins, user-defined functions, and "not callable" errors.
 #[async_recursion]
 pub async fn invoke_value(
     value: Value,
@@ -5373,21 +5416,21 @@ pub async fn invoke_value(
     span: Span,
 ) -> EvalResult<Value> {
     match value {
-        // Fase 9.z.2.a: `assert_throws` necesita invocar el callback
-        // async-recursive (el `invoke_value` genérico es async, los
-        // builtins son sync). Se intercepta acá antes del despacho
-        // genérico de builtins; cualquier otro builtin va por la
-        // rama de abajo. El stub `builtin_assert_throws_stub` emite
-        // unreachable! si llegara a ejecutarse — sentinel del bug.
+        // Phase 9.z.2.a: `assert_throws` needs to invoke the callback
+        // async-recursive (generic `invoke_value` is async, builtins
+        // are sync). It is intercepted here before the generic builtin
+        // dispatch; any other builtin goes through the branch below.
+        // The `builtin_assert_throws_stub` stub emits unreachable! if
+        // it ever executes — sentinel for the bug.
         Value::Builtin {
             name: "assert_throws",
             ..
         } => assert_throws_impl(arg_values, span).await,
         Value::Builtin { func, .. } => func(&arg_values).map_err(EvalSignal::Error),
 
-        // Mini-tanda Mw-Wrap — `Value::NativeFn` se invoca pasando los
-        // args al callback async. El callback es responsable de validar
-        // su propia aridad (el caso típico es 0 args = `next()`).
+        // Mini-batch Mw-Wrap — `Value::NativeFn` is invoked by passing
+        // the args to the async callback. The callback is responsible
+        // for validating its own arity (typical case is 0 args = `next()`).
         Value::NativeFn(native) => native.0(arg_values).await.map_err(EvalSignal::Error),
 
         Value::Function {
@@ -5396,11 +5439,11 @@ pub async fn invoke_value(
             closure,
             is_async,
         } => {
-            // Fp — default params: si faltan args trailing y los params
-            // tienen `default`, se rellenan.
-            // Fp.2 — varargs: el último param (si es variádico) absorbe
-            // 0+ args extra. Aridad mínima = required sin contar el
-            // varargs; máxima = total (o sin límite con varargs).
+            // Fp — default params: if trailing args are missing and the
+            // params have `default`, they get filled in.
+            // Fp.2 — varargs: the last param (if variadic) absorbs 0+
+            // extra args. Minimum arity = required without counting
+            // the varargs; maximum = total (or unbounded with varargs).
             let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
             let required_with_defaults = params.iter().filter(|p| p.default.is_none()).count();
             let required = if has_varargs {
@@ -5443,7 +5486,7 @@ pub async fn invoke_value(
                 )));
             }
 
-            // Nuevo scope hijo del CLOSURE, no del caller. Lexical scoping.
+            // New child scope of the CLOSURE, not the caller. Lexical scoping.
             let call_env = Environment::new_child(closure);
             let varargs_idx = if has_varargs {
                 Some(params.len() - 1)
@@ -5454,7 +5497,7 @@ pub async fn invoke_value(
             let mut arg_iter = arg_values.into_iter();
             for (i, param) in params.iter().enumerate() {
                 if Some(i) == varargs_idx {
-                    // Recolectar los args restantes (incluso 0) en una List.
+                    // Collect the remaining args (even 0) into a List.
                     let collected: Vec<Value> = arg_iter.by_ref().collect();
                     let list = Value::new_list(collected);
                     call_env.lock().define(param.name.clone(), list);
@@ -5463,9 +5506,9 @@ pub async fn invoke_value(
                 let value = if i < provided {
                     arg_iter.next().unwrap()
                 } else {
-                    // Default expr — se evalúa en el env del CLOSURE
-                    // (donde la fn vive), no en el del caller. Match
-                    // con la semántica de fields default y de Python.
+                    // Default expr — evaluated in the CLOSURE's env
+                    // (where the fn lives), not the caller's. Matches
+                    // the semantics of field defaults and Python.
                     let default_expr = param
                         .default
                         .as_ref()
@@ -5475,13 +5518,13 @@ pub async fn invoke_value(
                 call_env.lock().define(param.name.clone(), value);
             }
 
-            // Fase 6.4: si la fn es async, en vez de evaluar el body
-            // inmediato, lo envolvemos en un `Value::Future` perezoso.
-            // El `.await` del caller fuerza la evaluación; sin await
-            // queda como Future suelto (`let f = async_fn()`).
+            // Phase 6.4: if the fn is async, instead of evaluating the
+            // body immediately we wrap it in a lazy `Value::Future`.
+            // The caller's `.await` forces evaluation; without an await
+            // it stays as a dangling Future (`let f = async_fn()`).
             //
-            // Owned body + display_name: capturamos por valor en el
-            // async block para que el future sea `'static`.
+            // Owned body + display_name: we capture by value in the
+            // async block so the future is `'static`.
             if is_async {
                 let owned_body = body;
                 let display_owned = display_name.to_string();
@@ -5495,7 +5538,7 @@ pub async fn invoke_value(
                             }
                         }
                     }
-                    // Cuerpo sin `return` explícito → Null, igual que sync.
+                    // Body without explicit `return` → Null, same as sync.
                     let _ = display_owned;
                     Ok(Value::Null)
                 });
@@ -5512,11 +5555,11 @@ pub async fn invoke_value(
             Ok(Value::Null)
         }
 
-        // Fase 8.1.4 — `Value::PyObject(callable)` cruza al runtime
-        // Python via `py_interop::call`. Cubre `let f = math.sqrt; f(16.0)`,
-        // funciones top-level del módulo Python pasadas como variable,
-        // y cualquier callable opaco. El error se enriquece con el span
-        // de la llamada para que el usuario vea dónde explotó.
+        // Phase 8.1.4 — `Value::PyObject(callable)` crosses into the
+        // Python runtime via `py_interop::call`. Covers `let f = math.sqrt;
+        // f(16.0)`, top-level functions of a Python module passed as
+        // a variable, and any opaque callable. The error is enriched
+        // with the call's span so the user sees where it blew up.
         #[cfg(feature = "python")]
         Value::PyObject(handle) => {
             crate::py_interop::call(&handle, &arg_values).map_err(|mut e| {
@@ -5544,15 +5587,14 @@ pub async fn invoke_value(
     }
 }
 
-/// Dispatch de método built-in. Lookup por `(tipo del receptor, nombre
-/// del método)` en una tabla estática. Las implementaciones reciben el
-/// receptor (por valor, pero las colecciones internas son
-/// `Arc<Mutex<...>>`, así que las mutaciones se propagan a los aliases)
-/// y los args ya evaluados.
+/// Built-in method dispatch. Lookup by `(receiver type, method name)`
+/// against a static table. Implementations receive the receiver (by
+/// value, but inner collections are `Arc<Mutex<...>>`, so mutations
+/// propagate to aliases) and the already-evaluated args.
 ///
-/// Si no hay un método registrado para `(tipo, nombre)`, devuelve error
-/// "método no encontrado". El usuario lo va a ver como
-/// `xs.metodo_inexistente(...) — Lista no tiene un método llamado ...`.
+/// If there is no registered method for `(type, name)`, returns a
+/// "method not found" error. The user sees it as
+/// `xs.metodo_inexistente(...) — List has no method named ...`.
 #[async_recursion]
 async fn dispatch_method(
     receiver: Value,
@@ -5561,12 +5603,12 @@ async fn dispatch_method(
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
-    // Fase 10.4.b — navigation method sobre Value::Instance.
-    // Si el receiver es Instance + el method matchea una relación
-    // declarada en el TableMetadata del type, despachamos al ORM
-    // ANTES de buscar methods custom (las relations tienen
-    // prioridad — si el user nombrara un método igual, podría
-    // sombrearlo, pero típicamente no hay colisión).
+    // Phase 10.4.b — navigation method over Value::Instance.
+    // If the receiver is an Instance + the method matches a relation
+    // declared in the type's TableMetadata, we dispatch to the ORM
+    // BEFORE looking up custom methods (relations have priority —
+    // if the user named a method the same, it could shadow them,
+    // but typically there is no collision).
     if let Value::Instance { type_name, .. } = &receiver {
         let rel_opt: Option<crate::types::RelationMetadata> = {
             let env_guard = env.lock();
@@ -5583,10 +5625,10 @@ async fn dispatch_method(
         }
     }
 
-    // R.3 — método custom sobre Value::Instance. Buscamos en el
-    // Value::Type asociado (resolución por type_name en el env).
-    // El lookup se hace ANTES del .await para no mantener el lock
-    // del env vivo a través de la suspensión (Send-safe).
+    // R.3 — custom method on Value::Instance. We look in the
+    // associated Value::Type (resolution by type_name in the env).
+    // The lookup happens BEFORE the .await so we do not hold the env
+    // lock across suspension (Send-safe).
     if let Value::Instance { type_name, .. } = &receiver {
         let resolved: Option<crate::ast::MethodDef> = {
             let env_guard = env.lock();
@@ -5598,8 +5640,8 @@ async fn dispatch_method(
             }
         };
         if let Some(m) = resolved {
-            // Mini-tanda St — un método estático no se puede invocar
-            // sobre una instancia (no recibe los fields como locales).
+            // Mini-batch St — a static method cannot be invoked on an
+            // instance (it does not receive the fields as locals).
             if m.is_static {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -5616,7 +5658,7 @@ async fn dispatch_method(
             return invoke_custom_method(receiver, m, args, env, span).await;
         }
     }
-    // Mini-tanda St — método estático sobre Value::Type: `Type.make()`.
+    // Mini-batch St — static method on Value::Type: `Type.make()`.
     if let Value::Type {
         name: type_name,
         methods,
@@ -5641,16 +5683,17 @@ async fn dispatch_method(
             }
             return invoke_static_method(m, args, env, span).await;
         }
-        // Fase 10.3.b — métodos ORM sobre `Value::Type` con
-        // `@table(...)`. Solo despachamos si el type tiene
-        // metadata cacheada; si no, cae al error genérico.
+        // Phase 10.3.b — ORM methods on `Value::Type` with
+        // `@table(...)`. We only dispatch if the type has cached
+        // metadata; otherwise it falls through to the generic error.
         if table_metadata.is_some() {
             if let Some(result) = orm_dispatch_type_method(&receiver, method, args, span)? {
                 return Ok(result);
             }
         }
-        // Si no existe el método pero el receptor es un Type, error
-        // específico (mejor que el genérico "tipo X no tiene método").
+        // If the method does not exist but the receiver is a Type,
+        // give a specific error (better than the generic "type X has
+        // no method").
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line,
@@ -5661,8 +5704,8 @@ async fn dispatch_method(
             ),
         )));
     }
-    // Fase 10.3.b2 — dispatch sobre `Value::QueryBuilder`.
-    // Permite cadenas: `User.where(f).where(g).all(db).await?`.
+    // Phase 10.3.b2 — dispatch on `Value::QueryBuilder`.
+    // Enables chaining: `User.where(f).where(g).all(db).await?`.
     if matches!(&receiver, Value::QueryBuilder(_)) {
         if let Some(result) = orm_dispatch_qb_method(&receiver, method, args, span)? {
             return Ok(result);
@@ -5678,12 +5721,13 @@ async fn dispatch_method(
         )));
     }
     match (&receiver, method) {
-        // Fase 12.2.a — Secret<T>.expose() desempaca al inner T.
-        // Sin args. Usar para pasar el valor crudo a builtins que lo
-        // necesitan: `jwt.encode(claims, secret.expose())`,
-        // `hash.verify(pass.expose(), hashed)`, `db.connect(url.expose())`.
-        // Es la ÚNICA forma de obtener el inner — el resto del lenguaje
-        // (print, Display, Debug, value_to_json) redacta.
+        // Phase 12.2.a — Secret<T>.expose() unwraps the inner T.
+        // No args. Use to pass the raw value to builtins that need it:
+        // `jwt.encode(claims, secret.expose())`,
+        // `hash.verify(pass.expose(), hashed)`,
+        // `db.connect(url.expose())`. This is the ONLY way to get the
+        // inner — everything else in the language (print, Display,
+        // Debug, value_to_json) redacts it.
         (Value::Secret(inner), "expose") => {
             if !args.is_empty() {
                 return Err(EvalSignal::Error(FitzError::new(
@@ -5708,63 +5752,63 @@ async fn dispatch_method(
         (Value::List(_), "filter") => list_filter(receiver, args, span).await,
         (Value::List(_), "find") => list_find(receiver, args, span).await,
         (Value::List(_), "len") => list_len(receiver, args, span),
-        // S.3 (mini-tanda S) — métodos chicos sobre List<T>:
+        // S.3 (mini-batch S) — small methods on List<T>:
         (Value::List(_), "sort") => list_sort(receiver, args, span),
         (Value::List(_), "reverse") => list_reverse(receiver, args, span),
         (Value::List(_), "contains") => list_contains(receiver, args, span),
-        // Mini-tanda It — iteradores estilo Python:
+        // Mini-batch It — Python-style iterators:
         (Value::List(_), "enumerate") => list_enumerate(receiver, args, span),
         (Value::List(_), "zip") => list_zip(receiver, args, span),
         (Value::List(_), "chain") => list_chain(receiver, args, span),
-        // Mini-tanda Mb — flatten + sort_by con callback comparator.
+        // Mini-batch Mb — flatten + sort_by with comparator callback.
         (Value::List(_), "flatten") => list_flatten(receiver, args, span),
         (Value::List(_), "sort_by") => list_sort_by(receiver, args, span).await,
-        // Mini-tanda Lx — predicados funcionales: any/all/count/find_index.
+        // Mini-batch Lx — functional predicates: any/all/count/find_index.
         (Value::List(_), "any") => list_any(receiver, args, span).await,
         (Value::List(_), "all") => list_all(receiver, args, span).await,
         (Value::List(_), "count") => list_count(receiver, args, span).await,
         (Value::List(_), "find_index") => list_find_index(receiver, args, span).await,
-        // Mini-tanda Ex2 — flat_map + first / last accessors.
+        // Mini-batch Ex2 — flat_map + first / last accessors.
         (Value::List(_), "flat_map") => list_flat_map(receiver, args, span).await,
         (Value::List(_), "first") => list_first(receiver, args, span),
         (Value::List(_), "last") => list_last(receiver, args, span),
-        // Mini-tanda Mb2 — min/max/sum sobre List<Int>/List<Float>.
+        // Mini-batch Mb2 — min/max/sum sobre List<Int>/List<Float>.
         (Value::List(_), "min") => list_min(receiver, args, span),
         (Value::List(_), "max") => list_max(receiver, args, span),
         (Value::List(_), "sum") => list_sum(receiver, args, span),
-        // Mini-tanda Mb3 — fold + product + to_map.
+        // Mini-batch Mb3 — fold + product + to_map.
         (Value::List(_), "reduce") => list_reduce(receiver, args, span).await,
         (Value::List(_), "product") => list_product(receiver, args, span),
         (Value::List(_), "to_map") => list_to_map(receiver, args, span),
-        // Mini-tanda Mb4 — unique + partition.
+        // Mini-batch Mb4 — unique + partition.
         (Value::List(_), "unique") => list_unique(receiver, args, span),
         (Value::List(_), "partition") => list_partition(receiver, args, span).await,
-        // Mini-tanda Mb5 — group_by + zip_with + max_by/min_by.
+        // Mini-batch Mb5 — group_by + zip_with + max_by/min_by.
         (Value::List(_), "group_by") => list_group_by(receiver, args, span).await,
         (Value::List(_), "zip_with") => list_zip_with(receiver, args, span).await,
         (Value::List(_), "max_by") => list_max_by(receiver, args, span).await,
         (Value::List(_), "min_by") => list_min_by(receiver, args, span).await,
-        // Mini-tanda Mb6 — scan (fold con outputs intermedios) + windows.
+        // Mini-batch Mb6 — scan (fold with intermediate outputs) + windows.
         (Value::List(_), "scan") => list_scan(receiver, args, span).await,
         (Value::List(_), "windows") => list_windows(receiver, args, span),
-        // Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle.
+        // Mini-batch Mb7 — take/drop/init/tail/intersperse/cycle.
         (Value::List(_), "take") => list_take(receiver, args, span),
         (Value::List(_), "drop") => list_drop(receiver, args, span),
         (Value::List(_), "init") => list_init(receiver, args, span),
         (Value::List(_), "tail") => list_tail(receiver, args, span),
         (Value::List(_), "intersperse") => list_intersperse(receiver, args, span),
         (Value::List(_), "cycle") => list_cycle(receiver, args, span),
-        // Mini-tanda Mb8 — starts_with / ends_with / insert_at / remove_at / zip_to_map.
+        // Mini-batch Mb8 — starts_with / ends_with / insert_at / remove_at / zip_to_map.
         (Value::List(_), "starts_with") => list_starts_with(receiver, args, span),
         (Value::List(_), "ends_with") => list_ends_with(receiver, args, span),
         (Value::List(_), "insert_at") => list_insert_at(receiver, args, span),
         (Value::List(_), "remove_at") => list_remove_at(receiver, args, span),
         (Value::List(_), "zip_to_map") => list_zip_to_map(receiver, args, span),
-        // Mini-tanda Mb9 — split_at sobre List (similar a Str.split_at).
+        // Mini-batch Mb9 — split_at on List (similar to Str.split_at).
         (Value::List(_), "split_at") => list_split_at(receiver, args, span),
-        // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
-        // como `List<Int>` y delega a los métodos de List. Más simple
-        // que duplicar la lógica; el overhead es solo el `Vec` extra.
+        // Mini-batch Ir — iterators over Range. Materializes the range
+        // as `List<Int>` and delegates to List methods. Simpler
+        // than duplicating the logic; overhead is only the extra `Vec`.
         (Value::Range { start, end }, "enumerate") => {
             let materialized = range_to_list(*start, *end);
             list_enumerate(materialized, args, span)
@@ -5777,12 +5821,12 @@ async fn dispatch_method(
             let materialized = range_to_list(*start, *end);
             list_chain(materialized, args, span)
         }
-        // Mini-tanda Rg — `step_by(n)` materializa el rango con step.
-        // No materializa el rango entero primero — usamos `step_by`
-        // nativo de Rust al construir la List<Int>.
+        // Mini-batch Rg — `step_by(n)` materializes the range with step.
+        // Does not materialize the entire range first — we use Rust's
+        // native `step_by` when building the List<Int>.
         (Value::Range { start, end }, "step_by") => range_step_by(*start, *end, args, span),
-        // Mini-tanda Ir — `len` sobre Range. Devuelve `(end - start)`
-        // como Int, igual que `(start..end).count()` de Rust.
+        // Mini-batch Ir — `len` on Range. Returns `(end - start)`
+        // as Int, same as Rust's `(start..end).count()`.
         (Value::Range { start, end }, "len") => {
             if !args.is_empty() {
                 return Err(EvalSignal::Error(FitzError::new(
@@ -5800,37 +5844,36 @@ async fn dispatch_method(
         (Value::Map(_), "keys") => map_keys(receiver, args, span),
         (Value::Map(_), "values") => map_values(receiver, args, span),
         (Value::Map(_), "len") => map_len(receiver, args, span),
-        // Mini-tanda Ex — transformaciones funcionales sobre Map.
+        // Mini-batch Ex — functional transformations on Map.
         (Value::Map(_), "filter") => map_filter(receiver, args, span).await,
         (Value::Map(_), "map_values") => map_map_values(receiver, args, span).await,
-        // Mini-tanda Ex2 — merge: combina dos Maps (last-write-wins).
+        // Mini-batch Ex2 — merge: combines two Maps (last-write-wins).
         (Value::Map(_), "merge") => map_merge(receiver, args, span),
-        // Mini-tanda Up — update inmutable: aplica `fn(V) -> V` al
-        // value asociado a `k` y devuelve un Map nuevo.
+        // Mini-batch Up — immutable update: applies `fn(V) -> V` to the
+        // value associated with `k` and returns a new Map.
         (Value::Map(_), "update") => map_update(receiver, args, span).await,
-        // Mini-tanda Mb2 — keys_sorted: keys ordenadas (Int/Float/Str/Bool).
+        // Mini-batch Mb2 — keys_sorted: sorted keys (Int/Float/Str/Bool).
         (Value::Map(_), "keys_sorted") => map_keys_sorted(receiver, args, span),
-        // Mini-tanda Mb3 — entries: List<(K, V)> con los pares.
+        // Mini-batch Mb3 — entries: List<(K, V)> with the pairs.
         (Value::Map(_), "entries") => map_entries(receiver, args, span),
-        // Mini-tanda Mb4 — invert: Map<V, K> con pares intercambiados.
+        // Mini-batch Mb4 — invert: Map<V, K> with swapped pairs.
         (Value::Map(_), "invert") => map_invert(receiver, args, span),
-        // Mini-tanda Mb6 — merge_with: merge con callback para
-        // resolver conflicts.
+        // Mini-batch Mb6 — merge_with: merge with callback to
+        // resolve conflicts.
         (Value::Map(_), "merge_with") => map_merge_with(receiver, args, span).await,
-        // Mini-tanda Mb7 — with: functional update (Map nuevo con k→v).
+        // Mini-batch Mb7 — with: functional update (new Map with k→v).
         (Value::Map(_), "with") => map_with(receiver, args, span),
-        // Mini-tanda Mb9 — has_value: chequea si v está como value.
+        // Mini-batch Mb9 — has_value: checks if v is present as a value.
         (Value::Map(_), "has_value") => map_has_value(receiver, args, span),
-        // Mini-tanda Bytes — métodos sobre Value::Bytes.
+        // Mini-batch Bytes — methods on Value::Bytes.
         (Value::Bytes(_), "len") => bytes_len(receiver, args, span),
         (Value::Bytes(_), "is_empty") => bytes_is_empty(receiver, args, span),
         (Value::Bytes(_), "to_str") => bytes_to_str(receiver, args, span),
-        // F13.D — methods universales sobre cualquier `Value` para
-        // type-check dinámico en `Any` / FitzValue post-F13. Útiles
-        // adentro de listas/mapas heterogéneos: `xs[0].as_int()` →
-        // `Result<Int>` con Ok(n) si es Int, Err(msg) si no. La
-        // simétrica `type_name()` devuelve el nombre del tipo del
-        // value como Str.
+        // F13.D — universal methods on any `Value` for dynamic
+        // type-checking in `Any` / FitzValue post-F13. Useful inside
+        // heterogeneous lists/maps: `xs[0].as_int()` → `Result<Int>`
+        // with Ok(n) if it is Int, Err(msg) otherwise. The symmetric
+        // `type_name()` returns the value's type name as Str.
         (_, "as_int") => fv_as_int(receiver, args, span),
         (_, "as_float") => fv_as_float(receiver, args, span),
         (_, "as_str") => fv_as_str(receiver, args, span),
@@ -5841,37 +5884,38 @@ async fn dispatch_method(
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
         (Value::Str(_), "lower") => str_lower(receiver, args, span),
-        // S.1 (mini-tanda S) — métodos chicos sobre Str:
+        // S.1 (mini-batch S) — small methods on Str:
         (Value::Str(_), "contains") => str_contains(receiver, args, span),
         (Value::Str(_), "starts_with") => str_starts_with(receiver, args, span),
         (Value::Str(_), "ends_with") => str_ends_with(receiver, args, span),
-        // S.2 — manipulación de strings:
+        // S.2 — string manipulation:
         (Value::Str(_), "split") => str_split(receiver, args, span),
-        // Mini-tanda Mb3 — chars: List<Str> con cada caracter.
+        // Mini-batch Mb3 — chars: List<Str> with each character.
         (Value::Str(_), "chars") => str_chars(receiver, args, span),
-        // Mini-tanda Mb4 — split_at: divide en char idx → (Str, Str).
+        // Mini-batch Mb4 — split_at: divides at char idx → (Str, Str).
         (Value::Str(_), "split_at") => str_split_at(receiver, args, span),
-        // Mini-tanda Mb5 — lines + is_empty.
+        // Mini-batch Mb5 — lines + is_empty.
         (Value::Str(_), "lines") => str_lines(receiver, args, span),
         (Value::Str(_), "is_empty") => str_is_empty(receiver, args, span),
-        // Mini-tanda Mb7 — repeat_with (variante de repeat con sep).
+        // Mini-batch Mb7 — repeat_with (variant of repeat with sep).
         (Value::Str(_), "repeat_with") => str_repeat_with(receiver, args, span),
-        // Mini-tanda Mb8 — left/right/center.
+        // Mini-batch Mb8 — left/right/center.
         (Value::Str(_), "left") => str_left(receiver, args, span),
         (Value::Str(_), "right") => str_right(receiver, args, span),
         (Value::Str(_), "center") => str_center(receiver, args, span),
-        // Mini-tanda Mb9 — swap_case/title/is_alpha/is_digit/is_numeric.
+        // Mini-batch Mb9 — swap_case/title/is_alpha/is_digit/is_numeric.
         (Value::Str(_), "swap_case") => str_swap_case(receiver, args, span),
         (Value::Str(_), "title") => str_title(receiver, args, span),
         (Value::Str(_), "is_alpha") => str_is_alpha(receiver, args, span),
         (Value::Str(_), "is_digit") => str_is_digit(receiver, args, span),
         (Value::Str(_), "is_numeric") => str_is_numeric(receiver, args, span),
-        // ---- Mini-tanda Mb9 — methods sobre primitivos Int/Float ----
+        // ---- Mini-batch Mb9 — methods on primitive Int/Float ----
         //
-        // Hasta acá Fitz no tenía dispatch sobre `Value::Int`/`Value::Float`.
-        // Sumamos un set acotado de métodos análogos a Rust/Python.
-        // `n.abs()` / `x.abs()`, `n.to_str()` / `x.to_str()`, `n.to_str_base(b)`,
-        // `x.is_nan()` / `x.is_finite()`. Aridad fija; expect_arity.
+        // Until now Fitz had no dispatch on `Value::Int`/`Value::Float`.
+        // We add a bounded set of methods analogous to Rust/Python.
+        // `n.abs()` / `x.abs()`, `n.to_str()` / `x.to_str()`,
+        // `n.to_str_base(b)`, `x.is_nan()` / `x.is_finite()`.
+        // Fixed arity; expect_arity.
         (Value::Int(_), "abs") => {
             expect_arity("abs", &args, 0, span)?;
             let n = match receiver {
@@ -5944,7 +5988,7 @@ async fn dispatch_method(
                 Value::Float(x) => x,
                 _ => unreachable!(),
             };
-            // Mismo formato que Display del intérprete (3.0 → "3.0").
+            // Same format as the interpreter's Display (3.0 → "3.0").
             let s = if x.is_finite() && x.fract() == 0.0 {
                 format!("{:.1}", x)
             } else {
@@ -5969,22 +6013,22 @@ async fn dispatch_method(
             Ok(Value::Bool(x.is_finite()))
         }
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
-        // Mini-tanda Mb — variantes parciales de trim.
+        // Mini-batch Mb — partial variants of trim.
         (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
         (Value::Str(_), "trim_end") => str_trim_end(receiver, args, span),
         (Value::Str(_), "replace") => str_replace(receiver, args, span),
         (Value::Str(_), "repeat") => str_repeat(receiver, args, span),
-        // Mini-tanda Ex — búsqueda en strings.
+        // Mini-batch Ex — string search.
         (Value::Str(_), "find") => str_find(receiver, args, span),
         (Value::Str(_), "index_of") => str_index_of(receiver, args, span),
         (Value::Str(_), "last_index_of") => str_last_index_of(receiver, args, span),
-        // Mini-tanda Mb2 — padding (alineación de strings).
+        // Mini-batch Mb2 — padding (string alignment).
         (Value::Str(_), "pad_start") => str_pad_start(receiver, args, span),
         (Value::Str(_), "pad_end") => str_pad_end(receiver, args, span),
-        // Module: `mod.fn(args)` se resuelve buscando `fn` en el env del
-        // módulo y llamándola como cualquier función. No es method
-        // dispatch real — el módulo no es "el receptor", solo el lugar
-        // donde vive la función.
+        // Module: `mod.fn(args)` resolves by looking up `fn` in the
+        // module's env and calling it like any function. It is not
+        // real method dispatch — the module is not "the receiver",
+        // just the place where the function lives.
         (
             Value::Module {
                 name,
@@ -6002,11 +6046,12 @@ async fn dispatch_method(
             })?;
             invoke_value(value, args, method, span).await
         }
-        // Fase 8.1.4 — `pyobj.method(args)`: análogo al patrón de Module.
-        // Hacemos getattr para obtener el método/atributo (que puede ser
-        // function, bound method, etc.) y delegamos a `invoke_value`,
-        // que va a ratar la nueva rama de `Value::PyObject` callable.
-        // Cubre `math.sqrt(16.0)`, `os.path.join("a", "b")`, etc.
+        // Phase 8.1.4 — `pyobj.method(args)`: analogous to the Module
+        // pattern. We do getattr to obtain the method/attribute (which
+        // may be a function, bound method, etc.) and delegate to
+        // `invoke_value`, which will hit the new `Value::PyObject`
+        // callable branch. Covers `math.sqrt(16.0)`,
+        // `os.path.join("a", "b")`, etc.
         #[cfg(feature = "python")]
         (Value::PyObject(handle), _) => {
             let attr = crate::py_interop::get_attr(handle, method).map_err(|mut e| {
@@ -6018,12 +6063,12 @@ async fn dispatch_method(
             })?;
             invoke_value(attr, args, method, span).await
         }
-        // Fase 9.w.2 — WsConn<T> métodos. Los 4 paramétricos:
-        //   `recv() -> Result<T>` — bloquea hasta próximo frame.
-        //   `send(msg: T) -> Result<Null>` — envía al outbox del conn.
-        //   `broadcast(msg: T) -> Result<Null>` — al outbox de todos
-        //     los conns del endpoint (incluyendo el caller).
-        //   `close() -> Null` — cierra la conn (idempotente).
+        // Phase 9.w.2 — WsConn<T> methods. The 4 parametric ones:
+        //   `recv() -> Result<T>` — blocks until next frame.
+        //   `send(msg: T) -> Result<Null>` — sends to this conn's outbox.
+        //   `broadcast(msg: T) -> Result<Null>` — to the outbox of all
+        //     conns on the endpoint (including the caller).
+        //   `close() -> Null` — closes the conn (idempotent).
         (Value::WsConn(_), "recv") => ws_conn_recv(receiver, args, span).await,
         (Value::WsConn(_), "send") => ws_conn_send(receiver, args, span).await,
         (Value::WsConn(_), "broadcast") => ws_conn_broadcast(receiver, args, span).await,
@@ -6037,13 +6082,13 @@ async fn dispatch_method(
                 other,
             ),
         ))),
-        // Fase 10.1.b — DbConn métodos. Cada uno devuelve un
-        // `Value::Future` que el caller hace `.await?` para
-        // desempacar al `Result<T>` (paralelo a `WsConn.recv()`).
+        // Phase 10.1.b — DbConn methods. Each returns a `Value::Future`
+        // that the caller `.await?`s to unpack into `Result<T>`
+        // (parallel to `WsConn.recv()`).
         //   `query(sql, args) -> Future<Result<List<Map<Str, Any>>>>`
         //   `exec(sql, args)  -> Future<Result<Int>>` (rows affected)
-        //   `close()          -> Future<Null>` (idempotente)
-        //   `is_closed()      -> Future<Bool>` (diagnóstico)
+        //   `close()          -> Future<Null>` (idempotent)
+        //   `is_closed()      -> Future<Bool>` (diagnostic)
         (Value::DbConn(handle), "query") => {
             db_conn_query(Arc::clone(handle), &args).map_err(EvalSignal::Error)
         }
@@ -6057,9 +6102,9 @@ async fn dispatch_method(
             db_conn_is_closed(Arc::clone(handle), &args).map_err(EvalSignal::Error)
         }
         (Value::DbConn(handle), "transaction") => {
-            // Positional path (sin kwargs). El isolation se pasa solo
-            // via dispatch_method_named — acá `db.transaction(closure)`
-            // usa default Postgres (READ COMMITTED).
+            // Positional path (no kwargs). The isolation is only passed
+            // via dispatch_method_named — here `db.transaction(closure)`
+            // uses Postgres default (READ COMMITTED).
             if args.len() != 1 {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::WrongArgCount {
@@ -6087,8 +6132,8 @@ async fn dispatch_method(
                 other,
             ),
         ))),
-        // v0.10.24 — Date instance methods. Extracción (year/month/day/
-        // weekday), conversión (to_str/to_datetime), formato custom.
+        // v0.10.24 — Date instance methods. Extraction (year/month/day/
+        // weekday), conversion (to_str/to_datetime), custom format.
         (Value::Date(d), "year") => {
             expect_arity("year", &args, 0, span)?;
             use chrono::Datelike;
@@ -6123,8 +6168,8 @@ async fn dispatch_method(
                 .and_utc();
             Ok(Value::DateTime(dt))
         }
-        // v0.10.30 B.1 — Date arithmetic. `n` puede ser negativo; overflow
-        // del rango Postgres (NaiveDate ±9999) → FitzError claro.
+        // v0.10.30 B.1 — Date arithmetic. `n` can be negative; overflow
+        // of the Postgres range (NaiveDate ±9999) → clear FitzError.
         (Value::Date(d), "add_days") => date_add_days(*d, &args, span),
         (Value::Date(d), "add_months") => date_add_months(*d, &args, span),
         (Value::Date(d), "add_years") => date_add_months(
@@ -6132,15 +6177,15 @@ async fn dispatch_method(
             &date_scale_arg(&args, 12, "add_years", span)?,
             span,
         ),
-        // v0.10.30 B.2 — Date subtract (alias `add_*(-n)` por claridad).
+        // v0.10.30 B.2 — Date subtract (alias for `add_*(-n)` for clarity).
         (Value::Date(d), "subtract_days") => date_add_days(*d, &neg_int_arg(&args, "subtract_days", span)?, span),
         (Value::Date(d), "subtract_months") => date_add_months(*d, &neg_int_arg(&args, "subtract_months", span)?, span),
         (Value::Date(d), "subtract_years") => {
             let neg = neg_int_arg(&args, "subtract_years", span)?;
             date_add_months(*d, &date_scale_arg(&neg, 12, "subtract_years", span)?, span)
         }
-        // v0.10.30 B.3 — Date diff: `d1.diff_days(d2)` = días desde d2 a d1.
-        // Resultado signed Int (d2 después de d1 → negativo).
+        // v0.10.30 B.3 — Date diff: `d1.diff_days(d2)` = days from d2 to d1.
+        // Signed Int result (d2 after d1 → negative).
         (Value::Date(d), "diff_days") => date_diff_days(*d, &args, span),
         (Value::Date(_), other) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
@@ -6151,8 +6196,8 @@ async fn dispatch_method(
                 other,
             ),
         ))),
-        // v0.10.24 — DateTime instance methods. Extracción (year/.../second),
-        // timestamp Unix, conversión (to_str/date), formato custom.
+        // v0.10.24 — DateTime instance methods. Extraction (year/.../second),
+        // Unix timestamp, conversion (to_str/date), custom format.
         (Value::DateTime(dt), "year") => {
             expect_arity("year", &args, 0, span)?;
             use chrono::Datelike;
@@ -6184,8 +6229,8 @@ async fn dispatch_method(
             Ok(Value::Int(dt.second() as i64))
         }
         (Value::DateTime(dt), "timestamp") => {
-            // Unix epoch seconds. Posibilita aritmética simple sin
-            // tener Duration aún: `dt2.timestamp() - dt1.timestamp()`.
+            // Unix epoch seconds. Enables simple arithmetic without
+            // a Duration type yet: `dt2.timestamp() - dt1.timestamp()`.
             expect_arity("timestamp", &args, 0, span)?;
             Ok(Value::Int(dt.timestamp()))
         }
@@ -6199,11 +6244,11 @@ async fn dispatch_method(
             Ok(Value::Date(dt.date_naive()))
         }
         (Value::DateTime(dt), "format") => datetime_format(*dt, &args, span),
-        // v0.10.30 B.1 — DateTime arithmetic. Sub-second units van como
-        // `Duration::seconds/minutes/hours`; days/months/years usan
-        // `checked_add_*` symétrico al patrón Date para preservar
-        // semántica calendar-aware (no Duration::days * N que ignora
-        // DST/leap years).
+        // v0.10.30 B.1 — DateTime arithmetic. Sub-second units go via
+        // `Duration::seconds/minutes/hours`; days/months/years use
+        // `checked_add_*` symmetric to the Date pattern to preserve
+        // calendar-aware semantics (not Duration::days * N which
+        // ignores DST/leap years).
         (Value::DateTime(dt), "add_seconds") => datetime_add_duration(*dt, &args, 1, "add_seconds", span),
         (Value::DateTime(dt), "add_minutes") => datetime_add_duration(*dt, &args, 60, "add_minutes", span),
         (Value::DateTime(dt), "add_hours") => datetime_add_duration(*dt, &args, 3600, "add_hours", span),
@@ -6224,17 +6269,17 @@ async fn dispatch_method(
             let neg = neg_int_arg(&args, "subtract_years", span)?;
             datetime_add_months(*dt, &date_scale_arg(&neg, 12, "subtract_years", span)?, span)
         }
-        // v0.10.30 B.3 — DateTime diff: signed Int seconds entre dt2 y self.
+        // v0.10.30 B.3 — DateTime diff: signed Int seconds between dt2 and self.
         (Value::DateTime(dt), "diff_seconds") => datetime_diff(*dt, &args, 1, "diff_seconds", span),
         (Value::DateTime(dt), "diff_minutes") => datetime_diff(*dt, &args, 60, "diff_minutes", span),
         (Value::DateTime(dt), "diff_hours") => datetime_diff(*dt, &args, 3600, "diff_hours", span),
         (Value::DateTime(dt), "diff_days") => datetime_diff(*dt, &args, 86_400, "diff_days", span),
-        // v0.10.30 B.7 — Timezone display. `to_local()` (sin dep extra,
-        // formato ISO 8601 en el TZ del sistema) cubre el 90% del caso
-        // real ("mostrar al user en su huso"). `in_tz(iana)` (vía
-        // `chrono-tz`) cubre conversion arbitraria a un IANA tz name.
-        // El instante en sí (UTC interno) NO cambia — son helpers de
-        // formato, no aritmética.
+        // v0.10.30 B.7 — Timezone display. `to_local()` (no extra dep,
+        // ISO 8601 format in the system TZ) covers the 90% case
+        // ("display to the user in their tz"). `in_tz(iana)` (via
+        // `chrono-tz`) covers arbitrary conversion to an IANA tz name.
+        // The instant itself (UTC inside) does NOT change — these are
+        // formatting helpers, not arithmetic.
         (Value::DateTime(dt), "to_local") => {
             expect_arity("to_local", &args, 0, span)?;
             let local = dt.with_timezone(&chrono::Local);
@@ -6250,9 +6295,9 @@ async fn dispatch_method(
                 other,
             ),
         ))),
-        // v0.10.24 — Uuid instance methods. Sin extracción interna
-        // (versión/variant/etc. en MVP — agregable post-MVP si pide);
-        // solo to_str + is_nil que cubren el 99% del caso real.
+        // v0.10.24 — Uuid instance methods. No internal extraction
+        // (version/variant/etc. in MVP — addable post-MVP if asked);
+        // only to_str + is_nil, which cover 99% of the real case.
         (Value::Uuid(u), "to_str") => {
             expect_arity("to_str", &args, 0, span)?;
             Ok(Value::Str(u.to_string()))
@@ -6270,7 +6315,7 @@ async fn dispatch_method(
                 other,
             ),
         ))),
-        // U1 (v0.10.13) — migrado al constructor helper.
+        // U1 (v0.10.13) — migrated to the constructor helper.
         _ => Err(EvalSignal::Error(FitzError::method_not_found(
             span.line,
             span.column,
@@ -6280,11 +6325,11 @@ async fn dispatch_method(
     }
 }
 
-/// v0.10.24 — `date.format(fmt)` y `dt.format(fmt)`. Usan los specifiers
-/// estándar de chrono (`%Y`/`%m`/`%d`/`%H`/`%M`/`%S`/`%A` ...). Documentamos
-/// los más comunes en la guía. El formato `%` invalido panic-eaba en
-/// chrono <0.4.20; en 0.4.x moderno solo emite la string sin sustitución.
-/// Aridad fija 1 + Str.
+/// v0.10.24 — `date.format(fmt)` and `dt.format(fmt)`. They use the
+/// standard chrono specifiers (`%Y`/`%m`/`%d`/`%H`/`%M`/`%S`/`%A` ...).
+/// The most common ones are documented in the guide. An invalid `%`
+/// format used to panic in chrono <0.4.20; in modern 0.4.x it just
+/// emits the string without substitution. Fixed arity 1 + Str.
 fn date_format(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
     expect_arity("format", args, 1, span)?;
     let fmt = match &args[0] {
@@ -6337,8 +6382,8 @@ fn datetime_format(
 // v0.10.30 (Tier B — Date/DateTime arithmetic + diff + timezone)
 // ---------------------------------------------------------------------------
 
-/// Lee `args[0]` como `Value::Int` con check de aridad 1. Helper común
-/// para todos los `.add_*(n)` / `.subtract_*(n)` / `.diff_*(other)`.
+/// Reads `args[0]` as `Value::Int` with arity 1 check. Common helper
+/// for every `.add_*(n)` / `.subtract_*(n)` / `.diff_*(other)`.
 fn expect_int_arg(method: &str, args: &[Value], span: Span) -> EvalResult<i64> {
     expect_arity(method, args, 1, span)?;
     match &args[0] {
@@ -6359,10 +6404,10 @@ fn expect_int_arg(method: &str, args: &[Value], span: Span) -> EvalResult<i64> {
     }
 }
 
-/// Negativiza `args[0]` como Int para implementar `.subtract_*(n)`
-/// como `.add_*(-n)` sin duplicar dispatch. Devuelve `[Value::Int(-n)]`.
-/// Overflow defensivo via `checked_neg` (i64::MIN → error claro en vez
-/// de panic en debug y wrap-around en release).
+/// Negates `args[0]` as Int to implement `.subtract_*(n)` as
+/// `.add_*(-n)` without duplicating dispatch. Returns `[Value::Int(-n)]`.
+/// Defensive overflow via `checked_neg` (i64::MIN → clear error
+/// instead of debug panic + release wrap-around).
 fn neg_int_arg(args: &[Value], method: &str, span: Span) -> EvalResult<Vec<Value>> {
     let n = expect_int_arg(method, args, span)?;
     match n.checked_neg() {
@@ -6376,8 +6421,9 @@ fn neg_int_arg(args: &[Value], method: &str, span: Span) -> EvalResult<Vec<Value
     }
 }
 
-/// Escala el primer arg Int por un factor (usado para `add_years` = `add_months * 12`).
-/// Overflow → error claro. Devuelve `[Value::Int(n * factor)]`.
+/// Scales the first Int arg by a factor (used for `add_years` =
+/// `add_months * 12`). Overflow → clear error. Returns
+/// `[Value::Int(n * factor)]`.
 fn date_scale_arg(args: &[Value], factor: i64, method: &str, span: Span) -> EvalResult<Vec<Value>> {
     let n = expect_int_arg(method, args, span)?;
     match n.checked_mul(factor) {
@@ -6394,8 +6440,9 @@ fn date_scale_arg(args: &[Value], factor: i64, method: &str, span: Span) -> Eval
     }
 }
 
-/// `date.add_days(n)` — paralelo a `chrono::Duration::days(n)`. `n` signed.
-/// Overflow del rango `NaiveDate` (~-9999..+9999) → error claro.
+/// `date.add_days(n)` — parallel to `chrono::Duration::days(n)`.
+/// `n` is signed. Overflow of the `NaiveDate` range (~-9999..+9999)
+/// → clear error.
 fn date_add_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
     let n = expect_int_arg("add_days", args, span)?;
     match d.checked_add_signed(chrono::Duration::days(n)) {
@@ -6412,11 +6459,12 @@ fn date_add_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult
     }
 }
 
-/// `date.add_months(n)` calendar-aware (preserva día del mes cuando es
-/// válido, clampea al último día del mes objetivo si no — ej `Jan 31 +
-/// 1 mes = Feb 28/29`). `n` signed: positivo → forward, negativo →
-/// backward. Implementado vía `chrono::Months::new(u32)` con
-/// `checked_add_months` / `checked_sub_months` según signo.
+/// `date.add_months(n)` calendar-aware (preserves the day of month
+/// when valid, clamps to the last day of the target month otherwise
+/// — e.g. `Jan 31 + 1 month = Feb 28/29`). `n` is signed: positive
+/// → forward, negative → backward. Implemented via
+/// `chrono::Months::new(u32)` with `checked_add_months` /
+/// `checked_sub_months` based on sign.
 fn date_add_months(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
     let n = expect_int_arg("add_months", args, span)?;
     let result = if n >= 0 {
@@ -6433,7 +6481,7 @@ fn date_add_months(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResu
         })?;
         d.checked_add_months(chrono::Months::new(months))
     } else {
-        // i64::MIN → unsigned_abs OK (= 2^63), pero >u32::MAX.
+        // i64::MIN → unsigned_abs OK (= 2^63), but >u32::MAX.
         let months_u64 = n.unsigned_abs();
         let months = u32::try_from(months_u64).map_err(|_| {
             EvalSignal::Error(FitzError::new(
@@ -6462,7 +6510,7 @@ fn date_add_months(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResu
     }
 }
 
-/// `d1.diff_days(d2)` → `d1 - d2` en días, signed. d2 después de d1 → negativo.
+/// `d1.diff_days(d2)` → `d1 - d2` in days, signed. d2 after d1 → negative.
 fn date_diff_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResult<Value> {
     expect_arity("diff_days", args, 1, span)?;
     let other = match &args[0] {
@@ -6486,9 +6534,9 @@ fn date_diff_days(d: chrono::NaiveDate, args: &[Value], span: Span) -> EvalResul
     Ok(Value::Int(dur.num_days()))
 }
 
-/// `dt.add_seconds/minutes/hours(n)` — multiplica `n` por el factor del
-/// método (1/60/3600) y delega a `Duration::seconds(total)`. Overflow del
-/// rango DateTime → error claro.
+/// `dt.add_seconds/minutes/hours(n)` — multiplies `n` by the method's
+/// factor (1/60/3600) and delegates to `Duration::seconds(total)`.
+/// Overflow of the DateTime range → clear error.
 fn datetime_add_duration(
     dt: chrono::DateTime<chrono::Utc>,
     args: &[Value],
@@ -6525,9 +6573,9 @@ fn datetime_add_duration(
     }
 }
 
-/// `dt.add_days(n)` con `chrono::Duration::days(n)`. Calendar-naive
-/// (no toca month/year). Para day-of-month arithmetic preservar usar
-/// `add_months(n)` (paralelo a Date).
+/// `dt.add_days(n)` with `chrono::Duration::days(n)`. Calendar-naive
+/// (does not touch month/year). To preserve day-of-month arithmetic
+/// use `add_months(n)` (parallel to Date).
 fn datetime_add_days(
     dt: chrono::DateTime<chrono::Utc>,
     args: &[Value],
@@ -6548,9 +6596,9 @@ fn datetime_add_days(
     }
 }
 
-/// `dt.add_months(n)` calendar-aware sobre DateTime. Paralelo a
-/// `date_add_months`: preserva la hora UTC del instante original,
-/// el cambio es solo en year/month/day (con clamping).
+/// `dt.add_months(n)` calendar-aware on DateTime. Parallel to
+/// `date_add_months`: preserves the UTC hour of the original instant,
+/// the change is only in year/month/day (with clamping).
 fn datetime_add_months(
     dt: chrono::DateTime<chrono::Utc>,
     args: &[Value],
@@ -6599,9 +6647,10 @@ fn datetime_add_months(
     }
 }
 
-/// `dt1.diff_{seconds,minutes,hours,days}(dt2)` → `(dt1 - dt2)` en la unidad
-/// pedida, signed. `factor_secs` es 1/60/3600/86400. Truncamiento hacia 0
-/// para unidades > 1 segundo (paralelo a `chrono::Duration::num_*`).
+/// `dt1.diff_{seconds,minutes,hours,days}(dt2)` → `(dt1 - dt2)` in
+/// the requested unit, signed. `factor_secs` is 1/60/3600/86400.
+/// Truncation toward 0 for units > 1 second (parallel to
+/// `chrono::Duration::num_*`).
 fn datetime_diff(
     dt: chrono::DateTime<chrono::Utc>,
     args: &[Value],
@@ -6640,10 +6689,11 @@ fn datetime_diff(
     Ok(Value::Int(result))
 }
 
-/// `dt.in_tz(iana)` — formatea el instante UTC en la zona IANA pedida
-/// (`"America/Argentina/Buenos_Aires"`, `"Europe/Paris"`, etc.) como
-/// ISO 8601 con offset (`%Y-%m-%dT%H:%M:%S%:z`). El instante no cambia
-/// — esto es un helper de display. IANA name desconocido → `Err(Str)`.
+/// `dt.in_tz(iana)` — formats the UTC instant in the requested IANA
+/// zone (`"America/Argentina/Buenos_Aires"`, `"Europe/Paris"`, etc.)
+/// as ISO 8601 with offset (`%Y-%m-%dT%H:%M:%S%:z`). The instant does
+/// not change — this is a display helper. Unknown IANA name →
+/// `Err(Str)`.
 fn datetime_in_tz(
     dt: chrono::DateTime<chrono::Utc>,
     args: &[Value],
@@ -6684,24 +6734,24 @@ fn datetime_in_tz(
 }
 
 // ---------------------------------------------------------------------------
-// Fase 9.w.2 — WsConn<T> métodos del runtime
+// Phase 9.w.2 — WsConn<T> runtime methods
 // ---------------------------------------------------------------------------
 //
-// Los 4 métodos paramétricos del checker (9.w.2.a) dispatcheados sobre
-// `Value::WsConn(Arc<WsConnHandle>)`. Marshaling JSON automático del
-// T: `recv()` parsea el frame text como JSON y lo convierte a `Value`;
-// `send`/`broadcast` serializan el `Value` a JSON y mandan text frame.
-// El error de transporte va por el `Result::Err` de Fitz.
+// The 4 parametric methods from the checker (9.w.2.a) dispatched on
+// `Value::WsConn(Arc<WsConnHandle>)`. Automatic JSON marshaling of
+// T: `recv()` parses the text frame as JSON and converts it to `Value`;
+// `send`/`broadcast` serialize the `Value` to JSON and send a text
+// frame. Transport errors go through Fitz's `Result::Err`.
 
-/// 9.w.2-binary-frames — discriminador del modo del `WsConn`. Cuando
-/// `msg_type` es `TypeExpr::Named { name: "Bytes", .. }`, el conn opera
-/// en modo binary: `recv()` espera `Message::Binary` raw → `Value::Bytes`,
-/// y `send`/`broadcast` aceptan `Value::Bytes` exclusivamente y emiten
-/// `WsOutMessage::Binary`. Cualquier otro T (Str / nominal / etc.) sigue
-/// con el modelo JSON-marshalled text frame.
+/// 9.w.2-binary-frames — mode discriminator of the `WsConn`. When
+/// `msg_type` is `TypeExpr::Named { name: "Bytes", .. }`, the conn
+/// operates in binary mode: `recv()` expects raw `Message::Binary` →
+/// `Value::Bytes`, and `send`/`broadcast` accept only `Value::Bytes`
+/// and emit `WsOutMessage::Binary`. Any other T (Str / nominal / etc.)
+/// stays with the JSON-marshalled text frame model.
 ///
-/// `None` (conns sin contexto de tipo — tests) cae al modo text para
-/// preservar backward-compat.
+/// `None` (conns without type context — tests) falls back to text mode
+/// to preserve backward-compat.
 fn ws_msg_is_bytes(msg_type: &Option<crate::ast::TypeExpr>) -> bool {
     matches!(
         msg_type.as_ref(),
@@ -6734,16 +6784,15 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
         )))));
     }
     let is_bytes_mode = ws_msg_is_bytes(&handle.msg_type);
-    // Loop locking: cada iteración locka el rx, awaita el próximo
-    // frame, suelta el lock al volver. Diseñado para que send/broadcast
-    // concurrentes no se bloqueen (sink half tiene su propio Mutex
-    // adentro del writer task).
+    // Loop locking: each iteration locks the rx, awaits the next frame,
+    // releases the lock on return. Designed so concurrent send/broadcast
+    // do not block (the sink half has its own Mutex inside the writer
+    // task).
     let rx = handle.rx.clone();
-    // tokio::sync::Mutex `.lock().await` y `guard: Send` — el
-    // lock se sostiene a través del frame .await siguiente sin
-    // perder Send-ness del future contenedor. Solo este task tiene
-    // acceso legítimo al rx (el handler Fitz es secuencial sobre
-    // recv()).
+    // tokio::sync::Mutex `.lock().await` and `guard: Send` — the
+    // lock is held across the next frame .await without losing the
+    // containing future's Send-ness. Only this task has legitimate
+    // access to the rx (the Fitz handler is sequential over recv()).
     let next_frame = {
         let mut guard = rx.lock().await;
         guard.next_frame().await
@@ -6751,26 +6800,26 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
     match next_frame {
         Ok(Some(frame)) => {
             match (is_bytes_mode, frame) {
-                // T = Bytes + frame binario → match nativo.
+                // T = Bytes + binary frame → native match.
                 (true, crate::value::IncomingFrame::Binary(bs)) => {
                     Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bytes(bs)))))
                 }
-                // T = Bytes + frame text → mismatch claro.
+                // T = Bytes + text frame → clear mismatch.
                 (true, crate::value::IncomingFrame::Text(_)) => {
                     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
                         "WsConn.recv(): se esperaba frame binario (T = Bytes), llegó text"
                             .to_string(),
                     )))))
                 }
-                // T ≠ Bytes + frame binario → mismatch claro.
+                // T ≠ Bytes + binary frame → clear mismatch.
                 (false, crate::value::IncomingFrame::Binary(_)) => {
                     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
                         "WsConn.recv(): se esperaba frame text JSON, llegó binary (usá WsConn<Bytes> para frames binarios)"
                             .to_string(),
                     )))))
                 }
-                // T ≠ Bytes + frame text → JSON parse + coerce
-                // `Map → Instance` paralelo a 8.4.3 (anotaciones runtime).
+                // T ≠ Bytes + text frame → JSON parse + coerce
+                // `Map → Instance`, parallel to 8.4.3 (runtime annotations).
                 (false, crate::value::IncomingFrame::Text(text)) => {
                     match serde_json::from_str::<serde_json::Value>(&text) {
                         Ok(j) => {
@@ -6840,12 +6889,13 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             "WsConn cerrada".to_string(),
         )))));
     }
-    // 9.w.2-binary-frames + wsconn-bidir — branch por SEND type
-    // (para `WsConn<In, Out>` asimétrico, send/broadcast usan `Out`,
-    // no `In`).
+    // 9.w.2-binary-frames + wsconn-bidir — branch by SEND type
+    // (for asymmetric `WsConn<In, Out>`, send/broadcast use `Out`,
+    // not `In`).
     let out_msg = if ws_msg_is_bytes(&handle.send_type) {
-        // SEND = Bytes: el arg debe ser Value::Bytes; el checker ya lo
-        // validó estáticamente, pero defendemos el runtime path.
+        // SEND = Bytes: the arg must be Value::Bytes; the checker
+        // already validated this statically, but we defend the
+        // runtime path.
         match &args[0] {
             Value::Bytes(bs) => crate::value::WsOutMessage::Binary(bs.clone()),
             other => {
@@ -6858,7 +6908,7 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             }
         }
     } else {
-        // T ≠ Bytes: JSON-marshalled text frame, como antes.
+        // T ≠ Bytes: JSON-marshalled text frame, as before.
         let payload = match crate::http::value_to_json(&args[0]) {
             Ok(j) => match serde_json::to_string(&j) {
                 Ok(s) => s,
@@ -6908,11 +6958,11 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
         Value::WsConn(h) => h,
         _ => unreachable!(),
     };
-    // broadcast NO requiere que el sender esté vivo — el otro lado
-    // puede haberlo cerrado pero los demás conns del endpoint siguen
-    // recibiendo. Si el sender está cerrado, igual se intenta el
-    // broadcast (decisión: useful para "despedida" antes de cerrar).
-    // wsconn-bidir: broadcast usa SEND type (paralelo a send).
+    // broadcast does NOT require the sender to be alive — the other
+    // side may have closed it but the other conns on the endpoint
+    // keep receiving. If the sender is closed we still try the
+    // broadcast (decision: useful for "farewell" before closing).
+    // wsconn-bidir: broadcast uses SEND type (parallel to send).
     if ws_msg_is_bytes(&handle.send_type) {
         // SEND = Bytes: broadcast raw binary.
         let bs = match &args[0] {
@@ -6928,7 +6978,7 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
         };
         handle.broadcaster.broadcast_binary(&handle.endpoint, bs);
     } else {
-        // T ≠ Bytes: JSON-marshalled text broadcast (camino histórico).
+        // T ≠ Bytes: JSON-marshalled text broadcast (historical path).
         let payload = match crate::http::value_to_json(&args[0]) {
             Ok(j) => match serde_json::to_string(&j) {
                 Ok(s) => s,
@@ -6968,7 +7018,7 @@ fn ws_conn_close(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
         Value::WsConn(h) => h,
         _ => unreachable!(),
     };
-    // Idempotente: si ya estaba cerrada, no-op.
+    // Idempotent: if already closed, no-op.
     if handle.closed.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(Value::Null);
     }
@@ -6980,28 +7030,28 @@ fn ws_conn_close(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
 }
 
 // ---------------------------------------------------------------------------
-// R.3 — Invocación de método custom sobre Value::Instance
+// R.3 — Custom method invocation on Value::Instance
 // ---------------------------------------------------------------------------
 //
-// "Opción A" — los fields del Instance son visibles como variables
-// locales en el body del método. Implementación:
-//  1. Aridad: el método NO declara `self` en sus params. La llamada
-//     `u.greet(arg1)` pasa exactamente `arg1` (no el receiver), así que
-//     `args.len() == m.params.len()`.
-//  2. Scope: scope hijo del env del call site. Adentro pre-declaramos
-//     cada field del Instance como var local (con su valor actual);
-//     después declaramos los params (si un param se llama igual que un
-//     field, el param gana — Rust hace lo mismo con shadowing).
-//  3. El body se ejecuta vía `eval_block` con `Stmt::Return` y `?`
-//     bridgeados por `EvalSignal::Return`/`Error`.
-//  4. Si es async, el body puede usar `.await`; el caller debe
-//     await-ear el `Value::Future` resultante igual que con cualquier
-//     async fn. Para MVP el `is_async` del método se honora propagando
-//     a través de `register_user_function`? — en realidad invocamos
-//     en línea acá; los `.await` adentro del body funcionan porque
-//     `eval_block` es async. El método sync devuelve `Value`
-//     directamente; el método async devuelve un Future construido por
-//     el caller (cuando aterrice async methods, hoy MVP no lo hace).
+// "Option A" — the Instance's fields are visible as local variables
+// in the method body. Implementation:
+//  1. Arity: the method does NOT declare `self` in its params. The
+//     call `u.greet(arg1)` passes exactly `arg1` (not the receiver),
+//     so `args.len() == m.params.len()`.
+//  2. Scope: child scope of the call site's env. Inside, we pre-declare
+//     each Instance field as a local var (with its current value);
+//     then we declare the params (if a param shares a name with a
+//     field, the param wins — Rust does the same with shadowing).
+//  3. The body executes via `eval_block` with `Stmt::Return` and `?`
+//     bridged through `EvalSignal::Return`/`Error`.
+//  4. If async, the body can use `.await`; the caller must await the
+//     resulting `Value::Future` like with any async fn. For MVP the
+//     method's `is_async` is honored by propagating through
+//     `register_user_function`? — actually we invoke inline here; the
+//     `.await`s inside the body work because `eval_block` is async.
+//     The sync method returns `Value` directly; an async method
+//     returns a Future built by the caller (when async methods land,
+//     today MVP does not do that).
 
 async fn invoke_custom_method(
     receiver: Value,
@@ -7010,7 +7060,7 @@ async fn invoke_custom_method(
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
-    // Fp — aridad con defaults: requerido = params SIN default; total = params.len().
+    // Fp — arity with defaults: required = params WITHOUT default; total = params.len().
     let required = method.params.iter().filter(|p| p.default.is_none()).count();
     if args.len() < required || args.len() > method.params.len() {
         return Err(EvalSignal::Error(FitzError::new(
@@ -7039,17 +7089,17 @@ async fn invoke_custom_method(
         )));
     }
 
-    // Scope hijo del env del call site.
+    // Child scope of the call site's env.
     let method_env = Environment::new_child(env.clone());
 
-    // Pre-declarar fields del Instance como locales.
+    // Pre-declare the Instance's fields as locals.
     if let Value::Instance { fields, .. } = &receiver {
         for (fname, fvalue) in fields.lock().iter() {
             method_env.lock().define(fname.clone(), fvalue.clone());
         }
     }
 
-    // Declarar params: args provistos + defaults para los faltantes.
+    // Declare params: provided args + defaults for the missing ones.
     let provided = args.len();
     let mut arg_iter = args.into_iter();
     for (i, p) in method.params.iter().enumerate() {
@@ -7062,10 +7112,9 @@ async fn invoke_custom_method(
         method_env.lock().define(p.name.clone(), v);
     }
 
-    // R.3-async: si el método es async, envolvemos el body en un
-    // `Value::Future` perezoso. El `.await` del caller fuerza la
-    // evaluación. Patrón paralelo a Value::Function async (línea
-    // 2670 aprox).
+    // R.3-async: if the method is async, we wrap the body in a lazy
+    // `Value::Future`. The caller's `.await` forces evaluation.
+    // Pattern parallel to async Value::Function (around line 2670).
     if method.is_async {
         let owned_body = method.body;
         let fut: crate::value::FitzFuture = Box::pin(async move {
@@ -7081,9 +7130,9 @@ async fn invoke_custom_method(
         return Ok(Value::new_future(fut));
     }
 
-    // Sync: ejecutar el body. `Stmt::Return` rebota como
-    // EvalSignal::Return y lo desempacamos al valor; cualquier otra
-    // señal sube.
+    // Sync: execute the body. `Stmt::Return` bounces as
+    // EvalSignal::Return and we unwrap it to the value; any other
+    // signal bubbles up.
     match eval_block(&method.body, method_env).await {
         Ok(v) => Ok(v),
         Err(EvalSignal::Return(v)) => Ok(v),
@@ -7091,18 +7140,18 @@ async fn invoke_custom_method(
     }
 }
 
-/// Mini-tanda St — invoca un método estático declarado en el `type`
-/// body. Diferencia clave con `invoke_custom_method`: NO pre-declara
-/// los fields del tipo como locales (no hay receiver instance). Es
-/// más parecido a invocar una fn top-level: solo los params son
-/// locales del scope hijo.
+/// Mini-batch St — invokes a static method declared in the `type`
+/// body. Key difference with `invoke_custom_method`: it does NOT
+/// pre-declare the type's fields as locals (there is no receiver
+/// instance). More like calling a top-level fn: only the params are
+/// locals of the child scope.
 async fn invoke_static_method(
     method: crate::ast::MethodDef,
     args: Vec<Value>,
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
-    // Fp — aridad con defaults.
+    // Fp — arity with defaults.
     let required = method.params.iter().filter(|p| p.default.is_none()).count();
     if args.len() < required || args.len() > method.params.len() {
         return Err(EvalSignal::Error(FitzError::new(
@@ -7167,23 +7216,23 @@ async fn invoke_static_method(
 }
 
 // ---------------------------------------------------------------------------
-// Métodos built-in — implementaciones
+// Built-in methods — implementations
 // ---------------------------------------------------------------------------
 //
-// Cada función toma el receptor (consumido por valor — pero como las
-// colecciones internas son `Arc<Mutex<>>`, lo que importa es el Arc, no
-// el clone) y los args ya evaluados. Devuelve un `EvalResult<Value>`.
+// Each function takes the receiver (consumed by value — but since the
+// inner collections are `Arc<Mutex<>>`, what matters is the Arc, not
+// the clone) and the already-evaluated args. Returns `EvalResult<Value>`.
 //
-// Convenciones:
-//  - Aridad chequeada arriba de todo con `expect_arity`.
-//  - Métodos que mutan (push, pop) devuelven `Value::Null` o el valor
-//    extraído; los puros (map, filter, find) devuelven la colección o
-//    elemento computado.
-//  - "Buscar y no encontrar" se modela con `Result`: `find` y `get`
-//    devuelven `Ok(v)` / `Err(<msg>)`.
+// Conventions:
+//  - Arity checked up front with `expect_arity`.
+//  - Mutating methods (push, pop) return `Value::Null` or the extracted
+//    value; pure ones (map, filter, find) return the collection or
+//    computed element.
+//  - "Search and not find" is modeled with `Result`: `find` and `get`
+//    return `Ok(v)` / `Err(<msg>)`.
 
-/// Helper: chequea que `args.len() == expected`; si no, devuelve error
-/// de aridad citando el método.
+/// Helper: checks that `args.len() == expected`; otherwise returns an
+/// arity error citing the method.
 fn expect_arity(method: &str, args: &[Value], expected: usize, span: Span) -> EvalResult<()> {
     if args.len() != expected {
         return Err(EvalSignal::Error(FitzError::new(
@@ -7204,9 +7253,9 @@ fn expect_arity(method: &str, args: &[Value], expected: usize, span: Span) -> Ev
     Ok(())
 }
 
-/// Helper: invoca un `Value` que tiene que ser callable, con UN solo
-/// argumento. Para `map`/`filter`/`find`, donde la callback es siempre
-/// unaria.
+/// Helper: invokes a `Value` that must be callable, with a SINGLE
+/// argument. For `map`/`filter`/`find`, where the callback is always
+/// unary.
 #[async_recursion]
 async fn invoke_callback(
     callback: &Value,
@@ -7232,7 +7281,7 @@ fn list_push(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
         _ => unreachable!(),
     };
     let mut v = args.into_iter().next().unwrap();
-    // Si quien empuja se pasó a sí mismo, evitamos un re-borrow doble.
+    // If the pusher passed itself, we avoid a double re-borrow.
     items.lock().push(std::mem::replace(&mut v, Value::Null));
     Ok(Value::Null)
 }
@@ -7263,8 +7312,8 @@ async fn list_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
         _ => unreachable!(),
     };
     let callback = &args[0];
-    // Snapshot del Vec para evitar re-entrancia al RefCell si la callback
-    // mutase la lista original.
+    // Snapshot the Vec to avoid re-entrancy on the RefCell if the
+    // callback mutates the original list.
     let snapshot: Vec<Value> = items.lock().clone();
     let mut out = Vec::with_capacity(snapshot.len());
     for item in snapshot {
@@ -7354,9 +7403,9 @@ fn list_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     Ok(Value::Int(n))
 }
 
-/// Mini-tanda Lx — `xs.any(pred)`: `true` si algún elemento satisface
-/// el predicado. Lista vacía → `false` (paralelo a Python/Rust).
-/// Short-circuit en el primer `true`.
+/// Mini-batch Lx — `xs.any(pred)`: `true` if any element satisfies
+/// the predicate. Empty list → `false` (parallel to Python/Rust).
+/// Short-circuit on the first `true`.
 #[async_recursion]
 async fn list_any(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("any", &args, 1, span)?;
@@ -7390,10 +7439,9 @@ async fn list_any(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::Bool(false))
 }
 
-/// Mini-tanda Lx — `xs.all(pred)`: `true` si TODOS los elementos
-/// satisfacen el predicado. Lista vacía → `true` (vacuamente todo
-/// es verdad, paralelo a Python `all([])`). Short-circuit en el
-/// primer `false`.
+/// Mini-batch Lx — `xs.all(pred)`: `true` if ALL elements satisfy
+/// the predicate. Empty list → `true` (vacuously true, parallel to
+/// Python `all([])`). Short-circuit on the first `false`.
 #[async_recursion]
 async fn list_all(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("all", &args, 1, span)?;
@@ -7427,8 +7475,8 @@ async fn list_all(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::Bool(true))
 }
 
-/// Mini-tanda Lx — `xs.count(pred)`: cuenta cuántos elementos
-/// satisfacen el predicado. Devuelve `Int`.
+/// Mini-batch Lx — `xs.count(pred)`: counts how many elements
+/// satisfy the predicate. Returns `Int`.
 #[async_recursion]
 async fn list_count(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("count", &args, 1, span)?;
@@ -7463,12 +7511,12 @@ async fn list_count(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
     Ok(Value::Int(n))
 }
 
-/// Mini-tanda Ex2 — `xs.flat_map(fn(T) -> List<U>)`: aplica `fn` a
-/// cada elemento y aplana el resultado. Combinación de map + flatten
-/// en un solo paso (paralelo a Rust `Iterator::flat_map` y Python
+/// Mini-batch Ex2 — `xs.flat_map(fn(T) -> List<U>)`: applies `fn` to
+/// each element and flattens the result. Combines map + flatten in
+/// one step (parallel to Rust `Iterator::flat_map` and Python
 /// `[y for x in xs for y in fn(x)]`).
 ///
-/// Si el callback NO devuelve List, error de runtime claro.
+/// If the callback does NOT return List, a clear runtime error.
 #[async_recursion]
 async fn list_flat_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("flat_map", &args, 1, span)?;
@@ -7501,10 +7549,9 @@ async fn list_flat_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalRes
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Ex2 — `xs.first()`: primer elemento o `Err("no encontrado")`
-/// si la lista está vacía. Devuelve `Result<T>` para ser consistente con
-/// `find`/`find_index` (todos los accessors que pueden fallar devuelven
-/// Result).
+/// Mini-batch Ex2 — `xs.first()`: first element or `Err("no encontrado")`
+/// if the list is empty. Returns `Result<T>` to be consistent with
+/// `find`/`find_index` (all accessors that can fail return Result).
 fn list_first(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("first", &args, 0, span)?;
     let items = match receiver {
@@ -7520,7 +7567,7 @@ fn list_first(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     }
 }
 
-/// Mini-tanda Ex2 — `xs.last()`: último elemento o `Err`.
+/// Mini-batch Ex2 — `xs.last()`: last element or `Err`.
 fn list_last(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("last", &args, 0, span)?;
     let items = match receiver {
@@ -7536,11 +7583,11 @@ fn list_last(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     }
 }
 
-/// Mini-tanda Mb2 — Helper común para `min`/`max`/`sum`: extrae el
-/// receptor, valida que sea homogéneo Int o Float. Devuelve
-/// `Err` con `lista vacía` cuando corresponde a min/max; sum lo
-/// maneja con sentinel cero adentro de cada rama. Devuelve
-/// `(items_snapshot, "Int"|"Float")` o un error claro.
+/// Mini-batch Mb2 — Common helper for `min`/`max`/`sum`: extracts
+/// the receiver, validates homogeneous Int or Float. Returns
+/// `Err` with `lista vacía` when applicable to min/max; sum handles
+/// it with a zero sentinel inside each branch. Returns
+/// `(items_snapshot, "Int"|"Float")` or a clear error.
 fn require_numeric_list(
     receiver: Value,
     method: &str,
@@ -7597,10 +7644,10 @@ fn require_numeric_list(
     Ok((snapshot, first_kind))
 }
 
-/// Mini-tanda Mb2 — `xs.min()` / `xs.max()` sobre `List<Int>` o
-/// `List<Float>`. Devuelven `Result<T>`: `Err("lista vacía")` si la
-/// lista no tiene elementos. Para `Float` usamos `partial_cmp`
-/// devolviendo `Equal` ante NaN (determinístico, paralelo a `sort`).
+/// Mini-batch Mb2 — `xs.min()` / `xs.max()` on `List<Int>` or
+/// `List<Float>`. Return `Result<T>`: `Err("lista vacía")` if the
+/// list has no elements. For `Float` we use `partial_cmp` returning
+/// `Equal` on NaN (deterministic, parallel to `sort`).
 fn list_min(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("min", &args, 0, span)?;
     let (snapshot, kind) = require_numeric_list(receiver, "min", span)?;
@@ -7679,10 +7726,11 @@ fn list_max(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     Ok(Value::Result(ResultVariant::Ok(Box::new(best))))
 }
 
-/// Mini-tanda Mb2 — `xs.sum()` sobre `List<Int>` o `List<Float>`.
-/// Lista vacía → `Int(0)` (sentinel; el tipo Float vacío también
-/// devuelve `Int(0)` porque sin elementos el runtime no sabe cuál
-/// usar — el checker declara el tipo, pero el evaluator es gradual).
+/// Mini-batch Mb2 — `xs.sum()` on `List<Int>` or `List<Float>`.
+/// Empty list → `Int(0)` (sentinel; empty Float also returns
+/// `Int(0)` because without elements the runtime cannot know which
+/// one to use — the checker declares the type, but the evaluator is
+/// gradual).
 fn list_sum(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("sum", &args, 0, span)?;
     let (snapshot, kind) = require_numeric_list(receiver, "sum", span)?;
@@ -7713,10 +7761,10 @@ fn list_sum(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     Ok(total)
 }
 
-/// Mini-tanda Lx — `xs.find_index(pred)`: índice del primer elemento
-/// que satisface el predicado. Devuelve `Result<Int>`: `Ok(i)` si lo
-/// encuentra, `Err("no encontrado")` si no. Paralelo a `find` (que
-/// devuelve el elemento en lugar del índice).
+/// Mini-batch Lx — `xs.find_index(pred)`: index of the first element
+/// satisfying the predicate. Returns `Result<Int>`: `Ok(i)` if found,
+/// `Err("no encontrado")` otherwise. Parallel to `find` (which
+/// returns the element instead of the index).
 #[async_recursion]
 async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("find_index", &args, 1, span)?;
@@ -7756,12 +7804,12 @@ async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalR
     )))))
 }
 
-/// S.3 — `xs.sort()` ordena IN-PLACE. Soporta `List<T>` para T en
-/// {Int, Float, Str, Bool}. Listas heterogéneas o de tipos no
-/// comparables → error claro de runtime. `Float::NaN` ordena
-/// determinísticamente vía `partial_cmp.unwrap_or(Less)` (mismo
-/// approach que `f64::total_cmp` simplificado). Devuelve `Null`
-/// (mutación in-place, paralelo a `push`/`pop`).
+/// S.3 — `xs.sort()` sorts IN-PLACE. Supports `List<T>` for T in
+/// {Int, Float, Str, Bool}. Heterogeneous lists or non-comparable
+/// types → clear runtime error. `Float::NaN` sorts deterministically
+/// via `partial_cmp.unwrap_or(Less)` (same approach as `f64::total_cmp`
+/// simplified). Returns `Null` (in-place mutation, parallel to
+/// `push`/`pop`).
 fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("sort", &args, 0, span)?;
     let items = match receiver {
@@ -7769,8 +7817,8 @@ fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
         _ => unreachable!(),
     };
     let mut guard = items.lock();
-    // Tipo común: chequeamos el primer elemento y exigimos el resto
-    // igual. Para lista vacía, no-op.
+    // Common type: we check the first element and require the rest
+    // to match. For an empty list, no-op.
     if guard.is_empty() {
         return Ok(Value::Null);
     }
@@ -7826,8 +7874,8 @@ fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::Null)
 }
 
-/// S.3 — `xs.reverse()` invierte el orden IN-PLACE. Cualquier
-/// `List<T>`. Devuelve `Null`.
+/// S.3 — `xs.reverse()` reverses the order IN-PLACE. Any
+/// `List<T>`. Returns `Null`.
 fn list_reverse(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("reverse", &args, 0, span)?;
     let items = match receiver {
@@ -7838,9 +7886,9 @@ fn list_reverse(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::Null)
 }
 
-/// S.3 — `xs.contains(v)` devuelve `Bool`. Usa la igualdad
-/// estructural de `Value` (`PartialEq`), que ya hace lo correcto
-/// para primitivos, instancias, listas anidadas, etc.
+/// S.3 — `xs.contains(v)` returns `Bool`. Uses `Value` structural
+/// equality (`PartialEq`), which already does the right thing for
+/// primitives, instances, nested lists, etc.
 fn list_contains(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("contains", &args, 1, span)?;
     let items = match receiver {
@@ -7852,21 +7900,21 @@ fn list_contains(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
     Ok(Value::Bool(found))
 }
 
-/// Mini-tanda It — `xs.enumerate()` → `List<(Int, T)>` con pares
-/// (índice, elemento). Snapshot del Vec para evitar re-entrancia.
-/// Mini-tanda Ir — Helper: materializa un Range a un `Value::List` con
-/// los Ints del rango (semánticas exclusivas — `end` no incluido). Los
-/// rangos inclusivos (`0..=N`) se construyen con `end = N + 1` por el
-/// parser (R.1.4) así que ya quedan inclusivos al materializar.
+/// Mini-batch It — `xs.enumerate()` → `List<(Int, T)>` with
+/// (index, element) pairs. Snapshot the Vec to avoid re-entrancy.
+/// Mini-batch Ir — Helper: materializes a Range into a `Value::List`
+/// with the Ints of the range (exclusive semantics — `end` not
+/// included). Inclusive ranges (`0..=N`) are built with `end = N + 1`
+/// by the parser (R.1.4), so they remain inclusive when materialized.
 fn range_to_list(start: i64, end: i64) -> Value {
     let items: Vec<Value> = (start..end).map(Value::Int).collect();
     Value::new_list(items)
 }
 
-/// Mini-tanda Rg — `(start..end).step_by(n)` materializa el rango con
-/// step `n`. `n` debe ser un `Int > 0`. Si `n <= 0`, error claro de
-/// runtime. Output: `List<Int>` (paralelo a cómo enumerate/zip/chain
-/// se materializan desde Range — destino final es siempre una List).
+/// Mini-batch Rg — `(start..end).step_by(n)` materializes the range
+/// with step `n`. `n` must be an `Int > 0`. If `n <= 0`, clear runtime
+/// error. Output: `List<Int>` (parallel to how enumerate/zip/chain
+/// materialize from Range — final destination is always a List).
 fn range_step_by(start: i64, end: i64, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("step_by", &args, 1, span)?;
     let step = match args.into_iter().next().unwrap() {
@@ -7916,9 +7964,9 @@ fn list_enumerate(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda It — `xs.zip(ys)` → `List<(T, U)>` truncado al más
-/// corto. Si los tipos son distintos, igual funciona — los pares son
-/// tuples heterogéneas.
+/// Mini-batch It — `xs.zip(ys)` → `List<(T, U)>` truncated to the
+/// shortest. If the types differ, it still works — the pairs are
+/// heterogeneous tuples.
 fn list_zip(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("zip", &args, 1, span)?;
     let items = match receiver {
@@ -7949,8 +7997,8 @@ fn list_zip(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda It — `xs.chain(ys)` → `List<T>` concatenado. Snapshot
-/// de ambas listas para evitar re-entrancia.
+/// Mini-batch It — `xs.chain(ys)` → concatenated `List<T>`. Snapshot
+/// both lists to avoid re-entrancy.
 fn list_chain(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("chain", &args, 1, span)?;
     let items = match receiver {
@@ -7979,10 +8027,10 @@ fn list_chain(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb — `xss.flatten()` aplana `List<List<T>>` → `List<T>`.
-/// Concatena los elementos de cada sub-lista en orden. Si los elementos
-/// no son listas, error de runtime claro. Para listas vacías o con
-/// sub-listas vacías, no-op (resultado vacío).
+/// Mini-batch Mb — `xss.flatten()` flattens `List<List<T>>` → `List<T>`.
+/// Concatenates each sub-list's elements in order. If elements are not
+/// lists, clear runtime error. For empty lists or empty sub-lists,
+/// no-op (empty result).
 fn list_flatten(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("flatten", &args, 0, span)?;
     let items = match receiver {
@@ -8016,19 +8064,19 @@ fn list_flatten(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb — `xs.sort_by(cmp)` ordena IN-PLACE usando un
-/// callback comparator. El callback recibe `(a, b)` y devuelve un
-/// `Int` siguiendo la convención `cmp` de Rust/JS:
-///   - negativo si `a < b`,
-///   - cero si `a == b`,
-///   - positivo si `a > b`.
+/// Mini-batch Mb — `xs.sort_by(cmp)` sorts IN-PLACE using a comparator
+/// callback. The callback receives `(a, b)` and returns an `Int`
+/// following the Rust/JS `cmp` convention:
+///   - negative if `a < b`,
+///   - zero if `a == b`,
+///   - positive if `a > b`.
 ///
-/// El callback puede ser sync o async — invocamos via `invoke_value`
-/// que ya maneja ambos casos. Usamos selection sort (O(n²)) en lugar
-/// de `Vec::sort_by` porque este último toma un closure sync; con
-/// callbacks async tendríamos que bloquear o re-implementar
-/// internamente. Para listas chicas (<1000) está bien; sub-paso
-/// futuro si aparece presión real.
+/// The callback may be sync or async — we invoke via `invoke_value`
+/// which handles both cases. We use selection sort (O(n²)) instead
+/// of `Vec::sort_by` because the latter takes a sync closure; with
+/// async callbacks we would have to block or re-implement internally.
+/// For small lists (<1000) it is fine; future sub-step if real
+/// pressure appears.
 async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("sort_by", &args, 1, span)?;
     let items = match receiver {
@@ -8037,27 +8085,28 @@ async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
     };
     let cmp_fn = args.into_iter().next().unwrap();
 
-    // Snapshot del Vec para evitar re-entrancia con el callback.
-    // Después de comparar todo y ordenar el snapshot, volcamos al
-    // original. Patrón paralelo a `list_map`/`list_filter`.
+    // Snapshot the Vec to avoid re-entrancy with the callback.
+    // After comparing everything and sorting the snapshot, we dump
+    // it back to the original. Pattern parallel to
+    // `list_map`/`list_filter`.
     let snapshot = items.lock().clone();
     let n = snapshot.len();
     if n < 2 {
         return Ok(Value::Null);
     }
 
-    // Materializamos los pares de comparación que necesitamos. Pre-
-    // computamos `cmp(a, b)` para cada par solicitado por sort_by; el
-    // approach pragmático es invocar el callback adentro de `sort_by`
-    // de Rust pero `sort_by` toma un closure SYNC y nuestro `invoke_value`
-    // es async. Solución: pre-construir un Vec<usize> de índices,
-    // ordenarlos con sort_by que hace lookup a una matriz de
-    // comparación pre-computada... O más simple: implementamos
-    // selection sort O(n²) acá, invocando el callback async en cada
-    // par. Para listas chicas (<1000 elementos) está bien. Sub-paso
-    // futuro si aparece presión: spawn_blocking + sync invoke.
+    // Materialize the comparison pairs we need. Pre-compute
+    // `cmp(a, b)` for each pair requested by sort_by; the pragmatic
+    // approach is to invoke the callback inside Rust's `sort_by`, but
+    // `sort_by` takes a SYNC closure and our `invoke_value` is async.
+    // Solution: pre-build a Vec<usize> of indices, sort them with a
+    // sort_by that looks up a precomputed comparison matrix... Or
+    // simpler: we implement selection sort O(n²) here, invoking the
+    // async callback for each pair. For small lists (<1000 elements)
+    // it is fine. Future sub-step if pressure appears: spawn_blocking
+    // + sync invoke.
     let mut indexed: Vec<(usize, Value)> = snapshot.into_iter().enumerate().collect();
-    // Selection sort sobre `indexed`.
+    // Selection sort on `indexed`.
     for i in 0..n - 1 {
         let mut min_idx = i;
         for j in (i + 1)..n {
@@ -8090,16 +8139,16 @@ async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
         }
     }
 
-    // Volcamos al original (drop el orden anterior, escribir el nuevo).
+    // Dump back to the original (drop the previous order, write the new one).
     let mut guard = items.lock();
     *guard = indexed.into_iter().map(|(_, v)| v).collect();
     Ok(Value::Null)
 }
 
-/// Mini-tanda Mb3 — `xs.reduce(init, fn(acc, x) -> Acc)` fold canónico.
-/// Itera la lista aplicando `fn(acc, x)` y devuelve el acumulador
-/// final. Vacía → init. Paralelo a `Iterator::fold` de Rust o
-/// `Array.prototype.reduce(fn, init)` de JS.
+/// Mini-batch Mb3 — `xs.reduce(init, fn(acc, x) -> Acc)` canonical
+/// fold. Iterates the list applying `fn(acc, x)` and returns the
+/// final accumulator. Empty → init. Parallel to Rust
+/// `Iterator::fold` or JS `Array.prototype.reduce(fn, init)`.
 #[async_recursion]
 async fn list_reduce(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("reduce", &args, 2, span)?;
@@ -8117,9 +8166,9 @@ async fn list_reduce(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
     Ok(acc)
 }
 
-/// Mini-tanda Mb3 — `xs.product()` análogo a `sum`. Para `List<Int>`
-/// o `List<Float>` homogéneos. Vacía → `Int(1)` sentinel (paralelo
-/// a Python `math.prod([])`).
+/// Mini-batch Mb3 — `xs.product()` analogous to `sum`. For homogeneous
+/// `List<Int>` or `List<Float>`. Empty → `Int(1)` sentinel (parallel
+/// to Python `math.prod([])`).
 fn list_product(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("product", &args, 0, span)?;
     let (snapshot, kind) = require_numeric_list(receiver, "product", span)?;
@@ -8150,11 +8199,11 @@ fn list_product(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(total)
 }
 
-/// Mini-tanda Mb4 — `xs.unique()`: devuelve `List<T>` con los
-/// elementos en el orden de primera aparición, sin duplicados.
-/// Usa igualdad estructural (`PartialEq` de Value). O(n²) en el
-/// peor caso por la búsqueda lineal; para listas chicas (<1000)
-/// está bien. Paralelo a Python `list(dict.fromkeys(xs))`.
+/// Mini-batch Mb4 — `xs.unique()`: returns `List<T>` with the
+/// elements in first-appearance order, without duplicates. Uses
+/// structural equality (`PartialEq` on Value). O(n²) worst case due
+/// to linear search; for small lists (<1000) it is fine. Parallel
+/// to Python `list(dict.fromkeys(xs))`.
 fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("unique", &args, 0, span)?;
     let items = match receiver {
@@ -8171,10 +8220,10 @@ fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb9 — `xs.split_at(i)`: divide la lista en posición
-/// `i` y devuelve `(List<T>, List<T>)`. `i <= 0` → `([], xs)`;
-/// `i >= len` → `(xs, [])`. Paralelo a Rust `slice::split_at` pero
-/// devuelve copias en lugar de views.
+/// Mini-batch Mb9 — `xs.split_at(i)`: splits the list at position
+/// `i` and returns `(List<T>, List<T>)`. `i <= 0` → `([], xs)`;
+/// `i >= len` → `(xs, [])`. Parallel to Rust `slice::split_at` but
+/// returns copies instead of views.
 fn list_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("split_at", &args, 1, span)?;
     let items = match receiver {
@@ -8214,9 +8263,9 @@ fn list_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
     ]))
 }
 
-/// Mini-tanda Mb8 — `xs.starts_with(prefix)` / `xs.ends_with(suffix)`:
-/// devuelven `Bool` si la lista empieza/termina con la sublista dada.
-/// Usa igualdad estructural (PartialEq). Prefix vacío → `true`.
+/// Mini-batch Mb8 — `xs.starts_with(prefix)` / `xs.ends_with(suffix)`:
+/// return `Bool` if the list starts/ends with the given sublist.
+/// Uses structural equality (PartialEq). Empty prefix → `true`.
 fn list_starts_or_ends_with(
     receiver: Value,
     args: Vec<Value>,
@@ -8272,11 +8321,10 @@ fn list_ends_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     list_starts_or_ends_with(receiver, args, span, false, "ends_with")
 }
 
-/// Mini-tanda Mb8 — `xs.insert_at(i, v) -> List<T>`: devuelve una
-/// lista nueva con `v` insertado en posición `i` (los elementos
-/// existentes se corren a la derecha). `i < 0` → error claro;
-/// `i > len(xs)` clamp a `len(xs)` (insert al final, paralelo a
-/// Python `list.insert`).
+/// Mini-batch Mb8 — `xs.insert_at(i, v) -> List<T>`: returns a new
+/// list with `v` inserted at position `i` (existing elements shift
+/// right). `i < 0` → clear error; `i > len(xs)` clamps to `len(xs)`
+/// (insert at the end, parallel to Python `list.insert`).
 fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("insert_at", &args, 2, span)?;
     let items = match receiver {
@@ -8319,9 +8367,10 @@ fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb8 — `xs.remove_at(i) -> List<T>`: devuelve una lista
-/// nueva sin el elemento en posición `i`. `i < 0` o `i >= len(xs)`
-/// → error claro (no clamp — el usuario debería saber el rango).
+/// Mini-batch Mb8 — `xs.remove_at(i) -> List<T>`: returns a new
+/// list without the element at position `i`. `i < 0` or
+/// `i >= len(xs)` → clear error (no clamp — the user should know
+/// the range).
 fn list_remove_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("remove_at", &args, 1, span)?;
     let items = match receiver {
@@ -8368,9 +8417,9 @@ fn list_remove_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb8 — `xs.zip_to_map(values) -> Map<K, V>`: combina
-/// la lista de keys (self) con la de values formando un Map.
-/// Trunca al más corto (paralelo a Python `dict(zip(ks, vs))`).
+/// Mini-batch Mb8 — `xs.zip_to_map(values) -> Map<K, V>`: combines
+/// the keys list (self) with the values list to form a Map.
+/// Truncates to the shortest (parallel to Python `dict(zip(ks, vs))`).
 fn list_zip_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("zip_to_map", &args, 1, span)?;
     let keys = match receiver {
@@ -8407,9 +8456,9 @@ fn list_zip_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Mb7 — `xs.take(n) -> List<T>`: primeros `n` elementos.
-/// Si `n >= len(xs)`, devuelve copia completa; si `n <= 0`, lista
-/// vacía. Paralelo a Rust `Iterator::take`.
+/// Mini-batch Mb7 — `xs.take(n) -> List<T>`: first `n` elements.
+/// If `n >= len(xs)`, returns a full copy; if `n <= 0`, empty list.
+/// Parallel to Rust `Iterator::take`.
 fn list_take(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("take", &args, 1, span)?;
     let items = match receiver {
@@ -8440,9 +8489,9 @@ fn list_take(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb7 — `xs.drop(n) -> List<T>`: saltea los primeros `n`
-/// elementos. Si `n >= len(xs)`, lista vacía; si `n <= 0`, copia
-/// completa. Paralelo a Rust `Iterator::skip`.
+/// Mini-batch Mb7 — `xs.drop(n) -> List<T>`: skips the first `n`
+/// elements. If `n >= len(xs)`, empty list; if `n <= 0`, full copy.
+/// Parallel to Rust `Iterator::skip`.
 fn list_drop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("drop", &args, 1, span)?;
     let items = match receiver {
@@ -8473,8 +8522,8 @@ fn list_drop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb7 — `xs.init() -> List<T>`: todos los elementos menos
-/// el último. Paralelo a Haskell `init`. Lista vacía → lista vacía.
+/// Mini-batch Mb7 — `xs.init() -> List<T>`: all elements except the
+/// last. Parallel to Haskell `init`. Empty list → empty list.
 fn list_init(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("init", &args, 0, span)?;
     let items = match receiver {
@@ -8490,8 +8539,8 @@ fn list_init(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb7 — `xs.tail() -> List<T>`: todos los elementos menos
-/// el primero. Paralelo a Haskell `tail`. Lista vacía → lista vacía.
+/// Mini-batch Mb7 — `xs.tail() -> List<T>`: all elements except the
+/// first. Parallel to Haskell `tail`. Empty list → empty list.
 fn list_tail(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("tail", &args, 0, span)?;
     let items = match receiver {
@@ -8507,10 +8556,10 @@ fn list_tail(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb7 — `xs.intersperse(sep) -> List<T>`: inserta `sep`
-/// entre cada par de elementos consecutivos. `[a, b, c]` →
-/// `[a, sep, b, sep, c]`. Lista vacía o de 1 elemento → sin cambios.
-/// Paralelo a Haskell `intersperse`.
+/// Mini-batch Mb7 — `xs.intersperse(sep) -> List<T>`: inserts `sep`
+/// between each pair of consecutive elements. `[a, b, c]` →
+/// `[a, sep, b, sep, c]`. Empty list or single-element list →
+/// unchanged. Parallel to Haskell `intersperse`.
 fn list_intersperse(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("intersperse", &args, 1, span)?;
     let items = match receiver {
@@ -8529,10 +8578,10 @@ fn list_intersperse(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb7 — `xs.cycle(n) -> List<T>`: repite la lista `n`
-/// veces. `n <= 0` → lista vacía (no error — política friendly).
-/// Paralelo a Rust `Iterator::cycle().take(n * len)` pero acotado
-/// para evitar listas infinitas en memoria.
+/// Mini-batch Mb7 — `xs.cycle(n) -> List<T>`: repeats the list `n`
+/// times. `n <= 0` → empty list (no error — friendly policy).
+/// Parallel to Rust `Iterator::cycle().take(n * len)` but bounded
+/// to avoid infinite lists in memory.
 fn list_cycle(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("cycle", &args, 1, span)?;
     let items = match receiver {
@@ -8567,12 +8616,12 @@ fn list_cycle(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb6 — `xs.scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
-/// Fold con outputs intermedios — devuelve una lista con cada
-/// estado del acumulador después de procesar cada elemento. Útil
-/// para sumas parciales, máximos acumulados, etc. Paralelo a Rust
-/// `Iterator::scan` (sin la sutileza del Option de Rust — siempre
-/// emite un valor por elemento). Lista vacía → lista vacía.
+/// Mini-batch Mb6 — `xs.scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
+/// Fold with intermediate outputs — returns a list with each
+/// accumulator state after processing each element. Useful for
+/// partial sums, running maxima, etc. Parallel to Rust
+/// `Iterator::scan` (without Rust's Option subtlety — always emits
+/// one value per element). Empty list → empty list.
 #[async_recursion]
 async fn list_scan(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("scan", &args, 2, span)?;
@@ -8592,10 +8641,10 @@ async fn list_scan(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb6 — `xs.windows(n) -> List<List<T>>`: sliding windows
-/// de tamaño `n`. Cada ventana es una `List<T>` con `n` elementos
-/// consecutivos. Si `len(xs) < n`, lista vacía. `n <= 0` → error
-/// claro. Paralelo a Rust `slice::windows`.
+/// Mini-batch Mb6 — `xs.windows(n) -> List<List<T>>`: sliding windows
+/// of size `n`. Each window is a `List<T>` with `n` consecutive
+/// elements. If `len(xs) < n`, empty list. `n <= 0` → clear error.
+/// Parallel to Rust `slice::windows`.
 fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("windows", &args, 1, span)?;
     let items = match receiver {
@@ -8636,10 +8685,10 @@ fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb5 — `xs.group_by(fn(T) -> K)`: agrupa los elementos
-/// por la key que devuelve el callback. Output: `Map<K, List<T>>`.
-/// Preserva orden — el primer item con key K define posición en el
-/// map; items posteriores se acumulan en su `List<T>`.
+/// Mini-batch Mb5 — `xs.group_by(fn(T) -> K)`: groups the elements
+/// by the key returned by the callback. Output: `Map<K, List<T>>`.
+/// Preserves order — the first item with key K defines its position
+/// in the map; later items accumulate into its `List<T>`.
 #[async_recursion]
 async fn list_group_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("group_by", &args, 1, span)?;
@@ -8666,9 +8715,10 @@ async fn list_group_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalRes
     Ok(Value::new_map(pairs))
 }
 
-/// Mini-tanda Mb5 — `xs.zip_with(ys, fn(T, U) -> V)`: combina zip +
-/// map en un paso. Trunca al más corto (paralelo a Python `zip`).
-/// Útil cuando solo querés la transformación, no los pares crudos.
+/// Mini-batch Mb5 — `xs.zip_with(ys, fn(T, U) -> V)`: combines zip +
+/// map in one step. Truncates to the shortest (parallel to Python
+/// `zip`). Useful when you only want the transformation, not the
+/// raw pairs.
 #[async_recursion]
 async fn list_zip_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("zip_with", &args, 2, span)?;
@@ -8706,11 +8756,12 @@ async fn list_zip_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRes
     Ok(Value::new_list(out))
 }
 
-/// Mini-tanda Mb5 — `xs.max_by(fn(T) -> Int)` y `xs.min_by(...)`:
-/// devuelven el elemento con mayor/menor ranking según el callback.
-/// El callback extrae un `Int` y nosotros elegimos el item con el
-/// valor más grande/chico. Útil para tipos no numéricos (`Instance`,
-/// `Str`, etc.) donde `max`/`min` directos no aplican. Vacía → Err.
+/// Mini-batch Mb5 — `xs.max_by(fn(T) -> Int)` and `xs.min_by(...)`:
+/// return the element with the highest/lowest ranking according to
+/// the callback. The callback extracts an `Int` and we choose the
+/// item with the largest/smallest value. Useful for non-numeric
+/// types (`Instance`, `Str`, etc.) where direct `max`/`min` does not
+/// apply. Empty → Err.
 #[async_recursion]
 async fn list_max_min_by(
     receiver: Value,
@@ -8777,9 +8828,10 @@ async fn list_min_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
     list_max_min_by(receiver, args, span, false, "min_by").await
 }
 
-/// Mini-tanda Mb4 — `xs.partition(pred)`: devuelve `(List<T>, List<T>)`
-/// con los elementos para los que `pred` da `true` en el primer slot
-/// y los `false` en el segundo. Preserva orden relativo.
+/// Mini-batch Mb4 — `xs.partition(pred)`: returns
+/// `(List<T>, List<T>)` with the elements where `pred` gives `true`
+/// in the first slot and the `false` ones in the second. Preserves
+/// relative order.
 #[async_recursion]
 async fn list_partition(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("partition", &args, 1, span)?;
@@ -8819,10 +8871,10 @@ async fn list_partition(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
     ]))
 }
 
-/// Mini-tanda Mb3 — `xs.to_map()`: convierte `List<(K, V)>` en
-/// `Map<K, V>`. Política last-write-wins si hay keys duplicadas
-/// (paralelo a Python `dict(items)` que también sobrescribe).
-/// Si algún elemento no es Tuple de aridad 2 → error de runtime.
+/// Mini-batch Mb3 — `xs.to_map()`: converts `List<(K, V)>` into
+/// `Map<K, V>`. Last-write-wins policy if there are duplicate keys
+/// (parallel to Python `dict(items)`, which also overwrites). If any
+/// element is not a Tuple of arity 2 → runtime error.
 fn list_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("to_map", &args, 0, span)?;
     let items = match receiver {
@@ -8837,7 +8889,7 @@ fn list_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
                 let mut pit = parts.into_iter();
                 let k = pit.next().unwrap();
                 let val = pit.next().unwrap();
-                // Last-write-wins: buscamos si k ya existe y reemplazamos.
+                // Last-write-wins: we check if k already exists and replace.
                 if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &k) {
                     slot.1 = val;
                 } else {
@@ -8929,9 +8981,9 @@ fn map_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     Ok(Value::Int(n))
 }
 
-/// Mini-tanda Ex — `m.filter(pred)`: keeps pares (k, v) donde
-/// `pred(k, v) → true`. Devuelve un Map nuevo (no muta el receiver).
-/// Callback toma 2 args: la key y el value.
+/// Mini-batch Ex — `m.filter(pred)`: keeps pairs (k, v) where
+/// `pred(k, v) → true`. Returns a new Map (does not mutate the
+/// receiver). Callback takes 2 args: the key and the value.
 #[async_recursion]
 async fn map_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("filter", &args, 1, span)?;
@@ -8966,10 +9018,11 @@ async fn map_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Ex — `m.map_values(fn)`: aplica `fn(v) → U` a cada
-/// value, dejando las keys intactas. Devuelve un Map nuevo. Cubre
-/// el patrón canónico de transformar values sin tocar la estructura
-/// (paralelo a Python `{k: fn(v) for k, v in m.items()}`).
+/// Mini-batch Ex — `m.map_values(fn)`: applies `fn(v) → U` to each
+/// value, leaving the keys intact. Returns a new Map. Covers the
+/// canonical pattern of transforming values without touching the
+/// structure (parallel to Python
+/// `{k: fn(v) for k, v in m.items()}`).
 #[async_recursion]
 async fn map_map_values(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("map_values", &args, 1, span)?;
@@ -8987,12 +9040,13 @@ async fn map_map_values(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Up — `m.update(k, fn(V) -> V)`: aplica `fn` al value
-/// asociado a `k`, devuelve un Map nuevo (no muta). Si `k` no está
-/// presente, devuelve un Map igual al original (no inserta — sigue
-/// la convención "update" estilo Rust `Entry::and_modify`).
+/// Mini-batch Up — `m.update(k, fn(V) -> V)`: applies `fn` to the
+/// value associated with `k`, returns a new Map (does not mutate).
+/// If `k` is not present, returns a Map identical to the original
+/// (does not insert — follows the Rust-style "update" convention
+/// `Entry::and_modify`).
 ///
-/// Útil para mutaciones atómicas sin tener que `get(k)?` + `set`.
+/// Useful for atomic mutations without doing `get(k)?` + `set`.
 #[async_recursion]
 async fn map_update(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("update", &args, 2, span)?;
@@ -9016,10 +9070,10 @@ async fn map_update(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Ex2 — `m.merge(other)`: combina dos Maps en uno nuevo.
-/// Política last-write-wins (paralelo a Python `{**m, **other}` /
-/// JS spread / Rust `extend`): keys de `other` sobrescriben las de
-/// `m`. Devuelve un Map nuevo (no muta `m` ni `other`).
+/// Mini-batch Ex2 — `m.merge(other)`: combines two Maps into a new
+/// one. Last-write-wins policy (parallel to Python `{**m, **other}` /
+/// JS spread / Rust `extend`): `other`'s keys overwrite `m`'s.
+/// Returns a new Map (does not mutate `m` or `other`).
 fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("merge", &args, 1, span)?;
     let pairs = match receiver {
@@ -9042,9 +9096,9 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     };
     let mut out: Vec<(Value, Value)> = pairs.lock().clone();
     for (k, v) in other_pairs.lock().iter() {
-        // Buscar si la key ya existe — si sí, sobreescribir;
-        // si no, push al final (preserva orden de inserción para
-        // pares nuevos).
+        // Check if the key already exists — if so, overwrite;
+        // if not, push at the end (preserves insertion order for
+        // new pairs).
         if let Some(slot) = out.iter_mut().find(|(existing_k, _)| existing_k == k) {
             slot.1 = v.clone();
         } else {
@@ -9054,9 +9108,9 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Mb9 — `m.has_value(v) -> Bool`: devuelve true si algún
-/// par del Map tiene `v` como value. Igualdad estructural. Paralelo
-/// a `m.has(k)` (que chequea keys), pero sobre values.
+/// Mini-batch Mb9 — `m.has_value(v) -> Bool`: returns true if some
+/// Map pair has `v` as its value. Structural equality. Parallel to
+/// `m.has(k)` (which checks keys), but over values.
 fn map_has_value(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("has_value", &args, 1, span)?;
     let pairs = match receiver {
@@ -9068,11 +9122,11 @@ fn map_has_value(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
     Ok(Value::Bool(found))
 }
 
-/// Mini-tanda Mb7 — `m.with(k, v) -> Map<K, V>`: devuelve un Map
-/// nuevo con la key `k` mapeada a `v`. Si `k` ya existe, sobreescribe
-/// (last-write-wins, paralelo a `merge`). Operación funcional pura —
-/// el receiver queda intacto. Útil para construir Maps acumulando
-/// updates sin mutar.
+/// Mini-batch Mb7 — `m.with(k, v) -> Map<K, V>`: returns a new Map
+/// with key `k` mapped to `v`. If `k` already exists, overwrites
+/// (last-write-wins, parallel to `merge`). Pure functional operation
+/// — the receiver stays intact. Useful for building Maps by
+/// accumulating updates without mutating.
 fn map_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("with", &args, 2, span)?;
     let pairs = match receiver {
@@ -9091,13 +9145,13 @@ fn map_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Mb6 — `m.merge_with(other, fn(V, V) -> V) -> Map<K, V>`:
-/// merge con resolución de conflictos via callback. Para cada key
-/// que aparece en ambos maps, el callback decide qué value queda
-/// (e.g. `fn(a, b) => a + b` para sumar valores). Keys que están
-/// solo en uno de los dos maps pasan tal cual. Preserva orden:
-/// keys del receiver primero, keys nuevas de `other` al final.
-/// Generaliza `merge` (que es last-write-wins).
+/// Mini-batch Mb6 — `m.merge_with(other, fn(V, V) -> V) -> Map<K, V>`:
+/// merge with conflict resolution via callback. For each key that
+/// appears in both maps, the callback decides which value stays
+/// (e.g. `fn(a, b) => a + b` to sum values). Keys present in only
+/// one map pass through as-is. Preserves order: receiver's keys
+/// first, new keys from `other` at the end. Generalizes `merge`
+/// (which is last-write-wins).
 #[async_recursion]
 async fn map_merge_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("merge_with", &args, 2, span)?;
@@ -9126,7 +9180,7 @@ async fn map_merge_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
     let other_snap: Vec<(Value, Value)> = other_pairs.lock().clone();
     for (k, v_other) in other_snap {
         if let Some(slot_idx) = out.iter().position(|(ek, _)| ek == &k) {
-            // Key duplicada: el callback decide.
+            // Duplicate key: the callback decides.
             let v_self = out[slot_idx].1.clone();
             let resolved =
                 invoke_value(cb.clone(), vec![v_self, v_other], "merge_with", span).await?;
@@ -9138,10 +9192,10 @@ async fn map_merge_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Mb4 — `m.invert()`: devuelve `Map<V, K>` con los pares
-/// intercambiados (value pasa a key, key pasa a value). Si hay values
-/// duplicados, last-write-wins (paralelo a `to_map()`). Útil para
-/// "reverse lookup" — `{nombre: id}` → `{id: nombre}`.
+/// Mini-batch Mb4 — `m.invert()`: returns `Map<V, K>` with the pairs
+/// swapped (value becomes key, key becomes value). If there are
+/// duplicate values, last-write-wins (parallel to `to_map()`).
+/// Useful for "reverse lookup" — `{name: id}` → `{id: name}`.
 fn map_invert(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("invert", &args, 0, span)?;
     let pairs = match receiver {
@@ -9151,7 +9205,7 @@ fn map_invert(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
     let mut out: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
     for (k, v) in snapshot {
-        // El value pasa a key, la key pasa a value.
+        // Value becomes key, key becomes value.
         if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &v) {
             slot.1 = k;
         } else {
@@ -9161,9 +9215,9 @@ fn map_invert(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     Ok(Value::new_map(out))
 }
 
-/// Mini-tanda Mb3 — `m.entries()`: devuelve `List<(K, V)>` con los
-/// pares clave-valor en orden de inserción. Paralelo a Python
-/// `dict.items()` o JS `Object.entries(obj)`. Inversa de
+/// Mini-batch Mb3 — `m.entries()`: returns `List<(K, V)>` with the
+/// key-value pairs in insertion order. Parallel to Python
+/// `dict.items()` or JS `Object.entries(obj)`. Inverse of
 /// `xs.to_map()` (Mb3).
 fn map_entries(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("entries", &args, 0, span)?;
@@ -9179,10 +9233,10 @@ fn map_entries(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::new_list(snapshot))
 }
 
-/// Mini-tanda Mb2 — `m.keys_sorted()`: devuelve `List<K>` con las
-/// keys ordenadas. Solo válido para K en {Int, Float, Str, Bool}
-/// (mismas reglas que `list_sort`). Map vacío → lista vacía. Tipos
-/// no comparables o heterogéneos → error de runtime claro.
+/// Mini-batch Mb2 — `m.keys_sorted()`: returns `List<K>` with the
+/// keys sorted. Only valid for K in {Int, Float, Str, Bool} (same
+/// rules as `list_sort`). Empty map → empty list. Non-comparable
+/// or heterogeneous types → clear runtime error.
 fn map_keys_sorted(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("keys_sorted", &args, 0, span)?;
     let pairs = match receiver {
@@ -9257,11 +9311,11 @@ fn str_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
         Value::Str(s) => s,
         _ => unreachable!(),
     };
-    // Coincide con `len(s)` global: cuenta chars, no bytes.
+    // Matches the global `len(s)`: counts chars, not bytes.
     Ok(Value::Int(s.chars().count() as i64))
 }
 
-// ---- F13.D — methods universales sobre Value para type-check dinámico ----
+// ---- F13.D — universal methods on Value for dynamic type-checking ----
 
 fn fv_as_int(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("as_int", &args, 0, span)?;
@@ -9277,8 +9331,8 @@ fn fv_as_float(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     expect_arity("as_float", &args, 0, span)?;
     match receiver {
         Value::Float(x) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Float(x))))),
-        // Int → Float coerce: es la convención del lenguaje (`1` y
-        // `1.0` se comparan iguales).
+        // Int → Float coerce: the language's convention (`1` and
+        // `1.0` compare equal).
         Value::Int(n) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Float(
             n as f64,
         ))))),
@@ -9323,9 +9377,9 @@ fn fv_type_name(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::Str(receiver.type_name().to_string()))
 }
 
-// ---- Mini-tanda Bytes — métodos sobre Value::Bytes ----
+// ---- Mini-batch Bytes — methods on Value::Bytes ----
 
-/// `bytes.len()` — cantidad de bytes.
+/// `bytes.len()` — number of bytes.
 fn bytes_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("len", &args, 0, span)?;
     let Value::Bytes(bs) = receiver else {
@@ -9334,7 +9388,7 @@ fn bytes_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::Int(bs.len() as i64))
 }
 
-/// `bytes.is_empty()` — atajo de `.len() == 0`.
+/// `bytes.is_empty()` — shortcut for `.len() == 0`.
 fn bytes_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("is_empty", &args, 0, span)?;
     let Value::Bytes(bs) = receiver else {
@@ -9343,9 +9397,9 @@ fn bytes_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::Bool(bs.is_empty()))
 }
 
-/// `bytes.to_str() -> Result<Str>` — decodifica como UTF-8.
-/// Devuelve `Ok(s)` si el contenido es UTF-8 válido, `Err(msg)` si no.
-/// Paralelo a `String::from_utf8(...)` de Rust.
+/// `bytes.to_str() -> Result<Str>` — decodes as UTF-8.
+/// Returns `Ok(s)` if the content is valid UTF-8, `Err(msg)` otherwise.
+/// Parallel to Rust `String::from_utf8(...)`.
 fn bytes_to_str(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("to_str", &args, 0, span)?;
     let _ = span;
@@ -9381,9 +9435,10 @@ fn str_lower(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::Str(s.to_lowercase()))
 }
 
-/// S.1 — Helper común: extrae el `receiver: Str` y el `arg: Str` para
-/// los métodos `contains`/`starts_with`/`ends_with`. Si el argumento
-/// no es `Str` (caso gradual), devuelve error de runtime claro.
+/// S.1 — Common helper: extracts the `receiver: Str` and the
+/// `arg: Str` for the `contains`/`starts_with`/`ends_with` methods.
+/// If the arg is not `Str` (gradual case), returns a clear runtime
+/// error.
 fn str_one_str_arg(
     method: &str,
     receiver: Value,
@@ -9431,12 +9486,12 @@ fn str_ends_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
     Ok(Value::Bool(s.ends_with(&needle)))
 }
 
-/// S.2 — `s.split(sep)` devuelve `List<Str>`. Sin separador especial
-/// para whitespace (`s.split()` sin args queda como deuda menor —
-/// Rust `split_whitespace` lo cubre pero la semántica es distinta).
-/// Separador empty string: replica `str::split("")` que devuelve
-/// chars individuales + empties en bordes — mismo comportamiento
-/// que Python por default.
+/// S.2 — `s.split(sep)` returns `List<Str>`. No special whitespace
+/// separator (`s.split()` without args is a minor debt — Rust
+/// `split_whitespace` covers it but with different semantics).
+/// Empty-string separator: replicates `str::split("")`, which
+/// returns individual chars + empties at the edges — same behavior
+/// as Python by default.
 fn str_split(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     let (s, sep) = str_one_str_arg("split", receiver, args, span)?;
     let parts: Vec<Value> = s
@@ -9446,12 +9501,12 @@ fn str_split(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_list(parts))
 }
 
-/// Mini-tanda Mb4 — `s.split_at(idx)`: divide el string en posición
-/// `idx` (en CHARS, no bytes) y devuelve `(Str, Str)`. `idx == 0` →
-/// `("", s)`; `idx >= len(s)` → `(s, "")`. `idx < 0` → error claro.
-/// Paralelo a `str::split_at` Rust (que opera sobre bytes) pero con
-/// char-based indexing para uniformar con el resto de los métodos
-/// Str de Fitz.
+/// Mini-batch Mb4 — `s.split_at(idx)`: splits the string at position
+/// `idx` (in CHARS, not bytes) and returns `(Str, Str)`. `idx == 0` →
+/// `("", s)`; `idx >= len(s)` → `(s, "")`. `idx < 0` → clear error.
+/// Parallel to Rust `str::split_at` (which operates on bytes) but
+/// with char-based indexing for consistency with the rest of Fitz's
+/// Str methods.
 fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("split_at", &args, 1, span)?;
     let s = match receiver {
@@ -9493,9 +9548,9 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::Tuple(vec![Value::Str(left), Value::Str(right)]))
 }
 
-/// Mini-tanda Mb9 — `s.swap_case() -> Str`: invierte el case de cada
-/// caracter (mayúscula ↔ minúscula). Caracteres sin case (dígitos,
-/// símbolos) quedan como están.
+/// Mini-batch Mb9 — `s.swap_case() -> Str`: swaps the case of each
+/// character (uppercase ↔ lowercase). Characters without case (digits,
+/// symbols) stay as they are.
 fn str_swap_case(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("swap_case", &args, 0, span)?;
     let s = match receiver {
@@ -9517,9 +9572,9 @@ fn str_swap_case(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
     Ok(Value::Str(out))
 }
 
-/// Mini-tanda Mb9 — `s.title() -> Str`: capitaliza la primera letra
-/// de cada palabra (separadas por whitespace). Paralelo a Python
-/// `str.title`. El resto de cada palabra queda en lowercase.
+/// Mini-batch Mb9 — `s.title() -> Str`: capitalizes the first letter
+/// of each word (whitespace-separated). Parallel to Python
+/// `str.title`. The rest of each word goes to lowercase.
 fn str_title(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("title", &args, 0, span)?;
     let s = match receiver {
@@ -9542,8 +9597,8 @@ fn str_title(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::Str(out))
 }
 
-/// Mini-tanda Mb9 — `s.is_alpha() -> Bool`: todos los chars son
-/// letras. String vacío → false (paralelo a Python).
+/// Mini-batch Mb9 — `s.is_alpha() -> Bool`: all chars are letters.
+/// Empty string → false (parallel to Python).
 fn str_is_alpha(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("is_alpha", &args, 0, span)?;
     let s = match receiver {
@@ -9554,8 +9609,8 @@ fn str_is_alpha(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::Bool(r))
 }
 
-/// Mini-tanda Mb9 — `s.is_digit() -> Bool`: todos los chars son
-/// dígitos ASCII (0-9). String vacío → false.
+/// Mini-batch Mb9 — `s.is_digit() -> Bool`: all chars are ASCII
+/// digits (0-9). Empty string → false.
 fn str_is_digit(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("is_digit", &args, 0, span)?;
     let s = match receiver {
@@ -9566,9 +9621,9 @@ fn str_is_digit(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::Bool(r))
 }
 
-/// Mini-tanda Mb9 — `s.is_numeric() -> Bool`: el string completo
-/// parsea como número (Int o Float, con signo opcional). String
-/// vacío → false. Más permisivo que `is_digit` (acepta `.` y `-`).
+/// Mini-batch Mb9 — `s.is_numeric() -> Bool`: the full string parses
+/// as a number (Int or Float, optional sign). Empty string → false.
+/// More permissive than `is_digit` (accepts `.` and `-`).
 fn str_is_numeric(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("is_numeric", &args, 0, span)?;
     let s = match receiver {
@@ -9579,10 +9634,10 @@ fn str_is_numeric(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::Bool(r))
 }
 
-/// Mini-tanda Mb8 — `s.left(n) -> Str` / `s.right(n) -> Str`:
-/// primeros/últimos `n` caracteres. `n <= 0` → vacío; `n >= len(s)`
-/// → string completo. Paralelo a métodos VB/SQL clásicos. Char-based,
-/// no byte-based (consistente con `len`).
+/// Mini-batch Mb8 — `s.left(n) -> Str` / `s.right(n) -> Str`:
+/// first/last `n` characters. `n <= 0` → empty; `n >= len(s)` →
+/// full string. Parallel to classic VB/SQL methods. Char-based,
+/// not byte-based (consistent with `len`).
 fn str_left(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("left", &args, 1, span)?;
     let s = match receiver {
@@ -9638,12 +9693,11 @@ fn str_right(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::Str(out))
 }
 
-/// Mini-tanda Mb8 — `s.center(width, ch) -> Str`: centra el string
-/// padeando con `ch` a ambos lados hasta alcanzar `width` chars. Si
-/// `len(s) >= width`, devuelve `s` sin cambios. `ch` debe ser
-/// exactamente 1 char. Paralelo a Python `str.center(width, ch)`.
-/// Si el padding es impar, el extra va a la derecha (paralelo a
-/// Python).
+/// Mini-batch Mb8 — `s.center(width, ch) -> Str`: centers the string
+/// by padding with `ch` on both sides until reaching `width` chars.
+/// If `len(s) >= width`, returns `s` unchanged. `ch` must be exactly
+/// 1 char. Parallel to Python `str.center(width, ch)`. If padding is
+/// odd, the extra goes to the right (parallel to Python).
 fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("center", &args, 2, span)?;
     let s = match receiver {
@@ -9710,11 +9764,11 @@ fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     Ok(Value::Str(out))
 }
 
-/// Mini-tanda Mb7 — `s.repeat_with(n, sep) -> Str`: repite el string
-/// `n` veces, intercalando `sep` entre cada repetición. `n < 0` →
-/// error claro; `n == 0` → string vacío. `"x".repeat_with(3, ", ")` →
-/// `"x, x, x"`. Paralelo a Python `sep.join([s] * n)` con sintaxis
-/// método.
+/// Mini-batch Mb7 — `s.repeat_with(n, sep) -> Str`: repeats the
+/// string `n` times, inserting `sep` between each repetition.
+/// `n < 0` → clear error; `n == 0` → empty string.
+/// `"x".repeat_with(3, ", ")` → `"x, x, x"`. Parallel to Python
+/// `sep.join([s] * n)` with method syntax.
 fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("repeat_with", &args, 2, span)?;
     let s = match receiver {
@@ -9768,10 +9822,10 @@ fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
     Ok(Value::Str(parts.join(&sep)))
 }
 
-/// Mini-tanda Mb5 — `s.lines()`: separa el string por `\n` devolviendo
-/// `List<Str>`. Paralelo a `str::lines` Rust: si el string termina con
-/// `\n`, NO se agrega línea vacía al final. Strings vacíos → lista
-/// vacía.
+/// Mini-batch Mb5 — `s.lines()`: splits the string by `\n` returning
+/// `List<Str>`. Parallel to Rust `str::lines`: if the string ends
+/// with `\n`, an empty line is NOT added at the end. Empty strings
+/// → empty list.
 fn str_lines(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("lines", &args, 0, span)?;
     let s = match receiver {
@@ -9782,8 +9836,8 @@ fn str_lines(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_list(parts))
 }
 
-/// Mini-tanda Mb5 — `s.is_empty()`: `Bool` indicando si `s == ""`.
-/// Atajo de `s.len() == 0` con intención clara.
+/// Mini-batch Mb5 — `s.is_empty()`: `Bool` indicating whether
+/// `s == ""`. Shortcut for `s.len() == 0` with clear intent.
 fn str_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("is_empty", &args, 0, span)?;
     let s = match receiver {
@@ -9793,10 +9847,10 @@ fn str_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::Bool(s.is_empty()))
 }
 
-/// Mini-tanda Mb3 — `s.chars()`: devuelve `List<Str>` con cada char
-/// del string como Str de 1 caracter. Paralelo a Python `list(s)` o
-/// JS `[...s]`. Útil para iterar y para componer pipelines (e.g.
-/// `s.chars().filter(...)`).
+/// Mini-batch Mb3 — `s.chars()`: returns `List<Str>` with each char
+/// of the string as a 1-char Str. Parallel to Python `list(s)` or
+/// JS `[...s]`. Useful for iteration and for composing pipelines
+/// (e.g. `s.chars().filter(...)`).
 fn str_chars(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("chars", &args, 0, span)?;
     let s = match receiver {
@@ -9816,8 +9870,9 @@ fn str_trim(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     Ok(Value::Str(s.trim().to_string()))
 }
 
-/// Mb — `s.trim_start()`: solo recorta whitespace del inicio. Paralelo
-/// a `str::trim_start` Rust / `str.lstrip` Python (default whitespace).
+/// Mb — `s.trim_start()`: only trims whitespace from the start.
+/// Parallel to Rust `str::trim_start` / Python `str.lstrip`
+/// (whitespace default).
 fn str_trim_start(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("trim_start", &args, 0, span)?;
     let s = match receiver {
@@ -9827,8 +9882,9 @@ fn str_trim_start(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::Str(s.trim_start().to_string()))
 }
 
-/// Mb — `s.trim_end()`: solo recorta whitespace del final. Paralelo
-/// a `str::trim_end` Rust / `str.rstrip` Python (default whitespace).
+/// Mb — `s.trim_end()`: only trims whitespace from the end.
+/// Parallel to Rust `str::trim_end` / Python `str.rstrip`
+/// (whitespace default).
 fn str_trim_end(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("trim_end", &args, 0, span)?;
     let s = match receiver {
@@ -9838,9 +9894,8 @@ fn str_trim_end(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(Value::Str(s.trim_end().to_string()))
 }
 
-/// S.2 — `s.replace(old, new)`. Reemplaza TODAS las ocurrencias.
-/// Mismo comportamiento que `str::replace` Rust y `str.replace`
-/// Python.
+/// S.2 — `s.replace(old, new)`. Replaces ALL occurrences. Same
+/// behavior as Rust `str::replace` and Python `str.replace`.
 fn str_replace(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("replace", &args, 2, span)?;
     let s = match receiver {
@@ -9885,8 +9940,8 @@ fn str_replace(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::Str(s.replace(&old, &new_s)))
 }
 
-/// S.2 — `s.repeat(n)` repite el string n veces. `n < 0` es error
-/// claro; `n == 0` → string vacío (igual que Rust/Python).
+/// S.2 — `s.repeat(n)` repeats the string n times. `n < 0` is a
+/// clear error; `n == 0` → empty string (same as Rust/Python).
 fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("repeat", &args, 1, span)?;
     let s = match receiver {
@@ -9918,9 +9973,9 @@ fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     Ok(Value::Str(s.repeat(n as usize)))
 }
 
-/// Mini-tanda Mb2 — Helper: para `pad_start`/`pad_end`. Extrae
-/// `(s, width, ch)` con validaciones: width `Int`, ch `Str` de
-/// exactamente 1 char (paralelo a Python `str.rjust(width, ch)`).
+/// Mini-batch Mb2 — Helper: for `pad_start`/`pad_end`. Extracts
+/// `(s, width, ch)` with validations: width `Int`, ch a `Str` of
+/// exactly 1 char (parallel to Python `str.rjust(width, ch)`).
 fn str_pad_args(
     method: &str,
     receiver: Value,
@@ -9982,9 +10037,10 @@ fn str_pad_args(
     Ok((s, width, ch))
 }
 
-/// Mini-tanda Mb2 — `s.pad_start(width, ch)`: prefija el string con
-/// copias de `ch` hasta alcanzar `width` chars. Si `len(s) >= width`,
-/// devuelve `s` sin cambios. Paralelo a Python `str.rjust(width, ch)`.
+/// Mini-batch Mb2 — `s.pad_start(width, ch)`: prefixes the string
+/// with copies of `ch` until reaching `width` chars. If
+/// `len(s) >= width`, returns `s` unchanged. Parallel to Python
+/// `str.rjust(width, ch)`.
 fn str_pad_start(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     let (s, width, ch) = str_pad_args("pad_start", receiver, args, span)?;
     let len = s.chars().count() as i64;
@@ -9996,9 +10052,9 @@ fn str_pad_start(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
     Ok(Value::Str(format!("{}{}", pad, s)))
 }
 
-/// Mini-tanda Mb2 — `s.pad_end(width, ch)`: sufija el string con
-/// copias de `ch` hasta alcanzar `width` chars. Paralelo a Python
-/// `str.ljust(width, ch)`.
+/// Mini-batch Mb2 — `s.pad_end(width, ch)`: suffixes the string
+/// with copies of `ch` until reaching `width` chars. Parallel to
+/// Python `str.ljust(width, ch)`.
 fn str_pad_end(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     let (s, width, ch) = str_pad_args("pad_end", receiver, args, span)?;
     let len = s.chars().count() as i64;
@@ -10010,10 +10066,10 @@ fn str_pad_end(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::Str(format!("{}{}", s, pad)))
 }
 
-/// Mini-tanda Ex — `s.find(sub)`: posición de la primera ocurrencia.
-/// Devuelve `Result<Int>` — `Ok(i)` con el índice (en chars, no bytes)
-/// si lo encuentra, `Err("no encontrado")` si no. Sub vacío matchea
-/// en posición 0 (paralelo a Python).
+/// Mini-batch Ex — `s.find(sub)`: position of the first occurrence.
+/// Returns `Result<Int>` — `Ok(i)` with the index (in chars, not
+/// bytes) if found, `Err("no encontrado")` if not. Empty sub matches
+/// at position 0 (parallel to Python).
 fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("find", &args, 1, span)?;
     let s = match receiver {
@@ -10034,7 +10090,7 @@ fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
             )))
         }
     };
-    // Rust `str::find` devuelve byte index; convertimos a char index.
+    // Rust `str::find` returns a byte index; we convert to char index.
     if let Some(byte_idx) = s.find(needle.as_str()) {
         let char_idx = s[..byte_idx].chars().count() as i64;
         Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(
@@ -10047,8 +10103,8 @@ fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     }
 }
 
-/// Mini-tanda Ex — `s.index_of(sub)`: alias de `find` con nombre
-/// estilo JS/TypeScript. Misma semántica.
+/// Mini-batch Ex — `s.index_of(sub)`: alias for `find` with a
+/// JS/TypeScript-style name. Same semantics.
 fn str_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("index_of", &args, 1, span)?;
     let s = match receiver {
@@ -10081,8 +10137,8 @@ fn str_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     }
 }
 
-/// Mini-tanda Ex — `s.last_index_of(sub)`: posición de la ÚLTIMA
-/// ocurrencia. Mismo shape de retorno que `find`/`index_of`.
+/// Mini-batch Ex — `s.last_index_of(sub)`: position of the LAST
+/// occurrence. Same return shape as `find`/`index_of`.
 fn str_last_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("last_index_of", &args, 1, span)?;
     let s = match receiver {
@@ -10119,26 +10175,27 @@ fn str_last_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
 }
 
 // ---------------------------------------------------------------------------
-// Operaciones binarias
+// Binary operations
 // ---------------------------------------------------------------------------
 //
-// Tabla de promoción para aritmética (Add, Sub, Mul, Div):
+// Promotion table for arithmetic (Add, Sub, Mul, Div):
 //
 //   Int    + Int    → Int
 //   Int    + Float  → Float
 //   Float  + Int    → Float
 //   Float  + Float  → Float
-//   Str    + Str    → Str   (solo Add, concatenación)
-//   resto           → TypeMismatch
+//   Str    + Str    → Str   (Add only, concatenation)
+//   rest            → TypeMismatch
 //
-// Para Div: si el divisor es 0 (Int) o 0.0 (Float), se emite DivisionByZero
-// en vez de dejar pasar IEEE 754 infinitos/NaN.
+// For Div: if the divisor is 0 (Int) or 0.0 (Float), DivisionByZero is
+// emitted instead of letting IEEE 754 infinities/NaN propagate.
 //
-// Comparaciones (Lt, LtEq, Gt, GtEq): numéricas con promoción Int↔Float, o
-// strings alfabéticamente. El resto → TypeMismatch.
+// Comparisons (Lt, LtEq, Gt, GtEq): numeric with Int↔Float promotion,
+// or strings alphabetically. Rest → TypeMismatch.
 //
-// Igualdad (Eq, NotEq): delega en `PartialEq` de `Value`, que ya hace
-// coerción Int↔Float. Tipos incompatibles dan `false` sin error.
+// Equality (Eq, NotEq): delegates to `PartialEq` on `Value`, which
+// already handles Int↔Float coercion. Incompatible types yield
+// `false` without error.
 
 fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
     use BinOpKind::*;
@@ -10152,15 +10209,15 @@ fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
         NotEq => Ok(Value::Bool(l != r)),
         Lt | LtEq | Gt | GtEq => compare(op, l, r, span),
         And | Or | Xor => unreachable!("And/Or/Xor se manejan en eval_logical antes de llegar acá"),
-        // Mini-tanda Bits — solo Int. El checker rechaza otros tipos
-        // estáticamente; el runtime emite TypeError si por modo
-        // gradual llega un valor no-Int.
+        // Mini-batch Bits — Int only. The checker statically rejects
+        // other types; the runtime emits TypeError if a non-Int value
+        // arrives through the gradual mode.
         BitAnd | BitOr | BitXor => eval_bitwise(op, l, r, span),
         Shl | Shr => eval_shift(op, l, r, span),
     }
 }
 
-/// Mini-tanda Bits — AND/OR/XOR bit-a-bit sobre `Int`.
+/// Mini-batch Bits — bitwise AND/OR/XOR on `Int`.
 fn eval_bitwise(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
     match (&l, &r) {
         (Value::Int(a), Value::Int(b)) => Ok(Value::Int(match op {
@@ -10181,9 +10238,10 @@ fn eval_bitwise(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Va
     }
 }
 
-/// Mini-tanda Bits — shifts `<<` / `>>` sobre `Int`. RHS negativo o
-/// fuera del rango `0..64` produce error claro (paralelo a Rust panic
-/// con shift overflow, pero como mensaje recuperable en lugar de panic).
+/// Mini-batch Bits — `<<` / `>>` shifts on `Int`. Negative RHS or
+/// out of the `0..64` range produces a clear error (parallel to Rust
+/// shift-overflow panic, but as a recoverable message instead of a
+/// panic).
 fn eval_shift(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
     let (a, b) = match (&l, &r) {
         (Value::Int(a), Value::Int(b)) => (*a, *b),
@@ -10216,13 +10274,13 @@ fn eval_shift(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
     Ok(Value::Int(result))
 }
 
-/// R.1.2 — operador `%` con semántica euclidean. `i64::rem_euclid`
-/// garantiza resultado con el mismo signo del divisor (siempre
-/// positivo si el divisor es positivo). Paralelo a Python, distinto
-/// del `%` Rust (truncate-toward-zero).
+/// R.1.2 — `%` operator with Euclidean semantics. `i64::rem_euclid`
+/// guarantees a result with the same sign as the divisor (always
+/// positive if the divisor is positive). Parallel to Python,
+/// different from Rust's `%` (truncate-toward-zero).
 ///
-/// `n % 0` paniquearía en Rust nativo; lo capturamos antes y
-/// emitimos `DivisionByZero` para que el evaluator no aborte.
+/// `n % 0` would panic in native Rust; we catch it first and emit
+/// `DivisionByZero` so the evaluator does not abort.
 fn eval_mod(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     match (&l, &r) {
         (Value::Int(_), Value::Int(0)) => div_by_zero(span),
@@ -10231,8 +10289,8 @@ fn eval_mod(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     }
 }
 
-/// Add tiene un caso especial: `Str + Str` concatena. El resto delega en
-/// `arith` con el mismo patrón de promoción Int↔Float.
+/// Add has a special case: `Str + Str` concatenates. The rest
+/// delegates to `arith` with the same Int↔Float promotion pattern.
 fn eval_add(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     if let (Value::Str(a), Value::Str(b)) = (&l, &r) {
         return Ok(Value::Str(format!("{}{}", a, b)));
@@ -10240,7 +10298,8 @@ fn eval_add(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     arith(l, r, "+", |a, b| a + b, |a, b| a + b, span)
 }
 
-/// Div chequea 0 antes de delegar — error explícito en vez de Infinity/NaN.
+/// Div checks 0 before delegating — explicit error instead of
+/// Infinity/NaN.
 fn eval_div(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     match &r {
         Value::Int(0) => return div_by_zero(span),
@@ -10250,12 +10309,14 @@ fn eval_div(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     arith(l, r, "/", |a, b| a / b, |a, b| a / b, span)
 }
 
-/// Helper genérico para Add/Sub/Mul/Div: aplica `int_op` si ambos son Int,
-/// `float_op` si alguno es Float (promoviendo el Int a f64). Resto → error.
+/// Generic helper for Add/Sub/Mul/Div: applies `int_op` if both are
+/// Int, `float_op` if either is Float (promoting the Int to f64).
+/// Rest → error.
 ///
-/// `Fn(i64, i64) -> i64` es una _trait bound_ que acepta cualquier closure
-/// que no consume su entorno. Los closures `|a, b| a + b` que pasamos no
-/// capturan nada, así que cumplen. Esto evita repetir el match cuatro veces.
+/// `Fn(i64, i64) -> i64` is a _trait bound_ accepting any closure
+/// that does not consume its environment. The `|a, b| a + b`
+/// closures we pass capture nothing, so they qualify. This avoids
+/// repeating the match four times.
 fn arith<I, F>(
     l: Value,
     r: Value,
@@ -10268,14 +10329,15 @@ where
     I: Fn(i64, i64) -> i64,
     F: Fn(f64, f64) -> f64,
 {
-    // R6 (v0.10.14) — detectar overflow/NaN al momento de generar el
-    // Float, en lugar de propagar el valor inválido hasta serialización
-    // JSON donde produce `null` silencioso. `arith` envuelve cada
-    // resultado Float con `check_finite` que devuelve `FitzError` claro
-    // citando el operador. Paralelo a la check `eval_div`/`eval_mod`
-    // sobre divisor 0. Casos típicos: `1.0e300 * 1.0e300` → +inf;
-    // `(-0.0_f64).sqrt()` → NaN (cubierto a través de los builtins);
-    // `Float::NAN op cualquier_cosa` → NaN propaga.
+    // R6 (v0.10.14) — detect overflow/NaN at the moment we generate
+    // the Float, rather than propagating the invalid value all the
+    // way to JSON serialization where it silently produces `null`.
+    // `arith` wraps each Float result with `check_finite` returning
+    // a clear `FitzError` citing the operator. Parallel to the
+    // `eval_div`/`eval_mod` divisor-0 check. Typical cases:
+    // `1.0e300 * 1.0e300` → +inf;
+    // `(-0.0_f64).sqrt()` → NaN (covered through the builtins);
+    // `Float::NAN op anything` → NaN propagates.
     let to_float = |v: f64| -> EvalResult<Value> {
         if v.is_finite() {
             Ok(Value::Float(v))
@@ -10303,8 +10365,8 @@ where
 fn compare(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
     use BinOpKind::*;
 
-    // Numérico (con promoción Int→f64). NaN propaga como false en cualquiera
-    // de los cuatro operadores, lo cual es la semántica de IEEE 754.
+    // Numeric (with Int→f64 promotion). NaN propagates as false in
+    // any of the four operators, which is IEEE 754 semantics.
     if let (Some(a), Some(b)) = (as_f64(&l), as_f64(&r)) {
         return Ok(Value::Bool(match op {
             Lt => a < b,
@@ -10315,7 +10377,7 @@ fn compare(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> 
         }));
     }
 
-    // Strings alfabéticamente (orden lexicográfico estándar de Rust).
+    // Strings alphabetically (Rust standard lexicographic order).
     if let (Value::Str(a), Value::Str(b)) = (&l, &r) {
         return Ok(Value::Bool(match op {
             Lt => a < b,
@@ -10326,9 +10388,9 @@ fn compare(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> 
         }));
     }
 
-    // v0.10.30 B.4 — Date/DateTime comparison. `chrono::NaiveDate` y
-    // `chrono::DateTime<Utc>` derivan `Ord`/`PartialOrd`. Mapping
-    // natural: orden cronológico.
+    // v0.10.30 B.4 — Date/DateTime comparison. `chrono::NaiveDate`
+    // and `chrono::DateTime<Utc>` derive `Ord`/`PartialOrd`.
+    // Natural mapping: chronological order.
     if let (Value::Date(a), Value::Date(b)) = (&l, &r) {
         return Ok(Value::Bool(match op {
             Lt => a < b,
@@ -10351,8 +10413,9 @@ fn compare(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> 
     type_error(op_name(op), &l, &r, span)
 }
 
-/// Convierte un Value numérico a f64. Devuelve None si no es numérico —
-/// usado en `compare` para discriminar el camino numérico del de strings.
+/// Converts a numeric Value to f64. Returns None if not numeric —
+/// used in `compare` to distinguish the numeric path from the
+/// strings path.
 fn as_f64(v: &Value) -> Option<f64> {
     match v {
         Value::Int(n) => Some(*n as f64),
@@ -10361,9 +10424,10 @@ fn as_f64(v: &Value) -> Option<f64> {
     }
 }
 
-/// And/Or con short-circuit y type-check de Bool. Vive aparte de `eval_binop`
-/// porque necesita acceso a las expresiones SIN evaluar (para no evaluar el
-/// lado derecho cuando el izquierdo ya determina el resultado).
+/// And/Or with short-circuit and Bool type-check. Lives apart from
+/// `eval_binop` because it needs access to the UN-evaluated
+/// expressions (so we do not evaluate the right side when the left
+/// already determines the result).
 #[async_recursion]
 async fn eval_logical(
     op: &BinOpKind,
@@ -10376,8 +10440,8 @@ async fn eval_logical(
     let lb = expect_bool(&lv, op_name(op), "izquierdo", left.span())?;
 
     // Short-circuit: `false and ...` → false, `true or ...` → true.
-    // `xor` NO tiene short-circuit (necesita ambos lados para saber el
-    // resultado), así que cae directo al eval del RHS.
+    // `xor` does NOT short-circuit (it needs both sides to know the
+    // result), so it falls through to evaluating the RHS.
     match op {
         BinOpKind::And if !lb => return Ok(Value::Bool(false)),
         BinOpKind::Or if lb => return Ok(Value::Bool(true)),
@@ -10386,16 +10450,16 @@ async fn eval_logical(
 
     let rv = eval_expr(right, env).await?;
     let rb = expect_bool(&rv, op_name(op), "derecho", right.span())?;
-    let _ = span; // mantenido por consistencia de firma con eval_binop
-                  // Mini-tanda Xor — `a xor b` = `a != b` sobre Bool.
+    let _ = span; // kept for signature consistency with eval_binop
+                  // Mini-batch Xor — `a xor b` = `a != b` on Bool.
     match op {
         BinOpKind::Xor => Ok(Value::Bool(lb != rb)),
         _ => Ok(Value::Bool(rb)),
     }
 }
 
-/// Helper para chequear que un Value sea Bool. Devuelve el bool o un
-/// TypeMismatch contextualizado al operador y lado.
+/// Helper to check that a Value is Bool. Returns the bool or a
+/// TypeMismatch contextualized to the operator and side.
 fn expect_bool(v: &Value, op: &str, side: &str, span: Span) -> EvalResult<bool> {
     match v {
         Value::Bool(b) => Ok(*b),
@@ -10416,7 +10480,7 @@ fn expect_bool(v: &Value, op: &str, side: &str, span: Span) -> EvalResult<bool> 
     }
 }
 
-/// Símbolo legible de un BinOpKind, para mensajes de error.
+/// Readable symbol for a BinOpKind, for error messages.
 fn op_name(op: &BinOpKind) -> &'static str {
     use BinOpKind::*;
     match op {
@@ -10469,12 +10533,12 @@ fn div_by_zero<T>(span: Span) -> EvalResult<T> {
 }
 
 // ---------------------------------------------------------------------------
-// Listas, mapas, rangos: helpers de runtime
+// Lists, maps, ranges: runtime helpers
 // ---------------------------------------------------------------------------
 
-/// Extrae el Int de un Value, o emite un TypeMismatch claro indicando si
-/// fue el "inicio" o el "fin" del rango. Float NO coerciona — los rangos
-/// son discretos.
+/// Extracts the Int from a Value, or emits a clear TypeMismatch
+/// indicating whether it was the "start" or the "end" of the range.
+/// Float does NOT coerce — ranges are discrete.
 fn expect_int_for_range(v: &Value, side: &str, span: Span) -> EvalResult<i64> {
     match v {
         Value::Int(n) => Ok(*n),
@@ -10494,14 +10558,15 @@ fn expect_int_for_range(v: &Value, side: &str, span: Span) -> EvalResult<i64> {
     }
 }
 
-/// `obj[idx]`. Dispatch por tipo del receptor:
-///  - List + Int: bounds-check, devuelve el elemento.
-///  - Map + cualquier valor: búsqueda lineal por igualdad (la misma
-///    igualdad que usa `==`, así que claves Int↔Float matchean).
-///  - Range: no indexable por ahora (semántica no obvia: ¿`(0..10)[3]` = 3?
-///    Probablemente sí, pero lo dejamos para más adelante).
-///  - Str: no indexable hasta que decidamos si la unidad es char o byte.
-///  - Otros: type error.
+/// `obj[idx]`. Dispatches by receiver type:
+///  - List + Int: bounds-check, returns the element.
+///  - Map + any value: linear search by equality (the same equality
+///    as `==`, so Int↔Float keys match).
+///  - Range: not indexable for now (semantics not obvious: is
+///    `(0..10)[3]` = 3? Probably yes, but we leave it for later).
+///  - Str: not indexable until we decide whether the unit is char
+///    or byte.
+///  - Others: type error.
 fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
     match obj {
         Value::List(items) => {
@@ -10522,11 +10587,11 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                     )))
                 }
             };
-            // I.1 (mini-tanda I) — índices negativos al estilo Python:
-            // `xs[-1]` es el último, `xs[-2]` el penúltimo, etc. La
-            // resolución es `effective = len + i`. Si sigue negativo o
-            // ≥ len, error de runtime claro (sin auto-wrap más allá del
-            // tamaño).
+            // I.1 (mini-batch I) — Python-style negative indices:
+            // `xs[-1]` is the last, `xs[-2]` the second-to-last, etc.
+            // Resolution is `effective = len + i`. If it remains
+            // negative or ≥ len, clear runtime error (no auto-wrap
+            // beyond the size).
             let borrowed = items.lock();
             let len = borrowed.len() as i64;
             let effective = if i < 0 { len + i } else { i };
@@ -10541,10 +10606,10 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             Ok(borrowed[effective as usize].clone())
         }
         Value::Str(s) => {
-            // I.1 — `s[i]` devuelve el i-ésimo char como `Str` de un
-            // char (Fitz no tiene tipo Char). Soporta negativos
-            // (`s[-1]` = último char). Cuenta CHARS, no bytes — mismo
-            // contrato que `s.len()`.
+            // I.1 — `s[i]` returns the i-th char as a 1-char `Str`
+            // (Fitz has no Char type). Supports negatives (`s[-1]` =
+            // last char). Counts CHARS, not bytes — same contract as
+            // `s.len()`.
             let i = match idx {
                 Value::Int(n) => *n,
                 other => {
@@ -10576,8 +10641,8 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             Ok(Value::Str(chars[effective as usize].to_string()))
         }
         Value::Map(pairs) => {
-            // Búsqueda lineal por igualdad. Esto va a ser O(n) hasta que
-            // promovamos Map a una estructura indexada de verdad.
+            // Linear search by equality. This will be O(n) until we
+            // promote Map to a properly indexed structure.
             for (k, v) in pairs.lock().iter() {
                 if k == idx {
                     return Ok(v.clone());
@@ -10605,21 +10670,20 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
     }
 }
 
-/// I.2 (mini-tanda I) — slicing. Resuelve `xs[a..b]`, `xs[..b]`,
-/// `xs[a..]`, `xs[..]`, `xs[a..=b]` sobre List<T> y Str.
+/// I.2 (mini-batch I) — slicing. Resolves `xs[a..b]`, `xs[..b]`,
+/// `xs[a..]`, `xs[..]`, `xs[a..=b]` over List<T> and Str.
 ///
-/// Política:
+/// Policy:
 ///  - `start = None` → 0.
 ///  - `end = None` → len.
-///  - Índices negativos se convierten a `len + i` (igual que
-///    indexing).
-///  - **Clamp**: si después del wrap el índice queda fuera de
-///    `[0, len]`, se ajusta a las cotas (Python-style). `xs[100..]`
-///    con len=5 → []. No paniquea.
-///  - Si `start > end` tras clamp → slice vacío.
-///  - `inclusive: true` ajusta `end += 1` ANTES del clamp.
+///  - Negative indices convert to `len + i` (same as indexing).
+///  - **Clamp**: if after wrap the index falls outside `[0, len]`,
+///    it is clamped to the bounds (Python-style). `xs[100..]` with
+///    len=5 → []. Does not panic.
+///  - If `start > end` after clamp → empty slice.
+///  - `inclusive: true` adjusts `end += 1` BEFORE the clamp.
 ///
-/// Devuelve siempre una NUEVA colección (copy semantics).
+/// Always returns a NEW collection (copy semantics).
 fn eval_slice(
     obj: &Value,
     start: Option<&Value>,
@@ -10659,7 +10723,7 @@ fn eval_slice(
         let e_excl = if inclusive { e_wrap + 1 } else { e_wrap };
         let s_clamp = s_wrap.clamp(0, len);
         let e_clamp = e_excl.clamp(0, len);
-        let s = s_clamp.min(e_clamp); // si start > end, slice vacío
+        let s = s_clamp.min(e_clamp); // if start > end, empty slice
         (s as usize, e_clamp as usize)
     }
 
@@ -10694,47 +10758,47 @@ fn eval_slice(
 }
 
 // ---------------------------------------------------------------------------
-// Coerción Map → Instance con anotación (Fase 8.4.3)
+// Map → Instance coercion with annotation (Phase 8.4.3)
 // ---------------------------------------------------------------------------
 //
-// Cuando un `let x: T = ...` tiene anotación nominal y el RHS evaluado es
-// un `Value::Map` (típicamente un dict Python coercionado a Map en 8.2.2),
-// intentamos construir un `Value::Instance` validando que el dict tenga
-// los campos requeridos por `T`. Habilita el patrón canónico:
+// When a `let x: T = ...` has a nominal annotation and the evaluated RHS is
+// a `Value::Map` (typically a Python dict coerced to Map in 8.2.2),
+// we try to build a `Value::Instance` validating that the dict has the
+// fields required by `T`. Enables the canonical pattern:
 //
 //   let row: User = json.loads(s)?
 //
-// Sin coerción, `row` queda como Map y el resto del programa lo trata
-// gradualmente; con coerción, el usuario sale del "limbo Python" a tipos
-// Fitz concretos en un solo punto.
+// Without coercion, `row` stays as a Map and the rest of the program treats
+// it gradually; with coercion, the user escapes the "Python limbo" into
+// concrete Fitz types at a single point.
 //
-// Reglas:
-//   - Anotación `Named(T)` con T nominal + value `Map` → coerce.
-//   - Anotación `Nullable(Named(T))` con value `Map` → coerce a `T`.
-//   - Anotación `Nullable(Named(T))` con value `Null` → pasa `Null` tal cual.
-//   - Cualquier otra combinación (anotación generic, value no-Map,
-//     value ya `Instance`, etc.) → pasa el value tal cual sin tocar.
-//   - Si el dict no tiene un campo requerido (no nullable, sin default) →
-//     `FitzError` claro citando el campo y el tipo.
-//   - Campos extras del dict se ignoran (Python suele devolver más de lo
-//     necesario; ser permisivos evita fricción innecesaria).
+// Rules:
+//   - Annotation `Named(T)` with T nominal + value `Map` → coerce.
+//   - Annotation `Nullable(Named(T))` with value `Map` → coerce to `T`.
+//   - Annotation `Nullable(Named(T))` with value `Null` → passes `Null` as-is.
+//   - Any other combination (generic annotation, non-Map value, value
+//     already `Instance`, etc.) → passes the value as-is, untouched.
+//   - If the dict lacks a required field (not nullable, no default) →
+//     clear `FitzError` citing the field and the type.
+//   - Extra dict fields are ignored (Python usually returns more than
+//     needed; being permissive avoids unnecessary friction).
 
 #[async_recursion]
 async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> EvalResult<Value> {
-    // Mini-fase R.missing-recursive-instance-coercion (2026-05-22) —
-    // recursión sobre `List<T>` y `Map<K, V>` cuando el inner es
-    // nominal o `Nullable(nominal)`. Para el caso typical
-    // `let users: List<User> = json.loads(raw)?` el value es
-    // `Value::List(Vec<Value::Map>)` y queremos
-    // `Value::List(Vec<Value::Instance>)`. Iteramos items y recursamos
-    // sobre cada uno; el caso base (Map → Instance) lo cubre el código
-    // de abajo.
+    // Mini-phase R.missing-recursive-instance-coercion (2026-05-22) —
+    // recursion over `List<T>` and `Map<K, V>` when the inner is
+    // nominal or `Nullable(nominal)`. For the typical case
+    // `let users: List<User> = json.loads(raw)?` the value is
+    // `Value::List(Vec<Value::Map>)` and we want
+    // `Value::List(Vec<Value::Instance>)`. We iterate items and recurse
+    // on each; the base case (Map → Instance) is covered by the code
+    // below.
     //
-    // Solo recursamos cuando el inner es nominal (o `T?` nominal).
-    // Si es primitivo (`List<Int>`), `Any` (`List<Any>`) o estructural
-    // (`List<List<X>>`, `List<Map<...>>` con value primitivo) → no
-    // tocamos. La regla: la coerción dispara únicamente para crear
-    // Instances; las colecciones son contenedores transparentes.
+    // We only recurse when the inner is nominal (or `T?` nominal).
+    // If primitive (`List<Int>`), `Any` (`List<Any>`) or structural
+    // (`List<List<X>>`, `List<Map<...>>` with primitive value) → we
+    // do not touch it. The rule: coercion fires exclusively to create
+    // Instances; collections are transparent containers.
     if let TypeExpr::Generic { name, args } = annot {
         if name == "List" && args.len() == 1 && is_nominal_target(&args[0], &env) {
             if let Value::List(items_ref) = &value {
@@ -10760,15 +10824,15 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
             }
             return Ok(value);
         }
-        // Otros generics (Result<T>, Future<T>, etc.) → passthrough.
-        // Los Result son enums Ok/Err: coercer adentro requeriría
-        // semántica distinta (cómo coercer el T del Ok). Por ahora
-        // el usuario tiene que desempacar con `?` o `match` y aplicar
-        // la anotación sobre el inner. Reabrible si entra demanda.
+        // Other generics (Result<T>, Future<T>, etc.) → passthrough.
+        // Results are Ok/Err enums: coercing inside would require
+        // different semantics (how to coerce the Ok's T). For now
+        // the user has to unwrap with `?` or `match` and apply the
+        // annotation on the inner. Reopenable if demand appears.
         return Ok(value);
     }
 
-    // Resolver: nombre del tipo + si la anotación tolera Null.
+    // Resolve: type name + whether the annotation tolerates Null.
     let (type_name, allows_null) = match annot {
         TypeExpr::Named(name) => (name.clone(), false),
         TypeExpr::Nullable(inner) => match inner.as_ref() {
@@ -10783,12 +10847,12 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
         return Ok(value);
     }
 
-    // v0.10.24 — Str → Date/DateTime/Uuid coerción cuando la anotación
-    // lo pide y el valor recibido es Str (caso típico: body JSON HTTP
-    // con `"2026-05-30"` deserializado a Value::Str, anotación pide
-    // `Date`). Sin esto, el user tendría que llamar `Date.parse(s)?`
-    // manual sobre cada field después del deser, rompiendo el patrón
-    // canonical de Fitz "anotación + auto-coerción".
+    // v0.10.24 — Str → Date/DateTime/Uuid coercion when the annotation
+    // requests it and the received value is Str (typical case: HTTP
+    // JSON body with `"2026-05-30"` deserialized to Value::Str, the
+    // annotation asks for `Date`). Without this, the user would have
+    // to call `Date.parse(s)?` manually on each field after deser,
+    // breaking Fitz's canonical "annotation + auto-coercion" pattern.
     if let Value::Str(ref s) = value {
         match type_name.as_str() {
             "Date" => {
@@ -10806,8 +10870,8 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
                 };
             }
             "DateTime" => {
-                // Acepta RFC 3339 estándar O el formato Postgres
-                // timestamptz `YYYY-MM-DD HH:MM:SS+TZ`.
+                // Accepts standard RFC 3339 OR the Postgres
+                // timestamptz format `YYYY-MM-DD HH:MM:SS+TZ`.
                 if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
                     return Ok(Value::DateTime(dt.with_timezone(&chrono::Utc)));
                 }
@@ -10846,18 +10910,18 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
         }
     }
 
-    // Solo intentamos coercer cuando el valor es un Map. Cualquier otro
-    // tipo (Instance ya, primitivo, Result, etc.) pasa tal cual — el
-    // gradual del checker se encarga de aceptarlo si la anotación es
-    // gradual, y los usos posteriores van a fallar claro si no encaja.
+    // We only try to coerce when the value is a Map. Any other type
+    // (already an Instance, primitive, Result, etc.) passes as-is —
+    // the checker's gradual mode accepts it if the annotation is
+    // gradual, and later uses will fail clearly if it does not fit.
     let map_pairs = match value {
         Value::Map(pairs) => pairs,
         other => return Ok(other),
     };
 
-    // Resolver el tipo declarado en el env. Si no es un Value::Type
-    // (puede ser un built-in como `Int`, `Str`, etc.), no coercemos:
-    // los primitivos no se construyen desde dicts.
+    // Resolve the declared type in the env. If it is not a Value::Type
+    // (could be a built-in like `Int`, `Str`, etc.), we do not coerce:
+    // primitives are not built from dicts.
     let ty_value = env.lock().get(&type_name);
     let (declared_type_name, declared_fields, resolved_defaults) = match ty_value {
         Some(Value::Type {
@@ -10869,17 +10933,16 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
         _ => return Ok(Value::Map(map_pairs)),
     };
 
-    // Snapshot del Map adentro del lock, después soltamos para evitar
-    // mantener el guard durante el eval de los defaults (cualquiera de
-    // los cuales podría locker otro Mutex).
+    // Snapshot the Map inside the lock, then release it to avoid
+    // holding the guard during the eval of the defaults (any of which
+    // could lock another Mutex).
     let map_snapshot: Vec<(Value, Value)> = map_pairs.lock().clone();
 
     let mut instance_fields: Vec<(String, Value)> = Vec::with_capacity(declared_fields.len());
     for f in &declared_fields {
-        // Buscar el campo en el map por su nombre. La key tiene que
-        // ser un `Str` con el nombre exacto del field; otros tipos
-        // de key se ignoran (no son representables como nombre de
-        // campo Fitz).
+        // Look up the field in the map by name. The key must be a
+        // `Str` matching the field's exact name; other key types
+        // are ignored (not representable as a Fitz field name).
         let provided = map_snapshot
             .iter()
             .find(|(k, _)| matches!(k, Value::Str(s) if s == &f.name));
@@ -10909,16 +10972,16 @@ async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> Ev
     Ok(Value::new_instance(declared_type_name, instance_fields))
 }
 
-/// Mini-fase R.missing-recursive-instance-coercion — helper que
-/// devuelve `true` si la `TypeExpr` apunta a un tipo nominal del
-/// programa (`type Foo { ... }`), incluyendo la variante nullable
-/// `T?`. Filtra primitivos (`Int`, `Str`, etc.) y tipos no nominales
-/// (`Any`, generics, tuplas) porque no se construyen desde dicts.
+/// Mini-phase R.missing-recursive-instance-coercion — helper that
+/// returns `true` if the `TypeExpr` points to a program's nominal
+/// type (`type Foo { ... }`), including the nullable variant `T?`.
+/// Filters out primitives (`Int`, `Str`, etc.) and non-nominal types
+/// (`Any`, generics, tuples) because they are not built from dicts.
 ///
-/// Si el ident no resuelve a un `Value::Type` en el env, devuelve
-/// `false` — el caller decide qué hacer (típicamente passthrough sin
-/// coercer; el checker se encarga del error estático si la anotación
-/// no existe).
+/// If the ident does not resolve to a `Value::Type` in the env,
+/// returns `false` — the caller decides what to do (typically
+/// passthrough without coercion; the checker handles the static
+/// error if the annotation does not exist).
 fn is_nominal_target(ty: &TypeExpr, env: &EnvRef) -> bool {
     let name = match ty {
         TypeExpr::Named(n) => n,
@@ -10932,11 +10995,11 @@ fn is_nominal_target(ty: &TypeExpr, env: &EnvRef) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Operación unaria
+// Unary operation
 // ---------------------------------------------------------------------------
 //
-// - `Neg`: negación numérica (`-x`) sobre Int/Float.
-// - `Not` (R.1.1): negación lógica (`not x`) sobre Bool estricto.
+// - `Neg`: numeric negation (`-x`) on Int/Float.
+// - `Not` (R.1.1): logical negation (`not x`) on strict Bool.
 
 fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
     match op {
@@ -10968,7 +11031,7 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                 ),
             ))),
         },
-        // Mini-tanda Bits — NOT bit-a-bit. Solo Int.
+        // Mini-batch Bits — bitwise NOT. Int only.
         UnaryOpKind::BitNot => match v {
             Value::Int(n) => Ok(Value::Int(!n)),
             other => Err(EvalSignal::Error(FitzError::new(
@@ -10988,12 +11051,12 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Builtins — funciones nativas implementadas en Rust, expuestas como
-// identificadores en el env global.
+// Builtins — native functions implemented in Rust, exposed as
+// identifiers in the global env.
 // ---------------------------------------------------------------------------
 
-/// Registra todas las funciones builtin en el environment. Llamar una sola
-/// vez al inicio del programa.
+/// Registers all builtin functions in the environment. Call once at
+/// the start of the program.
 fn register_builtins(env: &EnvRef) {
     env.lock().define(
         "print",
@@ -11009,8 +11072,8 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_len,
         },
     );
-    // Mini-tanda Bytes — constructor `bytes(s: Str) -> Bytes`.
-    // Convierte un Str a Value::Bytes usando UTF-8 encoding.
+    // Mini-batch Bytes — constructor `bytes(s: Str) -> Bytes`.
+    // Converts a Str to Value::Bytes using UTF-8 encoding.
     env.lock().define(
         "bytes",
         Value::Builtin {
@@ -11018,18 +11081,18 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_bytes,
         },
     );
-    // `cors(config: Map?)` — built-in MW.2. Construye un
-    // `Value::CorsConfig` con los kwargs efectivos. El config es un
-    // `Map<Str, ...>` (no kwargs runtime — el parser de calls no los
-    // soporta y un refactor del AST queda fuera de scope de MW.2).
-    // Llamadas válidas:
-    //   - `cors()` o `cors({})` → defaults permisivos (origin "*",
-    //     métodos comunes, headers content-type+authorization).
-    //   - `cors({"allow_origin": "https://x.com"})` → override de un
-    //     subset; el resto queda en defaults.
-    //   - Keys soportadas: `allow_origin` (Str), `allow_methods`
+    // `cors(config: Map?)` — built-in MW.2. Builds a
+    // `Value::CorsConfig` with the effective kwargs. The config is a
+    // `Map<Str, ...>` (no runtime kwargs — the call parser does not
+    // support them and an AST refactor is out of MW.2 scope). Valid
+    // calls:
+    //   - `cors()` or `cors({})` → permissive defaults (origin "*",
+    //     common methods, headers content-type+authorization).
+    //   - `cors({"allow_origin": "https://x.com"})` → override of a
+    //     subset; the rest stays at defaults.
+    //   - Supported keys: `allow_origin` (Str), `allow_methods`
     //     (List<Str>), `allow_headers` (List<Str>), `max_age` (Int).
-    //   - Cualquier otra key, o un tipo distinto al esperado, da error.
+    //   - Any other key, or an unexpected type, errors.
     env.lock().define(
         "cors",
         Value::Builtin {
@@ -11037,14 +11100,14 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_cors,
         },
     );
-    // `sleep(ms: Int)` — async primitive introducido en Fase 6.3. El
-    // checker lo tipa como `Function { ret: Future<Null> }`. Acá
-    // registramos un stub que emite error claro: el evaluator async
-    // (refactor de eval_expr/eval_stmt/etc. a `async fn`) entra en
-    // 6.4, así que hasta entonces no podemos esperar ni construir
-    // un `Value::Future`. La barrera del evaluator sobre `Expr::Await`
-    // suele cortar antes; este builtin es para el caso de llamar a
-    // `sleep(100)` sin `.await` (guardar el Future suelto).
+    // `sleep(ms: Int)` — async primitive introduced in Phase 6.3.
+    // The checker types it as `Function { ret: Future<Null> }`.
+    // Here we register a stub that emits a clear error: the async
+    // evaluator (refactor of eval_expr/eval_stmt/etc. to `async fn`)
+    // lands in 6.4, so until then we cannot await or build a
+    // `Value::Future`. The evaluator's barrier on `Expr::Await`
+    // usually cuts earlier; this builtin is for the case of calling
+    // `sleep(100)` without `.await` (saving the dangling Future).
     env.lock().define(
         "sleep",
         Value::Builtin {
@@ -11053,10 +11116,10 @@ fn register_builtins(env: &EnvRef) {
         },
     );
     // 10.8.7 (v0.10.8) — `ws_broadcast(endpoint: Str, msg) -> Null`:
-    // broadcast cross-handler de un mensaje JSON a TODOS los
-    // clientes WS conectados al endpoint. Habilita el patrón
-    // canónico SaaS "handler HTTP triggerea notification realtime".
-    // Si no hay registry HTTP activo, no-op silencioso.
+    // cross-handler broadcast of a JSON message to ALL WS clients
+    // connected to the endpoint. Enables the canonical SaaS pattern
+    // "HTTP handler triggers a realtime notification". If there is
+    // no active HTTP registry, silent no-op.
     env.lock().define(
         "ws_broadcast",
         Value::Builtin {
@@ -11064,12 +11127,13 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_ws_broadcast,
         },
     );
-    // Fase 9.w.3 — `spawn(fn_call)` sentinel. El dispatch real vive en
-    // `eval_call` (eval_spawn_call) que intercepta antes de evaluar
-    // args (necesita capturar el inner call sin eager-evaluation).
-    // Este Builtin solo sirve como marker para que `is_spawn_builtin`
-    // detecte que no fue shadowed por una fn user-defined. Si llegara
-    // a ejecutarse el `func`, hubo un bug en el dispatch.
+    // Phase 9.w.3 — `spawn(fn_call)` sentinel. The real dispatch
+    // lives in `eval_call` (eval_spawn_call), which intercepts before
+    // evaluating args (needs to capture the inner call without eager
+    // evaluation). This Builtin only serves as a marker so
+    // `is_spawn_builtin` can detect it was not shadowed by a
+    // user-defined fn. If the `func` ever executes, there was a
+    // dispatch bug.
     env.lock().define(
         "spawn",
         Value::Builtin {
@@ -11077,8 +11141,8 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_spawn_stub,
         },
     );
-    // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
-    // 3 builtins para leer variables de entorno desde Fitz.
+    // Mini-phase env builtin (2026-05-22, Step 3 post-boilerplates) —
+    // 3 builtins to read environment variables from Fitz.
     env.lock().define(
         "env",
         Value::Builtin {
@@ -11100,7 +11164,7 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_load_env,
         },
     );
-    // Fase 12.2.a — Builtins de Fase 12 (Deployment).
+    // Phase 12.2.a — Builtins of Phase 12 (Deployment).
     env.lock().define(
         "secret",
         Value::Builtin {
@@ -11115,10 +11179,11 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_config,
         },
     );
-    // Fase 12.8 — Feature flags built-in. `flag(name) -> Bool` global +
-    // módulo `flags` con `is_enabled(name)` (alias) y `list()`. Defaults
-    // del manifest `[flags]` cargados al boot via `set_flag_defaults`,
-    // override runtime via env vars `FITZ_FLAG_<UPPERCASE>`.
+    // Phase 12.8 — Built-in feature flags. Global `flag(name) -> Bool`
+    // + a `flags` module with `is_enabled(name)` (alias) and `list()`.
+    // Defaults from the manifest's `[flags]` are loaded at boot via
+    // `set_flag_defaults`, runtime override via env vars
+    // `FITZ_FLAG_<UPPERCASE>`.
     env.lock().define(
         "flag",
         Value::Builtin {
@@ -11148,12 +11213,11 @@ fn register_builtins(env: &EnvRef) {
             env: flags_env,
         },
     );
-    // Fase 9.z.2.a — assertion builtins. Siempre disponibles (igual
-    // que `print`/`len`/`sleep`/`cors`); su semántica es la misma
-    // dentro o fuera de `@test`. Una aserción fallida emite
-    // `FitzError` que aborta la ejecución del programa — el runner
-    // de `fitz test` (9.z.2.b) atrapará ese error y lo reportará
-    // como fallo del test.
+    // Phase 9.z.2.a — assertion builtins. Always available (same as
+    // `print`/`len`/`sleep`/`cors`); semantics are the same inside or
+    // outside `@test`. A failed assertion emits a `FitzError` that
+    // aborts program execution — the `fitz test` runner (9.z.2.b)
+    // catches that error and reports it as a test failure.
     env.lock().define(
         "assert",
         Value::Builtin {
@@ -11175,12 +11239,12 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_assert_ne,
         },
     );
-    // `assert_throws(fn)` es **caso especial** en `invoke_value`:
-    // necesita invocar el callback async-recursive (el `invoke_value`
-    // genérico es async, los builtins son sync). El stub `func` acá
-    // emite un `unreachable!` — el dispatcher debería interceptar
-    // antes de invocarlo. Si llegás a ver "assert_throws stub", el
-    // dispatcher tiene un bug.
+    // `assert_throws(fn)` is a **special case** in `invoke_value`:
+    // it needs to invoke the callback async-recursive (the generic
+    // `invoke_value` is async, builtins are sync). The `func` stub
+    // here emits `unreachable!` — the dispatcher should intercept
+    // before invoking it. If you see "assert_throws stub", the
+    // dispatcher has a bug.
     env.lock().define(
         "assert_throws",
         Value::Builtin {
@@ -11188,9 +11252,9 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_assert_throws_stub,
         },
     );
-    // Mini-tanda Bits-extras — ops sobre Int. Builtins globales (en
-    // lugar de métodos sobre Int) para mantener simple la dispatch
-    // del receptor primitivo.
+    // Mini-batch Bits-extras — ops on Int. Global builtins (instead
+    // of methods on Int) to keep the primitive-receiver dispatch
+    // simple.
     env.lock().define(
         "popcount",
         Value::Builtin {
@@ -11226,7 +11290,7 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_rotate_right,
         },
     );
-    // Mini-tanda Math — abs/min/max/pow/sqrt/ceil/floor/round/clamp.
+    // Mini-batch Math — abs/min/max/pow/sqrt/ceil/floor/round/clamp.
     env.lock().define(
         "abs",
         Value::Builtin {
@@ -11291,14 +11355,14 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
-    // Fase 9.w.1.b — Auth nativa: módulos `jwt` y `hash` siempre
-    // disponibles en el env global. A diferencia de los builtins
-    // top-level (`print`/`len`/`sleep`/`cors`/...), `jwt` y `hash`
-    // tienen namespace propio: `jwt.encode(...)` y `hash.password(...)`.
-    // Patrón: construir un `EnvRef` fresh por módulo, registrar los
-    // builtins adentro, bindear como `Value::Module` en el env
-    // principal. El dispatcher de field access sobre `Value::Module`
-    // (ya existente desde Fase 3.5) hace el resto.
+    // Phase 9.w.1.b — Native auth: `jwt` and `hash` modules always
+    // available in the global env. Unlike the top-level builtins
+    // (`print`/`len`/`sleep`/`cors`/...), `jwt` and `hash` have their
+    // own namespace: `jwt.encode(...)` and `hash.password(...)`.
+    // Pattern: build a fresh `EnvRef` per module, register the
+    // builtins inside, bind as `Value::Module` in the main env. The
+    // field-access dispatcher on `Value::Module` (already existing
+    // since Phase 3.5) does the rest.
     let jwt_env = Environment::new();
     jwt_env.lock().define(
         "encode",
@@ -11345,15 +11409,15 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
-    // Fase 9.w.1.iter2.b — Módulo `auth` con 3 builtins para token
-    // blacklist + cleanup. La tabla `fitz_token_blacklist` se crea
-    // automáticamente al primer call con `CREATE TABLE IF NOT EXISTS`
-    // (paralelo a `cron_jobs::init_storage`).
+    // Phase 9.w.1.iter2.b — `auth` module with 3 builtins for token
+    // blacklist + cleanup. The `fitz_token_blacklist` table is
+    // automatically created on first call with `CREATE TABLE IF NOT
+    // EXISTS` (parallel to `cron_jobs::init_storage`).
     //
-    // Patrón canónico: el `@auth_provider` chequea
-    // `auth.is_blacklisted(db, jti)` antes de devolver el user;
-    // un handler `/auth/logout` llama `auth.blacklist(db, jti, exp)`;
-    // un job `@cron` periódico llama `auth.cleanup_expired(db)`.
+    // Canonical pattern: `@auth_provider` checks
+    // `auth.is_blacklisted(db, jti)` before returning the user;
+    // a `/auth/logout` handler calls `auth.blacklist(db, jti, exp)`;
+    // a periodic `@cron` job calls `auth.cleanup_expired(db)`.
     let auth_env = Environment::new();
     auth_env.lock().define(
         "blacklist",
@@ -11384,13 +11448,13 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
-    // Fase 12.3.a.1 — Módulo `log` para structured logging built-in.
-    // 4 niveles paralelos a `tracing` (info/warn/error/debug). Aceptan
-    // `msg: Str` posicional + kwargs heterogéneos. El path positional
-    // termina en `builtin_log_<level>`; el path con kwargs vive en
-    // `dispatch_builtin_kwargs` (que captura msg + kvs y llama directo
-    // a `emit_log_record`). Ver el bloque de doc al final de este
-    // archivo para detalle del shape de la API y kwargs reservados.
+    // Phase 12.3.a.1 — `log` module for built-in structured logging.
+    // 4 levels parallel to `tracing` (info/warn/error/debug). They
+    // accept a positional `msg: Str` + heterogeneous kwargs. The
+    // positional path ends in `builtin_log_<level>`; the kwargs path
+    // lives in `dispatch_builtin_kwargs` (which captures msg + kvs
+    // and calls `emit_log_record` directly). See the doc block at
+    // the end of this file for API shape and reserved kwargs detail.
     let log_env = Environment::new();
     log_env.lock().define(
         "info",
@@ -11428,13 +11492,13 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
-    // Fase 10.1.b — módulo `db`: driver Postgres nativo. Solo expone
-    // `connect(url)` que devuelve un `Future<Result<DbConn>>`. Los
-    // métodos sobre la conexión (`query`/`exec`/`close`) se despachan
-    // vía `dispatch_method` sobre `Value::DbConn`, paralelo a WsConn
-    // de 9.w.2 (las fns built-in del módulo son sync wrappers que
-    // arman un Value::Future; el work async vive adentro del block
-    // que el `.await` desempaca).
+    // Phase 10.1.b — `db` module: native Postgres driver. Only
+    // exposes `connect(url)` which returns `Future<Result<DbConn>>`.
+    // Methods on the connection (`query`/`exec`/`close`) are
+    // dispatched via `dispatch_method` on `Value::DbConn`, parallel
+    // to WsConn from 9.w.2 (the module's built-in fns are sync
+    // wrappers that build a Value::Future; the async work lives
+    // inside the block that `.await` unpacks).
     let db_env = Environment::new();
     db_env.lock().define(
         "connect",
@@ -11451,11 +11515,11 @@ fn register_builtins(env: &EnvRef) {
         },
     );
 
-    // v0.10.24 (Date/DateTime/Uuid) — registrar los 3 tipos como
-    // `Value::Module` para que el dispatcher de field access los
-    // resuelva como `Date.today()`, `DateTime.now()`, `Uuid.v4()`,
-    // etc. Mismo patrón que `db`/`jwt`/`hash`. El nombre coincide
-    // con el del tipo built-in (namespace separado type ≠ value).
+    // v0.10.24 (Date/DateTime/Uuid) — register the 3 types as
+    // `Value::Module` so the field-access dispatcher resolves them
+    // as `Date.today()`, `DateTime.now()`, `Uuid.v4()`, etc. Same
+    // pattern as `db`/`jwt`/`hash`. The name matches the built-in
+    // type (separate type ≠ value namespace).
     let date_env = Environment::new();
     date_env.lock().define(
         "today",
@@ -11478,9 +11542,9 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_date_from_ymd,
         },
     );
-    // v0.10.30 B.6 — shortcuts `Date.tomorrow()` / `Date.yesterday()`
-    // sobre Local::now (paralelo a `today()`). Sirven para casos cortos
-    // sin necesidad de `today().add_days(±1)`.
+    // v0.10.30 B.6 — `Date.tomorrow()` / `Date.yesterday()` shortcuts
+    // over Local::now (parallel to `today()`). Useful for short cases
+    // without needing `today().add_days(±1)`.
     date_env.lock().define(
         "tomorrow",
         Value::Builtin {
@@ -11525,7 +11589,7 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_datetime_from_timestamp,
         },
     );
-    // v0.10.30 B.6 — shortcut `DateTime.epoch()` (timestamp 0 = 1970-01-01T00:00:00Z).
+    // v0.10.30 B.6 — `DateTime.epoch()` shortcut (timestamp 0 = 1970-01-01T00:00:00Z).
     datetime_env.lock().define(
         "epoch",
         Value::Builtin {
@@ -11549,10 +11613,10 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_uuid_v4,
         },
     );
-    // v0.10.30 B.5 — `Uuid.v7()` UUIDv7 time-ordered (RFC 9562). Los
-    // primeros 48 bits codifican Unix millis → ordenan cronológicamente,
-    // muy útiles para PKs sortables por created_at (vs v4 random que
-    // produce scattering en btree indexes).
+    // v0.10.30 B.5 — `Uuid.v7()` UUIDv7 time-ordered (RFC 9562). The
+    // first 48 bits encode Unix millis → sort chronologically, very
+    // useful for PKs sortable by created_at (vs v4 random, which
+    // produces scattering on btree indexes).
     uuid_env.lock().define(
         "v7",
         Value::Builtin {
@@ -11583,9 +11647,9 @@ fn register_builtins(env: &EnvRef) {
     );
 }
 
-/// Mini-tanda Bits-extras — `popcount(n: Int) -> Int`: cantidad de
-/// bits en 1 en la representación de complemento a dos de `n` (64
-/// bits). Paralelo a `i64::count_ones()` Rust.
+/// Mini-batch Bits-extras — `popcount(n: Int) -> Int`: number of
+/// bits set to 1 in the two's-complement representation of `n`
+/// (64 bits). Parallel to Rust `i64::count_ones()`.
 fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -11615,8 +11679,8 @@ fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
     }
 }
 
-/// Mini-tanda Bits-extras — `leading_zeros(n: Int) -> Int`: cantidad
-/// de ceros líderes en la representación de 64 bits de `n`.
+/// Mini-batch Bits-extras — `leading_zeros(n: Int) -> Int`: number of
+/// leading zeros in the 64-bit representation of `n`.
 fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -11649,7 +11713,7 @@ fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
     }
 }
 
-/// Mini-tanda Bits-extras — `trailing_zeros(n: Int) -> Int`.
+/// Mini-batch Bits-extras — `trailing_zeros(n: Int) -> Int`.
 fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -11682,9 +11746,9 @@ fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
     }
 }
 
-/// Mini-tanda Bits-extras — `rotate_left(n: Int, bits: Int) -> Int`.
-/// Rotación a la izquierda en 64 bits. `bits` se toma módulo 64
-/// (paralelo a Rust `i64::rotate_left`).
+/// Mini-batch Bits-extras — `rotate_left(n: Int, bits: Int) -> Int`.
+/// Left rotation in 64 bits. `bits` is taken modulo 64 (parallel to
+/// Rust `i64::rotate_left`).
 fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -11737,7 +11801,7 @@ fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Int(n.rotate_left(bits.rem_euclid(64) as u32)))
 }
 
-/// Mini-tanda Bits-extras — `rotate_right(n: Int, bits: Int) -> Int`.
+/// Mini-batch Bits-extras — `rotate_right(n: Int, bits: Int) -> Int`.
 fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -11790,13 +11854,13 @@ fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Int(n.rotate_right(bits.rem_euclid(64) as u32)))
 }
 
-// ---- Mini-tanda Math — builtins matemáticos ----
+// ---- Mini-batch Math — math builtins ----
 //
-// `abs/min/max/pow/sqrt/ceil/floor/round/clamp`. Polimórficos sobre
-// Int/Float donde aplica:
-//   - abs/min/max/clamp aceptan ambos (devuelven el mismo tipo del input)
-//   - pow/sqrt operan sobre Float (devuelven Float)
-//   - ceil/floor/round toman Float y devuelven Int
+// `abs/min/max/pow/sqrt/ceil/floor/round/clamp`. Polymorphic over
+// Int/Float where applicable:
+//   - abs/min/max/clamp accept both (return the input's same type)
+//   - pow/sqrt operate on Float (return Float)
+//   - ceil/floor/round take Float and return Int
 
 fn builtin_math_abs(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
@@ -12046,7 +12110,7 @@ fn builtin_math_round(args: &[Value]) -> FitzResult<Value> {
         ));
     }
     match &args[0] {
-        // Rust f64::round() es "half away from zero"; suficiente.
+        // Rust f64::round() is "half away from zero"; good enough.
         Value::Float(x) => Ok(Value::Int(x.round() as i64)),
         Value::Int(n) => Ok(Value::Int(*n)),
         other => Err(FitzError::new(
@@ -12097,8 +12161,8 @@ fn builtin_math_clamp(args: &[Value]) -> FitzResult<Value> {
     }
 }
 
-/// `print(arg1, arg2, ...)` — imprime los args convertidos a string,
-/// separados por espacio, seguido de newline. Como Python.
+/// `print(arg1, arg2, ...)` — prints the args converted to strings,
+/// separated by spaces, followed by a newline. Like Python.
 fn builtin_print(args: &[Value]) -> FitzResult<Value> {
     let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
     println!("{}", parts.join(" "));
@@ -12106,13 +12170,14 @@ fn builtin_print(args: &[Value]) -> FitzResult<Value> {
 }
 
 /// 10.8.7 (v0.10.8) — `ws_broadcast(endpoint: Str, msg) -> Null`.
-/// Serializa `msg` a JSON y lo envía a TODOS los clientes WS
-/// conectados al endpoint. Delega a `http::ws_broadcast_to_endpoint`
-/// que accede al `WsBroadcaster` global del registry activo.
+/// Serializes `msg` to JSON and sends it to ALL WS clients connected
+/// to the endpoint. Delegates to `http::ws_broadcast_to_endpoint`,
+/// which accesses the active registry's global `WsBroadcaster`.
 ///
-/// Si no hay registry HTTP activo (programa CLI sin server), el
-/// broadcast es no-op silencioso. El usuario que llama
-/// `ws_broadcast` desde un script sin `@server` no recibe error.
+/// If there is no active HTTP registry (CLI program without a
+/// server), the broadcast is a silent no-op. A user calling
+/// `ws_broadcast` from a script without `@server` does not get an
+/// error.
 fn builtin_ws_broadcast(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -12165,22 +12230,22 @@ fn builtin_ws_broadcast(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Null)
 }
 
-/// `sleep(ms: Int) -> Future<Null>` — primer async primitive del
-/// lenguaje. Devuelve un `Value::Future` que internamente espera
-/// `ms` milisegundos via `tokio::time::sleep`. El usuario debe
-/// await-earlo desde una `async fn` para que la espera ocurra:
-/// `sleep(100).await` adentro de `async fn` pausa 100ms y produce
-/// `Null`.
+/// `sleep(ms: Int) -> Future<Null>` — the language's first async
+/// primitive. Returns a `Value::Future` that internally waits `ms`
+/// milliseconds via `tokio::time::sleep`. The user must `.await` it
+/// from an `async fn` for the wait to happen: `sleep(100).await`
+/// inside `async fn` pauses 100ms and produces `Null`.
 ///
-/// Diseño (Fase 6.4):
-/// - El builtin es **sync por firma** (`fn(&[Value]) -> FitzResult<Value>`)
-///   pero **devuelve un Future como valor**. Eso evita refactorar la
-///   firma de `Value::Builtin` para distinguir builtins async — el
-///   dispatcher trata todos los builtins igual, y los que producen
-///   `Value::Future` ceden el control vía `.await` en el caller.
-/// - Validación de args (aridad 1, Int) es defensiva: el checker
-///   estático 6.3 ya rechaza llamadas mal tipadas, pero el evaluador
-///   también lo chequea para casos donde el chequeo se haya saltado
+/// Design (Phase 6.4):
+/// - The builtin is **sync by signature**
+///   (`fn(&[Value]) -> FitzResult<Value>`) but **returns a Future as
+///   a value**. That avoids refactoring the `Value::Builtin`
+///   signature to distinguish async builtins — the dispatcher
+///   treats all builtins the same, and those producing
+///   `Value::Future` yield control via `.await` in the caller.
+/// - Arg validation (arity 1, Int) is defensive: the static checker
+///   6.3 already rejects ill-typed calls, but the evaluator also
+///   checks for cases where the check was skipped
 ///   (`fitz run --no-typecheck`).
 fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
@@ -12214,8 +12279,8 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
             ));
         }
     };
-    // Clampeamos negativos a 0: `sleep(-5)` no tiene sentido y
-    // tokio::time::sleep no acepta `Duration` negativa.
+    // We clamp negatives to 0: `sleep(-5)` makes no sense and
+    // tokio::time::sleep does not accept a negative `Duration`.
     let ms_u64 = ms.max(0) as u64;
     let fut: crate::value::FitzFuture = Box::pin(async move {
         tokio::time::sleep(std::time::Duration::from_millis(ms_u64)).await;
@@ -12225,26 +12290,25 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
 }
 
 // =============================================================
-// Fase 10.1.b — Builtins del módulo `db`
+// Phase 10.1.b — Builtins of the `db` module
 // =============================================================
 //
-// `db.connect(url)` es el único entry point del módulo. Devuelve
-// `Future<Result<DbConn>>`: en código Fitz se usa como
+// `db.connect(url)` is the module's only entry point. Returns
+// `Future<Result<DbConn>>`: in Fitz code it is used as
 //
 //     let db = db.connect("postgres://...").await?
 //     let rows = db.query("SELECT 1 AS n", []).await?
 //
-// El `.await` postfix de Fase 6 desempaca el Future, y el `?`
-// propaga el Err si la conexión falló (Auth, Io, Url, etc.).
+// Phase 6's postfix `.await` unwraps the Future, and `?` propagates
+// the Err if the connection failed (Auth, Io, Url, etc.).
 //
-// Los métodos sobre la conexión (`query`/`exec`/`close`) NO son
-// builtins del módulo `db` — se despachan vía `dispatch_method`
-// sobre `Value::DbConn`, igual que `ws_conn.recv()`/`send()` en
-// 9.w.2. El user los invoca como métodos:
-// `conn.query(sql, args).await?`.
+// Methods on the connection (`query`/`exec`/`close`) are NOT builtins
+// of the `db` module — they are dispatched via `dispatch_method` on
+// `Value::DbConn`, like `ws_conn.recv()`/`send()` in 9.w.2. The user
+// invokes them as methods: `conn.query(sql, args).await?`.
 
 /// `db.connect(url: Str) -> Future<Result<DbConn>>`. Sync wrapper
-/// que valida args y arma un Future async (mismo patrón que
+/// that validates args and builds an async Future (same pattern as
 /// `sleep`).
 fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
@@ -12280,8 +12344,8 @@ fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
     };
     let fut: crate::value::FitzFuture = Box::pin(async move {
         match crate::db::connect_url(&url).await {
-            // 10.9.2 — `connect_url` ahora devuelve Arc<DbConnHandle>
-            // directo (cacheado per URL).
+            // 10.9.2 — `connect_url` now returns Arc<DbConnHandle>
+            // directly (cached per URL).
             Ok(handle) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
                 Value::DbConn(handle),
             )))),
@@ -12293,9 +12357,9 @@ fn builtin_db_connect(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::new_future(fut))
 }
 
-/// Convierte un `Value` Fitz a `PgValue` para enviar al servidor
-/// como arg de query. Solo primitivos en 10.1 — composites
-/// (List, Map, Instance → JSONB / arrays) llegan en 10.5.
+/// Convert a Fitz `Value` into a `PgValue` to send to the server
+/// as a query arg. Primitives only in 10.1 — composites
+/// (List, Map, Instance → JSONB / arrays) arrive in 10.5.
 fn fitz_value_to_pg(v: &Value) -> Result<crate::db::PgValue, String> {
     match v {
         Value::Null => Ok(crate::db::PgValue::Null),
@@ -12304,15 +12368,16 @@ fn fitz_value_to_pg(v: &Value) -> Result<crate::db::PgValue, String> {
         Value::Str(s) => Ok(crate::db::PgValue::Text(s.clone())),
         Value::Bool(b) => Ok(crate::db::PgValue::Bool(*b)),
         Value::Bytes(b) => Ok(crate::db::PgValue::Bytes(b.clone())),
-        // v0.10.24 — Date/DateTime/Uuid → text en formato que Postgres
-        // acepta para `date`/`timestamptz`/`uuid` respectivamente. El
-        // server hace el cast implícito al tipo destino del param.
-        // Para columnas tipadas (`UPDATE users SET created_at = $1`),
-        // Postgres reconoce el text format y guarda el binario correcto.
+        // v0.10.24 — Date/DateTime/Uuid → text in the format Postgres
+        // accepts for `date`/`timestamptz`/`uuid` respectively. The
+        // server performs the implicit cast to the destination param
+        // type. For typed columns (`UPDATE users SET created_at = $1`),
+        // Postgres recognizes the text format and stores the correct
+        // binary value.
         Value::Date(d) => Ok(crate::db::PgValue::Text(d.format("%Y-%m-%d").to_string())),
         Value::DateTime(dt) => Ok(crate::db::PgValue::Text(
-            // RFC 3339 con `Z` terminal — Postgres lo parsea como
-            // timestamptz UTC sin ambigüedad.
+            // RFC 3339 with terminal `Z` — Postgres parses it as
+            // unambiguous UTC timestamptz.
             dt.format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string(),
         )),
         Value::Uuid(u) => Ok(crate::db::PgValue::Text(u.to_string())),
@@ -12327,13 +12392,13 @@ fn fitz_value_to_pg(v: &Value) -> Result<crate::db::PgValue, String> {
 // v0.10.24 — Date / DateTime / Uuid built-in constructors
 // =============================================================
 //
-// Constructors estáticos que viven como Builtin functions adentro
-// del `Value::Module` correspondiente (`Date`, `DateTime`, `Uuid`).
-// Pattern paralelo a `db.connect`, `jwt.encode`, `hash.password`.
+// Static constructors that live as Builtin functions inside the
+// corresponding `Value::Module` (`Date`, `DateTime`, `Uuid`).
+// Pattern parallel to `db.connect`, `jwt.encode`, `hash.password`.
 //
-// Cada uno: arity check + arg type check + construct + wrap. Los
-// que pueden fallar (`.parse`) devuelven `Result<T>` con `Err(Str)`
-// explicando el formato esperado.
+// Each one: arity check + arg type check + construct + wrap.
+// Those that can fail (`.parse`) return `Result<T>` with `Err(Str)`
+// explaining the expected format.
 
 fn builtin_date_today(args: &[Value]) -> FitzResult<Value> {
     if !args.is_empty() {
@@ -12350,9 +12415,9 @@ fn builtin_date_today(args: &[Value]) -> FitzResult<Value> {
             ),
         ));
     }
-    // Local timezone del sistema → date sin tz. `chrono::Local::now`
-    // requiere feature `clock` (ya activa). Para Date solo queremos
-    // YYYY-MM-DD en el huso local del host.
+    // System local timezone → date without tz. `chrono::Local::now`
+    // requires feature `clock` (already active). For Date we only
+    // want YYYY-MM-DD in the host's local timezone.
     let today = chrono::Local::now().date_naive();
     Ok(Value::Date(today))
 }
@@ -12386,9 +12451,9 @@ fn builtin_date_parse(args: &[Value]) -> FitzResult<Value> {
             ));
         }
     };
-    // ISO 8601 estricto `YYYY-MM-DD`. Sin variantes locales (`DD/MM`,
-    // `MM-DD-YYYY`) — el user que necesite parsear formato custom
-    // baja a Str + parsing manual.
+    // Strict ISO 8601 `YYYY-MM-DD`. No local variants (`DD/MM`,
+    // `MM-DD-YYYY`) — the user who needs to parse a custom format
+    // drops down to Str + manual parsing.
     match chrono::NaiveDate::parse_from_str(&s, "%Y-%m-%d") {
         Ok(d) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
             Value::Date(d),
@@ -12502,10 +12567,10 @@ fn builtin_datetime_parse(args: &[Value]) -> FitzResult<Value> {
             ));
         }
     };
-    // RFC 3339 (ISO 8601) — formato canonical con TZ offset explícito
-    // o `Z` terminal. Acepta `2026-05-30T14:30:00Z`,
+    // RFC 3339 (ISO 8601) — canonical format with explicit TZ offset
+    // or terminal `Z`. Accepts `2026-05-30T14:30:00Z`,
     // `2026-05-30T14:30:00+00:00`, `2026-05-30T14:30:00-03:00`, etc.
-    // El parser de chrono normaliza a UTC internamente.
+    // The chrono parser normalizes to UTC internally.
     match chrono::DateTime::parse_from_rfc3339(&s) {
         Ok(dt) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
             Value::DateTime(dt.with_timezone(&chrono::Utc)),
@@ -12579,10 +12644,10 @@ fn builtin_uuid_v4(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Uuid(uuid::Uuid::new_v4()))
 }
 
-/// v0.10.30 B.5 — UUIDv7 time-ordered. Primeros 48 bits = ms desde Unix
-/// epoch → ordena cronológicamente en btree, popular para PKs sortables
-/// por created_at (vs v4 que es full-random y produce scattering).
-/// Especificado en RFC 9562 (mayo 2024).
+/// v0.10.30 B.5 — UUIDv7 time-ordered. First 48 bits = ms since Unix
+/// epoch → orders chronologically in btree, popular for PKs that
+/// sort by created_at (vs v4 which is full-random and produces
+/// scattering). Specified in RFC 9562 (May 2024).
 fn builtin_uuid_v7(args: &[Value]) -> FitzResult<Value> {
     if !args.is_empty() {
         return Err(FitzError::new(
@@ -12599,8 +12664,8 @@ fn builtin_uuid_v7(args: &[Value]) -> FitzResult<Value> {
 }
 
 /// v0.10.30 B.6 — `Date.tomorrow()` = `today() + 1d`. Local timezone
-/// (paralelo a `today()`). Overflow imposible en práctica (fecha local
-/// del sistema lejos del rango NaiveDate).
+/// (parallel to `today()`). Overflow impossible in practice (system
+/// local date is far from the NaiveDate range).
 fn builtin_date_tomorrow(args: &[Value]) -> FitzResult<Value> {
     if !args.is_empty() {
         return Err(FitzError::new(
@@ -12645,8 +12710,8 @@ fn builtin_date_yesterday(args: &[Value]) -> FitzResult<Value> {
 }
 
 /// v0.10.30 B.6 — `DateTime.epoch()` = Unix epoch (1970-01-01T00:00:00Z).
-/// Sirve como sentinel "fecha mínima representable" sin tener que
-/// llamar `from_timestamp(0)?` con match.
+/// Serves as the "minimum representable date" sentinel without having
+/// to call `from_timestamp(0)?` with a match.
 fn builtin_datetime_epoch(args: &[Value]) -> FitzResult<Value> {
     if !args.is_empty() {
         return Err(FitzError::new(
@@ -12724,15 +12789,15 @@ fn builtin_uuid_nil(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Uuid(uuid::Uuid::nil()))
 }
 
-/// Fase 10.5.a — convierte un `Value` Fitz a su representación
-/// JSON text para una columna jsonb. Acepta cualquier Value que
-/// `crate::http::value_to_json` sepa serializar (Map, List, Str,
-/// Int, Float, Bool, Null + nested). El resultado se manda como
-/// `PgValue::Text` y se castea a `::jsonb` en el SQL emit.
+/// Phase 10.5.a — convert a Fitz `Value` to its JSON text
+/// representation for a jsonb column. Accepts any Value that
+/// `crate::http::value_to_json` can serialize (Map, List, Str,
+/// Int, Float, Bool, Null + nested). The result is sent as
+/// `PgValue::Text` and cast to `::jsonb` in the SQL emit.
 ///
-/// Null Fitz → JSON null → almacenamos `Null` para que Postgres
-/// reciba NULL real (no la string "null") en la columna jsonb,
-/// preservando la semántica de `Map<...>?` nullable.
+/// Fitz Null → JSON null → we store `Null` so Postgres receives a
+/// real NULL (not the string "null") in the jsonb column,
+/// preserving the semantics of nullable `Map<...>?`.
 fn fitz_value_to_jsonb(v: &Value) -> Result<crate::db::PgValue, String> {
     if matches!(v, Value::Null) {
         return Ok(crate::db::PgValue::Null);
@@ -12742,11 +12807,11 @@ fn fitz_value_to_jsonb(v: &Value) -> Result<crate::db::PgValue, String> {
     Ok(crate::db::PgValue::Text(s))
 }
 
-/// Fase 10.5.a — parsea un `PgValue::Text` que viene de una
-/// columna jsonb a un `Value` Fitz. Map/List/primitivos
-/// recursivamente. Si el text NO parsea como JSON válido,
-/// devuelve un `Value::Str` con el texto crudo (fallback
-/// defensivo — no debería pasar con columnas jsonb reales).
+/// Phase 10.5.a — parse a `PgValue::Text` coming from a jsonb
+/// column into a Fitz `Value`. Map/List/primitives recursively.
+/// If the text does NOT parse as valid JSON, returns a `Value::Str`
+/// with the raw text (defensive fallback — should not happen with
+/// real jsonb columns).
 fn jsonb_text_to_fitz_value(s: &str) -> Value {
     match serde_json::from_str::<serde_json::Value>(s) {
         Ok(j) => crate::http::json_to_value(&j),
@@ -12754,12 +12819,12 @@ fn jsonb_text_to_fitz_value(s: &str) -> Value {
     }
 }
 
-/// Convierte un `PgValue` recibido del servidor a `Value` Fitz.
-/// `oid_hint` permite refinar `PgValue::Text` a tipos nativos Fitz
-/// cuando el OID lo identifica (v0.10.24): OID 1082 (date),
-/// 1184/1114 (timestamptz/timestamp), 2950 (uuid). Sin hint o si
-/// el parse falla, cae a `Value::Str` (compat con el comportamiento
-/// pre-v0.10.24 donde estos tipos eran Str ISO 8601).
+/// Convert a `PgValue` received from the server into a Fitz `Value`.
+/// `oid_hint` allows refining `PgValue::Text` into native Fitz types
+/// when the OID identifies it (v0.10.24): OID 1082 (date),
+/// 1184/1114 (timestamptz/timestamp), 2950 (uuid). Without hint or
+/// if parse fails, falls back to `Value::Str` (compat with the
+/// pre-v0.10.24 behavior where these types were Str ISO 8601).
 fn pg_value_to_fitz(v: &crate::db::PgValue) -> Value {
     pg_value_to_fitz_with_oid(v, None)
 }
@@ -12771,10 +12836,10 @@ fn pg_value_to_fitz_with_oid(v: &crate::db::PgValue, oid_hint: Option<u32>) -> V
         crate::db::PgValue::Int(n) => Value::Int(*n),
         crate::db::PgValue::Float(x) => Value::Float(*x),
         crate::db::PgValue::Text(s) => {
-            // v0.10.24 — refinement por OID hint: Postgres devuelve
-            // date/timestamp/timestamptz/uuid como text en el wire,
-            // pero queremos el Value tipado adecuado para que el
-            // user pueda usar `.year()`, `.to_str()`, etc.
+            // v0.10.24 — OID hint refinement: Postgres returns
+            // date/timestamp/timestamptz/uuid as text on the wire,
+            // but we want the properly typed Value so the user can
+            // use `.year()`, `.to_str()`, etc.
             match oid_hint {
                 Some(oid::DATE) => match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
                     Ok(d) => Value::Date(d),
@@ -12782,14 +12847,15 @@ fn pg_value_to_fitz_with_oid(v: &crate::db::PgValue, oid_hint: Option<u32>) -> V
                 },
                 Some(oid::TIMESTAMPTZ) => {
                     // Postgres timestamptz text format:
-                    // "YYYY-MM-DD HH:MM:SS[.ffffff]+TZ" (con espacio
-                    // y offset variable). chrono::DateTime no parsea
-                    // ese formato directo — necesitamos ajustar.
+                    // "YYYY-MM-DD HH:MM:SS[.ffffff]+TZ" (space-
+                    // separated with variable offset).
+                    // chrono::DateTime can't parse this format
+                    // directly — we have to normalize.
                     parse_pg_timestamptz(s).unwrap_or_else(|| Value::Str(s.clone()))
                 }
                 Some(oid::TIMESTAMP) => {
-                    // timestamp WITHOUT TZ — asumimos UTC para
-                    // mapear a DateTime<Utc>. Caso menos común.
+                    // timestamp WITHOUT TZ — we assume UTC to map
+                    // to DateTime<Utc>. Less common case.
                     parse_pg_timestamp_naive(s).unwrap_or_else(|| Value::Str(s.clone()))
                 }
                 Some(oid::UUID) => match uuid::Uuid::parse_str(s) {
@@ -12801,14 +12867,15 @@ fn pg_value_to_fitz_with_oid(v: &crate::db::PgValue, oid_hint: Option<u32>) -> V
         }
         crate::db::PgValue::Bool(b) => Value::Bool(*b),
         crate::db::PgValue::Bytes(b) => Value::Bytes(b.clone()),
-        // Fase 10.5.b — array Postgres → List Fitz. Cada elemento se
-        // convierte recursivamente. v0.10.24: el `elem_oid` se propaga
-        // SOLO si el caller pidió refinamiento (oid_hint.is_some()).
-        // Si oid_hint es None (default backward-compat), los elementos
-        // de un array uuid[]/date[]/timestamptz[] vuelven como Str
-        // — preserva comportamiento pre-v0.10.24 donde `rows[0]["ids"]`
-        // de un `db.query` raw retornaba `List<Str>`. El path ORM
-        // @table-typed (annotation-aware) sí pasa Some(_) y refina.
+        // Phase 10.5.b — Postgres array → Fitz List. Each element
+        // is converted recursively. v0.10.24: `elem_oid` propagates
+        // ONLY if the caller requested refinement (oid_hint.is_some()).
+        // If oid_hint is None (default backward-compat), elements of
+        // a uuid[]/date[]/timestamptz[] array come back as Str —
+        // preserves the pre-v0.10.24 behavior where `rows[0]["ids"]`
+        // from a raw `db.query` returned `List<Str>`. The ORM
+        // @table-typed (annotation-aware) path does pass Some(_) and
+        // refines.
         crate::db::PgValue::Array { elem_oid, values } => {
             let elem_hint = oid_hint.map(|_| *elem_oid);
             let items: Vec<Value> = values
@@ -12820,17 +12887,17 @@ fn pg_value_to_fitz_with_oid(v: &crate::db::PgValue, oid_hint: Option<u32>) -> V
     }
 }
 
-/// v0.10.24 — parsea el formato text Postgres `timestamptz`
-/// (`YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM]` o `Z`). chrono soporta
-/// RFC 3339 pero no este formato directo, así que normalizamos
-/// (espacio → 'T', falta de ':' en el offset, etc.).
+/// v0.10.24 — parse Postgres' `timestamptz` text format
+/// (`YYYY-MM-DD HH:MM:SS[.ffffff]±HH[:MM]` or `Z`). chrono supports
+/// RFC 3339 but not this format directly, so we normalize (space
+/// → 'T', missing ':' in the offset, etc.).
 fn parse_pg_timestamptz(s: &str) -> Option<Value> {
-    // Reemplazar espacio entre fecha y hora con 'T' (formato ISO).
+    // Replace the space between date and time with 'T' (ISO format).
     let normalized = s.replacen(' ', "T", 1);
-    // Postgres puede emitir offsets `+00`, `-03`, `+0530` — RFC 3339
-    // requiere `:` (`+00:00`). Si no hay `:` en la última parte del
-    // offset, inyectamos uno. Heurística: si terminamos con 5 chars
-    // tipo `+0530` o 3 chars tipo `+03`, normalizar.
+    // Postgres may emit offsets `+00`, `-03`, `+0530` — RFC 3339
+    // requires `:` (`+00:00`). If there is no `:` in the trailing
+    // offset, we inject one. Heuristic: if we end with 5 chars
+    // like `+0530` or 3 chars like `+03`, normalize.
     let normalized = normalize_pg_offset(&normalized);
     chrono::DateTime::parse_from_rfc3339(&normalized)
         .ok()
@@ -12838,8 +12905,8 @@ fn parse_pg_timestamptz(s: &str) -> Option<Value> {
 }
 
 fn normalize_pg_offset(s: &str) -> String {
-    // Buscar último '+' o '-' después de la T (para no confundir con
-    // el '-' del 'YYYY-MM-DD').
+    // Look for the last '+' or '-' after the T (so we don't confuse
+    // it with the '-' of 'YYYY-MM-DD').
     let bytes = s.as_bytes();
     let t_idx = s.find('T').unwrap_or(0);
     let mut last_sign = None;
@@ -12849,7 +12916,7 @@ fn normalize_pg_offset(s: &str) -> String {
         }
     }
     let Some(sign_idx) = last_sign else {
-        // Sin offset explícito — agregar 'Z' si no termina así.
+        // No explicit offset — add 'Z' if it doesn't already end so.
         if s.ends_with('Z') {
             return s.to_string();
         }
@@ -12865,7 +12932,7 @@ fn normalize_pg_offset(s: &str) -> String {
     format!("{}{}", body, normalized_offset)
 }
 
-/// v0.10.24 — parsea timestamp WITHOUT TZ. Asumimos UTC.
+/// v0.10.24 — parse timestamp WITHOUT TZ. We assume UTC.
 fn parse_pg_timestamp_naive(s: &str) -> Option<Value> {
     let normalized = s.replacen(' ', "T", 1);
     chrono::NaiveDateTime::parse_from_str(&normalized, "%Y-%m-%dT%H:%M:%S%.f")
@@ -12874,17 +12941,18 @@ fn parse_pg_timestamp_naive(s: &str) -> Option<Value> {
         .map(|naive| Value::DateTime(naive.and_utc()))
 }
 
-/// Mapea una fila Postgres a un `Value::Map` Fitz con pares
-/// (Str column_name, Value). El orden de columnas se preserva
-/// (Map adentro es Vec<(K, V)>).
+/// Map a Postgres row to a Fitz `Value::Map` with
+/// (Str column_name, Value) pairs. Column order is preserved
+/// (Map internally is `Vec<(K, V)>`).
 ///
-/// v0.10.24 nota: el path raw `db.query(...)` NO refina los Text
-/// según OID — date/timestamptz/uuid bajan como `Value::Str`
-/// (formato ISO 8601 / canonical UUID del wire Postgres). Razón:
-/// sin anotación destino del lado Fitz, asumir refinamiento
-/// rompería código pre-v0.10.24 que esperaba strings. Si el user
-/// quiere typed values, usa el ORM con `@table type X { d: Date }`
-/// o coerce manual con `Date.parse(s)?`.
+/// v0.10.24 note: the raw `db.query(...)` path does NOT refine Text
+/// by OID — date/timestamptz/uuid come down as `Value::Str`
+/// (ISO 8601 format / canonical UUID from the Postgres wire).
+/// Reason: without a destination annotation on the Fitz side,
+/// assuming refinement would break pre-v0.10.24 code that expected
+/// strings. If the user wants typed values, use the ORM with
+/// `@table type X { d: Date }` or coerce manually with
+/// `Date.parse(s)?`.
 fn pg_row_to_fitz_map(row: &crate::db::Row) -> Value {
     let pairs: Vec<(Value, Value)> = row
         .columns()
@@ -12895,8 +12963,9 @@ fn pg_row_to_fitz_map(row: &crate::db::Row) -> Value {
     Value::new_map(pairs)
 }
 
-/// Builder común para los args de `query`/`exec`: valida que sea
-/// `(sql: Str, args: List<Any>)` y convierte los args a `PgValue`.
+/// Common builder for the args of `query`/`exec`: validates that
+/// the shape is `(sql: Str, args: List<Any>)` and converts the args
+/// into `PgValue`.
 fn parse_db_query_args(
     method: &str,
     args: &[Value],
@@ -12968,7 +13037,7 @@ fn parse_db_query_args(
 }
 
 /// `conn.query(sql, args) -> Future<Result<List<Map<Str, Any>>>>`.
-/// Envuelve `DbConnHandle::query` y mapea cada Row a un Map Fitz.
+/// Wraps `DbConnHandle::query` and maps each Row to a Fitz Map.
 fn db_conn_query(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
     let (sql, pg_args) = parse_db_query_args("query", args)?;
     let fut: crate::value::FitzFuture = Box::pin(async move {
@@ -12987,7 +13056,7 @@ fn db_conn_query(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRe
     Ok(Value::new_future(fut))
 }
 
-/// `conn.exec(sql, args) -> Future<Result<Int>>` — devuelve
+/// `conn.exec(sql, args) -> Future<Result<Int>>` — returns
 /// rows_affected (INSERT/UPDATE/DELETE/DDL).
 fn db_conn_exec(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
     let (sql, pg_args) = parse_db_query_args("exec", args)?;
@@ -13004,7 +13073,7 @@ fn db_conn_exec(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRes
     Ok(Value::new_future(fut))
 }
 
-/// `conn.close() -> Future<Null>` — cierra cooperativamente.
+/// `conn.close() -> Future<Null>` — cooperative close.
 fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
     if !args.is_empty() {
         return Err(FitzError::new(
@@ -13020,12 +13089,12 @@ fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRe
             ),
         ));
     }
-    // W5 (v0.10.6) — `db.close()` devuelve `Future<Result<Null>>` por
-    // consistencia con `db.query`/`db.exec`. Los errores de cierre
-    // (conn ya envenenada, semaphore roto, etc.) son raros pero
-    // posibles — el usuario debe poder manejarlos con `match` o `?`.
-    // Antes de v0.10.6 devolvía `Future<Null>` y el `?` daba error
-    // de runtime "el operador `?` requiere un Result".
+    // W5 (v0.10.6) — `db.close()` returns `Future<Result<Null>>` for
+    // consistency with `db.query`/`db.exec`. Close errors (conn
+    // already poisoned, broken semaphore, etc.) are rare but
+    // possible — the user must be able to handle them with `match`
+    // or `?`. Before v0.10.6 it returned `Future<Null>` and `?`
+    // produced the runtime error "the `?` operator requires a Result".
     let fut: crate::value::FitzFuture = Box::pin(async move {
         match handle.close().await {
             Ok(()) => Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
@@ -13040,26 +13109,28 @@ fn db_conn_close(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzRe
 }
 
 /// `conn.transaction(fn(tx) -> Result<T>) -> Future<Result<T>>` —
-/// Fase 10.7 (v0.10.14). Ejecuta el callback adentro de una
-/// transacción Postgres con commit automático en `Ok` y rollback
-/// automático en `Err`. El callback recibe `tx: DbConn` (mismo
-/// tipo que `db` — todos los métodos `.insert/.update/.first/.all`
-/// del ORM funcionan sin cambios) pegado a la misma conn física
-/// durante toda la tx.
+/// Phase 10.7 (v0.10.14). Runs the callback inside a Postgres
+/// transaction with automatic commit on `Ok` and automatic rollback
+/// on `Err`. The callback receives `tx: DbConn` (same type as `db`
+/// — every `.insert/.update/.first/.all` ORM method works
+/// unchanged) bound to the same physical connection for the entire
+/// transaction.
 ///
-/// **Semántica**:
-///   - `Ok(v)` del callback → `COMMIT` + return `Ok(v)`.
-///   - `Err(e)` del callback → `ROLLBACK` + return `Err(e)` preserva
-///     el `e` original (no se aplana a string del driver).
-///   - Error del driver (BEGIN/COMMIT/ROLLBACK fail) → `Err(<msg>)`
-///     con el error del driver formateado como Str.
+/// **Semantics**:
+///   - `Ok(v)` from the callback → `COMMIT` + return `Ok(v)`.
+///   - `Err(e)` from the callback → `ROLLBACK` + return `Err(e)`,
+///     preserving the original `e` (it is NOT flattened to the
+///     driver's string).
+///   - Driver error (BEGIN/COMMIT/ROLLBACK fail) → `Err(<msg>)`
+///     with the driver error formatted as Str.
 fn db_conn_transaction(
     handle: Arc<crate::db::DbConnHandle>,
     callback: Value,
     isolation: Option<String>,
     span: Span,
 ) -> FitzResult<Value> {
-    // Validar que callback es Function. Otros tipos no son invocables.
+    // Validate that callback is a Function. Other types are not
+    // invocable.
     if !matches!(callback, Value::Function { .. }) {
         return Err(FitzError::new(
             ErrorKind::TypeMismatch {
@@ -13074,10 +13145,10 @@ fn db_conn_transaction(
             ),
         ));
     }
-    // Cell compartido para preservar el `Value` original del `Err`
-    // que el callback retornó. El driver solo expone `DbResult<Value>`
-    // — usamos un Mutex<Option<Value>> capturado por la closure para
-    // smuggle-ar el Err Fitz através del boundary.
+    // Shared cell to preserve the original `Value` of the `Err` the
+    // callback returned. The driver only exposes `DbResult<Value>`
+    // — we use a `Mutex<Option<Value>>` captured by the closure to
+    // smuggle the Fitz Err across the boundary.
     let cb_err: std::sync::Arc<std::sync::Mutex<Option<Value>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
     let cb_err_outer = std::sync::Arc::clone(&cb_err);
@@ -13100,8 +13171,8 @@ fn db_conn_transaction(
                                 )));
                             }
                         };
-                    // Si el callback es `async fn`, raw es un Future
-                    // perezoso — lo consumimos acá igual que `await`.
+                    // If the callback is an `async fn`, raw is a lazy
+                    // Future — we consume it here the same as `await`.
                     let unwrapped = match raw {
                         Value::Future(cell) => {
                             let fut = cell.0.lock().take();
@@ -13121,8 +13192,9 @@ fn db_conn_transaction(
                     match unwrapped {
                         Value::Result(crate::value::ResultVariant::Ok(t)) => Ok(*t),
                         Value::Result(crate::value::ResultVariant::Err(e)) => {
-                            // Preservamos el Err original via cell
-                            // compartido; el driver hace rollback.
+                            // Preserve the original Err via the
+                            // shared cell; the driver does the
+                            // rollback.
                             *cb_err.lock().expect("cb_err mutex poisoned") = Some(*e);
                             Err(crate::db::DbError::Protocol("__tx_callback_err__".into()))
                         }
@@ -13140,11 +13212,12 @@ fn db_conn_transaction(
             Err(e) => {
                 let mut guard = cb_err_outer.lock().expect("cb_err mutex poisoned");
                 if let Some(original_err) = guard.take() {
-                    // El Err viene del callback Fitz — restauramos
-                    // el Value original (puede ser Str, Instance, etc).
+                    // The Err came from the Fitz callback — restore
+                    // the original Value (could be Str, Instance,
+                    // etc.).
                     Value::Result(crate::value::ResultVariant::Err(Box::new(original_err)))
                 } else {
-                    // Err del driver (BEGIN/COMMIT/ROLLBACK fail).
+                    // Driver Err (BEGIN/COMMIT/ROLLBACK fail).
                     Value::Result(crate::value::ResultVariant::Err(Box::new(Value::Str(
                         e.to_string(),
                     ))))
@@ -13156,9 +13229,9 @@ fn db_conn_transaction(
     Ok(Value::new_future(fut))
 }
 
-/// `conn.is_closed() -> Future<Bool>` — útil para asserts /
-/// branching. No async cara (un Mutex lock + Option check), pero
-/// devolvemos Future por uniformidad con el resto de la API.
+/// `conn.is_closed() -> Future<Bool>` — useful for asserts /
+/// branching. Not really async (one Mutex lock + Option check),
+/// but we return a Future for uniformity with the rest of the API.
 fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> FitzResult<Value> {
     if !args.is_empty() {
         return Err(FitzError::new(
@@ -13180,26 +13253,26 @@ fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> Fi
 }
 
 // =================================================================
-// Fase 9.w.1.iter2.b — Token blacklist (built-in `auth` module)
+// Phase 9.w.1.iter2.b — Token blacklist (built-in `auth` module)
 // =================================================================
 //
-// 3 builtins paralelos a `jwt.*`/`hash.*`:
+// 3 builtins parallel to `jwt.*`/`hash.*`:
 //
 //   auth.blacklist(db: DbConn, jti: Str, expires_at: Int) -> Future<Result<Null>>
 //   auth.is_blacklisted(db: DbConn, jti: Str) -> Future<Result<Bool>>
-//   auth.cleanup_expired(db: DbConn) -> Future<Result<Int>>  (rows borradas)
+//   auth.cleanup_expired(db: DbConn) -> Future<Result<Int>>  (rows deleted)
 //
-// Tabla `fitz_token_blacklist(jti TEXT PK, expires_at BIGINT)` auto-
-// creada con CREATE TABLE IF NOT EXISTS al primer call (paralelo a
-// cron_jobs::init_storage). `expires_at` es Unix epoch (segundos);
-// el comparison usa `expires_at > now()` para auto-filtrar tokens
-// con expiración pasada (no necesitan seguir bloqueando: el JWT
-// decode los rechaza por expirado primero).
+// Table `fitz_token_blacklist(jti TEXT PK, expires_at BIGINT)` is
+// auto-created with CREATE TABLE IF NOT EXISTS on the first call
+// (parallel to `cron_jobs::init_storage`). `expires_at` is Unix
+// epoch (seconds); the comparison uses `expires_at > now()` to
+// auto-filter tokens with past expiration (they don't need to keep
+// blocking: JWT decode rejects them as expired first).
 //
-// Patrón canónico de uso (cap 28 sub-sec 28.X):
+// Canonical usage pattern (cap 28 sub-sec 28.X):
 //
-//   // logout: el handler decodifica el JWT, extrae jti + exp, los
-//   // mete en la blacklist.
+//   // logout: the handler decodes the JWT, extracts jti + exp,
+//   // pushes them into the blacklist.
 //   @post("/auth/logout")
 //   async fn logout(headers: Map<Str, Str>) -> Result<Null> {
 //       let token = extract_bearer(headers)?
@@ -13210,7 +13283,7 @@ fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> Fi
 //       return Ok(null)
 //   }
 //
-//   // provider: checkear blacklist antes de aceptar el token.
+//   // provider: check the blacklist before accepting the token.
 //   @auth_provider
 //   async fn check(headers: Map<Str, Str>) -> Result<User> {
 //       let token = extract_bearer(headers)?
@@ -13219,17 +13292,19 @@ fn db_conn_is_closed(handle: Arc<crate::db::DbConnHandle>, args: &[Value]) -> Fi
 //       if auth.is_blacklisted(db, jti).await? {
 //           return Err("token revocado")
 //       }
-//       // ... resolver el user ...
+//       // ... resolve the user ...
 //   }
 //
-// Decisiones:
-// - `expires_at` como BIGINT (Unix timestamp) en vez de TIMESTAMPTZ:
-//   el JWT `exp` claim ya viene como Unix epoch, evita conversión.
-// - `now()` en SQL para el check (Postgres `extract(epoch from now())`):
-//   el server-clock manda, no el binario Fitz que podría tener drift.
-// - ON CONFLICT DO UPDATE en `blacklist`: si re-blacklisteás el mismo
-//   jti (caso raro pero posible — token re-emitido por algún motivo),
-//   actualizamos expires_at en lugar de fallar con duplicate key.
+// Decisions:
+// - `expires_at` as BIGINT (Unix timestamp) instead of TIMESTAMPTZ:
+//   the JWT `exp` claim already comes as Unix epoch, avoids
+//   conversion.
+// - `now()` in SQL for the check (Postgres
+//   `extract(epoch from now())`): server-clock is authoritative,
+//   not the Fitz binary which could have drift.
+// - ON CONFLICT DO UPDATE in `blacklist`: if you re-blacklist the
+//   same jti (rare but possible — token re-issued for some reason),
+//   update expires_at instead of failing with duplicate key.
 
 #[doc(hidden)]
 pub const SQL_CREATE_TABLE_TOKEN_BLACKLIST: &str = "\
@@ -13255,8 +13330,9 @@ pub const SQL_CLEANUP_EXPIRED_TOKENS: &str = "\
 DELETE FROM fitz_token_blacklist \
 WHERE expires_at <= extract(epoch from now())::bigint";
 
-/// Crea la tabla `fitz_token_blacklist` si no existe. Idempotente —
-/// Postgres serializa `CREATE TABLE IF NOT EXISTS` con LOCK interno.
+/// Create the `fitz_token_blacklist` table if it doesn't exist.
+/// Idempotent — Postgres serializes `CREATE TABLE IF NOT EXISTS`
+/// with internal LOCK.
 #[doc(hidden)]
 pub async fn ensure_token_blacklist_table(
     conn: &crate::db::DbConnHandle,
@@ -13498,61 +13574,63 @@ fn builtin_auth_cleanup_expired(args: &[Value]) -> FitzResult<Value> {
 }
 
 // =============================================================
-// Fase 10.3.b — Builder ORM sobre `Value::Type` con @table
+// Phase 10.3.b — ORM builder over `Value::Type` with @table
 // =============================================================
 //
-// Cuando el user escribe `User.all(db).await?`, el dispatch_method
-// detecta que `User` es un `Value::Type` con `table_metadata.is_some()`
-// e invoca `orm_dispatch_type_method`. Esta función decide cuál
-// builder método ORM activar y delega al helper correspondiente.
+// When the user writes `User.all(db).await?`, `dispatch_method`
+// detects that `User` is a `Value::Type` with
+// `table_metadata.is_some()` and invokes
+// `orm_dispatch_type_method`. This function decides which ORM
+// builder method to activate and delegates to the matching helper.
 //
-// 10.3.b1 (este sub-paso): solo `all(db)` que ejecuta
-// `SELECT col1, col2, ... FROM <table>` y deserializa rows a
-// `Value::Instance`. Sin where/order/limit todavía.
+// 10.3.b1 (this sub-step): only `all(db)`, which runs
+// `SELECT col1, col2, ... FROM <table>` and deserializes rows to
+// `Value::Instance`. No where/order/limit yet.
 
-/// Fase 10.3.b2 — state acumulado del query builder. Cada call a
-/// `where(closure)` / `order_by(...)` / `limit(n)` produce un
-/// NUEVO `QueryBuilderState` (clonando + mutando — semántica
-/// functional). El estado vive adentro de un `Value::QueryBuilder
-/// (Arc<dyn Any>)`; el dispatch sobre el receiver hace downcast.
+/// Phase 10.3.b2 — accumulated state of the query builder. Each
+/// call to `where(closure)` / `order_by(...)` / `limit(n)` produces
+/// a NEW `QueryBuilderState` (cloning + mutating — functional
+/// semantics). The state lives inside a
+/// `Value::QueryBuilder(Arc<dyn Any>)`; the dispatch on the
+/// receiver downcasts it.
 #[derive(Clone)]
 pub struct QueryBuilderState {
     pub type_name: String,
     pub fields: Vec<crate::ast::Field>,
     pub meta: crate::types::TableMetadata,
-    /// SQL fragment del WHERE (sin la palabra `WHERE`). `None` si
-    /// no se llamó `.where(...)`. Si hay múltiples `.where()` en
-    /// cadena, se combinan con AND.
+    /// SQL fragment of the WHERE (without the word `WHERE`). `None`
+    /// if `.where(...)` was not called. If there are multiple
+    /// chained `.where()` calls, they are combined with AND.
     pub where_sql: Option<String>,
-    /// Args parametrizados acumulados ($1, $2, ...) en orden de
-    /// aparición en `where_sql`.
+    /// Accumulated parametrized args ($1, $2, ...) in order of
+    /// appearance in `where_sql`.
     pub where_args: Vec<crate::db::PgValue>,
-    /// Fase 10.3.b3 — fragmentos `ORDER BY` acumulados. Cada
-    /// `.order_by(closure)` agrega una clause; se emiten
-    /// separados por coma en orden de aparición. Cada clause
-    /// incluye `ASC`/`DESC` derivado de si el closure usa
-    /// `-u.field` (DESC) o `u.field` (ASC default).
+    /// Phase 10.3.b3 — accumulated `ORDER BY` fragments. Each
+    /// `.order_by(closure)` adds a clause; they are emitted
+    /// comma-separated in order of appearance. Each clause
+    /// includes `ASC`/`DESC` derived from whether the closure
+    /// uses `-u.field` (DESC) or `u.field` (ASC default).
     pub order_by_clauses: Vec<String>,
-    /// Fase 10.3.b3 — `LIMIT N`. Si hay múltiples `.limit()`,
-    /// el último gana (overwrite). `None` = sin LIMIT.
+    /// Phase 10.3.b3 — `LIMIT N`. If there are multiple `.limit()`,
+    /// the last one wins (overwrite). `None` = no LIMIT.
     pub limit: Option<i64>,
-    /// Fase 10.3.b3 — `OFFSET N`. Mismo criterio que `limit`.
+    /// Phase 10.3.b3 — `OFFSET N`. Same criterion as `limit`.
     pub offset: Option<i64>,
-    /// Fase 10.5.f2 — clauses GROUP BY acumuladas. Cada
-    /// `.group_by(closure)` agrega un `(field_fitz, sql_col)`.
-    /// Cuando hay GROUP BY presente, los agregados (count/sum/
-    /// avg/min/max) cambian su shape de retorno de scalar a
-    /// `List<Map<Str, Any>>` con keys = group cols + el nombre
-    /// del agregado.
+    /// Phase 10.5.f2 — accumulated GROUP BY clauses. Each
+    /// `.group_by(closure)` adds a `(field_fitz, sql_col)`. When
+    /// GROUP BY is present, the aggregates (count/sum/avg/min/max)
+    /// change their return shape from scalar to
+    /// `List<Map<Str, Any>>` with keys = group cols + the
+    /// aggregate name.
     pub group_by_clauses: Vec<(String, String)>,
 }
 
-/// Despacha métodos ORM sobre un `Value::Type` con `@table(...)`.
-/// Devuelve:
-///   - `Ok(Some(v))`: el método existe en el ORM, devolvemos el
-///     Value (típicamente un `Future` o un `QueryBuilder`).
-///   - `Ok(None)`: el método NO es un built-in del ORM; el caller
-///     continúa con su flujo (error "método no encontrado").
+/// Dispatch ORM methods on a `Value::Type` with `@table(...)`.
+/// Returns:
+///   - `Ok(Some(v))`: the method exists in the ORM, we return the
+///     Value (typically a `Future` or a `QueryBuilder`).
+///   - `Ok(None)`: the method is NOT an ORM built-in; the caller
+///     continues with its own flow (error "method not found").
 fn orm_dispatch_type_method(
     type_value: &Value,
     method: &str,
@@ -13569,9 +13647,9 @@ fn orm_dispatch_type_method(
         "insert" => orm_type_insert(type_value.clone(), args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
-        // v0.10.27 — F1: bulk insert con batching VALUES (...), (...), ...
-        // Útil para seeds/imports de 1k+ rows (10-100x más rápido que
-        // loop con .insert). Default batch_size = 1000.
+        // v0.10.27 — F1: bulk insert with batched VALUES (...), (...),
+        // ... Useful for seeds/imports of 1k+ rows (10-100x faster
+        // than a loop with .insert). Default batch_size = 1000.
         "bulk_insert" => orm_type_bulk_insert(type_value.clone(), args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
@@ -13579,10 +13657,11 @@ fn orm_dispatch_type_method(
     }
 }
 
-/// Fase 10.3.b2 — Despacha métodos sobre un `Value::QueryBuilder`
-/// existente. Permite encadenar: `User.where(f).where(g).all(db)`.
-/// Devuelve `Some` si el método matchea, `None` si el caller
-/// debe continuar el dispatch (error genérico).
+/// Phase 10.3.b2 — Dispatch methods on an existing
+/// `Value::QueryBuilder`. Allows chaining:
+/// `User.where(f).where(g).all(db)`. Returns `Some` if the method
+/// matches, `None` if the caller should continue the dispatch
+/// (generic error).
 pub fn orm_dispatch_qb_method(
     qb_value: &Value,
     method: &str,
@@ -13629,15 +13708,15 @@ pub fn orm_dispatch_qb_method(
             .map(Some)
             .map_err(EvalSignal::Error),
         // v0.10.32 (Tier C.3) — JSON jsonb merge via Postgres `||`.
-        // `qb.merge_jsonb(db, field, patch)` ejecuta
+        // `qb.merge_jsonb(db, field, patch)` runs
         // `UPDATE tbl SET "field" = "field" || $1::jsonb WHERE <where>`,
-        // preservando las keys existentes y agregando/overwriteando
-        // las del patch. Útil para "actualizar settings parcial sin
-        // perder el resto". Caso límite: si la col es NULL, `NULL ||
-        // anything = NULL` (limitación de Postgres). Workaround:
+        // preserving existing keys and adding/overwriting those of
+        // the patch. Useful for "partially update settings without
+        // losing the rest". Edge case: if the col is NULL,
+        // `NULL || anything = NULL` (Postgres limitation). Workaround:
         // `UPDATE ... SET field = COALESCE(field, '{}'::jsonb) || ...`
-        // (no implementado en MVP — el user inicializa la col con
-        // `{}` al INSERT).
+        // (not implemented in MVP — the user initializes the col
+        // with `{}` on INSERT).
         "merge_jsonb" => orm_qb_merge_jsonb(state, args, span)
             .map(Some)
             .map_err(EvalSignal::Error),
@@ -13663,8 +13742,9 @@ pub fn orm_dispatch_qb_method(
     }
 }
 
-/// Helper: extrae los metadatos del `Value::Type` (asume que es
-/// un type con `@table(...)` — el caller ya validó).
+/// Helper: extract the metadata from a `Value::Type` (assumes
+/// it's a type with `@table(...)` — the caller has already
+/// validated).
 fn type_value_to_state(type_value: Value, span: Span) -> FitzResult<QueryBuilderState> {
     match type_value {
         Value::Type {
@@ -13692,23 +13772,24 @@ fn type_value_to_state(type_value: Value, span: Span) -> FitzResult<QueryBuilder
     }
 }
 
-/// `Type.all(db)` — equivalente a `.where(_ => true).all(db)`.
-/// Construye un QueryBuilder vacío y ejecuta `.all(db)` sobre él.
+/// `Type.all(db)` — equivalent to `.where(_ => true).all(db)`.
+/// Builds an empty QueryBuilder and runs `.all(db)` on it.
 fn orm_type_all(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let state = type_value_to_state(type_value, span)?;
     orm_qb_all(state, args, span)
 }
 
-/// `Type.where(closure)` — punto de entrada del builder. Traduce
-/// el closure a SQL + args parametrizados y devuelve un nuevo
+/// `Type.where(closure)` — builder entry point. Translates the
+/// closure to SQL + parametrized args and returns a new
 /// QueryBuilder.
 fn orm_type_where(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let state = type_value_to_state(type_value, span)?;
     orm_qb_where(state, args, span)
 }
 
-/// `qb.where(closure)` — agrega un AND al WHERE existente. Si no
-/// había WHERE previo, el nuevo se vuelve el WHERE inicial.
+/// `qb.where(closure)` — adds an AND to the existing WHERE. If
+/// there was no previous WHERE, the new one becomes the initial
+/// WHERE.
 fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -13724,10 +13805,10 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
             ),
         ));
     }
-    // Fase 10.b.9.b — capturamos el closure env para que el translator
-    // pueda resolver vars externas (e.g. `let limit = 18; .where(fn(u)
-    // => u.age >= limit)`). El env contiene los bindings del scope
-    // donde se definió la closure (clone barato — `Arc`).
+    // Phase 10.b.9.b — capture the closure env so the translator
+    // can resolve external vars (e.g. `let limit = 18; .where(fn(u)
+    // => u.age >= limit)`). The env contains the bindings of the
+    // scope where the closure was defined (cheap clone — `Arc`).
     let (params, body, closure_env) = match &args[0] {
         Value::Function {
             params,
@@ -13762,9 +13843,9 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
         ));
     }
     let param_name = params[0].name.clone();
-    // El body de `fn(u) => expr` es `[Stmt::Return(expr, ...)]`.
-    // Para closures más complejos (con statements adentro), el
-    // translator MVP no los soporta — error claro.
+    // The body of `fn(u) => expr` is `[Stmt::Return(expr, ...)]`.
+    // For more complex closures (with statements inside), the MVP
+    // translator does not support them — clear error.
     let body_expr = match body.as_slice() {
         [crate::ast::Stmt::Return(e, _)] => e.clone(),
         _ => {
@@ -13804,15 +13885,15 @@ fn orm_qb_where(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> F
     Ok(Value::QueryBuilder(Arc::new(state)))
 }
 
-/// Construye el SELECT completo para un state del builder. Útil
-/// tanto para `all()` como para `first()` (que solo agrega LIMIT 1).
-/// Devuelve `(sql, args_in_order)` donde args es el `where_args` del
-/// state (el SQL builder no agrega nuevos args — LIMIT/OFFSET se
-/// emiten inline como literales numéricos seguros, son `i64`).
+/// Build the full SELECT for a builder state. Useful for both
+/// `all()` and `first()` (which just adds LIMIT 1). Returns
+/// `(sql, args_in_order)` where args is the state's `where_args`
+/// (the SQL builder does not add new args — LIMIT/OFFSET are
+/// emitted inline as safe numeric literals, they are `i64`).
 fn build_select_sql(state: &QueryBuilderState, override_limit: Option<i64>) -> String {
-    // Columnas explícitas en orden de declaración. Fase 10.4.a:
-    // los fields virtuales (`@has_one`/`@has_many`) NO aparecen
-    // en el SELECT — solo se acceden vía navigation methods (10.4.b).
+    // Explicit columns in declaration order. Phase 10.4.a: virtual
+    // fields (`@has_one`/`@has_many`) do NOT appear in the SELECT —
+    // they are only accessed via navigation methods (10.4.b).
     let mut col_list = String::new();
     let mut first = true;
     for f in state.fields.iter() {
@@ -13856,7 +13937,8 @@ fn build_select_sql(state: &QueryBuilderState, override_limit: Option<i64>) -> S
     sql
 }
 
-/// Helper: valida que args sea `[DbConn]` y extrae el handle.
+/// Helper: validate that args is `[DbConn]` and extract the
+/// handle.
 fn extract_db_handle_arg(
     args: &[Value],
     method: &str,
@@ -13893,8 +13975,8 @@ fn extract_db_handle_arg(
     }
 }
 
-/// `qb.all(db)` — ejecuta el SELECT con todo el state acumulado
-/// y devuelve `Future<Result<List<Instance>>>`.
+/// `qb.all(db)` — runs the SELECT with all the accumulated state
+/// and returns `Future<Result<List<Instance>>>`.
 fn orm_qb_all(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let db_handle = extract_db_handle_arg(&args, "all", span)?;
     let sql = build_select_sql(&state, None);
@@ -13929,9 +14011,9 @@ fn orm_qb_all(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzRes
     Ok(Value::new_future(fut))
 }
 
-/// `qb.order_by(closure)` — el closure debe ser `fn(u) => u.field`
-/// (ASC) o `fn(u) => -u.field` (DESC). Acumula la clause en
-/// `order_by_clauses` y devuelve un nuevo QueryBuilder.
+/// `qb.order_by(closure)` — the closure must be `fn(u) => u.field`
+/// (ASC) or `fn(u) => -u.field` (DESC). Accumulates the clause in
+/// `order_by_clauses` and returns a new QueryBuilder.
 fn orm_qb_order_by(
     mut state: QueryBuilderState,
     args: Vec<Value>,
@@ -13989,7 +14071,7 @@ fn orm_qb_order_by(
         }
     };
 
-    // Detectar dirección: `-u.field` = DESC, `u.field` = ASC.
+    // Detect direction: `-u.field` = DESC, `u.field` = ASC.
     let (direction, field_expr) = match &body_expr {
         crate::ast::Expr::UnaryOp {
             op: crate::ast::UnaryOpKind::Neg,
@@ -13999,11 +14081,12 @@ fn orm_qb_order_by(
         other => ("ASC", other.clone()),
     };
     // v0.10.32 (Tier C.1) — `.order_by(fn(u) => u.field.rank("query"))`
-    // emite `ts_rank("field", to_tsquery($N))` (con `plainto_tsquery`
-    // si es `.plainto_rank`). Útil para ranking por relevancia en
-    // full-text search: combinar `.where(fn(u) => u.body.matches("q"))
-    // .order_by(fn(u) => -u.body.rank("q"))` ordena resultados por
-    // mejor match.
+    // emits `ts_rank("field", to_tsquery($N))` (with
+    // `plainto_tsquery` for `.plainto_rank`). Useful for ranking by
+    // relevance in full-text search: combine
+    // `.where(fn(u) => u.body.matches("q"))
+    // .order_by(fn(u) => -u.body.rank("q"))` to order results by
+    // best match.
     if let crate::ast::Expr::Call { callee, args, .. } = &field_expr {
         if let crate::ast::Expr::Field {
             object,
@@ -14043,7 +14126,7 @@ fn orm_qb_order_by(
                                 .and_then(|c| c.sql_name.as_deref())
                                 .unwrap_or(col.as_str())
                                 .to_string();
-                            // Eval arg como Str literal o var.
+                            // Eval arg as Str literal or var.
                             let query_str = match &args[0] {
                                 crate::ast::Expr::Str(s, _) => s.clone(),
                                 other => {
@@ -14063,10 +14146,11 @@ fn orm_qb_order_by(
                             } else {
                                 "to_tsquery"
                             };
-                            // ts_rank no usa params bindeados aquí
-                            // (el query string se inlinea para evitar
-                            // wire de PgValue al order_by stream — el
-                            // user pasa siempre Str literal).
+                            // ts_rank doesn't use bound params here
+                            // (the query string is inlined to avoid
+                            // a PgValue wire pass to the order_by
+                            // stream — the user always passes a Str
+                            // literal).
                             let escaped_q = query_str.replace('\'', "''");
                             state.order_by_clauses.push(format!(
                                 "ts_rank(\"{sql_col}\", {tsquery_fn}('{escaped_q}')) {direction}"
@@ -14132,7 +14216,8 @@ fn orm_qb_order_by(
     Ok(Value::QueryBuilder(Arc::new(state)))
 }
 
-/// Helper: extrae un arg `Int` no negativo. Usado por `limit`/`offset`.
+/// Helper: extract a non-negative `Int` arg. Used by `limit`/
+/// `offset`.
 fn extract_int_arg(args: &[Value], method: &str, span: Span) -> FitzResult<i64> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -14162,31 +14247,31 @@ fn extract_int_arg(args: &[Value], method: &str, span: Span) -> FitzResult<i64> 
     }
 }
 
-/// `qb.limit(n)` — emite `LIMIT N`. Solo el último call de
-/// `.limit()` en una cadena aplica (overwrite). N negativo se
-/// clampea a 0 en `build_select_sql`.
+/// `qb.limit(n)` — emits `LIMIT N`. Only the last `.limit()` call
+/// in a chain applies (overwrite). A negative N is clamped to 0
+/// in `build_select_sql`.
 fn orm_qb_limit(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let n = extract_int_arg(&args, "limit", span)?;
     state.limit = Some(n);
     Ok(Value::QueryBuilder(Arc::new(state)))
 }
 
-/// `qb.offset(n)` — emite `OFFSET N`. Mismo criterio que `limit`.
+/// `qb.offset(n)` — emits `OFFSET N`. Same criterion as `limit`.
 fn orm_qb_offset(mut state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let n = extract_int_arg(&args, "offset", span)?;
     state.offset = Some(n);
     Ok(Value::QueryBuilder(Arc::new(state)))
 }
 
-/// `qb.first(db)` — equivalente a `.limit(1).all(db)` pero
-/// devuelve `Result<Instance>` directo (sin envolver en List).
-/// Si el resultset está vacío, `Err("no rows")`. Si hay error
-/// DB, `Err(<mensaje>)`.
+/// `qb.first(db)` — equivalent to `.limit(1).all(db)` but returns
+/// `Result<Instance>` directly (without wrapping in a List). If the
+/// resultset is empty, `Err("no rows")`. On DB error,
+/// `Err(<message>)`.
 fn orm_qb_first(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let db_handle = extract_db_handle_arg(&args, "first", span)?;
-    // Forzamos LIMIT 1 sin tocar el state original (el user puede
-    // haber seteado uno distinto; lo override-amos para esta
-    // ejecución específica).
+    // Force LIMIT 1 without touching the original state (the user
+    // may have set a different one; we override it for this specific
+    // execution).
     let sql = build_select_sql(&state, Some(1));
     let fields_owned = state.fields.clone();
     let meta_owned = state.meta.clone();
@@ -14219,16 +14304,16 @@ fn orm_qb_first(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzR
     Ok(Value::new_future(fut))
 }
 
-/// `qb.count(db)` — ejecuta `SELECT COUNT(*) FROM ... [WHERE ...]`
-/// y devuelve `Result<Int>`. ORDER BY / LIMIT / OFFSET no aplican
-/// (el count es un agregado y los ignora — Postgres lo permite
-/// igual, pero los omitimos para SQL más limpio).
+/// `qb.count(db)` — runs `SELECT COUNT(*) FROM ... [WHERE ...]` and
+/// returns `Result<Int>`. ORDER BY / LIMIT / OFFSET don't apply
+/// (count is an aggregate and ignores them — Postgres allows them
+/// anyway, but we omit them for cleaner SQL).
 fn orm_qb_count(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let db_handle = extract_db_handle_arg(&args, "count", span)?;
-    // Fase 10.5.f2 — delega al helper común `build_aggregate_future`.
-    // Sin GROUP BY: devuelve `Result<Int>` (path scalar).
-    // Con GROUP BY: devuelve `Result<List<Map>>` con cada grupo +
-    // su count.
+    // Phase 10.5.f2 — delegate to the common helper
+    // `build_aggregate_future`. Without GROUP BY: returns
+    // `Result<Int>` (scalar path). With GROUP BY: returns
+    // `Result<List<Map>>` with each group + its count.
     let fut = build_aggregate_future(
         state,
         db_handle,
@@ -14238,15 +14323,15 @@ fn orm_qb_count(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzR
     Ok(Value::new_future(fut))
 }
 
-/// Fase 10.5.a — `true` si el `TypeExpr` representa un `Map<...>`
-/// (con cualquier sub-tipos). Usado por el ORM para detectar
-/// fields que mapean a columnas `jsonb`/`json` en Postgres y
-/// activar el marshalling JSON bidireccional.
+/// Phase 10.5.a — `true` if the `TypeExpr` represents a `Map<...>`
+/// (with any sub-types). Used by the ORM to detect fields that
+/// map to `jsonb`/`json` columns in Postgres and activate the
+/// bidirectional JSON marshalling.
 ///
-/// Casos cubiertos:
+/// Covered cases:
 ///   - `Map<K, V>` → true
-///   - `Map<K, V>?` (nullable wrapper) → true (recursa al inner)
-///   - Otros → false
+///   - `Map<K, V>?` (nullable wrapper) → true (recurses into inner)
+///   - Other → false
 fn is_map_type(t: &crate::ast::TypeExpr) -> bool {
     match t {
         crate::ast::TypeExpr::Generic { name, .. } => name == "Map",
@@ -14255,13 +14340,14 @@ fn is_map_type(t: &crate::ast::TypeExpr) -> bool {
     }
 }
 
-/// v0.10.24 (annotation-aware OID refinement) — `true` si el field
-/// type Fitz declara explícitamente uno de los 3 tipos nuevos
-/// (Date, DateTime, Uuid) o un wrapper que los contiene (Nullable o
-/// List<T>). Solo cuando devuelve `true`, el ORM read-back propaga
-/// el OID al converter para que `PgValue::Text` → `Value::Date/
-/// DateTime/Uuid`. Para fields declarados como `Str`/`List<Str>`/
-/// etc., backward-compat: mantener Value::Str (pre-v0.10.24).
+/// v0.10.24 (annotation-aware OID refinement) — `true` if the Fitz
+/// field type explicitly declares one of the 3 new types (Date,
+/// DateTime, Uuid) or a wrapper containing them (Nullable or
+/// List<T>). Only when it returns `true`, the ORM read-back path
+/// propagates the OID to the converter so that `PgValue::Text` →
+/// `Value::Date/DateTime/Uuid`. For fields declared as
+/// `Str`/`List<Str>`/etc., backward-compat: keep `Value::Str`
+/// (pre-v0.10.24).
 fn field_type_uses_new_temporal_or_uuid(t: &crate::ast::TypeExpr) -> bool {
     match t {
         crate::ast::TypeExpr::Named(name) => {
@@ -14275,18 +14361,18 @@ fn field_type_uses_new_temporal_or_uuid(t: &crate::ast::TypeExpr) -> bool {
     }
 }
 
-/// Fase 10.5.b — devuelve `Some(elem_oid)` si el TypeExpr es
-/// `List<T>` (o `List<T>?`) con T mapeable a un OID escalar
-/// soportado por arrays. Devuelve `None` para otros tipos.
+/// Phase 10.5.b — returns `Some(elem_oid)` if the TypeExpr is
+/// `List<T>` (or `List<T>?`) with T mappable to a scalar OID
+/// supported by arrays. Returns `None` for other types.
 ///
-/// Tipos T soportados:
-///   - `Int`  → `INT8` (Fitz Int es i64)
-///   - `Float`→ `FLOAT8` (Fitz Float es f64)
+/// Supported T types:
+///   - `Int`  → `INT8` (Fitz Int is i64)
+///   - `Float`→ `FLOAT8` (Fitz Float is f64)
 ///   - `Str`  → `TEXT`
 ///   - `Bool` → `BOOL`
 ///
-/// Otros (List<List<T>>, List<Map<...>>, List<Custom>) no son
-/// arrays escalares — el ORM los rechaza con error claro.
+/// Others (List<List<T>>, List<Map<...>>, List<Custom>) are not
+/// scalar arrays — the ORM rejects them with a clear error.
 fn list_elem_pg_oid(t: &crate::ast::TypeExpr) -> Option<u32> {
     match t {
         crate::ast::TypeExpr::Generic { name, args } if name == "List" && args.len() == 1 => {
@@ -14306,10 +14392,10 @@ fn list_elem_pg_oid(t: &crate::ast::TypeExpr) -> Option<u32> {
     }
 }
 
-/// Fase 10.5.b — convierte un `Value::List` Fitz a `PgValue::Array`
-/// con el `elem_oid` dado. Cada elemento se coerciona con
+/// Phase 10.5.b — convert a Fitz `Value::List` to `PgValue::Array`
+/// with the given `elem_oid`. Each element is coerced with
 /// `fitz_value_to_pg`. `Value::Null` (top-level) → `PgValue::Null`
-/// para soportar nullables `List<T>?`.
+/// to support nullable `List<T>?`.
 fn fitz_list_to_pg_array(v: &Value, elem_oid: u32) -> Result<crate::db::PgValue, String> {
     if matches!(v, Value::Null) {
         return Ok(crate::db::PgValue::Null);
@@ -14330,10 +14416,10 @@ fn fitz_list_to_pg_array(v: &Value, elem_oid: u32) -> Result<crate::db::PgValue,
     Ok(crate::db::PgValue::Array { elem_oid, values })
 }
 
-/// Mapea un OID escalar al nombre SQL de su tipo array para emitir
-/// el cast en INSERT. Devuelve `None` si el OID no tiene tipo array
-/// mapeado (no debería pasar — el caller solo invoca con OIDs que
-/// `list_elem_pg_oid` reportó).
+/// Map a scalar OID to the SQL name of its array type to emit the
+/// cast in INSERT. Returns `None` if the OID has no mapped array
+/// type (should never happen — the caller only invokes with OIDs
+/// that `list_elem_pg_oid` reported).
 fn array_sql_cast_for(elem_oid: u32) -> Option<&'static str> {
     match elem_oid {
         crate::db::oid::INT8 => Some("::int8[]"),
@@ -14347,12 +14433,11 @@ fn array_sql_cast_for(elem_oid: u32) -> Option<&'static str> {
     }
 }
 
-/// Fase 10.5.f1 — extrae el nombre del field accedido desde un
-/// closure `fn(u) => u.field`. Devuelve el nombre Fitz del field
-/// (sin override SQL aplicado todavía). Errores: closure de
-/// aridad ≠ 1, body no es expr `u.field` (puede haber `-u.field`
-/// para soportar DESC en order_by, pero acá no — el aggregate no
-/// tiene direction).
+/// Phase 10.5.f1 — extract the field name accessed from a closure
+/// `fn(u) => u.field`. Returns the Fitz field name (no SQL override
+/// applied yet). Errors: closure of arity ≠ 1, body is not an
+/// expression `u.field` (it can be `-u.field` to support DESC in
+/// order_by, but not here — the aggregate has no direction).
 fn field_from_closure(
     closure: &Value,
     span: Span,
@@ -14439,22 +14524,24 @@ fn field_from_closure(
     Ok(field)
 }
 
-/// Fase 10.5.f1 — genérico para `sum`/`min`/`max`. Emite
+/// Phase 10.5.f1 — generic for `sum`/`min`/`max`. Emits
 /// `SELECT <FUNC>("col") AS "__agg" FROM table [WHERE ...]`.
-/// `avg` va por `orm_qb_avg` separado porque casteamos a float8.
+/// `avg` goes through `orm_qb_avg` separately because we cast to
+/// float8.
 ///
-/// Args: `[closure, db]`. El closure es `fn(u) => u.field`.
-/// Devuelve `Future<Result<Int|Float>>` según el tipo de col:
-/// el OID del result del server determina el `PgValue` y
-/// `pg_value_to_fitz` lo convierte.
+/// Args: `[closure, db]`. The closure is `fn(u) => u.field`.
+/// Returns `Future<Result<Int|Float>>` depending on the column
+/// type: the result OID from the server determines the `PgValue`,
+/// and `pg_value_to_fitz` converts it.
 ///
-/// Para resultset vacío (e.g. SUM sobre WHERE que no matchea
-/// nada), Postgres devuelve NULL → `Result::Ok(Value::Null)`.
-/// El user matchea Null si querría tratarlo como cero.
+/// For an empty resultset (e.g. SUM over a WHERE that matches
+/// nothing), Postgres returns NULL → `Result::Ok(Value::Null)`.
+/// The user matches Null if they want to treat it as zero.
 ///
-/// Fase 10.5.f2 — Si `state.group_by_clauses` NO está vacío, el
-/// agregado emite GROUP BY query y devuelve `List<Map<Str, Any>>`
-/// con cada row = un grupo (keys = group cols + nombre del agg).
+/// Phase 10.5.f2 — if `state.group_by_clauses` is NOT empty, the
+/// aggregate emits a GROUP BY query and returns
+/// `List<Map<Str, Any>>` with each row = one group (keys = group
+/// cols + the agg name).
 fn orm_qb_aggregate(
     state: QueryBuilderState,
     args: Vec<Value>,
@@ -14507,13 +14594,13 @@ fn orm_qb_aggregate(
     Ok(Value::new_future(fut))
 }
 
-/// Fase 10.5.f1 + .f2 — helper común para los 4 agregados +
-/// count. Construye el Future que ejecuta:
-///   - Path scalar (sin GROUP BY): `SELECT <agg_expr> AS "__agg"
-///     FROM table [WHERE ...]`. Devuelve `Result<scalar>`.
-///   - Path GROUP BY: `SELECT col1, col2, ..., <agg_expr> AS
+/// Phase 10.5.f1 + .f2 — common helper for the 4 aggregates +
+/// count. Builds the Future that runs:
+///   - Scalar path (no GROUP BY): `SELECT <agg_expr> AS "__agg"
+///     FROM table [WHERE ...]`. Returns `Result<scalar>`.
+///   - GROUP BY path: `SELECT col1, col2, ..., <agg_expr> AS
 ///     "<agg_name>" FROM table [WHERE ...] GROUP BY col1, col2`.
-///     Devuelve `Result<List<Map<Str, Any>>>`.
+///     Returns `Result<List<Map<Str, Any>>>`.
 fn build_aggregate_future(
     state: QueryBuilderState,
     db_handle: Arc<crate::db::DbConnHandle>,
@@ -14527,7 +14614,7 @@ fn build_aggregate_future(
 
     Box::pin(async move {
         if group_by.is_empty() {
-            // Path scalar: igual al pre-10.5.f2.
+            // Scalar path: identical to pre-10.5.f2.
             let mut sql = format!("SELECT {} AS \"__agg\" FROM {}", agg_expr, qualified_name);
             if let Some(w) = &where_sql {
                 sql.push_str(" WHERE ");
@@ -14551,9 +14638,9 @@ fn build_aggregate_future(
                 )))),
             }
         } else {
-            // Path GROUP BY: emit `SELECT col1, col2, <agg> AS
+            // GROUP BY path: emit `SELECT col1, col2, <agg> AS
             // <agg_name> FROM ... [WHERE ...] GROUP BY col1, col2`
-            // y devuelve List<Map>.
+            // and return List<Map>.
             let mut select_list = String::new();
             let mut group_by_sql = String::new();
             for (i, (_fitz, sql_col)) in group_by.iter().enumerate() {
@@ -14605,11 +14692,12 @@ fn build_aggregate_future(
     })
 }
 
-/// Fase 10.5.f1 — `.avg(closure, db)` con cast a float8.
-/// Diferenciado de sum/min/max porque Postgres devuelve `numeric`
-/// (OID 1700) por default para AVG, y nuestro driver no soporta
-/// numeric en MVP. El cast explícito `::float8` produce un OID
-/// FLOAT8 (701) que `pg_value_to_fitz` mapea a Float.
+/// Phase 10.5.f1 — `.avg(closure, db)` with cast to float8.
+/// Differentiated from sum/min/max because Postgres returns
+/// `numeric` (OID 1700) by default for AVG, and our driver does
+/// not support numeric in MVP. The explicit cast `::float8`
+/// produces a FLOAT8 OID (701) that `pg_value_to_fitz` maps to
+/// Float.
 fn orm_qb_avg(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -14654,11 +14742,11 @@ fn orm_qb_avg(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzRes
     Ok(Value::new_future(fut))
 }
 
-/// Fase 10.5.f2 — `.group_by(closure) -> QueryBuilder`. Agrega una
-/// clause GROUP BY al state acumulado. El closure es
-/// `fn(u) => u.field` (igual que `order_by` y los agregados).
-/// El user encadena con count/sum/avg/min/max para obtener la
-/// agrupación.
+/// Phase 10.5.f2 — `.group_by(closure) -> QueryBuilder`. Adds a
+/// GROUP BY clause to the accumulated state. The closure is
+/// `fn(u) => u.field` (same as `order_by` and the aggregates).
+/// The user chains with count/sum/avg/min/max to get the
+/// aggregation.
 fn orm_qb_group_by(
     mut state: QueryBuilderState,
     args: Vec<Value>,
@@ -14690,16 +14778,17 @@ fn orm_qb_group_by(
     Ok(Value::QueryBuilder(Arc::new(state)))
 }
 
-/// Fase 10.3.c — `Type.insert(db, instance) -> Future<Result<Instance>>`.
-/// Inserta una instancia en la tabla con `INSERT ... RETURNING *`
-/// y deserializa la fila retornada (incluye valores generados por
-/// Postgres como auto-IDs cuando el field tiene default a nivel
-/// SQL). Si el user pasa un primary key explícito que ya existe,
-/// el servidor responde `Err` con violación de unique constraint.
+/// Phase 10.3.c — `Type.insert(db, instance) -> Future<Result<Instance>>`.
+/// Inserts an instance into the table with `INSERT ... RETURNING *`
+/// and deserializes the returned row (includes values generated by
+/// Postgres like auto-IDs when the field has a SQL-level default).
+/// If the user passes an explicit primary key that already exists,
+/// the server responds with `Err` due to a unique constraint
+/// violation.
 ///
 /// Args:
 ///   - args[0]: DbConn
-///   - args[1]: Instance del type
+///   - args[1]: Instance of the type
 fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -14762,23 +14851,23 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
         ));
     }
 
-    // Construir INSERT INTO table (col1, col2, ...) VALUES ($1, $2, ...)
-    // RETURNING col1, col2, ... — emitimos columnas explícitas (en
-    // orden de declaración del type) y args parametrizados.
+    // Build INSERT INTO table (col1, col2, ...) VALUES ($1, $2, ...)
+    // RETURNING col1, col2, ... — we emit explicit columns (in
+    // declaration order of the type) and parametrized args.
     let record_fields = record_fields_shared.lock().clone();
     let mut col_list = String::new();
     let mut placeholders = String::new();
     let mut pg_args: Vec<crate::db::PgValue> = Vec::with_capacity(state.fields.len());
     let mut placeholder_idx = 0;
     for f in state.fields.iter() {
-        // Fase 10.4.a — skip de fields virtuales (@has_one/@has_many)
+        // Phase 10.4.a — skip virtual fields (@has_one/@has_many).
         if state.meta.is_virtual_field(&f.name) {
             continue;
         }
-        // 10.8.2 (v0.10.8) — `@db_default` skipea el field del INSERT
-        // (Postgres aplica el DEFAULT del schema). Paralelo al codegen
-        // en `gen_orm_type_insert`. El field SÍ vuelve por el
-        // RETURNING (que se popula con SELECT * abajo).
+        // 10.8.2 (v0.10.8) — `@db_default` skips the field from the
+        // INSERT (Postgres applies the schema DEFAULT). Parallel to
+        // codegen in `gen_orm_type_insert`. The field DOES come back
+        // through RETURNING (populated with SELECT * below).
         let is_db_default = state
             .meta
             .columns
@@ -14799,27 +14888,30 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
             .find(|(n, _)| n == &f.name)
             .map(|(_, v)| v.clone())
             .unwrap_or(Value::Null);
-        // W4 (v0.10.6) — sentinel @primary Int = 0. Si el field es el
-        // primary key, está declarado como `Int` (no nullable, no genérico)
-        // y el valor runtime es `Int(0)`, lo skipeamos del INSERT para
-        // que Postgres asigne el id via `bigserial`/`IDENTITY DEFAULT`.
-        // Cualquier otro `id` explícito (1, 7, etc.) se inserta literal.
-        // v0.10.27 (F2) — sentinel solo aplica a single PK Int.
-        // Composite PK: el user provee valores explícitos, no sentinel.
+        // W4 (v0.10.6) — sentinel @primary Int = 0. If the field is
+        // the primary key, declared as `Int` (not nullable, not
+        // generic), and the runtime value is `Int(0)`, we skip it
+        // from the INSERT so Postgres assigns the id via
+        // `bigserial`/`IDENTITY DEFAULT`. Any other explicit `id`
+        // (1, 7, etc.) is inserted literally.
+        // v0.10.27 (F2) — sentinel only applies to single PK Int.
+        // Composite PK: the user provides explicit values, no
+        // sentinel.
         let is_pk_int_sentinel = state.meta.single_pk() == Some(f.name.as_str())
             && matches!(&f.type_, crate::ast::TypeExpr::Named(n) if n == "Int")
             && matches!(&value, Value::Int(0));
         if is_pk_int_sentinel {
             continue;
         }
-        // Fase 10.5.a — si el field Fitz es Map<...>, serializamos
-        // a JSON string y emitimos `$N::jsonb` para que Postgres lo
-        // reciba como columna jsonb. Sin el cast, $N::text no se
-        // asigna a una columna jsonb sin coerción explícita.
+        // Phase 10.5.a — if the Fitz field is Map<...>, we
+        // serialize it to a JSON string and emit `$N::jsonb` so
+        // Postgres receives it as a jsonb column. Without the cast,
+        // $N::text is not assigned to a jsonb column without
+        // explicit coercion.
         //
-        // Fase 10.5.b — si es List<T> con T mapeable a un OID
-        // escalar (Int/Float/Str/Bool), serializamos como array
-        // Postgres con el cast correspondiente (`::int8[]`, etc.).
+        // Phase 10.5.b — if it's List<T> with T mappable to a
+        // scalar OID (Int/Float/Str/Bool), we serialize it as a
+        // Postgres array with the matching cast (`::int8[]`, etc.).
         let field_is_map = is_map_type(&f.type_);
         let field_list_elem = list_elem_pg_oid(&f.type_);
         let (pg, placeholder_suffix) = if field_is_map {
@@ -14930,26 +15022,30 @@ fn orm_type_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResul
     Ok(Value::new_future(fut))
 }
 
-/// v0.10.27 — F1: Bulk insert con batching VALUES multi-tuple.
-/// `Type.bulk_insert(rows, db)` o `Type.bulk_insert(rows, db, batch_size)`.
-/// Devuelve `Future<Result<Int>>` con el total de rows insertadas.
+/// v0.10.27 — F1: Bulk insert with multi-tuple VALUES batching.
+/// `Type.bulk_insert(rows, db)` or
+/// `Type.bulk_insert(rows, db, batch_size)`. Returns
+/// `Future<Result<Int>>` with the total inserted row count.
 ///
 /// Args:
-///   - args[0]: `List<Type>` (instancias)
+///   - args[0]: `List<Type>` (instances)
 ///   - args[1]: DbConn
-///   - args[2] (opcional): Int batch_size (default 1000)
+///   - args[2] (optional): Int batch_size (default 1000)
 ///
-/// SQL emitido por batch: `INSERT INTO table (cols) VALUES (...), (...), ...`
-/// sin RETURNING (devolvemos el count del exec, no las rows insertadas).
+/// SQL emitted per batch:
+/// `INSERT INTO table (cols) VALUES (...), (...), ...`
+/// without RETURNING (we return the exec count, not the inserted
+/// rows).
 ///
-/// Detección de PK sentinel: si el PRIMER row tiene `id: 0` (Int @primary
-/// sentinel), skipea la columna PK en TODOS los rows del batch
-/// (Postgres asigna bigserial). Si el primer row tiene id explícito,
-/// incluye la columna PK siempre. Rows con shape mixto fallan claro.
+/// PK sentinel detection: if the FIRST row has `id: 0` (Int
+/// @primary sentinel), we skip the PK column in ALL rows of the
+/// batch (Postgres assigns bigserial). If the first row has an
+/// explicit id, we always include the PK column. Mixed-shape rows
+/// fail with a clear error.
 ///
-/// Per-row marshal: paralelo a `orm_type_insert` para JSONB (Map<...>
-/// → `$N::jsonb`), arrays (List<scalar> → `$N::int8[]`/etc.), y
-/// `@db_default` skip.
+/// Per-row marshal: parallel to `orm_type_insert` for JSONB
+/// (Map<...> → `$N::jsonb`), arrays (List<scalar> →
+/// `$N::int8[]`/etc.), and `@db_default` skip.
 fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     if args.len() != 2 && args.len() != 3 {
         return Err(FitzError::new(
@@ -14965,7 +15061,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
             ),
         ));
     }
-    // arg 0: List<Instance>
+    // arg 0: List<Instance>.
     let rows_shared = match &args[0] {
         Value::List(l) => Arc::clone(l),
         other => {
@@ -14984,7 +15080,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
         }
     };
     let rows: Vec<Value> = rows_shared.lock().clone();
-    // arg 1: DbConn
+    // arg 1: DbConn.
     let db_handle = match &args[1] {
         Value::DbConn(h) => Arc::clone(h),
         other => {
@@ -15002,7 +15098,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
             ));
         }
     };
-    // arg 2 (opcional): batch_size
+    // arg 2 (optional): batch_size.
     let batch_size = if args.len() == 3 {
         match &args[2] {
             Value::Int(n) if *n > 0 => *n as usize,
@@ -15037,7 +15133,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
     };
     let state = type_value_to_state(type_value, span)?;
 
-    // Caso vacío: nada que insertar, retornar 0 sin tocar la DB.
+    // Empty case: nothing to insert, return 0 without touching the DB.
     if rows.is_empty() {
         let fut: crate::value::FitzFuture = Box::pin(async move {
             Ok(Value::Result(crate::value::ResultVariant::Ok(Box::new(
@@ -15047,7 +15143,7 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
         return Ok(Value::new_future(fut));
     }
 
-    // Validar que todos los rows son Instance del type correcto.
+    // Validate that all rows are Instances of the correct type.
     for (i, row) in rows.iter().enumerate() {
         match row {
             Value::Instance { type_name, .. } => {
@@ -15082,11 +15178,11 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
         }
     }
 
-    // Decidir si se skipea la columna PK (sentinel detection desde el
-    // primer row). Si el PK es Int y el primer row tiene Int(0),
-    // skipeamos PK en TODOS los rows (asume shape uniforme). Si el
-    // primer row tiene id explícito, NO skipea PK.
-    // v0.10.27 (F2) — sentinel detection en bulk_insert requiere
+    // Decide whether to skip the PK column (sentinel detection from
+    // the first row). If the PK is Int and the first row has
+    // Int(0), we skip PK in ALL rows (assumes uniform shape). If
+    // the first row has an explicit id, do NOT skip PK.
+    // v0.10.27 (F2) — sentinel detection in bulk_insert requires a
     // single PK Int. Composite: pk_name=None, no sentinel applied.
     let pk_name: Option<String> = state.meta.single_pk().map(String::from);
     let skip_pk_in_all = match &rows[0] {
@@ -15110,8 +15206,9 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
         _ => unreachable!(),
     };
 
-    // Determinar la lista de fields a insertar (col_list + per-row marshal
-    // shape). Skipea virtuales, @db_default, y PK sentinel si aplica.
+    // Determine the list of fields to insert (col_list + per-row
+    // marshal shape). Skips virtuals, @db_default, and PK sentinel
+    // when applicable.
     let mut col_list = String::new();
     let mut insert_fields: Vec<&crate::ast::Field> = Vec::with_capacity(state.fields.len());
     let mut first_col = true;
@@ -15147,8 +15244,8 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
         insert_fields.push(f);
     }
 
-    // Process en batches. Cada batch construye un SQL nuevo con su
-    // propio placeholder count + args concatenados.
+    // Process in batches. Each batch builds a new SQL with its own
+    // placeholder count + concatenated args.
     let table_sql = state.meta.qualified_sql_name();
     let type_name_owned = state.type_name.clone();
     let insert_fields_owned: Vec<crate::ast::Field> = insert_fields.into_iter().cloned().collect();
@@ -15237,18 +15334,19 @@ fn orm_type_bulk_insert(type_value: Value, args: Vec<Value>, span: Span) -> Fitz
     Ok(Value::new_future(fut))
 }
 
-/// Fase 10.3.c — `qb.update(db, changes_map) -> Future<Result<Int>>`.
-/// Ejecuta `UPDATE table SET col1=$1, col2=$2, ... WHERE <where>`
-/// y devuelve el número de rows afectadas.
+/// Phase 10.3.c — `qb.update(db, changes_map) -> Future<Result<Int>>`.
+/// Runs `UPDATE table SET col1=$1, col2=$2, ... WHERE <where>` and
+/// returns the number of affected rows.
 ///
 /// Args:
 ///   - args[0]: DbConn
-///   - args[1]: Map<Str, Any> con los campos a actualizar.
+///   - args[1]: Map<Str, Any> with the fields to update.
 ///
-/// Guard de seguridad: si NO hay WHERE en el state, el UPDATE
-/// afectaría todas las rows del table. Rechazamos con error claro
-/// — el user debe `User.where(_ => true).update(...)` explícito
-/// si realmente quiere update sin filtro.
+/// Safety guard: if there is NO WHERE in the state, the UPDATE
+/// would affect every row in the table. We reject with a clear
+/// error — the user must explicitly write
+/// `User.where(_ => true).update(...)` if they really want an
+/// unfiltered update.
 fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -15307,9 +15405,9 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
         ));
     }
 
-    // Construir SET col=$N, col=$M ... a partir del Map de changes.
-    // Los args del SET van PRIMERO; los args del WHERE se renumeran
-    // a continuación (offsetando los $N del where_sql).
+    // Build SET col=$N, col=$M ... from the changes Map. The SET
+    // args go FIRST; the WHERE args are renumbered after them
+    // (offsetting the $N of where_sql).
     let changes = changes_shared.lock().clone();
     if changes.is_empty() {
         return Err(FitzError::new(
@@ -15339,7 +15437,7 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
                 ));
             }
         };
-        // Validar que el field existe en el type.
+        // Validate that the field exists in the type.
         if !state.fields.iter().any(|f| f.name == key_str) {
             return Err(FitzError::new(
                 ErrorKind::InvalidSyntax,
@@ -15364,10 +15462,10 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
             .get(&key_str)
             .and_then(|c| c.sql_name.as_deref())
             .unwrap_or(key_str.as_str());
-        // Fase 10.5.a — si el field destino es Map<...>, marshall
-        // a JSON + cast `::jsonb`.
-        // Fase 10.5.b — si es List<T>, marshall a array + cast
-        // `::int8[]`/`::text[]`/etc.
+        // Phase 10.5.a — if the destination field is Map<...>,
+        // marshal to JSON + `::jsonb` cast.
+        // Phase 10.5.b — if it's List<T>, marshal to array +
+        // `::int8[]`/`::text[]`/etc. cast.
         let field_def = state.fields.iter().find(|f| f.name == key_str);
         let field_is_map = field_def.map(|f| is_map_type(&f.type_)).unwrap_or(false);
         let field_list_elem = field_def.and_then(|f| list_elem_pg_oid(&f.type_));
@@ -15417,8 +15515,8 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
         ));
         pg_args.push(pg);
     }
-    // El where_sql usa $1..$M; renumeramos a $(N+1)..$(N+M) donde N
-    // es la cantidad de args del SET.
+    // where_sql uses $1..$M; we renumber to $(N+1)..$(N+M) where N
+    // is the count of SET args.
     let set_count = pg_args.len();
     let where_sql_renum =
         renumber_placeholders(state.where_sql.as_deref().unwrap_or(""), set_count);
@@ -15445,17 +15543,17 @@ fn orm_qb_update(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
 }
 
 /// v0.10.32 (Tier C.3) — `qb.merge_jsonb(db, field, patch) ->
-/// Future<Result<Int>>`. Ejecuta
+/// Future<Result<Int>>`. Runs
 /// `UPDATE tbl SET "field" = "field" || $1::jsonb WHERE <where>`,
-/// merging `patch` (Map<Str, Any>) en la columna jsonb existente.
-/// Las keys existentes que no están en patch se preservan; las que
-/// están se overwrite con el valor del patch (last-write-wins,
-/// semántica estándar de `||` jsonb).
+/// merging `patch` (Map<Str, Any>) into the existing jsonb column.
+/// Existing keys not in `patch` are preserved; those present are
+/// overwritten with the patch value (last-write-wins, standard
+/// jsonb `||` semantics).
 ///
-/// **Limitación Postgres**: si la columna es NULL, `NULL || anything
-/// = NULL` (resultado NULL). El user debe inicializar la columna con
-/// `{}` al INSERT para que el merge funcione. Workaround con
-/// COALESCE no implementado en MVP (deuda menor).
+/// **Postgres limitation**: if the column is NULL,
+/// `NULL || anything = NULL` (the result is NULL). The user must
+/// initialize the column with `{}` on INSERT for the merge to work.
+/// A COALESCE workaround is not implemented in MVP (minor debt).
 fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     if args.len() != 3 {
         return Err(FitzError::new(
@@ -15505,7 +15603,7 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
             ));
         }
     };
-    // Validar que el field existe y es Map<...>.
+    // Validate that the field exists and is Map<...>.
     let field_def = state
         .fields
         .iter()
@@ -15536,7 +15634,7 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
         ));
     }
     let patch_value = args[2].clone();
-    // Marshall el patch a jsonb.
+    // Marshal the patch to jsonb.
     let pg_patch = fitz_value_to_jsonb(&patch_value).map_err(|msg| {
         FitzError::new(
             ErrorKind::TypeError,
@@ -15560,8 +15658,8 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
         .get(&field_name)
         .and_then(|c| c.sql_name.as_deref())
         .unwrap_or(field_name.as_str());
-    // SET col = col || $1::jsonb. El where_sql usa $1..$M; renumeramos
-    // $1..$M → $2..$(M+1) porque el patch ocupa $1.
+    // SET col = col || $1::jsonb. where_sql uses $1..$M; we
+    // renumber $1..$M → $2..$(M+1) because the patch takes $1.
     let where_sql_renum = renumber_placeholders(state.where_sql.as_deref().unwrap_or(""), 1);
     let mut pg_args: Vec<crate::db::PgValue> = Vec::with_capacity(state.where_args.len() + 1);
     pg_args.push(pg_patch);
@@ -15586,12 +15684,12 @@ fn orm_qb_merge_jsonb(state: QueryBuilderState, args: Vec<Value>, span: Span) ->
     Ok(Value::new_future(fut))
 }
 
-/// Fase 10.3.c — `qb.delete(db) -> Future<Result<Int>>`. Ejecuta
-/// `DELETE FROM table WHERE <where>` y devuelve rows afectadas.
+/// Phase 10.3.c — `qb.delete(db) -> Future<Result<Int>>`. Runs
+/// `DELETE FROM table WHERE <where>` and returns affected rows.
 ///
-/// Mismo guard que `update`: requiere `.where(...)` previo. Para
-/// truncar la tabla, el user debe escribir
-/// `.where(fn(_) => true).delete(db)` explícito.
+/// Same guard as `update`: requires a previous `.where(...)`. To
+/// truncate the table, the user must explicitly write
+/// `.where(fn(_) => true).delete(db)`.
 fn orm_qb_delete(state: QueryBuilderState, args: Vec<Value>, span: Span) -> FitzResult<Value> {
     let db_handle = extract_db_handle_arg(&args, "delete", span)?;
     if state.where_sql.is_none() {
@@ -15621,13 +15719,13 @@ fn orm_qb_delete(state: QueryBuilderState, args: Vec<Value>, span: Span) -> Fitz
     Ok(Value::new_future(fut))
 }
 
-/// Fase 10.4.b — navega una relación desde una `Value::Instance`.
-/// Soporta los 3 kinds (BelongsTo / HasOne / HasMany). Construye
-/// un `QueryBuilderState` adecuado y delega a `orm_qb_first` o
-/// `orm_qb_all` según corresponda.
+/// Phase 10.4.b — navigate a relation from a `Value::Instance`.
+/// Supports the 3 kinds (BelongsTo / HasOne / HasMany). Builds an
+/// appropriate `QueryBuilderState` and delegates to `orm_qb_first`
+/// or `orm_qb_all` as needed.
 ///
-/// Args en MVP: `[DbConn]` solo. El where viene IMPLÍCITO de la
-/// relación (no del user). Cualquier args extra → error.
+/// MVP args: `[DbConn]` only. The where is IMPLICIT from the
+/// relation (not from the user). Any extra arg → error.
 async fn orm_instance_navigate(
     receiver: Value,
     rel: crate::types::RelationMetadata,
@@ -15635,7 +15733,8 @@ async fn orm_instance_navigate(
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
-    // Fase 10.b.13 — args: 0 (QueryBuilder chain) o 1 (DbConn, terminal).
+    // Phase 10.b.13 — args: 0 (QueryBuilder chain) or 1 (DbConn,
+    // terminal).
     if args.len() > 1 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::WrongArgCount {
@@ -15652,14 +15751,14 @@ async fn orm_instance_navigate(
     }
     let returns_qb = args.is_empty();
 
-    // 2. Extraer fields de la Instance receiver.
+    // 2. Extract fields from the Instance receiver.
     let (instance_type_name, instance_fields_snapshot) = match &receiver {
         Value::Instance { type_name, fields } => (type_name.clone(), fields.lock().clone()),
         _ => unreachable!("orm_instance_navigate solo recibe Value::Instance"),
     };
 
-    // 3. Resolver THIS_type y TARGET_type metadata desde el env.
-    //    Hacemos el lookup ANTES del .await para no mantener el lock.
+    // 3. Resolve THIS_type and TARGET_type metadata from the env.
+    //    Do the lookup BEFORE the .await so we don't hold the lock.
     let (this_meta, target_state) = {
         let env_guard = env.lock();
         let this_meta = match env_guard.get(&instance_type_name) {
@@ -15721,19 +15820,20 @@ async fn orm_instance_navigate(
         (this_meta, target_state)
     };
 
-    // 4. Construir WHERE según el kind.
+    // 4. Build WHERE depending on the kind.
     //
     //    BelongsTo: target.<primary> = this.<fk_field>
-    //      (busca el row del target cuya PK matchea el FK de this)
+    //      (look up the target row whose PK matches this's FK)
     //    HasOne / HasMany: target.<rel.fk_field> = this.<primary>
-    //      (busca rows del target cuyo FK apunta a la PK de this)
+    //      (look up target rows whose FK points to this's PK)
     let (where_col_fitz, where_value) = match rel.kind {
-        // Deuda #2 (v0.10.5) — BelongsToCompanion comparte la lógica
-        // de BelongsTo (target.<primary> = this.<fk_field>): el FK
-        // sigue siendo el del sibling, y el target se busca por su
-        // PK matcheando el FK.
+        // Debt #2 (v0.10.5) — BelongsToCompanion shares the
+        // BelongsTo logic (target.<primary> = this.<fk_field>): the
+        // FK is still the sibling's, and the target is looked up by
+        // its PK matching the FK.
         crate::types::RelationKind::BelongsTo | crate::types::RelationKind::BelongsToCompanion => {
-            // v0.10.27 (F2) — navigation requiere single PK del target.
+            // v0.10.27 (F2) — navigation requires single PK on the
+            // target.
             let primary_target_owned = target_state.meta.single_pk().map(String::from).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -15764,8 +15864,9 @@ async fn orm_instance_navigate(
             (primary_target.clone(), fk_value)
         }
         crate::types::RelationKind::HasOne | crate::types::RelationKind::HasMany => {
-            // v0.10.27 (F2) — Has* navigation también requiere single PK
-            // del parent (this) para que el FK del target apunte ahí.
+            // v0.10.27 (F2) — Has* navigation also requires a
+            // single PK on the parent (this) so the target's FK
+            // can point to it.
             let primary_this_owned = this_meta.single_pk().map(String::from).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -15796,8 +15897,8 @@ async fn orm_instance_navigate(
         }
     };
 
-    // Resolver el nombre SQL de la columna (puede tener override
-    // via @column(name=...) en target).
+    // Resolve the column's SQL name (it may have an override via
+    // @column(name=...) on the target).
     let where_col_sql = target_state
         .meta
         .columns
@@ -15806,7 +15907,7 @@ async fn orm_instance_navigate(
         .unwrap_or(where_col_fitz.as_str())
         .to_string();
 
-    // Convertir el valor al PgValue.
+    // Convert the value to PgValue.
     let pg_value = fitz_value_to_pg(&where_value).map_err(|msg| {
         EvalSignal::Error(FitzError::new(
             ErrorKind::TypeError,
@@ -15820,13 +15921,13 @@ async fn orm_instance_navigate(
     state.where_sql = Some(format!("\"{}\" = $1", where_col_sql));
     state.where_args = vec![pg_value];
 
-    // Fase 10.b.13 — path nuevo: sin db, devolvemos QueryBuilder
-    // para que el user encadene `.where/.limit/.all/.first/etc.`.
+    // Phase 10.b.13 — new path: without db, return a QueryBuilder
+    // so the user can chain `.where/.limit/.all/.first/etc.`.
     if returns_qb {
         return Ok(Value::QueryBuilder(Arc::new(state)));
     }
 
-    // Path legacy: terminal directo según kind.
+    // Legacy path: terminal directly based on the kind.
     let db_arg = args;
     match rel.kind {
         crate::types::RelationKind::BelongsTo
@@ -15840,15 +15941,16 @@ async fn orm_instance_navigate(
     }
 }
 
-/// Helper para `qb.update`: renumera los placeholders `$N` del
-/// where_sql sumando `offset` a cada uno. El where_sql se construye
-/// asumiendo args desde $1; cuando lo concatenamos después del SET
-/// (que ya usó $1..$set_count), tenemos que rebumpearle los índices.
+/// Helper for `qb.update`: renumber the `$N` placeholders of
+/// where_sql by adding `offset` to each one. The where_sql is
+/// built assuming args from $1; when we concatenate after the SET
+/// (which already used $1..$set_count), we have to bump the
+/// indices.
 ///
-/// Implementación naive (string scan), suficiente para SQL bien
-/// formado. Edge case: `$` literal adentro de un string SQL no
-/// existe en nuestro generator (los strings van como args, no
-/// inline), así que es seguro.
+/// Naive implementation (string scan), sufficient for well-formed
+/// SQL. Edge case: a literal `$` inside a SQL string does not
+/// exist in our generator (strings go through as args, not
+/// inlined), so this is safe.
 fn renumber_placeholders(sql: &str, offset: usize) -> String {
     let mut out = String::with_capacity(sql.len() + offset.to_string().len() * 4);
     let bytes = sql.as_bytes();
@@ -15873,39 +15975,39 @@ fn renumber_placeholders(sql: &str, offset: usize) -> String {
     out
 }
 
-/// Fase 10.3.b2 — translator Expr Fitz → SQL parametrizado.
-/// Walkea el AST del closure body y genera SQL emitiendo `$N`
-/// placeholders para literales (apendeados a `args_acc`).
+/// Phase 10.3.b2 — Fitz Expr → parametrized SQL translator.
+/// Walks the closure body AST and produces SQL, emitting `$N`
+/// placeholders for literals (appended to `args_acc`).
 ///
-/// `param_name` es el nombre del parámetro del closure (e.g. "u"
-/// en `fn (u) => u.age > 18`). Accesos a `<param_name>.field` se
-/// traducen a `"sql_column"` quoteado. Otros idents (sin field
-/// access) o accesos sobre otros nombres → error.
+/// `param_name` is the closure's parameter name (e.g. "u" in
+/// `fn (u) => u.age > 18`). Accesses to `<param_name>.field` are
+/// translated to quoted `"sql_column"`. Other idents (without
+/// field access) or accesses on other names → error.
 ///
-/// Cobertura MVP:
+/// MVP coverage:
 ///   - BinOp comparison: `== != < <= > >=` → `= <> < <= > >=`
 ///   - BinOp logical: `&& ||` → `AND OR`
 ///   - UnaryOp: `!` → `NOT (...)`
 ///   - Field access: `u.field` → `"sql_col"`
-///   - Literales: Int/Float/Str/Bool/Null → arg parametrizado
+///   - Literals: Int/Float/Str/Bool/Null → parametrized arg
 ///
-/// Fuera de scope (deuda para 10.3.b3+): function calls
-/// (`u.name.like(...)`), índices, expresiones anidadas complejas.
-/// Fase 10.5.g — traduce method calls dentro de `.where(...)` a
-/// fragments SQL. El shape es `Expr::Call { callee: Field {
+/// Out of scope (debt for 10.3.b3+): function calls
+/// (`u.name.like(...)`), indexing, complex nested expressions.
+/// Phase 10.5.g — translate method calls inside `.where(...)` to
+/// SQL fragments. The shape is `Expr::Call { callee: Field {
 /// object: Field { Ident(param), col }, method }, args }`.
 ///
-/// Métodos soportados (sobre `u.col`):
+/// Supported methods (on `u.col`):
 ///   - `is_null()`        → `"col" IS NULL`
 ///   - `is_not_null()`    → `"col" IS NOT NULL`
-///   - `is_in([a, b, c])` → `"col" IN ($1, $2, $3)` con args
-///     parametrizados. Acepta también `is_in(<var>)` donde var
-///     es una List.
+///   - `is_in([a, b, c])` → `"col" IN ($1, $2, $3)` with
+///     parametrized args. Also accepts `is_in(<var>)` where var
+///     is a List.
 ///   - `like(pattern)`    → `"col" LIKE $1`
 ///   - `ilike(pattern)`   → `"col" ILIKE $1` (case-insensitive)
-///   - `starts_with(s)`   → `"col" LIKE $1` con `$1 = "s%"`
-///   - `ends_with(s)`     → `"col" LIKE $1` con `$1 = "%s"`
-///   - `contains(s)`      → `"col" LIKE $1` con `$1 = "%s%"`
+///   - `starts_with(s)`   → `"col" LIKE $1` with `$1 = "s%"`
+///   - `ends_with(s)`     → `"col" LIKE $1` with `$1 = "%s"`
+///   - `contains(s)`      → `"col" LIKE $1` with `$1 = "%s%"`
 fn translate_method_call_to_sql(
     callee: &crate::ast::Expr,
     args: &[crate::ast::Expr],
@@ -15986,9 +16088,9 @@ fn translate_method_call_to_sql(
                 }
             };
             if items.is_empty() {
-                // `IN ()` no es SQL válido. Postgres aceptaría con
-                // un Vec<X>, pero la sintaxis `IN ()` no. Devolvemos
-                // un predicado siempre-false equivalente.
+                // `IN ()` is not valid SQL. Postgres would accept a
+                // Vec<X>, but the `IN ()` syntax is not allowed. We
+                // return an equivalent always-false predicate.
                 return Ok("false".to_string());
             }
             let mut placeholders = Vec::with_capacity(items.len());
@@ -16010,10 +16112,11 @@ fn translate_method_call_to_sql(
             let op = if method == "ilike" { "ILIKE" } else { "LIKE" };
             Ok(format!("\"{}\" {} {}", sql_col, op, pat))
         }
-        // Fase 10.b.9.c — operadores sobre arrays Postgres. Paralelo
-        // al codegen (~10785). `has(value)` emite `$N = ANY("col")`;
-        // `contains_all([...])` emite `"col" @> $N::<oid>[]`;
-        // `contained_in([...])` emite `"col" <@ $N::<oid>[]`.
+        // Phase 10.b.9.c — operators on Postgres arrays. Parallel
+        // to codegen (~10785). `has(value)` emits
+        // `$N = ANY("col")`; `contains_all([...])` emits
+        // `"col" @> $N::<oid>[]`; `contained_in([...])` emits
+        // `"col" <@ $N::<oid>[]`.
         "has" => {
             let field = fields
                 .iter()
@@ -16093,17 +16196,17 @@ fn translate_method_call_to_sql(
                 cast
             ))
         }
-        // Deuda residual #3 (v0.10.5) — JSON operators sobre fields
-        // jsonb (Map<Str, ...>). Sin estos, el user tenía que bajar a
-        // `db.query(...)` crudo. Métodos soportados:
+        // Residual debt #3 (v0.10.5) — JSON operators on jsonb fields
+        // (Map<Str, ...>). Without these, the user had to drop down to
+        // raw `db.query(...)`. Supported methods:
         //   .has_key("k")            → `"col" ? $N`
         //   .has_all_keys([...])     → `"col" ?& $N::text[]`
         //   .has_any_keys([...])     → `"col" ?| $N::text[]`
         //   .contains_json({...})    → `"col" @> $N::jsonb`
         //   .get("k")                → `("col"->>$N)` text result
         //
-        // Validación: el field debe ser `Map<...>` (jsonb column).
-        // Si el user llama estos métodos sobre otro tipo, error claro.
+        // Validation: the field must be `Map<...>` (jsonb column).
+        // If the user calls these methods on another type, clear error.
         "has_key"
         | "has_all_keys"
         | "has_any_keys"
@@ -16138,14 +16241,14 @@ fn translate_method_call_to_sql(
                 meta,
             )
         }
-        // v0.10.29 — Full-text search via Postgres tsvector. El
-        // field debe ser `Str` declarado del lado Fitz (las
-        // columnas tsvector se mapean a Str porque Fitz no tiene
-        // un tipo dedicado todavía; el `@column(sql_type="tsvector")`
-        // controla qué tipo SQL real va). Mapping:
+        // v0.10.29 — Full-text search via Postgres tsvector. The
+        // field must be `Str` on the Fitz side (tsvector columns
+        // map to Str because Fitz doesn't have a dedicated type
+        // yet; `@column(sql_type="tsvector")` controls which real
+        // SQL type goes in). Mapping:
         //   .matches("query")  → `"col" @@ to_tsquery($N)`
         //   .plainto_matches("query") → `"col" @@ plainto_tsquery($N)`
-        // Acepta var Str también — passan por el translator general.
+        // Also accepts a Str var — they pass through the general translator.
         "matches" | "plainto_matches" => {
             if args.len() != 1 {
                 return Err(format!(
@@ -16161,9 +16264,9 @@ fn translate_method_call_to_sql(
             };
             Ok(format!("\"{}\" @@ {}({})", sql_col, func, q))
         }
-        // Fase 10.b.9.b — `u.field.between(low, high)` → SQL
-        // `"field" BETWEEN $1 AND $2`. Equivalente a
-        // `field >= low AND field <= high` (inclusive ambos extremos).
+        // Phase 10.b.9.b — `u.field.between(low, high)` → SQL
+        // `"field" BETWEEN $1 AND $2`. Equivalent to
+        // `field >= low AND field <= high` (both endpoints inclusive).
         "between" => {
             if args.len() != 2 {
                 return Err(format!(
@@ -16182,18 +16285,18 @@ fn translate_method_call_to_sql(
                     "`{param_name}.{col_name}.{method}(s)` espera 1 arg Str"
                 ));
             }
-            // W3 (v0.10.6) — dos paths:
+            // W3 (v0.10.6) — two paths:
             //
-            // 1. Str literal: escape Rust-side de `%`/`_`, push como
-            //    Text con `%` ya envuelto. SQL `LIKE $N`. El user
-            //    espera "hola%a" → match literal de "hola%a".
+            // 1. Str literal: Rust-side escape of `%`/`_`, push as
+            //    Text with `%` already wrapped. SQL `LIKE $N`. The user
+            //    expects "hola%a" → literal match of "hola%a".
             //
-            // 2. Otra expresión (var, field, etc.): traducir como arg
-            //    general (binding $N) y envolver SQL-side con `||`
-            //    Postgres. SIN escape runtime: `name.starts_with(prefix)`
-            //    con `prefix = "a%b"` matchea como `LIKE 'a%b' || '%'`
-            //    → "a*b*" (% del var sigue siendo wildcard). Misma
-            //    semántica que `.like(var)` — el user controla el
+            // 2. Other expression (var, field, etc.): translate as a
+            //    general arg (binding $N) and wrap SQL-side with `||`
+            //    Postgres concat. NO runtime escape: `name.starts_with(prefix)`
+            //    with `prefix = "a%b"` matches as `LIKE 'a%b' || '%'`
+            //    → "a*b*" (% from the var is still a wildcard). Same
+            //    semantics as `.like(var)` — the user controls the
             //    pattern.
             match &args[0] {
                 Expr::Str(s, _) => {
@@ -16227,8 +16330,8 @@ fn translate_method_call_to_sql(
     }
 }
 
-/// Deuda residual #3 (v0.10.5) — traduce method calls JSON sobre
-/// fields `Map<...>` (columnas jsonb) a SQL nativo Postgres.
+/// Residual debt #3 (v0.10.5) — translates JSON method calls on
+/// `Map<...>` fields (jsonb columns) to native Postgres SQL.
 ///
 /// Mapping:
 ///   - `.has_key("foo")`           → `"col" ? $N`        (text key)
@@ -16237,11 +16340,11 @@ fn translate_method_call_to_sql(
 ///   - `.contains_json({"k":"v"})` → `"col" @> $N::jsonb`
 ///   - `.get("foo")`               → `("col"->>$N)`     (text result)
 ///
-/// `.get(...)` típicamente se usa en BinOp con string literal del lado
-/// derecho: `e.data.get("name") == "Alice"` → `("data"->>$1) = $2`.
-/// Para comparar contra Int/Float/Bool, el user puede usar
-/// `e.data.get("n") == "42"` (compare como string) o bajar a SQL
-/// crudo con cast `(data->>'n')::int`.
+/// `.get(...)` is typically used in a BinOp with a string literal on the
+/// right side: `e.data.get("name") == "Alice"` → `("data"->>$1) = $2`.
+/// To compare against Int/Float/Bool, the user can use
+/// `e.data.get("n") == "42"` (compare as string) or drop to raw SQL
+/// with cast `(data->>'n')::int`.
 #[allow(clippy::too_many_arguments)]
 fn translate_jsonb_method(
     method: &str,
@@ -16256,7 +16359,7 @@ fn translate_jsonb_method(
     use crate::ast::Expr;
     match method {
         "has_key" | "get" => {
-            // 1 arg: text key. Acepta literal Str o var externa Str.
+            // 1 arg: text key. Accepts Str literal or external Str var.
             if args.len() != 1 {
                 return Err(format!("`.{method}(key)` espera 1 arg Str (key del JSONB)"));
             }
@@ -16265,14 +16368,14 @@ fn translate_jsonb_method(
             if method == "has_key" {
                 Ok(format!("\"{}\" ? {}", sql_col, key_frag))
             } else {
-                // .get(key) devuelve text via `->>'key'`. Lo
-                // envolvemos en paréntesis para que un BinOp posterior
-                // (e.g. `== "value"`) lo trate como un solo operando.
+                // .get(key) returns text via `->>'key'`. We wrap
+                // it in parens so that a subsequent BinOp
+                // (e.g. `== "value"`) treats it as a single operand.
                 Ok(format!("(\"{}\"->>{})", sql_col, key_frag))
             }
         }
         "has_all_keys" | "has_any_keys" => {
-            // 1 arg: List<Str> literal. Postgres ?&/?| esperan text[].
+            // 1 arg: List<Str> literal. Postgres ?&/?| expect text[].
             if args.len() != 1 {
                 return Err(format!(
                     "`.{method}([keys...])` espera 1 arg (List literal de Str)"
@@ -16287,10 +16390,10 @@ fn translate_jsonb_method(
                 }
             };
             if items.is_empty() {
-                // Postgres `?&`/`?|` con array vacío: has_all_keys es
-                // siempre true (predicado neutral); has_any_keys es
-                // siempre false. Emitimos literales SQL para evitar
-                // round-trip degenerado.
+                // Postgres `?&`/`?|` with empty array: has_all_keys is
+                // always true (neutral predicate); has_any_keys is
+                // always false. We emit SQL literals to avoid a
+                // degenerate round-trip.
                 return Ok(if method == "has_all_keys" {
                     "true".to_string()
                 } else {
@@ -16322,9 +16425,9 @@ fn translate_jsonb_method(
             ))
         }
         "contains_json" => {
-            // 1 arg: Map literal (jsonb subset que el column debe
-            // contener). Serializamos el Map a JSON text + cast
-            // `::jsonb` en SQL. Equivalente a `@>` operator.
+            // 1 arg: Map literal (jsonb subset the column must
+            // contain). We serialize the Map to JSON text + cast
+            // `::jsonb` in SQL. Equivalent to the `@>` operator.
             if args.len() != 1 {
                 return Err(
                     "`.contains_json(map)` espera 1 arg Map (subset jsonb a chequear)".to_string(),
@@ -16339,9 +16442,9 @@ fn translate_jsonb_method(
                     );
                 }
             };
-            // Construir el JSON text del Map literal. Acepta keys Str
-            // literal + values primitivos literales (Int/Float/Str/Bool/
-            // Null). Maps nested + Lists: MVP no soporta, deuda menor.
+            // Build the JSON text from the Map literal. Accepts Str
+            // literal keys + literal primitive values (Int/Float/Str/Bool/
+            // Null). Nested Maps + Lists: MVP doesn't support, minor debt.
             let mut json_obj = serde_json::Map::with_capacity(map_items.len());
             for (k_expr, v_expr) in map_items.iter() {
                 let key = match k_expr {
@@ -16374,11 +16477,11 @@ fn translate_jsonb_method(
             args_acc.push(crate::db::PgValue::Text(json_text));
             Ok(format!("\"{}\" @> ${}::jsonb", sql_col, args_acc.len()))
         }
-        // v0.10.29 — Path access nested + cast tipado. Reciben 1 arg
-        // List<Str> literal con el path; emiten SQL con `#>` (jsonb
-        // path) o `#>>` (text path) + cast opcional al tipo Fitz
-        // pedido. Cubren el gap entre `.get("k")` single-level y el
-        // workaround de `db.query(...)` crudo para queries nested.
+        // v0.10.29 — Nested path access + typed cast. They take 1 arg
+        // List<Str> literal with the path; emit SQL with `#>` (jsonb
+        // path) or `#>>` (text path) + optional cast to the requested
+        // Fitz type. Cover the gap between single-level `.get("k")`
+        // and the raw `db.query(...)` workaround for nested queries.
         //
         //   .has_path([a, b])    → `"col" #> $N::text[] IS NOT NULL`
         //   .path_text([a, b])   → `("col" #>> $N::text[])`
@@ -16386,11 +16489,11 @@ fn translate_jsonb_method(
         //   .path_float([a, b])  → `(("col" #>> $N::text[])::float8)`
         //   .path_bool([a, b])   → `(("col" #>> $N::text[])::boolean)`
         //
-        // Path list vacío rechazado (no hay #> con array vacío
-        // semánticamente útil — sería el field entero, equivalente a
-        // `field.is_not_null()`). Cada key debe ser literal Str (MVP
-        // — vars externas en el array quedan deuda menor; el caller
-        // típico arma el path inline).
+        // Empty path list rejected (there's no semantically useful
+        // `#>` with an empty array — it would mean the entire field,
+        // equivalent to `field.is_not_null()`). Each key must be a Str
+        // literal (MVP — external vars in the array are minor debt;
+        // the typical caller builds the path inline).
         "has_path" | "path_text" | "path_int" | "path_float" | "path_bool" => {
             if args.len() != 1 {
                 return Err(format!(
@@ -16437,16 +16540,15 @@ fn translate_jsonb_method(
             })
         }
         _ => unreachable!(
-            "translate_jsonb_method recibió un method no listado en el dispatch caller"
+            "translate_jsonb_method received a method not listed in the dispatch caller"
         ),
     }
 }
 
-/// Fase 10.5.g — escapa los caracteres especiales de SQL LIKE
-/// (`%` y `_`) en una string literal del user. Esto previene que
-/// `starts_with("a%b")` se interprete como "empieza con 'a' +
-/// cualquier cadena + 'b'". Usamos `\` como escape char (Postgres
-/// default).
+/// Phase 10.5.g — escapes the special SQL LIKE characters (`%` and
+/// `_`) in a user string literal. This prevents `starts_with("a%b")`
+/// from being interpreted as "starts with 'a' + any string + 'b'".
+/// We use `\` as the escape char (Postgres default).
 fn escape_like(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -16461,10 +16563,10 @@ fn escape_like(s: &str) -> String {
     out
 }
 
-/// Wrapper compatible para call sites sin `closure_env` (los tests
-/// unit que no construyen un env real). Cuando no hay env, las vars
-/// externas adentro de `.where(...)` siguen rechazadas con error
-/// claro — comportamiento histórico.
+/// Compatible wrapper for call sites without `closure_env` (unit
+/// tests that don't build a real env). When there's no env, external
+/// vars inside `.where(...)` are still rejected with a clear error
+/// — historical behavior.
 pub fn translate_expr_to_sql(
     expr: &crate::ast::Expr,
     param_name: &str,
@@ -16475,10 +16577,10 @@ pub fn translate_expr_to_sql(
     translate_expr_to_sql_with_env(expr, param_name, fields, meta, args_acc, None)
 }
 
-/// Fase 10.b.9.b — variante que recibe el `closure_env` para
-/// resolver vars externas capturadas adentro del `.where(...)`. El
-/// caller real (`orm_qb_where`) lo pasa siempre; tests legacy usan
-/// el wrapper de arriba con `env=None`.
+/// Phase 10.b.9.b — variant that takes the `closure_env` to
+/// resolve external vars captured inside `.where(...)`. The real
+/// caller (`orm_qb_where`) always passes it; legacy tests use
+/// the wrapper above with `env=None`.
 pub fn translate_expr_to_sql_with_env(
     expr: &crate::ast::Expr,
     param_name: &str,
@@ -16507,12 +16609,12 @@ pub fn translate_expr_to_sql_with_env(
                 BinOpKind::Sub => "-",
                 BinOpKind::Mul => "*",
                 BinOpKind::Div => "/",
-                // Fase 10.b.9.b — módulo. Paralelo a codegen
-                // (translate_closure_to_sql ~10483). Postgres `%` es
-                // truncate-toward-zero; Fitz puro es euclidean; las
-                // dos semánticas coinciden cuando ambos operandos son
-                // positivos (caso típico). Divisores negativos en
-                // .where → divergencia menor (deuda).
+                // Phase 10.b.9.b — modulo. Parallel to codegen
+                // (translate_closure_to_sql ~10483). Postgres `%` is
+                // truncate-toward-zero; pure Fitz is euclidean; the
+                // two semantics agree when both operands are positive
+                // (typical case). Negative divisors in .where →
+                // minor divergence (debt).
                 BinOpKind::Mod => "%",
                 other => {
                     return Err(format!(
@@ -16535,15 +16637,15 @@ pub fn translate_expr_to_sql_with_env(
             }
         }
         Expr::Field { object, field, .. } => {
-            // Dos paths:
-            // 1. `<param>.<col>` → SQL column del row (sin binding).
-            // 2. W6 (v0.10.6) — `<var>.<field>` con var externa al
-            //    closure (Instance): lookup en closure_env, accedemos
-            //    al field, serializamos como $N binding. Caso típico
-            //    `body.lang` en `@post` handler.
+            // Two paths:
+            // 1. `<param>.<col>` → SQL column of the row (no binding).
+            // 2. W6 (v0.10.6) — `<var>.<field>` with a var external
+            //    to the closure (Instance): lookup in closure_env,
+            //    access the field, serialize as $N binding. Typical
+            //    case `body.lang` in a `@post` handler.
             match object.as_ref() {
                 Expr::Ident(name, _) if name == param_name => {
-                    // Validar que el field existe en el type.
+                    // Validate that the field exists in the type.
                     if !fields.iter().any(|f| f.name == *field) {
                         return Err(format!(
                             "field `{field}` no existe en el type (fields disponibles: {})",
@@ -16562,9 +16664,9 @@ pub fn translate_expr_to_sql_with_env(
                     Ok(format!("\"{}\"", sql_col))
                 }
                 Expr::Ident(var_name, _) => {
-                    // W6 — field access sobre var externa. Solo si
-                    // tenemos closure_env (env=None viene de tests
-                    // legacy que no resuelven vars).
+                    // W6 — field access on external var. Only if
+                    // we have closure_env (env=None comes from legacy
+                    // tests that don't resolve vars).
                     let e = env.ok_or_else(|| {
                         format!(
                             "`{var_name}.{field}` no soportado en `.where(...)` sin closure env"
@@ -16607,9 +16709,9 @@ pub fn translate_expr_to_sql_with_env(
                 )),
             }
         }
-        // Fase 10.5.g — method call sobre `u.field`. Soporta filtros
-        // tipo `u.name.starts_with("ada")`, `u.country.is_in([...])`,
-        // `u.deleted_at.is_null()`. El shape es `Expr::Call { callee:
+        // Phase 10.5.g — method call on `u.field`. Supports filters
+        // like `u.name.starts_with("ada")`, `u.country.is_in([...])`,
+        // `u.deleted_at.is_null()`. The shape is `Expr::Call { callee:
         // Field { object: Field { Ident(param), col }, method },
         // args }`.
         Expr::Call { callee, args, .. } => {
@@ -16638,12 +16740,12 @@ pub fn translate_expr_to_sql_with_env(
                     "no podés comparar el row entero (`{name}`); accedé a un field específico"
                 ))
             } else {
-                // Fase 10.b.9.b — var externa capturada por el closure.
-                // Si tenemos acceso al closure env, hacemos lookup y
-                // serializamos al PgValue del primitivo. Sin env (call
-                // legacy desde tests), seguimos rechazando con error
-                // claro. Paralelo al codegen (~10581) que ya lo
-                // soportaba via gen_expr + __IntoPgValue::into_pg.
+                // Phase 10.b.9.b — external var captured by the closure.
+                // If we have access to the closure env, we do a lookup
+                // and serialize to the primitive's PgValue. Without env
+                // (legacy call from tests), we keep rejecting with a
+                // clear error. Parallel to codegen (~10581) which
+                // already supported it via gen_expr + __IntoPgValue::into_pg.
                 match env {
                     Some(e) => {
                         let v = e.lock().get(name).ok_or_else(|| {
@@ -16670,10 +16772,11 @@ pub fn translate_expr_to_sql_with_env(
     }
 }
 
-/// Deserializa una fila Postgres a una `Value::Instance` del type
-/// declarado. Mapea cada field del type a su columna SQL (usando
-/// `@column(name=...)` si hay override) y convierte `PgValue` a
-/// `Value` Fitz nativo. Errores: columna faltante, tipo incompatible.
+/// Deserializes a Postgres row into a `Value::Instance` of the
+/// declared type. Maps each field of the type to its SQL column
+/// (using `@column(name=...)` if there's an override) and converts
+/// `PgValue` to native Fitz `Value`. Errors: missing column,
+/// incompatible type.
 fn pg_row_to_instance(
     row: &crate::db::Row,
     type_name: &str,
@@ -16682,10 +16785,10 @@ fn pg_row_to_instance(
 ) -> Result<Value, String> {
     let mut field_values: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for f in fields {
-        // Fase 10.4.a — fields virtuales no aparecen en el row;
-        // se inicializan con default sentinel (Null para opcionales,
-        // List vacía para has_many). El user accederá via navigation
-        // methods cuando llegue 10.4.b.
+        // Phase 10.4.a — virtual fields don't appear in the row;
+        // they're initialized with a sentinel default (Null for
+        // optionals, empty List for has_many). The user will access
+        // them via navigation methods once 10.4.b lands.
         if meta.is_virtual_field(&f.name) {
             let default_v = match meta.relations.get(&f.name).map(|r| r.kind) {
                 Some(crate::types::RelationKind::HasMany) => Value::new_list(vec![]),
@@ -16705,17 +16808,18 @@ fn pg_row_to_instance(
                 sql_col, f.name, type_name
             )
         })?;
-        // Fase 10.5.a — si el field Fitz es Map<...> y el PgValue
-        // es Text, parseamos como JSON. El driver mapea columnas
-        // jsonb/json a `PgValue::Text` con el JSON crudo.
-        // v0.10.24 (annotation-aware OID refinement) — propagamos el
-        // OID al converter SOLO cuando el field type es uno de los
-        // tipos nuevos (Date/DateTime/Uuid). Si el user declaró
-        // `Str` o `List<Str>` (backward compat con código pre-v0.10.24
-        // que trataba date/timestamptz/uuid como strings ISO 8601),
-        // pasamos `None` y el converter cae a Value::Str. Esto evita
-        // breakage de programas existentes sin perder el upgrade
-        // automático cuando el user opt-in con anotación explícita.
+        // Phase 10.5.a — if the Fitz field is Map<...> and the
+        // PgValue is Text, we parse as JSON. The driver maps
+        // jsonb/json columns to `PgValue::Text` with the raw JSON.
+        // v0.10.24 (annotation-aware OID refinement) — we propagate
+        // the OID to the converter ONLY when the field type is one of
+        // the new types (Date/DateTime/Uuid). If the user declared
+        // `Str` or `List<Str>` (backward compat with pre-v0.10.24
+        // code that treated date/timestamptz/uuid as ISO 8601
+        // strings), we pass `None` and the converter falls back to
+        // Value::Str. This avoids breakage of existing programs
+        // without losing the automatic upgrade when the user opts
+        // in with an explicit annotation.
         let oid_hint = if field_type_uses_new_temporal_or_uuid(&f.type_) {
             Some(oid)
         } else {
@@ -16735,16 +16839,17 @@ fn pg_row_to_instance(
     Ok(Value::new_instance(type_name.to_string(), field_values))
 }
 
-/// `cors(config: Map?)` — construye un `Value::CorsConfig` parametrizado
-/// por las keys del Map (mini-fase MW.2). Sin args (o con `{}`) emite
-/// el default permisivo (origin "*", métodos comunes, headers usuales).
-/// Keys reconocidas:
+/// `cors(config: Map?)` — builds a `Value::CorsConfig` parameterized
+/// by the Map keys (mini-phase MW.2). With no args (or with `{}`) it
+/// emits the permissive default (origin "*", common methods, usual
+/// headers).
+/// Recognized keys:
 ///       - `allow_origin: Str`
 ///       - `allow_methods: List<Str>`
 ///       - `allow_headers: List<Str>`
 ///       - `max_age: Int`
 ///
-/// Cualquier otra key o tipo distinto al esperado → error claro.
+/// Any other key or type different from the expected → clear error.
 fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
     use crate::http::CorsConfig;
     use std::sync::Arc;
@@ -16804,10 +16909,10 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
             };
             match key_str.as_str() {
                 "allow_origin" => match value {
-                    // Q.3: Str → literal (modo previo: emite valor fijo).
-                    // Mini-tanda HTTP-Cors — el valor especial `"echo"`
-                    // (case-sensitive) construye `AllowOrigin::Echo` que
-                    // hace echo del Origin recibido sin filtro.
+                    // Q.3: Str → literal (previous mode: emits a fixed value).
+                    // Mini-batch HTTP-Cors — the special value `"echo"`
+                    // (case-sensitive) builds `AllowOrigin::Echo` which
+                    // echoes the received Origin without filtering.
                     Value::Str(s) => {
                         config.allow_origin = if s == "echo" {
                             crate::http::AllowOrigin::Echo
@@ -16815,11 +16920,11 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
                             crate::http::AllowOrigin::Literal(s.clone())
                         };
                     }
-                    // Q.3: List<Str> → set de orígenes permitidos. El
-                    // dispatch HTTP echo del Origin del request si está
-                    // en la lista; si no, omite el header (browser
-                    // rechaza la response — CORS estricto). Útil con
-                    // credenciales (`Allow-Origin: *` incompatible).
+                    // Q.3: List<Str> → set of allowed origins. The HTTP
+                    // dispatch echoes the request's Origin if it's in
+                    // the list; if not, it omits the header (browser
+                    // rejects the response — strict CORS). Useful with
+                    // credentials (`Allow-Origin: *` is incompatible).
                     Value::List(items) => {
                         let mut set = Vec::with_capacity(items.lock().len());
                         for it in items.lock().iter() {
@@ -16909,12 +17014,12 @@ fn list_of_strings(value: &Value, key: &str) -> FitzResult<Vec<String>> {
     Ok(out)
 }
 
-/// `len(x)` — longitud de listas, mapas, strings y rangos.
-///  - List: cantidad de elementos.
-///  - Map: cantidad de pares.
-///  - Str: cantidad de chars (no bytes — UTF-8 aware).
-///  - Range: `end - start`, clampeado a 0 si el rango va al revés.
-///  - Otros: type error.
+/// `len(x)` — length of lists, maps, strings and ranges.
+///  - List: number of elements.
+///  - Map: number of pairs.
+///  - Str: number of chars (not bytes — UTF-8 aware).
+///  - Range: `end - start`, clamped to 0 if the range goes backwards.
+///  - Others: type error.
 fn builtin_len(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -16948,8 +17053,8 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Int(n))
 }
 
-/// Mini-tanda Bytes — `bytes(s: Str) -> Bytes` builtin. Convierte un
-/// Str a `Value::Bytes` usando UTF-8 encoding.
+/// Mini-batch Bytes — `bytes(s: Str) -> Bytes` builtin. Converts a
+/// Str into `Value::Bytes` using UTF-8 encoding.
 fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -16977,18 +17082,18 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Mini-fase env builtin (2026-05-22) — Paso 3 del plan post-boilerplates.
+// Mini-phase env builtin (2026-05-22) — Step 3 of the post-boilerplates plan.
 //
-// Tres builtins para leer variables de entorno desde Fitz:
-//   - `env(key: Str) -> Result<Str>`: lee `std::env::var`. Si la var
-//     existe → `Ok(value)`, si no → `Err("env var X no definida")`.
-//     Fuerza al usuario a manejar el caso missing con `?` o `match`.
-//   - `env_or(key: Str, default: Str) -> Str`: lo mismo pero con
-//     default. Nunca falla.
-//   - `load_env(path: Str) -> Result<Null>`: parser KEY=VALUE simple
-//     (sin variable expansion, sin multi-line). Setea cada var via
-//     `std::env::set_var`. Comments (#) y líneas vacías se ignoran.
-//     Sin auto-load: explícito por diseño (filosofía "explicit > magic").
+// Three builtins for reading environment variables from Fitz:
+//   - `env(key: Str) -> Result<Str>`: reads `std::env::var`. If the
+//     var exists → `Ok(value)`, otherwise → `Err("env var X no definida")`.
+//     Forces the user to handle the missing case with `?` or `match`.
+//   - `env_or(key: Str, default: Str) -> Str`: same but with a
+//     default. Never fails.
+//   - `load_env(path: Str) -> Result<Null>`: simple KEY=VALUE parser
+//     (no variable expansion, no multi-line). Sets each var via
+//     `std::env::set_var`. Comments (#) and empty lines are ignored.
+//     No auto-load: explicit by design ("explicit > magic" philosophy).
 // ---------------------------------------------------------------------------
 
 fn builtin_env(args: &[Value]) -> FitzResult<Value> {
@@ -17080,20 +17185,20 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
     Ok(Value::Str(value))
 }
 
-/// Fase 12.2.a — `secret(key: Str) -> Result<Secret<Str>>` builtin.
+/// Phase 12.2.a — `secret(key: Str) -> Result<Secret<Str>>` builtin.
 ///
-/// Multi-source lookup con la siguiente precedencia:
+/// Multi-source lookup with the following precedence:
 ///   1. Env var (`std::env::var(key)`).
-///   2. Mounted file `/run/secrets/<key>` — convención K8s/Docker
-///      secrets. En Windows el path no existe → skip silencioso.
-///   3. Si ninguno: `Err("secret 'KEY' no encontrado")`.
+///   2. Mounted file `/run/secrets/<key>` — K8s/Docker secrets
+///      convention. On Windows the path doesn't exist → silent skip.
+///   3. If none: `Err("secret 'KEY' no encontrado")`.
 ///
-/// El valor se envuelve en `Value::Secret(SecretInner(Box::new(...)))`
-/// para que el resto del lenguaje (print/Display/Debug/JSON) lo
-/// redacte automático. Para usarlo en builtins como `jwt.encode` o
-/// `db.connect`, el caller hace `.expose()` explícito.
+/// The value is wrapped in `Value::Secret(SecretInner(Box::new(...)))`
+/// so the rest of the language (print/Display/Debug/JSON) redacts it
+/// automatically. To use it in builtins like `jwt.encode` or
+/// `db.connect`, the caller does an explicit `.expose()`.
 ///
-/// Patrón canónico:
+/// Canonical pattern:
 /// ```fitz
 /// let db_pass = secret("DB_PASSWORD")?
 /// let db = db.connect("postgres://user:{db_pass.expose()}@host/db?...").await?
@@ -17136,18 +17241,18 @@ fn builtin_secret(args: &[Value]) -> FitzResult<Value> {
             crate::value::SecretInner(Box::new(Value::Str(value))),
         )))));
     }
-    // Source 2: mounted file (convención K8s/Docker secrets).
+    // Source 2: mounted file (K8s/Docker secrets convention).
     let mount_path = format!("/run/secrets/{}", key);
     if let Ok(contents) = std::fs::read_to_string(&mount_path) {
-        // Trim trailing newline (mounted secrets típicamente terminan
-        // con \n por convención de los provisioners — k8s/docker secrets
-        // los escriben sin newline pero el caller puede agregar uno).
+        // Trim trailing newline (mounted secrets typically end with
+        // \n by provisioner convention — k8s/docker secrets write
+        // them without a newline but the caller may add one).
         let trimmed = contents.trim_end_matches(['\n', '\r']).to_string();
         return Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Secret(
             crate::value::SecretInner(Box::new(Value::Str(trimmed))),
         )))));
     }
-    // No source disponible — Err.
+    // No source available — Err.
     Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
         format!(
             "secret '{}' no encontrado (chequeado: env var, /run/secrets/{})",
@@ -17156,24 +17261,26 @@ fn builtin_secret(args: &[Value]) -> FitzResult<Value> {
     )))))
 }
 
-/// Fase 12.2.a — `config(key: Str, default: T) -> T` builtin.
+/// Phase 12.2.a — `config(key: Str, default: T) -> T` builtin.
 ///
-/// Lookup type-coerced de un valor de configuración no-sensitive:
+/// Type-coerced lookup of a non-sensitive configuration value:
 ///
-/// 1. Si la env var `key` existe, parsea según el tipo del `default`:
+/// 1. If the env var `key` exists, it parses according to the
+///    `default` type:
 ///    - `Int`  → `i64::from_str_radix`.
 ///    - `Float`→ `f64::parse`.
 ///    - `Bool` → `"true"`/`"1"` → true, `"false"`/`"0"` → false.
 ///    - `Str`  → passthrough.
 ///
-///    Si el parse falla, retorna el default (no error — más
-///    ergonómico para configs misconfigured).
+///    If the parse fails, returns the default (no error — more
+///    ergonomic for misconfigured configs).
 ///
-/// 2. Si la env var no existe, retorna el default tal cual.
+/// 2. If the env var doesn't exist, returns the default as-is.
 ///
-/// vs `env_or(key, default) -> Str` (que solo soporta Str): `config`
-/// auto-coerciona y abre todas las primitive types. El cap del curso
-/// recomienda `config(...)` como reemplazo moderno de `env_or`.
+/// vs `env_or(key, default) -> Str` (which only supports Str):
+/// `config` auto-coerces and opens up to all primitive types. The
+/// course chapter recommends `config(...)` as a modern replacement
+/// for `env_or`.
 fn builtin_config(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -17211,7 +17318,7 @@ fn builtin_config(args: &[Value]) -> FitzResult<Value> {
         Ok(v) => v,
         Err(_) => return Ok(default.clone()),
     };
-    // Coercer según el tipo del default.
+    // Coerce according to the default's type.
     let coerced = match default {
         Value::Int(_) => raw
             .parse::<i64>()
@@ -17229,9 +17336,9 @@ fn builtin_config(args: &[Value]) -> FitzResult<Value> {
             _ => default.clone(),
         },
         Value::Str(_) => Value::Str(raw),
-        // Para tipos compuestos (List/Map/Instance/etc.) no hacemos
-        // parsing — solo soportamos primitivos. El user envuelve env
-        // vars complejas con `secret(...)` o las parsea manual.
+        // For composite types (List/Map/Instance/etc.) we don't do
+        // parsing — we only support primitives. The user wraps
+        // complex env vars with `secret(...)` or parses them manually.
         other => {
             return Err(FitzError::new(
                 ErrorKind::TypeMismatch {
@@ -17251,38 +17358,40 @@ fn builtin_config(args: &[Value]) -> FitzResult<Value> {
 }
 
 // ---------------------------------------------------------------
-// Fase 12.8 — Feature flags built-in: `flag(name)` + módulo `flags`.
+// Phase 12.8 — Feature flags built-in: `flag(name)` + `flags` module.
 //
-// Registry global con dos fuentes de truth:
-//   (a) defaults del manifest (cargados al boot via
-//       `set_flag_defaults`) — sub-paso 12.8.b.
-//   (b) override runtime via env vars `FITZ_FLAG_<UPPERCASE_NAME>`,
-//       leídas perezosamente con cache local. Soporta valores
+// Global registry with two sources of truth:
+//   (a) Defaults from the manifest (loaded at boot via
+//       `set_flag_defaults`) — sub-step 12.8.b.
+//   (b) Runtime override via env vars `FITZ_FLAG_<UPPERCASE_NAME>`,
+//       read lazily with local cache. Supports values
 //       `1`/`0`/`true`/`false`/`yes`/`no`/`on`/`off`.
 //
-// API runtime:
-//   - `flag(name: Str) -> Bool` (builtin global): consulta el registry.
-//   - `flags.is_enabled(name: Str) -> Bool`: alias funcional.
-//   - `flags.list() -> List<Str>`: nombres de flags conocidos (manifest
-//     + env vars detectadas en el boot).
+// Runtime API:
+//   - `flag(name: Str) -> Bool` (global builtin): queries the registry.
+//   - `flags.is_enabled(name: Str) -> Bool`: functional alias.
+//   - `flags.list() -> List<Str>`: names of known flags (manifest
+//     + env vars detected at boot).
 //
-// Semántica `@flag("name")` (decorator): el wrapper de routing (HTTP/WS)
-// chequea el registry al request; si la flag está off, retorna 404. Las
-// fns regulares con `@flag` también se wrappean en codegen y evaluator —
-// la doc del cap 33b de la guía explica los casos por return type.
+// `@flag("name")` (decorator) semantics: the routing wrapper
+// (HTTP/WS) checks the registry on each request; if the flag is off,
+// it returns 404. Regular fns with `@flag` are also wrapped in
+// codegen and evaluator — the chapter 33b doc explains the cases by
+// return type.
 //
-// Default cuando NO está en el registry: `false` (fail-safe, los flags
-// se activan opt-in).
+// Default when NOT in the registry: `false` (fail-safe, flags are
+// activated opt-in).
 
 static FLAG_REGISTRY: std::sync::OnceLock<parking_lot::Mutex<FlagRegistry>> =
     std::sync::OnceLock::new();
 
 #[derive(Debug, Default, Clone)]
 struct FlagRegistry {
-    /// Defaults declarados en el manifest (`fitz.toml [flags]`).
+    /// Defaults declared in the manifest (`fitz.toml [flags]`).
     defaults: std::collections::HashMap<String, bool>,
-    /// Cache de lookups runtime para evitar tocar el environment cada
-    /// call. Invalidate manualmente con `clear_flag_cache` (testing).
+    /// Cache of runtime lookups to avoid touching the environment on
+    /// each call. Invalidate manually with `clear_flag_cache`
+    /// (testing).
     cache: std::collections::HashMap<String, bool>,
 }
 
@@ -17290,33 +17399,34 @@ fn flag_registry() -> &'static parking_lot::Mutex<FlagRegistry> {
     FLAG_REGISTRY.get_or_init(|| parking_lot::Mutex::new(FlagRegistry::default()))
 }
 
-/// Sub-paso 12.8.b: cargar defaults del manifest. Llamado al boot
-/// desde `main.rs` antes del eval. Se llama múltiples veces sin
-/// problema (overwrite total).
+/// Sub-step 12.8.b: load defaults from the manifest. Called at boot
+/// from `main.rs` before eval. Can be called multiple times without
+/// issue (total overwrite).
 pub fn set_flag_defaults(defaults: std::collections::HashMap<String, bool>) {
     let mut reg = flag_registry().lock();
     reg.defaults = defaults;
     reg.cache.clear();
 }
 
-/// Limpia el cache. Usado en tests; en producción los flags se setean
-/// al boot y no cambian durante el lifetime del proceso (env vars son
-/// inmutables sin re-spawn).
+/// Clears the cache. Used in tests; in production flags are set at
+/// boot and don't change during the process lifetime (env vars are
+/// immutable without re-spawn).
 #[allow(dead_code)]
 pub fn clear_flag_cache() {
     let mut reg = flag_registry().lock();
     reg.cache.clear();
 }
 
-/// Convierte el flag name al env var equivalente: uppercase + replace
-/// `-` con `_`, prefijo `FITZ_FLAG_`. Ej: `new-checkout` → `FITZ_FLAG_NEW_CHECKOUT`.
+/// Converts the flag name to its env var equivalent: uppercase +
+/// replace `-` with `_`, prefix `FITZ_FLAG_`. e.g. `new-checkout` →
+/// `FITZ_FLAG_NEW_CHECKOUT`.
 fn flag_env_name(flag: &str) -> String {
     let upper = flag.to_uppercase().replace('-', "_");
     format!("FITZ_FLAG_{}", upper)
 }
 
-/// Parse de un valor env: true/1/yes/on → true; false/0/no/off → false;
-/// cualquier otro → None (cae al default del manifest).
+/// Parse of an env value: true/1/yes/on → true; false/0/no/off →
+/// false; anything else → None (falls back to the manifest default).
 fn parse_flag_env_value(raw: &str) -> Option<bool> {
     match raw.trim().to_lowercase().as_str() {
         "true" | "1" | "yes" | "on" => Some(true),
@@ -17325,8 +17435,8 @@ fn parse_flag_env_value(raw: &str) -> Option<bool> {
     }
 }
 
-/// Resuelve el estado de un flag: env var > manifest default > `false`.
-/// API pública para que `http.rs` y `codegen` consulten directo.
+/// Resolves a flag's state: env var > manifest default > `false`.
+/// Public API so `http.rs` and `codegen` can query directly.
 pub fn is_flag_enabled(name: &str) -> bool {
     let mut reg = flag_registry().lock();
     if let Some(cached) = reg.cache.get(name) {
@@ -17341,17 +17451,17 @@ pub fn is_flag_enabled(name: &str) -> bool {
     result
 }
 
-/// Lista los flags conocidos: manifest defaults + env vars detectadas.
-/// Útil para debug + dashboards.
+/// Lists known flags: manifest defaults + detected env vars.
+/// Useful for debugging + dashboards.
 fn list_known_flags() -> Vec<String> {
     let reg = flag_registry().lock();
     let mut names: std::collections::BTreeSet<String> = reg.defaults.keys().cloned().collect();
     drop(reg);
-    // Suma flags expuestos via env vars `FITZ_FLAG_*`.
+    // Add flags exposed via `FITZ_FLAG_*` env vars.
     for (key, _val) in std::env::vars() {
         if let Some(suffix) = key.strip_prefix("FITZ_FLAG_") {
-            // Convertir back a kebab-case-ish: lowercase, `_` queda como `_`
-            // (no podemos distinguir orig `-` de `_` sin info extra).
+            // Convert back to kebab-case-ish: lowercase, `_` stays as `_`
+            // (we can't distinguish original `-` from `_` without extra info).
             names.insert(suffix.to_lowercase());
         }
     }
@@ -17394,7 +17504,7 @@ fn builtin_flag(args: &[Value]) -> FitzResult<Value> {
 }
 
 fn builtin_flags_is_enabled(args: &[Value]) -> FitzResult<Value> {
-    // Alias funcional de `flag(name)`. Sintaxis: `flags.is_enabled("name")`.
+    // Functional alias of `flag(name)`. Syntax: `flags.is_enabled("name")`.
     if args.len() != 1 {
         return Err(FitzError::new(
             ErrorKind::WrongArgCount {
@@ -17489,16 +17599,16 @@ fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
     }
 }
 
-/// Mini-fase env builtin — parser KEY=VALUE simple. Lee el archivo,
-/// itera líneas. Por cada línea:
-/// - Strip whitespace al inicio/fin.
-/// - Líneas vacías o que empiezan con `#` se ignoran (comments).
-/// - Resto: split por el PRIMER `=`. Lado izq es la key, lado der el value.
-/// - Strip comillas dobles del value si están al inicio y al fin.
+/// Mini-phase env builtin — simple KEY=VALUE parser. Reads the file,
+/// iterates lines. For each line:
+/// - Strip whitespace at start/end.
+/// - Empty lines or lines starting with `#` are ignored (comments).
+/// - Rest: split by the FIRST `=`. Left side is the key, right is the value.
+/// - Strip wrapping double quotes from the value if present at both ends.
 /// - `std::env::set_var(key, value)`.
 ///
-/// Sin variable expansion (`$VAR`/`${VAR}`), sin multi-line, sin escape
-/// chars. Si entra demanda, mini-fase futura dedicada.
+/// No variable expansion (`$VAR`/`${VAR}`), no multi-line, no escape
+/// chars. If demand appears, a dedicated future mini-phase.
 fn parse_env_file(path: &str) -> Result<(), String> {
     let contents =
         std::fs::read_to_string(path).map_err(|e| format!("no se pudo leer `{}`: {}", path, e))?;
@@ -17519,18 +17629,18 @@ fn parse_env_file(path: &str) -> Result<(), String> {
         if key.is_empty() {
             return Err(format!("{}:{}: key vacía antes del `=`", path, line_no + 1));
         }
-        // Strip comillas dobles wrapping (si el valor abre y cierra con
-        // `"`). Útil para `KEY="value with spaces"`. Sin escape interno
-        // — `\"` queda literal, eso lo cubrirá la mini-fase de escapes
-        // si entra demanda.
+        // Strip wrapping double quotes (if the value opens and closes
+        // with `"`). Useful for `KEY="value with spaces"`. No internal
+        // escape — `\"` stays literal; that will be covered by the
+        // escapes mini-phase if demand appears.
         if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
             value = value[1..value.len() - 1].to_string();
         }
-        // SAFETY: std::env::set_var es unsafe en Rust 2024 — la doc
-        // advierte sobre concurrencia con threads. Como `load_env` se
-        // llama típicamente en el boot del programa (antes de spawnear
-        // workers), es seguro. Si el usuario lo llama desde un thread
-        // worker, es su responsabilidad serializar.
+        // SAFETY: std::env::set_var is unsafe in Rust 2024 — the doc
+        // warns about thread concurrency. Since `load_env` is
+        // typically called at program boot (before spawning workers),
+        // it's safe. If the user calls it from a worker thread, it's
+        // their responsibility to serialize.
         unsafe {
             std::env::set_var(key, value);
         }
@@ -17539,28 +17649,28 @@ fn parse_env_file(path: &str) -> Result<(), String> {
 }
 
 // ---------------------------------------------------------------------------
-// Assertion builtins (Fase 9.z.2.a)
+// Assertion builtins (Phase 9.z.2.a)
 //
-// Los 4 builtins de aserción del testing built-in. Diseñados para ser
-// llamados desde adentro de fns `@test`, pero NO son privilegiados —
-// se pueden usar en cualquier contexto. Una aserción fallida emite
-// `FitzError` que aborta la ejecución; el runner (9.z.2.b) atrapa el
-// error y reporta el test como FAILED.
+// The 4 assertion builtins of the built-in testing system. Designed
+// to be called from inside `@test` fns, but NOT privileged — they
+// can be used in any context. A failed assertion emits `FitzError`
+// that aborts execution; the runner (9.z.2.b) catches the error and
+// reports the test as FAILED.
 //
-// Formato de los mensajes: estilo cargo test (`left: <val>` / `right:
-// <val>`). Los valores se formatean con `Value::Display`, que produce
-// la misma representación que `print` (cargo usa `Debug`; en Fitz la
-// representación canónica vive en `Display`).
+// Message format: cargo test style (`left: <val>` / `right: <val>`).
+// Values are formatted with `Value::Display`, which produces the
+// same representation as `print` (cargo uses `Debug`; in Fitz the
+// canonical representation lives in `Display`).
 // ---------------------------------------------------------------------------
 
-/// `assert(cond: Bool, msg: Str?) -> Null` — la aserción base. Si
-/// `cond` es `false`, emite `FitzError`. Sin `msg`, mensaje genérico
-/// "aserción falló"; con `msg`, lo incluye al final.
+/// `assert(cond: Bool, msg: Str?) -> Null` — the base assertion.
+/// If `cond` is `false`, emits `FitzError`. Without `msg`, generic
+/// message "aserción falló"; with `msg`, includes it at the end.
 ///
-/// Decisión: el primer arg debe ser `Bool` estrictamente (no
-/// "truthy"/"falsy" estilo Python/JS). Pasar `Int`/`Str`/etc. emite
-/// type error claro — consistente con la decisión de diseño "sin
-/// truthy/falsy" del cap 6 de la guía.
+/// Decision: the first arg must be strictly `Bool` (no Python/JS-style
+/// "truthy"/"falsy"). Passing `Int`/`Str`/etc. emits a clear type
+/// error — consistent with the "no truthy/falsy" design decision of
+/// chapter 6 of the guide.
 fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
     if args.is_empty() || args.len() > 2 {
         return Err(FitzError::new(
@@ -17621,9 +17731,9 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
     Err(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, detail))
 }
 
-/// `assert_eq(a, b) -> Null` — falla si `a != b`. Usa la igualdad
-/// estructural de `Value` (la misma de `BinOp::Eq`), que coerciona
-/// `Int↔Float` y recurre adentro de `List`/`Map`/`Instance`/`Result`.
+/// `assert_eq(a, b) -> Null` — fails if `a != b`. Uses the structural
+/// equality of `Value` (the same as `BinOp::Eq`), which coerces
+/// `Int↔Float` and recurses into `List`/`Map`/`Instance`/`Result`.
 fn builtin_assert_eq(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -17653,7 +17763,7 @@ fn builtin_assert_eq(args: &[Value]) -> FitzResult<Value> {
     ))
 }
 
-/// `assert_ne(a, b) -> Null` — falla si `a == b`. Inverso exacto de
+/// `assert_ne(a, b) -> Null` — fails if `a == b`. Exact inverse of
 /// `assert_eq`.
 fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
@@ -17681,11 +17791,11 @@ fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
     ))
 }
 
-/// Stub del `assert_throws` builtin. NO debería invocarse jamás —
-/// el dispatcher (`invoke_value`) intercepta `Value::Builtin {
-/// name: "assert_throws", .. }` antes del despacho normal y lo
-/// resuelve async via `assert_throws_impl`. Si llegás a ver el
-/// mensaje del unreachable, es un bug del dispatcher.
+/// Stub of the `assert_throws` builtin. Should NEVER be invoked —
+/// the dispatcher (`invoke_value`) intercepts `Value::Builtin {
+/// name: "assert_throws", .. }` before the normal dispatch and
+/// resolves it async via `assert_throws_impl`. If you see the
+/// unreachable message, it's a dispatcher bug.
 fn builtin_assert_throws_stub(_args: &[Value]) -> FitzResult<Value> {
     Err(FitzError::new(
         ErrorKind::InvalidSyntax,
@@ -17697,17 +17807,17 @@ fn builtin_assert_throws_stub(_args: &[Value]) -> FitzResult<Value> {
     ))
 }
 
-/// `assert_throws(fn) -> Null` async impl. Invoca el callback Fitz
-/// y atrapa el `FitzError`. Si el callback retorna sin error,
-/// `assert_throws` falla ("se esperaba que tirara"). Si el
-/// callback tira, `assert_throws` pasa.
+/// `assert_throws(fn) -> Null` async impl. Invokes the Fitz callback
+/// and catches the `FitzError`. If the callback returns without
+/// error, `assert_throws` fails ("expected to throw"). If the
+/// callback throws, `assert_throws` passes.
 ///
-/// **Restricción MVP**: el callback debe ser una `Value::Function`
-/// con aridad 0 y NO async. Async callbacks devuelven un
-/// `Value::Future` suelto (no equivalente a "tirar"); el chequeo
-/// de "tiró" requeriría await-ear el Future, lo cual cambia la
-/// semántica. Si aparece presión, sub-paso futuro
-/// `assert_throws_async(fn)` o flag dedicado.
+/// **MVP restriction**: the callback must be a `Value::Function`
+/// with arity 0 and NOT async. Async callbacks return a loose
+/// `Value::Future` (not equivalent to "throwing"); the "threw"
+/// check would require await-ing the Future, which changes the
+/// semantics. If pressure appears, future sub-step
+/// `assert_throws_async(fn)` or dedicated flag.
 async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if args.len() != 1 {
         return Err(EvalSignal::Error(FitzError::new(
@@ -17778,48 +17888,49 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Fase 9.w.1.b — JWT y password hashing builtins.
+// Phase 9.w.1.b — JWT and password hashing builtins.
 //
-// Los 4 builtins de auth nativa, registrados como métodos de los
-// `Value::Module` `jwt` y `hash` desde `register_builtins`. La API
-// elegida deliberadamente minimalista para el MVP — el caso típico
-// (JWT bearer auth con HS256 + Argon2id password store) es expresable
-// con estos 4 calls.
+// The 4 native auth builtins, registered as methods of the `jwt` and
+// `hash` `Value::Module`s from `register_builtins`. The API is
+// deliberately minimal for the MVP — the typical case (JWT bearer
+// auth with HS256 + Argon2id password store) is expressible with
+// these 4 calls.
 //
-// Decisiones:
+// Decisions:
 //
-// - **Sin kwargs**. El parser de calls de Fitz no soporta kwargs (vive
-//   solo en decoradores desde Fase 4.1). Los args opcionales se modelan
-//   como positional opcional al final (ver `alg` en `jwt.encode`/`decode`).
+// - **No kwargs**. The Fitz call parser doesn't support kwargs (they
+//   only live in decorators since Phase 4.1). Optional args are
+//   modeled as optional positional at the end (see `alg` in
+//   `jwt.encode`/`decode`).
 //
-// - **`jwt.encode/decode` solo HS256/384/512** (HMAC simétrico con
-//   secret string). Asimétricos (RS256/ES256 con par de llaves PEM)
-//   quedan post-MVP — agregar requiere parsear PEM, kid headers,
-//   rotación, etc. Para JWT bearer auth en una app monolítica con su
-//   propio secret, HS* alcanza.
+// - **`jwt.encode/decode` only HS256/384/512** (symmetric HMAC with
+//   a secret string). Asymmetric (RS256/ES256 with PEM key pair)
+//   are post-MVP — adding them requires parsing PEM, kid headers,
+//   rotation, etc. For JWT bearer auth in a monolithic app with its
+//   own secret, HS* is enough.
 //
-// - **`jwt.decode` devuelve `Result<Map>`** (no `Map` directo). Token
-//   malformado, signature inválida, expirado son runtime events
-//   esperables — el usuario los maneja con `match` o `?`. Mensaje del
-//   `Err` viene del crate `jsonwebtoken` (claro y específico:
-//   "InvalidToken", "ExpiredSignature", etc.).
+// - **`jwt.decode` returns `Result<Map>`** (not `Map` directly).
+//   Malformed token, invalid signature, expired are runtime events
+//   the user expects — they handle them with `match` or `?`. The
+//   `Err` message comes from the `jsonwebtoken` crate (clear and
+//   specific: "InvalidToken", "ExpiredSignature", etc.).
 //
-// - **`hash.password` Argon2id con params default del crate**
-//   (memory=19456 KiB, iters=2, parallelism=1) — recomendación OWASP.
-//   Override de params queda fuera del MVP. El hash de salida incluye
-//   salt + params en formato PHC string ("$argon2id$v=19$m=...$..."),
-//   listo para almacenar tal cual en la DB.
+// - **`hash.password` Argon2id with default crate params**
+//   (memory=19456 KiB, iters=2, parallelism=1) — OWASP
+//   recommendation. Param override is out of MVP scope. The output
+//   hash includes salt + params in PHC string format
+//   ("$argon2id$v=19$m=...$..."), ready to store as-is in the DB.
 //
-// - **`hash.verify` devuelve `Bool` (no `Result<Bool>`)**. Cualquier
-//   falla (hash malformado, mismatch, error interno) → `false`. Decisión
-//   de seguridad: no se filtra al attacker si el hash en la DB está
-//   corrupto, fuera de formato o cualquier otro detalle interno —
-//   siempre se ve igual desde afuera. El call site típico es
-//   `if hash.verify(input, stored) { ... }`.
+// - **`hash.verify` returns `Bool` (not `Result<Bool>`)**. Any
+//   failure (malformed hash, mismatch, internal error) → `false`.
+//   Security decision: don't leak to the attacker if the hash in
+//   the DB is corrupted, out of format or any other internal
+//   detail — always looks the same from the outside. The typical
+//   call site is `if hash.verify(input, stored) { ... }`.
 // ---------------------------------------------------------------------------
 
 /// `jwt.encode(payload: Map, secret: Str, alg: Str = "HS256") -> Str`.
-/// Codifica un payload Map como JWT firmado con HMAC.
+/// Encodes a Map payload as an HMAC-signed JWT.
 fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
     if args.len() < 2 || args.len() > 3 {
         return Err(FitzError::new(
@@ -17931,9 +18042,9 @@ fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
 }
 
 /// `jwt.decode(token: Str, secret: Str, alg: Str = "HS256") -> Result<Map>`.
-/// Verifica la firma + decodifica el payload. Devuelve siempre
-/// `Result<Map>`: cualquier falla (token malformado, signature
-/// inválida, expirado, etc.) va al `Err` con mensaje específico.
+/// Verifies the signature + decodes the payload. Always returns
+/// `Result<Map>`: any failure (malformed token, invalid signature,
+/// expired, etc.) goes to `Err` with a specific message.
 fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
     if args.len() < 2 || args.len() > 3 {
         return Err(FitzError::new(
@@ -18022,11 +18133,11 @@ fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
     };
     let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
     let mut validation = jsonwebtoken::Validation::new(algorithm);
-    // Por default, `Validation::new` exige claim `exp` presente. Acá lo
-    // relajamos: tokens sin `exp` también son válidos (caso típico de
-    // "API keys long-lived"). Si `exp` está presente, sigue siendo
-    // validado por el crate (token expirado → Err). El usuario que
-    // quiera obligatoriedad de `exp` puede chequear el Map devuelto.
+    // By default, `Validation::new` requires the `exp` claim to be
+    // present. Here we relax it: tokens without `exp` are also valid
+    // (typical case for "long-lived API keys"). If `exp` is present,
+    // it's still validated by the crate (expired token → Err). A
+    // user who wants to require `exp` can check the returned Map.
     validation.required_spec_claims.clear();
     match jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation) {
         Ok(data) => {
@@ -18039,9 +18150,9 @@ fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
     }
 }
 
-/// `hash.password(plain: Str) -> Str`. Genera un hash Argon2id con
-/// salt aleatorio. Output en formato PHC string (incluye algoritmo,
-/// params y salt), listo para guardar tal cual en la DB.
+/// `hash.password(plain: Str) -> Str`. Generates an Argon2id hash
+/// with a random salt. Output in PHC string format (includes
+/// algorithm, params and salt), ready to store as-is in the DB.
 fn builtin_hash_password(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -18090,9 +18201,9 @@ fn builtin_hash_password(args: &[Value]) -> FitzResult<Value> {
         })
 }
 
-/// `hash.verify(plain: Str, hashed: Str) -> Bool`. Verifica una
-/// contraseña contra un hash PHC. Cualquier falla (hash malformado,
-/// mismatch, etc.) → `false` para no filtrar info al attacker.
+/// `hash.verify(plain: Str, hashed: Str) -> Bool`. Verifies a
+/// password against a PHC hash. Any failure (malformed hash,
+/// mismatch, etc.) → `false` to avoid leaking info to the attacker.
 fn builtin_hash_verify(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
@@ -18154,66 +18265,69 @@ fn builtin_hash_verify(args: &[Value]) -> FitzResult<Value> {
 }
 
 // ---------------------------------------------------------------------------
-// Fase 12.3.a.1 — Structured logging built-in: módulo `log`.
+// Phase 12.3.a.1 — Structured logging built-in: `log` module.
 //
-// Los 4 builtins (`info`/`warn`/`error`/`debug`) registrados como métodos
-// del `Value::Module` `log` desde `register_builtins`. Aceptan `msg: Str`
-// posicional + kwargs heterogéneos (Int/Float/Str/Bool/Secret/List/Map)
-// que viajan como key-value pairs adentro del registro emitido.
+// The 4 builtins (`info`/`warn`/`error`/`debug`) registered as methods
+// of the `log` `Value::Module` from `register_builtins`. They accept
+// `msg: Str` positional + heterogeneous kwargs (Int/Float/Str/Bool/
+// Secret/List/Map) that travel as key-value pairs in the emitted
+// record.
 //
-// API (la sintaxis de kwargs en function calls usa `name: value`, NO
-// `name=value` — los `=` están reservados para kwargs en decoradores):
+// API (the kwarg syntax in function calls uses `name: value`, NOT
+// `name=value` — `=` is reserved for kwargs in decorators):
 //
 //   log.info("login ok", user_id: 42, duration_ms: 15)
 //   log.warn("cache miss", key: "user_42")
 //   log.error("db connection failed", retry_in_s: 5)
 //   log.debug("cache hit", key: "user_42", ttl_remaining: 300)
 //
-// El path sin kwargs (`log.info("solo msg")`) usa `dispatch_method` clásico
-// y aterriza directo en el `builtin_log_<level>`. El path con kwargs pasa
-// por `dispatch_builtin_kwargs` (ver arriba) que recolecta msg + kvs y
-// llama a `emit_log_record` directo, bypaseando el builtin.
+// The path without kwargs (`log.info("solo msg")`) uses the classic
+// `dispatch_method` and lands directly in `builtin_log_<level>`. The
+// path with kwargs goes through `dispatch_builtin_kwargs` (see above)
+// which collects msg + kvs and calls `emit_log_record` directly,
+// bypassing the builtin.
 //
-// Output en 12.3.a.1: stub simple con `eprintln!` formateado como
-// `[<LEVEL>] <msg> k1=v1 k2=v2`. El JSON real con `tracing-subscriber`
-// + TTY detection + `FITZ_LOG_FORMAT` override + `Secret<T>` redaction
-// llega en 12.3.a.2. Codegen paridad en 12.3.a.3.
+// Output in 12.3.a.1: simple stub with `eprintln!` formatted as
+// `[<LEVEL>] <msg> k1=v1 k2=v2`. The real JSON with
+// `tracing-subscriber` + TTY detection + `FITZ_LOG_FORMAT` override +
+// `Secret<T>` redaction arrives in 12.3.a.2. Codegen parity in
+// 12.3.a.3.
 //
-// Kwargs reservados (rechazados con error claro): `msg`, `level`,
-// `timestamp` — los emite el logger automáticamente.
+// Reserved kwargs (rejected with clear error): `msg`, `level`,
+// `timestamp` — they're emitted by the logger automatically.
 // ---------------------------------------------------------------------------
 
-/// Stub del builtin `log.info` (path positional-only, sin kwargs).
-/// El path con kwargs vive en `dispatch_builtin_kwargs`.
+/// Stub of the `log.info` builtin (positional-only path, no kwargs).
+/// The kwargs path lives in `dispatch_builtin_kwargs`.
 fn builtin_log_info(args: &[Value]) -> FitzResult<Value> {
     let msg = expect_log_msg_positional(args, "log.info")?;
     emit_log_record("info", &msg, &[]);
     Ok(Value::Null)
 }
 
-/// Stub del builtin `log.warn`.
+/// Stub of the `log.warn` builtin.
 fn builtin_log_warn(args: &[Value]) -> FitzResult<Value> {
     let msg = expect_log_msg_positional(args, "log.warn")?;
     emit_log_record("warn", &msg, &[]);
     Ok(Value::Null)
 }
 
-/// Stub del builtin `log.error`.
+/// Stub of the `log.error` builtin.
 fn builtin_log_error(args: &[Value]) -> FitzResult<Value> {
     let msg = expect_log_msg_positional(args, "log.error")?;
     emit_log_record("error", &msg, &[]);
     Ok(Value::Null)
 }
 
-/// Stub del builtin `log.debug`.
+/// Stub of the `log.debug` builtin.
 fn builtin_log_debug(args: &[Value]) -> FitzResult<Value> {
     let msg = expect_log_msg_positional(args, "log.debug")?;
     emit_log_record("debug", &msg, &[]);
     Ok(Value::Null)
 }
 
-/// Valida el primer (y único) arg posicional como `Str` (el msg).
-/// Compartido por los 4 builtins de log en el path sin kwargs.
+/// Validates the first (and only) positional arg as `Str` (the msg).
+/// Shared by the 4 log builtins in the path without kwargs.
 fn expect_log_msg_positional(args: &[Value], display: &str) -> FitzResult<String> {
     if args.len() != 1 {
         return Err(FitzError::new(
@@ -18248,15 +18362,16 @@ fn expect_log_msg_positional(args: &[Value], display: &str) -> FitzResult<String
     }
 }
 
-/// Emite UN registro de log al sink configurado. Desde 12.3.a.2 delega
-/// al módulo `crate::logging` que implementa el output real (JSON flat,
-/// pretty mode con ANSI, TTY detection, filter por `RUST_LOG` vía
-/// `tracing` + `tracing-subscriber`, redacción recursiva de
-/// `Value::Secret` en kwargs directos y dentro de `List`/`Map`).
+/// Emits ONE log record to the configured sink. Since 12.3.a.2 it
+/// delegates to the `crate::logging` module which implements the real
+/// output (flat JSON, pretty mode with ANSI, TTY detection, filter
+/// via `RUST_LOG` through `tracing` + `tracing-subscriber`, recursive
+/// redaction of `Value::Secret` in direct kwargs and inside
+/// `List`/`Map`).
 ///
-/// Wrapper privado para mantener el call site existente
-/// (`dispatch_builtin_kwargs` + los 4 builtins stub) sin importar
-/// `crate::logging` desde cada sitio.
+/// Private wrapper to keep the existing call site
+/// (`dispatch_builtin_kwargs` + the 4 stub builtins) without
+/// importing `crate::logging` from each site.
 fn emit_log_record(level: &str, msg: &str, kvs: &[(String, Value)]) {
     crate::logging::emit_log_record(level, msg, kvs)
 }
@@ -18266,19 +18381,19 @@ fn emit_log_record(level: &str, msg: &str, kvs: &[(String, Value)]) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
+#[allow(clippy::approx_constant)] // 3.14 in tests is a generic Float, not PI.
 mod tests {
     use super::*;
     use crate::ast::TypeExpr;
 
     // ---- helpers ----
 
-    /// Evalúa una expresión aislada en un env vacío. Para tests cortos.
+    /// Evaluates an isolated expression in an empty env. For short tests.
     ///
-    /// Fase 6.4: el helper pasó a `async fn` (los tests viven adentro de
-    /// `#[tokio::test]` así que un `block_on` interno paniquearía con
-    /// "Cannot start a runtime from within a runtime"). Cada call site
-    /// agrega `.await`. Diff mínimo, preserva la lógica del test.
+    /// Phase 6.4: the helper became `async fn` (tests live inside
+    /// `#[tokio::test]` so an inner `block_on` would panic with
+    /// "Cannot start a runtime from within a runtime"). Each call site
+    /// adds `.await`. Minimal diff, preserves the test logic.
     async fn eval_expr_test(expr: Expr) -> EvalResult<Value> {
         let env = Environment::new();
         eval_expr(&expr, env).await
@@ -18291,12 +18406,12 @@ mod tests {
         assert!(eval(vec![]).await.is_ok());
     }
 
-    // ---- Fase 6.4: evaluator async, Value::Future, .await real ----
+    // ---- Phase 6.4: async evaluator, Value::Future, real .await ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn value_future_display_y_type_name() {
-        // Future "vivo" (con un future adentro) y Future "consumido"
-        // (Option::None) deben tener display y type_name consistentes.
+        // "Alive" Future (with a future inside) and "consumed" Future
+        // (Option::None) must have consistent display and type_name.
         let f: crate::value::FitzFuture = Box::pin(async { Ok(Value::Int(1)) });
         let v = Value::new_future(f);
         assert_eq!(v.type_name(), "Future");
@@ -18305,8 +18420,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn await_sobre_no_future_es_error_de_runtime() {
-        // El checker 6.2 ataja la mayoría de los casos, pero el
-        // evaluator también valida: `.await` sobre Int → error claro.
+        // The 6.2 checker catches most cases, but the evaluator also
+        // validates: `.await` on Int → clear error.
         let expr = Expr::Await(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         let err = eval_expr_test(expr)
             .await
@@ -18325,9 +18440,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_fn_llamada_con_await_produce_resultado() {
-        // `async fn f() -> Int { return 42 }; f().await` evalúa a Int(42).
-        // El flow: la llamada produce Value::Future; .await lo desempaca
-        // ejecutando el body adentro del runtime tokio.
+        // `async fn f() -> Int { return 42 }; f().await` evaluates to Int(42).
+        // The flow: the call produces Value::Future; .await unwraps it
+        // by running the body inside the tokio runtime.
         let (env, res) = parse_eval_into_env(
             "async fn f() -> Int { return 42 }\n\
              let x = f().await",
@@ -18339,8 +18454,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_fn_llamada_sin_await_produce_future_suelto() {
-        // Sin `.await`, la llamada a una async fn tipa y produce
-        // `Value::Future`. El usuario puede guardarlo, pasarlo, etc.
+        // Without `.await`, the call to an async fn type-checks and
+        // produces `Value::Future`. The user can store it, pass it, etc.
         let (env, res) = parse_eval_into_env(
             "async fn f() -> Int { return 42 }\n\
              let pending = f()",
@@ -18357,10 +18472,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn sleep_con_await_pausa_y_produce_null() {
-        // `sleep(0).await` adentro de async fn pausa cero tiempo y
-        // produce Null. Validamos la integración end-to-end del
-        // builtin con el runtime tokio: el `.await` cede control y
-        // tokio::time::sleep efectivamente espera.
+        // `sleep(0).await` inside an async fn pauses for zero time and
+        // produces Null. We validate the end-to-end integration of the
+        // builtin with the tokio runtime: `.await` yields control and
+        // tokio::time::sleep effectively waits.
         let (env, res) = parse_eval_into_env(
             "async fn pausa() -> Null { return sleep(0).await }\n\
              let r = pausa().await",
@@ -18372,8 +18487,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn sleep_sin_await_devuelve_future_suelto() {
-        // `let f = sleep(100)` — sin await, devuelve Value::Future.
-        // El builtin `sleep` construye el future pero no lo espera.
+        // `let f = sleep(100)` — without await, returns Value::Future.
+        // The `sleep` builtin builds the future but doesn't wait for it.
         let (env, res) = parse_eval_into_env("let f = sleep(100)").await;
         res.unwrap();
         let v = env.lock().get("f").expect("f definida");
@@ -18386,14 +18501,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn await_sobre_future_consumido_es_error() {
-        // Política: un future se await-ea una sola vez. Si el usuario
-        // intenta hacerlo dos veces sobre el mismo Value::Future,
-        // emite error explícito.
+        // Policy: a future is await-ed only once. If the user tries
+        // to do it twice on the same Value::Future, an explicit error
+        // is emitted.
         let f: crate::value::FitzFuture = Box::pin(async { Ok(Value::Int(1)) });
         let cell = crate::value::FutureCell(std::sync::Arc::new(parking_lot::Mutex::new(Some(f))));
         let v = Value::Future(cell);
 
-        // Primer .await: éxito.
+        // First .await: success.
         let env = Environment::new();
         env.lock().define("p", v.clone());
         let first = eval_expr(
@@ -18404,7 +18519,7 @@ mod tests {
         .unwrap();
         assert_eq!(first, Value::Int(1));
 
-        // Segundo .await: error.
+        // Second .await: error.
         let err = eval_expr(
             &Expr::Await(Box::new(Expr::Ident("p".into(), Span::ZERO)), Span::ZERO),
             env,
@@ -18419,7 +18534,7 @@ mod tests {
         }
     }
 
-    // ---- literales ----
+    // ---- literals ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_int_literal() {
@@ -18505,7 +18620,7 @@ mod tests {
         assert_eq!(result, Value::Str("from_global".into()));
     }
 
-    // ---- Stmt::Expr (paso intermedio para verificar el wiring stmt→expr) ----
+    // ---- Stmt::Expr (intermediate step to verify the stmt→expr wiring) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn stmt_expr_evalua_la_expresion_interna() {
@@ -18563,9 +18678,9 @@ mod tests {
         ));
     }
 
-    // ---- BinOp: aritmética ----
+    // ---- BinOp: arithmetic ----
 
-    /// Helper: construye `BinOp { op, left: l, right: r }` con boxes.
+    /// Helper: builds `BinOp { op, left: l, right: r }` with boxes.
     fn binop(op: BinOpKind, l: Expr, r: Expr) -> Expr {
         Expr::BinOp {
             op,
@@ -18652,7 +18767,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn div_int_int_trunca() {
-        // 10 / 3 = 3 (truncado), no 3.33
+        // 10 / 3 = 3 (truncated), not 3.33
         let e = binop(
             BinOpKind::Div,
             Expr::Int(10, Span::ZERO),
@@ -18703,7 +18818,7 @@ mod tests {
         ));
     }
 
-    // ---- BinOp: comparación e igualdad ----
+    // ---- BinOp: comparison and equality ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn eq_con_coercion_int_float() {
@@ -18718,7 +18833,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn eq_tipos_distintos_da_false_sin_error() {
-        // 1 == "1" → false (no error)
+        // 1 == "1" → false (no error, just false)
         let e = binop(
             BinOpKind::Eq,
             Expr::Int(1, Span::ZERO),
@@ -18783,7 +18898,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn comparacion_con_promocion_int_float() {
-        // 2 < 2.5 → true
+        // 2 < 2.5 → true (Int promoted to Float for comparison)
         let e = binop(
             BinOpKind::Lt,
             Expr::Int(2, Span::ZERO),
@@ -18804,7 +18919,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn comparacion_entre_bool_es_type_error() {
-        // Bool no se compara con <. Sí con ==.
+        // Bool isn't compared with <. With == it is.
         let e = binop(
             BinOpKind::Lt,
             Expr::Bool(true, Span::ZERO),
@@ -18819,7 +18934,7 @@ mod tests {
         ));
     }
 
-    // ---- BinOp: lógicos con short-circuit ----
+    // ---- BinOp: logical with short-circuit ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn and_true_true_da_true() {
@@ -18833,8 +18948,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn and_false_corta_y_no_evalua_derecho() {
-        // El lado derecho es un Ident no definido. Si se evaluara, daría error.
-        // Como `false and ...` corta, devuelve false sin error.
+        // The right side is an undefined Ident. If it were evaluated,
+        // it would error. Since `false and ...` short-circuits, it
+        // returns false without error.
         let e = binop(
             BinOpKind::And,
             Expr::Bool(false, Span::ZERO),
@@ -18881,7 +18997,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn and_con_no_bool_derecha_es_type_error() {
-        // Para que el lado derecho se evalúe, el izquierdo debe ser true.
+        // For the right side to evaluate, the left must be true.
         let e = binop(
             BinOpKind::And,
             Expr::Bool(true, Span::ZERO),
@@ -18896,7 +19012,7 @@ mod tests {
         ));
     }
 
-    // ---- Mini-tanda Xor ----
+    // ---- Mini-batch Xor ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn xor_tabla_de_verdad_completa() {
@@ -18925,9 +19041,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn xor_evalua_ambos_lados_sin_short_circuit() {
-        // Si `false xor <bad>` cortara como `and` lo haría, no
-        // emitiría error. Como xor NO short-circuita, evalua el RHS
-        // y dispara TypeError sobre el Ident no definido.
+        // If `false xor <bad>` short-circuited like `and` would, it
+        // wouldn't error. Since xor does NOT short-circuit, it
+        // evaluates the RHS and triggers TypeError on the undefined Ident.
         let e = binop(
             BinOpKind::Xor,
             Expr::Bool(false, Span::ZERO),
@@ -18952,11 +19068,11 @@ mod tests {
         ));
     }
 
-    // ---- BinOp anidados ----
+    // ---- nested BinOp ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn expresion_anidada_2_mas_3_por_4_da_14() {
-        // 2 + (3 * 4) — Stmt::Expr para verificar wiring completo.
+        // 2 + (3 * 4) — Stmt::Expr to verify full wiring.
         let inner = binop(
             BinOpKind::Mul,
             Expr::Int(3, Span::ZERO),
@@ -18990,7 +19106,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn doble_negacion_devuelve_el_original() {
-        // -(-7) = 7
+        // -(-7) = 7 (double negation cancels)
         let inner = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
             operand: Box::new(Expr::Int(7, Span::ZERO)),
@@ -19036,7 +19152,7 @@ mod tests {
         ));
     }
 
-    // ---- R.1.1 — `not` (mini-fase R) ----
+    // ---- R.1.1 — `not` (mini-phase R) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn not_true_es_false() {
@@ -19075,8 +19191,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn not_de_int_es_type_error_en_runtime_gradual() {
-        // Sin --no-typecheck el checker corta antes. Adentro del
-        // evaluator directo, debe emitir error de tipo.
+        // Without --no-typecheck the checker catches it earlier. Inside
+        // the evaluator directly, it must emit a type error.
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Not,
             operand: Box::new(Expr::Int(5, Span::ZERO)),
@@ -19107,7 +19223,7 @@ mod tests {
         ));
     }
 
-    // ---- R.1.2 — operador `%` (mini-fase R) ----
+    // ---- R.1.2 — `%` operator (mini-phase R) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mod_simple_positivo() {
@@ -19131,7 +19247,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mod_negativo_es_euclidean() {
-        // Semántica euclidean: -7 % 3 = 2 (no -1 como `%` Rust).
+        // Euclidean semantics: -7 % 3 = 2 (not -1 like Rust's `%`).
         let e = binop(
             BinOpKind::Mod,
             Expr::Int(-7, Span::ZERO),
@@ -19173,7 +19289,7 @@ mod tests {
         ));
     }
 
-    // ---- R.1.3 — asignación a índice (mini-fase R) ----
+    // ---- R.1.3 — index assignment (mini-phase R) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_list_replace_in_place() {
@@ -19199,7 +19315,7 @@ mod tests {
         match m {
             Value::Map(pairs) => {
                 let borrowed = pairs.lock();
-                // Insertion order preservado: "a" sigue siendo el primero.
+                // Insertion order preserved: "a" is still first.
                 assert_eq!(borrowed[0].0, Value::Str("a".into()));
                 assert_eq!(borrowed[0].1, Value::Int(10));
             }
@@ -19236,8 +19352,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_list_negativo_fuera_de_rango_es_error() {
-        // I.1: `xs[-1] = ...` ahora es válido (wrap). El error solo
-        // dispara si el wrap queda fuera de [0, len).
+        // I.1: `xs[-1] = ...` is now valid (wrap). The error only
+        // triggers if the wrap lands outside [0, len).
         let (_env, res) = parse_eval_into_env("let xs = [1, 2]\nxs[-99] = 99").await;
         let err = res.unwrap_err();
         assert!(
@@ -19250,9 +19366,9 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_sobre_int_es_type_error() {
         let (_env, res) = parse_eval_into_env("let x = 5\nx[0] = 1").await;
-        // El checker lo caza primero (type error). Para validar el
-        // runtime puro, deberíamos usar --no-typecheck via parse_eval
-        // directo; acá nos quedamos con el error sea de tipo o de
+        // The checker catches it first (type error). To validate the
+        // pure runtime, we should use --no-typecheck via direct
+        // parse_eval; here we accept the error being either type or
         // runtime.
         assert!(res.is_err());
     }
@@ -19303,7 +19419,7 @@ mod tests {
         };
         eval_stmt(&stmt, child).await.unwrap();
 
-        // El cambio se ve en el global.
+        // The change is visible in the global.
         assert_eq!(global.lock().get("x"), Some(Value::Int(42)));
     }
 
@@ -19320,15 +19436,15 @@ mod tests {
         };
         eval_stmt(&stmt, child.clone()).await.unwrap();
 
-        // Solo existe en child, no se propagó al padre.
+        // Only exists in child, didn't propagate to the parent.
         assert_eq!(child.lock().get("nueva"), Some(Value::Int(7)));
         assert_eq!(global.lock().get("nueva"), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_ignora_la_anotacion_de_tipo() {
-        // type_: Some("Int") con value String — no falla (tipado gradual,
-        // sin checks en runtime todavía).
+        // type_: Some("Int") with String value — doesn't fail
+        // (gradual typing, no runtime checks yet).
         let env = Environment::new();
         let stmt = Stmt::Assign {
             target: AssignTarget::Ident("x".into(), Span::default()),
@@ -19347,8 +19463,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn call_a_print_devuelve_null() {
-        // print(...) escribe a stdout y devuelve Null. Verificamos el Value
-        // de retorno; la salida real la chequeamos manualmente con hello.fitz.
+        // print(...) writes to stdout and returns Null. We verify the
+        // return Value; the actual output is checked manually with hello.fitz.
         let env = Environment::new();
         register_builtins(&env);
 
@@ -19362,10 +19478,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn call_a_funcion_no_definida_es_error() {
-        // Como `Expr::Call` ahora evalúa el callee como expresión, un
-        // ident sin definir falla con `UndefinedVariable` (no
-        // `UndefinedFunction` como antes). Es coherente: el parser no
-        // distingue "esto es un nombre de función" sintácticamente.
+        // Since `Expr::Call` now evaluates the callee as an
+        // expression, an undefined ident fails with
+        // `UndefinedVariable` (not `UndefinedFunction` as before).
+        // It's consistent: the parser doesn't syntactically
+        // distinguish "this is a function name".
         let env = Environment::new();
         let call = Expr::Call {
             callee: Box::new(Expr::Ident("noexiste".into(), Span::ZERO)),
@@ -19402,9 +19519,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn call_evalua_args_antes_de_invocar() {
-        // El arg `1 + 2` debe llegar al builtin como Int(3), no como BinOp.
-        // Como print no nos deja inspeccionar, usamos un assert indirecto:
-        // si el eval de args fallara, daría error. Si llega bien, Null.
+        // The `1 + 2` arg must reach the builtin as Int(3), not as
+        // a BinOp. Since print doesn't let us inspect, we use an
+        // indirect assert: if arg eval failed, it would error. If it
+        // arrives fine, Null.
         let env = Environment::new();
         register_builtins(&env);
 
@@ -19490,11 +19608,11 @@ mod tests {
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("3".into()));
     }
 
-    // ---- Integración mini: hello.fitz a mano ----
+    // ---- Mini integration: hello.fitz by hand ----
 
     // ---- FnDef + Return + Call (user-defined) ----
 
-    /// Helper: arma `fn name(params) { body }` como Stmt.
+    /// Helper: builds `fn name(params) { body }` as a Stmt.
     fn fn_def(name: &str, params: Vec<&str>, body: Vec<Stmt>) -> Stmt {
         Stmt::FnDef {
             name: name.into(),
@@ -19608,7 +19726,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fn_ve_variables_del_scope_donde_se_definio() {
-        // Closure básico: la función accede a `x` del scope global.
+        // Basic closure: the function accesses `x` from the global scope.
         //
         //   x = 10
         //   fn get_x() => x
@@ -19634,7 +19752,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fn_param_sombrea_variable_externa() {
-        // x = 100; fn f(x) => x ; f(7) → 7 (no 100)
+        // x = 100; fn f(x) => x ; f(7) → 7 (not 100 — param shadows)
         let env = Environment::new();
         env.lock().define("x", Value::Int(100));
 
@@ -19719,7 +19837,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn return_fuera_de_fn_es_error() {
-        // En el top level, `return 5` no tiene caller que lo intercepte.
+        // At the top level, `return 5` has no caller to intercept it.
         let result = eval(vec![Stmt::Return(Expr::Int(5, Span::ZERO), Span::ZERO)]).await;
         assert!(matches!(
             result.unwrap_err().kind,
@@ -19733,7 +19851,7 @@ mod tests {
         //     x = n * 2
         //     return x + 1
         // }
-        // f(5) → 11
+        // f(5) → 11 (multi-stmt body works correctly)
         let env = Environment::new();
         let body = vec![
             Stmt::Assign {
@@ -19773,7 +19891,7 @@ mod tests {
     async fn return_corta_la_ejecucion_del_body() {
         // fn f() {
         //     return 1
-        //     return 2   ← nunca se ejecuta
+        //     return 2   ← never executed
         // }
         let env = Environment::new();
         let body = vec![
@@ -19794,7 +19912,7 @@ mod tests {
 
     // ---- Expr::If ----
 
-    /// Helper: arma `if cond { then } else? { else_ }`.
+    /// Helper: builds `if cond { then } else? { else_ }`.
     fn if_expr(cond: Expr, then: Vec<Stmt>, else_: Option<Vec<Stmt>>) -> Expr {
         Expr::If {
             condition: Box::new(cond),
@@ -19806,7 +19924,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn if_true_sin_else_devuelve_valor_del_then() {
-        // if true { 7 } → 7
+        // if true { 7 } → 7 (no else needed when cond is true)
         let e = if_expr(
             Expr::Bool(true, Span::ZERO),
             vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)],
@@ -19827,7 +19945,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn if_else_toma_la_rama_correcta() {
-        // if true { 1 } else { 2 } → 1
+        // if true { 1 } else { 2 } → 1 (then branch when cond true)
         let then = vec![Stmt::Expr(Expr::Int(1, Span::ZERO), Span::ZERO)];
         let else_ = vec![Stmt::Expr(Expr::Int(2, Span::ZERO), Span::ZERO)];
         let e = if_expr(
@@ -19843,7 +19961,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn if_condicion_no_bool_es_type_error() {
-        // if 1 { ... } → error (no truthy coercion).
+        // if 1 { ... } → error (no truthy coercion in Fitz).
         let e = if_expr(Expr::Int(1, Span::ZERO), vec![], None);
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
@@ -19856,8 +19974,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn if_evalua_solo_la_rama_correspondiente() {
-        // El then es un Ident no definido. Si se evaluara, daría error.
-        // Como cond es false, no se toca → resultado del else.
+        // The then is an undefined Ident. If evaluated, it would
+        // error. Since cond is false, it's not touched → result of else.
         let then = vec![Stmt::Expr(
             Expr::Ident("no_existe".into(), Span::ZERO),
             Span::ZERO,
@@ -19871,7 +19989,7 @@ mod tests {
     async fn variables_definidas_dentro_del_if_persisten_afuera() {
         // x = 1
         // if x == 1 { y = 99 }
-        // print(y)  → "99"
+        // print(y)  → "99" (vars assigned in if persist outside)
         let env = Environment::new();
         env.lock().define("x", Value::Int(1));
 
@@ -19902,7 +20020,7 @@ mod tests {
     async fn else_if_anidado_funciona() {
         // if false { 1 } else if true { 2 } else { 3 } → 2
         //
-        // El parser modela `else if` como `else_: vec![Stmt::Expr(Expr::If, Span::ZERO)]`.
+        // The parser models `else if` as `else_: vec![Stmt::Expr(Expr::If, Span::ZERO)]`.
         let inner = if_expr(
             Expr::Bool(true, Span::ZERO),
             vec![Stmt::Expr(Expr::Int(2, Span::ZERO), Span::ZERO)],
@@ -19918,7 +20036,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn if_como_expresion_en_assign() {
-        // let r = if true { 42 } else { 0 }
+        // let r = if true { 42 } else { 0 } (if as expression in assign)
         let env = Environment::new();
         let stmt = Stmt::Assign {
             target: AssignTarget::Ident("r".into(), Span::default()),
@@ -19936,8 +20054,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn factorial_recursivo_funciona() {
-        // El test que ata todo: closures + recursión + if + comparación
-        // + BinOp + Return.
+        // The test that ties everything: closures + recursion + if +
+        // comparison + BinOp + Return.
         //
         //   fn factorial(n) {
         //       if n == 0 { return 1 }
@@ -20038,7 +20156,7 @@ mod tests {
     async fn match_toma_el_primer_arm_que_matchea() {
         // match "hola" {
         //     x => "primer arm: ${x}",
-        //     _ => "segundo arm (no se toca)",
+        //     _ => "segundo arm (not touched)",
         // }
         let e = Expr::Match {
             value: Box::new(Expr::Str("hola".into(), Span::ZERO)),
@@ -20068,7 +20186,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn match_binding_vive_solo_en_el_arm() {
-        // El binding `n` no debe escapar al scope contenedor.
+        // The `n` binding must not escape to the enclosing scope.
         let env = Environment::new();
         let e = Expr::Match {
             value: Box::new(Expr::Int(7, Span::ZERO)),
@@ -20080,7 +20198,7 @@ mod tests {
         };
         eval_expr(&e, env.clone()).await.unwrap();
 
-        // `n` no quedó definida en el scope de afuera.
+        // `n` did not get defined in the outer scope.
         assert_eq!(env.lock().get("n"), None);
     }
 
@@ -20134,7 +20252,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn match_ok_no_matchea_err() {
-        // El patrón Ok(_) NO matchea contra Err(_) — sigue al siguiente arm.
+        // The Ok(_) pattern does NOT match Err(_) — goes to the next arm.
         let e = Expr::Match {
             value: Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)),
             arms: vec![
@@ -20151,7 +20269,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn match_ok_no_matchea_no_result() {
-        // Ok(v) sobre un valor que no es Result → no matchea, cae en wildcard.
+        // Ok(v) on a non-Result value → doesn't match, falls to wildcard.
         let e = Expr::Match {
             value: Box::new(Expr::Int(5, Span::ZERO)),
             arms: vec![
@@ -20171,9 +20289,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn match_ok_wildcard_matchea_pero_no_bindea() {
-        // Pattern::OkWildcard matchea cualquier Ok sin bindear el
-        // inner. Cierra la deuda vieja de 3.3 donde `_` adentro se
-        // bindeaba como var llamada `_`.
+        // Pattern::OkWildcard matches any Ok without binding the
+        // inner. Closes the old 3.3 debt where `_` inside got bound
+        // as a var named `_`.
         let e = Expr::Match {
             value: Box::new(Expr::Ok(Box::new(Expr::Int(99, Span::ZERO)), Span::ZERO)),
             arms: vec![
@@ -20206,7 +20324,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn match_ok_wildcard_no_matchea_err() {
-        // OkWildcard NO debe matchear Err.
+        // OkWildcard must NOT match Err.
         let e = Expr::Match {
             value: Box::new(Expr::Err(Box::new(Expr::Int(0, Span::ZERO)), Span::ZERO)),
             arms: vec![
@@ -20220,8 +20338,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn match_ok_wildcard_no_ensucia_scope() {
-        // Después de un match con Ok(_), no debe existir una var
-        // llamada `_` en el env. Esto era el bug que cerraba 3.3.
+        // After a match with Ok(_), there should be no var named
+        // `_` in the env. This was the bug that 3.3 closed.
         let src = "\
 let x = match Ok(5) {\n\
     Ok(_) => 1\n\
@@ -20254,7 +20372,7 @@ print(_)\n";
     #[tokio::test(flavor = "current_thread")]
     async fn match_literal_int_no_coerciona_a_float() {
         // match 1.0 { 1 => "int", _ => "no-int" } → "no-int"
-        // (En match, igualdad es estructural — sin la coerción del `==`).
+        // (In match, equality is structural — no `==` coercion).
         let e = Expr::Match {
             value: Box::new(Expr::Float(1.0, Span::ZERO)),
             arms: vec![
@@ -20499,7 +20617,7 @@ print(_)\n";
         //   if i == 3 { continue }
         //   total = total + i
         // }
-        // total → 1+2+4+5 = 12 (saltó el 3)
+        // total → 1+2+4+5 = 12 (skipped 3)
         let stmt = Stmt::While {
             condition: Expr::BinOp {
                 op: BinOpKind::Lt,
@@ -20700,7 +20818,7 @@ print(_)\n";
 
     #[tokio::test(flavor = "current_thread")]
     async fn type_se_puede_referenciar_como_ident_sin_error() {
-        // Después de definir un type, `User` como Expr::Ident lo encuentra.
+        // After defining a type, `User` as Expr::Ident finds it.
         let env = Environment::new();
         eval_stmt(
             &Stmt::TypeDef {
@@ -20723,8 +20841,8 @@ print(_)\n";
 
     #[tokio::test(flavor = "current_thread")]
     async fn llamar_un_type_como_funcion_es_type_error() {
-        // User(1) sin struct literals → TypeMismatch porque Type no es callable.
-        // Esto es deuda explícita: la instanciación viene en Fase 3.
+        // User(1) without struct literals → TypeMismatch because Type is not callable.
+        // This is explicit debt: instantiation comes in Phase 3.
         let env = Environment::new();
         eval_stmt(
             &Stmt::TypeDef {
@@ -20753,18 +20871,18 @@ print(_)\n";
         ));
     }
 
-    // ---- Criterio de Fase 2: el programa completo ----
+    // ---- Phase 2 criterion: the complete program ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_fase_2_corre_end_to_end() {
-        // El programa del roadmap:
+        // The roadmap program:
         //   name = "Fitz"
         //   x = 10 + 5
         //   print("Hola {name}, x es {x}")
         //   fn double(n) => n * 2
         //   print(double(x))
         //
-        // Output esperado (vía stdout, no chequeado acá):
+        // Expected output (via stdout, not checked here):
         //   Hola Fitz, x es 15
         //   30
         let program = vec![
@@ -20830,9 +20948,9 @@ print(_)\n";
         assert!(eval(program).await.is_ok());
     }
 
-    /// Test de integración: el pipeline completo (lexer → parser → eval)
-    /// sobre el programa exacto del criterio de Fase 2 escrito como source.
-    /// Si esto pasa, las tres fases hablan bien entre sí.
+    /// Integration test: the complete pipeline (lexer → parser → eval)
+    /// over the exact Phase 2 criterion program written as source.
+    /// If this passes, the three phases talk to each other well.
     #[tokio::test(flavor = "current_thread")]
     async fn integracion_criterio_fase_2_lexer_parser_evaluator() {
         let source = r#"
@@ -20850,8 +20968,8 @@ print(double(x))
 
     #[tokio::test(flavor = "current_thread")]
     async fn integracion_factorial_recursivo_end_to_end() {
-        // Test de pipeline con recursión + if + return + cierre.
-        // Verifica que el evaluator atrapa Return correctamente vía signal.
+        // Pipeline test with recursion + if + return + closure.
+        // Verifies the evaluator catches Return correctly via signal.
         let source = r#"
 fn factorial(n) {
     if n == 0 {
@@ -20868,12 +20986,12 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn hello_fitz_corre_sin_error() {
-        // Réplica del AST equivalente a:
+        // AST replica equivalent to:
         //   name = "Patagonia"
         //   print("Hola, {name}!")
         //
-        // Verifica que el camino Assign → StrInterp → Call (builtin) funciona
-        // end-to-end. La salida real se ve con `cargo run -- run examples/hello.fitz`.
+        // Verifies the Assign → StrInterp → Call (builtin) path works
+        // end-to-end. The actual output is seen with `cargo run -- run examples/hello.fitz`.
         let program = vec![
             Stmt::Assign {
                 target: AssignTarget::Ident("name".into(), Span::default()),
@@ -20901,22 +21019,22 @@ print(factorial(5))
     }
 
     // -----------------------------------------------------------------------
-    // Tests — listas, mapas, rangos, indexing, for (Fase 3, paso 1)
+    // Tests — lists, maps, ranges, indexing, for (Phase 3, step 1)
     // -----------------------------------------------------------------------
 
-    /// Helper: parsea y evalúa programa entero. Devuelve el env final.
+    /// Helper: parses and evaluates the entire program. Returns the final env.
     async fn parse_and_eval(src: &str) -> FitzResult<()> {
         let tokens = crate::lexer::tokenize(src).expect("la fuente debe tokenizar");
         let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
         eval(program).await
     }
 
-    /// Como `parse_and_eval`, pero conserva el env para inspeccionarlo.
-    /// Útil cuando querés assertear valores específicos al final.
+    /// Like `parse_and_eval`, but keeps the env to inspect it.
+    /// Useful when you want to assert specific values at the end.
     ///
-    /// Fase 6.4: async fn — los tests viven adentro de `#[tokio::test]`
-    /// así que un `block_on` interno paniquearía con "runtime within
-    /// runtime". Los call sites suman `.await`.
+    /// Phase 6.4: async fn — tests live inside `#[tokio::test]`
+    /// so an internal `block_on` would panic with "runtime within
+    /// runtime". Call sites add `.await`.
     async fn parse_eval_into_env(src: &str) -> (EnvRef, FitzResult<()>) {
         let tokens = crate::lexer::tokenize(src).expect("la fuente debe tokenizar");
         let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
@@ -21045,12 +21163,12 @@ print(factorial(5))
         }
     }
 
-    // ---- R.1.4 — rangos inclusivos `..=` (mini-fase R) ----
+    // ---- R.1.4 — inclusive ranges `..=` (mini-phase R) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn range_inclusive_evalua_a_value_range_con_end_plus_1() {
-        // 0..=10 se materializa como Value::Range { 0, 11 } por
-        // la conversión inclusive→exclusive del evaluator (no toca
+        // 0..=10 is materialized as Value::Range { 0, 11 } via
+        // the evaluator's inclusive→exclusive conversion (does not touch
         // Value::Range).
         let v = eval_expr_test(Expr::Range {
             start: Box::new(Expr::Int(0, Span::ZERO)),
@@ -21065,7 +21183,7 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn for_inclusive_itera_end_inclusive() {
-        // for i in 0..=3 → 0, 1, 2, 3 (4 iteraciones).
+        // for i in 0..=3 → 0, 1, 2, 3 (4 iterations).
         let (env, res) = parse_eval_into_env(
             "let total = 0\nfor i in 0..=3 { total = total + i }\nlet sum = total",
         )
@@ -21131,7 +21249,7 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn or_pattern_mezcla_int_y_range() {
-        // 7 → matchea Range 5..=10 (segundo sub-pattern)
+        // 7 → matches Range 5..=10 (second sub-pattern)
         let (env, res) =
             parse_eval_into_env("let r = match 7 { 0 | 5..=10 => \"ok\", _ => \"x\" }").await;
         res.unwrap();
@@ -21148,10 +21266,10 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn or_pattern_no_introduce_binding_en_scope() {
-        // Si el body de un arm con or-pattern intentara usar una var
-        // bindeada por el pattern, fallaría. Verificamos que NO se
-        // bindee nada usando un literal y un body que no referencia
-        // ninguna var del pattern.
+        // If an or-pattern arm body tried to use a var bound by
+        // the pattern, it would fail. We verify that NOTHING
+        // is bound by using a literal and a body that does not reference
+        // any var from the pattern.
         let (env, res) = parse_eval_into_env(
             "let r = match 5 { 1 | 2 => \"chico\", 3 | 4 | 5 => \"medio\", _ => \"x\" }",
         )
@@ -21160,7 +21278,7 @@ print(factorial(5))
         assert_eq!(env.lock().get("r"), Some(Value::Str("medio".into())));
     }
 
-    // ---- Guards en match (R.2.2) ----
+    // ---- Match guards (R.2.2) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn guard_true_dispara_arm() {
@@ -21214,7 +21332,7 @@ print(factorial(5))
         assert!(err.message.contains("guard"));
     }
 
-    // ---- Operadores compuestos +=/-=/*=//= (R.2.3) ----
+    // ---- Compound operators +=/-=/*=//= (R.2.3) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn compound_plus_eq_sobre_ident() {
@@ -21283,7 +21401,7 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn compound_acumulado_en_loop() {
-        // Test típico: acumular en un loop.
+        // Typical test: accumulate in a loop.
         let (env, res) = parse_eval_into_env(
             "let suma = 0\n\
              for i in 1..=5 { suma += i }",
@@ -21293,7 +21411,7 @@ print(factorial(5))
         assert_eq!(env.lock().get("suma"), Some(Value::Int(15)));
     }
 
-    // ---- Métodos custom sobre type (R.3) ----
+    // ---- Custom methods on type (R.3) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn method_sin_params_lee_field() {
@@ -21325,7 +21443,7 @@ print(factorial(5))
         assert_eq!(env.lock().get("r"), Some(Value::Int(15)));
     }
 
-    // ---- Mini-tanda St — métodos estáticos ----
+    // ---- Mini-batch St — static methods ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn st_static_method_se_invoca_como_type_method() {
@@ -21340,7 +21458,7 @@ print(factorial(5))
         )
         .await;
         res.unwrap();
-        // Ambos son instancias de C. Verificamos via Display.
+        // Both are instances of C. We verify via Display.
         let z = env.lock().get("z").unwrap();
         let c = env.lock().get("c").unwrap();
         assert_eq!(z.to_string(), "C { value: 0 }");
@@ -21349,9 +21467,9 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn st_static_method_no_accede_a_fields_como_locales() {
-        // Un método estático NO recibe los fields como locales. Si el
-        // body intenta usar `value` (un field del tipo), debe fallar
-        // con "variable no definida".
+        // A static method does NOT receive the fields as locals. If the
+        // body tries to use `value` (a field of the type), it must fail
+        // with "undefined variable".
         let (_env, res) = parse_eval_into_env(
             "type C {\n\
                  value: Int = 0\n\
@@ -21370,8 +21488,8 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn st_static_method_invocado_sobre_instancia_es_error() {
-        // `instance.static_method()` debe fallar con mensaje claro
-        // sugiriendo la forma correcta.
+        // `instance.static_method()` must fail with a clear message
+        // suggesting the correct form.
         let (_env, res) = parse_eval_into_env(
             "type C {\n\
                  value: Int = 0\n\
@@ -21391,7 +21509,7 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn st_instance_method_invocado_como_static_es_error() {
-        // `Type.instance_method()` debe fallar.
+        // `Type.instance_method()` must fail.
         let (_env, res) = parse_eval_into_env(
             "type C {\n\
                  value: Int = 0\n\
@@ -21410,8 +21528,8 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn method_param_shadowea_field_homonimo() {
-        // R.3 — si un param tiene el mismo nombre que un field, el
-        // param gana adentro del body (documentado como caveat).
+        // R.3 — if a param has the same name as a field, the
+        // param wins inside the body (documented as caveat).
         let (env, res) = parse_eval_into_env(
             "type U {\n\
                  name: Str\n\
@@ -21453,7 +21571,7 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn method_multiples_arms_de_dispatch() {
-        // Múltiples métodos sobre el mismo type, despachados por nombre.
+        // Multiple methods on the same type, dispatched by name.
         let (env, res) = parse_eval_into_env(
             "type C {\n\
                  a: Int\n\
@@ -21476,8 +21594,8 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn method_chain_devuelve_instancia_ok() {
-        // Un método devuelve un nuevo Instance; encadenamos otro
-        // método sobre el resultado.
+        // A method returns a new Instance; we chain another
+        // method on the result.
         let (env, res) = parse_eval_into_env(
             "type P {\n\
                  x: Int\n\
@@ -21537,7 +21655,7 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn index_list_negativo_wrappea_al_final() {
-        // I.1 (mini-tanda I): `[1, 2][-1]` ahora wrap a `[1, 2][1]` = 2.
+        // I.1 (mini-batch I): `[1, 2][-1]` now wraps to `[1, 2][1]` = 2.
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::List(
                 vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
@@ -21670,7 +21788,7 @@ for x in [1, 2, 3, 4] {
 
     #[tokio::test(flavor = "current_thread")]
     async fn for_sobre_range_itera_inclusivo_exclusivo() {
-        // 0..3 → 0 + 1 + 2 = 3 (la cota superior es exclusiva)
+        // 0..3 → 0 + 1 + 2 = 3 (upper bound is exclusive)
         let src = r#"
 total = 0
 for i in 0..3 {
@@ -21697,7 +21815,7 @@ for x in [] {
 
     #[tokio::test(flavor = "current_thread")]
     async fn for_con_break_corta_iteracion() {
-        // Corta cuando i == 3 → last queda en 2.
+        // Cuts when i == 3 → last stays at 2.
         let src = r#"
 last = 0
 for i in 0..10 {
@@ -21731,7 +21849,7 @@ for i in 0..5 {
 
     #[tokio::test(flavor = "current_thread")]
     async fn for_sobre_map_destructura_pares_kv() {
-        // Mini-tanda Md — `for (k, v) in m` bindea k y v en cada iteración.
+        // Mini-batch Md — `for (k, v) in m` binds k and v on each iteration.
         let src = r#"
 let m = {"a": 1, "b": 2}
 for (k, v) in m {
@@ -21747,7 +21865,7 @@ for (k, v) in m {
 
     #[tokio::test(flavor = "current_thread")]
     async fn for_sobre_map_con_ident_bindea_como_tuple() {
-        // `for kv in m` bindea kv como Value::Tuple([k, v]) en cada iter.
+        // `for kv in m` binds kv as Value::Tuple([k, v]) on each iter.
         let src = r#"
 let m = {"a": 1}
 for kv in m {
@@ -21773,7 +21891,7 @@ for x in 42 {
         assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
     }
 
-    // ---- Mini-tanda It — iteradores enumerate/zip/chain ----
+    // ---- Mini-batch It — iterators enumerate/zip/chain ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_enumerate_emite_pares_indice_elem() {
@@ -21814,7 +21932,7 @@ let first_y = zs[0].1
         assert_eq!(env.lock().get("first_y"), Some(Value::Str("a".into())));
     }
 
-    // ---- Mini-tanda Bits — operadores bit-a-bit ----
+    // ---- Mini-batch Bits — bitwise operators ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn bits_and_or_xor_sobre_int() {
@@ -21837,7 +21955,7 @@ let first_y = zs[0].1
 
     #[tokio::test(flavor = "current_thread")]
     async fn bits_not_unario_invierte_int() {
-        // ~0 = -1 (todos los bits encendidos en i64 con signo).
+        // ~0 = -1 (all bits set in signed i64).
         let src = "let r: Int = ~0\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -21870,7 +21988,7 @@ let first_y = zs[0].1
         assert_eq!(env.lock().get("r"), Some(Value::Int(0b1110)));
     }
 
-    // ---- Mini-tanda Cmp — ops compuestos bit-a-bit ----
+    // ---- Mini-batch Cmp — compound bitwise ops ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn cmp_and_eq_compuesto() {
@@ -21905,12 +22023,12 @@ let first_y = zs[0].1
         assert!(res.is_err());
     }
 
-    // ---- Mini-tanda Err+ — `?` fuera de fn + Err con tipos no-Str ----
+    // ---- Mini-batch Err+ — `?` outside fn + Err with non-Str types ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn err_plus_try_en_top_level_con_err_str_da_mensaje_especifico() {
-        // `?` en top-level con Err debe mostrar mensaje claro
-        // (no el genérico "return fuera de función").
+        // `?` at top-level with Err must show a clear message
+        // (not the generic "return outside function").
         let src = "fn fail() -> Result<Int> { return Err(\"boom\") }\nlet r: Int = fail()?\n";
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
@@ -21935,10 +22053,10 @@ let first_y = zs[0].1
 
     #[tokio::test(flavor = "current_thread")]
     async fn err_plus_match_desempaca_err_con_tipo_custom() {
-        // Sumar caveats: el `e` del `Err(e)` matchea como Any (gradual),
-        // así que acceder a fields requiere conocer el shape. Uso de
-        // `match` como expresión en el RHS de un let para evitar
-        // assignments en arm bodies.
+        // Add caveats: the `e` of `Err(e)` matches as Any (gradual),
+        // so accessing fields requires knowing the shape. Using
+        // `match` as an expression on the RHS of a let to avoid
+        // assignments in arm bodies.
         let src = "\
             type ApiError { status: Int }\n\
             fn fetch() -> Result<Int> { return Err(ApiError { status: 503 }) }\n\
@@ -21954,9 +22072,9 @@ let first_y = zs[0].1
 
     #[tokio::test(flavor = "current_thread")]
     async fn err_plus_err_int_se_preserva_en_value_no_se_convierte_a_str() {
-        // El Err(Int) sigue siendo Int en el value, no se string-ifica
-        // (a diferencia del codegen que sí lo coerce a Str para
-        // compatibilidad con Result<T, String>).
+        // The Err(Int) remains Int in the value, not stringified
+        // (unlike codegen which does coerce it to Str for
+        // compatibility with Result<T, String>).
         let src = "\
             fn op() -> Result<Int> { return Err(42) }\n\
             let r: Int = match op() {\n\
@@ -21971,7 +22089,7 @@ let first_y = zs[0].1
 
     #[tokio::test(flavor = "current_thread")]
     async fn bits_combinado_con_hex_literales_de_lit() {
-        // Encaja con Lit: mask + shift sobre literales hex.
+        // Fits with Lit: mask + shift on hex literals.
         let src = "let mask: Int = 0xFF\nlet byte: Int = (0xABCD >> 8) & mask\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -21996,9 +22114,9 @@ let last = result[4]
 
     #[tokio::test(flavor = "current_thread")]
     async fn for_loop_var_persiste_despues_del_loop() {
-        // Consistente con la política de bloques de Fitz: las variables
-        // del body (incluida la variable de iteración) persisten en el
-        // scope contenedor. Tras 0..3, i = 2 e last = 2.
+        // Consistent with Fitz's block policy: variables of the
+        // body (including the iteration variable) persist in the
+        // containing scope. After 0..3, i = 2 and last = 2.
         let src = r#"
 for i in 0..3 {
     last = i
@@ -22012,7 +22130,7 @@ for i in 0..3 {
 
     #[tokio::test(flavor = "current_thread")]
     async fn for_anidado_funciona() {
-        // 3 * 3 = 9 iteraciones totales.
+        // 3 * 3 = 9 total iterations.
         let src = r#"
 total = 0
 for i in 0..3 {
@@ -22058,7 +22176,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pattern_range_es_exclusivo_en_el_fin() {
-        // n = 10 con patrón 0..10 NO matchea (exclusivo). El segundo arm sí.
+        // n = 10 with pattern 0..10 does NOT match (exclusive). The second arm does.
         let src = r#"
 let n = 10
 let r = match n {
@@ -22089,7 +22207,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn pattern_range_no_matchea_no_int() {
-        // 3.14 contra patrón 0..10 → no matchea, cae a wildcard.
+        // 3.14 against pattern 0..10 → no match, falls to wildcard.
         let src = r#"
 let n = 3.14
 let r = match n {
@@ -22130,7 +22248,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn len_de_string_cuenta_chars_no_bytes() {
-        // "ñandú" tiene 5 chars y más de 5 bytes en UTF-8.
+        // "ñandú" has 5 chars and more than 5 bytes in UTF-8.
         let src = r#"n = len("ñandú")"#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22147,7 +22265,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn len_de_range_al_reves_es_cero() {
-        // 10..0 — el evaluador trata rangos invertidos como vacíos.
+        // 10..0 — the evaluator treats reversed ranges as empty.
         let src = "n = len(10..0)";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22171,11 +22289,11 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Tipos custom instanciables (Fase 3, paso 2)
+    // Tests — Instantiable custom types (Phase 3, step 2)
     //
-    // El evaluador resuelve `User { id: 1, name: "x" }` contra el `type`
-    // declarado, aplica defaults y nullables, valida campos faltantes y
-    // extras, y permite `obj.campo` sobre la instancia resultante.
+    // The evaluator resolves `User { id: 1, name: "x" }` against the declared
+    // `type`, applies defaults and nullables, validates missing and
+    // extra fields, and allows `obj.field` on the resulting instance.
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
@@ -22201,8 +22319,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn struct_literal_ordena_campos_segun_la_declaracion() {
-        // El literal tipea los campos al revés; la instancia debe seguir
-        // el orden del `type`.
+        // The literal lists the fields in reverse; the instance must follow
+        // the order of the `type`.
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { name: \"Fitz\", id: 1 }\n\
@@ -22241,9 +22359,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn struct_literal_default_se_evalua_en_el_env_de_instanciacion() {
-        // El default es una expresión: se evalúa al instanciar, en el
-        // scope donde ocurre el literal. Si el usuario define una var
-        // con ese nombre, el default la ve.
+        // The default is an expression: it is evaluated on instantiation, in the
+        // scope where the literal occurs. If the user defines a var
+        // with that name, the default sees it.
         let src = "\
             type Cfg { port: Int = base + 1 }\n\
             let base = 4000\n\
@@ -22336,7 +22454,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn struct_literal_sobre_no_tipo_es_type_error() {
-        // `x` es Int, no un Type — instanciarlo es error.
+        // `x` is Int, not a Type — instantiating it is an error.
         let src = "\
             let x = 42\n\
             let u = x { id: 1 }\n\
@@ -22377,10 +22495,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn field_access_sobre_no_instance_es_type_error() {
-        // Field access "pelado" sobre un Int explota: no hay propiedades
-        // sobre primitivos. Los métodos sí (`x.upper()` para Str, etc.),
-        // pero ese camino va por `Expr::Call` con callee `Field`, no por
-        // este branch.
+        // "Bare" field access on an Int blows up: there are no properties
+        // on primitives. Methods do (`x.upper()` for Str, etc.),
+        // but that path goes through `Expr::Call` with callee `Field`, not through
+        // this branch.
         let src = "\
             let x = 42\n\
             let n = x.foo\n\
@@ -22404,8 +22522,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn instance_se_imprime_con_display_esperado() {
-        // Sanity: el print de una instancia muestra el formato canónico.
-        // (No capturamos stdout — usamos `to_string` del Value retornado.)
+        // Sanity: printing an instance shows the canonical format.
+        // (We do not capture stdout — we use `to_string` of the returned Value.)
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { id: 1, name: \"Fitz\" }\n\
@@ -22417,10 +22535,10 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Result + Ok/Err + ? (Fase 3, paso 3)
+    // Tests — Result + Ok/Err + ? (Phase 3, step 3)
     //
-    // Estos tests construyen el AST a mano para evitar depender del parser,
-    // que recibe el soporte para `Ok`/`Err`/`?` en este mismo paso.
+    // These tests build the AST by hand to avoid depending on the parser,
+    // which receives support for `Ok`/`Err`/`?` in this same step.
     // -----------------------------------------------------------------------
 
     fn ok_value(v: Value) -> Value {
@@ -22465,9 +22583,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn try_sobre_ok_desempaqueta() {
-        // Ok(7)? evaluado adentro de una función debería ser 7.
-        // Lo testeamos directamente: como no hay return contenedor, el `?`
-        // sobre Ok no emite ningún signal y la expresión vale 7.
+        // Ok(7)? evaluated inside a function should be 7.
+        // We test it directly: since there is no containing return, the `?`
+        // on Ok emits no signal and the expression evaluates to 7.
         let e = Expr::Try(
             Box::new(Expr::Ok(Box::new(Expr::Int(7, Span::ZERO)), Span::ZERO)),
             Span::ZERO,
@@ -22499,7 +22617,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn try_sobre_no_result_es_type_error() {
-        // 42? → error: el operador `?` requiere un Result, no Int.
+        // 42? → error: the `?` operator requires a Result, not Int.
         let e = Expr::Try(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         let env = Environment::new();
         match eval_expr(&e, env).await {
@@ -22517,11 +22635,11 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn try_adentro_de_funcion_con_ok_devuelve_inner() {
-        // fn pass() { return Ok(5)? }  → pass() == 5  (porque return de un
-        // valor "pelado" de Int sale como Int, no como Result).
+        // fn pass() { return Ok(5)? }  → pass() == 5  (because returning a
+        // "bare" Int value comes out as Int, not as Result).
         //
-        // Acá lo que probamos es que `Ok(5)?` desempaqueta a 5 sin emitir
-        // signal de retorno. La función devuelve ese 5 vía su return propio.
+        // Here we test that `Ok(5)?` unwraps to 5 without emitting
+        // a return signal. The function returns that 5 via its own return.
         let env = Environment::new();
         let body = vec![Stmt::Return(
             Expr::Try(
@@ -22545,7 +22663,7 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn try_adentro_de_funcion_con_err_propaga() {
         // fn boom() { let _ = Err("nope")? ; return Ok("nunca llega") }
-        // boom() devuelve Value::Result(Err("nope")) sin ejecutar el return.
+        // boom() returns Value::Result(Err("nope")) without executing the return.
         let env = Environment::new();
         let body = vec![
             Stmt::Assign {
@@ -22585,8 +22703,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn programa_e2e_find_user_con_result_y_try() {
-        // Programa similar al criterio de éxito de Fase 3:
-        // un find_user manual que devuelve Result, con `?` y `match`.
+        // Program similar to the Phase 3 success criterion:
+        // a manual find_user that returns Result, with `?` and `match`.
         let src = "\
             type User { id: Int, name: Str }\n\
             \n\
@@ -22647,8 +22765,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn try_top_level_con_err_genera_error_de_return_huerfano() {
-        // En top-level, `Err(...)?` emite Return; el evaluador global lo
-        // convierte en "return solo puede usarse adentro de una función".
+        // At top-level, `Err(...)?` emits Return; the global evaluator
+        // converts it into "return can only be used inside a function".
         let env = Environment::new();
         let stmt = Stmt::Expr(
             Expr::Try(
@@ -22658,18 +22776,18 @@ let r = match n {
             Span::ZERO,
         );
         match eval_stmt(&stmt, env.clone()).await {
-            Err(EvalSignal::Return(_)) => {} // ok — el global lo traduciría.
+            Err(EvalSignal::Return(_)) => {} // ok — the global would translate it.
             other => panic!("se esperaba EvalSignal::Return, se obtuvo {:?}", other),
         }
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Fase 3, paso 4 (fn anónimas, method calls, mutación de campos)
+    // Tests — Phase 3, step 4 (anonymous fns, method calls, field mutation)
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn fn_expr_evalua_a_function() {
-        // `fn(x) => x * 2` — evaluada sola, da un `Value::Function`.
+        // `fn(x) => x * 2` — evaluated alone, gives a `Value::Function`.
         let fnexpr = Expr::FnExpr {
             params: vec![crate::ast::Param {
                 name: "x".into(),
@@ -22706,7 +22824,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fn_expr_captura_el_env_actual() {
-        // El cuerpo de la anónima ve `n` definido afuera (closure).
+        // The anonymous body sees `n` defined outside (closure).
         let src = "\
             let n = 10\n\
             let f = fn(x) => x + n\n\
@@ -22719,8 +22837,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fn_expr_se_pasa_como_argumento() {
-        // Pasar fn anónima como callback a una función de orden superior
-        // declarada por el usuario.
+        // Pass anonymous fn as callback to a higher-order function
+        // declared by the user.
         let src = "\
             fn apply(f, x) => f(x)\n\
             let r = apply(fn(n) => n * n, 6)\n\
@@ -22732,8 +22850,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn field_assign_muta_la_instancia() {
-        // `user.name = "Otro"` cambia el campo, visible a través de
-        // cualquier alias.
+        // `user.name = "Otro"` changes the field, visible through
+        // any alias.
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { id: 1, name: \"Fitz\" }\n\
@@ -22753,8 +22871,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn field_assign_visible_a_traves_de_alias() {
-        // Dos variables apuntan a la misma instancia (vía `Rc`); mutar
-        // por una se ve por la otra.
+        // Two variables point to the same instance (via `Rc`); mutating
+        // through one is seen through the other.
         let src = "\
             type Box { value: Int }\n\
             let a = Box { value: 1 }\n\
@@ -22775,7 +22893,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn field_assign_a_no_instance_es_error() {
-        // `x.field = ...` sobre algo que no es Instance corta con type error.
+        // `x.field = ...` on something that is not Instance cuts with type error.
         let src = "\
             let x = 10\n\
             x.field = 1\n\
@@ -22798,8 +22916,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn method_call_sobre_tipo_sin_metodo_emite_error_explicito() {
-        // `xs.foo()` no existe — el dispatch corta con
-        // "no tiene un método llamado foo".
+        // `xs.foo()` does not exist — the dispatch cuts with
+        // "has no method called foo".
         let src = "\
             let xs = [1, 2, 3]\n\
             xs.foo()\n\
@@ -22809,7 +22927,7 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — built-ins de List
+    // Tests — built-ins of List
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
@@ -22835,7 +22953,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_push_visible_a_traves_de_alias() {
-        // Dos variables al mismo Rc; mutar por una se ve por la otra.
+        // Two variables to the same Rc; mutating through one is seen through the other.
         let src = "\
             let a = [1]\n\
             let b = a\n\
@@ -22946,7 +23064,7 @@ let r = match n {
         let src = "let r = {\"a\": 1}.get(\"nope\")\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        // El mensaje del Err lleva la clave.
+        // The Err message carries the key.
         let r = env.lock().get("r").unwrap();
         match r {
             Value::Result(ResultVariant::Err(inner)) => match *inner {
@@ -23004,7 +23122,7 @@ let r = match n {
         assert_eq!(env.lock().get("n"), Some(Value::Int(4)));
     }
 
-    // ---- Mini-tanda Bytes ----
+    // ---- Mini-batch Bytes ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn bytes_literal_se_evalua_a_value_bytes() {
@@ -23072,7 +23190,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn bytes_builtin_len_global_funciona() {
-        // `len(b"...")` global también funciona.
+        // global `len(b"...")` also works.
         let (env, res) = parse_eval_into_env("let n = len(b\"abcde\")").await;
         res.unwrap();
         assert_eq!(env.lock().get("n"), Some(Value::Int(5)));
@@ -23178,7 +23296,7 @@ let r = match n {
         assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
     }
 
-    // ---- Mini-tanda Mb: trim_start / trim_end ----
+    // ---- Mini-batch Mb: trim_start / trim_end ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb_str_trim_start_recorta_solo_inicio() {
@@ -23204,7 +23322,7 @@ let r = match n {
         assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
     }
 
-    // ---- Mini-tanda Mb: List.flatten ----
+    // ---- Mini-batch Mb: List.flatten ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb_list_flatten_concatena_sublistas_en_orden() {
@@ -23250,7 +23368,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda Mb: List.sort_by con callback ----
+    // ---- Mini-batch Mb: List.sort_by with callback ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb_list_sort_by_ascendente() {
@@ -23306,7 +23424,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda Ir — iteradores sobre Range ----
+    // ---- Mini-batch Ir — iteradores sobre Range ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn ir_range_enumerate_devuelve_pares_indice_valor() {
@@ -23316,7 +23434,7 @@ let r = match n {
         if let Value::List(items) = v {
             let g = items.lock();
             assert_eq!(g.len(), 3);
-            // Cada elemento es Tuple([Int, Int]) con (i, n).
+            // Each element is Tuple([Int, Int]) with (i, n).
             for (idx, item) in g.iter().enumerate() {
                 if let Value::Tuple(t) = item {
                     assert_eq!(t.len(), 2);
@@ -23382,7 +23500,7 @@ let r = match n {
         assert_eq!(env.lock().get("b"), Some(Value::Int(11)));
     }
 
-    // ---- Mini-tanda Up: Map.update + comprehension tuple destructuring ----
+    // ---- Mini-batch Up: Map.update + comprehension tuple destructuring ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn up_map_update_key_existente() {
@@ -23448,7 +23566,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda Ex2: List.flat_map/first/last + Map.merge ----
+    // ---- Mini-batch Ex2: List.flat_map/first/last + Map.merge ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn ex2_list_flat_map_concatena_callback_lists() {
@@ -23532,7 +23650,7 @@ let r = match n {
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
             assert_eq!(g.len(), 3);
-            // b debe ser 20 (m2 gana).
+            // b must be 20 (m2 wins).
             let b_value = g.iter().find(|(k, _)| k == &Value::Str("b".into()));
             assert_eq!(b_value.map(|(_, v)| v.clone()), Some(Value::Int(20)));
         } else {
@@ -23569,7 +23687,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda Ex: Str.find/index_of/last_index_of, Map.filter/map_values ----
+    // ---- Mini-batch Ex: Str.find/index_of/last_index_of, Map.filter/map_values ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn ex_str_find_devuelve_result_int() {
@@ -23607,10 +23725,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ex_str_find_con_chars_no_ascii_devuelve_char_index() {
-        // "café" tiene 4 chars (c, a, f, é) pero `é` ocupa 2 bytes
-        // en UTF-8. `find` debe devolver char index (3 para "é"),
-        // no byte index (3 también casualmente — usemos un char no-ASCII
-        // adelante para forzar la diferencia).
+        // "café" has 4 chars (c, a, f, é) but `é` takes 2 bytes
+        // in UTF-8. `find` must return the char index (3 for "é"),
+        // not the byte index (3 too coincidentally — let's use a non-ASCII char
+        // earlier to force the difference).
         let (env, res) = parse_eval_into_env(
             "let s: Str = \"café latte\"\n\
              let a = s.find(\"latte\")",
@@ -23654,7 +23772,7 @@ let r = match n {
         if let Value::Map(pairs) = doubled {
             let pairs = pairs.lock().clone();
             assert_eq!(pairs.len(), 3);
-            // Verificamos un par a modo de sample.
+            // We verify a pair as a sample.
             let a_value = pairs.iter().find(|(k, _)| k == &Value::Str("a".into()));
             assert_eq!(a_value.map(|(_, v)| v.clone()), Some(Value::Int(2)));
         } else {
@@ -23662,7 +23780,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda Lx: any/all/count/find_index ----
+    // ---- Mini-batch Lx: any/all/count/find_index ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn lx_any_y_all_corto_circuito() {
@@ -23690,8 +23808,8 @@ let r = match n {
         )
         .await;
         res.unwrap();
-        // Lista vacía: any → false, all → true (vacuamente todo es
-        // verdad, paralelo a Python/Rust).
+        // Empty list: any → false, all → true (vacuously everything is
+        // true, parallel to Python/Rust).
         assert_eq!(env.lock().get("a"), Some(Value::Bool(false)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(true)));
     }
@@ -23718,7 +23836,7 @@ let r = match n {
         res.unwrap();
         let a = env.lock().get("a").unwrap();
         let b = env.lock().get("b").unwrap();
-        // Ok(2) — el índice es 0-based.
+        // Ok(2) — the index is 0-based.
         assert!(matches!(a, Value::Result(ResultVariant::Ok(_))));
         if let Value::Result(ResultVariant::Ok(inner)) = a {
             assert_eq!(*inner, Value::Int(2));
@@ -23890,7 +24008,7 @@ let r = match n {
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
     }
 
-    // ---- I.1: índices negativos (mini-tanda I) ----
+    // ---- I.1: negative indices (mini-batch I) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_negative_index_devuelve_desde_el_final() {
@@ -24028,7 +24146,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_slice_devuelve_copia_no_view() {
-        // Mutar el slice NO afecta el original.
+        // Mutating the slice does NOT affect the original.
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3, 4, 5]\n\
              let mid = xs[1..4]\n\
@@ -24062,7 +24180,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_empty_methods_no_panic() {
-        // Lista vacía: sort/reverse no-op, contains false.
+        // Empty list: sort/reverse no-op, contains false.
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              xs.sort()\n\
@@ -24082,15 +24200,15 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — encadenamiento y composición
+    // Tests — chaining and composition
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn metodos_se_encadenan() {
-        // `.map(...).filter(...)` se encadena vía postfix. El parser corta
-        // sentencias en el newline; el encadenamiento multi-línea con `.`
-        // al inicio de la línea siguiente todavía no se soporta (deuda
-        // explícita). Se mantiene la cadena en una sola línea.
+        // `.map(...).filter(...)` chains via postfix. The parser cuts
+        // statements at newline; multi-line chaining with `.`
+        // at the start of the next line is not supported yet (explicit
+        // debt). We keep the chain on a single line.
         let src = "let r = [1, 2, 3, 4].map(fn(n) => n * n).filter(fn(n) => n > 5)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -24101,16 +24219,16 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Test E2E — criterio de éxito de Fase 3
+    // E2E test — Phase 3 success criterion
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn programa_e2e_criterio_de_exito_fase_3() {
-        // `users.find(fn(u) => u.id == id)` — usa method call, fn anónima,
-        // Result, struct literal y field access. `find` ya devuelve
-        // `Result<User>` así que `find_user` lo retorna directo. (Usar
-        // `return` adentro de un `match` como expresión es deuda; el
-        // caso de uso natural acá no lo necesita.)
+        // `users.find(fn(u) => u.id == id)` — uses method call, anonymous fn,
+        // Result, struct literal and field access. `find` already returns
+        // `Result<User>` so `find_user` returns it directly. (Using
+        // `return` inside a `match` as expression is debt; the
+        // natural use case here does not need it.)
         let src = "\
             type User { id: Int, name: Str }\n\
             \n\
@@ -24129,7 +24247,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
 
-        // hit es Ok(User { id: 1, name: "Fitz" })
+        // hit is Ok(User { id: 1, name: "Fitz" })
         let hit = env.lock().get("hit").unwrap();
         match hit {
             Value::Result(ResultVariant::Ok(inner)) => match *inner {
@@ -24147,19 +24265,19 @@ let r = match n {
             other => panic!("se esperaba Ok, se obtuvo {:?}", other),
         }
 
-        // miss es Err("no encontrado") — el mensaje viene de list_find.
+        // miss is Err("no encontrado") — the message comes from list_find.
         let miss = env.lock().get("miss").unwrap();
         assert_eq!(miss, err_value(Value::Str("no encontrado".into())));
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Módulos / import (Fase 3, paso 5)
+    // Tests — Modules / import (Phase 3, step 5)
     // -----------------------------------------------------------------------
 
-    /// Helper: monta `files` (path relativo → contenido) en un tempdir,
-    /// evalúa `main_src` con `base_dir` apuntando a ese tempdir, y
-    /// devuelve `(env, resultado)`. El tempdir vive lo suficiente para
-    /// que el loader pueda leer los archivos; se libera al final.
+    /// Helper: mounts `files` (relative path → content) in a tempdir,
+    /// evaluates `main_src` with `base_dir` pointing to that tempdir, and
+    /// returns `(env, result)`. The tempdir lives long enough for
+    /// the loader to read the files; it is released at the end.
     async fn eval_with_modules(files: &[(&str, &str)], main_src: &str) -> (EnvRef, FitzResult<()>) {
         let dir = tempfile::tempdir().expect("creando tempdir");
         for (rel_path, content) in files {
@@ -24177,7 +24295,7 @@ let r = match n {
             dir.path().to_path_buf(),
             crate::manifest::DepRegistry::new(),
         );
-        // Guard local: garantizamos uninstall aun ante panic en eval.
+        // Local guard: we guarantee uninstall even on eval panic.
         let _guard = LoaderGuard;
 
         let env = Environment::new();
@@ -24189,17 +24307,17 @@ let r = match n {
                 break;
             }
         }
-        // Cerramos el tempdir explícitamente para que se borre antes de
-        // que el helper retorne. Los `Value` ya están en memoria (env
-        // contiene clones); no dependen del fs.
+        // We close the tempdir explicitly so it gets deleted before
+        // the helper returns. The `Value`s are already in memory (env
+        // contains clones); they don't depend on the fs.
         drop(dir);
         (env, result)
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn import_simple_expone_el_modulo_como_namespace() {
-        // `import utils` + `utils.greet("Fitz")` — el módulo exporta
-        // una fn que devuelve un Str interpolado.
+        // `import utils` + `utils.greet("Fitz")` — the module exports
+        // a fn that returns an interpolated Str.
         let utils = "fn greet(name) => \"hola, {name}\"\n";
         let main = "\
             import utils\n\
@@ -24212,8 +24330,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn import_bindea_bajo_el_ultimo_segmento() {
-        // `import sub.foo` → binding `foo` (no `sub.foo`). El path
-        // resuelve a `sub/foo.fitz`.
+        // `import sub.foo` → binding `foo` (not `sub.foo`). The path
+        // resolves to `sub/foo.fitz`.
         let foo = "fn one() => 1\n";
         let main = "\
             import sub.foo\n\
@@ -24222,14 +24340,14 @@ let r = match n {
         let (env, res) = eval_with_modules(&[("sub/foo.fitz", foo)], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(1)));
-        // `sub` NO se bindea — solo el último segmento.
+        // `sub` is NOT bound — only the last segment.
         assert!(env.lock().get("sub").is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn from_import_bindea_nombres_directos() {
-        // `from utils import greet, NAME` trae `greet` y `NAME` al
-        // scope actual, sin exponer el módulo.
+        // `from utils import greet, NAME` brings `greet` and `NAME` into
+        // the current scope, without exposing the module.
         let utils = "\
             let NAME = \"Fitz\"\n\
             fn greet(n) => \"hola, {n}\"\n\
@@ -24241,15 +24359,15 @@ let r = match n {
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("g"), Some(Value::Str("hola, Fitz".into())));
-        // `utils` NO se bindea cuando se usa `from import`.
+        // `utils` is NOT bound when using `from import`.
         assert!(env.lock().get("utils").is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn from_import_de_tipo_permite_struct_literal() {
-        // `from foo import User` + `User { id: 1, name: "x" }` — el
-        // parser de struct literal espera `Ident { ... }`, y `from
-        // import` trae el Value::Type al scope con ese nombre.
+        // `from foo import User` + `User { id: 1, name: "x" }` — the
+        // struct literal parser expects `Ident { ... }`, and `from
+        // import` brings the Value::Type into the scope with that name.
         let foo = "type User { id: Int, name: Str }\n";
         let main = "\
             from foo import User\n\
@@ -24263,12 +24381,12 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn from_import_default_referencia_const_del_modulo() {
-        // PreF8.3: el `type User` del módulo tiene defaults que
-        // referencian consts del propio módulo (`MAX`, `HELLO`). El
-        // importer no las trae al scope. El loader pre-evalúa los
-        // defaults en el env del módulo, así `User {}` aplica `99` y
-        // `"saludos"` transparentemente. Pre-fix daba
-        // "variable `MAX` no definida" en runtime.
+        // PreF8.3: the module's `type User` has defaults that
+        // reference consts of the module itself (`MAX`, `HELLO`). The
+        // importer does not bring them into scope. The loader pre-evaluates
+        // the defaults in the module's env, so `User {}` applies `99` and
+        // `"saludos"` transparently. Pre-fix gave
+        // "variable `MAX` not defined" at runtime.
         let foo = "\
             let MAX = 99\n\
             let HELLO = \"saludos\"\n\
@@ -24288,7 +24406,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn import_con_alias_bindea_bajo_alias() {
-        // PreF8.4: `import utils as u` → binding `u`, no `utils`.
+        // PreF8.4: `import utils as u` → binding `u`, not `utils`.
         let utils = "fn greet(n) => \"hola, {n}\"\n";
         let main = "\
             import utils as u\n\
@@ -24297,7 +24415,7 @@ let r = match n {
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("g"), Some(Value::Str("hola, Fitz".into())));
-        // El nombre original NO queda bindeado.
+        // The original name is NOT bound.
         assert!(env.lock().get("utils").is_none());
     }
 
@@ -24317,7 +24435,7 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("hola, Fitz".into())));
         assert_eq!(env.lock().get("p"), Some(Value::Str("saludos, ".into())));
-        // Los nombres originales NO quedan bindeados.
+        // Original names are NOT bound.
         assert!(env.lock().get("greet").is_none());
         assert!(env.lock().get("PREFIX").is_none());
     }
@@ -24325,9 +24443,9 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn from_import_alias_de_tipo_struct_lit_usa_alias_pero_display_nombre_original() {
         // PreF8.4: `from foo import User as Person` + `Person { ... }`.
-        // El struct lit usa el alias para mirar el binding, pero el
-        // Display de la instancia usa el nombre canónico del tipo
-        // (`User`) para mantener paridad con `fitz build`.
+        // The struct lit uses the alias to look up the binding, but the
+        // Display of the instance uses the canonical type name
+        // (`User`) to keep parity with `fitz build`.
         let foo = "type User { id: Int, name: Str }\n";
         let main = "\
             from foo import User as Person\n\
@@ -24344,8 +24462,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn from_import_default_se_puede_sobrescribir_con_struct_lit() {
-        // Aunque el módulo defina defaults, el importer puede
-        // sobrescribirlos al construir.
+        // Even if the module defines defaults, the importer can
+        // overwrite them at construction.
         let foo = "\
             let MAX = 99\n\
             type User { id: Int = MAX }\n\
@@ -24379,7 +24497,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn from_import_de_nombre_inexistente_da_error_claro() {
-        // El módulo carga, pero el nombre pedido no existe en él.
+        // The module loads, but the requested name does not exist in it.
         let utils = "fn a() => 1\n";
         let main = "from utils import b\n";
         let (_env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
@@ -24391,8 +24509,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn field_access_en_modulo_inexistente_da_error_claro() {
-        // `import utils` + `utils.missing` — el módulo carga pero
-        // no expone `missing`.
+        // `import utils` + `utils.missing` — the module loads but
+        // does not export `missing`.
         let utils = "fn a() => 1\n";
         let main = "\
             import utils\n\
@@ -24409,15 +24527,15 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn modulo_cargado_dos_veces_no_re_ejecuta_side_effects() {
-        // Cada vez que un módulo se evalúa, su body corre. Pero el
-        // cache hace que un segundo import del mismo archivo devuelva
-        // el mismo `Value::Module` sin re-ejecutar el body. Para
-        // medirlo, el módulo escribe en una lista compartida y
-        // contamos cuántas veces se incrementó.
+        // Each time a module is evaluated, its body runs. But the
+        // cache makes a second import of the same file return
+        // the same `Value::Module` without re-executing the body. To
+        // measure it, the module writes to a shared list and
+        // we count how many times it was incremented.
         //
-        // No usamos side effects de print porque no tenemos forma
-        // de capturar stdout en tests; en su lugar, comparamos
-        // identidad de un valor exportado.
+        // We do not use print side effects because we have no way
+        // to capture stdout in tests; instead, we compare
+        // identity of an exported value.
         let counter_mod = "let value = 42\n";
         let main = "\
             import counter_mod\n\
@@ -24427,24 +24545,24 @@ let r = match n {
         let (env, res) = eval_with_modules(&[("counter_mod.fitz", counter_mod)], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("v"), Some(Value::Int(42)));
-        // Como no podemos detectar re-ejecución desde el lado del
-        // lenguaje, validamos al menos que ambos `import` no rompan
-        // ni dupliquen estado: el binding `counter_mod` queda accesible
-        // y consistente.
+        // Since we cannot detect re-execution from the language
+        // side, we at least validate that both `import`s do not break
+        // nor duplicate state: the `counter_mod` binding remains accessible
+        // and consistent.
         let m = env.lock().get("counter_mod").unwrap();
         assert!(matches!(m, Value::Module { .. }));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn modulo_cacheado_devuelve_misma_identidad_de_env() {
-        // Cargar un módulo dos veces desde paths distintos pero al
-        // mismo archivo (acá igual path) devuelve `Value::Module` con
-        // el MISMO `Arc<Mutex<Environment>>` adentro. Eso lo testea
-        // el `PartialEq` de Module (por identidad del env).
+        // Loading a module twice from different paths but to
+        // the same file (here same path) returns `Value::Module` with
+        // the SAME `Arc<Mutex<Environment>>` inside. That is tested by
+        // Module's `PartialEq` (by env identity).
         //
-        // En este test, dos `from utils import x` (que requieren cargar
-        // utils) deberían producir el mismo cache; verificamos
-        // accediendo dos veces a un binding "alias" del módulo.
+        // In this test, two `from utils import x` (which require loading
+        // utils) should produce the same cache; we verify by
+        // accessing twice an "alias" binding of the module.
         let utils = "let x = 7\n";
         let main = "\
             import utils\n\
@@ -24464,9 +24582,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ciclo_a_b_a_se_detecta() {
-        // a.fitz importa b.fitz que importa a.fitz. Mientras se
-        // evalúa a (todavía sin terminar), b intenta importar a y el
-        // loader detecta el ciclo.
+        // a.fitz imports b.fitz which imports a.fitz. While
+        // a is being evaluated (still unfinished), b tries to import a and the
+        // loader detects the cycle.
         let a = "\
             import b\n\
             let from_a = 1\n\
@@ -24487,10 +24605,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn import_anidado_resuelve_relativo_al_modulo_importer() {
-        // `main` importa `sub.foo`, y `sub/foo.fitz` importa `bar`,
-        // que tiene que resolverse como `sub/bar.fitz` (relativo a
-        // `foo`, no a main). Esto verifica el swap de `base_dir`
-        // durante la carga del módulo.
+        // `main` imports `sub.foo`, and `sub/foo.fitz` imports `bar`,
+        // which has to resolve as `sub/bar.fitz` (relative to
+        // `foo`, not to main). This verifies the `base_dir` swap
+        // during module load.
         let foo = "\
             import bar\n\
             fn outer() => bar.inner()\n\
@@ -24508,11 +24626,11 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn loader_absoluto_data_sibling_import_resuelve_via_import_root() {
-        // Mini-fase loader-absoluto (Paso 4 post-boilerplates) — caso
-        // canónico: `data/users.fitz` hace `from types.user import User`.
-        // Antes el loader buscaba `<base_dir>/types/user.fitz` con
-        // base_dir = data/ → fail. Ahora, si la búsqueda relativa falla,
-        // intenta también el `import_root` (entry file's dir).
+        // Loader-absolute mini-phase (Step 4 post-boilerplates) — canonical
+        // case: `data/users.fitz` does `from types.user import User`.
+        // Before, the loader searched `<base_dir>/types/user.fitz` with
+        // base_dir = data/ → fail. Now, if the relative search fails,
+        // it also tries the `import_root` (entry file's dir).
         let user = "type User { id: Int, name: Str }\n";
         let users_data = "\
             from types.user import User\n\
@@ -24528,9 +24646,9 @@ let r = match n {
         )
         .await;
         res.unwrap();
-        // Si el loader-absoluto funciona, `u` es una Instance de User
-        // con id=1 y name="ada". Sin el fix, el module load fallaría
-        // con "no se encontró el módulo `types.user`".
+        // If loader-absolute works, `u` is an Instance of User
+        // with id=1 and name="ada". Without the fix, the module load would fail
+        // with "module `types.user` not found".
         let u = env.lock().get("u").unwrap();
         match u {
             Value::Instance { type_name, fields } => {
@@ -24550,11 +24668,11 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn loader_absoluto_no_rompe_imports_relativos_legacy() {
-        // El fix loader-absoluto mantiene backward-compat: si la
-        // búsqueda relativa SÍ encuentra el archivo, gana sobre el
-        // fallback import_root. Test: `sub/foo.fitz` importa `bar`,
-        // existen DOS archivos `bar.fitz` (uno en sub/, otro en root).
-        // El de sub/ debe ganar (resolución relativa).
+        // The loader-absolute fix preserves backward-compat: if the
+        // relative search DOES find the file, it wins over the
+        // import_root fallback. Test: `sub/foo.fitz` imports `bar`,
+        // TWO files `bar.fitz` exist (one in sub/, another in root).
+        // The one in sub/ must win (relative resolution).
         let bar_root = "fn inner() => \"desde-root\"\n";
         let bar_sub = "fn inner() => \"desde-sub\"\n";
         let foo = "\
@@ -24575,14 +24693,14 @@ let r = match n {
         )
         .await;
         res.unwrap();
-        // Resolución relativa: sub/bar.fitz (mismo dir que foo) gana.
+        // Relative resolution: sub/bar.fitz (same dir as foo) wins.
         assert_eq!(env.lock().get("r"), Some(Value::Str("desde-sub".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn modulo_con_error_de_sintaxis_propaga_error() {
-        // Si el módulo importado tiene un parse error, debería
-        // propagarse al importer en lugar de pasar silenciosamente.
+        // If the imported module has a parse error, it should
+        // propagate to the importer rather than passing silently.
         let busted = "let x = +\n"; // syntax error
         let main = "import busted\n";
         let (_env, res) = eval_with_modules(&[("busted.fitz", busted)], main).await;
@@ -24591,19 +24709,19 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn modulo_con_error_de_runtime_propaga_error() {
-        // El módulo carga (parsea bien) pero su top-level body
-        // dispara un error al evaluar — debería propagarse.
+        // The module loads (parses fine) but its top-level body
+        // triggers an error on evaluation — it should propagate.
         let busted = "let x = no_existe\n";
         let main = "import busted\n";
         let (_env, res) = eval_with_modules(&[("busted.fitz", busted)], main).await;
         let err = res.unwrap_err();
-        // Esperamos UndefinedVariable de adentro del módulo.
+        // We expect UndefinedVariable from inside the module.
         assert!(matches!(err.kind, ErrorKind::UndefinedVariable(_)));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn method_call_sobre_modulo_invoca_funcion_exportada() {
-        // `utils.suma(2, 3)` debe resolver a `suma` adentro de utils.
+        // `utils.suma(2, 3)` must resolve to `suma` inside utils.
         let utils = "fn suma(a, b) => a + b\n";
         let main = "\
             import utils\n\
@@ -24616,13 +24734,13 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn funcion_importada_via_from_import_cierra_sobre_env_del_modulo() {
-        // `from utils import greet`, después `greet("x")` ejecuta el
-        // body de greet. Ese body usa una variable del módulo
-        // (`PREFIX`) — la captura por closure debe seguir viendo el
-        // env del módulo, no el del importer.
+        // `from utils import greet`, then `greet("x")` executes the
+        // body of greet. That body uses a module variable
+        // (`PREFIX`) — the closure capture must keep seeing the
+        // module env, not the importer's.
         //
-        // PREFIX NO está en el scope del importer; si la closure no
-        // capturó el env del módulo, esto rompería con UndefinedVariable.
+        // PREFIX is NOT in the importer's scope; if the closure did not
+        // capture the module env, this would break with UndefinedVariable.
         let utils = "\
             let PREFIX = \"saludos, \"\n\
             fn greet(name) => \"{PREFIX}{name}\"\n\
@@ -24640,17 +24758,17 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Fase 8.1.2: ruteo de `from python import X` al loader CPython
+    // Tests — Phase 8.1.2: routing of `from python import X` to the CPython loader
     // -----------------------------------------------------------------------
     //
-    // Estos tests verifican el comportamiento del evaluator. La lógica
-    // de import per se (resolver módulos Python, traducir excepciones)
-    // vive en `py_interop.rs` y tiene sus propios unit tests adentro.
-    // Acá solo chequeamos: bindings, alias, errores de path inválido,
-    // y el fallback sin feature.
+    // These tests verify the evaluator's behavior. The import logic
+    // per se (resolving Python modules, translating exceptions)
+    // lives in `py_interop.rs` and has its own unit tests inside.
+    // Here we only check: bindings, alias, invalid path errors,
+    // and the fallback without feature.
 
-    // Con feature `python`: el binario lincado a libpython carga
-    // módulos reales (math, json, etc.) y produce `Value::PyObject`.
+    // With feature `python`: the binary linked to libpython loads
+    // real modules (math, json, etc.) and produces `Value::PyObject`.
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn from_python_import_math_bindea_pyobject() {
@@ -24701,9 +24819,9 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn from_python_path_con_submodulos_no_se_soporta_en_8_1() {
-        // `from python.sqlalchemy.orm import Session` queda como deuda
-        // menor — para 8.1 hay que importar `sqlalchemy` y bajar con
-        // field access (8.1.3+). Mensaje debe ser claro citando 8.1.
+        // `from python.sqlalchemy.orm import Session` is left as minor
+        // debt — for 8.1 you have to import `sqlalchemy` and go down with
+        // field access (8.1.3+). Message must be clear citing 8.1.
         let (_env, res) = parse_eval_into_env("from python.sqlalchemy.orm import Session\n").await;
         let err = res.unwrap_err();
         assert!(
@@ -24716,8 +24834,8 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn import_python_punteado_no_se_soporta() {
-        // `import python.math` también queda fuera del scope de 8.1.
-        // Forma canónica: `from python import math`.
+        // `import python.math` also stays out of the 8.1 scope.
+        // Canonical form: `from python import math`.
         let (_env, res) = parse_eval_into_env("import python.math\n").await;
         let err = res.unwrap_err();
         assert!(
@@ -24727,8 +24845,8 @@ let r = match n {
         );
     }
 
-    // Sin feature `python`: el binario default produce error claro
-    // citando el flag de build para recompilar.
+    // Without feature `python`: the default binary produces a clear error
+    // citing the build flag to recompile.
     #[cfg(not(feature = "python"))]
     #[tokio::test(flavor = "current_thread")]
     async fn from_python_sin_feature_da_error_de_build() {
@@ -24742,7 +24860,7 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.1.3 — Expr::Field sobre Value::PyObject (getattr + auto-coerción)
+    // Phase 8.1.3 — Expr::Field over Value::PyObject (getattr + auto-coercion)
     // -------------------------------------------------------------------
 
     #[cfg(feature = "python")]
@@ -24750,8 +24868,8 @@ let r = match n {
     async fn field_access_math_pi_coerciona_a_float() {
         let (env, res) = parse_eval_into_env("from python import math\nlet p = math.pi\n").await;
         res.unwrap();
-        // Sacamos el binding fuera del lock para que el MutexGuard
-        // se libere antes de que `env` se dropee al fin del scope.
+        // We take the binding out of the lock so the MutexGuard
+        // is released before `env` is dropped at end of scope.
         let p = env.lock().get("p").unwrap();
         match p {
             Value::Float(f) => {
@@ -24764,8 +24882,8 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn field_access_funcion_python_queda_pyobject_opaco() {
-        // `math.sqrt` no se invoca, solo se lee. Debería quedar como
-        // PyObject opaco listo para call en 8.1.4.
+        // `math.sqrt` is not invoked, only read. It should remain as an
+        // opaque PyObject ready for call in 8.1.4.
         let (env, res) = parse_eval_into_env("from python import math\nlet f = math.sqrt\n").await;
         res.unwrap();
         assert!(matches!(env.lock().get("f"), Some(Value::PyObject(_))));
@@ -24785,12 +24903,12 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.1.4 — Expr::Call sobre Value::PyObject (criterio de éxito 8.1)
+    // Phase 8.1.4 — Expr::Call over Value::PyObject (success criterion 8.1)
     // -------------------------------------------------------------------
 
-    // 8.3: helper para tests Python — un `call` exitoso ahora devuelve
-    // `Value::Result(Ok(v))`. Para asserts mecánicos, desempaquetamos
-    // el Ok aquí. Si el binding tiene Err o no es Result, el test falla.
+    // 8.3: helper for Python tests — a successful `call` now returns
+    // `Value::Result(Ok(v))`. For mechanical asserts, we unwrap
+    // the Ok here. If the binding has Err or is not Result, the test fails.
     #[cfg(feature = "python")]
     fn ok_inner(v: Value) -> Value {
         match v {
@@ -24805,15 +24923,15 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_de_exito_8_1_math_sqrt_y_math_pi() {
-        // El criterio explícito del roadmap para cerrar Fase 8.1:
+        // The explicit roadmap criterion to close Phase 8.1:
         //   from python import math
         //   print(math.sqrt(16.0))   // 4
         //   print(math.pi)           // 3.141592653589793
         //
-        // 8.3: `math.sqrt(16.0)` ahora devuelve `Result<Float>`, así que
-        // el binding `r` es `Ok(4.0)` — el test desempaqueta con el
-        // helper. `math.pi` es field access (no llamada), sigue
-        // devolviendo Float directo.
+        // 8.3: `math.sqrt(16.0)` now returns `Result<Float>`, so
+        // the `r` binding is `Ok(4.0)` — the test unwraps with the
+        // helper. `math.pi` is field access (not a call), still
+        // returns Float directly.
         let src = "\
             from python import math\n\
             let r = math.sqrt(16.0)\n\
@@ -24835,11 +24953,11 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn call_via_method_dispatch_sobre_modulo_python() {
-        // `math.sqrt(16.0)` directo, sin pasar por let intermedio.
-        // El parser genera `Expr::Call { callee: Expr::Field {...} }`
-        // que cae al dispatch de método, que para PyObject hace
-        // getattr + invoke_value (rama nueva de 8.1.4).
-        // 8.3: el resultado viene envuelto en `Ok(Float)`.
+        // `math.sqrt(16.0)` directly, without going through an intermediate let.
+        // The parser generates `Expr::Call { callee: Expr::Field {...} }`
+        // which falls to method dispatch, which for PyObject does
+        // getattr + invoke_value (new branch of 8.1.4).
+        // 8.3: the result comes wrapped in `Ok(Float)`.
         let src = "let x = 4 + 5\nfrom python import math\nlet r = math.sqrt(x * x + 7 * 7)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -24856,10 +24974,10 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn call_via_pyobject_guardado_en_variable() {
-        // `let f = math.sqrt; f(25.0)` — el callable se extrae primero
-        // (field access) y se invoca via Ident. Esto pega en
-        // `invoke_value` directo, no en `dispatch_method`.
-        // 8.3: el call vía Ident también envuelve en Result.
+        // `let f = math.sqrt; f(25.0)` — the callable is first extracted
+        // (field access) and invoked via Ident. This hits
+        // `invoke_value` directly, not `dispatch_method`.
+        // 8.3: the call via Ident also wraps in Result.
         let src = "\
             from python import math\n\
             let f = math.sqrt\n\
@@ -24874,9 +24992,9 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn call_python_con_excepcion_se_envuelve_en_err() {
-        // 8.3: `math.sqrt(-1)` lanza ValueError en Python. El call NO
-        // aborta — devuelve `Result<Float>::Err("ValueError: ...")` que
-        // el usuario tiene que manejar con `match` o `?`.
+        // 8.3: `math.sqrt(-1)` raises ValueError in Python. The call does NOT
+        // abort — it returns `Result<Float>::Err("ValueError: ...")` which
+        // the user has to handle with `match` or `?`.
         let src = "from python import math\nlet r = math.sqrt(-1.0)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -24894,10 +25012,10 @@ let r = match n {
         }
     }
 
-    // 8.2.1: List ahora SÍ se marshalla. El test reapunta a `math.sqrt`
-    // recibiendo una `List<Int>` — Python lanza TypeError porque
-    // `sqrt` espera un número. 8.3: el TypeError llega como
-    // `Result::Err`, no como abort del programa.
+    // 8.2.1: List now IS marshalled. The test re-points to `math.sqrt`
+    // receiving a `List<Int>` — Python raises TypeError because
+    // `sqrt` expects a number. 8.3: TypeError arrives as
+    // `Result::Err`, not as a program abort.
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn call_python_con_list_como_arg_envuelve_typeerror_en_err() {
@@ -24926,7 +25044,7 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn call_python_arg_int_coerciona() {
-        // `abs(-7)` con arg Int Fitz → Int 7.
+        // `abs(-7)` with Fitz Int arg → Int 7.
         let src = "\
             from python import builtins\n\
             let v = builtins.abs(-7)\n\
@@ -24938,9 +25056,9 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.2.1 — Fitz → Python: List/Map/Instance se marshallan a
+    // Phase 8.2.1 — Fitz → Python: List/Map/Instance are marshalled to
     // list/dict/dict end-to-end via json.dumps.
-    // 8.3: cada call envuelve en Result, los asserts desempaquetan Ok.
+    // 8.3: each call wraps in Result, asserts unwrap Ok.
     // -------------------------------------------------------------------
 
     #[cfg(feature = "python")]
@@ -24974,7 +25092,7 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_instance_via_json_dumps() {
-        // Una Instance Fitz se marshalla a dict Python por field name.
+        // A Fitz Instance is marshalled to a Python dict by field name.
         let src = "\
             type User { id: Int, name: Str }\n\
             from python import json\n\
@@ -25016,7 +25134,7 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.2.2 — Python → Fitz: list/dict se coercionan a List/Map
+    // Phase 8.2.2 — Python → Fitz: list/dict are coerced to List/Map
     // end-to-end via json.loads.
     // -------------------------------------------------------------------
 
@@ -25039,10 +25157,10 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_json_loads_de_objeto_a_map() {
-        // En Fitz, `{` y `}` dentro de un string indican interpolación.
-        // Para que el JSON literal `{"a": 1, ...}` pase entero al
-        // string, escapamos las llaves con `\{` y `\}` (el lexer las
-        // preserva literales). En el source Rust eso es `\\{`/`\\}`.
+        // In Fitz, `{` and `}` inside a string indicate interpolation.
+        // For the JSON literal `{"a": 1, ...}` to pass whole to the
+        // string, we escape the braces with `\{` and `\}` (the lexer
+        // preserves them literal). In the Rust source that is `\\{`/`\\}`.
         let src = "\
             from python import json\n\
             let m = json.loads(\"\\{\\\"a\\\": 1, \\\"b\\\": 2\\}\")\n\
@@ -25062,10 +25180,10 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_round_trip_via_json_preserva_estructura() {
-        // dumps + loads sobre una List anidada con Map adentro.
-        // 8.3: el round-trip natural ahora pasa el `Result` adentro.
-        // Para validar que vuelve la misma estructura, usamos `match`
-        // para desempaquetar ambos lados.
+        // dumps + loads on a nested List with Map inside.
+        // 8.3: the natural round-trip now carries `Result` inside.
+        // To validate that the same structure comes back, we use `match`
+        // to unwrap both sides.
         let src = "\
             from python import json\n\
             let original = [{\"k\": 1}, {\"k\": 2}]\n\
@@ -25082,20 +25200,20 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.2.3 — Criterio de éxito de la fase 8.2 end-to-end:
-    // una función Python que recibe `List<User>` y devuelve un mapping
-    // string→int (count_by_email). Round-trip completo sin perder data.
+    // Phase 8.2.3 — Phase 8.2 end-to-end success criterion:
+    // a Python function that receives `List<User>` and returns a mapping
+    // string→int (count_by_email). Full round-trip without losing data.
     // -------------------------------------------------------------------
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_8_2_count_by_email_con_counter() {
-        // `collections.Counter` es subclass de `dict` y cuenta
-        // ocurrencias de elementos en un iterable. Cuando Fitz le pasa
-        // `List<Str>` (los emails extraídos de las instancias), Counter
-        // devuelve un dict-like con (email → cantidad). Como Counter
-        // hereda de dict, `is_instance_of::<PyDict>()` en
-        // `py_to_value` matchea y lo coerce a `Value::Map`.
+        // `collections.Counter` is a subclass of `dict` and counts
+        // occurrences of elements in an iterable. When Fitz passes it
+        // `List<Str>` (the emails extracted from the instances), Counter
+        // returns a dict-like with (email → count). Since Counter
+        // inherits from dict, `is_instance_of::<PyDict>()` in
+        // `py_to_value` matches and coerces it to `Value::Map`.
         let src = "\
             type User { id: Int, email: Str }\n\
             from python import collections\n\
@@ -25109,10 +25227,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        // 8.3: `counts` ahora es `Ok(Map)` (call envuelto). Desempaquetamos
-        // y validamos el orden de inserción del Counter (CPython 3.7+).
-        // `alice` aparece primero en `users` así que entra primero al
-        // Counter; `bob` después.
+        // 8.3: `counts` is now `Ok(Map)` (wrapped call). We unwrap
+        // and validate the insertion order of the Counter (CPython 3.7+).
+        // `alice` appears first in `users` so it enters the Counter first;
+        // `bob` after.
         let counts = env.lock().get("counts").unwrap();
         assert_eq!(
             ok_inner(counts),
@@ -25126,10 +25244,10 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_8_2_round_trip_no_muta_list_original() {
-        // Decisión cross-cutting #4: copia eager bidireccional. La
-        // List<User> Fitz que va a Python no comparte estado con la
-        // list Python; ninguna mutación del lado Python se debería
-        // ver en la List Fitz original.
+        // Cross-cutting decision #4: bidirectional eager copy. The
+        // Fitz `List<User>` going to Python does not share state with the
+        // Python list; no mutation on the Python side should
+        // be seen in the original Fitz List.
         let src = "\
             type User { id: Int, email: Str }\n\
             from python import collections\n\
@@ -25143,15 +25261,15 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(env.lock().get("snap"), Some(Value::Int(2)));
-        // La List<User> original sigue accesible como Fitz nativa:
-        // 2 elementos, field access funciona.
+        // The original List<User> remains accessible as native Fitz:
+        // 2 elements, field access works.
         let users = env.lock().get("users").unwrap();
         match users {
             Value::List(items) => {
                 let guard = items.lock();
                 assert_eq!(guard.len(), 2);
-                // Los elementos siguen siendo Instance Fitz, no
-                // PyObject (no se "contaminaron" por el round-trip).
+                // The elements remain Fitz Instance, not
+                // PyObject (they were not "contaminated" by the round-trip).
                 match &guard[0] {
                     Value::Instance { type_name, .. } => {
                         assert_eq!(type_name, "User");
@@ -25166,13 +25284,13 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_8_2_pipeline_completo() {
-        // Pipeline end-to-end del caso canónico:
+        // End-to-end pipeline of the canonical case:
         //   List<User> Fitz → emails List<Str>
-        //                    → Counter Python (Map<Str, Int>)
-        //                    → ordenar las keys con builtins
-        //                    → resultado iterable desde Fitz.
-        // 8.3: usamos `match` para desempaquetar el Counter antes de
-        // indexar. Es el patrón canónico que el usuario va a escribir.
+        //                    → Python Counter (Map<Str, Int>)
+        //                    → sort keys with builtins
+        //                    → result iterable from Fitz.
+        // 8.3: we use `match` to unwrap the Counter before
+        // indexing. It is the canonical pattern the user will write.
         let src = "\
             type User { id: Int, email: Str }\n\
             from python import collections\n\
@@ -25195,10 +25313,10 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_iterar_map_devuelto_por_python() {
-        // Devuelve un dict de Python y lo accede con indexing Fitz —
-        // exactamente el patrón de uso típico. Llaves del JSON escapadas
-        // con `\{` / `\}` para que el lexer Fitz no las trate como
-        // interpolación. 8.3: desempaquetamos con `match` antes de indexar.
+        // Returns a Python dict and accesses it with Fitz indexing —
+        // exactly the typical usage pattern. JSON braces escaped
+        // with `\{` / `\}` so the Fitz lexer does not treat them as
+        // interpolation. 8.3: we unwrap with `match` before indexing.
         let src = "\
             from python import json\n\
             let m_res = json.loads(\"\\{\\\"a\\\": 10, \\\"b\\\": 20\\}\")\n\
@@ -25213,8 +25331,8 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_arg_no_marshalleable_se_envuelve_en_err_con_path() {
-        // 8.3: Range adentro de List ahora produce `Result::Err(Str)`
-        // con path "arg0[1]" en el mensaje, no FitzError que aborta.
+        // 8.3: Range inside List now produces `Result::Err(Str)`
+        // with path "arg0[1]" in the message, not an aborting FitzError.
         let src = "\
             from python import json\n\
             let xs = [1, 0..5, 3]\n\
@@ -25240,8 +25358,8 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn call_python_chained_field_y_call() {
-        // `json.dumps` con string Fitz → JSON con comillas dobles
-        // adentro. 8.3: el return ahora viene envuelto en Ok.
+        // `json.dumps` with Fitz string → JSON with double quotes
+        // inside. 8.3: the return now comes wrapped in Ok.
         let src = "\
             from python import json\n\
             let s = json.dumps(\"hola\")\n\
@@ -25253,20 +25371,20 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.3 — Excepciones Python → Result<T>: criterio del roadmap
-    // y patrones canónicos (match, `?`).
+    // Phase 8.3 — Python exceptions → Result<T>: roadmap criterion
+    // and canonical patterns (match, `?`).
     // -------------------------------------------------------------------
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_8_3_json_loads_malformado_con_match() {
-        // Reproduce textualmente el ejemplo del roadmap:
+        // Textually reproduces the roadmap example:
         //   match parse("{ malformado") {
         //     Ok(m)  => ...,
         //     Err(e) => "error: <ClassName>: <message>",
         //   }
-        // El `{` del JSON malformado se escapa con `\{` para que el
-        // lexer Fitz no lo trate como inicio de interpolación.
+        // The `{` in the malformed JSON is escaped with `\{` so the
+        // Fitz lexer does not treat it as the start of interpolation.
         let src = "\
             from python import json\n\
             let r = json.loads(\"\\{ malformado\")\n\
@@ -25293,9 +25411,9 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_8_3_propagacion_con_try_operator() {
-        // Operador `?` adentro de una fn que retorna `Result<T>`
-        // propaga el Err Python al caller con el mismo mensaje.
-        // En éxito desempaqueta el Ok.
+        // Operator `?` inside a fn that returns `Result<T>`
+        // propagates the Python Err to the caller with the same message.
+        // On success unwraps the Ok.
         let src = "\
             from python import math\n\
             fn root(x: Float) -> Result<Float> {\n\
@@ -25325,10 +25443,10 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_8_3_field_access_no_se_envuelve() {
-        // Decisión interna: solo `call` envuelve en `Result`; field
-        // access (`math.pi`, `obj.attr`) sigue devolviendo el valor
-        // coercionado directo. Eso preserva la ergonomía de leer
-        // constantes y submódulos sin `match` por cada acceso.
+        // Internal decision: only `call` wraps in `Result`; field
+        // access (`math.pi`, `obj.attr`) still returns the
+        // coerced value directly. That preserves the ergonomics of reading
+        // constants and submodules without `match` for every access.
         let src = "\
             from python import math\n\
             let p = math.pi\n\
@@ -25336,7 +25454,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         let p = env.lock().get("p").unwrap();
-        // `p` es Float directo, NO Result<Float>.
+        // `p` is direct Float, NOT Result<Float>.
         assert!(
             matches!(p, Value::Float(_)),
             "field access NO debería envolver en Result, fue {:?}",
@@ -25345,21 +25463,21 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.4.3 — Coerción runtime Value::Map → Value::Instance con
-    // anotación nominal en el binding. Habilita el patrón canónico
+    // Phase 8.4.3 — Runtime coercion Value::Map → Value::Instance with
+    // nominal annotation in the binding. Enables the canonical pattern
     // `let row: User = py_call(...)?`.
     //
-    // Estos tests funcionan SIN feature `python` porque la coerción es
-    // del lado Fitz: arma un Map manualmente y verifica que la
-    // anotación lo transforma a Instance. La integración real con un
-    // dict Python se valida en 8.4.4 con un ejemplo runnable.
+    // These tests work WITHOUT feature `python` because the coercion is
+    // on the Fitz side: builds a Map manually and verifies that the
+    // annotation transforms it to Instance. Real integration with a
+    // Python dict is validated in 8.4.4 with a runnable example.
     // -------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn anotacion_nominal_coerciona_map_a_instance() {
-        // El Map literal Fitz tiene los mismos campos que el `type`;
-        // la anotación nominal dispara la coerción y bindea `row`
-        // como `Value::Instance`.
+        // The Fitz Map literal has the same fields as the `type`;
+        // the nominal annotation triggers coercion and binds `row`
+        // as `Value::Instance`.
         let src = "\
             type User { id: Int, name: Str }\n\
             let m = {\"id\": 1, \"name\": \"alice\"}\n\
@@ -25386,9 +25504,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn anotacion_nominal_con_field_faltante_es_error() {
-        // El Map tiene `id` pero NO `name`; `name` no es nullable ni
-        // tiene default. La coerción aborta con error claro citando
-        // el campo y el tipo.
+        // The Map has `id` but NOT `name`; `name` is neither nullable nor
+        // has a default. The coercion aborts with a clear error citing
+        // the field and the type.
         let src = "\
             type User { id: Int, name: Str }\n\
             let m = {\"id\": 1}\n\
@@ -25405,8 +25523,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn anotacion_nominal_aplica_default_si_falta_el_field() {
-        // El Map omite `email`, que tiene default. La coerción usa el
-        // default y construye la Instance completa.
+        // The Map omits `email`, which has a default. The coercion uses the
+        // default and builds the complete Instance.
         let src = "\
             type User { id: Int, email: Str = \"unknown@x.com\" }\n\
             let m = {\"id\": 1}\n\
@@ -25458,9 +25576,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn anotacion_nominal_ignora_fields_extras_del_map() {
-        // El Map tiene un campo `password_hash` que el `type` no
-        // declara. Lo ignoramos silenciosamente (Python suele devolver
-        // dicts con extras que el modelo Fitz no necesita).
+        // The Map has a `password_hash` field that the `type` does not
+        // declare. We ignore it silently (Python often returns
+        // dicts with extras the Fitz model does not need).
         let src = "\
             type User { id: Int, name: Str }\n\
             let m = {\"id\": 1, \"name\": \"alice\", \"password_hash\": \"xxx\"}\n\
@@ -25472,7 +25590,7 @@ let r = match n {
         match row {
             Value::Instance { fields, .. } => {
                 let f = fields.lock().clone();
-                // Solo los 2 declarados; password_hash no aparece.
+                // Only the 2 declared; password_hash does not appear.
                 assert_eq!(f.len(), 2);
                 assert_eq!(f[0].0, "id");
                 assert_eq!(f[1].0, "name");
@@ -25483,8 +25601,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn anotacion_nullable_con_null_no_coerciona() {
-        // Si la anotación tolera null y el valor es Null, no se intenta
-        // coercer — Null pasa tal cual.
+        // If the annotation tolerates null and the value is Null, no coercion
+        // is attempted — Null passes as-is.
         let src = "\
             type User { id: Int, name: Str }\n\
             let row: User? = null\n\
@@ -25509,9 +25627,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn anotacion_con_value_que_no_es_map_pasa_tal_cual() {
-        // Si el value ya es Instance, la coerción no intenta nada
-        // raro — passthrough. (El checker valida el tipo a nivel
-        // estático; el runtime no re-valida).
+        // If the value is already Instance, the coercion does not attempt anything
+        // strange — passthrough. (The checker validates the type
+        // statically; the runtime does not re-validate.)
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { id: 1, name: \"x\" }\n\
@@ -25525,10 +25643,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn anotacion_con_tipo_no_nominal_no_coerciona() {
-        // Si la anotación es `Int` (built-in), no coercemos —
-        // los primitivos no se construyen desde dicts. El Map se
-        // bindea tal cual (gradual; uso posterior fallará claro
-        // si no es compatible).
+        // If the annotation is `Int` (built-in), we do not coerce —
+        // primitives are not built from dicts. The Map is
+        // bound as-is (gradual; later use will fail clearly
+        // if not compatible).
         let src = "\
             let m = {\"k\": 1}\n\
             let row: Int = m\n\
@@ -25539,13 +25657,13 @@ let r = match n {
         assert!(matches!(row, Value::Map(_)));
     }
 
-    // Test con feature Python: el patrón canónico del roadmap.
+    // Test with Python feature: the canonical roadmap pattern.
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_8_4_dict_python_coerce_a_instance_con_anotacion() {
-        // El criterio del roadmap: `let row: User = py_call(...)?`.
-        // json.loads devuelve Result<Map>; el `?` desempaca al Map;
-        // la anotación `User` coerciona el Map a Instance.
+        // The roadmap criterion: `let row: User = py_call(...)?`.
+        // json.loads returns Result<Map>; `?` unwraps to Map;
+        // the `User` annotation coerces the Map to Instance.
         let src = "\
             type User { id: Int, name: Str }\n\
             from python import json\n\
@@ -25579,15 +25697,15 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Mini-fase R.missing-recursive-instance-coercion (2026-05-22) —
-    // la coerción `Map → Instance` (8.4.3) ahora recursa sobre
-    // `List<T>` y `Map<K, V>` cuando T/V es nominal o `Nullable(nominal)`.
+    // Mini-phase R.missing-recursive-instance-coercion (2026-05-22) —
+    // the `Map → Instance` coercion (8.4.3) now recurses over
+    // `List<T>` and `Map<K, V>` when T/V is nominal or `Nullable(nominal)`.
     // -------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_lista_de_maps_a_lista_de_instances() {
-        // Caso canónico: `let users: List<User> = [...]` con items que
-        // son Map literals → cada Map se coerce a Instance.
+        // Canonical case: `let users: List<User> = [...]` with items that
+        // are Map literals → each Map is coerced to Instance.
         let src = "\
             type User { id: Int, name: Str }\n\
             let raw = [{\"id\": 1, \"name\": \"ada\"}, {\"id\": 2, \"name\": \"luis\"}]\n\
@@ -25617,8 +25735,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_lista_vacia_pasa_sin_problema() {
-        // Edge case: lista vacía con anotación `List<T>` nominal —
-        // produce una List<Instance> vacía sin error.
+        // Edge case: empty list with nominal `List<T>` annotation —
+        // produces an empty List<Instance> without error.
         let src = "\
             type User { id: Int, name: Str }\n\
             let raw: List<Any> = []\n\
@@ -25635,7 +25753,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_lista_de_primitivos_no_dispara() {
-        // `List<Int>` con items Int — no toca la coerción (passthrough).
+        // `List<Int>` with Int items — does not touch the coercion (passthrough).
         let src = "\
             let xs: List<Int> = [1, 2, 3]\n\
         ";
@@ -25653,8 +25771,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_lista_con_nullable_nominal() {
-        // `List<User?>` — items pueden ser Null o Map → Null pasa,
-        // Map se coerce a Instance.
+        // `List<User?>` — items can be Null or Map → Null passes,
+        // Map is coerced to Instance.
         let src = "\
             type User { id: Int, name: Str }\n\
             let raw = [{\"id\": 1, \"name\": \"ada\"}, null, {\"id\": 2, \"name\": \"luis\"}]\n\
@@ -25675,8 +25793,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_map_de_string_a_instance() {
-        // `Map<Str, User>` con values Map → cada value se coerce a
-        // Instance, las keys se preservan tal cual.
+        // `Map<Str, User>` with Map values → each value is coerced to
+        // Instance, keys are preserved as-is.
         let src = "\
             type User { id: Int, name: Str }\n\
             let raw = {\"a\": {\"id\": 1, \"name\": \"ada\"}, \"b\": {\"id\": 2, \"name\": \"luis\"}}\n\
@@ -25690,7 +25808,7 @@ let r = match n {
             other => panic!("esperaba Map, fue {:?}", other),
         };
         assert_eq!(pairs.len(), 2);
-        // Key preservada como Str, value coercido a Instance.
+        // Key preserved as Str, value coerced to Instance.
         match &pairs[0] {
             (Value::Str(k), Value::Instance { type_name, .. }) => {
                 assert_eq!(k, "a");
@@ -25702,9 +25820,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_lista_de_maps_falta_campo_requerido_error_claro() {
-        // Si un Map adentro de la List no tiene un field requerido,
-        // el error apunta al campo y al tipo (no al índice del item —
-        // el caller ve "no se puede coercer a User: falta campo X").
+        // If a Map inside the List does not have a required field,
+        // the error points to the field and the type (not the item index —
+        // the caller sees "cannot coerce to User: missing field X").
         let src = "\
             type User { id: Int, name: Str }\n\
             let raw = [{\"id\": 1, \"name\": \"ada\"}, {\"id\": 2}]\n\
@@ -25722,8 +25840,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_lista_de_maps_con_default_aplica() {
-        // Si un Map no tiene un field con default declarado, la
-        // coerción aplica el default (no falla).
+        // If a Map does not have a field with a declared default, the
+        // coercion applies the default (does not fail).
         let src = "\
             type User { id: Int, name: Str = \"anon\" }\n\
             let raw = [{\"id\": 1, \"name\": \"ada\"}, {\"id\": 2}]\n\
@@ -25737,7 +25855,7 @@ let r = match n {
             other => panic!("esperaba List, fue {:?}", other),
         };
         assert_eq!(items.len(), 2);
-        // Segundo item: name debe ser "anon" del default.
+        // Second item: name must be "anon" from the default.
         match &items[1] {
             Value::Instance { fields, .. } => {
                 let f = fields.lock().clone();
@@ -25750,10 +25868,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn coerce_recursive_passthrough_si_value_no_es_list() {
-        // Si la anotación es `List<User>` pero el value es algo que
-        // no es una List (ej. un Map suelto), no tocamos — el
-        // checker se encarga de rechazarlo o el siguiente uso falla
-        // claro.
+        // If the annotation is `List<User>` but the value is something that
+        // is not a List (e.g. a loose Map), we don't touch it — the
+        // checker takes care of rejecting it or the next use fails
+        // clearly.
         let src = "\
             type User { id: Int, name: Str }\n\
             let raw = {\"id\": 1, \"name\": \"ada\"}\n\
@@ -25761,27 +25879,27 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        // Sin coerción: users sigue siendo el Map original.
+        // No coercion: users remains the original Map.
         let users = env.lock().get("users").unwrap();
         assert!(matches!(users, Value::Map(_)));
     }
 
     // -------------------------------------------------------------------
-    // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
-    // 3 builtins para leer variables de entorno desde Fitz:
+    // env builtin mini-phase (2026-05-22, Step 3 post-boilerplates) —
+    // 3 builtins to read environment variables from Fitz:
     // `env(key)`, `env_or(key, default)`, `load_env(path)`.
     //
-    // Tests usan vars con prefijo `FITZ_TEST_ENV_*` para evitar
-    // colisiones con env vars reales del usuario. Cada test setea
-    // la var antes del eval y la limpia al final (defensivo —
-    // tokio test runtime usa current_thread por F17 así que cross-test
-    // contamination es improbable pero igual).
+    // Tests use vars with prefix `FITZ_TEST_ENV_*` to avoid
+    // collisions with the user's real env vars. Each test sets
+    // the var before eval and cleans it up at the end (defensive —
+    // tokio test runtime uses current_thread per F17 so cross-test
+    // contamination is unlikely but still).
     // -------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn env_builtin_lee_var_existente_como_ok() {
-        // SAFETY: tests serializados por #[test], cada test setea su
-        // propia var con prefijo único.
+        // SAFETY: tests serialized by #[test], each test sets its
+        // own var with a unique prefix.
         unsafe {
             std::env::set_var("FITZ_TEST_ENV_EXISTS", "hola");
         }
@@ -25802,7 +25920,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn env_builtin_var_missing_devuelve_err() {
-        // Confirmamos que la var no existe antes.
+        // We confirm the var does not exist beforehand.
         unsafe {
             std::env::remove_var("FITZ_TEST_ENV_MISSING_XYZ");
         }
@@ -25828,9 +25946,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn env_builtin_var_vacia_es_ok_con_string_vacio() {
-        // Convención Unix: var vacía (`KEY=`) existe pero es "".
-        // env() la trata como Ok("") — el caller que quiera tratarla
-        // como missing usa `.is_empty()`.
+        // Unix convention: empty var (`KEY=`) exists but is "".
+        // env() treats it as Ok("") — the caller who wants to treat it
+        // as missing uses `.is_empty()`.
         unsafe {
             std::env::set_var("FITZ_TEST_ENV_EMPTY", "");
         }
@@ -25878,8 +25996,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn env_builtin_propagable_con_operador_try() {
-        // Patrón canónico de uso: `fn get_secret() -> Result<Str> { let s = env("KEY")?; ... }`.
-        // El `?` desempaca el Result; si missing, propaga el Err.
+        // Canonical usage pattern: `fn get_secret() -> Result<Str> { let s = env("KEY")?; ... }`.
+        // The `?` unwraps the Result; if missing, propagates the Err.
         unsafe {
             std::env::set_var("FITZ_TEST_ENV_TRY", "secret-value");
         }
@@ -25906,8 +26024,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn load_env_builtin_carga_archivo_simple() {
-        // Crea un .env temporal, lo carga, valida que las vars quedan
-        // disponibles via env().
+        // Creates a temporary .env, loads it, validates that the vars
+        // are available via env().
         let tmpdir = std::env::temp_dir().join("fitz-test-load-env");
         let _ = std::fs::create_dir_all(&tmpdir);
         let env_file = tmpdir.join("test.env");
@@ -25923,19 +26041,19 @@ let r = match n {
         );
         let (eval_env, res) = parse_eval_into_env(&src).await;
         res.unwrap();
-        // load_env devolvió Ok(Null).
+        // load_env returned Ok(Null).
         let r = eval_env.lock().get("r").unwrap();
         assert!(matches!(
             r,
             Value::Result(ResultVariant::Ok(ref inner)) if matches!(**inner, Value::Null)
         ));
-        // Variables seteadas.
+        // Variables set.
         assert_eq!(
             eval_env.lock().get("a").unwrap(),
             Value::Str("alpha".into())
         );
         assert_eq!(eval_env.lock().get("b").unwrap(), Value::Str("beta".into()));
-        // Comillas dobles stripped.
+        // Double quotes stripped.
         assert_eq!(
             eval_env.lock().get("c").unwrap(),
             Value::Str("with spaces".into())
@@ -25972,17 +26090,17 @@ let r = match n {
     }
 
     // -------------------------------------------------------------------
-    // Fase 8.6 — Bridge tokio ↔ asyncio: corutinas Python awaiteables
-    // desde `async fn` Fitz via `Value::Future`.
+    // Phase 8.6 — Bridge tokio ↔ asyncio: Python coroutines awaitable
+    // from `async fn` Fitz via `Value::Future`.
     // -------------------------------------------------------------------
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn fase_8_6_asyncio_sleep_awaiteable_desde_fitz() {
-        // `asyncio.sleep(0)` devuelve una corutina builtin que el
-        // bridge convierte a `Value::Future`. El `.await` adentro de
-        // una `async fn` Fitz que retorna `Result<...>` la consume y
-        // devuelve `Null` (return value de `asyncio.sleep`).
+        // `asyncio.sleep(0)` returns a builtin coroutine that the
+        // bridge converts to `Value::Future`. The `.await` inside
+        // a Fitz `async fn` that returns `Result<...>` consumes it and
+        // returns `Null` (return value of `asyncio.sleep`).
         let src = "\
             from python import asyncio\n\
             async fn test() -> Result<Null> {\n\
@@ -26005,9 +26123,9 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn fase_8_6_async_fn_fitz_que_await_python_devuelve_valor_calculado() {
-        // El test cumple el shape canónico del roadmap: `async fn`
-        // Fitz que internamente await-ea una corutina Python y usa
-        // su resultado para calcular el valor de retorno.
+        // The test meets the canonical roadmap shape: Fitz `async fn`
+        // that internally await-s a Python coroutine and uses
+        // its result to compute the return value.
         let src = "\
             from python import asyncio\n\
             async fn doble(x: Int) -> Result<Int> {\n\
@@ -26030,9 +26148,9 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn fase_8_6_call_async_devuelve_result_future() {
-        // Sin `.await`, el call a `asyncio.sleep(0)` devuelve
-        // `Result<Future<Null>>` (la Future no se await-ea hasta que
-        // el `.await` se aplique). Validamos el shape del binding.
+        // Without `.await`, the call to `asyncio.sleep(0)` returns
+        // `Result<Future<Null>>` (the Future is not awaited until
+        // `.await` is applied). We validate the binding's shape.
         let src = "\
             from python import asyncio\n\
             let f = asyncio.sleep(0)\n\
@@ -26040,8 +26158,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         let f = env.lock().get("f").unwrap();
-        // Debería ser Result(Ok(Future(_))) — el call envuelve en
-        // Result, el inner es el Future (no PyObject opaco).
+        // Should be Result(Ok(Future(_))) — the call wraps in
+        // Result, the inner is the Future (not an opaque PyObject).
         match f {
             Value::Result(crate::value::ResultVariant::Ok(inner)) => {
                 assert!(
@@ -26057,9 +26175,9 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn field_access_anidado_modulo_pyobject() {
-        // `os.path` es un submódulo. Field access debería darnos otro
-        // PyObject opaco — al chequearlo con `__name__` confirmamos
-        // que es realmente el submódulo correcto.
+        // `os.path` is a submodule. Field access should give us another
+        // opaque PyObject — checking it with `__name__` confirms
+        // it is really the correct submodule.
         let (env, res) =
             parse_eval_into_env("from python import os\nlet p = os.path\nlet n = p.__name__\n")
                 .await;
@@ -26067,8 +26185,8 @@ let r = match n {
         let p = env.lock().get("p");
         assert!(matches!(p, Some(Value::PyObject(_))));
         let name = env.lock().get("n").unwrap();
-        // `os.path.__name__` típicamente es "ntpath" en Windows,
-        // "posixpath" en Unix. Cualquiera de los dos es válido.
+        // `os.path.__name__` is typically "ntpath" on Windows,
+        // "posixpath" on Unix. Either is valid.
         match name {
             Value::Str(s) => {
                 assert!(
@@ -26082,18 +26200,18 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — decoradores (Fase 4, pasos 4.1 / 4.2)
+    // Tests — decorators (Phase 4, steps 4.1 / 4.2)
     // -----------------------------------------------------------------------
     //
-    // El evaluador procesa decorators al ver `Stmt::FnDef`. Los HTTP
-    // (`@get`/`@post`/`@put`/`@delete`) requieren `HttpRegistry`
-    // activo en el thread_local; sin él, error explícito. Cualquier
-    // otro decorator también es error (`@server` entra en 4.4).
+    // The evaluator processes decorators when it sees `Stmt::FnDef`. HTTP ones
+    // (`@get`/`@post`/`@put`/`@delete`) require an `HttpRegistry`
+    // active in the thread_local; without it, explicit error. Any
+    // other decorator is also an error (`@server` lands in 4.4).
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_con_decorator_http_sin_registry_da_error_claro() {
-        // `parse_and_eval` no instala HttpRegistry, así que un
-        // `@get(...)` corta con sugerencia de usar `fitz run`.
+        // `parse_and_eval` does not install HttpRegistry, so a
+        // `@get(...)` cuts with a suggestion to use `fitz run`.
         let src = "@get(\"/\")\nfn index() => \"hola\"";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
@@ -26118,8 +26236,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_con_decorator_http_con_registry_activo_registra_la_ruta() {
-        // Con registry activo, el decorator @get registra ruta sin
-        // error y define la fn en el env.
+        // With active registry, the @get decorator registers the route without
+        // error and defines the fn in the env.
 
         let src = "@get(\"/users/{id}\")\nfn get_user(id: Int) => \"hola\"";
         let (res, reg) =
@@ -26139,7 +26257,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_con_path_param_sin_param_de_handler_es_error() {
-        // `@get("/{id}")` pero el handler no tiene un param `id`.
+        // `@get("/{id}")` but the handler does not have an `id` param.
         let src = "@get(\"/{id}\")\nfn h() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26153,7 +26271,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_con_decorator_http_sin_args_es_error() {
-        // `@get()` sin path.
+        // `@get()` without path.
         let src = "@get()\nfn h() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26167,7 +26285,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_decorator_http_path_no_string_es_error() {
-        // `@get(42)` — path no es string.
+        // `@get(42)` — path is not a string.
         let src = "@get(42)\nfn h() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26214,8 +26332,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_body_sin_tipo_declarado_queda_sin_resolver() {
-        // `body` sin anotación: declared_type = None, runtime
-        // deserializa como Value libre.
+        // `body` without annotation: declared_type = None, runtime
+        // deserializes as a free Value.
         let src = "@post(\"/log\")\nfn log(body) => body";
         let (res, reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26245,8 +26363,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_get_con_body_se_registra_sin_problema() {
-        // Permitimos body en cualquier verbo; el evaluator no fuerza
-        // semántica de HTTP acá (axum/curl aceptan body en GET).
+        // We allow body in any verb; the evaluator does not force
+        // HTTP semantics here (axum/curl accept body in GET).
         let src = "\
             type Q { name: Str }\n\
             @get(\"/search\")\nfn s(body: Q) => body.name\n\
@@ -26257,7 +26375,7 @@ let r = match n {
         assert!(reg.routes[0].body_param.is_some());
     }
 
-    // ---- @server (Fase 4.4) ----
+    // ---- @server (Phase 4.4) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn server_decorator_setea_port_y_host() {
@@ -26425,8 +26543,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn tier3_server_decorator_acepta_kwarg_prometheus_true() {
-        // Fase 12.3.iter2.Tier3 — @server(3000, prometheus=true) popula
-        // prometheus_enabled=true. Sin la flag, default false.
+        // Phase 12.3.iter2.Tier3 — @server(3000, prometheus=true) populates
+        // prometheus_enabled=true. Without the flag, default false.
         let src = "@server(3000, prometheus=true)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
         let (res, reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26505,7 +26623,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_sin_param_correspondiente_es_error() {
-        // El handler no tiene el param derivado del header.
+        // The handler does not have the param derived from the header.
         let src = "@header(name=\"Authorization\")\n@get(\"/x\")\nfn h() => \"ok\"";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26532,7 +26650,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_duplicado_es_error() {
-        // Dos @header con el mismo name → error (match case-insensitive).
+        // Two @header with the same name → error (case-insensitive match).
         let src = "@header(name=\"Authorization\")\n@header(name=\"authorization\")\n@get(\"/x\")\nfn h(authorization: Str) => authorization";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26546,7 +26664,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_sin_decorator_de_ruta_es_error() {
-        // @header solo (sin @get/@post/...) → error.
+        // @header alone (without @get/@post/...) → error.
         let src = "@header(name=\"Authorization\")\nfn h(authorization: Str) => authorization";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26562,8 +26680,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_con_into_usa_alias_explicito() {
-        // `into="token"` mapea el header `X-Auth` al param `token`
-        // (override de la convención de derivar el nombre).
+        // `into="token"` maps the `X-Auth` header to the `token` param
+        // (override of the name-derivation convention).
         let src = "\
             @header(name=\"X-Auth\", into=\"token\")\n\
             @get(\"/x\")\n\
@@ -26595,9 +26713,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_into_inexistente_es_error_sin_mencionar_convencion() {
-        // Si `into="..."` apunta a un param que no existe, el mensaje
-        // de error NO menciona la convención de derivar (el usuario
-        // pidió un alias explícito; mencionar la convención confundiría).
+        // If `into="..."` points to a param that does not exist, the error
+        // message does NOT mention the derivation convention (the user
+        // requested an explicit alias; mentioning the convention would confuse).
         let src = "\
             @header(name=\"X-Auth\", into=\"token\")\n\
             @get(\"/x\")\n\
@@ -26700,7 +26818,7 @@ let r = match n {
         );
     }
 
-    // ---- Fase 9.w.2.e: @server(ws_heartbeat_secs=N) ----
+    // ---- Phase 9.w.2.e: @server(ws_heartbeat_secs=N) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn server_ws_heartbeat_secs_kwarg_carga_en_registry() {
@@ -26749,11 +26867,11 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn server_ws_heartbeat_secs_negativo_es_error() {
-        // `-1` se parsea como `UnaryOp::Neg(Int(1))`, no como
-        // `Int(-1)`. El evaluator rechaza por "no es Int literal"
-        // (el chequeo "n >= 0" cubre el caso pero rara vez se
-        // dispara — el parser ya construye UnaryOp). Mensaje
-        // resultante: "ws_heartbeat_secs debe ser Int literal".
+        // `-1` is parsed as `UnaryOp::Neg(Int(1))`, not as
+        // `Int(-1)`. The evaluator rejects with "not Int literal"
+        // (the "n >= 0" check covers the case but rarely
+        // fires — the parser already builds UnaryOp). Resulting
+        // message: "ws_heartbeat_secs must be Int literal".
         let src = "\
             @server(ws_heartbeat_secs=-1)\n\
             fn main() => 0\n\
@@ -26809,8 +26927,8 @@ let r = match n {
         let (res, _) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
-        // v0.15.13 — el mensaje ahora cita también `port` y `host`
-        // porque admitimos kwargs para esos parámetros (URGENTE-2).
+        // v0.15.13 — the message now also cites `port` and `host`
+        // because we accept kwargs for those parameters (URGENTE-2).
         assert!(
             err.message.contains("foo")
                 && err.message.contains("port")
@@ -26824,13 +26942,13 @@ let r = match n {
     }
 
     // ───────────────────────────────────────────────────────────────
-    // v0.15.13 — URGENTE-2: @server(host=, port=) como kwargs.
+    // v0.15.13 — URGENTE-2: @server(host=, port=) as kwargs.
     // ───────────────────────────────────────────────────────────────
 
     #[tokio::test(flavor = "current_thread")]
     async fn v0_15_13_server_host_kwarg_solo_aplica_y_port_default() {
-        // Bug original: `@server(host="0.0.0.0")` daba
-        // "kwarg 'host' no reconocido". Tras el fix debe parsear OK.
+        // Original bug: `@server(host="0.0.0.0")` gave
+        // "kwarg 'host' no reconocido". After the fix it must parse OK.
         let src = "\
             @server(host=\"0.0.0.0\")\n\
             fn main() => 0\n\
@@ -26853,7 +26971,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn v0_15_13_server_port_y_host_kwargs_mixed_con_otros() {
-        // Patrón canónico recomendado para Dockerizar:
+        // Recommended canonical pattern for Dockerizing:
         // @server(port=8080, host="0.0.0.0", prometheus=true)
         let src = "\
             @server(port=8080, host=\"0.0.0.0\", prometheus=true, ws_heartbeat_secs=30)\n\
@@ -26870,9 +26988,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn v0_15_13_server_port_positional_mas_host_kwarg_funciona() {
-        // Caso intermedio: port positional + host kwarg. La razón:
-        // el user que viene de @server(8080) muchas veces solo quiere
-        // sumar host="0.0.0.0" sin tocar el orden del port.
+        // Intermediate case: positional port + host kwarg. The reason:
+        // the user coming from @server(8080) often just wants
+        // to add host="0.0.0.0" without touching the port order.
         let src = "\
             @server(8080, host=\"0.0.0.0\")\n\
             fn main() => 0\n\
@@ -26888,7 +27006,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn v0_15_13_server_port_doble_positional_mas_kwarg_es_error() {
-        // Conflicto: port pasado dos veces — error claro estilo Python.
+        // Conflict: port passed twice — clear error Python-style.
         let src = "\
             @server(8080, port=9090)\n\
             fn main() => 0\n\
@@ -26969,8 +27087,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_kwarg_desconocido_lista_into_y_name() {
-        // El mensaje de error sobre kwarg desconocido ahora cita tanto
-        // `name` como `into` (Q.1).
+        // The error message about unknown kwarg now cites both
+        // `name` and `into` (Q.1).
         let src = "\
             @header(name=\"X\", foo=\"bar\")\n\
             @get(\"/x\")\n\
@@ -26990,8 +27108,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn get_decorator_con_kwarg_es_error_runtime() {
-        // Decoradores HTTP de ruta no aceptan kwargs (ni en 7.0 ni
-        // antes de que 7.6 defina la convención de headers).
+        // HTTP route decorators do not accept kwargs (neither in 7.0 nor
+        // before 7.6 defines the headers convention).
         let src = "@get(\"/x\", foo=1)\nfn h() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -27020,12 +27138,12 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Span en errores de runtime (S1.2 sub-paso 3)
+    // Tests — Span in runtime errors (S1.2 sub-step 3)
     //
-    // Antes de S1.2 los errores de runtime sobre expresiones heredaban
-    // posición `0:0` (sin ubicación reportada). Tras este sub-paso, cada
-    // error de tipo / aridad / división por cero / indexing sobre Expr
-    // cita la columna del nodo problemático.
+    // Before S1.2, runtime errors on expressions inherited position
+    // `0:0` (no reported location). After this sub-step, each
+    // type / arity / division by zero / indexing error on Expr
+    // cites the column of the problematic node.
     // -----------------------------------------------------------------------
 
     async fn first_runtime_error(src: &str) -> FitzError {
@@ -27036,7 +27154,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn span_runtime_div_zero_apunta_al_operador() {
-        // `print(10 / 0)` — el `/` está en columna 10.
+        // `print(10 / 0)` — the `/` is at column 10.
         let e = first_runtime_error("print(10 / 0)").await;
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 10);
@@ -27045,18 +27163,18 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn span_runtime_type_mismatch_binop_apunta_al_operador() {
-        // `print(1 + true)` — el `+` está en columna 9. El checker
-        // estático también lo capta; el error de runtime ahora cita
-        // la misma posición.
+        // `print(1 + true)` — the `+` is at column 9. The static
+        // checker also catches it; the runtime error now cites
+        // the same position.
         let e = first_runtime_error("fn f() => 1 + true\nprint(f())").await;
-        // El error ocurre adentro de `f`, columna del `+`.
+        // The error occurs inside `f`, column of the `+`.
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 13);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn span_runtime_ident_desconocido_apunta_al_ident() {
-        // `print(unknown_var)` — `unknown_var` arranca en columna 7.
+        // `print(unknown_var)` — `unknown_var` starts at column 7.
         let e = first_runtime_error("print(unknown_var)").await;
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 7);
@@ -27065,8 +27183,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn span_runtime_index_oob_apunta_al_corchete() {
-        // `let xs = [1, 2]\nprint(xs[10])` — el `[` está en col 9 de
-        // línea 2.
+        // `let xs = [1, 2]\nprint(xs[10])` — the `[` is at col 9 of
+        // line 2.
         let src = "let xs = [1, 2]\nprint(xs[10])";
         let e = first_runtime_error(src).await;
         assert_eq!(e.line, 2);
@@ -27076,8 +27194,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn span_runtime_arity_mismatch_apunta_al_paren() {
-        // `fn f(x: Int) => x\nprint(f(1, 2))` — el `(` del call está
-        // en col 8 de línea 2.
+        // `fn f(x: Int) => x\nprint(f(1, 2))` — the call's `(` is
+        // at col 8 of line 2.
         let src = "fn f(x: Int) -> Int => x\nlet _ = f(1, 2)";
         let e = first_runtime_error(src).await;
         assert_eq!(e.line, 2);
@@ -27086,7 +27204,7 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — mini-fase MW.1: @middleware en el intérprete
+    // Tests — mini-phase MW.1: @middleware in the interpreter
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
@@ -27129,10 +27247,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn middleware_referenciando_fn_inexistente_es_error_claro() {
-        // En MW.2, collect_middlewares evalúa la expresión completa
-        // del arg, así que el error de "no existe" viene del evaluator
-        // de identificadores (mensaje consistente con cualquier otro
-        // uso de variable sin definir).
+        // In MW.2, collect_middlewares evaluates the full expression
+        // of the arg, so the "does not exist" error comes from the
+        // identifier evaluator (message consistent with any other
+        // use of undefined variable).
         let src = "\
             @middleware(no_existe)\n\
             @get(\"/x\")\n\
@@ -27243,7 +27361,7 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Q.3: cors({"allow_origin": ["..."]}) modo Set
+    // Tests — Q.3: cors({"allow_origin": ["..."]}) Set mode
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
@@ -27280,7 +27398,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cors_allow_origin_tipo_invalido_menciona_str_y_list() {
-        // Pasar Int en allow_origin → error que cita ambas formas válidas.
+        // Passing Int in allow_origin → error citing both valid forms.
         let src = "let c = cors({\"allow_origin\": 42})";
         let (_env, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
@@ -27292,7 +27410,7 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — mini-fase MW.2: built-in cors(...)
+    // Tests — mini-phase MW.2: built-in cors(...)
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
@@ -27419,8 +27537,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn middleware_cors_carga_slot_cors_de_la_ruta() {
-        // @middleware(cors(...)) sobre un handler debe cargar
-        // route.cors (no entra a la chain de middlewares).
+        // @middleware(cors(...)) on a handler must load
+        // route.cors (it does not enter the middlewares chain).
         let src = "\
             @middleware(cors({\"allow_origin\": \"https://x.com\"}))\n\
             @get(\"/api\")\n\
@@ -27478,20 +27596,20 @@ let r = match n {
     }
 
     // ---------------------------------------------------------------
-    // Fase 9.z.2.a — `@test` decorator + assertion builtins
+    // Phase 9.z.2.a — `@test` decorator + assertion builtins
     // ---------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_decorator_sin_registry_es_no_op_silencioso() {
-        // `fitz run` con un `@test` presente NO debe abortar — el
-        // decorator es no-op silencioso. La fn queda definida en el
-        // env normalmente (paralelo a `#[cfg(test)]` Rust: fuera del
-        // runner, el código existe pero no se ejecuta).
+        // `fitz run` with a `@test` present must NOT abort — the
+        // decorator is a silent no-op. The fn remains defined in the
+        // env normally (parallel to Rust's `#[cfg(test)]`: outside the
+        // runner, the code exists but does not execute).
         let (env, res) = parse_eval_into_env("@test fn dummy() { let x = 1 }\nlet y = 42").await;
         res.expect("@test sin registry no debe abortar");
-        // `y` debe estar definida (la evaluación siguió).
+        // `y` must be defined (evaluation continued).
         assert_eq!(env.lock().get("y"), Some(Value::Int(42)));
-        // `dummy` también queda en el env (es una fn normal).
+        // `dummy` also remains in the env (it's a normal fn).
         assert!(matches!(
             env.lock().get("dummy"),
             Some(Value::Function { .. })
@@ -27500,8 +27618,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_decorator_con_registry_registra_la_fn() {
-        // Con un `TestRegistry` activo, `@test fn` empuja un `TestSpec`
-        // al registry. La fn también queda en el env.
+        // With an active `TestRegistry`, `@test fn` pushes a `TestSpec`
+        // to the registry. The fn also remains in the env.
         let src = "@test fn suma() { assert_eq(2 + 2, 4) }";
         let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(src).await;
@@ -27558,7 +27676,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn test_decorator_con_args_es_error() {
-        // `@test("nombre")` no soportado en MVP.
+        // `@test("nombre")` not supported in MVP.
         let (_, res) = parse_eval_into_env("@test(\"slow\") fn t() { let x = 1 }").await;
         let err = res.unwrap_err();
         assert!(
@@ -27616,8 +27734,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assert_con_no_bool_es_type_error() {
-        // El primer arg de `assert` debe ser `Bool` estrictamente (no
-        // truthy/falsy). `assert(1)` da type error claro.
+        // The first arg of `assert` must be `Bool` strictly (not
+        // truthy/falsy). `assert(1)` gives a clear type error.
         let (_, res) = parse_eval_into_env("assert(1)").await;
         let err = res.unwrap_err();
         assert!(
@@ -27689,8 +27807,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assert_throws_callback_que_tira_pasa() {
-        // El callback levanta vía `assert(false)`. assert_throws lo
-        // atrapa y devuelve Null.
+        // The callback raises via `assert(false)`. assert_throws catches
+        // it and returns Null.
         let (_, res) =
             parse_eval_into_env("assert_throws(fn() => assert(false, \"intencional\"))").await;
         res.expect("assert_throws debería pasar (callback tira)");
@@ -27698,7 +27816,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assert_throws_callback_que_no_tira_falla() {
-        // El callback retorna normal — assert_throws debe fallar.
+        // The callback returns normally — assert_throws must fail.
         let (_, res) = parse_eval_into_env("assert_throws(fn() => 1 + 1)").await;
         let err = res.unwrap_err();
         assert!(
@@ -27721,8 +27839,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assert_throws_callback_async_es_error_en_mvp() {
-        // Async callbacks generan Future suelto que rompe la semántica
-        // de "tirar". Restricción explícita del MVP.
+        // Async callbacks produce a loose Future that breaks the
+        // "throw" semantics. Explicit MVP restriction.
         let src = "\
             async fn lazy() -> Int { return 1 }\n\
             assert_throws(lazy)\n\
@@ -27747,10 +27865,10 @@ let r = match n {
         );
     }
 
-    // ---- Mini-tanda C — list comprehensions ----
+    // ---- Mini-batch C — list comprehensions ----
 
-    /// Helper local: evalúa una expresión `let r = <expr>` y devuelve
-    /// el valor de `r` como Value::List clonado a un Vec.
+    /// Local helper: evaluates an expression `let r = <expr>` and returns
+    /// the value of `r` as Value::List cloned to a Vec.
     async fn eval_to_list_vec(src: &str) -> Vec<Value> {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -27783,18 +27901,18 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_comp_var_no_escapa_al_caller_estilo_python() {
-        // Decisión de diseño: el var de la comprehension vive en un
-        // env hijo dedicado, así no shadowea ni define una var nueva
-        // en el scope contenedor (a diferencia del `for ... in`).
+        // Design decision: the comprehension's var lives in a dedicated
+        // child env, so it does not shadow nor define a new var in
+        // the containing scope (unlike `for ... in`).
         let src = "\
             let x = 100\n\
             let r = [v for v in [1, 2, 3]]\n\
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        // `x` del caller intacto.
+        // Caller's `x` intact.
         assert_eq!(env.lock().get("x"), Some(Value::Int(100)));
-        // `v` NO escapó al caller.
+        // `v` did NOT escape to the caller.
         assert_eq!(env.lock().get("v"), None);
     }
 
@@ -27810,12 +27928,12 @@ let r = match n {
         );
     }
 
-    // ---- Mini-tanda Mb2: métodos chicos List/Str/Map + Rg ----
+    // ---- Mini-batch Mb2: small List/Str/Map + Rg methods ----
     //
-    // Bundle de polish ergonómico: min/max/sum sobre List numérico,
-    // pad_start/pad_end sobre Str, keys_sorted sobre Map, step_by
-    // sobre Range. Tests por método cubren happy path + edge cases
-    // (vacío, heterogéneo, tipo equivocado).
+    // Ergonomic polish bundle: min/max/sum on numeric List,
+    // pad_start/pad_end on Str, keys_sorted on Map, step_by
+    // on Range. Tests per method cover happy path + edge cases
+    // (empty, heterogeneous, wrong type).
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb2_list_min_max_int() {
@@ -27905,10 +28023,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb2_list_sum_str_es_error_runtime() {
-        // El checker rechaza estáticamente (sum no acepta List<Str>),
-        // pero como `fitz run` no es strict aún en este wrap helper,
-        // verificamos directamente que el runtime aborte si se cuela
-        // una List<Str> sin anotación (escape gradual).
+        // The checker rejects statically (sum does not accept List<Str>),
+        // but since `fitz run` is not yet strict in this wrap helper,
+        // we verify directly that the runtime aborts if a
+        // List<Str> slips through without annotation (gradual escape).
         let (_, res) = parse_eval_into_env(
             "let xs = [\"a\", \"b\"]\n\
              let r = xs.sum()",
@@ -28083,7 +28201,7 @@ let r = match n {
                     }
                 })
                 .collect();
-            // 0..=10 con step 3 → [0, 3, 6, 9]
+            // 0..=10 with step 3 → [0, 3, 6, 9]
             assert_eq!(nums, vec![0, 3, 6, 9]);
         } else {
             panic!("esperaba List<Int>");
@@ -28112,7 +28230,7 @@ let r = match n {
         );
     }
 
-    // ---- Mini-tanda Mb3: métodos funcionales (reduce, product,
+    // ---- Mini-batch Mb3: functional methods (reduce, product,
     //      chars, entries, to_map) ----
 
     #[tokio::test(flavor = "current_thread")]
@@ -28139,8 +28257,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb3_list_reduce_acc_tipo_distinto_del_elem() {
-        // Acc puede ser de un tipo distinto al de los elementos.
-        // Ejemplo: List<Int> reducida a un Str.
+        // Acc can be of a different type than the elements.
+        // Example: List<Int> reduced to a Str.
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let s: Str = xs.reduce(\"\", fn(acc, x) => \"{acc}{x}-\")",
@@ -28215,7 +28333,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb3_str_chars_unicode() {
-        // Para chars no-ASCII contamos como un solo elemento.
+        // For non-ASCII chars we count as a single element.
         let (env, res) = parse_eval_into_env("let cs: List<Str> = \"café\".chars()").await;
         res.unwrap();
         let v = env.lock().get("cs").unwrap();
@@ -28238,7 +28356,7 @@ let r = match n {
         if let Value::List(items) = v {
             let g = items.lock();
             assert_eq!(g.len(), 3);
-            // Validamos el primer par.
+            // We validate the first pair.
             if let Value::Tuple(parts) = &g[0] {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(parts[0], Value::Str("a".into()));
@@ -28272,7 +28390,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb3_list_to_map_last_write_wins() {
-        // Si hay keys duplicadas, gana la última (paralelo a
+        // If there are duplicate keys, the last one wins (parallel to
         // Python `dict(items)`).
         let (env, res) = parse_eval_into_env(
             "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"a\", 999)]\n\
@@ -28293,7 +28411,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb3_round_trip_entries_to_map() {
-        // entries → to_map roundtrip preserva contenido.
+        // entries → to_map roundtrip preserves content.
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n\
              let back: Map<Str, Int> = m.entries().to_map()\n\
@@ -28314,7 +28432,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda Mb4: unique + partition + invert + split_at ----
+    // ---- Mini-batch Mb4: unique + partition + invert + split_at ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb4_list_unique_preserva_orden_de_1ra_aparicion() {
@@ -28370,7 +28488,7 @@ let r = match n {
         let v = env.lock().get("split").unwrap();
         if let Value::Tuple(items) = v {
             assert_eq!(items.len(), 2);
-            // Truthy (pares).
+            // Truthy (evens).
             if let Value::List(t) = &items[0] {
                 let nums: Vec<i64> = t
                     .lock()
@@ -28385,7 +28503,7 @@ let r = match n {
                     .collect();
                 assert_eq!(nums, vec![2, 4, 6]);
             }
-            // Falsy (impares).
+            // Falsy (odds).
             if let Value::List(f) = &items[1] {
                 let nums: Vec<i64> = f
                     .lock()
@@ -28417,7 +28535,7 @@ let r = match n {
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
             assert_eq!(g.len(), 3);
-            // El primer par debería ser ("a", 1).
+            // The first pair should be ("a", 1).
             assert_eq!(g[0].0, Value::Str("a".into()));
             assert_eq!(g[0].1, Value::Int(1));
         } else {
@@ -28437,7 +28555,7 @@ let r = match n {
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
             assert_eq!(g.len(), 1);
-            // value 1 → ahora key, último value gana ("b").
+            // value 1 → now key, last value wins ("b").
             assert_eq!(g[0].0, Value::Int(1));
             assert_eq!(g[0].1, Value::Str("b".into()));
         } else {
@@ -28471,7 +28589,7 @@ let r = match n {
         for (name, want_left, want_right) in &[
             ("a", "", "abc"),
             ("b", "abc", ""),
-            ("c", "abc", ""), // idx > len → clamp a len
+            ("c", "abc", ""), // idx > len → clamp to len
         ] {
             let v = env.lock().get(name).unwrap();
             if let Value::Tuple(items) = v {
@@ -28504,7 +28622,7 @@ let r = match n {
         );
     }
 
-    // ---- Mini-tanda Cmp+: multi-for + Map comprehensions ----
+    // ---- Mini-batch Cmp+: multi-for + Map comprehensions ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn cmp_multi_for_cartesian_product() {
@@ -28557,7 +28675,7 @@ let r = match n {
                     }
                 })
                 .collect();
-            // x impar: 1, 3 → (1,10), (1,20), (3,10), (3,20)
+            // x odd: 1, 3 → (1,10), (1,20), (3,10), (3,20)
             assert_eq!(nums, vec![10, 20, 30, 60]);
         } else {
             panic!("esperaba List");
@@ -28599,7 +28717,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cmp_map_comp_last_write_wins_en_duplicados() {
-        // Si la key se repite, gana el último value.
+        // If the key repeats, the last value wins.
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 1, 3]\n\
              let m: Map<Int, Int> = {x: x * 100 for x in xs}",
@@ -28609,15 +28727,15 @@ let r = match n {
         let v = env.lock().get("m").unwrap();
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
-            // Keys únicas: 1, 2, 3. La key 1 mantiene posición pero value
-            // se sobrescribe.
+            // Unique keys: 1, 2, 3. Key 1 keeps its position but value
+            // is overwritten.
             assert_eq!(g.len(), 3);
         } else {
             panic!("esperaba Map");
         }
     }
 
-    // ---- Mini-tanda Mb8 — starts_with/ends_with + insert_at/remove_at
+    // ---- Mini-batch Mb8 — starts_with/ends_with + insert_at/remove_at
     //                       + Str.left/right/center + zip_to_map +
     //                       bits-extras ----
 
@@ -28790,7 +28908,7 @@ let r = match n {
         assert_eq!(env.lock().get("b"), Some(Value::Int(1)));
     }
 
-    // ---- Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle +
+    // ---- Mini-batch Mb7 — take/drop/init/tail/intersperse/cycle +
     //                       repeat_with + with ----
 
     #[tokio::test(flavor = "current_thread")]
@@ -28967,7 +29085,7 @@ let r = match n {
         assert_eq!(env.lock().get("original_has_b"), Some(Value::Bool(false)));
     }
 
-    // ---- Mini-tanda Mb6 — scan + windows + merge_with ----
+    // ---- Mini-batch Mb6 — scan + windows + merge_with ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb6_list_scan_acumula_outputs_intermedios() {
@@ -28990,7 +29108,7 @@ let r = match n {
                     }
                 })
                 .collect();
-            // Cada paso del acc: 0+1=1, 1+2=3, 3+3=6, 6+4=10.
+            // Each acc step: 0+1=1, 1+2=3, 3+3=6, 6+4=10.
             assert_eq!(nums, vec![1, 3, 6, 10]);
         } else {
             panic!("esperaba List");
@@ -29072,7 +29190,7 @@ let r = match n {
         let v = env.lock().get("r").unwrap();
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
-            // x: 1 (solo en a), y: 2+10=12 (conflict), z: 3 (solo en b).
+            // x: 1 (only in a), y: 2+10=12 (conflict), z: 3 (only in b).
             assert_eq!(g.len(), 3);
             let y_val = g
                 .iter()
@@ -29084,7 +29202,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda HTTP-Cors — echo del Origin sin filtro ----
+    // ---- Mini-batch HTTP-Cors — Origin echo without filter ----
 
     #[test]
     fn http_cors_allow_origin_echo_devuelve_request_origin() {
@@ -29107,13 +29225,13 @@ let r = match n {
         assert_eq!(echo.resolve(None), None);
     }
 
-    // ---- Mini-tanda HTTP-Err — status codes específicos por Err ----
+    // ---- Mini-batch HTTP-Err — specific status codes by Err ----
 
     #[test]
     fn http_err_value_to_outcome_con_instance_status_field_usa_ese_status() {
-        // Construir Value::Result(Err(Instance { status: 404, message: "..." }))
-        // y verificar que `value_to_outcome` lo mapea a HandlerOutcome con
-        // status 404 (y body = Instance serializada, no `{"error": ...}`).
+        // Build Value::Result(Err(Instance { status: 404, message: "..." }))
+        // and verify that `value_to_outcome` maps it to HandlerOutcome with
+        // status 404 (and body = serialized Instance, not `{"error": ...}`).
         use crate::value::{ResultVariant, Value};
         use parking_lot::Mutex;
         use std::sync::Arc;
@@ -29128,7 +29246,7 @@ let r = match n {
         let err = Value::Result(ResultVariant::Err(Box::new(instance)));
         let outcome = crate::http::value_to_outcome(&err);
         assert_eq!(outcome.status, 404);
-        // El body debería serializar la Instance, no envolverla en
+        // The body should serialize the Instance, not wrap it in
         // `{"error": ...}`.
         let body_str = outcome.body.to_string();
         assert!(
@@ -29141,7 +29259,7 @@ let r = match n {
 
     #[test]
     fn http_err_sin_status_field_cae_al_500_historico() {
-        // Sin field `status`, fallback a 500 con `{"error": e}`.
+        // Without `status` field, fallback to 500 with `{"error": e}`.
         use crate::value::{ResultVariant, Value};
         use parking_lot::Mutex;
         use std::sync::Arc;
@@ -29166,7 +29284,7 @@ let r = match n {
 
     #[test]
     fn http_err_status_fuera_de_rango_cae_al_500() {
-        // status: 99 (fuera de 100..1000) → 500.
+        // status: 99 (outside 100..1000) → 500.
         use crate::value::{ResultVariant, Value};
         use parking_lot::Mutex;
         use std::sync::Arc;
@@ -29180,7 +29298,7 @@ let r = match n {
         assert_eq!(outcome.status, 500);
     }
 
-    // ---- Mini-tanda Mb5: group_by + zip_with + max_by/min_by +
+    // ---- Mini-batch Mb5: group_by + zip_with + max_by/min_by +
     //                     lines + is_empty ----
 
     #[tokio::test(flavor = "current_thread")]
@@ -29194,9 +29312,9 @@ let r = match n {
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
             assert_eq!(g.len(), 2);
-            // El primer grupo creado fue "impar" (n=1 cae primero).
+            // The first group created was "impar" (n=1 comes first).
             assert_eq!(g[0].0, Value::Str("impar".into()));
-            // Y "par" segundo (n=2).
+            // And "par" second (n=2).
             assert_eq!(g[1].0, Value::Str("par".into()));
         } else {
             panic!("esperaba Map");
@@ -29225,7 +29343,7 @@ let r = match n {
                     }
                 })
                 .collect();
-            // trunca a min(4, 2) = 2 elementos.
+            // truncates to min(4, 2) = 2 elements.
             assert_eq!(nums, vec![11, 22]);
         } else {
             panic!("esperaba List");
@@ -29328,13 +29446,13 @@ let r = match n {
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
     }
 
-    // ---- Mini-tanda Async-cl: async fn como closure inline ----
+    // ---- Mini-batch Async-cl: async fn as inline closure ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_cl_inline_devuelve_future() {
-        // `async fn(...) => ...` produce un Value::Function con
-        // is_async = true. Al invocar, devuelve Value::Future perezoso
-        // que el caller debe `.await`ar.
+        // `async fn(...) => ...` produces a Value::Function with
+        // is_async = true. On invocation, returns a lazy Value::Future
+        // the caller must `.await`.
         let (env, res) = parse_eval_into_env(
             "async fn run() -> Int {\n\
                  let f = async fn(n: Int) -> Int { return n * 2 }\n\
@@ -29368,7 +29486,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn async_cl_pasada_como_arg_funciona() {
-        // Un async closure se puede pasar como arg a otra async fn.
+        // An async closure can be passed as arg to another async fn.
         let (env, res) = parse_eval_into_env(
             "async fn apply_async(f, n: Int) -> Int {\n\
                  let r = f(n).await\n\
@@ -29387,7 +29505,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cmp_var_de_for_anidado_no_escapa() {
-        // Después de evaluar, ni `x` ni `y` están en el caller.
+        // After evaluating, neither `x` nor `y` is in the caller.
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
              let ys: List<Int> = [10]\n\
@@ -29399,7 +29517,7 @@ let r = match n {
         assert_eq!(env.lock().get("y"), None);
     }
 
-    // ---- Mini-tanda Math: builtins numéricos ----
+    // ---- Mini-batch Math: numeric builtins ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn math_abs_int_y_float() {
@@ -29481,7 +29599,7 @@ let r = match n {
         assert_eq!(env.lock().get("c"), Some(Value::Int(10)));
     }
 
-    // ---- Mini-tanda Mb9: Str.swap_case / title / is_alpha / is_digit / is_numeric ----
+    // ---- Mini-batch Mb9: Str.swap_case / title / is_alpha / is_digit / is_numeric ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb9_str_swap_case() {
@@ -29525,7 +29643,7 @@ let r = match n {
         assert_eq!(env.get("h"), Some(Value::Bool(false)));
     }
 
-    // ---- Mini-tanda Mb9: List.split_at(i) ----
+    // ---- Mini-batch Mb9: List.split_at(i) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb9_list_split_at_basico() {
@@ -29595,7 +29713,7 @@ let r = match n {
         }
     }
 
-    // ---- Mini-tanda Mb9: Map.has_value(v) ----
+    // ---- Mini-batch Mb9: Map.has_value(v) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb9_map_has_value() {
@@ -29610,7 +29728,7 @@ let r = match n {
         assert_eq!(env.lock().get("no"), Some(Value::Bool(false)));
     }
 
-    // ---- Mini-tanda Math+Mb9: métodos sobre Int ----
+    // ---- Mini-batch Math+Mb9: methods on Int ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn int_methods_abs_to_str_to_str_base() {
@@ -29631,9 +29749,9 @@ let r = match n {
         assert_eq!(env.get("e"), Some(Value::Str("10".into())));
     }
 
-    // ---- Mini-tanda Math+Mb9: métodos sobre Float ----
+    // ---- Mini-batch Math+Mb9: methods on Float ----
 
-    // ---- Mini-tanda Fp — default params ----
+    // ---- Mini-batch Fp — default params ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn fp_call_sin_args_usa_default() {
@@ -29670,7 +29788,7 @@ let r = match n {
         assert_eq!(env.lock().get("r2"), Some(Value::Int(7)));
     }
 
-    // ---- Mini-tanda Fp.2 — varargs en runtime ----
+    // ---- Mini-batch Fp.2 — varargs at runtime ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn fp2_varargs_sin_args_recibe_lista_vacia() {
@@ -29714,7 +29832,7 @@ let r = match n {
         assert_eq!(env.lock().get("r"), Some(Value::Int(3)));
     }
 
-    // ---- Mini-tanda Fp.3 — named args en runtime ----
+    // ---- Mini-batch Fp.3 — named args at runtime ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn fp3_call_solo_named_args() {
@@ -29765,7 +29883,7 @@ let r = match n {
         assert!(res.is_err(), "esperaba error por named arg inexistente");
     }
 
-    // ---- Mini-tanda Sp.2 — return en match arm ----
+    // ---- Mini-batch Sp.2 — return in match arm ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn sp2_return_en_match_arm_corta_la_fn() {
@@ -29818,9 +29936,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn fp_default_expr_compleja_se_evalua_en_cada_call() {
-        // Default expr puede ser cualquier expr — se evalúa en el
-        // env del closure cada vez que se llama sin ese arg.
-        // (Decisión de diseño: evaluado-en-cada-call, NO cacheado).
+        // Default expr can be any expr — evaluated in the
+        // closure's env each time it is called without that arg.
+        // (Design decision: evaluated-per-call, NOT cached).
         let (env, res) = parse_eval_into_env(
             "fn make_list(prefix: Str = \"x\", n: Int = 3) -> List<Str> {\n\
                 let xs: List<Str> = []\n\
@@ -29864,24 +29982,24 @@ let r = match n {
     }
 
     // ----------------------------------------------------------------
-    // Fase 9.w.1.b — Auth nativa: builtins jwt + hash.
+    // Phase 9.w.1.b — Native auth: jwt + hash builtins.
     //
-    // Cubren: registro como Value::Module en el env global, signatures
-    // de cada builtin (aridad + tipos), round-trips encode→decode y
-    // password→verify, modelo de errores (Result::Err con mensaje
-    // específico para JWT; Bool::false para hash con input malformado).
+    // Cover: registration as Value::Module in the global env, signatures
+    // of each builtin (arity + types), encode→decode and
+    // password→verify round-trips, error model (Result::Err with a
+    // specific message for JWT; Bool::false for hash with malformed input).
     // ----------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
     async fn register_builtins_define_jwt_y_hash_como_modulos() {
         let env = Environment::new();
         register_builtins(&env);
-        // `jwt` y `hash` están en el env global como Value::Module.
+        // `jwt` and `hash` are in the global env as Value::Module.
         let jwt = env.lock().get("jwt").expect("jwt debería estar bindeado");
         match jwt {
             Value::Module { name, env: jwt_env } => {
                 assert_eq!(name, "jwt");
-                // El env del módulo expone `encode` y `decode`.
+                // The module env exposes `encode` and `decode`.
                 assert!(jwt_env.lock().get("encode").is_some());
                 assert!(jwt_env.lock().get("decode").is_some());
             }
@@ -29903,8 +30021,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn jwt_encode_decode_round_trip_hs256() {
-        // Encode un payload, decode con el mismo secret, recuperá el
-        // payload bit-a-bit.
+        // Encode a payload, decode with the same secret, recover the
+        // payload bit-by-bit.
         let payload = Value::new_map(vec![
             (Value::Str("sub".into()), Value::Str("user123".into())),
             (Value::Str("admin".into()), Value::Bool(true)),
@@ -29915,9 +30033,9 @@ let r = match n {
             Value::Str(s) => s.clone(),
             other => panic!("encode debe devolver Str, fue {:?}", other),
         };
-        // JWT format: 3 partes separadas por `.`.
+        // JWT format: 3 parts separated by `.`.
         assert_eq!(token_str.split('.').count(), 3);
-        // Decode devuelve Result::Ok(Map) con los mismos claims.
+        // Decode returns Result::Ok(Map) with the same claims.
         let decoded = builtin_jwt_decode(&[Value::Str(token_str), secret]).unwrap();
         match decoded {
             Value::Result(ResultVariant::Ok(inner)) => match *inner {
@@ -29953,9 +30071,9 @@ let r = match n {
         match decoded {
             Value::Result(ResultVariant::Err(inner)) => match *inner {
                 Value::Str(msg) => {
-                    // El crate `jsonwebtoken` emite "InvalidSignature" cuando
-                    // el secret no matchea. Verificamos que el mensaje no
-                    // sea vacío y mencione la signature.
+                    // The `jsonwebtoken` crate emits "InvalidSignature" when
+                    // the secret does not match. We verify the message is
+                    // not empty and mentions signature.
                     assert!(
                         msg.to_lowercase().contains("signature")
                             || msg.to_lowercase().contains("invalid"),
@@ -29999,11 +30117,11 @@ let r = match n {
             Value::Str(s) => s,
             _ => panic!(),
         };
-        // Decode con HS256 default debería fallar (alg mismatch).
+        // Decode with HS256 default should fail (alg mismatch).
         let dec_default =
             builtin_jwt_decode(&[Value::Str(token_str.clone()), secret.clone()]).unwrap();
         assert!(matches!(dec_default, Value::Result(ResultVariant::Err(_))));
-        // Decode con HS384 explícito tiene que andar.
+        // Decode with explicit HS384 must work.
         let dec_ok = builtin_jwt_decode(&[Value::Str(token_str), secret, alg]).unwrap();
         assert!(matches!(dec_ok, Value::Result(ResultVariant::Ok(_))));
     }
@@ -30029,7 +30147,7 @@ let r = match n {
         assert!(r1.is_err());
         let r2 = builtin_jwt_encode(&[Value::new_map(vec![])]);
         assert!(r2.is_err());
-        // 4 args también es error (>3).
+        // 4 args is also an error (>3).
         let r4 = builtin_jwt_encode(&[
             Value::new_map(vec![]),
             Value::Str("s".into()),
@@ -30047,17 +30165,17 @@ let r = match n {
             Value::Str(s) => s.clone(),
             other => panic!("password debe devolver Str, fue {:?}", other),
         };
-        // El hash sigue el formato PHC string: `$argon2id$v=19$...`.
+        // The hash follows PHC string format: `$argon2id$v=19$...`.
         assert!(
             hashed_str.starts_with("$argon2id$"),
             "esperaba prefijo $argon2id$, fue: {}",
             hashed_str
         );
-        // Verify con el plain original devuelve true.
+        // Verify with the original plain returns true.
         let ok = builtin_hash_verify(&[Value::Str(plain.into()), Value::Str(hashed_str.clone())])
             .unwrap();
         assert_eq!(ok, Value::Bool(true));
-        // Verify con plain incorrecto devuelve false.
+        // Verify with wrong plain returns false.
         let bad = builtin_hash_verify(&[
             Value::Str("contraseña-distinta".into()),
             Value::Str(hashed_str),
@@ -30068,9 +30186,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn hash_password_genera_salts_distintos_por_call() {
-        // Argon2id usa salt aleatorio por cada llamada, así que dos
-        // password() del mismo plain producen hashes distintos. Ambos
-        // verifican OK contra el plain original.
+        // Argon2id uses a random salt on each call, so two
+        // password() of the same plain produce different hashes. Both
+        // verify OK against the original plain.
         let plain = Value::Str("misma-pass".into());
         let h1 = builtin_hash_password(std::slice::from_ref(&plain)).unwrap();
         let h2 = builtin_hash_password(std::slice::from_ref(&plain)).unwrap();
@@ -30083,9 +30201,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn hash_verify_hash_malformado_devuelve_false_no_error() {
-        // Hash malformado no panicquea — devuelve false. Decisión de
-        // seguridad: no se filtra al attacker que el hash en la DB
-        // está corrupto.
+        // Malformed hash does not panic — returns false. Security
+        // decision: we do not leak to the attacker that the hash in the DB
+        // is corrupt.
         let result = builtin_hash_verify(&[
             Value::Str("cualquier-plain".into()),
             Value::Str("no-es-un-hash-PHC".into()),
@@ -30116,11 +30234,11 @@ let r = match n {
         assert!(r1.is_err());
     }
 
-    // ---- Fase 9.w.1.iter2.b — auth.blacklist / is_blacklisted / cleanup_expired ----
+    // ---- Phase 9.w.1.iter2.b — auth.blacklist / is_blacklisted / cleanup_expired ----
 
     #[test]
     fn auth_blacklist_aridad_incorrecta_es_error() {
-        // Esperaba 3 args, recibe 2.
+        // Expected 3 args, receives 2.
         let r = builtin_auth_blacklist(&[Value::Str("x".into()), Value::Int(1)]);
         assert!(r.is_err());
         assert!(r.unwrap_err().message.contains("3 args"));
@@ -30139,13 +30257,13 @@ let r = match n {
 
     #[test]
     fn auth_blacklist_jti_debe_ser_str() {
-        // Construyo un Value::DbConn dummy con un handle creado a mano. No
-        // se llega a usar (el error se dispara antes del path async).
-        // Sin DbConnHandle real, simulamos con Int en el slot DB para
-        // verificar que el primer chequeo (DbConn) corre antes del segundo (Str).
+        // Build a dummy Value::DbConn with a hand-made handle. It is not
+        // actually used (the error fires before the async path).
+        // Without a real DbConnHandle, we simulate with Int in the DB slot to
+        // verify that the first check (DbConn) runs before the second (Str).
         let r = builtin_auth_blacklist(&[Value::Int(1), Value::Int(2), Value::Int(3)]);
         assert!(r.is_err());
-        // El error es del primer arg (DbConn missing), no del jti.
+        // The error is from the first arg (DbConn missing), not the jti.
         let msg = r.unwrap_err().message;
         assert!(msg.contains("DbConn"));
     }
@@ -30166,9 +30284,9 @@ let r = match n {
 
     #[test]
     fn auth_modulo_pre_registrado_y_acepta_field_access() {
-        // Verifica que `auth` está registrado como Value::Module y que
+        // Verifies that `auth` is registered as Value::Module and that
         // `auth.blacklist`/`auth.is_blacklisted`/`auth.cleanup_expired`
-        // están accesibles como builtins.
+        // are accessible as builtins.
         let env = Environment::new();
         register_builtins(&env);
         let auth = env.lock().get("auth").expect("auth debería estar bindeado");
@@ -30190,10 +30308,10 @@ let r = match n {
         }
     }
 
-    /// Test de end-to-end usando el evaluator real (no llamada directa
-    /// a la fn builtin). Verifica que `jwt.encode(...)` parseado como
-    /// expresión Fitz se ejecuta correctamente vía el dispatch normal
-    /// del field-access sobre Value::Module.
+    /// End-to-end test using the real evaluator (not a direct call
+    /// to the builtin fn). Verifies that `jwt.encode(...)` parsed as
+    /// a Fitz expression runs correctly via normal
+    /// field-access dispatch on Value::Module.
     #[tokio::test(flavor = "current_thread")]
     async fn jwt_y_hash_via_field_access_en_programa_fitz() {
         let (env, res) = parse_eval_into_env(
@@ -30205,12 +30323,12 @@ let r = match n {
         .await;
         res.unwrap();
         let env = env.lock();
-        // token es Str con 3 partes JWT.
+        // token is Str with 3 JWT parts.
         match env.get("token").expect("token bindeado") {
             Value::Str(s) => assert_eq!(s.split('.').count(), 3),
             other => panic!("token debería ser Str, fue {:?}", other),
         }
-        // pw es PHC string Argon2id.
+        // pw is PHC Argon2id string.
         match env.get("pw").expect("pw bindeado") {
             Value::Str(s) => assert!(s.starts_with("$argon2id$")),
             other => panic!("pw debería ser Str, fue {:?}", other),
@@ -30219,13 +30337,13 @@ let r = match n {
         assert_eq!(env.get("bad"), Some(Value::Bool(false)));
     }
 
-    // ---- Fase 12.3.a.1 — structured logging built-in ----
+    // ---- Phase 12.3.a.1 — structured logging built-in ----
     //
-    // Tests sobre los 4 builtins (`log.info/warn/error/debug`) y el
-    // dispatch de kwargs. No testean el output stderr en sí (eso es
-    // smoke E2E manual con el binario); chequean shape de la API,
-    // validaciones de tipos, kwargs reservados y wiring contra el env
-    // global del evaluator.
+    // Tests on the 4 builtins (`log.info/warn/error/debug`) and the
+    // kwargs dispatch. Do not test the stderr output itself (that is
+    // manual E2E smoke with the binary); they check API shape,
+    // type validations, reserved kwargs and wiring against the global
+    // env of the evaluator.
 
     #[tokio::test(flavor = "current_thread")]
     async fn log_info_solo_msg_devuelve_null() {
@@ -30285,8 +30403,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn log_info_con_kwargs_heterogeneos_compila_y_ejecuta() {
-        // Sintaxis de kwargs en function calls es `name: value` (`=` está
-        // reservado para decoradores). Mismo shape que `db.connect(url,
+        // Kwargs syntax in function calls is `name: value` (`=` is
+        // reserved for decorators). Same shape as `db.connect(url,
         // max_conns: 5)` / `DbConn.transaction(cb, isolation: "...")`.
         let (env, res) = parse_eval_into_env(
             "log.info(\"login ok\", user_id: 42, duration_ms: 15, role: \"admin\", active: true)\n\
@@ -30333,7 +30451,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn log_info_con_kwarg_no_serializable_es_error() {
-        // Una función como kwarg no es serializable (no es primitivo/Secret/List/Map).
+        // A function as kwarg is not serializable (not primitive/Secret/List/Map).
         let (_, res) = parse_eval_into_env(
             "fn f() -> Int { return 0 }\n\
              log.info(\"test\", cb: f)",
@@ -30349,7 +30467,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn log_info_kwargs_msg_no_str_es_error() {
-        // Path kwargs con msg posicional Int — debe rechazar.
+        // Kwargs path with Int positional msg — must reject.
         let (_, res) = parse_eval_into_env("log.info(42, foo: \"bar\")").await;
         let err = res.unwrap_err();
         assert!(
@@ -30361,7 +30479,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn log_info_kwargs_sin_msg_positional_es_error() {
-        // Solo kwargs, sin el msg positional — debe rechazar.
+        // Only kwargs, without the positional msg — must reject.
         let (_, res) = parse_eval_into_env("log.info(foo: \"bar\")").await;
         let err = res.unwrap_err();
         assert!(
@@ -30371,12 +30489,12 @@ let r = match n {
         );
     }
 
-    // ---- Fase 9.w.3 — runtime cron + background + spawn ----
+    // ---- Phase 9.w.3 — runtime cron + background + spawn ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn cron_decorator_sin_registry_activo_es_error() {
-        // `@cron("...")` sin contexto HTTP/registry → error claro.
-        // Replica defensiva del checker (que no chequea contexto).
+        // `@cron("...")` without HTTP context/registry → clear error.
+        // Defensive replica of the checker (which does not check context).
         let (_, res) =
             parse_eval_into_env("@cron(\"0 0 * * *\")\nfn h() -> Null { return null }").await;
         let err = res.unwrap_err();
@@ -30389,8 +30507,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cron_decorator_con_registry_registra_job() {
-        // Con un HttpRegistry activo, `@cron("...")` empuja un CronJob
-        // al cron_registry. La fn también queda en el env.
+        // With an active HttpRegistry, `@cron("...")` pushes a CronJob
+        // to the cron_registry. The fn also remains in the env.
         let (env, registry) = crate::http::with_active_registry_async(|| async {
             let (env, res) =
                 parse_eval_into_env("@cron(\"*/5 * * * *\")\nfn tick() -> Null { return null }")
@@ -30404,7 +30522,7 @@ let r = match n {
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].name, "tick");
         assert!(!jobs[0].is_async);
-        // La fn también queda en el env.
+        // The fn also remains in the env.
         assert!(matches!(
             env.lock().get("tick"),
             Some(Value::Function { .. })
@@ -30429,8 +30547,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cron_expression_invalida_es_error_claro() {
-        // El checker no valida sintaxis del cron expression; el
-        // runtime lo hace al registrar via `cron::Schedule::from_str`.
+        // The checker does not validate the cron expression syntax; the
+        // runtime does it on register via `cron::Schedule::from_str`.
         let result = crate::http::with_active_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(
                 "@cron(\"no es un cron válido\")\nfn h() -> Null { return null }",
@@ -30511,7 +30629,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cron_con_retry_solo_max_aplica_defaults() {
-        // Sin backoff/initial_secs/max_secs explícitos: defaults expo/1/60.
+        // Without explicit backoff/initial_secs/max_secs: defaults expo/1/60.
         let (_env, registry) = crate::http::with_active_registry_async(|| async {
             let (env, res) = parse_eval_into_env(
                 "@cron(\"0 0 * * *\", retry={max: 5})\n\
@@ -30548,7 +30666,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cron_con_store_no_dbconn_es_error_runtime() {
-        // `store=x` con `x` siendo un Int → error claro citando DbConn.
+        // `store=x` with `x` being an Int → clear error citing DbConn.
         let result = crate::http::with_active_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(
                 "let fake_db = 42\n\
@@ -30578,9 +30696,9 @@ let r = match n {
             res
         })
         .await;
-        // El checker captura el `db` no definido como warning del
-        // checker estático; el `unwrap_err()` ve el error del checker
-        // O del runtime (cualquiera de los dos cubre el caso).
+        // The checker captures the undefined `db` as a static
+        // checker warning; `unwrap_err()` sees the error from the checker
+        // OR the runtime (either covers the case).
         let err = result.0.unwrap_err();
         assert!(
             err.message.contains("db") || err.message.contains("store"),
@@ -30591,8 +30709,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn background_decorator_no_registra_en_runtime() {
-        // `@background` es solo marcador del checker; en runtime es
-        // no-op. La fn queda definida en el env normalmente.
+        // `@background` is only a checker marker; at runtime it is
+        // no-op. The fn remains defined in the env normally.
         let (env, res) =
             parse_eval_into_env("@background\nfn send(addr: Str) -> Null { return null }").await;
         res.expect("evaluación OK");
@@ -30604,10 +30722,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn spawn_sobre_background_fn_retorna_future() {
-        // `spawn(send_email(...))` retorna `Value::Future` que el
-        // caller puede `.await`-ear o descartar. El target debe ser
-        // una fn con `@background` (validación del runtime defensiva
-        // si el caller evita el checker).
+        // `spawn(send_email(...))` returns `Value::Future` which the
+        // caller can `.await` or discard. The target must be
+        // a fn with `@background` (defensive runtime validation
+        // if the caller bypasses the checker).
         let (env, res) = parse_eval_into_env(
             "@background\n\
              fn job() -> Int { return 42 }\n\
@@ -30625,8 +30743,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn spawn_y_await_devuelve_valor_target() {
-        // `spawn(fn_call).await` resuelve al valor que la fn target
-        // hubiera devuelto si la llamáramos directo.
+        // `spawn(fn_call).await` resolves to the value the target fn
+        // would have returned if called directly.
         let (env, res) = parse_eval_into_env(
             "@background\n\
              fn job() -> Int { return 42 }\n\
@@ -30638,8 +30756,8 @@ let r = match n {
         )
         .await;
         res.expect("evaluación OK");
-        // `caller()` retorna un Future porque es async. Para chequear
-        // el valor interior, lo awaiteamos en el test.
+        // `caller()` returns a Future because it is async. To check
+        // the inner value, we await it in the test.
         let caller_fut = env.lock().get("result").expect("result bindeado");
         let final_value = crate::http::await_if_future(caller_fut)
             .await
@@ -30649,10 +30767,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn spawn_userdefined_override_no_dispara_dispatch_especial() {
-        // Si el usuario define `fn spawn(...)`, el lookup retorna
-        // Value::Function y `is_spawn_builtin` devuelve false → el
-        // dispatch normal corre. Validamos que el call resuelve al
-        // user-defined spawn (no al builtin que requiere @background).
+        // If the user defines `fn spawn(...)`, the lookup returns
+        // Value::Function and `is_spawn_builtin` returns false → the
+        // normal dispatch runs. We validate the call resolves to the
+        // user-defined spawn (not the builtin that requires @background).
         let (env, res) = parse_eval_into_env(
             "fn spawn(x: Int) -> Int { return x + 1 }\n\
              let result = spawn(41)",
@@ -30662,20 +30780,20 @@ let r = match n {
         assert_eq!(env.lock().get("result"), Some(Value::Int(42)));
     }
 
-    // ---- Fase 10.1.b — módulo `db` (sin Postgres real) ----
+    // ---- Phase 10.1.b — `db` module (without real Postgres) ----
     //
-    // Estos tests cubren el dispatch del evaluator: registro del
-    // módulo, lookup vía field access, return shape de connect, y
-    // mensajes de error con args inválidos. NO conectan a un
-    // Postgres real — eso entraría como E2E opt-in con feature
-    // flag (`postgres-tests`) en sub-paso futuro 10.1.d, cuando
-    // tengamos un Postgres en docker en el setup de CI.
+    // These tests cover the evaluator's dispatch: module
+    // registration, field-access lookup, connect return shape, and
+    // error messages with invalid args. They do NOT connect to a
+    // real Postgres — that would be opt-in E2E with a feature
+    // flag (`postgres-tests`) in a future sub-step 10.1.d, when
+    // we have Postgres in docker in the CI setup.
 
     #[tokio::test(flavor = "current_thread")]
     async fn db_modulo_registrado_como_value_module() {
-        // El módulo `db` queda en el env como `Value::Module`
-        // después de `register_builtins`. Field access sobre él
-        // devuelve `Value::Builtin` para `connect`.
+        // The `db` module stays in the env as `Value::Module`
+        // after `register_builtins`. Field access on it
+        // returns `Value::Builtin` for `connect`.
         let env = Environment::new();
         register_builtins(&env);
         let db_value = env.lock().get("db").expect("módulo db registrado");
@@ -30694,9 +30812,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn db_connect_devuelve_future() {
-        // `db.connect("...")` sin .await debe devolver un
-        // Value::Future. El error de conexión real solo aparece al
-        // hacer el .await — acá testeamos el shape inmediato.
+        // `db.connect("...")` without .await must return a
+        // Value::Future. The real connection error only appears on
+        // .await — here we test the immediate shape.
         let (env, res) =
             parse_eval_into_env("let f = db.connect(\"postgres://nadie@127.0.0.1:1/x\")").await;
         res.expect("evaluación sin .await debe ser OK");
@@ -30720,9 +30838,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn db_connect_url_invalida_devuelve_err_via_await() {
-        // El .await del future resuelve a `Result::Err(...)` con el
-        // mensaje del parse de URL. Sin Postgres real, no necesitamos
-        // conexión TCP — el parse de URL falla antes.
+        // The future's .await resolves to `Result::Err(...)` with the
+        // URL parse message. Without real Postgres, we do not need a
+        // TCP connection — the URL parse fails first.
         let (env, res) = parse_eval_into_env("let r = db.connect(\"mysql://x@h/d\").await").await;
         res.expect("evaluación + await OK");
         let r = env.lock().get("r").expect("r bindeado");
@@ -30743,12 +30861,12 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn db_connect_url_con_sslmode_require_resuelve_y_falla_en_red() {
-        // v0.10.23 (Fase 10.1.b) — sslmode=require ahora parsea OK
-        // y el connect intenta la conexión TCP real (que falla
-        // porque "h" no resuelve DNS). El test valida que el flow
-        // llega al I/O step (no aborta en el parser ni en el
-        // dispatch). Antes de v0.10.23, el connect retornaba Err
-        // con NotImplemented sin tocar el socket.
+        // v0.10.23 (Phase 10.1.b) — sslmode=require now parses OK
+        // and the connect attempts the real TCP connection (which fails
+        // because "h" does not resolve DNS). The test validates that the flow
+        // reaches the I/O step (does not abort at the parser nor at the
+        // dispatch). Before v0.10.23, the connect returned Err
+        // with NotImplemented without touching the socket.
         let (env, res) =
             parse_eval_into_env("let r = db.connect(\"postgres://x@h/d?sslmode=require\").await")
                 .await;
@@ -30757,10 +30875,10 @@ let r = match n {
         match r {
             Value::Result(crate::value::ResultVariant::Err(boxed)) => {
                 if let Value::Str(msg) = boxed.as_ref() {
-                    // Aceptamos varias variantes del error de red
-                    // según OS (Windows: "Host desconocido", Linux:
-                    // "Name or service not known", etc.). Lo que NO
-                    // debe aparecer es "no implementado" o
+                    // We accept several network-error variants
+                    // depending on OS (Windows: "Host desconocido", Linux:
+                    // "Name or service not known", etc.). What must NOT
+                    // appear is "no implementado" or
                     // "NotImplemented".
                     assert!(
                         !msg.to_lowercase().contains("not implemented")
@@ -30777,14 +30895,14 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn db_conn_metodo_desconocido_da_error_claro() {
-        // Si construimos un DbConn opaco a mano y le llamamos un
-        // método inexistente, el dispatch_method devuelve mensaje
-        // claro listando los métodos soportados.
+        // If we build an opaque DbConn by hand and call a
+        // nonexistent method, dispatch_method returns a clear message
+        // listing the supported methods.
         use std::sync::Arc;
         let env = Environment::new();
         register_builtins(&env);
-        // Handle "fake" con conn = None — el dispatch nos importa,
-        // no la conn real.
+        // "Fake" handle with conn = None — we care about dispatch,
+        // not the real conn.
         let handle = Arc::new(crate::db::DbConnHandle::new_for_test_closed(
             "postgres://x@h/d".into(),
         ));
@@ -30799,9 +30917,9 @@ let r = match n {
         );
     }
 
-    /// Helper paralelo a `parse_eval_into_env` pero acepta un env
-    /// pre-poblado (con bindings extras). Útil para tests que
-    /// inyectan handles construidos a mano (DbConn, WsConn, etc.).
+    /// Helper parallel to `parse_eval_into_env` but accepts a
+    /// pre-populated env (with extra bindings). Useful for tests that
+    /// inject hand-built handles (DbConn, WsConn, etc.).
     async fn parse_eval_into_env_with_extra(src: &str, env: EnvRef) -> (EnvRef, FitzResult<()>) {
         let tokens = crate::lexer::tokenize(src).expect("la fuente debe tokenizar");
         let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
@@ -30815,13 +30933,13 @@ let r = match n {
         (env, result)
     }
 
-    // ---- Fase 10.3.b1 — builder ORM `User.all(db)` ----
+    // ---- Phase 10.3.b1 — ORM builder `User.all(db)` ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_value_type_cachea_table_metadata_al_evaluarse() {
-        // Después de `@table("users") type User { ... }`, el
-        // `Value::Type` en el env tiene `table_metadata = Some(...)`
-        // con el nombre SQL y los fields.
+        // After `@table("users") type User { ... }`, the
+        // `Value::Type` in the env has `table_metadata = Some(...)`
+        // with the SQL name and fields.
         let (env, res) = parse_eval_into_env(
             "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}",
         )
@@ -30855,9 +30973,9 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_all_sobre_type_sin_table_error_claro() {
-        // `Plain.all(db)` sin `@table` debe rechazarse — error genérico
-        // de método estático no encontrado (el ORM dispatch solo activa
-        // si hay table_metadata).
+        // `Plain.all(db)` without `@table` must be rejected — generic error
+        // for static method not found (ORM dispatch only activates
+        // if there's table_metadata).
         let env = Environment::new();
         register_builtins(&env);
         let (_env, res) = parse_eval_into_env_with_extra(
@@ -30875,7 +30993,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_all_sin_args_es_error_de_aridad() {
-        // `User.all()` sin el db → error de aridad.
+        // `User.all()` without the db → arity error.
         let (_env, res) =
             parse_eval_into_env("@table(\"users\") type User { id: Int }\nlet f = User.all()")
                 .await;
@@ -30900,9 +31018,9 @@ let r = match n {
         );
     }
 
-    // ---- Fase 10.3.b2 — translator Expr → SQL + where builder ----
+    // ---- Phase 10.3.b2 — Expr → SQL translator + where builder ----
 
-    /// Helper para construir fields + meta para tests del translator.
+    /// Helper to build fields + meta for translator tests.
     fn make_test_meta() -> (Vec<crate::ast::Field>, crate::types::TableMetadata) {
         use crate::ast::TypeExpr;
         let fields = vec![
@@ -30938,9 +31056,9 @@ let r = match n {
         (fields, meta)
     }
 
-    /// Helper: parsea `let _ = fn (u) => <expr>` y devuelve el
-    /// inner expr del closure. El wrap con `let` evita que el parser
-    /// trate `fn` top-level como declaración de fn nombrada.
+    /// Helper: parses `let _ = fn (u) => <expr>` and returns the
+    /// inner expr of the closure. The `let` wrap avoids the parser
+    /// treating top-level `fn` as a named fn declaration.
     fn parse_closure_body(src: &str) -> crate::ast::Expr {
         let wrapped = format!("let __closure = {}", src);
         let tokens = crate::lexer::tokenize(&wrapped).expect("tokenize OK");
@@ -31015,14 +31133,14 @@ let r = match n {
     #[test]
     fn translate_acceso_a_otra_var_es_error() {
         let (fields, meta) = make_test_meta();
-        // El closure intenta acceder a `other.x` (no el parámetro).
+        // The closure tries to access `other.x` (not the parameter).
         let expr = parse_closure_body("fn (u) => other.age == 18");
         let mut args = Vec::new();
         let r = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args);
         assert!(r.is_err());
     }
 
-    // ---- Fase 10.5.g — operadores extendidos en where ----
+    // ---- Phase 10.5.g — extended operators in where ----
 
     #[test]
     fn translate_and_or_chain() {
@@ -31030,8 +31148,8 @@ let r = match n {
         let expr = parse_closure_body("fn (u) => u.age > 18 and u.age < 65 or u.name == \"admin\"");
         let mut args = Vec::new();
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
-        // Precedencia: AND > OR (Fitz parsea igual que SQL).
-        // Esperamos: ((age > $1 AND age < $2) OR (name = $3))
+        // Precedence: AND > OR (Fitz parses same as SQL).
+        // We expect: ((age > $1 AND age < $2) OR (name = $3))
         assert!(
             sql.contains("AND") && sql.contains("OR"),
             "esperaba AND y OR en sql: {sql}"
@@ -31117,14 +31235,14 @@ let r = match n {
 
     #[test]
     fn translate_starts_with_escapa_caracteres_like() {
-        // Pattern del user con `%` literal debe escaparse para evitar
+        // User pattern with literal `%` must be escaped to avoid
         // wildcard injection.
         let (fields, meta) = make_test_meta();
         let expr = parse_closure_body("fn (u) => u.name.starts_with(\"100%_off\")");
         let mut args = Vec::new();
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
         assert_eq!(sql, "\"name\" LIKE $1");
-        // `%` y `_` se escapan con `\`; el `%` del suffix queda intacto.
+        // `%` and `_` are escaped with `\`; the suffix `%` stays intact.
         assert_eq!(args, vec![crate::db::PgValue::Text("100\\%\\_off%".into())]);
     }
 
@@ -31135,7 +31253,7 @@ let r = match n {
         let mut args = Vec::new();
         let sql = translate_expr_to_sql(&expr, "u", &fields, &meta, &mut args).unwrap();
         assert_eq!(sql, "\"name\" LIKE $1");
-        // .like NO escapa — el user explícitamente quiere wildcards.
+        // .like does NOT escape — the user explicitly wants wildcards.
         assert_eq!(args, vec![crate::db::PgValue::Text("a_a%".into())]);
     }
 
@@ -31175,7 +31293,7 @@ let r = match n {
 
     #[test]
     fn translate_column_override_usa_sql_name() {
-        // Si el field tiene @column(name="X"), el SQL usa X.
+        // If the field has @column(name="X"), the SQL uses X.
         let (fields, mut meta) = make_test_meta();
         meta.columns.insert(
             "name".into(),
@@ -31400,7 +31518,7 @@ let r = match n {
     #[test]
     fn list_elem_pg_oid_nullable_wrapper() {
         use crate::ast::TypeExpr;
-        // List<Int>? → INT8 (recursa al inner)
+        // List<Int>? → INT8 (recurses to the inner)
         let t = TypeExpr::Nullable(Box::new(TypeExpr::Generic {
             name: "List".into(),
             args: vec![TypeExpr::Named("Int".into())],
@@ -31411,20 +31529,20 @@ let r = match n {
     #[test]
     fn list_elem_pg_oid_rechaza_no_lista() {
         use crate::ast::TypeExpr;
-        // Map<Str, Int> NO es lista
+        // Map<Str, Int> is NOT a list
         let t = TypeExpr::Generic {
             name: "Map".into(),
             args: vec![TypeExpr::Named("Str".into()), TypeExpr::Named("Int".into())],
         };
         assert_eq!(list_elem_pg_oid(&t), None);
-        // Int suelto tampoco
+        // Loose Int either
         assert_eq!(list_elem_pg_oid(&TypeExpr::Named("Int".into())), None);
     }
 
     #[test]
     fn list_elem_pg_oid_rechaza_list_de_compuestos() {
         use crate::ast::TypeExpr;
-        // List<List<Int>> → no soportado por MVP (anidados)
+        // List<List<Int>> → not supported in MVP (nested)
         let t = TypeExpr::Generic {
             name: "List".into(),
             args: vec![TypeExpr::Generic {
@@ -31481,9 +31599,9 @@ let r = match n {
 
     #[test]
     fn fitz_list_to_pg_array_null_es_pgvalue_null() {
-        // Value::Null (típico nullable `List<T>?` con valor null)
-        // → PgValue::Null (no un array vacío). Esto preserva la
-        // semántica de nullable a nivel columna.
+        // Value::Null (typical nullable `List<T>?` with null value)
+        // → PgValue::Null (not an empty array). This preserves
+        // nullable semantics at the column level.
         let v = Value::Null;
         let pg = fitz_list_to_pg_array(&v, crate::db::oid::INT8).unwrap();
         assert!(matches!(pg, crate::db::PgValue::Null));
@@ -31491,7 +31609,7 @@ let r = match n {
 
     #[test]
     fn fitz_list_to_pg_array_no_es_lista() {
-        // Pasar un Int suelto donde se espera List → error claro.
+        // Passing a loose Int where List is expected → clear error.
         let v = Value::Int(42);
         let err = fitz_list_to_pg_array(&v, crate::db::oid::INT8).unwrap_err();
         assert!(err.contains("esperaba List<T>"));
@@ -31533,7 +31651,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_where_devuelve_query_builder() {
-        // `User.where(...)` sin .all() debe devolver un QueryBuilder.
+        // `User.where(...)` without .all() must return a QueryBuilder.
         let (env, res) = parse_eval_into_env(
             "@table(\"users\") type User {\n  id: Int\n  name: Str\n  age: Int\n}\n\
              let qb = User.where(fn(u) => u.age > 18)",
@@ -31546,7 +31664,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_where_con_closure_invalida_es_error() {
-        // El parámetro del closure no existe como field del type.
+        // The closure parameter does not exist as a field of the type.
         let (_env, res) = parse_eval_into_env(
             "@table(\"users\") type User {\n  id: Int\n}\n\
              let qb = User.where(fn(u) => u.does_not_exist == 1)",
@@ -31560,11 +31678,11 @@ let r = match n {
         );
     }
 
-    // ---- Fase 10.3.b3 — order_by/limit/offset/first/count ----
+    // ---- Phase 10.3.b3 — order_by/limit/offset/first/count ----
 
-    /// Helper local: construye un QueryBuilder vacío para tests
-    /// del build_select_sql directo, sin depender del evaluator
-    /// completo.
+    /// Local helper: builds an empty QueryBuilder for tests
+    /// of build_select_sql directly, without depending on the full
+    /// evaluator.
     fn empty_state() -> QueryBuilderState {
         QueryBuilderState {
             type_name: "User".into(),
@@ -31642,8 +31760,8 @@ let r = match n {
 
     #[test]
     fn build_sql_override_limit_para_first() {
-        // `first()` pasa Some(1) como override; respeta sobre el
-        // state.limit del user (que podría ser != 1).
+        // `first()` passes Some(1) as override; honored over the
+        // user's state.limit (which could be != 1).
         let mut s = empty_state();
         s.limit = Some(50);
         let sql = build_select_sql(&s, Some(1));
@@ -31663,9 +31781,9 @@ let r = match n {
 
     #[test]
     fn build_sql_skipea_fields_virtuales() {
-        // Fase 10.4.a — fields con @has_many / @has_one NO van
-        // en SELECT. Insertamos un field virtual `posts` y
-        // verificamos que las columnas reales se emitan en orden.
+        // Phase 10.4.a — fields with @has_many / @has_one do NOT go
+        // in SELECT. We insert a virtual `posts` field and
+        // verify that the real columns are emitted in order.
         let mut s = empty_state();
         s.fields.push(crate::ast::Field {
             name: "posts".into(),
@@ -31698,8 +31816,8 @@ let r = match n {
 
     #[test]
     fn build_sql_belongs_to_field_no_es_virtual() {
-        // El field con @belongs_to ES real (es el FK column).
-        // Debe aparecer en el SELECT normal.
+        // The field with @belongs_to IS real (it's the FK column).
+        // It must appear in the normal SELECT.
         let mut s = empty_state();
         s.meta.relations.insert(
             "age".into(),
@@ -31772,11 +31890,11 @@ let r = match n {
         );
     }
 
-    // ---- Fase 10.3.c — insert / update / delete ----
+    // ---- Phase 10.3.c — insert / update / delete ----
 
     #[test]
     fn renumber_placeholders_basico() {
-        // Renumera $1..$N agregando un offset.
+        // Renumbers $1..$N by adding an offset.
         assert_eq!(renumber_placeholders("(\"age\" > $1)", 2), "(\"age\" > $3)");
         assert_eq!(
             renumber_placeholders("(\"a\" = $1 AND \"b\" = $2)", 3),
@@ -31786,7 +31904,7 @@ let r = match n {
 
     #[test]
     fn renumber_placeholders_sin_args() {
-        // SQL sin $N: passthrough.
+        // SQL without $N: passthrough.
         assert_eq!(
             renumber_placeholders("WHERE \"x\" IS NULL", 5),
             "WHERE \"x\" IS NULL"
@@ -31802,44 +31920,44 @@ let r = match n {
              let f = User.insert(db.connect(\"postgres://x@h/d\"), r)",
         )
         .await;
-        // Falla en el typecheck del insert: r es Other, no User.
-        // Pero `db.connect` no terminó (await), así que el error
-        // puede venir de varios lados. Aceptamos cualquier error
-        // — el test solo confirma que no crashea silenciosamente.
+        // Fails in the insert typecheck: r is Other, not User.
+        // But `db.connect` did not finish (await), so the error
+        // can come from several sides. We accept any error
+        // — the test only confirms it does not crash silently.
         assert!(res.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_update_sin_where_es_error_explicito() {
-        // El guard de seguridad: `.update` sin `.where` previo se
-        // rechaza para evitar updates masivos accidentales.
+        // The safety guard: `.update` without a prior `.where` is
+        // rejected to avoid accidental mass updates.
         let (_env, res) = parse_eval_into_env(
             "@table(\"users\") type User { id: Int, name: Str }\n\
-             // Crear un qb sin where vía hack: el método where
-             // siempre lo agrega, así que construimos un type ORM
-             // y llamamos update directo sobre el Value::Type — el
-             // dispatch lo redirige solo si es QueryBuilder. Mejor
-             // chequeamos via `where(_ => true)` saltado:\n\
+             // Create a qb without where via hack: the where method
+             // always adds it, so we build an ORM type
+             // and call update directly on Value::Type — the
+             // dispatch redirects only if it is QueryBuilder. Better
+             // check via skipped `where(_ => true)`:\n\
              let qb_vacio = User.where(fn(u) => u.id == 0).delete(db.connect(\"x\"))",
         )
         .await;
-        // delete falla porque db.connect("x") es URL inválida —
-        // el .await? no se evalúa porque el test no tiene await.
-        // Aceptamos que falle por algún motivo (el test sirve para
-        // validar que el dispatch ORM acepta `.delete` syntactically).
+        // delete fails because db.connect("x") is an invalid URL —
+        // .await? is not evaluated because the test has no await.
+        // We accept that it fails for some reason (the test serves to
+        // validate that the ORM dispatch accepts `.delete` syntactically).
         let _ = res;
     }
 
-    // ---- Fase 12.8 — feature flags built-in ----
+    // ---- Phase 12.8 — feature flags built-in ----
     //
-    // El registry de flags es un global static (`FLAG_REGISTRY`) que
-    // las tests parallel mutarían simultaneous. Mutex local serializa
-    // las tests que tocan el registry — la alternativa de combinar
-    // todo en un solo test inflaría el log de errores. La política
-    // es lock al inicio + clear al final para no leak entre tests.
-    // clippy::await_holding_lock se permite acá porque cada test usa
-    // tokio current_thread runtime independiente — el lock no cruza
-    // tasks reales, solo serializa el orden de ejecución cross-test.
+    // The flags registry is a global static (`FLAG_REGISTRY`) that
+    // parallel tests would mutate simultaneously. A local Mutex serializes
+    // tests that touch the registry — the alternative of combining
+    // everything into a single test would inflate the error log. The policy
+    // is lock at start + clear at end to avoid leaks between tests.
+    // clippy::await_holding_lock is allowed here because each test uses
+    // an independent tokio current_thread runtime — the lock does not cross
+    // real tasks, it only serializes cross-test execution order.
     use std::sync::Mutex as StdMutex;
     static FLAG_TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
@@ -31964,7 +32082,7 @@ let r = match n {
                 _ => panic!("esperaba Str en list"),
             })
             .collect();
-        // alpha + beta del manifest + gamma del env var.
+        // alpha + beta from manifest + gamma from env var.
         assert!(names.contains(&"alpha".to_string()));
         assert!(names.contains(&"beta".to_string()));
         assert!(names.contains(&"gamma".to_string()));
@@ -31998,20 +32116,20 @@ let r = match n {
         assert_eq!(super::flag_env_name("dark_mode"), "FITZ_FLAG_DARK_MODE");
     }
 
-    // ---- Fase 10.4 — ORM delete con guard `.where(...)` ----
+    // ---- Phase 10.4 — ORM delete with `.where(...)` guard ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn orm_delete_sin_where_es_error_explicito_via_dispatch_directo() {
-        // Construir un QueryBuilder con where=None manualmente y
-        // verificar que delete rechaza. Como no tenemos API pública
-        // para construirlo sin un closure, simulamos vía un test
-        // funcional usando un programa que invocaría delete sin
-        // where. Como el chain natural de Fitz NO permite eso (el
-        // builder entry-point es siempre `User.where(...)`), el
-        // guard es defensivo para fallos del runtime futuro. Skip
-        // este test del dispatch directo — vive como defensa en
-        // el código que se valida via cuando el chain venga vacío
-        // (sub-paso futuro de 10.4: `User.delete_by_pk(id)` que
-        // implícitamente sería WHERE id = ...).
+        // Build a QueryBuilder with where=None manually and
+        // verify that delete rejects it. Since we have no public API
+        // to build it without a closure, we simulate via a functional
+        // test using a program that would invoke delete without
+        // where. Since Fitz's natural chain does NOT allow that (the
+        // builder entry-point is always `User.where(...)`), the
+        // guard is defensive for future runtime failures. Skip
+        // this direct-dispatch test — it lives as defense in
+        // the code that is validated when the chain comes empty
+        // (future sub-step of 10.4: `User.delete_by_pk(id)` which
+        // would implicitly be WHERE id = ...).
     }
 }
