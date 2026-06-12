@@ -3949,8 +3949,8 @@ mod tests {
 
     #[test]
     fn span_del_await_apunta_al_punto() {
-        // En `user.await`, el `.` está en columna 5. El span del nodo
-        // `Expr::Await` apunta al `.` (paralelo a `Field`).
+        // In `user.await`, the `.` is at column 5. The `Expr::Await`
+        // node's span points at the `.` (parallel to `Field`).
         let e = parse_expr("user.await").unwrap();
         assert_eq!(e.span().line, 1);
         assert_eq!(e.span().column, 5);
@@ -3964,10 +3964,10 @@ mod tests {
 
     #[test]
     fn future_como_anotacion_de_tipo_parsea_como_generic() {
-        // `Future<T>` reusa `TypeExpr::Generic` igual que `List<T>` —
-        // no necesita variante nueva en el AST. Test ancla la decisión
-        // de 6.1: si en el futuro alguien suma `TypeExpr::Future`
-        // dedicada, este test cambia explícitamente.
+        // `Future<T>` reuses `TypeExpr::Generic` just like `List<T>`
+        // — no new AST variant needed. This test pins the 6.1
+        // decision: if a dedicated `TypeExpr::Future` is added in
+        // the future, this test changes explicitly.
         let tokens = tokenize("fn f() -> Future<Int> => 0").expect("lex OK");
         let program = parse(tokens).expect("parse OK");
         let stmt = program.into_iter().next().expect("al menos 1 stmt");
@@ -3988,7 +3988,7 @@ mod tests {
     // Tests — expressions (step 2: precedence ladder)
     // -----------------------------------------------------------------------
 
-    /// Helper: parsea una sola expresión desde el código fuente.
+    /// Helper: parse a single expression from the source.
     fn parse_expr(src: &str) -> FitzResult<Expr> {
         let mut p = parser(src);
         p.expression()
@@ -4017,8 +4017,8 @@ mod tests {
 
     #[test]
     fn primary_parens_pass_through_without_node() {
-        // (42) parsea como Int(42) — los paréntesis no agregan nodo
-        // al AST, solo controlan precedencia.
+        // (42) parses as Int(42) — parens add no node to the AST,
+        // they only control precedence.
         assert_eq!(parse_expr("(42)").unwrap(), Expr::Int(42, Span::ZERO));
     }
 
@@ -4030,7 +4030,7 @@ mod tests {
 
     #[test]
     fn primary_errors_on_unexpected_token() {
-        // ')' aislado no inicia ninguna expresión válida.
+        // A lone ')' does not start any valid expression.
         let err = parse_expr(")").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -4235,8 +4235,8 @@ mod tests {
 
     #[test]
     fn unary_not_tiene_precedencia_mayor_que_eq() {
-        // `not x == y` → `(not x) == y` (asociatividad left-to-right
-        // del unary, mayor precedencia que ==).
+        // `not x == y` → `(not x) == y` (left-to-right associativity
+        // of unary, higher precedence than ==).
         let expr = parse_expr("not x == y").unwrap();
         // The root node is BinOp Eq with left = UnaryOp Not.
         match expr {
@@ -4289,8 +4289,8 @@ mod tests {
 
     #[test]
     fn op_modulo_left_associative_con_mul() {
-        // 10 % 3 * 2 → (10 % 3) * 2 (left-to-right entre mismos
-        // niveles de precedencia).
+        // 10 % 3 * 2 → (10 % 3) * 2 (left-to-right between same
+        // precedence levels).
         let expr = parse_expr("10 % 3 * 2").unwrap();
         match expr {
             Expr::BinOp {
@@ -4409,7 +4409,7 @@ mod tests {
 
     #[test]
     fn range_inclusive_pattern_en_match() {
-        // 0..=59 en pattern de match.
+        // 0..=59 as a match pattern.
         let stmt = parse_one_stmt("let r = match n { 0..=59 => \"F\", _ => \"otro\" }");
         match stmt {
             Stmt::Assign {
@@ -4539,7 +4539,7 @@ mod tests {
 
     #[test]
     fn call_with_trailing_comma() {
-        // Coma trailing válida — útil para diffs limpios.
+        // Trailing comma allowed — handy for clean diffs.
         assert_eq!(
             parse_expr("sum(1, 2,)").unwrap(),
             Expr::Call {
@@ -4552,7 +4552,7 @@ mod tests {
 
     #[test]
     fn call_with_newlines_inside_parens() {
-        // Dentro de '(' ... ')' los newlines se ignoran.
+        // Inside '(' ... ')' newlines are ignored.
         let src = "sum(\n  1,\n  2,\n  3\n)";
         assert_eq!(
             parse_expr(src).unwrap(),
@@ -4659,7 +4659,7 @@ mod tests {
 
     #[test]
     fn unary_neg_binds_tighter_than_postfix() {
-        // -foo.bar → -(foo.bar)  (postfix tiene mayor precedencia que unary)
+        // -foo.bar → -(foo.bar)  (postfix has higher precedence than unary)
         assert_eq!(
             parse_expr("-foo.bar").unwrap(),
             Expr::UnaryOp {
@@ -4724,7 +4724,7 @@ mod tests {
 
     #[test]
     fn field_access_multilinea_parsea_igual_que_oneliner() {
-        // Sin paréntesis: solo field access encadenado.
+        // Without parens: just chained field access.
         let one = parse_expr("user.profile.email").unwrap();
         let many = parse_expr("user\n  .profile\n  .email").unwrap();
         assert_eq!(one, many);
@@ -4740,7 +4740,7 @@ mod tests {
 
     #[test]
     fn method_chain_multilinea_con_newlines_en_blanco_funciona() {
-        // Más de un newline entre eslabones: siguen consumiéndose todos.
+        // More than one newline between links: all of them get consumed.
         let one = parse_expr("xs.a().b()").unwrap();
         let many = parse_expr("xs\n\n\n    .a()\n\n    .b()").unwrap();
         assert_eq!(one, many);
@@ -4748,16 +4748,16 @@ mod tests {
 
     #[test]
     fn method_chain_multilinea_no_consume_newline_si_no_sigue_dot() {
-        // `let x = foo` seguido de `bar()` en línea siguiente: dos
-        // statements, NO una llamada `foo()` que se "continúa". El
-        // lookahead solo dispara cuando lo que sigue es `.`.
+        // `let x = foo` followed by `bar()` on the next line: two
+        // statements, NOT a `foo()` call that "continues". The
+        // lookahead only fires when what follows is `.`.
         let program = parse_program_str("let x = foo\nbar()").unwrap();
         assert_eq!(program.len(), 2, "se esperaban 2 stmts separados");
     }
 
     #[test]
     fn method_chain_multilinea_funciona_en_rhs_de_let() {
-        // Caso de uso canónico: chain como RHS de un `let`.
+        // Canonical use case: chain as the RHS of a `let`.
         let program =
             parse_program_str("let nombres = users\n  .filter(activo)\n  .map(nombre)").unwrap();
         assert_eq!(program.len(), 1);
@@ -4776,8 +4776,8 @@ mod tests {
 
     #[test]
     fn dot_a_inicio_de_statement_sin_receptor_sigue_siendo_error() {
-        // No debería convertirse en continuación de nada: `.foo()` solo
-        // arrancando una línea sigue siendo error (Dot no es primary).
+        // Should not become a continuation of anything: a lone
+        // `.foo()` starting a line is still an error (Dot is not primary).
         let result = parse_program_str(".foo()");
         assert!(result.is_err(), "se esperaba error de parseo");
     }
@@ -4786,13 +4786,13 @@ mod tests {
     // Tests — statements (step 4: assign / return / expr-stmt / program)
     // -----------------------------------------------------------------------
 
-    /// Helper: parsea un programa y devuelve el `Program` (lista de stmts).
+    /// Helper: parse a program and return the `Program` (list of stmts).
     fn parse_program_str(src: &str) -> FitzResult<Program> {
         parse(tokenize(src).unwrap())
     }
 
-    /// Helper: parsea un programa que se espera tenga exactamente una
-    /// sentencia, y devuelve esa sentencia.
+    /// Helper: parse a program that is expected to have exactly one
+    /// statement, and return that statement.
     fn parse_one_stmt(src: &str) -> Stmt {
         let program = parse_program_str(src).expect("parseo OK");
         assert_eq!(program.len(), 1, "se esperaba una sola sentencia");
@@ -4906,9 +4906,9 @@ mod tests {
 
     #[test]
     fn return_status_con_body_map() {
-        // `return <Int> { ... }` dispara `Stmt::ReturnStatus`. El body
-        // se parsea como cualquier `Expr` — acá un map literal con key
-        // string explícita.
+        // `return <Int> { ... }` fires `Stmt::ReturnStatus`. The
+        // body is parsed as any `Expr` — here a map literal with
+        // explicit string keys.
         match parse_one_stmt("return 401 {\"message\": \"no autorizado\"}") {
             Stmt::ReturnStatus { status, body, .. } => {
                 assert!(matches!(status, Expr::Int(401, _)), "status: {:?}", status);
@@ -4923,9 +4923,9 @@ mod tests {
 
     #[test]
     fn return_int_sin_body_sigue_como_return_normal() {
-        // Sin `{...}` después del Int, sigue siendo Return de Int — no
-        // dispara ReturnStatus. Esto preserva la sintaxis existente
-        // (`return 42` en una fn que devuelve Int).
+        // Without `{...}` after the Int, it's still a plain Int
+        // Return — does NOT fire ReturnStatus. This preserves the
+        // existing syntax (`return 42` in a fn that returns Int).
         assert_eq!(
             parse_one_stmt("return 204"),
             Stmt::Return(Expr::Int(204, Span::ZERO), Span::ZERO),
@@ -4934,9 +4934,9 @@ mod tests {
 
     #[test]
     fn return_status_solo_con_int_literal() {
-        // Solo Int literales disparan `ReturnStatus`. Una expr más
-        // compleja (`return x { ... }`) NO — sigue siendo Return de la
-        // expr completa (que igual fallaría más adelante).
+        // Only Int literals fire `ReturnStatus`. A more complex expr
+        // (`return x { ... }`) does NOT — it stays as a Return of
+        // the full expr (which would fail later anyway).
         match parse_one_stmt("return get_status() ") {
             Stmt::Return(Expr::Call { .. }, _) => {}
             other => panic!("se esperaba Return(Call), fue: {:?}", other),
@@ -4945,8 +4945,8 @@ mod tests {
 
     #[test]
     fn return_sin_expresion_devuelve_null() {
-        // `return` solo (con newline al final). El parser lo modela como
-        // `Stmt::Return(Expr::Null(_), Span::ZERO)`.
+        // Bare `return` (with newline at the end). The parser models
+        // it as `Stmt::Return(Expr::Null(_), Span::ZERO)`.
         assert_eq!(
             parse_one_stmt("return"),
             Stmt::Return(Expr::Null(Span::ZERO), Span::ZERO)
@@ -4989,7 +4989,7 @@ mod tests {
 
     #[test]
     fn stmt_lleva_span_de_la_primera_linea() {
-        // Stmt simple en línea 1, col 1 → span debería ser (1, 1).
+        // Simple stmt at line 1, col 1 → span must be (1, 1).
         let stmt = parse_one_stmt("let x = 42");
         let span = stmt.span();
         assert_eq!(span.line, 1, "esperaba línea 1, fue {}", span.line);
@@ -4998,7 +4998,7 @@ mod tests {
 
     #[test]
     fn stmt_lleva_span_de_linea_posterior() {
-        // Stmts en líneas 2 y 3 — cada uno con su span.
+        // Stmts on lines 2 and 3 — each with its own span.
         let src = "\n  let x = 1\nreturn x";
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
@@ -5258,8 +5258,8 @@ mod tests {
 
     #[test]
     fn equality_in_expr_stmt_is_not_assignment() {
-        // `x == y` debe ser expr-stmt con BinOp(Eq), NO Assign.
-        // Esto valida que el lookahead distingue Eq de EqEq.
+        // `x == y` must be an expr-stmt with BinOp(Eq), NOT Assign.
+        // This validates that the lookahead distinguishes Eq from EqEq.
         assert_eq!(
             parse_one_stmt("x == y"),
             Stmt::Expr(
@@ -5317,7 +5317,7 @@ mod tests {
 
     #[test]
     fn assign_without_value_errors() {
-        // let x =  (sin expresión después de '=')
+        // let x =  (no expression after '=')
         let err = parse_program_str("let x =").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -5330,7 +5330,7 @@ mod tests {
 
     #[test]
     fn two_statements_same_line_without_separator_errors() {
-        // No hay separador entre `x = 1` y `print(x)` en la misma línea.
+        // No separator between `x = 1` and `print(x)` on the same line.
         let err = parse_program_str("x = 1 print(x)").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -5568,7 +5568,7 @@ mod tests {
 
     #[test]
     fn fndef_unclosed_block_errors() {
-        // 'fn f() {' sin '}' al final.
+        // 'fn f() {' without a closing '}' at the end.
         let err = parse_program_str("fn f() {\n  x = 1\n").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::MissingClosingBrace));
     }
@@ -5648,7 +5648,7 @@ mod tests {
 
     #[test]
     fn string_with_only_interpolation_no_literal_parts() {
-        // "{x}" — sin literales alrededor.
+        // "{x}" — no literals around.
         assert_eq!(
             parse_expr(r#""{x}""#).unwrap(),
             Expr::StrInterp(
@@ -5701,7 +5701,7 @@ mod tests {
 
     #[test]
     fn escaped_braces_become_literal_in_plain_string() {
-        // "\{nombre\}" → literal "{nombre}" sin interpolación.
+        // "\{name\}" → literal "{name}" with no interpolation.
         assert_eq!(
             parse_expr(r#""\{nombre\}""#).unwrap(),
             Expr::Str("{nombre}".into(), Span::ZERO),
@@ -5710,7 +5710,7 @@ mod tests {
 
     #[test]
     fn escaped_and_unescaped_braces_in_same_string() {
-        // "\{ {x} \}" → literal "{ ", interpolación de x, literal " }"
+        // "\{ {x} \}" → literal "{ ", interpolation of x, literal " }"
         assert_eq!(
             parse_expr(r#""\{ {x} \}""#).unwrap(),
             Expr::StrInterp(
@@ -5726,23 +5726,23 @@ mod tests {
 
     #[test]
     fn unclosed_interpolation_errors() {
-        // "hola {name"  — falta '}'
+        // "hola {name"  — missing '}'
         let err = parse_expr(r#""hola {name""#).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
     }
 
     #[test]
     fn lone_close_brace_errors() {
-        // "hola }"  — '}' suelto sin '{' previo
+        // "hola }"  — lone '}' without preceding '{'
         let err = parse_expr(r#""hola }""#).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
     }
 
     #[test]
     fn unclosed_interpolation_reporta_columna_del_brace_abierto() {
-        // `"a{x"` — el `{` está en columna 3 (después de la comilla en col 1
-        // y del 'a' en col 2). El error tiene que apuntar ahí, no a la
-        // columna 1 del string.
+        // `"a{x"` — the `{` is at column 3 (after the quote at col 1
+        // and the 'a' at col 2). The error must point there, not at
+        // column 1 of the string.
         let tokens = crate::lexer::tokenize(r#""a{x""#).unwrap();
         let err = parse(tokens).unwrap_err();
         assert_eq!(err.column, 3);
@@ -5750,14 +5750,14 @@ mod tests {
 
     #[test]
     fn error_en_subexpresion_de_interp_apunta_dentro_del_string() {
-        // `"foo{1 +}"` — el `+}` (subexpresión inválida) debe reportarse
-        // con columna apuntando dentro del bloque de interpolación,
-        // no a la columna 1.
+        // `"foo{1 +}"` — the `+}` (invalid subexpression) must be
+        // reported with a column inside the interpolation block, not
+        // at column 1.
         let tokens = crate::lexer::tokenize(r#""foo{1 +}""#).unwrap();
         let err = parse(tokens).unwrap_err();
         // The string starts at col 1, the content at col 2, the `{` at col 5.
         // The subexpression starts at col 6. Any column > 1 confirms
-        // que la traducción está activa.
+        // that the translation is active.
         assert!(
             err.column > 1,
             "se esperaba columna > 1, se obtuvo {} (msg: {})",
@@ -5768,7 +5768,7 @@ mod tests {
 
     #[test]
     fn invalid_subexpression_propagates_error() {
-        // "{1 +}"  — subexpresión inválida
+        // "{1 +}"  — invalid subexpression
         let err = parse_expr(r#""{1 +}""#).unwrap_err();
         // The error may be UnexpectedToken (from the subexpression).
         assert!(matches!(
@@ -5927,8 +5927,8 @@ mod tests {
 
     #[test]
     fn match_with_ok_and_err_wildcards() {
-        // `Ok(_)` y `Err(_)` parsean como wildcards dedicados, sin
-        // ensuciar el scope con una var llamada `_`.
+        // `Ok(_)` and `Err(_)` parse as dedicated wildcards without
+        // polluting the scope with a var named `_`.
         let stmt = parse_one_stmt("match result { Ok(_) => 1, Err(_) => 0 }");
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
@@ -5993,11 +5993,11 @@ mod tests {
         match stmt {
             Stmt::TypeDef { fields, .. } => {
                 assert_eq!(fields.len(), 3);
-                // email es nullable con default null
+                // email is nullable with default null
                 assert_eq!(fields[1].name, "email");
                 assert!(fields[1].type_.is_nullable());
                 assert_eq!(fields[1].default, Some(Expr::Null(Span::ZERO)));
-                // active no es nullable pero tiene default true
+                // active is not nullable but has default true
                 assert_eq!(fields[2].name, "active");
                 assert!(!fields[2].type_.is_nullable());
                 assert_eq!(fields[2].default, Some(Expr::Bool(true, Span::ZERO)));
@@ -6075,12 +6075,12 @@ mod tests {
 
     #[test]
     fn decorator_put_y_delete_reconocidos_por_nombre() {
-        // Nota sobre `/users/{id}`: el parser lo interpreta como
-        // `StrInterp` porque `{id}` es la sintaxis de interpolación de
-        // strings de Fitz. Para el runtime HTTP esto es una buena
-        // noticia, no un bug: en 4.2, los `StrPart::Expr(Ident(...))`
-        // del path se reconocen directamente como path params, sin
-        // necesidad de un mini parser dedicado dentro del decorator.
+        // Note about `/users/{id}`: the parser interprets it as
+        // `StrInterp` because `{id}` is Fitz's string interpolation
+        // syntax. For the HTTP runtime this is good news, not a bug:
+        // in 4.2, the `StrPart::Expr(Ident(...))` in the path are
+        // recognized directly as path params, without needing a mini
+        // parser dedicated inside the decorator.
         let put = parse_one_stmt("@put(\"/users/{id}\")\nasync fn upd(id: Int) -> User => user");
         let del = parse_one_stmt("@delete(\"/users\")\nasync fn del(id: Int) => 0");
         match put {
@@ -6115,8 +6115,8 @@ mod tests {
 
     #[test]
     fn decorator_sin_args_admite_parens_vacios() {
-        // `@server()` — paréntesis vacíos válidos por simetría con
-        // llamadas a función.
+        // `@server()` — empty parens are valid for symmetry with
+        // function calls.
         let stmt = parse_one_stmt("@server()\nfn config() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6130,9 +6130,9 @@ mod tests {
 
     #[test]
     fn decorator_admite_multiples_args_y_expresiones() {
-        // `@server(8080, "0.0.0.0")` — args positionals con tipos
-        // mezclados. El evaluador validará semántica; el parser solo
-        // los guarda.
+        // `@server(8080, "0.0.0.0")` — positional args with mixed types
+        // mixed. The evaluator will validate semantics; the parser only
+        // stores them.
         let stmt = parse_one_stmt("@server(8080, \"0.0.0.0\")\nfn cfg() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6150,8 +6150,8 @@ mod tests {
 
     #[test]
     fn decorators_apilados_se_acumulan_en_orden() {
-        // @get("/admin") + @auth("admin") apilados sobre la misma fn.
-        // Cada uno con su propia línea.
+        // @get("/admin") + @auth("admin") stacked on the same fn.
+        // Each on its own line.
         let src = "@get(\"/admin\")\n@auth(\"admin\")\nfn dash() => \"ok\"";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -6188,8 +6188,8 @@ mod tests {
 
     #[test]
     fn test_decorator_sin_parens_parsea() {
-        // Caso canónico de 9.z.2.a: `@test fn nombre() { ... }` sin
-        // paréntesis después de `@test`. Forma idiomática del spec.
+        // Canonical 9.z.2.a case: `@test fn name() { ... }` without
+        // parens after `@test`. The spec's idiomatic form.
         let stmt = parse_one_stmt("@test\nfn suma_funciona() { let x = 1 }");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6203,7 +6203,7 @@ mod tests {
 
     #[test]
     fn decorator_sin_handler_errores() {
-        // @get("/x") y nada después: el parser corta porque no hay fn.
+        // @get("/x") and nothing after: the parser bails because there is no fn.
         let err = parse_program_str("@get(\"/x\")").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -6217,8 +6217,8 @@ mod tests {
 
     #[test]
     fn decorator_desconocido_no_es_error_de_parser() {
-        // Cualquier `@nombre(args)` válido sintácticamente parsea.
-        // Que `@patch` no esté implementado lo decide el evaluator.
+        // Any `@name(args)` that is syntactically valid parses.
+        // Whether `@patch` is implemented is the evaluator's call.
         let stmt = parse_one_stmt("@patch(\"/x\")\nfn h() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6248,7 +6248,7 @@ mod tests {
 
     #[test]
     fn decorator_kwarg_solo_separa_clave_y_valor() {
-        // `@server(docs=false)` — un único kwarg, ningún positional.
+        // `@server(docs=false)` — a single kwarg, no positionals.
         let stmt = parse_one_stmt("@server(docs=false)\nfn cfg() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6284,7 +6284,7 @@ mod tests {
 
     #[test]
     fn decorator_positional_despues_de_kwarg_es_error() {
-        // `@get(a=1, "/x")` — kwarg primero, positional después: rechaza.
+        // `@get(a=1, "/x")` — kwarg first, then positional: rejected.
         let err = parse_program_str("@get(a=1, \"/x\")\nfn h() => 0").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(
@@ -6308,9 +6308,9 @@ mod tests {
 
     #[test]
     fn decorator_eqeq_en_arg_no_se_confunde_con_kwarg() {
-        // `@deco(a == b)` — un arg posicional `BinOp(Eq)`, NO un kwarg
-        // con clave `a` y valor `b`. La diferencia la hace el lexer:
-        // `==` es `Token::EqEq`, mientras que `=` es `Token::Eq`.
+        // `@deco(a == b)` — one positional arg `BinOp(Eq)`, NOT a kwarg
+        // with key `a` and value `b`. The lexer makes the difference:
+        // `==` is `Token::EqEq`, while `=` is `Token::Eq`.
         let stmt = parse_one_stmt("@deco(a == b)\nfn h() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6480,7 +6480,7 @@ mod tests {
 
     #[test]
     fn list_literal_with_newlines_inside() {
-        // Listas multilínea — los newlines entre elementos se ignoran.
+        // Multi-line lists — newlines between elements are ignored.
         let src = "[\n  1,\n  2,\n  3,\n]";
         assert_eq!(
             parse_expr(src).unwrap(),
@@ -6643,7 +6643,7 @@ mod tests {
 
     #[test]
     fn range_with_expressions_as_ends() {
-        // a..b+1 → a..(b+1) (range tiene menor precedencia que '+')
+        // a..b+1 → a..(b+1) (range has lower precedence than '+')
         assert_eq!(
             parse_expr("a..b+1").unwrap(),
             Expr::Range {
@@ -6663,7 +6663,7 @@ mod tests {
     #[test]
     fn range_precedence_below_comparison() {
         // 0..n < 10 → (0..n) < 10
-        // (range tiene mayor precedencia que '<')
+        // (range has higher precedence than '<')
         assert_eq!(
             parse_expr("0..n < 10").unwrap(),
             Expr::BinOp {
@@ -6706,14 +6706,14 @@ mod tests {
 
     #[test]
     fn range_chain_errors() {
-        // 1..2..3 — no chaineable
+        // 1..2..3 — not chainable
         let err = parse_expr("1..2..3").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
     }
 
     #[test]
     fn range_with_negative_int() {
-        // -3..3 — unary minus se aplica al primer extremo
+        // -3..3 — unary minus applies to the first endpoint
         assert_eq!(
             parse_expr("-3..3").unwrap(),
             Expr::Range {
@@ -7024,7 +7024,7 @@ mod tests {
 
     #[test]
     fn pattern_int_sin_dotdot_sigue_siendo_int() {
-        // Sanity check: que el cambio para Pattern::Range no rompa Pattern::Int.
+        // Sanity check: the change for Pattern::Range must not break Pattern::Int.
         let src = "match n { 42 => \"sí\", _ => \"no\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7037,7 +7037,7 @@ mod tests {
 
     #[test]
     fn pattern_range_con_float_es_error() {
-        // 0..1.5 — el float como extremo no se soporta en patrones
+        // 0..1.5 — float as an endpoint is not supported in patterns
         let src = "match n { 0..1.5 => \"x\", _ => \"y\" }";
         let err = parse_program_str(src).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
@@ -7085,7 +7085,7 @@ mod tests {
 
     #[test]
     fn or_pattern_un_solo_pat_sin_pipe_no_envuelve() {
-        // Sanity: pattern simple sin `|` no se envuelve en Or.
+        // Sanity: a simple pattern without `|` is not wrapped in Or.
         let src = "match n { 1 => \"x\", _ => \"y\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7137,7 +7137,7 @@ mod tests {
 
     #[test]
     fn or_pattern_con_binding_ident_es_error() {
-        // match n { 1 | x => "x" } — `x` es Ident binding, vetado.
+        // match n { 1 | x => "x" } — `x` is an Ident binding, vetoed.
         let src = "match n { 1 | x => \"x\" }";
         let err = parse_program_str(src).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
@@ -7238,7 +7238,7 @@ mod tests {
 
     #[test]
     fn compound_plus_eq_sobre_ident() {
-        // `x += 5` debe desugar a `x = x + 5`.
+        // `x += 5` must desugar to `x = x + 5`.
         let src = "x += 5";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7370,7 +7370,7 @@ mod tests {
                     },
                 ..
             } => {
-                // right es `a + b * 2` también
+                // right is `a + b * 2` too
                 assert!(matches!(*right, Expr::BinOp { .. }));
             }
             other => panic!(
@@ -7459,7 +7459,7 @@ mod tests {
 
     #[test]
     fn type_def_con_metodo_flecha() {
-        // `fn greet() => "x"` se desugarea a body con Return.
+        // `fn greet() => "x"` desugars to a body with Return.
         let src = "type User {\n\
                        fn name_str() -> Str => \"ada\"\n\
                    }";
@@ -7495,7 +7495,7 @@ mod tests {
 
     #[test]
     fn type_def_con_metodo_sin_cuerpo_es_error() {
-        // `fn nombre()` sin body es error (no admitimos abstract methods).
+        // `fn name()` without a body is an error (we don't allow abstract methods).
         let src = "type X { fn f() }";
         let err = parse_program_str(src).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
@@ -7567,7 +7567,7 @@ mod tests {
 
     #[test]
     fn struct_lit_multilinea_con_newlines_entre_campos() {
-        // Sin coma entre líneas — newline como separador.
+        // No comma between lines — newline as separator.
         let src = "let u = User {\n    id: 1\n    name: \"x\"\n}";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7630,8 +7630,8 @@ mod tests {
 
     #[test]
     fn struct_lit_como_argumento_de_funcion() {
-        // Adentro de paréntesis no hay ambigüedad — el struct literal
-        // se permite sin envolver.
+        // Inside parens there is no ambiguity — the struct literal
+        // is allowed without wrapping.
         let src = "print(User { id: 1, name: \"x\" })";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7645,8 +7645,8 @@ mod tests {
 
     #[test]
     fn struct_lit_dentro_de_lista() {
-        // Adentro de `[...]` cada item está delimitado por `,` o `]` —
-        // sin ambigüedad con bloques.
+        // Inside `[...]` each item is delimited by `,` or `]` —
+        // no ambiguity with blocks.
         let src = "let xs = [User { id: 1, name: \"a\" }, User { id: 2, name: \"b\" }]";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7693,9 +7693,10 @@ mod tests {
 
     #[test]
     fn while_con_struct_literal_sin_parens_da_error_con_hint() {
-        // `while User { id: 1 } { body }` — el parser ve el `{` después
-        // de `User` y, como estamos en condición, detecta que parece
-        // struct literal y emite un error con hint para usar paréntesis.
+        // `while User { id: 1 } { body }` — the parser sees the `{`
+        // after `User` and, since we are in a condition, detects
+        // that it looks like a struct literal and emits an error
+        // with a hint to use parens.
         let src = "while User { id: 1 } { print(x) }";
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
@@ -7744,7 +7745,7 @@ mod tests {
 
     #[test]
     fn if_con_struct_literal_envuelto_en_parens_parsea() {
-        // Con paréntesis sí: la condición ve un struct literal entero.
+        // With parens yes: the condition sees a full struct literal.
         let src = "if (User { id: 1 }) == other { print(x) }";
         let stmts = parse_program_str(src).expect("debería parsear con paréntesis");
         assert_eq!(stmts.len(), 1);
@@ -7761,9 +7762,9 @@ mod tests {
 
     #[test]
     fn while_con_ident_y_bloque_sin_struct_pattern_sigue_andando() {
-        // `while x { print(x) }` — el cuerpo del bloque no tiene shape
-        // de struct literal, así que el flag deja pasar el `{` para
-        // que `parse_block` lo agarre.
+        // `while x { print(x) }` — the block body does not have a
+        // struct-literal shape, so the flag lets the `{` through for
+        // `parse_block` to grab.
         let src = "while x { print(x) }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7779,8 +7780,8 @@ mod tests {
 
     #[test]
     fn for_sobre_lista_de_struct_literals_parsea() {
-        // Adentro de `[...]` los struct literals están permitidos
-        // incluso cuando el `for` está en modo no_struct_literal.
+        // Inside `[...]` struct literals are allowed
+        // even when the `for` is in no_struct_literal mode.
         let src = "for u in [User { id: 1, name: \"a\" }] { print(u) }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7797,8 +7798,9 @@ mod tests {
 
     #[test]
     fn if_con_typed_assignment_en_bloque_no_se_confunde_con_struct_literal() {
-        // `if x { y: Int = 1 }` — el bloque tiene una asignación tipada,
-        // que comparte shape inicial con un struct literal (`Ident :`).
+        // `if x { y: Int = 1 }` — the block has a typed assignment,
+        // which shares the initial shape with a struct literal
+        // (`Ident :`).
         // The parser must distinguish and let the block through without error.
         let src = "if x { y: Int = 1 }";
         let stmts = parse_program_str(src).expect("debería parsear");
@@ -7919,8 +7921,8 @@ mod tests {
 
     #[test]
     fn match_con_patrones_ok_y_err_parsea() {
-        // Sanity: el parser de patrones ya soportaba Ok/Err; verificamos
-        // que el conjunto entero (match + Ok/Err en valor) compone bien.
+        // Sanity: the pattern parser already supported Ok/Err; verify
+        // that the whole set (match + Ok/Err in value) composes well.
         let stmt = parse_one_stmt(
             "match Ok(1) {\n\
              \tOk(v) => v\n\
@@ -7952,7 +7954,7 @@ mod tests {
 
     #[test]
     fn import_simple_se_parsea() {
-        // `import utils` → Stmt::Import con alias None.
+        // `import utils` → Stmt::Import with alias None.
         assert_eq!(
             parse_one_stmt("import utils"),
             Stmt::Import {
@@ -7983,7 +7985,7 @@ mod tests {
 
     #[test]
     fn import_path_terminado_en_punto_es_error() {
-        // `import foo.` — falta el segmento siguiente.
+        // `import foo.` — missing the following segment.
         let err = parse_program_str("import foo.").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -8044,7 +8046,7 @@ mod tests {
 
     #[test]
     fn mln_from_import_parens_single_line() {
-        // `from utils import (a, b, c)` — paréntesis sin newlines.
+        // `from utils import (a, b, c)` — parens without newlines.
         assert_eq!(
             parse_one_stmt("from utils import (a, b, c)"),
             Stmt::FromImport {
@@ -8057,8 +8059,8 @@ mod tests {
 
     #[test]
     fn mln_from_import_parens_multi_linea_canonico() {
-        // Forma idiomática Python: `(`/`)` rodeando una lista de
-        // nombres separados por comas y newlines.
+        // Pythonic idiom: `(`/`)` wrapping a list of
+        // names separated by commas and newlines.
         let src = "from utils import (\n\
                        a,\n\
                        b,\n\
@@ -8076,8 +8078,8 @@ mod tests {
 
     #[test]
     fn mln_from_import_parens_con_aliases_mixtos() {
-        // Aliases dentro de los paréntesis multi-línea funcionan
-        // igual que en single-line.
+        // Aliases inside the multi-line parens work the same as in
+        // single-line.
         let src = "from utils import (\n\
                        greet,\n\
                        shout as scream,\n\
@@ -8128,19 +8130,19 @@ mod tests {
 
     #[test]
     fn from_sin_import_es_error() {
-        // `from utils slugify` — falta la keyword `import`.
+        // `from utils slugify` — missing the `import` keyword.
         let err = parse_program_str("from utils slugify").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
     fn from_import_sin_nombres_es_error() {
-        // `from utils import` — al menos un nombre obligatorio.
+        // `from utils import` — at least one name is required.
         let err = parse_program_str("from utils import").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
-    // PreF8.4: tests de aliases.
+    // PreF8.4: alias tests.
 
     #[test]
     fn import_con_alias_parsea_el_alias() {
@@ -8157,7 +8159,7 @@ mod tests {
 
     #[test]
     fn import_punteado_con_alias() {
-        // `import sub.foo as f` — alias se aplica al binding completo.
+        // `import sub.foo as f` — the alias applies to the full binding.
         assert_eq!(
             parse_one_stmt("import sub.foo as f"),
             Stmt::Import {
@@ -8200,14 +8202,14 @@ mod tests {
 
     #[test]
     fn import_as_sin_ident_es_error() {
-        // `import foo as` — falta el ident después de `as`.
+        // `import foo as` — missing ident after `as`.
         let err = parse_program_str("import foo as").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
     fn from_import_as_sin_ident_es_error() {
-        // `from foo import bar as` — falta el ident después de `as`.
+        // `from foo import bar as` — missing ident after `as`.
         let err = parse_program_str("from foo import bar as").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -8268,7 +8270,7 @@ mod tests {
 
     #[test]
     fn type_expr_generico_anidado() {
-        // Result<List<User>>  — dos `>` consecutivos al cerrar.
+        // Result<List<User>>  — two consecutive `>` to close.
         let t = parse_assign_type("let r: Result<List<User>> = Ok([])");
         assert_eq!(
             t,
@@ -8291,7 +8293,7 @@ mod tests {
 
     #[test]
     fn type_expr_nullable_sobre_generico() {
-        // List<Int>?  — el `?` aplica al átomo entero, no al último arg.
+        // List<Int>?  — the `?` applies to the whole atom, not the last arg.
         let t = parse_assign_type("let xs: List<Int>? = null");
         assert_eq!(
             t,
@@ -8304,7 +8306,7 @@ mod tests {
 
     #[test]
     fn type_expr_nullable_adentro_de_generico() {
-        // List<Int?>  — el `?` está adentro, no afuera.
+        // List<Int?>  — the `?` is inside, not outside.
         let t = parse_assign_type("let xs: List<Int?> = []");
         assert_eq!(
             t,
@@ -8372,7 +8374,7 @@ mod tests {
 
     #[test]
     fn type_expr_generico_vacio_es_error() {
-        // `List<>` no debería parsear: se exige al menos un argumento.
+        // `List<>` should not parse: at least one argument is required.
         let err = parse_program_str("let xs: List<> = []").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -8441,14 +8443,14 @@ mod tests {
 
     #[test]
     fn type_expr_funcion_sin_arrow_es_error() {
-        // `Fn(Int)` sin `-> R` → error explícito del parser.
+        // `Fn(Int)` without `-> R` → explicit parser error.
         let err = parse_program_str("let f: Fn(Int) = null").unwrap_err();
         assert!(err.message.contains("'->"));
     }
 
     #[test]
     fn type_expr_generico_sin_cerrar_es_error() {
-        // Falta el `>` final.
+        // The final `>` is missing.
         let err = parse_program_str("let xs: List<Int = []").unwrap_err();
         // The parser fails when it tries to consume `>` and finds `=`.
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
@@ -8456,7 +8458,7 @@ mod tests {
 
     #[test]
     fn type_expr_anotacion_sin_nombre_es_error() {
-        // `:` sin tipo después.
+        // `:` with no type after.
         let err = parse_program_str("let x: = 1").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
@@ -8714,9 +8716,9 @@ mod tests {
 
     #[test]
     fn lista_de_un_elemento_no_se_confunde_con_comprehension() {
-        // `[42]` es una lista de un elemento, NO una comprehension.
+        // `[42]` is a single-element list, NOT a comprehension.
         // The parser only detects a comprehension if, after the first expr,
-        // viene `for` (no `,` ni `]`).
+        // `for` follows (not `,` or `]`).
         let v = parse_first_let_value("let xs = [42]");
         match v {
             Expr::List(items, _) => assert_eq!(items.len(), 1),
@@ -8773,7 +8775,7 @@ mod tests {
 
     #[test]
     fn format_spec_grouping_y_precision_juntos() {
-        // `,.2f` — coma para miles + 2 decimales.
+        // `,.2f` — thousands separator + 2 decimal places.
         let spec = extract_first_strinterp_spec(r#"let r = "{x:,.2f}""#).unwrap();
         assert_eq!(spec.grouping, Some(','));
         assert_eq!(spec.precision, Some(2));
@@ -8788,7 +8790,7 @@ mod tests {
 
     #[test]
     fn interpolation_sin_spec_sigue_funcionando_compat() {
-        // Caso clásico sin `:` — el segundo campo de StrPart::Expr es None.
+        // Classic case without `:` — the second field of StrPart::Expr is None.
         let value = parse_first_let_value(r#"let r = "hola {name}""#);
         match value {
             Expr::StrInterp(parts, _) => {
@@ -8805,7 +8807,7 @@ mod tests {
 
     #[test]
     fn for_con_tuple_pattern_parsea() {
-        // `for (k, v) in m { ... }` con Pattern::Tuple de 2 idents.
+        // `for (k, v) in m { ... }` with a Pattern::Tuple of 2 idents.
         let stmt = parse_one_stmt("for (k, v) in m { print(k) }");
         match stmt {
             Stmt::For { var, .. } => match var {
@@ -8822,7 +8824,7 @@ mod tests {
 
     #[test]
     fn for_con_wildcard_pattern_parsea() {
-        // `for _ in 0..10 { ... }` con Pattern::Wildcard.
+        // `for _ in 0..10 { ... }` with Pattern::Wildcard.
         let stmt = parse_one_stmt("for _ in 0..10 { print(\"x\") }");
         match stmt {
             Stmt::For { var, .. } => {
@@ -8834,7 +8836,7 @@ mod tests {
 
     #[test]
     fn for_con_ident_simple_sigue_funcionando() {
-        // Regresión: `for x in xs` con Pattern::Ident.
+        // Regression: `for x in xs` with Pattern::Ident.
         let stmt = parse_one_stmt("for x in xs { print(x) }");
         match stmt {
             Stmt::For { var, .. } => {
@@ -8893,8 +8895,8 @@ mod tests {
 
     #[test]
     fn fp_required_despues_de_default_es_error() {
-        // Regla Python: una vez que un param tiene default, todos los
-        // siguientes también. `fn f(a = 1, b)` debe rechazarse.
+        // Python rule: once a param has a default, all following
+        // params must have defaults too. `fn f(a = 1, b)` must be rejected.
         let result = parse_program_str("fn f(a: Int = 1, b: Int) -> Int { return a + b }");
         assert!(result.is_err(), "esperaba error, dio {:?}", result);
         let msg = result.unwrap_err().message;
@@ -8907,8 +8909,8 @@ mod tests {
 
     #[test]
     fn fp_param_default_sin_tipo_se_parsea() {
-        // `fn f(x = 5)` sin anotación de tipo. Gradual: default
-        // sí, pero el tipo del param queda en Any.
+        // `fn f(x = 5)` without a type annotation. Gradual: default
+        // yes, but the param type stays as Any.
         let stmt = parse_one_stmt("fn f(x = 5) { return x }");
         match stmt {
             Stmt::FnDef { params, .. } => {
@@ -9004,7 +9006,7 @@ mod tests {
         let src = "fn f(n: Int) -> Str {\n  match n {\n    0 => return \"zero\"\n    _ => \"other\"\n  }\n  return \"end\"\n}";
         let stmt = parse_one_stmt(src);
         if let Stmt::FnDef { body, .. } = stmt {
-            // Buscar el Expr::Match adentro.
+            // Find the Expr::Match inside.
             if let Stmt::Expr(Expr::Match { arms, .. }, _) = &body[0] {
                 // Arm 0: pattern Int(0) → Stmt::Return.
                 assert_eq!(arms[0].body.len(), 1);
@@ -9038,7 +9040,7 @@ mod tests {
         }
     }
 
-    // ===== Fase 10.3.a — decoradores sobre `type` y fields =====
+    // ===== Phase 10.3.a — decorators on `type` and fields =====
 
     #[test]
     fn type_acepta_decorator_table_con_string() {
@@ -9106,7 +9108,7 @@ mod tests {
 
     #[test]
     fn field_acepta_decorator_column_con_kwargs() {
-        // NOTA: kwarg `sql_type` (no `type`) — keyword collision.
+        // NOTE: kwarg `sql_type` (not `type`) — keyword collision.
         let stmts = parse_ok(
             "@table(\"users\") type User {\n  @column(name=\"user_id\", sql_type=\"bigint\")\n  id: Int\n}",
         );
@@ -9138,7 +9140,7 @@ mod tests {
         }
     }
 
-    // ===== T3 — caminos de error del parser (deuda residual auditoría) =====
+    // ===== T3 — parser error paths (residual audit debt) =====
 
     #[test]
     fn fn_def_con_params_duplicados_es_error() {
@@ -9154,7 +9156,7 @@ mod tests {
 
     #[test]
     fn fn_def_con_params_duplicados_sin_tipo_es_error() {
-        // Sin anotación de tipo también debe captarse.
+        // Must also be caught when there is no type annotation.
         let tokens = tokenize("fn g(x, y, x) => 0").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar params duplicados");
         let msg = err.to_string();
@@ -9168,7 +9170,7 @@ mod tests {
     #[test]
     fn decorator_sobre_let_es_error() {
         // The parser only accepts decorators on `fn`, `async fn` or `type`.
-        // `@x(1)\nlet y = 2` debe fallar con mensaje claro.
+        // `@x(1)\nlet y = 2` must fail with a clear message.
         let tokens = tokenize("@get(\"/x\")\nlet y = 2").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar decorator sobre let");
         let msg = err.to_string();
@@ -9194,7 +9196,7 @@ mod tests {
     #[test]
     fn string_con_escape_invalido_es_error_del_lexer() {
         // The lexer rejects unknown escapes like `\q`. Reported at
-        // tokenize, no en parse, pero igual cuenta como error path del
+        // tokenize, not in parse, but it still counts as an error path of
         // pipeline lex-parse.
         let res = tokenize("let x = \"\\q\"");
         assert!(res.is_err(), "esperaba error de escape inválido");
@@ -9241,8 +9243,8 @@ mod tests {
 
     #[test]
     fn corchetes_anidados_mal_balanceados_es_error() {
-        // `[1, [2, 3]` — un corchete adentro y otro afuera, falta cerrar
-        // el exterior.
+        // `[1, [2, 3]` — one bracket inside and one outside, the
+        // outer one is missing its close.
         let tokens = tokenize("let xs = [1, [2, 3]").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar anidación mal balanceada");
         let msg = err.to_string();
@@ -9254,8 +9256,8 @@ mod tests {
 
     // ---- V1 (2026-06-05) — correct spans inside StrInterp ----
 
-    /// Extrae el primer `Expr::StrInterp` del `Program` y devuelve sus
-    /// parts. Helper de los tests V1.
+    /// Extract the first `Expr::StrInterp` from the `Program` and
+    /// return its parts. Helper for the V1 tests.
     fn first_strinterp_parts(src: &str) -> Vec<StrPart> {
         let tokens = tokenize(src).expect("debe tokenizar");
         let program = parse(tokens).expect("debe parsear");
@@ -9280,8 +9282,8 @@ mod tests {
 
     #[test]
     fn v1_ident_dentro_de_strinterp_tiene_span_real_no_col_1() {
-        // `print("hola {nombre}!")` — el span del Ident("nombre") debe
-        // ser (1, 14), NO (1, 1) (que era el bug pre-V1).
+        // `print("hola {nombre}!")` — the Ident("nombre") span must
+        // be (1, 14), NOT (1, 1) (which was the pre-V1 bug).
         let parts = first_strinterp_parts("print(\"hola {nombre}!\")\n");
         let ident = parts
             .iter()
@@ -9297,7 +9299,7 @@ mod tests {
             span.line
         );
         // The `{` is at col 13 (after `print("hola `), the `n` of
-        // `nombre` arranca en col 14.
+        // `nombre` starts at col 14.
         assert_eq!(
             span.column, 14,
             "span.column del Ident interno debería ser 14, fue {}",
@@ -9307,8 +9309,8 @@ mod tests {
 
     #[test]
     fn v1_binop_dentro_de_strinterp_recursa_a_operandos() {
-        // `print("v: {a + b}")` — el span del BinOp y sus operandos
-        // (Ident a, Ident b) tienen que apuntar al source real.
+        // `print("v: {a + b}")` — the BinOp span and its operands
+        // (Ident a, Ident b) must point at the real source.
         let parts = first_strinterp_parts("print(\"v: {a + b}\")\n");
         let expr = parts
             .iter()
@@ -9319,7 +9321,7 @@ mod tests {
             .expect("debe haber un StrPart::Expr");
         match expr {
             Expr::BinOp { left, right, .. } => {
-                // `a` está en col 12, `b` en col 16.
+                // `a` is at col 12, `b` at col 16.
                 assert_eq!(left.span().line, 1);
                 assert_eq!(left.span().column, 12, "col de `a`");
                 assert_eq!(right.span().line, 1);
@@ -9331,7 +9333,7 @@ mod tests {
 
     #[test]
     fn v1_call_dentro_de_strinterp_walkea_callee_y_args() {
-        // `print("v: {f(x)}")` — Call.callee y Call.args walkean.
+        // `print("v: {f(x)}")` — Call.callee and Call.args get walked.
         let parts = first_strinterp_parts("print(\"v: {f(x)}\")\n");
         let expr = parts
             .iter()
@@ -9342,7 +9344,7 @@ mod tests {
             .expect("debe haber un StrPart::Expr");
         match expr {
             Expr::Call { callee, args, .. } => {
-                // `f` está en col 12, `x` en col 14.
+                // `f` is at col 12, `x` at col 14.
                 assert_eq!(callee.span().column, 12);
                 assert_eq!(args.first().expect("un arg").span().column, 14);
             }
@@ -9363,7 +9365,7 @@ mod tests {
             .expect("debe haber un StrPart::Expr");
         match expr {
             Expr::Field { object, .. } => {
-                // `u` está en col 15.
+                // `u` is at col 15.
                 assert_eq!(object.span().column, 15);
             }
             other => panic!("esperaba Field, recibió {:?}", other),
