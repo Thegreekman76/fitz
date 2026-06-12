@@ -1,29 +1,29 @@
-// http.rs — Fase 4 (HTTP nativo)
+// http.rs — Phase 4 (native HTTP)
 //
-// Runtime HTTP de Fitz. Se ensambla en dos pasos:
+// Fitz HTTP runtime. Assembled in two steps:
 //
-//   1. Durante `eval`, cuando se ve un `Stmt::FnDef` con un decorator
-//      `@get`/`@post`/`@put`/`@delete`, se registra una `RouteSpec` en un
-//      `HttpRegistry` accesible vía thread_local.
-//   2. Al terminar `eval`, si el registry quedó no vacío, `serve()`
-//      arranca un runtime tokio + axum y bloquea hasta Ctrl-C.
+//   1. During `eval`, when a `Stmt::FnDef` with a decorator
+//      `@get`/`@post`/`@put`/`@delete` is seen, a `RouteSpec` is registered
+//      in an `HttpRegistry` accessible via thread_local.
+//   2. When `eval` finishes, if the registry is non-empty, `serve()`
+//      starts a tokio + axum runtime and blocks until Ctrl-C.
 //
 // Threading model (post-F17.5):
 //
-//   Un único runtime tokio `rt-multi-thread` (F17.4a) corre en el
-//   thread que llamó `eval` (`block_on` en `serve()`). Cada request
-//   axum dispatchea un handler async en alguno de los workers, que
-//   invoca `handle_task(&registry, ...).await` directo sobre el
-//   evaluator. `HttpRegistry` se comparte por `Arc` (Send + Sync
-//   post-F17.2-3). El paralelismo entre requests es real: N workers
-//   procesando handlers simultáneos.
+//   A single `rt-multi-thread` tokio runtime (F17.4a) runs on the
+//   thread that called `eval` (`block_on` in `serve()`). Each axum
+//   request dispatches an async handler on one of the workers, which
+//   invokes `handle_task(&registry, ...).await` directly on the
+//   evaluator. `HttpRegistry` is shared via `Arc` (Send + Sync
+//   post-F17.2-3). Parallelism between requests is real: N workers
+//   processing handlers simultaneously.
 //
-// Antes de F17.5 había un bridge mpsc/oneshot + un std::thread aparte
-// para tokio. Lo introdujo Fase 4 cuando `Value`/`EnvRef` eran
-// `Rc<RefCell<>>` no-Send y los handlers no podían invocarse desde
-// axum directo. F17.2 (Arc/Mutex), F17.3 (Send completo) y F17.4a
-// (multi-thread) destrabaron la eliminación. Resultado: ~300 LoC
-// menos acá y paralelismo HTTP real entre requests.
+// Before F17.5 there was an mpsc/oneshot bridge + a separate std::thread
+// for tokio. It was introduced in Phase 4 when `Value`/`EnvRef` were
+// non-Send `Rc<RefCell<>>` and handlers could not be invoked from
+// axum directly. F17.2 (Arc/Mutex), F17.3 (full Send) and F17.4a
+// (multi-thread) unblocked the removal. Result: ~300 fewer LoC
+// here and real HTTP parallelism across requests.
 
 use std::cell::RefCell;
 
@@ -32,18 +32,18 @@ use crate::ast::Span;
 use crate::ast::{Expr, TypeExpr};
 use crate::value::{shared, ResultVariant, Value};
 
-// Fase 9.w.2 — re-exports para evitar paths largos en el resto del
-// archivo. `WsBroadcasterTrait` y `WsOutMessage` son los hooks que el
-// runtime `WsConnHandle` consume; los concretos viven al final de
-// este archivo.
+// Phase 9.w.2 — re-exports to avoid long paths in the rest of the
+// file. `WsBroadcasterTrait` and `WsOutMessage` are the hooks the
+// `WsConnHandle` runtime consumes; the concrete types live at the end
+// of this file.
 use crate::value::{WsBroadcasterTrait, WsConnHandle, WsOutMessage, WsReadStreamTrait};
 
 // ---------------------------------------------------------------------------
-// Tipos base
+// Base types
 // ---------------------------------------------------------------------------
 
-/// Verbo HTTP soportado por un decorator. Vivo solo en runtime del
-/// servidor; el AST no lo usa (los decorators son genéricos).
+/// HTTP verb supported by a decorator. Lives only in the server
+/// runtime; the AST does not use it (decorators are generic).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
     Get,
@@ -53,8 +53,8 @@ pub enum HttpMethod {
 }
 
 impl HttpMethod {
-    /// Convierte un nombre de decorator (`"get"`, `"post"`, ...) al
-    /// verbo correspondiente. `None` si no es un decorator HTTP.
+    /// Converts a decorator name (`"get"`, `"post"`, ...) into the
+    /// corresponding verb. `None` if it isn't an HTTP decorator.
     pub fn from_decorator_name(name: &str) -> Option<HttpMethod> {
         match name {
             "get" => Some(HttpMethod::Get),
@@ -75,181 +75,184 @@ impl HttpMethod {
     }
 }
 
-/// Una ruta registrada por un decorator. El `handler` es un
-/// `Value::Function` clonado del env del intérprete — los `Rc` se
-/// clonan barato y la closure mantiene viva la env del módulo.
+/// A route registered by a decorator. The `handler` is a
+/// `Value::Function` cloned from the interpreter env — `Rc`s clone
+/// cheaply and the closure keeps the module env alive.
 #[derive(Debug, Clone)]
 pub struct RouteSpec {
     pub method: HttpMethod,
-    /// Path en formato axum (`/users/{id}`). Ya canonicalizado del
-    /// `Expr::Str` o `Expr::StrInterp` del decorator. El query
-    /// template (después del `?`) NO entra acá — vive en
+    /// Path in axum format (`/users/{id}`). Already canonicalized from
+    /// the `Expr::Str` or `Expr::StrInterp` of the decorator. The
+    /// query template (after the `?`) does NOT go here — it lives in
     /// `query_params`.
     pub path: String,
-    /// Nombres de los path params, en el orden en que aparecen en el
-    /// path. Vacío si la ruta no tiene params.
+    /// Names of the path params, in the order they appear in the
+    /// path. Empty if the route has no params.
     pub path_params: Vec<String>,
-    /// Nombres de los query params declarados con `?key={name}` en el
-    /// path del decorator. Cada uno se bindea al param Fitz del mismo
-    /// nombre. Vacío si la ruta no declara query.
+    /// Names of the query params declared with `?key={name}` in the
+    /// decorator path. Each one binds to the Fitz param of the same
+    /// name. Empty if the route does not declare a query.
     pub query_params: Vec<String>,
-    /// Handler Fitz. Tiene que ser `Value::Function` — el evaluator
-    /// valida esto en registro.
+    /// Fitz handler. Must be a `Value::Function` — the evaluator
+    /// validates this on registration.
     pub handler: Value,
-    /// Nombre del handler para mensajes de error/log.
+    /// Handler name for error/log messages.
     pub handler_name: String,
-    /// Tipos declarados de los parámetros del handler, en orden. Cada
-    /// tupla es `(nombre, head_name_sin_genericos_ni_nullable,
-    /// is_nullable)`. `head_name` sirve para `coerce_path_param`
-    /// (Int/Float/Str/Bool); `is_nullable` sirve para query params
-    /// (un `Int?` faltante en la query queda como `Null` en vez de
+    /// Declared types of the handler's parameters, in order. Each
+    /// tuple is `(name, head_name_without_generics_or_nullable,
+    /// is_nullable)`. `head_name` is used for `coerce_path_param`
+    /// (Int/Float/Str/Bool); `is_nullable` is used for query params
+    /// (a missing `Int?` in the query becomes `Null` instead of
     /// 400).
     pub param_types: Vec<(String, Option<String>, bool)>,
-    /// Si el handler declara un parámetro que no es path param, lo
-    /// tratamos como body. Acá guardamos su nombre y, opcionalmente,
-    /// el `Value::Type` declarado (resuelto del env en momento de
-    /// registro). Si el tipo no está declarado, deserializamos el
-    /// JSON como `Value` libre (Map/List/primitivos).
+    /// If the handler declares a parameter that is not a path param,
+    /// we treat it as body. We store its name here and, optionally,
+    /// the declared `Value::Type` (resolved from the env at
+    /// registration time). If the type is not declared, we
+    /// deserialize the JSON as a free `Value` (Map/List/primitives).
     ///
-    /// Máximo un body por handler. La validación de cuántos hay y
-    /// que sean compatibles la hace el evaluator durante el registro.
+    /// At most one body per handler. The evaluator validates how many
+    /// there are and that they are compatible during registration.
     pub body_param: Option<BodyParam>,
-    /// Headers declarados con `@header(name="X")` sobre el handler
-    /// (Fase 7.6). Vacío si el handler no declara ninguno. Cada
-    /// entry mapea un nombre HTTP a un param Fitz del handler.
+    /// Headers declared with `@header(name="X")` on the handler
+    /// (Phase 7.6). Empty if the handler declares none. Each entry
+    /// maps an HTTP name to a Fitz param of the handler.
     pub headers: Vec<HeaderSpec>,
-    /// TypeExpr completos de los parámetros del handler, en orden.
-    /// Aditivo a `param_types` (que carga solo el `head_name` sin
-    /// genéricos ni nullables, suficiente para el dispatch). Acá
-    /// guardamos el `TypeExpr` íntegro para que la generación de
-    /// schema OpenAPI (Fase 7.1) pueda emitir `List<Int>`, `Int?`,
-    /// `Result<User>`, etc. sin perder estructura.
+    /// Full TypeExpr of the handler parameters, in order. Additive
+    /// to `param_types` (which carries only the `head_name` without
+    /// generics or nullables, sufficient for dispatch). Here we
+    /// store the full `TypeExpr` so the OpenAPI schema generator
+    /// (Phase 7.1) can emit `List<Int>`, `Int?`, `Result<User>`,
+    /// etc., without losing structure.
     pub param_type_exprs: Vec<(String, Option<TypeExpr>)>,
-    /// Return type declarado del handler (si lo declaró). Lo usa el
-    /// generador OpenAPI para distinguir `200` solo vs `200` + `500`
-    /// (handlers que devuelven `Result<T>` mapean a ambos status).
-    /// Sin anotación → `None` y el generador trata el response como
-    /// "any" (`200` con schema vacío).
+    /// Declared return type of the handler (if any). The OpenAPI
+    /// generator uses it to distinguish `200` only vs `200` + `500`
+    /// (handlers returning `Result<T>` map to both statuses).
+    /// Without annotation → `None` and the generator treats the
+    /// response as "any" (`200` with empty schema).
     pub return_type_expr: Option<TypeExpr>,
-    /// Middlewares declarados con `@middleware(fn)` apilados antes del
-    /// decorator de ruta (mini-fase MW.1). El orden del Vec es el de
-    /// aplicación: el primero corre primero, el último justo antes del
-    /// handler. Cada uno se invoca con un único arg `Request`. Retornos
-    /// soportados (gate-only): `Null`/sin return → continúa la cadena;
-    /// `Value::HttpResponse` (vía `return <status> { ... }`) →
-    /// short-circuit con ese status code. Cualquier otro tipo → 500
-    /// con mensaje claro. Vacío si la ruta no tiene middlewares.
+    /// Middlewares declared with `@middleware(fn)` stacked before the
+    /// route decorator (mini-phase MW.1). The Vec order is the
+    /// application order: the first runs first, the last runs right
+    /// before the handler. Each is invoked with a single `Request`
+    /// arg. Supported returns (gate-only): `Null`/no return →
+    /// continues the chain; `Value::HttpResponse` (via
+    /// `return <status> { ... }`) → short-circuits with that status
+    /// code. Any other type → 500 with a clear message. Empty if
+    /// the route has no middlewares.
     pub middlewares: Vec<MiddlewareSpec>,
-    /// Configuración CORS aplicada con `@middleware(cors(...))`
-    /// (mini-fase MW.2). Vive en un slot dedicado, NO entra a la chain
-    /// de `middlewares`: CORS necesita inyectar headers en la response
-    /// real (no es gate-only) y registrar un handler de preflight
-    /// adicional (`OPTIONS`), cosas que el modelo de middleware gate
-    /// no expresa. Máximo uno por ruta — dos `cors(...)` aplicados al
-    /// mismo handler es un error de registro. `Arc` para evitar clonar
-    /// el config por request y para cruzar threads (preflight corre en
-    /// el thread tokio).
+    /// CORS configuration applied with `@middleware(cors(...))`
+    /// (mini-phase MW.2). Lives in a dedicated slot, does NOT enter
+    /// the `middlewares` chain: CORS needs to inject headers in the
+    /// real response (it's not gate-only) and register an additional
+    /// preflight handler (`OPTIONS`), things the gate middleware
+    /// model does not express. At most one per route — two
+    /// `cors(...)` applied to the same handler is a registration
+    /// error. `Arc` to avoid cloning the config per request and to
+    /// cross threads (preflight runs in the tokio thread).
     pub cors: Option<std::sync::Arc<CorsConfig>>,
-    /// Fase 9.w.1.c — Política de auth determinada por la presencia
-    /// de `@authenticated`/`@admin` sobre el handler. `None` (default)
-    /// es ruta pública.
+    /// Phase 9.w.1.c — Auth policy determined by the presence of
+    /// `@authenticated`/`@admin` on the handler. `None` (default)
+    /// means public route.
     pub auth: AuthSpec,
-    /// Fase 9.w.1.iter2.a — RBAC custom via `@requires("role")`
-    /// apilable. Cada `@requires("X")` agrega `"X"` a este Vec.
-    /// El wrapper de runtime exige que `user.role` (Str) esté en este
-    /// Vec; si no, 403. `@requires` implica auth (el wrapper corre el
-    /// `@auth_provider` aunque `auth == None`). Empty vec = sin
-    /// requisito de role (default). Apilar dos `@requires("a")
-    /// @requires("b")` = `vec!["a", "b"]` = el role debe matchear al
-    /// menos uno (OR sobre los valores; AND sobre múltiples decorators
-    /// sería incoherente porque el user solo tiene UN role).
+    /// Phase 9.w.1.iter2.a — Custom RBAC via stackable
+    /// `@requires("role")`. Each `@requires("X")` adds `"X"` to this
+    /// Vec. The runtime wrapper requires `user.role` (Str) to be in
+    /// this Vec; otherwise 403. `@requires` implies auth (the wrapper
+    /// runs the `@auth_provider` even when `auth == None`). Empty vec
+    /// = no role requirement (default). Stacking two `@requires("a")
+    /// @requires("b")` = `vec!["a", "b"]` = role must match at least
+    /// one (OR over values; AND across multiple decorators would be
+    /// incoherent because the user only has ONE role).
     pub required_roles: Vec<String>,
-    /// Fase 12.8 — Feature flag que gate-ea la ruta. `Some("flag-name")`
-    /// cuando el handler tiene `@flag("flag-name")`; `None` cuando no.
-    /// El wrapper consulta el registry runtime (`is_flag_enabled`) en
-    /// cada request — si el flag está off, retorna 404 con
-    /// `{"error": "feature disabled"}` ANTES de correr middlewares/auth.
-    /// La defensa profunda (404 en runtime aunque la ruta esté
-    /// registrada) preserva la posibilidad de toggle dinámico via env
-    /// vars sin restart.
+    /// Phase 12.8 — Feature flag gating the route. `Some("flag-name")`
+    /// when the handler has `@flag("flag-name")`; `None` otherwise.
+    /// The wrapper queries the runtime registry (`is_flag_enabled`)
+    /// on each request — if the flag is off, returns 404 with
+    /// `{"error": "feature disabled"}` BEFORE running middlewares/auth.
+    /// Deep defense (404 at runtime even though the route is
+    /// registered) preserves the possibility of dynamic toggling via
+    /// env vars without restart.
     pub flag_name: Option<String>,
-    /// Fase 9.w.1.c — Nombre del param del handler donde inyectar el
-    /// `user` retornado por el `@auth_provider`. `Some(name)` cuando
-    /// `auth != None` y el handler declaró un param de tipo `User`
-    /// (validado por el checker). `None` cuando `auth == None`. El
-    /// wrapper de runtime usa este nombre para insertar el `user` en
-    /// la posición correcta del Vec de args.
+    /// Phase 9.w.1.c — Name of the handler param where the `user`
+    /// returned by the `@auth_provider` should be injected.
+    /// `Some(name)` when `auth != None` and the handler declared a
+    /// param of type `User` (validated by the checker). `None` when
+    /// `auth == None`. The runtime wrapper uses this name to insert
+    /// the `user` at the correct position in the args Vec.
     pub auth_user_param_name: Option<String>,
-    /// Fase 9.w.2 — `true` si el handler está marcado con `@ws("/path")`.
-    /// El runtime registra la ruta como axum GET con `WebSocketUpgrade`
-    /// y, en el upgrade, spawnea el handler con un `Value::WsConn`
-    /// inyectado en lugar del HTTP dispatcher normal. `is_ws` y
-    /// `method` son ortogonales: `method` queda `Get` (el handshake
-    /// inicial siempre es GET), pero el dispatch en `build_router` se
-    /// bifurca por este flag.
+    /// Phase 9.w.2 — `true` if the handler is marked with
+    /// `@ws("/path")`. The runtime registers the route as an axum
+    /// GET with `WebSocketUpgrade` and, on upgrade, spawns the
+    /// handler with a `Value::WsConn` injected instead of the normal
+    /// HTTP dispatcher. `is_ws` and `method` are orthogonal: `method`
+    /// stays `Get` (the initial handshake is always GET), but the
+    /// dispatch in `build_router` forks based on this flag.
     pub is_ws: bool,
-    /// Fase 9.w.2 — Nombre del param `WsConn<T>` del handler. `Some(name)`
-    /// cuando `is_ws == true`; el wrapper lo usa para insertar el
-    /// `Value::WsConn` en la posición correcta del Vec de args. `None`
-    /// para routes HTTP normales.
+    /// Phase 9.w.2 — Name of the `WsConn<T>` param of the handler.
+    /// `Some(name)` when `is_ws == true`; the wrapper uses it to
+    /// insert `Value::WsConn` at the correct position in the args
+    /// Vec. `None` for normal HTTP routes.
     pub ws_conn_param_name: Option<String>,
-    /// Fase 9.w.2 — `TypeExpr` del T en `WsConn<T>` (e.g. `Str`,
-    /// `ChatMsg`). Lo guarda el evaluator al registrar la ruta. Lo
-    /// consume el generador AsyncAPI (9.w.2.d) para emitir el schema
-    /// del mensaje del canal. Coincide con `param_type_exprs[idx]` —
-    /// se aloja aparte porque es información esencial del WS endpoint.
+    /// Phase 9.w.2 — `TypeExpr` of T in `WsConn<T>` (e.g. `Str`,
+    /// `ChatMsg`). Stored by the evaluator at route registration.
+    /// Consumed by the AsyncAPI generator (9.w.2.d) to emit the
+    /// channel message schema. Matches `param_type_exprs[idx]` —
+    /// kept separately because it's essential WS endpoint
+    /// information.
     ///
-    /// 9.w.2-wsconn-bidir (v0.9.38): este campo corresponde al `recv`
-    /// (lo que se desempaqueta del frame). Para `WsConn<T>` simétrico,
-    /// es el mismo `T` que `ws_send_type`. Para `WsConn<In, Out>`
-    /// asimétrico, `ws_msg_type = In` y `ws_send_type = Out` difieren.
+    /// 9.w.2-wsconn-bidir (v0.9.38): this field corresponds to `recv`
+    /// (what is unpacked from the frame). For symmetric `WsConn<T>`,
+    /// it's the same `T` as `ws_send_type`. For asymmetric
+    /// `WsConn<In, Out>`, `ws_msg_type = In` and `ws_send_type = Out`
+    /// differ.
     pub ws_msg_type: Option<TypeExpr>,
-    /// 9.w.2-wsconn-bidir (v0.9.38): `TypeExpr` del Out en
-    /// `WsConn<In, Out>`. Para canales simétricos es igual a
-    /// `ws_msg_type`. `send/broadcast` lo usan para decidir el modo
-    /// binary vs text JSON al serializar el value que viene del
+    /// 9.w.2-wsconn-bidir (v0.9.38): `TypeExpr` of Out in
+    /// `WsConn<In, Out>`. For symmetric channels it equals
+    /// `ws_msg_type`. `send/broadcast` use it to decide the binary
+    /// vs text JSON mode when serializing the value coming from the
     /// handler.
     pub ws_send_type: Option<TypeExpr>,
 }
 
-/// Una entrada del stack de middlewares de una ruta (mini-fase MW.1).
-/// El `handler` viene resuelto a `Value::Function` desde el env del
-/// importer durante el registro de la ruta; el evaluator garantiza
-/// que el value sea callable (clon barato del `Rc` adentro). El
-/// `name` es el identificador con el que el usuario lo referenció
-/// en `@middleware(...)`, solo para mensajes de error/log.
-/// Mini-tanda Mw.next — kind del middleware. Determinado por la
-/// aridad del Value::Function en `collect_middlewares`:
+/// An entry of the middleware stack of a route (mini-phase MW.1).
+/// The `handler` comes resolved to `Value::Function` from the
+/// importer env during route registration; the evaluator guarantees
+/// the value is callable (cheap clone of the inner `Rc`). The
+/// `name` is the identifier the user used to reference it in
+/// `@middleware(...)`, only for error/log messages.
+/// Mini-batch Mw.next — middleware kind. Determined from the arity
+/// of the Value::Function in `collect_middlewares`:
 ///
-///   - **Pre (1 arg)**: gate-only clásico. Recibe `Request`, devuelve
-///     `null` para continuar o `Response` para short-circuit. NO ve
-///     la response final.
-///   - **Post (2 args)**: post-process. Corre DESPUÉS del handler.
-///     Recibe `(Request, Response)`, devuelve `Response`. Permite
-///     agregar headers, modificar el body, etc. Si varios post-mws
-///     existen, corren en orden INVERSO al de registración (semántica
-///     de wrap: el último registrado es el más interno, ve la
-///     response primero).
+///   - **Pre (1 arg)**: classic gate-only. Receives `Request`,
+///     returns `null` to continue or `Response` to short-circuit.
+///     Does NOT see the final response.
+///   - **Post (2 args)**: post-process. Runs AFTER the handler.
+///     Receives `(Request, Response)`, returns `Response`. Allows
+///     adding headers, modifying the body, etc. If multiple
+///     post-mws exist, they run in REVERSE registration order (wrap
+///     semantics: the last registered one is innermost and sees the
+///     response first).
 ///
-/// Decisión vs wrap-style con `next` callable: el modelo wrap exigiría
-/// construir un `next` callable Fitz desde Rust en runtime (refactor de
-/// 6-8h con Value variant nuevo). Post-process cubre 80% de los casos
-/// reales (timing, headers, logging post-handler) y es self-contained.
-/// El caso restante — wrap puro para catch panics o pre+post enlazado
-/// en una sola fn — queda como sub-paso futuro.
+/// Decision vs wrap-style with `next` callable: the wrap model would
+/// require building a `next` Fitz callable from Rust at runtime (6-8h
+/// refactor with a new Value variant). Post-process covers 80% of
+/// real cases (timing, headers, post-handler logging) and is
+/// self-contained. The remaining case — pure wrap for catching panics
+/// or pre+post linked in a single fn — is left as a future sub-step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MiddlewareKind {
     /// 1 arg, gate-only: `fn mw(req: Request) -> Response?`. Null
-    /// → continúa la chain, Response → short-circuit.
+    /// → continues the chain, Response → short-circuit.
     Pre,
     /// 2 args post-process: `fn mw(req: Request, resp: Response) -> Response`.
-    /// Corre DESPUÉS del handler.
+    /// Runs AFTER the handler.
     Post,
-    /// Mini-tanda Mw-Wrap — 2 args wrap-style:
+    /// Mini-batch Mw-Wrap — 2 args wrap-style:
     /// `fn mw(req: Request, next: Fn() -> Response) -> Response`.
-    /// El middleware controla la invocación del handler con `next()`.
-    /// Habilita timing, observability, response wrapping, decisión
-    /// condicional de continuar la chain.
+    /// The middleware controls handler invocation via `next()`.
+    /// Enables timing, observability, response wrapping, conditional
+    /// chain continuation.
     Wrap,
 }
 
@@ -260,45 +263,47 @@ pub struct MiddlewareSpec {
     pub kind: MiddlewareKind,
 }
 
-/// Mini-fase Q.3 + mini-tanda HTTP-Cors: la política de
-/// `Access-Control-Allow-Origin` admite tres modos: literal (valor
-/// fijo, como hasta MW.2), set de orígenes permitidos (echo si está
-/// en la lista), y echo sin filtro (acepta cualquier Origin recibido).
+/// Mini-phase Q.3 + mini-batch HTTP-Cors: the
+/// `Access-Control-Allow-Origin` policy supports three modes: literal
+/// (fixed value, as up to MW.2), set of allowed origins (echo if in
+/// the list), and echo without filter (accepts any received Origin).
 ///
-///       - `Literal("*")` o `Literal("https://x.com")` → emite el valor
-///         tal cual (modo previo).
-///       - `Set(["https://a.com", "https://b.com"])` → si el header
-///         `Origin` del request matchea uno de la lista, emite **ese**
-///         valor (no la lista entera). Si no matchea, NO emite el header
-///         (el browser rechaza la response — comportamiento estándar de
-///         CORS estricto). Útil cuando se necesitan credenciales (cookies/
-///         Authorization) sobre múltiples frontends: `Allow-Origin: *`
-///         incompatible con credentials, echo del Origin específico sí.
-///       - `Echo` → eco del Origin recibido sin filtro. Equivalente a
-///         escribir `Set(...)` con todos los frontends posibles. Útil
-///         para dev local donde no se conoce la lista a priori. Si la
-///         request NO tiene header `Origin`, NO emite el header
-///         (mismo comportamiento que Set sin match).
+///       - `Literal("*")` or `Literal("https://x.com")` → emits the
+///         value as-is (previous mode).
+///       - `Set(["https://a.com", "https://b.com"])` → if the request
+///         `Origin` header matches one in the list, emits **that**
+///         value (not the whole list). If it doesn't match, the
+///         header is NOT emitted (browser rejects the response —
+///         strict CORS standard behavior). Useful when credentials
+///         are needed (cookies/Authorization) across multiple
+///         frontends: `Allow-Origin: *` is incompatible with
+///         credentials, but echoing the specific Origin is fine.
+///       - `Echo` → echo the received Origin without filter.
+///         Equivalent to writing `Set(...)` with every possible
+///         frontend. Useful for local dev where the list is unknown
+///         a priori. If the request does NOT have an `Origin` header,
+///         the header is NOT emitted (same behavior as Set with no
+///         match).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllowOrigin {
-    /// Valor literal, emitido idéntico en cada response.
+    /// Literal value, emitted identically in every response.
     Literal(String),
-    /// Set de orígenes permitidos. El runtime echo si el `Origin` del
-    /// request está en la lista.
+    /// Set of allowed origins. The runtime echoes if the request
+    /// `Origin` is in the list.
     Set(Vec<String>),
-    /// Mini-tanda HTTP-Cors — echo del Origin recibido sin filtro.
-    /// Construido vía `allow_origin: "echo"` en el config Map.
+    /// Mini-batch HTTP-Cors — echo the received Origin without
+    /// filter. Built via `allow_origin: "echo"` in the config Map.
     Echo,
 }
 
 impl AllowOrigin {
-    /// Computa el valor a emitir en `Access-Control-Allow-Origin`
-    /// dado el `Origin` del request (si lo hay):
-    ///       - Literal → siempre el valor, sin importar el request.
-    ///       - Set → el valor del request si está en la lista; `None`
-    ///         si no.
-    ///       - Echo → el valor del request tal cual (sin filtro);
-    ///         `None` si no llega Origin header.
+    /// Computes the value to emit in `Access-Control-Allow-Origin`
+    /// given the request `Origin` (if any):
+    ///       - Literal → always the value, regardless of request.
+    ///       - Set → the request value if it's in the list; `None`
+    ///         otherwise.
+    ///       - Echo → the request value as-is (no filter); `None` if
+    ///         the Origin header is absent.
     pub fn resolve(&self, request_origin: Option<&str>) -> Option<String> {
         match self {
             AllowOrigin::Literal(s) => Some(s.clone()),
@@ -324,9 +329,10 @@ pub struct CorsConfig {
 }
 
 impl CorsConfig {
-    /// Construye un CorsConfig "default" pensado para uso de browser
-    /// frontend SPA: origin "*", métodos comunes, headers `content-type`
-    /// + `authorization`. Casos más restrictivos exigen kwargs explícitos.
+    /// Builds a "default" CorsConfig intended for SPA browser
+    /// frontend use: origin "*", common methods, `content-type` +
+    /// `authorization` headers. More restrictive cases require
+    /// explicit kwargs.
     pub fn permissive_default() -> Self {
         CorsConfig {
             allow_origin: AllowOrigin::Literal("*".to_string()),
@@ -342,12 +348,12 @@ impl CorsConfig {
         }
     }
 
-    /// Lista de headers HTTP que el server emite con una response
-    /// CORS (real o preflight), resuelta contra el `Origin` del
-    /// request. Si la política es `Set` y el origin no está permitido,
-    /// el header `Access-Control-Allow-Origin` se OMITE (el browser
-    /// rechaza la response, comportamiento CORS estricto correcto).
-    /// El resto de los headers (methods/headers/max_age) sí se emiten.
+    /// List of HTTP headers the server emits with a CORS response
+    /// (real or preflight), resolved against the request `Origin`.
+    /// If the policy is `Set` and the origin is not allowed, the
+    /// `Access-Control-Allow-Origin` header is OMITTED (the browser
+    /// rejects the response, correct strict CORS behavior). The
+    /// other headers (methods/headers/max_age) are emitted anyway.
     pub fn response_headers(&self, request_origin: Option<&str>) -> Vec<(String, String)> {
         let mut out = Vec::with_capacity(4);
         if let Some(origin) = self.allow_origin.resolve(request_origin) {
@@ -368,13 +374,13 @@ impl CorsConfig {
     }
 }
 
-/// Especificación de un header declarado con `@header(name="X")`
-/// sobre un handler (Fase 7.6). El `http_name` es el nombre HTTP
-/// canónico declarado por el usuario; `param_name` es el nombre del
-/// parámetro Fitz al que se bindea (derivado por convención:
-/// lowercase + `-` → `_`). `is_nullable`: si el param Fitz se declaró
-/// como `Str?`, el header es opcional (falta → `Null`); si no, es
-/// obligatorio (falta → 400).
+/// Specification of a header declared with `@header(name="X")` on a
+/// handler (Phase 7.6). `http_name` is the canonical HTTP name
+/// declared by the user; `param_name` is the name of the Fitz
+/// parameter it binds to (derived by convention: lowercase + `-` →
+/// `_`). `is_nullable`: if the Fitz param was declared as `Str?`,
+/// the header is optional (missing → `Null`); otherwise it is
+/// required (missing → 400).
 #[derive(Debug, Clone)]
 pub struct HeaderSpec {
     pub http_name: String,
@@ -382,93 +388,96 @@ pub struct HeaderSpec {
     pub is_nullable: bool,
 }
 
-/// Descripción del parámetro body de un handler: su nombre (para
-/// armar args en el orden correcto) y el `Value::Type` esperado, si
-/// el usuario lo declaró. Sin tipo declarado, deserializamos como
-/// `Value` libre (forma flexible — útil para webhooks o APIs sin
-/// schema).
+/// Description of a handler's body parameter: its name (to build
+/// args in the correct order) and the expected `Value::Type`, if the
+/// user declared it. Without a declared type we deserialize as a
+/// free `Value` (flexible shape — useful for webhooks or schemaless
+/// APIs).
 #[derive(Debug, Clone)]
 pub struct BodyParam {
     pub name: String,
-    /// `Some(Value::Type{...})` si el usuario declaró un tipo custom.
-    /// `None` si el parámetro no tiene anotación o si la anotación es
-    /// un primitivo (`Int`, `Str`, etc. — soportamos eso también).
+    /// `Some(Value::Type{...})` if the user declared a custom type.
+    /// `None` if the parameter has no annotation or if the annotation
+    /// is a primitive (`Int`, `Str`, etc. — we support that too).
     pub declared_type: Option<Value>,
-    /// Cuando `declared_type` es `None`, este campo guarda el nombre
-    /// del tipo (si lo hay) para mensajes de error. Si tampoco está
-    /// declarado, `None`. Lo dejamos como metadata estructural aunque
-    /// el lectura actual sea solo por `Debug`.
+    /// When `declared_type` is `None`, this field holds the type name
+    /// (if any) for error messages. If undeclared, `None`. Kept as
+    /// structural metadata even though current reads are only via
+    /// `Debug`.
     #[allow(dead_code)]
     pub declared_type_name: Option<String>,
 }
 
-/// Configuración del servidor que un `@server(...)` pudo haber
-/// declarado en el programa. Si está en `None`, se usan defaults
-/// (127.0.0.1:3000, docs habilitados). Solo se admite un `@server`
-/// por programa — la unicidad la enforcea el evaluator durante el
-/// registro.
+/// Server configuration a `@server(...)` may have declared in the
+/// program. If `None`, defaults are used (127.0.0.1:3000, docs
+/// enabled). Only one `@server` per program is allowed — the
+/// evaluator enforces uniqueness during registration.
 ///
-/// `enable_docs` (Fase 7.4): cuando `false`, el server NO
-/// autoregistra `/openapi.json` ni `/docs`. Default: `true` —
-/// el camino feliz entrega docs sin tocar nada. Opt-out con
+/// `enable_docs` (Phase 7.4): when `false`, the server does NOT
+/// auto-register `/openapi.json` or `/docs`. Default: `true` — the
+/// happy path serves docs without touching anything. Opt out with
 /// `@server(docs=false)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub enable_docs: bool,
-    /// Mini-fase Q.2: override de `info.version` del schema OpenAPI
-    /// vía `@server(api_version="1.2.3")`. `None` → el schema usa el
-    /// default `"0.1.0"`. Cuando se setea, lo lee `serve()` al
-    /// pre-computar el schema y lo pasa a `generate_openapi_with_version`.
+    /// Mini-phase Q.2: override of OpenAPI schema `info.version` via
+    /// `@server(api_version="1.2.3")`. `None` → schema uses the
+    /// default `"0.1.0"`. When set, `serve()` reads it while
+    /// pre-computing the schema and passes it to
+    /// `generate_openapi_with_version`.
     pub api_version: Option<String>,
-    /// Fase 9.w.2.e — intervalo de heartbeat ping/pong para conexiones
-    /// WebSocket, en segundos. El runtime envía un Ping cada
-    /// `ws_heartbeat_secs` segundos a cada conn vivo; si no llega
-    /// ningún frame (text/pong) en `2 * ws_heartbeat_secs`, la conn
-    /// se cierra (timeout de keepalive). `0` desactiva el heartbeat
-    /// (no recomendado para proxies/CDNs que matan conexiones idle).
-    /// Default: `30` — pasa por la mayoría de proxies sin ahogar el
-    /// network. Override con `@server(ws_heartbeat_secs=60)` o
+    /// Phase 9.w.2.e — heartbeat ping/pong interval for WebSocket
+    /// connections, in seconds. The runtime sends a Ping every
+    /// `ws_heartbeat_secs` seconds to every live conn; if no frame
+    /// (text/pong) arrives within `2 * ws_heartbeat_secs`, the conn
+    /// is closed (keepalive timeout). `0` disables the heartbeat
+    /// (not recommended for proxies/CDNs that kill idle conns).
+    /// Default: `30` — passes through most proxies without flooding
+    /// the network. Override with `@server(ws_heartbeat_secs=60)` or
     /// `@server(ws_heartbeat_secs=0)`.
     pub ws_heartbeat_secs: u64,
-    /// Fase 12.1.b — Tiempo máximo en segundos que el server espera a
-    /// que terminen las requests in-flight tras recibir SIGTERM/Ctrl-C
-    /// antes de matar el proceso. Durante esta ventana, `/readyz`
-    /// retorna 503 para que K8s deje de rutear tráfico, y axum cierra
-    /// el listener pero deja que los handlers en curso terminen. Default
-    /// `30` — alineado con `terminationGracePeriodSeconds` default de
-    /// K8s. Override con `@server(shutdown_timeout_secs=60)`. `0`
-    /// desactiva el grace period (shutdown inmediato — no recomendado
-    /// en producción).
+    /// Phase 12.1.b — Maximum seconds the server waits for in-flight
+    /// requests to finish after receiving SIGTERM/Ctrl-C before
+    /// killing the process. During this window, `/readyz` returns
+    /// 503 so K8s stops routing traffic, and axum closes the listener
+    /// but lets in-progress handlers finish. Default `30` — aligned
+    /// with the K8s default `terminationGracePeriodSeconds`. Override
+    /// with `@server(shutdown_timeout_secs=60)`. `0` disables the
+    /// grace period (immediate shutdown — not recommended in
+    /// production).
     pub shutdown_timeout_secs: u64,
-    /// Fase 12.3.b.5 — Activa la instrumentación HTTP automática
-    /// (SpanContext root por request, `log.info("http.access", ...)`
-    /// con `http.method`/`http.target`/`http.status_code`/`duration_ms`,
+    /// Phase 12.3.b.5 — Enables automatic HTTP instrumentation
+    /// (SpanContext root per request, `log.info("http.access", ...)`
+    /// with `http.method`/`http.target`/`http.status_code`/`duration_ms`,
     /// Counter `http_requests_total` + Histogram
-    /// `http_request_duration_seconds` con labels). Default `true`.
-    /// Override explícito con `@server(observability=false)` skipea TODO
-    /// el wrapper de instrumentación — los handlers corren bare-metal,
-    /// sin overhead por request. Útil en hot-paths donde cada microsegundo
-    /// cuenta, o cuando el user tiene su propio sistema de observability
-    /// custom. No afecta otros features (auth, CORS, middleware, etc.).
+    /// `http_request_duration_seconds` with labels). Default `true`.
+    /// Explicit override with `@server(observability=false)` skips
+    /// the ENTIRE instrumentation wrapper — handlers run bare-metal
+    /// with no per-request overhead. Useful in hot paths where every
+    /// microsecond counts, or when the user has their own custom
+    /// observability system. Does not affect other features (auth,
+    /// CORS, middleware, etc.).
     pub observability_enabled: bool,
-    /// Fase 12.3.iter2.Tier3 — Activa el endpoint `/metrics` con
-    /// Prometheus exposition format. Cuando es `true`, `serve()` instala
-    /// `PrometheusBuilder` como recorder global del crate `metrics`
-    /// (los Counter/Histogram que ya emite `dispatch_request` empiezan
-    /// a popular el recorder automático), y `build_router` auto-mounta
-    /// `GET /metrics` que renderea la exposition format en cada scrape.
-    /// Default `false` — sin la flag, recorder vacío + ruta no montada.
-    /// Override: `@server(prometheus=true)`, o env var `FITZ_PROMETHEUS=1`
-    /// (env var precede sobre el flag — útil para activar/desactivar
-    /// en producción sin recompilar). Endpoint sobre el mismo puerto +
-    /// transporte que el resto de la app (NO un puerto separado).
+    /// Phase 12.3.iter2.Tier3 — Enables the `/metrics` endpoint with
+    /// the Prometheus exposition format. When `true`, `serve()`
+    /// installs `PrometheusBuilder` as the global recorder of the
+    /// `metrics` crate (the Counter/Histogram values already emitted
+    /// by `dispatch_request` start populating the recorder
+    /// automatically), and `build_router` auto-mounts `GET /metrics`
+    /// rendering the exposition format on each scrape. Default
+    /// `false` — without the flag, empty recorder + route not
+    /// mounted. Override: `@server(prometheus=true)`, or env var
+    /// `FITZ_PROMETHEUS=1` (env var takes precedence over the flag —
+    /// useful to toggle in production without recompiling). Endpoint
+    /// shares the same port + transport as the rest of the app (NOT
+    /// a separate port).
     pub prometheus_enabled: bool,
 }
 
 impl ServerConfig {
-    /// Defaults aplicados cuando no hay `@server` en el programa.
+    /// Defaults applied when there is no `@server` in the program.
     pub fn default_addr() -> Self {
         ServerConfig {
             host: "127.0.0.1".into(),
@@ -482,9 +491,9 @@ impl ServerConfig {
         }
     }
 
-    /// Traduce a `SocketAddr`. Falla si el host no parsea como IP
-    /// numérica (no resolvemos DNS — para evitar surpresas con un
-    /// host literal que no es IP).
+    /// Translates to a `SocketAddr`. Fails if the host does not
+    /// parse as a numeric IP (we don't resolve DNS — to avoid
+    /// surprises with a literal host that is not an IP).
     pub fn to_socket_addr(&self) -> Result<std::net::SocketAddr, String> {
         let ip: std::net::IpAddr = self.host.parse().map_err(|_| {
             format!(
@@ -496,117 +505,117 @@ impl ServerConfig {
     }
 }
 
-/// Fase 9.w.1.c — Política de auth para un handler HTTP. Determinada
-/// al registro de la ruta por la presencia de `@authenticated` y/o
-/// `@admin` decorators. Sin esos decorators → `None` (handler público,
-/// sin auth check).
+/// Phase 9.w.1.c — Auth policy for an HTTP handler. Determined at
+/// route registration by the presence of `@authenticated` and/or
+/// `@admin` decorators. Without those decorators → `None` (public
+/// handler, no auth check).
 ///
-/// El checker (9.w.1.a) ya validó estáticamente que cualquier handler
-/// con `Authenticated`/`Admin` tiene un param compatible con el
-/// `User` que retorna el `@auth_provider`, y que `Admin` exige campo
-/// `role: Str` en `User`.
+/// The checker (9.w.1.a) already validated statically that any
+/// handler with `Authenticated`/`Admin` has a param compatible with
+/// the `User` returned by the `@auth_provider`, and that `Admin`
+/// requires a `role: Str` field on `User`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthSpec {
-    /// Sin requisito de auth (default — handler público).
+    /// No auth requirement (default — public handler).
     None,
-    /// `@authenticated`: requiere que el `@auth_provider` retorne
-    /// `Result::Ok(user)`. Cualquier `user` retornado vale.
+    /// `@authenticated`: requires the `@auth_provider` to return
+    /// `Result::Ok(user)`. Any returned `user` is valid.
     Authenticated,
-    /// `@admin`: además de `@authenticated`, exige que el `user`
-    /// retornado tenga campo `role: Str` con valor `"admin"`.
+    /// `@admin`: on top of `@authenticated`, requires the returned
+    /// `user` to have a `role: Str` field with value `"admin"`.
     Admin,
 }
 
-/// Fase 9.w.1.c — Handle al `@auth_provider` registrado en el
-/// programa. Singleton: máximo uno por programa (validado tanto por
-/// el checker 9.w.1.a como por `set_auth_provider` defensivamente).
+/// Phase 9.w.1.c — Handle to the `@auth_provider` registered in the
+/// program. Singleton: at most one per program (validated by both the
+/// 9.w.1.a checker and `set_auth_provider` defensively).
 ///
-/// El runtime invoca `handler` con un único arg de tipo `Map<Str, Str>`
-/// (los headers HTTP del request entrante) y espera `Result<User>` de
-/// vuelta. `Ok` → continúa al handler con el `user` inyectado; `Err` →
-/// 401 con `{"error": <msg>}`.
-/// Fase 12.1.b — Handle de un probe `@healthz` o `@readyz` registrado
-/// en runtime. Paralelo a `AuthProviderHandle` pero más simple:
-/// solo nombre + handler + is_async (no tiene tipo nominal asociado).
+/// The runtime invokes `handler` with a single arg of type
+/// `Map<Str, Str>` (the incoming request HTTP headers) and expects
+/// `Result<User>` back. `Ok` → continues to the handler with the
+/// `user` injected; `Err` → 401 with `{"error": <msg>}`.
+/// Phase 12.1.b — Handle to a `@healthz` or `@readyz` probe registered
+/// at runtime. Parallel to `AuthProviderHandle` but simpler: only
+/// name + handler + is_async (no associated nominal type).
 #[derive(Debug, Clone)]
 pub struct HealthCheckHandle {
-    /// Nombre de la fn marcada con `@healthz` o `@readyz`. Solo para
+    /// Name of the fn marked with `@healthz` or `@readyz`. Only for
     /// logging.
     pub name: String,
-    /// `Value::Function` (el handler resuelto del env de definición).
-    /// El call site lo invoca exactamente igual que cualquier
-    /// `Value::Function` Fitz.
+    /// `Value::Function` (the handler resolved from the definition
+    /// env). The call site invokes it exactly like any Fitz
+    /// `Value::Function`.
     pub handler: Value,
-    /// `true` si la fn es `async`. El call site debe await-ear el
-    /// `Value::Future` resultante.
+    /// `true` if the fn is `async`. The call site must await the
+    /// resulting `Value::Future`.
     pub is_async: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct AuthProviderHandle {
-    /// Nombre de la fn marcada con `@auth_provider`. Solo para
-    /// mensajes de error y logging.
+    /// Name of the fn marked with `@auth_provider`. Only for error
+    /// messages and logging.
     pub name: String,
-    /// Value::Function (el handler resuelto del env de definición).
-    /// El call site lo invoca exactamente igual que cualquier
-    /// `Value::Function` Fitz.
+    /// Value::Function (the handler resolved from the definition
+    /// env). The call site invokes it exactly like any Fitz
+    /// `Value::Function`.
     pub handler: Value,
-    /// `true` si la fn provider es `async`. El call site debe
-    /// await-ear el `Value::Future` resultante; sync → llamar y usar
-    /// el `Value` retornado directo.
+    /// `true` if the provider fn is `async`. The call site must await
+    /// the resulting `Value::Future`; sync → call and use the
+    /// returned `Value` directly.
     pub is_async: bool,
-    /// W14 (v0.10.10) — nombre del tipo `T` del `Result<T>` que
-    /// retorna el provider. Lo extrae `register_auth_provider` al
-    /// momento de procesar el `@auth_provider`, parseando el
-    /// `return_type` del FnDef. Lo consulta el dispatcher de
-    /// handlers para identificar el param "user" por TIPO en vez de
-    /// la regla del primer leftover, así un handler protegido puede
-    /// recibir además un body separado (`fn create(body: PostInput,
-    /// user: User) -> Post`).
+    /// W14 (v0.10.10) — name of the type `T` of the `Result<T>`
+    /// returned by the provider. Extracted by `register_auth_provider`
+    /// when processing the `@auth_provider`, parsing the FnDef's
+    /// `return_type`. Queried by the handler dispatcher to identify
+    /// the "user" param by TYPE instead of the first-leftover rule,
+    /// so a protected handler can also receive a separate body (`fn
+    /// create(body: PostInput, user: User) -> Post`).
     pub user_type_name: String,
 }
 
-/// Acumulador de rutas registradas durante `eval`. Construido por
-/// `main.rs` antes de evaluar; consultado después para decidir si
-/// arrancar el server.
+/// Accumulator of routes registered during `eval`. Built by `main.rs`
+/// before evaluating; consulted afterwards to decide whether to start
+/// the server.
 #[derive(Debug, Default)]
 pub struct HttpRegistry {
     pub routes: Vec<RouteSpec>,
-    /// Configuración del server declarada con `@server(...)`. `None`
-    /// si el programa no la declaró — el caller (main.rs) aplica
+    /// Server config declared with `@server(...)`. `None` if the
+    /// program did not declare it — the caller (main.rs) applies
     /// `ServerConfig::default_addr()`.
     pub server_config: Option<ServerConfig>,
-    /// Fase 9.w.1.c — Provider de auth declarado con `@auth_provider`.
-    /// `None` si el programa no lo declaró (en ese caso no puede haber
-    /// handlers con `@authenticated`/`@admin` — el checker lo bloquea).
+    /// Phase 9.w.1.c — Auth provider declared with `@auth_provider`.
+    /// `None` if the program did not declare one (in that case there
+    /// can be no `@authenticated`/`@admin` handlers — the checker
+    /// blocks them).
     pub auth_provider: Option<AuthProviderHandle>,
-    /// Fase 9.w.2 — Broadcaster compartido para los `@ws` endpoints.
-    /// `Arc` para que cada `WsConnHandle` lo capture sin pasar por el
-    /// registry. Se inicializa lazy en `new()`. Si el programa no
-    /// tiene `@ws` endpoints, el broadcaster vive vacío y no cuesta
-    /// nada.
+    /// Phase 9.w.2 — Shared broadcaster for `@ws` endpoints. `Arc` so
+    /// each `WsConnHandle` captures it without going through the
+    /// registry. Lazy-initialized in `new()`. If the program has no
+    /// `@ws` endpoints, the broadcaster stays empty and costs
+    /// nothing.
     pub ws_broadcaster: std::sync::Arc<WsBroadcaster>,
-    /// Fase 9.w.3 — Registry de jobs `@cron`. Se llena durante el
-    /// evaluation; el scheduler arranca cuando `serve()` levanta el
-    /// runtime tokio o cuando el cron-only mode toma el control
-    /// (`run_scheduler_only`). `Arc` para compartirlo con los workers
-    /// tokio que ejecutan los jobs.
+    /// Phase 9.w.3 — Registry of `@cron` jobs. Populated during
+    /// evaluation; the scheduler starts when `serve()` brings up the
+    /// tokio runtime or when cron-only mode takes control
+    /// (`run_scheduler_only`). `Arc` to share with the tokio workers
+    /// that run the jobs.
     pub cron_registry: std::sync::Arc<crate::cron_jobs::CronRegistry>,
-    /// Fase 12.1.b — Handler `@healthz` (liveness probe K8s). `None`
-    /// si el programa no lo declaró → el auto-mount sirve una respuesta
-    /// 200 "ok" default. `Some(h)` → se invoca el handler Fitz y se
-    /// mapea el retorno a status code.
+    /// Phase 12.1.b — `@healthz` handler (K8s liveness probe). `None`
+    /// if the program did not declare it → auto-mount serves a
+    /// default 200 "ok" response. `Some(h)` → the Fitz handler is
+    /// invoked and the return is mapped to a status code.
     pub healthz_handler: Option<HealthCheckHandle>,
-    /// Fase 12.1.b — Handler `@readyz` (readiness probe K8s). `None`
-    /// → default returns 200 cuando no está draining, 503 cuando sí.
-    /// `Some(h)` → se invoca el handler Fitz; durante draining
-    /// SIEMPRE 503 sin tocar el handler.
+    /// Phase 12.1.b — `@readyz` handler (K8s readiness probe). `None`
+    /// → default returns 200 when not draining, 503 when draining.
+    /// `Some(h)` → the Fitz handler is invoked; during draining it's
+    /// ALWAYS 503 without touching the handler.
     pub readyz_handler: Option<HealthCheckHandle>,
-    /// Fase 12.1.b — Bandera atómica que indica si el server está
-    /// "draining" (SIGTERM/Ctrl-C ya disparó). `/readyz` la consulta
-    /// y retorna 503 cuando es `true`, para que K8s deje de rutear
-    /// requests nuevos a este pod. Compartida entre el handler y el
-    /// `shutdown_signal()` que la flippea.
+    /// Phase 12.1.b — Atomic flag indicating whether the server is
+    /// "draining" (SIGTERM/Ctrl-C already fired). `/readyz` queries
+    /// it and returns 503 when `true`, so K8s stops routing new
+    /// requests to this pod. Shared between the handler and the
+    /// `shutdown_signal()` that flips it.
     pub draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -625,9 +634,9 @@ impl HttpRegistry {
     }
 
     pub fn is_empty(&self) -> bool {
-        // El registry está "vacío" si no tiene rutas. Un `@server`
-        // sin rutas no levanta nada (no hay endpoints a servir);
-        // ignorarlo es lo más útil.
+        // The registry is "empty" when it has no routes. A `@server`
+        // without routes serves nothing (no endpoints); ignoring it
+        // is the most useful behavior.
         self.routes.is_empty()
     }
 
@@ -635,7 +644,8 @@ impl HttpRegistry {
         self.routes.push(route);
     }
 
-    /// Devuelve el config explícito o el default. Útil para `main.rs`.
+    /// Returns the explicit config or the default. Useful for
+    /// `main.rs`.
     pub fn resolved_config(&self) -> ServerConfig {
         self.server_config
             .clone()
@@ -643,47 +653,48 @@ impl HttpRegistry {
     }
 }
 
-// thread_local: el evaluador se entera de si hay un registry activo
-// sin pasarlo como parámetro por todos lados. Mismo patrón que el
-// loader de módulos en 3.5. `None` → estamos corriendo en un contexto
-// sin HTTP (REPL, eval embebido, tests sin server) y los decorators
-// dan error explícito.
+// thread_local: the evaluator can tell whether a registry is active
+// without passing it as a parameter everywhere. Same pattern as the
+// module loader in 3.5. `None` → we're running in a context without
+// HTTP (REPL, embedded eval, tests without server) and decorators
+// emit an explicit error.
 thread_local! {
     static HTTP_REGISTRY: RefCell<Option<HttpRegistry>> = const { RefCell::new(None) };
 }
 
-/// Instala un registry vacío para el thread actual durante la
-/// duración del closure. Al terminar lo devuelve. Si el closure
-/// retorna `Err`, el registry se descarta junto con el resto del
-/// estado. Pensado para `main.rs`: arma, evalúa, recibe el registry,
-/// decide si arrancar el server.
+/// Installs an empty registry on the current thread for the duration
+/// of the closure. Returns it when finished. If the closure returns
+/// `Err`, the registry is dropped along with the rest of the state.
+/// Designed for `main.rs`: set up, evaluate, receive the registry,
+/// decide whether to start the server.
 ///
-/// **Invariantes de reentrancia (R5 audit, 2026-05-27)**: el patrón
-/// `take()` + `replace()` + `take()` final + restore evita compartir
-/// préstamos vivos del `RefCell` durante la ejecución del closure `f`.
-/// La secuencia es:
-///   1. `take()` saca el registry previo (típicamente `None`; `Some` solo
-///      en tests anidados que reusan este helper).
-///   2. Se inserta un `HttpRegistry::new()` fresco.
-///   3. Se ejecuta `f()` SIN un borrow vivo — el closure puede invocar
-///      `register_http_route`/`register_server_config`/etc. que también
-///      hacen `cell.borrow_mut()` sin chocar (no hay préstamos vivos).
-///   4. Al volver, `take()` saca el registry poblado y `replace()` repone
-///      el previo. El registry capturado se retorna junto con el output
-///      de `f`.
+/// **Reentrancy invariants (R5 audit, 2026-05-27)**: the pattern
+/// `take()` + `replace()` + final `take()` + restore avoids sharing
+/// live borrows of the `RefCell` while the closure `f` is running.
+/// The sequence is:
+///   1. `take()` pulls out the previous registry (typically `None`;
+///      `Some` only in nested tests that reuse this helper).
+///   2. A fresh `HttpRegistry::new()` is inserted.
+///   3. `f()` runs WITHOUT a live borrow — the closure can invoke
+///      `register_http_route`/`register_server_config`/etc., which
+///      also call `cell.borrow_mut()` without clashing (no live
+///      borrows).
+///   4. On return, `take()` pulls out the populated registry and
+///      `replace()` restores the previous one. The captured registry
+///      is returned along with the output of `f`.
 ///
-/// Esto significa que el closure puede llamar funciones que internamente
-/// hagan `with_borrow_mut` o `with_borrow` sobre `HTTP_REGISTRY` sin
-/// deadlock por re-entrancia.
+/// This means the closure can call functions that internally invoke
+/// `with_borrow_mut` or `with_borrow` over `HTTP_REGISTRY` without
+/// deadlocking due to reentrancy.
 pub fn with_active_registry<F, T>(f: F) -> (T, HttpRegistry)
 where
     F: FnOnce() -> T,
 {
     HTTP_REGISTRY.with(|cell| {
-        // Guardamos el registry previo (típicamente `None` — el caso
-        // anidado existe solo para tests). Después de `f()` lo
-        // restauramos textual, sin reemplazarlo por `HttpRegistry::new()`
-        // por error.
+        // Save the previous registry (typically `None` — the nested
+        // case only exists for tests). After `f()` we restore it
+        // verbatim, never replacing it with `HttpRegistry::new()` by
+        // mistake.
         let prev = cell.borrow_mut().take();
         *cell.borrow_mut() = Some(HttpRegistry::new());
         let out = f();
@@ -696,18 +707,18 @@ where
     })
 }
 
-/// Variante async de `with_active_registry` (Fase 6.4). Misma semántica
-/// pero acepta una closure que devuelve un `Future`, para uso desde
-/// código async (handlers, tests con `#[tokio::test]`).
+/// Async variant of `with_active_registry` (Phase 6.4). Same
+/// semantics but accepts a closure returning a `Future`, for use
+/// from async code (handlers, tests with `#[tokio::test]`).
 ///
-/// **Invariante de borrow**: NO mantenemos `cell.borrow_mut()` cross
-/// await — los borrows se toman/sueltan al entrar y al salir de cada
-/// paso atómico. Si la closure paniquea, el guard sigue restaurando
-/// el registry previo en el `Drop` implícito (mismo patrón que la
-/// versión sync, vía panics propagados después del setup).
+/// **Borrow invariant**: we do NOT hold `cell.borrow_mut()` across
+/// awaits — borrows are taken/released entering and leaving each
+/// atomic step. If the closure panics, the guard still restores the
+/// previous registry on implicit `Drop` (same pattern as the sync
+/// version, via panics propagated after setup).
 ///
-/// `dead_code` allow: solo lo usan tests por ahora (los handlers HTTP
-/// reales aterrizan en 6.5 cuando se elimine el bridge mpsc).
+/// `dead_code` allow: only tests use it for now (real HTTP handlers
+/// land in 6.5 when the mpsc bridge is removed).
 #[allow(dead_code)]
 pub async fn with_active_registry_async<F, Fut, T>(f: F) -> (T, HttpRegistry)
 where
@@ -731,24 +742,24 @@ where
     (out, registry)
 }
 
-/// `true` si hay un registry HTTP activo en el thread actual. El
-/// evaluator lo consulta antes de procesar un decorator HTTP: si no
-/// hay, sigue cortando con error explícito.
+/// `true` if there is an active HTTP registry on the current thread.
+/// The evaluator queries it before processing an HTTP decorator: if
+/// there isn't one, it still stops with an explicit error.
 pub fn has_active_registry() -> bool {
     HTTP_REGISTRY.with(|cell| cell.borrow().is_some())
 }
 
-/// 10.8.7 (v0.10.8) — broadcast cross-handler de un mensaje JSON a
-/// TODOS los clientes WS conectados al `endpoint`. Habilita el
-/// patrón canónico SaaS "handler HTTP triggerea notification
-/// realtime a clientes WS suscritos" — el built-in
-/// `ws_broadcast(endpoint, msg)` del lenguaje delega acá.
+/// 10.8.7 (v0.10.8) — cross-handler broadcast of a JSON message to
+/// ALL WS clients connected to `endpoint`. Enables the canonical
+/// SaaS pattern "HTTP handler triggers realtime notification to
+/// subscribed WS clients" — the built-in `ws_broadcast(endpoint, msg)`
+/// in the language delegates here.
 ///
-/// Si no hay registry HTTP activo (programa CLI sin server), el
-/// broadcast es no-op silencioso. El usuario que llama
-/// `ws_broadcast` desde un script sin `@server` no recibe error —
-/// el comportamiento se reduce a un no-op pedagógicamente
-/// aceptable: el endpoint no existe, no hay clientes.
+/// If there's no active HTTP registry (CLI program with no server),
+/// the broadcast is a silent no-op. A user calling `ws_broadcast`
+/// from a script without `@server` does not get an error — the
+/// behavior degrades to a pedagogically acceptable no-op: the
+/// endpoint doesn't exist, there are no clients.
 pub fn ws_broadcast_to_endpoint(endpoint: &str, payload: String) {
     HTTP_REGISTRY.with(|cell| {
         if let Some(reg) = cell.borrow().as_ref() {
@@ -757,10 +768,11 @@ pub fn ws_broadcast_to_endpoint(endpoint: &str, payload: String) {
     });
 }
 
-/// Fase 9.w.1.c — `true` si el registry activo tiene un `@auth_provider`
-/// registrado. `register_http_route` lo consulta al ver un handler con
-/// `@authenticated`/`@admin` para validar orden de declaración (el
-/// provider debe estar antes que cualquier handler que lo use).
+/// Phase 9.w.1.c — `true` if the active registry has an
+/// `@auth_provider` registered. `register_http_route` queries it when
+/// it sees a handler with `@authenticated`/`@admin` to validate the
+/// declaration order (the provider must come before any handler that
+/// uses it).
 pub fn has_auth_provider() -> bool {
     HTTP_REGISTRY.with(|cell| {
         cell.borrow()
@@ -770,12 +782,12 @@ pub fn has_auth_provider() -> bool {
     })
 }
 
-/// W14 (v0.10.10) — Devuelve el `user_type_name` del provider
-/// registrado (string vacío si no hay provider o si el provider se
-/// registró sin extraer el tipo). Lo consulta el dispatcher de
-/// handlers protegidos para identificar el param "user" por tipo en
-/// vez de la regla del primer leftover, así un handler protegido
-/// puede recibir body + user juntos.
+/// W14 (v0.10.10) — Returns the `user_type_name` of the registered
+/// provider (empty string if there's no provider or if the provider
+/// was registered without extracting the type). Queried by the
+/// protected handler dispatcher to identify the "user" param by
+/// type rather than the first-leftover rule, so a protected handler
+/// can receive body + user together.
 pub fn get_auth_provider_user_type_name() -> String {
     HTTP_REGISTRY.with(|cell| {
         cell.borrow()
@@ -785,9 +797,9 @@ pub fn get_auth_provider_user_type_name() -> String {
     })
 }
 
-/// Empuja una ruta al registry activo. Pánico si no hay uno — el
-/// llamador debe haber chequeado con `has_active_registry()` o estar
-/// adentro de `with_active_registry`.
+/// Pushes a route onto the active registry. Panics if there isn't
+/// one — the caller must have checked with `has_active_registry()`
+/// or be inside `with_active_registry`.
 pub fn push_route(route: RouteSpec) {
     HTTP_REGISTRY.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -798,9 +810,9 @@ pub fn push_route(route: RouteSpec) {
     });
 }
 
-/// Setea la `ServerConfig` del registry activo. Falla si ya había
-/// una (mantiene la unicidad de `@server`). Devuelve `Err(())` y el
-/// evaluator emite un error explícito.
+/// Sets the `ServerConfig` of the active registry. Fails if one was
+/// already set (preserves `@server` uniqueness). Returns `Err(())`
+/// and the evaluator emits an explicit error.
 pub fn set_server_config(config: ServerConfig) -> Result<(), ServerConfig> {
     HTTP_REGISTRY.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -815,15 +827,17 @@ pub fn set_server_config(config: ServerConfig) -> Result<(), ServerConfig> {
     })
 }
 
-/// Fase 9.w.1.c — Setea el `@auth_provider` del registry activo.
-/// Falla con `Err(Box<existing>)` si ya había uno registrado
-/// (singleton). El checker (9.w.1.a) hace el mismo chequeo
-/// estáticamente, pero el runtime lo replica defensivamente para que
-/// código generado o evaluación incremental no rompa la invariante.
+/// Phase 9.w.1.c — Sets the `@auth_provider` of the active registry.
+/// Fails with `Err(Box<existing>)` if one was already registered
+/// (singleton). The checker (9.w.1.a) does the same check
+/// statically, but the runtime replicates it defensively so
+/// generated code or incremental evaluation does not break the
+/// invariant.
 ///
-/// `Err` boxed para que `Result` no quede gigante (clippy
-/// `result_large_err`): `AuthProviderHandle` arrastra un `Value` que
-/// puede ser pesado por sus variantes (Arc<Mutex<>> de List/Map/etc.).
+/// `Err` boxed so `Result` does not become huge (clippy
+/// `result_large_err`): `AuthProviderHandle` carries a `Value` that
+/// can be heavy because of its variants (Arc<Mutex<>> of
+/// List/Map/etc.).
 pub fn set_auth_provider(handle: AuthProviderHandle) -> Result<(), Box<AuthProviderHandle>> {
     HTTP_REGISTRY.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -838,20 +852,21 @@ pub fn set_auth_provider(handle: AuthProviderHandle) -> Result<(), Box<AuthProvi
     })
 }
 
-/// Fase 12.1.b — Resultado del intento de registrar un health handler.
+/// Phase 12.1.b — Result of trying to register a health handler.
 #[derive(Debug)]
 pub enum SetHealthHandlerError {
-    /// No hay registry HTTP activo (programa REPL / eval embebido).
+    /// No active HTTP registry (REPL / embedded eval program).
     NoRegistry,
-    /// Ya había un handler del mismo kind registrado; trae el nombre
-    /// previo para el mensaje de error.
+    /// A handler of the same kind was already registered; carries
+    /// the previous name for the error message.
     Duplicate(String),
 }
 
-/// Fase 12.1.b — Setea el handler de `@healthz` o `@readyz` en el
-/// registry activo. `kind` debe ser `"healthz"` o `"readyz"`.
-/// Falla con `Duplicate(prev_name)` si ya había uno (singleton —
-/// paralelo a `set_auth_provider`). Sin registry → `NoRegistry`.
+/// Phase 12.1.b — Sets the `@healthz` or `@readyz` handler in the
+/// active registry. `kind` must be `"healthz"` or `"readyz"`. Fails
+/// with `Duplicate(prev_name)` if one was already set (singleton —
+/// parallel to `set_auth_provider`). Without a registry →
+/// `NoRegistry`.
 pub fn set_health_handler(
     kind: &str,
     handle: HealthCheckHandle,
@@ -875,11 +890,11 @@ pub fn set_health_handler(
     })
 }
 
-/// Fase 9.w.3 — registra un cron job en el `CronRegistry` del registry
-/// activo. Si la cron expression es inválida, devuelve `Err(msg)` para
-/// que el caller (evaluator) emita un FitzError. Sin registry activo
-/// → `Err` ("no hay registry") — el contexto típico es `fitz run` del
-/// archivo, igual que `set_auth_provider`.
+/// Phase 9.w.3 — Registers a cron job in the active registry's
+/// `CronRegistry`. If the cron expression is invalid, returns
+/// `Err(msg)` so the caller (evaluator) can emit a FitzError. Without
+/// an active registry → `Err` ("no registry") — the typical context
+/// is `fitz run` of the file, same as `set_auth_provider`.
 pub fn register_cron_job(
     fn_name: String,
     cron_expr: &str,
@@ -898,9 +913,10 @@ pub fn register_cron_job(
     })
 }
 
-/// Fase 9.w.3 — `true` si el registry activo tiene al menos un cron
-/// job. Lo usa `eval_with_base_and_deps` para decidir si arrancar el
-/// scheduler standalone cuando no hay handlers HTTP (cron-only mode).
+/// Phase 9.w.3 — `true` if the active registry has at least one cron
+/// job. Used by `eval_with_base_and_deps` to decide whether to start
+/// the standalone scheduler when there are no HTTP handlers
+/// (cron-only mode).
 pub fn registry_has_cron_jobs() -> bool {
     HTTP_REGISTRY.with(|cell| {
         cell.borrow()
@@ -910,52 +926,53 @@ pub fn registry_has_cron_jobs() -> bool {
     })
 }
 
-/// Fase 9.w.3 — devuelve un clone del `Arc<CronRegistry>` del registry
-/// activo, o `None` si no hay registry. El caller (cron-only mode lo
-/// usa para `run_scheduler_only`).
+/// Phase 9.w.3 — Returns a clone of the active registry's
+/// `Arc<CronRegistry>`, or `None` if there's no registry. The caller
+/// (cron-only mode uses it for `run_scheduler_only`).
 pub fn current_cron_registry() -> Option<std::sync::Arc<crate::cron_jobs::CronRegistry>> {
     HTTP_REGISTRY.with(|cell| cell.borrow().as_ref().map(|reg| reg.cron_registry.clone()))
 }
 
 // ---------------------------------------------------------------------------
-// Path: del decorator a la sintaxis de axum
+// Path: from decorator to axum syntax
 // ---------------------------------------------------------------------------
 
-/// Resultado de extraer un path declarado en un decorator HTTP.
+/// Result of extracting a path declared in an HTTP decorator.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathTemplate {
-    /// Path en formato axum: `/users/{id}`, `/`, `/users`. Lo que viene
-    /// después de un `?` en el template original NO entra acá — vive
-    /// adentro de `query_params`. Axum hace su routing solo con esto.
+    /// Path in axum format: `/users/{id}`, `/`, `/users`. Whatever
+    /// comes after a `?` in the original template does NOT go here
+    /// — it lives inside `query_params`. Axum routes only on this.
     pub path: String,
-    /// Nombres de los path params en el orden de aparición.
+    /// Path param names in order of appearance.
     pub params: Vec<String>,
-    /// Nombres de los query params declarados en el template. Cada uno
-    /// proviene de un `?key={name}&...` después del path. Por ahora
-    /// exigimos que la key del query y el nombre del param Fitz
-    /// coincidan (`?limit={limit}`, no `?l={limit}`). El orden de
-    /// `query_params` es el de aparición en el template.
+    /// Names of the query params declared in the template. Each one
+    /// comes from a `?key={name}&...` after the path. For now we
+    /// require the query key and the Fitz param name to match
+    /// (`?limit={limit}`, not `?l={limit}`). The order of
+    /// `query_params` is the order of appearance in the template.
     pub query_params: Vec<String>,
 }
 
-/// Errores al normalizar el path de un decorator. Mensajes en español
-/// para que vayan directo al usuario.
+/// Errors normalizing the path of a decorator. Messages in Spanish
+/// so they go straight to the user.
 #[derive(Debug, PartialEq, Eq)]
 pub enum PathError {
-    /// El primer arg del decorator no es un literal string.
+    /// The first arg of the decorator is not a string literal.
     NotAStringLiteral,
-    /// El path no arranca con `/`.
+    /// The path does not start with `/`.
     MustStartWithSlash,
-    /// Un segmento de interpolación incluyó algo que no es un
-    /// identificador simple (`{user.id}`, `{42}`, etc.).
+    /// An interpolation segment included something that is not a
+    /// simple identifier (`{user.id}`, `{42}`, etc.).
     UnsupportedInterpolation(String),
-    /// Algún path param se repitió (`/a/{x}/b/{x}`).
+    /// Some path param was repeated (`/a/{x}/b/{x}`).
     DuplicateParam(String),
-    /// Un query param declarado tiene una key distinta del nombre del
-    /// param (`?l={limit}`). Hoy exigimos que coincidan.
+    /// A declared query param has a key different from the param
+    /// name (`?l={limit}`). Today we require them to match.
     QueryKeyNameMismatch { key: String, name: String },
-    /// El template del query no respeta `key={name}` con identificador
-    /// simple — ej. `?{limit}`, `?limit=`, `?limit={x.y}`, `?=v`.
+    /// The query template does not respect `key={name}` with simple
+    /// identifier — e.g. `?{limit}`, `?limit=`, `?limit={x.y}`,
+    /// `?=v`.
     MalformedQueryTemplate(String),
 }
 
@@ -993,23 +1010,22 @@ impl PathError {
     }
 }
 
-/// Toma la expresión que el parser dejó como primer arg de un
-/// decorator HTTP y la convierte a un `PathTemplate`. Acepta dos
-/// formas:
+/// Takes the expression the parser left as the first arg of an HTTP
+/// decorator and turns it into a `PathTemplate`. Accepts two forms:
 ///
-///  - `Expr::Str(s, _)`: path sin params. Ej: `"/"`, `"/users"`.
-///  - `Expr::StrInterp(parts, _)`: path con params. Cada `StrPart::Expr`
-///    tiene que ser un `Ident` simple (`{id}`). Cualquier otra cosa
-///    es error.
+///  - `Expr::Str(s, _)`: path without params. E.g. `"/"`, `"/users"`.
+///  - `Expr::StrInterp(parts, _)`: path with params. Each
+///    `StrPart::Expr` must be a simple `Ident` (`{id}`). Anything
+///    else is an error.
 ///
-/// Cualquier otra forma de expresión → `PathError::NotAStringLiteral`.
+/// Any other expression form → `PathError::NotAStringLiteral`.
 pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
     use crate::ast::StrPart;
 
-    // Primera pasada: reconstruir el texto del path canonicalizado y
-    // recolectar todos los `{name}` en orden (sin distinguir path vs
-    // query todavía). El `?` que separa path de query queda como
-    // carácter literal en `buf` — lo dividimos abajo.
+    // First pass: rebuild the canonicalized path text and gather
+    // every `{name}` in order (without distinguishing path vs query
+    // yet). The `?` separating path from query stays as a literal
+    // char in `buf` — we split it below.
     let (full, all_params): (String, Vec<String>) = match expr {
         Expr::Str(s, _) => (s.clone(), Vec::new()),
         Expr::StrInterp(parts, _) => {
@@ -1041,30 +1057,30 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
         return Err(PathError::MustStartWithSlash);
     }
 
-    // Separar path de query template por el primer `?`. Si no hay,
-    // toda la cadena es path y `query_params` queda vacío.
+    // Split path from query template on the first `?`. If absent,
+    // the whole string is path and `query_params` stays empty.
     let (path, query_template) = match full.find('?') {
         Some(idx) => (full[..idx].to_string(), Some(&full[idx + 1..])),
         None => (full, None),
     };
 
-    // Para distinguir path_params de query_params: los que aparecen
-    // adentro del path quedan en `path_params`; los que aparecen
-    // adentro del query template (con su key) van a `query_params`.
+    // To distinguish path_params from query_params: those appearing
+    // inside the path go to `path_params`; those appearing inside
+    // the query template (with their key) go to `query_params`.
     let mut path_params: Vec<String> = Vec::new();
     let mut query_params: Vec<String> = Vec::new();
 
-    // Re-escanear el path canonicalizado para extraer los `{name}` que
-    // están adentro de él (sin parsear de cero — solo buscamos
-    // `{ident}` entre llaves para ordenar correcto).
+    // Re-scan the canonicalized path to extract the `{name}`s inside
+    // it (no full parse — we only look for `{ident}` between braces
+    // to get the order right).
     extract_brace_idents_into(&path, &mut path_params);
 
-    // Parsear el query template si existe.
+    // Parse the query template if it exists.
     if let Some(q) = query_template {
-        // Formato: `key={name}&otra={otra}` con cada pair separado por
-        // `&`. Validar que cada pair tenga `key={name}` con key
-        // identificador simple y `{name}` también identificador simple,
-        // y que key == name.
+        // Format: `key={name}&another={another}` with each pair
+        // separated by `&`. Validate that each pair has `key={name}`
+        // with key being a simple identifier and `{name}` also a
+        // simple identifier, and that key == name.
         if q.is_empty() {
             return Err(PathError::MalformedQueryTemplate(String::new()));
         }
@@ -1077,9 +1093,9 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
             if key.is_empty() || !is_simple_ident(key) {
                 return Err(PathError::MalformedQueryTemplate(pair.to_string()));
             }
-            // El value tiene que ser exactamente `{name}` (un brace
-            // pair con un identificador adentro). Cualquier otra cosa
-            // (literal, expr, vacío) no se soporta.
+            // The value must be exactly `{name}` (a brace pair with
+            // an identifier inside). Anything else (literal, expr,
+            // empty) is not supported.
             if !(value.starts_with('{') && value.ends_with('}') && value.len() >= 3) {
                 return Err(PathError::MalformedQueryTemplate(pair.to_string()));
             }
@@ -1100,11 +1116,11 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
         }
     }
 
-    // Sanity check: la suma path + query debería matchear `all_params`
-    // (todos los `{name}` que extrajimos en la primera pasada). Si no,
-    // hay algo raro en el path (ej. `{name}` adentro del query value
-    // sin ser exactamente `={name}`). El parser de query ya lo cazaría
-    // pero validamos por defensa.
+    // Sanity check: path + query should match `all_params` (every
+    // `{name}` extracted in the first pass). Otherwise, there's
+    // something off in the path (e.g. `{name}` inside the query
+    // value without being exactly `={name}`). The query parser
+    // already catches this but we validate defensively.
     let _ = all_params;
 
     Ok(PathTemplate {
@@ -1114,10 +1130,10 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
     })
 }
 
-/// Extrae nombres entre `{...}` en un path canonicalizado, en orden de
-/// aparición, y los empuja a `out`. Asume que el path ya fue
-/// reconstruido por `parse_path_template` (las llaves vienen siempre
-/// alrededor de identificadores simples).
+/// Extracts names between `{...}` in a canonicalized path, in order
+/// of appearance, and pushes them to `out`. Assumes the path was
+/// already rebuilt by `parse_path_template` (braces always surround
+/// simple identifiers).
 fn extract_brace_idents_into(path: &str, out: &mut Vec<String>) {
     let bytes = path.as_bytes();
     let mut i = 0;
@@ -1134,10 +1150,10 @@ fn extract_brace_idents_into(path: &str, out: &mut Vec<String>) {
     }
 }
 
-/// Identificador "simple" para keys y param names en query templates:
-/// ASCII letras/digits/underscore, primer char no-digit. No usamos
-/// `char::is_alphanumeric` para evitar aceptar unicode (Fitz lo
-/// rechaza también en idents del lexer).
+/// "Simple" identifier for keys and param names in query templates:
+/// ASCII letters/digits/underscore, first char non-digit. We don't
+/// use `char::is_alphanumeric` to avoid accepting unicode (Fitz also
+/// rejects it in lexer idents).
 fn is_simple_ident(s: &str) -> bool {
     let mut chars = s.chars();
     match chars.next() {
@@ -1148,27 +1164,27 @@ fn is_simple_ident(s: &str) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Serialización Value → JSON
+// Value → JSON serialization
 // ---------------------------------------------------------------------------
 
-/// Respuesta destilada de un handler: status code + cuerpo serializado.
-/// El handler Fitz devuelve un `Value`; esta función decide cómo se
-/// traduce a HTTP. La conversión es total (cualquier `Value` produce
-/// un `HandlerOutcome`), pero algunos tipos no serializables (Function,
-/// Type, Module, Range) generan 500 con un mensaje claro.
+/// Distilled response of a handler: status code + serialized body.
+/// The Fitz handler returns a `Value`; this function decides how it
+/// translates to HTTP. The conversion is total (any `Value` produces
+/// a `HandlerOutcome`), but some non-serializable types (Function,
+/// Type, Module, Range) generate 500 with a clear message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HandlerOutcome {
     pub status: u16,
-    /// JSON ya serializado, listo para mandar como body. Vacío para
-    /// 204 (no usado en 4.2; reservado).
+    /// JSON already serialized, ready to send as body. Empty for 204
+    /// (unused in 4.2; reserved).
     pub body: String,
-    /// Content-type del body. Hoy siempre `application/json`; queda
-    /// preparado para `text/plain` u otros cuando los necesitemos.
+    /// Body content-type. Today always `application/json`; ready for
+    /// `text/plain` or others when needed.
     pub content_type: &'static str,
-    /// Headers extra a emitir junto con la response (mini-fase MW.2).
-    /// Se popula al final de `handle_task` cuando la ruta tiene
-    /// `RouteSpec.cors`: la inyección de `Access-Control-Allow-*`
-    /// vive acá. Vacío para responses normales sin CORS.
+    /// Extra headers to emit with the response (mini-phase MW.2).
+    /// Populated at the end of `handle_task` when the route has
+    /// `RouteSpec.cors`: the `Access-Control-Allow-*` injection lives
+    /// here. Empty for normal non-CORS responses.
     pub extra_headers: Vec<(String, String)>,
 }
 
@@ -1182,22 +1198,23 @@ impl HandlerOutcome {
         }
     }
 
-    /// Atajo para errores del runtime que el handler nunca tendría
-    /// que ver: tipo no serializable, decorator mal usado, etc.
+    /// Shortcut for runtime errors the handler should never see:
+    /// non-serializable type, misused decorator, etc.
     pub fn internal_error(msg: impl Into<String>) -> Self {
         let body = serde_json::json!({ "error": msg.into() });
         HandlerOutcome::json(500, body)
     }
 }
 
-// Fase 6.4 / 9.w.3.b — helper `await_if_future` para los dispatchers
-// del HTTP runtime: si un handler `async fn` retorna `Value::Future`,
-// hay que awaitearlo antes de pasar el value al serializer. Paralelo
-// al patrón en `build_ws_method_router` y `register_auth_provider`.
+// Phase 6.4 / 9.w.3.b — `await_if_future` helper for the HTTP
+// runtime dispatchers: if an `async fn` handler returns
+// `Value::Future`, we must await it before passing the value to the
+// serializer. Parallel to the pattern in `build_ws_method_router`
+// and `register_auth_provider`.
 //
-// Sin este helper, los handlers `async fn` HTTP en intérprete fallaban
-// con "Future pendiente no es serializable" — bug preexistente
-// detectado al validar 9.w.3.b.
+// Without this helper, `async fn` HTTP handlers in the interpreter
+// failed with "Future pendiente no es serializable" — a pre-existing
+// bug detected while validating 9.w.3.b.
 pub async fn await_if_future(value: Value) -> crate::error::FitzResult<Value> {
     if let Value::Future(cell) = value {
         let fut = cell.0.lock().take();
@@ -1210,27 +1227,27 @@ pub async fn await_if_future(value: Value) -> crate::error::FitzResult<Value> {
     }
 }
 
-/// Convierte el resultado de un handler Fitz a un `HandlerOutcome`.
+/// Converts the result of a Fitz handler into a `HandlerOutcome`.
 ///
-/// Reglas:
-///   - `Value::Result(Ok(v))`  → status 200, body = `v` serializado.
-///   - `Value::Result(Err(e))` → mini-tanda HTTP-Err: si `e` es
-///     `Value::Instance` con field `status: Int`, usa ese status code
-///     y el body es la Instance serializada (intacta — el usuario
-///     decide el shape). Si no tiene `status`, fallback a 500 con
-///     `{"error": e}` (comportamiento histórico).
-///   - Cualquier otro `Value`  → status 200, body = ese valor
-///     serializado directo (sin envolver). Esto permite handlers que
-///     no usan `Result` y devuelven `Str`, `Int`, `Instance`, etc.
-///   - Tipos no serializables (Function, Builtin, Type, Module, Range)
-///     → status 500, `{"error": "valor no serializable: <tipo>"}`.
+/// Rules:
+///   - `Value::Result(Ok(v))`  → status 200, body = serialized `v`.
+///   - `Value::Result(Err(e))` → mini-batch HTTP-Err: if `e` is a
+///     `Value::Instance` with field `status: Int`, use that status
+///     code and serialize the Instance as the body (untouched — the
+///     user decides the shape). Without a `status` field, fall back
+///     to 500 with `{"error": e}` (historical behavior).
+///   - Any other `Value`  → status 200, body = that value serialized
+///     directly (no wrapping). This allows handlers that don't use
+///     `Result` and return `Str`, `Int`, `Instance`, etc.
+///   - Non-serializable types (Function, Builtin, Type, Module,
+///     Range) → status 500, `{"error": "valor no serializable: <type>"}`.
 pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
-    // Status code custom (spec): el handler hizo `return 401 { ... }`
-    // y el evaluator emitió `Value::HttpResponse`. Mapeo directo: el
-    // status va al outcome, el body (si existe) se serializa con las
-    // mismas reglas que cualquier Value. Body ausente → JSON null
-    // (HTTP 204 No Content todavía no está implementado, hoy el
-    // parser exige body explícito).
+    // Custom status code (spec): the handler did `return 401 { ... }`
+    // and the evaluator emitted `Value::HttpResponse`. Direct
+    // mapping: the status goes to the outcome, the body (if any) is
+    // serialized with the same rules as any Value. Missing body →
+    // JSON null (HTTP 204 No Content is not implemented yet; today
+    // the parser requires an explicit body).
     if let Value::HttpResponse { status, body } = value {
         let payload_json = match body {
             Some(b) => match value_to_json(b) {
@@ -1242,17 +1259,17 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
         return HandlerOutcome::json(*status, payload_json);
     }
 
-    // Result auto-handling: peel one layer. El inner se serializa con
-    // las mismas reglas que cualquier otro Value.
+    // Result auto-handling: peel one layer. The inner is serialized
+    // with the same rules as any other Value.
     let (status, payload) = match value {
         Value::Result(ResultVariant::Ok(inner)) => (200, inner.as_ref()),
         Value::Result(ResultVariant::Err(inner)) => {
-            // Mini-tanda HTTP-Err — convención: si el Err lleva una
-            // `Instance` con field `status: Int`, usar ese status
+            // Mini-batch HTTP-Err — convention: if the Err carries an
+            // `Instance` with field `status: Int`, use that status
             // (e.g. `Err(ApiErr { status: 404, message: "..." })`).
-            // El body se serializa íntegro — el usuario decide el
-            // shape final. Sin field `status`, fallback al 500 con
-            // `{"error": e}` (comportamiento histórico).
+            // The body is serialized whole — the user decides the
+            // final shape. Without a `status` field, fall back to
+            // 500 with `{"error": e}` (historical behavior).
             if let Value::Instance { fields, .. } = inner.as_ref() {
                 let status_opt = {
                     let g = fields.lock();
@@ -1265,14 +1282,14 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
                     })
                 };
                 if let Some(s) = status_opt {
-                    // Mini-tanda HC.1 — status válido `[100, 1000)`
-                    // matchea axum y la spec HTTP. Si el usuario
-                    // provee un status fuera de rango, ya no caemos
-                    // silenciosamente a 500 — emitimos 500 con un
-                    // mensaje explícito citando el valor inválido.
-                    // Esto destraba debugging cuando el usuario hace
-                    // `Err({ status: 999 })` por typo o convención
-                    // distinta.
+                    // Mini-batch HC.1 — valid status `[100, 1000)`
+                    // matches axum and the HTTP spec. If the user
+                    // provides an out-of-range status, we no longer
+                    // silently fall to 500 — we emit 500 with an
+                    // explicit message citing the invalid value.
+                    // This unblocks debugging when the user does
+                    // `Err({ status: 999 })` due to a typo or a
+                    // different convention.
                     if (100..1000).contains(&s) {
                         return match value_to_json(inner) {
                             Ok(j) => HandlerOutcome::json(s as u16, j),
@@ -1300,23 +1317,24 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
     }
 }
 
-/// Serializa un `Value` a `serde_json::Value`. Es total para los tipos
-/// "de datos" del lenguaje; tipos opacos al usuario (Function, Type,
-/// Module, Range, Builtin) devuelven `Err` con mensaje al estilo
-/// "valor no serializable: <tipo>".
+/// Serializes a `Value` to `serde_json::Value`. Total for the
+/// "data" types of the language; opaque types (Function, Type,
+/// Module, Range, Builtin) return `Err` with a message like
+/// "valor no serializable: <type>".
 ///
-/// Importante: `Result` NO se trata especialmente acá — esa decisión
-/// vive en `value_to_outcome` (que mapea Ok→200, Err→500). Si por
-/// alguna razón llega un `Result` anidado (un handler que devuelve
-/// `Ok(Ok(x))`), serializamos como objeto `{"Ok": ...}` o `{"Err": ...}`
-/// para no perder información.
+/// Important: `Result` is NOT specially handled here — that decision
+/// lives in `value_to_outcome` (which maps Ok→200, Err→500). If a
+/// nested `Result` arrives somehow (a handler returning
+/// `Ok(Ok(x))`), we serialize as object `{"Ok": ...}` or
+/// `{"Err": ...}` so no information is lost.
 pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
     use serde_json::Value as J;
 
     Ok(match value {
         Value::Int(n) => J::from(*n),
         Value::Float(f) => {
-            // serde_json no admite NaN/Inf — los rechazamos explícito.
+            // serde_json doesn't allow NaN/Inf — we reject them
+            // explicitly.
             serde_json::Number::from_f64(*f)
                 .map(J::Number)
                 .ok_or_else(|| format!("float no serializable como JSON: {}", f))?
@@ -1324,15 +1342,15 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         Value::Str(s) => J::String(s.clone()),
         Value::Bool(b) => J::Bool(*b),
         Value::Null => J::Null,
-        // Mini-tanda Bytes + quick win F13 bundle — Bytes se
-        // serializa como base64 string (estándar de facto para
-        // bytes en JSON). Antes se emitía como array de Int (cada
-        // byte un i64), que funciona pero infla la representación
-        // ~4x y es no-estándar. Decodificación implementada manual
-        // (alfabeto RFC 4648 sin padding, sin '+' / '/' problemáticos
-        // — se usa el `base64-standard`). Para mantener la deuda de
-        // dep ligera, no agregamos la crate `base64`; encodeamos
-        // inline.
+        // Mini-batch Bytes + quick win F13 bundle — Bytes is
+        // serialized as a base64 string (de-facto standard for
+        // bytes in JSON). Previously emitted as an array of Int
+        // (each byte an i64), which works but bloats the
+        // representation ~4x and is non-standard. Decoding
+        // implemented by hand (RFC 4648 alphabet without padding,
+        // without problematic '+' / '/' — `base64-standard` is
+        // used). To keep the dep footprint light, we don't add the
+        // `base64` crate; we encode inline.
         Value::Bytes(bs) => J::String(b64_encode_standard(bs)),
 
         Value::List(items) => {
@@ -1343,9 +1361,10 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
             J::Array(out)
         }
 
-        // Tuples (mini-tanda T): serializamos como Array JSON (no hay
-        // tuple type en JSON). Pierde la distinción tuple/list pero
-        // es lo razonable para handlers HTTP.
+        // Tuples (mini-batch T): serialized as a JSON Array (there
+        // is no tuple type in JSON). Loses the tuple/list
+        // distinction but it's the reasonable choice for HTTP
+        // handlers.
         Value::Tuple(items) => {
             let mut out = Vec::with_capacity(items.len());
             for v in items {
@@ -1380,15 +1399,15 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         }
 
         Value::Result(ResultVariant::Ok(inner)) => {
-            // Result anidado (poco común). Lo etiquetamos para no perder
-            // la distinción Ok/Err.
+            // Nested Result (uncommon). We tag it so the Ok/Err
+            // distinction is preserved.
             serde_json::json!({ "Ok": value_to_json(inner)? })
         }
         Value::Result(ResultVariant::Err(inner)) => {
             serde_json::json!({ "Err": value_to_json(inner)? })
         }
 
-        // Tipos opacos: no tienen representación JSON sensata.
+        // Opaque types: no sensible JSON representation.
         Value::Function { .. }
         | Value::Builtin { .. }
         | Value::Type { .. }
@@ -1399,30 +1418,31 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 value.type_name(),
             ));
         }
-        // HttpResponse no se serializa directo — vive en
-        // `value_to_outcome` (intercepta antes de llegar acá). Si
-        // alguien lo serializa fuera de context HTTP, es un bug del
-        // codegen/runtime, no del usuario.
+        // HttpResponse is not serialized directly — it lives in
+        // `value_to_outcome` (which intercepts before reaching
+        // here). If someone serializes it outside an HTTP context,
+        // it's a codegen/runtime bug, not the user's.
         Value::HttpResponse { .. } => {
             return Err(
                 "HttpResponse no es serializable a JSON fuera de un handler HTTP".to_string(),
             );
         }
-        // Future pendiente: no es serializable. Si llega un Future a un
-        // response, el usuario olvidó `.await`. El checker 6.2 lo
-        // detecta estáticamente para handlers anotados; este path es
-        // defensivo (handlers sin return_type, Future generado por
-        // otro camino).
+        // Pending Future: not serializable. If a Future reaches a
+        // response, the user forgot `.await`. The 6.2 checker
+        // detects this statically for annotated handlers; this path
+        // is defensive (handlers without return_type, Future
+        // generated through another route).
         Value::Future(_) => {
             return Err(
                 "Future pendiente no es serializable — falta `.await` en algún lado del handler"
                     .to_string(),
             );
         }
-        // Fase 12.2.a — `Secret<T>` está bloqueado al serializer JSON
-        // por diseño: previene leaks accidentales de credenciales a
-        // clientes HTTP. Para enviar el inner T (raro y peligroso),
-        // el handler debe desempacar explícito con `.expose()`.
+        // Phase 12.2.a — `Secret<T>` is blocked from the JSON
+        // serializer by design: it prevents accidental credential
+        // leaks to HTTP clients. To send the inner T (rare and
+        // dangerous), the handler must unwrap explicitly with
+        // `.expose()`.
         Value::Secret(_) => {
             return Err(
                 "Secret<T> no es serializable a JSON (auto-redaction para prevenir leaks de credenciales). \
@@ -1430,58 +1450,60 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                  pero en ese caso es mejor pasar el valor crudo sin envolver en Secret en primer lugar.".to_string(),
             );
         }
-        // Fase 9.w.2 — `WsConn` es un handle vivo a una conexión WS,
-        // no un valor de datos. Si llega al serializer es bug del
-        // handler (devolvió el conn en lugar de un msg/Result).
+        // Phase 9.w.2 — `WsConn` is a live handle to a WS
+        // connection, not a data value. If it reaches the
+        // serializer it's a handler bug (returned the conn instead
+        // of a msg/Result).
         Value::WsConn(_) => {
             return Err(
                 "WsConn no es serializable a JSON — los handlers `@ws` consumen el conn vía `recv()`/`send()`/`broadcast()`, no lo retornan".to_string(),
             );
         }
-        // Fase 10.1.b — `DbConn` es un handle a una conexión TCP
-        // con Postgres. Mismo criterio que WsConn: si llega al
-        // serializer, el handler devolvió el handle en lugar del
-        // resultset.
+        // Phase 10.1.b — `DbConn` is a handle to a TCP connection
+        // with Postgres. Same criterion as WsConn: if it reaches
+        // the serializer, the handler returned the handle instead
+        // of the resultset.
         Value::DbConn(_) => {
             return Err(
                 "DbConn no es serializable a JSON — los handlers consumen el conn vía `query()`/`exec()`, no lo retornan".to_string(),
             );
         }
-        // Fase 10.3.b2 — `QueryBuilder` opaco no serializable.
+        // Phase 10.3.b2 — Opaque `QueryBuilder`, non-serializable.
         Value::QueryBuilder(_) => {
             return Err(
                 "QueryBuilder no es serializable a JSON — terminá la cadena con `.all(db)` / `.first(db)` para obtener el resultado".to_string(),
             );
         }
-        // v0.10.24 — Date/DateTime/Uuid serializan como JSON string
-        // canonical (ISO 8601 para temporales, formato canonical
-        // hyphenated para Uuid). Convención estándar de la industria
-        // (JSON Schema "date"/"date-time"/"uuid" formats).
+        // v0.10.24 — Date/DateTime/Uuid serialize as canonical JSON
+        // strings (ISO 8601 for temporals, canonical hyphenated
+        // format for Uuid). Industry standard convention (JSON
+        // Schema "date"/"date-time"/"uuid" formats).
         Value::Date(d) => J::String(d.format("%Y-%m-%d").to_string()),
         Value::DateTime(dt) => J::String(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()),
         Value::Uuid(u) => J::String(u.to_string()),
-        // Mini-tanda Mw-Wrap — `Value::NativeFn` es el callable
-        // `next` que se pasa a wrap-style middlewares. Si llega al
-        // serializer, el handler lo devolvió por error.
+        // Mini-batch Mw-Wrap — `Value::NativeFn` is the `next`
+        // callable passed to wrap-style middlewares. If it reaches
+        // the serializer, the handler returned it by mistake.
         Value::NativeFn(_) => {
             return Err(
                 "función nativa no es serializable — `next` solo se puede invocar, no devolver"
                     .to_string(),
             );
         }
-        // CorsConfig (MW.2): opaco, no se serializa. Si llega acá,
-        // es un bug del registro: el evaluator debió usarlo como
-        // arg de `@middleware(cors(...))` y guardarlo en el slot
-        // `RouteSpec.cors`, no como valor de retorno del handler.
+        // CorsConfig (MW.2): opaque, not serialized. If it gets
+        // here, it's a registration bug: the evaluator should have
+        // used it as the `@middleware(cors(...))` arg and stored
+        // it in the `RouteSpec.cors` slot, not as a handler return
+        // value.
         Value::CorsConfig(_) => {
             return Err(
                 "CorsConfig no es serializable — se usa como argumento de `@middleware(cors(...))`, no como valor".to_string(),
             );
         }
-        // PyObject (Fase 8.1+, feature `python`): opaco. El handler
-        // debería extraer primitivos (8.1) o usar marshaling explícito
-        // (8.2+) antes de devolver. Si llega un PyObject crudo, el
-        // usuario olvidó coercionar.
+        // PyObject (Phase 8.1+, feature `python`): opaque. The
+        // handler should extract primitives (8.1) or use explicit
+        // marshaling (8.2+) before returning. If a raw PyObject
+        // arrives, the user forgot to coerce.
         #[cfg(feature = "python")]
         Value::PyObject(_) => {
             return Err(
@@ -1492,23 +1514,23 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
 }
 
 // ---------------------------------------------------------------------------
-// JSON → Value (deserialización del body)
+// JSON → Value (body deserialization)
 // ---------------------------------------------------------------------------
 
-/// Convierte un `serde_json::Value` a un `Value` de Fitz "libre" —
-/// sin chequear contra un schema. Útil cuando el handler declara un
-/// body sin anotación de tipo, o con un tipo que no es `type` custom.
+/// Converts a `serde_json::Value` to a "free" Fitz `Value` — without
+/// checking against a schema. Useful when the handler declares a
+/// body without a type annotation, or with a type that is not a
+/// custom `type`.
 ///
-/// Mapeo:
-///   - números enteros → `Int`; con parte fraccional → `Float`.
+/// Mapping:
+///   - integer numbers → `Int`; with fractional part → `Float`.
 ///   - strings → `Str`. Bools → `Bool`. null → `Null`.
-///   - arrays → `List` con cada elemento traducido recursivo.
-///   - objects → `Map` con claves `Str` (mantiene orden de inserción
-///     del parser de serde_json).
+///   - arrays → `List` with each element translated recursively.
+///   - objects → `Map` with `Str` keys (preserves insertion order
+///     from the serde_json parser).
 ///
-/// No falla nunca: cualquier JSON válido produce un `Value`. La
-/// validación contra un `type` específico se hace en
-/// `json_to_instance`.
+/// Never fails: any valid JSON produces a `Value`. Validation
+/// against a specific `type` happens in `json_to_instance`.
 pub fn json_to_value(json: &serde_json::Value) -> Value {
     use crate::value::shared;
     use serde_json::Value as J;
@@ -1522,9 +1544,9 @@ pub fn json_to_value(json: &serde_json::Value) -> Value {
             } else if let Some(f) = n.as_f64() {
                 Value::Float(f)
             } else {
-                // u64 que no entra en i64. Lo guardamos como Float
-                // para no perder. Mejor opción hasta que tengamos
-                // BigInt o u64 en el lenguaje.
+                // u64 that doesn't fit in i64. We store it as Float
+                // so nothing is lost. Best option until we have
+                // BigInt or u64 in the language.
                 Value::Float(n.as_f64().unwrap_or(0.0))
             }
         }
@@ -1543,22 +1565,24 @@ pub fn json_to_value(json: &serde_json::Value) -> Value {
     }
 }
 
-/// Convierte un `serde_json::Value` que se espera sea un objeto a un
-/// `Value::Instance` validado contra los campos del `type` declarado.
+/// Converts a `serde_json::Value` expected to be an object into a
+/// `Value::Instance` validated against the fields of the declared
+/// `type`.
 ///
-/// Reglas (mismas que `StructLit` en el evaluador):
-///   - Objeto JSON requerido — array, string o número → error.
-///   - Cada campo del type debe estar presente, o tener default, o
-///     ser nullable. Campo faltante sin default ni nullable → error.
-///   - Campos extra (en el JSON pero no en el type) → error explícito.
-///   - El valor de cada campo se convierte recursivamente con
-///     `json_to_value` (sin validación adicional contra el tipo
-///     declarado del campo — la validación de tipos compuestos llega
-///     con el type-checker estático de Fase 5).
+/// Rules (same as `StructLit` in the evaluator):
+///   - JSON object required — array, string or number → error.
+///   - Every type field must be present, have a default, or be
+///     nullable. Missing field without default or nullable → error.
+///   - Extra fields (in the JSON but not in the type) → explicit
+///     error.
+///   - Each field value is converted recursively with
+///     `json_to_value` (no additional validation against the
+///     declared field type — composite type validation arrives with
+///     the Phase 5 static type checker).
 ///
-/// Devuelve `Err(msg)` con un mensaje listo para mandar como 400.
+/// Returns `Err(msg)` with a message ready to send as 400.
 pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<Value, String> {
-    // 1. El segundo arg tiene que ser un Value::Type.
+    // 1. The second arg must be a Value::Type.
     let (type_name, fields) = match type_value {
         Value::Type { name, fields, .. } => (name.clone(), fields.clone()),
         other => {
@@ -1569,7 +1593,7 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
         }
     };
 
-    // 2. El JSON tiene que ser un objeto.
+    // 2. The JSON must be an object.
     let obj = match json {
         serde_json::Value::Object(map) => map,
         other => {
@@ -1581,8 +1605,9 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
         }
     };
 
-    // 3. Detectar campos extra antes de construir nada. Mensaje más
-    //    útil acumulando todos los extra, no solo el primero.
+    // 3. Detect extra fields before building anything. The message
+    //    is more useful accumulating all extras, not just the
+    //    first.
     let field_names: std::collections::HashSet<&str> =
         fields.iter().map(|f| f.name.as_str()).collect();
     let extras: Vec<&str> = obj
@@ -1600,21 +1625,21 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
         ));
     }
 
-    // 4. Recorrer los campos declarados en orden y construir los
-    //    pares. Para cada uno: usar valor del JSON si está, o el
-    //    default evaluado en este contexto si no, o Null si es
-    //    nullable, o error.
+    // 4. Walk declared fields in order and build the pairs. For
+    //    each: use the JSON value if present, or the default
+    //    evaluated in this context if not, or Null if nullable, or
+    //    error.
     let mut out: Vec<(String, Value)> = Vec::with_capacity(fields.len());
     for field in &fields {
         if let Some(json_val) = obj.get(&field.name) {
             out.push((field.name.clone(), json_to_value(json_val)));
         } else if let Some(default_expr) = field.default.as_ref() {
-            // Los defaults son `Expr` y se evalúan en el env de
-            // instanciación. Acá no tenemos env porque el body se
-            // valida lejos del eval. Para 4.3, los defaults sólo
-            // funcionan si son literales constantes simples; otros
-            // casos requieren más cableado. Lo manejamos en
-            // `default_to_value` (helper local).
+            // Defaults are `Expr` and are evaluated in the
+            // instantiation env. We don't have an env here because
+            // body validation happens away from eval. For 4.3,
+            // defaults only work if they are simple constant
+            // literals; other cases require more plumbing. Handled
+            // by `default_to_value` (local helper).
             match default_to_value(default_expr) {
                 Ok(v) => out.push((field.name.clone(), v)),
                 Err(_) => {
@@ -1639,7 +1664,8 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
     Ok(Value::new_instance(type_name, out))
 }
 
-/// Nombre humano para el shape de un JSON value, útil en mensajes.
+/// Human-readable name for the shape of a JSON value, useful in
+/// messages.
 fn json_shape_name(v: &serde_json::Value) -> &'static str {
     match v {
         serde_json::Value::Null => "null",
@@ -1651,14 +1677,13 @@ fn json_shape_name(v: &serde_json::Value) -> &'static str {
     }
 }
 
-/// Evalúa un default literal del AST a un `Value`. Soporta literales
-/// directos (los más comunes en defaults de `type`); cualquier otra
-/// cosa devuelve `Err(())` y el caller decide qué hacer.
+/// Evaluates a literal default from the AST into a `Value`. Supports
+/// direct literals (the most common in `type` defaults); anything
+/// else returns `Err(())` and the caller decides what to do.
 ///
-/// No tenemos un env aquí porque corremos del lado del runtime HTTP,
-/// no adentro de eval. En 4.x, si necesitamos defaults complejos,
-/// evaluamos al momento de registrar la ruta y guardamos el valor
-/// resuelto.
+/// We don't have an env here because we run on the HTTP runtime
+/// side, not inside eval. In 4.x, if we need complex defaults, we
+/// evaluate at route registration time and store the resolved value.
 fn default_to_value(expr: &Expr) -> Result<Value, ()> {
     match expr {
         Expr::Int(n, _) => Ok(Value::Int(*n)),
@@ -1671,21 +1696,21 @@ fn default_to_value(expr: &Expr) -> Result<Value, ()> {
 }
 
 // ---------------------------------------------------------------------------
-// Path params crudos → Value con el tipo declarado
+// Raw path params → Value with the declared type
 // ---------------------------------------------------------------------------
 
-/// Convierte un path param crudo (lo que axum extrajo como `String`)
-/// al `Value` que corresponda según el tipo declarado del parámetro
-/// del handler. `None` como tipo → tratamos como `Str` (igual que
-/// los parámetros sin anotación en general).
+/// Converts a raw path param (what axum extracted as `String`) into
+/// the `Value` matching the handler parameter's declared type.
+/// `None` as type → treated as `Str` (same as unannotated parameters
+/// in general).
 ///
-/// Tipos soportados: `Int`, `Float`, `Str`, `Bool`. Cualquier otro
-/// tipo declarado en el handler para un path param es error: los
-/// tipos custom no entran como path params directamente (`Int` para
-/// el id; el handler reconstruye el objeto adentro si quiere).
+/// Supported types: `Int`, `Float`, `Str`, `Bool`. Any other type
+/// declared in the handler for a path param is an error: custom
+/// types don't go in as path params directly (`Int` for the id;
+/// the handler reconstructs the object inside if needed).
 ///
-/// Devuelve `Err(msg)` cuando el valor crudo no se puede convertir.
-/// El runtime traduce ese error a HTTP 400.
+/// Returns `Err(msg)` when the raw value can't be converted. The
+/// runtime translates that error to HTTP 400.
 pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value, String> {
     let ty = declared_type.unwrap_or("Str");
     match ty {
@@ -1714,33 +1739,33 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
 }
 
 // ---------------------------------------------------------------------------
-// Runtime async — axum + tokio multi-thread, evaluator directo
+// Async runtime — axum + tokio multi-thread, direct evaluator
 // ---------------------------------------------------------------------------
 //
-// Diseño post-F17.5 (sin bridge):
+// Design post-F17.5 (no bridge):
 //
-//   thread main = runtime tokio rt-multi-thread (block_on en `serve`)
+//   main thread = rt-multi-thread tokio runtime (block_on in `serve`)
 //   ┌─────────────────────────────────────────────────────────────┐
-//   │  axum::serve  →  handler async  →  handle_task(&registry,…) │
+//   │  axum::serve  →  async handler  →  handle_task(&registry,…) │
 //   │                       │                                     │
-//   │                       │  Arc<HttpRegistry> compartido        │
+//   │                       │  shared Arc<HttpRegistry>            │
 //   │                       ▼                                     │
 //   │                  call_handler(...).await  (evaluator)        │
 //   └─────────────────────────────────────────────────────────────┘
 //
-// Cada request axum se dispatchea en uno de los N workers tokio. El
-// `Arc<HttpRegistry>` se clona barato a cada handler (es solo el
-// refcount del Arc); los `Value::Function` adentro se invocan vía
-// `handle_task` directo sobre el evaluator async. Paralelismo HTTP
-// real: dos requests concurrentes corren simultáneo en workers
-// distintos sobre el mismo registry. Lo que cruzaba entre threads
-// en el bridge previo (path params, query, body, headers crudos)
-// ahora viaja por la stack del handler.
+// Each axum request is dispatched on one of the N tokio workers.
+// The `Arc<HttpRegistry>` is cloned cheaply for each handler (just
+// the Arc refcount); the `Value::Function`s inside are invoked via
+// `handle_task` directly on the async evaluator. Real HTTP
+// parallelism: two concurrent requests run simultaneously on
+// different workers over the same registry. What used to cross
+// threads in the previous bridge (path params, query, body, raw
+// headers) now travels on the handler stack.
 //
-// `RouteMeta` se mantiene como vista estructural (`Send + Clone`) de
-// `RouteSpec` para que `build_router` arme las routes sin
-// quedarse con borrows del registry — los closures de cada handler
-// cierran sobre el `Arc<HttpRegistry>` por separado.
+// `RouteMeta` is kept as a structural (`Send + Clone`) view of
+// `RouteSpec` so `build_router` can assemble the routes without
+// holding borrows of the registry — each handler's closure closes
+// over the `Arc<HttpRegistry>` separately.
 
 use std::collections::HashMap;
 
@@ -1754,38 +1779,40 @@ use axum::{
     Router,
 };
 
-/// Metadata estructural de una ruta que el thread tokio necesita
-/// para configurar el router. Es `Send + Sync + Clone` — no incluye
-/// el handler (que vive en el thread del intérprete).
+/// Structural metadata of a route the tokio thread needs to configure
+/// the router. It's `Send + Sync + Clone` — doesn't include the
+/// handler (which lives on the interpreter thread).
 #[derive(Debug, Clone)]
 pub struct RouteMeta {
     pub method: HttpMethod,
     pub path: String,
     pub has_path_params: bool,
-    /// `true` si el handler declara al menos un query param. Hace que
-    /// axum extraiga `Query<HashMap<String, String>>` y lo mande al
-    /// intérprete. Cuando es `false`, no extraemos nada (cualquier
-    /// query string de la request se ignora).
+    /// `true` if the handler declares at least one query param.
+    /// Causes axum to extract `Query<HashMap<String, String>>` and
+    /// send it to the interpreter. When `false`, nothing is
+    /// extracted (any query string in the request is ignored).
     pub has_query_params: bool,
-    /// `true` si el handler declara un parámetro body. Sirve para
-    /// que el handler de axum sepa si extraer el body de la request
-    /// y mandarlo al intérprete. Cuando es `false`, ignoramos
-    /// cualquier body recibido.
+    /// `true` if the handler declares a body parameter. Lets the
+    /// axum handler know whether to extract the body from the
+    /// request and send it to the interpreter. When `false`, any
+    /// received body is ignored.
     pub expects_body: bool,
-    /// Configuración CORS clonada de `RouteSpec.cors` (mini-fase MW.2).
-    /// Si es `Some`, `build_router` registra un handler de preflight
-    /// `OPTIONS` para el mismo path. `Arc` se clona barato y atraviesa
-    /// la frontera de threads sin moverse del config compartido.
+    /// CORS configuration cloned from `RouteSpec.cors` (mini-phase
+    /// MW.2). If `Some`, `build_router` registers an `OPTIONS`
+    /// preflight handler for the same path. `Arc` clones cheaply
+    /// and crosses thread boundaries without moving the shared
+    /// config.
     pub cors: Option<std::sync::Arc<CorsConfig>>,
-    /// Fase 9.w.2 — `true` si la ruta es `@ws("/path")`. `build_router`
-    /// se bifurca al detectarlo: registra el path con un handler que
-    /// usa `WebSocketUpgrade` en lugar del dispatcher HTTP normal.
+    /// Phase 9.w.2 — `true` if the route is `@ws("/path")`.
+    /// `build_router` forks on detecting it: registers the path
+    /// with a handler that uses `WebSocketUpgrade` instead of the
+    /// normal HTTP dispatcher.
     pub is_ws: bool,
 }
 
 impl HttpRegistry {
-    /// Vista del registry que el thread tokio puede consumir sin
-    /// llevarse los handlers. Útil para `build_router`.
+    /// View of the registry the tokio thread can consume without
+    /// taking the handlers. Useful for `build_router`.
     pub fn metas(&self) -> Vec<RouteMeta> {
         self.routes
             .iter()
@@ -1802,33 +1829,34 @@ impl HttpRegistry {
     }
 }
 
-/// Construye un `axum::Router` a partir de la metadata de rutas.
-/// Cada handler async cierra sobre un `Arc<HttpRegistry>` clonado y
-/// el índice de su ruta, e invoca `handle_task(...).await` directo
-/// sobre el registry compartido.
+/// Builds an `axum::Router` from the route metadata. Each async
+/// handler closes over a cloned `Arc<HttpRegistry>` and its route
+/// index, and invokes `handle_task(...).await` directly on the
+/// shared registry.
 ///
-/// La metadata (`Vec<RouteMeta>`) basta para configurar todo el
-/// routing: verbo + path + flags estructurales (has_path_params /
-/// has_query_params / expects_body) que deciden el shape del handler
-/// axum (cuáles extractors usar). El `RouteSpec` correspondiente (con
-/// el `Value::Function` Fitz) vive dentro del registry y se busca por
-/// índice cuando entra una request.
+/// The metadata (`Vec<RouteMeta>`) is enough to configure all the
+/// routing: verb + path + structural flags (has_path_params /
+/// has_query_params / expects_body) that decide the axum handler
+/// shape (which extractors to use). The corresponding `RouteSpec`
+/// (with the Fitz `Value::Function`) lives inside the registry and
+/// is looked up by index when a request comes in.
 ///
-/// `openapi_schema` (Fase 7.2): si es `Some`, registra una ruta
-/// `GET /openapi.json` que sirve el schema cacheado (precomputado al
-/// arrancar el server). Si el usuario ya declaró un handler con ese
-/// path en sus rutas, el auto-register cede — la del usuario gana.
-/// `None` para programas donde no querramos servir el schema (tests
-/// internos, server arrancado en modo opt-out cuando 7.4 cierre).
+/// `openapi_schema` (Phase 7.2): if `Some`, registers a
+/// `GET /openapi.json` route serving the cached schema (precomputed
+/// at server startup). If the user already declared a handler at
+/// that path in their routes, auto-register yields — the user's
+/// wins. `None` for programs where we don't want to serve the
+/// schema (internal tests, server started in opt-out mode once 7.4
+/// closes).
 ///
-/// **F17.5**: el viejo bridge `mpsc/oneshot` (`InterpTask` + un
-/// std::thread aparte para el intérprete, con `run_interpreter_loop`
-/// del lado main) desapareció. Post-F17.3 los futures del evaluator
-/// son `Send` y `HttpRegistry` también — los handlers axum llaman al
-/// evaluator directo y `tokio::spawn` (vía `rt-multi-thread` desde
-/// F17.4a) los corre en paralelo entre workers. Eso destraba el
-/// paralelismo HTTP real, sin perder ninguna funcionalidad que tenía
-/// el bridge.
+/// **F17.5**: the old `mpsc/oneshot` bridge (`InterpTask` + a
+/// separate std::thread for the interpreter, with
+/// `run_interpreter_loop` on the main side) is gone. Post-F17.3
+/// evaluator futures are `Send` and so is `HttpRegistry` — axum
+/// handlers call the evaluator directly and `tokio::spawn` (via
+/// `rt-multi-thread` since F17.4a) runs them in parallel across
+/// workers. This unlocks real HTTP parallelism without losing any
+/// functionality the bridge had.
 pub fn build_router(
     metas: &[RouteMeta],
     registry: std::sync::Arc<HttpRegistry>,
@@ -1841,18 +1869,19 @@ pub fn build_router(
 // v0.10.28 (Tier S, sub-paso 4) — FITZ_HTTP_LOG: access log opt-in
 // =====================================================================
 
-/// Mode del access log HTTP. Activado por la env var `FITZ_HTTP_LOG`:
+/// HTTP access log mode. Enabled via the `FITZ_HTTP_LOG` env var:
 ///
-/// - vacío / `=0` / no seteado → `Off` (default, zero overhead, el
-///   middleware ni se monta).
+/// - empty / `=0` / unset → `Off` (default, zero overhead, the
+///   middleware isn't even mounted).
 /// - `=1` / `=true` → `Simple` (method + path + status + elapsed).
-/// - `=verbose` → `Verbose` (además User-Agent + Content-Length).
+/// - `=verbose` → `Verbose` (also User-Agent + Content-Length).
 ///
-/// Loguea TODAS las requests HTTP que pasen por el router: handlers
-/// matcheados, preflight OPTIONS (CORS), rutas auto `/openapi.json`/
-/// `/docs`/`/asyncapi.json`, y respuestas 401/403/400/500 de auth/
-/// middleware/handler. WebSocket handshake (GET /chat con upgrade)
-/// también pasa por el layer y se loguea como 101 Switching Protocols.
+/// Logs ALL HTTP requests that go through the router: matched
+/// handlers, OPTIONS preflight (CORS), auto routes `/openapi.json`/
+/// `/docs`/`/asyncapi.json`, and 401/403/400/500 responses from
+/// auth/middleware/handler. WebSocket handshake (GET /chat with
+/// upgrade) also goes through the layer and is logged as 101
+/// Switching Protocols.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpLogMode {
     Off,
@@ -1860,9 +1889,9 @@ pub enum HttpLogMode {
     Verbose,
 }
 
-/// Lee `FITZ_HTTP_LOG` una sola vez por proceso. El mode queda
-/// fijado al primer acceso (lazy). Patrón paralelo al `DB_LOG_MODE`
-/// del driver (sub-paso 3).
+/// Reads `FITZ_HTTP_LOG` once per process. The mode is locked at
+/// first access (lazy). Pattern parallel to the driver's
+/// `DB_LOG_MODE` (sub-step 3).
 pub static HTTP_LOG_MODE: std::sync::LazyLock<HttpLogMode> =
     std::sync::LazyLock::new(|| match std::env::var("FITZ_HTTP_LOG").as_deref() {
         Ok("verbose") => HttpLogMode::Verbose,
@@ -1870,12 +1899,12 @@ pub static HTTP_LOG_MODE: std::sync::LazyLock<HttpLogMode> =
         _ => HttpLogMode::Off,
     });
 
-/// Formatea una línea de access log lista para emitir a stderr.
-/// Pure function para que el unit test pueda asertir el output sin
-/// tocar stderr ni el axum Router.
+/// Formats an access log line ready to emit to stderr. Pure function
+/// so the unit test can assert the output without touching stderr or
+/// the axum Router.
 ///
-/// Forma simple: `[fitz HTTP 12.3ms] GET /users/42 → 200`
-/// Forma verbose: `[fitz HTTP 45.2ms verbose] GET /users → 200 (UA="curl/8.0" len=1234)`
+/// Simple form: `[fitz HTTP 12.3ms] GET /users/42 → 200`
+/// Verbose form: `[fitz HTTP 45.2ms verbose] GET /users → 200 (UA="curl/8.0" len=1234)`
 pub fn format_http_log_line(
     elapsed: std::time::Duration,
     method: &str,
@@ -1909,9 +1938,9 @@ pub fn format_http_log_line(
     }
 }
 
-/// Axum middleware (`from_fn` compatible) que loguea cada request.
-/// Solo se monta cuando `HTTP_LOG_MODE` != Off (decisión tomada en
-/// build_router_with_asyncapi) — overhead estricto cero cuando Off.
+/// Axum middleware (`from_fn` compatible) that logs each request.
+/// Only mounted when `HTTP_LOG_MODE` != Off (decision made in
+/// build_router_with_asyncapi) — strictly zero overhead when Off.
 async fn http_log_layer(
     req: axum::extract::Request,
     next: axum::middleware::Next,
@@ -1919,7 +1948,7 @@ async fn http_log_layer(
     let start = std::time::Instant::now();
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
-    // Capturamos User-Agent ANTES de mover el request al next.
+    // Capture User-Agent BEFORE moving the request to next.
     let user_agent = req
         .headers()
         .get("user-agent")
@@ -1927,9 +1956,9 @@ async fn http_log_layer(
         .map(|s| s.to_string());
     let response = next.run(req).await;
     let status = response.status().as_u16();
-    // Content-Length: axum lo suele setear via Body::size_hint del
-    // builder de respuesta. Para responses chunked/streaming puede
-    // no estar — None en ese caso, no error.
+    // Content-Length: axum usually sets it via Body::size_hint on
+    // the response builder. For chunked/streaming responses it may
+    // be absent — None in that case, no error.
     let content_length = response
         .headers()
         .get("content-length")
@@ -1948,12 +1977,12 @@ async fn http_log_layer(
     response
 }
 
-/// Fase 9.w.2.d — variante de `build_router` que también acepta un
-/// schema AsyncAPI 3.0 pre-computado. Si `Some`, registra
-/// `/asyncapi.json` (y suma una nota a `/docs` listando los WS
-/// endpoints — el bundle Scalar no soporta AsyncAPI nativamente,
-/// pero el endpoint queda servido para tooling externo). `None` para
-/// programas sin handlers `@ws` (zero overhead).
+/// Phase 9.w.2.d — variant of `build_router` that also accepts a
+/// pre-computed AsyncAPI 3.0 schema. If `Some`, registers
+/// `/asyncapi.json` (and adds a note to `/docs` listing the WS
+/// endpoints — the Scalar bundle doesn't support AsyncAPI natively,
+/// but the endpoint is still served for external tooling). `None`
+/// for programs without `@ws` handlers (zero overhead).
 pub fn build_router_with_asyncapi(
     metas: &[RouteMeta],
     registry: std::sync::Arc<HttpRegistry>,
@@ -1961,17 +1990,17 @@ pub fn build_router_with_asyncapi(
     asyncapi_schema: Option<serde_json::Value>,
 ) -> Router {
     let mut router = Router::new();
-    // Pre-compute merged CorsConfig por path. Cuando varios handlers
-    // comparten un path (típico: `/tasks` con `@get` + `@post` o
-    // `/tasks/{id}` con `@get`/`@put`/`@delete`), cada uno trae su
-    // propio `@middleware(cors(...))` que normalmente difiere solo en
-    // `allow_methods` (cada uno declara su verbo). axum permite
-    // encadenar verbos distintos en un mismo path via `router.route`,
-    // pero el `OPTIONS` del preflight CORS se duplicaría — axum hace
-    // panic con "Overlapping method route". Solución: mergeamos
-    // todos los CorsConfig por path (unión de methods + headers, max
-    // de max_age, primer allow_origin gana) y attachamos el preflight
-    // UNA sola vez por path al primer handler que aparezca.
+    // Pre-compute merged CorsConfig per path. When multiple handlers
+    // share a path (typical: `/tasks` with `@get` + `@post`, or
+    // `/tasks/{id}` with `@get`/`@put`/`@delete`), each one carries
+    // its own `@middleware(cors(...))` that usually differs only in
+    // `allow_methods` (each one declares its verb). axum allows
+    // chaining different verbs on the same path via `router.route`,
+    // but the CORS preflight `OPTIONS` would be duplicated — axum
+    // panics with "Overlapping method route". Solution: merge all
+    // CorsConfigs per path (union of methods + headers, max of
+    // max_age, first allow_origin wins) and attach the preflight
+    // ONCE per path on the first handler that appears.
     let mut merged_cors_per_path: std::collections::HashMap<String, CorsConfig> =
         std::collections::HashMap::new();
     for meta in metas.iter() {
@@ -1985,10 +2014,11 @@ pub fn build_router_with_asyncapi(
     let mut preflight_attached: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for (idx, meta) in metas.iter().enumerate() {
-        // Fase 9.w.2 — WebSocket routes se manejan distinto: el
-        // dispatch es GET HTTP que retorna `WebSocketUpgrade::on_upgrade`,
-        // no el dispatcher HTTP normal. CORS aplica al handshake; auth
-        // también (corre pre-upgrade).
+        // Phase 9.w.2 — WebSocket routes are handled differently:
+        // dispatch is an HTTP GET returning
+        // `WebSocketUpgrade::on_upgrade`, not the normal HTTP
+        // dispatcher. CORS applies to the handshake; auth too
+        // (runs pre-upgrade).
         let route_handler = if meta.is_ws {
             build_ws_method_router(idx, registry.clone())
         } else {
@@ -2011,15 +2041,15 @@ pub fn build_router_with_asyncapi(
         router = router.route(&meta.path, route_handler);
     }
 
-    // Auto-register de /openapi.json (Fase 7.2) y /docs (Fase 7.3).
-    // El schema viene precomputado por `serve` (eager, una sola vez
-    // al arrancar); cada request lo clona — clone de `serde_json::Value`
-    // es lineal en el tamaño del schema, despreciable para APIs
-    // típicas. La UI Scalar es HTML estático (incluido al binario
-    // como `&'static str`).
+    // Auto-register of /openapi.json (Phase 7.2) and /docs (Phase
+    // 7.3). The schema is precomputed by `serve` (eager, once at
+    // startup); each request clones it — `serde_json::Value` clone
+    // is linear in schema size, negligible for typical APIs. The
+    // Scalar UI is static HTML (embedded in the binary as
+    // `&'static str`).
     //
-    // En ambos casos: si el usuario ya declaró un handler con el
-    // mismo path, el auto-register cede.
+    // In both cases: if the user already declared a handler with
+    // the same path, auto-register yields.
     if let Some(schema) = openapi_schema {
         if !metas.iter().any(|m| m.path == "/openapi.json") {
             let schema = std::sync::Arc::new(schema);
@@ -2038,14 +2068,14 @@ pub fn build_router_with_asyncapi(
             );
         }
     }
-    // Fase 9.w.2.d — auto-register de /asyncapi.json cuando hay
-    // handlers @ws. Mismo patrón que /openapi.json: si el user declaró
-    // un handler con el mismo path, su handler gana.
+    // Phase 9.w.2.d — auto-register of /asyncapi.json when there
+    // are @ws handlers. Same pattern as /openapi.json: if the user
+    // declared a handler with the same path, their handler wins.
     //
-    // 9.w.2-asyncapi-ui — además del JSON crudo, registramos /asyncapi
-    // con la UI embebida (paralelo a /docs de OpenAPI). El bundle
-    // `@asyncapi/react-component` se carga desde CDN (estructura
-    // idéntica al patrón Scalar).
+    // 9.w.2-asyncapi-ui — in addition to the raw JSON, we register
+    // /asyncapi with the embedded UI (parallel to OpenAPI's /docs).
+    // The `@asyncapi/react-component` bundle is loaded from CDN
+    // (structure identical to the Scalar pattern).
     if let Some(schema) = asyncapi_schema {
         if !metas.iter().any(|m| m.path == "/asyncapi.json") {
             let schema = std::sync::Arc::new(schema);
@@ -2067,18 +2097,21 @@ pub fn build_router_with_asyncapi(
         }
     }
 
-    // Fase 12.1.b — auto-mount de `/healthz` y `/readyz` (K8s probes).
+    // Phase 12.1.b — auto-mount of `/healthz` and `/readyz` (K8s
+    // probes).
     //
-    // Política:
-    //   - Si el usuario declaró `@get("/healthz")` (handler HTTP normal),
-    //     gana ese — el auto-mount cede (mismo patrón que /openapi.json).
-    //   - Si el usuario declaró `@healthz fn ...` (decorator dedicado),
-    //     se mounta esa fn con dispatch a `invoke_value` + mapeo del
-    //     retorno a status (Bool/Result<Null>/Result<Bool>).
-    //   - Si no declaró ninguno: default 200.
-    //   - Idem `/readyz` pero con state de "draining": cuando el atomic
-    //     está en `true` (SIGTERM disparado), retorna 503 SIN tocar el
-    //     handler — K8s deja de rutear inmediato.
+    // Policy:
+    //   - If the user declared `@get("/healthz")` (normal HTTP
+    //     handler), that wins — auto-mount yields (same pattern as
+    //     /openapi.json).
+    //   - If the user declared `@healthz fn ...` (dedicated
+    //     decorator), that fn is mounted with dispatch to
+    //     `invoke_value` + return-to-status mapping
+    //     (Bool/Result<Null>/Result<Bool>).
+    //   - If neither: default 200.
+    //   - Same for `/readyz` but with "draining" state: when the
+    //     atomic is `true` (SIGTERM fired), returns 503 WITHOUT
+    //     touching the handler — K8s stops routing immediately.
     if !metas.iter().any(|m| m.path == "/healthz") {
         let healthz = registry.healthz_handler.clone();
         router = router.route(
@@ -2103,8 +2136,8 @@ pub fn build_router_with_asyncapi(
                 let readyz = readyz.clone();
                 let draining = draining.clone();
                 async move {
-                    // Durante draining, 503 sin tocar el handler (K8s
-                    // deja de rutear inmediato).
+                    // During draining, 503 without touching the
+                    // handler (K8s stops routing immediately).
                     if draining.load(std::sync::atomic::Ordering::Relaxed) {
                         return drained_response();
                     }
@@ -2117,15 +2150,16 @@ pub fn build_router_with_asyncapi(
         );
     }
 
-    // Fase 12.3.iter2.Tier3 — auto-mount `/metrics` Prometheus opcional.
-    // Solo si el provider está instalado (`init_prometheus(true)` fue
-    // llamado desde `serve()` cuando `@server(prometheus=true)` o env
-    // var `FITZ_PROMETHEUS=1`). Sin provider, la ruta NO se monta —
-    // request a `/metrics` cae a 404 default de axum, zero overhead.
+    // Phase 12.3.iter2.Tier3 — optional auto-mount of `/metrics`
+    // Prometheus. Only if the provider is installed
+    // (`init_prometheus(true)` was called from `serve()` when
+    // `@server(prometheus=true)` or env var `FITZ_PROMETHEUS=1`).
+    // Without a provider, the route is NOT mounted — a `/metrics`
+    // request falls through to axum's default 404, zero overhead.
     //
-    // Si el usuario declaró su propio `@get("/metrics")` (caso raro
-    // pero válido — quizás un endpoint custom de Prometheus con
-    // labels específicos), su handler gana (mismo patrón que
+    // If the user declared their own `@get("/metrics")` (rare but
+    // valid — maybe a custom Prometheus endpoint with specific
+    // labels), their handler wins (same pattern as
     // /openapi.json/healthz).
     if let Some(handle) = crate::observability::prometheus_handle() {
         if !metas.iter().any(|m| m.path == "/metrics") {
@@ -2149,9 +2183,9 @@ pub fn build_router_with_asyncapi(
         }
     }
 
-    // v0.10.28 — Access log opt-in. Solo se monta el layer si el mode
-    // es activo; cuando Off, el Router queda 100% como antes (zero
-    // overhead, ni siquiera la indirection del middleware).
+    // v0.10.28 — Opt-in access log. The layer is only mounted if
+    // the mode is active; when Off, the Router stays 100% as before
+    // (zero overhead, not even the middleware indirection).
     if *HTTP_LOG_MODE != HttpLogMode::Off {
         router = router.layer(axum::middleware::from_fn(http_log_layer));
     }
@@ -2159,10 +2193,10 @@ pub fn build_router_with_asyncapi(
     router
 }
 
-/// Fase 12.1.b — Respuesta default cuando no hay handler `@healthz`
-/// o `@readyz` declarado (y el server NO está draining). Status 200
-/// con body `{"status": "ok"}`. Body intencionalmente mínimo —
-/// cualquier endpoint que necesite más detalle declara su propio
+/// Phase 12.1.b — Default response when there's no `@healthz` or
+/// `@readyz` handler declared (and the server is NOT draining).
+/// Status 200 with body `{"status": "ok"}`. Body intentionally
+/// minimal — any endpoint that needs more detail declares its own
 /// handler.
 fn default_health_response() -> axum::response::Response {
     use axum::response::IntoResponse;
@@ -2173,10 +2207,10 @@ fn default_health_response() -> axum::response::Response {
         .into_response()
 }
 
-/// Fase 12.1.b — Respuesta cuando el server está draining (post
-/// SIGTERM/Ctrl-C). Status 503 + body `{"status": "draining"}`. K8s
-/// con `readinessProbe` lo lee y deja de rutear traffic nuevo a este
-/// pod — mientras axum drena las requests in-flight.
+/// Phase 12.1.b — Response when the server is draining (post
+/// SIGTERM/Ctrl-C). Status 503 + body `{"status": "draining"}`.
+/// K8s with `readinessProbe` reads it and stops routing new traffic
+/// to this pod — while axum drains in-flight requests.
 fn drained_response() -> axum::response::Response {
     use axum::response::IntoResponse;
     (
@@ -2186,14 +2220,14 @@ fn drained_response() -> axum::response::Response {
         .into_response()
 }
 
-/// Fase 12.1.b — Invoca un handler `@healthz`/`@readyz` y mapea el
-/// retorno Fitz a una HTTP response.
+/// Phase 12.1.b — Invokes a `@healthz`/`@readyz` handler and maps
+/// the Fitz return to an HTTP response.
 ///
-/// Reglas del retorno:
+/// Return rules:
 ///   - `Bool true` / `Result Ok(...)` / `Null` → 200 + `{"status": "ok"}`.
 ///   - `Bool false` → 503 + `{"status": "unhealthy"}`.
 ///   - `Result Err(e)` → 503 + `{"status": "unhealthy", "error": <e>}`.
-///   - Cualquier panic / Future no resuelto → 503 con mensaje genérico.
+///   - Any panic / unresolved Future → 503 with a generic message.
 async fn invoke_health_check(handle: HealthCheckHandle, kind: &str) -> axum::response::Response {
     use axum::response::IntoResponse;
     let name = handle.name.clone();
@@ -2202,8 +2236,8 @@ async fn invoke_health_check(handle: HealthCheckHandle, kind: &str) -> axum::res
     let value = match raw {
         Ok(v) => v,
         Err(_) => {
-            // Error de evaluación → unhealthy con mensaje genérico
-            // (el error específico va a stderr vía el evaluator).
+            // Evaluation error → unhealthy with a generic message
+            // (the specific error goes to stderr via the evaluator).
             eprintln!("[{kind}] error al invocar handler '{name}'");
             return (
                 axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -2212,7 +2246,7 @@ async fn invoke_health_check(handle: HealthCheckHandle, kind: &str) -> axum::res
                 .into_response();
         }
     };
-    // Si fue async, el Value es un Future que hay que consumir.
+    // If it was async, the Value is a Future that must be consumed.
     let value = match await_if_future(value).await {
         Ok(v) => v,
         Err(_) => {
@@ -2227,9 +2261,9 @@ async fn invoke_health_check(handle: HealthCheckHandle, kind: &str) -> axum::res
     map_health_value_to_response(value)
 }
 
-/// Helper de `invoke_health_check`. Convierte el `Value` retornado por
-/// el handler Fitz a una HTTP response apropiada según las reglas
-/// documentadas arriba.
+/// Helper for `invoke_health_check`. Converts the `Value` returned
+/// by the Fitz handler to an appropriate HTTP response per the
+/// rules documented above.
 fn map_health_value_to_response(value: Value) -> axum::response::Response {
     use axum::response::IntoResponse;
     match value {
@@ -2260,9 +2294,9 @@ fn map_health_value_to_response(value: Value) -> axum::response::Response {
                 .into_response()
         }
         other => {
-            // Tipo inesperado (el checker debería haberlo prevenido).
-            // Tratamos como healthy con warning a stderr para no romper
-            // probes por bug del codegen.
+            // Unexpected type (the checker should have prevented
+            // this). We treat it as healthy with a stderr warning so
+            // probes are not broken by a codegen bug.
             eprintln!(
                 "[probe] handler retornó valor de tipo inesperado {} — tratando como OK",
                 other.type_name()
@@ -2276,11 +2310,11 @@ fn map_health_value_to_response(value: Value) -> axum::response::Response {
     }
 }
 
-/// Convierte el `HeaderMap` de axum a un `HashMap<String, String>`
-/// con todas las keys en lowercase (Fase 7.6). El dispatch hace
-/// lookup case-insensitive contra esta map. Los headers no-UTF-8 se
-/// omiten (HTTP teóricamente permite bytes raros; en la práctica
-/// todos los headers usuales son ASCII).
+/// Converts the axum `HeaderMap` to a `HashMap<String, String>`
+/// with all keys lowercased (Phase 7.6). The dispatcher does
+/// case-insensitive lookup against this map. Non-UTF-8 headers are
+/// dropped (HTTP theoretically allows weird bytes; in practice all
+/// usual headers are ASCII).
 fn headers_to_map(hm: &axum::http::HeaderMap) -> HashMap<String, String> {
     let mut out: HashMap<String, String> = HashMap::new();
     for (name, value) in hm.iter() {
@@ -2291,29 +2325,30 @@ fn headers_to_map(hm: &axum::http::HeaderMap) -> HashMap<String, String> {
     out
 }
 
-/// 9.w.2-ws-auth-browser: extrae un bearer token del header
-/// `Sec-WebSocket-Protocol` del handshake WS. Workaround estándar
-/// para autenticar WS desde browsers — la API `new WebSocket(url,
-/// protocols)` NO permite setear headers HTTP arbitrarios, pero
-/// SÍ acepta una lista de subprotocols como segundo argumento.
+/// 9.w.2-ws-auth-browser: extracts a bearer token from the
+/// `Sec-WebSocket-Protocol` header of the WS handshake. Standard
+/// workaround for authenticating WS from browsers — the
+/// `new WebSocket(url, protocols)` API does NOT allow setting
+/// arbitrary HTTP headers, but it DOES accept a list of subprotocols
+/// as the second argument.
 ///
-/// Convención: el cliente envía un subprotocol con el formato
-/// `bearer.<token>` (donde `<token>` es JWT u opaque). El server
-/// extrae el token, lo inyecta como `authorization: Bearer <token>`
-/// en el map de headers que ve el `@auth_provider`, y hace echo
-/// del subprotocol seleccionado en el handshake response (RFC 6455
-/// §4.1 — sin echo, el browser rechaza el upgrade).
+/// Convention: the client sends a subprotocol in the format
+/// `bearer.<token>` (where `<token>` is JWT or opaque). The server
+/// extracts the token, injects it as `authorization: Bearer <token>`
+/// in the headers map seen by the `@auth_provider`, and echoes the
+/// selected subprotocol in the handshake response (RFC 6455 §4.1 —
+/// without the echo, the browser rejects the upgrade).
 ///
-/// Devuelve `Some((subprotocol_completo, token))` si encontró un
-/// subprotocol que matchea `bearer.*`, `None` si no.
+/// Returns `Some((full_subprotocol, token))` if a subprotocol
+/// matching `bearer.*` was found, `None` otherwise.
 pub fn extract_ws_bearer_subprotocol(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
     let raw = headers
         .get("sec-websocket-protocol")
         .or_else(|| headers.get("Sec-WebSocket-Protocol"))?
         .to_str()
         .ok()?;
-    // RFC 6455: el header puede ser CSV (comma-separated) con
-    // múltiples subprotocols ofrecidos. El server elige uno.
+    // RFC 6455: the header can be CSV (comma-separated) with
+    // multiple offered subprotocols. The server picks one.
     for piece in raw.split(',') {
         let proto = piece.trim();
         if let Some(token) = proto.strip_prefix("bearer.") {
@@ -2325,20 +2360,20 @@ pub fn extract_ws_bearer_subprotocol(headers: &axum::http::HeaderMap) -> Option<
     None
 }
 
-/// Construye un `MethodRouter` con el handler async correspondiente
-/// al verbo. Las ocho combinaciones (path_params × query × body)
-/// viven en closures distintos porque los extractors de axum aparecen
-/// como argumentos del handler — no se pueden hacer condicionales.
-/// `HeaderMap` se extrae **siempre** como argumento extra (Fase 7.6):
-/// es zero-cost cuando el handler no declara headers (pasa HashMap
-/// vacío y `handle_task` lo ignora).
+/// Builds a `MethodRouter` with the async handler corresponding to
+/// the verb. The eight combinations (path_params × query × body)
+/// live in different closures because axum extractors appear as
+/// handler arguments — they can't be made conditional. `HeaderMap`
+/// is **always** extracted as an extra argument (Phase 7.6): it's
+/// zero-cost when the handler declares no headers (an empty HashMap
+/// is passed and `handle_task` ignores it).
 ///
-/// **F17.5**: cada closure clona el `Arc<HttpRegistry>` y llama a
-/// `handle_task(&registry, ...).await` directo. Antes mandaba un
-/// `InterpTask` por mpsc y await-eaba un `oneshot`. La eliminación
-/// del bridge destraba el paralelismo HTTP real: con runtime
-/// `rt-multi-thread` (F17.4a), N workers procesan handlers en
-/// simultáneo sobre el mismo registry compartido (Send + Sync).
+/// **F17.5**: each closure clones the `Arc<HttpRegistry>` and calls
+/// `handle_task(&registry, ...).await` directly. Before this, it
+/// sent an `InterpTask` over mpsc and awaited a `oneshot`. Removing
+/// the bridge unlocks real HTTP parallelism: with the
+/// `rt-multi-thread` runtime (F17.4a), N workers process handlers
+/// simultaneously over the same shared (Send + Sync) registry.
 fn build_method_router(
     method: HttpMethod,
     route_idx: usize,
@@ -2452,8 +2487,8 @@ fn build_method_router(
     }
 }
 
-/// Mapea `HttpMethod` al constructor de axum (`get`/`post`/`put`/`delete`)
-/// aplicado al handler dado.
+/// Maps `HttpMethod` to the axum constructor
+/// (`get`/`post`/`put`/`delete`) applied to the given handler.
 fn wrap<H, T>(method: HttpMethod, h: H) -> MethodRouter
 where
     H: axum::handler::Handler<T, ()>,
@@ -2468,25 +2503,26 @@ where
     }
 }
 
-/// Suma un handler `OPTIONS` al MethodRouter dado para responder
-/// preflight CORS (mini-fase MW.2). El handler devuelve 204 con los
-/// headers `Access-Control-Allow-*` resueltos contra el `Origin` del
-/// request — no toca el intérprete, así que es rápido y no usa el
-/// bridge mpsc. Q.3: el header `Access-Control-Allow-Origin` puede
-/// omitirse si la política `Set` rechaza el origin recibido (browser
-/// rechaza el preflight, comportamiento estándar CORS estricto).
-/// Fase 9.w.2 — Construye el `MethodRouter` para una ruta WebSocket.
-/// El método HTTP es siempre GET (handshake). El handler extrae el
-/// `WebSocketUpgrade` extractor de axum, ejecuta auth pre-upgrade y
-/// luego ejecuta `ws.on_upgrade(...)`. Dentro del upgrade closure
-/// arma el `Value::WsConn` y llama al handler Fitz.
+/// Adds an `OPTIONS` handler to the given MethodRouter to answer
+/// CORS preflight (mini-phase MW.2). The handler returns 204 with
+/// `Access-Control-Allow-*` headers resolved against the request
+/// `Origin` — it does not touch the interpreter, so it's fast and
+/// doesn't use the mpsc bridge. Q.3: the `Access-Control-Allow-Origin`
+/// header can be omitted if the `Set` policy rejects the received
+/// origin (browser rejects the preflight, standard strict CORS
+/// behavior).
+/// Phase 9.w.2 — Builds the `MethodRouter` for a WebSocket route.
+/// The HTTP method is always GET (handshake). The handler extracts
+/// axum's `WebSocketUpgrade` extractor, runs auth pre-upgrade and
+/// then runs `ws.on_upgrade(...)`. Inside the upgrade closure it
+/// builds the `Value::WsConn` and calls the Fitz handler.
 ///
-/// Diferencias con HTTP normal:
-///   - No hay path params dinámicos (el `@ws("/chat")` es exact path).
-///   - No hay body en el handshake (GET).
-///   - Auth: 401/403 antes del upgrade. Middleware Pre/Wrap: idem.
-///   - Output: `Response::switching_protocols` que axum encadena con
-///     el resto del upgrade flow.
+/// Differences vs normal HTTP:
+///   - No dynamic path params (`@ws("/chat")` is an exact path).
+///   - No body in the handshake (GET).
+///   - Auth: 401/403 before upgrade. Pre/Wrap middleware: same.
+///   - Output: `Response::switching_protocols` that axum chains
+///     with the rest of the upgrade flow.
 fn build_ws_method_router(
     route_idx: usize,
     registry: std::sync::Arc<HttpRegistry>,
@@ -2507,9 +2543,9 @@ fn build_ws_method_router(
                         .into_response();
                 }
             };
-            // Fase 12.8 — gate por feature flag en el handshake WS.
-            // Si la flag está off, devolver 404 ANTES del upgrade
-            // (paralelo a HTTP).
+            // Phase 12.8 — gate by feature flag at the WS handshake.
+            // If the flag is off, return 404 BEFORE the upgrade
+            // (parallel to HTTP).
             if let Some(name) = route.flag_name.as_ref() {
                 if !crate::evaluator::is_flag_enabled(name) {
                     let body = serde_json::json!({
@@ -2524,16 +2560,16 @@ fn build_ws_method_router(
                 }
             }
             let mut raw_headers = headers_to_map(&headers);
-            // 9.w.2-ws-auth-browser: extraer bearer token del header
-            // `Sec-WebSocket-Protocol` cuando el cliente envió un
-            // subprotocol con formato `bearer.<token>`. Es el workaround
-            // estándar para que browsers (que NO pueden setear
-            // `Authorization` header en `new WebSocket(url)`) pasen
-            // tokens al handshake. El runtime inyecta
-            // `authorization: Bearer <token>` al map de headers que ve
-            // el `@auth_provider`, paralelo al flujo HTTP. El server
-            // también hace echo del subprotocol elegido para que el
-            // browser no rechace el upgrade (RFC 6455 §4.1).
+            // 9.w.2-ws-auth-browser: extract a bearer token from the
+            // `Sec-WebSocket-Protocol` header when the client sent a
+            // subprotocol formatted as `bearer.<token>`. This is the
+            // standard workaround so browsers (which CANNOT set the
+            // `Authorization` header in `new WebSocket(url)`) can
+            // pass tokens at the handshake. The runtime injects
+            // `authorization: Bearer <token>` into the headers map
+            // seen by the `@auth_provider`, parallel to the HTTP
+            // flow. The server also echoes the chosen subprotocol so
+            // the browser doesn't reject the upgrade (RFC 6455 §4.1).
             let bearer_subproto = extract_ws_bearer_subprotocol(&headers);
             if let Some((selected_proto, token)) = &bearer_subproto {
                 raw_headers
@@ -2546,10 +2582,11 @@ fn build_ws_method_router(
                 None => ws,
             };
 
-            // Auth pre-upgrade (paralelo al wrapper HTTP 9.w.1.c). El
-            // checker garantiza que si `route.auth != None`, existe un
-            // provider en el registry. Fase 9.w.1.iter2.a: `@requires("role")`
-            // también dispara el wrapper aunque `auth == None`.
+            // Pre-upgrade auth (parallel to the HTTP wrapper 9.w.1.c).
+            // The checker guarantees that if `route.auth != None`,
+            // there is a provider in the registry. Phase
+            // 9.w.1.iter2.a: `@requires("role")` also triggers the
+            // wrapper even when `auth == None`.
             let mut auth_user: Option<Value> = None;
             if route.auth != AuthSpec::None || !route.required_roles.is_empty() {
                 let provider = match registry.auth_provider.as_ref() {
@@ -2567,7 +2604,7 @@ fn build_ws_method_router(
                             .into_response();
                     }
                 };
-                // Construir Map<Str,Str> de headers.
+                // Build Map<Str,Str> of headers.
                 let headers_pairs: Vec<(Value, Value)> = raw_headers
                     .iter()
                     .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
@@ -2585,7 +2622,7 @@ fn build_ws_method_router(
                             .into_response();
                     }
                 };
-                // Si el provider es async, await el Future.
+                // If the provider is async, await the Future.
                 let resolved = if provider.is_async {
                     match raw_result {
                         Value::Future(cell) => {
@@ -2647,9 +2684,9 @@ fn build_ws_method_router(
                                     .into_response();
                             }
                         }
-                        // Fase 9.w.1.iter2.a — RBAC custom con
-                        // `@requires("role")`. El user.role (Str) debe
-                        // matchear al menos uno de los `required_roles`.
+                        // Phase 9.w.1.iter2.a — Custom RBAC with
+                        // `@requires("role")`. user.role (Str) must
+                        // match at least one of `required_roles`.
                         if !route.required_roles.is_empty() {
                             let actual_role = match user_box.as_ref() {
                                 Value::Instance { fields, .. } => {
@@ -2715,7 +2752,7 @@ fn build_ws_method_router(
                 }
             }
 
-            // Capturar lo que el upgrade closure va a necesitar.
+            // Capture what the upgrade closure will need.
             let endpoint = route.path.clone();
             let handler = route.handler.clone();
             let handler_name = route.handler_name.clone();
@@ -2723,8 +2760,8 @@ fn build_ws_method_router(
             let ws_conn_param_name = route.ws_conn_param_name.clone();
             let ws_msg_type = route.ws_msg_type.clone();
             let ws_send_type = route.ws_send_type.clone();
-            // Env del handler — Value::Function lo carry como `closure`.
-            // recv() lo usa para resolver T nominal y coercer Map →
+            // Handler env — Value::Function carries it as `closure`.
+            // recv() uses it to resolve nominal T and coerce Map →
             // Instance.
             let handler_env = match &route.handler {
                 Value::Function { closure, .. } => closure.clone(),
@@ -2742,18 +2779,18 @@ fn build_ws_method_router(
                 .map(|(n, _)| n.clone())
                 .collect();
             let broadcaster = registry.ws_broadcaster.clone();
-            // Fase 9.w.2.e — intervalo de heartbeat ping del config.
-            // Default 30s; el usuario lo sobrescribe con
-            // `@server(ws_heartbeat_secs=N)`. `0` desactiva.
+            // Phase 9.w.2.e — heartbeat ping interval from the
+            // config. Default 30s; the user overrides with
+            // `@server(ws_heartbeat_secs=N)`. `0` disables.
             let heartbeat_secs = registry
                 .server_config
                 .as_ref()
                 .map(|c| c.ws_heartbeat_secs)
                 .unwrap_or(30);
 
-            // Upgrade. La closure es `FnOnce(WebSocket)`; adentro
-            // armamos el Value::WsConn, llamamos al handler Fitz, y
-            // hacemos cleanup al terminar.
+            // Upgrade. The closure is `FnOnce(WebSocket)`; inside we
+            // build the Value::WsConn, call the Fitz handler, and
+            // clean up at the end.
             ws.on_upgrade(move |socket| async move {
                 let (conn_value, conn_id, writer_task) = build_ws_conn(
                     socket,
@@ -2764,10 +2801,10 @@ fn build_ws_method_router(
                     handler_env,
                     heartbeat_secs,
                 );
-                // Arma args en el orden declarado del handler. El ws
-                // conn va en `ws_conn_param_name`; user (si aplica)
-                // en `auth_user_param_name`. Otros params no se
-                // soportan en WS hoy.
+                // Build args in the handler's declared order. The ws
+                // conn goes in `ws_conn_param_name`; user (if any)
+                // in `auth_user_param_name`. Other params are not
+                // supported in WS today.
                 let mut args: Vec<Value> = Vec::with_capacity(resolved_params.len());
                 for name in &resolved_params {
                     if ws_conn_param_name.as_deref() == Some(name.as_str()) {
@@ -2775,8 +2812,8 @@ fn build_ws_method_router(
                     } else if auth_user_param_name.as_deref() == Some(name.as_str()) {
                         args.push(auth_user.clone().unwrap_or(Value::Null));
                     } else {
-                        // Param no clasificado — bug del registro.
-                        // Log y cerrar conn.
+                        // Unclassified param — registration bug.
+                        // Log and close the conn.
                         eprintln!(
                             "WS handler '{}': param '{}' sin clasificación, cerrando conn",
                             handler_name, name,
@@ -2786,52 +2823,54 @@ fn build_ws_method_router(
                         return;
                     }
                 }
-                // Invocar el handler Fitz. Es async (validado por
-                // el checker 9.w.2.a), así que el ret es Value::Future
-                // que hay que await-ear.
+                // Invoke the Fitz handler. It's async (validated by
+                // the 9.w.2.a checker), so the ret is a Value::Future
+                // that must be awaited.
                 let invoke = call_handler(handler, args, &handler_name).await;
                 match invoke {
                     Ok(Value::Future(cell)) => {
                         let fut = cell.0.lock().take();
                         if let Some(f) = fut {
-                            // El handler corre acá; en cualquier
-                            // momento puede llamar recv/send/broadcast/close.
+                            // The handler runs here; at any moment
+                            // it can call recv/send/broadcast/close.
                             let _ = f.await;
                         }
                     }
                     Ok(_) => {
-                        // El checker validó async fn — si no devolvió
-                        // Future, es bug. Cerramos.
+                        // The checker validated async fn — if it
+                        // didn't return a Future, it's a bug. We
+                        // close.
                     }
                     Err(e) => {
                         eprintln!("WS handler '{}' falló: {}", handler_name, e.message,);
                     }
                 }
-                // Cleanup: desregistrar del broadcaster + cerrar
-                // writer task. La conn axum se cierra al dropear el
-                // sink (writer_task tiene el sink y termina en su
-                // próxima iteración del loop).
+                // Cleanup: unregister from the broadcaster + close
+                // writer task. The axum conn closes when the sink
+                // is dropped (writer_task holds the sink and
+                // terminates on its next loop iteration).
                 broadcaster.unregister(&endpoint, conn_id);
-                let _ = writer_task.await; // graceful: esperamos que el writer termine
+                let _ = writer_task.await; // graceful: wait for the writer to finish
             })
             .into_response()
         }
     })
 }
 
-/// Merge incremental de un `CorsConfig` adicional sobre uno existente
-/// — usado por `build_router_with_asyncapi` cuando varios handlers
-/// comparten path. Cada handler trae su propio `@middleware(cors(...))`
-/// con su `allow_methods` específico; la unión de todos define el
-/// preflight que el browser ve.
+/// Incremental merge of an additional `CorsConfig` over an existing
+/// one — used by `build_router_with_asyncapi` when multiple handlers
+/// share a path. Each handler carries its own `@middleware(cors(...))`
+/// with its specific `allow_methods`; the union of all of them
+/// defines the preflight the browser sees.
 ///
-/// Política de merge:
-/// - `allow_methods`: unión preservando orden de inserción.
-/// - `allow_headers`: unión case-insensitive (HTTP header names lo son).
-/// - `max_age`: el mayor de los dos (None es "no opinión").
-/// - `allow_origin`: el primero gana — handlers de un mismo path
-///   normalmente deberían declarar el mismo origin; si discrepan, es
-///   un error del usuario y preferimos no inventar política agregada.
+/// Merge policy:
+/// - `allow_methods`: union preserving insertion order.
+/// - `allow_headers`: case-insensitive union (HTTP header names
+///   are).
+/// - `max_age`: the larger of the two (None means "no opinion").
+/// - `allow_origin`: the first wins — handlers on the same path
+///   should normally declare the same origin; if they disagree, it's
+///   a user error and we prefer not to invent an aggregate policy.
 fn merge_cors_into(existing: &mut CorsConfig, other: &CorsConfig) {
     for m in &other.allow_methods {
         if !existing.allow_methods.iter().any(|e| e == m) {
@@ -2877,22 +2916,23 @@ fn attach_preflight(mr: MethodRouter, cors: std::sync::Arc<CorsConfig>) -> Metho
     })
 }
 
-/// Punto único donde el handler axum invoca al evaluator y devuelve
-/// la `Response`. Post-F17.5: llamada directa a `handle_task` —
-/// el bridge mpsc/oneshot que existía en F4.x quedó eliminado al
-/// volver `Value`/`EnvRef` `Send` (F17.2-3) y `HttpRegistry`
-/// `Send + Sync`.
+/// Single point where the axum handler invokes the evaluator and
+/// returns the `Response`. Post-F17.5: direct call to `handle_task`
+/// — the mpsc/oneshot bridge that existed in F4.x was removed once
+/// `Value`/`EnvRef` became `Send` (F17.2-3) and `HttpRegistry`
+/// became `Send + Sync`.
 ///
-/// Fase 12.3.b.2 — auto-instrumentation HTTP:
-/// - Abre un `SpanContext::new_root()` antes de invocar `handle_task`.
-/// - Wrappea la ejecución con `with_span_context(ctx, ...)` para que
-///   TODO `log.info/warn/error/debug` emitido adentro del handler
-///   herede el `trace_id`/`span_id` automático.
-/// - Emite `log.info("http.access", ...)` al FINAL del request con
-///   `http.method`, `http.target`, `http.status_code`, `duration_ms`.
-///   El access log sale ADENTRO del scope, así que también incluye
-///   trace_id/span_id (correlación con el resto de los logs del
-///   request). Convención de naming OTel-compatible.
+/// Phase 12.3.b.2 — auto HTTP instrumentation:
+/// - Opens a `SpanContext::new_root()` before invoking
+///   `handle_task`.
+/// - Wraps the execution with `with_span_context(ctx, ...)` so EVERY
+///   `log.info/warn/error/debug` emitted inside the handler
+///   automatically inherits the `trace_id`/`span_id`.
+/// - Emits `log.info("http.access", ...)` at the END of the request
+///   with `http.method`, `http.target`, `http.status_code`,
+///   `duration_ms`. The access log is emitted INSIDE the scope so it
+///   also includes trace_id/span_id (correlation with the rest of
+///   the request logs). OTel-compatible naming convention.
 async fn dispatch_request(
     registry: &HttpRegistry,
     route_idx: usize,
@@ -2906,12 +2946,12 @@ async fn dispatch_request(
         None => ("UNKNOWN", String::new()),
     };
 
-    // Fase 12.8 — gate por feature flag. Si el handler tiene
-    // `@flag("name")` y el flag está off en el registry runtime,
-    // cortar acá con 404. Decisión arquitectónica: chequeo ANTES
-    // de auth/middlewares (la ruta "no existe" desde el punto de
-    // vista del cliente, no se filtra info de schemas/auth). El
-    // observability/access log siguen activos para auditoría.
+    // Phase 12.8 — gate by feature flag. If the handler has
+    // `@flag("name")` and the flag is off in the runtime registry,
+    // stop here with 404. Architectural decision: check BEFORE
+    // auth/middlewares (the route "does not exist" from the
+    // client's point of view, no schemas/auth info is leaked). The
+    // observability/access log stays active for auditing.
     let flag_blocked: Option<String> = registry
         .routes
         .get(route_idx)
@@ -2929,13 +2969,12 @@ async fn dispatch_request(
         return response;
     }
 
-    // Fase 12.3.b.5 — opt-out con `@server(observability=false)`.
-    // Cuando está deshabilitada, bypaseamos TODO el wrapper de
-    // instrumentación: no abrimos span context, no emitimos access
-    // log, no registramos métricas. Los handlers corren bare-metal,
-    // sin overhead por request. El user que escribió
-    // `log.X(...)` adentro de un handler igual los emite, pero sin
-    // trace_id/span_id (no hay span activo).
+    // Phase 12.3.b.5 — opt-out with `@server(observability=false)`.
+    // When disabled, we bypass the ENTIRE instrumentation wrapper:
+    // no span context opened, no access log emitted, no metrics
+    // registered. Handlers run bare-metal, with no per-request
+    // overhead. A user calling `log.X(...)` inside a handler still
+    // emits, but without trace_id/span_id (no active span).
     let observability_enabled = registry
         .server_config
         .as_ref()
@@ -2956,20 +2995,21 @@ async fn dispatch_request(
 
     let start = std::time::Instant::now();
 
-    // Fase 12.3.c.1 — abrir un OTel span paralelo al SpanContext propio
-    // cuando el provider está instalado. El span OTel se envía al
-    // backend (Jaeger/Tempo/Honeycomb/Datadog) con atributos
-    // `http.method`/`http.target` al boot; al final del request,
-    // sumamos `http.status_code` + cierre. Sin provider instalado,
-    // `is_otel_enabled()` es `false` y el bloque entero se skipea
-    // (zero overhead).
+    // Phase 12.3.c.1 — open an OTel span parallel to the own
+    // SpanContext when the provider is installed. The OTel span is
+    // sent to the backend (Jaeger/Tempo/Honeycomb/Datadog) with
+    // `http.method`/`http.target` attributes at boot; at the end of
+    // the request we add `http.status_code` + close. Without the
+    // provider installed, `is_otel_enabled()` is `false` and the
+    // entire block is skipped (zero overhead).
     //
-    // Fase 12.3.iter2.a — el OTel span se abre ANTES del SpanContext
-    // propio para poder derivar `trace_id`/`span_id` desde sus IDs.
-    // Cuando OTel está activo, el `trace_id` que aparece en los logs
-    // stderr/Loki es EL MISMO que el del span OTel en
-    // Jaeger/Tempo/Datadog — habilita queries cross-pipeline. Sin
-    // OTel, `new_root()` genera trace_id/span_id frescos vía uuid.
+    // Phase 12.3.iter2.a — the OTel span is opened BEFORE the own
+    // SpanContext so we can derive `trace_id`/`span_id` from its
+    // IDs. When OTel is active, the `trace_id` appearing in
+    // stderr/Loki logs is THE SAME as the OTel span's in
+    // Jaeger/Tempo/Datadog — enabling cross-pipeline queries.
+    // Without OTel, `new_root()` generates fresh trace_id/span_id
+    // via uuid.
     let mut otel_span = if crate::observability::is_otel_enabled() {
         use opentelemetry::trace::{Span as _, Tracer as _};
         use opentelemetry::KeyValue;
@@ -2982,10 +3022,11 @@ async fn dispatch_request(
         None
     };
 
-    // Fase 12.3.iter2.a — derivar SpanContext propio desde el span OTel
-    // (cuando hay uno). `TraceId::to_string()` y `SpanId::to_string()`
-    // devuelven 32/16 hex chars lowercase — mismo formato del propio
-    // `generate_trace_id`/`generate_span_id`. Sin OTel, fresh uuid.
+    // Phase 12.3.iter2.a — derive the own SpanContext from the OTel
+    // span (when there is one). `TraceId::to_string()` and
+    // `SpanId::to_string()` return 32/16 lowercase hex chars — same
+    // format as the own `generate_trace_id`/`generate_span_id`.
+    // Without OTel, fresh uuid.
     let ctx = if let Some(span) = otel_span.as_ref() {
         use opentelemetry::trace::Span as _;
         let sctx = span.span_context();
@@ -3007,10 +3048,10 @@ async fn dispatch_request(
             headers,
         )
         .await;
-        // Emit access log ADENTRO del scope para que herede
-        // trace_id/span_id del span del request. Naming OTel-compatible:
-        // `http.method` / `http.target` / `http.status_code` /
-        // `duration_ms`.
+        // Emit access log INSIDE the scope so it inherits
+        // trace_id/span_id from the request span. OTel-compatible
+        // naming: `http.method` / `http.target` /
+        // `http.status_code` / `duration_ms`.
         let elapsed = start.elapsed();
         let duration_ms = elapsed.as_millis() as i64;
         let duration_secs = elapsed.as_secs_f64();
@@ -3029,21 +3070,24 @@ async fn dispatch_request(
         ];
         crate::logging::emit_log_record("info", "http.access", &kvs);
 
-        // Fase 12.3.b.3 — métricas built-in. Counter +1 por request
-        // con labels (method, path-template, status). Histogram con el
-        // duration en segundos (Prometheus-style — buckets default del
-        // recorder + cuantiles vía `histogram_quantiles` cuando esté
-        // expuesto). Labels SIEMPRE iguales entre Counter y Histogram
-        // para correlación cross-metric.
+        // Phase 12.3.b.3 — built-in metrics. Counter +1 per
+        // request with labels (method, path-template, status).
+        // Histogram with the duration in seconds (Prometheus-style
+        // — default recorder buckets + quantiles via
+        // `histogram_quantiles` when exposed). Labels are ALWAYS
+        // the same between Counter and Histogram for cross-metric
+        // correlation.
         //
-        // Sin recorder global instalado (caso default), las macros son
-        // no-op silenciosas — zero overhead. En 12.3.c sumamos el
-        // exporter OTLP que se instala como recorder global y conecta
-        // estas métricas al backend OTel. Naming Prometheus-style
-        // (`http_requests_total` / `http_request_duration_seconds`)
-        // por consistencia con el ecosistema; OTel semantic conventions
-        // (`http.server.request.duration`) se evalúan en 12.3.c si
-        // entra demanda real.
+        // Without a global recorder installed (default case), the
+        // macros are silent no-ops — zero overhead. In 12.3.c we
+        // add the OTLP exporter installed as the global recorder
+        // and connect these metrics to the OTel backend.
+        // Prometheus-style naming
+        // (`http_requests_total` /
+        // `http_request_duration_seconds`) for ecosystem
+        // consistency; OTel semantic conventions
+        // (`http.server.request.duration`) are evaluated in 12.3.c
+        // if real demand appears.
         let labels = [
             ("method", method_str.to_string()),
             ("path", path_template.clone()),
@@ -3056,10 +3100,10 @@ async fn dispatch_request(
     })
     .await;
 
-    // Fase 12.3.c.1 — finalizar el OTel span con el status code real
-    // y el resultado (Ok para 2xx/3xx, Error para 4xx/5xx). Solo si
-    // el provider estaba instalado al boot del request (zero overhead
-    // sin OTel).
+    // Phase 12.3.c.1 — finalize the OTel span with the real status
+    // code and result (Ok for 2xx/3xx, Error for 4xx/5xx). Only if
+    // the provider was installed at request boot (zero overhead
+    // without OTel).
     if let Some(span) = otel_span.as_mut() {
         use opentelemetry::trace::{Span as _, Status};
         use opentelemetry::KeyValue;
@@ -3075,14 +3119,14 @@ async fn dispatch_request(
     outcome_to_response(outcome)
 }
 
-/// Convierte un `HandlerOutcome` a la `Response` de axum. Status,
-/// header `content-type`, body como bytes, y los `extra_headers` que
-/// hayan inyectado los middlewares (mini-fase MW.2: headers CORS).
+/// Converts a `HandlerOutcome` into an axum `Response`. Status,
+/// `content-type` header, body as bytes, and the `extra_headers`
+/// injected by middlewares (mini-phase MW.2: CORS headers).
 ///
-/// Si un extra_header trae un nombre o un valor no parseable como
-/// header HTTP, se omite silenciosamente — preferimos perder un
-/// header malformado a hacer panic en una request. En la práctica los
-/// CORS headers que emitimos son válidos por construcción.
+/// If an extra_header carries an unparseable name or value as an
+/// HTTP header, it is silently dropped — we prefer losing a
+/// malformed header to panicking on a request. In practice the CORS
+/// headers we emit are valid by construction.
 fn outcome_to_response(outcome: HandlerOutcome) -> Response {
     let mut resp = Response::new(Body::from(outcome.body));
     *resp.status_mut() =
@@ -3101,14 +3145,14 @@ fn outcome_to_response(outcome: HandlerOutcome) -> Response {
     resp
 }
 
-/// Construye el `Value::Instance` de tipo `Request` que el runtime
-/// pasa a cada middleware (mini-fase MW.1). El path lleva los path
-/// params sustituidos (`/users/{id}` con `id=42` se ve como
-/// `/users/42`); la query string del request original NO se concatena
-/// para evitar dependencia del orden de `HashMap`. Si aparece presión
-/// real por exponer la query string completa, se suma como deuda
-/// menor. Los headers se exponen con sus keys en lowercase (consistente
-/// con el dispatch case-insensitive de `@header`).
+/// Builds the `Value::Instance` of type `Request` the runtime
+/// passes to each middleware (mini-phase MW.1). The path carries
+/// the path params substituted (`/users/{id}` with `id=42` is seen
+/// as `/users/42`); the original request query string is NOT
+/// concatenated to avoid depending on `HashMap` order. If real
+/// demand for exposing the full query string appears, we add it as
+/// minor debt. Headers are exposed with lowercase keys (consistent
+/// with the case-insensitive `@header` dispatch).
 fn build_request_value(
     method: HttpMethod,
     path_template: &str,
@@ -3117,9 +3161,10 @@ fn build_request_value(
 ) -> Value {
     use crate::value::shared;
 
-    // Sustituir cada `{name}` por su valor real. O(n*m) pero n y m
-    // son chicos (un handler típico tiene 0-3 path params); evitable
-    // con un parser fino, no vale el costo de mantenimiento.
+    // Substitute each `{name}` with its real value. O(n*m) but n
+    // and m are small (a typical handler has 0-3 path params);
+    // avoidable with a fine-grained parser, not worth the
+    // maintenance cost.
     let mut path = path_template.to_string();
     for (k, v) in raw_path_params {
         path = path.replace(&format!("{{{}}}", k), v);
@@ -3143,27 +3188,28 @@ fn build_request_value(
     )
 }
 
-/// Ejecuta la cadena de middlewares de una ruta en orden (mini-fase
-/// MW.1). Cada middleware recibe un único arg `Request` y se espera
-/// que devuelva:
+/// Runs a route's middleware chain in order (mini-phase MW.1). Each
+/// middleware receives a single `Request` arg and is expected to
+/// return:
 ///
-///   - `Value::Null` (o nada) → la cadena continúa con el siguiente
-///     middleware o el handler.
-///   - `Value::HttpResponse` (construido con `return <status> { ... }`)
-///     → short-circuit: la cadena corta acá y el outcome se devuelve
-///     al cliente.
-///   - Cualquier otro valor → 500 con mensaje claro (el middleware
-///     tiene que ser gate-only).
+///   - `Value::Null` (or nothing) → the chain continues with the
+///     next middleware or the handler.
+///   - `Value::HttpResponse` (built with `return <status> { ... }`)
+///     → short-circuit: the chain stops here and the outcome is
+///     returned to the client.
+///   - Any other value → 500 with a clear message (middleware must
+///     be gate-only).
 ///
-/// Devuelve `Some(outcome)` si un middleware short-circuita o si algo
-/// falló; `None` si la cadena llegó al final y hay que invocar el
-/// handler.
+/// Returns `Some(outcome)` if a middleware short-circuits or if
+/// something failed; `None` if the chain reached the end and the
+/// handler should be invoked.
 async fn run_middleware_chain(
     middlewares: &[MiddlewareSpec],
     request: &Value,
 ) -> Option<HandlerOutcome> {
-    // Mw.next — solo corremos los Pre (gate-only) en este path. Los
-    // Post se procesan en `run_post_middlewares` después del handler.
+    // Mw.next — we only run the Pre (gate-only) middlewares in this
+    // path. Posts are processed in `run_post_middlewares` after the
+    // handler.
     for mw in middlewares.iter().filter(|m| m.kind == MiddlewareKind::Pre) {
         let args = vec![request.clone()];
         let label = format!("middleware {}", mw.name);
@@ -3199,17 +3245,17 @@ async fn run_middleware_chain(
     None
 }
 
-/// Mw.next — corre los middlewares Post (2 args) en orden INVERSO al
-/// de registración (semántica de wrap: el último registrado es el más
-/// interno, ve la response primero). Cada Post recibe `(Request,
-/// Response)` y devuelve un `Response`. La Response actual se
-/// representa como `Value::HttpResponse { status, body }` construido
-/// desde el `HandlerOutcome` previo. La response final retorna como
-/// HandlerOutcome.
+/// Mw.next — runs the Post (2 args) middlewares in REVERSE
+/// registration order (wrap semantics: the last registered is the
+/// innermost, sees the response first). Each Post receives
+/// `(Request, Response)` and returns a `Response`. The current
+/// Response is represented as `Value::HttpResponse { status, body }`
+/// built from the previous `HandlerOutcome`. The final response is
+/// returned as HandlerOutcome.
 ///
-/// Errores: si un Post no devuelve `Value::HttpResponse`, error 500
-/// claro citando el middleware. Si la chain está vacía o no hay Post
-/// mws, devuelve el outcome original sin cambios.
+/// Errors: if a Post does not return `Value::HttpResponse`, a clear
+/// 500 error citing the middleware. If the chain is empty or there
+/// are no Post mws, returns the original outcome unchanged.
 async fn run_post_middlewares(
     middlewares: &[MiddlewareSpec],
     request: &Value,
@@ -3222,9 +3268,9 @@ async fn run_post_middlewares(
     if post_mws.is_empty() {
         return outcome;
     }
-    // Construir el Value::HttpResponse inicial. El body se parsea desde
-    // el JSON del outcome. Si el body no es JSON válido (caso raro), lo
-    // pasamos como Str crudo.
+    // Build the initial Value::HttpResponse. The body is parsed
+    // from the outcome JSON. If the body isn't valid JSON (rare
+    // case), we pass it as raw Str.
     for mw in post_mws.iter().rev() {
         let body_value: Option<Box<Value>> =
             serde_json::from_str::<serde_json::Value>(&outcome.body)
@@ -3245,12 +3291,12 @@ async fn run_post_middlewares(
                     },
                     None => serde_json::Value::Null,
                 };
-                // Preservar headers existentes (CORS, custom ya
-                // inyectados); el Post-mw puede sumar headers via
-                // un campo adicional `extra_headers` futuro (deuda
-                // residual). Por ahora, el post-mw decide status +
-                // body, los extra_headers se preservan del outcome
-                // previo.
+                // Preserve existing headers (CORS, custom already
+                // injected); the Post-mw can add headers via a
+                // future `extra_headers` field (residual debt). For
+                // now, the post-mw decides status + body, and the
+                // extra_headers are preserved from the previous
+                // outcome.
                 let prev_extras = std::mem::take(&mut outcome.extra_headers);
                 outcome = HandlerOutcome::json(status, payload_json);
                 outcome.extra_headers = prev_extras;
@@ -3274,18 +3320,19 @@ async fn run_post_middlewares(
     outcome
 }
 
-/// Mini-tanda Mw-Wrap — corre la chain de wrap-style middlewares
-/// envolviendo el handler + post chain. Cada Wrap recibe
-/// `(request, next)` donde `next` es un `Value::NativeFn` que ejecuta
-/// el resto: los wraps restantes + el handler + los post mws.
+/// Mini-batch Mw-Wrap — runs the wrap-style middleware chain
+/// wrapping the handler + post chain. Each Wrap receives
+/// `(request, next)` where `next` is a `Value::NativeFn` that
+/// executes the rest: the remaining wraps + the handler + the post
+/// mws.
 ///
-/// El Wrap mw decide cuándo invocar `next()` (antes/después del
-/// handler, condicionalmente, midiendo tiempo, etc.). Su return value
-/// (`Response`) se convierte al outcome final.
+/// The Wrap mw decides when to invoke `next()` (before/after the
+/// handler, conditionally, measuring time, etc.). Its return value
+/// (`Response`) becomes the final outcome.
 ///
-/// Estructura recursiva: caso base = sin wraps → invocar handler + post.
-/// Caso recursivo = pop primer wrap, construir NativeFn que recursea
-/// con los wraps restantes, invocar wrap actual.
+/// Recursive structure: base case = no wraps → invoke handler +
+/// post. Recursive case = pop the first wrap, build a NativeFn that
+/// recurses with the remaining wraps, invoke the current wrap.
 fn run_wrap_chain(
     wraps: Vec<MiddlewareSpec>,
     handler: Value,
@@ -3296,29 +3343,29 @@ fn run_wrap_chain(
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = HandlerOutcome> + Send>> {
     Box::pin(async move {
         if wraps.is_empty() {
-            // Caso base: invocar handler + post chain.
+            // Base case: invoke handler + post chain.
             let outcome = match call_handler(handler, handler_args, &handler_name).await {
                 Ok(value) => value_to_outcome(&value),
                 Err(err) => {
-                    // U3 (v0.10.15) — log al stderr con contexto del
-                    // handler (nombre + posición del error). Antes el
-                    // mensaje se incluía solo en el response body, lo
-                    // que ocultaba el error en los logs del server.
-                    // Ahora aparece en ambos lados: response (cliente)
-                    // + stderr (dev/ops).
+                    // U3 (v0.10.15) — log to stderr with handler
+                    // context (name + error position). Previously
+                    // the message was included only in the response
+                    // body, hiding the error from server logs. Now
+                    // it appears on both sides: response (client) +
+                    // stderr (dev/ops).
                     eprintln!("[fitz HTTP] handler `{}` falló: {}", handler_name, err);
                     HandlerOutcome::internal_error(err.message)
                 }
             };
             return run_post_middlewares(&post_mws, &request, outcome).await;
         }
-        // Pop first wrap; el resto va a la closure del NativeFn.
+        // Pop first wrap; the rest goes to the NativeFn closure.
         let mut iter = wraps.into_iter();
         let current = iter.next().unwrap();
         let remaining: Vec<MiddlewareSpec> = iter.collect();
 
-        // Construir el `next` callable. Capturamos por valor (clone)
-        // todo lo que la closure va a necesitar la próxima vez.
+        // Build the `next` callable. We capture by value (clone)
+        // everything the closure will need next time.
         let req_clone = request.clone();
         let handler_clone = handler.clone();
         let handler_name_clone = handler_name.clone();
@@ -3327,7 +3374,7 @@ fn run_wrap_chain(
         let remaining_clone = remaining.clone();
         let next: crate::value::NativeAsyncFn =
             crate::value::NativeAsyncFn(std::sync::Arc::new(move |_args: Vec<Value>| {
-                // Re-clone para cada invocación (puede llamarse 0+ veces).
+                // Re-clone for each invocation (may be called 0+ times).
                 let req2 = req_clone.clone();
                 let h2 = handler_clone.clone();
                 let p2 = post_clone.clone();
@@ -3336,8 +3383,8 @@ fn run_wrap_chain(
                 let ha2 = handler_args_clone.clone();
                 Box::pin(async move {
                     let outcome = run_wrap_chain(r2, h2, ha2, hn2, req2, p2).await;
-                    // Convertir outcome → Value::HttpResponse para que el
-                    // mw lo consuma como `Response`.
+                    // Convert outcome → Value::HttpResponse so the
+                    // mw consumes it as `Response`.
                     let body = serde_json::from_str::<serde_json::Value>(&outcome.body)
                         .ok()
                         .map(|j| Box::new(json_to_value(&j)));
@@ -3348,7 +3395,7 @@ fn run_wrap_chain(
                 }) as crate::value::FitzFuture
             }));
 
-        // Invocar el Wrap mw con (request, next).
+        // Invoke the Wrap mw with (request, next).
         let args = vec![request.clone(), Value::NativeFn(next)];
         let label = format!("middleware wrap '{}'", current.name);
         match call_handler(current.handler.clone(), args, &label).await {
@@ -3376,7 +3423,8 @@ fn run_wrap_chain(
     })
 }
 
-/// Procesa un único task. Aislado del loop para testearlo sin canal.
+/// Processes a single task. Isolated from the loop so it can be
+/// tested without the channel.
 async fn handle_task(
     registry: &HttpRegistry,
     route_idx: usize,
@@ -3392,11 +3440,12 @@ async fn handle_task(
         ));
     };
 
-    // MW.1: middlewares apilados sobre la ruta. Corren ANTES de parsear
-    // body o coercionar params: si un middleware de auth/CORS cortocircuita,
-    // ahorramos el trabajo de validar el resto del request. La cadena
-    // recibe un único arg `Request` con method/path/headers; body y
-    // query params no se exponen al middleware (deuda explícita).
+    // MW.1: middlewares stacked on the route. They run BEFORE
+    // parsing the body or coercing params: if an auth/CORS
+    // middleware short-circuits, we save the work of validating the
+    // rest of the request. The chain receives a single `Request`
+    // arg with method/path/headers; body and query params are not
+    // exposed to the middleware (explicit debt).
     if !route.middlewares.is_empty() {
         let request =
             build_request_value(route.method, &route.path, &raw_path_params, &raw_headers);
@@ -3405,19 +3454,20 @@ async fn handle_task(
         }
     }
 
-    // Fase 9.w.1.c — auth check. Después de middlewares (que pueden
-    // short-circuitear sin tocar auth — CORS preflight, etc.) y antes
-    // de parsear el body o armar args. Si la ruta exige
-    // `@authenticated`/`@admin`, invocamos el `@auth_provider` con un
-    // `Map<Str, Str>` de los headers y esperamos `Result<User>`:
+    // Phase 9.w.1.c — auth check. After middlewares (which may
+    // short-circuit without touching auth — CORS preflight, etc.)
+    // and before parsing the body or building args. If the route
+    // requires `@authenticated`/`@admin`, we invoke the
+    // `@auth_provider` with a `Map<Str, Str>` of the headers and
+    // expect `Result<User>`:
     //
-    //   - `Ok(user)` → continúa al handler, `user` se inyecta como arg.
-    //     Para `@admin`, validamos `user.role == "admin"` adicional;
-    //     si no matchea → 403.
-    //   - `Err(msg)` → 401 con `{"error": msg}`.
-    //   - Provider falló con FitzError o devolvió shape distinto a
-    //     `Result<User>` → 500 con mensaje (no debería pasar — el
-    //     checker 9.w.1.a valida estáticamente; defensivo).
+    //   - `Ok(user)` → continues to the handler, `user` is injected
+    //     as an arg. For `@admin`, we additionally validate
+    //     `user.role == "admin"`; if it doesn't match → 403.
+    //   - `Err(msg)` → 401 with `{"error": msg}`.
+    //   - Provider failed with FitzError or returned a shape other
+    //     than `Result<User>` → 500 with message (shouldn't happen
+    //     — the 9.w.1.a checker validates statically; defensive).
     let auth_user: Option<Value> = if route.auth != AuthSpec::None
         || !route.required_roles.is_empty()
     {
@@ -3430,8 +3480,8 @@ async fn handle_task(
                 ));
             }
         };
-        // Construir `Map<Str, Str>` con los headers HTTP recibidos para
-        // pasárselo al provider. Mismo shape que `Request.headers`.
+        // Build a `Map<Str, Str>` with the received HTTP headers
+        // to pass to the provider. Same shape as `Request.headers`.
         let headers_pairs: Vec<(Value, Value)> = raw_headers
             .iter()
             .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
@@ -3448,8 +3498,9 @@ async fn handle_task(
                 ));
             }
         };
-        // Si el provider es async, lo invocado es `Value::Future` y hay
-        // que await-earlo (paralelo a `run_test_handler` de 9.z.2.b).
+        // If the provider is async, the invoked value is a
+        // `Value::Future` that must be awaited (parallel to
+        // `run_test_handler` from 9.z.2.b).
         let resolved = if provider.is_async {
             match raw_result {
                 Value::Future(cell) => {
@@ -3483,12 +3534,12 @@ async fn handle_task(
         } else {
             raw_result
         };
-        // `resolved` debe ser `Result<User>`.
+        // `resolved` must be `Result<User>`.
         match resolved {
             Value::Result(crate::value::ResultVariant::Ok(user_box)) => {
-                // Para `@admin`, validar `user.role == "admin"`. El
-                // checker valida que el tipo `User` tenga el campo;
-                // acá miramos el valor en runtime.
+                // For `@admin`, validate `user.role == "admin"`.
+                // The checker validates that the `User` type has
+                // the field; here we look at the runtime value.
                 if route.auth == AuthSpec::Admin {
                     let role_ok = match user_box.as_ref() {
                         Value::Instance { fields, .. } => {
@@ -3508,10 +3559,11 @@ async fn handle_task(
                         );
                     }
                 }
-                // Fase 9.w.1.iter2.a — RBAC custom con `@requires("role")`.
-                // El user.role (Str) debe matchear al menos uno de los
-                // roles requeridos. Apilar `@requires("a") @requires("b")`
-                // produce `vec!["a","b"]` = OR.
+                // Phase 9.w.1.iter2.a — Custom RBAC with
+                // `@requires("role")`. user.role (Str) must match
+                // at least one of the required roles. Stacking
+                // `@requires("a") @requires("b")` produces
+                // `vec!["a","b"]` = OR.
                 if !route.required_roles.is_empty() {
                     let actual_role = match user_box.as_ref() {
                         Value::Instance { fields, .. } => {
@@ -3566,19 +3618,22 @@ async fn handle_task(
         None
     };
 
-    // Si el handler espera body, parsearlo y prepararlo. Lo hacemos
-    // antes de armar args para fallar temprano si el JSON está roto.
+    // If the handler expects a body, parse and prepare it. We do
+    // this before building args so we fail early if the JSON is
+    // broken.
     //
-    // Mini-tanda Hpx.1 — validación de Content-Type: si el handler
-    // declara body param, exigimos `application/json`. Cualquier otro
-    // Content-Type (multipart, urlencoded, etc.) → 415 con mensaje
-    // claro. Si NO hay header (body crudo), aceptamos (clientes
-    // tipo curl sin -H lo emiten así, y Fitz nunca prometió Content-
-    // Type estricto). Sub-paso futuro dedicado para multipart/form.
+    // Mini-batch Hpx.1 — Content-Type validation: if the handler
+    // declares a body param, we require `application/json`. Any
+    // other Content-Type (multipart, urlencoded, etc.) → 415 with
+    // a clear message. If there's NO header (raw body), we accept
+    // (curl-style clients without -H emit it that way, and Fitz
+    // never promised strict Content-Type). Dedicated future
+    // sub-step for multipart/form.
     //
-    // Mini-tanda MP — sumamos soporte para `application/x-www-form-urlencoded`:
-    // se parsea como `Map<Str, Str>` y se asigna al body param.
-    // Multipart con files queda como sub-paso futuro (más complejo).
+    // Mini-batch MP — we add support for
+    // `application/x-www-form-urlencoded`: it's parsed as
+    // `Map<Str, Str>` and assigned to the body param. Multipart
+    // with files is left as a future sub-step (more complex).
     let body_value: Option<Value> = if let Some(bp) = &route.body_param {
         let raw_ct = raw_headers.get("content-type").cloned();
         let ct_primary = raw_ct
@@ -3594,7 +3649,7 @@ async fn handle_task(
 
         let is_urlencoded = ct_primary == "application/x-www-form-urlencoded";
         let is_json_or_empty = ct_primary.is_empty() || ct_primary == "application/json";
-        // Mini-tanda MP2 — multipart/form-data con boundary.
+        // Mini-batch MP2 — multipart/form-data with boundary.
         let is_multipart = ct_primary == "multipart/form-data";
 
         if !is_json_or_empty && !is_urlencoded && !is_multipart {
@@ -3615,9 +3670,9 @@ async fn handle_task(
         }
 
         if is_multipart {
-            // Mini-tanda MP2 — extraer boundary del Content-Type
-            // (`multipart/form-data; boundary=<token>`). Sin boundary
-            // → 400 claro.
+            // Mini-batch MP2 — extract the boundary from
+            // Content-Type (`multipart/form-data; boundary=<token>`).
+            // Without a boundary → clear 400.
             let boundary = raw_ct.as_deref().and_then(extract_multipart_boundary);
             match boundary {
                 None => {
@@ -3654,20 +3709,21 @@ async fn handle_task(
         None
     };
 
-    // Armar args en el orden declarado del handler. Para cada
-    // parámetro:
-    //   - si su nombre está en `path_params`, tomar el valor crudo del
-    //     map de path y coercionarlo al tipo declarado;
-    //   - si está en `query_params`, idem desde el map de query
-    //     (nullable → Null si falta; obligatorio → 400 si falta);
-    //   - si es el body param, usar el valor parseado;
-    //   - cualquier otro caso (no path, no query, no body) es un bug
-    //     del registro: el evaluator no permite registrarlo.
+    // Build args in the handler's declared order. For each
+    // parameter:
+    //   - if its name is in `path_params`, take the raw value from
+    //     the path map and coerce it to the declared type;
+    //   - if it's in `query_params`, same from the query map
+    //     (nullable → Null if missing; required → 400 if missing);
+    //   - if it's the body param, use the parsed value;
+    //   - any other case (not path, not query, not body) is a
+    //     registration bug: the evaluator doesn't allow it.
     let mut args = Vec::with_capacity(route.param_types.len());
     for (name, head_type, is_nullable) in &route.param_types {
         if route.path_params.iter().any(|p| p == name) {
-            // Path params son siempre obligatorios (axum garantiza que
-            // llegan si la ruta matcheó). Coerción al tipo declarado.
+            // Path params are always required (axum guarantees they
+            // arrive if the route matched). Coercion to the
+            // declared type.
             let raw = raw_path_params.get(name).map(|s| s.as_str()).unwrap_or("");
             match coerce_path_param(raw, head_type.as_deref()) {
                 Ok(v) => args.push(v),
@@ -3681,8 +3737,8 @@ async fn handle_task(
                 }
             }
         } else if route.query_params.iter().any(|q| q == name) {
-            // Query params: si el tipo declarado es nullable (`Int?`),
-            // missing → Null. Si es obligatorio, missing → 400.
+            // Query params: if the declared type is nullable
+            // (`Int?`), missing → Null. If required, missing → 400.
             let raw = raw_query_params.get(name);
             match (raw, *is_nullable) {
                 (Some(s), _) => match coerce_path_param(s, head_type.as_deref()) {
@@ -3707,13 +3763,14 @@ async fn handle_task(
                 }
             }
         } else if route.body_param.as_ref().map(|bp| bp.name.as_str()) == Some(name) {
-            // Body param: ya parseado arriba; tomarlo de `body_value`.
-            // unwrap es seguro porque body_value es Some sii hay body_param.
+            // Body param: already parsed above; take it from
+            // `body_value`. unwrap is safe because body_value is
+            // Some iff body_param exists.
             args.push(body_value.clone().unwrap());
         } else if let Some(hdr) = route.headers.iter().find(|h| &h.param_name == name) {
-            // Header (Fase 7.6). Lookup case-insensitive vía lowercase
-            // del nombre HTTP. Falta + nullable → Null. Falta +
-            // obligatorio → 400.
+            // Header (Phase 7.6). Case-insensitive lookup via
+            // lowercase HTTP name. Missing + nullable → Null.
+            // Missing + required → 400.
             let key = hdr.http_name.to_lowercase();
             match (raw_headers.get(&key), hdr.is_nullable) {
                 (Some(v), _) => args.push(Value::Str(v.clone())),
@@ -3731,12 +3788,13 @@ async fn handle_task(
                 }
             }
         } else if route.auth_user_param_name.as_deref() == Some(name.as_str()) {
-            // Fase 9.w.1.c — param inyectado por `@authenticated`/`@admin`.
-            // El `auth_user` fue resuelto arriba ANTES de armar args. Si
-            // por alguna razón `auth_user` es None (no debería pasar: si
-            // `auth_user_param_name` es Some, el bloque de auth arriba
-            // garantiza que `auth_user` también lo sea), default a Null
-            // como defensa.
+            // Phase 9.w.1.c — param injected by
+            // `@authenticated`/`@admin`. `auth_user` was resolved
+            // above BEFORE building args. If for some reason
+            // `auth_user` is None (shouldn't happen: if
+            // `auth_user_param_name` is Some, the auth block above
+            // guarantees `auth_user` is too), default to Null as a
+            // safety net.
             args.push(auth_user.clone().unwrap_or(Value::Null));
         } else {
             return HandlerOutcome::internal_error(format!(
@@ -3747,9 +3805,10 @@ async fn handle_task(
         }
     }
 
-    // Mini-tanda Mw-Wrap — si hay wrap-style middlewares, el chain
-    // runner los envuelve alrededor del handler + post mws. Si no
-    // hay wraps, seguimos con el flujo clásico (handler + post).
+    // Mini-batch Mw-Wrap — if there are wrap-style middlewares, the
+    // chain runner wraps them around the handler + post mws. If
+    // there are no wraps, we continue with the classic flow
+    // (handler + post).
     let has_wraps = route
         .middlewares
         .iter()
@@ -3779,14 +3838,15 @@ async fn handle_task(
         )
         .await
     } else {
-        // Flujo clásico: invocar handler + post mws.
-        // Fase 6.4 — si el handler es async, el invoke devuelve
-        // `Value::Future`; lo awaiteamos antes de pasarlo al
-        // serializer (paralelo al patrón en build_ws_method_router
-        // y register_auth_provider). Sin este await, async handlers
-        // HTTP devolvían "Future pendiente no es serializable" —
-        // bug preexistente expuesto al cerrar 9.w.3.b (que necesita
-        // async handlers que llamen `spawn(...)`).
+        // Classic flow: invoke handler + post mws.
+        // Phase 6.4 — if the handler is async, the invoke returns
+        // `Value::Future`; we await it before passing it to the
+        // serializer (parallel to the pattern in
+        // build_ws_method_router and register_auth_provider).
+        // Without this await, async HTTP handlers returned "Future
+        // pendiente no es serializable" — pre-existing bug exposed
+        // while closing 9.w.3.b (which needs async handlers calling
+        // `spawn(...)`).
         let mut outcome = match call_handler(route.handler.clone(), args, &route.handler_name).await
         {
             Ok(value) => {
@@ -3799,11 +3859,11 @@ async fn handle_task(
             Err(err) => HandlerOutcome::internal_error(err.message),
         };
 
-        // Mw.next — correr los post-middlewares (kind = Post, 2-arg)
-        // DESPUÉS del handler. Reciben `(Request, Response)` y pueden
-        // modificar el body o agregar headers. Si hay middlewares Pre que
-        // short-circuit, este path no corre (ya retornamos arriba con la
-        // response del Pre).
+        // Mw.next — run the post-middlewares (kind = Post, 2-arg)
+        // AFTER the handler. They receive `(Request, Response)` and
+        // can modify the body or add headers. If a Pre middleware
+        // short-circuits, this path does not run (we already
+        // returned above with the Pre's response).
         if route
             .middlewares
             .iter()
@@ -3816,15 +3876,16 @@ async fn handle_task(
         outcome
     };
 
-    // MW.2: si la ruta declara CORS, agregar los headers
-    // `Access-Control-Allow-*` a la response real. Incluido en
-    // responses de error (500/400) — el browser lee CORS antes de
-    // parsear el body, así que sin estos headers cualquier error
-    // sale como un "CORS error" en consola en vez del 500/400 que
-    // de verdad ocurrió.
-    // Q.3: pasamos el `Origin` del request al config; si la política
-    // es `Set` y matchea, echo del Origin recibido; si no, NO se
-    // emite el header (browser rechaza la response — CORS estricto).
+    // MW.2: if the route declares CORS, add the
+    // `Access-Control-Allow-*` headers to the real response.
+    // Included on error responses (500/400) — the browser reads
+    // CORS before parsing the body, so without these headers any
+    // error surfaces as a "CORS error" in the console instead of
+    // the actual 500/400 that happened.
+    // Q.3: we pass the request `Origin` to the config; if the
+    // policy is `Set` and matches, echo the received Origin;
+    // otherwise, the header is NOT emitted (browser rejects the
+    // response — strict CORS).
     if let Some(cors) = &route.cors {
         let request_origin = raw_headers.get("origin").map(|s| s.as_str());
         outcome
@@ -3834,18 +3895,20 @@ async fn handle_task(
     outcome
 }
 
-/// Parsea los bytes del body en un `Value` Fitz según la convención
-/// del body param:
-///   - JSON inválido → error 400 con mensaje claro.
-///   - Si el body param tiene `declared_type: Some(Value::Type)`,
-///     validamos contra el type (campos faltantes, extras, etc.) y
-///     construimos un `Value::Instance`.
-///   - Si no, deserializamos a `Value` libre (Map/List/primitivos).
+/// Parses the body bytes into a Fitz `Value` per the body param
+/// convention:
+///   - Invalid JSON → 400 error with a clear message.
+///   - If the body param has `declared_type: Some(Value::Type)`,
+///     validate against the type (missing fields, extras, etc.)
+///     and build a `Value::Instance`.
+///   - Otherwise, deserialize into a free `Value` (Map/List/
+///     primitives).
 ///
-/// Mini-tanda MP — parsea `application/x-www-form-urlencoded` body
-/// (formato `key1=value1&key2=value2`) a un `Value::Map<Str, Str>`.
-/// URL-decoding aplicado a keys y valores. Body vacío → Map vacío.
-/// Duplicados: last-wins (paralelo a la convención de `serde_urlencoded`).
+/// Mini-batch MP — parses `application/x-www-form-urlencoded` body
+/// (format `key1=value1&key2=value2`) into a `Value::Map<Str, Str>`.
+/// URL-decoding applied to keys and values. Empty body → empty
+/// Map. Duplicates: last-wins (parallel to the `serde_urlencoded`
+/// convention).
 fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
     use crate::value::shared;
     let s = std::str::from_utf8(bytes)
@@ -3860,25 +3923,27 @@ fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
         let raw_v = parts.next().unwrap_or("");
         let k = url_decode(raw_k)?;
         let v = url_decode(raw_v)?;
-        // Duplicados: last-wins. Eliminamos entry previa con misma key.
+        // Duplicates: last-wins. Remove the previous entry with
+        // the same key.
         pairs.retain(|(existing_k, _)| !matches!(existing_k, Value::Str(s) if s == &k));
         pairs.push((Value::Str(k), Value::Str(v)));
     }
     Ok(Value::Map(shared(pairs)))
 }
 
-/// Mini-tanda MP2 — extrae el `boundary` del Content-Type header de
-/// `multipart/form-data` (`multipart/form-data; boundary=<token>` o
-/// `boundary="<token>"`). Devuelve `None` si no aparece el parámetro.
-/// Trim de espacios + soporte de comillas dobles (RFC 7578).
+/// Mini-batch MP2 — extracts the `boundary` from the
+/// `multipart/form-data` Content-Type header
+/// (`multipart/form-data; boundary=<token>` or
+/// `boundary="<token>"`). Returns `None` if the parameter isn't
+/// present. Whitespace trim + support for double quotes (RFC 7578).
 fn extract_multipart_boundary(content_type: &str) -> Option<String> {
     for part in content_type.split(';').skip(1) {
         let part = part.trim();
         let lower = part.to_ascii_lowercase();
         if let Some(stripped) = lower.strip_prefix("boundary=") {
-            // Stripped es lowercase; necesitamos volver al original
-            // para preservar el case del boundary (los boundaries son
-            // case-sensitive según RFC 7578).
+            // Stripped is lowercase; we need to go back to the
+            // original to preserve the boundary case (boundaries
+            // are case-sensitive per RFC 7578).
             let orig_offset = part.len() - stripped.len();
             let value = &part[orig_offset..];
             let trimmed = value.trim_matches('"');
@@ -3891,50 +3956,50 @@ fn extract_multipart_boundary(content_type: &str) -> Option<String> {
     None
 }
 
-/// Mini-tanda MP2 + File.content Bytes — parser de
-/// `multipart/form-data` (RFC 7578) sobre raw bytes.
+/// Mini-batch MP2 + File.content Bytes — parser for
+/// `multipart/form-data` (RFC 7578) over raw bytes.
 ///
-/// Cada part del body viene delimitado por `--<boundary>\r\n` con
-/// headers tipo `Content-Disposition: form-data; name="X"; filename="Y"`
-/// (filename opcional para text fields). Body de la part separado
-/// de los headers por `\r\n\r\n`. La última part termina con
+/// Each body part is delimited by `--<boundary>\r\n` with headers
+/// like `Content-Disposition: form-data; name="X"; filename="Y"`
+/// (filename optional for text fields). The part body is separated
+/// from the headers by `\r\n\r\n`. The last part ends with
 /// `\r\n--<boundary>--`.
 ///
-/// Devuelve `Value::Map<Str, Value>` donde cada entry es:
-/// - Text field (sin `filename`) → `Value::Str(content)` (UTF-8;
-///   si el content no es UTF-8, error 400).
-/// - File field (con `filename`) → `Value::Instance` de `File` con
-///   `name`, `content_type`, `content: Bytes`. Files binarios YA
-///   funcionan — el content se guarda como `Value::Bytes(Vec<u8>)`
-///   sin requerir UTF-8.
+/// Returns `Value::Map<Str, Value>` where each entry is:
+/// - Text field (without `filename`) → `Value::Str(content)`
+///   (UTF-8; if the content isn't UTF-8, 400 error).
+/// - File field (with `filename`) → `Value::Instance` of `File`
+///   with `name`, `content_type`, `content: Bytes`. Binary files
+///   ALREADY work — content is stored as `Value::Bytes(Vec<u8>)`
+///   without requiring UTF-8.
 ///
-/// Refactor desde la versión MP2 inicial: ahora trabajamos byte por
-/// byte para preservar bytes binarios. Búsqueda de delimitadores
-/// usa `slice::windows` o un scan manual; headers se parsean como
-/// UTF-8 (ASCII per RFC 7578).
+/// Refactor from the initial MP2 version: now we work byte by byte
+/// to preserve binary bytes. Delimiter search uses
+/// `slice::windows` or a manual scan; headers are parsed as UTF-8
+/// (ASCII per RFC 7578).
 ///
-/// Duplicados de `name`: last-wins.
+/// `name` duplicates: last-wins.
 fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
     let delimiter = format!("--{}", boundary).into_bytes();
-    // Split por la secuencia delimitador.
+    // Split by the delimiter sequence.
     let parts_raw: Vec<&[u8]> = split_bytes_by(bytes, &delimiter);
     let mut entries: Vec<(Value, Value)> = Vec::new();
     for raw in parts_raw.iter().skip(1) {
-        // Terminator final: `--<boundary>--` produce un raw que
-        // empieza con `--` (justo después del delimiter).
+        // Final terminator: `--<boundary>--` produces a raw that
+        // starts with `--` (right after the delimiter).
         if raw.starts_with(b"--") {
             break;
         }
-        // Cada part empieza con `\r\n` (separator entre delimiter y
-        // headers). Si no lo tiene, malformado.
+        // Each part starts with `\r\n` (separator between
+        // delimiter and headers). If absent, malformed.
         let body = strip_prefix_bytes(raw, b"\r\n").unwrap_or(raw);
-        // Cada part puede terminar con `\r\n` antes del próximo
-        // delimiter. Trimmealo.
+        // Each part may end with `\r\n` before the next delimiter.
+        // Trim it.
         let body = strip_suffix_bytes(body, b"\r\n").unwrap_or(body);
 
-        // Split headers vs content por la primera ocurrencia de
-        // `\r\n\r\n`. Los headers son ASCII; el content puede ser
-        // cualquier secuencia de bytes.
+        // Split headers vs content on the first occurrence of
+        // `\r\n\r\n`. Headers are ASCII; content can be any byte
+        // sequence.
         let Some(split_idx) = find_bytes(body, b"\r\n\r\n") else {
             return Err(
                 "multipart: part malformada — falta `\\r\\n\\r\\n` entre headers y body"
@@ -3946,9 +4011,9 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
         let headers_str = std::str::from_utf8(headers_bytes)
             .map_err(|e| format!("multipart: headers no son ASCII/UTF-8 válido: {}", e))?;
 
-        // Parse de headers de la part. Solo nos interesa
-        // `Content-Disposition` (extrae `name` y `filename`) y
-        // `Content-Type` (para files).
+        // Parse the part headers. We only care about
+        // `Content-Disposition` (extract `name` and `filename`) and
+        // `Content-Type` (for files).
         let mut name_field: Option<String> = None;
         let mut filename: Option<String> = None;
         let mut content_type_part: Option<String> = None;
@@ -3973,8 +4038,8 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
 
         let value = match filename {
             None => {
-                // Text field: content debe ser UTF-8 válido. Para
-                // bytes binarios sin filename, error.
+                // Text field: content must be valid UTF-8. For
+                // binary bytes without filename, error.
                 let s = std::str::from_utf8(content_bytes).map_err(|e| {
                     format!(
                         "multipart: text field '{}' no es UTF-8 válido (use filename= para bytes binarios): {}",
@@ -3984,7 +4049,7 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
                 Value::Str(s.to_string())
             }
             Some(fname) => {
-                // File field: content como Bytes (raw). Binary OK.
+                // File field: content as raw Bytes. Binary OK.
                 let mut fields: Vec<(String, Value)> = Vec::new();
                 let name_val = if fname.is_empty() {
                     Value::Null
@@ -4012,7 +4077,7 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
     Ok(Value::Map(shared(entries)))
 }
 
-/// File.content Bytes — helpers para split/find sobre `&[u8]`.
+/// File.content Bytes — helpers for split/find over `&[u8]`.
 fn split_bytes_by<'a>(haystack: &'a [u8], needle: &[u8]) -> Vec<&'a [u8]> {
     let mut out = Vec::new();
     let mut start = 0;
@@ -4060,12 +4125,12 @@ fn strip_suffix_bytes<'a>(s: &'a [u8], suffix: &[u8]) -> Option<&'a [u8]> {
     }
 }
 
-/// Helper para parsear params del header Content-Disposition:
-/// `form-data; name="X"; filename="Y"`. Devuelve un map case-insensitive
-/// (keys lowercase) → valor sin comillas.
+/// Helper to parse Content-Disposition header params:
+/// `form-data; name="X"; filename="Y"`. Returns a case-insensitive
+/// map (lowercase keys) → unquoted value.
 fn parse_cd_params(s: &str) -> std::collections::HashMap<String, String> {
     let mut out = std::collections::HashMap::new();
-    // Skip el primer token (`form-data`).
+    // Skip the first token (`form-data`).
     for part in s.split(';').skip(1) {
         let part = part.trim();
         let Some(eq_idx) = part.find('=') else {
@@ -4078,12 +4143,12 @@ fn parse_cd_params(s: &str) -> std::collections::HashMap<String, String> {
     out
 }
 
-/// Mini-tanda MP — URL-decode (formato `application/x-www-form-urlencoded`):
-/// `+` → espacio, `%XX` → byte hex. Errores de %XX malformado se
-/// reportan con offset claro.
-/// Quick win F13 bundle — encoder base64 estándar (RFC 4648, sin
-/// URL-safe alphabet, con padding). Inline para evitar dep `base64`.
-/// Acepta cualquier slice de bytes, devuelve String ASCII.
+/// Mini-batch MP — URL-decode (format
+/// `application/x-www-form-urlencoded`): `+` → space, `%XX` → hex
+/// byte. Malformed %XX errors are reported with a clear offset.
+/// Quick win F13 bundle — standard base64 encoder (RFC 4648, no
+/// URL-safe alphabet, with padding). Inline to avoid the `base64`
+/// dep. Accepts any byte slice, returns an ASCII String.
 fn b64_encode_standard(bytes: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
@@ -4125,7 +4190,7 @@ fn url_decode(s: &str) -> Result<String, String> {
                     .ok_or_else(|| format!("urlencoded: %XX incompleto en offset {}", idx))?;
                 let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
                     .map_err(|_| format!("urlencoded: %{}{} no es hex válido", h1, h2))?;
-                // Acumular bytes para chars multi-byte UTF-8.
+                // Accumulate bytes for multi-byte UTF-8 chars.
                 out.push(byte as char);
                 idx += 3;
                 continue;
@@ -4138,9 +4203,9 @@ fn url_decode(s: &str) -> Result<String, String> {
 }
 
 fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
-    // Body vacío para un handler que espera body → error claro. Esto
-    // pasa con `POST /users` sin body cuando el handler declara
-    // `body: User`.
+    // Empty body for a handler expecting a body → clear error.
+    // This happens with `POST /users` without a body when the
+    // handler declares `body: User`.
     if bytes.is_empty() {
         return Err(format!(
             "body requerido para el parámetro '{}' pero la request no trajo body",
@@ -4155,24 +4220,25 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
     }
 }
 
-/// Arranca el servidor HTTP y bloquea el thread llamador hasta Ctrl-C.
+/// Starts the HTTP server and blocks the calling thread until
+/// Ctrl-C.
 ///
-/// **F17.5**: modelo simplificado, sin bridge:
-///   - Un único runtime tokio `rt-multi-thread` corre acá mismo
-///     (`block_on`), N workers según cores.
-///   - El `HttpRegistry` se envuelve en `Arc` y se comparte con cada
-///     handler axum. Cada worker que recibe una request invoca
-///     `handle_task(&registry, ...).await` directo sobre el
-///     evaluator — `Send + Sync` lo destrabó F17.2-3.
-///   - El thread main bloquea sobre el runtime hasta que axum baja
-///     por Ctrl-C (graceful shutdown sigue intacto).
+/// **F17.5**: simplified model, no bridge:
+///   - A single `rt-multi-thread` tokio runtime runs right here
+///     (`block_on`), N workers per cores.
+///   - `HttpRegistry` is wrapped in `Arc` and shared with each axum
+///     handler. Each worker that receives a request invokes
+///     `handle_task(&registry, ...).await` directly on the
+///     evaluator — `Send + Sync` unblocked it in F17.2-3.
+///   - The main thread blocks on the runtime until axum shuts down
+///     on Ctrl-C (graceful shutdown still intact).
 ///
-/// Antes (Fase 4 → F17.4a) había un std::thread separado para tokio
-/// más un loop síncrono en main que recibía `InterpTask`s por mpsc
-/// y respondía por `oneshot`s. La eliminación del bridge fue la deuda
-/// más grande de F17 — destraba paralelismo HTTP real (~300 LoC
-/// menos en este archivo) y deja al evaluator alcanzable desde
-/// axum sin glue.
+/// Before (Phase 4 → F17.4a) there was a separate std::thread for
+/// tokio plus a synchronous loop in main that received `InterpTask`s
+/// over mpsc and replied through `oneshot`s. Removing the bridge
+/// was F17's biggest piece of debt — it unblocks real HTTP
+/// parallelism (~300 fewer LoC in this file) and makes the evaluator
+/// reachable from axum without glue.
 pub fn serve(
     registry: HttpRegistry,
     program: crate::ast::Program,
@@ -4182,12 +4248,13 @@ pub fn serve(
     let resolved_config = registry.resolved_config();
     let enable_docs = resolved_config.enable_docs;
 
-    // Fase 12.3.iter2.Tier3 — Prometheus opt-in. Dual gate: el flag
-    // del config (`@server(prometheus=true)`) OR la env var
-    // `FITZ_PROMETHEUS=1`/`true`/`yes`. El env var precede como
-    // override (útil en producción para desactivar/activar sin
-    // recompilar). Cuando true, `init_prometheus` instala el recorder
-    // global y `build_router` auto-mounta `GET /metrics`.
+    // Phase 12.3.iter2.Tier3 — opt-in Prometheus. Dual gate: the
+    // config flag (`@server(prometheus=true)`) OR the env var
+    // `FITZ_PROMETHEUS=1`/`true`/`yes`. The env var takes
+    // precedence as an override (useful in production to
+    // toggle without recompiling). When true, `init_prometheus`
+    // installs the global recorder and `build_router` auto-mounts
+    // `GET /metrics`.
     let prometheus_enabled = resolved_config.prometheus_enabled
         || matches!(
             std::env::var("FITZ_PROMETHEUS").as_deref(),
@@ -4195,16 +4262,18 @@ pub fn serve(
         );
     crate::observability::init_prometheus(prometheus_enabled);
 
-    // Fase 7.2: precomputar el schema OpenAPI con `program` + `registry`
-    // y pasarlo a `build_router`. El auto-register de `/openapi.json`
-    // y `/docs` pasa por ahí (y respeta cualquier ruta declarada por
-    // el usuario con esos paths).
+    // Phase 7.2: precompute the OpenAPI schema with `program` +
+    // `registry` and pass it to `build_router`. Auto-register of
+    // `/openapi.json` and `/docs` happens there (and respects any
+    // user-declared route at those paths).
     //
-    // Fase 7.4: si `@server(docs=false)`, ni computamos el schema ni
-    // lo pasamos al router — ambas rutas auto-registradas quedan en
-    // 404. Trade-off: zero overhead cuando el usuario apaga los docs.
-    // Q.2: leer `api_version` del config si se seteó vía
-    // `@server(api_version="X.Y.Z")`. None → schema usa default "0.1.0".
+    // Phase 7.4: if `@server(docs=false)`, we neither compute the
+    // schema nor pass it to the router — both auto-registered
+    // routes stay 404. Trade-off: zero overhead when the user
+    // turns off docs.
+    // Q.2: read `api_version` from the config if set via
+    // `@server(api_version="X.Y.Z")`. None → schema uses default
+    // "0.1.0".
     let api_version = registry
         .server_config
         .as_ref()
@@ -4219,9 +4288,10 @@ pub fn serve(
     } else {
         None
     };
-    // Fase 9.w.2.d — AsyncAPI 3.0 schema cuando hay handlers `@ws`.
-    // Gated por `enable_docs` igual que OpenAPI: si el usuario apagó
-    // docs con `@server(docs=false)`, tampoco emitimos AsyncAPI.
+    // Phase 9.w.2.d — AsyncAPI 3.0 schema when there are `@ws`
+    // handlers. Gated by `enable_docs` same as OpenAPI: if the
+    // user turned off docs with `@server(docs=false)`, we don't
+    // emit AsyncAPI either.
     let asyncapi_schema = if enable_docs {
         let channels = crate::asyncapi::channels_from_registry(&registry);
         if channels.is_empty() {
@@ -4239,12 +4309,13 @@ pub fn serve(
     let has_asyncapi = asyncapi_schema.is_some();
 
     let registry = std::sync::Arc::new(registry);
-    // Fase 9.w.3 — clonamos el cron_registry ANTES de mover el
-    // `Arc<HttpRegistry>` al router. Spawn del scheduler adentro del
-    // runtime, paralelo a axum.
+    // Phase 9.w.3 — clone the cron_registry BEFORE moving the
+    // `Arc<HttpRegistry>` into the router. Scheduler spawned
+    // inside the runtime, in parallel with axum.
     let cron_registry_for_scheduler = registry.cron_registry.clone();
-    // Fase 12.1.b — capturamos draining + shutdown_timeout ANTES de
-    // mover `registry` al router; el shutdown signal los necesita.
+    // Phase 12.1.b — capture draining + shutdown_timeout BEFORE
+    // moving `registry` into the router; the shutdown signal
+    // needs them.
     let draining_for_shutdown = registry.draining.clone();
     let shutdown_timeout_secs = resolved_config.shutdown_timeout_secs;
 
@@ -4278,10 +4349,10 @@ pub fn serve(
         if crate::observability::prometheus_handle().is_some() {
             eprintln!("   GET /metrics       (Prometheus exposition format)");
         }
-        // Fase 9.w.3 — arranca el cron scheduler antes de axum::serve.
-        // Los tasks corren detached en el mismo runtime tokio. Cuando
-        // el `with_graceful_shutdown(ctrl_c)` dispare y dropeemos el
-        // runtime, los tasks cron también se cancelan.
+        // Phase 9.w.3 — starts the cron scheduler before
+        // axum::serve. Tasks run detached on the same tokio
+        // runtime. When `with_graceful_shutdown(ctrl_c)` fires and
+        // we drop the runtime, cron tasks are also cancelled.
         crate::cron_jobs::spawn_cron_scheduler(cron_registry_for_scheduler);
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal(
@@ -4294,22 +4365,22 @@ pub fn serve(
     Ok(())
 }
 
-/// Fase 12.1.b — Escucha SIGINT (Ctrl-C) y orquesta el graceful
-/// shutdown.
+/// Phase 12.1.b — Listens for SIGINT (Ctrl-C) and orchestrates the
+/// graceful shutdown.
 ///
-/// Secuencia:
-///   1. Espera a SIGINT/Ctrl-C.
-///   2. Flippea `draining` a `true` — `/readyz` empieza a retornar 503
-///      inmediato. K8s con `readinessProbe` deja de rutear traffic
-///      nuevo en ~1-2 ticks.
-///   3. Espera un grace period chico (2 segundos hardcoded en MVP)
-///      para que K8s vea el cambio y rerutee. Sin este delay, el pod
-///      puede recibir requests en flight justo en el momento del
-///      shutdown.
-///   4. Devuelve — axum cierra el listener y drena las requests
-///      in-flight. El timeout total lo controla
-///      `shutdown_timeout_secs` (default 30s) via el wrapper de tokio
-///      timeout más abajo (el caller arranca un timer paralelo si
+/// Sequence:
+///   1. Waits for SIGINT/Ctrl-C.
+///   2. Flips `draining` to `true` — `/readyz` starts returning
+///      503 immediately. K8s with `readinessProbe` stops routing
+///      new traffic in ~1-2 ticks.
+///   3. Waits for a short grace period (2 seconds hardcoded in the
+///      MVP) so K8s sees the change and reroutes. Without this
+///      delay, the pod may receive in-flight requests right at
+///      shutdown time.
+///   4. Returns — axum closes the listener and drains in-flight
+///      requests. The total timeout is controlled by
+///      `shutdown_timeout_secs` (default 30s) via the tokio timeout
+///      wrapper below (the caller starts a parallel timer if
 ///      `> 0`).
 async fn shutdown_signal(
     draining: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -4319,10 +4390,10 @@ async fn shutdown_signal(
     eprintln!("\n[shutdown] SIGINT recibido — flippeando draining state");
     draining.store(true, std::sync::atomic::Ordering::SeqCst);
 
-    // Grace period: dar tiempo a K8s a notar el 503 y rerutear traffic.
-    // 2 segundos es el mínimo razonable (kubelet polea probes cada
-    // ~10s por default, pero load balancers más rápidos como Envoy ven
-    // el cambio en ~1s).
+    // Grace period: give K8s time to notice the 503 and reroute
+    // traffic. 2 seconds is the reasonable minimum (kubelet polls
+    // probes every ~10s by default, but faster load balancers like
+    // Envoy see the change in ~1s).
     let grace = std::cmp::min(2u64, shutdown_timeout_secs.max(1));
     eprintln!("[shutdown] esperando {grace}s de grace period para que el load balancer rerutee...");
     tokio::time::sleep(std::time::Duration::from_secs(grace)).await;
@@ -4333,34 +4404,35 @@ async fn shutdown_signal(
 }
 
 // ---------------------------------------------------------------------------
-// Fase 9.w.2 — Runtime de WebSockets
+// Phase 9.w.2 — WebSocket runtime
 // ---------------------------------------------------------------------------
 //
-// Tres piezas:
+// Three pieces:
 //
-//   1. `WsBroadcaster` — compartido por `HttpRegistry`. Mantiene el
-//      mapeo endpoint→outbox per conn. Permite `broadcast(msg)` que
-//      envía a todos los conns vivos del endpoint.
+//   1. `WsBroadcaster` — shared by `HttpRegistry`. Maintains the
+//      endpoint→outbox-per-conn mapping. Enables `broadcast(msg)`
+//      that sends to every live conn on the endpoint.
 //
-//   2. `WsReadStreamImpl` — wrapper sobre el SplitStream de axum que
-//      implementa el trait `WsReadStreamTrait` declarado en value.rs.
-//      Filtra frames no-text (ping/pong automático; binary → Err)
-//      y normaliza close → Ok(None).
+//   2. `WsReadStreamImpl` — wrapper over the axum SplitStream that
+//      implements the `WsReadStreamTrait` declared in value.rs.
+//      Filters non-text frames (auto ping/pong; binary → Err) and
+//      normalizes close → Ok(None).
 //
-//   3. `handle_ws_upgrade` — corre tras el handshake HTTP→WS exitoso.
-//      Spawnea el writer task (drena outbox → sink), arma el
-//      `Value::WsConn`, invoca el handler Fitz, limpia al terminar.
+//   3. `handle_ws_upgrade` — runs after the successful HTTP→WS
+//      handshake. Spawns the writer task (drains outbox → sink),
+//      builds the `Value::WsConn`, invokes the Fitz handler, cleans
+//      up when done.
 //
-// El auth check vive en `handle_ws_route_with_auth` y corre ANTES del
-// `WebSocketUpgrade::on_upgrade` — si falla, devolvemos 401/403 HTTP
-// y el upgrade nunca ocurre.
+// The auth check lives in `handle_ws_route_with_auth` and runs
+// BEFORE `WebSocketUpgrade::on_upgrade` — if it fails, we return
+// 401/403 HTTP and the upgrade never happens.
 
-/// Broadcaster del runtime. Mantiene `HashMap<endpoint, Vec<(conn_id,
-/// outbox_tx)>>`. Thread-safe — los métodos toman locks chicos y los
-/// sueltan rápido.
-/// Alias del tipo del map interno del broadcaster. Evita el lint
-/// `type_complexity` de clippy y deja explícito el shape: por endpoint
-/// (path), una lista de `(conn_id, outbox_tx)`.
+/// Runtime broadcaster. Holds `HashMap<endpoint, Vec<(conn_id,
+/// outbox_tx)>>`. Thread-safe — methods take short locks and release
+/// them quickly.
+/// Alias for the type of the broadcaster's internal map. Avoids
+/// clippy's `type_complexity` lint and makes the shape explicit:
+/// per endpoint (path), a list of `(conn_id, outbox_tx)`.
 type WsConnList = Vec<(u64, tokio::sync::mpsc::UnboundedSender<WsOutMessage>)>;
 
 pub struct WsBroadcaster {
@@ -4393,8 +4465,8 @@ impl WsBroadcaster {
         }
     }
 
-    /// Registra un nuevo conn en el endpoint. Devuelve el `conn_id`
-    /// único para que el caller pueda llamar `unregister` al cerrar.
+    /// Registers a new conn on the endpoint. Returns the unique
+    /// `conn_id` so the caller can call `unregister` on close.
     pub fn register(
         &self,
         endpoint: String,
@@ -4408,9 +4480,9 @@ impl WsBroadcaster {
         conn_id
     }
 
-    /// Desregistra un conn. Idempotente — si ya no estaba (caso normal
-    /// si el conn cerró por error y se removió del retain de broadcast),
-    /// no hace nada.
+    /// Unregisters a conn. Idempotent — if it was already gone
+    /// (normal case if the conn closed on error and was removed by
+    /// the broadcast retain), it does nothing.
     pub fn unregister(&self, endpoint: &str, conn_id: u64) {
         let mut conns = self.conns.lock();
         if let Some(list) = conns.get_mut(endpoint) {
@@ -4421,7 +4493,7 @@ impl WsBroadcaster {
         }
     }
 
-    /// Cantidad de conns vivos en un endpoint. Útil para tests.
+    /// Number of live conns on an endpoint. Useful for tests.
     #[allow(dead_code)]
     pub fn count(&self, endpoint: &str) -> usize {
         self.conns
@@ -4434,8 +4506,8 @@ impl WsBroadcaster {
 
 impl WsBroadcasterTrait for WsBroadcaster {
     fn broadcast_text(&self, endpoint: &str, payload: String) {
-        // Strategy: lock corto, retain elimina los txs cerrados
-        // lazy. Cada outbox_tx.send() es non-blocking (mpsc unbounded).
+        // Strategy: short lock, retain lazily drops closed txs.
+        // Each outbox_tx.send() is non-blocking (unbounded mpsc).
         let mut conns = self.conns.lock();
         if let Some(list) = conns.get_mut(endpoint) {
             list.retain(|(_, tx)| tx.send(WsOutMessage::Text(payload.clone())).is_ok());
@@ -4446,9 +4518,9 @@ impl WsBroadcasterTrait for WsBroadcaster {
     }
 
     fn broadcast_binary(&self, endpoint: &str, payload: Vec<u8>) {
-        // 9.w.2-binary-frames — mismo modelo que `broadcast_text` pero
-        // empuja `WsOutMessage::Binary(...)`. El writer task de cada
-        // conn lo traduce a `Message::Binary` axum.
+        // 9.w.2-binary-frames — same model as `broadcast_text` but
+        // pushes `WsOutMessage::Binary(...)`. Each conn's writer
+        // task translates it to axum's `Message::Binary`.
         let mut conns = self.conns.lock();
         if let Some(list) = conns.get_mut(endpoint) {
             list.retain(|(_, tx)| tx.send(WsOutMessage::Binary(payload.clone())).is_ok());
@@ -4459,20 +4531,20 @@ impl WsBroadcasterTrait for WsBroadcaster {
     }
 }
 
-/// Wrapper sobre el read half del WebSocket axum que implementa el
-/// trait que `WsConnHandle.rx` espera. 9.w.2-binary-frames: expone
-/// AMBOS text y binary; el evaluator/codegen discrimina según el T
-/// declarado del `WsConn<T>`.
+/// Wrapper over the read half of the axum WebSocket implementing
+/// the trait `WsConnHandle.rx` expects. 9.w.2-binary-frames:
+/// exposes BOTH text and binary; the evaluator/codegen discriminates
+/// based on the declared T of `WsConn<T>`.
 ///
 ///   - text   → `Ok(Some(IncomingFrame::Text(s)))`.
 ///   - binary → `Ok(Some(IncomingFrame::Binary(bs)))`.
-///   - close  → `Ok(None)` (conn cerrada ordenadamente).
-///   - ping/pong → axum auto-replies pings desde el server side;
-///     los descartamos en el loop interno.
+///   - close  → `Ok(None)` (cleanly closed conn).
+///   - ping/pong → axum auto-replies pings on the server side; we
+///     discard them in the inner loop.
 ///
-/// `Ping/Pong/Close` los maneja la stack axum/tungstenite por
-/// debajo (al iterar el stream); acá solo decidimos qué exponer al
-/// handler Fitz.
+/// `Ping/Pong/Close` are handled by the axum/tungstenite stack
+/// underneath (while iterating the stream); here we only decide
+/// what to expose to the Fitz handler.
 struct WsReadStreamImpl {
     inner: futures_util::stream::SplitStream<axum::extract::ws::WebSocket>,
 }
@@ -4500,9 +4572,9 @@ impl WsReadStreamTrait for WsReadStreamImpl {
                     }
                     Some(Ok(axum::extract::ws::Message::Ping(_)))
                     | Some(Ok(axum::extract::ws::Message::Pong(_))) => {
-                        // axum auto-replies pings desde el server side;
-                        // descartamos para que el handler vea solo
-                        // text/binary.
+                        // axum auto-replies pings on the server
+                        // side; we discard them so the handler only
+                        // sees text/binary.
                         continue;
                     }
                     Some(Ok(axum::extract::ws::Message::Close(_))) => {
@@ -4516,20 +4588,21 @@ impl WsReadStreamTrait for WsReadStreamImpl {
     }
 }
 
-/// Construye un `Value::WsConn` a partir del WebSocket axum + el
-/// broadcaster. También arranca el writer task que drena el outbox.
-/// Devuelve `(value, conn_id, writer_handle)` — el caller usa `conn_id`
-/// para `unregister` al cerrar y `writer_handle` para abortar el task.
+/// Builds a `Value::WsConn` from the axum WebSocket + the
+/// broadcaster. Also starts the writer task that drains the outbox.
+/// Returns `(value, conn_id, writer_handle)` — the caller uses
+/// `conn_id` for `unregister` on close and `writer_handle` to abort
+/// the task.
 ///
-/// `msg_type` + `env` permiten que `recv()` coerce `Map` recibidos a
-/// `Instance` cuando T es nominal (paralelo a 8.4.3). `None` para
-/// conns construidos en tests sin contexto de tipo.
+/// `msg_type` + `env` allow `recv()` to coerce received `Map`s into
+/// `Instance` when T is nominal (parallel to 8.4.3). `None` for
+/// conns built in tests without type context.
 ///
-/// Fase 9.w.2.e — `heartbeat_secs`: intervalo de Ping automático en
-/// segundos. `0` desactiva. El writer task traduce
-/// `WsOutMessage::Ping` a un frame Ping de axum; si el sink falla, el
-/// writer termina y `closed` se setea (lo cual el heartbeat task
-/// detecta en su próxima iteración y termina solo).
+/// Phase 9.w.2.e — `heartbeat_secs`: automatic Ping interval in
+/// seconds. `0` disables. The writer task translates
+/// `WsOutMessage::Ping` into an axum Ping frame; if the sink fails,
+/// the writer terminates and `closed` is set (which the heartbeat
+/// task detects on its next iteration and terminates by itself).
 pub fn build_ws_conn(
     socket: axum::extract::ws::WebSocket,
     endpoint: String,
@@ -4560,7 +4633,7 @@ pub fn build_ws_conn(
                     }
                 }
                 WsOutMessage::Binary(bs) => {
-                    // 9.w.2-binary-frames — frame raw binario.
+                    // 9.w.2-binary-frames — raw binary frame.
                     if sink
                         .send(axum::extract::ws::Message::Binary(bs.into()))
                         .await
@@ -4587,18 +4660,18 @@ pub fn build_ws_conn(
         closed_writer.store(true, std::sync::atomic::Ordering::Relaxed);
     });
 
-    // Fase 9.w.2.e — heartbeat task. Si `heartbeat_secs > 0`, spawn
-    // un task que envía Ping al outbox cada N segundos. Termina cuando
-    // `closed` se setea (writer task falló) o cuando el outbox_tx
-    // está cerrado. Sin allocs extras: clonamos solo el tx (cheap) y
-    // el flag `closed`.
+    // Phase 9.w.2.e — heartbeat task. If `heartbeat_secs > 0`,
+    // spawn a task that sends Ping to the outbox every N seconds.
+    // Ends when `closed` is set (writer task failed) or when the
+    // outbox_tx is closed. No extra allocs: we clone only the tx
+    // (cheap) and the `closed` flag.
     if heartbeat_secs > 0 {
         let hb_tx = outbox_tx.clone();
         let hb_closed = closed.clone();
         let interval = std::time::Duration::from_secs(heartbeat_secs);
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
-            // Saltamos el primer tick (fire-immediate de interval).
+            // Skip the first tick (interval fires immediately).
             ticker.tick().await;
             loop {
                 ticker.tick().await;
@@ -4635,7 +4708,7 @@ pub fn build_ws_conn(
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
+#[allow(clippy::approx_constant)] // 3.14 in tests is a generic Float, not PI.
 mod tests {
     use super::*;
     use crate::ast::StrPart;
@@ -4718,7 +4791,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn path_con_expresion_no_ident_es_error() {
-        // `"{a+b}"` — interpolación con BinOp.
+        // `"{a+b}"` — interpolation with BinOp.
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/".into()),
@@ -4756,17 +4829,17 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn path_no_string_literal_es_error() {
-        // `@get(42)` — Int en lugar de string.
+        // `@get(42)` — Int instead of string.
         let err = parse_path_template(&Expr::Int(42, Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::NotAStringLiteral);
     }
 
-    // ---- Query params en el template ----
+    // ---- Query params in the template ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn query_template_separa_path_de_query_params() {
-        // `"/items?limit={limit}&offset={offset}"` → path solo `/items`,
-        // query_params `["limit", "offset"]` en orden.
+        // `"/items?limit={limit}&offset={offset}"` → path only
+        // `/items`, query_params `["limit", "offset"]` in order.
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/items?limit=".into()),
@@ -4787,8 +4860,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn query_template_combina_con_path_params() {
-        // `"/users/{id}/posts?limit={limit}"` → path `/users/{id}/posts`,
-        // path params `["id"]`, query params `["limit"]`.
+        // `"/users/{id}/posts?limit={limit}"` → path
+        // `/users/{id}/posts`, path params `["id"]`, query params
+        // `["limit"]`.
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/users/".into()),
@@ -4806,7 +4880,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn query_template_key_distinta_del_nombre_es_error() {
-        // `"/x?l={limit}"` — key `l` no coincide con nombre `limit`.
+        // `"/x?l={limit}"` — key `l` doesn't match name `limit`.
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/x?l=".into()),
@@ -4824,7 +4898,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn query_template_malformado_es_error() {
-        // `"/x?limit"` — falta `={name}`.
+        // `"/x?limit"` — missing `={name}`.
         let e = Expr::Str("/x?limit".into(), Span::ZERO);
         let err = parse_path_template(&e).unwrap_err();
         assert!(
@@ -4836,7 +4910,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn query_template_param_duplicado_con_path_es_error() {
-        // `"/users/{id}?id={id}"` — `id` aparece en path y query.
+        // `"/users/{id}?id={id}"` — `id` appears in both path and
+        // query.
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/users/".into()),
@@ -4847,9 +4922,10 @@ mod tests {
             Span::ZERO,
         );
         let err = parse_path_template(&e).unwrap_err();
-        // El parser dispara DuplicateParam al ver el segundo `{id}` en
-        // la primera pasada (antes de separar path de query). Eso es
-        // OK — el mensaje es claro al usuario igualmente.
+        // The parser fires DuplicateParam when it sees the second
+        // `{id}` in the first pass (before separating path from
+        // query). That's OK — the message is still clear to the
+        // user.
         assert_eq!(err, PathError::DuplicateParam("id".into()));
     }
 
@@ -4936,7 +5012,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn value_to_json_function_es_error() {
-        // Function no es serializable.
+        // Function is not serializable.
         let env = crate::env::Environment::new();
         let v = Value::Function {
             params: vec![],
@@ -4974,7 +5050,7 @@ mod tests {
         ))));
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 500);
-        // Body es `{"error":"no encontrado"}` (orden de serde_json).
+        // Body is `{"error":"no encontrado"}` (serde_json order).
         assert_eq!(out.body, "{\"error\":\"no encontrado\"}");
     }
 
@@ -4989,16 +5065,17 @@ mod tests {
         );
         let out = value_to_outcome(&inst);
         assert_eq!(out.status, 200);
-        // serde_json::Map preserva orden de inserción con la feature
-        // `preserve_order` activada; sin ella, el orden es indefinido.
-        // Acá no asumimos orden: parseamos el body y comparamos.
+        // serde_json::Map preserves insertion order with the
+        // `preserve_order` feature enabled; without it, the order
+        // is undefined. We don't assume order here: parse the body
+        // and compare.
         let parsed: serde_json::Value = serde_json::from_str(&out.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 7, "name": "ana" }));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn outcome_de_tipo_no_serializable_es_500() {
-        // Range no es serializable.
+        // Range is not serializable.
         let v = Value::Range { start: 0, end: 10 };
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 500);
@@ -5009,9 +5086,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn outcome_de_http_response_usa_su_status_y_body() {
-        // El evaluator produce `Value::HttpResponse` cuando el usuario
-        // hace `return 401 { ... }`. El outcome usa el status del
-        // response y serializa el body con las reglas habituales.
+        // The evaluator produces `Value::HttpResponse` when the
+        // user does `return 401 { ... }`. The outcome uses the
+        // response status and serializes the body with the usual
+        // rules.
         let body = Value::new_instance(
             "Error".into(),
             vec![("message".into(), Value::Str("no autorizado".into()))],
@@ -5028,8 +5106,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn outcome_de_http_response_sin_body_es_null_json() {
-        // `HttpResponse { body: None }` → body JSON null. Reserva para
-        // 204 No Content si llega; hoy el parser exige body explícito.
+        // `HttpResponse { body: None }` → JSON null body. Reserved
+        // for 204 No Content if it ever arrives; today the parser
+        // requires an explicit body.
         let v = Value::HttpResponse {
             status: 204,
             body: None,
@@ -5041,7 +5120,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn outcome_de_http_response_con_body_map_serializa_a_objeto() {
-        // Body = map literal con string keys → objeto JSON.
+        // Body = map literal with string keys → JSON object.
         let body = Value::new_map(vec![
             (Value::Str("error".into()), Value::Str("falló".into())),
             (Value::Str("code".into()), Value::Int(42)),
@@ -5097,8 +5176,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn path_param_tipo_no_soportado_es_error() {
-        // Un tipo custom no entra como path param: el handler tiene
-        // que recibir el id raw y reconstruir el objeto adentro.
+        // A custom type isn't allowed as a path param: the handler
+        // must receive the raw id and rebuild the object inside.
         let err = coerce_path_param("42", Some("User")).unwrap_err();
         assert!(err.contains("User"));
     }
@@ -5114,28 +5193,28 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn with_active_registry_expone_has_active_para_el_evaluator() {
-        // Afuera: no hay registry, los decorators dan error explícito.
+        // Outside: no registry, decorators emit an explicit error.
         assert!(!has_active_registry());
 
         let ((), reg) = with_active_registry(|| {
-            // Adentro: el evaluator ve registry activo.
+            // Inside: the evaluator sees an active registry.
             assert!(has_active_registry());
         });
 
-        // Devuelto vacío (nadie pusheó), y afuera sigue sin haber.
+        // Returned empty (nobody pushed), and outside still none.
         assert!(reg.is_empty());
         assert!(!has_active_registry());
     }
 
-    // ---- handle_task (lado del intérprete, sin tokio) ----
+    // ---- handle_task (interpreter side, no tokio) ----
 
-    /// Helper: construye un `HttpRegistry` con una sola ruta a partir
-    /// de una fuente Fitz que la registra. Aprovecha el evaluator
-    /// real, así no construimos `Value::Function` a mano (que es
-    /// frágil — capturar el closure correcto importa).
+    /// Helper: builds an `HttpRegistry` with a single route from a
+    /// Fitz source that registers it. Uses the real evaluator so we
+    /// don't construct `Value::Function` by hand (which is fragile
+    /// — capturing the right closure matters).
     ///
-    /// Fase 6.4: pasa a `async fn` porque `eval` ahora es async.
-    /// Los call sites suman `.await`.
+    /// Phase 6.4: becomes `async fn` because `eval` is now async.
+    /// Call sites add `.await`.
     async fn registry_from_source(src: &str) -> HttpRegistry {
         let (res, registry) = with_active_registry_async(|| async {
             let tokens = crate::lexer::tokenize(src).unwrap();
@@ -5205,7 +5284,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_handler_que_retorna_err_es_500_con_error() {
-        // El handler devuelve Err("boom"): runtime lo traduce a 500.
+        // The handler returns Err("boom"): runtime translates it
+        // to 500.
         let src = "@get(\"/\")\nfn h() => Err(\"boom\")";
         let registry = registry_from_source(src).await;
         let outcome = handle_task(
@@ -5242,12 +5322,12 @@ mod tests {
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
     }
 
-    // ---- Mini-fase MW.1: middleware chain en handle_task ----
+    // ---- Mini-phase MW.1: middleware chain in handle_task ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_middleware_que_retorna_null_continua_al_handler() {
-        // Middleware "passthrough": no devuelve nada → la cadena sigue
-        // y el handler corre normal.
+        // "Passthrough" middleware: returns nothing → chain
+        // continues and the handler runs normally.
         let src = "\
             fn pass(req) {}\n\
             @middleware(pass)\n\
@@ -5270,8 +5350,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_middleware_que_short_circuita_con_401() {
-        // Middleware corta la cadena con `return 401 { ... }`. El handler
-        // NO se invoca y la response es la del middleware.
+        // Middleware cuts the chain with `return 401 { ... }`. The
+        // handler is NOT invoked and the response is the
+        // middleware's.
         let src = "\
             fn auth(req) {\n\
                 return 401 {\"error\": \"no autorizado\"}\n\
@@ -5297,9 +5378,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_dos_middlewares_short_circuita_el_primero_que_corte() {
-        // Primero `logger` (pass), después `auth` (corta). El handler
-        // no debería correr. Si invertimos el orden y el corte aterriza
-        // primero, lo verificamos abajo.
+        // First `logger` (pass), then `auth` (cuts). The handler
+        // shouldn't run. If we flip the order and the cut lands
+        // first, we verify it below.
         let src = "\
             fn logger(req) {}\n\
             fn auth(req) {\n\
@@ -5326,9 +5407,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_middleware_lee_method_y_path_del_request() {
-        // El middleware inspecciona req.method y req.path. Verifica
-        // que el path lleva los path params SUSTITUIDOS, no la
-        // template (mini-fase MW.1: `/users/{id}` → `/users/42`).
+        // The middleware inspects req.method and req.path. Verifies
+        // that the path carries the SUBSTITUTED path params, not
+        // the template (mini-phase MW.1: `/users/{id}` →
+        // `/users/42`).
         let src = "\
             fn debug_mw(req) {\n\
                 return 200 {\"method\": req.method, \"path\": req.path}\n\
@@ -5357,8 +5439,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_middleware_lee_headers_lowercase() {
-        // Headers expuestos al middleware con keys en lowercase (mismo
-        // criterio que el dispatch de @header).
+        // Headers exposed to the middleware with lowercase keys
+        // (same criterion as the @header dispatch).
         let src = "\
             fn auth(req) {\n\
                 return 200 {\"token\": req.headers[\"authorization\"]}\n\
@@ -5386,9 +5468,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_middleware_que_retorna_valor_invalido_es_500() {
-        // Si el middleware devuelve cualquier cosa que no sea Null ni
-        // HttpResponse (Int, Str, Instance, ...), el runtime emite 500
-        // con mensaje claro citando "gate-only".
+        // If the middleware returns anything other than Null or
+        // HttpResponse (Int, Str, Instance, ...), the runtime
+        // emits 500 with a clear message citing "gate-only".
         let src = "\
             fn loco(req) => 42\n\
             @middleware(loco)\n\
@@ -5412,7 +5494,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-fase MW.2: cors built-in + inyección de headers ----
+    // ---- Mini-phase MW.2: cors built-in + header injection ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn cors_response_headers_emite_los_tres_headers_basicos() {
@@ -5422,11 +5504,11 @@ mod tests {
         assert!(names.contains(&"access-control-allow-origin"));
         assert!(names.contains(&"access-control-allow-methods"));
         assert!(names.contains(&"access-control-allow-headers"));
-        // max_age default es None → no se emite ese header.
+        // max_age default is None → that header is not emitted.
         assert!(!names.contains(&"access-control-max-age"));
     }
 
-    // ---- Q.3: AllowOrigin Set + echo del Origin del request ----
+    // ---- Q.3: AllowOrigin Set + echo of the request Origin ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn cors_set_echo_si_origin_esta_en_la_lista() {
@@ -5448,21 +5530,23 @@ mod tests {
             allow_origin: AllowOrigin::Set(vec!["https://a.com".into()]),
             ..CorsConfig::permissive_default()
         };
-        // Origin del request NO está en la lista → el header
-        // access-control-allow-origin NO se emite; el browser
-        // rechaza la response.
+        // The request Origin is NOT in the list → the
+        // access-control-allow-origin header is NOT emitted; the
+        // browser rejects the response.
         let headers = cfg.response_headers(Some("https://evil.com"));
         let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
         assert!(!names.contains(&"access-control-allow-origin"));
-        // El resto de headers CORS sí se emiten (no son request-aware).
+        // The other CORS headers are emitted (they are not
+        // request-aware).
         assert!(names.contains(&"access-control-allow-methods"));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn cors_set_omite_origin_si_request_no_trae_origin() {
-        // Sin header `Origin` (request same-origin, browser no lo manda),
-        // el modo Set tampoco emite — no hay nada que echo. El browser
-        // de all modos no lo necesitaría en ese caso.
+        // Without an `Origin` header (same-origin request, browser
+        // doesn't send it), Set mode also doesn't emit — nothing
+        // to echo. The browser wouldn't need it in that case
+        // anyway.
         let cfg = CorsConfig {
             allow_origin: AllowOrigin::Set(vec!["https://a.com".into()]),
             ..CorsConfig::permissive_default()
@@ -5474,7 +5558,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cors_literal_ignora_el_origin_del_request() {
-        // Literal emite siempre el mismo valor, sin importar el request.
+        // Literal always emits the same value, regardless of the
+        // request.
         let cfg = CorsConfig {
             allow_origin: AllowOrigin::Literal("*".into()),
             ..CorsConfig::permissive_default()
@@ -5521,8 +5606,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_inyecta_headers_cors_en_response_real() {
-        // Handler normal + @middleware(cors()) → la response 200 carga
-        // los headers Access-Control-Allow-*.
+        // Normal handler + @middleware(cors()) → the 200 response
+        // carries the Access-Control-Allow-* headers.
         let src = "\
             @middleware(cors())\n\
             @get(\"/api\")\n\
@@ -5551,9 +5636,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_inyecta_headers_cors_incluso_en_500_de_error() {
-        // Si el handler devuelve Err(...), la response es 500 PERO igual
-        // lleva los headers CORS. Sin esto el browser ve "CORS error" en
-        // lugar del 500 que de verdad pasó.
+        // If the handler returns Err(...), the response is 500 but
+        // still carries the CORS headers. Without this the browser
+        // sees "CORS error" instead of the actual 500 that
+        // happened.
         let src = "\
             @middleware(cors())\n\
             @get(\"/\")\n\
@@ -5605,8 +5691,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_cors_set_echo_request_origin_si_matchea() {
-        // Q.3: cors con lista de orígenes permitidos. Request con
-        // `Origin: https://a.com` en la lista → echo del origin.
+        // Q.3: cors with allowed origin list. Request with
+        // `Origin: https://a.com` in the list → echo the origin.
         let src = "\
             @middleware(cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]}))\n\
             @get(\"/\")\n\
@@ -5656,16 +5742,17 @@ mod tests {
             .iter()
             .map(|(n, _)| n.as_str())
             .collect();
-        // El header origin NO se emite (browser rechaza la response).
+        // The origin header is NOT emitted (browser rejects the
+        // response).
         assert!(!names.contains(&"access-control-allow-origin"));
-        // El resto de headers CORS sí.
+        // The other CORS headers are emitted.
         assert!(names.contains(&"access-control-allow-methods"));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_sin_cors_no_emite_headers_extras() {
-        // Sanity: handler sin @middleware(cors(...)) no debe traer
-        // headers extras (no contaminación).
+        // Sanity: a handler without @middleware(cors(...)) must
+        // not carry extra headers (no contamination).
         let src = "@get(\"/\")\nfn h() => \"ok\"";
         let registry = registry_from_source(src).await;
         let outcome = handle_task(
@@ -5682,9 +5769,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_middleware_corta_antes_de_parsear_body() {
-        // Si el middleware short-circuita, el body NO se parsea (el
-        // 400 por body inválido que normalmente saldría no aparece).
-        // Esto chequea que el orden es middlewares → parse body → handler.
+        // If the middleware short-circuits, the body is NOT parsed
+        // (the 400 for invalid body that would normally appear is
+        // gone). This checks that the order is middlewares → parse
+        // body → handler.
         let src = "\
             type Input { x: Int }\n\
             fn deny(req) {\n\
@@ -5695,7 +5783,8 @@ mod tests {
             fn h(body: Input) => body\n\
         ";
         let registry = registry_from_source(src).await;
-        // Body inválido (no es JSON) — si llegara al parser, daría 400.
+        // Invalid body (not JSON) — would yield 400 if it reached
+        // the parser.
         let outcome = handle_task(
             &registry,
             0,
@@ -5709,7 +5798,7 @@ mod tests {
         assert!(outcome.body.contains("nope"));
     }
 
-    // ---- ServerConfig (Fase 4.4) ----
+    // ---- ServerConfig (Phase 4.4) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn server_config_default_es_localhost_3000() {
@@ -5775,7 +5864,8 @@ mod tests {
                 prometheus_enabled: false,
             };
             let err = set_server_config(second).unwrap_err();
-            // El error contiene el config existente, no el nuevo.
+            // The error carries the existing config, not the new
+            // one.
             assert_eq!(err, first);
         });
     }
@@ -5785,7 +5875,7 @@ mod tests {
         let mut reg = HttpRegistry::new();
         assert!(reg.server_config.is_none());
         assert_eq!(reg.resolved_config(), ServerConfig::default_addr());
-        // Con config explícito sí.
+        // With explicit config, yes.
         reg.server_config = Some(ServerConfig {
             host: "0.0.0.0".into(),
             port: 80,
@@ -5801,7 +5891,7 @@ mod tests {
         assert_eq!(resolved.host, "0.0.0.0");
     }
 
-    // ---- json_to_value (deserialización libre) ----
+    // ---- json_to_value (free deserialization) ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn json_to_value_primitivos() {
@@ -5836,9 +5926,9 @@ mod tests {
             Value::Map(pairs) => {
                 let pairs = pairs.lock();
                 assert_eq!(pairs.len(), 2);
-                // El orden de serde_json::Map depende de la feature
-                // `preserve_order`. No la asumimos: convertimos a un
-                // map auxiliar para comparar.
+                // serde_json::Map order depends on the
+                // `preserve_order` feature. We don't assume it:
+                // we convert to an auxiliary map to compare.
                 let as_map: std::collections::HashMap<String, Value> = pairs
                     .iter()
                     .map(|(k, v)| {
@@ -5856,11 +5946,11 @@ mod tests {
         }
     }
 
-    // ---- json_to_instance (validación contra Value::Type) ----
+    // ---- json_to_instance (validation against Value::Type) ----
 
-    /// Helper: arma un `Value::Type` con los campos dados. Cada
-    /// campo es `(nombre, tipo, nullable, default)`. El flag `nullable`
-    /// se traduce a `TypeExpr::Nullable(Named(t))`.
+    /// Helper: builds a `Value::Type` with the given fields. Each
+    /// field is `(name, type, nullable, default)`. The `nullable`
+    /// flag translates to `TypeExpr::Nullable(Named(t))`.
     fn type_value(name: &str, fields: Vec<(&str, &str, bool, Option<Expr>)>) -> Value {
         use crate::ast::TypeExpr;
         Value::Type {
@@ -6079,7 +6169,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_body_sin_anotacion_de_tipo_acepta_libre() {
-        // `body` sin tipo → llega como Map<Str,Value>.
+        // Untyped `body` → arrives as Map<Str,Value>.
         let src = "\
             @post(\"/log\")\nfn log(body) => body[\"name\"]\n\
         ";
@@ -6100,23 +6190,24 @@ mod tests {
 
     // ---- build_router + oneshot E2E ----
     //
-    // Estos tests arman un router de axum y le mandan requests sin
-    // abrir socket TCP, vía `tower::ServiceExt::oneshot`.
+    // These tests build an axum router and send requests without
+    // opening a TCP socket, via `tower::ServiceExt::oneshot`.
     //
-    // Post-F17.5: cero glue. El registry se envuelve en `Arc` y se
-    // pasa a `build_router`; cada handler axum invoca al evaluator
-    // directo. Antes hacía falta un `LocalSet` + un loop tokio::select!
-    // sobre `mpsc::recv` para coexistir con el bridge — eso desapareció.
+    // Post-F17.5: zero glue. The registry is wrapped in `Arc` and
+    // passed to `build_router`; each axum handler invokes the
+    // evaluator directly. Previously this needed a `LocalSet` + a
+    // `tokio::select!` loop over `mpsc::recv` to coexist with the
+    // bridge — that disappeared.
 
-    /// Helper: corre un request contra el router y devuelve
-    /// (status, body string). Sin body, sin headers extra.
+    /// Helper: runs a request against the router and returns
+    /// (status, body string). No body, no extra headers.
     async fn run_oneshot(src: &str, method: axum::http::Method, path: &str) -> (u16, String) {
         run_oneshot_with_body(src, method, path, None).await
     }
 
-    /// Como `run_oneshot_with_body` pero acepta también una lista de
-    /// headers `(name, value)` que se agregan a la request. Útil para
-    /// los tests de `@header(...)` (Fase 7.6).
+    /// Like `run_oneshot_with_body` but also accepts a list of
+    /// `(name, value)` headers added to the request. Useful for
+    /// `@header(...)` tests (Phase 7.6).
     async fn run_oneshot_with_headers(
         src: &str,
         method: axum::http::Method,
@@ -6141,9 +6232,9 @@ mod tests {
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
-    /// Como `run_oneshot` pero con body opcional. Si `body` es
-    /// `Some(s)`, se manda como `application/json` (aunque el runtime
-    /// hoy no valida content-type).
+    /// Like `run_oneshot` but with an optional body. If `body` is
+    /// `Some(s)`, it's sent as `application/json` (though the
+    /// runtime doesn't validate content-type today).
     async fn run_oneshot_with_body(
         src: &str,
         method: axum::http::Method,
@@ -6155,8 +6246,9 @@ mod tests {
 
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
-        // Tests existentes de routing: schema = None para no contaminar
-        // los path lookups con la ruta auto-registrada de 7.2.
+        // Existing routing tests: schema = None so we don't
+        // contaminate path lookups with the 7.2 auto-registered
+        // route.
         let router = build_router(&metas, std::sync::Arc::new(registry), None);
 
         let req_body = match body {
@@ -6175,9 +6267,9 @@ mod tests {
         (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
-    /// Como `run_oneshot` pero devuelve además los headers de la
-    /// response (un Vec<(name, value)> en lowercase). Usado por los
-    /// tests CORS de MW.2 para verificar `Access-Control-Allow-*`.
+    /// Like `run_oneshot` but also returns the response headers
+    /// (a Vec<(name, value)> in lowercase). Used by the MW.2 CORS
+    /// tests to verify `Access-Control-Allow-*`.
     async fn run_oneshot_full(
         src: &str,
         method: axum::http::Method,
@@ -6213,9 +6305,10 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_preflight_options_responde_204_con_headers_cors() {
-        // OPTIONS sobre una ruta con @middleware(cors(...)) devuelve 204
-        // y los headers Access-Control-Allow-*. El handler real (GET) NO
-        // se invoca — axum routea OPTIONS al preflight handler dedicado.
+        // OPTIONS on a route with @middleware(cors(...)) returns
+        // 204 and the Access-Control-Allow-* headers. The real
+        // (GET) handler is NOT invoked — axum routes OPTIONS to
+        // the dedicated preflight handler.
         let src = "\
             @middleware(cors())\n\
             @get(\"/api\")\n\
@@ -6233,9 +6326,10 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_options_sin_cors_es_405_method_not_allowed() {
-        // Si la ruta NO tiene @middleware(cors(...)), un OPTIONS responde
-        // 405 (axum default — el método no está registrado para ese path).
-        // Sanity: sin CORS, no creamos preflight handler.
+        // If the route has NO @middleware(cors(...)), an OPTIONS
+        // responds 405 (axum default — the method isn't registered
+        // for that path). Sanity: without CORS, we don't create a
+        // preflight handler.
         let src = "@get(\"/api\")\nfn h() => \"ok\"";
         let (status, _, _) = run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
         assert_eq!(status, 405);
@@ -6243,7 +6337,8 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_response_real_con_cors_lleva_headers_inyectados() {
-        // GET normal sobre ruta con cors → 200 + headers Access-Control-Allow-*.
+        // Normal GET on a cors route → 200 + Access-Control-Allow-*
+        // headers.
         let src = "\
             @middleware(cors({\"allow_origin\": \"https://x.com\"}))\n\
             @get(\"/api\")\n\
@@ -6261,8 +6356,8 @@ mod tests {
 
     #[tokio::test]
     async fn e2e_preflight_set_echo_si_origin_en_la_lista() {
-        // Q.3: preflight con cors({"allow_origin": [...]}) hace echo
-        // del Origin si está permitido.
+        // Q.3: preflight with cors({"allow_origin": [...]}) echoes
+        // the Origin if it's allowed.
         let src = "\
             @middleware(cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]}))\n\
             @get(\"/api\")\n\
@@ -6303,8 +6398,8 @@ mod tests {
         assert!(names.contains(&"access-control-allow-methods"));
     }
 
-    /// Variante de `run_oneshot_full` que acepta headers extra para
-    /// la request (Q.3: para mandar `Origin: ...` y verificar echo).
+    /// Variant of `run_oneshot_full` that accepts extra headers for
+    /// the request (Q.3: to send `Origin: ...` and verify echo).
     async fn run_oneshot_full_with_headers(
         src: &str,
         method: axum::http::Method,
@@ -6359,20 +6454,21 @@ mod tests {
         assert_eq!(max_age, Some("3600".to_string()));
     }
 
-    // ---- Regresión bug OPTIONS preflight duplicado (2026-05-22) ----
+    // ---- Regression bug duplicate OPTIONS preflight (2026-05-22) ----
     //
-    // Cuando varios handlers comparten path (típico CRUD: `/tasks` con
-    // `@get` + `@post`), cada uno trae su propio `@middleware(cors(...))`
-    // con su `allow_methods`. Pre-fix, ambos intentaban registrar
-    // `OPTIONS /tasks` y axum hacía panic con "Overlapping method route.
-    // Handler for `OPTIONS /tasks` already exists" al construir el Router.
-    // Fix: pre-computar el merge de CorsConfig por path; preflight se
-    // registra UNA vez con methods unificados.
+    // When multiple handlers share a path (typical CRUD: `/tasks`
+    // with `@get` + `@post`), each one carries its own
+    // `@middleware(cors(...))` with its `allow_methods`. Pre-fix,
+    // both tried to register `OPTIONS /tasks` and axum panicked with
+    // "Overlapping method route. Handler for `OPTIONS /tasks`
+    // already exists" when building the Router. Fix: pre-compute
+    // the CorsConfig merge per path; the preflight is registered
+    // ONCE with unified methods.
 
     #[tokio::test]
     async fn bug_options_preflight_duplicado_no_panicea_en_build_router() {
-        // Dos handlers en `/tasks` con CORS — pre-fix esto hacía panic.
-        // Hoy build_router termina sin error.
+        // Two handlers on `/tasks` with CORS — pre-fix this
+        // panicked. Today build_router finishes without errors.
         let src = "\
             @middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))\n\
             @get(\"/tasks\")\n\
@@ -6381,9 +6477,10 @@ mod tests {
             @post(\"/tasks\")\n\
             fn create() => \"created\"\n\
         ";
-        // run_oneshot ya construye el router internamente — si paniqueara,
-        // el test colgaría con un panic visible. Lo dejamos como smoke
-        // de "no panic" además de validar que el GET sigue funcionando.
+        // run_oneshot already builds the router internally — if it
+        // panicked, the test would hang with a visible panic. We
+        // keep it as a "no panic" smoke in addition to validating
+        // that GET still works.
         let (status, body) = run_oneshot(src, axum::http::Method::GET, "/tasks").await;
         assert_eq!(status, 200);
         assert_eq!(body, "\"ok\"");
@@ -6391,9 +6488,9 @@ mod tests {
 
     #[tokio::test]
     async fn bug_options_preflight_duplicado_merged_methods_en_preflight_response() {
-        // Despues del fix, el preflight unificado advertise GET + POST.
-        // Sin merge, advertise solo del primero (GET) → browser rechaza
-        // POST en CORS check.
+        // After the fix, the unified preflight advertises GET +
+        // POST. Without the merge, only the first (GET) is
+        // advertised → browser rejects POST in the CORS check.
         let src = "\
             @middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))\n\
             @get(\"/tasks\")\n\
@@ -6410,8 +6507,8 @@ mod tests {
             .find(|(n, _)| n == "access-control-allow-methods")
             .map(|(_, v)| v.clone())
             .expect("preflight debe traer Access-Control-Allow-Methods");
-        // Orden de insertion: GET aparece primero (es el owner), POST
-        // se mergea después. OPTIONS aparece una sola vez (dedup).
+        // Insertion order: GET appears first (it's the owner),
+        // POST is merged after. OPTIONS appears only once (dedup).
         assert!(
             methods.contains("GET"),
             "merged methods debe incluir GET: {}",
@@ -6431,9 +6528,9 @@ mod tests {
 
     #[tokio::test]
     async fn bug_options_preflight_duplicado_tres_handlers_con_path_id() {
-        // Caso del 6to boilerplate (api-fullstack-postgres):
-        // `/tasks/{id}` con GET + PUT + DELETE, cada uno con su CORS.
-        // Pre-fix paniqueaba al segundo handler.
+        // Case from the 6th boilerplate (api-fullstack-postgres):
+        // `/tasks/{id}` with GET + PUT + DELETE, each with its own
+        // CORS. Pre-fix it panicked on the second handler.
         let src = "\
             @middleware(cors({\"allow_origin\": \"*\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))\n\
             @get(\"/tasks/{id}\")\n\
@@ -6460,8 +6557,8 @@ mod tests {
 
     #[tokio::test]
     async fn bug_options_preflight_duplicado_merge_de_headers_case_insensitive() {
-        // Dos handlers con headers que difieren solo en case — al
-        // mergear, no se duplican.
+        // Two handlers with headers differing only in case — they
+        // are not duplicated on merge.
         let src = "\
             @middleware(cors({\"allow_origin\": \"*\", \"allow_headers\": [\"Content-Type\"]}))\n\
             @get(\"/x\")\n\
@@ -6477,9 +6574,10 @@ mod tests {
             .find(|(n, _)| n == "access-control-allow-headers")
             .map(|(_, v)| v.clone())
             .expect("preflight debe traer Access-Control-Allow-Headers");
-        // Content-Type del primer handler se preserva con su casing
-        // original. Authorization se suma del segundo. "content-type"
-        // del segundo NO se duplica (case-insensitive match).
+        // Content-Type from the first handler is preserved with
+        // its original casing. Authorization is added from the
+        // second. "content-type" from the second is NOT duplicated
+        // (case-insensitive match).
         let comma_count = allowed_headers.matches(',').count();
         assert_eq!(
             comma_count, 1,
@@ -6634,7 +6732,7 @@ mod tests {
         assert!(body.contains("body requerido"));
     }
 
-    // ---- 7.6 headers como params del handler ----
+    // ---- 7.6 headers as handler params ----
 
     #[tokio::test]
     async fn e2e_header_obligatorio_presente_handler_lo_recibe() {
@@ -6665,16 +6763,16 @@ mod tests {
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) -> Str { return \"ok\" }";
         let (status, body) =
             run_oneshot_with_headers(src, axum::http::Method::GET, "/traced", &[]).await;
-        // Handler corre OK porque el header es opcional.
+        // Handler runs OK because the header is optional.
         assert_eq!(status, 200);
         assert_eq!(body, "\"ok\"");
     }
 
     #[tokio::test]
     async fn e2e_header_lookup_es_case_insensitive() {
-        // HTTP es case-insensitive en nombres de header. Mandamos
-        // `authorization` (lowercase) y el handler declara
-        // `@header(name="Authorization")` — debe matchear.
+        // HTTP is case-insensitive in header names. We send
+        // `authorization` (lowercase) and the handler declares
+        // `@header(name="Authorization")` — it must match.
         let src = "@header(name=\"Authorization\")\n@get(\"/x\")\nfn h(authorization: Str) => authorization";
         let (status, body) = run_oneshot_with_headers(
             src,
@@ -6707,8 +6805,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn default_healthz_responde_200() {
-        // Sin @healthz declarado, el server auto-mounta /healthz con
-        // respuesta 200 default.
+        // Without a declared @healthz, the server auto-mounts
+        // /healthz with a default 200 response.
         let (status, body) = oneshot_get(HttpRegistry::new(), "/healthz").await;
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -6725,9 +6823,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn readyz_responde_503_durante_draining() {
-        // Con `draining = true`, /readyz retorna 503 SIN tocar el
-        // handler (incluso si lo hubiera). El test simula el state
-        // post-SIGTERM antes de que axum cierre el listener.
+        // With `draining = true`, /readyz returns 503 WITHOUT
+        // touching the handler (even if one exists). The test
+        // simulates the post-SIGTERM state before axum closes the
+        // listener.
         let registry = HttpRegistry::new();
         registry
             .draining
@@ -6740,9 +6839,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn healthz_no_se_afecta_por_draining() {
-        // Liveness ≠ readiness: aunque estemos draining, /healthz
-        // sigue retornando 200 (el proceso está vivo). K8s sólo deja
-        // de rutear, no reinicia el pod por liveness.
+        // Liveness ≠ readiness: even while draining, /healthz keeps
+        // returning 200 (the process is alive). K8s only stops
+        // routing, it does not restart the pod for liveness.
         let registry = HttpRegistry::new();
         registry
             .draining
@@ -6751,12 +6850,13 @@ mod tests {
         assert_eq!(status, 200);
     }
 
-    // ---- 7.2 auto-register de /openapi.json ----
+    // ---- 7.2 auto-register of /openapi.json ----
     //
-    // Helper local: arma router desde un `HttpRegistry` (Arc-wrapped) +
-    // schema y le manda GET /openapi.json. Para los casos sin rutas
-    // de usuario se pasa `HttpRegistry::new()`. Post-F17.5: cero glue,
-    // el router responde directo (no necesita ningún bridge).
+    // Local helper: builds a router from an `HttpRegistry`
+    // (Arc-wrapped) + schema and sends GET /openapi.json. For
+    // cases with no user routes we pass `HttpRegistry::new()`.
+    // Post-F17.5: zero glue, the router responds directly (no
+    // bridge needed).
 
     async fn oneshot_get_openapi(
         registry: HttpRegistry,
@@ -6780,7 +6880,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_con_schema_some_registra_openapi_json() {
-        // Schema mínimo: el router lo sirve como-is en GET /openapi.json.
+        // Minimal schema: the router serves it as-is on GET
+        // /openapi.json.
         let schema = serde_json::json!({
             "openapi": "3.1.0",
             "info": { "title": "Fitz API", "version": "0.1.0" },
@@ -6804,8 +6905,8 @@ mod tests {
 
     #[test]
     fn ws_bearer_subprotocol_entre_varios_csv() {
-        // El cliente puede ofrecer múltiples subprotocols (RFC 6455 §4.1).
-        // Tomamos el primero que matchee `bearer.*`.
+        // The client can offer multiple subprotocols (RFC 6455
+        // §4.1). We take the first one matching `bearer.*`.
         let mut h = axum::http::HeaderMap::new();
         h.insert(
             "sec-websocket-protocol",
@@ -6820,14 +6921,14 @@ mod tests {
 
     #[test]
     fn ws_bearer_subprotocol_ausente() {
-        // Sin header `sec-websocket-protocol`, devuelve None.
+        // Without a `sec-websocket-protocol` header, returns None.
         let h = axum::http::HeaderMap::new();
         assert_eq!(extract_ws_bearer_subprotocol(&h), None);
     }
 
     #[test]
     fn ws_bearer_subprotocol_sin_match() {
-        // Header presente pero ningún subprotocol matchea `bearer.*`.
+        // Header present but no subprotocol matches `bearer.*`.
         let mut h = axum::http::HeaderMap::new();
         h.insert("sec-websocket-protocol", "chat.v1, app.v2".parse().unwrap());
         assert_eq!(extract_ws_bearer_subprotocol(&h), None);
@@ -6835,7 +6936,7 @@ mod tests {
 
     #[test]
     fn ws_bearer_subprotocol_token_vacio_es_none() {
-        // `bearer.` sin token detrás no cuenta.
+        // `bearer.` with no token after it doesn't count.
         let mut h = axum::http::HeaderMap::new();
         h.insert("sec-websocket-protocol", "bearer.".parse().unwrap());
         assert_eq!(extract_ws_bearer_subprotocol(&h), None);
@@ -6843,9 +6944,9 @@ mod tests {
 
     #[test]
     fn ws_bearer_subprotocol_token_con_dots_internos() {
-        // JWTs llevan dots internos (`header.payload.signature`).
-        // El strip_prefix de `bearer.` consume solo el primer `.`,
-        // el token sigue siendo todo lo que vino después.
+        // JWTs carry internal dots (`header.payload.signature`).
+        // The `bearer.` strip_prefix consumes only the first `.`,
+        // and the token keeps everything that came after.
         let jwt = "eyJhbGciOi.eyJzdWI.SflKxw";
         let mut h = axum::http::HeaderMap::new();
         h.insert(
@@ -6868,9 +6969,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_auto_register_convive_con_rutas_del_usuario() {
-        // Si el usuario tiene `@get("/")` y el auto-register suma
-        // `/openapi.json`, ambas funcionan. Verificamos que el schema
-        // sigue disponible aún con rutas declaradas.
+        // If the user has `@get("/")` and auto-register adds
+        // `/openapi.json`, both work. We verify the schema is still
+        // available even with declared routes.
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
         let registry = registry_from_source(src).await;
         let schema = serde_json::json!({
@@ -6884,10 +6985,10 @@ mod tests {
 
     #[tokio::test]
     async fn usuario_declara_openapi_json_propio_y_gana_sobre_auto_register() {
-        // El usuario declaró su propio `@get("/openapi.json")`. El
-        // auto-register debe ceder — la ruta del usuario es la que
-        // responde. Verificamos que la respuesta es la del usuario
-        // (un string `"mio"`), no el schema cacheado que pasamos.
+        // The user declared their own `@get("/openapi.json")`.
+        // Auto-register must yield — the user's route is what
+        // responds. We verify the response is the user's (a
+        // `"mio"` string), not the cached schema we passed.
         let src = "@get(\"/openapi.json\")\nfn custom() => \"mio\"";
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
@@ -6912,15 +7013,17 @@ mod tests {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
 
         assert_eq!(status, 200);
-        // El body es el del handler del usuario: `"mio"` (JSON string).
-        // NO contiene "_marker" del schema auto-register.
+        // The body is the user's handler: `"mio"` (JSON string).
+        // It does NOT contain "_marker" from the auto-register
+        // schema.
         assert_eq!(body, "\"mio\"");
         assert!(!body.contains("_marker"));
     }
 
-    // ---- 7.3 auto-register de /docs (UI Scalar) ----
+    // ---- 7.3 auto-register of /docs (Scalar UI) ----
 
-    /// Helper local: GET /docs sobre un router armado con o sin schema.
+    /// Local helper: GET /docs on a router built with or without a
+    /// schema.
     async fn oneshot_get_docs(
         registry: HttpRegistry,
         openapi_schema: Option<serde_json::Value>,
@@ -6943,10 +7046,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_con_schema_some_registra_docs() {
-        // GET /docs devuelve el HTML embebido. Verificamos que el
-        // body referencia `/openapi.json` (data-url del script de
-        // Scalar) — eso garantiza que el HTML está conectado al
-        // schema autogenerado.
+        // GET /docs returns the embedded HTML. We verify the body
+        // references `/openapi.json` (the data-url of Scalar's
+        // script) — that guarantees the HTML is connected to the
+        // auto-generated schema.
         let schema = serde_json::json!({ "openapi": "3.1.0", "paths": {} });
         let (status, body) = oneshot_get_docs(HttpRegistry::new(), Some(schema)).await;
         assert_eq!(status, 200);
@@ -6964,15 +7067,17 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_con_schema_none_no_registra_docs() {
-        // Sin schema no se registra /docs (paridad con /openapi.json).
+        // Without a schema, /docs is not registered (parity with
+        // /openapi.json).
         let (status, _body) = oneshot_get_docs(HttpRegistry::new(), None).await;
         assert_eq!(status, 404);
     }
 
     #[tokio::test]
     async fn usuario_declara_docs_propio_y_gana_sobre_auto_register() {
-        // El usuario declaró su propio `@get("/docs")`. El auto-register
-        // de la UI Scalar cede — la ruta del usuario es la que responde.
+        // The user declared their own `@get("/docs")`. The Scalar
+        // UI auto-register yields — the user's route is what
+        // responds.
         let src = "@get(\"/docs\")\nfn custom() => \"docs-personalizada\"";
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
@@ -6994,19 +7099,20 @@ mod tests {
         let body = String::from_utf8(bytes.to_vec()).unwrap();
 
         assert_eq!(status, 200);
-        // Body del usuario, no el HTML de Scalar.
+        // User's body, not Scalar's HTML.
         assert_eq!(body, "\"docs-personalizada\"");
         assert!(!body.contains("@scalar/api-reference"));
     }
 
-    // ---- 9.w.2-asyncapi-ui — UI HTML embebida para `/asyncapi` ----
+    // ---- 9.w.2-asyncapi-ui — embedded HTML UI for `/asyncapi` ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_con_asyncapi_schema_registra_asyncapi_ui() {
-        // Cuando hay asyncapi_schema (porque hay handlers @ws), GET
-        // /asyncapi devuelve el HTML embebido (paralelo a /docs del
-        // OpenAPI). El body referencia /asyncapi.json para cargar el
-        // schema y carga el bundle @asyncapi/react-component.
+        // When asyncapi_schema is present (because there are @ws
+        // handlers), GET /asyncapi returns the embedded HTML
+        // (parallel to OpenAPI's /docs). The body references
+        // /asyncapi.json to load the schema and loads the
+        // @asyncapi/react-component bundle.
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
@@ -7047,7 +7153,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_sin_asyncapi_schema_no_registra_asyncapi_ui() {
-        // Sin asyncapi_schema (programa HTTP-only), /asyncapi devuelve 404.
+        // Without asyncapi_schema (HTTP-only program), /asyncapi
+        // returns 404.
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
@@ -7071,7 +7178,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_asyncapi_json_sigue_disponible() {
-        // Sanity: el endpoint JSON sigue funcionando independiente de la UI.
+        // Sanity: the JSON endpoint keeps working independently of
+        // the UI.
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
@@ -7138,7 +7246,7 @@ mod tests {
         assert_eq!(reg.routes[0].handler_name, "index");
     }
 
-    // ---- Mini-tanda HC.1 — status fuera de 100..1000 ----
+    // ---- Mini-batch HC.1 — status outside 100..1000 ----
 
     fn err_instance_with_status(status: i64) -> Value {
         let fields = vec![
@@ -7182,11 +7290,11 @@ mod tests {
         assert_eq!(outcome.status, 500);
     }
 
-    // ---- Mini-tanda Hpx.1 — Content-Type validation ----
+    // ---- Mini-batch Hpx.1 — Content-Type validation ----
 
     fn registry_with_post_body_route() -> std::sync::Arc<HttpRegistry> {
-        // Setup mínimo: una ruta POST /test que espera body como
-        // Value::Map libre (sin schema).
+        // Minimal setup: a POST /test route expecting body as a
+        // free Value::Map (no schema).
         let mut reg = HttpRegistry::new();
         let handler = Value::Function {
             params: vec![crate::ast::Param {
@@ -7280,10 +7388,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mp2_content_type_charset_diff_no_oficial_rechaza() {
-        // Mini-tanda MP2 — `text/plain` (test viejo asumía
-        // multipart-rechaza-con-415; ahora multipart se acepta así
-        // que cambié el case). text/plain sigue rechazado: el
-        // intérprete acepta JSON, urlencoded y multipart, nada más.
+        // Mini-batch MP2 — `text/plain` (the old test assumed
+        // multipart-rejected-with-415; now multipart is accepted
+        // so I switched the case). text/plain stays rejected: the
+        // interpreter accepts JSON, urlencoded and multipart,
+        // nothing else.
         let reg = registry_with_post_body_route();
         let body = b"raw text content".to_vec();
         let mut headers = std::collections::HashMap::new();
@@ -7307,7 +7416,8 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn hpx1_content_type_ausente_acepta() {
-        // Sin header Content-Type (curl sin -H), aceptamos JSON crudo.
+        // Without a Content-Type header (curl without -H), we
+        // accept raw JSON.
         let reg = registry_with_post_body_route();
         let body = br#"{"foo": 42}"#.to_vec();
         let headers = std::collections::HashMap::new();
@@ -7323,11 +7433,11 @@ mod tests {
         assert_eq!(outcome.status, 200);
     }
 
-    // ---- Mini-tanda Mw.next — middleware post-process ----
+    // ---- Mini-batch Mw.next — middleware post-process ----
 
     fn make_mw_post(name: &str) -> MiddlewareSpec {
-        // Constructor minimal de un middleware Post (2 args).
-        // Body: `return 200 { "wrapped": true }`.
+        // Minimal constructor of a Post (2 args) middleware. Body:
+        // `return 200 { "wrapped": true }`.
         let handler = Value::Function {
             params: vec![
                 crate::ast::Param {
@@ -7400,7 +7510,7 @@ mod tests {
         assert_eq!(outcome.body, original.body);
     }
 
-    // ---- Mini-tanda MP — urlencoded bodies ----
+    // ---- Mini-batch MP — urlencoded bodies ----
 
     #[tokio::test(flavor = "current_thread")]
     async fn mp_urlencoded_basico_parsea_a_map() {
@@ -7435,7 +7545,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn mp_urlencoded_con_url_encoding() {
         let reg = registry_with_post_body_route();
-        // "hola mundo" + "Fitz Roy" con encoding (espacios como +)
+        // "hola mundo" + "Fitz Roy" with encoding (spaces as +).
         let body = b"greeting=hola+mundo&place=Fitz%20Roy".to_vec();
         let mut headers = std::collections::HashMap::new();
         headers.insert(
@@ -7487,9 +7597,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mp2_multipart_sin_boundary_es_400() {
-        // Mini-tanda MP2 — `multipart/form-data` sin `boundary=` →
-        // 400 con mensaje claro (no 415, ahora SÍ se acepta multipart
-        // como CT supported pero el boundary es obligatorio).
+        // Mini-batch MP2 — `multipart/form-data` without
+        // `boundary=` → 400 with a clear message (not 415: multipart
+        // IS now accepted as a supported CT but the boundary is
+        // mandatory).
         let reg = registry_with_post_body_route();
         let body = b"--boundary\r\n".to_vec();
         let mut headers = std::collections::HashMap::new();
@@ -7520,7 +7631,7 @@ mod tests {
 
     #[test]
     fn b64_encode_basico() {
-        // RFC 4648 test vectors estándar.
+        // Standard RFC 4648 test vectors.
         assert_eq!(b64_encode_standard(b"f"), "Zg==");
         assert_eq!(b64_encode_standard(b"fo"), "Zm8=");
         assert_eq!(b64_encode_standard(b"foo"), "Zm9v");
@@ -7531,15 +7642,15 @@ mod tests {
 
     #[test]
     fn b64_encode_binarios() {
-        // Bytes binarios arbitrarios.
+        // Arbitrary binary bytes.
         assert_eq!(b64_encode_standard(&[0u8]), "AA==");
         assert_eq!(b64_encode_standard(&[0xff, 0xff, 0xff]), "////");
     }
 
     #[test]
     fn value_to_json_bytes_emite_base64() {
-        // Mini-tanda Bytes + quick win F13: `Value::Bytes` se
-        // serializa como base64 string (no como array de Int).
+        // Mini-batch Bytes + quick win F13: `Value::Bytes` is
+        // serialized as a base64 string (not as an array of Int).
         let v = Value::Bytes(b"hola".to_vec());
         let j = value_to_json(&v).unwrap();
         assert_eq!(j, serde_json::json!("aG9sYQ=="));
@@ -7555,7 +7666,7 @@ mod tests {
 
     #[test]
     fn mp2_extract_boundary_con_comillas() {
-        // RFC 7578 permite boundary entre comillas dobles.
+        // RFC 7578 allows the boundary between double quotes.
         assert_eq!(
             extract_multipart_boundary(r#"multipart/form-data; boundary="my-boundary""#),
             Some("my-boundary".to_string())
@@ -7564,8 +7675,8 @@ mod tests {
 
     #[test]
     fn mp2_extract_boundary_case_sensitive_value() {
-        // Los boundaries son case-sensitive: `BOUNDARY` minus se trim,
-        // pero el valor se preserva tal cual.
+        // Boundaries are case-sensitive: `Boundary` matches the
+        // lowercase trim but the value is preserved verbatim.
         assert_eq!(
             extract_multipart_boundary("multipart/form-data; Boundary=ABC-Def"),
             Some("ABC-Def".to_string())
@@ -7579,8 +7690,8 @@ mod tests {
 
     #[test]
     fn mp2_parse_multipart_text_field_basico() {
-        // Body con una part de tipo text field (sin filename).
-        // Estructura: --<b>\r\n<hdr>\r\n\r\n<body>\r\n--<b>--
+        // Body with a single text field part (without filename).
+        // Structure: --<b>\r\n<hdr>\r\n\r\n<body>\r\n--<b>--
         let boundary = "----foo";
         let body =
             "------foo\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nhola\r\n------foo--"
@@ -7599,8 +7710,8 @@ mod tests {
 
     #[test]
     fn mp2_parse_multipart_file_field_construye_instance_file() {
-        // Body con file field (con filename) → Value::Instance del
-        // tipo built-in `File`.
+        // Body with a file field (with filename) → Value::Instance
+        // of the built-in `File` type.
         let boundary = "----foo";
         let body = "------foo\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents here\r\n------foo--";
         let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
@@ -7620,8 +7731,8 @@ mod tests {
                 assert_eq!(fld[1].0, "content_type");
                 assert_eq!(fld[1].1, Value::Str("text/plain".into()));
                 assert_eq!(fld[2].0, "content");
-                // File.content Bytes — content ahora es Value::Bytes
-                // (Vec<u8>), no Value::Str. Habilita files binarios.
+                // File.content Bytes — content is now Value::Bytes
+                // (Vec<u8>), not Value::Str. Enables binary files.
                 assert_eq!(fld[2].1, Value::Bytes(b"file contents here".to_vec()));
             }
             other => panic!("esperaba Value::Instance(File), fue: {:?}", other),
@@ -7630,7 +7741,7 @@ mod tests {
 
     #[test]
     fn mp2_parse_multipart_mixto_text_y_file() {
-        // Form con un text field + un file field.
+        // Form with one text field + one file field.
         let boundary = "X";
         let body = "--X\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nMi título\r\n--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\ncontenido\r\n--X--";
         let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
@@ -7647,9 +7758,9 @@ mod tests {
 
     #[test]
     fn mp2_parse_multipart_binary_file_field_funciona() {
-        // File.content Bytes — bytes binarios no-UTF8 (0xFF) en un
-        // FILE field ya funcionan (antes era 400, ahora se guardan
-        // como `Value::Bytes` raw). Habilita uploads binarios.
+        // File.content Bytes — non-UTF8 binary bytes (0xFF) in a
+        // FILE field now work (used to be 400; now stored as raw
+        // `Value::Bytes`). Enables binary uploads.
         let boundary = "X";
         let mut body =
             b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\n"
@@ -7676,8 +7787,8 @@ mod tests {
 
     #[test]
     fn mp2_parse_multipart_text_field_sin_filename_sigue_exigiendo_utf8() {
-        // Text field (sin filename) sigue requiriendo UTF-8 — para
-        // bytes binarios, el usuario debe usar `filename=`.
+        // Text field (without filename) still requires UTF-8 —
+        // for binary bytes the user must use `filename=`.
         let boundary = "X";
         let mut body = b"--X\r\nContent-Disposition: form-data; name=\"raw\"\r\n\r\n".to_vec();
         body.push(0xff);
@@ -7692,9 +7803,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mp2_multipart_end_to_end_acepta_y_parsea() {
-        // E2E del path completo: `handle_task` recibe un body
-        // multipart válido y lo enrutea al handler con el body
-        // parseado como `Value::Map<Str, Value>`.
+        // Full path E2E: `handle_task` receives a valid multipart
+        // body and routes it to the handler with the body parsed
+        // as `Value::Map<Str, Value>`.
         let reg = registry_with_post_body_route();
         let boundary = "----my-boundary";
         let body = "------my-boundary\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nFitz\r\n------my-boundary--".to_string();
@@ -7712,8 +7823,8 @@ mod tests {
             headers,
         )
         .await;
-        // `registry_with_post_body_route` espera body parseable como
-        // `Map`, así que devolverá 200 con el body echo'd.
+        // `registry_with_post_body_route` expects a body parseable
+        // as `Map`, so it returns 200 with the body echoed.
         assert_eq!(outcome.status, 200, "outcome body: {}", outcome.body);
     }
 
@@ -7738,11 +7849,11 @@ mod tests {
         assert_eq!(outcome.status, 200);
     }
 
-    // ---- Mini-tanda Mw-Wrap — clasificación + chain runner ----
+    // ---- Mini-batch Mw-Wrap — classification + chain runner ----
 
     #[test]
     fn mw_wrap_classifier_param_fn_es_wrap() {
-        // Segundo param `Fn() -> Response` → Wrap.
+        // Second param `Fn() -> Response` → Wrap.
         use crate::ast::{Param, TypeExpr};
         let p = Param {
             name: "next".into(),
@@ -7762,7 +7873,7 @@ mod tests {
 
     #[test]
     fn mw_wrap_classifier_param_response_es_post() {
-        // Segundo param `Response` (nominal) → Post.
+        // Second param `Response` (nominal) → Post.
         use crate::ast::{Param, TypeExpr};
         let p = Param {
             name: "resp".into(),
@@ -7779,7 +7890,8 @@ mod tests {
 
     #[test]
     fn mw_wrap_classifier_param_sin_anotacion_es_post() {
-        // Sin anotación → default Post (preserva semántica histórica).
+        // No annotation → default Post (preserves historical
+        // semantics).
         use crate::ast::Param;
         let p = Param {
             name: "resp".into(),
@@ -7796,7 +7908,7 @@ mod tests {
 
     #[test]
     fn mw_wrap_classifier_param_fn_nullable_es_wrap() {
-        // `Fn() -> Response?` también clasifica como Wrap.
+        // `Fn() -> Response?` also classifies as Wrap.
         use crate::ast::{Param, TypeExpr};
         let p = Param {
             name: "next".into(),
@@ -7815,18 +7927,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Fase 9.w.1.c — Tests E2E del wrapper de auth nativa.
+    // Phase 9.w.1.c — E2E tests of the native auth wrapper.
     //
-    // Validan el flujo end-to-end por el path real de axum vía
-    // `Router::oneshot`: registry desde source Fitz, `@auth_provider`
-    // ejecutado antes del handler, `user` inyectado en los args, y
-    // codes 401/403 cuando el provider rechaza o el rol no matchea.
+    // Validate the end-to-end flow through the real axum path via
+    // `Router::oneshot`: registry from Fitz source, `@auth_provider`
+    // executed before the handler, `user` injected in args, and
+    // codes 401/403 when the provider rejects or the role doesn't
+    // match.
     //
-    // Fuente compartida para los tests: provider que matchea headers
-    // contra dos tokens hard-codeados (admin y user normal) y emite
-    // `Err` para cualquier otra cosa. Usa `match` sobre el `Result`
-    // de `headers.get("authorization")` para distinguir
-    // "falta Authorization" de "token inválido".
+    // Shared source for the tests: a provider that matches headers
+    // against two hard-coded tokens (admin and a regular user) and
+    // emits `Err` for anything else. Uses `match` on the `Result`
+    // of `headers.get("authorization")` to distinguish "missing
+    // Authorization" from "invalid token".
     // -----------------------------------------------------------------
 
     const AUTH_E2E_SOURCE: &str = "\
@@ -7858,9 +7971,9 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_ruta_publica_sin_auth_devuelve_200() {
-        // Ruta sin `@authenticated`/`@admin` no toca el provider.
-        // Smoke: no debería romperse aunque el programa tenga
-        // `@auth_provider` declarado.
+        // Route without `@authenticated`/`@admin` doesn't touch
+        // the provider. Smoke: shouldn't break even if the
+        // program declares `@auth_provider`.
         let (status, body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/public").await;
         assert_eq!(status, 200);
         assert_eq!(body, "\"sin auth\"");
@@ -7868,8 +7981,9 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_authenticated_sin_header_devuelve_401() {
-        // Sin header `Authorization` → provider emite `Err("falta...")`
-        // → wrapper convierte a 401 con `{"error": "falta..."}`.
+        // Without an `Authorization` header → provider emits
+        // `Err("falta...")` → wrapper converts to 401 with
+        // `{"error": "falta..."}`.
         let (status, body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/me").await;
         assert_eq!(status, 401);
         assert!(
@@ -7881,8 +7995,8 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_authenticated_token_invalido_devuelve_401() {
-        // Header presente pero token desconocido → Err("token inválido")
-        // → 401.
+        // Header present but unknown token →
+        // Err("token inválido") → 401.
         let (status, body) = run_oneshot_with_headers(
             AUTH_E2E_SOURCE,
             axum::http::Method::GET,
@@ -7900,9 +8014,10 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_authenticated_token_valido_devuelve_200_con_user_inyectado() {
-        // Token user válido → provider devuelve Ok(User{name:"Alice"})
-        // → wrapper inyecta `user` como arg del handler → el handler
-        // accede a `user.name` y devuelve "Alice".
+        // Valid user token → provider returns
+        // Ok(User{name:"Alice"}) → wrapper injects `user` as an
+        // arg of the handler → handler reads `user.name` and
+        // returns "Alice".
         let (status, body) = run_oneshot_with_headers(
             AUTH_E2E_SOURCE,
             axum::http::Method::GET,
@@ -7916,8 +8031,8 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_admin_con_rol_no_admin_devuelve_403() {
-        // Token válido, pero `user.role == "user"` (no "admin") →
-        // wrapper emite 403 con mensaje "se requiere rol admin".
+        // Valid token but `user.role == "user"` (not "admin") →
+        // wrapper emits 403 with "se requiere rol admin".
         let (status, body) = run_oneshot_with_headers(
             AUTH_E2E_SOURCE,
             axum::http::Method::GET,
@@ -7935,7 +8050,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_admin_con_rol_admin_devuelve_200() {
-        // Token admin → user.role == "admin" → handler ejecuta.
+        // Admin token → user.role == "admin" → handler runs.
         let (status, body) = run_oneshot_with_headers(
             AUTH_E2E_SOURCE,
             axum::http::Method::GET,
@@ -7949,18 +8064,19 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_admin_sin_header_devuelve_401_no_403() {
-        // Sin header, el provider falla con Err ANTES de evaluar role.
-        // Resultado: 401 (no autenticado), no 403 (no autorizado).
+        // Without a header, the provider fails with Err BEFORE
+        // evaluating the role. Result: 401 (unauthenticated), not
+        // 403 (forbidden).
         let (status, _body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/admin").await;
         assert_eq!(status, 401);
     }
 
-    // ---- Fase 9.w.1.iter2.a — @requires("role") (RBAC custom) ----
+    // ---- Phase 9.w.1.iter2.a — @requires("role") (custom RBAC) ----
 
-    /// Programa con varios endpoints protegidos por `@requires`:
-    /// - `/editor` exige role "editor" (1 role).
-    /// - `/multi` apila `@requires("editor")` y `@requires("publisher")`
-    ///   = OR (matchea cualquiera de los dos).
+    /// Program with several endpoints protected by `@requires`:
+    /// - `/editor` requires the "editor" role (1 role).
+    /// - `/multi` stacks `@requires("editor")` and
+    ///   `@requires("publisher")` = OR (matches either).
     const REQUIRES_E2E_SOURCE: &str = "\
 type User { id: Int, name: Str, role: Str }\n\
 @auth_provider\n\
@@ -8022,7 +8138,8 @@ fn multi_route(user: User) -> Str => user.name\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn requires_apilado_acepta_cualquiera_de_los_dos_roles() {
-        // `/multi` exige editor OR publisher. Probamos los dos casos.
+        // `/multi` requires editor OR publisher. We test both
+        // cases.
         let (status_ed, _) = run_oneshot_with_headers(
             REQUIRES_E2E_SOURCE,
             axum::http::Method::GET,
@@ -8044,7 +8161,8 @@ fn multi_route(user: User) -> Str => user.name\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn requires_apilado_rechaza_role_que_no_matchea_ninguno() {
-        // `/multi` exige editor OR publisher; viewer no es ninguno → 403.
+        // `/multi` requires editor OR publisher; viewer matches
+        // neither → 403.
         let (status, _) = run_oneshot_with_headers(
             REQUIRES_E2E_SOURCE,
             axum::http::Method::GET,
@@ -8057,7 +8175,8 @@ fn multi_route(user: User) -> Str => user.name\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn requires_sin_header_devuelve_401_no_403() {
-        // Sin header, provider falla con Err ANTES de evaluar role.
+        // Without a header, the provider fails with Err BEFORE
+        // evaluating the role.
         let (status, _) =
             run_oneshot(REQUIRES_E2E_SOURCE, axum::http::Method::GET, "/editor").await;
         assert_eq!(status, 401);
@@ -8065,9 +8184,9 @@ fn multi_route(user: User) -> Str => user.name\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_provider_duplicado_es_error_en_runtime() {
-        // Defensa runtime de la unicidad: dos `@auth_provider`
-        // deberían emitir error al evaluar el programa (el checker
-        // también lo bloquea, pero replicamos en runtime por defensa).
+        // Runtime uniqueness defense: two `@auth_provider`s should
+        // emit an error when evaluating the program (the checker
+        // also blocks it; we replicate at runtime defensively).
         let src = "\
 type User { id: Int, role: Str }\n\
 @auth_provider\n\
@@ -8094,10 +8213,10 @@ fn h(user: User) -> Str => user.role\n\
 
     #[tokio::test(flavor = "current_thread")]
     async fn auth_handler_sin_provider_es_error_en_runtime() {
-        // Defensa runtime: handler con @authenticated pero sin un
-        // @auth_provider declarado. El checker también lo bloquea
-        // estáticamente; replicamos en runtime para mantener la
-        // invariante del registry.
+        // Runtime defense: handler with @authenticated but no
+        // declared @auth_provider. The checker also blocks it
+        // statically; we replicate at runtime to preserve the
+        // registry invariant.
         let src = "\
 type User { id: Int }\n\
 @authenticated\n\
@@ -8119,30 +8238,32 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     // -----------------------------------------------------------------
-    // Fase 9.w.2 — Tests E2E del wrapper WebSocket.
+    // Phase 9.w.2 — E2E tests of the WebSocket wrapper.
     //
-    // Usamos `tokio-tungstenite` como cliente WS, axum::serve sobre un
-    // listener TCP con port asignado por el SO (`:0`) para evitar
-    // colisiones en runs paralelos. Cada test:
-    //   1. Construye un registry desde source Fitz.
-    //   2. Levanta el server en un TcpListener.
-    //   3. Conecta uno o varios clientes WS.
-    //   4. Envía/recibe frames de prueba.
-    //   5. Cierra y verifica.
+    // We use `tokio-tungstenite` as the WS client, axum::serve over
+    // a TCP listener with OS-assigned port (`:0`) to avoid
+    // collisions in parallel runs. Each test:
+    //   1. Builds a registry from Fitz source.
+    //   2. Boots the server on a TcpListener.
+    //   3. Connects one or more WS clients.
+    //   4. Sends/receives test frames.
+    //   5. Closes and verifies.
     //
-    // Cubre: echo simple, broadcast multi-cliente, auth pre-upgrade
-    // (401), tipos custom marshalled por JSON.
+    // Covers: simple echo, multi-client broadcast, pre-upgrade auth
+    // (401), custom types marshalled as JSON.
     // -----------------------------------------------------------------
 
     use tokio_tungstenite::tungstenite;
 
-    /// Helper: arma server desde src Fitz, lo bindea a 127.0.0.1:0 y
-    /// devuelve (addr, handle). El handle se mantiene vivo el tiempo
-    /// del test; al droppearlo, el server termina.
+    /// Helper: builds a server from Fitz src, binds it to
+    /// 127.0.0.1:0 and returns (addr, handle). The handle is kept
+    /// alive for the duration of the test; dropping it terminates
+    /// the server.
     async fn spawn_ws_server(src: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
-        // Evaluar el src adentro de un registry activo (igual que
-        // `registry_from_source`), pero con `with_active_registry_async`
-        // y conservando el Arc resultante.
+        // Evaluate the src inside an active registry (same as
+        // `registry_from_source`) but with
+        // `with_active_registry_async` and keeping the resulting
+        // Arc.
         let (res, registry) = with_active_registry_async(|| async {
             let tokens = crate::lexer::tokenize(src).unwrap();
             let program = crate::parser::parse(tokens).unwrap();
@@ -8161,13 +8282,13 @@ fn me(user: User) -> Str => \"x\"\n\
         let handle = tokio::spawn(async move {
             let _ = axum::serve(listener, router).await;
         });
-        // Pequeña espera para que el listener esté listo (loopback,
-        // típicamente 1-2ms).
+        // Small wait so the listener is ready (loopback, typically
+        // 1-2ms).
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         (addr, handle)
     }
 
-    /// Helper: conecta un cliente WS al path indicado del addr.
+    /// Helper: connects a WS client to the given path of addr.
     async fn ws_connect(
         addr: std::net::SocketAddr,
         path: &str,
@@ -8182,7 +8303,7 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_echo_simple_send_recv_str() {
-        // Handler echo: recibe un Str, lo manda de vuelta con prefijo.
+        // Echo handler: receives a Str, sends it back with prefix.
         let src = "@ws(\"/echo\")\n\
                    async fn echo(conn: WsConn<Str>) -> Null {\n\
                        match conn.recv() {\n\
@@ -8197,13 +8318,13 @@ fn me(user: User) -> Str => \"x\"\n\
         let mut ws = ws_connect(addr, "/echo").await;
 
         use futures_util::{SinkExt, StreamExt};
-        // Enviar texto. El payload Fitz es JSON del Str, lo cual
-        // queda como `"hola"` (con comillas).
+        // Send text. The Fitz payload is JSON of the Str, which
+        // ends up as `"hola"` (with quotes).
         ws.send(tungstenite::Message::text("\"hola\""))
             .await
             .expect("send");
 
-        // Recibir la respuesta.
+        // Receive the response.
         let resp = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
             .await
             .expect("timeout")
@@ -8219,8 +8340,8 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_broadcast_multi_cliente() {
-        // Dos clientes conectados al mismo endpoint. Uno envía; AMBOS
-        // reciben el broadcast (incluyendo el sender).
+        // Two clients connected to the same endpoint. One sends;
+        // BOTH receive the broadcast (including the sender).
         let src = "@ws(\"/room\")\n\
                    async fn room(conn: WsConn<Str>) -> Null {\n\
                        loop {\n\
@@ -8238,7 +8359,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let mut b = ws_connect(addr, "/room").await;
 
         use futures_util::{SinkExt, StreamExt};
-        // Damos un instante para que el server registre ambos conns.
+        // Give the server a moment to register both conns.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         a.send(tungstenite::Message::text("\"hola\""))
             .await
@@ -8265,8 +8386,9 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_auth_pre_upgrade_devuelve_401_sin_token() {
-        // Handler protegido por @authenticated. Sin Authorization,
-        // el handshake debería fallar con 401 ANTES del upgrade.
+        // Handler protected by @authenticated. Without
+        // Authorization, the handshake should fail with 401 BEFORE
+        // the upgrade.
         let src = "type User { id: Int, name: Str, role: Str }\n\
                    @auth_provider\n\
                    fn check(h: Map<Str, Str>) -> Result<User> {\n\
@@ -8278,8 +8400,8 @@ fn me(user: User) -> Str => \"x\"\n\
         let (addr, _h) = spawn_ws_server(src).await;
         let url = format!("ws://{}/chat", addr);
         let r = tokio_tungstenite::connect_async(&url).await;
-        // Cualquier error es válido — axum responde 401 HTTP y
-        // tokio-tungstenite ve "non-101 response" como error.
+        // Any error is valid — axum returns HTTP 401 and
+        // tokio-tungstenite sees "non-101 response" as an error.
         assert!(
             r.is_err(),
             "esperaba fallo de handshake (401), pero conectó OK",
@@ -8288,8 +8410,8 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_bidir_recv_y_send_tipos_distintos() {
-        // 9.w.2-wsconn-bidir — canal asimétrico: cliente envía Str
-        // (comando), server emite ChatMsg (evento estructurado).
+        // 9.w.2-wsconn-bidir — asymmetric channel: client sends
+        // Str (command), server emits ChatMsg (structured event).
         let src = "type ChatMsg { user: Str, text: Str }\n\
                    @ws(\"/cmd\")\n\
                    async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null {\n\
@@ -8326,12 +8448,12 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_auth_via_subprotocol_acepta_token() {
-        // 9.w.2-ws-auth-browser — el cliente envía el token via
-        // subprotocol (`bearer.<token>`) en lugar del header
-        // `Authorization`. El runtime lo extrae y lo inyecta como
-        // `authorization: Bearer <token>` al map que ve el
-        // @auth_provider. Sin cambios del lado user — el mismo
-        // provider funciona para HTTP y WS browser.
+        // 9.w.2-ws-auth-browser — the client sends the token via
+        // subprotocol (`bearer.<token>`) instead of the
+        // `Authorization` header. The runtime extracts it and
+        // injects `authorization: Bearer <token>` into the map
+        // seen by the @auth_provider. No user-side changes — the
+        // same provider works for HTTP and browser WS.
         let src = "type User { id: Int, name: Str, role: Str }\n\
                    @auth_provider\n\
                    fn check(h: Map<Str, Str>) -> Result<User> {\n\
@@ -8356,7 +8478,8 @@ fn me(user: User) -> Str => \"x\"\n\
                        }\n\
                    }";
         let (addr, _h) = spawn_ws_server(src).await;
-        // Armar request HTTP con subprotocol `bearer.secret-tok`.
+        // Build an HTTP request with subprotocol
+        // `bearer.secret-tok`.
         use tokio_tungstenite::tungstenite::client::IntoClientRequest;
         let url = format!("ws://{}/chat", addr);
         let mut req = url.as_str().into_client_request().unwrap();
@@ -8367,8 +8490,9 @@ fn me(user: User) -> Str => \"x\"\n\
         let (mut ws, resp) = tokio_tungstenite::connect_async(req)
             .await
             .expect("handshake debería pasar con bearer.secret-tok");
-        // Verificar que el server echo el subprotocol seleccionado
-        // (RFC 6455 §4.1 — sin echo, el browser rechazaría el upgrade).
+        // Verify the server echoed the selected subprotocol (RFC
+        // 6455 §4.1 — without the echo, the browser would reject
+        // the upgrade).
         let echoed = resp
             .headers()
             .get("sec-websocket-protocol")
@@ -8398,9 +8522,9 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_auth_via_subprotocol_token_invalido_rechaza() {
-        // Mismo @auth_provider que el test anterior, pero el cliente
-        // envía un token inválido via subprotocol → handshake falla
-        // con 401 ANTES del upgrade.
+        // Same @auth_provider as the previous test, but the client
+        // sends an invalid token via subprotocol → handshake
+        // fails with 401 BEFORE the upgrade.
         let src = "type User { id: Int, name: Str, role: Str }\n\
                    @auth_provider\n\
                    fn check(h: Map<Str, Str>) -> Result<User> {\n\
@@ -8433,9 +8557,9 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_tipos_custom_marshaling_json() {
-        // Handler que recibe un `ChatMsg` tipado y devuelve otro.
-        // Verifica que el JSON marshaling automático sobre tipos
-        // custom anda en ambas direcciones.
+        // Handler that receives a typed `ChatMsg` and returns
+        // another. Verifies that automatic JSON marshaling over
+        // custom types works in both directions.
         let src = "type ChatMsg { user: Str, text: Str }\n\
                    @ws(\"/chat\")\n\
                    async fn chat(conn: WsConn<ChatMsg>) -> Null {\n\
@@ -8463,8 +8587,8 @@ fn me(user: User) -> Str => \"x\"\n\
             .expect("ok");
         match resp {
             tungstenite::Message::Text(t) => {
-                // Esperamos `{"user":"ada","text":"re:hi"}` (orden
-                // preservado por preserve_order de serde_json).
+                // We expect `{"user":"ada","text":"re:hi"}` (order
+                // preserved by serde_json's preserve_order).
                 let v: serde_json::Value = serde_json::from_str(t.as_str()).expect("JSON valid");
                 assert_eq!(v["user"], serde_json::json!("ada"));
                 assert_eq!(v["text"], serde_json::json!("re:hi"));
@@ -8475,10 +8599,10 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_heartbeat_envia_ping_periodico() {
-        // Fase 9.w.2.e — handler simple con `@server(ws_heartbeat_secs=1)`.
-        // El cliente conecta y espera; debería recibir al menos un
-        // frame Ping del server dentro de ~2 segundos (1s primer
-        // tick + margen).
+        // Phase 9.w.2.e — simple handler with
+        // `@server(ws_heartbeat_secs=1)`. The client connects and
+        // waits; it should receive at least one Ping frame from
+        // the server within ~2 seconds (1s first tick + margin).
         let src = "@server(43996, ws_heartbeat_secs=1)\n\
                    fn main() => 0\n\
                    @ws(\"/hb\")\n\
@@ -8495,7 +8619,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let (addr, _h) = spawn_ws_server(src).await;
         let mut ws = ws_connect(addr, "/hb").await;
         use futures_util::StreamExt;
-        // Esperamos un Ping en hasta 3 segundos.
+        // We wait up to 3 seconds for a Ping.
         let frame = tokio::time::timeout(std::time::Duration::from_secs(3), async {
             loop {
                 match ws.next().await {
@@ -8503,9 +8627,10 @@ fn me(user: User) -> Str => \"x\"\n\
                         return tungstenite::Message::Ping(Vec::new().into());
                     }
                     Some(Ok(other)) => {
-                        // tokio-tungstenite responde Pings con Pongs
-                        // automáticamente, así que un Ping puede no
-                        // verse acá. Si vemos otro tipo, seguimos.
+                        // tokio-tungstenite replies to Pings with
+                        // Pongs automatically, so a Ping may not
+                        // surface here. If we see another type, we
+                        // continue.
                         let _ = other;
                         continue;
                     }
@@ -8514,21 +8639,22 @@ fn me(user: User) -> Str => \"x\"\n\
             }
         })
         .await;
-        // tokio-tungstenite intercepta Pings y responde Pongs sin
-        // expornerlos al .next() del cliente. La forma robusta de
-        // verificar heartbeat: asegurarse de que la conn sigue viva
-        // después del intervalo (el server no la cerró).
-        // Si llegamos sin panic, el heartbeat funcionó (en producción
-        // un cliente que ignora Pings cerraría la conn; tokio-
-        // tungstenite responde Pong automático).
+        // tokio-tungstenite intercepts Pings and replies with
+        // Pongs without exposing them to the client's .next(). The
+        // robust way to verify heartbeat: confirm the conn is
+        // still alive after the interval (server didn't close it).
+        // If we get here without panic, the heartbeat worked (in
+        // production a client that ignores Pings would close the
+        // conn; tokio-tungstenite auto-replies with Pong).
         let _ = frame;
-        // Sanity: la conn sigue conectada — podemos cerrarla limpia.
+        // Sanity: the conn is still connected — we can close it
+        // cleanly.
         let _ = ws.close(None).await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_broadcast_se_limpia_al_cerrar_conn() {
-        // El broadcaster debería desregistrar el conn al cerrarse.
+        // The broadcaster should unregister the conn on close.
         let src = "@ws(\"/r\")\n\
                    async fn r(conn: WsConn<Str>) -> Null {\n\
                        loop {\n\
@@ -8540,22 +8666,23 @@ fn me(user: User) -> Str => \"x\"\n\
                        return null\n\
                    }";
         let (_addr, _h) = spawn_ws_server(src).await;
-        // Verificación indirecta vía `WsBroadcaster::count` no tenemos
-        // handle directo al broadcaster acá. Lo dejamos como smoke
-        // mínimo — el cleanup se valida vía el otro test (ws_echo
-        // termina sin leaks).
-        // (Test placeholder; deja documentado la deuda de exposición
-        // del broadcaster para inspección.)
+        // Indirect verification via `WsBroadcaster::count`: we
+        // don't have a direct handle to the broadcaster here. We
+        // leave it as a minimal smoke — cleanup is validated via
+        // the other test (ws_echo finishes without leaks).
+        // (Placeholder test; documents the debt of exposing the
+        // broadcaster for inspection.)
     }
 
     // ---- 9.w.2-binary-frames — `WsConn<Bytes>` end-to-end ----
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_echo_binary_round_trip() {
-        // Handler echo binario: recibe `Bytes`, los manda de vuelta sin
-        // tocar. El cliente envía `Message::Binary`, el server lo recibe
-        // como `Value::Bytes` (via `recv()` con T = Bytes), lo reenvía
-        // con `send(buf)` que emite `Message::Binary` (no Text con JSON).
+        // Binary echo handler: receives `Bytes`, sends them back
+        // untouched. The client sends `Message::Binary`, the
+        // server receives it as `Value::Bytes` (via `recv()` with
+        // T = Bytes), forwards it with `send(buf)` emitting
+        // `Message::Binary` (not Text with JSON).
         let src = "@ws(\"/raw\")\n\
                    async fn raw(conn: WsConn<Bytes>) -> Null {\n\
                        match conn.recv() {\n\
@@ -8570,8 +8697,8 @@ fn me(user: User) -> Str => \"x\"\n\
         let mut ws = ws_connect(addr, "/raw").await;
 
         use futures_util::{SinkExt, StreamExt};
-        // Bytes arbitrarios — incluyen 0x00 y 0xff para forzar que el
-        // path no esté re-encodeando a UTF-8.
+        // Arbitrary bytes — include 0x00 and 0xff to force the
+        // path not to re-encode as UTF-8.
         let payload: Vec<u8> = vec![0x00, 0x01, 0x10, 0x80, 0xff, 0x7e];
         ws.send(tungstenite::Message::binary(payload.clone()))
             .await
@@ -8592,8 +8719,9 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_broadcast_binary_multi_cliente() {
-        // Dos clientes conectados; uno envía binary, ambos reciben el
-        // broadcast (sender incluido — convención Socket.IO/Phoenix).
+        // Two connected clients; one sends binary, both receive
+        // the broadcast (sender included — Socket.IO/Phoenix
+        // convention).
         let src = "@ws(\"/room\")\n\
                    async fn room(conn: WsConn<Bytes>) -> Null {\n\
                        loop {\n\
@@ -8611,7 +8739,7 @@ fn me(user: User) -> Str => \"x\"\n\
         let mut b = ws_connect(addr, "/room").await;
 
         use futures_util::{SinkExt, StreamExt};
-        // Damos un instante para que el server registre ambos conns.
+        // Give the server a moment to register both conns.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         let payload: Vec<u8> = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0xff];
@@ -8640,10 +8768,11 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn ws_recv_bytes_mismatch_si_cliente_envia_text() {
-        // Si el handler declara `WsConn<Bytes>` y el cliente manda un
-        // text frame, `recv()` devuelve `Err`. El handler responde con
-        // un literal binario sentinela (`b"mismatch"`) — el test confirma
-        // que el path del Err se ejecuta y el cliente recibe el frame.
+        // If the handler declares `WsConn<Bytes>` and the client
+        // sends a text frame, `recv()` returns `Err`. The handler
+        // responds with a sentinel binary literal (`b"mismatch"`)
+        // — the test confirms the Err path runs and the client
+        // receives the frame.
         let src = "@ws(\"/raw\")\n\
                    async fn raw(conn: WsConn<Bytes>) -> Null {\n\
                        match conn.recv() {\n\
@@ -8707,7 +8836,7 @@ fn me(user: User) -> Str => \"x\"\n\
         assert!(line.starts_with("[fitz HTTP "), "{line}");
         assert!(line.contains("12.0ms"), "{line}");
         assert!(line.contains("GET /users/42 → 200"), "{line}");
-        // Simple no incluye UA ni Content-Length.
+        // Simple does not include UA or Content-Length.
         assert!(!line.contains("UA="), "Simple no debe loguear UA: {line}");
         assert!(!line.contains("len="), "Simple no debe loguear len: {line}");
     }
@@ -8731,8 +8860,9 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[test]
     fn format_http_log_line_verbose_sin_ua_ni_len_omite_secciones() {
-        // Caso típico: response sin Content-Length (streaming/chunked)
-        // y request sin User-Agent header.
+        // Typical case: response without Content-Length
+        // (streaming/chunked) and request without User-Agent
+        // header.
         let line = format_http_log_line(
             std::time::Duration::from_millis(8),
             "GET",
@@ -8750,7 +8880,8 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[test]
     fn format_http_log_line_status_4xx_y_5xx_loguean_normal() {
-        // 404/500 son requests HTTP válidas — el log las loguea igual.
+        // 404/500 are valid HTTP requests — the log logs them
+        // the same.
         let line_404 = format_http_log_line(
             std::time::Duration::from_millis(2),
             "GET",
@@ -8776,7 +8907,7 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[test]
     fn format_http_log_line_options_preflight_se_loguea_igual() {
-        // Preflight OPTIONS (CORS) son tráfico real — se loguean.
+        // OPTIONS preflight (CORS) is real traffic — it's logged.
         let line = format_http_log_line(
             std::time::Duration::from_millis(1),
             "OPTIONS",
@@ -8790,28 +8921,28 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     // -----------------------------------------------------------------
-    // Fase 12.3.b.3 — Métricas built-in (`http_requests_total` Counter
-    // + `http_request_duration_seconds` Histogram).
+    // Phase 12.3.b.3 — Built-in metrics (`http_requests_total`
+    // Counter + `http_request_duration_seconds` Histogram).
     //
-    // Tests con `DebuggingRecorder` instalado como recorder local del
-    // thread (via `metrics::with_local_recorder`) para capturar las
-    // métricas emitidas adentro del closure. Sin recorder, las macros
-    // son no-op silenciosas — los tests validan que `dispatch_request`
-    // las invoca con los labels correctos.
+    // Tests with `DebuggingRecorder` installed as the thread-local
+    // recorder (via `metrics::with_local_recorder`) to capture the
+    // metrics emitted inside the closure. Without a recorder, the
+    // macros are silent no-ops — the tests validate that
+    // `dispatch_request` calls them with the right labels.
     // -----------------------------------------------------------------
 
-    /// Helper común: ejecuta un async block adentro de un Runtime tokio
-    /// nuevo, con un `DebuggingRecorder` instalado como recorder local
-    /// para el thread. Devuelve el snapshot final de métricas.
+    /// Shared helper: runs an async block inside a fresh tokio
+    /// Runtime with a `DebuggingRecorder` installed as the
+    /// thread-local recorder. Returns the final metrics snapshot.
     ///
-    /// El Runtime se crea adentro del closure de `with_local_recorder`
-    /// y se block_on adentro del mismo scope thread-local — eso es lo
-    /// que permite que las macros `metrics::counter!()` / `histogram!()`
-    /// del request handler hereden el recorder. Si extraemos el Future
-    /// y lo await-eamos afuera, el guard del recorder se dropea antes
-    /// (problema clásico thread-local + async).
+    /// The Runtime is created inside the `with_local_recorder`
+    /// closure and `block_on` runs in the same thread-local scope —
+    /// that's what lets the `metrics::counter!()` / `histogram!()`
+    /// macros from the request handler inherit the recorder. If we
+    /// extract the Future and await it outside, the recorder guard
+    /// is dropped first (classic thread-local + async problem).
     ///
-    /// Por la misma razón, los tests son `#[test]` sync, NO
+    /// For the same reason, the tests are sync `#[test]`, NOT
     /// `#[tokio::test]`.
     fn capture_metrics<F>(
         setup_and_run: F,
@@ -8923,9 +9054,9 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[test]
     fn metrics_path_template_no_resuelve_params() {
-        // Path con `{id}` debe registrarse en métricas como TEMPLATE,
-        // no como el path resuelto (`/users/42`). Esto evita
-        // cardinality explosion en producción.
+        // Path with `{id}` must be recorded in metrics as the
+        // TEMPLATE, not the resolved path (`/users/42`). This
+        // avoids cardinality explosion in production.
         let src = "@get(\"/users/{id}\")\nfn h(id: Int) -> Str => \"u\"\n";
 
         let captured = capture_metrics(|rt| {
@@ -9006,9 +9137,9 @@ fn me(user: User) -> Str => \"x\"\n\
 
     #[test]
     fn metrics_status_500_se_registra_con_label_correcto() {
-        // Handler que retorna Result::Err → wrapper convierte a 500.
-        // Validamos que el label status="500" se setea correcto cuando
-        // el outcome.status no es 200.
+        // Handler returning Result::Err → wrapper converts to 500.
+        // We validate the status="500" label is set correctly when
+        // outcome.status is not 200.
         let src = "@get(\"/fail\")\nfn h() -> Result<Str> => Err(\"boom\")\n";
 
         let captured = capture_metrics(|rt| {
