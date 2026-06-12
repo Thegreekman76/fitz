@@ -1,15 +1,15 @@
-// main.rs — Entry point del compilador/intérprete de Fitz.
+// main.rs — Entry point of the Fitz compiler/interpreter.
 //
-// Los módulos viven en `src/lib.rs` desde Fase 9.x.1.b (refactor
-// lib + bin para que `fitz-lsp` pueda reusarlos sin compilación
-// duplicada). Acá solo importamos lo que el CLI consume.
+// Modules live in `src/lib.rs` since Phase 9.x.1.b (lib + bin
+// refactor so that `fitz-lsp` can reuse them without duplicate
+// compilation). Here we only import what the CLI consumes.
 
 use fitz::{
     ast, codegen, cron_jobs, db, deploy, docker, error, evaluator, fmt, http, launcher_template,
     lexer, lint, lockfile, manifest, migrations, openapi, parser, pbs, pyi_loader, testing, types,
 };
 
-// Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
+// `fitz py-types` sub-command (Phase 8.5) — only with the `python` feature.
 #[cfg(feature = "python")]
 use fitz::py_types;
 
@@ -29,294 +29,309 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Ejecutar un archivo .fitz (o el `[bin].main` del `fitz.toml` si
-    /// no se pasa archivo — Fase 9.y.2).
+    /// Run a .fitz file (or the `fitz.toml` `[bin].main` if no
+    /// file is passed — Phase 9.y.2).
     Run {
-        /// Archivo a ejecutar. Si se omite, busca `fitz.toml` en el
-        /// directorio actual o ancestros (Cargo-style) y ejecuta su
-        /// `[bin].main`.
+        /// File to run. If omitted, looks for `fitz.toml` in the
+        /// current directory or ancestors (Cargo-style) and runs
+        /// its `[bin].main`.
         file: Option<PathBuf>,
-        /// Saltar el chequeo estático de tipos. Sin esta flag los
-        /// errores del checker abortan la ejecución (modo strict).
+        /// Skip the static type check. Without this flag, checker
+        /// errors abort execution (strict mode).
         #[arg(long)]
         no_typecheck: bool,
-        /// Fase 13 (v0.11.0) — Args adicionales que se pasan al
-        /// programa Fitz cuando tiene `@command` decorators. El
-        /// CliRegistry se popula al evaluar; si tiene >=1 comando,
-        /// estos args se parsean como argv del CLI (subcomando +
-        /// positional + flags). Ejemplo:
+        /// Phase 13 (v0.11.0) — Extra args passed to the Fitz
+        /// program when it has `@command` decorators. The
+        /// CliRegistry is populated at eval time; if it has >=1
+        /// command, these args are parsed as the CLI argv
+        /// (subcommand + positional + flags). Example:
         ///   `fitz run greeter.fitz -- greet Ada --loud`
-        /// El `--` separa los args de fitz de los del programa.
+        /// The `--` separates fitz args from program args.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Compilar a binario (Fase 5b). Sin archivo, lee el manifest
-    /// (Fase 9.y.2) y emite el binario a `<manifest>/target/release/`
-    /// con el nombre del paquete.
+    /// Compile to a binary (Phase 5b). With no file, reads the
+    /// manifest (Phase 9.y.2) and emits the binary at
+    /// `<manifest>/target/release/` with the package name.
     Build {
-        /// Archivo a compilar. Si se omite, busca `fitz.toml` y
-        /// compila su `[bin].main` con output en
+        /// File to compile. If omitted, looks for `fitz.toml` and
+        /// compiles its `[bin].main` with output at
         /// `<manifest_dir>/target/release/<pkg-name>`.
         file: Option<PathBuf>,
-        /// Fase 8.b — Bundlear CPython embebido en el binario final.
-        /// El output es un binario standalone que NO requiere Python
-        /// instalado en el destino. Internamente: launcher Datasette-
-        /// style + tarball PBS + real binary, todos embebidos.
-        /// Requiere que el programa use `from python import ...`.
-        /// Suma ~30 MB (Windows) / ~45 MB (Linux x64) al binario.
+        /// Phase 8.b — Bundle CPython embedded into the final
+        /// binary. The output is a standalone binary that does NOT
+        /// require Python installed on the destination. Internally:
+        /// Datasette-style launcher + PBS tarball + real binary, all
+        /// embedded. Requires the program to use `from python
+        /// import ...`. Adds ~30 MB (Windows) / ~45 MB (Linux x64)
+        /// to the binary.
         #[arg(long = "bundle-python")]
         bundle_python: bool,
-        /// Fase 8.c — Bundlear paquetes pip junto al CPython embebido.
-        /// Flag repetible: `--bundle-pip sqlalchemy --bundle-pip psycopg2`.
-        /// Acepta version pin nativa de pip:
-        /// `--bundle-pip "sqlalchemy==2.0.0"`. Implica `--bundle-python`
-        /// automáticamente. Builder ejecuta `pip install --target` al
-        /// build time, empaqueta el resultado en un tarball secundario
-        /// embebido en el launcher. En primer run del binario, los
-        /// paquetes se extraen a `<TMPDIR>/fitz-py-<hash>/python/Lib/
-        /// site-packages/` (Windows) o equivalente Unix.
+        /// Phase 8.c — Bundle pip packages along with the embedded
+        /// CPython. Repeatable flag: `--bundle-pip sqlalchemy
+        /// --bundle-pip psycopg2`. Accepts pip's native version
+        /// pin: `--bundle-pip "sqlalchemy==2.0.0"`. Implies
+        /// `--bundle-python` automatically. The builder runs
+        /// `pip install --target` at build time and packs the
+        /// result in a secondary tarball embedded in the launcher.
+        /// On the binary's first run, packages are extracted to
+        /// `<TMPDIR>/fitz-py-<hash>/python/Lib/site-packages/`
+        /// (Windows) or the Unix equivalent.
         #[arg(long = "bundle-pip", value_name = "PACKAGE")]
         bundle_pip: Vec<String>,
-        /// Bundlear paquetes pip leídos desde un `requirements.txt`.
-        /// Flag repetible: `--bundle-pip-requirements requirements.txt
-        /// --bundle-pip-requirements requirements-dev.txt`. Implica
-        /// `--bundle-python` automáticamente. El archivo se pasa
-        /// directo a `pip install -r <file>`, así que toda la sintaxis
-        /// nativa de pip (comentarios `#`, `-r other.txt` includes,
-        /// version pins, `--hash`, etc.) funciona sin cambios.
-        /// Combinable con `--bundle-pip <pkg>`: pip los acumula.
+        /// Bundle pip packages read from a `requirements.txt`.
+        /// Repeatable flag: `--bundle-pip-requirements
+        /// requirements.txt --bundle-pip-requirements
+        /// requirements-dev.txt`. Implies `--bundle-python`
+        /// automatically. The file is passed straight to
+        /// `pip install -r <file>`, so all of pip's native syntax
+        /// (`#` comments, `-r other.txt` includes, version pins,
+        /// `--hash`, etc.) works unchanged. Combinable with
+        /// `--bundle-pip <pkg>`: pip accumulates them.
         #[arg(long = "bundle-pip-requirements", value_name = "FILE")]
         bundle_pip_requirements: Vec<PathBuf>,
     },
-    /// Verificar tipos y sintaxis. Sin archivo, lee el manifest
-    /// (Fase 9.y.2) y chequea el `[bin].main`.
+    /// Type-check and syntax-check. With no file, reads the manifest
+    /// (Phase 9.y.2) and checks the `[bin].main`.
     Check {
-        /// Archivo a verificar. Si se omite, busca `fitz.toml` y
-        /// chequea su `[bin].main`.
+        /// File to check. If omitted, looks for `fitz.toml` and
+        /// checks its `[bin].main`.
         file: Option<PathBuf>,
     },
-    /// Emite el schema OpenAPI 3.1 del programa a stdout
+    /// Emits the program's OpenAPI 3.1 schema to stdout
     Openapi {
-        /// Archivo a inspeccionar
+        /// File to inspect
         file: PathBuf,
     },
-    /// Fase 8.5 — Genera `type` Fitz a partir de modelos SQLAlchemy
-    /// definidos en un archivo Python. La introspección usa duck
-    /// typing sobre `__table__.columns`: cualquier clase con ese
-    /// shape se traduce (compatible con SQLAlchemy real y mocks
-    /// equivalentes). Requiere binario `fitz` compilado con
+    /// Phase 8.5 — Generates Fitz `type` from SQLAlchemy models
+    /// defined in a Python file. Introspection uses duck typing
+    /// over `__table__.columns`: any class with that shape is
+    /// translated (compatible with real SQLAlchemy and equivalent
+    /// mocks). Requires the `fitz` binary compiled with
     /// `--features python`.
     PyTypes {
-        /// Archivo Python con modelos a introspeccionar
+        /// Python file with models to introspect
         source: PathBuf,
-        /// Archivo destino. Si se omite, escribe a stdout.
+        /// Destination file. If omitted, writes to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// pyi-stubs (v0.9.39) — Genera `type` Fitz a partir de un
-    /// archivo `.pyi` (stubs Python PEP 484/561). Parsea las
-    /// `class` top-level y emite los `type` Fitz equivalentes,
-    /// listos para `import`. NO requiere feature `python` — el
-    /// parser .pyi vive en el binario default. Útil para integrar
-    /// libs Python tipadas con stubs (e.g. `requests.pyi`).
+    /// pyi-stubs (v0.9.39) — Generates Fitz `type` from a `.pyi`
+    /// file (Python PEP 484/561 stubs). Parses top-level `class`es
+    /// and emits the equivalent Fitz `type`s, ready to `import`.
+    /// Does NOT require the `python` feature — the .pyi parser
+    /// lives in the default binary. Useful to integrate typed
+    /// Python libs with stubs (e.g. `requests.pyi`).
     PyStubs {
-        /// Archivo `.pyi` a parsear
+        /// `.pyi` file to parse
         source: PathBuf,
-        /// Archivo destino. Si se omite, escribe a stdout.
+        /// Destination file. If omitted, writes to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
     },
-    /// Fase 9.y.1 — Crea un proyecto Fitz nuevo en una carpeta.
+    /// Phase 9.y.1 — Creates a new Fitz project in a folder.
     ///
-    /// Genera `<name>/fitz.toml`, `<name>/src/main.fitz`, `<name>/.gitignore`,
-    /// y (a menos que se pase `--no-git`) corre `git init`. El nombre
-    /// debe matchear `^[a-z][a-z0-9_-]{0,63}$`.
+    /// Generates `<name>/fitz.toml`, `<name>/src/main.fitz`,
+    /// `<name>/.gitignore`, and (unless `--no-git` is passed) runs
+    /// `git init`. The name must match `^[a-z][a-z0-9_-]{0,63}$`.
     New {
-        /// Nombre del proyecto (también nombre de la carpeta a crear).
+        /// Project name (also the name of the folder to create).
         name: String,
-        /// Template HTTP en vez de CLI hello world.
+        /// HTTP template instead of the CLI hello world.
         #[arg(long)]
         http: bool,
-        /// No correr `git init` en la carpeta creada.
+        /// Don't run `git init` in the created folder.
         #[arg(long)]
         no_git: bool,
     },
-    /// Fase 9.y.1 — Inicializa un proyecto Fitz en el directorio actual.
+    /// Phase 9.y.1 — Initializes a Fitz project in the current
+    /// directory.
     ///
-    /// Genera `./fitz.toml`, `./src/main.fitz`, `./.gitignore`, y (a
-    /// menos que se pase `--no-git`) corre `git init`. El nombre del
-    /// paquete se deriva del nombre del directorio actual, o del flag
-    /// `--name` si se provee. Falla si ya existe un `fitz.toml`.
+    /// Generates `./fitz.toml`, `./src/main.fitz`, `./.gitignore`,
+    /// and (unless `--no-git` is passed) runs `git init`. The
+    /// package name is derived from the current directory's name,
+    /// or from `--name` if provided. Fails if a `fitz.toml` already
+    /// exists.
     Init {
-        /// Sobrescribe el nombre del paquete (default: nombre del
-        /// directorio actual). Debe matchear `^[a-z][a-z0-9_-]{0,63}$`.
+        /// Override the package name (default: current directory's
+        /// name). Must match `^[a-z][a-z0-9_-]{0,63}$`.
         #[arg(long)]
         name: Option<String>,
-        /// Template HTTP en vez de CLI hello world.
+        /// HTTP template instead of the CLI hello world.
         #[arg(long)]
         http: bool,
-        /// No correr `git init` en el directorio.
+        /// Don't run `git init` in the directory.
         #[arg(long)]
         no_git: bool,
     },
-    /// Fase 9.y.4 — Agrega una dep al `fitz.toml` del proyecto actual
-    /// y sincroniza el `fitz.lock`. Requiere `--path` o `--git`
-    /// (versiones sueltas registry-style llegan en 9.y.5).
+    /// Phase 9.y.4 — Adds a dep to the current project's
+    /// `fitz.toml` and syncs `fitz.lock`. Requires `--path` or
+    /// `--git` (loose registry-style versions arrive in 9.y.5).
     ///
-    /// Si la dep ya existía con el mismo nombre, se sobreescribe
-    /// (cargo-style). Si la resolución posterior falla (path
-    /// inexistente, git clone fallido, etc.), el manifest persiste
-    /// igual — usá `fitz remove <name>` para revertir.
+    /// If the dep already existed with the same name, it's
+    /// overwritten (cargo-style). If subsequent resolution fails
+    /// (missing path, failed git clone, etc.), the manifest
+    /// persists anyway — use `fitz remove <name>` to revert.
     Add {
-        /// Nombre de la dep tal como aparecerá en `[dependencies]`.
+        /// Dep name as it will appear in `[dependencies]`.
         name: String,
-        /// Path dep relativo al manifest del proyecto.
+        /// Path dep relative to the project's manifest.
         #[arg(long, conflicts_with = "git")]
         path: Option<String>,
-        /// URL del repo git. Requiere también `--tag` o `--rev`.
+        /// Git repo URL. Also requires `--tag` or `--rev`.
         #[arg(long, conflicts_with = "path")]
         git: Option<String>,
-        /// Tag a checkout-ear (mutuamente exclusivo con `--rev`).
+        /// Tag to check out (mutually exclusive with `--rev`).
         #[arg(long, conflicts_with = "rev", requires = "git")]
         tag: Option<String>,
-        /// Commit SHA a checkout-ear (mutuamente exclusivo con `--tag`).
+        /// Commit SHA to check out (mutually exclusive with
+        /// `--tag`).
         #[arg(long, conflicts_with = "tag", requires = "git")]
         rev: Option<String>,
     },
-    /// Fase 9.y.4 — Quita una dep del `fitz.toml` del proyecto actual
-    /// y sincroniza el `fitz.lock`. Si la dep no existía, error claro.
+    /// Phase 9.y.4 — Removes a dep from the current project's
+    /// `fitz.toml` and syncs `fitz.lock`. If the dep didn't exist,
+    /// clear error.
     Remove {
-        /// Nombre de la dep a quitar (tal como aparece en
+        /// Name of the dep to remove (as it appears in
         /// `[dependencies]`).
         name: String,
     },
-    /// Fase 9.y.4 — Re-resuelve las deps del proyecto actual. Para
-    /// git deps, invalida el cache local y re-clona (útil cuando el
-    /// tag upstream se movió o cuando querés un fetch fresh). Para
-    /// path deps es no-op (siempre fresh). Sin args, actualiza todas.
+    /// Phase 9.y.4 — Re-resolves the current project's deps. For
+    /// git deps, invalidates the local cache and re-clones (useful
+    /// when the upstream tag moved or when you want a fresh
+    /// fetch). For path deps it's a no-op (always fresh). Without
+    /// args, updates all of them.
     Update {
-        /// Nombre de la dep específica a actualizar. Sin este flag,
-        /// actualiza todas las deps del manifest.
+        /// Name of the specific dep to update. Without this flag,
+        /// updates all manifest deps.
         name: Option<String>,
     },
-    /// Fase 9.z.1 (a + b CERRADAS) — Formatea código Fitz a su
-    /// estilo canónico (cero config). 4 espacios indent, comillas
-    /// dobles, trailing comma solo multi-línea. **Preserva
-    /// comentarios y blank lines del usuario** (9.z.1.b).
+    /// Phase 9.z.1 (a + b CLOSED) — Formats Fitz code to its
+    /// canonical style (zero config). 4-space indent, double
+    /// quotes, trailing comma only on multi-line. **Preserves the
+    /// user's comments and blank lines** (9.z.1.b).
     ///
-    /// Sin argumentos, formatea todos los `.fitz` del proyecto
-    /// actual (vía manifest). Con archivos explícitos, formatea
-    /// solo esos. `--check` no escribe, exit 1 si hay diffs.
+    /// Without arguments, formats every `.fitz` in the current
+    /// project (via manifest). With explicit files, formats only
+    /// those. `--check` does not write; exit 1 on diffs.
     Fmt {
-        /// Archivos `.fitz` a formatear. Si se omiten, formatea todo
-        /// el proyecto (requiere `fitz.toml`).
+        /// `.fitz` files to format. If omitted, formats the entire
+        /// project (requires `fitz.toml`).
         files: Vec<PathBuf>,
-        /// Modo CI: no escribe, exit 1 si hay diffs.
+        /// CI mode: no writes, exit 1 on diffs.
         #[arg(long)]
         check: bool,
     },
-    /// Fase 9.z.2.b — Corre todas las fns marcadas con `@test` del
-    /// proyecto. En manifest mode, descubre desde `[lib].entry` (o
-    /// `[bin].main`) + `tests/*.fitz` top-level del directorio del
-    /// manifest. En single-file mode (`fitz test archivo.fitz`),
-    /// carga ese archivo y corre sus `@test`. Filtra por substring
-    /// del nombre del test si se pasa `[filter]`. Exit code 0 si
-    /// todos pasan, 1 si alguno falla.
+    /// Phase 9.z.2.b — Runs every fn marked with `@test` in the
+    /// project. In manifest mode, discovers from `[lib].entry`
+    /// (or `[bin].main`) + top-level `tests/*.fitz` in the
+    /// manifest directory. In single-file mode (`fitz test
+    /// file.fitz`), loads that file and runs its `@test`s.
+    /// Filters by substring of the test name if `[filter]` is
+    /// passed. Exit code 0 if all pass, 1 if any fail.
     Test {
-        /// Substring del nombre del test para filtrar. Sin filter,
-        /// corre todos los descubiertos.
+        /// Substring of the test name to filter by. With no
+        /// filter, runs all discovered tests.
         filter: Option<String>,
-        /// Archivo `.fitz` específico. Si se omite, busca
-        /// `fitz.toml` (manifest mode) y descubre desde el proyecto.
+        /// Specific `.fitz` file. If omitted, looks for
+        /// `fitz.toml` (manifest mode) and discovers from the
+        /// project.
         #[arg(long)]
         file: Option<PathBuf>,
     },
-    /// Fase 9.z.3 — Modo desarrollo con hot reload. Corre tu programa
-    /// y lo re-arranca automáticamente cuando un archivo `.fitz` (o
-    /// `fitz.toml`) cambia. Sin args, busca `fitz.toml` y corre el
-    /// `[bin].main`. Con `--file`, corre ese archivo (single-file mode).
+    /// Phase 9.z.3 — Development mode with hot reload. Runs your
+    /// program and restarts it automatically when a `.fitz` file
+    /// (or `fitz.toml`) changes. Without args, looks for
+    /// `fitz.toml` and runs the `[bin].main`. With `--file`, runs
+    /// that file (single-file mode).
     ///
-    /// Estrategia: kill+respawn del proceso (incremental rebuild es
-    /// deuda). Excluye `target/`, `.git/`, `node_modules/`, archivos
-    /// ocultos. Debounce 100ms para colapsar saves múltiples del
-    /// editor. Ctrl+C mata el child antes de salir.
+    /// Strategy: kill+respawn the process (incremental rebuild is
+    /// debt). Excludes `target/`, `.git/`, `node_modules/`, hidden
+    /// files. 100 ms debounce to collapse multiple editor saves.
+    /// Ctrl+C kills the child before exiting.
     Dev {
-        /// Archivo `.fitz` específico. Si se omite, busca
-        /// `fitz.toml` (manifest mode) y corre `[bin].main`.
+        /// Specific `.fitz` file. If omitted, looks for
+        /// `fitz.toml` (manifest mode) and runs `[bin].main`.
         #[arg(long)]
         file: Option<PathBuf>,
     },
-    /// Fase 9.z.4 — REPL interactivo. Abre un prompt `fitz> ` donde
-    /// podés ingresar expresiones y statements línea por línea. El
-    /// env persiste entre líneas: `let x = 1` queda definida para
-    /// las siguientes. Multi-line automático (`... `) cuando un
-    /// `{` o `(` quedan abiertos. History persistente en
-    /// `~/.fitz/history`. Comandos especiales: `:help`, `:quit`,
-    /// `:type <expr>`, `:env`, `:reset`, `:load <archivo>`.
-    /// Ctrl+D sale. Async funciona (`sleep(100).await` y similares).
+    /// Phase 9.z.4 — Interactive REPL. Opens a `fitz> ` prompt
+    /// where you can enter expressions and statements line by
+    /// line. The env persists between lines: `let x = 1` stays
+    /// defined for subsequent inputs. Automatic multi-line
+    /// (`... `) when `{` or `(` remain open. Persistent history
+    /// at `~/.fitz/history`. Special commands: `:help`, `:quit`,
+    /// `:type <expr>`, `:env`, `:reset`, `:load <file>`. Ctrl+D
+    /// exits. Async works (`sleep(100).await` and similar).
     Repl,
-    /// Fase 9.z.5 — Linter de patrones más allá de tipos. Detecta
+    /// Phase 9.z.5 — Linter for patterns beyond types. Detects
     /// `unused_variable`, `unused_import`, `useless_match`,
-    /// `string_concat`. Default: warnings (exit 0). `--deny <lint>`
-    /// trata ese lint como error (exit 1). Supresión por
-    /// `// @allow(<lint>)` en la línea anterior. Sin args, busca
-    /// `fitz.toml` (manifest mode) y lintea todos los `.fitz`.
+    /// `string_concat`. Default: warnings (exit 0). `--deny
+    /// <lint>` treats that lint as an error (exit 1). Suppression
+    /// via `// @allow(<lint>)` on the previous line. With no
+    /// args, looks for `fitz.toml` (manifest mode) and lints all
+    /// `.fitz` files.
     Lint {
-        /// Archivos `.fitz` a lintear. Si se omiten, lintea todo
-        /// el proyecto (requiere `fitz.toml`).
+        /// `.fitz` files to lint. If omitted, lints the entire
+        /// project (requires `fitz.toml`).
         files: Vec<PathBuf>,
-        /// Trata el lint nombrado como error (exit 1 si aparece).
-        /// Se puede pasar múltiples veces: `--deny unused_variable
-        /// --deny string_concat`.
+        /// Treat the named lint as an error (exit 1 if it
+        /// appears). Can be passed multiple times: `--deny
+        /// unused_variable --deny string_concat`.
         #[arg(long)]
         deny: Vec<String>,
     },
 
-    /// Fase 10.6 — Migraciones automáticas del ORM. Compara el
-    /// schema declarado en los `@table` types con el schema real de
-    /// la DB, genera SQL DDL para sincronizar, y trackea qué
-    /// migraciones corrieron.
+    /// Phase 10.6 — Automatic ORM migrations. Compares the schema
+    /// declared in the `@table` types with the real DB schema,
+    /// generates SQL DDL to sync them, and tracks which
+    /// migrations ran.
     #[command(subcommand)]
     Db(DbCmd),
 
-    /// Fase 12.4 — Genera `Dockerfile`, `.dockerignore` y
-    /// `docker-compose.yml` para el proyecto actual. Detecta el
-    /// shape del programa (puerto HTTP, uso de DB) leyendo el AST
-    /// del entry point del manifest. Smart por defecto: si el
-    /// programa usa `db.connect(...)`, el compose suma un service
-    /// `postgres:16-alpine` con healthcheck.
+    /// Phase 12.4 — Generates `Dockerfile`, `.dockerignore`, and
+    /// `docker-compose.yml` for the current project. Detects the
+    /// program shape (HTTP port, DB usage) by reading the AST of
+    /// the manifest's entry point. Smart by default: if the
+    /// program uses `db.connect(...)`, compose adds a
+    /// `postgres:16-alpine` service with healthcheck.
     #[command(subcommand)]
     Docker(DockerCmd),
 
-    /// Fase 12.6 — Orchestrator de deployment. Thin wrapper sobre
-    /// `docker build/push` o `docker compose up` según el target
-    /// seleccionado. Targets MVP: `docker` (build + push) y `compose`
-    /// (up local). Targets futuros como `fly`/`railway`/`k8s` quedan
-    /// como deuda visible — para esos, correr los CLIs directo.
+    /// Phase 12.6 — Deployment orchestrator. Thin wrapper over
+    /// `docker build/push` or `docker compose up` depending on
+    /// the selected target. MVP targets: `docker` (build + push)
+    /// and `compose` (up local). Future targets like
+    /// `fly`/`railway`/`k8s` remain visible debt — for those, run
+    /// the CLIs directly.
     #[command(subcommand)]
     Deploy(DeployCmd),
 }
 
 #[derive(Subcommand)]
 enum DeployCmd {
-    /// Build + push de la imagen Docker. `docker build -t <tag> .`
-    /// seguido de `docker push <tag>`. Default tag = `<pkg-name>:latest`.
-    /// Aborta si no hay Dockerfile (sugiere `fitz docker init`).
+    /// Docker image build + push. `docker build -t <tag> .`
+    /// followed by `docker push <tag>`. Default tag =
+    /// `<pkg-name>:latest`. Aborts if there's no Dockerfile
+    /// (suggests `fitz docker init`).
     Docker {
-        /// Tag de la imagen. Default: `<package.name>:latest`.
+        /// Image tag. Default: `<package.name>:latest`.
         #[arg(long)]
         tag: Option<String>,
-        /// Saltar el `docker push` (solo build local, útil sin registry).
+        /// Skip the `docker push` (local build only, useful with
+        /// no registry).
         #[arg(long)]
         no_push: bool,
     },
-    /// Levanta el stack con `docker compose up -d --build`. Aborta si
-    /// no hay `docker-compose.yml` (sugiere `fitz docker init`).
+    /// Brings the stack up with `docker compose up -d --build`.
+    /// Aborts if there's no `docker-compose.yml` (suggests
+    /// `fitz docker init`).
     Compose {
-        /// Correr en foreground (sin `-d`).
+        /// Run in foreground (no `-d`).
         #[arg(long)]
         no_detach: bool,
-        /// No re-buildear las imágenes (sin `--build`).
+        /// Don't rebuild images (no `--build`).
         #[arg(long)]
         no_build: bool,
     },
@@ -324,20 +339,22 @@ enum DeployCmd {
 
 #[derive(Subcommand)]
 enum DockerCmd {
-    /// Genera los 3 archivos en el directorio del manifest. Si un
-    /// archivo ya existe, lo skipea (a menos que se pase `--force`).
+    /// Generates the 3 files in the manifest directory. If a
+    /// file already exists, skips it (unless `--force` is
+    /// passed).
     Init {
-        /// Sobrescribir archivos existentes (Dockerfile, .dockerignore,
-        /// docker-compose.yml). Por defecto se preservan.
+        /// Overwrite existing files (Dockerfile, .dockerignore,
+        /// docker-compose.yml). They are preserved by default.
         #[arg(long)]
         force: bool,
     },
-    /// Thin wrapper sobre `docker build` que usa el Dockerfile del
-    /// directorio del manifest y tagea la imagen con el `package.name`
-    /// del `fitz.toml` (override con `--tag`). Aborta si no hay
-    /// Dockerfile (sugiere correr `fitz docker init` primero).
+    /// Thin wrapper over `docker build` that uses the Dockerfile
+    /// in the manifest directory and tags the image with the
+    /// `fitz.toml` `package.name` (override with `--tag`). Aborts
+    /// if there's no Dockerfile (suggests running `fitz docker
+    /// init` first).
     Build {
-        /// Tag de la imagen. Default: `<package.name>:latest`.
+        /// Image tag. Default: `<package.name>:latest`.
         #[arg(long)]
         tag: Option<String>,
     },
@@ -345,214 +362,232 @@ enum DockerCmd {
 
 #[derive(Subcommand)]
 enum DbCmd {
-    /// Compara el schema actual de la DB con el declarado en los
-    /// `@table` types del programa Fitz y emite SQL DDL para
-    /// sincronizar (CREATE TABLE / ADD COLUMN / etc.).
+    /// Compares the DB's current schema with the one declared in
+    /// the Fitz program's `@table` types and emits SQL DDL to
+    /// sync them (CREATE TABLE / ADD COLUMN / etc.).
     Diff {
-        /// Programa Fitz con los `@table` types. Si se omite,
-        /// usa el `[bin].main` del `fitz.toml` del cwd/ancestros.
+        /// Fitz program with the `@table` types. If omitted,
+        /// uses the cwd/ancestor `fitz.toml`'s `[bin].main`.
         file: Option<PathBuf>,
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
-        /// Archivo de salida `.sql`. Si se omite, escribe a stdout.
+        /// Output `.sql` file. If omitted, writes to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// v0.10.31 (Tier A.1) — clasifica cada change como
-        /// safe/risky/destructive y aborta si hay destructive
-        /// sin `--allow-destructive`. El SQL emitido suma
-        /// comentarios `-- [SAFE]` / `-- [RISKY]` / `-- [DESTRUCTIVE]`
-        /// por change para review humano antes de aplicar.
+        /// v0.10.31 (Tier A.1) — classifies each change as
+        /// safe/risky/destructive and aborts if there is any
+        /// destructive change without `--allow-destructive`. The
+        /// emitted SQL adds `-- [SAFE]` / `-- [RISKY]` /
+        /// `-- [DESTRUCTIVE]` comments per change for human
+        /// review before applying.
         ///
-        /// Política: DropTable/DropColumn → Destructive;
-        /// AddColumn NOT NULL sin default / AlterColumnType /
-        /// SET NOT NULL / AlterColumnDefault / DropIndex →
-        /// Risky; resto → Safe.
+        /// Policy: DropTable/DropColumn → Destructive; AddColumn
+        /// NOT NULL without default / AlterColumnType / SET NOT
+        /// NULL / AlterColumnDefault / DropIndex → Risky; rest →
+        /// Safe.
         #[arg(long)]
         check_destructive: bool,
-        /// v0.10.31 (Tier A.1) — junto con `--check-destructive`,
-        /// permite que el diff emita aunque haya changes
-        /// destructivos. Sin este flag, `--check-destructive`
-        /// aborta con exit 1 si encuentra cualquier destructive.
-        /// Risky NO bloquea (solo se reporta).
+        /// v0.10.31 (Tier A.1) — together with
+        /// `--check-destructive`, allows the diff to emit even
+        /// with destructive changes. Without this flag,
+        /// `--check-destructive` aborts with exit 1 on any
+        /// destructive change. Risky does NOT block (it's only
+        /// reported).
         #[arg(long)]
         allow_destructive: bool,
     },
-    /// Corre todas las migraciones pendientes en `migrations/`
-    /// (o el dir custom de `--dir`). Idempotente — skipea las
-    /// ya aplicadas según `_fitz_migrations`.
+    /// Runs every pending migration in `migrations/` (or the
+    /// custom `--dir`). Idempotent — skips those already applied
+    /// according to `_fitz_migrations`.
     Migrate {
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
-        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        /// Directory with `.sql` files. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Solo imprime qué se aplicaría, sin tocar la DB.
+        /// Only print what would be applied, without touching
+        /// the DB.
         #[arg(long)]
         dry_run: bool,
-        /// v0.10.20 — Offline SQL mode: en vez de ejecutar las
-        /// migrations pendientes, las emite al stdout como SQL
-        /// concatenado (1 archivo por migration con header
-        /// `-- migration <version>: <filename>`). Útil para
-        /// pasarle el SQL a un DBA que aplica manual. Sigue
-        /// conectándose para leer `_fitz_migrations` (qué está
-        /// applied) — si no querés conectar, usá `--dry-run`.
-        /// Rechaza `.fitz` migrations (no se pueden materializar
-        /// como SQL offline).
+        /// v0.10.20 — Offline SQL mode: instead of running the
+        /// pending migrations, emits them as concatenated SQL to
+        /// stdout (1 file per migration with header
+        /// `-- migration <version>: <filename>`). Useful for
+        /// handing the SQL to a DBA who applies it manually.
+        /// Still connects to read `_fitz_migrations` (what's
+        /// applied) — if you don't want to connect, use
+        /// `--dry-run`. Rejects `.fitz` migrations (they can't
+        /// be materialized as offline SQL).
         #[arg(long)]
         sql: bool,
     },
-    /// Lista las migraciones del dir + estado (applied/pending).
+    /// Lists the dir's migrations + state (applied/pending).
     Status {
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
-        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        /// Directory with `.sql` files. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// Crea un archivo de migración vacío con prefijo timestamp
-    /// `YYYYMMDDHHMMSS_<name>.sql` en `migrations/`. v0.10.17 —
-    /// el stub incluye secciones `-- UP` / `-- DOWN` por convención.
+    /// Creates an empty migration file with a timestamp prefix
+    /// `YYYYMMDDHHMMSS_<name>.sql` in `migrations/`. v0.10.17 —
+    /// the stub includes `-- UP` / `-- DOWN` sections by
+    /// convention.
     New {
-        /// Nombre descriptivo de la migración (snake_case).
+        /// Descriptive name for the migration (snake_case).
         name: String,
-        /// Directorio destino. Default: `./migrations`.
+        /// Destination directory. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// v0.10.17 — Revierte las últimas N migraciones aplicadas
-    /// ejecutando su sección `-- DOWN` adentro de tx + borrando
-    /// el registro de `_fitz_migrations`. Default `N=1`. Aborta
-    /// fast si alguna migration target no tiene `-- DOWN`.
+    /// v0.10.17 — Reverts the last N applied migrations by
+    /// running their `-- DOWN` section inside a tx and removing
+    /// the entry from `_fitz_migrations`. Default `N=1`. Aborts
+    /// fast if any target migration lacks a `-- DOWN`.
     Rollback {
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
-        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        /// Directory with `.sql` files. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Cantidad de migraciones a revertir (más reciente
-        /// primero). Default: 1.
+        /// Number of migrations to revert (most recent first).
+        /// Default: 1.
         #[arg(long, default_value_t = 1)]
         count: usize,
     },
-    /// v0.10.18 — Drift check: corre el diff y devuelve exit 0
-    /// si el schema declarado matchea la DB, exit 1 con el SQL
-    /// pendiente al stderr si hay diferencias. Hook para CI
-    /// bloqueante ("no merge si el schema diverge").
+    /// v0.10.18 — Drift check: runs the diff and returns exit 0
+    /// if the declared schema matches the DB, exit 1 with the
+    /// pending SQL on stderr if there are differences. Hook for
+    /// blocking CI ("no merge if the schema diverges").
     Check {
-        /// Programa Fitz con los `@table` types. Si se omite,
-        /// usa el `[bin].main` del `fitz.toml`.
+        /// Fitz program with the `@table` types. If omitted,
+        /// uses the `fitz.toml`'s `[bin].main`.
         file: Option<PathBuf>,
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
     },
-    /// v0.10.20 — Audit log: lista las migrations aplicadas con
-    /// `version` + `applied_at` + filename (si el file sigue
-    /// existiendo en el dir). Orden: más reciente primero.
+    /// v0.10.20 — Audit log: lists the applied migrations with
+    /// `version` + `applied_at` + filename (if the file still
+    /// exists in the dir). Order: most recent first.
     History {
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
-        /// Directorio con archivos. Default: `./migrations`.
+        /// Directory with files. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
     },
-    /// v0.10.20 — Combina las migrations del rango `[from, to]`
-    /// (inclusive) en una sola. Concatena los UP en orden + los
-    /// DOWN en orden inverso. Mueve los files viejos a
-    /// `migrations/squashed/`. Si alguna del range ya estaba
-    /// aplicada en la DB, actualiza el tracking para apuntar al
-    /// nuevo squashed. Solo `.sql` (rechaza `.fitz`).
+    /// v0.10.20 — Combines the migrations in the `[from, to]`
+    /// (inclusive) range into a single one. Concatenates the UPs
+    /// in order + the DOWNs in reverse order. Moves the old
+    /// files to `migrations/squashed/`. If any in the range was
+    /// already applied in the DB, updates the tracking to point
+    /// to the new squashed migration. Only `.sql` (rejects
+    /// `.fitz`).
     Squash {
-        /// Version del primer migration del rango (inclusive).
+        /// Version of the first migration of the range
+        /// (inclusive).
         from: String,
-        /// Version del último migration del rango (inclusive).
+        /// Version of the last migration of the range
+        /// (inclusive).
         to: String,
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
-        /// Necesaria solo para actualizar el tracking; si pasás
-        /// `--no-tracking`, no se conecta.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env. Only needed to update the tracking; if you
+        /// pass `--no-tracking`, it does not connect.
         #[arg(long)]
         url: Option<String>,
-        /// Directorio con archivos. Default: `./migrations`.
+        /// Directory with files. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
-        /// Skipea la actualización del tracking en `_fitz_migrations`.
-        /// Útil para repos sin DB de staging accesible (CI-only).
+        /// Skips updating the tracking in `_fitz_migrations`.
+        /// Useful for repos without an accessible staging DB
+        /// (CI-only).
         #[arg(long)]
         no_tracking: bool,
     },
-    /// v0.10.28 (Tier S, sub-paso 1) — Introspect del schema real
-    /// de la DB. Lista tables, columnas (tipo + nullability +
-    /// default), primary keys, indexes (con WHERE de partial) y
-    /// foreign keys. Sin tocar tu programa Fitz — pura
-    /// introspección de la DB conectada. Útil para auditar antes
-    /// de cambiar tipos, descubrir tables legacy, o comparar dos
-    /// envs (dev vs prod).
+    /// v0.10.28 (Tier S, sub-step 1) — Introspect the DB's real
+    /// schema. Lists tables, columns (type + nullability +
+    /// default), primary keys, indexes (with partial WHERE) and
+    /// foreign keys. Without touching your Fitz program — pure
+    /// introspection of the connected DB. Useful to audit
+    /// before changing types, discover legacy tables, or
+    /// compare two envs (dev vs prod).
     Inspect {
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
-        /// Schema a introspectar. Default: `public`. Tables en
-        /// schemas distintos quedan filtradas.
+        /// Schema to introspect. Default: `public`. Tables in
+        /// other schemas are filtered out.
         #[arg(long)]
         schema: Option<String>,
-        /// Restringir a una sola tabla. Default: lista todas las
-        /// del schema. Si la tabla no existe en el schema, emite
-        /// mensaje claro sin error.
+        /// Restrict to a single table. Default: lists every
+        /// table in the schema. If the table doesn't exist in
+        /// the schema, emits a clear message without error.
         #[arg(long)]
         table: Option<String>,
-        /// Output JSON machine-readable con shape lockeada (para
-        /// scripts externos). Default: vista texto plano legible.
+        /// Machine-readable JSON output with a locked shape
+        /// (for external scripts). Default: readable plain text
+        /// view.
         #[arg(long)]
         json: bool,
-        /// v0.10.29 — Listar TODOS los schemas user-defined a la
-        /// vez (no solo el filtrado por `--schema`). Cada schema
-        /// aparece con su propia sección. Mutuamente excluyente
-        /// con `--schema`.
+        /// v0.10.29 — List ALL user-defined schemas at once
+        /// (not only the one filtered by `--schema`). Each
+        /// schema appears with its own section. Mutually
+        /// exclusive with `--schema`.
         #[arg(long, conflicts_with = "schema")]
         all_schemas: bool,
     },
-    /// v0.10.18 — Marca una migration como aplicada SIN ejecutar
-    /// su SQL. Útil para adoptar Fitz en una DB legacy donde el
-    /// schema ya está aplicado manualmente. `--all` marca todas
-    /// las pending del dir como aplicadas.
+    /// v0.10.18 — Marks a migration as applied WITHOUT running
+    /// its SQL. Useful to adopt Fitz on a legacy DB where the
+    /// schema is already applied manually. `--all` marks every
+    /// pending migration in the dir as applied.
     Stamp {
-        /// Version a marcar (timestamp prefix del filename, p.ej.
-        /// `20260530120000`). Mutuamente excluyente con `--all`.
+        /// Version to stamp (filename's timestamp prefix, e.g.
+        /// `20260530120000`). Mutually exclusive with `--all`.
         #[arg(conflicts_with = "all")]
         version: Option<String>,
-        /// Marca todas las pending del dir como aplicadas.
-        /// Mutuamente excluyente con `<version>`.
+        /// Marks every pending migration in the dir as applied.
+        /// Mutually exclusive with `<version>`.
         #[arg(long)]
         all: bool,
-        /// URL Postgres. Si se omite, lee `DATABASE_URL` del env.
+        /// Postgres URL. If omitted, reads `DATABASE_URL` from
+        /// the env.
         #[arg(long)]
         url: Option<String>,
-        /// Directorio con archivos `.sql`. Default: `./migrations`.
+        /// Directory with `.sql` files. Default: `./migrations`.
         #[arg(long)]
         dir: Option<PathBuf>,
     },
 }
 
 fn main() {
-    // Fase 12.3.a.2 — Inicializa el subscriber de tracing (con
-    // `EnvFilter::from_default_env()`) UNA vez al boot del binario.
-    // Default level si `RUST_LOG` no está seteada = `info`. Sin esto
-    // los builtins `log.info/warn/error/debug` no respetarían el filter
-    // y emitirían siempre. Idempotente: si ya hay un subscriber global
-    // instalado (caso `cargo test` con tests que inicializan logging),
-    // es no-op.
+    // Phase 12.3.a.2 — Initializes the tracing subscriber (with
+    // `EnvFilter::from_default_env()`) ONCE at binary boot. Default
+    // level if `RUST_LOG` is unset = `info`. Without this the
+    // `log.info/warn/error/debug` builtins would not honor the filter
+    // and would always emit. Idempotent: if a global subscriber is
+    // already installed (e.g. `cargo test` with tests that initialize
+    // logging), it's a no-op.
     fitz::logging::init_logging();
-    // Fase 12.3.c.1 — Si `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada,
-    // instala el provider OTel global y los spans HTTP del intérprete
-    // se exportan al backend (Jaeger/Tempo/Honeycomb/Datadog/etc).
-    // Sin esa env var, es no-op silencioso — los handlers siguen con
-    // la instrumentación local (stderr logs + métricas in-memory)
-    // sin enviar nada por la red.
+    // Phase 12.3.c.1 — If `OTEL_EXPORTER_OTLP_ENDPOINT` is set,
+    // installs the global OTel provider and the interpreter's HTTP
+    // spans are exported to the backend
+    // (Jaeger/Tempo/Honeycomb/Datadog/etc). Without that env var,
+    // it's a silent no-op — handlers continue with local
+    // instrumentation (stderr logs + in-memory metrics) without
+    // sending anything over the wire.
     fitz::observability::init_otel();
 
     let cli = Cli::parse();
@@ -576,9 +611,10 @@ fn main() {
         } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
-            // En manifest mode, output a `<manifest_dir>/target/release/
-            // <pkg-name>(.exe)` (Cargo-style). En single-file mode, el
-            // copy adyacente al fuente se decide adentro de build_file.
+            // In manifest mode, output goes to
+            // `<manifest_dir>/target/release/<pkg-name>(.exe)`
+            // (Cargo-style). In single-file mode, copying next to the
+            // source is decided inside build_file.
             let override_dest = resolved.manifest_ctx.as_ref().map(|ctx| {
                 let filename = if cfg!(windows) {
                     format!("{}.exe", ctx.manifest.package.name)
@@ -592,9 +628,10 @@ fn main() {
             });
             let dep_registry = dep_registry_from(&resolved);
             let flag_defaults = flag_defaults_from(&resolved);
-            // Fase 8.c: --bundle-pip implica --bundle-python.
-            // Fase 8.c (cosecha): --bundle-pip-requirements también.
-            // Cualquiera de los tres rutea al pipeline de bundling.
+            // Phase 8.c: --bundle-pip implies --bundle-python.
+            // Phase 8.c (harvest): --bundle-pip-requirements does
+            // too. Any of the three routes through the bundling
+            // pipeline.
             if bundle_python || !bundle_pip.is_empty() || !bundle_pip_requirements.is_empty() {
                 build_file_with_bundle(
                     &resolved.entry,
@@ -616,12 +653,13 @@ fn main() {
         Commands::Check { file } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
-            // `fitz check` no usa el loader (el checker no recursea en
-            // módulos importados — los nombres del importer se tipan
-            // como Any/nominal placeholder y la validación real ocurre
-            // en `fitz run`/`build`). Por eso `check_file` no recibe el
-            // dep_registry. Si en el futuro el checker quiere consumir
-            // tipos del módulo importado, agregar acá el wiring.
+            // `fitz check` doesn't use the loader (the checker does
+            // not recurse into imported modules — the importer's
+            // names get typed as Any/nominal placeholders and real
+            // validation happens in `fitz run`/`build`). That's why
+            // `check_file` does not receive the dep_registry. If the
+            // checker ever wants to consume types from the imported
+            // module, wire it up here.
             check_file(&resolved.entry);
         }
         Commands::Openapi { file } => {
@@ -729,47 +767,47 @@ fn main() {
     }
 }
 
-// ---- Fase 9.y.2 — resolución de entry point (single-file vs manifest) ----
+// ---- Phase 9.y.2 — entry point resolution (single-file vs manifest) ----
 
-/// Contexto del manifest cargado durante `resolve_entry`. Cuando está
-/// presente, el caller sabe que el run/build/check arrancó desde un
-/// proyecto Fitz (no en modo single-file).
+/// Manifest context loaded during `resolve_entry`. When present, the
+/// caller knows the run/build/check started from a Fitz project (not
+/// single-file mode).
 ///
-/// Por ahora lo consumen: `build_file` para decidir el destino del
-/// binario; `sync_lockfile_if_needed` para emitir el `fitz.lock`; y
-/// el dispatch (Run/Build) para construir el `dep_registry` que
-/// recibe el evaluator y el codegen (9.y.3.b).
+/// For now it's consumed by: `build_file` to decide where the binary
+/// goes; `sync_lockfile_if_needed` to emit `fitz.lock`; and the
+/// dispatch (Run/Build) to build the `dep_registry` that the
+/// evaluator and codegen receive (9.y.3.b).
 struct ManifestCtx {
     manifest: manifest::Manifest,
     manifest_dir: PathBuf,
-    /// Deps resueltas (path deps resueltas a `lib_entry` absoluto).
-    /// Fase 9.y.3.a: poblado en `resolve_entry`, consumido por
-    /// `sync_lockfile_if_needed`. Fase 9.y.3.b: también usado para
-    /// armar el `dep_registry` que pasa al evaluator / codegen.
+    /// Resolved deps (path deps resolved to absolute `lib_entry`).
+    /// Phase 9.y.3.a: populated in `resolve_entry`, consumed by
+    /// `sync_lockfile_if_needed`. Phase 9.y.3.b: also used to build
+    /// the `dep_registry` passed to the evaluator / codegen.
     resolved_deps: Vec<manifest::ResolvedDep>,
 }
 
-/// Resultado de resolver el entry point del comando. `entry` apunta al
-/// `.fitz` a procesar; `manifest_ctx` está presente cuando se llegó
-/// vía `fitz.toml` (manifest mode).
+/// Result of resolving the command's entry point. `entry` points to
+/// the `.fitz` to process; `manifest_ctx` is present when we got
+/// here via `fitz.toml` (manifest mode).
 struct ResolvedEntry {
     entry: PathBuf,
     manifest_ctx: Option<ManifestCtx>,
 }
 
-/// Resuelve el entry point del subcomando:
+/// Resolves the subcommand's entry point:
 ///
-/// - Si `file_opt.is_some()`, modo **single-file** (compatibilidad
-///   pre-9.y.2): devuelve el path tal cual, sin manifest ctx.
-/// - Si `file_opt.is_none()`, modo **manifest**: busca `fitz.toml`
-///   subiendo desde el cwd (Cargo-style), lo parsea, y devuelve
-///   `<manifest_dir>/[bin].main` como entry. Sale del proceso con
-///   mensaje claro si:
-///   - no hay `fitz.toml` arriba del cwd (sugiere `fitz new` o pasar
-///     archivo explícito);
-///   - el manifest no parsea;
-///   - el manifest no tiene sección `[bin]` (el MVP de 9.y exige uno;
-///     multi-bin queda 9.y.8+).
+/// - If `file_opt.is_some()`, **single-file** mode (pre-9.y.2
+///   compatibility): returns the path as-is, with no manifest ctx.
+/// - If `file_opt.is_none()`, **manifest** mode: searches for
+///   `fitz.toml` walking up from the cwd (Cargo-style), parses it,
+///   and returns `<manifest_dir>/[bin].main` as the entry. Exits the
+///   process with a clear message if:
+///   - there is no `fitz.toml` above the cwd (suggests `fitz new` or
+///     passing an explicit file);
+///   - the manifest fails to parse;
+///   - the manifest has no `[bin]` section (the 9.y MVP requires
+///     one; multi-bin is 9.y.8+).
 fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
     if let Some(entry) = file_opt {
         return ResolvedEntry {
@@ -826,20 +864,21 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
 
     let entry = manifest_dir.join(&bin.main);
 
-    // Fase 9.y.3.a — resolver deps eager (fail-fast con mensaje del
-    // resolver). Si hay errores, abortamos antes de tocar el lockfile
-    // o invocar al evaluator/codegen.
+    // Phase 9.y.3.a — eager dep resolution (fail-fast with the
+    // resolver's message). On errors, abort before touching the
+    // lockfile or invoking the evaluator/codegen.
     let resolved_deps =
         manifest::resolve_dependencies(&manifest, &manifest_dir).unwrap_or_else(|e| {
             eprintln!("✗ no se pudieron resolver las dependencias: {e}");
             std::process::exit(1);
         });
 
-    // Fase 12.8 — cargar defaults de feature flags al registry runtime.
-    // Idempotente, se llama una vez por proceso. Sin manifest (single-file
-    // mode), el registry queda vacío y todas las flags caen al default
-    // `false` salvo override env var. La conversión BTreeMap→HashMap es
-    // O(N) sobre N flags declarados (típico < 50).
+    // Phase 12.8 — load feature flag defaults into the runtime
+    // registry. Idempotent, called once per process. Without a
+    // manifest (single-file mode), the registry stays empty and all
+    // flags fall back to the `false` default unless an env var
+    // overrides them. The BTreeMap→HashMap conversion is O(N) over
+    // N declared flags (typically < 50).
     let flag_defaults: std::collections::HashMap<String, bool> = manifest
         .flags
         .iter()
@@ -857,13 +896,13 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
     }
 }
 
-/// Fase 9.y.3.b — construye el `DepRegistry` (map `dep-name →
-/// lib_entry-absoluto`) consumido por `eval_with_base_and_deps_sync`
-/// (`fitz run`) y `codegen::generate_project` (`fitz build`).
+/// Phase 9.y.3.b — builds the `DepRegistry` (map `dep-name →
+/// absolute-lib_entry`) consumed by `eval_with_base_and_deps_sync`
+/// (`fitz run`) and `codegen::generate_project` (`fitz build`).
 ///
-/// Devuelve registry vacío en single-file mode (sin manifest) o cuando
-/// el manifest no tiene `[dependencies]`. El loader trata empty igual
-/// que pre-9.y.3.b: solo path-relativo, sin shortcuts.
+/// Returns an empty registry in single-file mode (no manifest) or
+/// when the manifest has no `[dependencies]`. The loader treats
+/// empty just like pre-9.y.3.b: only path-relative, no shortcuts.
 fn dep_registry_from(resolved: &ResolvedEntry) -> manifest::DepRegistry {
     match &resolved.manifest_ctx {
         Some(ctx) => manifest::build_dep_registry(&ctx.resolved_deps),
@@ -871,10 +910,11 @@ fn dep_registry_from(resolved: &ResolvedEntry) -> manifest::DepRegistry {
     }
 }
 
-/// Fase 12.8 — devuelve los flag defaults del manifest (sección
-/// `[flags]`). Empty map en single-file mode o cuando el manifest no
-/// declara flags. El codegen los embebe en el binario generado al boot
-/// (paralelo a `evaluator::set_flag_defaults` para `fitz run`).
+/// Phase 12.8 — returns the manifest's flag defaults (`[flags]`
+/// section). Empty map in single-file mode or when the manifest
+/// declares no flags. Codegen embeds them in the generated binary
+/// at boot (parallel to `evaluator::set_flag_defaults` for `fitz
+/// run`).
 fn flag_defaults_from(resolved: &ResolvedEntry) -> std::collections::BTreeMap<String, bool> {
     match &resolved.manifest_ctx {
         Some(ctx) => ctx.manifest.flags.clone(),
@@ -882,13 +922,13 @@ fn flag_defaults_from(resolved: &ResolvedEntry) -> std::collections::BTreeMap<St
     }
 }
 
-/// Fase 9.y.3.a — sincroniza el `fitz.lock` con las deps del manifest.
-/// No-op en modo single-file y cuando el manifest no tiene deps.
+/// Phase 9.y.3.a — syncs `fitz.lock` with the manifest's deps. No-op
+/// in single-file mode and when the manifest has no deps.
 ///
-/// Para 9.y.3.a las deps son solo path deps (resolución determinística
-/// trivial). El lockfile se regenera siempre; `write_lockfile_if_changed`
-/// hace short-circuit byte-a-byte cuando el contenido coincide para
-/// no spamear mtime y diff vacío.
+/// For 9.y.3.a deps are only path deps (trivial deterministic
+/// resolution). The lockfile is always regenerated;
+/// `write_lockfile_if_changed` short-circuits byte-by-byte when the
+/// contents match, to avoid mtime spam and empty diffs.
 fn sync_lockfile_if_needed(resolved: &ResolvedEntry) {
     let ctx = match &resolved.manifest_ctx {
         Some(c) => c,
@@ -902,11 +942,12 @@ fn sync_lockfile_if_needed(resolved: &ResolvedEntry) {
     let path = lockfile::lockfile_path(&ctx.manifest_dir);
     match lockfile::write_lockfile_if_changed(&path, &lock) {
         Ok(true) => {
-            // Solo notificamos cuando escribimos algo nuevo. La
-            // regeneración silenciosa es el caso 90% y no merece spam.
+            // Only notify when we actually wrote something new.
+            // Silent regeneration is the 90% case and doesn't
+            // deserve spam.
             println!("✓ actualizado {}", path.display());
         }
-        Ok(false) => {} // sin cambios
+        Ok(false) => {} // no changes
         Err(e) => {
             eprintln!("✗ no se pudo escribir `{}`: {e}", path.display());
             std::process::exit(1);
@@ -914,13 +955,14 @@ fn sync_lockfile_if_needed(resolved: &ResolvedEntry) {
     }
 }
 
-/// `fitz py-types <archivo.py> [--out <archivo.fitz>]` — Fase 8.5.
-/// Importa el archivo Python via PyO3, introspecciona las clases con
-/// `__table__.columns` (compatible con SQLAlchemy real y mocks), y
-/// genera `type` Fitz correspondientes. Escribe a stdout o al
-/// `--out` indicado.
+/// `fitz py-types <file.py> [--out <file.fitz>]` — Phase 8.5.
+/// Imports the Python file via PyO3, introspects classes with
+/// `__table__.columns` (compatible with real SQLAlchemy and mocks),
+/// and generates the corresponding Fitz `type`. Writes to stdout or
+/// to the given `--out`.
 ///
-/// Sin feature `python`, emite error claro citando el flag de build.
+/// Without the `python` feature, emits a clear error citing the
+/// build flag.
 #[cfg(feature = "python")]
 fn py_types_file(source: &std::path::Path, out: Option<&std::path::Path>) {
     let output = match py_types::generate_from_file(source) {
@@ -957,15 +999,16 @@ fn py_types_file(_source: &std::path::Path, _out: Option<&std::path::Path>) {
     std::process::exit(1);
 }
 
-/// `fitz py-stubs <archivo.pyi> [--out <archivo.fitz>]` — pyi-stubs
-/// (v0.9.39). Parsea un archivo `.pyi` (PEP 484/561) y emite los
-/// `type` Fitz equivalentes para cada `class` top-level del stub.
-/// Disponible sin feature `python` (el parser es ad-hoc, no usa PyO3).
+/// `fitz py-stubs <file.pyi> [--out <file.fitz>]` — pyi-stubs
+/// (v0.9.39). Parses a `.pyi` file (PEP 484/561) and emits the
+/// equivalent Fitz `type` for every top-level `class` in the stub.
+/// Available without the `python` feature (the parser is ad-hoc,
+/// doesn't use PyO3).
 ///
-/// Output: archivo Fitz commiteable que el user puede importar normal
-/// (`from <archivo> import User`). El checker entonces ve tipos
-/// reales, no `PyAny` opaco. Trade-off: pierde sincronía automática
-/// con el .pyi (regenerar si el stub cambia).
+/// Output: a committable Fitz file the user can import normally
+/// (`from <file> import User`). The checker then sees real types,
+/// not opaque `PyAny`. Trade-off: loses automatic sync with the
+/// .pyi (regenerate if the stub changes).
 fn py_stubs_file(source: &std::path::Path, out: Option<&std::path::Path>) {
     let raw = match fs::read_to_string(source) {
         Ok(s) => s,
@@ -998,10 +1041,10 @@ fn py_stubs_file(source: &std::path::Path, out: Option<&std::path::Path>) {
     }
 }
 
-/// Convierte los items del stub a código Fitz commiteable. Por ahora
-/// emite solo `class` → `type` (fns/vars top-level del stub quedan
-/// como deuda menor — el `.py` real expone esas vías field access
-/// con `PyAny` opaco hoy y eso ya funciona).
+/// Converts the stub items to committable Fitz code. For now it
+/// only emits `class` → `type` (top-level fns/vars in the stub
+/// remain minor debt — the real `.py` exposes those via field
+/// access with opaque `PyAny` today and that already works).
 fn render_stub_items_as_fitz(
     items: &[fitz::pyi_stub::StubItem],
     source: &std::path::Path,
@@ -1016,7 +1059,8 @@ fn render_stub_items_as_fitz(
     for item in items {
         if let StubItem::Class(cls) = item {
             if cls.fields.is_empty() {
-                // class sin fields → no aporta info útil al checker.
+                // class with no fields → adds no useful info for
+                // the checker.
                 continue;
             }
             out.push_str(&format!("type {} {{\n", cls.name));
@@ -1042,8 +1086,8 @@ fn render_stub_type_as_fitz(ty: &fitz::pyi_stub::StubType) -> String {
             "None" | "NoneType" => "Null".into(),
             "bytes" | "bytearray" => "Bytes".into(),
             "Any" | "object" => "Any".into(),
-            // Custom name — el user debería tener el tipo declarado
-            // adyacente o lo importará separado.
+            // Custom name — the user should have the type declared
+            // alongside or will import it separately.
             other => other.to_string(),
         },
         StubType::Generic(name, args) => match (name.as_str(), args.len()) {
@@ -1059,7 +1103,7 @@ fn render_stub_type_as_fitz(ty: &fitz::pyi_stub::StubType) -> String {
             _ => "Any".into(),
         },
         StubType::Union(alts) => {
-            // `T | None` → `T?`. Resto → `Any`.
+            // `T | None` → `T?`. Anything else → `Any`.
             let mut non_null = Vec::new();
             let mut has_null = false;
             for alt in alts {
@@ -1080,10 +1124,10 @@ fn render_stub_type_as_fitz(ty: &fitz::pyi_stub::StubType) -> String {
     }
 }
 
-/// 8-pyi.B (v0.9.57) — Computa el `base_dir` para el lookup de stubs
-/// `.pyi` adyacentes. Es el directorio padre del `path` del `.fitz`;
-/// si el path no tiene padre claro (e.g. archivo en cwd sin prefix),
-/// fallback a `current_dir()`.
+/// 8-pyi.B (v0.9.57) — Computes the `base_dir` for the adjacent
+/// `.pyi` stub lookup. It's the parent directory of the `.fitz`
+/// `path`; if the path has no clear parent (e.g. file in cwd
+/// without a prefix), fallback to `current_dir()`.
 fn base_dir_for_stub_lookup(path: &std::path::Path) -> PathBuf {
     path.parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -1091,17 +1135,18 @@ fn base_dir_for_stub_lookup(path: &std::path::Path) -> PathBuf {
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
-/// 8-pyi.B (v0.9.57) — Wrapper de `check_program` que ANTES de invocar
-/// al checker carga stubs `.pyi` adyacentes al `path` y registra sus
-/// nominales en el TypeEnv. Política silent fallback: si el `.pyi` no
-/// existe o falla al parsear, sigue como si no estuviera (el binding
-/// del `from python import` queda como `Type::PyAny` opaco).
+/// 8-pyi.B (v0.9.57) — Wrapper of `check_program` that BEFORE
+/// invoking the checker loads `.pyi` stubs adjacent to `path` and
+/// registers their nominals in the TypeEnv. Silent-fallback policy:
+/// if the `.pyi` doesn't exist or fails to parse, it carries on as
+/// if it weren't there (the `from python import` binding stays as
+/// opaque `Type::PyAny`).
 ///
-/// **Por qué main.rs y no types.rs**: el checker no conoce el
-/// filesystem; el `path` solo lo tiene el caller que arrancó el
-/// pipeline. Mantenemos `types::check_program(program)` puro para los
-/// call sites sin contexto de archivo (tests, REPL, openapi de
-/// programas sin path conocido).
+/// **Why main.rs and not types.rs**: the checker doesn't know the
+/// filesystem; only the caller that started the pipeline has the
+/// `path`. We keep `types::check_program(program)` pure for call
+/// sites without file context (tests, REPL, openapi of programs
+/// without a known path).
 fn check_program_with_pyi_stubs(
     program: &ast::Program,
     path: &std::path::Path,
@@ -1114,35 +1159,36 @@ fn check_program_with_pyi_stubs(
     check_program_with_pyi_stubs_and_deps(program, path, &manifest::DepRegistry::new())
 }
 
-/// W12 (v0.10.8) — variante de `check_program_with_pyi_stubs` que
-/// además recibe el `dep_registry` resuelto del `fitz.toml` (cuando
-/// `fitz check`/`build`/`run` corre adentro de un proyecto Fitz con
-/// `[dependencies]`). Lo usa el pre-scan de `@auth_provider`
-/// cross-module para resolver `from <dep-name> import` al `lib_entry`
-/// absoluto de la dep en lugar de fallback a path relativo al
-/// importer.
+/// W12 (v0.10.8) — variant of `check_program_with_pyi_stubs` that
+/// also receives the `dep_registry` resolved from `fitz.toml` (when
+/// `fitz check`/`build`/`run` runs inside a Fitz project with
+/// `[dependencies]`). The cross-module `@auth_provider` pre-scan
+/// uses it to resolve `from <dep-name> import` to the dep's
+/// absolute `lib_entry` instead of falling back to a path relative
+/// to the importer.
 ///
-/// **Pasos coordinados** (orden importa):
-/// 1. `pyi_loader::load_stubs` — pre-llena el TypeEnv con nominales
-///    declarados en `.pyi` adyacentes (los call sites posteriores
-///    pueden referenciar `User` del stub).
-/// 2. `resolve_program_with_env` — registra nominales locales del
-///    `.fitz` + nominales traídos por `from <mod> import <T>` (vuelta
-///    1b) en el TypeEnv del importer.
-/// 3. `pyi_loader::load_callables` — pre-llena callables de stubs
-///    (depende de tipos resueltos en paso 2 para los rets).
-/// 4. **`pre_scan_imported_auth_provider`** — escanea cada
-///    `Stmt::Import` / `Stmt::FromImport`, resuelve el archivo .fitz,
-///    parsea, extrae `@auth_provider` con
-///    `types::extract_auth_provider_signature`. El primero que
-///    aparezca gana (el caller, no el orden de imports). Si hay
-///    provider, se registra en el TypeEnv con
-///    `set_imported_auth_provider`. Errores de lectura/parse del
-///    módulo se silencian — el loader real del runtime/codegen
-///    reportará los suyos cuando corra de verdad.
-/// 5. `check_with_env` — el checker corre con el env enriquecido;
-///    `collect_auth_provider` hace fallback al provider importado
-///    cuando no encuentra uno local.
+/// **Coordinated steps** (order matters):
+/// 1. `pyi_loader::load_stubs` — pre-populates the TypeEnv with
+///    nominals declared in adjacent `.pyi` files (later call sites
+///    can reference the stub's `User`).
+/// 2. `resolve_program_with_env` — registers the `.fitz`'s local
+///    nominals + nominals brought in by `from <mod> import <T>`
+///    (pass 1b) in the importer's TypeEnv.
+/// 3. `pyi_loader::load_callables` — pre-populates the stubs'
+///    callables (depends on types resolved in step 2 for the
+///    returns).
+/// 4. **`pre_scan_imported_auth_provider`** — scans each
+///    `Stmt::Import` / `Stmt::FromImport`, resolves the .fitz file,
+///    parses it, extracts `@auth_provider` with
+///    `types::extract_auth_provider_signature`. The first one to
+///    appear wins (caller order, not import order). If there's a
+///    provider, it's registered in the TypeEnv with
+///    `set_imported_auth_provider`. Module read/parse errors are
+///    silenced — the real runtime/codegen loader will report theirs
+///    when it actually runs.
+/// 5. `check_with_env` — the checker runs with the enriched env;
+///    `collect_auth_provider` falls back to the imported provider
+///    when it doesn't find a local one.
 fn check_program_with_pyi_stubs_and_deps(
     program: &ast::Program,
     path: &std::path::Path,
@@ -1158,36 +1204,35 @@ fn check_program_with_pyi_stubs_and_deps(
     let stubs = pyi_loader::load_stubs(program, &base_dir, &mut env);
     let (mut env, errors) = types::resolve_program_with_env(program, env, Vec::new());
     pyi_loader::load_callables(&stubs, &mut env);
-    // W12 — pre-scan de `@auth_provider` cross-module.
+    // W12 — cross-module `@auth_provider` pre-scan.
     if let Some(provider) = pre_scan_imported_auth_provider(program, &base_dir, dep_registry) {
         env.set_imported_auth_provider(provider);
     }
     types::check_with_env(program, env, errors)
 }
 
-/// W12 (v0.10.8) — Escanea los `Stmt::Import` / `Stmt::FromImport` del
-/// importer. Por cada módulo importado, resuelve su archivo `.fitz`,
-/// lo lee + lexea + parsea, e invoca
-/// `types::extract_auth_provider_signature` sobre el AST. Devuelve el
-/// primer provider encontrado (siguiendo el orden top-down de los
-/// imports en el archivo).
+/// W12 (v0.10.8) — Scans the importer's `Stmt::Import` /
+/// `Stmt::FromImport` statements. For every imported module,
+/// resolves its `.fitz` file, reads + lexes + parses it, and
+/// invokes `types::extract_auth_provider_signature` on the AST.
+/// Returns the first provider found (following the top-down order
+/// of the imports in the file).
 ///
-/// **Política de errores**: errores de lectura/parse del módulo se
-/// silencian (silent fallback — paralelo a la política del
-/// `pyi_loader::load_stubs`). El loader real del runtime
-/// (`evaluator::eval_with_base_and_deps`) y del codegen
-/// (`ModuleLoader` en `codegen.rs`) cargan los módulos por su cuenta
-/// y reportan errores claros si fallan. Acá NO queremos doble-reporte
-/// — el objetivo es enriquecer el TypeEnv con info estática, no
-/// validar imports.
+/// **Error policy**: module read/parse errors are silenced (silent
+/// fallback — parallel to `pyi_loader::load_stubs`'s policy). The
+/// real runtime loader (`evaluator::eval_with_base_and_deps`) and
+/// codegen (`ModuleLoader` in `codegen.rs`) load modules on their
+/// own and report clear errors if they fail. We do NOT want
+/// double-reporting here — the goal is to enrich the TypeEnv with
+/// static info, not to validate imports.
 ///
-/// **Alcance MVP**: un solo nivel de profundidad. El importer ve
-/// `@auth_provider` de sus imports directos; no recursa transitivos.
-/// Caso típico cubierto: `main.fitz` importa `auth.fitz`+`posts.fitz`
-/// (provider en `auth.fitz`) — funciona. Caso fuera del MVP:
-/// `posts.fitz` importa `lib.fitz` que a su vez importa el provider
-/// desde `auth.fitz` — requeriría recursión. Si aparece presión,
-/// extender en sub-paso futuro.
+/// **MVP scope**: a single level of depth. The importer sees
+/// `@auth_provider` from its direct imports; it does not recurse
+/// into transitive ones. Typical case covered: `main.fitz` imports
+/// `auth.fitz`+`posts.fitz` (provider in `auth.fitz`) — works.
+/// Case outside the MVP: `posts.fitz` imports `lib.fitz`, which in
+/// turn imports the provider from `auth.fitz` — would require
+/// recursion. If pressure appears, extend in a future sub-step.
 fn pre_scan_imported_auth_provider(
     program: &ast::Program,
     base_dir: &std::path::Path,
@@ -1196,7 +1241,8 @@ fn pre_scan_imported_auth_provider(
     for stmt in program {
         let (path_segments, module_binding_name) = match stmt {
             ast::Stmt::Import { path, alias, .. } => {
-                // Skip Python imports — no tienen archivo .fitz en disk.
+                // Skip Python imports — they have no .fitz file on
+                // disk.
                 if path.first().map(String::as_str) == Some("python") {
                     continue;
                 }
@@ -1211,9 +1257,10 @@ fn pre_scan_imported_auth_provider(
                 if path.first().map(String::as_str) == Some("python") {
                     continue;
                 }
-                // El "module_binding_name" para `from auth import User` es
-                // `auth` (el último segmento del path). Codegen lo usa
-                // como nombre de mod en el crate generado.
+                // The "module_binding_name" for `from auth import
+                // User` is `auth` (the last segment of the path).
+                // Codegen uses it as the mod name in the generated
+                // crate.
                 let binding = path.last().cloned().unwrap_or_default();
                 (path.clone(), binding)
             }
@@ -1241,16 +1288,17 @@ fn pre_scan_imported_auth_provider(
     None
 }
 
-/// W12 (v0.10.8) — resuelve `path` de un `Stmt::Import` /
-/// `Stmt::FromImport` al archivo `.fitz` correspondiente. Mirror
-/// liviano de `evaluator::resolve_module_path`:
-/// 1. Single-segment matchea key del `dep_registry` → `lib_entry` de
-///    la dep.
-/// 2. Fallback a path relativo a `base_dir`: `["foo"]` →
+/// W12 (v0.10.8) — resolves the `path` of a `Stmt::Import` /
+/// `Stmt::FromImport` to the corresponding `.fitz` file. Light
+/// mirror of `evaluator::resolve_module_path`:
+/// 1. Single-segment matches a key of the `dep_registry` → dep's
+///    `lib_entry`.
+/// 2. Fallback to a path relative to `base_dir`: `["foo"]` →
 ///    `<base>/foo.fitz`; `["sub", "foo"]` → `<base>/sub/foo.fitz`.
 ///
-/// Devuelve `None` si el archivo no existe (verificamos con `exists()`
-/// para que el silent fallback funcione sin tirar warnings espurios).
+/// Returns `None` if the file doesn't exist (we check with
+/// `exists()` so the silent fallback works without throwing
+/// spurious warnings).
 fn resolve_import_file_path(
     segments: &[String],
     base_dir: &std::path::Path,
@@ -1277,17 +1325,17 @@ fn resolve_import_file_path(
     }
 }
 
-/// `fitz openapi <archivo>` — Fase 7.1. Lex + parse + check + eval
-/// con un `HttpRegistry` activo para que los decoradores HTTP registren
-/// sus rutas; después escupe el schema OpenAPI 3.1 a stdout
+/// `fitz openapi <file>` — Phase 7.1. Lex + parse + check + eval
+/// with an active `HttpRegistry` so HTTP decorators register their
+/// routes; then dumps the OpenAPI 3.1 schema to stdout
 /// (pretty-printed).
 ///
-/// No levanta el server: el registry se popula durante `eval` (los
-/// decoradores HTTP son side-effects del top-level) y el schema se
-/// puede derivar de ahí + el AST.
+/// Does not start the server: the registry is populated during
+/// `eval` (HTTP decorators are top-level side effects) and the
+/// schema can be derived from there + the AST.
 ///
-/// Útil para CI, generar SDKs con openapi-generator, snapshot testing
-/// del contrato.
+/// Useful for CI, generating SDKs with openapi-generator, snapshot
+/// testing the contract.
 fn openapi_file(path: &PathBuf) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
@@ -1309,9 +1357,10 @@ fn openapi_file(path: &PathBuf) {
         }
     };
 
-    // Checker estricto: no tiene sentido emitir un schema de un programa
-    // con errores de tipo (el handler quizá ni siquiera tipa). Mismo
-    // criterio que `fitz build`. 8-pyi.B: carga stubs .pyi adyacentes.
+    // Strict checker: it makes no sense to emit a schema for a
+    // program with type errors (the handler might not even type).
+    // Same criterion as `fitz build`. 8-pyi.B: loads adjacent .pyi
+    // stubs.
     let (_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
@@ -1350,9 +1399,9 @@ fn openapi_file(path: &PathBuf) {
     }
 }
 
-/// `fitz check <archivo>` — corre lexer + parser + checker estático
-/// y reporta errores. Exit code 0 si está limpio, 1 si hay errores
-/// de cualquier tipo.
+/// `fitz check <file>` — runs lexer + parser + static checker and
+/// reports errors. Exit code 0 if clean, 1 if there are errors of
+/// any kind.
 fn check_file(path: &PathBuf) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
@@ -1372,7 +1421,7 @@ fn check_file(path: &PathBuf) {
             std::process::exit(1);
         }
     };
-    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    // 8-pyi.B: loads adjacent .pyi stubs before the check.
     let (_env, _types, _defs, errors) = check_program_with_pyi_stubs(&program, path);
     if errors.is_empty() {
         println!("✓ {} — sin errores de tipo", path.display());
@@ -1385,26 +1434,28 @@ fn check_file(path: &PathBuf) {
     }
 }
 
-/// `fitz build <archivo>` — Fase 5b. Compila el .fitz a binario nativo.
-/// Flujo: lex → parse → checker (strict) → codegen a Cargo project →
-/// `cargo build --release` → copia el binario.
+/// `fitz build <file>` — Phase 5b. Compiles the .fitz to a native
+/// binary. Flow: lex → parse → checker (strict) → codegen to a
+/// Cargo project → `cargo build --release` → copy the binary.
 ///
-/// Destino del binario:
-/// - **Single-file mode** (`override_dest = None`): adyacente al `.fitz`
-///   con el stem original (`hello.fitz` → `hello.exe`). Comportamiento
-///   pre-9.y.2.
-/// - **Manifest mode** (`override_dest = Some(p)`): el caller provee la
-///   ruta destino completa (típicamente `<manifest_dir>/target/release/
-///   <pkg-name>(.exe)`). Llega desde el dispatch en `main()` cuando el
-///   user corre `fitz build` sin args y hay un `fitz.toml`.
+/// Binary destination:
+/// - **Single-file mode** (`override_dest = None`): next to the
+///   `.fitz` with the original stem (`hello.fitz` → `hello.exe`).
+///   Pre-9.y.2 behavior.
+/// - **Manifest mode** (`override_dest = Some(p)`): the caller
+///   provides the full destination path (typically
+///   `<manifest_dir>/target/release/<pkg-name>(.exe)`). Comes from
+///   the dispatch in `main()` when the user runs `fitz build`
+///   without args and there's a `fitz.toml`.
 ///
-/// Desde 5b.5 generamos un Cargo project en lugar de invocar rustc
-/// directamente. Razones: (a) los imports cross-archivo necesitan
-/// múltiples `.rs` con `mod`, lo que se hace nativo con cargo; (b) cuando
-/// llegue 5b.6 con HTTP, sumamos `axum`/`tokio`/`serde_json` al
-/// `Cargo.toml` generado sin reescribir pipeline; (c) cargo cachea
-/// incremental, lo que abarata segunda compilación. Trade-off: la
-/// primera compilación cuesta ~1-2s más que `rustc` directo.
+/// Since 5b.5 we generate a Cargo project instead of invoking
+/// rustc directly. Reasons: (a) cross-file imports need multiple
+/// `.rs` with `mod`, which is native to cargo; (b) when 5b.6
+/// arrives with HTTP, we add `axum`/`tokio`/`serde_json` to the
+/// generated `Cargo.toml` without rewriting the pipeline; (c)
+/// cargo caches incrementally, which cheapens the second
+/// compile. Trade-off: the first compile costs ~1-2s more than
+/// `rustc` directly.
 fn build_file(
     path: &PathBuf,
     override_dest: Option<&std::path::Path>,
@@ -1431,8 +1482,8 @@ fn build_file(
         }
     };
 
-    // Checker en modo strict — no hay `--no-typecheck` en build.
-    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    // Checker in strict mode — there is no `--no-typecheck` in
+    // build. 8-pyi.B: loads adjacent .pyi stubs before the check.
     let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
@@ -1447,21 +1498,22 @@ fn build_file(
         std::process::exit(1);
     }
 
-    // Mini-tanda P2 — 5b.1/Hpx.2 chained fix. Si hay fns con params
-    // sin anotar (5b.1) Y return type sin anotar (Hpx.2), la primera
-    // pasada del checker tipa el body asumiendo params como Any, y
-    // Hpx.2 falla porque el body retorna Any. Estrategia: inferir
-    // params via call sites (codegen::infer_param_type_from_call_sites)
-    // y mutar el AST en-place fillingo Param.type_, después re-correr
-    // el checker para refinar TypeInfo. Cost extra: ~1 check pass para
-    // programas con unannotated fns; gratis para programas anotados.
+    // Mini-batch P2 — 5b.1/Hpx.2 chained fix. If there are fns with
+    // unannotated params (5b.1) AND an unannotated return type
+    // (Hpx.2), the checker's first pass types the body assuming
+    // params are Any, and Hpx.2 fails because the body returns Any.
+    // Strategy: infer params via call sites
+    // (codegen::infer_param_type_from_call_sites) and mutate the
+    // AST in place filling Param.type_, then re-run the checker to
+    // refine TypeInfo. Extra cost: ~1 check pass for programs with
+    // unannotated fns; free for annotated programs.
     let (env, types) = if codegen::has_unannotated_fn_params(&program) {
         codegen::fill_inferred_param_types(&mut program, &types, &env);
-        // 8-pyi.B: re-check también carga stubs (idempotente).
+        // 8-pyi.B: re-check also loads stubs (idempotent).
         let (env2, types2, _defs2, errs2) = check_program_with_pyi_stubs(&program, path);
         if !errs2.is_empty() {
-            // Si el re-check genera nuevos errores con los tipos
-            // inferidos, surfacearlos.
+            // If the re-check produces new errors with the
+            // inferred types, surface them.
             eprintln!(
                 "✗ {} — {} error(es) de tipo tras inferencia de params (5b.1):",
                 path.display(),
@@ -1477,10 +1529,11 @@ fn build_file(
         (env, types)
     };
 
-    // Codegen a Cargo project. Mini-tanda Hpx.2 — TypeInfo del checker
-    // se pasa al codegen para inferir return types de fns sin anotar.
-    // Fase 12.8 — flag_defaults del manifest se embeben en main.rs
-    // generado vía `__fitz_flag_init(...)` al boot.
+    // Codegen to a Cargo project. Mini-batch Hpx.2 — the checker's
+    // TypeInfo is passed to codegen to infer return types of
+    // unannotated fns. Phase 12.8 — manifest's flag_defaults are
+    // embedded in the generated main.rs via `__fitz_flag_init(...)`
+    // at boot.
     let project = match codegen::generate_project(
         path,
         &program,
@@ -1497,7 +1550,7 @@ fn build_file(
         }
     };
 
-    // Layout del Cargo project: target/fitz-build/<stem>/{Cargo.toml, src/...}.
+    // Cargo project layout: target/fitz-build/<stem>/{Cargo.toml, src/...}.
     let build_dir = PathBuf::from("target")
         .join("fitz-build")
         .join(&project.bin_name);
@@ -1507,21 +1560,21 @@ fn build_file(
         std::process::exit(1);
     }
 
-    // Escribir Cargo.toml.
+    // Write Cargo.toml.
     let cargo_toml_path = build_dir.join("Cargo.toml");
     if let Err(e) = fs::write(&cargo_toml_path, &project.cargo_toml) {
         eprintln!("Error escribiendo {}: {}", cargo_toml_path.display(), e);
         std::process::exit(1);
     }
 
-    // Escribir src/main.rs.
+    // Write src/main.rs.
     let main_rs_path = src_dir.join("main.rs");
     if let Err(e) = fs::write(&main_rs_path, &project.main_rs) {
         eprintln!("Error escribiendo {}: {}", main_rs_path.display(), e);
         std::process::exit(1);
     }
 
-    // Escribir cada mod file (5b.5+).
+    // Write each mod file (5b.5+).
     for mod_file in &project.mod_files {
         let dest = src_dir.join(&mod_file.rel_path);
         if let Some(parent) = dest.parent() {
@@ -1536,8 +1589,9 @@ fn build_file(
         }
     }
 
-    // Invocar cargo build --release. Trabajamos contra el manifiesto
-    // del project generado; el target dir se hereda (cargo decide).
+    // Invoke `cargo build --release`. We work against the generated
+    // project's manifest; the target dir is inherited (cargo
+    // decides).
     let output = std::process::Command::new("cargo")
         .args(["build", "--release", "--manifest-path"])
         .arg(&cargo_toml_path)
@@ -1563,11 +1617,11 @@ fn build_file(
         std::process::exit(1);
     }
 
-    // Binario en target/release/<bin_name>; copiar adyacente al .fitz
-    // con el `output_basename` (= stem original del .fitz, sin
-    // sanitizar). Si el usuario buildea `02-hola.fitz`, el archivo
-    // final es `02-hola.exe` aunque el crate dentro de Cargo se llame
-    // `fitz_02-hola`.
+    // Binary in target/release/<bin_name>; copy next to the .fitz
+    // with `output_basename` (= original stem of the .fitz, not
+    // sanitized). If the user builds `02-hola.fitz`, the final
+    // file is `02-hola.exe` even though the crate inside Cargo is
+    // called `fitz_02-hola`.
     let release_bin_filename = if cfg!(windows) {
         format!("{}.exe", project.bin_name)
     } else {
@@ -1583,7 +1637,7 @@ fn build_file(
         .join("release")
         .join(&release_bin_filename);
 
-    // Destino: override del manifest (9.y.2) o adyacente al fuente.
+    // Destination: manifest override (9.y.2) or next to the source.
     let bin_out = match override_dest {
         Some(p) => p.to_path_buf(),
         None => path
@@ -1592,9 +1646,9 @@ fn build_file(
             .unwrap_or_else(|| PathBuf::from(&output_filename)),
     };
 
-    // Crear el directorio destino si hace falta (manifest mode: el
-    // primer build de un proyecto recién creado no tiene target/release/
-    // todavía).
+    // Create the destination directory if needed (manifest mode:
+    // the first build of a freshly created project doesn't have
+    // target/release/ yet).
     if let Some(parent) = bin_out.parent() {
         if !parent.as_os_str().is_empty() {
             if let Err(e) = fs::create_dir_all(parent) {
@@ -1617,25 +1671,28 @@ fn build_file(
     println!("✓ binario: {}", bin_out.display());
 }
 
-/// Fase 8.b — Variante de `build_file` que produce un binario standalone
-/// Hash determinístico de los inputs del pip install (positionals
-/// `--bundle-pip` + bytes de los `--bundle-pip-requirements`).
+/// Phase 8.b — Variant of `build_file` that produces a standalone
+/// binary.
 ///
-/// Usado como cache key del pip_packages tarball para evitar re-correr
-/// pip install en cada `fitz build` cuando los paquetes no cambiaron.
+/// Deterministic hash of the pip install inputs (positionals
+/// `--bundle-pip` + bytes of the `--bundle-pip-requirements`).
 ///
-/// El sidecar `<bin>_pip_packages.inputs_hash` adyacente al tarball
-/// guarda el resultado; en el próximo build, si matchea el hash actual,
-/// se reusa el tarball existente.
+/// Used as the cache key of the pip_packages tarball to avoid
+/// re-running pip install on every `fitz build` when the packages
+/// didn't change.
 ///
-/// Reglas del hash:
-/// - Positionals de `--bundle-pip` se ordenan alfabéticamente
-///   (reordenar args no debe invalidar cache).
-/// - Bytes de cada requirements file en orden CLI (reordenar archivos
-///   sí invalida; pip los procesa en orden y puede dar resultados
-///   diferentes con el mismo set de paquetes).
-/// - Separador `\n---\n` entre las dos secciones para que
-///   `["foo", "bar"]` positionals ≠ `"foo\nbar"` en requirements.
+/// The sidecar `<bin>_pip_packages.inputs_hash` next to the
+/// tarball stores the result; on the next build, if it matches
+/// the current hash, the existing tarball is reused.
+///
+/// Hash rules:
+/// - `--bundle-pip` positionals are sorted alphabetically
+///   (reordering args must not invalidate the cache).
+/// - Bytes of each requirements file in CLI order (reordering
+///   files DOES invalidate; pip processes them in order and may
+///   give different results with the same set of packages).
+/// - `\n---\n` separator between the two sections so that
+///   `["foo", "bar"]` positionals ≠ `"foo\nbar"` in requirements.
 fn pip_inputs_hash(bundle_pip: &[String], requirements_contents: &[Vec<u8>]) -> String {
     let mut sorted_pkgs: Vec<&str> = bundle_pip.iter().map(|s| s.as_str()).collect();
     sorted_pkgs.sort();
@@ -1652,21 +1709,24 @@ fn pip_inputs_hash(bundle_pip: &[String], requirements_contents: &[Vec<u8>]) -> 
     launcher_template::tarball_hash_short(&buf)
 }
 
-/// con CPython embebido. El output es UN solo archivo que internamente
-/// lleva: tarball PBS (install_only_stripped 3.14.x) + real binary +
-/// launcher Rust standalone. Primer run extrae a `$TMPDIR/fitz-py-<hash>/`,
-/// setea PYTHONHOME + LD_LIBRARY_PATH/DYLD/PATH según OS, exec del real
-/// binary. Subsecuentes runs son instantáneos (cache TMP).
+/// Builds with embedded CPython. The output is a single file that
+/// internally carries: PBS tarball (install_only_stripped 3.14.x)
+/// + real binary + standalone Rust launcher. The first run
+/// extracts to `$TMPDIR/fitz-py-<hash>/`, sets PYTHONHOME +
+/// LD_LIBRARY_PATH/DYLD/PATH depending on the OS, then execs the
+/// real binary. Subsequent runs are instant (TMP cache).
 ///
-/// Validaciones tempranas: host triple soportado por PBS, programa usa
-/// `from python import` (sin interop no tiene sentido bundlear).
+/// Early validations: host triple supported by PBS, program uses
+/// `from python import` (without interop there's no point in
+/// bundling).
 ///
-/// Constraint conocido del Linux (deuda R.bug-pyo3-abi3-portable-link):
-/// el real binary linkea contra `libpython3.X.so.1.0` específica del
-/// builder, no contra `libpython3.so` stable ABI. PBS 3.14.5 exige que
-/// el builder tenga Python 3.14.x disponible al momento de `cargo build`
-/// para que la versión del symlink linkeado coincida con la libpython
-/// del bundle. En Windows este problema no existe (linkea contra
+/// Known Linux constraint (debt R.bug-pyo3-abi3-portable-link):
+/// the real binary links against the builder's specific
+/// `libpython3.X.so.1.0`, not against the stable-ABI
+/// `libpython3.so`. PBS 3.14.5 requires the builder to have
+/// Python 3.14.x available at `cargo build` time so the linked
+/// symlink version matches the bundle's libpython. On Windows
+/// this problem does not exist (it links against the
 /// `python3.dll` stable ABI shim).
 fn build_file_with_bundle(
     path: &PathBuf,
@@ -1676,7 +1736,7 @@ fn build_file_with_bundle(
     bundle_pip: Vec<String>,
     bundle_pip_requirements: Vec<PathBuf>,
 ) {
-    // --- Validación temprana: host triple soportado ---
+    // --- Early validation: supported host triple ---
     let triple = match pbs::host_triple() {
         Ok(t) => t,
         Err(e) => {
@@ -1685,10 +1745,10 @@ fn build_file_with_bundle(
         }
     };
 
-    // --- Validación temprana: requirements files existen y son legibles ---
+    // --- Early validation: requirements files exist and are readable ---
     //
-    // Lo hacemos ANTES de tocar lex/parse/PBS para fail-fast sobre el
-    // input del usuario (caso típico: typo en el path del archivo).
+    // We do this BEFORE touching lex/parse/PBS so we fail fast on
+    // user input (typical case: typo in the file path).
     let mut requirements_abs_paths: Vec<PathBuf> = Vec::new();
     let mut requirements_pkg_count: usize = 0;
     for req_path in &bundle_pip_requirements {
@@ -1714,9 +1774,9 @@ fn build_file_with_bundle(
                 std::process::exit(1);
             }
         };
-        // Conteo aproximado solo para el summary: líneas no-blank que no
-        // empiezan con `#`. pip se encarga del parsing real (includes
-        // `-r other.txt`, opciones como `--hash`, etc.).
+        // Approximate count only for the summary: non-blank lines
+        // that don't start with `#`. pip handles the real parsing
+        // (includes `-r other.txt`, options like `--hash`, etc.).
         requirements_pkg_count += content
             .lines()
             .map(|l| l.trim())
@@ -1725,7 +1785,7 @@ fn build_file_with_bundle(
         requirements_abs_paths.push(abs);
     }
 
-    // --- Lex + parse para detectar from python import ---
+    // --- Lex + parse to detect `from python import` ---
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
         std::process::exit(1);
@@ -1755,8 +1815,8 @@ fn build_file_with_bundle(
         std::process::exit(1);
     }
 
-    // --- Checker strict (sin `--no-typecheck` en build) ---
-    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    // --- Strict checker (no `--no-typecheck` in build) ---
+    // 8-pyi.B: loads adjacent .pyi stubs before the check.
     let (env, types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         eprintln!(
@@ -1773,7 +1833,7 @@ fn build_file_with_bundle(
 
     let (env, types) = if codegen::has_unannotated_fn_params(&program) {
         codegen::fill_inferred_param_types(&mut program, &types, &env);
-        // 8-pyi.B: re-check también carga stubs (idempotente).
+        // 8-pyi.B: re-check also loads stubs (idempotent).
         let (env2, types2, _defs2, errs2) = check_program_with_pyi_stubs(&program, path);
         if !errs2.is_empty() {
             eprintln!(
@@ -1791,7 +1851,7 @@ fn build_file_with_bundle(
         (env, types)
     };
 
-    // --- Codegen + escribir Cargo project del real binary ---
+    // --- Codegen + write the real binary's Cargo project ---
     let project = match codegen::generate_project(
         path,
         &program,
@@ -1840,7 +1900,7 @@ fn build_file_with_bundle(
         }
     }
 
-    // --- Build del real binary ---
+    // --- Build the real binary ---
     println!("→ compilando real binary…");
     let output = std::process::Command::new("cargo")
         .args(["build", "--release", "--manifest-path"])
@@ -1909,30 +1969,32 @@ fn build_file_with_bundle(
         }
     };
 
-    // --- Fase 8.c — Pip install + tarball secundario (si --bundle-pip) ---
+    // --- Phase 8.c — Pip install + secondary tarball (if --bundle-pip) ---
     //
-    // Si el usuario pasó `--bundle-pip <pkg>` (uno o más veces), instalamos
-    // esos paquetes con pip al build time adentro de un dir local del
-    // proyecto y los empacamos en un tarball secundario que el launcher
-    // va a embeber como segundo `include_bytes!`. Al primer run del
-    // binario, el launcher extrae los paquetes adentro de
-    // `python/Lib/site-packages/` (Windows) o `python/lib/python3.X/
-    // site-packages/` (Unix) del extract dir TMP, automáticamente
-    // accesibles via `import` desde el código Python del usuario.
+    // If the user passed `--bundle-pip <pkg>` (one or more times),
+    // we install those packages with pip at build time inside a
+    // local project dir and pack them into a secondary tarball
+    // that the launcher embeds as a second `include_bytes!`. On
+    // the binary's first run, the launcher extracts the packages
+    // into `python/Lib/site-packages/` (Windows) or
+    // `python/lib/python3.X/site-packages/` (Unix) of the TMP
+    // extract dir, automatically accessible via `import` from the
+    // user's Python code.
     //
-    // Para correr `pip install` necesitamos un Python ejecutable; usamos
-    // el python embebido del PBS tarball, extraído al cache local del
-    // proyecto. El extract es ~60 MB pero se reusa entre builds.
+    // To run `pip install` we need a Python executable; we use
+    // PBS's embedded python, extracted to the project's local
+    // cache. The extract is ~60 MB but is reused between builds.
     let pip_total_count = bundle_pip.len() + requirements_pkg_count;
     let pip_tarball_abs: Option<PathBuf> = if !bundle_pip.is_empty()
         || !requirements_abs_paths.is_empty()
     {
-        // --- Cache key del pip_packages tarball ---
+        // --- pip_packages tarball cache key ---
         //
-        // Helper `pip_inputs_hash` calcula el hash determinístico sobre
-        // los inputs del pip install (positionals --bundle-pip ordenados
-        // + bytes de los requirements files). Sidecar vive adentro de
-        // `target/fitz-build/<bin>_*` → scoped por proyecto.
+        // The `pip_inputs_hash` helper computes the deterministic
+        // hash over the pip install inputs (sorted
+        // `--bundle-pip` positionals + bytes of the requirements
+        // files). The sidecar lives inside
+        // `target/fitz-build/<bin>_*` → scoped by project.
         let mut requirements_contents: Vec<Vec<u8>> =
             Vec::with_capacity(requirements_abs_paths.len());
         for req_path in &requirements_abs_paths {
@@ -1958,8 +2020,8 @@ fn build_file_with_bundle(
             .join("fitz-build")
             .join(format!("{}_pip_packages.inputs_hash", project.bin_name));
 
-        // Cache hit: tarball + sidecar existen y el hash matchea.
-        // Saltamos extracción del PBS, pip install y tar.
+        // Cache hit: tarball + sidecar exist and the hash matches.
+        // We skip PBS extraction, pip install, and tar.
         let cache_hit = pip_tarball_path.exists()
             && pip_hash_sidecar
                 .exists()
@@ -1994,8 +2056,8 @@ fn build_file_with_bundle(
                     eprintln!("Error creando {}: {}", pbs_extract_dir.display(), e);
                     std::process::exit(1);
                 }
-                // Extraer PBS tarball usando `tar -xzf` (mismo subprocess que
-                // usa el launcher en runtime).
+                // Extract the PBS tarball using `tar -xzf` (same
+                // subprocess the launcher uses at runtime).
                 let tar_status = std::process::Command::new("tar")
                     .args([
                         "-xzf",
@@ -2022,7 +2084,7 @@ fn build_file_with_bundle(
                     }
                 }
             }
-            // Path del ejecutable Python adentro del PBS extract.
+            // Path of the Python executable inside the PBS extract.
             let python_exe = if cfg!(windows) {
                 pbs_extract_dir.join("python").join("python.exe")
             } else {
@@ -2036,9 +2098,10 @@ fn build_file_with_bundle(
                 std::process::exit(1);
             }
 
-            // Dir del pip install. Limpiar previo si existe para builds
-            // reproducibles (pip install --target es additive, sin clean
-            // los paquetes acumulan entre builds).
+            // pip install dir. Clean previous one if it exists for
+            // reproducible builds (pip install --target is
+            // additive; without cleaning, packages accumulate
+            // between builds).
             let pip_install_dir = PathBuf::from("target")
                 .join("fitz-build")
                 .join(format!("{}_pip_packages", project.bin_name));
@@ -2058,14 +2121,15 @@ fn build_file_with_bundle(
                 "--target".to_string(),
                 pip_install_dir.to_string_lossy().to_string(),
                 "--no-warn-script-location".to_string(),
-                // Quiet para evitar ruido en CI; los errores siguen
-                // visibles en stderr.
+                // Quiet to avoid noise in CI; errors are still
+                // visible on stderr.
                 "--quiet".to_string(),
             ];
-            // `-r <file>` por cada requirements file. pip los acumula con
-            // los positionals que vienen después; toda la sintaxis nativa
-            // del archivo (comments, includes, version pins, --hash) la
-            // procesa pip directamente, sin parsing del lado de Fitz.
+            // `-r <file>` per requirements file. pip accumulates
+            // them with the positionals that come after; all the
+            // file's native syntax (comments, includes, version
+            // pins, --hash) is handled by pip directly, without
+            // parsing on the Fitz side.
             for req_path in &requirements_abs_paths {
                 pip_args.push("-r".to_string());
                 pip_args.push(req_path.to_string_lossy().into_owned());
@@ -2088,9 +2152,9 @@ fn build_file_with_bundle(
                 std::process::exit(1);
             }
 
-            // Crear tarball secundario desde el pip_install_dir. Usamos
-            // `tar -czf` con `-C <dir>` para que las paths internas sean
-            // relativas (sin el prefijo del cwd).
+            // Create the secondary tarball from pip_install_dir.
+            // We use `tar -czf` with `-C <dir>` so the inner
+            // paths are relative (without the cwd prefix).
             println!("→ empacando pip_packages.tar.gz…");
             let tar_status = std::process::Command::new("tar")
                 .args([
@@ -2115,10 +2179,11 @@ fn build_file_with_bundle(
                     std::process::exit(1);
                 }
             }
-            // Write sidecar con el hash de los inputs. El sidecar vive
-            // adyacente al tarball para que `rm target/fitz-build/<bin>_*`
-            // limpie todo junto. Si la escritura falla no abortamos el
-            // build — el cache simplemente no funcionará la próxima vez.
+            // Write sidecar with the hash of the inputs. The
+            // sidecar lives next to the tarball so that
+            // `rm target/fitz-build/<bin>_*` cleans everything
+            // together. If the write fails we don't abort the
+            // build — the cache simply won't work next time.
             if let Err(e) = fs::write(&pip_hash_sidecar, &pip_inputs_hash) {
                 eprintln!(
                     "Warning: no se pudo escribir cache sidecar `{}`: {}",
@@ -2138,9 +2203,10 @@ fn build_file_with_bundle(
         None
     };
 
-    // Hash combinado: si hay pip, incluir los bytes del pip tarball en
-    // el hash para que dos proyectos con distintos paquetes tengan
-    // distintos extract dirs en TMP (cache hit-or-miss correcto).
+    // Combined hash: if there's pip, include the pip tarball
+    // bytes in the hash so two projects with different packages
+    // get different extract dirs in TMP (correct cache
+    // hit-or-miss).
     let tarball_hash = if let Some(ref pip_path) = pip_tarball_abs {
         let pip_bytes = match fs::read(pip_path) {
             Ok(b) => b,
@@ -2156,7 +2222,7 @@ fn build_file_with_bundle(
         launcher_template::tarball_hash_short(&tarball_bytes)
     };
 
-    // --- Generar + buildear launcher ---
+    // --- Generate + build the launcher ---
     println!("→ compilando launcher…");
     let launcher_bin_name = format!("{}_launcher", project.bin_name);
     let launcher_dir = PathBuf::from("target")
@@ -2220,7 +2286,7 @@ fn build_file_with_bundle(
         std::process::exit(1);
     }
 
-    // --- Copiar launcher al destino del usuario ---
+    // --- Copy the launcher to the user's destination ---
     let launcher_release_filename = if cfg!(windows) {
         format!("{}.exe", launcher_bin_name)
     } else {
@@ -2286,9 +2352,10 @@ fn build_file_with_bundle(
     );
 }
 
-/// Detecta `from python import X` en el AST. Devuelve true si al menos
-/// un `Stmt::FromImport` tiene `path[0] == "python"`. Usado por
-/// `build_file_with_bundle` para validar el uso de `--bundle-python`.
+/// Detects `from python import X` in the AST. Returns true if at
+/// least one `Stmt::FromImport` has `path[0] == "python"`. Used by
+/// `build_file_with_bundle` to validate the use of
+/// `--bundle-python`.
 fn program_uses_from_python_import(program: &fitz::ast::Program) -> bool {
     use fitz::ast::Stmt;
     program.iter().any(|s| {
@@ -2300,16 +2367,16 @@ fn program_uses_from_python_import(program: &fitz::ast::Program) -> bool {
     })
 }
 
-/// Fase 13 (v0.11.0) — Dispatcha args CLI al comando matcheante.
-/// Devuelve el exit code para que el caller lo propague vía
-/// `std::process::exit`. Imprime help / errors a stderr según
-/// corresponda.
+/// Phase 13 (v0.11.0) — Dispatches CLI args to the matching
+/// command. Returns the exit code so the caller can propagate it
+/// via `std::process::exit`. Prints help / errors to stderr as
+/// appropriate.
 ///
-/// Política de exit codes:
-/// - `0` éxito (handler retornó 0 o pidió --help).
-/// - `1`+ retornado por el handler como exit code.
-/// - `2` error de parsing del CLI (comando desconocido, arg faltante,
-///   tipo inválido). Convención estándar de POSIX.
+/// Exit-code policy:
+/// - `0` success (handler returned 0 or asked for --help).
+/// - `1`+ returned by the handler as the exit code.
+/// - `2` CLI parse error (unknown command, missing arg, invalid
+///   type). Standard POSIX convention.
 fn dispatch_cli(registry: &fitz::cli::CliRegistry, argv: &[String]) -> i32 {
     let bin_name = std::env::current_exe()
         .ok()
@@ -2334,13 +2401,14 @@ fn dispatch_cli(registry: &fitz::cli::CliRegistry, argv: &[String]) -> i32 {
             code
         }
         fitz::cli::ParseResult::Invoke(inv) => {
-            // Invocar el handler. El runtime tokio del evaluator
-            // construye una runtime current_thread.
+            // Invoke the handler. The evaluator's tokio runtime
+            // builds a current_thread runtime.
             let rt = evaluator::build_runtime();
             let value_result = rt.block_on(async move {
-                // Resolver defaults para args == Value::Null (sentinel
-                // del parser cuando una flag no se pasó). El default
-                // del Param se evalúa al call site del handler.
+                // Resolve defaults for args == Value::Null (parser
+                // sentinel when a flag was not passed). The
+                // Param's default is evaluated at the handler's
+                // call site.
                 let cmd = inv.cmd;
                 let mut final_args: Vec<fitz::value::Value> = Vec::with_capacity(cmd.params.len());
                 for (i, p) in cmd.params.iter().enumerate() {
@@ -2348,9 +2416,9 @@ fn dispatch_cli(registry: &fitz::cli::CliRegistry, argv: &[String]) -> i32 {
                     let is_default_sentinel = matches!(v, fitz::value::Value::Null);
                     match (is_default_sentinel, p.default.as_ref()) {
                         (true, Some(de)) => {
-                            // Eval del default expression con un env
-                            // nuevo — los defaults son literales simples
-                            // por convención.
+                            // Eval the default expression with a
+                            // fresh env — defaults are simple
+                            // literals by convention.
                             let env = fitz::env::Environment::new();
                             match evaluator::eval_expr_for_default(de, env).await {
                                 Ok(dv) => final_args.push(dv),
@@ -2403,7 +2471,7 @@ fn run_file(
         std::process::exit(1);
     });
 
-    // Fase 2.1: lexer
+    // Phase 2.1: lexer
     let tokens = match lexer::tokenize(&source) {
         Ok(tokens) => tokens,
         Err(e) => {
@@ -2412,7 +2480,7 @@ fn run_file(
         }
     };
 
-    // Fase 2.3: parser
+    // Phase 2.3: parser
     let program = match parser::parse(tokens) {
         Ok(program) => program,
         Err(e) => {
@@ -2421,12 +2489,12 @@ fn run_file(
         }
     };
 
-    // Fase 5.4: checker estático en modo strict por default. Los
-    // errores de tipo abortan la ejecución antes de pasar al
-    // evaluator. La flag `--no-typecheck` cambia el comportamiento
-    // a warning (los reporta pero sigue ejecutando), pensada para
-    // legacy code o para diagnosticar bugs del checker.
-    // 8-pyi.B: carga stubs .pyi adyacentes antes del check.
+    // Phase 5.4: static checker in strict mode by default. Type
+    // errors abort execution before reaching the evaluator. The
+    // `--no-typecheck` flag changes the behavior to warning (they
+    // get reported but execution continues), intended for legacy
+    // code or to diagnose checker bugs.
+    // 8-pyi.B: loads adjacent .pyi stubs before the check.
     let (_type_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         if no_typecheck {
@@ -2454,28 +2522,30 @@ fn run_file(
         }
     }
 
-    // Base dir para resolver `import`s: el directorio del archivo que
-    // se está ejecutando. Si por algún motivo no podemos derivarlo
-    // (path sin parent), caemos al cwd.
+    // Base dir for resolving `import`s: the directory of the file
+    // being executed. If for some reason we can't derive it (path
+    // without a parent), we fall back to cwd.
     let base_dir = path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Fase 2.4 + Fase 4: evaluamos el programa dentro de un
-    // `HttpRegistry` activo. Los decoradores HTTP registran rutas
-    // ahí mientras corre el eval. Si después de eval el registry
-    // tiene rutas, arrancamos el servidor; si no, terminamos como un
-    // programa CLI normal.
+    // Phase 2.4 + Phase 4: we evaluate the program inside an
+    // active `HttpRegistry`. HTTP decorators register routes there
+    // while the eval runs. If after eval the registry has routes,
+    // we start the server; otherwise we finish like a regular CLI
+    // program.
     //
-    // Fase 7.2: el server necesita el AST original también para
-    // precomputar el schema OpenAPI (`components.schemas` recorre los
-    // `Stmt::TypeDef`). Clonamos antes de moverlo al evaluator.
+    // Phase 7.2: the server also needs the original AST to
+    // pre-compute the OpenAPI schema (`components.schemas` walks
+    // the `Stmt::TypeDef`s). We clone before moving it to the
+    // evaluator.
     //
-    // Fase 13 (v0.11.0) — Instalamos un CliRegistry vacío antes del
-    // eval. Si el programa tiene `@command`s, los registrar acá.
-    // Post-eval, si count > 0, dispatchamos CLI desde `cli_args`.
+    // Phase 13 (v0.11.0) — We install an empty CliRegistry before
+    // the eval. If the program has `@command`s, they register
+    // here. Post-eval, if count > 0, we dispatch the CLI from
+    // `cli_args`.
     let cli_registry = std::sync::Arc::new(fitz::cli::CliRegistry::new());
     evaluator::install_cli_registry(std::sync::Arc::clone(&cli_registry));
     let program_for_server = program.clone();
@@ -2489,18 +2559,19 @@ fn run_file(
         std::process::exit(1);
     }
 
-    // v0.11.0 — Modo CLI tiene prioridad sobre HTTP server / cron.
-    // Si el programa declaró `@command`s, no servimos HTTP — somos
-    // un CLI tool. (En el futuro podríamos soportar HTTP + CLI
-    // coexistiendo via subcomandos `serve` / `cmd1`, pero MVP separa.)
+    // v0.11.0 — CLI mode takes priority over HTTP server / cron.
+    // If the program declared `@command`s, we don't serve HTTP —
+    // we're a CLI tool. (In the future we could support HTTP + CLI
+    // coexisting via `serve` / `cmd1` subcommands, but the MVP
+    // keeps them separate.)
     if cli_registry.count() > 0 {
         let exit_code = dispatch_cli(&cli_registry, &cli_args);
         std::process::exit(exit_code);
     }
 
     if !registry.is_empty() {
-        // Si el programa declaró `@server(port, host)`, usamos eso;
-        // si no, default 127.0.0.1:3000.
+        // If the program declared `@server(port, host)`, we use
+        // that; otherwise default 127.0.0.1:3000.
         let config = registry.resolved_config();
         let addr = match config.to_socket_addr() {
             Ok(a) => a,
@@ -2514,11 +2585,11 @@ fn run_file(
             std::process::exit(1);
         }
     } else if registry.cron_registry.has_jobs() {
-        // Fase 9.w.3 — cron-only mode: el programa NO tiene rutas
-        // HTTP pero SÍ tiene jobs `@cron`. Arrancamos el scheduler
-        // standalone y bloqueamos hasta SIGINT/Ctrl+C (decisión
-        // confirmada con el autor: vivo bloqueante, modo
-        // systemd-friendly).
+        // Phase 9.w.3 — cron-only mode: the program has NO HTTP
+        // routes but DOES have `@cron` jobs. We start the
+        // scheduler standalone and block until SIGINT/Ctrl+C
+        // (decision confirmed with the author: live blocking,
+        // systemd-friendly mode).
         let cron_registry = registry.cron_registry.clone();
         if let Err(e) = cron_jobs::run_scheduler_only(cron_registry) {
             eprintln!("Error del cron scheduler: {}", e);
@@ -2527,11 +2598,12 @@ fn run_file(
     }
 }
 
-// ---- Fase 9.y.1 — scaffolding (`fitz new` / `fitz init`) ----
+// ---- Phase 9.y.1 — scaffolding (`fitz new` / `fitz init`) ----
 
-/// Template para el `src/main.fitz` default (CLI hello world).
-/// Sigue el estilo del cap 2 de la guía (`examples/guide/02-hola.fitz`):
-/// top-level `print(...)` sin `fn main`.
+/// Template for the default `src/main.fitz` (CLI hello world).
+/// Follows the style of guide chapter 2
+/// (`examples/guide/02-hola.fitz`): top-level `print(...)` without
+/// `fn main`.
 fn template_cli(name: &str) -> String {
     format!(
         "// main.fitz — generado por `fitz new`\n\
@@ -2544,9 +2616,9 @@ fn template_cli(name: &str) -> String {
     )
 }
 
-/// Template para `src/main.fitz` con `--http`. Servidor mínimo que
-/// responde un GET en `/`. Sigue el patrón canónico
-/// `@server(...) fn main() => 0` del cap 17 de la guía.
+/// Template for `src/main.fitz` with `--http`. Minimal server that
+/// responds to a GET at `/`. Follows the canonical
+/// `@server(...) fn main() => 0` pattern from guide chapter 17.
 fn template_http(name: &str) -> String {
     format!(
         "// main.fitz — generado por `fitz new --http`\n\
@@ -2564,8 +2636,8 @@ fn template_http(name: &str) -> String {
     )
 }
 
-/// Template para el `.gitignore`. `fitz.lock` NO está acá: el lockfile
-/// se commitea (Cargo-style), no se ignora.
+/// Template for the `.gitignore`. `fitz.lock` is NOT here: the
+/// lockfile is committed (Cargo-style), not ignored.
 fn template_gitignore() -> &'static str {
     "# Artefactos de compilación\n\
      target/\n\
@@ -2576,8 +2648,8 @@ fn template_gitignore() -> &'static str {
      *.pdb\n"
 }
 
-/// `fitz new <nombre> [--http] [--no-git]` — crea un proyecto Fitz
-/// nuevo en una carpeta. Falla si la carpeta ya existe.
+/// `fitz new <name> [--http] [--no-git]` — creates a new Fitz
+/// project in a folder. Fails if the folder already exists.
 fn new_project(name: &str, http: bool, no_git: bool) {
     if !manifest::is_valid_package_name(name) {
         eprintln!(
@@ -2605,8 +2677,9 @@ fn new_project(name: &str, http: bool, no_git: bool) {
     println!("  fitz run src/main.fitz");
 }
 
-/// `fitz init [--name X] [--http] [--no-git]` — inicializa un proyecto
-/// Fitz en el directorio actual. Falla si ya existe un `fitz.toml`.
+/// `fitz init [--name X] [--http] [--no-git]` — initializes a Fitz
+/// project in the current directory. Fails if a `fitz.toml`
+/// already exists.
 fn init_project(name_override: Option<&str>, http: bool, no_git: bool) {
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("✗ no se pudo leer el directorio actual: {e}");
@@ -2653,19 +2726,20 @@ fn init_project(name_override: Option<&str>, http: bool, no_git: bool) {
     println!("  fitz run src/main.fitz");
 }
 
-/// Common scaffolding: crea `<target>/fitz.toml`, `<target>/src/main.fitz`,
-/// `<target>/.gitignore`, y (a menos que `no_git`) corre `git init`.
+/// Common scaffolding: creates `<target>/fitz.toml`,
+/// `<target>/src/main.fitz`, `<target>/.gitignore`, and (unless
+/// `no_git`) runs `git init`.
 ///
-/// Sale del proceso con código 1 ante cualquier error de I/O.
+/// Exits the process with code 1 on any I/O error.
 fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bool) {
-    // Crear directorios.
+    // Create directories.
     let src = target.join("src");
     if let Err(e) = fs::create_dir_all(&src) {
         eprintln!("✗ no se pudo crear `{}`: {e}", src.display());
         std::process::exit(1);
     }
 
-    // Escribir fitz.toml.
+    // Write fitz.toml.
     let m = match manifest::Manifest::new_default(name) {
         Ok(m) => m,
         Err(e) => {
@@ -2686,7 +2760,7 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
         std::process::exit(1);
     }
 
-    // Escribir src/main.fitz con el template elegido.
+    // Write src/main.fitz with the chosen template.
     let main_text = if http {
         template_http(name)
     } else {
@@ -2698,15 +2772,16 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
         std::process::exit(1);
     }
 
-    // Escribir .gitignore.
+    // Write .gitignore.
     let gi_path = target.join(".gitignore");
     if let Err(e) = fs::write(&gi_path, template_gitignore()) {
         eprintln!("✗ no se pudo escribir `{}`: {e}", gi_path.display());
         std::process::exit(1);
     }
 
-    // git init (opcional). No abortamos si falla: el proyecto sigue
-    // siendo válido sin git; solo lo notamos como warning.
+    // git init (optional). We don't abort if it fails: the
+    // project is still valid without git; we only note it as a
+    // warning.
     if !no_git {
         match std::process::Command::new("git")
             .arg("init")
@@ -2732,13 +2807,14 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
     }
 }
 
-// ---- Fase 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ----
+// ---- Phase 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ----
 
 /// `fitz add <name> [--path <p>] [--git <url> --tag <t>|--rev <r>]`
-/// — Fase 9.y.4. Modifica el `[dependencies]` del `fitz.toml` del
-/// proyecto actual (cwd o ancestros), preserva formatting con
-/// `toml_edit`, y sincroniza el `fitz.lock` resolviendo todas las
-/// deps incluida la nueva. Si la dep ya existía, se sobreescribe.
+/// — Phase 9.y.4. Modifies the current project's `fitz.toml`
+/// `[dependencies]` (cwd or ancestors), preserves formatting with
+/// `toml_edit`, and syncs `fitz.lock` by resolving all deps
+/// including the new one. If the dep already existed, it's
+/// overwritten.
 fn add_dep_cmd(
     name: &str,
     path_opt: Option<&str>,
@@ -2746,8 +2822,9 @@ fn add_dep_cmd(
     tag_opt: Option<&str>,
     rev_opt: Option<&str>,
 ) {
-    // Build el spec según los flags. clap ya validó conflicts_with /
-    // requires entre path/git/tag/rev; igual chequeamos defensivo.
+    // Build the spec from the flags. clap already validated
+    // conflicts_with / requires between path/git/tag/rev; we
+    // double-check defensively anyway.
     let spec = match (path_opt, git_opt) {
         (Some(p), None) => manifest::AddDepSpec::Path {
             path: p.to_string(),
@@ -2774,7 +2851,7 @@ fn add_dep_cmd(
             }
         }
         (Some(_), Some(_)) => {
-            // clap debería haber bloqueado esto.
+            // clap should have blocked this.
             eprintln!("✗ `--path` y `--git` son mutuamente exclusivos.");
             std::process::exit(1);
         }
@@ -2805,17 +2882,18 @@ fn add_dep_cmd(
     }
     println!("✓ agregado `{name}` a `{}`", manifest_path.display());
 
-    // Re-resolver + sync lockfile (manifest mode con file=None).
-    // resolve_entry carga el manifest actualizado y resuelve TODAS
-    // las deps (la nueva incluida). Si la resolución falla, el
-    // manifest queda persistido — el usuario puede `fitz remove`
-    // para revertir.
+    // Re-resolve + sync lockfile (manifest mode with file=None).
+    // resolve_entry loads the updated manifest and resolves ALL
+    // deps (the new one included). If resolution fails, the
+    // manifest stays persisted — the user can run `fitz remove`
+    // to revert.
     let resolved = resolve_entry(None);
     sync_lockfile_if_needed(&resolved);
 }
 
-/// `fitz remove <name>` — Fase 9.y.4. Quita la entry del manifest y
-/// re-sincroniza el lockfile. Si la dep no existía, error claro.
+/// `fitz remove <name>` — Phase 9.y.4. Removes the entry from the
+/// manifest and re-syncs the lockfile. If the dep didn't exist,
+/// clear error.
 fn remove_dep_cmd(name: &str) {
     let manifest_path = find_local_manifest_or_exit();
     let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
@@ -2842,10 +2920,11 @@ fn remove_dep_cmd(name: &str) {
     }
     println!("✓ quitada `{name}` de `{}`", manifest_path.display());
 
-    // Re-resolver para que el lockfile refleje la nueva lista de deps.
-    // Si la dep removida era la única, sync_lockfile_if_needed
-    // detectará deps vacías y no escribe (pero el lockfile viejo
-    // sigue ahí con la entry stale). Limpiamos eso a mano:
+    // Re-resolve so the lockfile reflects the new list of deps.
+    // If the removed dep was the only one, sync_lockfile_if_needed
+    // will detect empty deps and skip writing (but the old
+    // lockfile is still there with the stale entry). We clean
+    // that by hand:
     let resolved = resolve_entry(None);
     if let Some(ctx) = &resolved.manifest_ctx {
         if ctx.resolved_deps.is_empty() {
@@ -2865,16 +2944,16 @@ fn remove_dep_cmd(name: &str) {
     sync_lockfile_if_needed(&resolved);
 }
 
-/// `fitz update [name]` — Fase 9.y.4. Re-resuelve las deps; para
-/// git deps, invalida el cache local (borra el dir) y fuerza
-/// re-clone con el commit más reciente del tag/rev pedido. Para
-/// path deps es no-op (siempre fresh). Sin `name`, actualiza todas;
-/// con `name`, solo esa dep.
+/// `fitz update [name]` — Phase 9.y.4. Re-resolves deps; for git
+/// deps, invalidates the local cache (deletes the dir) and forces
+/// a re-clone with the most recent commit of the requested
+/// tag/rev. For path deps it's a no-op (always fresh). Without
+/// `name`, updates all of them; with `name`, only that dep.
 fn update_deps_cmd(name_filter: Option<&str>) {
     let manifest_path = find_local_manifest_or_exit();
 
-    // Parse del manifest sin tocar el resolver — solo necesitamos el
-    // listado de [dependencies] para iterar.
+    // Parse the manifest without touching the resolver — we only
+    // need the [dependencies] list to iterate.
     let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
         eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
         std::process::exit(1);
@@ -2894,13 +2973,14 @@ fn update_deps_cmd(name_filter: Option<&str>) {
                 continue;
             }
         }
-        // Solo git deps tienen cache para invalidar; path deps son no-op.
+        // Only git deps have a cache to invalidate; path deps are
+        // no-op.
         if let manifest::Dependency::Detailed(d) = dep {
             if let Some(url) = &d.git {
                 let gitref = match (&d.tag, &d.rev) {
                     (Some(t), None) => fitz::git_dep::GitRef::Tag(t.clone()),
                     (None, Some(r)) => fitz::git_dep::GitRef::Rev(r.clone()),
-                    _ => continue, // shape inválido — el resolver reportará
+                    _ => continue, // invalid shape — the resolver will report
                 };
                 let cache_path = match fitz::git_dep::cache_path_for(url, &gitref) {
                     Ok(p) => p,
@@ -2923,8 +3003,9 @@ fn update_deps_cmd(name_filter: Option<&str>) {
         }
     }
 
-    // Validar que el `--name` filter haya matcheado algo (UX: si el
-    // user typea mal el nombre, no quiero silencio).
+    // Validate that the `--name` filter actually matched
+    // something (UX: if the user typos the name, I don't want
+    // silence).
     if let Some(filter) = name_filter {
         if !parsed.dependencies.contains_key(filter) {
             eprintln!(
@@ -2944,30 +3025,31 @@ fn update_deps_cmd(name_filter: Option<&str>) {
         println!("✓ cache invalidado para: {}", busted.join(", "));
     }
 
-    // Re-resolver via manifest mode (que va a re-clonar las git deps
-    // porque su cache ya no existe) + sync lockfile. Pasamos `None`
-    // para que resolve_entry haga `find_manifest` desde el cwd; ya
-    // sabemos que el manifest existe (manifest_path arriba lo
-    // confirmó).
-    let _ = manifest_path; // mantener vivo el lifetime; resolve_entry hace el discover
+    // Re-resolve via manifest mode (which will re-clone the git
+    // deps because their cache no longer exists) + sync
+    // lockfile. We pass `None` so resolve_entry does
+    // `find_manifest` from the cwd; we already know the manifest
+    // exists (manifest_path above confirmed it).
+    let _ = manifest_path; // keep the lifetime alive; resolve_entry does the discover
     let resolved = resolve_entry(None);
     sync_lockfile_if_needed(&resolved);
 }
 
-// ---- Fase 9.z.1 — `fitz fmt` ----
+// ---- Phase 9.z.1 — `fitz fmt` ----
 
-/// `fitz fmt [files...] [--check]` — Fase 9.z.1. Formatea archivos
-/// `.fitz` al estilo canónico. Sin `files`, formatea todo el proyecto
-/// (descubre vía manifest). Con `--check`, no escribe — exit 1 si
-/// algún archivo difiere de su forma canónica (modo CI).
+/// `fitz fmt [files...] [--check]` — Phase 9.z.1. Formats `.fitz`
+/// files to the canonical style. Without `files`, formats the
+/// whole project (discovers via manifest). With `--check`, does
+/// not write — exit 1 if any file differs from its canonical form
+/// (CI mode).
 ///
-/// El descubrimiento de archivos en project mode incluye
-/// `src/main.fitz` (del `[bin].main`), `src/lib.fitz` (del
-/// `[lib].entry`), y cualquier `.fitz` adicional en `src/` (walk
-/// recursivo). Excluye `target/` y cualquier dir oculto.
+/// File discovery in project mode includes `src/main.fitz` (from
+/// `[bin].main`), `src/lib.fitz` (from `[lib].entry`), and any
+/// extra `.fitz` in `src/` (recursive walk). Excludes `target/`
+/// and any hidden dir.
 fn fmt_cmd(files: Vec<PathBuf>, check: bool) {
     let targets = if files.is_empty() {
-        // Project mode — descubrir vía manifest.
+        // Project mode — discover via manifest.
         discover_project_fitz_files()
     } else {
         files
@@ -2978,8 +3060,9 @@ fn fmt_cmd(files: Vec<PathBuf>, check: bool) {
         std::process::exit(1);
     }
 
-    // (Fase 9.z.1.b: el warning loud de 9.z.1.a se removió porque
-    // ya preservamos comments + blank lines del usuario.)
+    // (Phase 9.z.1.b: the loud warning from 9.z.1.a was removed
+    // because we now preserve the user's comments + blank
+    // lines.)
 
     let mut any_diff = false;
     let mut errors = 0usize;
@@ -3011,11 +3094,11 @@ fn fmt_cmd(files: Vec<PathBuf>, check: bool) {
 }
 
 enum FmtResult {
-    /// El archivo ya estaba en forma canónica.
+    /// The file was already in canonical form.
     Unchanged,
-    /// Escribimos el archivo con la forma canónica.
+    /// We wrote the file in canonical form.
     Wrote,
-    /// `--check` mode: el archivo cambiaría si se formateara.
+    /// `--check` mode: the file would change if formatted.
     WouldChange,
 }
 
@@ -3032,9 +3115,10 @@ fn fmt_one_file(path: &std::path::Path, check_only: bool) -> Result<FmtResult, S
     Ok(FmtResult::Wrote)
 }
 
-/// Descubre archivos `.fitz` del proyecto actual via manifest. Lee
-/// `[bin].main` y `[lib].entry` (si existen) + walk recursivo de
-/// `src/`. Excluye `target/` y dirs ocultos (`.git/`, etc.).
+/// Discovers `.fitz` files in the current project via the
+/// manifest. Reads `[bin].main` and `[lib].entry` (if they exist)
+/// + recursive walk of `src/`. Excludes `target/` and hidden dirs
+/// (`.git/`, etc.).
 fn discover_project_fitz_files() -> Vec<PathBuf> {
     let manifest_path = find_local_manifest_or_exit();
     let manifest_dir = manifest_path
@@ -3047,9 +3131,9 @@ fn discover_project_fitz_files() -> Vec<PathBuf> {
     if src_dir.is_dir() {
         collect_fitz_recursive(&src_dir, &mut targets);
     }
-    // Dedup por path canonicalizado para evitar formatear el mismo
-    // archivo dos veces si aparece como `[bin].main` y también en
-    // el walk de `src/`.
+    // Dedup by canonicalized path to avoid formatting the same
+    // file twice if it appears as `[bin].main` and also in the
+    // walk of `src/`.
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     targets.retain(|p| {
         let canon = fs::canonicalize(p).unwrap_or_else(|_| p.clone());
@@ -3070,7 +3154,7 @@ fn collect_fitz_recursive(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
             Some(n) => n,
             None => continue,
         };
-        // Skip dirs ocultos (`.git`, `.fitz-cache`) y `target/`.
+        // Skip hidden dirs (`.git`, `.fitz-cache`) and `target/`.
         if name.starts_with('.') || name == "target" {
             continue;
         }
@@ -3082,8 +3166,8 @@ fn collect_fitz_recursive(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Helper compartido por add/remove/update: encuentra el `fitz.toml`
-/// del proyecto actual o sale con error claro.
+/// Shared helper for add/remove/update: finds the current
+/// project's `fitz.toml` or exits with a clear error.
 fn find_local_manifest_or_exit() -> PathBuf {
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("✗ no se pudo leer el directorio actual: {e}");
@@ -3104,36 +3188,37 @@ fn find_local_manifest_or_exit() -> PathBuf {
     }
 }
 
-// ---- Fase 9.z.2.b — `fitz test` (testing built-in) ----
+// ---- Phase 9.z.2.b — `fitz test` (built-in testing) ----
 
-/// Una fuente de tests para el runner. `path` es absoluto (la
-/// invocación con `fitz test archivo.fitz` lo canonicaliza). `label`
-/// es el nombre amigable que se usa para prefijar los nombres en el
-/// output (`<label>::<test>`); `None` significa no prefijar — caso
-/// típico de single-file mode.
+/// A source of tests for the runner. `path` is absolute (the
+/// `fitz test file.fitz` invocation canonicalizes it). `label` is
+/// the friendly name used to prefix the names in the output
+/// (`<label>::<test>`); `None` means no prefix — typical case of
+/// single-file mode.
 struct TestSource {
     path: PathBuf,
     label: Option<String>,
 }
 
-/// Entry point del sub-comando `fitz test` (Fase 9.z.2.b).
+/// Entry point of the `fitz test` sub-command (Phase 9.z.2.b).
 ///
-/// - **Single-file mode** (`fitz test --file archivo.fitz [filter]`):
-///   evalúa `archivo.fitz` con un `TestRegistry` activo, después
-///   corre los tests descubiertos.
-/// - **Manifest mode** (`fitz test [filter]`): busca `fitz.toml`,
-///   evalúa el entry de la lib (o el bin si no hay lib) + cada
-///   `tests/*.fitz` top-level del directorio del manifest. Cada
-///   archivo se evalúa con su path como `source_label` para que el
-///   output prefije los nombres.
+/// - **Single-file mode** (`fitz test --file file.fitz [filter]`):
+///   evaluates `file.fitz` with an active `TestRegistry`, then
+///   runs the discovered tests.
+/// - **Manifest mode** (`fitz test [filter]`): looks for
+///   `fitz.toml`, evaluates the lib entry (or the bin if there's
+///   no lib) + every top-level `tests/*.fitz` in the manifest
+///   directory. Each file is evaluated with its path as
+///   `source_label` so the output prefixes the names.
 ///
-/// El filtro es substring case-sensitive sobre el nombre del test
-/// (sin prefijo de file). Cargo style.
+/// The filter is a case-sensitive substring on the test name
+/// (without the file prefix). Cargo style.
 fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
     let (sources, dep_registry) = match file_arg {
         Some(p) => {
-            // Single-file: el path tal cual; sin label en el output.
-            // Dep registry vacío (single-file no toca `fitz.toml`).
+            // Single-file: the path as-is; no label in the
+            // output. Empty dep registry (single-file does not
+            // touch `fitz.toml`).
             (
                 vec![TestSource {
                     path: p,
@@ -3154,10 +3239,11 @@ fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
         std::process::exit(1);
     }
 
-    // Build runtime tokio current_thread + bloquear sobre toda la
-    // operación: descubrimiento (evaluar cada archivo con registry
-    // activo) + run de los tests. Una sola invocación del runtime
-    // para todo, así los TestSpec acumulan en el mismo registry.
+    // Build a tokio current_thread runtime + block over the whole
+    // operation: discovery (evaluate each file with the registry
+    // active) + running the tests. A single runtime invocation
+    // for everything, so the TestSpecs accumulate in the same
+    // registry.
     let runtime = evaluator::build_runtime();
     let registry = runtime.block_on(async {
         let ((), reg) = testing::with_active_test_registry_async(|| async {
@@ -3187,25 +3273,25 @@ fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
     }
 }
 
-/// Descubre las fuentes de tests en manifest mode. Lee el manifest
-/// (debe existir), arma el `dep_registry` (resolución de deps
-/// path/git), después devuelve:
+/// Discovers test sources in manifest mode. Reads the manifest
+/// (it must exist), builds the `dep_registry` (path/git dep
+/// resolution), then returns:
 ///
-/// 1. `[lib].entry` si existe; si no, `[bin].main` si existe; si no,
-///    ninguna fuente del proyecto (solo `tests/*.fitz`).
-/// 2. Todos los `tests/<nombre>.fitz` top-level del directorio del
-///    manifest (no recursivo — alineado con cómo Cargo descubre
+/// 1. `[lib].entry` if it exists; otherwise `[bin].main` if it
+///    exists; otherwise no project source (only `tests/*.fitz`).
+/// 2. All top-level `tests/<name>.fitz` in the manifest directory
+///    (non-recursive — aligned with how Cargo discovers
 ///    integration tests).
 ///
-/// A diferencia de `resolve_entry`, NO exigimos `[bin]` — un
-/// proyecto solo-lib es válido (caso 90% de las librerías). Si no
-/// hay ni lib ni bin ni `tests/`, devolvemos lista vacía y el caller
-/// (`test_cmd`) emite el mensaje "no se encontraron archivos con
-/// tests".
+/// Unlike `resolve_entry`, we do NOT require `[bin]` — a lib-only
+/// project is valid (90% of the libraries case). If there's
+/// neither lib nor bin nor `tests/`, we return an empty list and
+/// the caller (`test_cmd`) emits the "no test files found"
+/// message.
 ///
-/// Los `label` son paths relativos al `manifest_dir`
-/// (`"src/lib.fitz"`, `"tests/math.fitz"`) para que el output sea
-/// legible y portable entre máquinas.
+/// The `label`s are paths relative to `manifest_dir`
+/// (`"src/lib.fitz"`, `"tests/math.fitz"`) so the output is
+/// readable and portable across machines.
 fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegistry) {
     let manifest_path = find_local_manifest_or_exit();
     let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
@@ -3221,16 +3307,17 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    // Resolver deps eager (fail-fast con mensaje del resolver). Sin
-    // deps, el dep_registry queda vacío y el loader solo usará paths
-    // relativos.
+    // Eager dep resolution (fail-fast with the resolver's
+    // message). Without deps, the dep_registry stays empty and
+    // the loader will only use relative paths.
     let resolved_deps = manifest::resolve_dependencies(&parsed_manifest, &manifest_dir)
         .unwrap_or_else(|e| {
             eprintln!("✗ no se pudieron resolver las dependencias: {e}");
             std::process::exit(1);
         });
 
-    // Sync lockfile (no-op si no hay deps o ya está sincronizado).
+    // Sync lockfile (no-op if there are no deps or it's already
+    // in sync).
     if !resolved_deps.is_empty() {
         let lock = lockfile::Lockfile::from_resolved(&resolved_deps);
         let lock_path = lockfile::lockfile_path(&manifest_dir);
@@ -3241,13 +3328,14 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
     }
     let mut dep_registry = manifest::build_dep_registry(&resolved_deps);
 
-    // Auto-self-import: si el proyecto declara `[lib].entry`,
-    // registramos el lib bajo el nombre del paquete en el
-    // `dep_registry`. Esto permite que `tests/*.fitz` haga
-    // `from <pkg-name> import X` para acceder al código de la lib —
-    // paralelo a `use my_crate::*` de Rust en tests integration.
-    // Sin esto, los tests tendrían que escribir paths fragmentados
-    // (`from ../src/lib import X`) que el loader actual no soporta.
+    // Auto-self-import: if the project declares `[lib].entry`,
+    // we register the lib under the package name in the
+    // `dep_registry`. This lets `tests/*.fitz` do
+    // `from <pkg-name> import X` to access the lib's code —
+    // parallel to Rust's `use my_crate::*` in integration tests.
+    // Without this, tests would have to write fragmented paths
+    // (`from ../src/lib import X`) that the current loader does
+    // not support.
     if let Some(lib) = &parsed_manifest.lib {
         let lib_path = manifest_dir.join(&lib.entry);
         if lib_path.exists() {
@@ -3255,8 +3343,9 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
         }
     }
 
-    // Primero coleccionamos los `tests/*.fitz` top-level del manifest dir
-    // (no recursivo). Orden alfabético para reproducibilidad.
+    // First we collect the top-level `tests/*.fitz` of the
+    // manifest dir (non-recursive). Alphabetical order for
+    // reproducibility.
     let mut integration_sources: Vec<TestSource> = Vec::new();
     let tests_dir = manifest_dir.join("tests");
     if tests_dir.is_dir() {
@@ -3282,17 +3371,19 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
     let mut sources: Vec<TestSource> = Vec::new();
 
     if !integration_sources.is_empty() {
-        // **Modo "tests integration"**: SOLO cargamos los `tests/*.fitz`.
-        // El `[lib]` (o `[bin]`) se carga indirectamente cuando un test
-        // hace `from <pkg> import X` — el dep_registry tiene el auto-self
-        // registrado, y el loader cachea por path canonical, así un
-        // `@test` declarado en el lib se descubre UNA VEZ aunque varios
-        // tests importen la lib. Si no lo importa nadie, no se descubre
-        // (deuda visible para el caso degenerado).
+        // **"Integration tests" mode**: we ONLY load the
+        // `tests/*.fitz`. The `[lib]` (or `[bin]`) is loaded
+        // indirectly when a test does `from <pkg> import X` —
+        // the dep_registry has the auto-self registered, and the
+        // loader caches by canonical path, so an `@test`
+        // declared in the lib is discovered ONCE even if several
+        // tests import the lib. If nobody imports it, it's not
+        // discovered (visible debt for the degenerate case).
         sources.extend(integration_sources);
     } else {
-        // **Modo "tests inline only"**: cargamos el `[lib]` (o `[bin]`)
-        // directamente porque es el único lugar donde puede haber `@test`.
+        // **"Inline tests only" mode**: we load the `[lib]` (or
+        // `[bin]`) directly because it's the only place that
+        // can have `@test`.
         let entry_rel: Option<String> = match (&parsed_manifest.lib, &parsed_manifest.bin) {
             (Some(lib), _) => Some(lib.entry.clone()),
             (None, Some(bin)) => Some(bin.main.clone()),
@@ -3312,15 +3403,15 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
     (sources, dep_registry)
 }
 
-/// Evalúa un archivo con el `TestRegistry` (y posiblemente el
-/// `CURRENT_TEST_SOURCE`) ya activos por el caller. Hace
-/// lexer + parser + checker strict + eval. Si el checker reporta
-/// errores, los formatea y devuelve `Err` (el caller decide
-/// abortar).
+/// Evaluates a file with the `TestRegistry` (and possibly
+/// `CURRENT_TEST_SOURCE`) already active in the caller. Does
+/// lexer + parser + strict checker + eval. If the checker reports
+/// errors, formats them and returns `Err` (the caller decides
+/// whether to abort).
 ///
-/// `base_dir` se deriva del directorio del archivo — así los
-/// imports relativos (`from utils import X`) resuelven al sibling
-/// del archivo, paralelo a `fitz run` single-file.
+/// `base_dir` is derived from the file's directory — so relative
+/// imports (`from utils import X`) resolve to the file's sibling,
+/// parallel to `fitz run` single-file.
 async fn eval_test_source(
     path: &std::path::Path,
     dep_registry: &manifest::DepRegistry,
@@ -3330,9 +3421,9 @@ async fn eval_test_source(
     let tokens = lexer::tokenize(&source).map_err(|e| format!("{e}"))?;
     let program = parser::parse(tokens).map_err(|e| format!("{e}"))?;
 
-    // 8-pyi.B: carga stubs .pyi adyacentes antes del check (también en
-    // tests — los `tests/*.fitz` que usan `from python import foo` ven
-    // los tipos del `foo.pyi` adyacente).
+    // 8-pyi.B: loads adjacent .pyi stubs before the check (also
+    // in tests — `tests/*.fitz` files that use `from python
+    // import foo` see the types from the adjacent `foo.pyi`).
     let (_env, _types, _defs, type_errors) = check_program_with_pyi_stubs(&program, path);
     if !type_errors.is_empty() {
         let mut msg = format!("{} error(es) de tipo:", type_errors.len());
@@ -3349,22 +3440,26 @@ async fn eval_test_source(
         .map_err(|e| format!("{e}"))
 }
 
-/// Corre todos los tests del registry, aplica `filter` opcional,
-/// reporta estilo cargo (`test <name> ... ok/FAILED`), summary
-/// final, y devuelve la cantidad de tests fallidos. El caller usa
-/// ese número para decidir el exit code (`>0` → 1).
+/// Runs every test in the registry, applies the optional
+/// `filter`, reports cargo-style (`test <name> ... ok/FAILED`)
+/// with a final summary, and returns the number of failed tests.
+/// The caller uses that number to decide the exit code (`>0` →
+/// 1).
 ///
 /// Output:
-/// - `running N tests` (o `N (M filtered out)` si hay filter).
-/// - Por cada test: `test <full_name> ... <result>` con result
-///   coloreado (ok verde, FAILED rojo) si stdout es TTY.
-/// - Si hay failures, sección `failures:` con detalle de cada uno
-///   (mensaje del FitzError o EvalSignal).
-/// - Summary: `test result: ok|FAILED. P passed; F failed; finished in Ts`.
+/// - `running N tests` (or `N (M filtered out)` if there's a
+///   filter).
+/// - For each test: `test <full_name> ... <result>` with the
+///   result colored (ok green, FAILED red) if stdout is a TTY.
+/// - If there are failures, a `failures:` section with detail
+///   for each one (FitzError or EvalSignal message).
+/// - Summary: `test result: ok|FAILED. P passed; F failed;
+///   finished in Ts`.
 fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> usize {
     use std::io::IsTerminal;
 
-    // ANSI raw — usar colors solo si stdout es TTY (no redirigido).
+    // Raw ANSI — use colors only if stdout is a TTY (not
+    // redirected).
     let use_color = std::io::stdout().is_terminal();
     let green = |s: &str| {
         if use_color {
@@ -3391,8 +3486,8 @@ fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> 
     let all = registry.tests();
     let total_discovered = all.len();
 
-    // Aplicar filtro. Tests excluidos se cuentan como "filtered out"
-    // en el output (cargo style).
+    // Apply filter. Excluded tests are counted as "filtered
+    // out" in the output (cargo style).
     let selected: Vec<&testing::TestSpec> = match filter {
         Some(needle) => all.iter().filter(|t| t.name.contains(needle)).collect(),
         None => all.iter().collect(),
@@ -3425,9 +3520,10 @@ fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> 
             Some(src) => format!("{}::{}", src, test.name),
             None => test.name.clone(),
         };
-        // Imprimimos "test <name> ..." y dejamos pendiente el OK/FAILED
-        // para imprimir después de ejecutar (cargo lo hace en la misma
-        // línea con un buffer — acá usamos print! + flush).
+        // We print "test <name> ..." and leave OK/FAILED
+        // pending to print after running (cargo does it on the
+        // same line with a buffer — here we use print! +
+        // flush).
         print!("test {} ... ", full_name);
         std::io::Write::flush(&mut std::io::stdout()).ok();
 
@@ -3472,45 +3568,47 @@ fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> 
     failures.len()
 }
 
-/// Invoca un test individual via `evaluator::run_test_handler`.
-/// Cualquier `FitzError` se devuelve como `Err(formatted_string)` —
-/// el runner lo registra en la sección `failures:` del output.
+/// Invokes an individual test via `evaluator::run_test_handler`.
+/// Any `FitzError` is returned as `Err(formatted_string)` — the
+/// runner records it in the `failures:` section of the output.
 async fn invoke_one_test(test: &testing::TestSpec) -> Result<(), String> {
     evaluator::run_test_handler(test.handler.clone(), test.is_async, &test.name)
         .await
         .map_err(|e| format!("{e}"))
 }
 
-// ---- Fase 9.z.3 — `fitz dev` (hot reload) ----
+// ---- Phase 9.z.3 — `fitz dev` (hot reload) ----
 
-/// Resuelto al inicio de `dev_cmd`: qué directorio watcheamos y qué
-/// argumentos le pasamos al child `fitz run`. Single-file mode usa el
-/// parent del archivo como watch root + `fitz run <file>`; manifest
-/// mode usa `manifest_dir` como root + `fitz run` (sin args, así el
-/// child re-descubre el manifest cada arranque y respeta cambios de
-/// `[bin].main` en `fitz.toml`).
+/// Resolved at the start of `dev_cmd`: which directory we watch
+/// and which arguments we pass to the `fitz run` child.
+/// Single-file mode uses the file's parent as the watch root +
+/// `fitz run <file>`; manifest mode uses `manifest_dir` as the
+/// root + `fitz run` (no args, so the child re-discovers the
+/// manifest on each start and respects `[bin].main` changes in
+/// `fitz.toml`).
 struct DevTarget {
-    /// Directorio que el watcher monitorea recursivamente.
+    /// Directory the watcher monitors recursively.
     watch_dir: PathBuf,
-    /// Args adicionales para el child `fitz run ...`.
+    /// Additional args for the `fitz run ...` child.
     child_args: Vec<String>,
-    /// String corta para el banner UX ("`./mi_app.fitz`" o
-    /// "proyecto `miapp`").
+    /// Short string for the UX banner ("`./my_app.fitz`" or
+    /// "project `myapp`").
     display: String,
 }
 
-/// Entry point del sub-comando `fitz dev` (Fase 9.z.3).
+/// Entry point of the `fitz dev` sub-command (Phase 9.z.3).
 ///
-/// Loop principal: spawn child `fitz run <entry>`, escucha cambios en
-/// el filesystem, y al detectar uno relevante (archivo `.fitz` o
-/// `fitz.toml`, no excluido), mata el child y respawnea. Ctrl+C mata
-/// el child antes de salir para evitar procesos zombie.
+/// Main loop: spawn a `fitz run <entry>` child, listen for
+/// filesystem changes, and on a relevant one (`.fitz` file or
+/// `fitz.toml`, not excluded), kill the child and respawn.
+/// Ctrl+C kills the child before exiting to avoid zombie
+/// processes.
 ///
-/// Toda la lógica corre adentro de un runtime tokio current_thread
-/// porque combina `tokio::process` (kill async del child),
-/// `tokio::signal::ctrl_c`, y un canal async para los eventos de
-/// `notify` (que es sync; lo reenviamos vía `std::thread::spawn` +
-/// `tokio::sync::mpsc::UnboundedSender`).
+/// All logic runs inside a tokio current_thread runtime because
+/// it combines `tokio::process` (async kill of the child),
+/// `tokio::signal::ctrl_c`, and an async channel for `notify`
+/// events (which is sync; we forward them via
+/// `std::thread::spawn` + `tokio::sync::mpsc::UnboundedSender`).
 fn dev_cmd(file_arg: Option<PathBuf>) {
     let target = resolve_dev_target(file_arg);
 
@@ -3527,12 +3625,13 @@ fn dev_cmd(file_arg: Option<PathBuf>) {
     });
 }
 
-/// Decide qué directorio watchear + qué args pasarle al child.
+/// Decides which directory to watch + which args to pass to the
+/// child.
 fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
     if let Some(path) = file_arg {
-        // Single-file mode: watch el parent del archivo, child con
-        // `fitz run <file>` (path absolute para evitar problemas si
-        // el cwd cambia).
+        // Single-file mode: watch the file's parent, child with
+        // `fitz run <file>` (absolute path to avoid issues if
+        // the cwd changes).
         let abs = std::fs::canonicalize(&path).unwrap_or_else(|e| {
             eprintln!("✗ no se pudo resolver `{}`: {e}", path.display());
             std::process::exit(1);
@@ -3549,9 +3648,10 @@ fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
         };
     }
 
-    // Manifest mode: encontrar fitz.toml, watch su directorio. Child
-    // `fitz run` sin args para que re-descubra el manifest cada
-    // arranque (si el user edita `[bin].main`, se respeta).
+    // Manifest mode: find fitz.toml, watch its directory. Child
+    // `fitz run` without args so it re-discovers the manifest on
+    // every start (if the user edits `[bin].main`, it's
+    // respected).
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("✗ no se pudo leer el directorio actual: {e}");
         std::process::exit(1);
@@ -3573,7 +3673,7 @@ fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| cwd.clone());
-    // Parsear nombre del paquete para el banner.
+    // Parse the package name for the banner.
     let display = match fs::read_to_string(&manifest_path)
         .ok()
         .and_then(|t| manifest::Manifest::parse(&t).ok())
@@ -3588,13 +3688,14 @@ fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
     }
 }
 
-/// Loop principal del dev: spawnea child + escucha cambios + Ctrl+C.
-/// Cada iteración del outer loop = un "run" del programa. Cuando un
-/// archivo relevante cambia, kill+respawn. Cuando Ctrl+C llega,
-/// kill child y return Ok.
+/// Main dev loop: spawns child + listens for changes + Ctrl+C.
+/// Each outer-loop iteration = one "run" of the program. When a
+/// relevant file changes, kill+respawn. When Ctrl+C arrives, kill
+/// the child and return Ok.
 async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
-    // Canal sync → async para los eventos del watcher. notify es sync;
-    // un std::thread re-envía cada evento al canal tokio.
+    // Sync → async channel for the watcher's events. notify is
+    // sync; a std::thread forwards each event to the tokio
+    // channel.
     let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
     let mut watcher = notify::recommended_watcher(notify_tx)
         .map_err(|e| format!("no se pudo crear el file watcher: {e}"))?;
@@ -3605,10 +3706,10 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
 
     let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
     std::thread::spawn(move || {
-        // Ignoramos errores del watcher (`Err`): el SO a veces emite
-        // ruido (paths efímeros, permisos transitorios) que no nos
-        // afecta. Si el canal tokio cierra (`send().is_err()`), el
-        // consumer murió y salimos.
+        // We ignore watcher errors (`Err`): the OS sometimes
+        // emits noise (ephemeral paths, transient permissions)
+        // that doesn't affect us. If the tokio channel closes
+        // (`send().is_err()`), the consumer died and we exit.
         for event in notify_rx.into_iter().flatten() {
             if tokio_tx.send(event).is_err() {
                 break;
@@ -3623,9 +3724,10 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
     loop {
         clear_screen_and_banner(&target, run_count);
 
-        // Spawn child con working dir = el watch_dir para que `fitz run`
-        // (sin args, manifest mode) encuentre el manifest. Single-file
-        // mode usa el path absoluto del archivo, así que el cwd no importa.
+        // Spawn child with working dir = watch_dir so `fitz run`
+        // (without args, manifest mode) finds the manifest.
+        // Single-file mode uses the file's absolute path, so the
+        // cwd doesn't matter.
         let mut child = match tokio::process::Command::new(&bin)
             .args(&target.child_args)
             .current_dir(&target.watch_dir)
@@ -3634,19 +3736,21 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("✗ no se pudo spawnear el child: {e}");
-                // Si no podemos spawnear, igual queremos seguir escuchando
-                // por si el user fixea (path inexistente, permisos, etc.).
-                // Esperamos un cambio + retry.
+                // If we can't spawn, we still want to keep
+                // listening in case the user fixes things
+                // (missing path, permissions, etc.). Wait for a
+                // change + retry.
                 drain_until_change(&mut tokio_rx, &target.watch_dir).await;
                 continue;
             }
         };
 
-        // Inner loop: esperamos cambio en filesystem, Ctrl+C, o child exit.
+        // Inner loop: wait for a filesystem change, Ctrl+C, or
+        // the child exiting.
         let restart = tokio::select! {
             change = wait_for_relevant_change(&mut tokio_rx, &target.watch_dir) => {
                 let path = change;
-                // Debounce: 100ms drain del canal para colapsar saves múltiples.
+                // Debounce: 100ms channel drain to collapse multiple saves.
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_millis(100),
                     drain_pending(&mut tokio_rx),
@@ -3665,8 +3769,9 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
                 return Ok(());
             }
             status = child.wait() => {
-                // El child terminó solo (programa CLI corto, error de tipo, etc.).
-                // Mostramos el status y esperamos un cambio para reiniciar.
+                // The child finished on its own (short CLI
+                // program, type error, etc.). We show the
+                // status and wait for a change to restart.
                 match status {
                     Ok(s) if s.success() => {
                         eprintln!("\n✓ programa terminó OK (exit 0) — esperando cambios ...");
@@ -3687,7 +3792,8 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
             }
         };
 
-        // Kill del child si seguía vivo (case "restart por cambio").
+        // Kill the child if it was still alive ("restart due to
+        // change" case).
         if restart {
             let _ = child.kill().await;
             let _ = child.wait().await;
@@ -3696,18 +3802,18 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
     }
 }
 
-/// Espera el próximo evento del watcher que toque un archivo relevante
-/// (`.fitz` o `fitz.toml`, no excluido). Eventos irrelevantes se
-/// drenan silenciosamente.
+/// Waits for the next watcher event that touches a relevant file
+/// (`.fitz` or `fitz.toml`, not excluded). Irrelevant events are
+/// drained silently.
 async fn wait_for_relevant_change(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Event>,
     watch_dir: &std::path::Path,
 ) -> PathBuf {
     loop {
         let Some(ev) = rx.recv().await else {
-            // El canal cerró (el thread del watcher murió). Esto NO debería
-            // pasar en uso normal; tratamos como cambio sintético para que
-            // el loop salga.
+            // The channel closed (the watcher thread died). This
+            // should NOT happen in normal use; we treat it as a
+            // synthetic change so the loop exits.
             return watch_dir.to_path_buf();
         };
         for p in &ev.paths {
@@ -3718,17 +3824,18 @@ async fn wait_for_relevant_change(
     }
 }
 
-/// Drena eventos en el canal sin bloquear (poll). Usado para el
-/// debounce: tras detectar UN evento, drenamos los que llegan en los
-/// próximos 100ms para colapsar saves múltiples.
+/// Drains events from the channel without blocking (poll). Used
+/// for debouncing: after detecting ONE event, we drain the ones
+/// arriving in the next 100ms to collapse multiple saves.
 async fn drain_pending(rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Event>) {
     loop {
         match rx.try_recv() {
             Ok(_) => continue,
             Err(_) => {
-                // Esperamos un poco para que lleguen los próximos eventos
-                // del save múltiple (típico en VSCode: write tmp, rename,
-                // chmod). El timeout exterior corta a 100ms total.
+                // Wait a bit for the next events of the
+                // multi-save to arrive (typical in VSCode: write
+                // tmp, rename, chmod). The outer timeout caps it
+                // at 100ms total.
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 if rx.try_recv().is_err() {
                     return;
@@ -3738,25 +3845,25 @@ async fn drain_pending(rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Eve
     }
 }
 
-/// Bloquea hasta que llegue un cambio relevante. Versión "loop hasta
-/// que algo pase" usada cuando el child terminó solo y esperamos al
-/// próximo save del user.
+/// Blocks until a relevant change arrives. "Loop until something
+/// happens" variant used when the child finished on its own and
+/// we wait for the user's next save.
 async fn drain_until_change(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Event>,
     watch_dir: &std::path::Path,
 ) {
     let _ = wait_for_relevant_change(rx, watch_dir).await;
-    // Debounce post-cambio.
+    // Post-change debounce.
     let _ = tokio::time::timeout(std::time::Duration::from_millis(100), drain_pending(rx)).await;
 }
 
-/// Decide si un path del evento merece restart. Reglas:
+/// Decides whether an event path warrants a restart. Rules:
 ///
-/// - Sólo `.fitz` o `fitz.toml` (otras extensiones se ignoran).
-/// - Excluye paths bajo `target/`, `.git/`, `node_modules/`,
-///   `.fitz/`, archivos ocultos (`.algo`).
+/// - Only `.fitz` or `fitz.toml` (other extensions are ignored).
+/// - Excludes paths under `target/`, `.git/`, `node_modules/`,
+///   `.fitz/`, hidden files (`.something`).
 fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool {
-    // Filename check primero (más barato).
+    // Filename check first (cheaper).
     let is_fitz_file = path
         .extension()
         .and_then(|e| e.to_str())
@@ -3771,7 +3878,7 @@ fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool
         return false;
     }
 
-    // Componentes excluidos en cualquier nivel.
+    // Components excluded at any level.
     let rel = path.strip_prefix(watch_dir).unwrap_or(path);
     for component in rel.components() {
         let std::path::Component::Normal(name) = component else {
@@ -3784,10 +3891,11 @@ fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool
         ) {
             return false;
         }
-        // Cualquier otro componente que arranca con `.` es oculto.
-        // Excepto el archivo final si es `.fitz` literal — pero ya
-        // chequeamos extensión, así que un archivo `.algo.fitz`
-        // (hidden con extensión fitz) sí dispara. Razonable.
+        // Any other component starting with `.` is hidden.
+        // Except the final file if it's a literal `.fitz` — but
+        // we already checked the extension, so a `.something.fitz`
+        // file (hidden with the fitz extension) does trigger.
+        // Reasonable.
         if s.starts_with('.') && s != "." && s != ".." && !s.ends_with(".fitz") {
             return false;
         }
@@ -3795,26 +3903,27 @@ fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool
     true
 }
 
-/// Para mensajes UX: muestra el path como relativo al watch_dir si
-/// está adentro, o tal cual si está afuera.
+/// For UX messages: shows the path relative to watch_dir if it's
+/// inside, or as-is if it's outside.
 fn relative_to(path: &std::path::Path, base: &std::path::Path) -> String {
     path.strip_prefix(base)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| path.display().to_string())
 }
 
-// ---- Fase 9.z.4 — `fitz repl` (REPL interactivo) ----
+// ---- Phase 9.z.4 — `fitz repl` (interactive REPL) ----
 
-/// Entry point del sub-comando `fitz repl` (Fase 9.z.4). Abre un
-/// prompt interactivo donde cada línea se evalúa contra un env
-/// compartido. Soporta multi-line continuation cuando hay
-/// `{`/`(`/`[` abierto, comandos especiales con prefijo `:`,
-/// history persistente en `~/.fitz/history`, y Ctrl+D para salir.
+/// Entry point of the `fitz repl` sub-command (Phase 9.z.4).
+/// Opens an interactive prompt where each line is evaluated
+/// against a shared env. Supports multi-line continuation when
+/// `{`/`(`/`[` is open, special commands with `:` prefix,
+/// persistent history in `~/.fitz/history`, and Ctrl+D to exit.
 ///
-/// Toda la lógica corre adentro de un runtime tokio current_thread
-/// (`evaluator::build_runtime`) porque el evaluator es async desde
-/// Fase 6.4 y necesitamos await-ear `Value::Future` para que
-/// `sleep(100).await` y similares funcionen desde el prompt.
+/// All logic runs inside a tokio current_thread runtime
+/// (`evaluator::build_runtime`) because the evaluator has been
+/// async since Phase 6.4 and we need to await `Value::Future` so
+/// that `sleep(100).await` and similar things work from the
+/// prompt.
 fn repl_cmd() {
     println!("Fitz REPL");
     println!("Tipos: `:help` para comandos disponibles. Ctrl+D para salir.\n");
@@ -3828,10 +3937,10 @@ fn repl_cmd() {
     };
     let history_path = repl_history_path();
     if let Some(ref p) = history_path {
-        // Si el archivo no existe es OK — primera sesión. Cualquier otro
-        // error (permisos, fs corrupto) se ignora silencioso para no
-        // ensuciar la UX del arranque; rustyline igual maneja la sesión
-        // sin history persistente.
+        // If the file doesn't exist it's OK — first session.
+        // Any other error (permissions, corrupt fs) is silently
+        // ignored so we don't dirty the startup UX; rustyline
+        // still handles the session without persistent history.
         let _ = editor.load_history(p);
     }
 
@@ -3841,23 +3950,23 @@ fn repl_cmd() {
     });
 }
 
-/// Path al archivo de history del REPL: `~/.fitz/history`. Si no
-/// podemos resolver el home dir (caso muy raro), devolvemos `None` y
-/// la sesión corre sin history persistente.
+/// Path to the REPL's history file: `~/.fitz/history`. If we
+/// can't resolve the home dir (very rare case), we return `None`
+/// and the session runs without persistent history.
 fn repl_history_path() -> Option<PathBuf> {
     let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     let dir = PathBuf::from(home).join(".fitz");
-    // Mejor intentamos crear el directorio acá; si falla, dejamos que
-    // rustyline lo gestione en el `save_history` (que también va a
-    // fallar pero silencioso).
+    // Better try to create the directory here; if it fails, let
+    // rustyline handle it in `save_history` (which will also
+    // fail but silently).
     let _ = fs::create_dir_all(&dir);
     Some(dir.join("history"))
 }
 
-/// Loop principal del REPL. Cada iteración: read una línea (o varias
-/// si está incompleta), procesar comandos especiales `:`, parsear,
-/// evaluar contra el env compartido, imprimir el valor si era una
-/// expresión top-level.
+/// Main REPL loop. Each iteration: read one line (or several if
+/// it's incomplete), handle `:` special commands, parse,
+/// evaluate against the shared env, print the value if it was a
+/// top-level expression.
 async fn repl_loop(editor: &mut rustyline::DefaultEditor, history_path: Option<&std::path::Path>) {
     let mut env = evaluator::new_repl_env();
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -3866,7 +3975,8 @@ async fn repl_loop(editor: &mut rustyline::DefaultEditor, history_path: Option<&
         let buffer = match read_complete_input(editor) {
             Ok(b) => b,
             Err(ReplReadError::Interrupted) => {
-                // Ctrl+C: limpio buffer multi-line si había, vuelvo al prompt.
+                // Ctrl+C: clear the multi-line buffer if any, go
+                // back to the prompt.
                 println!("(Ctrl+C — cancelado)");
                 continue;
             }
@@ -3886,13 +3996,14 @@ async fn repl_loop(editor: &mut rustyline::DefaultEditor, history_path: Option<&
         if buffer.trim().is_empty() {
             continue;
         }
-        // Lo agregamos a la history sólo si no es vacío. rustyline
-        // dedupea automáticamente la línea anterior idéntica.
+        // We add it to history only if it's non-empty.
+        // rustyline automatically dedupes against the identical
+        // previous line.
         let _ = editor.add_history_entry(buffer.as_str());
 
-        // Comandos especiales: `:help`, `:quit`, `:type`, `:env`,
-        // `:reset`, `:load`. Si la línea arranca con `:` (sin espacios
-        // previos), la tratamos como comando.
+        // Special commands: `:help`, `:quit`, `:type`, `:env`,
+        // `:reset`, `:load`. If the line starts with `:` (no
+        // leading whitespace), we treat it as a command.
         let trimmed = buffer.trim_start();
         if let Some(cmd) = trimmed.strip_prefix(':') {
             match handle_special_command(cmd, &mut env, &base_dir).await {
@@ -3908,28 +4019,28 @@ async fn repl_loop(editor: &mut rustyline::DefaultEditor, history_path: Option<&
             continue;
         }
 
-        // Evaluamos como código Fitz. Errores de lexer/parser/checker
-        // se muestran y volvemos al prompt sin abortar.
+        // Evaluate as Fitz code. Lexer/parser/checker errors are
+        // shown and we return to the prompt without aborting.
         eval_repl_input(&buffer, &mut env, &base_dir).await;
     }
 }
 
-/// Resultado de procesar una línea con `rustyline`: lectura OK,
-/// Ctrl+C (cancela buffer multi-line), Ctrl+D (sale), o error
-/// inesperado.
+/// Result of processing a line with `rustyline`: read OK,
+/// Ctrl+C (cancels the multi-line buffer), Ctrl+D (exits), or an
+/// unexpected error.
 enum ReplReadError {
     Interrupted,
     Eof,
     Other(String),
 }
 
-/// Lee una entrada COMPLETA del usuario: una o más líneas hasta que
-/// los brackets/parens/braces/strings estén balanceados. Devuelve el
-/// buffer concatenado.
+/// Reads a COMPLETE user input: one or more lines until
+/// brackets/parens/braces/strings are balanced. Returns the
+/// concatenated buffer.
 ///
-/// El prompt cambia entre líneas: `fitz> ` para la primera línea,
-/// `...   ` para continuations. Mantiene el visual aligned con `fitz>`
-/// (4 chars cada uno).
+/// The prompt changes between lines: `fitz> ` for the first
+/// line, `...   ` for continuations. Visually aligned with
+/// `fitz>` (4 chars each).
 fn read_complete_input(editor: &mut rustyline::DefaultEditor) -> Result<String, ReplReadError> {
     use rustyline::error::ReadlineError;
 
@@ -3948,7 +4059,8 @@ fn read_complete_input(editor: &mut rustyline::DefaultEditor) -> Result<String, 
                 if input_is_complete(&buffer) {
                     return Ok(buffer);
                 }
-                // Si no está completo, seguimos pidiendo más líneas.
+                // If it's not complete, keep asking for more
+                // lines.
             }
             Err(ReadlineError::Interrupted) => return Err(ReplReadError::Interrupted),
             Err(ReadlineError::Eof) => return Err(ReplReadError::Eof),
@@ -3957,18 +4069,19 @@ fn read_complete_input(editor: &mut rustyline::DefaultEditor) -> Result<String, 
     }
 }
 
-/// Heurística de "input completo": balanced `{`/`(`/`[` + sin string
-/// literal abierto. Para multi-line continuation cuando el usuario
-/// escribe un bloque (`fn`, `if`, `match`) o expresión compleja.
+/// "Input complete" heuristic: balanced `{`/`(`/`[` + no open
+/// string literal. Used for multi-line continuation when the
+/// user writes a block (`fn`, `if`, `match`) or complex
+/// expression.
 ///
-/// Maneja:
-/// - String literals `"..."` con escapes `\"`.
-/// - Comments de línea `//` (ignora resto hasta `\n`).
-/// - Comments multi-línea `/* ... */`.
+/// Handles:
+/// - String literals `"..."` with `\"` escapes.
+/// - Line comments `//` (ignore the rest up to `\n`).
+/// - Multi-line comments `/* ... */`.
 ///
-/// No es un parser real — heurística suficiente para multi-line
-/// detection. El parser real puede aún fallar con un error sintáctico
-/// distinto; el REPL lo muestra y vuelve al prompt.
+/// It's not a real parser — heuristic enough for multi-line
+/// detection. The real parser may still fail with a different
+/// syntax error; the REPL shows it and returns to the prompt.
 fn input_is_complete(buf: &str) -> bool {
     let mut braces = 0i32;
     let mut parens = 0i32;
@@ -3998,7 +4111,7 @@ fn input_is_complete(buf: &str) -> bool {
             '[' => brackets += 1,
             ']' => brackets -= 1,
             '/' if chars.peek() == Some(&'/') => {
-                // Line comment: skip hasta \n.
+                // Line comment: skip up to \n.
                 for c2 in chars.by_ref() {
                     if c2 == '\n' {
                         break;
@@ -4006,8 +4119,8 @@ fn input_is_complete(buf: &str) -> bool {
                 }
             }
             '/' if chars.peek() == Some(&'*') => {
-                // Block comment: skip hasta `*/`.
-                chars.next(); // consume el `*`
+                // Block comment: skip up to `*/`.
+                chars.next(); // consume the `*`
                 let mut prev = ' ';
                 for c2 in chars.by_ref() {
                     if prev == '*' && c2 == '/' {
@@ -4022,15 +4135,15 @@ fn input_is_complete(buf: &str) -> bool {
     !in_str && braces <= 0 && parens <= 0 && brackets <= 0
 }
 
-/// Resultado de un comando especial: `Continue` vuelve al prompt,
-/// `Quit` sale del REPL.
+/// Result of a special command: `Continue` returns to the
+/// prompt, `Quit` exits the REPL.
 enum ReplCommandResult {
     Continue,
     Quit,
 }
 
-/// Procesa un comando especial `:nombre [args]`. La línea ya viene
-/// sin el `:` inicial (consumida por el caller).
+/// Handles a special command `:name [args]`. The line comes in
+/// without the leading `:` (consumed by the caller).
 async fn handle_special_command(
     cmd: &str,
     env: &mut fitz::env::EnvRef,
@@ -4082,8 +4195,8 @@ fn print_repl_help() {
     println!("  :load <archivo> — evaluar un .fitz en el scope actual");
 }
 
-/// Imprime las variables del scope raíz, excluyendo builtins
-/// (`print`/`len`/etc.) que no son interesantes para el usuario.
+/// Prints the root scope's variables, excluding builtins
+/// (`print`/`len`/etc.) that aren't interesting for the user.
 fn print_repl_env(env: &fitz::env::EnvRef) {
     let names = env.lock().local_names();
     let builtins: std::collections::HashSet<&str> =
@@ -4106,19 +4219,20 @@ fn print_repl_env(env: &fitz::env::EnvRef) {
     }
 }
 
-/// Implementa `:type <expr>`. Parsea la expresión + chequea contra
-/// los nombres existentes en el env del REPL, después imprime el tipo
-/// sintetizado.
+/// Implements `:type <expr>`. Parses the expression + checks
+/// against existing names in the REPL env, then prints the
+/// synthesized type.
 ///
-/// Pragmático: el checker corre sobre el programa entero (un solo
-/// `Stmt::Expr`), no sobre la expresión aislada — eso permite que
-/// `:type x + 1` con `x: Int` previo refleje que el resultado es
-/// `Int`. Implementación: sintetizamos un `let __repl_type = <expr>`
-/// y le preguntamos al checker el tipo del binding. El env del REPL
-/// solo importa para que el ident `x` no falte; el checker reconstruye
-/// los bindings desde cero al ver el programa, por eso un `let x =
-/// "hola"` previo no influye en este path. Como mejora futura: feeding
-/// del env del REPL al checker.
+/// Pragmatic: the checker runs on the whole program (a single
+/// `Stmt::Expr`), not on the isolated expression — that lets
+/// `:type x + 1` with a previous `x: Int` reflect that the
+/// result is `Int`. Implementation: we synthesize a `let
+/// __repl_type = <expr>` and ask the checker for the binding's
+/// type. The REPL env only matters so the ident `x` isn't
+/// missing; the checker rebuilds the bindings from scratch on
+/// seeing the program, which is why a previous `let x = "hola"`
+/// does not influence this path. Future improvement: feeding the
+/// REPL env into the checker.
 fn print_repl_type(expr_src: &str, _env: &fitz::env::EnvRef) {
     let synthesized = format!("let __repl_type = {expr_src}");
     let tokens = match fitz::lexer::tokenize(&synthesized) {
@@ -4136,8 +4250,9 @@ fn print_repl_type(expr_src: &str, _env: &fitz::env::EnvRef) {
         }
     };
     let (type_env, types, _defs, _errs) = fitz::types::check_program(&program);
-    // El último stmt es `Stmt::Assign` con value = la expr. Su tipo
-    // sintetizado está en TypeInfo bajo el span del value.
+    // The last stmt is `Stmt::Assign` with value = the expr.
+    // Its synthesized type is in TypeInfo under the value's
+    // span.
     let last = program.last();
     if let Some(fitz::ast::Stmt::Assign { value, .. }) = last {
         let span = value.span();
@@ -4151,9 +4266,9 @@ fn print_repl_type(expr_src: &str, _env: &fitz::env::EnvRef) {
     }
 }
 
-/// Implementa `:load <archivo>`. Lee el archivo, parsea + chequea +
-/// evalúa contra el env del REPL. Los `let`/`fn` definidos en el
-/// archivo quedan disponibles para las siguientes líneas del prompt.
+/// Implements `:load <file>`. Reads the file, parses + checks +
+/// evaluates against the REPL env. `let`/`fn` defined in the
+/// file stay available for subsequent prompt lines.
 async fn load_into_repl_env(
     path_str: &str,
     env: &mut fitz::env::EnvRef,
@@ -4210,10 +4325,10 @@ async fn load_into_repl_env(
     }
 }
 
-/// Evalúa la entrada del usuario como código Fitz. El último stmt del
-/// programa, si es `Stmt::Expr`, se evalúa devolviendo un `Value` que
-/// se imprime (paralelo a Python `_`). Para los demás stmts (let,
-/// fn, etc.) el output es silencioso.
+/// Evaluates the user's input as Fitz code. The program's last
+/// stmt, if it's `Stmt::Expr`, is evaluated and returns a
+/// `Value` that gets printed (parallel to Python's `_`). For the
+/// rest of the stmts (let, fn, etc.) the output is silent.
 async fn eval_repl_input(source: &str, env: &mut fitz::env::EnvRef, base_dir: &std::path::Path) {
     let tokens = match fitz::lexer::tokenize(source) {
         Ok(t) => t,
@@ -4229,23 +4344,24 @@ async fn eval_repl_input(source: &str, env: &mut fitz::env::EnvRef, base_dir: &s
             return;
         }
     };
-    // Checker en modo warning (paralelo a `fitz run --no-typecheck`):
-    // el REPL es para experimentar; preferimos que el user vea el
-    // resultado runtime incluso si los tipos son ambiguos. Errores
-    // duros (sintaxis) ya cortaron arriba.
+    // Checker in warning mode (parallel to `fitz run
+    // --no-typecheck`): the REPL is for experimenting; we prefer
+    // the user to see the runtime result even when types are
+    // ambiguous. Hard errors (syntax) already cut off above.
     //
-    // Filtramos "variable desconocida" específicamente porque el
-    // checker arma su scope desde cero por línea — ignora las vars
-    // que el user definió en líneas anteriores. El eval contra `env`
-    // sí las ve. Sin este filtro, cada `let x = 1; x + 1` emitía un
-    // warning spurio del checker para `x` en la segunda línea. Si la
-    // var realmente no existe, `eval_program_with_env` aborta más
-    // abajo con su propio error.
+    // We filter "variable desconocida" specifically because the
+    // checker builds its scope from scratch per line — it
+    // ignores vars the user defined on previous lines. The eval
+    // against `env` does see them. Without this filter, every
+    // `let x = 1; x + 1` emitted a spurious checker warning for
+    // `x` on the second line. If the var really doesn't exist,
+    // `eval_program_with_env` aborts below with its own error.
     //
-    // Filtramos por substring del mensaje porque todos los errores
-    // del checker llevan `ErrorKind::TypeError` (el `UndefinedVariable`
-    // es kind del evaluator). El string "variable desconocida" está
-    // hardcoded en `types::infer_expr` y es estable.
+    // We filter by substring of the message because every
+    // checker error carries `ErrorKind::TypeError` (the
+    // `UndefinedVariable` kind belongs to the evaluator). The
+    // "variable desconocida" string is hardcoded in
+    // `types::infer_expr` and is stable.
     let (_env, _types, _defs, type_errors) = fitz::types::check_program(&program);
     for e in &type_errors {
         if e.message.contains("variable desconocida") {
@@ -4254,11 +4370,11 @@ async fn eval_repl_input(source: &str, env: &mut fitz::env::EnvRef, base_dir: &s
         println!("⚠ {e}");
     }
 
-    // Detectamos si el último stmt es `Stmt::Expr` para decidir si
-    // imprimir el resultado (Python-style). El eval devuelve el
-    // `Value` del último stmt; sólo lo mostramos cuando vino de una
-    // expresión y no es Null (print/let/fn devuelven Null y no
-    // queremos ruido visual).
+    // Detect whether the last stmt is `Stmt::Expr` to decide
+    // whether to print the result (Python-style). Eval returns
+    // the `Value` of the last stmt; we only show it when it came
+    // from an expression and isn't Null (print/let/fn return
+    // Null and we don't want visual noise).
     let last_is_expr = matches!(program.last(), Some(fitz::ast::Stmt::Expr(_, _)));
     match evaluator::eval_program_with_env(
         program,
@@ -4279,15 +4395,16 @@ async fn eval_repl_input(source: &str, env: &mut fitz::env::EnvRef, base_dir: &s
     }
 }
 
-// ---- Fase 9.z.5 — `fitz lint` (linter de patrones más allá de tipos) ----
+// ---- Phase 9.z.5 — `fitz lint` (linter for patterns beyond types) ----
 
-/// Entry point del sub-comando `fitz lint`. Descubre archivos
-/// (single-file o manifest mode), corre el linter sobre cada uno,
-/// imprime findings estilo cargo-clippy, decide exit code según
-/// `--deny`.
+/// Entry point of the `fitz lint` sub-command. Discovers files
+/// (single-file or manifest mode), runs the linter on each one,
+/// prints findings in cargo-clippy style, and decides the exit
+/// code based on `--deny`.
 ///
-/// Default: exit 0 incluso con findings (warnings no rompen build).
-/// Si algún finding matchea un name listado en `--deny`, exit 1.
+/// Default: exit 0 even with findings (warnings don't break the
+/// build). If any finding matches a name listed in `--deny`,
+/// exit 1.
 fn lint_cmd(files: Vec<PathBuf>, deny: Vec<String>) {
     let targets = if files.is_empty() {
         discover_project_fitz_files()
@@ -4343,7 +4460,7 @@ fn lint_cmd(files: Vec<PathBuf>, deny: Vec<String>) {
         }
     }
 
-    // Summary final.
+    // Final summary.
     if total_findings == 0 && read_errors == 0 {
         if use_color {
             println!(
@@ -4380,14 +4497,14 @@ fn lint_cmd(files: Vec<PathBuf>, deny: Vec<String>) {
     }
 }
 
-/// Imprime un finding estilo cargo-clippy:
+/// Prints a finding cargo-clippy-style:
 /// ```text
 /// warning: variable `x` declarada pero no usada
 ///   --> src/main.fitz:3:5
 ///   = nota: si es intencional, prefijá con `_` ...
 /// ```
-/// Con `--deny <name>`, se usa "error:" rojo en lugar de "warning:"
-/// amarillo.
+/// With `--deny <name>`, "error:" red is used instead of
+/// "warning:" yellow.
 fn print_lint_finding(
     path: &std::path::Path,
     finding: &lint::LintFinding,
@@ -4427,16 +4544,17 @@ fn print_lint_finding(
     }
 }
 
-/// Banner UX al arrancar / re-arrancar el child. Limpia la pantalla
-/// (ANSI `\x1b[2J\x1b[H`) si stdout es TTY, sino solo separa con
-/// líneas. Después imprime el run number + el target.
+/// UX banner when starting / restarting the child. Clears the
+/// screen (ANSI `\x1b[2J\x1b[H`) if stdout is a TTY, otherwise
+/// just separates with lines. Then prints the run number + the
+/// target.
 fn clear_screen_and_banner(target: &DevTarget, run_count: u32) {
     use std::io::IsTerminal;
     let use_ansi = std::io::stdout().is_terminal();
     if use_ansi {
-        // `\x1b[2J` borra la pantalla, `\x1b[H` mueve el cursor a
-        // (1,1). Suficiente en terminals modernos (cmd, PowerShell,
-        // Windows Terminal, bash, zsh, fish).
+        // `\x1b[2J` clears the screen, `\x1b[H` moves the cursor
+        // to (1,1). Sufficient on modern terminals (cmd,
+        // PowerShell, Windows Terminal, bash, zsh, fish).
         print!("\x1b[2J\x1b[H");
     } else {
         println!("\n----------------------------------------");
@@ -4446,28 +4564,29 @@ fn clear_screen_and_banner(target: &DevTarget, run_count: u32) {
 }
 
 // =================================================================
-// Fase 12.4 — Handler de `fitz docker init`
+// Phase 12.4 — `fitz docker init` handler
 // =================================================================
 
-/// `fitz docker init [--force]` — genera Dockerfile + .dockerignore +
-/// docker-compose.yml en el directorio del manifest. Detecta el shape
-/// del programa (puerto HTTP, uso de DB) leyendo el AST del entry point
-/// declarado en `[bin].main`.
+/// `fitz docker init [--force]` — generates Dockerfile +
+/// .dockerignore + docker-compose.yml in the manifest directory.
+/// Detects the program shape (HTTP port, DB usage) by reading the
+/// AST of the entry point declared in `[bin].main`.
 ///
 /// Exit codes:
-///   - 0: éxito (al menos un archivo escrito o todo skipeado por
-///     existir + sin `--force`).
-///   - 1: error de IO / manifest no encontrado / parse del .fitz roto.
+///   - 0: success (at least one file written or everything
+///     skipped because it exists + no `--force`).
+///   - 1: I/O error / missing manifest / broken .fitz parse.
 fn docker_init_cmd(force: bool) {
-    // Reusamos `resolve_entry(None)` que walkea hacia arriba buscando
-    // `fitz.toml`. Si no hay manifest, aborta con mensaje claro.
+    // We reuse `resolve_entry(None)` which walks upwards looking
+    // for `fitz.toml`. With no manifest, it aborts with a clear
+    // message.
     let resolved = resolve_entry(None);
     let ctx = match resolved.manifest_ctx {
         Some(c) => c,
         None => {
-            // `resolve_entry` solo devuelve `None` cuando pasamos un
-            // file explícito, pero `docker init` no acepta arg de
-            // archivo — este branch es defensa.
+            // `resolve_entry` only returns `None` when we pass
+            // an explicit file, but `docker init` does not
+            // accept a file arg — this branch is defensive.
             eprintln!(
                 "✗ `fitz docker init` requiere un proyecto Fitz con `fitz.toml`. \
                  Creá uno con `fitz new <nombre>` o `fitz init` primero."
@@ -4550,10 +4669,11 @@ fn docker_init_cmd(force: bool) {
     }
 }
 
-/// `fitz docker build [--tag X]` — thin wrapper sobre `docker build` con
-/// tag por defecto del `package.name` del manifest. Aborta si no hay
-/// `fitz.toml` arriba del cwd, si no hay `Dockerfile` en el manifest_dir,
-/// o si el `docker build` falla (propaga el exit code).
+/// `fitz docker build [--tag X]` — thin wrapper over `docker
+/// build` with the manifest's `package.name` as the default tag.
+/// Aborts if there's no `fitz.toml` above cwd, if there's no
+/// `Dockerfile` in `manifest_dir`, or if `docker build` fails
+/// (propagates the exit code).
 fn docker_build_cmd(tag: Option<String>) {
     let resolved = resolve_entry(None);
     let ctx = match resolved.manifest_ctx {
@@ -4598,8 +4718,8 @@ fn docker_build_cmd(tag: Option<String>) {
             println!("✓ build OK — `{}`", tag);
         }
         Ok(s) => {
-            // `docker build` ya escribió su error a stderr; salimos con su
-            // exit code para que CI lo capture igual.
+            // `docker build` already wrote its error to stderr;
+            // we exit with its exit code so CI captures it too.
             std::process::exit(s.code().unwrap_or(1));
         }
         Err(e) => {
@@ -4613,12 +4733,12 @@ fn docker_build_cmd(tag: Option<String>) {
 }
 
 // =================================================================
-// Fase 12.6 — Handlers de `fitz deploy <subcomando>`
+// Phase 12.6 — `fitz deploy <subcommand>` handlers
 // =================================================================
 
-/// `fitz deploy docker [--tag X] [--no-push]` — build + push de la
-/// imagen Docker. Thin wrapper sobre `docker build/push` que toma el
-/// tag desde el `package.name` por default.
+/// `fitz deploy docker [--tag X] [--no-push]` — Docker image
+/// build + push. Thin wrapper over `docker build/push` that takes
+/// the tag from `package.name` by default.
 fn deploy_docker_cmd(tag: Option<String>, no_push: bool) {
     let resolved = resolve_entry(None);
     let ctx = match resolved.manifest_ctx {
@@ -4668,8 +4788,8 @@ fn deploy_docker_cmd(tag: Option<String>, no_push: bool) {
     }
 }
 
-/// `fitz deploy compose [--no-detach] [--no-build]` — `docker compose up`
-/// con flags configurables.
+/// `fitz deploy compose [--no-detach] [--no-build]` — `docker
+/// compose up` with configurable flags.
 fn deploy_compose_cmd(no_detach: bool, no_build: bool) {
     let resolved = resolve_entry(None);
     let ctx = match resolved.manifest_ctx {
@@ -4720,10 +4840,10 @@ fn deploy_compose_cmd(no_detach: bool, no_build: bool) {
 }
 
 // =================================================================
-// Fase 10.6 — Handlers de `fitz db <subcomando>`
+// Phase 10.6 — `fitz db <subcommand>` handlers
 // =================================================================
 
-/// Resuelve la URL de conexión PG: explícita > `DATABASE_URL` env.
+/// Resolves the PG connection URL: explicit > `DATABASE_URL` env.
 fn resolve_db_url(explicit: Option<String>) -> Result<String, String> {
     match explicit {
         Some(u) => Ok(u),
@@ -4734,12 +4854,12 @@ fn resolve_db_url(explicit: Option<String>) -> Result<String, String> {
     }
 }
 
-/// Resuelve el dir de migrations: explícito > `./migrations` (cwd).
+/// Resolves the migrations dir: explicit > `./migrations` (cwd).
 fn resolve_migrations_dir(explicit: Option<PathBuf>) -> PathBuf {
     explicit.unwrap_or_else(|| PathBuf::from("migrations"))
 }
 
-/// Resuelve el entry .fitz: explícito > `[bin].main` del manifest.
+/// Resolves the .fitz entry: explicit > manifest's `[bin].main`.
 fn resolve_db_entry(file: Option<PathBuf>) -> Result<PathBuf, String> {
     if let Some(f) = file {
         return Ok(f);
@@ -4761,8 +4881,8 @@ fn resolve_db_entry(file: Option<PathBuf>) -> Result<PathBuf, String> {
     Ok(manifest_dir.join(bin_main))
 }
 
-/// Lee + parsea + chequea un programa Fitz, devuelve (Program, TypeEnv).
-/// Usado por `db diff` para construir el schema esperado.
+/// Reads + parses + checks a Fitz program, returns (Program,
+/// TypeEnv). Used by `db diff` to build the expected schema.
 fn load_program_for_db(entry: &std::path::Path) -> Result<(ast::Program, types::TypeEnv), String> {
     let src = std::fs::read_to_string(entry)
         .map_err(|e| format!("leyendo `{}`: {e}", entry.display()))?;
@@ -4813,10 +4933,11 @@ fn db_diff_cmd(
             std::process::exit(1);
         }
     };
-    // Una sola runtime tokio para connect + introspect: la connection
-    // arma `tokio::spawn(health_check_task)`; si dropeamos el runtime
-    // entre connect y query, esa task muere y la próxima query rompe
-    // con "cstr no es UTF-8" o similar.
+    // A single tokio runtime for connect + introspect: the
+    // connection sets up `tokio::spawn(health_check_task)`; if
+    // we drop the runtime between connect and query, that task
+    // dies and the next query breaks with "cstr is not UTF-8"
+    // or similar.
     let rt = evaluator::build_runtime();
     let result = rt.block_on(async {
         let conn = db::connect_url(&url)
@@ -4839,8 +4960,9 @@ fn db_diff_cmd(
         eprintln!("✓ schema sincronizado — no hay cambios pendientes");
         return;
     }
-    // v0.10.31 (Tier A.1) — classification + guard. Aborta si hay
-    // destructive changes y no se pasó `--allow-destructive`.
+    // v0.10.31 (Tier A.1) — classification + guard. Aborts if
+    // there are destructive changes and `--allow-destructive`
+    // was not passed.
     if check_destructive {
         let (safe, risky, destructive) = migrations::count_by_severity(&changes);
         eprintln!(
@@ -4863,7 +4985,7 @@ fn db_diff_cmd(
             std::process::exit(1);
         }
     }
-    // SQL: con --check-destructive enriquecemos con comentarios per change.
+    // SQL: with --check-destructive we enrich with per-change comments.
     let sql = if check_destructive {
         migrations::changes_to_sql_with_severity(&changes)
     } else {
@@ -4884,11 +5006,11 @@ fn db_diff_cmd(
     }
 }
 
-/// v0.10.31 (Tier A.1) — label corto del CLI espejado del helper
-/// `change_short_label` de migrations.rs. Vive acá porque la fn de
-/// migrations es `pub(crate)` y no podemos acceder desde main.rs sin
-/// re-exposicionarla. Mantener sincronizado con `change_short_label`
-/// de migrations.rs si cambia.
+/// v0.10.31 (Tier A.1) — short CLI label mirrored from
+/// `change_short_label` in migrations.rs. Lives here because
+/// migrations' fn is `pub(crate)` and we can't access it from
+/// main.rs without re-exposing it. Keep in sync with
+/// `change_short_label` in migrations.rs if it changes.
 fn change_short_label_for_cli(c: &migrations::Change) -> String {
     use migrations::Change;
     match c {
@@ -4896,15 +5018,16 @@ fn change_short_label_for_cli(c: &migrations::Change) -> String {
         Change::DropColumn { table, column } => {
             format!("DropColumn {} from {}", column, table.name)
         }
-        // El guard solo lista Destructive; el resto no debería caer acá.
+        // The guard only lists Destructive; nothing else should
+        // fall here.
         other => format!("{:?}", other),
     }
 }
 
-/// v0.10.28 (Tier S, sub-paso 1) — `fitz db inspect`. Conecta a la
-/// DB, corre `introspect_schema` y emite el report en texto plano
-/// (default) o JSON (con `--json`). NO toca el programa Fitz —
-/// pura inspección del estado real de la DB.
+/// v0.10.28 (Tier S, sub-step 1) — `fitz db inspect`. Connects
+/// to the DB, runs `introspect_schema` and emits the report in
+/// plain text (default) or JSON (with `--json`). Does NOT touch
+/// the Fitz program — pure introspection of the DB's real state.
 fn db_inspect_cmd(
     url: Option<String>,
     schema: Option<String>,
@@ -4996,9 +5119,9 @@ fn db_migrate_cmd(url: Option<String>, dir: Option<PathBuf>, dry_run: bool, sql:
         return;
     }
     let rt = evaluator::build_runtime();
-    // v0.10.20 — Offline SQL mode: emite el SQL pendiente al
-    // stdout en lugar de ejecutarlo. Sigue conectándose para
-    // leer _fitz_migrations (qué está applied) y skipear esas.
+    // v0.10.20 — Offline SQL mode: emits the pending SQL to
+    // stdout instead of running it. Still connects to read
+    // _fitz_migrations (what's applied) and skip those.
     if sql {
         let result = rt.block_on(async {
             let conn = db::connect_url(&url)
@@ -5079,10 +5202,11 @@ fn db_migrate_cmd(url: Option<String>, dir: Option<PathBuf>, dry_run: bool, sql:
         eprintln!("[dry-run] {pending} migration(s) pendiente(s) — no se aplicaron");
         return;
     }
-    // v0.10.19 — dispatch per-migration por kind: .sql via
-    // `apply_migration` (SQL crudo adentro de tx), .fitz via
-    // `apply_fitz_migration_blocking` (parsea + invoca async fn
-    // migrate(db) + INSERT en _fitz_migrations al final).
+    // v0.10.19 — per-migration dispatch by kind: .sql via
+    // `apply_migration` (raw SQL inside a tx), .fitz via
+    // `apply_fitz_migration_blocking` (parses + invokes async
+    // fn migrate(db) + INSERT into _fitz_migrations at the
+    // end).
     let result = rt.block_on(async {
         let conn = db::connect_url(&url)
             .await
@@ -5186,7 +5310,7 @@ fn db_new_cmd(name: String, dir: Option<PathBuf>) {
         eprintln!("✗ creando `{}`: {e}", dir.display());
         std::process::exit(1);
     }
-    // Timestamp `YYYYMMDDHHMMSS` UTC + name sanitizado.
+    // Timestamp `YYYYMMDDHHMMSS` UTC + sanitized name.
     let now = chrono::Utc::now();
     let timestamp = now.format("%Y%m%d%H%M%S").to_string();
     let sanitized: String = name
@@ -5241,7 +5365,7 @@ fn db_rollback_cmd(url: Option<String>, dir: Option<PathBuf>, count: usize) {
             std::process::exit(1);
         }
     };
-    // v0.10.19 — dispatch per-migration por kind (paralelo a migrate).
+    // v0.10.19 — per-migration dispatch by kind (parallel to migrate).
     let rt = evaluator::build_runtime();
     let result = rt.block_on(async {
         let conn = db::connect_url(&url)
@@ -5268,12 +5392,12 @@ fn db_rollback_cmd(url: Option<String>, dir: Option<PathBuf>, count: usize) {
     }
 }
 
-/// v0.10.19 — Variante del `rollback_n` con dispatch por kind:
-/// .sql via `migrations::revert_migration` (SQL DOWN adentro de
-/// tx), .fitz via `revert_fitz_migration_async` (parsea + invoca
-/// async fn rollback(db) + DELETE de _fitz_migrations). Mismo
-/// pre-flight que `rollback_n` (todas las target tienen archivo +
-/// rollback path resoluble) antes de tocar la DB.
+/// v0.10.19 — Variant of `rollback_n` with kind-dispatch: .sql
+/// via `migrations::revert_migration` (DOWN SQL inside a tx),
+/// .fitz via `revert_fitz_migration_async` (parses + invokes
+/// async fn rollback(db) + DELETE from _fitz_migrations). Same
+/// pre-flight as `rollback_n` (every target has a file + a
+/// resolvable rollback path) before touching the DB.
 async fn rollback_n_dispatch(
     conn: &std::sync::Arc<db::DbConnHandle>,
     migrations_list: &[migrations::MigrationFile],
@@ -5289,8 +5413,8 @@ async fn rollback_n_dispatch(
         .await
         .map_err(|e| format!("applied_versions: {e}"))?;
     let applied_desc: Vec<&String> = {
-        // Reusar applied_versions_desc requiere exponerla; en su
-        // lugar leemos applied (ASC) y reverteamos.
+        // Reusing applied_versions_desc would require exposing
+        // it; instead we read applied (ASC) and reverse it.
         let mut v: Vec<&String> = applied.iter().collect();
         v.reverse();
         v
@@ -5303,7 +5427,7 @@ async fn rollback_n_dispatch(
         .iter()
         .map(|m| (m.version.as_str(), m))
         .collect();
-    // Pre-flight: cada target debe tener file + path resoluble.
+    // Pre-flight: every target must have file + a resolvable path.
     for v in &target_versions {
         let m = by_version.get(v.as_str()).ok_or_else(|| {
             format!(
@@ -5355,33 +5479,37 @@ async fn rollback_n_dispatch(
     Ok(reverted)
 }
 
-/// v0.10.19 (10.6.d) — Runner del `.fitz` script de una migration.
-/// Convención del archivo:
+/// v0.10.19 (10.6.d) — Runner for a migration's `.fitz` script.
+/// File convention:
 ///
 /// ```ignore
 /// async fn migrate(db: DbConn) -> Result<Null> {
-///     // back-fill, parseo de JSON viejo, etc.
+///     // back-fill, parsing old JSON, etc.
 ///     return Ok(null)
 /// }
 ///
-/// // Opcional, requerido solo si querés que `fitz db rollback` ande:
+/// // Optional, only required if you want `fitz db rollback` to
+/// // work:
 /// async fn rollback(db: DbConn) -> Result<Null> {
 ///     return Ok(null)
 /// }
 /// ```
 ///
-/// El runner:
-/// 1. Parsea el archivo y verifica que declara `migrate`.
-/// 2. Inyecta `db` como var pre-bindeada al env.
-/// 3. Appendea un stmt sintético al programa: `let __fitz_mig_result = migrate(db).await`.
-/// 4. Eval con `evaluator::eval_program_with_env`.
-/// 5. Si el último valor es `Result::Ok(_)` → trackea la migration aplicada.
-/// 6. Si es `Result::Err(msg)` → error sin trackear.
+/// The runner:
+/// 1. Parses the file and verifies it declares `migrate`.
+/// 2. Injects `db` as a pre-bound var in the env.
+/// 3. Appends a synthetic stmt to the program: `let
+///    __fitz_mig_result = migrate(db).await`.
+/// 4. Evaluates with `evaluator::eval_program_with_env`.
+/// 5. If the last value is `Result::Ok(_)` → tracks the
+///    migration as applied.
+/// 6. If it's `Result::Err(msg)` → error without tracking.
 ///
-/// **Atomicidad**: la responsabilidad de envolver en tx queda al
-/// usuario (típicamente con `return db.transaction(fn(tx) -> Result<Null> { ... }).await`).
-/// El runner NO envuelve automático porque la `Value::DbConn` se
-/// pasa cruda; el user decide granularidad.
+/// **Atomicity**: wrapping in a tx is the user's responsibility
+/// (typically with `return db.transaction(fn(tx) -> Result<Null>
+/// { ... }).await`). The runner does NOT wrap automatically
+/// because the `Value::DbConn` is passed raw; the user decides
+/// the granularity.
 async fn apply_fitz_migration_async(
     conn: &std::sync::Arc<db::DbConnHandle>,
     version: &str,
@@ -5390,19 +5518,20 @@ async fn apply_fitz_migration_async(
     source: &str,
 ) -> Result<(), String> {
     run_fitz_migration_callback(conn, path, source, "migrate").await?;
-    // Si la callback retornó Ok, marcamos como aplicada. Esta
-    // INSERT NO está en la tx del user — si el user comiteó
-    // sus cambios dentro del `.fitz`, ya persistieron; este
-    // tracking es separado.
+    // If the callback returned Ok, mark it as applied. This
+    // INSERT is NOT inside the user's tx — if the user
+    // committed their changes inside the `.fitz`, they
+    // already persisted; this tracking is separate.
     migrations::track_fitz_migration_applied(conn, version)
         .await
         .map_err(|e| format!("track aplicada: {e}"))?;
-    let _ = filename; // disponible para mensajes futuros si entra demanda
+    let _ = filename; // available for future messages if demand appears
     Ok(())
 }
 
-/// v0.10.19 — Análogo a `apply_fitz_migration_async` para
-/// rollback: invoca `async fn rollback(db)` + borra el registro.
+/// v0.10.19 — Analogue of `apply_fitz_migration_async` for
+/// rollback: invokes `async fn rollback(db)` + deletes the
+/// record.
 async fn revert_fitz_migration_async(
     conn: &std::sync::Arc<db::DbConnHandle>,
     version: &str,
@@ -5418,13 +5547,14 @@ async fn revert_fitz_migration_async(
     Ok(())
 }
 
-/// Helper compartido por `apply_fitz_migration_async` y
-/// `revert_fitz_migration_async`. Parsea el archivo, verifica que
-/// `fn_name` esté declarada como `async fn(db: DbConn) -> ...`,
-/// crea env con `db` pre-bindeado a `Value::DbConn(conn)`,
-/// appendea `let __fitz_mig_result = <fn_name>(db).await` y eval
-/// con `evaluator::eval_program_with_env`. Inspecciona el último
-/// valor: `Result::Ok(_)` → Ok(()); `Result::Err(msg)` → Err(msg).
+/// Shared helper for `apply_fitz_migration_async` and
+/// `revert_fitz_migration_async`. Parses the file, checks that
+/// `fn_name` is declared as `async fn(db: DbConn) -> ...`,
+/// creates an env with `db` pre-bound to `Value::DbConn(conn)`,
+/// appends `let __fitz_mig_result = <fn_name>(db).await` and
+/// evaluates with `evaluator::eval_program_with_env`. Inspects
+/// the last value: `Result::Ok(_)` → Ok(()); `Result::Err(msg)`
+/// → Err(msg).
 async fn run_fitz_migration_callback(
     conn: &std::sync::Arc<db::DbConnHandle>,
     path: &std::path::Path,
@@ -5435,7 +5565,7 @@ async fn run_fitz_migration_callback(
     // 1. Lex + parse.
     let tokens = lexer::tokenize(source).map_err(|e| format!("lexer: {e}"))?;
     let mut program = parser::parse(tokens).map_err(|e| format!("parser: {e}"))?;
-    // 2. Verificar que `fn_name` está declarada como async fn.
+    // 2. Check that `fn_name` is declared as an async fn.
     let has_callback = program.iter().any(|stmt| matches!(stmt, ast::Stmt::FnDef { name, is_async, .. } if name == fn_name && *is_async));
     if !has_callback {
         return Err(format!(
@@ -5443,9 +5573,10 @@ async fn run_fitz_migration_callback(
              El runner de `.fitz` migrations espera esa fn como entry point."
         ));
     }
-    // 3. Type-check (warning-only, paralelo a `fitz run` permissive).
+    // 3. Type-check (warning-only, parallel to `fitz run`
+    //    permissive).
     let (_env, _ti, _di, _errs) = types::check_program(&program);
-    // 4. Appendear stmt sintético: `let __fitz_mig_result = <fn>(db).await`.
+    // 4. Append synthetic stmt: `let __fitz_mig_result = <fn>(db).await`.
     let call_expr = ast::Expr::Call {
         callee: Box::new(ast::Expr::Ident(fn_name.to_string(), ast::Span::ZERO)),
         args: vec![ast::Expr::Ident("db".to_string(), ast::Span::ZERO)],
@@ -5459,11 +5590,11 @@ async fn run_fitz_migration_callback(
         span: ast::Span::ZERO,
     };
     program.push(assign_stmt);
-    // 5. Env nuevo con builtins + db pre-bindeado.
-    // `new_repl_env()` arma un EnvRef con builtins registrados —
-    // mismo scope que un script `fitz run` típico.
+    // 5. Fresh env with builtins + db pre-bound. `new_repl_env()`
+    //    builds an EnvRef with builtins registered — same scope
+    //    as a typical `fitz run` script.
     let env = evaluator::new_repl_env();
-    // Inyectar db como Value::DbConn(Arc<DbConnHandle>).
+    // Inject db as Value::DbConn(Arc<DbConnHandle>).
     env.lock()
         .define("db", Value::DbConn(std::sync::Arc::clone(conn)));
     // 6. Eval.
@@ -5479,10 +5610,11 @@ async fn run_fitz_migration_callback(
     )
     .await
     .map_err(|e| format!("eval: {e}"))?;
-    // 7. Inspeccionar `__fitz_mig_result`.
-    // El último stmt es el `let __fitz_mig_result = ...` cuyo
-    // valor retornado por eval_program_with_env es Null (asignación).
-    // Leemos el binding del env directamente para obtener el Value.
+    // 7. Inspect `__fitz_mig_result`.
+    // The last stmt is the `let __fitz_mig_result = ...`
+    // whose return value from eval_program_with_env is Null
+    // (assignment). We read the binding directly from the env
+    // to get the Value.
     let _ = last;
     let result = env
         .lock()
@@ -5499,10 +5631,10 @@ async fn run_fitz_migration_callback(
     }
 }
 
-/// Heurística simple (basada en parse) para detectar si el `.fitz`
-/// migration declara `async fn rollback(db: DbConn)`. Usado por
-/// `rollback_n_dispatch` en el pre-flight check ANTES de tocar la
-/// DB, para fallar fast con mensaje claro.
+/// Simple heuristic (based on parse) to detect whether the
+/// `.fitz` migration declares `async fn rollback(db: DbConn)`.
+/// Used by `rollback_n_dispatch` in the pre-flight check BEFORE
+/// touching the DB, to fail fast with a clear message.
 fn fitz_migration_has_rollback(source: &str) -> bool {
     let Ok(tokens) = lexer::tokenize(source) else {
         return false;
@@ -5562,8 +5694,8 @@ fn db_check_cmd(file: Option<PathBuf>, url: Option<String>) {
         eprintln!("✓ schema sincronizado — schema declarado matchea la DB");
         std::process::exit(0);
     }
-    // Drift detectado: SQL pendiente al stderr (visible en CI logs),
-    // count al stdout (parseable), exit 1.
+    // Drift detected: pending SQL to stderr (visible in CI
+    // logs), count to stdout (parseable), exit 1.
     let sql = migrations::changes_to_sql(&changes);
     eprintln!(
         "✗ drift detectado — {} change(s) pendiente(s):",
@@ -5579,8 +5711,8 @@ fn db_check_cmd(file: Option<PathBuf>, url: Option<String>) {
 }
 
 fn db_stamp_cmd(version: Option<String>, all: bool, url: Option<String>, dir: Option<PathBuf>) {
-    // clap garantiza version XOR all (conflicts_with), pero validamos
-    // que al menos UNO esté presente.
+    // clap guarantees version XOR all (conflicts_with), but
+    // we validate that at least ONE is present.
     if version.is_none() && !all {
         eprintln!(
             "✗ `fitz db stamp` requiere `<version>` o `--all`. \
@@ -5630,10 +5762,10 @@ fn db_stamp_cmd(version: Option<String>, all: bool, url: Option<String>, dir: Op
         }
         return;
     }
-    let version = version.unwrap(); // garantizado por el check arriba
-                                    // Warning si la version no está en el dir (puede ser intencional
-                                    // — adopción de versions legacy que no existen como files — pero
-                                    // típicamente es un typo).
+    let version = version.unwrap(); // guaranteed by the check above
+                                    // Warn if the version is not in the dir (can be
+                                    // intentional — adopting legacy versions that
+                                    // don't exist as files — but typically a typo).
     let in_dir = migrations_list.iter().any(|m| m.version == version);
     if !in_dir {
         eprintln!(
@@ -5717,7 +5849,7 @@ fn db_squash_cmd(
             std::process::exit(1);
         }
     };
-    // 1. Localizar las migrations en el rango (inclusive).
+    // 1. Locate the migrations in the range (inclusive).
     let from_idx = migrations_list.iter().position(|m| m.version == from);
     let to_idx = migrations_list.iter().position(|m| m.version == to);
     let (from_idx, to_idx) = match (from_idx, to_idx) {
@@ -5742,7 +5874,7 @@ fn db_squash_cmd(
         eprintln!("✗ squash: el rango tiene <2 migrations — nada para combinar");
         std::process::exit(1);
     }
-    // 2. Rechazar .fitz en el rango (squashing solo SQL en MVP).
+    // 2. Reject .fitz in the range (squashing only SQL in MVP).
     for m in range {
         if m.is_fitz() {
             eprintln!(
@@ -5753,7 +5885,7 @@ fn db_squash_cmd(
             std::process::exit(1);
         }
     }
-    // 3. Construir UP + DOWN concatenados.
+    // 3. Build concatenated UP + DOWN.
     let mut up_parts: Vec<String> = Vec::with_capacity(range.len());
     let mut down_parts: Vec<String> = Vec::with_capacity(range.len());
     let mut all_have_down = true;
@@ -5779,9 +5911,9 @@ fn db_squash_cmd(
             migrations::MigrationKind::Fitz { .. } => unreachable!("filtrado arriba"),
         }
     }
-    // DOWN va en orden inverso (revierte newest primero).
+    // DOWN goes in reverse order (reverts newest first).
     down_parts.reverse();
-    // 4. Construir el archivo squashed.
+    // 4. Build the squashed file.
     let squashed_filename = format!("{from}_squashed.sql");
     let squashed_path = dir.join(&squashed_filename);
     if squashed_path.exists() {
@@ -5816,7 +5948,7 @@ fn db_squash_cmd(
         squashed.push_str("\n-- (sin sección -- DOWN porque al menos una migration del rango\n");
         squashed.push_str("-- no tenía DOWN. Si querés rollback, agregá la sección a mano.)\n");
     }
-    // 5. Mover los archivos originales a `migrations/squashed/`.
+    // 5. Move the original files to `migrations/squashed/`.
     let squashed_dir = dir.join("squashed");
     if let Err(e) = std::fs::create_dir_all(&squashed_dir) {
         eprintln!("✗ squash: creando `{}`: {e}", squashed_dir.display());
@@ -5834,13 +5966,14 @@ fn db_squash_cmd(
             std::process::exit(1);
         }
     }
-    // 6. Escribir el squashed.
+    // 6. Write the squashed file.
     if let Err(e) = std::fs::write(&squashed_path, &squashed) {
         eprintln!("✗ squash: escribiendo `{}`: {e}", squashed_path.display());
         std::process::exit(1);
     }
-    // 7. Tracking: si alguna del range estaba applied, borrar todas
-    // del tracking y stampear solo `from` (la nueva squashed).
+    // 7. Tracking: if any in the range was applied, delete all
+    // from the tracking and stamp only `from` (the new
+    // squashed one).
     if !no_tracking {
         let url = match resolve_db_url(url) {
             Ok(u) => u,
@@ -5865,9 +5998,9 @@ fn db_squash_cmd(
                 .iter()
                 .any(|v| target_versions.iter().any(|tv| tv == v));
             if !any_in_range {
-                return Ok::<_, String>(false); // nada que actualizar
+                return Ok::<_, String>(false); // nothing to update
             }
-            // Borrar todas las del range que estén applied.
+            // Delete every one in the range that's applied.
             for v in &target_versions {
                 if applied.iter().any(|a| a == v) {
                     migrations::untrack_fitz_migration(&conn, v)
@@ -5875,7 +6008,7 @@ fn db_squash_cmd(
                         .map_err(|e| format!("untrack {v}: {e}"))?;
                 }
             }
-            // Insertar el squashed (apunta a la version del `from`).
+            // Insert the squashed (points to the `from` version).
             migrations::stamp_version(&conn, &target_versions[0])
                 .await
                 .map_err(|e| format!("stamp {}: {e}", target_versions[0]))?;
@@ -5915,9 +6048,10 @@ mod tests {
 
     #[test]
     fn pip_inputs_hash_es_insensible_al_orden_de_positionals() {
-        // Reordenar `--bundle-pip` args NO debe invalidar cache:
-        // `--bundle-pip a --bundle-pip b` y `--bundle-pip b --bundle-pip a`
-        // instalan el mismo set de paquetes.
+        // Reordering `--bundle-pip` args must NOT invalidate
+        // the cache: `--bundle-pip a --bundle-pip b` and
+        // `--bundle-pip b --bundle-pip a` install the same set
+        // of packages.
         let h1 = pip_inputs_hash(
             &["sqlalchemy".to_string(), "psycopg2-binary".to_string()],
             &[],
@@ -5945,10 +6079,10 @@ mod tests {
 
     #[test]
     fn pip_inputs_hash_positionals_vs_requirements_son_distintos() {
-        // El separador `\n---\n` garantiza que ["foo", "bar"] como
-        // positionals dé hash distinto que el mismo texto en un
-        // requirements file. Sin el separador, ambos producirían
-        // los mismos bytes y colisionarían.
+        // The `\n---\n` separator guarantees that ["foo", "bar"]
+        // as positionals hashes differently from the same text
+        // in a requirements file. Without the separator both
+        // would produce the same bytes and collide.
         let h1 = pip_inputs_hash(&["foo".to_string(), "bar".to_string()], &[]);
         let h2 = pip_inputs_hash(&[], &[b"bar\nfoo\n".to_vec()]);
         assert_ne!(h1, h2);
@@ -5956,7 +6090,7 @@ mod tests {
 
     #[test]
     fn pip_inputs_hash_es_16_chars_hex() {
-        // Heredado de tarball_hash_short (FNV-1a 64-bit).
+        // Inherited from tarball_hash_short (FNV-1a 64-bit).
         let h = pip_inputs_hash(&["requests".to_string()], &[]);
         assert_eq!(h.len(), 16);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
@@ -5964,10 +6098,10 @@ mod tests {
 
     #[test]
     fn pip_inputs_hash_vacio_devuelve_hash_estable() {
-        // Sin paquetes ni requirements (caso degenerado — no debería
-        // dispararse en runtime porque el bloque pip arranca solo si
-        // hay algo que instalar, pero el helper sigue siendo bien
-        // definido).
+        // No packages nor requirements (degenerate case — should
+        // not trigger at runtime because the pip block only
+        // starts if there's something to install, but the helper
+        // is still well-defined).
         let h1 = pip_inputs_hash(&[], &[]);
         let h2 = pip_inputs_hash(&[], &[]);
         assert_eq!(h1, h2);
@@ -5976,10 +6110,11 @@ mod tests {
 
     #[test]
     fn pip_inputs_hash_orden_de_requirements_si_invalida_cache() {
-        // Reordenar requirements files SÍ invalida cache. Razón: pip
-        // los procesa en orden y dos archivos con conflicts/overrides
-        // pueden producir distintos paquetes resueltos según el orden.
-        // Tratamos cada permutación como input distinto, conservadora.
+        // Reordering requirements files DOES invalidate the
+        // cache. Reason: pip processes them in order and two
+        // files with conflicts/overrides can produce different
+        // resolved packages depending on the order. We treat
+        // each permutation as a distinct input, conservatively.
         let h1 = pip_inputs_hash(&[], &[b"requests\n".to_vec(), b"httpx\n".to_vec()]);
         let h2 = pip_inputs_hash(&[], &[b"httpx\n".to_vec(), b"requests\n".to_vec()]);
         assert_ne!(h1, h2);
