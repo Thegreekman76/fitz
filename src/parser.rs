@@ -1,13 +1,12 @@
-// parser.rs — Fase 2.3
+// parser.rs — Phase 2.3
 //
-// El parser convierte la lista plana de tokens del lexer en un AST.
-// Implementación: recursive descent. Cada regla gramatical es una
-// función; la precedencia de operadores está codificada en la jerarquía
-// de llamadas (`equality` llama a `comparison`, que llama a `term`,
-// etc.).
+// The parser turns the flat token list from the lexer into an AST.
+// Implementation: recursive descent. Every grammar rule is a function;
+// operator precedence is encoded in the call hierarchy (`equality`
+// calls `comparison`, which calls `term`, etc.).
 //
-// Estado: en construcción. Ver docs/roadmap.md sección 2.3 para alcance
-// y deuda explícita.
+// Status: under construction. See docs/roadmap.md section 2.3 for the
+// scope and explicit debt.
 
 use crate::ast::{
     AssignTarget, BinOpKind, Decorator, Expr, Field, FormatSpec, MatchArm, MethodDef, Param,
@@ -16,57 +15,56 @@ use crate::ast::{
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::lexer::{tokenize, Token, TokenWithPos};
 
-/// Estado del parseo. Privado al módulo.
+/// Parsing state. Module-private.
 ///
-/// El parser consume tokens de izquierda a derecha. `pos` apunta al
-/// próximo token a leer. Cuando llegamos al final, `peek` devuelve
-/// `&Token::EOF` (no `Option<&Token>`) — el lexer garantiza que el
-/// último token siempre es EOF, así nos ahorramos `unwrap`s en cada
-/// regla.
+/// The parser consumes tokens left to right. `pos` points to the next
+/// token to read. When we reach the end, `peek` returns `&Token::EOF`
+/// (not `Option<&Token>`) — the lexer guarantees the last token is
+/// always EOF, so we save `unwrap`s in every rule.
 struct Parser {
     tokens: Vec<TokenWithPos>,
     pos: usize,
-    /// Cuando es `true`, un `Ident` seguido de `{` NO se interpreta como
-    /// struct literal — se rompe el postfix y el `{` queda para el
-    /// caller (típicamente un bloque controlado: `if/while/for/match`).
+    /// When `true`, an `Ident` followed by `{` is NOT interpreted as a
+    /// struct literal — the postfix is broken and the `{` is left for
+    /// the caller (typically a control block: `if/while/for/match`).
     ///
-    /// El flag se setea al entrar a la condición de `if`/`while`, al
-    /// iterable de `for`, y al scrutinee de `match`. Se limpia en
-    /// subexpresiones delimitadas (paréntesis, args de llamada,
-    /// cuerpos de listas/mapas/struct literals, indexing), donde no
-    /// hay ambigüedad con bloques.
+    /// The flag is set when entering the condition of `if`/`while`,
+    /// the iterable of `for`, and the scrutinee of `match`. It is
+    /// cleared in delimited subexpressions (parentheses, call args,
+    /// list/map/struct literal bodies, indexing), where there is no
+    /// ambiguity with blocks.
     ///
-    /// Si en modo bloqueado se ve un cuerpo que tiene pinta de struct
-    /// literal (`{ Ident : ...`), el parser corta con un error
-    /// explícito sugiriendo envolver en paréntesis.
+    /// If, in blocked mode, a body that looks like a struct literal
+    /// (`{ Ident : ...`) is seen, the parser bails with an explicit
+    /// error suggesting wrapping it in parentheses.
     no_struct_literal: bool,
 
-    /// Mini-tanda I.2 — slicing. Cuando es `true`, `range_expr` NO
-    /// consume el operador `..`/`..=`: devuelve el start sin
-    /// promoverlo a `Expr::Range`. El postfix `[` lo mira y arma el
-    /// `Expr::Slice` correspondiente.
+    /// Mini-batch I.2 — slicing. When `true`, `range_expr` does NOT
+    /// consume the `..`/`..=` operator: it returns the start without
+    /// promoting it to `Expr::Range`. The postfix `[` looks at this
+    /// and builds the matching `Expr::Slice`.
     in_slice_context: bool,
 
-    /// Fase 9.0.1 (F15): si es `true`, los loops top-level de stmts
-    /// (`parse_program` + `parse_block`) capturan errores de
-    /// `parse_stmt`, los acumulan en `recovered_errors`, sincronizan
-    /// hasta el próximo stmt-boundary (Newline/Semicolon/RBrace/EOF) y
-    /// continúan con un `Stmt::Error(span)` en lugar del stmt original.
-    /// Sirve para tooling externo (LSP) que necesita un AST parcial
-    /// sobre buffers en construcción. `parse()` strict lo deja en
-    /// `false`; `parse_with_recovery()` lo prende.
+    /// Phase 9.0.1 (F15): if `true`, the top-level stmt loops
+    /// (`parse_program` + `parse_block`) catch errors from
+    /// `parse_stmt`, accumulate them into `recovered_errors`,
+    /// synchronize to the next stmt boundary (Newline/Semicolon/
+    /// RBrace/EOF) and continue with a `Stmt::Error(span)` in place
+    /// of the original stmt. Used by external tooling (LSP) that
+    /// needs a partial AST over in-progress buffers. Strict `parse()`
+    /// keeps it `false`; `parse_with_recovery()` turns it on.
     recovery_mode: bool,
 
-    /// Errores acumulados durante `parse_with_recovery`. En modo strict
-    /// queda siempre vacío. Cota: ver `MAX_RECOVERED_ERRORS`.
+    /// Errors accumulated during `parse_with_recovery`. In strict
+    /// mode it stays empty. Cap: see `MAX_RECOVERED_ERRORS`.
     recovered_errors: Vec<FitzError>,
 }
 
-/// Cota dura de errores acumulados en `parse_with_recovery`. Cuando se
-/// alcanza, el parser se rinde: descarta el resto del input y devuelve
-/// lo que tiene. Protege contra cascadas runaway en buffers grandes
-/// muy rotos. 100 cubre el caso 90% (~5-20 errores en un buffer LSP
-/// real) con margen amplio.
+/// Hard cap on accumulated errors in `parse_with_recovery`. When
+/// reached, the parser gives up: it discards the rest of the input
+/// and returns what it has. Protects against runaway cascades on
+/// large, very broken buffers. 100 covers the 90% case (~5-20 errors
+/// in a real LSP buffer) with plenty of headroom.
 const MAX_RECOVERED_ERRORS: usize = 100;
 
 impl Parser {
@@ -81,15 +79,15 @@ impl Parser {
         }
     }
 
-    // ---------- navegación ----------
+    // ---------- navigation ----------
 
-    /// Token actual sin consumir.
+    /// Current token without consuming.
     fn peek(&self) -> &Token {
         &self.tokens[self.pos].token
     }
 
-    /// Token en `pos + n` sin consumir. Útil para lookahead corto.
-    /// Devuelve `&Token::EOF` si nos pasamos del final.
+    /// Token at `pos + n` without consuming. Handy for short
+    /// lookahead. Returns `&Token::EOF` if we go past the end.
     fn peek_at(&self, n: usize) -> &Token {
         self.tokens
             .get(self.pos + n)
@@ -97,28 +95,28 @@ impl Parser {
             .unwrap_or(&Token::EOF)
     }
 
-    /// `(line, column)` del token actual. Útil para construir errores.
+    /// `(line, column)` of the current token. Used to build errors.
     fn current_pos(&self) -> (usize, usize) {
         let t = &self.tokens[self.pos];
         (t.line, t.column)
     }
 
-    /// `Span` del token actual. Atajo para construir nodos `Expr` con
-    /// su posición. Equivale a
+    /// `Span` of the current token. Shortcut for building `Expr` nodes
+    /// with their position. Equivalent to
     /// `let (l, c) = self.current_pos(); Span::new(l, c)`.
     fn cur_span(&self) -> Span {
         let (line, column) = self.current_pos();
         Span::new(line, column)
     }
 
-    /// `true` si estamos parados en el token EOF.
+    /// `true` if we are sitting on the EOF token.
     fn is_at_end(&self) -> bool {
         matches!(self.peek(), Token::EOF)
     }
 
-    /// Consume el token actual y lo devuelve clonado. El cursor avanza,
-    /// salvo que ya estemos en EOF (no avanzamos pasado el final, así
-    /// `peek` siempre es válido).
+    /// Consume the current token and return it cloned. The cursor
+    /// advances, unless we are already at EOF (we do not advance
+    /// past the end, so `peek` is always valid).
     fn advance(&mut self) -> TokenWithPos {
         let tok = self.tokens[self.pos].clone();
         if !self.is_at_end() {
@@ -127,19 +125,19 @@ impl Parser {
         tok
     }
 
-    // ---------- comparación / consumo ----------
+    // ---------- comparison / consumption ----------
 
-    /// `true` si el token actual coincide con `want`. Usa la
-    /// implementación de `PartialEq` de `Token`, que compara variante
-    /// Y payload — sirve para tokens sin payload (`Plus`, `RParen`,
-    /// ...). Para `Ident(_)` u otros con payload, usar `matches!`
-    /// directamente sobre `peek()`.
+    /// `true` if the current token matches `want`. Uses `Token`'s
+    /// `PartialEq` implementation, which compares variant AND payload
+    /// — works for payload-less tokens (`Plus`, `RParen`, ...). For
+    /// `Ident(_)` or others with payload, use `matches!` directly on
+    /// `peek()`.
     fn check(&self, want: &Token) -> bool {
         self.peek() == want
     }
 
-    /// Consume el token si coincide con `want`. Devuelve `true` si
-    /// hubo match. Útil para tokens opcionales (ej. coma trailing).
+    /// Consume the token if it matches `want`. Returns `true` on a
+    /// match. Useful for optional tokens (e.g. trailing comma).
     fn eat(&mut self, want: &Token) -> bool {
         if self.check(want) {
             self.advance();
@@ -149,8 +147,8 @@ impl Parser {
         }
     }
 
-    /// Consume el token si coincide con `want`, o devuelve un error
-    /// con el mensaje dado y la posición del token actual.
+    /// Consume the token if it matches `want`, or return an error
+    /// with the given message and the current token's position.
     fn expect(&mut self, want: &Token, message: impl Into<String>) -> FitzResult<()> {
         if self.eat(want) {
             Ok(())
@@ -159,12 +157,12 @@ impl Parser {
         }
     }
 
-    /// Si el token actual es un `Ident`, lo consume y devuelve el
-    /// nombre. Si no, devuelve un error con el mensaje dado.
+    /// If the current token is an `Ident`, consume it and return the
+    /// name. Otherwise, return an error with the given message.
     fn expect_ident(&mut self, message: impl Into<String>) -> FitzResult<String> {
-        // El `match` borrow termina al ejecutarse `name.clone()`, así
-        // que `self.advance()` (que requiere `&mut self`) puede
-        // ejecutarse después sin pelear con el borrow checker.
+        // The `match` borrow ends when `name.clone()` runs, so
+        // `self.advance()` (which requires `&mut self`) can run
+        // afterwards without fighting the borrow checker.
         let name = match self.peek() {
             Token::Ident(name) => name.clone(),
             _ => return Err(self.error(ErrorKind::UnexpectedToken, message)),
@@ -173,71 +171,70 @@ impl Parser {
         Ok(name)
     }
 
-    /// V2 (2026-06-05) — variante de `expect_ident` que también devuelve
-    /// el `Span` del token Ident. Usado al construir `AssignTarget::Ident`
-    /// para que el checker pueda registrar el tipo del binding bajo el
-    /// span del LHS y habilitar hover sobre el nombre de la variable.
+    /// V2 (2026-06-05) — variant of `expect_ident` that also returns
+    /// the `Span` of the Ident token. Used while building
+    /// `AssignTarget::Ident` so the checker can record the binding
+    /// type under the LHS span and enable hover on the variable name.
     fn expect_ident_with_span(&mut self, message: impl Into<String>) -> FitzResult<(String, Span)> {
         let span = self.cur_span();
         let name = self.expect_ident(message)?;
         Ok((name, span))
     }
 
-    /// Consume runs de `Newline`. Usar antes de cada elemento dentro
-    /// de listas (args, fields, arms) y antes de cada sentencia dentro
-    /// de un bloque. Entre tokens de una expresión, los newlines
-    /// importan (terminan la sentencia) — ahí NO se llama.
+    /// Consume runs of `Newline`. Use before each element inside a
+    /// list (args, fields, arms) and before each statement inside a
+    /// block. Between tokens of an expression, newlines matter (they
+    /// end the statement) — do NOT call there.
     fn skip_newlines(&mut self) {
         while matches!(self.peek(), Token::Newline) {
             self.advance();
         }
     }
 
-    // ---------- construcción de errores ----------
+    // ---------- error construction ----------
 
-    /// Construye un `FitzError` con la posición del token actual.
-    /// Centralizar acá nos da consistencia en todos los errores.
+    /// Build a `FitzError` with the current token's position.
+    /// Centralizing here gives us consistent errors across the parser.
     fn error(&self, kind: ErrorKind, message: impl Into<String>) -> FitzError {
         let (line, column) = self.current_pos();
         FitzError::new(kind, line, column, message)
     }
 
-    // ---------- expresiones: escalera de precedencia ----------
+    // ---------- expressions: precedence ladder ----------
     //
-    // De menor a mayor precedencia:
+    // From lowest to highest precedence:
     //   expression  → logic_or
     //   logic_or    → logic_and ( "or" logic_and )*
     //   logic_and   → equality  ( "and" equality )*
     //   equality    → comparison ( ("==" | "!=") comparison )*
     //   comparison  → range      ( ("<" | ">" | "<=" | ">=") range )*
-    //   range       → term       ( ".." term )?     (no chainable)
+    //   range       → term       ( ".." term )?     (not chainable)
     //   term        → factor     ( ("+" | "-") factor )*
     //   factor      → unary      ( ("*" | "/") unary )*
     //   unary       → "-" unary  |  postfix
     //   postfix     → primary    ( "." Ident  |  "(" args ")"  |  "[" expr "]" )*
     //   primary     → literal | Ident | "(" expression ")" | list | map
     //
-    // Los binarios chainables son izquierda-asociativos: el `while` itera
-    // y va anidando al `left` cada vez. `range` NO es chainable — `1..2..3`
-    // es error (lo agarra el caller si peek_at sigue siendo `..`). `expression`
-    // es el punto de entrada desde cualquier regla externa que quiera parsear
-    // una expresión completa.
+    // Chainable binaries are left-associative: the `while` iterates,
+    // nesting onto `left` each time. `range` is NOT chainable —
+    // `1..2..3` is an error (caught by the caller if `peek_at` is
+    // still `..`). `expression` is the entry point from any outer
+    // rule that wants to parse a full expression.
 
     fn expression(&mut self) -> FitzResult<Expr> {
         self.logic_or()
     }
 
-    /// Igual que `expression()`, pero con el flag `no_struct_literal`
-    /// activo: `Ident { ... }` NO se intentará parsear como struct
-    /// literal dentro de esta expresión. Se usa en posiciones donde
-    /// el `{` que sigue es la apertura de un bloque controlado
-    /// (condición de `if`/`while`, iterable de `for`, scrutinee de
-    /// `match`).
+    /// Same as `expression()`, but with the `no_struct_literal` flag
+    /// active: `Ident { ... }` will NOT be parsed as a struct literal
+    /// inside this expression. Used in positions where the next `{`
+    /// opens a control block (the condition of `if`/`while`, the
+    /// iterable of `for`, the scrutinee of `match`).
     ///
-    /// Subexpresiones delimitadas dentro de la llamada (paréntesis,
-    /// args, indexing, cuerpos de literales) restauran el flag a
-    /// `false` localmente — así se permite `if x == (User { id: 1 })`
-    /// sin pelearse con el flag.
+    /// Delimited subexpressions inside the call (parens, args,
+    /// indexing, literal bodies) restore the flag to `false` locally
+    /// — so `if x == (User { id: 1 })` works without fighting the
+    /// flag.
     fn expression_no_struct_lit(&mut self) -> FitzResult<Expr> {
         let prev = std::mem::replace(&mut self.no_struct_literal, true);
         let result = self.expression();
@@ -245,45 +242,43 @@ impl Parser {
         result
     }
 
-    /// Heurística para distinguir `Ident { ... }` como struct literal
-    /// vs. como Ident seguido de un bloque controlado. Solo se usa
-    /// para emitir un error con hint cuando estamos en modo
-    /// `no_struct_literal` y el cuerpo tiene pinta inequívoca de
-    /// struct literal.
+    /// Heuristic to tell `Ident { ... }` as struct literal apart from
+    /// `Ident` followed by a control block. Only used to emit an
+    /// error with a hint when we are in `no_struct_literal` mode and
+    /// the body unmistakably looks like a struct literal.
     ///
-    /// Pre: `peek()` es `Token::LBrace`. Mira hacia adelante saltando
-    /// newlines y retorna `true` si el cuerpo arranca con `Ident :` —
-    /// patrón de campo de struct literal que no podría ser, en
-    /// condiciones normales, el principio de un bloque (`x: Int = 1`
-    /// sí podría, pero hace falta `Ident` después del `:`).
+    /// Pre: `peek()` is `Token::LBrace`. Looks ahead skipping
+    /// newlines and returns `true` if the body starts with
+    /// `Ident :` — a struct-literal field pattern that, under normal
+    /// circumstances, cannot start a block (`x: Int = 1` could, but
+    /// it needs `Ident` after the `:`).
     fn looks_like_struct_lit_body(&self) -> bool {
         if !matches!(self.peek(), Token::LBrace) {
             return false;
         }
-        // Saltar newlines después del `{`.
+        // Skip newlines after the `{`.
         let mut i = 1;
         while matches!(self.peek_at(i), Token::Newline) {
             i += 1;
         }
-        // Cuerpo vacío `{ }` → tratamos como struct literal (en un
-        // bloque controlado, `{}` vacío en posición de expresión no
-        // tiene sentido, así que el hint sigue siendo útil).
+        // Empty body `{ }` → treat as struct literal (an empty `{}`
+        // in expression position inside a control block makes no
+        // sense, so the hint is still useful).
         if matches!(self.peek_at(i), Token::RBrace) {
             return true;
         }
-        // Tiene que arrancar con `Ident` seguido de `:`. Si después
-        // del `:` hay `Ident =` esto es una asignación tipada de
-        // bloque, no un struct literal — esa distinción la dejamos
-        // pasar (preferimos un error claro en el caller para ese caso
-        // raro).
+        // Must start with `Ident` followed by `:`. If after the `:`
+        // there is `Ident =`, this is a typed block assignment, not
+        // a struct literal — we let that case slip (we prefer a
+        // clear error from the caller for that rare case).
         let p1 = self.peek_at(i);
         let p2 = self.peek_at(i + 1);
         if !matches!(p1, Token::Ident(_)) || !matches!(p2, Token::Colon) {
             return false;
         }
-        // Si tras `Ident :` viene `Ident =`, parece asignación tipada
-        // dentro de un bloque (`{ x: Int = 1 }`). En ese caso no es
-        // un struct literal y no metemos el hint.
+        // If after `Ident :` comes `Ident =`, it looks like a typed
+        // assignment inside a block (`{ x: Int = 1 }`). In that case
+        // it is not a struct literal and we don't add the hint.
         let after_colon = self.peek_at(i + 2);
         let after_after = self.peek_at(i + 3);
         if matches!(after_colon, Token::Ident(_)) && matches!(after_after, Token::Eq) {
@@ -292,13 +287,13 @@ impl Parser {
         true
     }
 
-    /// `a or b or c` — `or` y `xor` son izquierda-asociativos y
-    /// comparten precedencia (más baja que `and`, paralelo a Python
-    /// para `or`). Esto da `a and b or c` = `(a and b) or c` y
+    /// `a or b or c` — `or` and `xor` are left-associative and share
+    /// precedence (lower than `and`, parallel to Python for `or`).
+    /// This gives `a and b or c` = `(a and b) or c` and
     /// `a or b xor c` = `(a or b) xor c` (left-fold).
     ///
-    /// Mini-tanda Xor: `xor` se sumó al mismo nivel para que
-    /// `a xor b xor c` chain natural sin paréntesis.
+    /// Mini-batch Xor: `xor` was added at the same level so
+    /// `a xor b xor c` chains naturally without parens.
     fn logic_or(&mut self) -> FitzResult<Expr> {
         let mut left = self.logic_and()?;
         loop {
@@ -320,8 +315,8 @@ impl Parser {
         Ok(left)
     }
 
-    /// `a and b and c` — más alto que `or`, más bajo que `==`. Resultado:
-    /// `a == 1 and b == 2` se parsea como `(a == 1) and (b == 2)`.
+    /// `a and b and c` — higher than `or`, lower than `==`. Result:
+    /// `a == 1 and b == 2` parses as `(a == 1) and (b == 2)`.
     fn logic_and(&mut self) -> FitzResult<Expr> {
         let mut left = self.equality()?;
         while matches!(self.peek(), Token::And) {
@@ -377,12 +372,12 @@ impl Parser {
         Ok(left)
     }
 
-    /// Mini-tanda Bits — `|` OR bit-a-bit. Precedencia más baja entre
-    /// los bitwise (paralelo a Python/C): `|` < `^` < `&` < `<<`/`>>`.
+    /// Mini-batch Bits — `|` bitwise OR. Lowest precedence among
+    /// bitwise ops (parallel to Python/C): `|` < `^` < `&` < `<<`/`>>`.
     ///
-    /// Cuidado: `|` también se usa como separador de or-patterns en
-    /// match arms (R.2.1), pero el parser de match no llega acá — los
-    /// patterns se parsean con `parse_or_pattern`.
+    /// Watch out: `|` is also used as the or-pattern separator in
+    /// match arms (R.2.1), but the match parser doesn't reach here
+    /// — patterns are parsed via `parse_or_pattern`.
     fn bitor_expr(&mut self) -> FitzResult<Expr> {
         let mut left = self.bitxor_expr()?;
         while matches!(self.peek(), Token::Pipe) {
@@ -399,7 +394,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// Mini-tanda Bits — `^` XOR bit-a-bit.
+    /// Mini-batch Bits — `^` bitwise XOR.
     fn bitxor_expr(&mut self) -> FitzResult<Expr> {
         let mut left = self.bitand_expr()?;
         while matches!(self.peek(), Token::Caret) {
@@ -416,7 +411,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// Mini-tanda Bits — `&` AND bit-a-bit.
+    /// Mini-batch Bits — `&` bitwise AND.
     fn bitand_expr(&mut self) -> FitzResult<Expr> {
         let mut left = self.shift_expr()?;
         while matches!(self.peek(), Token::Amp) {
@@ -433,7 +428,7 @@ impl Parser {
         Ok(left)
     }
 
-    /// Mini-tanda Bits — `<<` y `>>`. Precedencia entre bitwise y rango.
+    /// Mini-batch Bits — `<<` and `>>`. Precedence between bitwise and range.
     fn shift_expr(&mut self) -> FitzResult<Expr> {
         let mut left = self.range_expr()?;
         loop {
@@ -455,12 +450,12 @@ impl Parser {
         Ok(left)
     }
 
-    /// `start..end` (exclusivo) o `start..=end` (inclusivo, R.1.4).
-    /// `span` apunta al `..` o `..=`.
+    /// `start..end` (exclusive) or `start..=end` (inclusive, R.1.4).
+    /// `span` points to the `..` or `..=`.
     fn range_expr(&mut self) -> FitzResult<Expr> {
         let start = self.term()?;
-        // I.2 — en bracket context, NO consumimos `..`/`..=`: el
-        // postfix `[` lo mira para armar el `Expr::Slice`.
+        // I.2 — in bracket context, do NOT consume `..`/`..=`: the
+        // postfix `[` looks at this to build the `Expr::Slice`.
         if self.in_slice_context {
             return Ok(start);
         }
@@ -470,7 +465,7 @@ impl Parser {
             _ => return Ok(start),
         };
         let span = self.cur_span();
-        self.advance(); // consume '..' o '..='
+        self.advance(); // consume '..' or '..='
         let end = self.term()?;
         if matches!(self.peek(), Token::DotDot | Token::DotDotEq) {
             return Err(self.error(
@@ -542,7 +537,7 @@ impl Parser {
         let op = match self.peek() {
             Token::Star => BinOpKind::Mul,
             Token::Slash => BinOpKind::Div,
-            // R.1.2 — `%` tiene la misma precedencia que `*` y `/`.
+            // R.1.2 — `%` has the same precedence as `*` and `/`.
             Token::Percent => BinOpKind::Mod,
             _ => return None,
         };
@@ -551,15 +546,14 @@ impl Parser {
         Some((op, span))
     }
 
-    /// Unary prefijo: `-x` (negación numérica) o `not x` (negación
-    /// lógica, R.1.1). `span` apunta al operador. Ambos tienen la
-    /// misma precedencia (más alta que comparación, debajo de
-    /// postfix), así que `not x == 1` parsea como `not (x == 1)`
-    /// si quisiéramos eso — pero la asociatividad real es
-    /// `(not x) == 1`. Para evitar la ambigüedad, **`not` tiene
-    /// precedencia más alta que `==`/`!=`**: `not x == 1` parsea
-    /// como `(not x) == 1`. Para el otro orden, usar paréntesis:
-    /// `not (x == 1)`.
+    /// Unary prefix: `-x` (numeric negation) or `not x` (logical
+    /// negation, R.1.1). `span` points to the operator. Both have
+    /// the same precedence (higher than comparison, below postfix),
+    /// so `not x == 1` would parse as `not (x == 1)` if that's what
+    /// we wanted — but actual associativity is `(not x) == 1`. To
+    /// avoid the ambiguity, **`not` has higher precedence than
+    /// `==`/`!=`**: `not x == 1` parses as `(not x) == 1`. For the
+    /// other order, use parens: `not (x == 1)`.
     fn unary(&mut self) -> FitzResult<Expr> {
         match self.peek() {
             Token::Minus => {
@@ -582,8 +576,8 @@ impl Parser {
                     span,
                 })
             }
-            // Mini-tanda Bits — `~x` NOT bit-a-bit (unario, solo Int).
-            // Misma precedencia que `-` y `not`.
+            // Mini-batch Bits — `~x` bitwise NOT (unary, Int only).
+            // Same precedence as `-` and `not`.
             Token::Tilde => {
                 let span = self.cur_span();
                 self.advance();
@@ -603,20 +597,20 @@ impl Parser {
     /// encadenar: `user.profile.email`, `xs[0][1]`, `m["clave"]`,
     /// `xs.map(f).filter(g)`.
     ///
-    /// Desde Fase 3.4 el callee de una llamada es cualquier expresión
-    /// postfix — `Expr::Call.callee` es `Box<Expr>`. Eso destraba method
-    /// calls (`xs.map(...)`), invocación de fn anónima al vuelo
-    /// (`(fn(x) => x + 1)(2)`), y futuros patrones de orden superior.
+    /// Since Phase 3.4 the callee of a call is any postfix expression
+    /// — `Expr::Call.callee` is `Box<Expr>`. That unlocks method
+    /// calls (`xs.map(...)`), on-the-fly anonymous fn invocation
+    /// (`(fn(x) => x + 1)(2)`), and future higher-order patterns.
     fn postfix(&mut self) -> FitzResult<Expr> {
         let mut expr = self.primary()?;
         loop {
-            // PreF8.2: method chain multi-línea. Si peek() es Newline,
-            // miramos adelante saltando newlines: si el próximo token
-            // significativo es `.`, consumimos los newlines y dejamos
-            // que la iteración siguiente del loop matchee el `Dot`.
-            // Solo `.` continúa — `(`, `[`, `?` rompen como hoy para
-            // no cambiar la semántica de expression statements
-            // separados ambiguamente por newlines.
+            // PreF8.2: multi-line method chain. If peek() is Newline,
+            // look ahead skipping newlines: if the next significant
+            // token is `.`, consume the newlines and let the next
+            // loop iteration match the `Dot`. Only `.` continues —
+            // `(`, `[`, `?` break as before so we don't change the
+            // semantics of expression statements ambiguously separated
+            // by newlines.
             if matches!(self.peek(), Token::Newline) {
                 let mut i = 1;
                 while matches!(self.peek_at(i), Token::Newline) {
@@ -633,23 +627,23 @@ impl Parser {
             match self.peek() {
                 Token::Dot => {
                     let span = self.cur_span();
-                    // Fase 6.1: `.await` postfix. Detectamos antes de
-                    // consumir el `.` porque `await` ya es keyword del
-                    // lexer (`Token::Await`), no un Ident — el camino
-                    // normal de `.field` falla con "se esperaba nombre
-                    // de campo" sin esto. Mismo lugar en la cadena que
-                    // `.field` y `.method()`, así que `expr.await?`,
-                    // `expr.await.field`, `expr.await()` encajan por
-                    // continuación natural del loop.
+                    // Phase 6.1: `.await` postfix. Detected before
+                    // consuming the `.` because `await` is already a
+                    // lexer keyword (`Token::Await`), not an Ident —
+                    // the normal `.field` path would fail with "field
+                    // name expected" otherwise. Same spot in the
+                    // chain as `.field` and `.method()`, so
+                    // `expr.await?`, `expr.await.field`, `expr.await()`
+                    // fit through the loop's natural continuation.
                     if matches!(self.peek_at(1), Token::Await) {
                         self.advance(); // consume '.'
                         self.advance(); // consume 'await'
                         expr = Expr::Await(Box::new(expr), span);
                         continue;
                     }
-                    // Mini-tanda T — `t.0`, `t.1`, etc. Tuple field
-                    // access. El lexer emite `Int(n)` separado del `.`,
-                    // así que detectamos `Dot Int` por lookahead.
+                    // Mini-batch T — `t.0`, `t.1`, etc. Tuple field
+                    // access. The lexer emits `Int(n)` separately from
+                    // the `.`, so we detect `Dot Int` via lookahead.
                     if let Token::Int(n) = self.peek_at(1).clone() {
                         if n < 0 {
                             return Err(self.error(
@@ -658,7 +652,7 @@ impl Parser {
                             ));
                         }
                         self.advance(); // consume '.'
-                        self.advance(); // consume el Int
+                        self.advance(); // consume the Int
                         expr = Expr::TupleField {
                             tuple: Box::new(expr),
                             index: n as usize,
@@ -667,13 +661,13 @@ impl Parser {
                         continue;
                     }
                     self.advance();
-                    // v0.9.51 F15 recovery sub-stmt — si después del `.`
-                    // no hay un ident (típico: EOF, Newline, otro stmt),
-                    // en modo recovery preservamos `Expr::Field` con
-                    // `field: ""` (placeholder) en lugar de descartar el
-                    // stmt entero. Habilita completion fino tras
-                    // `user.<typo o EOF>` — el LSP usa el tipo del
-                    // `object` para mostrar fields/métodos sugeridos.
+                    // v0.9.51 F15 sub-stmt recovery — if there is no
+                    // ident after `.` (typical: EOF, Newline, another
+                    // stmt), in recovery mode we keep `Expr::Field`
+                    // with `field: ""` (placeholder) instead of
+                    // dropping the whole stmt. Enables fine completion
+                    // after `user.<typo or EOF>` — the LSP uses the
+                    // `object` type to suggest fields/methods.
                     let field =
                         match self.expect_ident("se esperaba nombre de campo después de '.'") {
                             Ok(f) => f,
@@ -719,7 +713,7 @@ impl Parser {
                             ));
                         }
                         let inner = args.into_iter().next().unwrap();
-                        // El span del Ok/Err se hereda del Ident receptor.
+                        // The Ok/Err span is inherited from the receiver Ident.
                         let ctor_span = expr.span();
                         expr = if name == "Ok" {
                             Expr::Ok(Box::new(inner), ctor_span)
@@ -743,16 +737,16 @@ impl Parser {
                     let span = self.cur_span();
                     self.advance(); // consume '['
                     let prev_no_struct = std::mem::replace(&mut self.no_struct_literal, false);
-                    // I.2 — entrar a slice context para que range_expr
-                    // NO consuma `..`/`..=`. Lo manejamos manual.
+                    // I.2 — enter slice context so range_expr does NOT
+                    // consume `..`/`..=`. We handle it manually here.
                     let prev_slice = std::mem::replace(&mut self.in_slice_context, true);
 
-                    // Caso A: `[..end]` o `[..=end]` o `[..]` — slice
-                    // sin start.
+                    // Case A: `[..end]` or `[..=end]` or `[..]` —
+                    // slice with no start.
                     let bracket_result: FitzResult<Expr> = match self.peek().clone() {
                         Token::DotDot | Token::DotDotEq => {
                             let inclusive = matches!(self.peek(), Token::DotDotEq);
-                            self.advance(); // consume `..` o `..=`
+                            self.advance(); // consume `..` or `..=`
                             let end = if matches!(self.peek(), Token::RBracket) {
                                 None
                             } else {
@@ -767,10 +761,10 @@ impl Parser {
                             })
                         }
                         _ => {
-                            // Caso B: parsear primer expr (con
-                            // in_slice_context=true, no consume `..`).
+                            // Case B: parse the first expr (with
+                            // in_slice_context=true, won't consume `..`).
                             let first = self.expression()?;
-                            // Caso B.1: index simple.
+                            // Case B.1: plain index.
                             if matches!(self.peek(), Token::RBracket) {
                                 Ok(Expr::Index {
                                     object: Box::new(expr.clone()),
@@ -778,10 +772,10 @@ impl Parser {
                                     span,
                                 })
                             } else if matches!(self.peek(), Token::DotDot | Token::DotDotEq) {
-                                // Caso B.2: slice con start. End
-                                // opcional.
+                                // Case B.2: slice with start. End
+                                // is optional.
                                 let inclusive = matches!(self.peek(), Token::DotDotEq);
-                                self.advance(); // consume `..` o `..=`
+                                self.advance(); // consume `..` or `..=`
                                 let end = if matches!(self.peek(), Token::RBracket) {
                                     None
                                 } else {
@@ -829,7 +823,7 @@ impl Parser {
                         break;
                     }
 
-                    // Reusamos el span del Ident (nombre del tipo).
+                    // Reuse the Ident span (the type name).
                     expr = self.parse_struct_lit_body(name, ident_span)?;
                 }
                 _ => break,
@@ -838,17 +832,17 @@ impl Parser {
         Ok(expr)
     }
 
-    /// Cuerpo de un struct literal: `{ campo: expr, campo: expr, ... }`.
-    /// El receptor (nombre del tipo) ya está consumido y se pasa como
-    /// `type_name`. Acepta:
-    ///   - Vacío: `{}`.
+    /// Struct literal body: `{ field: expr, field: expr, ... }`. The
+    /// receiver (type name) is already consumed and is passed as
+    /// `type_name`. Accepts:
+    ///   - Empty: `{}`.
     ///   - Trailing comma.
-    ///   - Newlines entre campos (literal multilínea).
-    ///   - Coma o newline como separador entre campos.
+    ///   - Newlines between fields (multiline literal).
+    ///   - Comma or newline as field separator.
     ///
-    /// Dentro de los valores el flag `no_struct_literal` se restaura a
-    /// `false` (cada valor está delimitado por `,` o `}`), así
-    /// permitimos nidos: `Order { user: User { id: 1, name: "x" } }`.
+    /// Inside values, the `no_struct_literal` flag is restored to
+    /// `false` (each value is delimited by `,` or `}`), so we allow
+    /// nesting: `Order { user: User { id: 1, name: "x" } }`.
     fn parse_struct_lit_body(&mut self, type_name: String, span: Span) -> FitzResult<Expr> {
         self.expect(&Token::LBrace, "se esperaba '{'")?;
         let prev = std::mem::replace(&mut self.no_struct_literal, false);
@@ -860,7 +854,7 @@ impl Parser {
     fn parse_struct_lit_fields(&mut self, type_name: String, span: Span) -> FitzResult<Expr> {
         let mut fields: Vec<(String, Expr)> = Vec::new();
         self.skip_newlines();
-        // Vacío: `Empty {}`.
+        // Empty: `Empty {}`.
         if matches!(self.peek(), Token::RBrace) {
             self.advance();
             return Ok(Expr::StructLit {
@@ -893,14 +887,14 @@ impl Parser {
             self.skip_newlines();
             let value = self.expression()?;
             fields.push((field_name, value));
-            // Separadores aceptados: coma o newline. RBrace cierra el
-            // literal en la próxima iter del loop. Otra cosa → error.
+            // Allowed separators: comma or newline. RBrace closes the
+            // literal in the next loop iter. Anything else → error.
             match self.peek() {
                 Token::Comma => {
                     self.advance();
                 }
                 Token::Newline | Token::RBrace => {
-                    // skip_newlines en la próxima iter consume el newline.
+                    // skip_newlines in the next iter eats the newline.
                 }
                 _ => {
                     return Err(self.error(
@@ -912,28 +906,29 @@ impl Parser {
         }
     }
 
-    // ---------- sentencias ----------
+    // ---------- statements ----------
     //
-    // Un programa es una lista de sentencias separadas por `Newline`
-    // (o `EOF` al final). Las llaves de un bloque (`{ ... }`) también
-    // hacen de terminador implícito: un bloque puede terminar sin
-    // newline antes del `}`. Esa lógica vive en `consume_stmt_terminator`.
+    // A program is a list of statements separated by `Newline` (or
+    // `EOF` at the end). The braces of a block (`{ ... }`) also act
+    // as an implicit terminator: a block can end without a newline
+    // before the `}`. That logic lives in `consume_stmt_terminator`.
     //
-    // Dispatch de `parse_stmt`:
-    //   Let                    → asignación con `let`
+    // `parse_stmt` dispatch:
+    //   Let                    → `let` assignment
     //   Return                 → return
-    //   Break / Continue       → sentencia simple
-    //   Ident + (Eq|Colon)     → asignación sin `let`  (lookahead a peek_at(1))
-    //   cualquier otra cosa    → expression-statement
+    //   Break / Continue       → simple statement
+    //   Ident + (Eq|Colon)     → assignment without `let`  (peek_at(1) lookahead)
+    //   anything else          → expression-statement
 
-    /// Punto de entrada para parsear un programa completo (top-level).
-    /// Consume todo hasta `EOF`.
+    /// Entry point to parse a full program (top-level). Consumes
+    /// everything up to `EOF`.
     ///
-    /// Si `recovery_mode` está activo (modo `parse_with_recovery`), un
-    /// error de `parse_stmt` no se propaga: se acumula en
-    /// `recovered_errors`, se sincroniza hasta el próximo stmt-boundary
-    /// y se inserta un `Stmt::Error(span)` en el lugar. El loop sigue
-    /// hasta EOF o hasta alcanzar `MAX_RECOVERED_ERRORS`.
+    /// If `recovery_mode` is active (`parse_with_recovery` mode), an
+    /// error from `parse_stmt` is not propagated: it is accumulated
+    /// in `recovered_errors`, we synchronize to the next stmt
+    /// boundary, and a `Stmt::Error(span)` is inserted in its place.
+    /// The loop runs until EOF or until `MAX_RECOVERED_ERRORS` is
+    /// reached.
     fn parse_program(&mut self) -> FitzResult<Program> {
         let mut stmts = Vec::new();
         loop {
@@ -968,36 +963,35 @@ impl Parser {
         Ok(stmts)
     }
 
-    /// Push de un error recuperado, con respeto a la cota. Si ya
-    /// llegamos al máximo, el error se descarta silenciosamente — el
-    /// caller verá en el `Vec` final que estamos en el límite.
+    /// Push a recovered error, respecting the cap. If we already hit
+    /// the maximum, the error is silently dropped — the caller will
+    /// see in the final `Vec` that we are at the limit.
     fn push_recovered(&mut self, e: FitzError) {
         if self.recovered_errors.len() < MAX_RECOVERED_ERRORS {
             self.recovered_errors.push(e);
         }
     }
 
-    /// Avanza el cursor hasta un sync point stmt-level. Los sync points
-    /// son:
-    ///  - `Newline` — terminador natural de stmt en Fitz (se consume).
-    ///  - `RBrace` — cierre de bloque (NO se consume; el caller lo
-    ///    maneja para cerrar el bloque actual).
-    ///  - `EOF` — fin del archivo (NO se consume).
-    ///  - Keywords que típicamente arrancan un stmt: `Let`, `Fn`,
-    ///    `Async`, `Type`, `Return`, `Break`, `Continue`, `While`,
-    ///    `Loop`, `For`, `If`, `Import`, `From`, `At` (decorador). Si
-    ///    el cursor está parado en uno, NO se consume — paramos justo
-    ///    antes para que el próximo `parse_stmt` lo agarre.
+    /// Advance the cursor to a stmt-level sync point. Sync points are:
+    ///  - `Newline` — Fitz's natural stmt terminator (consumed).
+    ///  - `RBrace` — block close (NOT consumed; the caller handles
+    ///    it to close the current block).
+    ///  - `EOF` — end of file (NOT consumed).
+    ///  - Keywords that typically start a stmt: `Let`, `Fn`, `Async`,
+    ///    `Type`, `Return`, `Break`, `Continue`, `While`, `Loop`,
+    ///    `For`, `If`, `Import`, `From`, `At` (decorator). If the
+    ///    cursor sits on one, it is NOT consumed — we stop right
+    ///    before so the next `parse_stmt` can grab it.
     ///
-    /// Por qué parar en keywords: `primary()` consume el token actual
-    /// antes de validarlo. Si una expresión se rompe encontrando un
-    /// `Newline` u otro token raro, el cursor puede haber avanzado más
-    /// allá del newline hasta el `Let` del próximo stmt. Sin la regla
-    /// de keywords, `synchronize` se comería el próximo stmt entero
-    /// buscando un newline.
+    /// Why stop at keywords: `primary()` consumes the current token
+    /// before validating it. If an expression breaks on a `Newline`
+    /// or another odd token, the cursor may have advanced past the
+    /// newline up to the `Let` of the next stmt. Without the
+    /// keyword rule, `synchronize` would eat the whole next stmt
+    /// hunting for a newline.
     ///
-    /// Fitz no tiene `;` como separador — Newline es el único
-    /// terminador explícito.
+    /// Fitz has no `;` as a separator — Newline is the only explicit
+    /// terminator.
     fn synchronize(&mut self) {
         loop {
             match self.peek() {
@@ -1006,9 +1000,9 @@ impl Parser {
                     return;
                 }
                 Token::RBrace | Token::EOF => return,
-                // Keywords que típicamente arrancan un stmt. No
-                // consumimos — paramos justo antes para que el próximo
-                // `parse_stmt` los procese desde cero.
+                // Keywords that typically start a stmt. Do not consume
+                // — stop right before so the next `parse_stmt` can
+                // process them from scratch.
                 Token::Let
                 | Token::Fn
                 | Token::Async
@@ -1030,9 +1024,9 @@ impl Parser {
         }
     }
 
-    /// Después de una sentencia, consumimos su terminador. `Newline`
-    /// se consume; `EOF` y `RBrace` se dejan sin consumir (el caller
-    /// decide qué hacer con ellos).
+    /// After a statement, consume its terminator. `Newline` is
+    /// consumed; `EOF` and `RBrace` are left unconsumed (the caller
+    /// decides what to do with them).
     fn consume_stmt_terminator(&mut self) -> FitzResult<()> {
         match self.peek() {
             Token::Newline => {
@@ -1047,9 +1041,9 @@ impl Parser {
         }
     }
 
-    /// Parsea UNA sentencia. El caller maneja terminadores y loops.
-    /// Captura el span del primer token y lo pasa a cada sub-parser
-    /// vía sus constructores de `Stmt`.
+    /// Parse ONE statement. The caller handles terminators and loops.
+    /// Captures the span of the first token and passes it to each
+    /// sub-parser through its `Stmt` constructors.
     fn parse_stmt(&mut self) -> FitzResult<Stmt> {
         let (line, column) = self.current_pos();
         let span = Span::new(line, column);
@@ -1061,9 +1055,9 @@ impl Parser {
             Token::At => self.parse_decorated_stmt(span),
             Token::Break => {
                 self.advance();
-                // Mini-tanda L — sintaxis `break ['label] [<expr>]`.
-                // Label primero (si está), después value opcional.
-                // Rust usa el mismo orden: `break 'outer 42`.
+                // Mini-batch L — syntax `break ['label] [<expr>]`.
+                // Label first (if any), then optional value. Rust
+                // uses the same order: `break 'outer 42`.
                 let label = if let Token::Label(l) = self.peek().clone() {
                     self.advance();
                     Some(l)
@@ -1089,9 +1083,9 @@ impl Parser {
             Token::While => self.parse_while(span),
             Token::Loop => self.parse_loop(span),
             Token::For => self.parse_for(span),
-            // Mini-tanda L — `'label: <loop>` declara label antes del
-            // loop. Soporta loop/while/for. El parser consume el
-            // Label + Colon y delega al parse_*_with_label.
+            // Mini-batch L — `'label: <loop>` declares a label before
+            // the loop. Supports loop/while/for. The parser consumes
+            // the Label + Colon and delegates to parse_*_with_label.
             Token::Label(_) => {
                 let label = if let Token::Label(l) = self.peek().clone() {
                     l
@@ -1116,10 +1110,10 @@ impl Parser {
         }
     }
 
-    /// `import foo` o `import foo.bar.baz`. El path se acumula como
-    /// `Ident ( '.' Ident )*`. PreF8.4: acepta `as <ident>` al final
-    /// para alias del namespace (`import foo as f` → binding `f` en
-    /// lugar del último segmento).
+    /// `import foo` or `import foo.bar.baz`. The path accumulates as
+    /// `Ident ( '.' Ident )*`. PreF8.4: accepts `as <ident>` at the
+    /// end to alias the namespace (`import foo as f` → binding `f`
+    /// instead of the last segment).
     fn parse_import(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Import, "se esperaba 'import'")?;
         let path = self.parse_module_path()?;
@@ -1134,11 +1128,10 @@ impl Parser {
         Ok(Stmt::Import { path, alias, span })
     }
 
-    /// `from foo import a, b, c` — el path puede tener puntos (`from
-    /// sub.foo import bar`). La lista de nombres tiene que tener al
-    /// menos uno. Acepta trailing comma. PreF8.4: cada nombre puede
-    /// llevar `as <ident>` para alias (`from foo import bar as b,
-    /// baz as z`).
+    /// `from foo import a, b, c` — the path may have dots (`from
+    /// sub.foo import bar`). The names list must have at least one.
+    /// Accepts trailing comma. PreF8.4: each name may carry
+    /// `as <ident>` for aliasing (`from foo import bar as b, baz as z`).
     fn parse_from_import(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::From, "se esperaba 'from'")?;
         let path = self.parse_module_path()?;
@@ -1147,10 +1140,10 @@ impl Parser {
             "se esperaba 'import' después del path en 'from ... import ...'",
         )?;
 
-        // Mini-tanda Mln — multi-línea con paréntesis. Si después del
-        // `import` viene un `(`, entramos a modo multi-línea: newlines
-        // entre nombres se toleran (los consumimos), y cerramos con
-        // `)`. Sin paréntesis sigue el comportamiento single-line.
+        // Mini-batch Mln — multi-line via parens. If a `(` follows
+        // the `import`, we enter multi-line mode: newlines between
+        // names are tolerated (we consume them), and we close with
+        // `)`. Without parens, the single-line behavior stands.
         let multiline = matches!(self.peek(), Token::LParen);
         if multiline {
             self.advance(); // consume '('
@@ -1161,7 +1154,7 @@ impl Parser {
             while matches!(self.peek(), Token::Comma) {
                 self.advance();
                 self.skip_newlines_inside_parens();
-                // Trailing comma antes del `)` es OK.
+                // Trailing comma before `)` is OK.
                 if matches!(self.peek(), Token::RParen) {
                     break;
                 }
@@ -1179,7 +1172,7 @@ impl Parser {
         names.push(self.parse_from_import_name(/*is_first=*/ true)?);
         while matches!(self.peek(), Token::Comma) {
             self.advance();
-            // Trailing comma: `from foo import a,` — paramos sin error.
+            // Trailing comma: `from foo import a,` — stop without error.
             if matches!(self.peek(), Token::Newline | Token::EOF | Token::RBrace) {
                 break;
             }
@@ -1188,18 +1181,17 @@ impl Parser {
         Ok(Stmt::FromImport { path, names, span })
     }
 
-    /// Mini-tanda Mln — Helper para `from foo import (...)` multi-línea.
-    /// Consume newlines consecutivos hasta encontrar un token de
-    /// contenido. Sin checks de profundidad — el caller ya está adentro
-    /// del paréntesis.
+    /// Mini-batch Mln — Helper for multi-line `from foo import (...)`.
+    /// Consumes consecutive newlines until a content token is reached.
+    /// No depth checks — the caller is already inside the paren.
     fn skip_newlines_inside_parens(&mut self) {
         while matches!(self.peek(), Token::Newline) {
             self.advance();
         }
     }
 
-    /// Helper: parsea un binding de `from ... import`: `Ident [as Ident]`.
-    /// `is_first` solo cambia el mensaje de error del primer ident.
+    /// Helper: parse a `from ... import` binding: `Ident [as Ident]`.
+    /// `is_first` only changes the error message of the first ident.
     fn parse_from_import_name(&mut self, is_first: bool) -> FitzResult<(String, Option<String>)> {
         let name = self.expect_ident(if is_first {
             "se esperaba al menos un identificador después de 'import'"
@@ -1217,8 +1209,8 @@ impl Parser {
         Ok((name, alias))
     }
 
-    /// Path de módulo: `Ident ( '.' Ident )*`. Devuelve los segmentos.
-    /// Siempre tiene al menos un elemento. Sirve para `import` y para
+    /// Module path: `Ident ( '.' Ident )*`. Returns the segments.
+    /// Always has at least one element. Serves both `import` and
     /// `from ... import`.
     fn parse_module_path(&mut self) -> FitzResult<Vec<String>> {
         let first = self.expect_ident("se esperaba nombre de módulo (identificador)")?;
@@ -1233,10 +1225,10 @@ impl Parser {
 
     fn parse_assign_with_let(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Let, "se esperaba 'let'")?;
-        // Mini-tanda T — destructuring `let (a, b) = expr`. Detectamos
-        // por peek `(`. El pattern admite nesting: `let ((x, y), z) =
-        // ...`. Sin type annotation por simplicidad MVP (el checker
-        // infiere desde el RHS).
+        // Mini-batch T — destructuring `let (a, b) = expr`. Detected
+        // by peeking `(`. The pattern allows nesting: `let ((x, y),
+        // z) = ...`. No type annotation for MVP simplicity (the
+        // checker infers from the RHS).
         if matches!(self.peek(), Token::LParen) {
             let pattern = self.parse_pattern()?;
             self.expect(
@@ -1263,23 +1255,24 @@ impl Parser {
         })
     }
 
-    /// Parsea una sentencia que arranca con una expresión. Tres casos:
-    ///   1. `expr` — sentencia-expresión (típicamente una llamada).
-    ///   2. `Ident: Tipo = expr` — declaración/reasignación con anotación.
-    ///   3. `lvalue = expr` — asignación. El lvalue puede ser `Ident`
-    ///      (variable) o `Expr::Field` (mutación de campo de instancia).
-    ///      Cualquier otra forma (`f() = ...`, `xs[0] = ...`) es error.
+    /// Parse a statement that starts with an expression. Three cases:
+    ///   1. `expr` — expression statement (typically a call).
+    ///   2. `Ident: Type = expr` — annotated declaration/reassign.
+    ///   3. `lvalue = expr` — assignment. The lvalue can be an
+    ///      `Ident` (variable) or `Expr::Field` (mutating an
+    ///      instance field). Any other form (`f() = ...`,
+    ///      `xs[0] = ...`) is an error.
     ///
-    /// Unifica el camino antes separado entre `parse_assign_no_let` y
-    /// `parse_expr_stmt`: parseamos la expresión completa primero, y
-    /// recién después decidimos si era asignación, según el token que
-    /// haya quedado. Eso resuelve naturalmente `user.name = "x"` y
-    /// elimina el lookahead duro que antes solo miraba `peek_at(1)`.
+    /// Unifies the formerly separate `parse_assign_no_let` and
+    /// `parse_expr_stmt` paths: we parse the full expression first,
+    /// then decide if it was an assignment based on the remaining
+    /// token. That naturally resolves `user.name = "x"` and removes
+    /// the hard lookahead that used to look only at `peek_at(1)`.
     fn parse_expr_or_assign_stmt(&mut self, span: Span) -> FitzResult<Stmt> {
         let lhs = self.expression()?;
 
-        // Caso 2: `Ident : Tipo = expr`. La anotación solo se acepta
-        // sobre un identificador pelado.
+        // Case 2: `Ident : Type = expr`. The annotation is only
+        // accepted on a bare identifier.
         if matches!(self.peek(), Token::Colon) {
             let (name, name_span) = match lhs {
                 Expr::Ident(n, ispan) => (n, ispan),
@@ -1302,16 +1295,16 @@ impl Parser {
             });
         }
 
-        // Caso 3: `lvalue = expr`.
+        // Case 3: `lvalue = expr`.
         if self.eat(&Token::Eq) {
             let value = self.expression()?;
             let target = match lhs {
                 Expr::Ident(n, ispan) => AssignTarget::Ident(n, ispan),
                 Expr::Field { object, field, .. } => AssignTarget::Field { object, field },
-                // R.1.3 — `xs[i] = v` y `m["k"] = v` (mini-fase R).
-                // El parser ya construyó `Expr::Index { object, index }`
-                // como parte del postfix; lo "destruimos" acá para
-                // armar el `AssignTarget::Index`.
+                // R.1.3 — `xs[i] = v` and `m["k"] = v` (mini-phase R).
+                // The parser already built `Expr::Index { object,
+                // index }` as part of the postfix; we deconstruct it
+                // here to build the `AssignTarget::Index`.
                 Expr::Index { object, index, .. } => AssignTarget::Index { object, index },
                 _ => {
                     return Err(self.error(
@@ -1329,20 +1322,20 @@ impl Parser {
             });
         }
 
-        // Caso 3b — R.2.3: operadores compuestos `+=`/`-=`/`*=`/`/=`.
-        // Desugar a `target = target <op> rhs` en el parser. Esto deja
-        // el resto del pipeline (checker, evaluator, codegen) sin tocar
-        // — trabajan con `Stmt::Assign` regulares. El target se evalúa
-        // DOS veces: una como Expr (RHS del BinOp) y otra como
-        // AssignTarget (destino). El evaluator de índice usa el
-        // patrón "compute first, lock last" (R.1.3) así que la doble
-        // evaluación del index también va segura.
+        // Case 3b — R.2.3: compound operators `+=`/`-=`/`*=`/`/=`.
+        // Desugar to `target = target <op> rhs` in the parser. That
+        // leaves the rest of the pipeline (checker, evaluator,
+        // codegen) untouched — they work with regular `Stmt::Assign`.
+        // The target is evaluated TWICE: once as Expr (RHS of the
+        // BinOp) and once as AssignTarget (destination). The index
+        // evaluator uses the "compute first, lock last" pattern
+        // (R.1.3), so double evaluation of the index is also safe.
         let compound_op = match self.peek() {
             Token::PlusEq => Some(BinOpKind::Add),
             Token::MinusEq => Some(BinOpKind::Sub),
             Token::StarEq => Some(BinOpKind::Mul),
             Token::SlashEq => Some(BinOpKind::Div),
-            // Mini-tanda Cmp — ops bit-a-bit compuestos.
+            // Mini-batch Cmp — compound bitwise ops.
             Token::AmpEq => Some(BinOpKind::BitAnd),
             Token::PipeEq => Some(BinOpKind::BitOr),
             Token::CaretEq => Some(BinOpKind::BitXor),
@@ -1352,7 +1345,7 @@ impl Parser {
         };
         if let Some(op) = compound_op {
             let op_span = self.cur_span();
-            self.advance(); // consume el token `+=`/etc.
+            self.advance(); // consume the `+=`/etc. token
             let rhs = self.expression()?;
             let (target, target_as_expr) = match lhs {
                 Expr::Ident(n, ispan) => {
@@ -1410,13 +1403,14 @@ impl Parser {
             });
         }
 
-        // Caso 1: sentencia-expresión.
+        // Case 1: expression statement.
         Ok(Stmt::Expr(lhs, span))
     }
 
-    /// Anotación de tipo opcional: `: TypeExpr`. Devuelve `Some(t)` si
-    /// la había. Acepta `Int`, `Str`, `List<Int>`, `Map<Str, User>`,
-    /// `Result<List<User>>`, `User?`, `Map<Str, Int>?`, etc.
+    /// Optional type annotation: `: TypeExpr`. Returns `Some(t)` if
+    /// it was present. Accepts `Int`, `Str`, `List<Int>`,
+    /// `Map<Str, User>`, `Result<List<User>>`, `User?`,
+    /// `Map<Str, Int>?`, etc.
     fn parse_optional_type_annotation(&mut self) -> FitzResult<Option<TypeExpr>> {
         if self.eat(&Token::Colon) {
             Ok(Some(self.parse_type_expr()?))
@@ -1425,9 +1419,9 @@ impl Parser {
         }
     }
 
-    /// Parsea una `TypeExpr` (obligatoria) en posición de anotación.
+    /// Parse a (required) `TypeExpr` in annotation position.
     ///
-    /// Gramática:
+    /// Grammar:
     ///
     /// ```text
     /// type_expr := fn_type | atom ( '?' )?
@@ -1436,27 +1430,27 @@ impl Parser {
     /// generic_args := '<' type_expr ( ',' type_expr )* '>'
     /// ```
     ///
-    /// Sufijo `?` se asocia al átomo entero: `List<Int>?` → `Nullable(List<Int>)`.
-    /// Aceptamos `?` una sola vez por ahora; `T??` se podría modelar más
-    /// adelante (`Nullable(Nullable(T))`), pero hoy `eat` solo consume uno
-    /// y un segundo `?` se quedaría sin consumir, sin error explícito.
-    /// El checker estático puede normalizarlo cuando llegue.
+    /// The `?` suffix attaches to the whole atom: `List<Int>?` →
+    /// `Nullable(List<Int>)`. We accept `?` only once for now; `T??`
+    /// could be modeled later (`Nullable(Nullable(T))`), but today
+    /// `eat` only consumes one and a second `?` is left unconsumed
+    /// without an explicit error. The static checker can normalize
+    /// it when it lands.
     ///
-    /// `Fn` es keyword contextual sintáctica del tipo función. Cuando
-    /// se ve `Fn` seguido de `(`, parseamos como `TypeExpr::Function`.
-    /// Si el siguiente token no es `(`, `Fn` se trata como nombre
-    /// nominal normal — fallará en resolución por no existir como
-    /// tipo en el env.
+    /// `Fn` is a syntactic contextual keyword of the function type.
+    /// When `Fn` is followed by `(`, we parse it as
+    /// `TypeExpr::Function`. If the next token is not `(`, `Fn` is
+    /// treated as a regular nominal name — resolution will fail
+    /// because it does not exist as a type in the env.
     ///
-    /// Nota sobre lexing: el lexer emite `>` siempre como `Token::Gt`
-    /// (no hay `>>` como un solo token), así que `Result<List<Int>>` se
-    /// cierra consumiendo dos `Token::Gt` separados — uno por nivel de
-    /// genérico.
+    /// Lexing note: the lexer always emits `>` as `Token::Gt` (there
+    /// is no `>>` as a single token), so `Result<List<Int>>` closes
+    /// by consuming two separate `Token::Gt` — one per generic level.
     fn parse_type_expr(&mut self) -> FitzResult<TypeExpr> {
-        // Mini-tanda T — tipo tupla `(T1, T2, ...)`. `()` es la
-        // tupla vacía, `(T,)` una tupla de un elemento (trailing
-        // comma obligatoria), `(T)` solo paréntesis (sin tupla,
-        // delega al tipo interno).
+        // Mini-batch T — tuple type `(T1, T2, ...)`. `()` is the
+        // empty tuple, `(T,)` a single-element tuple (trailing
+        // comma required), `(T)` is just parens (no tuple, delegates
+        // to the inner type).
         if matches!(self.peek(), Token::LParen) {
             self.advance(); // consume `(`
             if matches!(self.peek(), Token::RParen) {
@@ -1484,7 +1478,7 @@ impl Parser {
                 }
                 return Ok(t);
             }
-            // Sin coma → solo paréntesis de agrupación.
+            // No comma → just grouping parens.
             self.expect(
                 &Token::RParen,
                 "se esperaba ')' para cerrar el tipo entre paréntesis",
@@ -1496,7 +1490,7 @@ impl Parser {
             return Ok(t);
         }
         let name = self.expect_ident("se esperaba un nombre de tipo")?;
-        // Keyword contextual: `Fn(...)` → tipo función.
+        // Contextual keyword: `Fn(...)` → function type.
         if name == "Fn" && matches!(self.peek(), Token::LParen) {
             return self.parse_fn_type();
         }
@@ -1524,18 +1518,17 @@ impl Parser {
                 break;
             }
             self.skip_newlines();
-            // Mini-tanda Bits: el lexer ahora produce `Token::Shr` para
-            // `>>`, lo que rompe `List<List<Int>>` y similares. Acá
-            // splitteamos un `Shr` en dos `Gt` consumiendo solo uno —
-            // el segundo `>` queda como `Gt` para el caller de
-            // afuera.
+            // Mini-batch Bits: the lexer now produces `Token::Shr`
+            // for `>>`, which breaks `List<List<Int>>` and similar.
+            // Here we split a `Shr` into two `Gt` consuming only one
+            // — the second `>` stays as `Gt` for the outer caller.
             match self.peek() {
                 Token::Gt => {
                     self.advance();
                 }
                 Token::Shr => {
-                    // Mutamos el token actual a Gt en su lugar y
-                    // shifteamos la columna para apuntar al segundo `>`.
+                    // Mutate the current token to Gt in place and
+                    // shift the column to point at the second `>`.
                     self.tokens[self.pos].token = Token::Gt;
                     self.tokens[self.pos].column += 1;
                 }
@@ -1556,7 +1549,7 @@ impl Parser {
         Ok(t)
     }
 
-    /// `Fn` ya consumido; parsea `(P1, P2, ...) -> R`.
+    /// `Fn` already consumed; parses `(P1, P2, ...) -> R`.
     fn parse_fn_type(&mut self) -> FitzResult<TypeExpr> {
         self.expect(&Token::LParen, "se esperaba '(' después de `Fn`")?;
         self.skip_newlines();
@@ -1588,9 +1581,9 @@ impl Parser {
 
     fn parse_return(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Return, "se esperaba 'return'")?;
-        // `return` sin valor devuelve null implícito. Detectamos los
-        // terminadores válidos para una sentencia: fin de línea, cierre
-        // de bloque o fin de archivo.
+        // `return` with no value returns implicit null. Detect the
+        // valid statement terminators: end of line, block close, or
+        // end of file.
         match self.peek() {
             Token::Newline | Token::RBrace | Token::EOF => {
                 return Ok(Stmt::Return(Expr::Null(span), span));
@@ -1598,31 +1591,33 @@ impl Parser {
             _ => {}
         }
 
-        // Mini-tanda OAPI — lookahead específico para detectar el
-        // patrón ReturnStatus ANTES de invocar `expression()` (que
-        // greedea `Ident { ... }` como struct literal). El patrón es:
-        //   `<Int> { ... }` o `<Ident> { ... }` donde el `{...}` es un
-        //   map literal (primera clave Str), no un struct lit (primera
-        //   clave Ident).
+        // Mini-batch OAPI — specific lookahead to detect the
+        // ReturnStatus pattern BEFORE calling `expression()` (which
+        // greedily parses `Ident { ... }` as a struct literal). The
+        // pattern is:
+        //   `<Int> { ... }` or `<Ident> { ... }` where the `{...}`
+        //   is a map literal (first key Str), not a struct lit
+        //   (first key Ident).
         //
-        // Disambiguación robusta:
-        //   - tok0: Int o Ident
+        // Robust disambiguation:
+        //   - tok0: Int or Ident
         //   - tok1: LBrace
-        //   - primer token no-newline después de LBrace: Str (map lit)
-        //     o RBrace (map vacío)
+        //   - first non-newline token after LBrace: Str (map lit)
+        //     or RBrace (empty map)
         //
-        // Si la primera key es Ident → struct lit (`return P { x: 1 }`),
-        // NO es ReturnStatus.
-        // Si es Str → map lit (`return NOT_FOUND { "error": "..." }`),
-        // SÍ es ReturnStatus.
+        // If the first key is Ident → struct lit
+        // (`return P { x: 1 }`), this is NOT a ReturnStatus.
+        // If it is Str → map lit
+        // (`return NOT_FOUND { "error": "..." }`), this IS a
+        // ReturnStatus.
         let looks_like_return_status = {
             let t0 = self.peek_at(0);
             let t1 = self.peek_at(1);
             let head_ok = matches!(t0, Token::Int(_) | Token::Ident(_));
             let brace_next = matches!(t1, Token::LBrace);
             if head_ok && brace_next {
-                // Skip newlines después del LBrace (bound: 16 para
-                // evitar walks largos sobre archivos patológicos).
+                // Skip newlines after the LBrace (bound: 16 to
+                // avoid long walks over pathological files).
                 const MAX_SKIP: usize = 16;
                 let mut i = 2usize;
                 let mut is_map_body = false;
@@ -1645,8 +1640,8 @@ impl Parser {
         };
 
         if looks_like_return_status {
-            // Parsear el status como un atom — Int o Ident solo,
-            // SIN postfix (sin call, sin field, sin struct lit).
+            // Parse the status as an atom — Int or Ident only, with
+            // NO postfix (no call, no field, no struct lit).
             let status_span = self.cur_span();
             let status = match self.peek().clone() {
                 Token::Int(n) => {
@@ -1657,7 +1652,7 @@ impl Parser {
                     self.advance();
                     Expr::Ident(name, status_span)
                 }
-                _ => unreachable!("lookahead garantiza Int o Ident"),
+                _ => unreachable!("lookahead guarantees Int or Ident"),
             };
             let body = self.expression()?;
             return Ok(Stmt::ReturnStatus {
@@ -1671,16 +1666,16 @@ impl Parser {
         Ok(Stmt::Return(value, span))
     }
 
-    // ---------- definición de función ----------
+    // ---------- function definition ----------
     //
-    // Cuatro formas (combinables con `async` opcional):
+    // Four shapes (combinable with optional `async`):
     //   fn name(params) { body }
     //   fn name(params) -> Type { body }
     //   fn name(params) => expr
     //   fn name(params) -> Type => expr
     //
-    // La forma de flecha se desugar a `body: vec![Stmt::Return(expr, Span::ZERO)]`
-    // (decisión documentada en ast.rs).
+    // The arrow shape desugars to `body: vec![Stmt::Return(expr,
+    // Span::ZERO)]` (decision documented in ast.rs).
 
     fn parse_fndef(&mut self, span: Span) -> FitzResult<Stmt> {
         let is_async = self.eat(&Token::Async);
@@ -1693,7 +1688,7 @@ impl Parser {
         let params = self.parse_params()?;
         let return_type = self.parse_optional_return_type()?;
 
-        // Cuerpo: bloque `{ ... }` o flecha `=> expr`.
+        // Body: block `{ ... }` or arrow `=> expr`.
         let body = match self.peek() {
             Token::FatArrow => {
                 self.advance();
@@ -1716,22 +1711,22 @@ impl Parser {
             return_type,
             body,
             is_async,
-            // El parser de fn "pelada" no conoce decorators. Cuando se
-            // entra por `parse_decorated_fndef`, ese path reconstruye el
-            // FnDef pegándole los decorators acumulados.
+            // The bare-fn parser does not know about decorators.
+            // When entering via `parse_decorated_fndef`, that path
+            // rebuilds the FnDef attaching the accumulated decorators.
             decorators: vec![],
             span,
         })
     }
 
-    /// Función anónima en posición de expresión: `fn(x) => x * 2` o
-    /// `fn(x) { return x * 2 }`. Diferencias con `parse_fndef`: no hay
-    /// nombre y no se admite `async` (no tendría dónde aplicarse hasta
-    /// Fase 4). El cuerpo y el tipo de retorno se parsean igual.
+    /// Anonymous function in expression position: `fn(x) => x * 2`
+    /// or `fn(x) { return x * 2 }`. Differences vs `parse_fndef`:
+    /// no name, and `async` was not allowed (had nowhere to apply
+    /// until Phase 4). Body and return type are parsed the same way.
     fn parse_fn_expr(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
-        // Mini-tanda Async-cl — `async fn(...)` es un closure async.
-        // El body puede usar `.await` y la fn devuelve un `Future<T>`.
+        // Mini-batch Async-cl — `async fn(...)` is an async closure.
+        // The body may use `.await` and the fn returns a `Future<T>`.
         let is_async = if matches!(self.peek(), Token::Async) {
             self.advance();
             true
@@ -1770,18 +1765,19 @@ impl Parser {
         })
     }
 
-    /// Lista de parámetros, ya con '(' consumido. Termina consumiendo
-    /// el ')'. Cada parámetro es `name`, `name: Type`, `name = default`,
-    /// `name: Type = default` (mini-tanda Fp — default params), o
-    /// `...name: Type` (mini-tanda Fp.2 — varargs). Acepta trailing
-    /// comma y newlines dentro de los paréntesis.
+    /// Parameter list, with the '(' already consumed. Finishes by
+    /// consuming the ')'. Each parameter is `name`, `name: Type`,
+    /// `name = default`, `name: Type = default` (mini-batch Fp —
+    /// default params), or `...name: Type` (mini-batch Fp.2 —
+    /// varargs). Accepts trailing comma and newlines inside the
+    /// parens.
     ///
-    /// **Regla Python para defaults**: una vez que un param tiene default,
-    /// todos los siguientes también deben tener default.
+    /// **Python rule for defaults**: once a param has a default, all
+    /// following params must have a default too.
     ///
-    /// **Regla varargs (Fp.2)**: solo el ÚLTIMO param puede ser varargs.
-    /// Un varargs NO puede tener default. El binding adentro del body
-    /// tipa como `List<T>` (o `List<Any>` si no se anotó).
+    /// **Varargs rule (Fp.2)**: only the LAST param may be varargs.
+    /// A varargs param CANNOT have a default. The body binding types
+    /// as `List<T>` (or `List<Any>` if not annotated).
     fn parse_params(&mut self) -> FitzResult<Vec<Param>> {
         let mut params = Vec::new();
         let mut saw_default = false;
@@ -1793,10 +1789,11 @@ impl Parser {
         }
         loop {
             self.skip_newlines();
-            // Fp.2 — `...name` indica varargs. Detectamos `..` + `.`
-            // (Token::DotDot seguido de Token::Dot). Fitz tiene `..` para
-            // Range y `..=` para Range inclusivo; tres `.` consecutivos
-            // no colisionan con nada (el lexer empareja greedy).
+            // Fp.2 — `...name` signals varargs. Detected as `..` + `.`
+            // (Token::DotDot followed by Token::Dot). Fitz has `..`
+            // for Range and `..=` for inclusive Range; three
+            // consecutive `.` don't collide with anything (the lexer
+            // matches greedily).
             let varargs =
                 if matches!(self.peek(), Token::DotDot) && matches!(self.peek_at(1), Token::Dot) {
                     if saw_varargs {
@@ -1821,7 +1818,7 @@ impl Parser {
             let (name, name_span) =
                 self.expect_ident_with_span("se esperaba nombre de parámetro")?;
             let type_ = self.parse_optional_type_annotation()?;
-            // Fp — default value `= <expr>`. Varargs no admite default.
+            // Fp — default value `= <expr>`. Varargs do not allow a default.
             let default = if matches!(self.peek(), Token::Eq) {
                 if varargs {
                     return Err(self.error(
@@ -1834,10 +1831,11 @@ impl Parser {
                 saw_default = true;
                 Some(expr)
             } else {
-                // Default + varargs son mutex: un varargs absorbe 0+ args,
-                // así que NO triggerea la regla de "todos los siguientes
-                // necesitan default" (no hay siguientes y absorbe el rol
-                // de "args opcionales adicionales").
+                // Default + varargs are mutually exclusive: a varargs
+                // absorbs 0+ args, so it does NOT trigger the "all
+                // following need defaults" rule (there are no
+                // following params and it absorbs the role of
+                // "additional optional args").
                 if saw_default && !varargs {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
@@ -1850,10 +1848,11 @@ impl Parser {
                 }
                 None
             };
-            // T3 — chequeo de nombres duplicados. `fn f(a: Int, a: Int)` es
-            // bug típico copy-paste; el evaluator daría un error confuso
-            // ("variable redefinida") al bindear el segundo `a`. Mejor
-            // capturarlo en el parser con mensaje claro citando el nombre.
+            // T3 — duplicate name check. `fn f(a: Int, a: Int)` is a
+            // typical copy-paste bug; the evaluator would emit a
+            // confusing error ("variable redefined") when binding
+            // the second `a`. Better to catch it in the parser with
+            // a clear message citing the name.
             if params.iter().any(|p| p.name == name) {
                 return Err(self.error(
                     ErrorKind::UnexpectedToken,
@@ -1889,8 +1888,8 @@ impl Parser {
         Ok(params)
     }
 
-    /// `-> TypeExpr` opcional. Comparte la gramática de tipos con
-    /// `parse_optional_type_annotation` — acepta genéricos y nullables.
+    /// Optional `-> TypeExpr`. Shares the type grammar with
+    /// `parse_optional_type_annotation` — accepts generics and nullables.
     fn parse_optional_return_type(&mut self) -> FitzResult<Option<TypeExpr>> {
         if self.eat(&Token::Arrow) {
             Ok(Some(self.parse_type_expr()?))
@@ -1899,17 +1898,18 @@ impl Parser {
         }
     }
 
-    /// Bloque `{ stmt; stmt; ... }`. Consume llaves de apertura y cierre.
-    /// Acepta líneas en blanco entre sentencias y bloques vacíos.
+    /// Block `{ stmt; stmt; ... }`. Consumes the opening and closing
+    /// braces. Accepts blank lines between statements and empty blocks.
     ///
-    /// Recovery (9.0.1, F15): si `recovery_mode` está activo, errores
-    /// de `parse_stmt` adentro del bloque se capturan paralelamente al
-    /// loop top-level — `Stmt::Error(span)` en lugar del stmt fallido,
-    /// `synchronize()` hasta `Newline`/`RBrace`/`EOF`, y se sigue. Si
-    /// el `{` de apertura nunca apareció o el `}` de cierre falta, el
-    /// error sí se propaga: arreglar la estructura de un bloque es muy
-    /// costoso adentro de recovery; preferimos abortar el bloque entero
-    /// y dejar que el loop padre se reacomode en el próximo sync point.
+    /// Recovery (9.0.1, F15): if `recovery_mode` is active, errors
+    /// from `parse_stmt` inside the block are caught in parallel to
+    /// the top-level loop — `Stmt::Error(span)` instead of the
+    /// failing stmt, `synchronize()` up to `Newline`/`RBrace`/`EOF`,
+    /// and we keep going. If the opening `{` never appeared or the
+    /// closing `}` is missing, the error IS propagated: fixing a
+    /// broken block structure during recovery is very costly; we
+    /// prefer to abort the whole block and let the parent loop
+    /// realign at the next sync point.
     fn parse_block(&mut self) -> FitzResult<Vec<Stmt>> {
         self.expect(&Token::LBrace, "se esperaba '{'")?;
         let mut stmts = Vec::new();
@@ -1926,8 +1926,8 @@ impl Parser {
                 ));
             }
             if self.recovery_mode && self.recovered_errors.len() >= MAX_RECOVERED_ERRORS {
-                // Saltamos al cierre del bloque (si hay) para no dejar
-                // un `{` colgado en el AST padre.
+                // Jump to the block close (if any) so we don't leave
+                // a dangling `{` in the parent AST.
                 while !matches!(self.peek(), Token::RBrace | Token::EOF) {
                     self.advance();
                 }
@@ -1961,16 +1961,17 @@ impl Parser {
 
     // ---------- loops ----------
 
-    /// `while cond { body }`. Iteración condicional. La condición se evalúa
-    /// antes de cada iteración; si es `false`, termina el loop.
+    /// `while cond { body }`. Conditional iteration. The condition is
+    /// evaluated before each iteration; on `false`, the loop ends.
     fn parse_while(&mut self, span: Span) -> FitzResult<Stmt> {
         self.parse_while_with_label(span, None)
     }
 
     fn parse_while_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
         self.expect(&Token::While, "se esperaba 'while'")?;
-        // La condición no permite struct literal a primer nivel — el `{`
-        // siguiente arranca el cuerpo del while. Adentro de paréntesis sí.
+        // The condition does not allow a struct literal at the top
+        // level — the next `{` opens the while body. Inside parens
+        // it's fine.
         let condition = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
         Ok(Stmt::While {
@@ -1981,7 +1982,7 @@ impl Parser {
         })
     }
 
-    /// `loop { body }` — loop infinito. Solo se sale con `break` o `return`.
+    /// `loop { body }` — infinite loop. Only exits via `break` or `return`.
     fn parse_loop(&mut self, span: Span) -> FitzResult<Stmt> {
         self.parse_loop_with_label(span, None)
     }
@@ -1992,10 +1993,10 @@ impl Parser {
         Ok(Stmt::Loop { body, label, span })
     }
 
-    /// Mini-tanda L — `loop { body }` como expresión. Versión
-    /// idéntica a `parse_loop` pero devuelve `Expr::Loop`.
-    /// Usada cuando `loop` aparece como RHS de let, arg de
-    /// call, etc. `label` opcional para `'name: loop { ... }`.
+    /// Mini-batch L — `loop { body }` as an expression. Identical
+    /// version of `parse_loop` but returns `Expr::Loop`. Used when
+    /// `loop` appears as the RHS of let, a call arg, etc. Optional
+    /// `label` for `'name: loop { ... }`.
     fn parse_loop_expr(&mut self, label: Option<String>) -> FitzResult<Expr> {
         let span = self.cur_span();
         self.expect(&Token::Loop, "se esperaba 'loop'")?;
@@ -2003,27 +2004,28 @@ impl Parser {
         Ok(Expr::Loop { body, label, span })
     }
 
-    /// `for var in iter { body }`. Iteración sobre listas y rangos
-    /// (mapas todavía no, hasta que tengamos el tipo `Pair`).
-    /// `var` se define en cada iteración en el scope del body.
+    /// `for var in iter { body }`. Iteration over lists and ranges
+    /// (maps not yet, until we have the `Pair` type). `var` is
+    /// defined in each iteration within the body's scope.
     fn parse_for(&mut self, span: Span) -> FitzResult<Stmt> {
         self.parse_for_with_label(span, None)
     }
 
     fn parse_for_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
         self.expect(&Token::For, "se esperaba 'for'")?;
-        // Mini-tanda Md: el var del for ahora es un Pattern. Reusa
-        // `parse_pattern` (el mismo de los arms de match), que cubre
-        // Ident, Wildcard, Tuple — los 3 casos válidos en for. Otros
-        // patterns (literales, Ok/Err, Range) el checker los rechaza.
+        // Mini-batch Md: the `for` var is now a Pattern. Reuses
+        // `parse_pattern` (same one used by match arms), which
+        // covers Ident, Wildcard, Tuple — the 3 valid cases in
+        // `for`. Other patterns (literals, Ok/Err, Range) are
+        // rejected by the checker.
         let var = self.parse_pattern()?;
         self.expect(
             &Token::In,
             "se esperaba 'in' después de la variable de 'for'",
         )?;
-        // El iterable no permite struct literal a primer nivel — el `{`
-        // siguiente arranca el cuerpo del for. Adentro de paréntesis o
-        // listas sí: `for u in [User { id: 1 }]`.
+        // The iterable does not allow a struct literal at the top
+        // level — the next `{` opens the `for` body. Inside parens
+        // or lists it's fine: `for u in [User { id: 1 }]`.
         let iter = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
         Ok(Stmt::For {
@@ -2037,10 +2039,10 @@ impl Parser {
 
     // ---------- if / match / type ----------
 
-    /// `if cond { ... }` o `if cond { ... } else { ... }` o
-    /// `if cond { ... } else if ... { ... } else { ... }`.
-    /// La cadena `else if` se desugar a un `else` que contiene una
-    /// sola sentencia: el `if` siguiente envuelto en `Stmt::Expr`.
+    /// `if cond { ... }` or `if cond { ... } else { ... }` or
+    /// `if cond { ... } else if ... { ... } else { ... }`. The
+    /// `else if` chain desugars to an `else` containing a single
+    /// statement: the next `if` wrapped in `Stmt::Expr`.
     fn parse_if_expr(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
         self.expect(&Token::If, "se esperaba 'if'")?;
@@ -2065,16 +2067,17 @@ impl Parser {
         })
     }
 
-    /// `match value { pat => expr, pat => expr, ... }`.
-    /// Brazos separados por coma o newline (ambos aceptados).
-    /// Limitaciones de los patrones, según el AST: solo `Ident`,
-    /// `_` (wildcard), `Ok(x)`, `Err(e)`. Literales y rangos en
-    /// patrones son deuda explícita.
+    /// `match value { pat => expr, pat => expr, ... }`. Arms are
+    /// separated by comma or newline (both accepted). Pattern
+    /// limitations, per the AST: only `Ident`, `_` (wildcard),
+    /// `Ok(x)`, `Err(e)`. Literals and ranges in patterns are
+    /// explicit debt.
     fn parse_match_expr(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
         self.expect(&Token::Match, "se esperaba 'match'")?;
-        // El scrutinee no permite struct literal a primer nivel — el `{`
-        // siguiente arranca el bloque de arms. Adentro de paréntesis sí.
+        // The scrutinee does not allow a struct literal at the top
+        // level — the next `{` opens the arms block. Inside parens
+        // it's fine.
         let value = self.expression_no_struct_lit()?;
         self.expect(
             &Token::LBrace,
@@ -2094,7 +2097,7 @@ impl Parser {
                 ));
             }
             let pattern = self.parse_or_pattern()?;
-            // R.2.2 — guard opcional `if <cond>` entre pattern y `=>`.
+            // R.2.2 — optional guard `if <cond>` between pattern and `=>`.
             let guard = if matches!(self.peek(), Token::If) {
                 self.advance(); // consume `if`
                 Some(self.expression()?)
@@ -2102,10 +2105,10 @@ impl Parser {
                 None
             };
             self.expect(&Token::FatArrow, "se esperaba '=>' después del patrón")?;
-            // Sp.2 — el cuerpo del arm puede ser:
-            //   1. `return <expr>` / `break <expr>` / `continue` → Stmt directo.
-            //   2. `{ <stmts> }` → bloque de stmts (parse_block).
-            //   3. `<expr>` → un Stmt::Expr de una sola entrada (legacy).
+            // Sp.2 — the arm body may be:
+            //   1. `return <expr>` / `break <expr>` / `continue` → Stmt directly.
+            //   2. `{ <stmts> }` → block of stmts (parse_block).
+            //   3. `<expr>` → a single Stmt::Expr entry (legacy).
             let body: Vec<Stmt> = match self.peek() {
                 Token::Return | Token::Break | Token::Continue => {
                     let stmt = self.parse_stmt()?;
@@ -2123,9 +2126,9 @@ impl Parser {
                 guard,
                 body,
             });
-            // Separador entre brazos: coma o newline. RBrace y EOF se
-            // dejan pasar — el siguiente iter del loop los maneja:
-            // RBrace termina el match, EOF cae a MissingClosingBrace.
+            // Separator between arms: comma or newline. RBrace and
+            // EOF are let through — the next loop iter handles them:
+            // RBrace ends the match, EOF falls into MissingClosingBrace.
             match self.peek() {
                 Token::Comma => {
                     self.advance();
@@ -2146,27 +2149,27 @@ impl Parser {
         })
     }
 
-    /// Patrones soportados:
+    /// Supported patterns:
     ///   _           → Wildcard
-    ///   nombre      → Ident(nombre)        (captura, matchea todo)
-    ///   42 / -3     → Int (con `-` para negativos)
+    ///   name        → Ident(name)          (capture, matches anything)
+    ///   42 / -3     → Int (with `-` for negatives)
     ///   3.14        → Float
-    ///   "texto"     → Str
+    ///   "text"      → Str
     ///   true/false  → Bool
     ///   null        → Null
-    ///   0..10       → Range (solo Int; extremos pueden ser negativos)
-    ///   Ok(name)    → OkBinding(name)      (bloqueado runtime hasta Fase 3)
-    ///   Err(name)   → ErrBinding(name)     (bloqueado runtime hasta Fase 3)
-    /// Parsea uno o más patterns separados por `|` (or-pattern,
-    /// R.2.1). Si solo hay uno, devuelve el pattern simple sin
-    /// envolver en `Or`. Si hay 2+, devuelve `Pattern::Or(...)`.
+    ///   0..10       → Range (Int only; bounds may be negative)
+    ///   Ok(name)    → OkBinding(name)      (runtime-blocked until Phase 3)
+    ///   Err(name)   → ErrBinding(name)     (runtime-blocked until Phase 3)
+    /// Parse one or more patterns separated by `|` (or-pattern,
+    /// R.2.1). If only one, returns the plain pattern without
+    /// wrapping in `Or`. With 2+, returns `Pattern::Or(...)`.
     ///
-    /// Restricciones del MVP (paralelas a Rust):
-    ///  - **Sin bindings** adentro de or-patterns. `Ident(x)`,
-    ///    `OkBinding(name)` y `ErrBinding(name)` se rechazan con
-    ///    error claro citando el caveat. Workaround sugerido al
-    ///    usuario: usar `Wildcard` / `OkWildcard` / `ErrWildcard`,
-    ///    o desdoblar el arm.
+    /// MVP restrictions (parallel to Rust):
+    ///  - **No bindings** inside or-patterns. `Ident(x)`,
+    ///    `OkBinding(name)` and `ErrBinding(name)` are rejected
+    ///    with a clear error citing the caveat. Suggested workaround
+    ///    for the user: use `Wildcard` / `OkWildcard` /
+    ///    `ErrWildcard`, or split the arm.
     fn parse_or_pattern(&mut self) -> FitzResult<Pattern> {
         let first = self.parse_pattern()?;
         if !matches!(self.peek(), Token::Pipe) {
@@ -2178,8 +2181,8 @@ impl Parser {
             let next = self.parse_pattern()?;
             subs.push(next);
         }
-        // Validar restricciones del MVP: sin bindings en
-        // sub-patterns. Mirá el doc comment de `Pattern::Or`.
+        // Validate MVP restrictions: no bindings in sub-patterns.
+        // See the `Pattern::Or` doc comment.
         for sub in &subs {
             if matches!(
                 sub,
@@ -2195,12 +2198,12 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> FitzResult<Pattern> {
-        // Mini-tanda T — `(p1, p2, ...)` tuple pattern. Decisión
-        // del parser: si arranca con `(`, asumimos tuple pattern
-        // (no hay otro uso de `(` en posición de pattern). `()` →
-        // tupla vacía. `(p)` sin coma → en match no tiene sentido
-        // (un pattern entre paréntesis equivalente a `p`), pero
-        // lo admitimos por consistencia.
+        // Mini-batch T — `(p1, p2, ...)` tuple pattern. Parser
+        // decision: if it starts with `(`, assume tuple pattern
+        // (there is no other use of `(` in pattern position).
+        // `()` → empty tuple. `(p)` without comma → in match it
+        // makes no sense (a pattern in parens is equivalent to
+        // `p`), but we accept it for consistency.
         if matches!(self.peek(), Token::LParen) {
             self.advance(); // consume `(`
             if matches!(self.peek(), Token::RParen) {
@@ -2226,9 +2229,9 @@ impl Parser {
             self.expect(&Token::RParen, "se esperaba ')' para cerrar el pattern")?;
             return Ok(first);
         }
-        // Literales. Clonamos el peek antes de avanzar para no chocar con
-        // el borrow checker. Los Int caen en `try_int_or_range` para
-        // chequear si después viene `..` y promovemos a Range.
+        // Literals. Clone the peek before advancing so we don't fight
+        // the borrow checker. Ints go through `try_int_or_range` to
+        // check whether `..` follows and promote to Range.
         match self.peek().clone() {
             Token::Int(n) => {
                 self.advance();
@@ -2255,9 +2258,9 @@ impl Parser {
                 return Ok(Pattern::Null);
             }
             Token::Minus => {
-                // Soporte para literales negativos: `-42`, `-3.14`. Si tras
-                // el `-` no viene un número, es error (no aceptamos `-x`
-                // como patrón).
+                // Support for negative literals: `-42`, `-3.14`. If
+                // there is no number after the `-`, error (we do not
+                // accept `-x` as a pattern).
                 self.advance();
                 match self.peek().clone() {
                     Token::Int(n) => {
@@ -2279,7 +2282,7 @@ impl Parser {
             _ => {}
         }
 
-        // Casos especiales: Ok(...) y Err(...).
+        // Special cases: Ok(...) and Err(...).
         if let Token::Ident(name) = self.peek() {
             if name == "Ok" || name == "Err" {
                 let is_ok = name == "Ok";
@@ -2292,8 +2295,8 @@ impl Parser {
                     "se esperaba identificador para el binding de Ok/Err",
                 )?;
                 self.expect(&Token::RParen, "se esperaba ')' al final del patrón Ok/Err")?;
-                // `_` adentro es wildcard (no bindea): cierra deuda
-                // vieja de 3.3 donde `_` se bindeaba como var.
+                // `_` inside is a wildcard (does not bind): closes
+                // the old 3.3 debt where `_` was bound as a var.
                 return Ok(match (is_ok, binding.as_str()) {
                     (true, "_") => Pattern::OkWildcard,
                     (false, "_") => Pattern::ErrWildcard,
@@ -2302,7 +2305,7 @@ impl Parser {
                 });
             }
         }
-        // Caso general: identificador o wildcard.
+        // General case: identifier or wildcard.
         let (name, name_span) = self.expect_ident_with_span("se esperaba patrón")?;
         if name == "_" {
             Ok(Pattern::Wildcard)
@@ -2311,18 +2314,18 @@ impl Parser {
         }
     }
 
-    /// Después de consumir un Int (posiblemente negativo), peek `..`
-    /// o `..=`: si está, parsea el segundo extremo y devuelve
-    /// `Pattern::Range`; si no, devuelve `Pattern::Int(start)` sin
-    /// más. El extremo derecho admite `-Int` también. R.1.4 sumó
-    /// soporte de `..=` (rango inclusivo).
+    /// After consuming an Int (possibly negative), peek `..` or
+    /// `..=`: if present, parse the second endpoint and return
+    /// `Pattern::Range`; otherwise return `Pattern::Int(start)`
+    /// directly. The right endpoint also accepts `-Int`. R.1.4
+    /// added `..=` support (inclusive range).
     fn try_int_or_range(&mut self, start: i64) -> FitzResult<Pattern> {
         let inclusive = match self.peek() {
             Token::DotDot => false,
             Token::DotDotEq => true,
             _ => return Ok(Pattern::Int(start)),
         };
-        self.advance(); // consume '..' o '..='
+        self.advance(); // consume '..' or '..='
         let end = match self.peek().clone() {
             Token::Int(n) => {
                 self.advance();
@@ -2358,15 +2361,15 @@ impl Parser {
     }
 
     /// `type Name { field: TypeExpr [= default], ..., fn method(...) {...} }`.
-    /// Separador entre items: coma o newline (ambos aceptados).
-    /// Items pueden ser **fields** (`name: TypeExpr [= default]`) o
-    /// **métodos** (`[async] fn nombre(params) [-> Ret] { body }` —
-    /// R.3, mini-fase R). Lookahead trivial: `fn` o `async` →
-    /// método; cualquier otro Ident → field.
-    /// El tipo del campo usa la misma gramática que el resto de las
-    /// anotaciones (`parse_type_expr`): admite genéricos y el sufijo
-    /// `?` para nullable. La nullabilidad queda dentro de `TypeExpr`
-    /// como `TypeExpr::Nullable(...)`.
+    /// Separator between items: comma or newline (both accepted).
+    /// Items can be **fields** (`name: TypeExpr [= default]`) or
+    /// **methods** (`[async] fn name(params) [-> Ret] { body }` —
+    /// R.3, mini-phase R). Trivial lookahead: `fn` or `async` →
+    /// method; any other Ident → field.
+    /// The field type uses the same grammar as the rest of the
+    /// annotations (`parse_type_expr`): allows generics and the
+    /// `?` nullable suffix. Nullability lives inside `TypeExpr` as
+    /// `TypeExpr::Nullable(...)`.
     fn parse_typedef(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Type, "se esperaba 'type'")?;
         let name = self.expect_ident("se esperaba nombre del tipo")?;
@@ -2394,17 +2397,17 @@ impl Parser {
                     "se esperaba '}' para cerrar 'type'",
                 ));
             }
-            // Fase 10.3.a — decoradores por field (`@primary`,
-            // `@column(name="...")`, `@unique`, `@index`). Acumulamos
-            // antes de leer el field/método target. Soportamos
-            // apilamiento (`@primary @unique id: Int`).
+            // Phase 10.3.a — per-field decorators (`@primary`,
+            // `@column(name="...")`, `@unique`, `@index`). Accumulate
+            // before reading the target field/method. Stacking is
+            // supported (`@primary @unique id: Int`).
             let mut field_decorators: Vec<Decorator> = Vec::new();
             while matches!(self.peek(), Token::At) {
                 field_decorators.push(self.parse_one_decorator()?);
                 self.skip_newlines();
             }
-            // R.3 — método de instancia: `[async] fn nombre(...) [-> T] { ... }`.
-            // Mini-tanda St — método estático: `static [async] fn nombre(...)`.
+            // R.3 — instance method: `[async] fn name(...) [-> T] { ... }`.
+            // Mini-batch St — static method: `static [async] fn name(...)`.
             if matches!(self.peek(), Token::Async | Token::Fn | Token::Static) {
                 if !field_decorators.is_empty() {
                     return Err(self.error(
@@ -2434,21 +2437,21 @@ impl Parser {
                     decorators: field_decorators,
                 });
             }
-            // Separador opcional: coma. Newline se consume en la
-            // próxima iteración por skip_newlines.
+            // Optional separator: comma. Newline is consumed in the
+            // next iteration by skip_newlines.
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
             }
         }
     }
 
-    /// Parsea un método custom adentro del bloque `type` (R.3).
-    /// Sintaxis idéntica a `parse_fndef`, pero NO admite decoradores
-    /// (los métodos no aceptan `@get`/`@server`/etc.) y emite
-    /// `MethodDef` en lugar de `Stmt::FnDef`.
+    /// Parse a custom method inside a `type` block (R.3). Syntax
+    /// identical to `parse_fndef`, but does NOT allow decorators
+    /// (methods don't accept `@get`/`@server`/etc.) and emits
+    /// `MethodDef` instead of `Stmt::FnDef`.
     fn parse_method_def(&mut self, span: Span) -> FitzResult<MethodDef> {
-        // Mini-tanda St — `static [async] fn ...` declara un método
-        // estático (sin receiver `self`). `static` debe preceder a
+        // Mini-batch St — `static [async] fn ...` declares a static
+        // method (no `self` receiver). `static` must come before
         // `async`/`fn`.
         let is_static = self.eat(&Token::Static);
         let is_async = self.eat(&Token::Async);
@@ -2486,37 +2489,37 @@ impl Parser {
         })
     }
 
-    // ---------- decoradores ----------
+    // ---------- decorators ----------
     //
-    // Forma:
-    //   @nombre(arg1, arg2, ...)
-    //   [@otro_deco(...)]*
+    // Shape:
+    //   @name(arg1, arg2, ...)
+    //   [@other_deco(...)]*
     //   [async] fn handler(...) [-> Type] { ... }
     //
-    // Acumulamos los decoradores en `Decorator { name, args, kwargs }`
-    // y los pegamos al `Stmt::FnDef` resultante. La semántica (qué
-    // hace cada decorator) es responsabilidad del evaluador: el
-    // parser solo garantiza que estructuralmente vienen antes de una
-    // fn, que la sintaxis es `@Ident(args, key=value)`, y que los
-    // kwargs van después de los positionals. Args y values son
-    // expresiones cualquiera — el decorator específico decide qué
-    // tipos acepta en runtime.
+    // We accumulate decorators into `Decorator { name, args, kwargs }`
+    // and attach them to the resulting `Stmt::FnDef`. Semantics
+    // (what each decorator actually does) is the evaluator's job:
+    // the parser only guarantees they structurally come before a
+    // fn, that the syntax is `@Ident(args, key=value)`, and that
+    // kwargs come after positionals. Args and values are arbitrary
+    // expressions — the specific decorator decides what types it
+    // accepts at runtime.
     //
-    // Hasta 4.1 el evaluador corta con error explícito en cuanto ve
-    // decorators no vacíos; 4.2 cablea `@get`/`@post`/`@put`/`@delete`
-    // contra el runtime HTTP.
+    // Up to 4.1 the evaluator bails with an explicit error as soon
+    // as it sees non-empty decorators; 4.2 wires `@get`/`@post`/
+    // `@put`/`@delete` against the HTTP runtime.
 
-    /// Parsea uno o más decoradores apilados (`@x @y @z`) seguidos de
-    /// un `fn`, `async fn` o `type`. Renombrado desde
-    /// `parse_decorated_fndef` en Fase 10.3.a — antes solo permitía
-    /// decoradores sobre fns; ahora también sobre `type` para
-    /// `@table("users") type User { ... }` del ORM declarativo.
+    /// Parse one or more stacked decorators (`@x @y @z`) followed by
+    /// `fn`, `async fn` or `type`. Renamed from
+    /// `parse_decorated_fndef` in Phase 10.3.a — it used to allow
+    /// decorators only on fns; now also on `type` for
+    /// `@table("users") type User { ... }` of the declarative ORM.
     fn parse_decorated_stmt(&mut self, span: Span) -> FitzResult<Stmt> {
         let mut decorators: Vec<Decorator> = Vec::new();
-        // Al menos uno: el llamador entró acá viendo `@`.
+        // At least one: the caller entered here seeing `@`.
         loop {
             decorators.push(self.parse_one_decorator()?);
-            // Permitimos newline entre decorators apilados.
+            // Allow newline between stacked decorators.
             self.skip_newlines();
             if !matches!(self.peek(), Token::At) {
                 break;
@@ -2573,22 +2576,22 @@ impl Parser {
         }
     }
 
-    /// Parsea un único decorador (`@ Ident ( args )?`), con el `@`
-    /// aún sin consumir. Devuelve el `Decorator` listo; el caller
-    /// decide si seguir acumulando.
+    /// Parse a single decorator (`@ Ident ( args )?`), with the `@`
+    /// still unconsumed. Returns the ready `Decorator`; the caller
+    /// decides whether to keep accumulating.
     ///
-    /// Los paréntesis son **opcionales** desde 9.z.2.a (necesario
-    /// para `@test fn ...` que no toma args). Decoradores sin paréntesis
-    /// son equivalentes a `@nombre()` (args = kwargs = vacíos). Cambio
-    /// retro-compatible: `@server()` y `@get("/x")` siguen funcionando
-    /// idéntico.
+    /// Parens are **optional** since 9.z.2.a (needed for `@test fn
+    /// ...` which takes no args). Decorators without parens are
+    /// equivalent to `@name()` (args = kwargs = empty). Backwards-
+    /// compatible: `@server()` and `@get("/x")` keep working the
+    /// same.
     fn parse_one_decorator(&mut self) -> FitzResult<Decorator> {
         self.expect(&Token::At, "se esperaba '@'")?;
         let name = self.expect_ident("se esperaba nombre de decorador después de '@'")?;
-        // Si viene `(`, parseamos args; si no, decorator sin args.
-        // El próximo significativo determina la rama (saltando newlines
-        // no — el `(` debe venir en la misma línea que el nombre, para
-        // evitar ambigüedades con el próximo stmt).
+        // If `(` follows, parse args; otherwise it's a decorator
+        // without args. The next significant token picks the branch
+        // (without skipping newlines — the `(` must be on the same
+        // line as the name to avoid ambiguity with the next stmt).
         let (args, kwargs) = if matches!(self.peek(), Token::LParen) {
             self.advance();
             self.parse_decorator_args()?
@@ -2598,48 +2601,48 @@ impl Parser {
         Ok(Decorator { name, args, kwargs })
     }
 
-    /// Parsea los argumentos de un decorator después del `(` consumido.
-    /// Separa positionals de kwargs. La regla:
+    /// Parse a decorator's arguments after the `(` is consumed.
+    /// Splits positionals from kwargs. Rule:
     ///
-    /// - Mientras el siguiente arg sea una expresión suelta, va a
+    /// - While the next arg is a bare expression, it goes into
     ///   `args` (positional).
-    /// - Detección de kwarg: `Ident '='` (con `Token::Eq`, NO
-    ///   `Token::EqEq` — `a == b` sigue siendo una expresión válida
-    ///   como arg posicional).
-    /// - Una vez visto el primer kwarg, **todos** los args siguientes
-    ///   deben ser kwargs; un positional posterior es error.
-    /// - Kwargs duplicados son error.
+    /// - Kwarg detection: `Ident '='` (with `Token::Eq`, NOT
+    ///   `Token::EqEq` — `a == b` is still a valid expression as a
+    ///   positional arg).
+    /// - Once the first kwarg is seen, **all** following args must
+    ///   be kwargs; a later positional is an error.
+    /// - Duplicate kwargs are an error.
     ///
-    /// Termina consumiendo el `)`. Acepta lista vacía, coma trailing
-    /// y newlines entre elementos.
+    /// Ends by consuming the `)`. Accepts empty list, trailing comma
+    /// and newlines between elements.
     #[allow(clippy::type_complexity)]
     fn parse_decorator_args(&mut self) -> FitzResult<(Vec<Expr>, Vec<(String, Expr)>)> {
         let mut args: Vec<Expr> = Vec::new();
         let mut kwargs: Vec<(String, Expr)> = Vec::new();
         self.skip_newlines();
-        // Caso vacío: @deco()
+        // Empty case: @deco()
         if matches!(self.peek(), Token::RParen) {
             self.advance();
             return Ok((args, kwargs));
         }
         loop {
             self.skip_newlines();
-            // Detección de kwarg: Ident seguido de `=` (Token::Eq).
-            // `==` (Token::EqEq) NO dispara: es un BinOp en una expresión
-            // posicional.
+            // Kwarg detection: Ident followed by `=` (Token::Eq).
+            // `==` (Token::EqEq) does NOT fire: it is a BinOp in a
+            // positional expression.
             let is_kwarg =
                 matches!(self.peek(), Token::Ident(_)) && matches!(self.peek_at(1), Token::Eq);
             if is_kwarg {
                 let key_tok = self.advance();
                 let key = match key_tok.token {
                     Token::Ident(s) => s,
-                    _ => unreachable!("verificado por is_kwarg"),
+                    _ => unreachable!("checked by is_kwarg"),
                 };
-                // Consumir el `=`.
+                // Consume the `=`.
                 self.advance();
                 self.skip_newlines();
                 let value = self.expression()?;
-                // Duplicado.
+                // Duplicate.
                 if kwargs.iter().any(|(k, _)| k == &key) {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
@@ -2651,7 +2654,7 @@ impl Parser {
                 }
                 kwargs.push((key, value));
             } else {
-                // Positional. Si ya hubo kwargs, es error.
+                // Positional. If kwargs already appeared, error.
                 if !kwargs.is_empty() {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
@@ -2682,22 +2685,22 @@ impl Parser {
         Ok((args, kwargs))
     }
 
-    /// M5 helper (post-audit 2026-05-27) — parsea una secuencia de
-    /// items separados por coma, terminada por `terminator`. Maneja
-    /// trailing comma (`[1, 2, 3,]`) y newlines entre items. El
-    /// caller pasa el parser per-item como closure; el helper se
-    /// encarga del scaffold (skip_newlines, comma, trailing comma,
-    /// expect del terminator).
+    /// M5 helper (post-audit 2026-05-27) — parses a comma-separated
+    /// sequence of items, terminated by `terminator`. Handles
+    /// trailing comma (`[1, 2, 3,]`) and newlines between items.
+    /// The caller passes the per-item parser as a closure; the
+    /// helper handles the scaffolding (skip_newlines, comma,
+    /// trailing comma, expecting the terminator).
     ///
-    /// `terminator` debe ser una variante unit (`RParen`/`RBracket`/
-    /// `RBrace`) — los comparamos con `matches!` exhaustivo en el
-    /// dispatch interno.
+    /// `terminator` must be a unit variant (`RParen`/`RBracket`/
+    /// `RBrace`) — we compare them via exhaustive `matches!` in
+    /// the internal dispatch.
     ///
-    /// **NO aplica a** `parse_struct_lit_fields` (separador puede
-    /// ser newline además de coma) ni a `parse_list_literal_items`
-    /// (necesita detección de comprehension tras el primer item).
-    /// Esos siguen con su propio loop por razones documentadas en
-    /// sus doc-comments.
+    /// **Does NOT apply to** `parse_struct_lit_fields` (separator
+    /// can be newline in addition to comma) nor to
+    /// `parse_list_literal_items` (needs comprehension detection
+    /// after the first item). Those keep their own loops for
+    /// reasons documented in their own doc-comments.
     fn parse_comma_separated<T, F>(
         &mut self,
         terminator: &Token,
@@ -2732,25 +2735,26 @@ impl Parser {
         Ok(items)
     }
 
-    /// Parsea los argumentos de una llamada, ya con '(' consumido.
-    /// Termina consumiendo el ')'. Acepta lista vacía, coma trailing,
-    /// y newlines entre elementos (útil para llamadas multilínea).
+    /// Parse a call's arguments, with the '(' already consumed.
+    /// Ends by consuming the ')'. Accepts empty list, trailing
+    /// comma, and newlines between elements (handy for multiline
+    /// calls).
     fn parse_call_args(&mut self) -> FitzResult<Vec<Expr>> {
-        // M5 (post-audit) — el scaffold de "coma + trailing comma +
-        // newlines + RParen" lo provee `parse_comma_separated`. La
-        // lógica per-item (Fp.3: named arg vs positional + flag
-        // `saw_named` para orden) queda en el closure.
+        // M5 (post-audit) — the "comma + trailing comma + newlines
+        // + RParen" scaffold is provided by `parse_comma_separated`.
+        // The per-item logic (Fp.3: named arg vs positional + the
+        // `saw_named` flag for ordering) lives in the closure.
         let mut saw_named = false;
         self.parse_comma_separated(
             &Token::RParen,
             "se esperaba ')' para cerrar la llamada",
             |p| {
-                // Fp.3 — `name: value` con lookahead Ident + Colon.
-                // Mismo patrón que kwargs de decoradores (eval ya lo
-                // hace para `@server(port=3000)`). El parser no
-                // chequea aquí si el name corresponde a un param real
-                // — eso lo hace el checker y el evaluator/codegen al
-                // despachar la call.
+                // Fp.3 — `name: value` with Ident + Colon lookahead.
+                // Same pattern as decorator kwargs (eval already
+                // does it for `@server(port=3000)`). The parser
+                // does NOT check here whether the name corresponds
+                // to a real param — that's done by the checker and
+                // the evaluator/codegen when dispatching the call.
                 let (start_line, start_col) = p.current_pos();
                 let is_named =
                     matches!(p.peek(), Token::Ident(_)) && matches!(p.peek_at(1), Token::Colon);
@@ -2778,28 +2782,27 @@ impl Parser {
         )
     }
 
-    /// Expresión "hoja": literal, identificador, paréntesis, `if`,
-    /// `match`, list literal `[...]` o map literal `{...}`. Acá
-    /// termina la recursión hacia abajo en la escalera.
+    /// "Leaf" expression: literal, identifier, parens, `if`,
+    /// `match`, list literal `[...]` or map literal `{...}`. The
+    /// downward recursion in the ladder bottoms out here.
     ///
-    /// Nota sobre `{`: en posición de expresión SIEMPRE arranca un
-    /// map literal. Los bloques (`fn ... { body }`, `if cond { ... }`,
-    /// etc.) consumen su `{` desde `parse_block`/`parse_match_expr`,
-    /// no desde acá — el flujo nunca cae en este caso para esos
-    /// constructos.
+    /// Note about `{`: in expression position it ALWAYS starts a
+    /// map literal. Blocks (`fn ... { body }`, `if cond { ... }`,
+    /// etc.) consume their `{` from `parse_block`/`parse_match_expr`
+    /// — the flow never falls through here for those constructs.
     fn primary(&mut self) -> FitzResult<Expr> {
-        // `if` y `match` son expresiones — las manejamos antes de
-        // consumir el token para que sus parsers lo hagan.
+        // `if` and `match` are expressions — handle them before
+        // consuming the token so their own parsers do it.
         match self.peek() {
             Token::If => return self.parse_if_expr(),
             Token::Match => return self.parse_match_expr(),
-            // Mini-tanda L — `loop { body }` como expresión. En
-            // statement position, `parse_stmt` ya intercepta
-            // Token::Loop antes; este branch solo aplica en RHS de
-            // let, args, etc. Devuelve `Expr::Loop { body }`.
+            // Mini-batch L — `loop { body }` as an expression. In
+            // statement position, `parse_stmt` already intercepts
+            // Token::Loop earlier; this branch only fires in the
+            // RHS of let, args, etc. Returns `Expr::Loop { body }`.
             Token::Loop => return self.parse_loop_expr(None),
-            // Mini-tanda L.2 — `'label: loop { ... }` como expresión.
-            // Detectamos Label + lookahead Colon + Loop.
+            // Mini-batch L.2 — `'label: loop { ... }` as expression.
+            // Detected as Label + Colon lookahead + Loop.
             Token::Label(_)
                 if matches!(self.peek_at(1), Token::Colon)
                     && matches!(self.peek_at(2), Token::Loop) =>
@@ -2815,15 +2818,16 @@ impl Parser {
             }
             Token::LBracket => return self.parse_list_literal(),
             Token::LBrace => return self.parse_map_literal(),
-            // `fn(...)` o `fn(...) => expr` — función anónima en posición
-            // de expresión. `fn name(...)` no es válido acá: una function
-            // con nombre es `Stmt::FnDef`, sentencia, no expresión.
+            // `fn(...)` or `fn(...) => expr` — anonymous function in
+            // expression position. `fn name(...)` is NOT valid here:
+            // a named function is a `Stmt::FnDef`, a statement, not
+            // an expression.
             Token::Fn if matches!(self.peek_at(1), Token::LParen) => {
                 return self.parse_fn_expr();
             }
-            // Mini-tanda Async-cl — `async fn(...)` closure async en
-            // posición de expresión. Reusa `parse_fn_expr` (que detecta
-            // el `async` prefijo y setea `is_async`).
+            // Mini-batch Async-cl — `async fn(...)` async closure in
+            // expression position. Reuses `parse_fn_expr` (which
+            // detects the `async` prefix and sets `is_async`).
             Token::Async
                 if matches!(self.peek_at(1), Token::Fn)
                     && matches!(self.peek_at(2), Token::LParen) =>
@@ -2844,17 +2848,17 @@ impl Parser {
             Token::Null => Ok(Expr::Null(tok_span)),
             Token::Ident(name) => Ok(Expr::Ident(name, tok_span)),
             Token::LParen => {
-                // Mini-tanda T — distinguimos:
-                //   `()`        → tupla vacía.
-                //   `(e,)`      → tupla de 1 elemento (trailing comma).
-                //   `(e1, ...)` → tupla.
-                //   `(e)`       → solo paréntesis de agrupación.
+                // Mini-batch T — distinguish:
+                //   `()`        → empty tuple.
+                //   `(e,)`      → 1-element tuple (trailing comma).
+                //   `(e1, ...)` → tuple.
+                //   `(e)`       → grouping parens only.
                 //
-                // Adentro de paréntesis no hay ambigüedad con bloques:
-                // limpiamos `no_struct_literal` para permitir struct
-                // literals (habilita `(User { id: 1 }) == other`).
+                // Inside parens there is no ambiguity with blocks:
+                // clear `no_struct_literal` to allow struct literals
+                // (enables `(User { id: 1 }) == other`).
                 let prev = std::mem::replace(&mut self.no_struct_literal, false);
-                // Caso: tupla vacía `()`.
+                // Case: empty tuple `()`.
                 if matches!(self.peek(), Token::RParen) {
                     self.advance();
                     self.no_struct_literal = prev;
@@ -2863,12 +2867,12 @@ impl Parser {
                 let first_result = self.expression();
                 self.no_struct_literal = prev;
                 let first = first_result?;
-                // Si la próxima es coma → tupla.
+                // If the next is comma → tuple.
                 if matches!(self.peek(), Token::Comma) {
                     let mut items = vec![first];
                     while matches!(self.peek(), Token::Comma) {
                         self.advance(); // consume `,`
-                                        // Trailing comma admitida: `(e,)` o `(e1, e2,)`.
+                                        // Trailing comma allowed: `(e,)` or `(e1, e2,)`.
                         if matches!(self.peek(), Token::RParen) {
                             break;
                         }
@@ -2880,7 +2884,7 @@ impl Parser {
                     self.expect(&Token::RParen, "se esperaba ')' para cerrar la tupla")?;
                     return Ok(Expr::Tuple(items, tok_span));
                 }
-                // Sin coma → solo paréntesis de agrupación.
+                // No comma → just grouping parens.
                 self.expect(&Token::RParen, "se esperaba ')' para cerrar el paréntesis")?;
                 Ok(first)
             }
@@ -2893,9 +2897,9 @@ impl Parser {
         }
     }
 
-    /// `[expr, expr, ...]` — lista literal. Acepta vacía `[]`,
-    /// trailing comma y newlines entre elementos (útil para listas
-    /// multilínea).
+    /// `[expr, expr, ...]` — list literal. Accepts empty `[]`,
+    /// trailing comma and newlines between elements (handy for
+    /// multiline lists).
     fn parse_list_literal(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
         self.expect(&Token::LBracket, "se esperaba '['")?;
@@ -2916,9 +2920,9 @@ impl Parser {
             self.skip_newlines();
             let first = self.expression()?;
             self.skip_newlines();
-            // Mini-tanda C: tras parsear el primer expr, si viene `for`,
-            // es una list comprehension. Solo cuando items está vacío
-            // (no podemos mezclar `[1, 2 for x in xs]`).
+            // Mini-batch C: after parsing the first expr, if `for`
+            // follows, this is a list comprehension. Only when
+            // `items` is empty (we can't mix `[1, 2 for x in xs]`).
             if items.is_empty() && matches!(self.peek(), Token::For) {
                 return self.parse_list_comprehension_tail(span, first);
             }
@@ -2939,12 +2943,12 @@ impl Parser {
         Ok(Expr::List(items, span))
     }
 
-    /// Mini-tanda C + Cmp+ — parsea la cola de una list comprehension
-    /// después del expr inicial: `for <var> in <iter> [for ...]* [if cond]?]`.
-    /// El primer `[` y el `expr` ya fueron consumidos por el caller.
-    /// Mini-tanda Cmp+ extiende esto para múltiples `for` clauses
-    /// (cartesian product); el `if` opcional al final se evalúa adentro
-    /// del loop más interno.
+    /// Mini-batch C + Cmp+ — parse the tail of a list comprehension
+    /// after the initial expr: `for <var> in <iter> [for ...]* [if cond]?]`.
+    /// The leading `[` and the `expr` were already consumed by the
+    /// caller. Mini-batch Cmp+ extends this for multiple `for`
+    /// clauses (cartesian product); the optional trailing `if`
+    /// runs inside the innermost loop.
     fn parse_list_comprehension_tail(&mut self, span: Span, expr: Expr) -> FitzResult<Expr> {
         let (var, iter, extra_clauses, filter) =
             self.parse_comprehension_clauses(&Token::RBracket, "list comprehension")?;
@@ -2962,13 +2966,14 @@ impl Parser {
         })
     }
 
-    /// Mini-tanda Cmp+ — parsea las clauses `for <pat> in <iter>` (1 o
-    /// más) y un `if <cond>` opcional al final. Comparte la lógica entre
-    /// list comprehension (`[expr for ...]`) y map comprehension
-    /// (`{k: v for ...}`). Devuelve `(var, iter, extra_clauses, filter)`:
-    /// el primer for sale separado por compatibilidad con el shape AST
-    /// actual; las clauses 2+ van en `extra_clauses`. No consume el
-    /// delimitador de cierre (`]` o `}`); el caller lo expecta.
+    /// Mini-batch Cmp+ — parse `for <pat> in <iter>` clauses (1 or
+    /// more) and an optional trailing `if <cond>`. Shares logic
+    /// between list comprehension (`[expr for ...]`) and map
+    /// comprehension (`{k: v for ...}`). Returns
+    /// `(var, iter, extra_clauses, filter)`: the first `for` comes
+    /// out separately for compatibility with the current AST shape;
+    /// clauses 2+ go into `extra_clauses`. Does not consume the
+    /// closing delimiter (`]` or `}`); the caller expects it.
     #[allow(clippy::type_complexity)]
     fn parse_comprehension_clauses(
         &mut self,
@@ -2991,7 +2996,7 @@ impl Parser {
         self.skip_newlines();
 
         let mut extra_clauses: Vec<(crate::ast::Pattern, Expr)> = Vec::new();
-        // Múltiples `for` clauses: `[expr for a in xs for b in ys]`.
+        // Multiple `for` clauses: `[expr for a in xs for b in ys]`.
         while matches!(self.peek(), Token::For) {
             self.advance(); // consume `for`
             let extra_var = self.parse_pattern()?;
@@ -3019,12 +3024,12 @@ impl Parser {
         Ok((var, iter, extra_clauses, filter))
     }
 
-    /// `{"k": v, ...}` — mapa literal. Acepta vacío `{}`, trailing
-    /// comma y newlines entre pares. La clave es una expresión, no un
-    /// identificador suelto: para usar el valor de una variable como
-    /// clave, los strings literales son lo natural (`{"name": x}`),
-    /// pero `{key_expr: value}` es válido si `key_expr` evalúa a algo
-    /// hasheable en runtime.
+    /// `{"k": v, ...}` — map literal. Accepts empty `{}`, trailing
+    /// comma and newlines between pairs. The key is an expression,
+    /// not a bare identifier: to use a variable's value as the key,
+    /// string literals are natural (`{"name": x}`), but
+    /// `{key_expr: value}` is valid if `key_expr` evaluates to
+    /// something hashable at runtime.
     fn parse_map_literal(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
         self.expect(&Token::LBrace, "se esperaba '{'")?;
@@ -3041,7 +3046,7 @@ impl Parser {
             self.advance();
             return Ok(Expr::Map(pairs, span));
         }
-        // Primer par: `key: value`.
+        // First pair: `key: value`.
         self.skip_newlines();
         let key = self.expression()?;
         self.expect(&Token::Colon, "se esperaba ':' entre clave y valor en mapa")?;
@@ -3049,9 +3054,10 @@ impl Parser {
         let value = self.expression()?;
         self.skip_newlines();
 
-        // Mini-tanda Cmp+ — después del primer par, si viene `for`,
-        // es una map comprehension `{k: v for ...}`. Si viene `,` o
-        // `}`, es un map literal normal y seguimos parseando pares.
+        // Mini-batch Cmp+ — after the first pair, if `for` follows,
+        // this is a map comprehension `{k: v for ...}`. If `,` or
+        // `}` follows, it's a normal map literal and we keep parsing
+        // pairs.
         if matches!(self.peek(), Token::For) {
             let (var, iter, extra_clauses, filter) =
                 self.parse_comprehension_clauses(&Token::RBrace, "map comprehension")?;
@@ -3071,20 +3077,20 @@ impl Parser {
         }
 
         pairs.push((key, value));
-        // M5 (post-audit) — el resto de pares se parsea con el
-        // helper `parse_comma_separated`. El primer par ya está en
-        // `pairs`; para reusar el helper, simulamos un terminador
-        // alternativo a través de una rama dedicada: si después del
-        // primer par ya viene `}`, salimos sin invocarlo. Si viene
-        // `,` lo consumimos y dejamos que el helper itere desde el
-        // próximo par.
+        // M5 (post-audit) — the remaining pairs are parsed by the
+        // `parse_comma_separated` helper. The first pair is already
+        // in `pairs`; to reuse the helper we simulate an alternative
+        // terminator via a dedicated branch: if after the first pair
+        // a `}` already follows, we bail without calling it. If `,`
+        // comes, we consume it and let the helper iterate from the
+        // next pair.
         self.skip_newlines();
         if matches!(self.peek(), Token::RBrace) {
             self.advance();
             return Ok(Expr::Map(pairs, span));
         }
-        // Próximo char debería ser `,`. El helper lo espera fuera
-        // del primer item, así que lo consumimos manualmente acá.
+        // Next char should be `,`. The helper expects it outside
+        // the first item, so consume it manually here.
         self.expect(
             &Token::Comma,
             "se esperaba ',' o '}' después del primer par del mapa",
@@ -3105,48 +3111,47 @@ impl Parser {
     }
 }
 
-/// Entrada pública del parser. Convierte tokens en un `Program`.
+/// Public parser entry point. Converts tokens into a `Program`.
 pub fn parse(tokens: Vec<TokenWithPos>) -> FitzResult<Program> {
     let mut parser = Parser::new(tokens);
     parser.parse_program()
 }
 
-/// Variante recovering del parser. Pensada para tooling externo (LSP,
-/// formatter, futuras herramientas de análisis) que necesita un AST
-/// parcial sobre buffers en construcción o con errores tipográficos
-/// transitorios. **No** la usa la CLI strict (`fitz run`, `fitz build`,
-/// `fitz check`): esos siguen llamando a `parse()` y abortan al primer
-/// error. Fase 9.0.1 (F15).
+/// Recovering variant of the parser. Designed for external tooling
+/// (LSP, formatter, future analysis tools) that needs a partial AST
+/// over in-progress buffers or buffers with transient typos. **Not**
+/// used by the strict CLI (`fitz run`, `fitz build`, `fitz check`):
+/// those still call `parse()` and abort on the first error.
+/// Phase 9.0.1 (F15).
 ///
-/// Reglas:
-///  - Captura errores stmt-level y los acumula en el `Vec<FitzError>`
-///    devuelto. El AST devuelto siempre es estructuralmente válido (un
-///    `Vec<Stmt>` posiblemente con `Stmt::Error(span)` en lugares
-///    rotos).
-///  - Sync points: `Newline`, `RBrace` (no consumido), `EOF`.
-///  - Cota dura: `MAX_RECOVERED_ERRORS` (100). Al alcanzarla, el parser
-///    abandona el resto del input y devuelve lo que tiene.
-///  - Errores DENTRO de un stmt (paréntesis sin cerrar, expresión
-///    incompleta, etc.) descartan el stmt entero — el cursor avanza
-///    hasta el próximo sync point. Recovery sub-stmt queda como deuda
-///    explícita para más adelante.
+/// Rules:
+///  - Captures stmt-level errors and accumulates them in the
+///    returned `Vec<FitzError>`. The returned AST is always
+///    structurally valid (a `Vec<Stmt>` possibly with
+///    `Stmt::Error(span)` in broken places).
+///  - Sync points: `Newline`, `RBrace` (not consumed), `EOF`.
+///  - Hard cap: `MAX_RECOVERED_ERRORS` (100). When reached, the
+///    parser drops the rest of the input and returns what it has.
+///  - Errors INSIDE a stmt (unclosed paren, incomplete expression,
+///    etc.) discard the whole stmt — the cursor advances to the
+///    next sync point. Sub-stmt recovery is explicit debt for later.
 ///
-/// Garantiza que **nunca** retorna `Err`: cualquier error queda
-/// acumulado en la lista paralela. El caller decide qué hacer.
+/// Guarantees that it **never** returns `Err`: any error ends up
+/// accumulated in the parallel list. The caller decides what to do.
 ///
-/// `#[allow(dead_code)]`: en Fase 9.0.1 esta API solo se ejercita
-/// desde tests. Los consumidores reales (LSP, formatter, futuras
-/// herramientas) aterrizan en sub-pasos siguientes de Fase 9. El
-/// allow se quita cuando aparezca el primer caller fuera de tests.
+/// `#[allow(dead_code)]`: in Phase 9.0.1 this API is exercised only
+/// by tests. Real consumers (LSP, formatter, future tools) land in
+/// later sub-steps of Phase 9. The allow is removed when the first
+/// caller outside of tests appears.
 #[allow(dead_code)]
 pub fn parse_with_recovery(tokens: Vec<TokenWithPos>) -> (Program, Vec<FitzError>) {
     let mut parser = Parser::new(tokens);
     parser.recovery_mode = true;
-    // En recovery, `parse_program` no devuelve `Err` (los errores van a
-    // `recovered_errors`); pero el tipo de retorno sigue siendo
-    // `FitzResult` para no duplicar código. `unwrap_or_else` es defensa
-    // por si alguna ruta strict-residual se cuela — en ese caso, el
-    // error se acumula como parte de la lista.
+    // In recovery mode, `parse_program` does not return `Err`
+    // (errors go to `recovered_errors`); but the return type stays
+    // `FitzResult` to avoid code duplication. `unwrap_or_else` is
+    // a defense in case any strict-residual path slips through —
+    // in that case, the error is accumulated as part of the list.
     let stmts = parser.parse_program().unwrap_or_else(|e| {
         parser.recovered_errors.push(e);
         Vec::new()
@@ -3154,25 +3159,27 @@ pub fn parse_with_recovery(tokens: Vec<TokenWithPos>) -> (Program, Vec<FitzError
     (stmts, parser.recovered_errors)
 }
 
-/// Toma el contenido crudo de un `Token::Str` y construye la
-/// expresión correspondiente: `Expr::Str` si es solo texto, o
-/// `Expr::StrInterp` si tiene `{...}` interpolados.
+/// Takes the raw contents of a `Token::Str` and builds the matching
+/// expression: `Expr::Str` if it's just text, or `Expr::StrInterp`
+/// if it has `{...}` interpolations.
 ///
-/// Reglas de procesamiento:
-///  - `\{` y `\}` se desescapan a `{` y `}` literales (el lexer los
-///    preserva con la barra para que podamos distinguirlos acá).
-///  - `{ ... }` no escapado abre interpolación. El contenido entre
-///    llaves se re-tokeniza y se parsea como expresión.
-///  - `}` suelto (sin `{` previo) es error — el usuario debe escapar
-///    como `\}`.
+/// Processing rules:
+///  - `\{` and `\}` are unescaped to literal `{` and `}` (the lexer
+///    preserves them with the backslash so we can tell them apart
+///    here).
+///  - Unescaped `{ ... }` opens interpolation. The content between
+///    braces is re-tokenized and parsed as an expression.
+///  - A lone `}` (without a preceding `{`) is an error — the user
+///    must escape it as `\}`.
 ///
-/// Limitación residual:
-///  - Strings dentro de la interpolación no se soportan: el buscador
-///    de `}` es ingenuo y se confunde con `}` dentro de `"..."` anidados.
-///  - Si el string contiene escapes (`\n`, `\t`, etc.), la columna
-///    reportada en errores de interpolación está corrida un char por cada
-///    escape anterior al error. Sin acceso al source original no podemos
-///    reconstruir el mapping exacto.
+/// Residual limitation:
+///  - Strings inside interpolation are not supported: the `}`
+///    scanner is naïve and gets confused by `}` inside nested
+///    `"..."`.
+///  - If the string contains escapes (`\n`, `\t`, etc.), the column
+///    reported in interpolation errors is off by one char for every
+///    escape before the error. Without access to the original
+///    source we can't reconstruct the exact mapping.
 fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> {
     let chars: Vec<char> = raw.chars().collect();
     let mut parts: Vec<StrPart> = Vec::new();
@@ -3180,24 +3187,24 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
     let mut i = 0;
     let str_span = Span::new(line, column);
 
-    // Columna del primer char del contenido del string en el source:
-    // el `column` que recibimos apunta a la comilla de apertura `"`.
+    // Column of the first char of the string content in the source:
+    // the `column` we receive points at the opening quote `"`.
     let content_col = column + 1;
 
     while i < chars.len() {
         let c = chars[i];
 
-        // Escape de '{' o '}' literal: '\{' o '\}'.
+        // Escape for literal '{' or '}': '\{' or '\}'.
         if c == '\\' && i + 1 < chars.len() && (chars[i + 1] == '{' || chars[i + 1] == '}') {
             current_lit.push(chars[i + 1]);
             i += 2;
             continue;
         }
 
-        // Inicio de interpolación.
+        // Start of interpolation.
         if c == '{' {
-            // Columna del `{` en el source original (aproximada — ver
-            // limitación residual sobre escapes).
+            // Column of the `{` in the original source (approximate
+            // — see the escape-related residual limitation).
             let interp_col = content_col + i;
 
             if !current_lit.is_empty() {
@@ -3205,8 +3212,8 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
             }
             i += 1;
             let expr_start = i;
-            // Buscar '}' que cierre. Ingenuo: no entiende strings
-            // anidados — documentado como deuda.
+            // Look for closing '}'. Naïve: doesn't understand nested
+            // strings — documented as debt.
             while i < chars.len() && chars[i] != '}' {
                 i += 1;
             }
@@ -3220,18 +3227,18 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
             }
             let interp_src: String = chars[expr_start..i].iter().collect();
 
-            // La subexpresión empieza un char después del `{` en el source.
+            // The subexpression starts one char after `{` in the source.
             let sub_col_base = interp_col + 1;
 
-            // Mini-tanda Fm — separar `expr` de `:spec` por el primer `:`
-            // a depth 0 (no adentro de paréntesis/brackets/braces). Esto
-            // permite que `{m["k"]:.2f}` distinga el `:` del spec del
-            // de un map literal anidado.
+            // Mini-batch Fm — split `expr` from `:spec` at the first
+            // depth-0 `:` (not inside parens/brackets/braces). This
+            // lets `{m["k"]:.2f}` tell apart the spec's `:` from a
+            // nested map literal's.
             let (expr_src, spec_src) = split_expr_and_format_spec(&interp_src);
 
-            // Re-tokenizamos. Cualquier error del sub-lexer lleva la
-            // posición relativa al inicio de expr_src — la trasladamos al
-            // source real para que el usuario vea la línea/columna correcta.
+            // Re-tokenize. Any sub-lexer error carries the position
+            // relative to the start of expr_src — translate it to the
+            // real source so the user sees the right line/column.
             let sub_tokens = tokenize(&expr_src).map_err(|mut e| {
                 e.line = line;
                 e.column = sub_col_base + e.column.saturating_sub(1);
@@ -3243,20 +3250,22 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                 e.column = sub_col_base + e.column.saturating_sub(1);
                 e
             })?;
-            // V1 (2026-06-05) — ajustar spans del sub-Expr al source
-            // original. Sin este paso, los spans del Expr resultante
-            // arrastran `line=1, col=N` del sub-tokenizer (que arranca
-            // desde el inicio del `expr_src` aislado). Eso rompía
-            // hover y diagnostics adentro de string interpolation:
-            //   - Hover sobre `{altitud_m}` devolvía `Str` (el tipo del
-            //     StrInterp entero) porque el span del Ident interno
-            //     quedaba en col=1 y perdía la heurística "max col ≤ cursor".
-            //   - Error de checker en `{a + b}` con `Int + Str` se
-            //     reportaba en línea 1:1 en vez de la línea real.
-            // Ver `docs/deudas-post-5b.md` → V1.
+            // V1 (2026-06-05) — adjust sub-Expr spans to the original
+            // source. Without this step, the resulting Expr's spans
+            // carry `line=1, col=N` from the sub-tokenizer (which
+            // starts at the beginning of the isolated `expr_src`).
+            // That broke hover and diagnostics inside string
+            // interpolation:
+            //   - Hover over `{altitud_m}` returned `Str` (the type
+            //     of the whole StrInterp) because the inner Ident's
+            //     span was at col=1 and lost the "max col ≤ cursor"
+            //     heuristic.
+            //   - A checker error on `{a + b}` with `Int + Str` was
+            //     reported on line 1:1 instead of the real line.
+            // See `docs/deudas-post-5b.md` → V1.
             shift_expr_spans(&mut expr, line, sub_col_base);
-            // No debe quedar nada después de la expresión (más allá
-            // del EOF que pone el lexer).
+            // Nothing should remain after the expression (beyond the
+            // EOF the lexer appends).
             if !sub_parser.is_at_end() {
                 return Err(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -3265,7 +3274,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                     format!("Tokens extra dentro de interpolación: '{}'", expr_src),
                 ));
             }
-            // Mini-tanda Fm — si había `:spec`, parsearlo a FormatSpec.
+            // Mini-batch Fm — if there was a `:spec`, parse it into FormatSpec.
             let format_spec = if let Some(spec) = spec_src {
                 Some(parse_format_spec(&spec).map_err(|msg| {
                     FitzError::new(
@@ -3279,11 +3288,11 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                 None
             };
             parts.push(StrPart::Expr(expr, format_spec));
-            i += 1; // saltar '}'
+            i += 1; // skip '}'
             continue;
         }
 
-        // '}' sin '{' previo — el usuario probablemente quiso escaparlo.
+        // '}' without a preceding '{' — the user probably meant to escape it.
         if c == '}' {
             return Err(FitzError::new(
                 ErrorKind::InvalidSyntax,
@@ -3301,9 +3310,9 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
         parts.push(StrPart::Lit(current_lit));
     }
 
-    // Si todas las partes son literales (o no hay partes), devolvemos
-    // un `Expr::Str` simple — nada que interpolar. Si hay al menos
-    // una `StrPart::Expr`, va a `Expr::StrInterp`.
+    // If all parts are literals (or there are no parts), return a
+    // plain `Expr::Str` — nothing to interpolate. If there's at
+    // least one `StrPart::Expr`, it becomes `Expr::StrInterp`.
     let has_interp = parts.iter().any(|p| matches!(p, StrPart::Expr(_, _)));
     if has_interp {
         Ok(Expr::StrInterp(parts, str_span))
@@ -3319,28 +3328,29 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
     }
 }
 
-/// V1 (2026-06-05) — walker recursivo que reescribe los `Span` del
-/// `Expr` resultante del sub-parser de string interpolation para que
-/// apunten al source original en vez de al sub-texto aislado.
+/// V1 (2026-06-05) — recursive walker that rewrites the `Span`s of
+/// the `Expr` produced by the string-interpolation sub-parser so
+/// they point at the original source instead of the isolated
+/// sub-text.
 ///
-/// Para cada `Span` no-ZERO del Expr (y todos sus sub-Exprs):
+/// For each non-ZERO `Span` of the Expr (and all its sub-Exprs):
 ///
 /// ```text
-/// new_span.line   = line               (línea del source original)
+/// new_span.line   = line               (line of the original source)
 /// new_span.column = sub_col_base + (old.column - 1)
 /// ```
 ///
-/// `Span::ZERO` (sentinel `0:0` para nodos sintéticos) se preserva tal
-/// cual — no se desplaza.
+/// `Span::ZERO` (the `0:0` sentinel for synthetic nodes) is
+/// preserved as-is — not shifted.
 ///
-/// **Alcance**: walkea solo `Expr` y sub-`Expr` (incluyendo args de
-/// Call, branches de If, arms de Match, etc.). Stmts adentro de
-/// `FnExpr.body`/`Loop.body`/etc., Patterns de Match y TypeExprs NO se
-/// walkean — quedan como deuda residual menor. En la práctica, el 99%
-/// de las interpolaciones son `{ident}`, `{a + b}`, `{f(x)}`, `{x.field}`
-/// que no involucran Stmts/Patterns/TypeExprs.
+/// **Scope**: walks only `Expr` and sub-`Expr` (including Call args,
+/// If branches, Match arms, etc.). Stmts inside
+/// `FnExpr.body`/`Loop.body`/etc., Match Patterns, and TypeExprs are
+/// NOT walked — minor residual debt. In practice, 99% of
+/// interpolations are `{ident}`, `{a + b}`, `{f(x)}`, `{x.field}`
+/// which don't involve Stmts/Patterns/TypeExprs.
 fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
-    // Reescribir el span del nodo actual (si no es ZERO).
+    // Rewrite the current node's span (if not ZERO).
     {
         let s = expr.span_mut();
         if s.column > 0 {
@@ -3348,9 +3358,9 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
             s.column = sub_col_base + s.column.saturating_sub(1);
         }
     }
-    // Recursar en sub-Exprs según la variante.
+    // Recurse on sub-Exprs depending on the variant.
     match expr {
-        // Literales sin sub-Exprs.
+        // Literals with no sub-Exprs.
         Expr::Int(_, _)
         | Expr::Float(_, _)
         | Expr::Str(_, _)
@@ -3359,10 +3369,10 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
         | Expr::Bytes(_, _)
         | Expr::Ident(_, _)
         | Expr::Error(_) => {}
-        // StrInterp anidado (raro pero posible): walkear cada Expr de
-        // los parts. Cada uno fue parseado por sub-sub-parser con su
-        // propia base; al llegar acá ya tuvieron su propio shift.
-        // Lo dejamos como no-op para no doble-shiftear.
+        // Nested StrInterp (rare but possible): walk each Expr of
+        // the parts. Each was parsed by a sub-sub-parser with its
+        // own base; by the time we get here they already had their
+        // own shift. We make this a no-op to avoid double-shifting.
         Expr::StrInterp(_, _) => {}
         Expr::BinOp { left, right, .. } => {
             shift_expr_spans(left, line, sub_col_base);
@@ -3381,10 +3391,10 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
             shift_expr_spans(value, line, sub_col_base);
         }
         Expr::FnExpr { body, .. } => {
-            // body: Vec<Stmt> — deuda residual (no walkeamos Stmts).
-            // En la práctica, FnExpr inline adentro de un StrInterp es
-            // extremadamente raro. Si entra demanda, sumamos walker
-            // para Stmt en otro sub-paso.
+            // body: Vec<Stmt> — residual debt (we don't walk Stmts).
+            // In practice, an inline FnExpr inside a StrInterp is
+            // extremely rare. If demand appears, we'll add a Stmt
+            // walker in another sub-step.
             let _ = body;
         }
         Expr::Field { object, .. } => {
@@ -3414,7 +3424,7 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
             shift_expr_spans(tuple, line, sub_col_base);
         }
         Expr::Loop { .. } => {
-            // body: Vec<Stmt> — deuda residual igual que FnExpr.
+            // body: Vec<Stmt> — same residual debt as FnExpr.
         }
         Expr::List(items, _) => {
             for it in items {
@@ -3422,7 +3432,7 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
             }
         }
         Expr::ListComp { .. } | Expr::MapComp { .. } => {
-            // Compuesta — deuda residual menor (caso muy raro en interp).
+            // Composite — minor residual debt (very rare in interp).
         }
         Expr::Map(pairs, _) => {
             for (k, v) in pairs {
@@ -3441,13 +3451,13 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
             ..
         } => {
             shift_expr_spans(condition, line, sub_col_base);
-            // then/else son Vec<Stmt> — deuda residual.
+            // then/else are Vec<Stmt> — residual debt.
             let _ = then;
             let _ = else_;
         }
         Expr::Match { value, .. } => {
             shift_expr_spans(value, line, sub_col_base);
-            // arms son Vec<MatchArm> con Pattern + body — deuda residual.
+            // arms are Vec<MatchArm> with Pattern + body — residual debt.
         }
         Expr::StructLit { fields, .. } => {
             for (_, value) in fields {
@@ -3460,9 +3470,9 @@ fn shift_expr_spans(expr: &mut Expr, line: usize, sub_col_base: usize) {
     }
 }
 
-/// Mini-tanda Fm — separa `{expr:spec}` en `(expr_src, Some(spec))`,
-/// o `(expr_src, None)` si no hay spec. El split toma el primer `:`
-/// que NO está adentro de paréntesis/brackets/braces balanceados.
+/// Mini-batch Fm — split `{expr:spec}` into `(expr_src, Some(spec))`,
+/// or `(expr_src, None)` if there is no spec. The split takes the
+/// first `:` that is NOT inside balanced parens/brackets/braces.
 fn split_expr_and_format_spec(s: &str) -> (String, Option<String>) {
     let mut depth: i32 = 0;
     for (i, c) in s.char_indices() {
@@ -3478,15 +3488,15 @@ fn split_expr_and_format_spec(s: &str) -> (String, Option<String>) {
     (s.to_string(), None)
 }
 
-/// Mini-tanda Fm — parsea un format spec estilo Python.
-/// Gramática: `[[fill]align][sign][#][0][width][grouping][.precision][type]`.
+/// Mini-batch Fm — parse a Python-style format spec.
+/// Grammar: `[[fill]align][sign][#][0][width][grouping][.precision][type]`.
 fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
     use crate::ast::{FormatKind, FormatSign};
     let mut spec = FormatSpec::default();
     let chars: Vec<char> = s.chars().collect();
     let mut i = 0;
 
-    // fill + align: 2 chars donde el segundo es align.
+    // fill + align: 2 chars where the second one is align.
     if chars.len() >= 2 {
         if let Some(a) = align_from_char(chars[1]) {
             spec.fill = Some(chars[0]);
@@ -3494,7 +3504,7 @@ fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
             i = 2;
         }
     }
-    // align solo.
+    // align only.
     if spec.align.is_none() && i < chars.len() {
         if let Some(a) = align_from_char(chars[i]) {
             spec.align = Some(a);
@@ -3601,24 +3611,24 @@ fn align_from_char(c: char) -> Option<crate::ast::FormatAlign> {
 }
 
 // ---------------------------------------------------------------------------
-// Tests — helpers del Parser
+// Tests — Parser helpers
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
+#[allow(clippy::approx_constant)] // 3.14 in tests is a generic Float, not PI.
 mod tests {
     use super::*;
     use crate::lexer::tokenize;
 
-    /// Helper: tokeniza el source y crea un Parser listo para tests.
+    /// Helper: tokenize the source and create a Parser ready for tests.
     fn parser(src: &str) -> Parser {
         let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
         Parser::new(tokens)
     }
 
-    /// Helper Fase 10.3.a: parsea el source completo a un
-    /// `Program`, asumiendo que es válido. Útil para tests de
-    /// decoradores que necesitan ver el AST entero.
+    /// Phase 10.3.a helper: parse the whole source into a `Program`,
+    /// assuming it's valid. Useful for decorator tests that need to
+    /// see the whole AST.
     fn parse_ok(src: &str) -> Program {
         let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
         parse(tokens).expect("la fuente debe parsear sin error")
@@ -3628,7 +3638,7 @@ mod tests {
     fn peek_returns_current_token_without_advancing() {
         let p = parser("42 + 1");
         assert_eq!(*p.peek(), Token::Int(42));
-        // Segunda llamada: mismo token, no consumió.
+        // Second call: same token, did not consume.
         assert_eq!(*p.peek(), Token::Int(42));
     }
 
@@ -3659,7 +3669,7 @@ mod tests {
     fn advance_at_eof_is_idempotent() {
         let mut p = parser("");
         assert!(p.is_at_end());
-        // Aunque llamemos advance varias veces, seguimos en EOF.
+        // Even if we call advance several times, we stay at EOF.
         p.advance();
         p.advance();
         assert!(p.is_at_end());
@@ -3677,7 +3687,7 @@ mod tests {
     fn eat_consumes_only_on_match() {
         let mut p = parser("+ -");
         assert!(p.eat(&Token::Plus));
-        // No coincide: no consume.
+        // No match: does not consume.
         assert!(!p.eat(&Token::Plus));
         assert!(p.eat(&Token::Minus));
         assert!(p.is_at_end());
@@ -3710,7 +3720,7 @@ mod tests {
 
     #[test]
     fn expect_ident_fails_on_keyword() {
-        // 'fn' es keyword, no Ident — debe fallar.
+        // 'fn' is a keyword, not an Ident — should fail.
         let mut p = parser("fn");
         let err = p.expect_ident("se esperaba identificador").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
@@ -3733,13 +3743,13 @@ mod tests {
     #[test]
     fn current_pos_tracks_token_position() {
         let mut p = parser("let\n  x");
-        // Antes de consumir: Let en (1, 1)
+        // Before consuming: Let at (1, 1)
         assert_eq!(p.current_pos(), (1, 1));
         p.advance(); // consume Let
-                     // Próximo token: Newline en (1, 4)
+                     // Next token: Newline at (1, 4)
         assert_eq!(p.current_pos(), (1, 4));
         p.advance(); // consume Newline
-                     // Próximo token: Ident("x") en (2, 3)
+                     // Next token: Ident("x") at (2, 3)
         assert_eq!(p.current_pos(), (2, 3));
     }
 
@@ -3751,26 +3761,28 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Span en Expr (S1.2 sub-paso 1)
+    // Tests — Span on Expr (S1.2 sub-step 1)
     //
-    // El parser propaga `Span { line, column }` a cada nodo `Expr`. Estos
-    // tests fijan los call sites de las 5 reglas más visibles para el
-    // checker (literal, BinOp, Call, Field, Index) y dejan que cualquier
-    // refactor que pierda spans se note en la suite. Comparan posiciones
-    // explícitamente (no por `assert_eq!` sobre `Expr` — `Span::PartialEq`
-    // siempre es trivial, así que la única forma de validar la posición es
-    // mirar `.span().line` / `.span().column` directamente).
+    // The parser propagates `Span { line, column }` to every `Expr`
+    // node. These tests pin the call sites of the 5 most checker-
+    // visible rules (literal, BinOp, Call, Field, Index) and make
+    // any refactor that loses spans show up in the suite. They
+    // compare positions explicitly (not via `assert_eq!` on `Expr`
+    // — `Span::PartialEq` is always trivial, so the only way to
+    // validate the position is to look at `.span().line` /
+    // `.span().column` directly).
     // -----------------------------------------------------------------------
 
     #[test]
     fn span_literal_apunta_al_primer_token() {
-        // En `  42`, el `42` arranca en columna 3 (1-indexed). El span
-        // del nodo `Expr::Int` reusa la posición del token literal.
+        // In `  42`, the `42` starts at column 3 (1-indexed). The
+        // `Expr::Int` node's span reuses the literal token's
+        // position.
         let e = parse_expr("  42").unwrap();
         let s = e.span();
         assert_eq!(s.line, 1);
         assert_eq!(s.column, 3);
-        // Sanidad: también para Str e Ident.
+        // Sanity: also for Str and Ident.
         let e = parse_expr("\"hola\"").unwrap();
         assert_eq!(e.span().column, 1);
         let e = parse_expr("user").unwrap();
@@ -3779,15 +3791,15 @@ mod tests {
 
     #[test]
     fn span_binop_apunta_al_operador_no_al_left() {
-        // En `1 + 2`, el `+` está en columna 3. El span de `Expr::BinOp`
-        // debe apuntar al operador (criterio rustc/clang). El left
-        // (`Expr::Int(1)`) tiene su propio span en columna 1.
+        // In `1 + 2`, the `+` is at column 3. The `Expr::BinOp` span
+        // must point at the operator (rustc/clang convention). The
+        // `left` (`Expr::Int(1)`) carries its own span at column 1.
         let e = parse_expr("1 + 2").unwrap();
         let outer = e.span();
         assert_eq!(outer.line, 1);
         assert_eq!(outer.column, 3);
         if let Expr::BinOp { left, .. } = &e {
-            // El sub-nodo `left` mantiene su span propio.
+            // The `left` sub-node keeps its own span.
             assert_eq!(left.span().column, 1);
         } else {
             panic!("se esperaba BinOp, se obtuvo {:?}", e);
@@ -3796,9 +3808,9 @@ mod tests {
 
     #[test]
     fn span_call_apunta_al_paren_de_apertura() {
-        // En `f(1, 2)`, el `(` está en columna 2. El span de `Expr::Call`
-        // debe apuntar al `(`, no al callee (que tiene su propio span
-        // en columna 1).
+        // In `f(1, 2)`, the `(` is at column 2. The `Expr::Call` span
+        // must point at the `(`, not at the callee (which keeps its
+        // own span at column 1).
         let e = parse_expr("f(1, 2)").unwrap();
         assert_eq!(e.span().column, 2);
         if let Expr::Call { callee, .. } = &e {
@@ -3810,9 +3822,9 @@ mod tests {
 
     #[test]
     fn span_field_apunta_al_punto() {
-        // En `user.name`, el `.` está en columna 5. El span de
-        // `Expr::Field` apunta al `.`; el receptor mantiene su span en
-        // columna 1.
+        // In `user.name`, the `.` is at column 5. The `Expr::Field`
+        // span points at the `.`; the receiver keeps its span at
+        // column 1.
         let e = parse_expr("user.name").unwrap();
         assert_eq!(e.span().column, 5);
         if let Expr::Field { object, .. } = &e {
@@ -3824,9 +3836,9 @@ mod tests {
 
     #[test]
     fn span_index_apunta_al_corchete() {
-        // En `xs[0]`, el `[` está en columna 3. El span de `Expr::Index`
-        // apunta al `[`; el receptor mantiene su span en columna 1, y
-        // el índice en columna 4.
+        // In `xs[0]`, the `[` is at column 3. The `Expr::Index` span
+        // points at the `[`; the receiver keeps its span at column 1
+        // and the index at column 4.
         let e = parse_expr("xs[0]").unwrap();
         assert_eq!(e.span().column, 3);
         if let Expr::Index { object, index, .. } = &e {
@@ -3838,14 +3850,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — `.await` postfix (Fase 6.1)
+    // Tests — `.await` postfix (Phase 6.1)
     //
-    // El parser construye `Expr::Await(inner, span)` cuando ve `.await`
-    // después de cualquier expresión postfix. La keyword `await` ya está
-    // tokenizada como `Token::Await` desde antes de Fase 6 (token dormido).
-    // El checker/evaluator/codegen rechazan el nodo con error explícito
-    // hasta 6.2/6.4/6.6; los tests de barrera viven en `types.rs`,
-    // `evaluator.rs` y `codegen.rs`.
+    // The parser builds `Expr::Await(inner, span)` when it sees
+    // `.await` after any postfix expression. The `await` keyword is
+    // already tokenized as `Token::Await` from before Phase 6
+    // (dormant token). The checker/evaluator/codegen reject the node
+    // with an explicit error until 6.2/6.4/6.6; the barrier tests
+    // live in `types.rs`, `evaluator.rs` and `codegen.rs`.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -3893,7 +3905,7 @@ mod tests {
     #[test]
     fn await_seguido_de_try_es_try_de_await() {
         // `expr.await?` → Try(Await(expr))
-        // El postfix loop procesa `.await` primero, después `?`.
+        // The postfix loop processes `.await` first, then `?`.
         let e = parse_expr("x.await?").unwrap();
         match e {
             Expr::Try(inner, _) => {
@@ -3943,7 +3955,7 @@ mod tests {
         assert_eq!(e.span().line, 1);
         assert_eq!(e.span().column, 5);
         if let Expr::Await(inner, _) = &e {
-            // El receptor mantiene su span propio en columna 1.
+            // The receiver keeps its own span at column 1.
             assert_eq!(inner.span().column, 1);
         } else {
             panic!("se esperaba Await, se obtuvo {:?}", e);
@@ -3973,7 +3985,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — expresiones (paso 2: escalera de precedencia)
+    // Tests — expressions (step 2: precedence ladder)
     // -----------------------------------------------------------------------
 
     /// Helper: parsea una sola expresión desde el código fuente.
@@ -4178,7 +4190,7 @@ mod tests {
         );
     }
 
-    // ---------------- R.1.1 — `not` (mini-fase R) ----------------
+    // ---------------- R.1.1 — `not` (mini-phase R) ----------------
 
     #[test]
     fn unary_not_parsea_sobre_bool_literal() {
@@ -4226,7 +4238,7 @@ mod tests {
         // `not x == y` → `(not x) == y` (asociatividad left-to-right
         // del unary, mayor precedencia que ==).
         let expr = parse_expr("not x == y").unwrap();
-        // El nodo raíz es BinOp Eq con left = UnaryOp Not.
+        // The root node is BinOp Eq with left = UnaryOp Not.
         match expr {
             Expr::BinOp { op, left, .. } => {
                 assert_eq!(op, BinOpKind::Eq);
@@ -4254,7 +4266,7 @@ mod tests {
         }
     }
 
-    // ---------------- R.1.2 — operador `%` (mini-fase R) ----------------
+    // ---------------- R.1.2 — `%` operator (mini-phase R) ----------------
 
     #[test]
     fn op_modulo_parsea_con_misma_precedencia_que_mul() {
@@ -4307,7 +4319,7 @@ mod tests {
         ));
     }
 
-    // ---------------- R.1.3 — asignación a índice (mini-fase R) ----------------
+    // ---------------- R.1.3 — index assignment (mini-phase R) ----------------
 
     #[test]
     fn assign_index_list_parsea() {
@@ -4364,7 +4376,7 @@ mod tests {
         }
     }
 
-    // ---------------- R.1.4 — rangos inclusivos `..=` (mini-fase R) ----------------
+    // ---------------- R.1.4 — inclusive ranges `..=` (mini-phase R) ----------------
 
     #[test]
     fn range_inclusive_expr_parsea() {
@@ -4447,7 +4459,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — postfix (paso 3: field access y call)
+    // Tests — postfix (step 3: field access and call)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -4604,9 +4616,9 @@ mod tests {
 
     #[test]
     fn method_call_parses_as_call_with_field_callee() {
-        // `foo.bar()` ahora parsea: `Call { callee: Field { foo, bar }, args: [] }`.
-        // Antes el parser tiraba error (deuda explícita de 2.3). El dispatch
-        // de método como tal lo verifica el evaluador.
+        // `foo.bar()` now parses: `Call { callee: Field { foo, bar }, args: [] }`.
+        // Previously the parser errored (explicit debt from 2.3). The
+        // method dispatch itself is checked by the evaluator.
         let expr = parse_expr("foo.bar()").unwrap();
         assert_eq!(
             expr,
@@ -4663,11 +4675,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // PreF8.2: method chain multi-línea
+    // PreF8.2: multi-line method chain
     // -----------------------------------------------------------------------
     //
-    // El postfix loop tolera Newline antes de `.` y continúa la expresión.
-    // El AST resultante es idéntico al de la versión one-liner equivalente.
+    // The postfix loop tolerates Newline before `.` and continues the
+    // expression. The resulting AST is identical to the one-liner
+    // equivalent.
 
     #[test]
     fn method_chain_multilinea_parsea_igual_que_oneliner() {
@@ -4751,7 +4764,7 @@ mod tests {
         let Stmt::Assign { value, .. } = &program[0] else {
             panic!("se esperaba Assign")
         };
-        // El value debe ser una Call con callee Field.
+        // The value must be a Call with a Field callee.
         let Expr::Call { callee, .. } = value else {
             panic!("se esperaba Call en RHS")
         };
@@ -4770,7 +4783,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — sentencias (paso 4: assign / return / expr-stmt / programa)
+    // Tests — statements (step 4: assign / return / expr-stmt / program)
     // -----------------------------------------------------------------------
 
     /// Helper: parsea un programa y devuelve el `Program` (lista de stmts).
@@ -5019,7 +5032,7 @@ mod tests {
 
     #[test]
     fn span_de_fn_decorada_apunta_al_decorator() {
-        // El span de `Stmt::FnDef` decorada apunta al `@`, no al `fn`.
+        // A decorated `Stmt::FnDef` span points at `@`, not at `fn`.
         let src = "@get(\"/\") fn handler() => 0";
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
@@ -5027,7 +5040,7 @@ mod tests {
         assert_eq!(span.column, 1);
     }
 
-    // ---- fin tests B.1 span ---------------------------------------
+    // ---- end of B.1 span tests ------------------------------------
 
     #[test]
     fn break_statement() {
@@ -5115,7 +5128,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Xor ----
+    // ---- Mini-batch Xor ----
 
     #[test]
     fn xor_basic_parses() {
@@ -5323,7 +5336,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — fndef (paso 5)
+    // Tests — fndef (step 5)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5562,13 +5575,13 @@ mod tests {
 
     #[test]
     fn fndef_missing_body_marker_errors() {
-        // Después de ')' o '-> Type' debe venir '{' o '=>'.
+        // After ')' or '-> Type' there must be '{' or '=>'.
         let err = parse_program_str("fn f() return 1").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     // -----------------------------------------------------------------------
-    // Tests — StrInterp (paso 6)
+    // Tests — StrInterp (step 6)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5742,8 +5755,8 @@ mod tests {
         // no a la columna 1.
         let tokens = crate::lexer::tokenize(r#""foo{1 +}""#).unwrap();
         let err = parse(tokens).unwrap_err();
-        // El string empieza en col 1, el contenido en col 2, el `{` en col 5.
-        // La subexpresión empieza en col 6. Cualquier columna > 1 confirma
+        // The string starts at col 1, the content at col 2, the `{` at col 5.
+        // The subexpression starts at col 6. Any column > 1 confirms
         // que la traducción está activa.
         assert!(
             err.column > 1,
@@ -5757,7 +5770,7 @@ mod tests {
     fn invalid_subexpression_propagates_error() {
         // "{1 +}"  — subexpresión inválida
         let err = parse_expr(r#""{1 +}""#).unwrap_err();
-        // El error puede ser UnexpectedToken (de la subexpresión).
+        // The error may be UnexpectedToken (from the subexpression).
         assert!(matches!(
             err.kind,
             ErrorKind::UnexpectedToken | ErrorKind::InvalidSyntax
@@ -5765,7 +5778,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — if / match / type (paso 7)
+    // Tests — if / match / type (step 7)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -5825,7 +5838,7 @@ mod tests {
                 },
                 _,
             ) => {
-                // El else exterior contiene una sola stmt: un Expr::If anidado.
+                // The outer else holds a single stmt: a nested Expr::If.
                 assert_eq!(outer_else.len(), 1);
                 match &outer_else[0] {
                     Stmt::Expr(
@@ -6000,12 +6013,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — decoradores sobre FnDef (Fase 4, paso 4.1)
+    // Tests — decorators on FnDef (Phase 4, step 4.1)
     // -----------------------------------------------------------------------
     //
-    // El parser no entiende qué hace cada decorator (eso lo decide el
-    // evaluador). Acá validamos pura estructura: nombre, args, y que se
-    // peguen al FnDef en el orden correcto.
+    // The parser doesn't know what each decorator does (that's the
+    // evaluator's job). Here we validate pure structure: name, args,
+    // and that they attach to the FnDef in the right order.
 
     #[test]
     fn decorator_get_pega_decorator_al_fndef() {
@@ -6074,7 +6087,7 @@ mod tests {
             Stmt::FnDef { decorators, .. } => {
                 assert_eq!(decorators.len(), 1);
                 assert_eq!(decorators[0].name, "put");
-                // El path tiene `{id}` → llega como StrInterp.
+                // The path has `{id}` → arrives as StrInterp.
                 assert_eq!(decorators[0].args.len(), 1);
                 assert!(matches!(decorators[0].args[0], Expr::StrInterp(_, _)));
                 if let Expr::StrInterp(parts, _) = &decorators[0].args[0] {
@@ -6090,7 +6103,7 @@ mod tests {
         match del {
             Stmt::FnDef { decorators, .. } => {
                 assert_eq!(decorators[0].name, "delete");
-                // Sin path params: llega como Str pelado.
+                // No path params: arrives as a bare Str.
                 assert_eq!(
                     decorators[0].args,
                     vec![Expr::Str("/users".into(), Span::ZERO)]
@@ -6157,11 +6170,10 @@ mod tests {
 
     #[test]
     fn decorator_sin_parens_parsea_con_args_vacios() {
-        // Fase 9.z.2.a — paréntesis opcionales en decorators
-        // (necesario para `@test fn ...`). `@get fn h() => 0` parsea
-        // con `args = kwargs = vacíos`. La validación semántica de
-        // que `@get` necesita un path la hace el evaluator, no el
-        // parser.
+        // Phase 9.z.2.a — optional parens in decorators (needed for
+        // `@test fn ...`). `@get fn h() => 0` parses with
+        // `args = kwargs = empty`. Semantic validation that `@get`
+        // needs a path is done by the evaluator, not the parser.
         let stmt = parse_one_stmt("@get\nfn h() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
@@ -6217,7 +6229,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Fase 7, sub-paso 7.0 (kwargs en decoradores)
+    // Tests — Phase 7, sub-step 7.0 (kwargs in decorators)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -6318,12 +6330,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Test integrador final del criterio de Fase 2 — AHORA con interpolación
+    // Final integration test of the Phase 2 criterion — NOW with interpolation
     // -----------------------------------------------------------------------
 
-    /// Criterio de éxito de Fase 2 completo a nivel parser. El AST
-    /// resultante coincide exactamente con el que se construye a mano
-    /// en `ast::tests::can_represent_phase2_success_program`.
+    /// Full Phase 2 success criterion at the parser level. The
+    /// resulting AST matches exactly the one built by hand in
+    /// `ast::tests::can_represent_phase2_success_program`.
     #[test]
     fn parses_phase2_success_program_end_to_end() {
         let src = "name = \"Fitz\"\nx = 10 + 5\nprint(\"Hola, {name}!\")\nfn double(n) => n * 2\nprint(double(x))";
@@ -6424,7 +6436,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Listas, mapas, rangos, indexing (Fase 3, paso 1)
+    // Tests — Lists, maps, ranges, indexing (Phase 3, step 1)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -6835,7 +6847,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — for loop (Fase 3, paso 1)
+    // Tests — for loop (Phase 3, step 1)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -6913,7 +6925,7 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::For { body, .. } => {
-                // El body tiene una sola sentencia: un if/else con break/continue.
+                // The body has a single statement: an if/else with break/continue.
                 assert_eq!(body.len(), 1);
             }
             other => panic!("se esperaba For, se obtuvo {:?}", other),
@@ -6936,7 +6948,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — patrones de rango en match (Fase 3, paso 1)
+    // Tests — range patterns in match (Phase 3, step 1)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -7032,7 +7044,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Or-patterns (R.2.1, mini-fase R)
+    // Tests — Or-patterns (R.2.1, mini-phase R)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -7141,7 +7153,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Guards en match (R.2.2)
+    // Tests — Guards in match (R.2.2)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -7209,7 +7221,7 @@ mod tests {
 
     #[test]
     fn guard_es_expresion_compleja() {
-        // El guard puede ser una expresión booleana arbitraria.
+        // The guard can be any boolean expression.
         let src = "match n { x if x > 0 and x < 100 => \"ok\", _ => \"x\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7221,7 +7233,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Operadores compuestos +=/-=/*=//= (R.2.3)
+    // Tests — Compound operators +=/-=/*=//= (R.2.3)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -7345,7 +7357,7 @@ mod tests {
 
     #[test]
     fn compound_rhs_expresion_completa() {
-        // El RHS debe parsear como expresión completa, no solo literal.
+        // The RHS must parse as a full expression, not just a literal.
         let src = "x += a + b * 2";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7369,7 +7381,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Métodos custom sobre `type` (R.3, mini-fase R)
+    // Tests — Custom methods on `type` (R.3, mini-phase R)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -7490,12 +7502,12 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Struct literals (Fase 3, paso 2)
+    // Tests — Struct literals (Phase 3, step 2)
     //
-    // El parser reconoce `Nombre { campo: expr, ... }` como `Expr::StructLit`
-    // adentro de un postfix de Ident. La ambigüedad con bloques se resuelve
-    // con el flag `no_struct_literal`: en condiciones de if/while/for/match
-    // los struct literals exigen paréntesis.
+    // The parser recognizes `Name { field: expr, ... }` as
+    // `Expr::StructLit` inside an Ident's postfix. The ambiguity with
+    // blocks is resolved via the `no_struct_literal` flag: in
+    // if/while/for/match conditions, struct literals require parens.
     // -----------------------------------------------------------------------
 
     #[test]
@@ -7601,7 +7613,7 @@ mod tests {
 
     #[test]
     fn struct_lit_con_expresion_compleja_como_valor() {
-        // El valor del campo puede ser cualquier expresión.
+        // The field value can be any expression.
         let src = "let p = Point { x: 1 + 2, y: f(3) }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7665,7 +7677,7 @@ mod tests {
 
     #[test]
     fn struct_lit_como_indice_y_receptor_de_index() {
-        // El struct literal puede aparecer adentro de `[...]` de indexing.
+        // The struct literal can appear inside an indexing `[...]`.
         let src = "let v = m[Key { id: 1 }]";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7787,14 +7799,14 @@ mod tests {
     fn if_con_typed_assignment_en_bloque_no_se_confunde_con_struct_literal() {
         // `if x { y: Int = 1 }` — el bloque tiene una asignación tipada,
         // que comparte shape inicial con un struct literal (`Ident :`).
-        // El parser debe distinguir y dejar pasar el bloque sin error.
+        // The parser must distinguish and let the block through without error.
         let src = "if x { y: Int = 1 }";
         let stmts = parse_program_str(src).expect("debería parsear");
         assert_eq!(stmts.len(), 1);
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Result + Ok/Err + ? (Fase 3, paso 3)
+    // Tests — Result + Ok/Err + ? (Phase 3, step 3)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -7935,7 +7947,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Módulos / import (Fase 3, paso 5)
+    // Tests — Modules / import (Phase 3, step 5)
     // -----------------------------------------------------------------------
 
     #[test]
@@ -8028,7 +8040,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Mln — from foo import ( ... ) multi-línea ----
+    // ---- Mini-batch Mln — multi-line from foo import ( ... ) ----
 
     #[test]
     fn mln_from_import_parens_single_line() {
@@ -8089,7 +8101,7 @@ mod tests {
 
     #[test]
     fn mln_from_import_parens_sin_trailing_comma() {
-        // El último nombre antes del `)` no requiere coma.
+        // The last name before `)` does not require a comma.
         let src = "from utils import (\n\
                        a,\n\
                        b\n\
@@ -8201,20 +8213,20 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — TypeExpr en anotaciones (Fase 5, paso 5.1)
+    // Tests — TypeExpr in annotations (Phase 5, step 5.1)
     //
-    // Cubrimos los tres lugares donde el parser pide un tipo:
+    // We cover the three places the parser asks for a type:
     //   - `let x: T = ...` (Stmt::Assign.type_)
-    //   - `fn f(p: T) -> T` (Param.type_ y FnDef.return_type)
+    //   - `fn f(p: T) -> T` (Param.type_ and FnDef.return_type)
     //   - `type X { f: T }` (Field.type_)
     //
-    // El alcance del paso 5.1 es estructura sintáctica: el parser
-    // construye la TypeExpr correcta. Validación semántica (que el
-    // nombre exista, que la aridad del genérico sea correcta, etc.)
-    // queda para 5.2 — el type checker.
+    // The scope of step 5.1 is syntactic structure: the parser
+    // builds the right TypeExpr. Semantic validation (that the name
+    // exists, that the generic arity is correct, etc.) is left to
+    // 5.2 — the type checker.
     // -----------------------------------------------------------------------
 
-    /// Helper: extrae la `TypeExpr` de un `let x: T = 0` simple.
+    /// Helper: extract the `TypeExpr` from a simple `let x: T = 0`.
     fn parse_assign_type(src: &str) -> TypeExpr {
         match parse_one_stmt(src) {
             Stmt::Assign { type_: Some(t), .. } => t,
@@ -8438,7 +8450,7 @@ mod tests {
     fn type_expr_generico_sin_cerrar_es_error() {
         // Falta el `>` final.
         let err = parse_program_str("let xs: List<Int = []").unwrap_err();
-        // El parser falla cuando intenta consumir `>` y se encuentra con `=`.
+        // The parser fails when it tries to consume `>` and finds `=`.
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
@@ -8451,16 +8463,16 @@ mod tests {
 
     #[test]
     fn type_expr_display_round_trip_sobre_un_caso_complejo() {
-        // El display debe reproducir la forma escrita en el fuente.
+        // The display must reproduce the form written in the source.
         let t = parse_assign_type("let m: Map<Str, Result<List<User>?>> = {}");
         assert_eq!(t.display_name(), "Map<Str, Result<List<User>?>>");
     }
 
     // ---------------------------------------------------------------------
-    // Fase 9.0.1 — parse_with_recovery
+    // Phase 9.0.1 — parse_with_recovery
     // ---------------------------------------------------------------------
 
-    /// Helper que tokeniza y corre `parse_with_recovery`. Devuelve
+    /// Helper that tokenizes and runs `parse_with_recovery`. Returns
     /// `(stmts, errors)`.
     fn parse_recovering(src: &str) -> (Program, Vec<FitzError>) {
         let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
@@ -8469,8 +8481,8 @@ mod tests {
 
     #[test]
     fn recovery_programa_valido_no_acumula_errores() {
-        // Smoke: la API recovering produce el mismo AST que strict
-        // sobre código sin errores, con `Vec<FitzError>` vacío.
+        // Smoke: the recovering API produces the same AST as strict
+        // over error-free code, with an empty `Vec<FitzError>`.
         let src = "let x = 1\nlet y = 2\nprint(x + y)";
         let (stmts_rec, errors) = parse_recovering(src);
         assert!(errors.is_empty(), "no se esperaban errores: {:?}", errors);
@@ -8480,9 +8492,9 @@ mod tests {
 
     #[test]
     fn recovery_stmt_roto_a_top_level_inserta_error_y_continua() {
-        // El `1 +` deja un binop pendiente — falla. El parser sincroniza
-        // hasta el próximo Newline y continúa con `let y = 2`, que debe
-        // parsear OK.
+        // The `1 +` leaves a pending binop — fails. The parser
+        // synchronizes to the next Newline and continues with
+        // `let y = 2`, which must parse OK.
         let src = "let x = 1 +\nlet y = 2";
         let (stmts, errors) = parse_recovering(src);
         assert_eq!(errors.len(), 1, "exactamente un error: {:?}", errors);
@@ -8498,8 +8510,8 @@ mod tests {
 
     #[test]
     fn recovery_dos_stmts_rotos_consecutivos_emiten_dos_errores() {
-        // Dos líneas rotas: el parser debe acumular dos errores, no
-        // perderse.
+        // Two broken lines: the parser must accumulate two errors,
+        // not get lost.
         let src = "let a = 1 +\nlet b = *\nlet c = 3";
         let (stmts, errors) = parse_recovering(src);
         assert_eq!(errors.len(), 2);
@@ -8516,12 +8528,12 @@ mod tests {
 
     #[test]
     fn recovery_stmt_roto_dentro_de_bloque_inserta_error_y_sigue() {
-        // El body del `if` tiene un stmt roto seguido de uno válido.
+        // The `if` body has a broken stmt followed by a valid one.
         let src = "if (x) {\n  let a = 1 +\n  let b = 2\n}";
         let (stmts, errors) = parse_recovering(src);
         assert_eq!(errors.len(), 1);
         assert_eq!(stmts.len(), 1);
-        // El `if` es Stmt::Expr(Expr::If { ... }, _). Inspeccionamos su body.
+        // The `if` is Stmt::Expr(Expr::If { ... }, _). Inspect its body.
         match &stmts[0] {
             Stmt::Expr(Expr::If { then, .. }, _) => {
                 assert_eq!(then.len(), 2);
@@ -8539,9 +8551,9 @@ mod tests {
 
     #[test]
     fn recovery_error_span_apunta_al_token_donde_empezo_el_stmt() {
-        // El stmt roto arranca en la línea 1, col 1 (el `let`). El span
-        // del `Stmt::Error` lo refleja para que el LSP lo subraye desde
-        // el inicio del stmt y no desde el caracter raro.
+        // The broken stmt starts at line 1, col 1 (the `let`). The
+        // `Stmt::Error` span reflects this so the LSP underlines it
+        // from the start of the stmt, not from the odd character.
         let src = "let x = +\nlet y = 2";
         let (stmts, _errors) = parse_recovering(src);
         match &stmts[0] {
@@ -8555,33 +8567,33 @@ mod tests {
 
     #[test]
     fn recovery_error_lleva_linea_y_columna_del_token_problematico() {
-        // El error reportado debe apuntar al token donde se detectó el
-        // problema (el `+` suelto), no al inicio del stmt — útil para
-        // el LSP que subraya el squiggly.
+        // The reported error must point at the token where the
+        // problem was detected (the lone `+`), not at the start of
+        // the stmt — useful for the LSP underlining the squiggly.
         let src = "let x = +\nlet y = 2";
         let (_stmts, errors) = parse_recovering(src);
         assert_eq!(errors.len(), 1);
         assert_eq!(errors[0].line, 1);
-        // El `+` está en la columna 9.
+        // The `+` is at column 9.
         assert_eq!(errors[0].column, 9);
     }
 
     #[test]
     fn recovery_eof_inesperado_se_acumula_como_error() {
-        // `let x =` deja una expresión pendiente al final del archivo.
-        // El parser debe acumular el error y devolver lo que pudo
-        // construir.
+        // `let x =` leaves a pending expression at the end of file.
+        // The parser must accumulate the error and return what it
+        // could build.
         let src = "let x =";
         let (stmts, errors) = parse_recovering(src);
         assert_eq!(errors.len(), 1);
-        // El stmt roto va como Error.
+        // The broken stmt comes through as Error.
         assert!(matches!(stmts.last(), Some(Stmt::Error(_))));
     }
 
     #[test]
     fn recovery_cota_de_errores_corta_la_acumulacion() {
-        // Generamos un programa con más de MAX_RECOVERED_ERRORS líneas
-        // rotas. Verificamos que la cota se respeta.
+        // Generate a program with more than MAX_RECOVERED_ERRORS
+        // broken lines. Verify the cap is respected.
         let n = MAX_RECOVERED_ERRORS + 50;
         let lines: Vec<String> = (0..n).map(|_| "let a = +".to_string()).collect();
         let src = lines.join("\n");
@@ -8591,10 +8603,10 @@ mod tests {
 
     #[test]
     fn recovery_fn_con_body_roto_preserva_estructura() {
-        // El body de `fn foo` tiene un stmt roto. Lo importante: el
-        // FnDef sigue siendo FnDef (con body que contiene Stmt::Error),
-        // no se descarta entero. El stmt que sigue al cierre del fn
-        // también parsea OK.
+        // The `fn foo` body has a broken stmt. The key point: the
+        // FnDef remains a FnDef (with a body containing Stmt::Error),
+        // it isn't discarded entirely. The stmt after the fn close
+        // also parses OK.
         let src = "fn foo() {\n  let a = +\n}\nlet b = 1";
         let (stmts, errors) = parse_recovering(src);
         assert_eq!(errors.len(), 1);
@@ -8617,21 +8629,21 @@ mod tests {
 
     #[test]
     fn recovery_parse_strict_sigue_abortando_al_primer_error() {
-        // Garantía clave: `parse()` strict NO cambia su comportamiento.
-        // Sigue devolviendo `Err` al primer error. La CLI strict
-        // (`fitz run`/`build`/`check`) sigue funcionando igual.
+        // Key guarantee: strict `parse()` does NOT change behavior.
+        // It still returns `Err` on the first error. The strict CLI
+        // (`fitz run`/`build`/`check`) keeps working the same.
         let src = "let x = +\nlet y = 2";
         let err = parse(tokenize(src).unwrap()).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     // ---------------------------------------------------------------------
-    // Mini-tanda C — list comprehensions.
+    // Mini-batch C — list comprehensions.
     // ---------------------------------------------------------------------
 
-    /// Extrae el valor de un `let x = <expr>` top-level y lo devuelve.
-    /// Útil para tests que arman programas chicos y quieren inspeccionar
-    /// el primer `Expr` parseado.
+    /// Extract the value of a top-level `let x = <expr>` and return
+    /// it. Useful for tests that build small programs and want to
+    /// inspect the first parsed `Expr`.
     fn parse_first_let_value(src: &str) -> Expr {
         let stmts = parse(tokenize(src).expect("tokenize")).expect("parse");
         match stmts.into_iter().next().expect("al menos un stmt") {
@@ -8660,7 +8672,7 @@ mod tests {
         }
     }
 
-    // Mini-tanda Up — tuple destructuring en list comprehension.
+    // Mini-batch Up — tuple destructuring in list comprehension.
     #[test]
     fn up_comprehension_acepta_tuple_destructuring() {
         let v = parse_first_let_value("let ys = [a + b for (a, b) in pairs]");
@@ -8703,7 +8715,7 @@ mod tests {
     #[test]
     fn lista_de_un_elemento_no_se_confunde_con_comprehension() {
         // `[42]` es una lista de un elemento, NO una comprehension.
-        // El parser solo detecta comprehension si tras el primer expr
+        // The parser only detects a comprehension if, after the first expr,
         // viene `for` (no `,` ni `]`).
         let v = parse_first_let_value("let xs = [42]");
         match v {
@@ -8713,7 +8725,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Mini-tanda Fm — format specs en interpolación.
+    // Mini-batch Fm — format specs in interpolation.
     // ---------------------------------------------------------------
 
     fn extract_first_strinterp_spec(src: &str) -> Option<crate::ast::FormatSpec> {
@@ -8788,7 +8800,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Mini-tanda Md — for con Pattern en `var`.
+    // Mini-batch Md — for with Pattern in `var`.
     // ---------------------------------------------------------------
 
     #[test]
@@ -8832,7 +8844,7 @@ mod tests {
         }
     }
 
-    // ---- Mini-tanda Fp — default params ----
+    // ---- Mini-batch Fp — default params ----
 
     #[test]
     fn fp_param_con_default_int_se_parsea() {
@@ -8907,7 +8919,7 @@ mod tests {
         }
     }
 
-    // ---- Mini-tanda Fp.2 — varargs ----
+    // ---- Mini-batch Fp.2 — varargs ----
 
     #[test]
     fn fp2_param_varargs_se_parsea() {
@@ -8956,7 +8968,7 @@ mod tests {
         }
     }
 
-    // ---- Mini-tanda Fp.3 — named args ----
+    // ---- Mini-batch Fp.3 — named args ----
 
     #[test]
     fn fp3_call_con_named_arg_emite_named_arg() {
@@ -8985,7 +8997,7 @@ mod tests {
         assert!(result.is_err(), "esperaba error positional-tras-named");
     }
 
-    // ---- Mini-tanda Sp.2 — return en match arm ----
+    // ---- Mini-batch Sp.2 — return in match arm ----
 
     #[test]
     fn sp2_match_arm_con_return_se_parsea_como_stmt_return() {
@@ -9009,7 +9021,7 @@ mod tests {
 
     #[test]
     fn sp2_match_arm_body_es_vec_stmt_de_1_para_expr_simple() {
-        // El caso common: arm body de 1 stmt expr.
+        // Common case: arm body with 1 stmt expr.
         let src = "let r = match 1 { 0 => \"a\"\n_ => \"b\" }";
         let program = parse_program_str(src).expect("parse OK");
         if let Stmt::Assign {
@@ -9155,7 +9167,7 @@ mod tests {
 
     #[test]
     fn decorator_sobre_let_es_error() {
-        // El parser solo acepta decoradores sobre `fn`, `async fn` o `type`.
+        // The parser only accepts decorators on `fn`, `async fn` or `type`.
         // `@x(1)\nlet y = 2` debe fallar con mensaje claro.
         let tokens = tokenize("@get(\"/x\")\nlet y = 2").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar decorator sobre let");
@@ -9181,7 +9193,7 @@ mod tests {
 
     #[test]
     fn string_con_escape_invalido_es_error_del_lexer() {
-        // El lexer rechaza escapes desconocidos como `\q`. Se reporta en
+        // The lexer rejects unknown escapes like `\q`. Reported at
         // tokenize, no en parse, pero igual cuenta como error path del
         // pipeline lex-parse.
         let res = tokenize("let x = \"\\q\"");
@@ -9240,7 +9252,7 @@ mod tests {
         );
     }
 
-    // ---- V1 (2026-06-05) — spans correctos adentro de StrInterp ----
+    // ---- V1 (2026-06-05) — correct spans inside StrInterp ----
 
     /// Extrae el primer `Expr::StrInterp` del `Program` y devuelve sus
     /// parts. Helper de los tests V1.
@@ -9284,7 +9296,7 @@ mod tests {
             "span.line del Ident interno debería ser 1, fue {}",
             span.line
         );
-        // El `{` está en col 13 (después de `print("hola `), el `n` de
+        // The `{` is at col 13 (after `print("hola `), the `n` of
         // `nombre` arranca en col 14.
         assert_eq!(
             span.column, 14,
