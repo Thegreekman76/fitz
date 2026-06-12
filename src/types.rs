@@ -1,44 +1,44 @@
-// types.rs — Fase 5.2
+// types.rs — Phase 5.2
 //
-// Representación interna del sistema de tipos de Fitz. Mientras
-// `ast::TypeExpr` es lo que el parser produce a partir del fuente,
-// este módulo modela el tipo *resuelto* contra una tabla: cada
-// nombre se busca, cada genérico valida aridad, cada nominal lleva
-// identidad única dentro del programa.
+// Internal representation of Fitz's type system. While
+// `ast::TypeExpr` is what the parser produces from source,
+// this module models the *resolved* type against a table: each
+// name is looked up, each generic validates arity, each nominal carries
+// a unique identity within the program.
 //
-// El flujo es:
+// The flow is:
 //
-//   AST (TypeExpr)  ──resolve_type_expr──►  Type  (resuelto)
-//                          contra
+//   AST (TypeExpr)  ──resolve_type_expr──►  Type  (resolved)
+//                          against
 //                       TypeEnv
 //
-// 5.2 valida las anotaciones top-level (campos de `type`, params y
-// return de fns, anotaciones de let). El chequeo de cuerpos de
-// funciones contra valores queda para 5.3.
+// 5.2 validates top-level annotations (fields of `type`, params and
+// return of fns, let annotations). Checking function bodies against
+// values is left for 5.3.
 
 use std::collections::HashMap;
 
 use crate::ast::{Decorator, Expr, Field, Param, Program, Span, Stmt, TypeExpr};
 use crate::error::{ErrorKind, FitzError};
 
-/// Identidad única para los tipos nominales (los declarados con
-/// `type`). Internamente es un índice contra `TypeEnv.nominals`.
-/// Dos `type User` en módulos distintos producen `TypeId`s distintos
-/// — la identidad es nominal, no estructural.
+/// Unique identity for nominal types (those declared with
+/// `type`). Internally an index against `TypeEnv.nominals`.
+/// Two `type User` in different modules produce different `TypeId`s
+/// — identity is nominal, not structural.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeId(pub usize);
 
-/// Un tipo resuelto. Lo que el checker compara y muestra al usuario.
+/// A resolved type. What the checker compares and shows to the user.
 ///
-/// Diferencias con `TypeExpr`:
-///  - `Nominal(TypeId)` lleva la identidad ya resuelta (no es solo
-///    un string).
-///  - Los genéricos built-in tienen variantes propias en lugar de
-///    `Generic { name, args }` — facilita el pattern matching.
-///  - Los primitivos son singletons (no llevan datos).
+/// Differences with `TypeExpr`:
+///  - `Nominal(TypeId)` carries the already-resolved identity (not just
+///    a string).
+///  - Built-in generics have their own variants instead of
+///    `Generic { name, args }` — makes pattern matching easier.
+///  - Primitives are singletons (carry no data).
 ///
-/// La igualdad estructural derivada sirve: dos `Type` que el checker
-/// dice "compatible" deben dar `==`.
+/// The derived structural equality works: two `Type`s that the checker
+/// says "compatible" must yield `==`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Int,
@@ -46,255 +46,255 @@ pub enum Type {
     Str,
     Bool,
     Null,
-    /// Mini-tanda Bytes — secuencia de bytes binarios. Primitivo
-    /// nuevo del lenguaje. Construido vía literal `b"..."` (con
-    /// escapes hex `\xHH`) o vía builtin `bytes_from_str(s)`. Métodos
-    /// soportados: `.len()`, `.is_empty()`, `.to_str() -> Result<Str>`.
+    /// Mini-batch Bytes — sequence of binary bytes. New primitive
+    /// of the language. Built via literal `b"..."` (with
+    /// hex escapes `\xHH`) or via builtin `bytes_from_str(s)`. Methods
+    /// supported: `.len()`, `.is_empty()`, `.to_str() -> Result<Str>`.
     Bytes,
-    /// `Range` solo aparece en `0..10` por ahora — no tiene parámetro.
+    /// `Range` only appears in `0..10` for now — has no parameter.
     Range,
 
     /// `List<T>`.
     List(Box<Type>),
     /// `Map<K, V>`.
     Map(Box<Type>, Box<Type>),
-    /// `Result<T>` o `Result<T, E>` (mini-tanda Re+). Cuando el usuario
-    /// escribe `Result<T>` sin E explícito, el parser lo expande a
-    /// `Result<T, Str>` por compatibilidad con todo el código que existía
-    /// antes del refactor. Anotar `Result<T, MiError>` permite carry de
-    /// tipos custom en el Err side.
+    /// `Result<T>` or `Result<T, E>` (mini-batch Re+). When the user
+    /// writes `Result<T>` without explicit E, the parser expands it to
+    /// `Result<T, Str>` for compat with all code that existed
+    /// before the refactor. Annotating `Result<T, MyError>` allows carry of
+    /// custom types in the Err side.
     Result {
         ok: Box<Type>,
         err: Box<Type>,
     },
 
-    /// `Future<T>` — el valor pendiente que produce una `async fn` al
-    /// llamarse. Solo `.await` (adentro de otra `async fn`) lo desempaca
-    /// a `T`. Aridad fija 1 (built-in genérico, paralelo a Result/List/
-    /// Nullable). Introducido en Fase 6.2.
+    /// `Future<T>` — the pending value produced by an `async fn` when
+    /// called. Only `.await` (inside another `async fn`) unwraps
+    /// it to `T`. Fixed arity 1 (built-in generic, parallel to Result/List/
+    /// Nullable). Introduced in Phase 6.2.
     Future(Box<Type>),
 
-    /// Fase 12.2.a — `Secret<T>` tipo opaco con auto-redaction.
-    /// Construido por el builtin `secret("KEY")` que lee env var /
-    /// mounted file `/run/secrets/<key>` / `.env`. El Display y Debug
-    /// del runtime emiten `<redacted Secret<T>>` para prevenir leaks
-    /// accidentales en logs. Acceder al inner T requiere llamar
-    /// `.expose()` explícito — diseño defensive-by-default paralelo
-    /// al pattern Secret<T> de Rust libs como `secrecy`.
+    /// Phase 12.2.a — `Secret<T>` opaque type with auto-redaction.
+    /// Built by the `secret("KEY")` builtin that reads env var /
+    /// mounted file `/run/secrets/<key>` / `.env`. The runtime's
+    /// Display and Debug emit `<redacted Secret<T>>` to prevent
+    /// accidental leaks in logs. Accessing the inner T requires calling
+    /// `.expose()` explicitly — defensive-by-default design parallel
+    /// to the Secret<T> pattern of Rust libs like `secrecy`.
     ///
-    /// Serialization a JSON está bloqueada en `value_to_json` — un
-    /// handler HTTP que devuelva `Secret<Str>` recibe error explícito
-    /// citando `.expose()` (deuda residual: refinement con field-level
-    /// redaction en types con field Secret).
+    /// JSON serialization is blocked in `value_to_json` — an
+    /// HTTP handler that returns `Secret<Str>` receives an explicit error
+    /// citing `.expose()` (residual debt: refinement with field-level
+    /// redaction in types with a Secret field).
     ///
-    /// Aridad fija 1 (built-in genérico, paralelo a Future/Result/List).
+    /// Fixed arity 1 (built-in generic, parallel to Future/Result/List).
     Secret(Box<Type>),
 
-    /// Fase 9.w.2 — `WsConn<T>` conexión WebSocket tipada. `T` es el
-    /// tipo de mensaje (cualquier tipo que serialice a JSON: primitivo,
-    /// `type` custom, List/Map, etc.). Aridad fija 1, built-in genérico
-    /// (paralelo a Future/Result/List). Sólo aparece como param de
-    /// handlers `@ws("/path")` — el runtime construye el `Value::WsConn`
-    /// tras el upgrade HTTP→WS y lo inyecta. Métodos paramétricos:
+    /// Phase 9.w.2 — `WsConn<T>` typed WebSocket connection. `T` is the
+    /// message type (any type that serializes to JSON: primitive,
+    /// custom `type`, List/Map, etc.). Fixed arity 1, built-in generic
+    /// (parallel to Future/Result/List). Only appears as a param of
+    /// `@ws("/path")` handlers — the runtime constructs the `Value::WsConn`
+    /// after the HTTP→WS upgrade and injects it. Parametric methods:
     /// `recv: () -> Result<RECV>`, `send: (SEND) -> Result<Null>`,
-    /// `broadcast: (SEND) -> Result<Null>` (a todos los conn del endpoint,
-    /// incluyendo el sender), `close: () -> Null`.
+    /// `broadcast: (SEND) -> Result<Null>` (to all conns on the endpoint,
+    /// including the sender), `close: () -> Null`.
     ///
-    /// 9.w.2-wsconn-bidir (v0.9.38): cuando el usuario declara
-    /// `WsConn<T>` (aridad 1), ambos `recv` y `send` apuntan al mismo
-    /// `T` (backward-compat con todo el código pre-bidir). Cuando
-    /// declara `WsConn<In, Out>` (aridad 2), `recv = In` y `send = Out`
-    /// pueden diferir — habilita canales asimétricos (e.g. cliente
-    /// envía comandos, server emite eventos de distinto shape).
+    /// 9.w.2-wsconn-bidir (v0.9.38): when the user declares
+    /// `WsConn<T>` (arity 1), both `recv` and `send` point to the same
+    /// `T` (backward-compat with all pre-bidir code). When
+    /// declaring `WsConn<In, Out>` (arity 2), `recv = In` and `send = Out`
+    /// can differ — enables asymmetric channels (e.g. client
+    /// sends commands, server emits events of different shape).
     WsConn {
         recv: Box<Type>,
         send: Box<Type>,
     },
 
-    /// Fase 10.1.c — handle opaco a una conexión Postgres viva.
-    /// Producido por `db.connect(url).await?` y consumido por los
-    /// métodos `query/exec/close/is_closed`. Opaco: el user no
-    /// construye instancias directamente.
+    /// Phase 10.1.c — opaque handle to a live Postgres connection.
+    /// Produced by `db.connect(url).await?` and consumed by the
+    /// `query/exec/close/is_closed` methods. Opaque: the user does not
+    /// construct instances directly.
     ///
-    /// Sin parámetros de tipo (a diferencia de WsConn que es
-    /// genérico sobre RECV/SEND). El row type es siempre
-    /// `Map<Str, Any>` en MVP — composites tipados (ORM con
-    /// `@table type User { ... }`) llegan en 10.3.
+    /// No type parameters (unlike WsConn which is
+    /// generic over RECV/SEND). The row type is always
+    /// `Map<Str, Any>` in the MVP — typed composites (ORM with
+    /// `@table type User { ... }`) come in 10.3.
     DbConn,
 
-    /// Fase 10.1.c — una fila del resultset de un query Postgres.
-    /// Producida por `conn.query(...).await?` (como `List<DbRow>`)
-    /// y consumida con `row.get("col")` / `row.get_at(idx)` que
-    /// devuelven el valor primitivo (Int/Float/Str/Bool/Bytes/Null).
-    /// Opaca: el user no construye instancias.
+    /// Phase 10.1.c — one row of the resultset of a Postgres query.
+    /// Produced by `conn.query(...).await?` (as `List<DbRow>`)
+    /// and consumed with `row.get("col")` / `row.get_at(idx)` which
+    /// return the primitive value (Int/Float/Str/Bool/Bytes/Null).
+    /// Opaque: the user does not construct instances.
     DbRow,
 
-    /// v0.10.24 — fecha sin hora ni tz. Formato ISO 8601 `YYYY-MM-DD`.
-    /// Construida via `Date.today()` o `Date.parse("2026-05-30")`.
-    /// Mapea a Postgres `date` (OID 1082) en ORM/driver.
+    /// v0.10.24 — date without time or tz. ISO 8601 format `YYYY-MM-DD`.
+    /// Built via `Date.today()` or `Date.parse("2026-05-30")`.
+    /// Maps to Postgres `date` (OID 1082) in ORM/driver.
     Date,
 
-    /// v0.10.24 — fecha + hora + tz (siempre UTC en MVP). Formato ISO
-    /// 8601 `YYYY-MM-DDTHH:MM:SSZ`. Construida via `DateTime.now()` o
-    /// `DateTime.parse("...")`. Mapea a Postgres `timestamptz` (OID
-    /// 1184) en ORM/driver. TZ explícitas parametrizadas
-    /// (`DateTime<TZ>`) quedan como deuda futura — usado por <5% de
-    /// apps reales.
+    /// v0.10.24 — date + time + tz (always UTC in MVP). ISO 8601
+    /// format `YYYY-MM-DDTHH:MM:SSZ`. Built via `DateTime.now()` or
+    /// `DateTime.parse("...")`. Maps to Postgres `timestamptz` (OID
+    /// 1184) in ORM/driver. Explicit parameterized TZs
+    /// (`DateTime<TZ>`) remain as future debt — used by <5% of
+    /// real apps.
     DateTime,
 
-    /// v0.10.24 — UUID v4 random. Formato canonical `xxxxxxxx-xxxx-
-    /// 4xxx-yxxx-xxxxxxxxxxxx`. Construido via `Uuid.v4()` (random) o
-    /// `Uuid.parse("...")`. Mapea a Postgres `uuid` (OID 2950) en
-    /// ORM/driver. Naming `Uuid` (no `UUID`) por consistencia con
+    /// v0.10.24 — random v4 UUID. Canonical format `xxxxxxxx-xxxx-
+    /// 4xxx-yxxx-xxxxxxxxxxxx`. Built via `Uuid.v4()` (random) or
+    /// `Uuid.parse("...")`. Maps to Postgres `uuid` (OID 2950) in
+    /// ORM/driver. Naming `Uuid` (not `UUID`) for consistency with
     /// `DbConn`/`DbRow`/`PyAny`.
     Uuid,
 
-    /// Fase 10.3+ — query builder del ORM. Devuelto por
-    /// `Type.where(closure)` cuando `Type` tiene `@table`, y
-    /// preservado por la chain `.where`/`.order_by`/`.limit`/
-    /// `.offset`/`.group_by`. Las terminales (`.all`/`.first`/
+    /// Phase 10.3+ — ORM query builder. Returned by
+    /// `Type.where(closure)` when `Type` has `@table`, and
+    /// preserved by the `.where`/`.order_by`/`.limit`/
+    /// `.offset`/`.group_by` chain. The terminals (`.all`/`.first`/
     /// `.count`/`.sum`/`.avg`/`.min`/`.max`/`.update`/`.delete`)
-    /// rompen la chain devolviendo `Result<...>`.
+    /// break the chain returning `Result<...>`.
     ///
-    /// El param `row` lleva el tipo nominal del row para que las
-    /// terminales sepan qué devolver: `.all(db) → Result<List<row>>`,
-    /// `.first(db) → Result<row>`, etc. Opaco a runtime: el
-    /// evaluador usa `Value::QueryBuilder(Arc<dyn Any>)` y nunca
-    /// inspecciona el row a este nivel.
+    /// The `row` param carries the row's nominal type so that the
+    /// terminals know what to return: `.all(db) → Result<List<row>>`,
+    /// `.first(db) → Result<row>`, etc. Opaque to runtime: the
+    /// evaluator uses `Value::QueryBuilder(Arc<dyn Any>)` and never
+    /// inspects the row at this level.
     QueryBuilder(Box<Type>),
 
-    /// Fase 10.b.14 — `Aggregated<Row>`. QueryBuilder post-`.group_by(...)`.
-    /// Conserva todos los chain methods (where/order_by/limit/offset/
-    /// group_by) que devuelven `Aggregated<Row>`. Los aggregates
-    /// terminales (`sum/avg/min/max/count`) cambian shape: devuelven
-    /// `Future<Result<List<Map<Str, Any>>>>` con cada row = un grupo
-    /// más su aggregate. `.all/.first/.update/.delete` se rechazan
-    /// (no tiene sentido sobre un GROUP BY). El refactor desbloquea
-    /// la deuda residual de 10.b.6 que solo soportaba aggregates
-    /// scalares (path sin group_by).
+    /// Phase 10.b.14 — `Aggregated<Row>`. QueryBuilder post-`.group_by(...)`.
+    /// Preserves all chain methods (where/order_by/limit/offset/
+    /// group_by) that return `Aggregated<Row>`. The terminal
+    /// aggregates (`sum/avg/min/max/count`) change shape: return
+    /// `Future<Result<List<Map<Str, Any>>>>` with each row = a group
+    /// plus its aggregate. `.all/.first/.update/.delete` are rejected
+    /// (makes no sense over a GROUP BY). The refactor unblocks
+    /// the residual debt of 10.b.6 which only supported scalar
+    /// aggregates (path without group_by).
     Aggregated(Box<Type>),
 
-    /// Tipo declarado por el usuario (`type User { ... }`) o
-    /// importado. La identidad va por `TypeId`.
+    /// Type declared by the user (`type User { ... }`) or
+    /// imported. Identity goes via `TypeId`.
     Nominal(TypeId),
 
-    /// `T?` — el valor puede ser de tipo `T` o `Null`.
+    /// `T?` — the value can be of type `T` or `Null`.
     Nullable(Box<Type>),
 
-    /// Tipo de una función: `fn(p1, p2, ...) -> r`. Lo construye el
-    /// checker al registrar `Stmt::FnDef` (5.3.2) y al sintetizar
-    /// `Expr::FnExpr` (5.3.5). En 5.3.1 ya existe como variante para
-    /// no refactorizar después.
+    /// Function type: `fn(p1, p2, ...) -> r`. Built by the
+    /// checker when registering `Stmt::FnDef` (5.3.2) and when synthesizing
+    /// `Expr::FnExpr` (5.3.5). In 5.3.1 it already exists as a variant to
+    /// avoid refactoring later.
     Function {
         params: Vec<Type>,
         ret: Box<Type>,
     },
 
-    /// Tipo tupla `(T1, T2, ...)` (mini-tanda T). Heterogénea, tamaño
-    /// fijo, posicional. Vec vacío → tupla unitaria `()`. Acceso por
-    /// `t.0`, `t.1`, etc. La identidad estructural: dos `Tuple` con
-    /// los mismos elementos en el mismo orden son iguales.
+    /// Tuple type `(T1, T2, ...)` (mini-batch T). Heterogeneous, fixed
+    /// size, positional. Empty Vec → unit tuple `()`. Access via
+    /// `t.0`, `t.1`, etc. Structural identity: two `Tuple`s with
+    /// the same elements in the same order are equal.
     Tuple(Vec<Type>),
 
-    /// "Sin tipo determinado". Escape gradual: aparece donde el
-    /// checker no puede o no quiere inferir un tipo concreto. Param
-    /// sin anotación, `let` sin anotación con RHS no inferible,
-    /// expresiones que el checker todavía no modela (calls antes de
-    /// 5.3.2, métodos antes de 5.3.4, etc.). Cualquier comparación
-    /// contra `Any` pasa: nada se rechaza por culpa de un `Any`.
+    /// "No determined type". Gradual escape: appears where the
+    /// checker cannot or does not want to infer a concrete type. Param
+    /// without annotation, `let` without annotation with non-inferrable RHS,
+    /// expressions that the checker does not yet model (calls before
+    /// 5.3.2, methods before 5.3.4, etc.). Any comparison
+    /// against `Any` passes: nothing is rejected because of an `Any`.
     ///
-    /// **Matriz de uso de `Type::Any` (audit F1, v0.9.45)** — los
-    /// ~180 sitios donde aparece se clasifican en estas categorías,
-    /// todas intencionales (no son bugs por silenciar):
+    /// **Matrix of `Type::Any` usage (audit F1, v0.9.45)** — the
+    /// ~180 sites where it appears are classified into these categories,
+    /// all intentional (not bugs from silencing):
     ///
-    /// 1. **Builtins variádicos** (`print(...)`, `assert(...)`,
-    ///    `assert_eq`, `format!`-style): firma `params: vec![Any, ...]`
-    ///    porque aceptan cualquier tipo. Refinable en sub-fase de
-    ///    overloading multi-aridad, sin presión real.
+    /// 1. **Variadic builtins** (`print(...)`, `assert(...)`,
+    ///    `assert_eq`, `format!`-style): signature `params: vec![Any, ...]`
+    ///    because they accept any type. Refinable in a multi-arity
+    ///    overloading sub-phase, no real pressure.
     ///
-    /// 2. **Builtins polimórficos sobre tipo distinto** (`len(x)` →
-    ///    Str/List/Map/Bytes; `bytes(s)` → Str): param `Any`, ret
-    ///    concreto. El dispatch real ocurre en runtime/codegen por
-    ///    tipo del receiver. Cubrir esto con tipos sum (`Str | List
-    ///    | Map | Bytes`) no aporta sin tipo unión genérico.
+    /// 2. **Polymorphic builtins over a distinct type** (`len(x)` →
+    ///    Str/List/Map/Bytes; `bytes(s)` → Str): param `Any`, concrete
+    ///    ret. The real dispatch occurs in runtime/codegen by
+    ///    receiver type. Covering this with sum types (`Str | List
+    ///    | Map | Bytes`) does not help without a generic union type.
     ///
-    /// 3. **Propagación gradual** (`Any op X → Any`, `Any.field →
-    ///    Any`, `Any(args) → Any`): patrón clásico de gradual
-    ///    typing. Garantiza que código sin anotaciones siga andando
-    ///    cuando entra en contacto con vars tipadas.
+    /// 3. **Gradual propagation** (`Any op X → Any`, `Any.field →
+    ///    Any`, `Any(args) → Any`): classic pattern of gradual
+    ///    typing. Guarantees code without annotations keeps working
+    ///    when it comes into contact with typed vars.
     ///
-    /// 4. **Anotaciones que fallan resolución** (`Some(t) =>
-    ///    resolve_type_expr(t, &env).unwrap_or(Type::Any)`): fallback
-    ///    defensivo — si el usuario anotó un tipo inválido, el
-    ///    checker emite el error de anotación pero NO aborta el
-    ///    pipeline; el binding queda como `Any` para que el resto
-    ///    del programa siga chequeando. Sin esto, un solo typo en
-    ///    una anotación cascadea a errores de "var desconocida".
+    /// 4. **Annotations that fail resolution** (`Some(t) =>
+    ///    resolve_type_expr(t, &env).unwrap_or(Type::Any)`): defensive
+    ///    fallback — if the user annotated an invalid type, the
+    ///    checker emits the annotation error but does NOT abort the
+    ///    pipeline; the binding stays as `Any` so the rest
+    ///    of the program keeps checking. Without this, a single typo in
+    ///    an annotation cascades into "unknown var" errors.
     ///
-    /// 5. **Callbacks sin anotación** (`FnExpr` inline sin `ret`
-    ///    declarado, antes de la inferencia 5.3.5): ret type `Any`
-    ///    hasta que se procese el body. Tras 5.3.5, el ret se infiere
-    ///    via `unify_returns` + `lub`; sólo queda `Any` cuando el
-    ///    body no tiene returns o son heterogéneos irrecuperables.
+    /// 5. **Callbacks without annotation** (`FnExpr` inline without `ret`
+    ///    declared, before inference 5.3.5): ret type `Any`
+    ///    until the body is processed. After 5.3.5, the ret is inferred
+    ///    via `unify_returns` + `lub`; only remains `Any` when the
+    ///    body has no returns or they are irrecoverably heterogeneous.
     ///
-    /// 6. **Patterns de match con scrutinee `Any`** (`Ok(x)` /
-    ///    `Err(e)` / `Ident(b)`): el binding queda `Any` para
-    ///    propagar el gradual. Refinable cuando el scrutinee tipa
-    ///    concreto.
+    /// 6. **Match patterns with scrutinee `Any`** (`Ok(x)` /
+    ///    `Err(e)` / `Ident(b)`): the binding stays `Any` to
+    ///    propagate the gradual. Refinable when the scrutinee types
+    ///    concrete.
     ///
-    /// 7. **`Expr::Error` (F15 recovery)**: el wrapper `infer_expr`
-    ///    persiste `Expr::Error → Type::Any` para que el LSP corra
-    ///    el checker sobre AST roto sin cascadas de errores. Política
-    ///    silenciosa: el error real ya lo registró el parser.
+    /// 7. **`Expr::Error` (F15 recovery)**: the `infer_expr` wrapper
+    ///    persists `Expr::Error → Type::Any` so the LSP runs
+    ///    the checker over broken AST without cascading errors. Silent
+    ///    policy: the real error was already registered by the parser.
     ///
-    /// 8. **Result/Future built-ins sin info concreta**
-    ///    (`Result<Any>` en `Err("...")` suelto, `Future<Any>` en
-    ///    `spawn(...)` sin call literal): "no sabemos el `T`,
-    ///    refinar en el sitio destino". El `is_compatible` recursivo
-    ///    los permite contra `Result<X>` / `Future<X>` concretos.
+    /// 8. **Result/Future built-ins without concrete info**
+    ///    (`Result<Any>` in standalone `Err("...")`, `Future<Any>` in
+    ///    `spawn(...)` without literal call): "we don't know the `T`,
+    ///    refine at the destination site". Recursive `is_compatible`
+    ///    allows them against concrete `Result<X>` / `Future<X>`.
     ///
-    /// 9. **`Type::PyAny` se propaga como `Type::Any` en algunos
-    ///    contextos** (`Any | PyAny → Any` en BinOp/UnaryOp): el
-    ///    gradual escape de PyAny vive en su propio variante para
-    ///    diferenciarlo en hover/completion del LSP, pero degrada a
-    ///    `Any` al combinarse con vars no-Python.
+    /// 9. **`Type::PyAny` propagates as `Type::Any` in some
+    ///    contexts** (`Any | PyAny → Any` in BinOp/UnaryOp): the
+    ///    PyAny gradual escape lives in its own variant to
+    ///    differentiate it in LSP hover/completion, but degrades to
+    ///    `Any` when combined with non-Python vars.
     ///
-    /// Lo que NO está en esta lista (y sería bug si apareciera):
-    /// - Usar `Type::Any` como tipo de error real (debería ser un
-    ///   variante específico o `Result<X, E>` con E claro).
-    /// - Usar `Type::Any` para silenciar un mismatch genuino (debería
-    ///   ser `ctx.error_at(...)`).
-    /// - `Type::Any` como retorno de fns user-defined sin anotación
-    ///   (cuando llegue la inferencia full, debería ser el unify de
-    ///   los returns, no fallback gradual).
+    /// What is NOT in this list (and would be a bug if it appeared):
+    /// - Using `Type::Any` as a real error type (should be a
+    ///   specific variant or `Result<X, E>` with clear E).
+    /// - Using `Type::Any` to silence a genuine mismatch (should
+    ///   be `ctx.error_at(...)`).
+    /// - `Type::Any` as the return of user-defined fns without annotation
+    ///   (when full inference arrives, it should be the unify of
+    ///   the returns, not gradual fallback).
     Any,
 
-    /// Fase 8.4 — "Objeto Python opaco". Aparece en los bindings de
-    /// `from python import X` y se propaga por field access
-    /// (`mod.submod`, `obj.attr` → siguen siendo `PyAny`). Existe
-    /// separado de `Any` para que el checker pueda distinguir "esto
-    /// es Python opaco" de "esto es Any general" y refinar el tipo
-    /// de las llamadas: `pyobj(args)` y `pyobj.method(args)` tipan
-    /// como `Result<Any>` (el wrap automático de 8.3), forzando al
-    /// usuario a manejar el error con `match` o `?` estáticamente.
+    /// Phase 8.4 — "Opaque Python object". Appears in the bindings of
+    /// `from python import X` and propagates through field access
+    /// (`mod.submod`, `obj.attr` → still `PyAny`). Exists
+    /// separate from `Any` so the checker can distinguish "this
+    /// is opaque Python" from "this is general Any" and refine the type
+    /// of calls: `pyobj(args)` and `pyobj.method(args)` type
+    /// as `Result<Any>` (the automatic wrap from 8.3), forcing the
+    /// user to handle the error with `match` or `?` statically.
     ///
-    /// Compatibilidad: como `Any`, `PyAny` es bidireccionalmente
-    /// compatible con cualquier otro tipo (gradual escape).
-    /// Anotaciones explícitas (`let row: User = py_call(...)?`) son
-    /// la vía recomendada para "salir" de PyAny y entrar a tipos
-    /// Fitz concretos — el runtime hace la coerción real (deuda 8.4.3:
-    /// dict → Instance vía field name match).
+    /// Compatibility: like `Any`, `PyAny` is bidirectionally
+    /// compatible with any other type (gradual escape).
+    /// Explicit annotations (`let row: User = py_call(...)?`) are
+    /// the recommended way to "exit" PyAny and enter concrete Fitz
+    /// types — the runtime does the real coercion (debt 8.4.3:
+    /// dict → Instance via field name match).
     PyAny,
 }
 
 impl Type {
-    /// `true` si el tipo es `T?` a nivel top.
+    /// `true` if the type is `T?` at the top level.
     pub fn is_nullable(&self) -> bool {
         matches!(self, Type::Nullable(_))
     }
 
-    /// Devuelve `&Type` pelando una sola capa de `Nullable`. `Int? →
-    /// Int`. `Int → Int`. No baja recursivamente.
+    /// Returns `&Type` peeling a single layer of `Nullable`. `Int? →
+    /// Int`. `Int → Int`. Does not recurse.
     pub fn base(&self) -> &Type {
         match self {
             Type::Nullable(t) => t,
@@ -302,8 +302,8 @@ impl Type {
         }
     }
 
-    /// Reproduce el tipo para mensajes al usuario. Necesita el env
-    /// para resolver los nombres de los `Nominal`.
+    /// Renders the type for user-facing messages. Needs the env
+    /// to resolve `Nominal` names.
     pub fn display(&self, env: &TypeEnv) -> String {
         match self {
             Type::Int => "Int".into(),
@@ -315,20 +315,20 @@ impl Type {
             Type::Range => "Range".into(),
             Type::List(t) => format!("List<{}>", t.display(env)),
             Type::Map(k, v) => format!("Map<{}, {}>", k.display(env), v.display(env)),
-            // Mini-tanda Re+ — Display omite el E cuando es Str
-            // (default, compat con escritura `Result<T>`) o cuando es
-            // Any. Para E concreto distinto (Int/Instance/etc.),
-            // muestra la forma completa `Result<T, E>`.
+            // Mini-batch Re+ — Display omits the E when it is Str
+            // (default, compat with `Result<T>` writing) or when it is
+            // Any. For a concrete distinct E (Int/Instance/etc.),
+            // shows the full form `Result<T, E>`.
             Type::Result { ok: t, err: e } => match e.as_ref() {
                 Type::Str | Type::Any => format!("Result<{}>", t.display(env)),
                 _ => format!("Result<{}, {}>", t.display(env), e.display(env)),
             },
             Type::Future(t) => format!("Future<{}>", t.display(env)),
             Type::Secret(t) => format!("Secret<{}>", t.display(env)),
-            // 9.w.2-wsconn-bidir — Display compacto:
-            //   `WsConn<T>` cuando recv == send (caso simétrico,
-            //   default histórico).
-            //   `WsConn<In, Out>` cuando difieren.
+            // 9.w.2-wsconn-bidir — compact Display:
+            //   `WsConn<T>` when recv == send (symmetric case,
+            //   historical default).
+            //   `WsConn<In, Out>` when they differ.
             Type::WsConn { recv, send } => {
                 if recv == send {
                     format!("WsConn<{}>", recv.display(env))
@@ -363,20 +363,20 @@ impl Type {
     }
 }
 
-/// Info de un tipo nominal declarado en el programa.
+/// Info of a nominal type declared in the program.
 #[derive(Debug, Clone)]
 pub struct NominalInfo {
     pub name: String,
-    /// Campos resueltos. `None` mientras el tipo está siendo
-    /// registrado en la primera vuelta (forward decl); se completa
-    /// en la segunda vuelta una vez que todos los nominales son
-    /// conocidos.
+    /// Resolved fields. `None` while the type is being
+    /// registered in the first pass (forward decl); completed
+    /// in the second pass once all nominals are
+    /// known.
     pub fields: Option<Vec<ResolvedField>>,
-    /// R.3 — métodos custom resueltos. Cada entry tiene el nombre del
-    /// método, su firma `Function { params, ret }` resuelta a tipos
-    /// Fitz y un flag `is_async` para que `infer_method_call` pueda
-    /// envolver el ret en `Future<T>`. `Vec::new()` si el tipo no
-    /// declara métodos.
+    /// R.3 — resolved custom methods. Each entry has the method's
+    /// name, its `Function { params, ret }` signature resolved to Fitz
+    /// types, and an `is_async` flag so `infer_method_call` can
+    /// wrap the ret in `Future<T>`. `Vec::new()` if the type does not
+    /// declare methods.
     pub methods: Vec<NominalMethod>,
 }
 
@@ -386,13 +386,13 @@ pub struct NominalMethod {
     pub params: Vec<Type>,
     pub ret: Type,
     pub is_async: bool,
-    /// Mini-tanda St — `true` si el método es estático
-    /// (`static fn` adentro del `type` body). Se invoca como
-    /// `Type.method(args)` en lugar de `instance.method(args)`.
+    /// Mini-batch St — `true` if the method is static
+    /// (`static fn` inside the `type` body). Invoked as
+    /// `Type.method(args)` instead of `instance.method(args)`.
     pub is_static: bool,
-    /// Mini-tanda Up — nombres de los params en orden, paralelo a
-    /// `params`. Útil para que el LSP muestre `fn(x: Int, y: Int)`
-    /// en lugar de `fn(Int, Int)` en autocomplete + hover.
+    /// Mini-batch Up — param names in order, parallel to
+    /// `params`. Useful so the LSP shows `fn(x: Int, y: Int)`
+    /// instead of `fn(Int, Int)` in autocomplete + hover.
     pub param_names: Vec<String>,
 }
 
@@ -402,162 +402,162 @@ pub struct ResolvedField {
     pub type_: Type,
 }
 
-/// Fase 10.3.a — Metadata extraída de los decoradores ORM sobre
-/// un `type Foo { ... }`. Si el type NO tiene `@table`, queda
-/// `None` en `TypeEnv.tables`. Si lo tiene, registramos el nombre
-/// de tabla SQL + el field primary + overrides por columna +
-/// relaciones (Fase 10.4.a).
+/// Phase 10.3.a — Metadata extracted from the ORM decorators on
+/// a `type Foo { ... }`. If the type does NOT have `@table`, stays
+/// `None` in `TypeEnv.tables`. If it does, we register the SQL
+/// table name + the primary field + per-column overrides +
+/// relations (Phase 10.4.a).
 ///
-/// El runtime (10.3.b) consume esta metadata para emitir SQL
-/// correcto al traducir `User.where(...).all().await?`.
+/// The runtime (10.3.b) consumes this metadata to emit correct
+/// SQL when translating `User.where(...).all().await?`.
 #[derive(Debug, Clone)]
 pub struct TableMetadata {
-    /// Nombre SQL de la tabla (`@table("nombre")`). Si el
-    /// decorator no pasa string, default = nombre Fitz del type
-    /// en lowercase (`User` → `user`). Pluralización automática
-    /// queda como deuda menor — el user puede especificar
-    /// explícitamente.
+    /// SQL name of the table (`@table("name")`). If the
+    /// decorator does not pass a string, default = Fitz name of the type
+    /// in lowercase (`User` → `user`). Automatic pluralization
+    /// remains as minor debt — the user can specify
+    /// explicitly.
     ///
-    /// v0.10.21 (10.6.e.3) — Si el arg del decorator contiene
-    /// `.` (ej: `@table("analytics.events")`), el parser splitea
-    /// en `(schema, name)`: `sql_name = "events"`, `schema =
-    /// Some("analytics")`. Si NO contiene `.`, `schema = None`
-    /// (= `public` por convención Postgres).
+    /// v0.10.21 (10.6.e.3) — If the decorator arg contains
+    /// `.` (e.g. `@table("analytics.events")`), the parser splits
+    /// into `(schema, name)`: `sql_name = "events"`, `schema =
+    /// Some("analytics")`. If NOT containing `.`, `schema = None`
+    /// (= `public` by Postgres convention).
     pub sql_name: String,
-    /// v0.10.21 (10.6.e.3) — Schema Postgres custom donde vive la
-    /// tabla. `None` = `public` (default). El SQL emit del ORM y
-    /// las migrations usan qualified names (`"schema"."name"`)
-    /// solo cuando `schema.is_some()`.
+    /// v0.10.21 (10.6.e.3) — Custom Postgres schema where the
+    /// table lives. `None` = `public` (default). The ORM SQL emit and
+    /// migrations use qualified names (`"schema"."name"`)
+    /// only when `schema.is_some()`.
     pub schema: Option<String>,
-    /// Nombres Fitz de los fields marcados con `@primary`. Vacío
-    /// si no hay PK declarada. Single-PK = `vec!["id"]`; composite
-    /// PK = `vec!["org_id", "user_id"]` (orden importa para el
-    /// `PRIMARY KEY (a, b)` constraint en CREATE TABLE).
+    /// Fitz names of fields marked with `@primary`. Empty
+    /// if no PK is declared. Single-PK = `vec!["id"]`; composite
+    /// PK = `vec!["org_id", "user_id"]` (order matters for the
+    /// `PRIMARY KEY (a, b)` constraint in CREATE TABLE).
     ///
-    /// v0.10.27 (F2) — antes era `primary_field: Option<String>`
-    /// (un solo PK). Composite PK era deuda explícita. Ahora se
-    /// soporta N PKs; sitios que solo manejan single PK usan
-    /// `single_pk()` que devuelve `Option<&str>` solo si `len() == 1`.
+    /// v0.10.27 (F2) — previously was `primary_field: Option<String>`
+    /// (a single PK). Composite PK was explicit debt. Now it
+    /// supports N PKs; sites that only handle single PK use
+    /// `single_pk()` which returns `Option<&str>` only if `len() == 1`.
     pub primary_fields: Vec<String>,
-    /// Overrides por columna. Indexed por nombre Fitz del field
-    /// (no por nombre SQL — la mapping vive en este struct).
-    /// Solo entries para fields con `@column`/`@unique`/`@index`;
-    /// fields sin decorators mapean directamente (nombre Fitz =
-    /// nombre SQL, tipo SQL derivado del tipo Fitz).
+    /// Per-column overrides. Indexed by Fitz field name
+    /// (not by SQL name — the mapping lives in this struct).
+    /// Only entries for fields with `@column`/`@unique`/`@index`;
+    /// fields without decorators map directly (Fitz name =
+    /// SQL name, SQL type derived from the Fitz type).
     pub columns: std::collections::HashMap<String, ColumnMetadata>,
-    /// Fase 10.4.a — Relaciones declaradas con `@belongs_to`,
-    /// `@has_one`, `@has_many`. Indexed por nombre Fitz del field.
-    /// `BelongsTo` mapea un FK real del row; `HasOne`/`HasMany`
-    /// son virtuales (no aparecen en SELECT/INSERT, se navegan
-    /// con métodos en runtime — 10.4.b).
+    /// Phase 10.4.a — Relations declared with `@belongs_to`,
+    /// `@has_one`, `@has_many`. Indexed by Fitz field name.
+    /// `BelongsTo` maps a real FK of the row; `HasOne`/`HasMany`
+    /// are virtual (do not appear in SELECT/INSERT, navigated
+    /// with methods at runtime — 10.4.b).
     pub relations: std::collections::HashMap<String, RelationMetadata>,
-    /// v0.10.17 (10.6.b.2) — Si está, `fitz db diff` emite
-    /// `ALTER TABLE "old" RENAME TO "new"` en vez de DROP + CREATE.
-    /// Decorator transient: el user lo borra después de aplicar la
-    /// migration. Sintaxis: `@table("new", renamed_from="old")` o
+    /// v0.10.17 (10.6.b.2) — If present, `fitz db diff` emits
+    /// `ALTER TABLE "old" RENAME TO "new"` instead of DROP + CREATE.
+    /// Transient decorator: the user removes it after applying the
+    /// migration. Syntax: `@table("new", renamed_from="old")` or
     /// `@renamed_from("old") @table("new") type T { ... }`
-    /// (TBD parsing — solo kwarg en `@table` por simplicidad MVP).
+    /// (TBD parsing — only kwarg in `@table` for MVP simplicity).
     pub renamed_from: Option<String>,
-    /// v0.10.27 (F3) — `@index(...)` decoradores apilables a nivel
-    /// type para definir índices compuestos / parciales sin escribir
-    /// `CREATE INDEX` a mano. Cada `IndexSpec` se traduce a un
-    /// `CREATE INDEX` en `fitz db diff/migrate`. Cumple drift check:
-    /// si el user remueve un `@index`, el diff emite `DROP INDEX`.
+    /// v0.10.27 (F3) — `@index(...)` stackable decorators at the
+    /// type level to define composite / partial indexes without writing
+    /// `CREATE INDEX` by hand. Each `IndexSpec` translates to a
+    /// `CREATE INDEX` in `fitz db diff/migrate`. Honors drift check:
+    /// if the user removes an `@index`, the diff emits `DROP INDEX`.
     pub indexes: Vec<IndexSpec>,
-    /// v0.10.29 — `@check_constraint("<sql_expr>")` decoradores
-    /// apilables a nivel type para emitir `CHECK (<expr>)` en
-    /// `CREATE TABLE`. Sin drift check del lado del migrator (los
-    /// checks no se introspectean al MVP; el user los borra/recrea
-    /// con `db.exec` si cambia el shape).
+    /// v0.10.29 — `@check_constraint("<sql_expr>")` stackable
+    /// decorators at the type level to emit `CHECK (<expr>)` in
+    /// `CREATE TABLE`. No drift check on the migrator side (checks
+    /// are not introspected at MVP; the user removes/recreates them
+    /// with `db.exec` if the shape changes).
     pub check_constraints: Vec<CheckConstraintSpec>,
 }
 
-/// v0.10.27 (F3) — Especificación de un índice del ORM. Se popula
-/// desde `@index(...)` a nivel type. Formas de uso:
-///   - `@index("col1, col2")` — composite simple (btree implícito).
+/// v0.10.27 (F3) — Specification of an ORM index. Populated
+/// from `@index(...)` at the type level. Usage forms:
+///   - `@index("col1, col2")` — simple composite (implicit btree).
 ///   - `@index("col1, col2", unique=true)` — composite UNIQUE.
-///   - `@index("col1, col2", name="custom")` — nombre custom (sino
-///     auto-generado `idx_<table>_<col1>_<col2>`).
+///   - `@index("col1, col2", name="custom")` — custom name (else
+///     auto-generated `idx_<table>_<col1>_<col2>`).
 ///   - `@index("col1, col2", where_="deleted_at IS NULL")` — partial.
 ///   - `@index("col", using="gin")` — v0.10.28: method override
-///     (btree default; gin/gist/brin/hash/spgist habilitados sin
-///     bajar a `db.exec`).
+///     (btree default; gin/gist/brin/hash/spgist enabled without
+///     dropping to `db.exec`).
 ///
-/// Expression indexes (`@index("lower(email)")`) NO en MVP — el
-/// arg es un parser SQL mini que sale de scope. Workaround: bajar
-/// a `db.exec("CREATE INDEX ...")` manual y skipear drift check
-/// para ese índice.
-/// v0.10.29 — Especificación de un CHECK constraint. Se popula
-/// desde `@check_constraint("<sql_expr>", name="optional")`.
+/// Expression indexes (`@index("lower(email)")`) NOT in MVP — the
+/// arg is a mini SQL parser that's out of scope. Workaround: drop
+/// to manual `db.exec("CREATE INDEX ...")` and skip drift check
+/// for that index.
+/// v0.10.29 — Specification of a CHECK constraint. Populated
+/// from `@check_constraint("<sql_expr>", name="optional")`.
 ///
-/// El `expr` se pasa **literal** al SQL CREATE TABLE — Fitz no
-/// parsea la expresión (sería bajar a un parser SQL del check
-/// lang, fuera de scope MVP). El user es responsable de que sea
-/// SQL válido contra el shape de la tabla.
+/// The `expr` is passed **literal** to the SQL CREATE TABLE — Fitz does not
+/// parse the expression (would require dropping to a SQL parser of the check
+/// lang, out of MVP scope). The user is responsible that it is
+/// valid SQL against the table shape.
 ///
-/// Drift check NO implementado en MVP — la introspect no lee
-/// `pg_constraint.contype = 'c'` para reconciliar. Si cambiás el
-/// `expr` Fitz-side sin migrar a mano, la DB sigue con el viejo.
-/// Documentado como caveat.
+/// Drift check NOT implemented in MVP — introspect does not read
+/// `pg_constraint.contype = 'c'` to reconcile. If you change the
+/// `expr` on the Fitz side without migrating by hand, the DB stays on the old one.
+/// Documented as a caveat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckConstraintSpec {
-    /// Nombre del constraint. `None` = auto-generado como
-    /// `chk_<table>_<idx>`. Útil para drop por nombre desde
-    /// `db.exec` cuando hay drift.
+    /// Name of the constraint. `None` = auto-generated as
+    /// `chk_<table>_<idx>`. Useful for drop by name from
+    /// `db.exec` when there is drift.
     pub name: Option<String>,
-    /// Expresión SQL booleana evaluada por row al INSERT/UPDATE.
-    /// Ejemplo: `"age >= 0 AND age <= 150"`, `"status IN ('a',
+    /// Boolean SQL expression evaluated per row at INSERT/UPDATE.
+    /// Example: `"age >= 0 AND age <= 150"`, `"status IN ('a',
     /// 'p', 'd')"`, `"start_date <= end_date"`.
     pub expr: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexSpec {
-    /// Nombre del índice. `None` = auto-generado por el migrator
-    /// como `idx_<table>_<col1>_<col2>_..._<unique?>` para que el
-    /// drift check pueda matchear DB-vs-Fitz consistentemente.
+    /// Name of the index. `None` = auto-generated by the migrator
+    /// as `idx_<table>_<col1>_<col2>_..._<unique?>` so the
+    /// drift check can match DB-vs-Fitz consistently.
     pub name: Option<String>,
-    /// Lista de columnas SQL (post `@column(name=...)` resolution).
-    /// Orden importa para Postgres (compound index left-prefix).
+    /// List of SQL columns (post `@column(name=...)` resolution).
+    /// Order matters for Postgres (compound index left-prefix).
     pub columns: Vec<String>,
-    /// UNIQUE flag — emite `CREATE UNIQUE INDEX` en vez de `CREATE
-    /// INDEX`. Útil para constraints de uniqueness sobre tuples.
+    /// UNIQUE flag — emits `CREATE UNIQUE INDEX` instead of `CREATE
+    /// INDEX`. Useful for uniqueness constraints over tuples.
     pub unique: bool,
-    /// WHERE clause para partial index. `None` = full index. Útil
-    /// para soft-deletes: `WHERE deleted_at IS NULL` cubre solo
-    /// rows vivas, índice más chico.
+    /// WHERE clause for partial index. `None` = full index. Useful
+    /// for soft-deletes: `WHERE deleted_at IS NULL` covers only
+    /// live rows, smaller index.
     pub where_clause: Option<String>,
     /// v0.10.28 — Method override (`USING <method>`). `None` =
-    /// btree (default Postgres). Whitelisted: `btree` | `hash` |
-    /// `gin` | `gist` | `brin` | `spgist`. Habilita full-text
-    /// search (`gin` sobre tsvector), range queries (`gist`),
-    /// large tables resumidas (`brin`) y bloom-style approximations
-    /// (extension) sin escape hatch a `db.exec`.
+    /// btree (Postgres default). Whitelisted: `btree` | `hash` |
+    /// `gin` | `gist` | `brin` | `spgist`. Enables full-text
+    /// search (`gin` over tsvector), range queries (`gist`),
+    /// summarized large tables (`brin`) and bloom-style approximations
+    /// (extension) without escape hatch to `db.exec`.
     pub using: Option<String>,
-    /// v0.10.32 (Tier C.2) — Expression index. Cuando está,
-    /// `columns` se ignora y el SQL emit usa la expression
-    /// directamente: `CREATE INDEX ... ON tbl (<expression>)`.
-    /// Ejemplos canonical: `lower(email)` para búsqueda
-    /// case-insensitive, `to_tsvector('english', body)` para FTS,
-    /// `(price * quantity)` para totals. El user pasa la expression
-    /// raw via kwarg: `@index(expression="lower(email)")`.
+    /// v0.10.32 (Tier C.2) — Expression index. When present,
+    /// `columns` is ignored and SQL emit uses the expression
+    /// directly: `CREATE INDEX ... ON tbl (<expression>)`.
+    /// Canonical examples: `lower(email)` for case-insensitive
+    /// search, `to_tsvector('english', body)` for FTS,
+    /// `(price * quantity)` for totals. The user passes the raw
+    /// expression via kwarg: `@index(expression="lower(email)")`.
     ///
-    /// **Drift check incompleto**: la introspect lee el index
-    /// listing de `pg_indexes` pero NO parsea `pg_index.indexprs`
-    /// para detectar el expression. El diff puede generar
-    /// `DROP INDEX + CREATE INDEX` espurio en runs subsequentes.
-    /// Workaround: el user nombra el index explícito con `name=` y
-    /// confía en que el diff lo detecta por nombre (no por content).
+    /// **Incomplete drift check**: introspect reads the index
+    /// listing from `pg_indexes` but does NOT parse `pg_index.indexprs`
+    /// to detect the expression. The diff can generate
+    /// spurious `DROP INDEX + CREATE INDEX` on subsequent runs.
+    /// Workaround: the user names the index explicitly with `name=` and
+    /// trusts that the diff detects it by name (not by content).
     pub expression: Option<String>,
 }
 
 impl TableMetadata {
-    /// v0.10.21 (10.6.e.3) — Nombre SQL quoteado con schema
-    /// qualifier opcional. Tables en `public` (schema=None) →
-    /// `"name"`. Tables en schema custom → `"schema"."name"`.
-    /// Helper canónico para que TODOS los SQL emit del ORM
-    /// (SELECT/INSERT/UPDATE/DELETE en evaluator y codegen) usen
-    /// la misma convención y soporten schemas custom uniformemente.
+    /// v0.10.21 (10.6.e.3) — Quoted SQL name with optional schema
+    /// qualifier. Tables in `public` (schema=None) →
+    /// `"name"`. Tables in custom schema → `"schema"."name"`.
+    /// Canonical helper so ALL ORM SQL emit
+    /// (SELECT/INSERT/UPDATE/DELETE in evaluator and codegen) uses
+    /// the same convention and supports custom schemas uniformly.
     pub fn qualified_sql_name(&self) -> String {
         match &self.schema {
             Some(s) => format!(
@@ -569,12 +569,12 @@ impl TableMetadata {
         }
     }
 
-    /// v0.10.27 (F2) — Single-PK accessor para sitios que solo
-    /// manejan PK simple (sentinel `id: 0` auto-bigserial,
-    /// navigation belongs_to, etc.). Devuelve `Some(name)` SOLO si
-    /// hay exactamente UN PK. `None` para composite PK (N≥2) o
-    /// sin PK (N=0). Sitios composite-aware iteran sobre
-    /// `primary_fields` directo.
+    /// v0.10.27 (F2) — Single-PK accessor for sites that only
+    /// handle simple PK (`id: 0` auto-bigserial sentinel,
+    /// belongs_to navigation, etc.). Returns `Some(name)` ONLY if
+    /// there is exactly ONE PK. `None` for composite PK (N≥2) or
+    /// no PK (N=0). Composite-aware sites iterate over
+    /// `primary_fields` directly.
     pub fn single_pk(&self) -> Option<&str> {
         if self.primary_fields.len() == 1 {
             Some(self.primary_fields[0].as_str())
@@ -583,123 +583,122 @@ impl TableMetadata {
         }
     }
 
-    /// v0.10.27 (F2) — `true` si el type tiene PK declarada
-    /// (single o composite). Útil como check rápido pre-operación
-    /// (e.g. ORM rechaza INSERT/SELECT sin PK declarada).
+    /// v0.10.27 (F2) — `true` if the type has a declared PK
+    /// (single or composite). Useful as a quick pre-operation check
+    /// (e.g. ORM rejects INSERT/SELECT without a declared PK).
     pub fn has_pk(&self) -> bool {
         !self.primary_fields.is_empty()
     }
 }
 
-/// Fase 10.3.a — Configuración por columna del ORM. Se popula
-/// desde `@column(name=..., type=...)`, `@unique`, `@index`.
+/// Phase 10.3.a — Per-column configuration of the ORM. Populated
+/// from `@column(name=..., type=...)`, `@unique`, `@index`.
 #[derive(Debug, Clone, Default)]
 pub struct ColumnMetadata {
-    /// Nombre SQL si distinto del nombre Fitz. `None` = mismo
-    /// nombre (mapeo directo).
+    /// SQL name if different from the Fitz name. `None` = same
+    /// name (direct mapping).
     pub sql_name: Option<String>,
-    /// Tipo SQL custom si el default no aplica. `None` = el ORM
-    /// deriva del tipo Fitz (`Int` → `bigint`, `Str` → `text`,
+    /// Custom SQL type if the default doesn't apply. `None` = the ORM
+    /// derives from the Fitz type (`Int` → `bigint`, `Str` → `text`,
     /// etc.).
     pub sql_type: Option<String>,
     pub unique: bool,
     pub indexed: bool,
-    /// 10.8.2 (v0.10.8) — `@db_default` marca el field como
-    /// "manejado por la DB": el ORM lo SKIPEA del INSERT, dejando
-    /// que Postgres aplique el `DEFAULT` declarado en el schema
-    /// (típicamente `DEFAULT NOW()` para timestamps, `DEFAULT
-    /// gen_random_uuid()` para UUIDs, etc.). El field sigue
-    /// participando del SELECT/UPDATE normal — el cliente lo recibe
-    /// del RETURNING * con el valor que Postgres asignó.
+    /// 10.8.2 (v0.10.8) — `@db_default` marks the field as
+    /// "DB-managed": the ORM SKIPS it from the INSERT, leaving
+    /// Postgres to apply the `DEFAULT` declared in the schema
+    /// (typically `DEFAULT NOW()` for timestamps, `DEFAULT
+    /// gen_random_uuid()` for UUIDs, etc.). The field still
+    /// participates in normal SELECT/UPDATE — the client receives
+    /// it from the RETURNING * with the value Postgres assigned.
     ///
-    /// Sin este flag, el ORM siempre incluye el field en el
-    /// INSERT con el value de Fitz (típicamente `""` para Str con
-    /// default `""`), que Postgres rechaza para tipos no-text
-    /// (`timestamptz`, `uuid`, etc.) o sobrescribe el DEFAULT
-    /// silenciosamente.
+    /// Without this flag, the ORM always includes the field in the
+    /// INSERT with the Fitz value (typically `""` for Str with
+    /// default `""`), which Postgres rejects for non-text types
+    /// (`timestamptz`, `uuid`, etc.) or silently overwrites the
+    /// DEFAULT.
     ///
-    /// **Trade-off**: pierde la capacidad de override desde el
-    /// cliente HTTP. Útil para fields que JAMÁS deberían venir
-    /// del cliente (`created_at`, `updated_at`). Si necesitás
-    /// override condicional, no uses `@db_default` y enviá el
-    /// timestamp explícito desde Fitz (via builtin o helper).
+    /// **Trade-off**: loses the ability to override from the
+    /// HTTP client. Useful for fields that should NEVER come
+    /// from the client (`created_at`, `updated_at`). If you need
+    /// conditional override, don't use `@db_default` and send the
+    /// timestamp explicitly from Fitz (via builtin or helper).
     pub db_default: bool,
-    /// v0.10.16 — Expresión SQL del default cuando el user pasa
-    /// `@db_default("NOW()")`. `None` cuando se usa `@db_default`
-    /// sin args (comportamiento original 10.8.2: skip INSERT pero
-    /// sin default específico — el user mete el `DEFAULT NOW()` a
-    /// mano en su CREATE TABLE / migration).
+    /// v0.10.16 — SQL expression of the default when the user passes
+    /// `@db_default("NOW()")`. `None` when `@db_default` is used
+    /// without args (original 10.8.2 behavior: skip INSERT but
+    /// without specific default — the user puts the `DEFAULT NOW()`
+    /// by hand in their CREATE TABLE / migration).
     ///
-    /// Cuando es `Some(sql)`, `fitz db diff` emite `DEFAULT <sql>`
-    /// en el CREATE TABLE / ADD COLUMN automáticamente. La
-    /// normalización del diff es case-insensitive sobre función
-    /// calls (`NOW()` == `now()`) — evita falsos positivos cuando
-    /// Postgres devuelve `now()` lowercase desde
+    /// When `Some(sql)`, `fitz db diff` emits `DEFAULT <sql>`
+    /// in the CREATE TABLE / ADD COLUMN automatically. The diff
+    /// normalization is case-insensitive over function
+    /// calls (`NOW()` == `now()`) — avoids false positives when
+    /// Postgres returns lowercase `now()` from
     /// `information_schema.columns.column_default`.
     pub db_default_sql: Option<String>,
-    /// v0.10.17 (10.6.b.2) — Si está, `fitz db diff` emite
-    /// `ALTER TABLE ... RENAME COLUMN "old" TO "new"` en vez de
-    /// DROP COLUMN + ADD COLUMN. Decorator transient: el user
-    /// lo borra después de aplicar la migration.
-    /// Sintaxis: `@renamed_from("old") field_name: Type = default`.
+    /// v0.10.17 (10.6.b.2) — If present, `fitz db diff` emits
+    /// `ALTER TABLE ... RENAME COLUMN "old" TO "new"` instead of
+    /// DROP COLUMN + ADD COLUMN. Transient decorator: the user
+    /// removes it after applying the migration.
+    /// Syntax: `@renamed_from("old") field_name: Type = default`.
     pub renamed_from: Option<String>,
 }
 
-/// Fase 10.4.a — Tipo de relación declarada sobre un field.
+/// Phase 10.4.a — Relation type declared over a field.
 ///
-/// `BelongsTo` y `HasOne` se diferencian en quién hospeda el FK:
-/// `BelongsTo` significa "este field es un FK column que apunta
-/// al otro type"; `HasOne` significa "el otro type tiene un FK
-/// apuntando a éste". El primero es REAL (aparece en SELECT/
-/// INSERT/UPDATE); los otros dos son VIRTUALES (solo
-/// navegables).
+/// `BelongsTo` and `HasOne` differ in who hosts the FK:
+/// `BelongsTo` means "this field is a FK column pointing
+/// to the other type"; `HasOne` means "the other type has a FK
+/// pointing to this one". The first is REAL (appears in SELECT/
+/// INSERT/UPDATE); the other two are VIRTUAL (navigable only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RelationKind {
-    /// `@belongs_to("User")` sobre `author_id: Int`. Este field
-    /// almacena el FK que apunta al primary key de la otra tabla.
-    /// Es real (columna en el SELECT) y participa del SQL normal.
+    /// `@belongs_to("User")` over `author_id: Int`. This field
+    /// stores the FK pointing to the primary key of the other table.
+    /// Is real (column in the SELECT) and participates in normal SQL.
     BelongsTo,
-    /// Deuda residual #2 (v0.10.5) — `BelongsToCompanion` es la
-    /// contraparte virtual de un `BelongsTo`. Se registra
-    /// automáticamente cuando el user declara `@belongs_to("User")
-    /// user_id: Int` Y un sibling field `user: User?` en el mismo
-    /// type. La convención: stripping `_id` del FK + match con
-    /// sibling Nullable<Target>. El field es virtual (no aparece
-    /// en SELECT/INSERT) y se puebla via `.preload("user")` con
-    /// batch SELECT inverso (target table WHERE id IN (FK values)).
-    /// Sin preload, el field queda en Null.
+    /// Residual debt #2 (v0.10.5) — `BelongsToCompanion` is the
+    /// virtual counterpart of a `BelongsTo`. Registered
+    /// automatically when the user declares `@belongs_to("User")
+    /// user_id: Int` AND a sibling field `user: User?` in the same
+    /// type. The convention: stripping `_id` from the FK + match with
+    /// sibling Nullable<Target>. The field is virtual (does not appear
+    /// in SELECT/INSERT) and is populated via `.preload("user")` with
+    /// inverse batch SELECT (target table WHERE id IN (FK values)).
+    /// Without preload, the field stays Null.
     BelongsToCompanion,
-    /// `@has_one("Profile")` sobre `profile: Profile?`. Field
-    /// virtual: la tabla del otro type tiene un FK apuntando
-    /// a este. No aparece en SELECT/INSERT/UPDATE del builder.
+    /// `@has_one("Profile")` over `profile: Profile?`. Virtual
+    /// field: the other type's table has a FK pointing
+    /// to this one. Does not appear in builder SELECT/INSERT/UPDATE.
     HasOne,
-    /// `@has_many("Post", via="author_id")` sobre
-    /// `posts: List<Post>`. Virtual, igual que HasOne, pero
-    /// devuelve múltiples instancias del otro type.
+    /// `@has_many("Post", via="author_id")` over
+    /// `posts: List<Post>`. Virtual, like HasOne, but
+    /// returns multiple instances of the other type.
     HasMany,
 }
 
-/// Fase 10.4.a — Acción cascade para `on_delete`/`on_update`.
-/// Default es `Restrict` (Postgres default, conservativo).
+/// Phase 10.4.a — Cascade action for `on_delete`/`on_update`.
+/// Default is `Restrict` (Postgres default, conservative).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CascadeAction {
-    /// Si la row referenciada se borra, también se borra ésta.
+    /// If the referenced row is deleted, this one is deleted too.
     Cascade,
-    /// Si la row referenciada se borra, este FK se setea a NULL.
-    /// Requiere que el field sea nullable (`Int?`).
+    /// If the referenced row is deleted, this FK is set to NULL.
+    /// Requires the field to be nullable (`Int?`).
     SetNull,
-    /// Default. Borrar la row referenciada falla si hay rows
-    /// que la referencian.
+    /// Default. Deleting the referenced row fails if there are rows
+    /// referencing it.
     #[default]
     Restrict,
-    /// Como `Restrict` pero la verificación se difiere al fin
-    /// de la transaction (raramente usado).
+    /// Like `Restrict` but the check is deferred until end
+    /// of the transaction (rarely used).
     NoAction,
 }
 
 impl CascadeAction {
-    /// SQL clause para `ON DELETE`/`ON UPDATE`. La emite la
-    /// migration en 10.7.
+    /// SQL clause for `ON DELETE`/`ON UPDATE`. Emitted by the
+    /// migration in 10.7.
     pub fn as_sql(self) -> &'static str {
         match self {
             CascadeAction::Cascade => "CASCADE",
@@ -710,31 +709,31 @@ impl CascadeAction {
     }
 }
 
-/// Fase 10.4.a — Metadata por relación declarada con
+/// Phase 10.4.a — Metadata per relation declared with
 /// `@belongs_to` / `@has_one` / `@has_many`.
 #[derive(Debug, Clone)]
 pub struct RelationMetadata {
     pub kind: RelationKind,
-    /// Nombre Fitz del type referenciado (e.g. "User").
+    /// Fitz name of the referenced type (e.g. "User").
     pub target_type: String,
-    /// Nombre Fitz del field que actúa como FK:
-    ///   - Para `BelongsTo`: el field local que lleva el FK
-    ///     (e.g. en `Post.@belongs_to("User") author_id`, fk_field
-    ///     = "author_id"; default = el field decorado).
-    ///   - Para `HasOne` / `HasMany`: el field FK EN EL OTRO type
+    /// Fitz name of the field acting as FK:
+    ///   - For `BelongsTo`: the local field carrying the FK
+    ///     (e.g. in `Post.@belongs_to("User") author_id`, fk_field
+    ///     = "author_id"; default = the decorated field).
+    ///   - For `HasOne` / `HasMany`: the FK field IN THE OTHER type
     ///     (e.g. `User.@has_many("Post", via="author_id") posts`,
-    ///     fk_field = "author_id" pero refiere al field de `Post`).
+    ///     fk_field = "author_id" but refers to the field of `Post`).
     pub fk_field: String,
     pub on_delete: CascadeAction,
     pub on_update: CascadeAction,
 }
 
 impl TableMetadata {
-    /// Fase 10.4.a — `true` si el field es virtual del ORM
-    /// (declarado con `@has_one`/`@has_many`, o auto-detectado
-    /// como BelongsToCompanion en v0.10.5). El SQL builder
-    /// salta estos fields en SELECT/INSERT/UPDATE. `BelongsTo`
-    /// NO es virtual — el FK column es real.
+    /// Phase 10.4.a — `true` if the field is virtual to the ORM
+    /// (declared with `@has_one`/`@has_many`, or auto-detected
+    /// as BelongsToCompanion in v0.10.5). The SQL builder
+    /// skips these fields in SELECT/INSERT/UPDATE. `BelongsTo`
+    /// is NOT virtual — the FK column is real.
     pub fn is_virtual_field(&self, field_name: &str) -> bool {
         matches!(
             self.relations.get(field_name).map(|r| r.kind),
@@ -745,45 +744,45 @@ impl TableMetadata {
     }
 }
 
-/// Entorno de tipos del programa. Lleva:
-///  - Built-ins (primitivos y genéricos), implícitos vía
+/// Type environment of the program. Carries:
+///  - Built-ins (primitives and generics), implicit via
 ///    `resolve_named`.
-///  - Tipos nominales declarados, accesibles por nombre.
+///  - Declared nominal types, accessible by name.
 ///
-/// Sin scopes anidados todavía: 5.2 trabaja a nivel del programa
-/// completo. Cuando entren chequeos de bodies (5.3) se agregarán
-/// scopes locales para `let`/params.
+/// No nested scopes yet: 5.2 works at the whole-program level.
+/// When body checks arrive (5.3), local scopes for `let`/params
+/// will be added.
 #[derive(Debug, Default)]
 pub struct TypeEnv {
     nominals: Vec<NominalInfo>,
     by_name: HashMap<String, TypeId>,
-    /// 8-pyi.C (v0.9.57): mapeo `module_name → nominal_id sintético`
-    /// para stubs `.pyi` adyacentes cargados por `pyi_loader`. Cada
-    /// stub se materializa como un nominal sintético con un field por
-    /// cada fn/var top-level del stub. El checker consulta esta tabla
-    /// en `Stmt::FromImport` para bindear `from python import foo`
-    /// con `Type::Nominal(id)` en lugar de `Type::PyAny` opaco —
-    /// destraba field access tipado (`foo.fetch_user(uid)` resuelve a
-    /// `Result<User>` en lugar de `Result<Any>`).
+    /// 8-pyi.C (v0.9.57): mapping `module_name → synthetic nominal_id`
+    /// for adjacent `.pyi` stubs loaded by `pyi_loader`. Each
+    /// stub is materialized as a synthetic nominal with one field per
+    /// top-level fn/var of the stub. The checker consults this table
+    /// in `Stmt::FromImport` to bind `from python import foo`
+    /// with `Type::Nominal(id)` instead of opaque `Type::PyAny` —
+    /// unblocks typed field access (`foo.fetch_user(uid)` resolves to
+    /// `Result<User>` instead of `Result<Any>`).
     pyi_modules: HashMap<String, TypeId>,
-    /// Fase 10.3.a — metadata ORM por `TypeId`. Solo types con
-    /// `@table(...)` aparecen acá. El runtime (10.3.b) consulta
-    /// `env.table_metadata(id)` para saber el nombre SQL, primary
-    /// key, y overrides por columna. Para types sin `@table`,
-    /// `table_metadata` devuelve `None` y los queries del ORM
-    /// fallan con error claro.
+    /// Phase 10.3.a — ORM metadata by `TypeId`. Only types with
+    /// `@table(...)` appear here. The runtime (10.3.b) consults
+    /// `env.table_metadata(id)` to know the SQL name, primary
+    /// key, and per-column overrides. For types without `@table`,
+    /// `table_metadata` returns `None` and ORM queries
+    /// fail with a clear error.
     tables: HashMap<TypeId, TableMetadata>,
-    /// W12 (v0.10.8) — `@auth_provider` declarado en un módulo
-    /// importado por el program local. El caller (típicamente
-    /// `main.rs::check_program_with_pyi_stubs_and_imports`) lo
-    /// pre-escanea sobre cada módulo importado vía
-    /// `extract_auth_provider_signature` y lo registra en el env del
-    /// importer con `set_imported_auth_provider`. El checker
-    /// (`collect_auth_provider`) hace fallback a este slot cuando no
-    /// encuentra provider local, así los handlers `@authenticated`/
-    /// `@admin` del importer pueden compilar contra un provider
-    /// cross-module. El codegen también lo consulta para emitir las
-    /// invocaciones del wrapper con path qualified (`<module>::<fn>`).
+    /// W12 (v0.10.8) — `@auth_provider` declared in a module
+    /// imported by the local program. The caller (typically
+    /// `main.rs::check_program_with_pyi_stubs_and_imports`)
+    /// pre-scans it on each imported module via
+    /// `extract_auth_provider_signature` and registers it in the importer's
+    /// env with `set_imported_auth_provider`. The checker
+    /// (`collect_auth_provider`) falls back to this slot when it does not
+    /// find a local provider, so the importer's `@authenticated`/
+    /// `@admin` handlers can compile against a cross-module provider.
+    /// The codegen also consults it to emit wrapper
+    /// invocations with qualified path (`<module>::<fn>`).
     imported_auth_provider: Option<ImportedAuthProvider>,
 }
 
@@ -792,41 +791,41 @@ impl TypeEnv {
         Self::default()
     }
 
-    /// 8-pyi.C: registra el `id` del nominal sintético asociado al
-    /// stub `name`. Llamado por `pyi_loader::load_callables` después
-    /// de `resolve_program` (los nominales declarados por el .fitz
-    /// ya están disponibles, los fns del stub pueden referirlos en
-    /// su ret type).
+    /// 8-pyi.C: registers the synthetic nominal `id` associated with
+    /// stub `name`. Called by `pyi_loader::load_callables` after
+    /// `resolve_program` (the nominals declared by the .fitz
+    /// are already available, the stub fns can refer to them in
+    /// their ret type).
     pub fn set_pyi_module(&mut self, name: String, id: TypeId) {
         self.pyi_modules.insert(name, id);
     }
 
-    /// 8-pyi.C: lookup del nominal sintético para un stub. Usado por
-    /// el checker en `Stmt::FromImport` from_python. Devuelve `None`
-    /// si no hay `.pyi` adyacente (binding cae a `Type::PyAny`
-    /// gradual).
+    /// 8-pyi.C: lookup the synthetic nominal for a stub. Used by
+    /// the checker in `Stmt::FromImport` from_python. Returns `None`
+    /// if there is no adjacent `.pyi` (binding falls to gradual
+    /// `Type::PyAny`).
     pub fn pyi_module(&self, name: &str) -> Option<TypeId> {
         self.pyi_modules.get(name).copied()
     }
 
-    /// Fase 10.3.a — Registra metadata ORM para un tipo nominal.
-    /// Llamado por `resolve_program` cuando un `type` lleva
-    /// decoradores `@table`/`@primary`/etc. Sin `@table` el type
-    /// NO aparece en `tables` y `table_metadata` devuelve `None`.
+    /// Phase 10.3.a — Registers ORM metadata for a nominal type.
+    /// Called by `resolve_program` when a `type` carries
+    /// `@table`/`@primary`/etc. decorators. Without `@table` the type
+    /// does NOT appear in `tables` and `table_metadata` returns `None`.
     pub fn set_table_metadata(&mut self, id: TypeId, meta: TableMetadata) {
         self.tables.insert(id, meta);
     }
 
-    /// Fase 10.3.a — Devuelve la metadata ORM del tipo si está
-    /// declarada con `@table(...)`. El runtime (10.3.b) llama a
-    /// esto cuando ve `User.where(...)` para saber el nombre SQL
-    /// de la tabla y la primary key.
+    /// Phase 10.3.a — Returns the type's ORM metadata if declared
+    /// with `@table(...)`. The runtime (10.3.b) calls this
+    /// when it sees `User.where(...)` to know the SQL name
+    /// of the table and the primary key.
     pub fn table_metadata(&self, id: TypeId) -> Option<&TableMetadata> {
         self.tables.get(&id)
     }
 
-    /// Registra un tipo nominal por nombre, devolviendo su id.
-    /// Si el nombre ya estaba → error "tipo redeclarado".
+    /// Registers a nominal type by name, returning its id.
+    /// If the name was already there → error "redeclared type".
     pub fn declare_nominal(&mut self, name: String) -> Result<TypeId, FitzError> {
         if self.by_name.contains_key(&name) {
             return Err(FitzError::new(
@@ -846,12 +845,12 @@ impl TypeEnv {
         Ok(id)
     }
 
-    /// Completa los fields de un nominal (segunda vuelta).
+    /// Completes the fields of a nominal (second pass).
     pub fn set_fields(&mut self, id: TypeId, fields: Vec<ResolvedField>) {
         self.nominals[id.0].fields = Some(fields);
     }
 
-    /// R.3 — Setea los métodos de un nominal (tercera vuelta).
+    /// R.3 — Sets the methods of a nominal (third pass).
     pub fn set_methods(&mut self, id: TypeId, methods: Vec<NominalMethod>) {
         self.nominals[id.0].methods = methods;
     }
@@ -864,47 +863,47 @@ impl TypeEnv {
         &self.nominals[id.0]
     }
 
-    /// Cantidad de nominales registrados. Útil para tests.
+    /// Number of registered nominals. Useful for tests.
     #[allow(dead_code)]
     pub fn nominal_count(&self) -> usize {
         self.nominals.len()
     }
 
-    /// W12 (v0.10.8) — Registra info de un `@auth_provider` que vive en
-    /// un módulo importado. El caller invoca esto DESPUÉS de
-    /// `resolve_program` (para que el nominal `User` ya esté registrado
-    /// en el TypeEnv del importer vía vuelta 1b), pero ANTES de
-    /// `check_with_env` (para que `collect_auth_provider` lo vea en su
-    /// fallback). Es idempotente: si ya hay un provider importado y se
-    /// llama de nuevo, gana el último (caso poco probable — solo un
-    /// `@auth_provider` se admite en todo el árbol de imports; la
-    /// validación de "más de uno" la hace el caller que orquesta el
-    /// pre-scan).
+    /// W12 (v0.10.8) — Registers info of an `@auth_provider` living in
+    /// an imported module. The caller invokes this AFTER
+    /// `resolve_program` (so the `User` nominal is already registered
+    /// in the importer's TypeEnv via pass 1b), but BEFORE
+    /// `check_with_env` (so `collect_auth_provider` sees it in its
+    /// fallback). Idempotent: if there is already an imported provider and
+    /// it's called again, the last one wins (unlikely case — only one
+    /// `@auth_provider` is allowed across the whole import tree; the
+    /// "more than one" validation is done by the caller orchestrating
+    /// the pre-scan).
     pub fn set_imported_auth_provider(&mut self, provider: ImportedAuthProvider) {
         self.imported_auth_provider = Some(provider);
     }
 
-    /// W12 (v0.10.8) — Devuelve `Some(provider)` si el caller registró
-    /// un `@auth_provider` cross-module vía
-    /// `set_imported_auth_provider`. Lo consultan
-    /// `collect_auth_provider` (fallback cuando no hay provider local) y
-    /// el codegen (para emitir invocaciones module-qualified).
+    /// W12 (v0.10.8) — Returns `Some(provider)` if the caller registered
+    /// a cross-module `@auth_provider` via
+    /// `set_imported_auth_provider`. Consulted by
+    /// `collect_auth_provider` (fallback when there is no local provider) and
+    /// the codegen (to emit module-qualified invocations).
     pub fn imported_auth_provider(&self) -> Option<&ImportedAuthProvider> {
         self.imported_auth_provider.as_ref()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Side-table de tipos sintetizados por nodo (Fase 9.0 — F16)
+// Side-table of types synthesized per node (Phase 9.0 — F16)
 // ---------------------------------------------------------------------------
 
-/// Clave hashable derivada de un `Span`. Existe porque `Span` tiene un
-/// `PartialEq` custom que devuelve `true` siempre (necesario para que
-/// los tests de AST comparen estructura sin re-derivar posiciones del
-/// parser; ver el comentario sobre `impl PartialEq for Span` en
-/// `src/ast.rs`). Con esa semántica, `Span` no sirve como clave de
-/// `HashMap` — todas las entradas colisionarían. `SpanKey` envuelve
-/// `(line, column)` con `Eq`/`Hash` reales para el side-table.
+/// Hashable key derived from a `Span`. Exists because `Span` has a
+/// custom `PartialEq` that always returns `true` (needed so that
+/// AST tests compare structure without re-deriving parser positions;
+/// see the comment on `impl PartialEq for Span` in
+/// `src/ast.rs`). With that semantics, `Span` does not work as a
+/// `HashMap` key — all entries would collide. `SpanKey` wraps
+/// `(line, column)` with real `Eq`/`Hash` for the side-table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SpanKey(pub usize, pub usize);
 
@@ -914,25 +913,25 @@ impl From<Span> for SpanKey {
     }
 }
 
-/// Side-table que persiste el `Type` sintetizado por `infer_expr` para
-/// cada nodo `Expr` con `Span` conocido. Pre-requisito habilitante del
-/// LSP (Fase 9): `textDocument/hover` consulta el tipo del nodo bajo
-/// el cursor, y completion contextual (`u.` → fields de `User`)
-/// necesita el tipo del receptor.
+/// Side-table that persists the `Type` synthesized by `infer_expr` for
+/// each `Expr` node with a known `Span`. Enabling pre-requisite for the
+/// LSP (Phase 9): `textDocument/hover` consults the type of the node under
+/// the cursor, and contextual completion (`u.` → fields of `User`)
+/// needs the receiver's type.
 ///
-/// Política de poblamiento:
-/// - El wrapper sobre `infer_expr` registra **todos** los `Expr` que
-///   pasan por el checker — granularidad amplia, simple, sin "olvidé
-///   tal caso".
-/// - Nodos con `Span::ZERO` (sintéticos del parser, nodos de tests) se
-///   omiten: no son user-visible y dos sintéticos colisionarían bajo
-///   la misma clave `(0, 0)`.
-/// - `Expr::Error` (F15) tipa como `Type::Any` y se persiste igual —
-///   el LSP decide qué mostrar.
+/// Populating policy:
+/// - The wrapper over `infer_expr` registers **all** `Expr`s that
+///   pass through the checker — broad granularity, simple, without "I forgot
+///   such a case".
+/// - Nodes with `Span::ZERO` (parser synthetics, test nodes) are
+///   omitted: they are not user-visible and two synthetics would collide under
+///   the same key `(0, 0)`.
+/// - `Expr::Error` (F15) types as `Type::Any` and is persisted the same —
+///   the LSP decides what to show.
 ///
-/// Sin index espacial (rango inicio-fin). Para hover, el LSP elige el
-/// nodo cuyo span está más cerca del cursor; un futuro refinamiento
-/// con rangos completos queda como deuda menor (requiere `end_span` en
+/// No spatial index (start-end range). For hover, the LSP picks the
+/// node whose span is closest to the cursor; a future refinement
+/// with full ranges remains as minor debt (requires `end_span` on
 /// `Expr`).
 #[derive(Debug, Clone, Default)]
 pub struct TypeInfo {
@@ -944,9 +943,9 @@ impl TypeInfo {
         Self::default()
     }
 
-    /// Persiste el `Type` asociado al `Span` del nodo. Omite silenciosa
-    /// para `Span::ZERO` (nodos sintéticos / tests): esos no aportan a
-    /// hover y colisionarían entre sí.
+    /// Persists the `Type` associated with the node's `Span`. Silent omit
+    /// for `Span::ZERO` (synthetic / test nodes): those don't contribute to
+    /// hover and would collide with each other.
     pub fn record(&mut self, span: Span, ty: Type) {
         if !span.is_known() {
             return;
@@ -954,10 +953,10 @@ impl TypeInfo {
         self.inner.insert(SpanKey::from(span), ty);
     }
 
-    /// Devuelve el `Type` previamente registrado para `span`, si existe.
-    /// API pública para el LSP (Fase 9.x.2 — hover). `#[allow(dead_code)]`
-    /// hasta que aterricen los consumidores, mismo patrón que
-    /// `parse_with_recovery` en F15.
+    /// Returns the `Type` previously registered for `span`, if it exists.
+    /// Public API for the LSP (Phase 9.x.2 — hover). `#[allow(dead_code)]`
+    /// until consumers land, same pattern as
+    /// `parse_with_recovery` in F15.
     #[allow(dead_code)]
     pub fn type_at(&self, span: Span) -> Option<&Type> {
         if !span.is_known() {
@@ -966,50 +965,50 @@ impl TypeInfo {
         self.inner.get(&SpanKey::from(span))
     }
 
-    /// Cantidad de entries en el side-table. Útil para smoke tests y
-    /// para que el LSP estime cobertura. `#[allow(dead_code)]` hasta
-    /// que aterricen los consumidores externos.
+    /// Number of entries in the side-table. Useful for smoke tests and
+    /// for the LSP to estimate coverage. `#[allow(dead_code)]` until
+    /// external consumers land.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
-    /// `true` si no hay entries registradas.
+    /// `true` if there are no registered entries.
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
-    /// Itera todas las entries del side-table. Útil para consumidores
-    /// del LSP (Fase 9.x.2 — hover) que necesitan hacer un lookup
-    /// heurístico sobre posiciones (encontrar el span más cercano a
-    /// un cursor). Sin esto, `type_at` solo permite lookup exacto.
+    /// Iterates all entries of the side-table. Useful for LSP consumers
+    /// (Phase 9.x.2 — hover) that need to perform a heuristic
+    /// lookup over positions (find the closest span to
+    /// a cursor). Without this, `type_at` only allows exact lookup.
     pub fn iter(&self) -> impl Iterator<Item = (&SpanKey, &Type)> {
         self.inner.iter()
     }
 }
 
-/// Side-table que persiste el `Span` de la **declaración** de cada
-/// `Ident` usado en el programa. Pre-requisito habilitante del LSP
-/// (Fase 9.x.3 — go-to-definition): `textDocument/definition` busca
-/// el ident bajo el cursor y devuelve la ubicación donde fue
-/// declarado.
+/// Side-table that persists the **declaration** `Span` of each
+/// `Ident` used in the program. Enabling pre-requisite for the LSP
+/// (Phase 9.x.3 — go-to-definition): `textDocument/definition` looks up
+/// the ident under the cursor and returns the location where it was
+/// declared.
 ///
-/// Política de poblamiento:
-/// - Cada `Expr::Ident(name, use_span)` que el checker resuelve
-///   exitosamente vía `lookup_binding` registra
-///   `(use_span → def_span)` cuando la binding tiene span conocido.
-/// - **Builtins** (`print`, `len`, `sleep`, `cors`) tienen
-///   `def_span = Span::ZERO` y se omiten (no hay archivo donde
-///   saltar).
-/// - **Nodos con `use_span == Span::ZERO`** (sintéticos / tests)
-///   se omiten igual que en `TypeInfo`.
+/// Populating policy:
+/// - Every `Expr::Ident(name, use_span)` that the checker resolves
+///   successfully via `lookup_binding` registers
+///   `(use_span → def_span)` when the binding has a known span.
+/// - **Builtins** (`print`, `len`, `sleep`, `cors`) have
+///   `def_span = Span::ZERO` and are omitted (no file to
+///   jump to).
+/// - **Nodes with `use_span == Span::ZERO`** (synthetic / tests)
+///   are omitted like in `TypeInfo`.
 ///
-/// Granularidad del `def_span` registrado: por limitaciones del AST
-/// actual (sin spans propios en `AssignTarget::Ident`/`Param`/
-/// `For.var`), usamos el span del `Stmt` contenedor como
-/// aproximación. VSCode salta al stmt — el usuario ve la línea de
-/// declaración. Precisión por nombre exacto queda como deuda S1.
+/// Granularity of the registered `def_span`: due to current AST
+/// limitations (no own spans in `AssignTarget::Ident`/`Param`/
+/// `For.var`), we use the containing `Stmt`'s span as
+/// approximation. VSCode jumps to the stmt — the user sees the line
+/// of declaration. Precision by exact name remains as S1 debt.
 #[derive(Debug, Clone, Default)]
 pub struct DefinitionInfo {
     inner: HashMap<SpanKey, Span>,
@@ -1020,8 +1019,8 @@ impl DefinitionInfo {
         Self::default()
     }
 
-    /// Persiste la relación `use_span → def_span`. Omite silenciosa
-    /// cuando alguno de los dos es `Span::ZERO` (sintéticos / builtins).
+    /// Persists the `use_span → def_span` relation. Silent omit
+    /// when either of the two is `Span::ZERO` (synthetic / builtins).
     pub fn record(&mut self, use_span: Span, def_span: Span) {
         if !use_span.is_known() || !def_span.is_known() {
             return;
@@ -1029,7 +1028,7 @@ impl DefinitionInfo {
         self.inner.insert(SpanKey::from(use_span), def_span);
     }
 
-    /// Lookup exacto por span del uso. API pública para tests.
+    /// Exact lookup by use span. Public API for tests.
     #[allow(dead_code)]
     pub fn definition_at(&self, use_span: Span) -> Option<Span> {
         if !use_span.is_known() {
@@ -1038,33 +1037,33 @@ impl DefinitionInfo {
         self.inner.get(&SpanKey::from(use_span)).copied()
     }
 
-    /// Cantidad de entries. `#[allow(dead_code)]` paralelo a
+    /// Number of entries. `#[allow(dead_code)]` parallel to
     /// `TypeInfo::len`.
     #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.inner.len()
     }
 
-    /// `true` si no hay entries registradas.
+    /// `true` if there are no registered entries.
     #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
 
-    /// Itera todas las entries. Útil para el LSP (Fase 9.x.3) que
-    /// hace lookup heurístico sobre posiciones del cursor.
+    /// Iterates all entries. Useful for the LSP (Phase 9.x.3) which
+    /// performs heuristic lookup over cursor positions.
     pub fn iter(&self) -> impl Iterator<Item = (&SpanKey, &Span)> {
         self.inner.iter()
     }
 }
 
 // ---------------------------------------------------------------------------
-// Resolución de TypeExpr → Type
+// TypeExpr → Type resolution
 // ---------------------------------------------------------------------------
 
-/// Convierte un `TypeExpr` (sintáctico) en un `Type` (resuelto)
-/// contra `env`. Devuelve el `Type` o un `FitzError` describiendo
-/// qué falló. Los errores siempre son `ErrorKind::TypeError`.
+/// Converts a `TypeExpr` (syntactic) into a `Type` (resolved)
+/// against `env`. Returns the `Type` or a `FitzError` describing
+/// what failed. Errors are always `ErrorKind::TypeError`.
 pub fn resolve_type_expr(t: &TypeExpr, env: &TypeEnv) -> Result<Type, FitzError> {
     match t {
         TypeExpr::Named(name) => resolve_named(name, &[], env),
@@ -1084,7 +1083,7 @@ pub fn resolve_type_expr(t: &TypeExpr, env: &TypeEnv) -> Result<Type, FitzError>
                 ret: Box::new(ret),
             })
         }
-        // Tuples (mini-tanda T): resolución elemento por elemento.
+        // Tuples (mini-batch T): element-by-element resolution.
         TypeExpr::Tuple(items) => {
             let resolved: Vec<Type> = items
                 .iter()
@@ -1095,13 +1094,13 @@ pub fn resolve_type_expr(t: &TypeExpr, env: &TypeEnv) -> Result<Type, FitzError>
     }
 }
 
-/// Resuelve un nombre + argumentos contra el env. La separación
-/// entre `Named` y `Generic` desaparece acá: `List<Int>` y
-/// `List` (sin argumentos) toman el mismo camino y la aridad
-/// validada en el lugar correspondiente.
+/// Resolves a name + arguments against the env. The separation
+/// between `Named` and `Generic` disappears here: `List<Int>` and
+/// `List` (without arguments) take the same path and the arity
+/// validated at the corresponding place.
 fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, FitzError> {
-    // Primitivos (aridad 0). Si el usuario los aplica como genéricos
-    // → error de aridad explícito.
+    // Primitives (arity 0). If the user applies them as generics
+    // → explicit arity error.
     let prim = match name {
         "Int" => Some(Type::Int),
         "Float" => Some(Type::Float),
@@ -1110,18 +1109,18 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
         "Null" => Some(Type::Null),
         "Bytes" => Some(Type::Bytes),
         "Range" => Some(Type::Range),
-        // F13.C — `Any` como anotación de tipo (gradual escape +
-        // heterogéneos). Habilita `body: List<Any>` / `body: Map<Str, Any>`
-        // en handlers HTTP.
+        // F13.C — `Any` as type annotation (gradual escape +
+        // heterogeneous). Enables `body: List<Any>` / `body: Map<Str, Any>`
+        // in HTTP handlers.
         "Any" => Some(Type::Any),
-        // Fase 10.1 — tipos opacos del driver Postgres nativo.
-        // `DbConn` es el handle de conexión devuelto por `db.connect`,
-        // anotable en params (`fn run(db: DbConn)`) y vars
-        // (`let conn: DbConn = ...`). `DbRow` es el row crudo devuelto
-        // por `db.query`, también anotable.
+        // Phase 10.1 — opaque types of the native Postgres driver.
+        // `DbConn` is the connection handle returned by `db.connect`,
+        // annotatable in params (`fn run(db: DbConn)`) and vars
+        // (`let conn: DbConn = ...`). `DbRow` is the raw row returned
+        // by `db.query`, also annotatable.
         "DbConn" => Some(Type::DbConn),
         "DbRow" => Some(Type::DbRow),
-        // v0.10.24 — tipos built-in para fechas y UUIDs nativos.
+        // v0.10.24 — built-in types for native dates and UUIDs.
         "Date" => Some(Type::Date),
         "DateTime" => Some(Type::DateTime),
         "Uuid" => Some(Type::Uuid),
@@ -1134,7 +1133,7 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
         return Ok(t);
     }
 
-    // Genéricos built-in con aridad fija.
+    // Built-in generics with fixed arity.
     match name {
         "List" => {
             expect_arity(name, 1, args)?;
@@ -1148,9 +1147,9 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             Ok(Type::Map(Box::new(k), Box::new(v)))
         }
         "Result" => {
-            // Mini-tanda Re+ — aridad 1 o 2. `Result<T>` se expande a
-            // `Result<T, Str>` (default por compatibilidad). `Result<T, E>`
-            // con E explícito habilita carry de tipos custom en Err.
+            // Mini-batch Re+ — arity 1 or 2. `Result<T>` expands to
+            // `Result<T, Str>` (default for compat). `Result<T, E>`
+            // with explicit E enables carry of custom types in Err.
             if args.is_empty() || args.len() > 2 {
                 return Err(FitzError::new(
                     ErrorKind::TypeError,
@@ -1179,20 +1178,20 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             Ok(Type::Future(Box::new(inner)))
         }
         "Secret" => {
-            // Fase 12.2.a — `Secret<T>` tipo opaco con auto-redaction.
-            // Aridad fija 1. El inner T puede ser cualquier tipo
-            // resoluble; típicamente `Str` (passwords, tokens), pero
-            // también puede ser nominal (`Secret<Credentials>` para
-            // bundles atómicos).
+            // Phase 12.2.a — `Secret<T>` opaque type with auto-redaction.
+            // Fixed arity 1. The inner T can be any resolvable type;
+            // typically `Str` (passwords, tokens), but
+            // can also be nominal (`Secret<Credentials>` for
+            // atomic bundles).
             expect_arity(name, 1, args)?;
             let inner = resolve_type_expr(&args[0], env)?;
             Ok(Type::Secret(Box::new(inner)))
         }
         "WsConn" => {
-            // 9.w.2-wsconn-bidir (v0.9.38) — `WsConn` acepta 1 o 2
-            // argumentos:
-            //   `WsConn<T>` (aridad 1, simétrico) — recv == send == T.
-            //   `WsConn<In, Out>` (aridad 2, asimétrico) — recv = In,
+            // 9.w.2-wsconn-bidir (v0.9.38) — `WsConn` accepts 1 or 2
+            // arguments:
+            //   `WsConn<T>` (arity 1, symmetric) — recv == send == T.
+            //   `WsConn<In, Out>` (arity 2, asymmetric) — recv = In,
             //     send = Out.
             if args.is_empty() || args.len() > 2 {
                 return Err(FitzError::new(
@@ -1217,7 +1216,7 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             })
         }
         _ => {
-            // Nominal declarado por el usuario.
+            // Nominal declared by the user.
             match env.lookup(name) {
                 Some(id) => {
                     if !args.is_empty() {
@@ -1252,22 +1251,22 @@ fn expect_arity(name: &str, expected: usize, args: &[TypeExpr]) -> Result<(), Fi
     }
 }
 
-/// Pre-registra los tipos built-in que aporta el runtime HTTP de Fitz.
-/// Hoy: `Request` (lo construye el dispatcher antes de cada handler/
-/// middleware; expone `method`, `path`, `headers`) y `Response` (marker
-/// opaco para anotar el retorno de middlewares — el valor real lo
-/// produce `return <status> { ... }`).
+/// Pre-registers the built-in types provided by the Fitz HTTP runtime.
+/// Today: `Request` (built by the dispatcher before each handler/
+/// middleware; exposes `method`, `path`, `headers`) and `Response` (opaque
+/// marker to annotate the return of middlewares — the real value is
+/// produced by `return <status> { ... }`).
 ///
-/// Se llama desde `resolve_program` antes de la vuelta 1, así que un
-/// `type Request { ... }` declarado por el usuario dispara el error de
-/// redeclaración existente. El precio: dos nominales fijos en el env
-/// aún en programas que no usan HTTP. Trade-off aceptable — los costos
-/// de chequeo se mantienen O(1) y la superficie semántica del lenguaje
-/// queda consistente.
+/// Called from `resolve_program` before pass 1, so a
+/// `type Request { ... }` declared by the user fires the existing
+/// redeclaration error. The cost: two fixed nominals in the env
+/// even in programs that don't use HTTP. Acceptable trade-off — checking
+/// costs stay O(1) and the semantic surface of the language
+/// stays consistent.
 fn register_http_builtin_types(env: &mut TypeEnv) {
-    // `Request`: el id que queda asignado es estable porque corremos
-    // antes que cualquier otra registración. Sus fields se completan
-    // explícito (no derivados de un Stmt::TypeDef).
+    // `Request`: the assigned id is stable because we run
+    // before any other registration. Its fields are completed
+    // explicitly (not derived from a Stmt::TypeDef).
     let req_id = env
         .declare_nominal("Request".to_string())
         .expect("Request es el primer nominal — no puede colisionar");
@@ -1289,26 +1288,26 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
         ],
     );
 
-    // `Response`: nominal opaco sin fields. El usuario no lo instancia
-    // con struct lit (`Response { ... }` daría error: falta cualquier
-    // field — pero como no tiene, struct lit con `{}` pasa; documentado).
-    // El uso esperado es como marker en firmas: `fn auth(req) -> Response?`.
+    // `Response`: opaque nominal without fields. The user does not instantiate
+    // it with struct lit (`Response { ... }` would error: any field missing
+    // — but since it has none, struct lit with `{}` passes; documented).
+    // The expected use is as a marker in signatures: `fn auth(req) -> Response?`.
     let resp_id = env
         .declare_nominal("Response".to_string())
         .expect("Response es el segundo nominal — no puede colisionar");
     env.set_fields(resp_id, vec![]);
 
-    // Mini-tanda MP2 + File.content Bytes — `File`: nominal built-in
-    // para representar files de multipart/form-data bodies. El
-    // dispatcher lo construye al parsear `multipart/form-data`
+    // Mini-batch MP2 + File.content Bytes — `File`: built-in nominal
+    // to represent files from multipart/form-data bodies. The
+    // dispatcher builds it when parsing `multipart/form-data`
     // requests. Fields:
-    //   - `name`: filename del Content-Disposition (`filename="..."`),
-    //     `null` si la part no es file (form text field).
-    //   - `content_type`: MIME del Content-Type de la part, `null` si
-    //     no estaba presente.
-    //   - `content`: contenido binario crudo. Antes era `Str` (solo
-    //     UTF-8); ahora es `Bytes` (cualquier secuencia). Para texto
-    //     UTF-8, usar `f.content.to_str() -> Result<Str>`.
+    //   - `name`: filename from Content-Disposition (`filename="..."`),
+    //     `null` if the part is not a file (form text field).
+    //   - `content_type`: MIME from the part's Content-Type, `null` if
+    //     not present.
+    //   - `content`: raw binary content. Previously was `Str` (UTF-8
+    //     only); now it's `Bytes` (any sequence). For UTF-8 text,
+    //     use `f.content.to_str() -> Result<Str>`.
     let file_id = env
         .declare_nominal("File".to_string())
         .expect("File es el tercer nominal built-in — no puede colisionar");
@@ -1344,30 +1343,30 @@ fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
 }
 
 // ---------------------------------------------------------------------------
-// Pasada de resolución sobre el programa
+// Resolution pass over the program
 // ---------------------------------------------------------------------------
 
-/// Resultado de chequear un programa: el `TypeEnv` con todos los
-/// tipos declarados resueltos, y la lista (posiblemente vacía) de
-/// errores acumulados. Devolvemos ambos siempre: el caller decide
-/// si abortar (modo strict) o reportar como warnings (modo run).
+/// Result of checking a program: the `TypeEnv` with all
+/// declared types resolved, and the (possibly empty) list of
+/// accumulated errors. We always return both: the caller decides
+/// whether to abort (strict mode) or report as warnings (run mode).
 pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
     resolve_program_with_env(program, TypeEnv::new(), Vec::new())
 }
 
-/// Variante de `resolve_program` que parte de un `TypeEnv` ya pre-
-/// llenado (típicamente por `pyi_loader::load_stubs` que registra
-/// nominales declarados en `.pyi` adyacentes al `.fitz` raíz —
+/// Variant of `resolve_program` that starts from a `TypeEnv` already
+/// pre-filled (typically by `pyi_loader::load_stubs` which registers
+/// nominals declared in `.pyi` adjacent to the root `.fitz` —
 /// 8-pyi.B, v0.9.57).
 ///
-/// El `errors_init` se preserva (típicamente vacío del caller; el
-/// loader silent-fallback no produce errores de tipo).
+/// `errors_init` is preserved (typically empty from the caller; the
+/// loader silent-fallback does not produce type errors).
 ///
-/// **Política sobre redeclaraciones**: si el env pre-llenado ya tiene
-/// un nominal `Foo` y el programa también declara `type Foo { ... }`,
-/// la vuelta 1 emite el error de redeclaración estándar — el caller
-/// (loader) es responsable de skipear classes del stub que el
-/// programa ya declara, vía el pre-scan en `pyi_loader::load_stubs`.
+/// **Policy on redeclarations**: if the pre-filled env already has
+/// a nominal `Foo` and the program also declares `type Foo { ... }`,
+/// pass 1 emits the standard redeclaration error — the caller
+/// (loader) is responsible for skipping stub classes that the
+/// program already declares, via the pre-scan in `pyi_loader::load_stubs`.
 pub fn resolve_program_with_env(
     program: &Program,
     initial_env: TypeEnv,
@@ -1376,18 +1375,18 @@ pub fn resolve_program_with_env(
     let mut env = initial_env;
     let mut errors = errors_init;
 
-    // Vuelta 0 (mini-fase MW.1): registrar tipos built-in del runtime HTTP.
-    // `Request` lo construye el dispatcher antes de invocar middlewares
-    // y handlers; el usuario lo lee adentro de sus middlewares con
-    // `req.method`, `req.path`, `req.headers`. `Response` queda como
-    // marker opaco para anotar `-> Response?` en middlewares; el usuario
-    // no lo instancia (el valor lo produce `return <status> { ... }`).
-    // Si el usuario declara `type Request`/`type Response`, la vuelta 1
-    // emite el error de redeclaración existente.
+    // Pass 0 (mini-phase MW.1): register built-in types from the HTTP runtime.
+    // `Request` is built by the dispatcher before invoking middlewares
+    // and handlers; the user reads it inside their middlewares with
+    // `req.method`, `req.path`, `req.headers`. `Response` is an
+    // opaque marker to annotate `-> Response?` in middlewares; the user
+    // does not instantiate it (the value is produced by `return <status> { ... }`).
+    // If the user declares `type Request`/`type Response`, pass 1
+    // emits the existing redeclaration error.
     register_http_builtin_types(&mut env);
 
-    // Vuelta 1: registrar los nombres de los `type` declarados localmente.
-    // Forward refs entre nominales locales.
+    // Pass 1: register the names of locally-declared `type`s.
+    // Forward refs between local nominals.
     for stmt in program {
         if let Stmt::TypeDef { name, .. } = stmt {
             if let Err(e) = env.declare_nominal(name.clone()) {
@@ -1396,41 +1395,41 @@ pub fn resolve_program_with_env(
         }
     }
 
-    // Vuelta 1b: registrar nombres traídos por `from ... import ...`
-    // como nominales con fields desconocidos. Sin esto, un
-    // `User { ... }` que viene de `from foo import User` queda sin
-    // tipo declarado y el checker se queja. Si el nombre choca con
-    // un type local, gana el local — el import se ignora en silencio
-    // (decisión: 5.x mantiene comportamiento gradual; cuando 5.3.x
-    // cargue módulos cross-archivo, podemos refinar el warning).
+    // Pass 1b: register names brought by `from ... import ...`
+    // as nominals with unknown fields. Without this, a
+    // `User { ... }` coming from `from foo import User` is left without
+    // a declared type and the checker complains. If the name clashes with
+    // a local type, the local wins — the import is silently ignored
+    // (decision: 5.x keeps gradual behavior; when 5.3.x
+    // loads cross-file modules, we can refine the warning).
     //
-    // `import foo` no agrega nombres en el TypeEnv — el módulo es un
-    // value, no un type. Se registra como var en `check_stmt`.
+    // `import foo` does not add names in the TypeEnv — the module is a
+    // value, not a type. It's registered as a var in `check_stmt`.
     for stmt in program {
         if let Stmt::FromImport { names, .. } = stmt {
             for (n, alias) in names {
-                // PreF8.4: con alias, el binding local en el TypeEnv
-                // usa el alias. Sin alias, el nombre original.
+                // PreF8.4: with alias, the local binding in the TypeEnv
+                // uses the alias. Without alias, the original name.
                 let binding = alias.clone().unwrap_or_else(|| n.clone());
                 if env.lookup(&binding).is_none() {
-                    // declare_nominal puede fallar solo si el nombre
-                    // ya estaba; ya chequeamos así que es seguro.
+                    // declare_nominal can only fail if the name
+                    // was already there; we already checked so it's safe.
                     let _ = env.declare_nominal(binding);
                 }
             }
         }
     }
 
-    // Vuelta 2: resolver los fields de cada `type`.
+    // Pass 2: resolve the fields of each `type`.
     for stmt in program {
         if let Stmt::TypeDef { name, fields, .. } = stmt {
-            // Si la declaración falló (duplicado), no hay id que actualizar.
+            // If the declaration failed (duplicate), there's no id to update.
             let id = match env.lookup(name) {
                 Some(id) => id,
                 None => continue,
             };
-            // Si el slot ya tiene fields, es la segunda vez que vemos
-            // este nominal — un duplicado que ya reportamos. Saltar.
+            // If the slot already has fields, this is the second time we see
+            // this nominal — a duplicate already reported. Skip.
             if env.info(id).fields.is_some() {
                 continue;
             }
@@ -1458,10 +1457,10 @@ pub fn resolve_program_with_env(
         }
     }
 
-    // Vuelta 2.5 (R.3): resolver firmas de métodos custom. Después de
-    // tener fields, los métodos pueden referenciar nominales en sus
-    // params/return. Si un método ya tiene firma resuelta (segundo
-    // import / forward ref), saltamos.
+    // Pass 2.5 (R.3): resolve signatures of custom methods. After
+    // having fields, methods can reference nominals in their
+    // params/return. If a method already has a resolved signature (second
+    // import / forward ref), we skip.
     for stmt in program {
         if let Stmt::TypeDef { name, methods, .. } = stmt {
             if methods.is_empty() {
@@ -1503,11 +1502,11 @@ pub fn resolve_program_with_env(
         }
     }
 
-    // Vuelta 2.6 (Fase 10.3.a): procesar decoradores ORM sobre
-    // los `type Foo { ... }`. Solo los types con `@table(...)`
-    // generan metadata; los demás se ignoran silenciosamente.
-    // Decoradores no reconocidos a nivel type → error; a nivel
-    // field también. La metadata se guarda en `env.tables`.
+    // Pass 2.6 (Phase 10.3.a): process ORM decorators over
+    // the `type Foo { ... }`s. Only types with `@table(...)`
+    // generate metadata; the others are silently ignored.
+    // Unrecognized decorators at the type level → error; at the
+    // field level too. The metadata is saved in `env.tables`.
     for stmt in program {
         if let Stmt::TypeDef {
             name,
@@ -1529,7 +1528,7 @@ pub fn resolve_program_with_env(
         }
     }
 
-    // Vuelta 3: anotaciones de FnDef / Assign / let internos.
+    // Pass 3: annotations of FnDef / Assign / internal lets.
     for stmt in program {
         resolve_stmt_annotations(stmt, &env, &mut errors);
     }
@@ -1569,9 +1568,9 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
                     ));
                 }
             }
-            // Bajamos por el body para validar anotaciones de lets
-            // internos. Las expresiones en sí (cuerpo del fn) se
-            // validan en 5.3.
+            // We descend into the body to validate annotations of internal
+            // lets. The expressions themselves (fn body) are
+            // validated in 5.3.
             for s in body {
                 resolve_stmt_annotations(s, env, errors);
             }
@@ -1585,38 +1584,38 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
     }
 }
 
-/// Chequea (caso simple) que un default literal coincida con el
-/// tipo declarado del campo. Aplica solo a literales constantes:
-/// otros defaults (expresiones, struct literals, llamadas) se
-/// aceptan sin chequeo hasta 5.3, que valida expresiones contra
-/// tipos esperados.
+/// Checks (simple case) that a literal default matches the
+/// declared field type. Applies only to constant literals:
+/// other defaults (expressions, struct literals, calls) are
+/// accepted without checking until 5.3, which validates expressions against
+/// expected types.
 ///
-/// Reglas:
-///   - `Null` aceptable si el declarado es `T?`.
-///   - `Int` aceptable contra `Float` (coerción Int→Float, mismo
-///     criterio que el evaluator usa en runtime).
-///   - El resto: igualdad estructural sobre la base (pelando un
-///     `Nullable` si lo hay).
+/// Rules:
+///   - `Null` acceptable if the declared is `T?`.
+///   - `Int` acceptable against `Float` (Int→Float coercion, same
+///     criterion the evaluator uses at runtime).
+///   - The rest: structural equality on the base (peeling a
+///     `Nullable` if present).
 //
-// Fase 10.3.a — procesa los decoradores ORM sobre un `type`.
-// Devuelve:
-//   - `Ok(Some(meta))`: el type tiene `@table(...)`, hay metadata.
-//   - `Ok(None)`: sin `@table` ni decoradores de fields ORM; el
-//     type no participa del ORM, queda como tipo Fitz normal.
-//   - `Err(errs)`: decoradores inválidos (nombre no reconocido,
-//     args mal-tipados, `@primary` en más de un field, etc.).
+// Phase 10.3.a — processes ORM decorators over a `type`.
+// Returns:
+//   - `Ok(Some(meta))`: the type has `@table(...)`, there is metadata.
+//   - `Ok(None)`: no `@table` nor ORM field decorators; the
+//     type does not participate in the ORM, stays as a normal Fitz type.
+//   - `Err(errs)`: invalid decorators (unrecognized name,
+//     mal-typed args, `@primary` on more than one field, etc.).
 //
-// Decoradores reconocidos:
-//   * Sobre el `type`:
-//     - `@table("nombre")` o `@table` — nombre SQL de la tabla
-//       (default: lowercase del nombre Fitz). String literal
-//       en el arg (no expresiones).
-//   * Sobre cada `Field`:
-//     - `@primary` — marca primary key. Solo 1 por type.
-//     - `@column(name="X", sql_type="Y")` — overrides de nombre/
-//       tipo SQL. Ambos kwargs opcionales.
-//     - `@unique` — emite `UNIQUE` constraint.
-//     - `@index` — emite `CREATE INDEX` en la migration.
+// Recognized decorators:
+//   * On the `type`:
+//     - `@table("name")` or `@table` — SQL name of the table
+//       (default: lowercase of the Fitz name). String literal
+//       in the arg (no expressions).
+//   * On each `Field`:
+//     - `@primary` — marks primary key. Only 1 per type.
+//     - `@column(name="X", sql_type="Y")` — name/SQL type overrides.
+//       Both kwargs optional.
+//     - `@unique` — emits `UNIQUE` constraint.
+//     - `@index` — emits `CREATE INDEX` in the migration.
 pub fn process_table_decorators(
     type_name: &str,
     type_decorators: &[Decorator],
@@ -1627,23 +1626,23 @@ pub fn process_table_decorators(
 
     let mut errors: Vec<FitzError> = Vec::new();
 
-    // ¿Hay @table sobre el type?
+    // Is there @table on the type?
     let mut sql_name: Option<String> = None;
     let mut table_schema: Option<String> = None;
     let mut has_table = false;
-    // v0.10.27 (F3) — Acumulador para `@index(...)` decoradores.
-    // Se vacía a `TableMetadata.indexes` si has_table = true. Si NO
-    // hay @table pero hay @index, error (igual que @primary sin @table).
+    // v0.10.27 (F3) — Accumulator for `@index(...)` decorators.
+    // Drained into `TableMetadata.indexes` if has_table = true. If there
+    // is NO @table but there is @index, error (same as @primary without @table).
     let mut pending_indexes: Vec<IndexSpec> = Vec::new();
     let mut pending_check_constraints: Vec<CheckConstraintSpec> = Vec::new();
     let mut table_renamed_from: Option<String> = None;
     for d in type_decorators {
         match d.name.as_str() {
             "renamed_from" => {
-                // v0.10.17 — Decorator transient para renames seguros.
-                // `@renamed_from("old_table")` le dice al diff:
-                // emite `ALTER TABLE "old" RENAME TO "new"` en vez
-                // de DROP + CREATE.
+                // v0.10.17 — Transient decorator for safe renames.
+                // `@renamed_from("old_table")` tells the diff:
+                // emit `ALTER TABLE "old" RENAME TO "new"` instead
+                // of DROP + CREATE.
                 if !d.kwargs.is_empty() {
                     errors.push(FitzError::new(
                         ErrorKind::TypeError,
@@ -1698,7 +1697,7 @@ pub fn process_table_decorators(
                     continue;
                 }
                 has_table = true;
-                // `@table("nombre")` con arg Str opcional.
+                // `@table("name")` with optional Str arg.
                 if !d.kwargs.is_empty() {
                     errors.push(FitzError::new(
                         ErrorKind::TypeError,
@@ -1711,15 +1710,15 @@ pub fn process_table_decorators(
                     ));
                 }
                 if d.args.is_empty() {
-                    // `@table` sin args → nombre default
+                    // `@table` without args → default name
                     sql_name = Some(type_name.to_lowercase());
                 } else if d.args.len() == 1 {
                     match &d.args[0] {
                         Expr::Str(s, _) => {
-                            // v0.10.21 (10.6.e.3) — Split por `.`:
+                            // v0.10.21 (10.6.e.3) — Split by `.`:
                             // `"foo.bar"` → schema="foo", name="bar".
                             // `"bar"` → schema=None, name="bar".
-                            // Validamos cada segmento no-vacío.
+                            // We validate each non-empty segment.
                             match split_schema_qualified_table(s) {
                                 Ok((schema, name)) => {
                                     table_schema = schema;
@@ -1756,16 +1755,16 @@ pub fn process_table_decorators(
                 }
             }
             // v0.10.27 (F3) — `@index(cols, unique=?, name=?, where_=?)`.
-            // Apilable (múltiples `@index` sobre el mismo type). Cada
-            // uno produce un IndexSpec acumulado en `indexes`. El
-            // migrator emite CREATE INDEX / DROP INDEX desde diff.
-            // v0.10.32 (Tier C.2) — soporta también
-            // `@index(expression="lower(email)")` para expression
-            // indexes; en ese caso el arg posicional NO es required
-            // (las cols se ignoran).
+            // Stackable (multiple `@index` on the same type). Each
+            // one produces an IndexSpec accumulated in `indexes`. The
+            // migrator emits CREATE INDEX / DROP INDEX from diff.
+            // v0.10.32 (Tier C.2) — also supports
+            // `@index(expression="lower(email)")` for expression
+            // indexes; in that case the positional arg is NOT required
+            // (cols are ignored).
             "index" => {
-                // v0.10.32 (Tier C.2) — chequeo previo de `expression=`:
-                // si está presente, `arg 0` (cols Str) NO es requerido.
+                // v0.10.32 (Tier C.2) — pre-check for `expression=`:
+                // if present, `arg 0` (cols Str) is NOT required.
                 let has_expression_kwarg = d.kwargs.iter().any(|(k, _)| k == "expression");
                 if !has_expression_kwarg && d.args.len() != 1 {
                     errors.push(FitzError::new(
@@ -1856,10 +1855,10 @@ pub fn process_table_decorators(
                                     .to_string(),
                             )),
                         },
-                        // v0.10.28 — Method override. Whitelist de los
-                        // 6 methods oficiales de Postgres. Otro valor =
-                        // typo del user (mejor fallar en compile-time
-                        // que dejar pasar y romper al CREATE INDEX).
+                        // v0.10.28 — Method override. Whitelist of the
+                        // 6 official Postgres methods. Other value =
+                        // user typo (better to fail at compile time
+                        // than let it through and break at CREATE INDEX).
                         "using" => match v {
                             Expr::Str(s, _) => {
                                 const ALLOWED: &[&str] =
@@ -1876,10 +1875,10 @@ pub fn process_table_decorators(
                                         ),
                                     ));
                                 } else if lower != "btree" {
-                                    // btree es default Postgres — lo
-                                    // dejamos como None para no emitir
-                                    // `USING btree` redundante (matchea
-                                    // lo que reporta introspect para el
+                                    // btree is Postgres default — we
+                                    // leave it as None to not emit
+                                    // redundant `USING btree` (matches
+                                    // what introspect reports for the
                                     // default).
                                     using = Some(lower);
                                 }
@@ -1893,8 +1892,8 @@ pub fn process_table_decorators(
                             )),
                         },
                         // v0.10.32 (Tier C.2) — Expression index.
-                        // El user pasa la expression SQL raw; Fitz la
-                        // emite literal en CREATE INDEX (no la parsea).
+                        // The user passes the raw SQL expression; Fitz
+                        // emits it literal in CREATE INDEX (doesn't parse).
                         "expression" => match v {
                             Expr::Str(s, _) => {
                                 let trimmed = s.trim();
@@ -1937,13 +1936,13 @@ pub fn process_table_decorators(
                 });
             }
             // v0.10.29 — `@unique(col1, col2, ..., name="optional")`.
-            // Shortcut de `@index(col1, col2, ..., unique=true)`. La
-            // sintaxis ergonómica es bare idents (`@unique(email,
-            // tenant_id)`); también acepta Str con commas
-            // (`@unique("email, tenant_id")`) por consistencia con
-            // `@index`. Solo kwarg soportado: `name="..."` (sin
-            // `where_=`/`using=`/`unique=` — para esos casos
-            // avanzados usar `@index(...)` directo).
+            // Shortcut for `@index(col1, col2, ..., unique=true)`. The
+            // ergonomic syntax is bare idents (`@unique(email,
+            // tenant_id)`); it also accepts Str with commas
+            // (`@unique("email, tenant_id")`) for consistency with
+            // `@index`. Only supported kwarg: `name="..."` (no
+            // `where_=`/`using=`/`unique=` — for those advanced
+            // cases use `@index(...)` directly).
             "unique" => {
                 if d.args.is_empty() {
                     errors.push(FitzError::new(
@@ -1961,7 +1960,7 @@ pub fn process_table_decorators(
                     match arg {
                         Expr::Ident(name, _) => columns.push(name.clone()),
                         Expr::Str(s, _) => {
-                            // Permitir Str con commas (compat con @index).
+                            // Allow Str with commas (compat with @index).
                             for part in s.split(',') {
                                 let p = part.trim();
                                 if !p.is_empty() {
@@ -2029,10 +2028,10 @@ pub fn process_table_decorators(
                 });
             }
             // v0.10.29 — `@check_constraint("<sql_expr>",
-            // name="optional")`. Apilable. La expr se pasa literal
-            // al CREATE TABLE — Fitz NO parsea SQL para validar
-            // contra el shape de la tabla; el user lo hace bien o
-            // Postgres lo rechaza al primer INSERT.
+            // name="optional")`. Stackable. The expr is passed literal
+            // to CREATE TABLE — Fitz does NOT parse SQL to validate
+            // against the table shape; the user gets it right or
+            // Postgres rejects it at the first INSERT.
             "check_constraint" => {
                 if d.args.len() != 1 {
                     errors.push(FitzError::new(
@@ -2109,9 +2108,9 @@ pub fn process_table_decorators(
         }
     }
 
-    // Procesar decoradores de cada field (incluso si no hay @table —
-    // esos decoradores sin @table son "error" porque solo tienen
-    // sentido en contexto ORM).
+    // Process decorators of each field (even if there is no @table —
+    // those decorators without @table are "error" because they only
+    // make sense in ORM context).
     let mut primary_fields: Vec<String> = Vec::new();
     let mut columns: HashMap<String, ColumnMetadata> = HashMap::new();
     let mut relations: HashMap<String, RelationMetadata> = HashMap::new();
@@ -2121,19 +2120,19 @@ pub fn process_table_decorators(
         if f.decorators.is_empty() {
             continue;
         }
-        // v0.10.11 — `any_field_decorator` solo cuenta decoradores
-        // ORM (primary/column/unique/index/db_default/belongs_to/
-        // has_one/has_many). `@hidden` es ortogonal al ORM y NO debe
-        // disparar el check "tiene decoradores ORM pero falta
-        // @table" (sino sería imposible usar @hidden en types plain
-        // HTTP sin tabla). Se setea dentro de cada arm específico
-        // del match abajo, no acá.
+        // v0.10.11 — `any_field_decorator` only counts ORM
+        // decorators (primary/column/unique/index/db_default/belongs_to/
+        // has_one/has_many). `@hidden` is orthogonal to the ORM and must NOT
+        // trigger the "has ORM decorators but missing @table" check
+        // (otherwise it would be impossible to use @hidden in plain
+        // HTTP types without table). Set inside each specific arm
+        // of the match below, not here.
         let mut col_meta = ColumnMetadata::default();
         let mut has_meta = false;
         for d in &f.decorators {
-            // v0.10.11 — `@hidden` es ortogonal al ORM (no implica
-            // @table). Todos los demás decoradores de field SÍ son
-            // ORM-specific y disparan el check "missing @table".
+            // v0.10.11 — `@hidden` is orthogonal to the ORM (does not imply
+            // @table). All other field decorators ARE
+            // ORM-specific and trigger the "missing @table" check.
             if d.name != "hidden" {
                 any_field_decorator = true;
             }
@@ -2147,10 +2146,10 @@ pub fn process_table_decorators(
                             "`@primary` no acepta args ni kwargs".to_string(),
                         ));
                     }
-                    // v0.10.27 (F2) — composite PK soportada: N @primary
-                    // fields se acumulan a `primary_fields`. Orden importa
-                    // para el `PRIMARY KEY (a, b)` constraint en CREATE
-                    // TABLE (PG arma el index según ese orden).
+                    // v0.10.27 (F2) — composite PK supported: N @primary
+                    // fields accumulate to `primary_fields`. Order matters
+                    // for the `PRIMARY KEY (a, b)` constraint in CREATE
+                    // TABLE (PG builds the index according to that order).
                     if primary_fields.contains(&f.name) {
                         errors.push(FitzError::new(
                             ErrorKind::TypeError,
@@ -2176,11 +2175,11 @@ pub fn process_table_decorators(
                                 .to_string(),
                         ));
                     }
-                    // NOTA: el kwarg se llama `sql_type` (no `type`)
-                    // porque `type` es keyword reservada del lenguaje
-                    // y el parser de decorator args no acepta
-                    // keywords como key. Si entra demanda real,
-                    // refinable en el parser; por ahora API explícita.
+                    // NOTE: the kwarg is named `sql_type` (not `type`)
+                    // because `type` is a reserved keyword of the language
+                    // and the decorator args parser does not accept
+                    // keywords as keys. If real demand appears,
+                    // refinable in the parser; for now explicit API.
                     for (k, v) in &d.kwargs {
                         match k.as_str() {
                             "name" => match v {
@@ -2237,13 +2236,13 @@ pub fn process_table_decorators(
                     col_meta.indexed = true;
                 }
                 "db_default" => {
-                    // 10.8.2 (v0.10.8) — field manejado por la DB.
-                    // El ORM lo skipea del INSERT (Postgres aplica
-                    // su DEFAULT). v0.10.16 — acepta arg Str
-                    // opcional con la expresión SQL del default
-                    // (`@db_default("NOW()")`) para que `fitz db
-                    // diff` la emita en el CREATE TABLE / ADD
-                    // COLUMN automáticamente.
+                    // 10.8.2 (v0.10.8) — DB-managed field.
+                    // The ORM skips it from the INSERT (Postgres applies
+                    // its DEFAULT). v0.10.16 — accepts optional Str arg
+                    // with the SQL expression of the default
+                    // (`@db_default("NOW()")`) so `fitz db
+                    // diff` emits it in CREATE TABLE / ADD
+                    // COLUMN automatically.
                     has_meta = true;
                     if !d.kwargs.is_empty() {
                         errors.push(FitzError::new(
@@ -2289,23 +2288,23 @@ pub fn process_table_decorators(
                     }
                 }
                 "hidden" => {
-                    // v0.10.11 — el field NO cruza la frontera HTTP.
-                    // Tanto `__to_fitz_json` (response al cliente)
-                    // como `__FromFitzJson` (body del cliente) lo
-                    // SKIPEAN. Útil para campos sensibles
-                    // (`password_hash`, tokens) y metadata interna.
-                    // El field sigue siendo asignable desde código
-                    // Fitz interno y participa del I/O DB normal.
-                    // Sin args ni kwargs. El checker lo tolera
-                    // pero NO necesita estado adicional acá — el
-                    // codegen lo lee directo de `Field.decorators`.
+                    // v0.10.11 — the field does NOT cross the HTTP boundary.
+                    // Both `__to_fitz_json` (response to client)
+                    // and `__FromFitzJson` (client body)
+                    // SKIP it. Useful for sensitive fields
+                    // (`password_hash`, tokens) and internal metadata.
+                    // The field is still assignable from
+                    // internal Fitz code and participates in normal DB I/O.
+                    // No args nor kwargs. The checker tolerates it
+                    // but does NOT need extra state here — the
+                    // codegen reads it directly from `Field.decorators`.
                     //
-                    // **No setea `has_meta = true`** — @hidden es
-                    // ortogonal al ORM. Funciona en types con o
-                    // sin @table. Si lo seteara, el checker
-                    // exigiría @table sobre el type aunque el user
-                    // solo quiera marcar un field como hidden en
-                    // un type plain HTTP.
+                    // **Does not set `has_meta = true`** — @hidden is
+                    // orthogonal to the ORM. Works in types with or
+                    // without @table. If set, the checker
+                    // would require @table on the type even if the user
+                    // only wants to mark a field as hidden in
+                    // a plain HTTP type.
                     if !d.args.is_empty() || !d.kwargs.is_empty() {
                         errors.push(FitzError::new(
                             ErrorKind::TypeError,
@@ -2316,12 +2315,12 @@ pub fn process_table_decorators(
                     }
                 }
                 "renamed_from" => {
-                    // v0.10.17 (10.6.b.2) — Decorator transient para
-                    // rename seguro del column SIN perder datos.
+                    // v0.10.17 (10.6.b.2) — Transient decorator for
+                    // safe column rename WITHOUT losing data.
                     // `@renamed_from("old_name") full_name: Str = ""`
-                    // hace que `fitz db diff` emita `ALTER TABLE
+                    // makes `fitz db diff` emit `ALTER TABLE
                     // ... RENAME COLUMN "old_name" TO "full_name"`
-                    // en vez de DROP + ADD.
+                    // instead of DROP + ADD.
                     has_meta = true;
                     if !d.kwargs.is_empty() {
                         errors.push(FitzError::new(
@@ -2412,9 +2411,9 @@ pub fn process_table_decorators(
         }
     }
 
-    // Validación cross: si hay decoradores de field ORM pero no
-    // hay @table, el user probablemente olvidó el @table. Error
-    // claro.
+    // Cross validation: if there are ORM field decorators but no
+    // @table, the user probably forgot the @table. Clear
+    // error.
     if !has_table && (!primary_fields.is_empty() || any_field_decorator) {
         errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -2434,36 +2433,36 @@ pub fn process_table_decorators(
         return Ok(None);
     }
 
-    // Deuda residual #2 (v0.10.5) — post-process: registrar
-    // `BelongsToCompanion` para cada par `@belongs_to xxx_id: Int` +
-    // sibling field `xxx: Target?`. Sin esto, `.preload("xxx")` sobre
-    // BelongsTo no funciona (la API solo soportaba HasMany).
+    // Residual debt #2 (v0.10.5) — post-process: register
+    // `BelongsToCompanion` for each pair `@belongs_to xxx_id: Int` +
+    // sibling field `xxx: Target?`. Without this, `.preload("xxx")` over
+    // BelongsTo does not work (the API only supported HasMany).
     //
-    // Convención de detección:
-    //   1. El FK field (con `@belongs_to`) debe tener nombre que termine
-    //      en `_id` (e.g. `user_id`, `author_id`).
-    //   2. Existe un sibling field cuyo nombre es el FK sin el sufijo
-    //      `_id` (e.g. `user`, `author`).
-    //   3. El sibling es de tipo `Target?` (Nullable wrapping un
-    //      Named matching el target del @belongs_to).
-    //   4. El sibling no tiene su propio decorator de relación
-    //      (no es ya @has_one/@has_many/etc.).
+    // Detection convention:
+    //   1. The FK field (with `@belongs_to`) must have a name ending
+    //      in `_id` (e.g. `user_id`, `author_id`).
+    //   2. There exists a sibling field whose name is the FK without the
+    //      `_id` suffix (e.g. `user`, `author`).
+    //   3. The sibling is of type `Target?` (Nullable wrapping a
+    //      Named matching the target of @belongs_to).
+    //   4. The sibling does not have its own relation decorator
+    //      (it's not already @has_one/@has_many/etc.).
     //
-    // Si los 4 puntos se cumplen, registramos `BelongsToCompanion`
-    // bajo el nombre del sibling. El codegen lo trata como virtual
-    // (skip SELECT/INSERT), inicializa Null, y `.preload("xxx")` lo
-    // puebla con batch SELECT inverso.
+    // If the 4 points are met, we register `BelongsToCompanion`
+    // under the sibling's name. The codegen treats it as virtual
+    // (skip SELECT/INSERT), initializes Null, and `.preload("xxx")`
+    // populates it with an inverse batch SELECT.
     register_belongs_to_companions(&mut relations, fields);
 
-    // v0.10.27 (F3) — Resolver col names del @index del nombre Fitz
-    // al nombre SQL respetando `@column(name=...)`. Validar que cada
-    // col existe como field del type.
+    // v0.10.27 (F3) — Resolve col names from @index from the Fitz name
+    // to the SQL name respecting `@column(name=...)`. Validate that each
+    // col exists as a field of the type.
     let mut resolved_indexes: Vec<IndexSpec> = Vec::with_capacity(pending_indexes.len());
     for idx in pending_indexes {
         let mut resolved_cols: Vec<String> = Vec::with_capacity(idx.columns.len());
         let mut idx_errors: Vec<String> = Vec::new();
         for fitz_col in &idx.columns {
-            // Buscar el field por nombre Fitz
+            // Find the field by Fitz name
             let field_decl = fields.iter().find(|f| f.name == *fitz_col);
             if field_decl.is_none() {
                 idx_errors.push(format!(
@@ -2474,7 +2473,7 @@ pub fn process_table_decorators(
                 ));
                 continue;
             }
-            // Resolver SQL name del field (respeta @column(name=...))
+            // Resolve SQL name of the field (respects @column(name=...))
             let sql_col = columns
                 .get(fitz_col)
                 .and_then(|c| c.sql_name.as_deref())
@@ -2490,10 +2489,10 @@ pub fn process_table_decorators(
                 e,
             ));
         }
-        // v0.10.32 (Tier C.2) — expression indexes pasan aunque
-        // resolved_cols esté vacío (la expression es la fuente del
-        // index). Sin expression Y sin cols → skipear (probablemente
-        // typo en col names que el resolve filtró).
+        // v0.10.32 (Tier C.2) — expression indexes pass even if
+        // resolved_cols is empty (the expression is the source of the
+        // index). Without expression AND without cols → skip (probably
+        // typo in col names that the resolve filtered out).
         if !resolved_cols.is_empty() || idx.expression.is_some() {
             resolved_indexes.push(IndexSpec {
                 name: idx.name,
@@ -2511,7 +2510,7 @@ pub fn process_table_decorators(
     }
 
     Ok(Some(TableMetadata {
-        sql_name: sql_name.unwrap(), // garantizado por has_table check
+        sql_name: sql_name.unwrap(), // guaranteed by has_table check
         schema: table_schema,
         primary_fields,
         columns,
@@ -2522,15 +2521,15 @@ pub fn process_table_decorators(
     }))
 }
 
-/// v0.10.21 (10.6.e.3) — Split por `.` para `@table("schema.name")`.
+/// v0.10.21 (10.6.e.3) — Split by `.` for `@table("schema.name")`.
 ///
-/// - `"users"` → `(None, "users")` — schema default `public`.
+/// - `"users"` → `(None, "users")` — default schema `public`.
 /// - `"analytics.events"` → `(Some("analytics"), "events")`.
-/// - `"a.b.c"` o `".name"` o `"schema."` o `""` → error.
+/// - `"a.b.c"` or `".name"` or `"schema."` or `""` → error.
 ///
-/// El name y el schema deben ser identifiers SQL razonables: no
-/// vacíos, sin whitespace internal. NO validamos chars exóticos
-/// porque el `quote_ident` en migrations los protege con `"..."`.
+/// The name and schema must be reasonable SQL identifiers: not
+/// empty, no internal whitespace. We do NOT validate exotic chars
+/// because `quote_ident` in migrations protects them with `"..."`.
 fn split_schema_qualified_table(s: &str) -> Result<(Option<String>, String), String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
@@ -2559,14 +2558,14 @@ fn split_schema_qualified_table(s: &str) -> Result<(Option<String>, String), Str
     }
 }
 
-/// Deuda residual #2 (v0.10.5) — registra automáticamente los
-/// `BelongsToCompanion` cuando se detecta el patrón canónico:
+/// Residual debt #2 (v0.10.5) — automatically registers the
+/// `BelongsToCompanion` when the canonical pattern is detected:
 /// `@belongs_to(...) xxx_id: Int` + sibling `xxx: Target?`.
 fn register_belongs_to_companions(
     relations: &mut HashMap<String, RelationMetadata>,
     fields: &[Field],
 ) {
-    // Snapshot de las relations BelongsTo para iterarlas sin mutar.
+    // Snapshot of the BelongsTo relations to iterate without mutating.
     let belongs_to_entries: Vec<(String, RelationMetadata)> = relations
         .iter()
         .filter(|(_, r)| r.kind == RelationKind::BelongsTo)
@@ -2574,26 +2573,26 @@ fn register_belongs_to_companions(
         .collect();
 
     for (fk_field_name, rel) in belongs_to_entries.iter() {
-        // (1) FK debe terminar en `_id` para que el companion name sea
+        // (1) FK must end in `_id` so the companion name is
         // derivable.
         let companion_name = match fk_field_name.strip_suffix("_id") {
             Some(n) if !n.is_empty() => n.to_string(),
-            _ => continue, // FK sin sufijo `_id` (e.g. usuario en es) → skip
+            _ => continue, // FK without `_id` suffix (e.g. usuario in es) → skip
         };
 
-        // (2)+(4) Sibling field existe Y no tiene relation propia.
+        // (2)+(4) Sibling field exists AND does not have its own relation.
         let sibling = fields.iter().find(|f| f.name == companion_name);
         let sibling = match sibling {
             Some(f) if !relations.contains_key(&f.name) => f,
             _ => continue,
         };
 
-        // (3) Sibling DEBE ser `Nullable<Named(target_type)>`, p.ej.
-        // `user: User?`. El field se inicializa con `None` antes de
-        // que `.preload(...)` lo pueble, así que no-nullable rompe
-        // la deserialización. Si el user quiere acceder al companion
-        // como no-null post-preload, hace `.unwrap()` / `match` al
-        // consumir.
+        // (3) Sibling MUST be `Nullable<Named(target_type)>`, e.g.
+        // `user: User?`. The field is initialized with `None` before
+        // `.preload(...)` populates it, so non-nullable breaks
+        // the deserialization. If the user wants to access the companion
+        // as non-null post-preload, they do `.unwrap()` / `match` when
+        // consuming.
         let target_matches = match &sibling.type_ {
             TypeExpr::Nullable(inner) => match inner.as_ref() {
                 TypeExpr::Named(name) => name == &rel.target_type,
@@ -2605,7 +2604,7 @@ fn register_belongs_to_companions(
             continue;
         }
 
-        // Registrar la companion.
+        // Register the companion.
         relations.insert(
             companion_name,
             RelationMetadata {
@@ -2619,14 +2618,14 @@ fn register_belongs_to_companions(
     }
 }
 
-/// Fase 10.4.a — Parsea un decorator de relación
-/// (`@belongs_to`/`@has_one`/`@has_many`). Devuelve
-/// `Some(meta)` si el decorator es válido; `None` y pushea
-/// errors al vec si hay problemas. Validaciones:
-///   - 1 arg posicional Str (nombre del type referenciado).
-///   - Kwargs reconocidos: `on_delete`, `on_update`, `fk` (para
-///     belongs_to) o `via` (para has_one/has_many).
-///   - Valores de `on_delete`/`on_update`: "cascade" | "set_null"
+/// Phase 10.4.a — Parses a relation decorator
+/// (`@belongs_to`/`@has_one`/`@has_many`). Returns
+/// `Some(meta)` if the decorator is valid; `None` and pushes
+/// errors to the vec if there are problems. Validations:
+///   - 1 positional Str arg (name of the referenced type).
+///   - Recognized kwargs: `on_delete`, `on_update`, `fk` (for
+///     belongs_to) or `via` (for has_one/has_many).
+///   - Values of `on_delete`/`on_update`: "cascade" | "set_null"
 ///     | "restrict" | "no_action".
 fn parse_relation_decorator(
     d: &Decorator,
@@ -2640,14 +2639,14 @@ fn parse_relation_decorator(
         RelationKind::BelongsTo => "@belongs_to",
         RelationKind::HasOne => "@has_one",
         RelationKind::HasMany => "@has_many",
-        // BelongsToCompanion no se llega aquí — solo se construye
-        // post-process en `register_belongs_to_companions`, jamás
-        // por el parser de decoradores user-facing.
+        // BelongsToCompanion is not reached here — only built
+        // post-process in `register_belongs_to_companions`, never
+        // by the user-facing decorator parser.
         RelationKind::BelongsToCompanion => unreachable!(
             "BelongsToCompanion no es user-facing — parse_relation_decorator solo se llama con kinds parseables"
         ),
     };
-    // Arg posicional 1: nombre del type referenciado.
+    // Positional arg 1: name of the referenced type.
     if d.args.len() != 1 {
         errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -2676,11 +2675,11 @@ fn parse_relation_decorator(
         }
     };
 
-    // Default fk_field: depende del kind.
-    //   - BelongsTo: el field decorado ES el FK (por convención),
-    //     a menos que el user lo override con `fk="other_col"`.
-    //   - HasOne/HasMany: convención `<lowercase(this_type)>_id`,
-    //     a menos que `via="X"` lo override.
+    // Default fk_field: depends on the kind.
+    //   - BelongsTo: the decorated field IS the FK (by convention),
+    //     unless the user overrides with `fk="other_col"`.
+    //   - HasOne/HasMany: convention `<lowercase(this_type)>_id`,
+    //     unless `via="X"` overrides it.
     let mut fk_field: String = match kind {
         RelationKind::BelongsTo => field_name.to_string(),
         RelationKind::HasOne | RelationKind::HasMany => format!("{}_id", type_name.to_lowercase()),
@@ -2762,8 +2761,8 @@ fn parse_relation_decorator(
     })
 }
 
-/// Fase 10.4.a — Parsea un valor de `on_delete`/`on_update`.
-/// Soportado: literales Str con valores canónicos.
+/// Phase 10.4.a — Parses an `on_delete`/`on_update` value.
+/// Supported: Str literals with canonical values.
 fn parse_cascade_value(v: &Expr) -> Option<CascadeAction> {
     if let Expr::Str(s, _) = v {
         match s.as_str() {
@@ -2795,29 +2794,29 @@ fn check_field_default(
     };
     let lit_type = match lit_type {
         Some(t) => t,
-        None => return Ok(()), // no literal, se valida en 5.3
+        None => return Ok(()), // not a literal, validated in 5.3
     };
-    // Null sobre tipo nullable: OK.
+    // Null over nullable type: OK.
     if matches!(lit_type, Type::Null) && declared.is_nullable() {
         return Ok(());
     }
-    // Coerción Int→Float.
+    // Int→Float coercion.
     if matches!(lit_type, Type::Int) && matches!(declared.base(), Type::Float) {
         return Ok(());
     }
-    // v0.10.24 — Str literal sentinel/default para Date/DateTime/Uuid.
-    // El user escribe `happens_on: Date = ""` como sentinel (paralelo
-    // a `id: Int = 0`). El evaluator coerce el Str → tipo correspondiente
-    // en runtime (via `coerce_to_annotation`); si el Str no parsea,
-    // falla en runtime con mensaje claro. Caso típico: Date/DateTime
-    // que se setea desde el JSON body HTTP, donde el "default Str"
-    // nunca llega a usarse porque el user provee el valor real.
+    // v0.10.24 — Str literal sentinel/default for Date/DateTime/Uuid.
+    // The user writes `happens_on: Date = ""` as sentinel (parallel
+    // to `id: Int = 0`). The evaluator coerces the Str → corresponding type
+    // at runtime (via `coerce_to_annotation`); if the Str does not parse,
+    // it fails at runtime with a clear message. Typical case: Date/DateTime
+    // set from the HTTP JSON body, where the "default Str"
+    // never ends up being used because the user provides the real value.
     if matches!(lit_type, Type::Str)
         && matches!(declared.base(), Type::Date | Type::DateTime | Type::Uuid)
     {
         return Ok(());
     }
-    // Igualdad estructural sobre la base.
+    // Structural equality over the base.
     if &lit_type != declared.base() {
         return Err(FitzError::new(
             ErrorKind::TypeError,
@@ -2835,167 +2834,167 @@ fn check_field_default(
     Ok(())
 }
 
-/// Anexa contexto a un mensaje de error. El mensaje original queda
-/// primero, el contexto entre paréntesis al final.
+/// Appends context to an error message. The original message goes
+/// first, the context in parentheses at the end.
 fn annotate(mut e: FitzError, context: &str) -> FitzError {
     e.message = format!("{} ({})", e.message, context);
     e
 }
 
 // ---------------------------------------------------------------------------
-// Checker de expresiones (Fase 5.3.1)
+// Expression checker (Phase 5.3.1)
 //
-// Mientras `resolve_program` chequea anotaciones, `check_program` corre
-// además una pasada por las expresiones del programa. La idea:
-//   1. Pre-registrar firmas de los `Stmt::FnDef` top-level y builtins
-//      en un scope global de variables.
-//   2. Recorrer cada Stmt, abriendo scopes por cada `FnDef`/loop/etc.
-//   3. Para cada `Expr`, sintetizar su tipo (`infer_expr`).
-//   4. Cuando hay un tipo *esperado* (anotación de `let`, default de
-//      campo no-literal, etc.), validar compatibilidad.
+// While `resolve_program` checks annotations, `check_program` also runs
+// a pass over the program's expressions. The idea:
+//   1. Pre-register signatures of top-level `Stmt::FnDef`s and builtins
+//      in a global variable scope.
+//   2. Walk each Stmt, opening scopes for each `FnDef`/loop/etc.
+//   3. For each `Expr`, synthesize its type (`infer_expr`).
+//   4. When there is an *expected* type (let annotation, non-literal
+//      field default, etc.), validate compatibility.
 //
-// 5.3.1 cubre: literales, ident, BinOp aritmético/comparación/lógico,
-// UnaryOp Neg, StrInterp, `if` expr, list/map literales, struct lit,
-// field access sobre Nominal, Range. Resto devuelve `Any` y se cubre
-// en 5.3.2+.
+// 5.3.1 covers: literals, ident, arithmetic/comparison/logical BinOp,
+// UnaryOp Neg, StrInterp, `if` expr, list/map literals, struct lit,
+// field access over Nominal, Range. The rest returns `Any` and is covered
+// in 5.3.2+.
 // ---------------------------------------------------------------------------
 
 use crate::ast::{AssignTarget, BinOpKind, StrPart, UnaryOpKind};
 
-/// Binding de una variable en un scope. Lleva el tipo y un flag
-/// `annotated` que indica si la PRIMERA asignación de ese nombre
-/// vino con anotación de tipo explícita (`x: Int = ...`). El flag
-/// se usa para chequear reasignaciones: si la var fue anotada, las
-/// reasignaciones posteriores sin anotación tienen que respetar
-/// ese tipo. Si la var se infirió sin anotación, las
-/// reasignaciones pueden cambiar el tipo (modelo gradual).
+/// Binding of a variable in a scope. Carries the type and an
+/// `annotated` flag indicating whether the FIRST assignment of that name
+/// came with an explicit type annotation (`x: Int = ...`). The flag
+/// is used to check reassignments: if the var was annotated,
+/// subsequent reassignments without annotation must respect
+/// that type. If the var was inferred without annotation,
+/// reassignments can change the type (gradual model).
 #[derive(Debug, Clone)]
 struct VarBinding {
     ty: Type,
     annotated: bool,
-    /// Span de la declaración (let stmt, fn def, type def, param, etc.).
-    /// `Span::ZERO` para builtins — el LSP los filtra en go-to-definition
-    /// porque no hay archivo donde saltar.
+    /// Span of the declaration (let stmt, fn def, type def, param, etc.).
+    /// `Span::ZERO` for builtins — the LSP filters them in go-to-definition
+    /// because there is no file to jump to.
     def_span: Span,
-    /// Fp — cantidad de params con default al final de la firma. Si la
-    /// fn tiene `fn(a, b, c = 1, d = 2)`, `defaults_count = 2`. La aridad
-    /// requerida es `params.len() - defaults_count`. Solo relevante para
-    /// vars que tipan como `Type::Function`. 0 para todo lo demás.
+    /// Fp — number of params with default at the end of the signature. If the
+    /// fn has `fn(a, b, c = 1, d = 2)`, `defaults_count = 2`. The required
+    /// arity is `params.len() - defaults_count`. Only relevant for
+    /// vars that type as `Type::Function`. 0 for everything else.
     defaults_count: usize,
-    /// Fp.2 — `true` si el último param es variádico (`...xs`). En ese
-    /// caso, el call site acepta cualquier cantidad >= required de args.
+    /// Fp.2 — `true` if the last param is variadic (`...xs`). In that
+    /// case, the call site accepts any number >= required of args.
     has_varargs: bool,
 }
 
-/// Estado mutable durante la pasada de chequeo de expresiones.
+/// Mutable state during the expression checking pass.
 struct CheckCtx<'a> {
     types: &'a TypeEnv,
-    /// Stack de scopes para variables. El primero es el global
-    /// (builtins + fns top-level + lets top-level). Cada `FnDef`
-    /// body, cada loop body, abren un scope nuevo.
+    /// Stack of scopes for variables. The first is the global one
+    /// (builtins + top-level fns + top-level lets). Each `FnDef`
+    /// body, each loop body, opens a new scope.
     scopes: Vec<std::collections::HashMap<String, VarBinding>>,
-    /// Stack de tipos de retorno esperados, uno por cada función
-    /// (FnDef o FnExpr) anidada que se está chequeando. Vacío en
-    /// el scope top-level. `Stmt::Return` lo consulta para validar.
+    /// Stack of expected return types, one for each function
+    /// (FnDef or FnExpr) nested that's being checked. Empty in
+    /// the top-level scope. `Stmt::Return` consults it to validate.
     return_stack: Vec<Type>,
-    /// Stack paralelo a `return_stack`: cada frame recolecta los
-    /// tipos sintetizados de los `Stmt::Return` adentro de esa
-    /// función. `Expr::FnExpr` lo consume al salir para inferir su
-    /// `ret`. Para `Stmt::FnDef` se acumula también pero se
-    /// descarta (ya tenemos `return_type` declarado).
+    /// Stack parallel to `return_stack`: each frame collects the
+    /// synthesized types of `Stmt::Return`s inside that
+    /// function. `Expr::FnExpr` consumes it on exit to infer its
+    /// `ret`. For `Stmt::FnDef` it's also accumulated but
+    /// discarded (we already have declared `return_type`).
     inferred_returns: Vec<Vec<Type>>,
-    /// Stack paralelo a `return_stack`: `true` cuando la fn actual
-    /// es un handler HTTP (tiene decorator `@get`/`@post`/`@put`/
-    /// `@delete`). `Stmt::ReturnStatus` (return con status code) lo
-    /// consulta para validar que solo aparezca adentro de un handler.
-    /// `FnExpr` no es handler nunca; pushea `false`.
+    /// Stack parallel to `return_stack`: `true` when the current fn
+    /// is an HTTP handler (has decorator `@get`/`@post`/`@put`/
+    /// `@delete`). `Stmt::ReturnStatus` (return with status code)
+    /// consults it to validate that it only appears inside a handler.
+    /// `FnExpr` is never a handler; pushes `false`.
     in_http_handler: Vec<bool>,
-    /// Stack paralelo a `return_stack`: `true` cuando la fn actual es
-    /// `async`. `Expr::Await` lo consulta para validar que solo aparezca
-    /// adentro de una async fn. `FnExpr` no soporta async todavía
-    /// (el parser no lo admite); siempre pushea `false`. Introducido
-    /// en Fase 6.2.
+    /// Stack parallel to `return_stack`: `true` when the current fn is
+    /// `async`. `Expr::Await` consults it to validate that it only appears
+    /// inside an async fn. `FnExpr` does not support async yet
+    /// (parser does not allow it); always pushes `false`. Introduced
+    /// in Phase 6.2.
     await_stack: Vec<bool>,
-    /// Nombres de fns que aparecen como argumento de un `@middleware(...)`
-    /// en algún FnDef del programa. Pre-scaneado en `check_program`. Lo
-    /// usamos para tratar a esas fns como "contexto HTTP" a efectos de
-    /// `Stmt::ReturnStatus` (un middleware puede hacer `return 401 { ... }`
-    /// para short-circuitear el handler). Introducido en mini-fase MW.1.
+    /// Names of fns that appear as argument of a `@middleware(...)`
+    /// in some FnDef of the program. Pre-scanned in `check_program`. We
+    /// use it to treat those fns as "HTTP context" for purposes of
+    /// `Stmt::ReturnStatus` (a middleware can do `return 401 { ... }`
+    /// to short-circuit the handler). Introduced in mini-phase MW.1.
     middleware_fn_names: std::collections::HashSet<String>,
-    /// Fase 9.w.1 — Auth nativo. `Some(info)` cuando el programa declara
-    /// una fn con `@auth_provider`. Recolectado por `collect_auth_provider`
-    /// antes del walk del checker. Lo consulta el chequeo de
-    /// `@authenticated`/`@admin` para validar que cada handler protegido
-    /// declare un param compatible con el `User` que retorna el provider,
-    /// y que el `User` tenga campo `role: Str` cuando hay `@admin` en el
-    /// programa.
+    /// Phase 9.w.1 — Native auth. `Some(info)` when the program declares
+    /// a fn with `@auth_provider`. Collected by `collect_auth_provider`
+    /// before the checker walk. Consulted by the
+    /// `@authenticated`/`@admin` check to validate that each protected handler
+    /// declares a param compatible with the `User` returned by the provider,
+    /// and that the `User` has a `role: Str` field when there is `@admin` in the
+    /// program.
     auth_provider: Option<AuthProviderInfo>,
-    /// Fase 9.w.3 — set de nombres de fns top-level con decorator
-    /// `@background`. Recolectado por `collect_background_fns` antes
-    /// del walk. Lo consulta el chequeo de `spawn(call)` para validar
-    /// que el target del spawn esté declarado como ejecutable en
-    /// background — evita usos accidentales de spawn sobre fns
-    /// regulares cuyo retorno el caller espera consumir.
+    /// Phase 9.w.3 — set of names of top-level fns with `@background`
+    /// decorator. Collected by `collect_background_fns` before
+    /// the walk. Consulted by the `spawn(call)` check to validate
+    /// that the spawn target is declared as executable in
+    /// background — avoids accidental uses of spawn on
+    /// regular fns whose return the caller expects to consume.
     background_fns: std::collections::HashSet<String>,
-    /// Fase 12.1 — `Some((name, span))` cuando ya se vio un `@healthz`
-    /// en el walk. Singleton: un segundo `@healthz` en otra fn dispara
-    /// error explícito citando la primera. No persiste info adicional
-    /// (no hay downstream check como `@auth_provider`); el runtime y el
-    /// codegen re-recolectan por su cuenta al auto-mount `/healthz`.
+    /// Phase 12.1 — `Some((name, span))` when a `@healthz` has already
+    /// been seen in the walk. Singleton: a second `@healthz` in another fn fires
+    /// an explicit error citing the first. Does not persist additional info
+    /// (no downstream check like `@auth_provider`); runtime and
+    /// codegen re-collect on their own when auto-mounting `/healthz`.
     healthz_first: Option<(String, Span)>,
-    /// Fase 12.1 — paralelo a `healthz_first` pero para `@readyz`.
+    /// Phase 12.1 — parallel to `healthz_first` but for `@readyz`.
     readyz_first: Option<(String, Span)>,
-    /// Mini-tanda L — stack paralelo a los `Expr::Loop` actualmente
-    /// siendo chequeados. Cada frame recolecta los tipos de los
-    /// valores de `break <v>` adentro. `Expr::Loop` consume el
-    /// frame al salir para inferir el tipo de la expresión via
-    /// `unify_returns`. Loops como statement (`Stmt::Loop`,
-    /// `Stmt::While`, `Stmt::For`) NO empujan al stack — los
-    /// `break <v>` adentro tipan el value pero NO se propagan.
+    /// Mini-batch L — stack parallel to `Expr::Loop`s currently
+    /// being checked. Each frame collects the types of the
+    /// values of `break <v>` inside. `Expr::Loop` consumes the
+    /// frame on exit to infer the type of the expression via
+    /// `unify_returns`. Loops as statement (`Stmt::Loop`,
+    /// `Stmt::While`, `Stmt::For`) do NOT push to the stack — the
+    /// `break <v>`s inside type the value but do NOT propagate.
     break_value_stack: Vec<Vec<Type>>,
-    /// Profundidad de loops adentro de la función actual (R.2.4 — F3).
-    /// `Stmt::Break`/`Continue` exige que este valor sea > 0; si es 0,
-    /// el statement está huérfano (top-level o adentro de fn sin loop).
-    /// `While`/`Loop`/`For` incrementan al entrar y decrementan al
-    /// salir; `FnDef`/`FnExpr` guardan el valor previo, lo resetean a
-    /// 0, y lo restauran al salir (un break adentro de una closure NO
-    /// rompe el loop externo, igual que Rust).
+    /// Depth of loops inside the current function (R.2.4 — F3).
+    /// `Stmt::Break`/`Continue` require this value to be > 0; if 0,
+    /// the statement is orphan (top-level or inside fn without loop).
+    /// `While`/`Loop`/`For` increment on entry and decrement on
+    /// exit; `FnDef`/`FnExpr` save the previous value, reset it to
+    /// 0, and restore it on exit (a break inside a closure does NOT
+    /// break the outer loop, just like Rust).
     loop_depth: usize,
     errors: Vec<FitzError>,
-    /// Side-table de tipos sintetizados por nodo `Expr` (Fase 9.0 — F16).
-    /// Poblado por el wrapper `infer_expr` al salir de cada llamada; se
-    /// expone vía `check_program` para que el LSP responda hover y
-    /// completion contextual.
+    /// Side-table of types synthesized per `Expr` node (Phase 9.0 — F16).
+    /// Populated by the `infer_expr` wrapper when exiting each call; exposed
+    /// via `check_program` so the LSP can answer hover and
+    /// contextual completion.
     type_info: TypeInfo,
-    /// Side-table de definiciones por uso (Fase 9.x.3 — go-to-definition).
-    /// Poblado cuando `infer_expr` resuelve un `Expr::Ident` vía
-    /// `lookup_binding` y la binding tiene `def_span` conocido (no
-    /// builtin). Mismo flujo de exposición que `type_info`.
+    /// Side-table of definitions per use (Phase 9.x.3 — go-to-definition).
+    /// Populated when `infer_expr` resolves an `Expr::Ident` via
+    /// `lookup_binding` and the binding has a known `def_span` (not
+    /// builtin). Same exposure flow as `type_info`.
     def_info: DefinitionInfo,
-    /// Mini-tanda Vp — `Some(id)` cuando estamos chequeando el body
-    /// de un método del tipo `id`. Se usa para validar acceso a campos
-    /// privados (prefijo `_`): el checker rechaza `instance._field` o
-    /// struct lits con `_field` desde afuera del type body, pero los
-    /// permite adentro (incluido cuando un método accede a otro
-    /// `instancia._field` de la misma clase). `None` en top-level
-    /// (script global, fn top-level, fn anónima escapada).
+    /// Mini-batch Vp — `Some(id)` when we are checking the body
+    /// of a method of type `id`. Used to validate access to private
+    /// fields (prefix `_`): the checker rejects `instance._field` or
+    /// struct lits with `_field` from outside the type body, but allows
+    /// them inside (including when a method accesses another
+    /// `instance._field` of the same class). `None` at top-level
+    /// (global script, top-level fn, escaped anonymous fn).
     current_type: Option<TypeId>,
-    /// L2 (2026-06-05) — Stack de "hints" para inferencia bidireccional
-    /// de tipos de params en `Expr::FnExpr` sin anotación. Cada elemento
-    /// corresponde al próximo `infer_expr` que va a procesar un FnExpr,
-    /// y opcionalmente provee los tipos esperados de sus params.
+    /// L2 (2026-06-05) — Stack of "hints" for bidirectional inference
+    /// of param types in `Expr::FnExpr` without annotation. Each element
+    /// corresponds to the next `infer_expr` that will process a FnExpr,
+    /// and optionally provides the expected types of its params.
     ///
-    /// Setup actual: solo se usa para callbacks de métodos built-in con
-    /// templates paramétricos conocidos (`.map`/`.filter`/`.find`/etc.
-    /// sobre `List<T>` y `Map<K,V>`). El call site del método empuja un
-    /// hint con el T del receptor ANTES de sintetizar el callback, y el
-    /// handler de `Expr::FnExpr` lo consume al pop. Si el hint está
-    /// presente Y el param NO tiene anotación, se usa el hint en vez de
-    /// `Type::Any` para bindear el param en el scope del body.
+    /// Current setup: only used for callbacks of built-in methods with
+    /// known parametric templates (`.map`/`.filter`/`.find`/etc.
+    /// over `List<T>` and `Map<K,V>`). The method call site pushes a
+    /// hint with the T from the receiver BEFORE synthesizing the callback, and the
+    /// `Expr::FnExpr` handler consumes it on pop. If the hint is
+    /// present AND the param does NOT have an annotation, the hint is used instead of
+    /// `Type::Any` to bind the param in the body's scope.
     ///
-    /// Stack en vez de un solo Option porque un FnExpr puede contener
-    /// otro FnExpr en su body (nested callbacks). En la práctica casi
-    /// siempre tiene 0 o 1 elemento; el stack lo hace robusto.
+    /// Stack instead of a single Option because a FnExpr can contain
+    /// another FnExpr in its body (nested callbacks). In practice almost
+    /// always has 0 or 1 elements; the stack makes it robust.
     fn_expr_param_hints: Vec<Option<Vec<Type>>>,
 }
 
@@ -3025,17 +3024,17 @@ impl<'a> CheckCtx<'a> {
         ctx
     }
 
-    /// Builtins del lenguaje que existen siempre en el env del
-    /// evaluator. Los de aridad fija reciben firma real (chequea
-    /// aridad y eventualmente tipos); los variádicos se modelan
-    /// como `Any` hasta tener una representación dedicada.
+    /// Language builtins that always exist in the evaluator's env.
+    /// Those with fixed arity receive a real signature (checks
+    /// arity and eventually types); variadic ones are modeled
+    /// as `Any` until we have a dedicated representation.
     fn register_builtins(&mut self) {
-        // Todos los builtins usan `def_span: Span::ZERO` — no hay
-        // archivo Fitz donde saltar para go-to-definition. El LSP
-        // los filtra al responder `textDocument/definition`.
+        // All builtins use `def_span: Span::ZERO` — there is no
+        // Fitz file to jump to for go-to-definition. The LSP
+        // filters them when responding `textDocument/definition`.
 
-        // `print(args...)` — variádico. Modelado como Any: ningún
-        // call sobre Any se chequea (gradual escape).
+        // `print(args...)` — variadic. Modeled as Any: no
+        // call over Any is checked (gradual escape).
         self.scopes[0].insert(
             "print".into(),
             VarBinding {
@@ -3046,10 +3045,10 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // `len(x) -> Int` — aridad 1 sobre List/Map/Str/Range. El
-        // param es Any porque los receptores no comparten un solo
-        // tipo (todavía no tenemos union types / "any iterable").
-        // La aridad sí se valida; el tipo del receptor llega en 5.3.4.
+        // `len(x) -> Int` — arity 1 over List/Map/Str/Range. The
+        // param is Any because the receivers do not share a single
+        // type (we don't have union types / "any iterable" yet).
+        // Arity is validated; receiver type arrives in 5.3.4.
         self.scopes[0].insert(
             "len".into(),
             VarBinding {
@@ -3063,7 +3062,7 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Mini-tanda Bytes — `bytes(s: Str) -> Bytes` constructor.
+        // Mini-batch Bytes — `bytes(s: Str) -> Bytes` constructor.
         self.scopes[0].insert(
             "bytes".into(),
             VarBinding {
@@ -3078,11 +3077,11 @@ impl<'a> CheckCtx<'a> {
             },
         );
         // `cors(config: Map?) -> CorsConfig` — built-in MW.2.
-        // Hoy lo tipamos como `Any` (variádico de facto: 0 o 1 arg, y
-        // el Map adentro tiene tipos heterogéneos por key). Una firma
-        // más precisa requiere union types o un tipo dedicado para
-        // CorsConfig en el `Type` enum — out of scope para MW.2.
-        // El evaluator hace la validación completa en runtime.
+        // We type it as `Any` today (de facto variadic: 0 or 1 arg, and
+        // the inner Map has heterogeneous types per key). A more
+        // precise signature requires union types or a dedicated type for
+        // CorsConfig in the `Type` enum — out of scope for MW.2.
+        // The evaluator does the full validation at runtime.
         self.scopes[0].insert(
             "cors".into(),
             VarBinding {
@@ -3093,18 +3092,18 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 9.w.3 — `spawn(fn_call) -> Future<T>` fire-and-forget.
-        // Tipado como `Any` porque T depende del fn target; el dispatch
-        // especial en `synthesize_expr` para `Expr::Call` cuando el
-        // callee es Ident "spawn" refina al tipo concreto. Validaciones
-        // del checker:
-        //   - exactamente 1 arg, que debe ser un `Expr::Call` literal,
-        //   - el callee del inner call debe ser una fn top-level
-        //     declarada con `@background`,
-        //   - el ret del spawn es `Future<T>` con T = ret de la fn
-        //     target (await-able igual que `sleep(...)`).
-        // El runtime hace `tokio::spawn` y devuelve un Future que
-        // resuelve cuando la task termina.
+        // Phase 9.w.3 — `spawn(fn_call) -> Future<T>` fire-and-forget.
+        // Typed as `Any` because T depends on the fn target; the special
+        // dispatch in `synthesize_expr` for `Expr::Call` when the
+        // callee is Ident "spawn" refines to the concrete type. Checker
+        // validations:
+        //   - exactly 1 arg, which must be a literal `Expr::Call`,
+        //   - the callee of the inner call must be a top-level fn
+        //     declared with `@background`,
+        //   - the ret of the spawn is `Future<T>` with T = ret of the
+        //     target fn (await-able same as `sleep(...)`).
+        // The runtime does `tokio::spawn` and returns a Future that
+        // resolves when the task finishes.
         self.scopes[0].insert(
             "spawn".into(),
             VarBinding {
@@ -3115,13 +3114,13 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // `sleep(ms: Int) -> Future<Null>` — primer async primitive.
-        // Introducido en Fase 6.3. La firma envuelve `Null` en
-        // `Future<Null>` (paralelo a cualquier `async fn` del usuario):
-        // el usuario obligatoriamente la await-ea adentro de otra
-        // `async fn`, o guarda el Future suelto. El evaluator tiene
-        // un stub que falla con "llega en 6.4" hasta que aterrice
-        // el evaluator async.
+        // `sleep(ms: Int) -> Future<Null>` — first async primitive.
+        // Introduced in Phase 6.3. The signature wraps `Null` in
+        // `Future<Null>` (parallel to any user `async fn`):
+        // the user mandatorily await-s it inside another
+        // `async fn`, or holds the Future. The evaluator has
+        // a stub that fails with "arrives in 6.4" until the
+        // async evaluator lands.
         self.scopes[0].insert(
             "sleep".into(),
             VarBinding {
@@ -3136,9 +3135,9 @@ impl<'a> CheckCtx<'a> {
             },
         );
         // 10.8.7 (v0.10.8) — `ws_broadcast(endpoint: Str, msg) -> Null`
-        // broadcast cross-handler de un mensaje JSON a clientes WS
-        // conectados al `endpoint`. Tipa msg como `Any` para aceptar
-        // cualquier shape — el runtime serializa via JSON.
+        // cross-handler broadcast of a JSON message to WS clients
+        // connected to the `endpoint`. Types msg as `Any` to accept
+        // any shape — the runtime serializes via JSON.
         self.scopes[0].insert(
             "ws_broadcast".into(),
             VarBinding {
@@ -3152,11 +3151,11 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 9.z.2.a — assertion builtins. `assert` queda como `Any`
-        // porque tiene aridad variable (1 o 2 args, msg opcional); el
-        // runtime valida tipos y aridad. `assert_eq`/`assert_ne` tienen
-        // aridad fija con args `Any` (estructural equality maneja
-        // cualquier tipo). `assert_throws` exige `Function` aridad 0.
+        // Phase 9.z.2.a — assertion builtins. `assert` stays as `Any`
+        // because it has variable arity (1 or 2 args, optional msg); the
+        // runtime validates types and arity. `assert_eq`/`assert_ne` have
+        // fixed arity with `Any` args (structural equality handles
+        // any type). `assert_throws` requires `Function` arity 0.
         self.scopes[0].insert(
             "assert".into(),
             VarBinding {
@@ -3167,26 +3166,26 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 9.w.1.b — `jwt` y `hash` como módulos siempre disponibles
-        // en el scope global. El evaluator los construye como
-        // `Value::Module` con sus builtins adentro (`encode`/`decode`
-        // para jwt; `password`/`verify` para hash). El checker los tipa
-        // como `Any` por dos razones:
+        // Phase 9.w.1.b — `jwt` and `hash` as modules always available
+        // in the global scope. The evaluator builds them as
+        // `Value::Module` with their builtins inside (`encode`/`decode`
+        // for jwt; `password`/`verify` for hash). The checker types them
+        // as `Any` for two reasons:
         //
-        // (1) `Type::Function` actual no modela args opcionales — `alg`
-        //     en `jwt.encode/decode` es positional opcional al final
-        //     (`Str?` a nivel valor) que con la firma estática
-        //     `Type::Function { params, ret }` no expresable hoy.
+        // (1) Current `Type::Function` does not model optional args — `alg`
+        //     in `jwt.encode/decode` is positional optional at the end
+        //     (`Str?` at value level) which is not expressible with the static
+        //     `Type::Function { params, ret }` signature today.
         //
-        // (2) Field access sobre `Any` cae a gradual (también `Any`), así
-        //     que `jwt.encode` y `hash.password` tipan como `Any` y los
-        //     calls no se chequean estáticamente. La pérdida es contenida
-        //     porque la validación de tipos de retorno (`Str` para encode,
-        //     `Result<Map>` para decode, etc.) sucede en runtime con
-        //     mensajes claros desde los builtins.
+        // (2) Field access over `Any` falls to gradual (also `Any`), so
+        //     `jwt.encode` and `hash.password` type as `Any` and the
+        //     calls are not statically checked. The loss is contained
+        //     because the validation of return types (`Str` for encode,
+        //     `Result<Map>` for decode, etc.) happens at runtime with
+        //     clear messages from the builtins.
         //
-        // Refinable post-MVP con union types o un tipo `Module` dedicado
-        // que carry una tabla de `Function` signatures internas.
+        // Refinable post-MVP with union types or a dedicated `Module` type
+        // that carries a table of internal `Function` signatures.
         self.scopes[0].insert(
             "jwt".into(),
             VarBinding {
@@ -3207,11 +3206,11 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 9.w.1.iter2.b — módulo `auth` con builtins
+        // Phase 9.w.1.iter2.b — `auth` module with builtins
         // `blacklist(db, jti, expires_at)`, `is_blacklisted(db, jti)`,
-        // `cleanup_expired(db)`. Mismo patrón Type::Any que jwt/hash —
-        // las signatures heterogéneas (DbConn primer arg) se chequean
-        // en runtime con mensajes claros desde los builtins.
+        // `cleanup_expired(db)`. Same Type::Any pattern as jwt/hash —
+        // heterogeneous signatures (DbConn first arg) are checked
+        // at runtime with clear messages from the builtins.
         self.scopes[0].insert(
             "auth".into(),
             VarBinding {
@@ -3222,13 +3221,12 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 12.8 — `flag(name: Str) -> Bool` (builtin global) +
-        // `flags` (módulo con `is_enabled(name)` y `list()`). Feature
-        // flags built-in con defaults configurables via manifest
-        // `[flags]` y env vars `FITZ_FLAG_<NAME>`. Mismo patrón Type::Any
-        // que jwt/hash/auth para que el field access + calls caigan a
-        // gradual; los builtins runtime validan shape con mensajes
-        // claros.
+        // Phase 12.8 — `flag(name: Str) -> Bool` (global builtin) +
+        // `flags` (module with `is_enabled(name)` and `list()`). Built-in
+        // feature flags with defaults configurable via manifest
+        // `[flags]` and env vars `FITZ_FLAG_<NAME>`. Same Type::Any pattern
+        // as jwt/hash/auth so that field access + calls fall to
+        // gradual; runtime builtins validate shape with clear messages.
         self.scopes[0].insert(
             "flag".into(),
             VarBinding {
@@ -3249,14 +3247,14 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 12.3.a.1 — módulo `log` siempre disponible. Mismo patrón
-        // que `jwt`/`hash`/`db`: tipa como `Type::Any`. La firma exacta
-        // (`fn log.info(msg: Str, **kwargs) -> Null`) tiene kwargs
-        // heterogéneos arbitrarios que el sistema actual no modela como
-        // `Type::Function`; el field access cae a `Any` y los calls se
-        // chequean en runtime contra el reservado/shape del logger.
-        // Refinable post-MVP cuando entren union types o `Type::Module`
-        // dedicado.
+        // Phase 12.3.a.1 — `log` module always available. Same pattern
+        // as `jwt`/`hash`/`db`: types as `Type::Any`. The exact signature
+        // (`fn log.info(msg: Str, **kwargs) -> Null`) has arbitrary
+        // heterogeneous kwargs which the current system does not model as
+        // `Type::Function`; field access falls to `Any` and calls are
+        // checked at runtime against the reserved/shape of the logger.
+        // Refinable post-MVP when union types or dedicated `Type::Module`
+        // arrive.
         self.scopes[0].insert(
             "log".into(),
             VarBinding {
@@ -3267,12 +3265,12 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 10.1.b — módulo `db` siempre disponible en el env
-        // global. Tipado como `Type::Any` (mismo patrón que jwt/hash):
-        // la signature exacta de `db.connect(url: Str) -> Future<Result<DbConn>>`
-        // tiene Future + Result + tipo opaco DbConn que el sistema
-        // actual no modela; refinar a `Type::Function` paramétrica
-        // viene como deuda menor cuando llegue el ORM en 10.3+.
+        // Phase 10.1.b — `db` module always available in the global
+        // env. Typed as `Type::Any` (same pattern as jwt/hash):
+        // the exact signature of `db.connect(url: Str) -> Future<Result<DbConn>>`
+        // has Future + Result + opaque DbConn type which the current
+        // system does not model; refining to parametric `Type::Function`
+        // comes as minor debt when the ORM arrives in 10.3+.
         self.scopes[0].insert(
             "db".into(),
             VarBinding {
@@ -3283,11 +3281,11 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // v0.10.24 — Date/DateTime/Uuid namespace global con sus
-        // constructors estáticos como Value::Module. Tipados como `Any`
-        // (mismo patrón que db/jwt/hash) — el field access resuelve a
-        // Any → ret type del call viene del builtin runtime. La
-        // refinement a signatures concretas queda como deuda menor.
+        // v0.10.24 — Date/DateTime/Uuid global namespace with their
+        // static constructors as Value::Module. Typed as `Any`
+        // (same pattern as db/jwt/hash) — field access resolves to
+        // Any → ret type of the call comes from the runtime builtin.
+        // Refinement to concrete signatures remains as minor debt.
         for module_name in ["Date", "DateTime", "Uuid"] {
             self.scopes[0].insert(
                 module_name.into(),
@@ -3300,10 +3298,10 @@ impl<'a> CheckCtx<'a> {
                 },
             );
         }
-        // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
-        // 3 builtins para leer variables de entorno desde Fitz.
-        // `env(key) -> Result<Str>` fuerza al usuario a manejar el caso
-        // missing con `?` o `match` (paralelo a `find`/`get`/`json.loads`).
+        // Mini-phase env builtin (2026-05-22, Step 3 post-boilerplates) —
+        // 3 builtins to read environment variables from Fitz.
+        // `env(key) -> Result<Str>` forces the user to handle the
+        // missing case with `?` or `match` (parallel to `find`/`get`/`json.loads`).
         self.scopes[0].insert(
             "env".into(),
             VarBinding {
@@ -3320,8 +3318,8 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // `env_or(key, default) -> Str` — nunca falla, devuelve default
-        // si la var no existe. Paralelo a `Option::unwrap_or` de Rust.
+        // `env_or(key, default) -> Str` — never fails, returns default
+        // if the var doesn't exist. Parallel to Rust's `Option::unwrap_or`.
         self.scopes[0].insert(
             "env_or".into(),
             VarBinding {
@@ -3335,9 +3333,9 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // `load_env(path) -> Result<Null>` — parser KEY=VALUE simple
-        // (sin variable expansion, sin multi-line). Setea vars via
-        // `std::env::set_var`. Sin auto-load por diseño.
+        // `load_env(path) -> Result<Null>` — simple KEY=VALUE parser
+        // (no variable expansion, no multi-line). Sets vars via
+        // `std::env::set_var`. No auto-load by design.
         self.scopes[0].insert(
             "load_env".into(),
             VarBinding {
@@ -3354,10 +3352,10 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 12.2.a — `secret(key) -> Result<Secret<Str>>` — lookup
-        // multi-source (env var → /run/secrets/<key>) que devuelve un
-        // tipo opaco con auto-redaction. El inner se accede con
-        // `.expose()` explícito.
+        // Phase 12.2.a — `secret(key) -> Result<Secret<Str>>` — multi-source
+        // lookup (env var → /run/secrets/<key>) returning an
+        // opaque type with auto-redaction. The inner is accessed with
+        // explicit `.expose()`.
         self.scopes[0].insert(
             "secret".into(),
             VarBinding {
@@ -3374,13 +3372,13 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Fase 12.2.a — `config(key, default) -> T` — lookup
-        // type-coerced. Return type depende del shape del default
-        // (Int/Float/Bool/Str). Lo tipamos como `Any` porque el
-        // checker no infiere "el tipo del second arg" como ret type
-        // todavía. Refinement futuro: especialización por shape del
-        // default. Por ahora el caller anota con `let port: Int =
-        // config("PORT", 8080)` y la coerción runtime ajusta.
+        // Phase 12.2.a — `config(key, default) -> T` — type-coerced
+        // lookup. Return type depends on the shape of the default
+        // (Int/Float/Bool/Str). We type it as `Any` because the
+        // checker doesn't infer "the type of the second arg" as ret type
+        // yet. Future refinement: specialization by shape of the
+        // default. For now the caller annotates with `let port: Int =
+        // config("PORT", 8080)` and the runtime coercion adjusts.
         self.scopes[0].insert(
             "config".into(),
             VarBinding {
@@ -3436,7 +3434,7 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
-        // Mini-tanda Bits-extras — builtins globales sobre Int.
+        // Mini-batch Bits-extras — global builtins over Int.
         // `popcount/leading_zeros/trailing_zeros(n: Int) -> Int`
         // `rotate_left/right(n: Int, bits: Int) -> Int`
         for name in &["popcount", "leading_zeros", "trailing_zeros"] {
@@ -3469,11 +3467,11 @@ impl<'a> CheckCtx<'a> {
                 },
             );
         }
-        // Mini-tanda Math — abs/min/max/clamp son polimórficos
-        // (Int|Float); pow/sqrt devuelven Float; ceil/floor/round
-        // devuelven Int. Hoy todos `Any` por la complejidad de
-        // modelar polimorfismo en el sistema actual; el evaluator
-        // y codegen los validan en cada call site.
+        // Mini-batch Math — abs/min/max/clamp are polymorphic
+        // (Int|Float); pow/sqrt return Float; ceil/floor/round
+        // return Int. Today all `Any` due to the complexity of
+        // modeling polymorphism in the current system; the evaluator
+        // and codegen validate them at each call site.
         for name in &[
             "abs", "min", "max", "pow", "sqrt", "ceil", "floor", "round", "clamp",
         ] {
@@ -3498,18 +3496,18 @@ impl<'a> CheckCtx<'a> {
         self.scopes.pop();
     }
 
-    /// M4 (v0.10.15) — helper para ejecutar un bloque de checks dentro
-    /// de un scope nuevo (push + work + pop), reduciendo la
-    /// repetición del patrón `push_scope(); ...; pop_scope();` que
-    /// aparece ~10 veces en `check_block` / `infer_expr`.
+    /// M4 (v0.10.15) — helper to execute a block of checks inside
+    /// a new scope (push + work + pop), reducing the
+    /// repetition of the `push_scope(); ...; pop_scope();` pattern that
+    /// appears ~10 times in `check_block` / `infer_expr`.
     ///
-    /// **Limitación**: el closure recibe `&mut self`, así que early
-    /// returns con `?` adentro de él no fugan scope (porque cuando
-    /// retornan, ya están saliendo de `with_scope` que ya pasó por
-    /// el push). Sin embargo, si el closure paniquea, el pop_scope
-    /// no corre — para tests/REPL recovery con catch_unwind queda
-    /// como deuda menor. En práctica el checker no paniquea (los
-    /// errores van a `ctx.errors`, no via panic).
+    /// **Limitation**: the closure receives `&mut self`, so early
+    /// returns with `?` inside it don't leak scope (because when
+    /// they return, they are already exiting `with_scope` which has already
+    /// done the push). However, if the closure panics, pop_scope
+    /// does not run — for tests/REPL recovery with catch_unwind this
+    /// remains as minor debt. In practice the checker does not panic (errors
+    /// go to `ctx.errors`, not via panic).
     fn with_scope<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> R {
         self.push_scope();
         let r = f(self);
@@ -3517,11 +3515,11 @@ impl<'a> CheckCtx<'a> {
         r
     }
 
-    /// Declara una variable sin anotación de tipo (inferida o
-    /// gradual). Permite que reasignaciones futuras cambien el
-    /// tipo libremente. `def_span` es la posición de la declaración
-    /// (Fase 9.x.3 — usado por go-to-definition); pasar `Span::ZERO`
-    /// para builtins / declaraciones sintéticas.
+    /// Declares a variable without type annotation (inferred or
+    /// gradual). Allows future reassignments to change the
+    /// type freely. `def_span` is the declaration's position
+    /// (Phase 9.x.3 — used by go-to-definition); pass `Span::ZERO`
+    /// for builtins / synthetic declarations.
     fn declare_var(&mut self, name: String, ty: Type, def_span: Span) {
         if let Some(top) = self.scopes.last_mut() {
             top.insert(
@@ -3537,9 +3535,9 @@ impl<'a> CheckCtx<'a> {
         }
     }
 
-    /// Declara una variable con anotación explícita de tipo. Las
-    /// reasignaciones posteriores sin anotación se van a chequear
-    /// contra este tipo. `def_span` igual que `declare_var`.
+    /// Declares a variable with explicit type annotation. Subsequent
+    /// reassignments without annotation will be checked
+    /// against this type. `def_span` same as `declare_var`.
     fn declare_var_annotated(&mut self, name: String, ty: Type, def_span: Span) {
         if let Some(top) = self.scopes.last_mut() {
             top.insert(
@@ -3555,10 +3553,10 @@ impl<'a> CheckCtx<'a> {
         }
     }
 
-    /// Fp — declara una fn con info de defaults. La aridad mínima del
-    /// callee es `params.len() - defaults_count`. Fp.2 — `has_varargs`
-    /// indica si el último param es variádico (el call site acepta 0+
-    /// args extra).
+    /// Fp — declares a fn with defaults info. The minimum arity of the
+    /// callee is `params.len() - defaults_count`. Fp.2 — `has_varargs`
+    /// indicates whether the last param is variadic (the call site accepts 0+
+    /// extra args).
     fn declare_fn(
         &mut self,
         name: String,
@@ -3590,23 +3588,23 @@ impl<'a> CheckCtx<'a> {
         None
     }
 
-    /// Reporta un error sin posición conocida. Tras S1.2 sub-paso 2,
-    /// los sitios de error sobre `Expr` ya conocen su span y usan
-    /// `error_at`. Este helper queda para reportes "globales" (sin
-    /// nodo asociado) que puedan aparecer en el futuro.
+    /// Reports an error without known position. After S1.2 sub-step 2,
+    /// error sites over `Expr` already know their span and use
+    /// `error_at`. This helper remains for "global" reports (no
+    /// associated node) that may appear in the future.
     #[allow(dead_code)]
     fn error(&mut self, msg: impl Into<String>) {
         self.errors
             .push(FitzError::new(ErrorKind::TypeError, 0, 0, msg.into()));
     }
 
-    /// Variante de `error` que cita la posición real del nodo (línea
-    /// y columna del primer token del `Stmt`). Lo usan los sitios de
-    /// reporte stmt-level — ver `check_stmt`. Cuando el span es
-    /// `Span::ZERO` (nodos sintéticos del parser o tests),
-    /// `FitzError::Display` omite el prefijo "en línea N:M" por la
-    /// regla `is_known()` de Span — el comportamiento queda idéntico
-    /// a `error` para esos casos.
+    /// Variant of `error` that cites the actual node position (line
+    /// and column of the first `Stmt` token). Used by stmt-level
+    /// report sites — see `check_stmt`. When the span is
+    /// `Span::ZERO` (parser synthetic nodes or tests),
+    /// `FitzError::Display` omits the "at line N:M" prefix per
+    /// Span's `is_known()` rule — behavior stays identical
+    /// to `error` for those cases.
     fn error_at(&mut self, span: Span, msg: impl Into<String>) {
         self.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -3617,9 +3615,9 @@ impl<'a> CheckCtx<'a> {
     }
 }
 
-/// Convierte una `Option<TypeExpr>` en `Type` para anotaciones del
-/// usuario. Si la anotación faltó → `Any`. Si la anotación está pero
-/// no resuelve → `Any` y se asume que el error ya fue reportado por
+/// Converts an `Option<TypeExpr>` into `Type` for user annotations.
+/// If the annotation was missing → `Any`. If the annotation is present but
+/// doesn't resolve → `Any` and the error is assumed to have been reported by
 /// `resolve_program`.
 fn ann_to_type(ann: Option<&TypeExpr>, env: &TypeEnv) -> Type {
     match ann {
@@ -3628,37 +3626,37 @@ fn ann_to_type(ann: Option<&TypeExpr>, env: &TypeEnv) -> Type {
     }
 }
 
-/// Sintetiza el tipo de una expresión y lo persiste en el side-table
-/// `ctx.type_info` antes de devolverlo. La lógica de síntesis vive en
-/// `synthesize_expr`; este wrapper centraliza el `record` para que
-/// **todos** los nodos `Expr` queden registrados al pasar por el
-/// checker (incluyendo recursión: el wrapper se llama por nodo, así
-/// que `BinOp { left, right }` y sus operandos quedan los tres). Nodos
-/// con `Span::ZERO` (sintéticos / tests) se omiten — ver `TypeInfo::
-/// record`. Pre-req habilitante del LSP (Fase 9 — F16).
+/// Synthesizes the type of an expression and persists it in the
+/// `ctx.type_info` side-table before returning it. The synthesis logic lives in
+/// `synthesize_expr`; this wrapper centralizes the `record` so that
+/// **all** `Expr` nodes are registered when passing through the
+/// checker (including recursion: the wrapper is called per node, so
+/// `BinOp { left, right }` and its operands are all three). Nodes
+/// with `Span::ZERO` (synthetic / tests) are omitted — see `TypeInfo::
+/// record`. Enabling pre-req of the LSP (Phase 9 — F16).
 fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
     let ty = synthesize_expr(ctx, e);
     ctx.type_info.record(e.span(), ty.clone());
     ty
 }
 
-/// 10.8.4 (v0.10.8) — flow-sensitive narrowing parcial sobre
-/// condiciones `Ident <op> null` (en cualquier orden). Si la
-/// condition matchea el patrón y el binding del Ident es
-/// `Nullable<T>`, devuelve `(name, T, def_span)` para que el caller
-/// declare un binding shadow en el scope del branch refinado.
+/// 10.8.4 (v0.10.8) — partial flow-sensitive narrowing over
+/// `Ident <op> null` conditions (in any order). If the
+/// condition matches the pattern and the Ident's binding is
+/// `Nullable<T>`, returns `(name, T, def_span)` so the caller
+/// declares a shadow binding in the refined branch's scope.
 ///
-/// - `want_not_null = true`: refinar cuando la condition es
-///   `x != null` o `null != x` (branch `then`).
-/// - `want_not_null = false`: refinar cuando la condition es
-///   `x == null` o `null == x` (branch `else`).
+/// - `want_not_null = true`: narrow when the condition is
+///   `x != null` or `null != x` (branch `then`).
+/// - `want_not_null = false`: narrow when the condition is
+///   `x == null` or `null == x` (branch `else`).
 ///
-/// Limitaciones (deuda menor — refinable si entra demanda):
-/// - No soporta `not (x == null)` (negación explícita).
-/// - No soporta `x != null and ...` (chain de condiciones).
-/// - No soporta narrowing transitivo a través de fns.
-/// - No soporta narrowing del else side via early-return en then
-///   (típica idiom: `if (x == null) return; <usar x como T>`).
+/// Limitations (minor debt — refinable if demand appears):
+/// - Does not support `not (x == null)` (explicit negation).
+/// - Does not support `x != null and ...` (chain of conditions).
+/// - Does not support transitive narrowing through fns.
+/// - Does not support else-side narrowing via early-return in then
+///   (typical idiom: `if (x == null) return; <use x as T>`).
 fn narrow_null_check(
     cond: &Expr,
     ctx: &CheckCtx,
@@ -3678,13 +3676,13 @@ fn narrow_null_check(
     if !matches_op {
         return None;
     }
-    // Detectar (Ident, Null) en cualquier orden.
+    // Detect (Ident, Null) in any order.
     let name = match (left.as_ref(), right.as_ref()) {
         (Expr::Ident(n, _), Expr::Null(_)) => n.clone(),
         (Expr::Null(_), Expr::Ident(n, _)) => n.clone(),
         _ => return None,
     };
-    // Binding debe existir y ser Nullable<inner>.
+    // Binding must exist and be Nullable<inner>.
     let binding = ctx.lookup_binding(&name)?;
     if let Type::Nullable(inner) = &binding.ty {
         return Some((name, (**inner).clone(), binding.def_span));
@@ -3692,19 +3690,19 @@ fn narrow_null_check(
     None
 }
 
-/// Núcleo de síntesis. NO toca `type_info` directamente — el wrapper
-/// `infer_expr` lo hace al salir. Esto centraliza la política de
-/// poblamiento del side-table en un solo punto, evitando que cada
-/// branch del match tenga que recordar el `record`.
+/// Synthesis core. Does NOT touch `type_info` directly — the
+/// `infer_expr` wrapper does it on exit. This centralizes the
+/// side-table populating policy in a single place, avoiding that each
+/// match branch has to remember the `record`.
 ///
-/// Casos no cubiertos en 5.3.1 devuelven `Type::Any` silenciosamente
-/// — no son errores, solo no chequeamos esa forma todavía. Las
-/// sub-fases siguientes (5.3.2 calls, 5.3.3 Result, 5.3.4 métodos,
-/// 5.3.5 FnExpr) los irán reemplazando.
+/// Cases not covered in 5.3.1 silently return `Type::Any` — they are
+/// not errors, we just don't check that form yet. Subsequent
+/// sub-phases (5.3.2 calls, 5.3.3 Result, 5.3.4 methods,
+/// 5.3.5 FnExpr) will replace them.
 fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
     match e {
-        // Fp.3 — NamedArg solo es válido adentro de Call.args; el
-        // dispatcher de calls lo procesa. Verlo acá indica bug.
+        // Fp.3 — NamedArg is only valid inside Call.args; the
+        // calls dispatcher processes it. Seeing it here indicates a bug.
         Expr::NamedArg { name, value, span } => {
             ctx.error_at(
                 *span,
@@ -3723,11 +3721,11 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         Expr::Null(_) => Type::Null,
         Expr::Bytes(_, _) => Type::Bytes,
 
-        // Mini-tanda L — `loop { body }` como expresión. El tipo es
-        // el `lub` de los valores de `break <v>` adentro. Sin
-        // breaks con valor → `Null`. Recolectar los tipos de break
-        // requiere walkear el body; usamos un side-channel
-        // `break_value_stack` que `Stmt::Break(Some(e), _)` alimenta.
+        // Mini-batch L — `loop { body }` as an expression. The type is
+        // the `lub` of the `break <v>` values inside. Without
+        // breaks with a value → `Null`. Collecting break types
+        // requires walking the body; we use a side-channel
+        // `break_value_stack` that `Stmt::Break(Some(e), _)` feeds.
         Expr::Loop { body, .. } => {
             ctx.loop_depth += 1;
             ctx.break_value_stack.push(Vec::new());
@@ -3739,7 +3737,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             unify_returns(&values)
         }
 
-        // Tuples (mini-tanda T) — tipamos cada slot y armamos
+        // Tuples (mini-batch T) — we type each slot and assemble
         // `Type::Tuple`.
         Expr::Tuple(items, _) => {
             let tys: Vec<Type> = items.iter().map(|x| infer_expr(ctx, x)).collect();
@@ -3779,10 +3777,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
 
         Expr::StrInterp(parts, _) => {
-            // Las sub-expresiones se evalúan para errores aunque el
-            // resultado siempre sea Str. Mini-tanda Fm: el spec se
-            // valida en `validate_format_spec_for_type` — el filter de
-            // tipos numéricos vs `f`, etc.
+            // Sub-expressions are evaluated for errors although the
+            // result is always Str. Mini-batch Fm: the spec is
+            // validated in `validate_format_spec_for_type` — the filter of
+            // numeric types vs `f`, etc.
             for p in parts {
                 if let StrPart::Expr(inner, spec) = p {
                     let ty = infer_expr(ctx, inner);
@@ -3795,20 +3793,20 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
 
         Expr::Ident(name, span) => {
-            // Resolvemos el binding y clonamos lo necesario para liberar
-            // el préstamo inmutable de `ctx.scopes` antes de tocar
-            // `ctx.def_info` (que requiere &mut self). Fase 9.x.3:
-            // registramos el `def_span` para go-to-definition cuando
-            // existe (no es builtin con Span::ZERO).
+            // We resolve the binding and clone what's needed to release
+            // the immutable borrow on `ctx.scopes` before touching
+            // `ctx.def_info` (which requires &mut self). Phase 9.x.3:
+            // we register the `def_span` for go-to-definition when
+            // it exists (not a builtin with Span::ZERO).
             let resolved = ctx.lookup_binding(name).map(|b| (b.ty.clone(), b.def_span));
             if let Some((ty, def_span)) = resolved {
                 ctx.def_info.record(*span, def_span);
                 return ty;
             }
-            // Si es un tipo nominal declarado, el usuario lo está
-            // usando como valor (lo cual el evaluator soporta:
-            // registra Value::Type en el env). No es error; lo
-            // tratamos como Any.
+            // If it's a declared nominal type, the user is using it
+            // as a value (which the evaluator supports:
+            // registers Value::Type in the env). Not an error; we
+            // treat it as Any.
             if ctx.types.lookup(name).is_some() {
                 return Type::Any;
             }
@@ -3832,10 +3830,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         Type::Any
                     }
                 },
-                // R.1.1 — `not <expr>` exige `Bool` estricto. Sin
-                // truthy/falsy en Fitz: pasar `Int`/`Str`/etc. es
-                // error de tipo (consistente con `assert(cond)` que
-                // también exige Bool estricto).
+                // R.1.1 — `not <expr>` requires strict `Bool`. No
+                // truthy/falsy in Fitz: passing `Int`/`Str`/etc. is
+                // a type error (consistent with `assert(cond)` which
+                // also requires strict Bool).
                 UnaryOpKind::Not => match &t {
                     Type::Bool | Type::Any => Type::Bool,
                     other => {
@@ -3849,7 +3847,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         Type::Bool
                     }
                 },
-                // Mini-tanda Bits — `~x` solo Int.
+                // Mini-batch Bits — `~x` only Int.
                 UnaryOpKind::BitNot => match &t {
                     Type::Int | Type::Any => Type::Int,
                     other => {
@@ -3883,11 +3881,11 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             else_,
             ..
         } => {
-            // Condición debe ser Bool (o Any).
+            // Condition must be Bool (or Any).
             let cond_ty = infer_expr(ctx, condition);
             if !is_compatible(&cond_ty, &Type::Bool) {
-                // Apuntamos al span de la condición misma — mejor
-                // pista que el `if` mismo.
+                // We point to the condition's own span — better
+                // hint than the `if` itself.
                 ctx.error_at(
                     condition.span(),
                     format!(
@@ -3896,27 +3894,27 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ),
                 );
             }
-            // 10.8.4 (v0.10.8) — fix #1: narrowing flow-sensitive de
-            // `Nullable<T>` → `T`. Si la condition es `x != null` (o
-            // `null != x`), refinamos el binding `x` adentro del
-            // `then` branch al inner type. Si es `x == null`,
-            // refinamos en el `else`. Caso canónico:
+            // 10.8.4 (v0.10.8) — fix #1: flow-sensitive narrowing from
+            // `Nullable<T>` → `T`. If the condition is `x != null` (or
+            // `null != x`), we narrow the `x` binding inside the
+            // `then` branch to the inner type. If it's `x == null`,
+            // we narrow in the `else`. Canonical case:
             //   if (status != null) { let s: Str = status }
-            // Antes el checker tipaba `status` como `Str?` adentro
-            // del `if`, forzando workaround con match arm.
+            // Previously the checker typed `status` as `Str?` inside
+            // the `if`, forcing a workaround with match arm.
             //
-            // Patrón soportado: comparación literal Ident <op> null
-            // (en cualquier orden) sobre un binding Nullable.
-            // No-soportado (deuda menor): chains como
-            // `if (x != null and ...)`, narrowing del else side via
-            // early-return en if-then, narrowing transitivo a través
-            // de fns.
+            // Supported pattern: literal comparison Ident <op> null
+            // (in any order) over a Nullable binding.
+            // Not supported (minor debt): chains like
+            // `if (x != null and ...)`, narrowing of the else side via
+            // early-return in if-then, transitive narrowing through
+            // fns.
             let then_narrow = narrow_null_check(condition, ctx, /*want_not_null=*/ true);
             let else_narrow = narrow_null_check(condition, ctx, /*want_not_null=*/ false);
-            // Cada rama es un bloque; el "tipo" de un if-stmt es el
-            // de su última expresión-stmt. Para 5.3.1 nos alcanza con
-            // walkear los bloques (con scope) y devolver Any.
-            // M4 (v0.10.15) — usar with_scope helper para auto-pop.
+            // Each branch is a block; the "type" of an if-stmt is that
+            // of its last expression-stmt. For 5.3.1 it's enough for us to
+            // walk the blocks (with scope) and return Any.
+            // M4 (v0.10.15) — use with_scope helper for auto-pop.
             ctx.with_scope(|ctx| {
                 if let Some((name, inner_ty, def_span)) = then_narrow {
                     ctx.declare_var(name, inner_ty, def_span);
@@ -3935,8 +3933,8 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
 
         Expr::List(items, _) => {
-            // List<T> con T = tipo del primer elemento si los demás
-            // son compatibles; si hay mezcla, T = Any.
+            // List<T> with T = type of the first element if the rest
+            // are compatible; if there's a mix, T = Any.
             if items.is_empty() {
                 return Type::List(Box::new(Type::Any));
             }
@@ -3955,10 +3953,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        // Mini-tanda C + Cmp+ — `[expr for var in iter ([for ...]*) [if cond]?]`.
-        // Tipa cada `for` clause (iter como List/Range, var via pattern),
-        // bindeando en scopes anidados; valida `filter: Bool` adentro
-        // del scope más interno; tipa `expr: U` y devuelve `List<U>`.
+        // Mini-batch C + Cmp+ — `[expr for var in iter ([for ...]*) [if cond]?]`.
+        // Types each `for` clause (iter as List/Range, var via pattern),
+        // binding in nested scopes; validates `filter: Bool` inside
+        // the innermost scope; types `expr: U` and returns `List<U>`.
         Expr::ListComp {
             expr,
             var,
@@ -3989,9 +3987,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::List(Box::new(elem_ty))
         }
 
-        // Mini-tanda Cmp+ — `{key: value for ...}`. Análogo a ListComp:
-        // tipa cada clause, valida filter, y tipa key+value en el scope
-        // más interno. Devuelve `Map<K, V>`.
+        // Mini-batch Cmp+ — `{key: value for ...}`. Analogous to ListComp:
+        // types each clause, validates filter, and types key+value in the
+        // innermost scope. Returns `Map<K, V>`.
         Expr::MapComp {
             key,
             value,
@@ -4028,7 +4026,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if pairs.is_empty() {
                 return Type::Map(Box::new(Type::Any), Box::new(Type::Any));
             }
-            // Sintetizamos por el primer par. Mezcla de tipos cae a Any.
+            // We synthesize from the first pair. Mix of types falls to Any.
             let (fk, fv) = (infer_expr(ctx, &pairs[0].0), infer_expr(ctx, &pairs[0].1));
             let mut k_same = true;
             let mut v_same = true;
@@ -4049,9 +4047,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
 
         Expr::Range { start, end, .. } => {
-            // Start y end deben ser Int (lo es en el evaluator). El
-            // span del error apunta al extremo problemático para
-            // distinguir cuál de los dos.
+            // Start and end must be Int (as in the evaluator). The
+            // error span points to the problematic endpoint to
+            // distinguish which of the two.
             for (label, e) in [("inicio", start.as_ref()), ("fin", end.as_ref())] {
                 let t = infer_expr(ctx, e);
                 if !is_compatible(&t, &Type::Int) {
@@ -4073,31 +4071,31 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             fields,
             span,
         } => {
-            // Sintetiza Nominal si el nombre del tipo está declarado.
-            // Validar campos contra el `type` declarado: faltantes,
-            // extras, tipos incompatibles.
+            // Synthesizes Nominal if the type's name is declared.
+            // Validates fields against the declared `type`: missing,
+            // extras, incompatible types.
             let id = match ctx.types.lookup(type_name) {
                 Some(id) => id,
                 None => {
-                    // resolve_program ya reporta tipos desconocidos
-                    // como campos/anotaciones; un StructLit con
-                    // nombre inexistente sí es propio del checker.
+                    // resolve_program already reports unknown types
+                    // as fields/annotations; a StructLit with
+                    // non-existent name is the checker's responsibility.
                     ctx.error_at(
                         *span,
                         format!("no existe el tipo `{}` para instanciar", type_name),
                     );
-                    // Igual evaluamos los valores para detectar errores
-                    // adentro.
+                    // We still evaluate the values to detect errors
+                    // inside.
                     for (_, v) in fields {
                         let _ = infer_expr(ctx, v);
                     }
                     return Type::Any;
                 }
             };
-            // Comparamos contra los campos resueltos del nominal.
+            // We compare against the nominal's resolved fields.
             let declared = ctx.types.info(id).fields.clone();
-            // Inferir tipos provistos (siempre, para que warnings adentro
-            // afloren).
+            // Infer provided types (always, so that inner warnings
+            // surface).
             let mut provided_types: Vec<(String, Type, Span)> = Vec::new();
             for (n, v) in fields {
                 let t = infer_expr(ctx, v);
@@ -4114,9 +4112,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             format!("el tipo `{}` no tiene un campo llamado `{}`", type_name, n),
                         );
                     }
-                    // Mini-tanda Vp — struct lit no puede setear campos
-                    // privados desde afuera del type body. Útil para
-                    // forzar uso de constructores estáticos (mini-tanda St).
+                    // Mini-batch Vp — struct lit cannot set private
+                    // fields from outside the type body. Useful to
+                    // force use of static constructors (mini-batch St).
                     if is_private_field(n) && ctx.current_type != Some(id) {
                         ctx.error_at(*fs, format!(
                             "el campo `{}.{}` es privado: no se puede setear desde un struct lit afuera de los métodos del tipo `{}` (usá un constructor estático como `{}.new(...)`)",
@@ -4124,7 +4122,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ));
                     }
                 }
-                // Faltantes y compatibilidad de los provistos.
+                // Missing and compatibility of provided.
                 let provided_map: std::collections::HashMap<&str, (&Type, Span)> = provided_types
                     .iter()
                     .map(|(n, t, fs)| (n.as_str(), (t, *fs)))
@@ -4145,16 +4143,16 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         }
                         Some(_) => {}
                         None => {
-                            // Faltante: válido si nullable o si el
-                            // evaluator espera default (validado en
+                            // Missing: valid if nullable or if the
+                            // evaluator expects a default (validated in
                             // resolve_program).
                             //
-                            // En el caso nullable, no hay error. En el
-                            // resto, podríamos alertar — pero el
-                            // evaluator emite su propio error en
-                            // runtime cuando falta un campo sin
-                            // default. Para no duplicar mensajes,
-                            // dejamos esto pasar en 5.3.1.
+                            // In the nullable case, no error. In the
+                            // rest, we could alert — but the
+                            // evaluator emits its own error at
+                            // runtime when a field is missing without
+                            // default. To not duplicate messages,
+                            // we let this pass in 5.3.1.
                         }
                     }
                 }
@@ -4174,9 +4172,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     let type_name = info.name.clone();
                     if let Some(declared) = &info.fields {
                         if let Some(f) = declared.iter().find(|f| f.name == *field) {
-                            // Mini-tanda Vp — campos privados (`_*`)
-                            // solo accesibles desde adentro del body
-                            // de un método del MISMO type.
+                            // Mini-batch Vp — private fields (`_*`)
+                            // only accessible from inside the body
+                            // of a method of the SAME type.
                             if is_private_field(field) && ctx.current_type != Some(*id) {
                                 ctx.error_at(*span, format!(
                                     "el campo `{}.{}` es privado (prefijo `_`); solo accesible desde métodos del propio tipo `{}`",
@@ -4185,46 +4183,46 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             }
                             return f.type_.clone();
                         }
-                        // Campo desconocido. En 5.3.4 cuando entren
-                        // métodos puede ser legítimo (el "field"
-                        // sintáctico es un método). Por ahora silencio
-                        // si está dentro de un Call (lo handlea
-                        // infer_call), y warning si no — pero no
-                        // sabemos el contexto acá. Devolvemos Any.
+                        // Unknown field. In 5.3.4 when methods land
+                        // it may be legitimate (the syntactic "field"
+                        // is a method). For now we stay silent
+                        // if it's inside a Call (handled by
+                        // infer_call), and warn if not — but we don't
+                        // know the context here. We return Any.
                         return Type::Any;
                     }
                     Type::Any
                 }
-                // 8.4: field access sobre `PyAny` da `PyAny`. Cubre
-                // chains como `os.path` / `os.path.sep` / `engine.url`
-                // — todos opacos hasta que el usuario anote
-                // explícitamente. El chequeo runtime via getattr ya
-                // tira AttributeError claro si el field no existe.
+                // 8.4: field access over `PyAny` gives `PyAny`. Covers
+                // chains like `os.path` / `os.path.sep` / `engine.url`
+                // — all opaque until the user annotates
+                // explicitly. The runtime check via getattr already
+                // throws a clear AttributeError if the field doesn't exist.
                 Type::PyAny => Type::PyAny,
-                // Cualquier otro receptor: 5.3.4 lo cubre con métodos
-                // built-in. Por ahora Any.
+                // Any other receiver: 5.3.4 covers it with built-in
+                // methods. For now Any.
                 _ => Type::Any,
             }
         }
 
         Expr::Call { callee, args, span } => {
-            // Camino de método: `obj.method(args)` ↔ callee
-            // sintáctico es `Expr::Field`. Despachamos por
-            // `(tipo del receptor, nombre del método)` contra la
-            // tabla de built-ins (5.3.4) en lugar de pasar por la
-            // ruta general — la ruta general no puede modelar
-            // signatures paramétricas como `List<T>.map`.
+            // Method path: `obj.method(args)` ↔ callee
+            // syntactic is `Expr::Field`. We dispatch by
+            // `(receiver type, method name)` against the
+            // built-ins table (5.3.4) instead of going through the
+            // general route — the general route cannot model
+            // parametric signatures like `List<T>.map`.
             if let Expr::Field { object, field, .. } = callee.as_ref() {
                 let mut obj_ty = infer_expr(ctx, object);
-                // Fase 10.3+ — ORM static methods: cuando el `object` es
-                // un Ident que matchea un nominal con `@table`, el
-                // `infer_expr` ya lo tipa como `Any` (regla del Ident
-                // arm: type-name-as-value). Refinamos a `Nominal(id)`
-                // localmente para que `infer_method_call` despache los
-                // static methods (all/where/insert) correctamente.
-                // Esto NO cambia el tipo global del Ident — solo en
-                // este Call específico. Otros usos de `User` como var
-                // siguen siendo `Any`.
+                // Phase 10.3+ — ORM static methods: when the `object` is
+                // an Ident that matches a nominal with `@table`,
+                // `infer_expr` already types it as `Any` (Ident arm
+                // rule: type-name-as-value). We refine to `Nominal(id)`
+                // locally so that `infer_method_call` dispatches the
+                // static methods (all/where/insert) correctly.
+                // This does NOT change the global type of the Ident — only in
+                // this specific Call. Other uses of `User` as var
+                // remain `Any`.
                 if matches!(obj_ty, Type::Any) {
                     if let Expr::Ident(name, _) = object.as_ref() {
                         if let Some(id) = ctx.types.lookup(name) {
@@ -4234,27 +4232,27 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         }
                     }
                 }
-                // Fp.3 — para method calls con named args, el chequeo
-                // exacto requiere conocer los param names del método
-                // (R.3 custom methods). Para built-ins no soportamos
-                // named args (sin nombres de params expuestos). Por
-                // ahora, NamedArg en method call con receiver Nominal
-                // pasa como gradual (Any); el runtime hace el chequeo
-                // real. Si el receiver es built-in (List/Map/Str), el
-                // checker tipa el value adentro del NamedArg y delega
-                // al dispatcher general — el runtime emite error claro.
-                // L2 (2026-06-05) — Inferencia bidireccional en
-                // callbacks de métodos built-in. Si el arg es directamente
-                // un `Expr::FnExpr` y el método tiene template paramétrico
-                // conocido (`.map`/`.filter`/etc. sobre `List<T>` y
-                // `Map<K,V>`), empujamos un hint con los tipos esperados
-                // de los params ANTES de sintetizar el callback. El
-                // handler de `Expr::FnExpr` (`fn_expr_param_hints.pop()`)
-                // consume el hint exactamente una vez. Push y pop
-                // quedan balanceados porque solo empujamos cuando el arg
-                // ES un FnExpr directo (que siempre va a popear). Args
-                // wrappeados en `NamedArg` también funcionan — el wrapper
-                // delega a `infer_expr(value)` que entra al handler.
+                // Fp.3 — for method calls with named args, exact
+                // checking requires knowing the method's param names
+                // (R.3 custom methods). For built-ins we don't support
+                // named args (no exposed param names). For
+                // now, NamedArg in a method call with Nominal receiver
+                // passes as gradual (Any); the runtime does the real
+                // check. If the receiver is built-in (List/Map/Str), the
+                // checker types the value inside the NamedArg and delegates
+                // to the general dispatcher — the runtime emits a clear error.
+                // L2 (2026-06-05) — Bidirectional inference in
+                // callbacks of built-in methods. If the arg is directly
+                // an `Expr::FnExpr` and the method has a known
+                // parametric template (`.map`/`.filter`/etc. over `List<T>` and
+                // `Map<K,V>`), we push a hint with the expected
+                // param types BEFORE synthesizing the callback. The
+                // `Expr::FnExpr` handler (`fn_expr_param_hints.pop()`)
+                // consumes the hint exactly once. Push and pop
+                // stay balanced because we only push when the arg
+                // IS a direct FnExpr (which will always pop). Args
+                // wrapped in `NamedArg` also work — the wrapper
+                // delegates to `infer_expr(value)` which enters the handler.
                 let args_ty: Vec<Type> = args
                     .iter()
                     .map(|a| {
@@ -4273,15 +4271,15 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         }
                     })
                     .collect();
-                // 8.4: receptor PyAny — el método se invoca cruzando
-                // a Python via dispatch_method (8.1.4). El runtime
-                // envuelve TODO call Python en `Result<T>` (8.3); el
-                // checker refleja eso: la llamada tipa como
-                // `Result<Any>`, no `Any`. Esto activa la regla de
-                // exhaustividad sobre Result (5.3.3) y la restricción
-                // del operador `?` (5.3.2/5.3.3) — el usuario es
-                // forzado a manejar la falla estáticamente, igual
-                // que cualquier `Result<T>` nativo.
+                // 8.4: PyAny receiver — the method is invoked crossing
+                // to Python via dispatch_method (8.1.4). The runtime
+                // wraps ALL Python calls in `Result<T>` (8.3); the
+                // checker mirrors that: the call types as
+                // `Result<Any>`, not `Any`. This activates the
+                // exhaustiveness rule over Result (5.3.3) and the
+                // `?` operator restriction (5.3.2/5.3.3) — the user is
+                // forced to handle the failure statically, just like
+                // any native `Result<T>`.
                 if matches!(obj_ty, Type::PyAny) {
                     return Type::Result {
                         ok: Box::new(Type::Any),
@@ -4290,26 +4288,26 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
                 return match infer_method_call(ctx, &obj_ty, field, &args_ty, *span) {
                     Some(ret) => ret,
-                    // Receptor que no entendemos (Nominal sin métodos
-                    // custom, Module via import, Any): seguimos en
-                    // modo gradual sin chequear nada de la llamada.
+                    // Receiver we don't understand (Nominal without custom
+                    // methods, Module via import, Any): we continue in
+                    // gradual mode without checking anything of the call.
                     None => Type::Any,
                 };
             }
-            // Fase 9.w.3 — dispatch especial para `spawn(fn_call)`.
-            // El built-in se tipa como `Any` (5.3.4); acá refinamos al
-            // tipo concreto `Future<T>` donde T es el ret type de la
-            // fn target. Validaciones:
-            //   - exactamente 1 arg, que debe ser un `Expr::Call`
-            //     literal (no var, no expression compuesta).
-            //   - el callee del inner call debe ser una fn top-level
-            //     declarada con `@background` (opt-in del autor).
+            // Phase 9.w.3 — special dispatch for `spawn(fn_call)`.
+            // The builtin is typed as `Any` (5.3.4); here we refine to
+            // the concrete `Future<T>` type where T is the ret type of the
+            // target fn. Validations:
+            //   - exactly 1 arg, which must be a literal `Expr::Call`
+            //     (no var, no composite expression).
+            //   - the callee of the inner call must be a top-level fn
+            //     declared with `@background` (author's opt-in).
             //
-            // El dispatch solo aplica si el binding de `spawn` no fue
-            // shadowed por una fn user-defined: comparamos el `ty` del
-            // binding contra `Type::Any` (el del builtin). Si el
-            // usuario hace `fn spawn(x) -> Int`, el lookup tipa como
-            // `Function{...}` y caemos a la ruta normal.
+            // The dispatch only applies if the `spawn` binding was not
+            // shadowed by a user-defined fn: we compare the `ty` of the
+            // binding against `Type::Any` (the builtin's). If the
+            // user does `fn spawn(x) -> Int`, the lookup types as
+            // `Function{...}` and we fall to the normal route.
             if let Expr::Ident(name, _) = callee.as_ref() {
                 if name == "spawn"
                     && matches!(ctx.lookup_binding("spawn").map(|b| &b.ty), Some(Type::Any))
@@ -4317,26 +4315,26 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     return check_spawn_call(ctx, args, *span);
                 }
             }
-            // Sintetizamos siempre callee y args para que afloren
-            // errores adentro. Después validamos aridad y tipos según
-            // lo que sea el callee.
-            // Fp.3 — destruir NamedArg al sintetizar para tipar el value
-            // y no fallar con "fuera de una llamada". El reorder/chequeo
-            // real ocurre en `infer_call_with_named_args` cuando el
-            // callee es un Ident resoluble.
+            // We always synthesize callee and args so that errors
+            // inside surface. Then we validate arity and types according
+            // to what the callee is.
+            // Fp.3 — destructure NamedArg when synthesizing to type the value
+            // and not fail with "outside a call". The actual reorder/check
+            // happens in `infer_call_with_named_args` when the
+            // callee is a resolvable Ident.
             let callee_ty = infer_expr(ctx, callee);
-            // L2 expandido (2026-06-05) — Inferencia bidireccional
-            // desde callees user-defined con param Function. Si el
-            // callee tipa como `Function { params, ret }` y un arg es
-            // FnExpr cuyo param-i correspondiente es a su vez
-            // `Function { params: cb_params, .. }`, propagamos los
-            // `cb_params` como hint al FnExpr. Cubre el caso canónico:
+            // L2 expanded (2026-06-05) — Bidirectional inference
+            // from user-defined callees with Function param. If the
+            // callee types as `Function { params, ret }` and an arg is
+            // a FnExpr whose corresponding param-i is in turn
+            // `Function { params: cb_params, .. }`, we propagate the
+            // `cb_params` as a hint to the FnExpr. Covers the canonical case:
             //
             //     fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
-            //     apply(fn(n) => n * 2, 5)   // n se infiere como Int
+            //     apply(fn(n) => n * 2, 5)   // n is inferred as Int
             //
-            // Stack-based como L2 original — el handler de Expr::FnExpr
-            // hace pop al entrar.
+            // Stack-based like original L2 — the Expr::FnExpr handler
+            // pops on entry.
             let callee_param_types: Option<Vec<Type>> = match &callee_ty {
                 Type::Function { params, .. } => Some(params.clone()),
                 _ => None,
@@ -4368,49 +4366,49 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 })
                 .collect();
             match callee_ty {
-                // Gradual: callee de tipo desconocido no se chequea.
+                // Gradual: callee with unknown type is not checked.
                 Type::Any => Type::Any,
-                // 8.4: callee es un PyObject opaco — el call cruza a
-                // Python y vuelve envuelto en `Result<T>` (decisión
-                // 8.3). Cubre `let f = math.sqrt; f(25.0)` (callee
-                // resuelto por Ident después del field access).
+                // 8.4: callee is an opaque PyObject — the call crosses to
+                // Python and returns wrapped in `Result<T>` (decision
+                // 8.3). Covers `let f = math.sqrt; f(25.0)` (callee
+                // resolved by Ident after field access).
                 Type::PyAny => Type::Result {
                     ok: Box::new(Type::Any),
                     err: Box::new(Type::Str),
                 },
                 Type::Function { params, ret } => {
                     let label = describe_callee(callee);
-                    // Fp — la function-signature en `Type::Function` no
-                    // lleva info de defaults (solo lista los tipos). Para
-                    // el chequeo de aridad consultamos directo el
-                    // Stmt::FnDef cuando el callee es un Ident resoluble;
-                    // fallback a aridad estricta para callees indirectos
-                    // (callbacks, fns como var).
+                    // Fp — the function-signature in `Type::Function` does
+                    // not carry defaults info (it only lists the types). For
+                    // arity checking we consult Stmt::FnDef directly
+                    // when the callee is a resolvable Ident;
+                    // fallback to strict arity for indirect callees
+                    // (callbacks, fns as var).
                     let required = required_arity_for_callee(ctx, callee, params.len());
                     let has_varargs = callee_has_varargs(ctx, callee);
-                    // Fp.2 — varargs: tail param tipa como `List<T>` en
-                    // el binding, pero adentro de Type::Function los
-                    // params siguen llevando el tipo de elemento T. El
-                    // call site valida cada arg contra T (no contra
-                    // List<T>); aridad mínima incluye al menos los
-                    // params previos al varargs.
+                    // Fp.2 — varargs: tail param types as `List<T>` in
+                    // the binding, but inside Type::Function the
+                    // params still carry the element type T. The
+                    // call site validates each arg against T (not against
+                    // List<T>); minimum arity includes at least the
+                    // params prior to varargs.
                     let max_arity = if has_varargs {
                         usize::MAX
                     } else {
                         params.len()
                     };
                     let required = if has_varargs {
-                        // Varargs acepta 0+ args en el último slot, así
-                        // que la aridad mínima es total - 1 (el varargs
-                        // puede recibir 0 args).
+                        // Varargs accepts 0+ args in the last slot, so
+                        // the minimum arity is total - 1 (the varargs
+                        // can receive 0 args).
                         required.min(params.len().saturating_sub(1))
                     } else {
                         required
                     };
-                    // Fp.3 — si hay named args, el reorder real ocurre
-                    // en runtime/codegen. El chequeo estricto de aridad
-                    // por posición no aplica (los nombres pueden saltar
-                    // posiciones). Validamos solo aridad mínima global.
+                    // Fp.3 — if there are named args, the real reorder happens
+                    // at runtime/codegen. The strict arity check
+                    // by position does not apply (names can skip
+                    // positions). We validate only minimum global arity.
                     let has_named_args = args.iter().any(|a| matches!(a, Expr::NamedArg { .. }));
                     if args.len() < required || args.len() > max_arity {
                         ctx.error_at(
@@ -4441,12 +4439,12 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         );
                     } else if !has_named_args {
                         for (i, actual) in args_ty.iter().enumerate() {
-                            // Fp.2 — para el slot varargs (el último),
-                            // todos los args extras se chequean contra
-                            // el tipo de ELEMENTO del varargs (no contra
-                            // List<T>). Si i < params.len()-1, va al
-                            // param posicional; si i >= last_idx y hay
-                            // varargs, va contra params[last_idx].
+                            // Fp.2 — for the varargs slot (the last),
+                            // all extra args are checked against
+                            // the ELEMENT type of the varargs (not against
+                            // List<T>). If i < params.len()-1, goes to the
+                            // positional param; if i >= last_idx and there are
+                            // varargs, goes against params[last_idx].
                             let expected_idx = if has_varargs && i >= params.len() {
                                 params.len() - 1
                             } else {
@@ -4484,32 +4482,32 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             is_async,
             span,
         } => {
-            // Walkeamos el body con un scope nuevo y los params
-            // bindeados (con su tipo declarado o `Any` si la
-            // anotación faltó). El tipo del FnExpr es `Function`;
-            // 5.3.5 infiere el `ret` recolectando los tipos de los
-            // `Stmt::Return` del body y unificándolos con `lub`.
-            // Empujamos `Any` al return_stack porque sin anotación
-            // no podemos validar contra qué — los returns se
-            // recolectan, no se chequean.
+            // We walk the body with a new scope and the params
+            // bound (with their declared type or `Any` if the
+            // annotation was missing). The FnExpr's type is `Function`;
+            // 5.3.5 infers the `ret` by collecting the types of the
+            // `Stmt::Return`s in the body and unifying them with `lub`.
+            // We push `Any` to the return_stack because without annotation
+            // we cannot validate against what — the returns are
+            // collected, not checked.
             //
-            // Mini-tanda Async-cl — `await_stack` pushea `*is_async`:
-            // `async fn(...)` permite `.await` adentro; `fn(...)` lo
-            // rechaza. El tipo final del FnExpr async es
+            // Mini-batch Async-cl — `await_stack` pushes `*is_async`:
+            // `async fn(...)` allows `.await` inside; `fn(...)` rejects it.
+            // The final type of the async FnExpr is
             // `Function { ret: Future<T> }`.
             ctx.push_scope();
             ctx.return_stack.push(Type::Any);
             ctx.inferred_returns.push(Vec::new());
             ctx.in_http_handler.push(false);
             ctx.await_stack.push(*is_async);
-            // R.2.4 (F3): break/continue NO escapan FnExpr (closures).
+            // R.2.4 (F3): break/continue do NOT escape FnExpr (closures).
             let saved_loop_depth = ctx.loop_depth;
             ctx.loop_depth = 0;
-            // L2 (2026-06-05) — consumir hint de inferencia bidireccional
-            // si lo hay (puesto por el call site de un método built-in con
-            // template paramétrico conocido). Para cada param SIN anotación,
-            // usamos el tipo del hint en vez de `Type::Any`. Param CON
-            // anotación explícita gana siempre (no se sobrescribe).
+            // L2 (2026-06-05) — consume bidirectional inference hint
+            // if any (set by the call site of a built-in method with
+            // known parametric template). For each param WITHOUT annotation,
+            // we use the hint's type instead of `Type::Any`. Param WITH
+            // explicit annotation always wins (not overwritten).
             let hint = ctx.fn_expr_param_hints.pop().flatten();
             let param_types: Vec<Type> = params
                 .iter()
@@ -4525,20 +4523,19 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 })
                 .collect();
             for (p, t) in params.iter().zip(param_types.iter()) {
-                // Fp.2 — varargs: adentro del body, el binding tipa
-                // como `List<T>`.
+                // Fp.2 — varargs: inside the body, the binding types
+                // as `List<T>`.
                 let bind_ty = if p.varargs {
                     Type::List(Box::new(t.clone()))
                 } else {
                     t.clone()
                 };
-                // S1 (2026-06-05) — `Param` ahora tiene `name_span`
-                // propio. Si está presente (no ZERO), lo usamos como
-                // def_span del binding y registramos el tipo en
-                // TypeInfo para habilitar hover sobre el nombre del
-                // param en la firma del FnExpr. Fallback al span del
-                // FnExpr contenedor si name_span es ZERO (param
-                // sintético en tests).
+                // S1 (2026-06-05) — `Param` now has its own `name_span`.
+                // If present (not ZERO), we use it as the binding's
+                // def_span and register the type in
+                // TypeInfo to enable hover over the param's name
+                // in the FnExpr's signature. Fallback to the containing
+                // FnExpr's span if name_span is ZERO (synthetic param in tests).
                 let def_span = if p.name_span.column > 0 {
                     p.name_span
                 } else {
@@ -4643,11 +4640,11 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     (**v).clone()
                 }
                 Type::Str => {
-                    // I.1 (mini-tanda I) — `s[i]` devuelve el i-ésimo
-                    // char como `Str` de un char (Fitz no tiene Char).
-                    // Indexación por CHAR, no por byte (consistente con
-                    // `s.len()` que cuenta chars). Negativos soportados:
-                    // `s[-1]` = último.
+                    // I.1 (mini-batch I) — `s[i]` returns the i-th
+                    // char as a single-char `Str` (Fitz has no Char).
+                    // Indexed by CHAR, not byte (consistent with
+                    // `s.len()` which counts chars). Negatives supported:
+                    // `s[-1]` = last.
                     if !is_compatible(&idx_ty, &Type::Int) {
                         ctx.error_at(
                             index.span(),
@@ -4659,9 +4656,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     }
                     Type::Str
                 }
-                // Gradual: Any y Nominal no chequean. Nominal con
-                // operador `[]` es deuda (custom indexers no existen);
-                // Any es el escape habitual.
+                // Gradual: Any and Nominal don't check. Nominal with
+                // `[]` operator is debt (custom indexers don't exist);
+                // Any is the usual escape.
                 Type::Any | Type::Nominal(_) => Type::Any,
                 other => {
                     ctx.error_at(
@@ -4677,42 +4674,42 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
         Expr::Match { value, arms, span } => {
             let scrutinee = infer_expr(ctx, value);
-            // W2 (v0.10.6) — Nullable refinement en match arms.
-            // Cuando el scrutinee es `T?` (Nullable<T>) y un arm
-            // PREVIO matchea `null` explícito, los arms posteriores
-            // con `Pattern::Ident` quedan refinados a `T` (sin
-            // Nullable). Esto destraba `match post.user { null =>
+            // W2 (v0.10.6) — Nullable refinement in match arms.
+            // When the scrutinee is `T?` (Nullable<T>) and a
+            // PREVIOUS arm matches explicit `null`, subsequent arms
+            // with `Pattern::Ident` are refined to `T` (without
+            // Nullable). This unblocks `match post.user { null =>
             // "<null>", u => u.name }`.
             //
-            // Reglas (MVP):
-            // - Scrutinee debe ser `Type::Nullable(T)`.
-            // - Algún arm previo debe tener `Pattern::Null`. Un
-            //   `Pattern::Or` que contenga Null también cubre.
-            // - Solo refinamos `Pattern::Ident(_, _)` (incluido el caso
-            //   `_`/wildcard que no bindea pero igual no rompe).
-            // - Tuples/OkBinding/ErrBinding NO se refinan en MVP.
+            // Rules (MVP):
+            // - Scrutinee must be `Type::Nullable(T)`.
+            // - Some previous arm must have `Pattern::Null`. A
+            //   `Pattern::Or` containing Null also covers.
+            // - We only refine `Pattern::Ident(_, _)` (including the
+            //   `_`/wildcard case which doesn't bind but doesn't break either).
+            // - Tuples/OkBinding/ErrBinding are NOT refined in MVP.
             let refined_inner: Option<Type> = match &scrutinee {
                 Type::Nullable(inner) => Some((**inner).clone()),
                 _ => None,
             };
             let mut null_cubierto_previamente = false;
-            // Tipo del binding según el patrón. Para `Ok(x)` con
-            // scrutinee `Result<T>`, x es T. Para `Err(e)` el error
-            // está fijado en Str. Para Ident es el scrutinee
-            // completo. Para literales/wildcard/range no hay bind.
+            // Binding type according to the pattern. For `Ok(x)` with
+            // scrutinee `Result<T>`, x is T. For `Err(e)` the error
+            // is fixed at Str. For Ident it's the whole scrutinee.
+            // For literals/wildcard/range there is no bind.
             let mut first: Option<Type> = None;
             for arm in arms {
                 ctx.push_scope();
-                // Sin span propio en `MatchArm`/`Pattern` (deuda S1),
-                // usamos el span del body como aproximación del
-                // `def_span` del binding — el más cercano del arm en
-                // el AST actual. go-to-def sobre el uso del binding
-                // salta al body del arm.
-                // Sp.2 — body es Vec<Stmt>; el span es el del primer stmt.
+                // Without own span on `MatchArm`/`Pattern` (S1 debt),
+                // we use the body's span as the approximation of the
+                // binding's `def_span` — the closest of the arm in
+                // the current AST. go-to-def over the binding's use
+                // jumps to the arm's body.
+                // Sp.2 — body is Vec<Stmt>; the span is that of the first stmt.
                 let body_span = arm.body.first().map(|s| s.span()).unwrap_or(Span::ZERO);
-                // W2 — decidir si refinamos el binding de este arm.
-                // Solo aplica a Pattern::Ident sobre scrutinee Nullable
-                // cuando un arm previo ya cubrió Null.
+                // W2 — decide whether to refine this arm's binding.
+                // Only applies to Pattern::Ident over Nullable scrutinee
+                // when a previous arm already covered Null.
                 let scrutinee_for_binding = match (&arm.pattern, &refined_inner) {
                     (crate::ast::Pattern::Ident(_, _), Some(inner))
                         if null_cubierto_previamente =>
@@ -4722,8 +4719,8 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     _ => scrutinee.clone(),
                 };
                 bind_pattern(ctx, &arm.pattern, &scrutinee_for_binding, body_span);
-                // R.2.2 — el guard tipa adentro del scope del binding.
-                // Debe sintetizar Bool; otro tipo es error.
+                // R.2.2 — the guard types inside the binding's scope.
+                // It must synthesize Bool; other type is an error.
                 if let Some(guard_expr) = &arm.guard {
                     let guard_ty = infer_expr(ctx, guard_expr);
                     if !matches!(guard_ty, Type::Bool | Type::Any) {
@@ -4736,15 +4733,15 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         );
                     }
                 }
-                // Sp.2 — chequear el body (Vec<Stmt>) y derivar el tipo
-                // del arm. Casos:
-                //   - Stmt::Expr: t = tipo del expr.
-                //   - Stmt::Return/Break/Continue: tipo `!` (never).
-                //     Como no hay un Type::Never explícito, usamos
-                //     Type::Any (matchea cualquier expected).
-                //   - Otros stmts: solo se chequean, no contribuyen
-                //     al tipo del arm. Si son el ÚLTIMO stmt, t queda
-                //     en Null (decisión consistente con if/else).
+                // Sp.2 — check the body (Vec<Stmt>) and derive the arm's
+                // type. Cases:
+                //   - Stmt::Expr: t = expr's type.
+                //   - Stmt::Return/Break/Continue: `!` type (never).
+                //     Since there is no explicit Type::Never, we use
+                //     Type::Any (matches any expected).
+                //   - Other stmts: only checked, don't contribute
+                //     to the arm's type. If they are the LAST stmt, t stays
+                //     Null (decision consistent with if/else).
                 let mut t = Type::Null;
                 let arm_len = arm.body.len();
                 for (i, stmt) in arm.body.iter().enumerate() {
@@ -4754,8 +4751,8 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             t = infer_expr(ctx, e);
                         }
                         Stmt::Return(e, _) => {
-                            // Chequear el value del return contra
-                            // return_stack. El "tipo del arm" es Any
+                            // Check the return's value against
+                            // return_stack. The "arm's type" is Any
                             // (never coerce).
                             check_stmt(ctx, stmt);
                             let _ = e;
@@ -4781,27 +4778,27 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 if first.is_none() {
                     first = Some(t);
                 }
-                // W2 — actualizar el flag DESPUÉS de procesar el arm:
-                // el próximo arm puede beneficiarse del refinement si
-                // ÉSTE arm matcheó null.
+                // W2 — update the flag AFTER processing the arm:
+                // the next arm can benefit from the refinement if
+                // THIS arm matched null.
                 if pattern_cubre_null(&arm.pattern) {
                     null_cubierto_previamente = true;
                 }
             }
-            // Exhaustividad: solo la exigimos cuando el scrutinee es
-            // `Result<T>` (puro, no nullable). Otros tipos no tienen
-            // semántica de "variantes" para Fitz todavía.
+            // Exhaustiveness: we only require it when the scrutinee is
+            // `Result<T>` (pure, not nullable). Other types don't have
+            // "variants" semantics in Fitz yet.
             if matches!(scrutinee, Type::Result { .. }) {
                 check_result_match_exhaustiveness(ctx, arms, *span);
             }
             first.unwrap_or(Type::Any)
         }
         Expr::Ok(inner, _) => {
-            // Mini-tanda Re+ — sin contexto, E queda como `Any` (el
-            // checker no sabe qué Err puede aparecer luego). El LUB
-            // contra otros Results refinará E si se construyen Err en
-            // el mismo flujo. La anotación destino (`-> Result<T, E>`)
-            // gana sobre el inferido.
+            // Mini-batch Re+ — without context, E stays `Any` (the
+            // checker doesn't know what Err can appear later). The LUB
+            // against other Results will refine E if Errs are built in
+            // the same flow. The destination annotation (`-> Result<T, E>`)
+            // wins over the inferred.
             let t = infer_expr(ctx, inner);
             Type::Result {
                 ok: Box::new(t),
@@ -4809,9 +4806,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
         Expr::Err(inner, _) => {
-            // Mini-tanda Re+ — el tipo del E ahora se infiere desde el
-            // value. T queda Any sin contexto; el LUB/anotación destino
-            // lo refinará.
+            // Mini-batch Re+ — the E type is now inferred from the
+            // value. T stays Any without context; the LUB/destination
+            // annotation will refine it.
             let e_ty = infer_expr(ctx, inner);
             Type::Result {
                 ok: Box::new(Type::Any),
@@ -4819,26 +4816,26 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
         Expr::Await(inner, span) => {
-            // 6.2: semántica completa del checker.
+            // 6.2: full checker semantics.
             //
-            // Regla 1 — contexto async. `.await` solo es legal adentro
-            // de una `async fn` Fitz. Top-level y FnExpr (closures
-            // sync) son inválidos. `await_stack.last()` nos dice si la
-            // fn más cercana es async. Si no, error con mensaje
-            // claro pero igual seguimos sintetizando un tipo para no
-            // confundir al usuario con errores cascada.
+            // Rule 1 — async context. `.await` is only legal inside
+            // a Fitz `async fn`. Top-level and FnExpr (sync closures)
+            // are invalid. `await_stack.last()` tells us if the
+            // nearest fn is async. If not, error with clear
+            // message but we still synthesize a type to not
+            // confuse the user with cascading errors.
             //
-            // Regla 2 — operando `Future<T>`. Lo que `.await` desempaca
-            // tiene que ser un `Future<T>` (o `Any` para escape
-            // gradual). Cualquier otro tipo concreto es error.
+            // Rule 2 — `Future<T>` operand. What `.await` unwraps
+            // must be a `Future<T>` (or `Any` for gradual escape).
+            // Any other concrete type is an error.
             let operand_ty = infer_expr(ctx, inner);
 
-            // Top-level (stack vacío) cuenta como contexto async válido
-            // — el evaluator arranca el runtime tokio ahí y el codegen
-            // emite `#[tokio::main] async fn main()` cuando el programa
-            // usa async. Solo rechazamos cuando estamos adentro de una
-            // fn sync explícita (`Some(false)`): FnDef no-async o
-            // FnExpr (los closures no soportan async todavía).
+            // Top-level (empty stack) counts as a valid async context
+            // — the evaluator starts the tokio runtime there and the codegen
+            // emits `#[tokio::main] async fn main()` when the program
+            // uses async. We only reject when we are inside an explicit
+            // sync fn (`Some(false)`): non-async FnDef or
+            // FnExpr (closures don't support async yet).
             if matches!(ctx.await_stack.last(), Some(false)) {
                 ctx.error_at(
                     *span,
@@ -4849,18 +4846,18 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             match &operand_ty {
                 Type::Any => Type::Any,
                 Type::Future(inner_ty) => (**inner_ty).clone(),
-                // Fase 8.7.3: `.await` sobre `Result<PyAny>` o
-                // `Result<Any>` (lo que el call Python sintetiza per
-                // 8.4 → 8.3) NO está soportado directo en intérprete
-                // (el evaluator rechaza con "se esperaba Future").
-                // El patrón canónico es `<py_call>?.await`: el `?`
-                // desempaca el Result a Future, y el .await opera
-                // sobre el Future. Acá NO agregamos rama para
-                // `Result<...>` — sigue siendo error de tipo si el
-                // usuario omite el `?`. La rama para `PyAny` solo
-                // cubre el caso del codegen 8.7.3 donde el inner del
-                // await después de `?` es PyAny (`<call>?.await` con
-                // el helper combinado).
+                // Phase 8.7.3: `.await` over `Result<PyAny>` or
+                // `Result<Any>` (what the Python call synthesizes per
+                // 8.4 → 8.3) is NOT directly supported in the interpreter
+                // (the evaluator rejects with "expected Future").
+                // The canonical pattern is `<py_call>?.await`: the `?`
+                // unwraps the Result to Future, and .await operates
+                // over the Future. Here we do NOT add a branch for
+                // `Result<...>` — it remains a type error if the
+                // user omits the `?`. The `PyAny` branch only
+                // covers the codegen 8.7.3 case where the inner of the
+                // await after `?` is PyAny (`<call>?.await` with
+                // the combined helper).
                 Type::PyAny => Type::Any,
                 other => {
                     ctx.error_at(
@@ -4878,30 +4875,30 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         Expr::Try(inner, span) => {
             let operand_ty = infer_expr(ctx, inner);
             match &operand_ty {
-                // Gradual: operando de tipo desconocido no se chequea.
-                // Cubre el caso típico de método built-in (callee
-                // Field) que todavía devuelve Any hasta 5.3.4.
+                // Gradual: operand with unknown type is not checked.
+                // Covers the typical case of a built-in method (Field
+                // callee) which still returns Any until 5.3.4.
                 Type::Any => Type::Any,
                 Type::Result {
                     ok: inner_ty,
                     err: _,
                 } => {
-                    // Si estamos adentro de una función con
-                    // return_type concreto, exigimos que sea Result —
-                    // el `?` propaga un `Err(_)` vía `return`, así que
-                    // la fn contenedora tiene que poder recibirlo.
-                    // Fn sin return_type (Any) o top-level no chequea.
+                    // If we are inside a function with
+                    // concrete return_type, we require it to be Result —
+                    // `?` propagates an `Err(_)` via `return`, so
+                    // the containing fn must be able to receive it.
+                    // Fn without return_type (Any) or top-level does not check.
                     //
-                    // W13 (v0.10.9) — Excepción: si estamos adentro de
-                    // un HTTP handler (`@get`/`@post`/`@put`/`@delete`),
-                    // el `?` se permite incluso con return_type concreto
-                    // distinto de Result. El runtime/codegen wrappea
-                    // el handler en `__FitzResponse`: el Err propagado
-                    // por `?` se convierte automáticamente en una
-                    // respuesta 500 (paridad con `value_to_outcome` y
-                    // con el match Ok/Err del wrapper). El usuario no
-                    // tiene que reescribir su fn como `-> Result<T>`
-                    // solo para usar `?` en su body.
+                    // W13 (v0.10.9) — Exception: if we are inside
+                    // an HTTP handler (`@get`/`@post`/`@put`/`@delete`),
+                    // `?` is allowed even with concrete return_type
+                    // different from Result. The runtime/codegen wraps
+                    // the handler in `__FitzResponse`: the Err propagated
+                    // by `?` automatically becomes a
+                    // 500 response (parity with `value_to_outcome` and
+                    // with the wrapper's Ok/Err match). The user does
+                    // not have to rewrite their fn as `-> Result<T>`
+                    // just to use `?` in its body.
                     let in_handler = ctx.in_http_handler.last().copied().unwrap_or(false);
                     if let Some(expected) = ctx.return_stack.last().cloned() {
                         let is_ok = matches!(expected, Type::Any | Type::Result { .. });
@@ -4927,21 +4924,20 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        // Fase 9.0.1 (F15): `Expr::Error` solo lo produce
-        // `parse_with_recovery`. El checker lo trata como `Type::Any`
-        // y NO emite errores derivados — el error real ya está en la
-        // lista de `recovered_errors` del parser. Silencioso es la
-        // política correcta: si el LSP corre el checker sobre un AST
-        // con Error nodes, no queremos cascada de errores derivados
-        // sobre el mismo punto.
+        // Phase 9.0.1 (F15): `Expr::Error` is only produced by
+        // `parse_with_recovery`. The checker treats it as `Type::Any`
+        // and does NOT emit derived errors — the real error is already in the
+        // parser's `recovered_errors` list. Silent is the
+        // correct policy: if the LSP runs the checker over an AST
+        // with Error nodes, we don't want cascade of derived errors
+        // on the same point.
         Expr::Error(_) => Type::Any,
     }
 }
 
-/// Etiqueta amigable para el callee de un `Call`. Aparece en los
-/// errores de aridad y de tipos de argumento. Cuando podemos
-/// identificar el nombre (Ident o Field), lo usamos; si no, una
-/// etiqueta genérica.
+/// Friendly label for a `Call`'s callee. Appears in arity and
+/// argument type errors. When we can identify the name (Ident or Field),
+/// we use it; otherwise, a generic label.
 fn describe_callee(callee: &Expr) -> String {
     match callee {
         Expr::Ident(name, _) => format!("la función `{}`", name),
@@ -4950,20 +4946,20 @@ fn describe_callee(callee: &Expr) -> String {
     }
 }
 
-/// "Least upper bound" pragmático para sintetizar el tipo de
-/// retorno de una función cuyo body tiene varios `return` con
-/// tipos diferentes. No es un lattice formal: prioriza preservar
-/// información útil (Result<X> + Result<Any> = Result<X>) sobre
-/// la pureza teórica.
+/// Pragmatic "Least upper bound" to synthesize the return type of
+/// a function whose body has multiple `return`s with
+/// different types. Not a formal lattice: prioritizes preserving
+/// useful information (Result<X> + Result<Any> = Result<X>) over
+/// theoretical purity.
 ///
-/// Reglas:
+/// Rules:
 ///   - `a == b` → `a`.
-///   - Cualquiera Any → el otro (Any cede al concreto).
-///   - Int + Float → Float (coerción).
-///   - Null + T → `T?` (rama opcional).
+///   - Any either side → the other (Any yields to the concrete).
+///   - Int + Float → Float (coercion).
+///   - Null + T → `T?` (optional branch).
 ///   - T + T? → `T?`.
-///   - Generics (List/Map/Result/Nullable) → recursión.
-///   - Mix arbitrario → Any.
+///   - Generics (List/Map/Result/Nullable) → recursion.
+///   - Arbitrary mix → Any.
 fn lub(a: &Type, b: &Type) -> Type {
     if a == b {
         return a.clone();
@@ -4974,21 +4970,21 @@ fn lub(a: &Type, b: &Type) -> Type {
     if matches!(b, Type::Any) {
         return a.clone();
     }
-    // Coerción Int↔Float.
+    // Int↔Float coercion.
     if (matches!(a, Type::Int) && matches!(b, Type::Float))
         || (matches!(a, Type::Float) && matches!(b, Type::Int))
     {
         return Type::Float;
     }
-    // Null + T → T? (y simétrico).
+    // Null + T → T? (and symmetric).
     if matches!(a, Type::Null) {
         return Type::Nullable(Box::new(b.clone()));
     }
     if matches!(b, Type::Null) {
         return Type::Nullable(Box::new(a.clone()));
     }
-    // T + T? → T? (y simétrico): si el inner del nullable es igual
-    // al otro, ya es lo mejor que tenemos.
+    // T + T? → T? (and symmetric): if the nullable's inner is equal
+    // to the other, that's already the best we have.
     if let Type::Nullable(inner) = a {
         if **inner == *b {
             return a.clone();
@@ -4999,13 +4995,13 @@ fn lub(a: &Type, b: &Type) -> Type {
             return b.clone();
         }
     }
-    // Generics recursivos.
+    // Recursive generics.
     match (a, b) {
         (Type::List(ai), Type::List(bi)) => Type::List(Box::new(lub(ai, bi))),
         (Type::Map(ak, av), Type::Map(bk, bv)) => {
             Type::Map(Box::new(lub(ak, bk)), Box::new(lub(av, bv)))
         }
-        // Mini-tanda Re+: lub recursivo en ambos lados (ok y err).
+        // Mini-batch Re+: recursive lub on both sides (ok and err).
         (
             Type::Result {
                 ok: a_ok,
@@ -5025,11 +5021,11 @@ fn lub(a: &Type, b: &Type) -> Type {
     }
 }
 
-/// Unifica los tipos de los `return` recolectados durante el
-/// walkeo del body de una función. Si la lista está vacía, la
-/// función no retorna explícitamente y devolvemos `Null` (matchea
-/// la semántica del evaluator: una fn que termina sin `return`
-/// produce `Value::Null`).
+/// Unifies the types of the `return`s collected during the
+/// walk of a function's body. If the list is empty, the
+/// function does not return explicitly and we return `Null` (matches
+/// the evaluator's semantics: a fn that ends without `return`
+/// produces `Value::Null`).
 fn unify_returns(types: &[Type]) -> Type {
     if types.is_empty() {
         return Type::Null;
@@ -5041,56 +5037,56 @@ fn unify_returns(types: &[Type]) -> Type {
     result
 }
 
-/// L2 (2026-06-05) — Inferencia bidireccional de callbacks.
-/// Para un método built-in con template paramétrico conocido,
-/// devuelve los tipos esperados de los params del callback.
+/// L2 (2026-06-05) — Bidirectional callback inference.
+/// For a built-in method with a known parametric template,
+/// returns the expected types of the callback's params.
 ///
-/// Casos cubiertos en el MVP:
+/// Cases covered in the MVP:
 ///
 /// - `List<T>.map/filter/find/any/all/count/find_index/flat_map(fn(T) -> ...)`
 ///   → `Some(vec![T])`.
-/// - `Map<K, V>.filter/find/any/all/count(fn(K, V) -> Bool)` (si existieran;
-///   hoy no están registrados en `infer_map_method`) → `Some(vec![K, V])`.
-/// - Otros métodos / receptores → `None`.
+/// - `Map<K, V>.filter/find/any/all/count(fn(K, V) -> Bool)` (if they existed;
+///   today they are not registered in `infer_map_method`) → `Some(vec![K, V])`.
+/// - Other methods / receivers → `None`.
 ///
-/// El call site empuja el hint al `ctx.fn_expr_param_hints` antes de
-/// sintetizar el arg. El handler de `Expr::FnExpr` lo consume al pop:
-/// para params SIN anotación usa el hint; para params CON anotación
-/// la anotación gana siempre (no se sobrescribe).
+/// The call site pushes the hint to `ctx.fn_expr_param_hints` before
+/// synthesizing the arg. The `Expr::FnExpr` handler consumes it on pop:
+/// for params WITHOUT annotation it uses the hint; for params WITH annotation
+/// the annotation always wins (not overwritten).
 fn expected_callback_param_for_builtin_method(obj_ty: &Type, method: &str) -> Option<Vec<Type>> {
     match obj_ty {
         Type::List(elem_ty) => match method {
-            // Todos toman `fn(T) -> ...` — propagamos T como expected.
+            // All take `fn(T) -> ...` — we propagate T as expected.
             "map" | "filter" | "find" | "any" | "all" | "count" | "find_index" | "flat_map" => {
                 Some(vec![(**elem_ty).clone()])
             }
             _ => None,
         },
-        // `Map<K, V>` no expone hoy métodos higher-order en
-        // `infer_map_method` (solo get/has/keys/values/len). Si llegan
-        // en el futuro (filter/find/etc. sobre entries), agregar acá
-        // con shape `fn(K, V) -> ...` → `Some(vec![K, V])`.
+        // `Map<K, V>` does not expose higher-order methods today in
+        // `infer_map_method` (only get/has/keys/values/len). If they arrive
+        // in the future (filter/find/etc. over entries), add here
+        // with shape `fn(K, V) -> ...` → `Some(vec![K, V])`.
         Type::Map(_, _) => None,
         _ => None,
     }
 }
 
-/// Despacho del checker para método built-in. Recibe el tipo del
-/// receptor (`xs` en `xs.map(f)`), el nombre del método, y los
-/// tipos ya inferidos de los argumentos. Devuelve `Some(ret)` con
-/// el tipo del resultado, o `None` cuando el receptor no entra en
-/// el dispatch built-in (Nominal sin métodos custom todavía,
-/// Module via import — ambos modelados como `Any` o `Nominal`).
+/// Checker dispatch for built-in method. Receives the receiver's
+/// type (`xs` in `xs.map(f)`), the method's name, and the
+/// already-inferred argument types. Returns `Some(ret)` with
+/// the result's type, or `None` when the receiver doesn't enter
+/// the built-in dispatch (Nominal without custom methods yet,
+/// Module via import — both modeled as `Any` or `Nominal`).
 ///
-/// Para los casos `None`, el caller continúa en modo gradual
-/// (devuelve `Any` sin chequear aridad/tipos). Para los casos
-/// soportados, las violaciones se reportan vía `ctx.error(...)`
-/// pero el dispatch siempre devuelve `Some(...)` con el ret
-/// inferido (los errores no propagan, se acumulan).
+/// For `None` cases, the caller continues in gradual mode
+/// (returns `Any` without checking arity/types). For supported
+/// cases, violations are reported via `ctx.error(...)`
+/// but the dispatch always returns `Some(...)` with the
+/// inferred ret (errors don't propagate, they accumulate).
 ///
-/// Convención: `T` siempre proviene del receptor concreto en este
-/// call site. `List<Int>.map(f)` y `List<Str>.map(f)` instancian
-/// distinto.
+/// Convention: `T` always comes from the concrete receiver at this
+/// call site. `List<Int>.map(f)` and `List<Str>.map(f)` instantiate
+/// differently.
 fn infer_method_call(
     ctx: &mut CheckCtx,
     receiver_ty: &Type,
@@ -5098,9 +5094,9 @@ fn infer_method_call(
     args_ty: &[Type],
     span: Span,
 ) -> Option<Type> {
-    // Pelamos un Nullable: `xs?.map(...)` cae cuando el `?` ya
-    // desempacó, así que acá raramente vemos Nullable. Por las
-    // dudas, lo dejamos transparente.
+    // We peel a Nullable: `xs?.map(...)` falls when `?` has already
+    // unwrapped, so here we rarely see Nullable. Just in case,
+    // we keep it transparent.
     let recv = receiver_ty.base();
     match recv {
         Type::List(t) => {
@@ -5113,11 +5109,11 @@ fn infer_method_call(
             Some(infer_map_method(ctx, &k, &v, method, args_ty, span))
         }
         Type::Str => Some(infer_str_method(ctx, method, args_ty, span)),
-        // Mini-tanda Bytes — métodos sobre Bytes.
+        // Mini-batch Bytes — methods on Bytes.
         Type::Bytes => Some(infer_bytes_method(ctx, method, args_ty, span)),
-        // F13.D — methods universales sobre `Type::Any` para type-check
-        // dinámico en heterogéneos. Devuelven `Result<T>` si match,
-        // `Result::Err(Str)` si no. `type_name()` devuelve `Str` directo.
+        // F13.D — universal methods over `Type::Any` for dynamic
+        // type-check on heterogeneous. Return `Result<T>` if match,
+        // `Result::Err(Str)` otherwise. `type_name()` returns `Str` directly.
         Type::Any => match method {
             "as_int" => {
                 check_method_arity(ctx, method, args_ty, 0, span);
@@ -5158,34 +5154,34 @@ fn infer_method_call(
                 check_method_arity(ctx, method, args_ty, 0, span);
                 Some(Type::Str)
             }
-            // Cualquier otro método sobre Any: gradual (cae al fallback
-            // genérico que asume Any).
+            // Any other method on Any: gradual (falls to the generic
+            // fallback that assumes Any).
             _ => None,
         },
-        // R.3 — métodos custom sobre nominal. Buscamos primero en
-        // los fields que sean `Type::Function` (8-pyi.C: el loader
-        // de `.pyi` registra cada fn del stub como un field
-        // `Function { params, ret }` adentro del nominal sintético
-        // del módulo). Después en `NominalInfo.methods` (R.3 — métodos
-        // custom declarados con `fn name(self, ...)` adentro del
-        // `type`). Si nada matchea: gradual (None), igual que Any.
+        // R.3 — custom methods over nominal. We first look in
+        // the fields that are `Type::Function` (8-pyi.C: the `.pyi`
+        // loader registers each stub fn as a
+        // `Function { params, ret }` field inside the module's
+        // synthetic nominal). Then in `NominalInfo.methods` (R.3 — custom
+        // methods declared with `fn name(self, ...)` inside the
+        // `type`). If nothing matches: gradual (None), like Any.
         Type::Nominal(id) => {
-            // Fase 10.3+ — ORM static methods sobre nominal con
-            // `@table`. Antes del lookup de métodos custom para que
-            // `User.where(...)`/`.all(...)`/`.insert(...)` tipen aunque
-            // el user no haya declarado esos métodos explícitamente.
-            // El dispatch runtime los maneja desde `orm_dispatch_*`.
+            // Phase 10.3+ — ORM static methods on nominal with
+            // `@table`. Before the custom methods lookup so that
+            // `User.where(...)`/`.all(...)`/`.insert(...)` type even if
+            // the user has not declared those methods explicitly.
+            // The runtime dispatch handles them from `orm_dispatch_*`.
             if ctx.types.table_metadata(*id).is_some() {
                 let row_ty = Type::Nominal(*id);
                 match method {
                     "all" => {
                         check_method_arity(ctx, method, args_ty, 1, span);
-                        // arg 0 debe ser DbConn (compatible con Any
-                        // también para escape gradual). Skipeamos
-                        // chequeo estricto para que `User.all(db)`
-                        // con db: Any siga compilando.
-                        // Fase 10.b: el evaluator devuelve Future, el
-                        // checker lo refleja para que `.await?` tipe OK.
+                        // arg 0 must be DbConn (also compatible with Any
+                        // for gradual escape). We skip
+                        // strict checking so `User.all(db)`
+                        // with db: Any keeps compiling.
+                        // Phase 10.b: the evaluator returns Future, the
+                        // checker mirrors it so `.await?` types OK.
                         return Some(Type::Future(Box::new(Type::Result {
                             ok: Box::new(Type::List(Box::new(row_ty))),
                             err: Box::new(Type::Str),
@@ -5193,32 +5189,32 @@ fn infer_method_call(
                     }
                     "where" => {
                         check_method_arity(ctx, method, args_ty, 1, span);
-                        // arg 0 es una closure fn(Row) -> Bool. Skip
-                        // chequeo del tipo de la closure por ahora —
-                        // el evaluator valida en runtime.
+                        // arg 0 is a closure fn(Row) -> Bool. Skip
+                        // closure type check for now —
+                        // the evaluator validates at runtime.
                         return Some(Type::QueryBuilder(Box::new(row_ty)));
                     }
                     "group_by" => {
-                        // Fase 10.b.14 — `User.group_by(...)` directo
-                        // (sin .where previo) devuelve Aggregated<User>.
-                        // Mismo shape que `User.where(...).group_by(...)`
-                        // pero saltea el QueryBuilder intermedio.
+                        // Phase 10.b.14 — `User.group_by(...)` directly
+                        // (without prior .where) returns Aggregated<User>.
+                        // Same shape as `User.where(...).group_by(...)`
+                        // but skips the intermediate QueryBuilder.
                         check_method_arity(ctx, method, args_ty, 1, span);
                         return Some(Type::Aggregated(Box::new(row_ty)));
                     }
                     "insert" => {
                         check_method_arity(ctx, method, args_ty, 2, span);
-                        // Fase 10.b: ditto — evaluator devuelve Future.
+                        // Phase 10.b: ditto — evaluator returns Future.
                         return Some(Type::Future(Box::new(Type::Result {
                             ok: Box::new(row_ty),
                             err: Box::new(Type::Str),
                         })));
                     }
                     // v0.10.27 — F1 bulk insert: `Type.bulk_insert(rows,
-                    // db)` o `Type.bulk_insert(rows, db, batch_size)`.
-                    // Inserta N rows en batches con VALUES (...)
-                    // multi-tuple. Devuelve total rows insertadas.
-                    // Aridad acepta 2 (default batch) o 3 (batch custom).
+                    // db)` or `Type.bulk_insert(rows, db, batch_size)`.
+                    // Inserts N rows in batches with multi-tuple
+                    // VALUES (...). Returns total rows inserted.
+                    // Arity accepts 2 (default batch) or 3 (custom batch).
                     "bulk_insert" => {
                         let n = args_ty.len();
                         if n != 2 && n != 3 {
@@ -5237,35 +5233,35 @@ fn infer_method_call(
                         })));
                     }
                     _ => {
-                        // Fall through al lookup de métodos custom
-                        // por si el user definió `User.helper(...)`.
+                        // Fall through to the custom methods lookup
+                        // in case the user defined `User.helper(...)`.
                     }
                 }
             }
-            // Fase 10.b.7 — navigation methods sobre Nominal con
-            // @table. Si el method matchea el nombre Fitz de un field
-            // con `@belongs_to`/`@has_one`/`@has_many`, lo tipamos como
-            // el Future apropiado (paralelo a `orm_instance_navigate`
-            // del evaluator). Esto cubre `post.user(db).await?` con
-            // tipo concreto `User` adentro del Ok, sin requerir
-            // anotación destino.
+            // Phase 10.b.7 — navigation methods on Nominal with
+            // @table. If the method matches the Fitz name of a field
+            // with `@belongs_to`/`@has_one`/`@has_many`, we type it as
+            // the appropriate Future (parallel to `orm_instance_navigate`
+            // in the evaluator). This covers `post.user(db).await?` with
+            // concrete `User` type inside the Ok, without requiring
+            // a destination annotation.
             //
-            // Limitación del checker: no distingue receiver-type
-            // (Type::Nominal del Ident estático `User`) de receiver-
-            // instance (Type::Nominal de una Instance). Si el user
-            // hace `User.profile(db)` estático con un name que matchea
-            // una relation, el checker dice OK pero el runtime/codegen
-            // lo rechaza porque navigation requiere Instance. Caso
-            // patológico — los names de static ORM methods (all/where/
-            // insert/etc.) no pueden ser names de field del type.
+            // Checker limitation: does not distinguish receiver-type
+            // (Type::Nominal of the static `User` Ident) from receiver-
+            // instance (Type::Nominal of an Instance). If the user
+            // does static `User.profile(db)` with a name matching
+            // a relation, the checker says OK but the runtime/codegen
+            // rejects it because navigation requires Instance. Pathological
+            // case — the names of static ORM methods (all/where/
+            // insert/etc.) cannot be field names of the type.
             if let Some(meta) = ctx.types.table_metadata(*id) {
                 if let Some(rel) = meta.relations.get(method).cloned() {
-                    // Fase 10.b.13 — 2 paths:
-                    //   - args.is_empty() → QueryBuilder<Target> para
-                    //     chain (recomendado). User encadena .where/.
+                    // Phase 10.b.13 — 2 paths:
+                    //   - args.is_empty() → QueryBuilder<Target> for
+                    //     chain (recommended). User chains .where/.
                     //     limit/.all/.first/etc.
-                    //   - args.len() == 1 (DbConn) → terminal directo
-                    //     (backward compat con 10.b.7).
+                    //   - args.len() == 1 (DbConn) → direct terminal
+                    //     (backward compat with 10.b.7).
                     if args_ty.len() > 1 {
                         ctx.error_at(
                             span,
@@ -5276,17 +5272,17 @@ fn infer_method_call(
                             ),
                         );
                     }
-                    // Resolver el target type del env por nombre Fitz.
+                    // Resolve target type from env by Fitz name.
                     let target_id_opt = ctx.types.lookup(&rel.target_type);
                     let target_ty = match target_id_opt {
                         Some(tid) => Type::Nominal(tid),
                         None => Type::Any,
                     };
-                    // Path nuevo (sin db) → QueryBuilder<Target>.
+                    // New path (no db) → QueryBuilder<Target>.
                     if args_ty.is_empty() {
                         return Some(Type::QueryBuilder(Box::new(target_ty)));
                     }
-                    // Path legacy (con db) → terminal directo.
+                    // Legacy path (with db) → direct terminal.
                     let ok_ty = match rel.kind {
                         RelationKind::BelongsTo
                         | RelationKind::HasOne
@@ -5300,15 +5296,15 @@ fn infer_method_call(
                 }
             }
             let info = ctx.types.info(*id);
-            // 8-pyi.C: field-as-callable (Function type registrado
-            // como field por el loader de stubs `.pyi`).
+            // 8-pyi.C: field-as-callable (Function type registered
+            // as a field by the `.pyi` stubs loader).
             if let Some(fields) = info.fields.as_ref() {
                 if let Some(f) = fields.iter().find(|f| f.name == method).cloned() {
                     if let Type::Function { params, ret } = &f.type_ {
-                        // 8-pyi.C: para nominales sintéticos del
-                        // loader (`__pyi_module_<binding>`), mostramos
-                        // solo el binding en mensajes de error — el
-                        // prefijo es detalle interno.
+                        // 8-pyi.C: for synthetic nominals from the
+                        // loader (`__pyi_module_<binding>`), we show
+                        // only the binding in error messages — the
+                        // prefix is internal detail.
                         let nominal_name = info
                             .name
                             .strip_prefix("__pyi_module_")
@@ -5329,9 +5325,9 @@ fn infer_method_call(
                         }
                         for (i, (got, expected)) in args_ty.iter().zip(params.iter()).enumerate() {
                             if !is_compatible(got, expected) {
-                                // U2 (v0.10.15) — usar el helper canónico
-                                // FitzError::type_mismatch (U1) en lugar
-                                // del format!() ad-hoc.
+                                // U2 (v0.10.15) — use the canonical helper
+                                // FitzError::type_mismatch (U1) instead of
+                                // the ad-hoc format!().
                                 ctx.errors.push(FitzError::type_mismatch(
                                     span.line,
                                     span.column,
@@ -5347,16 +5343,16 @@ fn infer_method_call(
             }
             let info = ctx.types.info(*id);
             if let Some(nm) = info.methods.iter().find(|m| m.name == method).cloned() {
-                // Mini-tanda Vm — métodos privados (`_method`) solo
-                // accesibles desde adentro de métodos del MISMO type.
-                // Aplica a métodos de instancia y estáticos por igual.
+                // Mini-batch Vm — private methods (`_method`) only
+                // accessible from inside methods of the SAME type.
+                // Applies to instance and static methods equally.
                 if is_private_field(method) && ctx.current_type != Some(*id) {
                     ctx.error_at(span, format!(
                         "el método `{}.{}` es privado (prefijo `_`); solo accesible desde métodos del propio tipo `{}`",
                         info.name, method, info.name
                     ));
                 }
-                // Aridad.
+                // Arity.
                 if args_ty.len() != nm.params.len() {
                     ctx.error_at(
                         span,
@@ -5375,8 +5371,8 @@ fn infer_method_call(
                     };
                     return Some(ret);
                 }
-                // Tipos de args (compatible_with semánticamente).
-                // U2 (v0.10.15) — usar FitzError::type_mismatch (U1).
+                // Arg types (semantically compatible_with).
+                // U2 (v0.10.15) — use FitzError::type_mismatch (U1).
                 for (i, (got, expected)) in args_ty.iter().zip(nm.params.iter()).enumerate() {
                     if !is_compatible(got, expected) {
                         ctx.errors.push(FitzError::type_mismatch(
@@ -5395,23 +5391,23 @@ fn infer_method_call(
                 };
                 Some(ret)
             } else {
-                // Método inexistente sobre nominal → gradual (Any).
-                // El evaluator emitirá error en runtime; el codegen
-                // también. Acá no levantamos para no duplicar.
+                // Non-existent method on nominal → gradual (Any).
+                // The evaluator will emit an error at runtime; codegen
+                // too. Here we don't fire to avoid duplicating.
                 None
             }
         }
-        // Mini-tanda Ir — métodos sobre Range. Range expone el subset
-        // de iteradores que tiene sentido (enumerate/zip/chain) + `len`.
-        // El evaluator materializa el Range a List<Int> y delega.
+        // Mini-batch Ir — methods on Range. Range exposes the subset
+        // of iterators that make sense (enumerate/zip/chain) + `len`.
+        // The evaluator materializes the Range to List<Int> and delegates.
         Type::Range => Some(infer_range_method(ctx, method, args_ty, span)),
-        // Fase 9.w.2 + 9.w.2-wsconn-bidir — `WsConn<T>` o
-        // `WsConn<In, Out>`. Métodos paramétricos:
-        // `recv() -> Result<RECV>` (Err si conn cerrada),
-        // `send(msg: SEND) -> Result<Null>` (Err si send falló),
-        // `broadcast(msg: SEND) -> Result<Null>` (a todos los conn del
-        // endpoint, incluyendo el sender),
-        // `close() -> Null` (cierra la conn).
+        // Phase 9.w.2 + 9.w.2-wsconn-bidir — `WsConn<T>` or
+        // `WsConn<In, Out>`. Parametric methods:
+        // `recv() -> Result<RECV>` (Err if conn closed),
+        // `send(msg: SEND) -> Result<Null>` (Err if send failed),
+        // `broadcast(msg: SEND) -> Result<Null>` (to all conns of the
+        // endpoint, including the sender),
+        // `close() -> Null` (closes the conn).
         Type::WsConn { recv, send } => {
             let recv = (**recv).clone();
             let send = (**send).clone();
@@ -5419,48 +5415,48 @@ fn infer_method_call(
                 ctx, &recv, &send, method, args_ty, span,
             ))
         }
-        // Mini-tanda Mb9 — métodos sobre primitivos Int/Float.
+        // Mini-batch Mb9 — methods on Int/Float primitives.
         Type::Int => Some(infer_int_method(ctx, method, args_ty, span)),
         Type::Float => Some(infer_float_method(ctx, method, args_ty, span)),
-        // Fase 10.3+ — métodos del ORM sobre `QueryBuilder<Row>`.
-        // Chain methods (where/order_by/limit/offset/group_by) preservan
-        // el row type. Terminales rompen la chain devolviendo
-        // `Result<...>` con el shape apropiado.
+        // Phase 10.3+ — ORM methods on `QueryBuilder<Row>`.
+        // Chain methods (where/order_by/limit/offset/group_by) preserve
+        // the row type. Terminals break the chain returning
+        // `Result<...>` with the appropriate shape.
         Type::QueryBuilder(row) => {
             let row_ty = (**row).clone();
             Some(infer_query_builder_method(
                 ctx, &row_ty, method, args_ty, span,
             ))
         }
-        // Fase 10.b.14 — `Aggregated<Row>`: QueryBuilder post-group_by.
-        // Los aggregates (sum/avg/min/max/count) cambian shape a
-        // `Future<Result<List<Map<Str, Any>>>>` con cada row = un
-        // grupo + su aggregate. Chain methods (where/order_by/limit/
-        // offset/group_by) continúan como Aggregated. all/first/
-        // update/delete se rechazan (no tiene sentido sobre GROUP BY).
+        // Phase 10.b.14 — `Aggregated<Row>`: QueryBuilder post-group_by.
+        // Aggregates (sum/avg/min/max/count) change shape to
+        // `Future<Result<List<Map<Str, Any>>>>` with each row = a
+        // group + its aggregate. Chain methods (where/order_by/limit/
+        // offset/group_by) continue as Aggregated. all/first/
+        // update/delete are rejected (don't make sense over GROUP BY).
         Type::Aggregated(row) => {
             let row_ty = (**row).clone();
             Some(infer_aggregated_method(ctx, &row_ty, method, args_ty, span))
         }
-        // Fase 10.7 (v0.10.14) — métodos del driver Postgres sobre
-        // `DbConn`. `query/exec` escape hatch SQL crudo, `close/
-        // is_closed` lifecycle, `transaction` orquesta una tx con
-        // commit/rollback automático.
+        // Phase 10.7 (v0.10.14) — Postgres driver methods on
+        // `DbConn`. `query/exec` raw SQL escape hatch, `close/
+        // is_closed` lifecycle, `transaction` orchestrates a tx with
+        // automatic commit/rollback.
         Type::DbConn => Some(infer_db_conn_method(ctx, method, args_ty, span)),
-        // v0.10.22 — `DbRow` (row crudo del query result) expone
-        // `.get(col: Str) -> Result<Any>` para extraer fields. El
-        // tipo retornado es Any porque el shape del row es dinámico
-        // (depende del SELECT). El user lo coerciona con anotación
+        // v0.10.22 — `DbRow` (raw row of the query result) exposes
+        // `.get(col: Str) -> Result<Any>` to extract fields. The
+        // returned type is Any because the row's shape is dynamic
+        // (depends on the SELECT). The user coerces with an annotation
         // (`let id: Int = row.get("id")?`).
         Type::DbRow => Some(infer_db_row_method(ctx, method, args_ty, span)),
         // v0.10.24 — Date/DateTime/Uuid instance methods.
         Type::Date => Some(infer_date_method(ctx, method, args_ty, span)),
         Type::DateTime => Some(infer_datetime_method(ctx, method, args_ty, span)),
         Type::Uuid => Some(infer_uuid_method(ctx, method, args_ty, span)),
-        // Fase 12.2.a — `Secret<T>.expose() -> T` desempaca el inner.
-        // Único método del tipo; sin args. El checker chequea aridad
-        // y devuelve el inner T tipado (no Any) para que el resto del
-        // pipeline pueda razonar con tipo concreto.
+        // Phase 12.2.a — `Secret<T>.expose() -> T` unwraps the inner.
+        // Only method of the type; no args. The checker checks arity
+        // and returns the typed inner T (not Any) so the rest of the
+        // pipeline can reason with a concrete type.
         Type::Secret(inner) => match method {
             "expose" => {
                 if !args_ty.is_empty() {
@@ -5487,9 +5483,9 @@ fn infer_method_call(
             }
         },
         other => {
-            // Tipos sin métodos built-in: `42.foo()` y similares.
-            // El evaluator también corta, acá nos adelantamos con
-            // mensaje específico.
+            // Types without built-in methods: `42.foo()` and similar.
+            // The evaluator also stops; here we get ahead with a
+            // specific message.
             ctx.error_at(
                 span,
                 format!(
@@ -5503,16 +5499,16 @@ fn infer_method_call(
     }
 }
 
-/// Fase 10.3+ — signatures de los métodos del ORM sobre `QueryBuilder<Row>`.
+/// Phase 10.3+ — signatures of ORM methods on `QueryBuilder<Row>`.
 ///
-/// Chain methods (preservan el row type):
+/// Chain methods (preserve the row type):
 ///   - `where(closure) -> QueryBuilder<Row>`
 ///   - `order_by(closure) -> QueryBuilder<Row>`
 ///   - `limit(n: Int) -> QueryBuilder<Row>`
 ///   - `offset(n: Int) -> QueryBuilder<Row>`
-///   - `group_by(closure) -> QueryBuilder<Row>` (terminal vía .all)
+///   - `group_by(closure) -> QueryBuilder<Row>` (terminal via .all)
 ///
-/// Terminales (rompen la chain):
+/// Terminals (break the chain):
 ///   - `all(db) -> Result<List<Row>>`
 ///   - `first(db) -> Result<Row>`
 ///   - `count(db) -> Result<Int>`
@@ -5520,8 +5516,8 @@ fn infer_method_call(
 ///   - `update(db, changes: Map) -> Result<Int>` (rows affected)
 ///   - `delete(db) -> Result<Int>` (rows affected)
 ///
-/// Args: skipeamos chequeo estricto para escape gradual. El evaluator
-/// valida en runtime con mensajes claros.
+/// Args: we skip strict checking for gradual escape. The evaluator
+/// validates at runtime with clear messages.
 fn infer_query_builder_method(
     ctx: &mut CheckCtx,
     row: &Type,
@@ -5529,9 +5525,9 @@ fn infer_query_builder_method(
     args_ty: &[Type],
     span: Span,
 ) -> Type {
-    // Fase 10.b: los terminales son async — devuelven Future para
-    // que `.await?` tipe contra el shape correcto. Chain methods son
-    // sync (devuelven QueryBuilder directo).
+    // Phase 10.b: terminals are async — return Future so that
+    // `.await?` types against the correct shape. Chain methods are
+    // sync (return QueryBuilder directly).
     let future_result_int = || {
         Type::Future(Box::new(Type::Result {
             ok: Box::new(Type::Int),
@@ -5547,8 +5543,8 @@ fn infer_query_builder_method(
     let qb = || Type::QueryBuilder(Box::new(row.clone()));
     let aggregated = || Type::Aggregated(Box::new(row.clone()));
     match method {
-        // Chain methods — preservan QueryBuilder<Row>, EXCEPTO
-        // `.group_by(...)` que muta a Aggregated<Row> (10.b.14).
+        // Chain methods — preserve QueryBuilder<Row>, EXCEPT
+        // `.group_by(...)` which mutates to Aggregated<Row> (10.b.14).
         "where" | "order_by" => {
             check_method_arity(ctx, method, args_ty, 1, span);
             qb()
@@ -5561,17 +5557,17 @@ fn infer_query_builder_method(
             check_method_arity(ctx, method, args_ty, 1, span);
             qb()
         }
-        // Fase 10.b.15 — `.preload("name")`: chain method que registra
-        // una relation a precargar. Preserva el row type del
-        // QueryBuilder. Args: 1 string literal (validado en codegen
-        // contra meta.relations del row). El runtime ejecuta el batch
-        // post-deserialize en `.all`/`.first`.
+        // Phase 10.b.15 — `.preload("name")`: chain method that registers
+        // a relation to preload. Preserves the QueryBuilder's row type.
+        // Args: 1 string literal (validated in codegen against
+        // meta.relations of the row). The runtime executes the batch
+        // post-deserialize in `.all`/`.first`.
         "preload" => {
             check_method_arity(ctx, method, args_ty, 1, span);
             qb()
         }
-        // Terminales async — envueltos en Future para que `.await?`
-        // tipe correcto.
+        // Async terminals — wrapped in Future so `.await?`
+        // types correctly.
         "all" => {
             check_method_arity(ctx, method, args_ty, 1, span);
             Type::Future(Box::new(Type::Result {
@@ -5591,11 +5587,11 @@ fn infer_query_builder_method(
             future_result_int()
         }
         "sum" | "avg" | "min" | "max" => {
-            // 2 args: closure de selección + db
+            // 2 args: selection closure + db
             check_method_arity(ctx, method, args_ty, 2, span);
-            // `avg` siempre retorna Float; sum/min/max dependen del
-            // tipo de columna. Para MVP devolvemos Float (compatible
-            // con Int via promoción en el caller).
+            // `avg` always returns Float; sum/min/max depend on the
+            // column type. For MVP we return Float (compatible
+            // with Int via promotion in the caller).
             future_result_float()
         }
         "update" => {
@@ -5626,22 +5622,22 @@ fn infer_query_builder_method(
     }
 }
 
-/// Fase 10.b.14 — signatures de los métodos sobre `Aggregated<Row>`
+/// Phase 10.b.14 — signatures of methods on `Aggregated<Row>`
 /// (QueryBuilder post-`.group_by(...)`).
 ///
-/// Chain methods que se mantienen como `Aggregated<Row>`:
+/// Chain methods that stay as `Aggregated<Row>`:
 ///   - `where(closure)`, `order_by(closure)`, `limit(n)`, `offset(n)`
-///   - `group_by(closure)` (acumular más cols al GROUP BY)
+///   - `group_by(closure)` (accumulate more cols to GROUP BY)
 ///
-/// Terminales aggregate (devuelven `Future<Result<List<Map<Str, Any>>>>`):
+/// Aggregate terminals (return `Future<Result<List<Map<Str, Any>>>>`):
 ///   - `count(db)`, `sum/avg/min/max(closure, db)`.
 ///
-/// Cada item del List es un Map con keys = group_by cols más nombre
-/// del aggregate ("count", "sum", "avg", "min", "max"), values = los
-/// datos del grupo.
+/// Each item of the List is a Map with keys = group_by cols plus the
+/// aggregate name ("count", "sum", "avg", "min", "max"), values = the
+/// group's data.
 ///
-/// Rechazados sobre Aggregated (no tienen sentido sobre GROUP BY):
-///   - `all/first/update/delete` → error claro.
+/// Rejected on Aggregated (don't make sense over GROUP BY):
+///   - `all/first/update/delete` → clear error.
 fn infer_aggregated_method(
     ctx: &mut CheckCtx,
     row: &Type,
@@ -5651,7 +5647,7 @@ fn infer_aggregated_method(
 ) -> Type {
     let aggregated = || Type::Aggregated(Box::new(row.clone()));
     // Shape común de los aggregates con group_by: List<Map<Str, Any>>.
-    // Cada item del List es un row {group_col: value, agg_name: value}.
+    // Each item of the List is a row {group_col: value, agg_name: value}.
     let future_result_list_map = || {
         Type::Future(Box::new(Type::Result {
             ok: Box::new(Type::List(Box::new(Type::Map(
@@ -5662,7 +5658,7 @@ fn infer_aggregated_method(
         }))
     };
     match method {
-        // Chain methods — preservan Aggregated<Row>.
+        // Chain methods — preserve Aggregated<Row>.
         "where" | "order_by" | "group_by" => {
             check_method_arity(ctx, method, args_ty, 1, span);
             aggregated()
@@ -5671,7 +5667,7 @@ fn infer_aggregated_method(
             check_method_arity(ctx, method, args_ty, 1, span);
             aggregated()
         }
-        // Terminales aggregate: shape List<Map<Str, Any>>.
+        // Aggregate terminals: shape List<Map<Str, Any>>.
         "count" => {
             check_method_arity(ctx, method, args_ty, 1, span);
             future_result_list_map()
@@ -5680,7 +5676,7 @@ fn infer_aggregated_method(
             check_method_arity(ctx, method, args_ty, 2, span);
             future_result_list_map()
         }
-        // Sin sentido sobre Aggregated.
+        // No sense on Aggregated.
         "all" | "first" | "update" | "delete" => {
             ctx.error_at(
                 span,
@@ -5706,8 +5702,8 @@ fn infer_aggregated_method(
     }
 }
 
-/// Mini-tanda Mb9 — signatures de métodos sobre primitivos Int/Float.
-/// Lista acotada por simplicidad; ampliar si entra demanda.
+/// Mini-batch Mb9 — signatures of methods on Int/Float primitives.
+/// Bounded list for simplicity; expand if demand appears.
 fn infer_int_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "abs" => {
@@ -5772,9 +5768,9 @@ fn infer_float_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
     }
 }
 
-/// Mini-tanda Ir — signatures de métodos built-in sobre `Range`. El
-/// Range conceptualmente es un `List<Int>` lazy; los métodos coinciden
-/// con los de `List<Int>` para enumerate/zip/chain, más `len`.
+/// Mini-batch Ir — signatures of built-in methods on `Range`. The
+/// Range is conceptually a lazy `List<Int>`; the methods coincide
+/// with those of `List<Int>` for enumerate/zip/chain, plus `len`.
 fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "enumerate" => {
@@ -5834,8 +5830,8 @@ fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
             check_method_arity(ctx, "len", args_ty, 0, span);
             Type::Int
         }
-        // Mini-tanda Rg — `step_by(n)`: materializa el rango con step `n`.
-        // `n: Int` (> 0 validado en runtime). Devuelve `List<Int>`.
+        // Mini-batch Rg — `step_by(n)`: materializes the range with step `n`.
+        // `n: Int` (> 0 validated at runtime). Returns `List<Int>`.
         "step_by" => {
             if check_method_arity(ctx, "step_by", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
@@ -5863,16 +5859,16 @@ fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
     }
 }
 
-/// Valida aridad de un método built-in. Devuelve `true` si la
-/// aridad coincide (para que el caller pueda saltarse validaciones
-/// extra sobre argumentos que no existen). Si falla, acumula error
-/// y devuelve `false`.
-/// Mini-tanda Vp — predicado de visibilidad: un campo se considera
-/// **privado** si su nombre arranca con `_`. La convención es la de
-/// Python (no enforced en runtime), pero Fitz la valida estáticamente
-/// en el checker: `instance._field` y struct lits `{ _field: ... }`
-/// desde afuera del type body son errores. Adentro de métodos del
-/// MISMO tipo (`current_type == Some(id)`) todo es accesible.
+/// Validates arity of a built-in method. Returns `true` if the
+/// arity matches (so the caller can skip extra validations on
+/// arguments that don't exist). If it fails, accumulates the error
+/// and returns `false`.
+/// Mini-batch Vp — visibility predicate: a field is considered
+/// **private** if its name starts with `_`. The convention is Python's
+/// (not enforced at runtime), but Fitz validates it statically
+/// in the checker: `instance._field` and struct lits `{ _field: ... }`
+/// from outside the type body are errors. Inside methods of the
+/// SAME type (`current_type == Some(id)`), everything is accessible.
 fn is_private_field(name: &str) -> bool {
     name.starts_with('_')
 }
@@ -5900,10 +5896,10 @@ fn check_method_arity(
     }
 }
 
-/// Valida un callback unario (`fn(T) -> U`). Devuelve el `U`
-/// inferido del callback, o `Any` si el callback es Any o no
-/// validable. Si `expected_ret` es `Some(B)`, además exige que U
-/// sea compatible con B (caso típico: `.filter()` exige `Bool`).
+/// Validates a unary callback (`fn(T) -> U`). Returns the inferred
+/// `U` of the callback, or `Any` if the callback is Any or not
+/// validatable. If `expected_ret` is `Some(B)`, also requires U
+/// to be compatible with B (typical case: `.filter()` requires `Bool`).
 fn check_unary_callback(
     ctx: &mut CheckCtx,
     cb: &Type,
@@ -5926,9 +5922,9 @@ fn check_unary_callback(
                 );
                 return (**ret).clone();
             }
-            // El param del callback tiene que poder recibir un T
-            // (el tipo de los elementos). Si el callback declaró un
-            // tipo concreto incompatible, error.
+            // The callback's param must be able to receive a T
+            // (the element type). If the callback declared a
+            // concrete incompatible type, error.
             if !is_compatible(elem_ty, &params[0]) {
                 ctx.error_at(
                     span,
@@ -6028,8 +6024,8 @@ fn infer_list_method(
                 err: Box::new(Type::Str),
             }
         }
-        // Mini-tanda Lx — predicados funcionales sobre List<T>.
-        // Todos toman `fn(T) -> Bool`. Devuelven Bool/Int/Result<Int>.
+        // Mini-batch Lx — functional predicates over List<T>.
+        // All take `fn(T) -> Bool`. Return Bool/Int/Result<Int>.
         "any" | "all" => {
             if check_method_arity(ctx, method, args_ty, 1, span) {
                 check_unary_callback(ctx, &args_ty[0], t, method, Some(&Type::Bool), span);
@@ -6051,8 +6047,8 @@ fn infer_list_method(
                 err: Box::new(Type::Str),
             }
         }
-        // Mini-tanda Ex2 — `flat_map(fn(T) -> List<U>)` → `List<U>`.
-        // El callback debe devolver una lista; inferimos U del ret type.
+        // Mini-batch Ex2 — `flat_map(fn(T) -> List<U>)` → `List<U>`.
+        // The callback must return a list; we infer U from the ret type.
         "flat_map" => {
             if !check_method_arity(ctx, "flat_map", args_ty, 1, span) {
                 return Type::List(Box::new(Type::Any));
@@ -6108,7 +6104,7 @@ fn infer_list_method(
             };
             Type::List(Box::new(inner_u))
         }
-        // Mini-tanda Ex2 — `first()` / `last()` → `Result<T>`.
+        // Mini-batch Ex2 — `first()` / `last()` → `Result<T>`.
         "first" | "last" => {
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::Result {
@@ -6116,11 +6112,11 @@ fn infer_list_method(
                 err: Box::new(Type::Str),
             }
         }
-        // Mini-tanda Mb2 — reducciones numéricas sobre `List<Int>`
-        // o `List<Float>`. `min`/`max` devuelven `Result<T>` porque
-        // la lista puede estar vacía. `sum` devuelve `T` (0/0.0
-        // como sentinel para vacío). Tipos no numéricos → error.
-        // `List<Any>` pasa gradual (Any).
+        // Mini-batch Mb2 — numeric reductions on `List<Int>`
+        // or `List<Float>`. `min`/`max` return `Result<T>` because
+        // the list can be empty. `sum` returns `T` (0/0.0 as
+        // sentinel for empty). Non-numeric types → error.
+        // `List<Any>` passes gradual (Any).
         "min" | "max" => {
             check_method_arity(ctx, method, args_ty, 0, span);
             match t {
@@ -6154,8 +6150,8 @@ fn infer_list_method(
                 }
             }
         }
-        // Mini-tanda Mb3 — `product()` análogo a `sum`. Solo Int/Float.
-        // Vacío → 1/1.0 (sentinel).
+        // Mini-batch Mb3 — `product()` analogous to `sum`. Only Int/Float.
+        // Empty → 1/1.0 (sentinel).
         "product" => {
             check_method_arity(ctx, "product", args_ty, 0, span);
             match t {
@@ -6170,9 +6166,9 @@ fn infer_list_method(
                 }
             }
         }
-        // Mini-tanda Mb3 — `reduce(init, fn(acc, x) -> Acc) -> Acc`.
-        // Fold canónico funcional. El init tipa Acc; el callback es
-        // `fn(Acc, T) -> Acc`; el ret es Acc.
+        // Mini-batch Mb3 — `reduce(init, fn(acc, x) -> Acc) -> Acc`.
+        // Canonical functional fold. The init types Acc; the callback is
+        // `fn(Acc, T) -> Acc`; the ret is Acc.
         "reduce" => {
             if !check_method_arity(ctx, "reduce", args_ty, 2, span) {
                 return Type::Any;
@@ -6181,8 +6177,8 @@ fn infer_list_method(
             check_binary_callback(ctx, &args_ty[1], &acc_ty, t, "reduce", Some(&acc_ty), span);
             acc_ty
         }
-        // Mini-tanda Mb3 — `to_map()`: convierte `List<(K, V)>` →
-        // `Map<K, V>`. T debe ser `Tuple` de aridad 2; otros → error.
+        // Mini-batch Mb3 — `to_map()`: converts `List<(K, V)>` →
+        // `Map<K, V>`. T must be a `Tuple` of arity 2; others → error.
         "to_map" => {
             check_method_arity(ctx, "to_map", args_ty, 0, span);
             match t {
@@ -6199,12 +6195,12 @@ fn infer_list_method(
                 }
             }
         }
-        // Mini-tanda Mb4 — `unique()`: dedup preservando orden. Cualquier T.
+        // Mini-batch Mb4 — `unique()`: dedup preserving order. Any T.
         "unique" => {
             check_method_arity(ctx, "unique", args_ty, 0, span);
             Type::List(Box::new(t.clone()))
         }
-        // Mini-tanda Mb4 — `partition(pred)`: divide en dos listas.
+        // Mini-batch Mb4 — `partition(pred)`: splits into two lists.
         // Callback `fn(T) -> Bool`. Ret: `(List<T>, List<T>)`.
         "partition" => {
             if check_method_arity(ctx, "partition", args_ty, 1, span) {
@@ -6215,8 +6211,8 @@ fn infer_list_method(
                 Type::List(Box::new(t.clone())),
             ])
         }
-        // Mini-tanda Mb5 — `group_by(fn(T) -> K)`: agrupa por key.
-        // Output: `Map<K, List<T>>`. K se infiere del ret type del cb.
+        // Mini-batch Mb5 — `group_by(fn(T) -> K)`: groups by key.
+        // Output: `Map<K, List<T>>`. K is inferred from the cb's ret type.
         "group_by" => {
             if !check_method_arity(ctx, "group_by", args_ty, 1, span) {
                 return Type::Map(
@@ -6227,9 +6223,9 @@ fn infer_list_method(
             let k_ty = check_unary_callback(ctx, &args_ty[0], t, "group_by", None, span);
             Type::Map(Box::new(k_ty), Box::new(Type::List(Box::new(t.clone()))))
         }
-        // Mini-tanda Mb5 — `zip_with(ys, fn(T, U) -> V)`: combina zip
-        // + map. Ret: `List<V>`. U sale del tipo de elementos de `ys`;
-        // V del ret type del callback.
+        // Mini-batch Mb5 — `zip_with(ys, fn(T, U) -> V)`: combines zip
+        // + map. Ret: `List<V>`. U comes from the element type of `ys`;
+        // V from the callback's ret type.
         "zip_with" => {
             if !check_method_arity(ctx, "zip_with", args_ty, 2, span) {
                 return Type::List(Box::new(Type::Any));
@@ -6296,9 +6292,9 @@ fn infer_list_method(
             };
             Type::List(Box::new(v_ty))
         }
-        // Mini-tanda Mb5 — `max_by`/`min_by(fn(T) -> Int)`: extrae
-        // ranking Int por elemento y devuelve el item con max/min.
-        // Vacía → `Err`. Útil para tipos no numéricos.
+        // Mini-batch Mb5 — `max_by`/`min_by(fn(T) -> Int)`: extracts
+        // Int ranking per element and returns the item with max/min.
+        // Empty → `Err`. Useful for non-numeric types.
         "max_by" | "min_by" => {
             if check_method_arity(ctx, method, args_ty, 1, span) {
                 check_unary_callback(ctx, &args_ty[0], t, method, Some(&Type::Int), span);
@@ -6308,9 +6304,9 @@ fn infer_list_method(
                 err: Box::new(Type::Str),
             }
         }
-        // Mini-tanda Mb6 — `scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
-        // Fold con outputs intermedios. Mismo shape que reduce salvo
-        // que retorna una List<Acc> con cada estado del acc.
+        // Mini-batch Mb6 — `scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
+        // Fold with intermediate outputs. Same shape as reduce except
+        // it returns a List<Acc> with each state of the acc.
         "scan" => {
             if !check_method_arity(ctx, "scan", args_ty, 2, span) {
                 return Type::List(Box::new(Type::Any));
@@ -6319,8 +6315,8 @@ fn infer_list_method(
             check_binary_callback(ctx, &args_ty[1], &acc_ty, t, "scan", Some(&acc_ty), span);
             Type::List(Box::new(acc_ty))
         }
-        // Mini-tanda Mb6 — `windows(n) -> List<List<T>>`. Cada ventana
-        // es una List<T> con `n` elementos consecutivos.
+        // Mini-batch Mb6 — `windows(n) -> List<List<T>>`. Each window
+        // is a List<T> with `n` consecutive elements.
         "windows" => {
             if check_method_arity(ctx, "windows", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
@@ -6335,8 +6331,8 @@ fn infer_list_method(
             }
             Type::List(Box::new(Type::List(Box::new(t.clone()))))
         }
-        // Mini-tanda Mb9 — `split_at(i) -> (List<T>, List<T>)`:
-        // divide en `i`, clamp safe (paralelo a Str.split_at de Mb4).
+        // Mini-batch Mb9 — `split_at(i) -> (List<T>, List<T>)`:
+        // splits at `i`, clamp safe (parallel to Mb4's Str.split_at).
         "split_at" => {
             if check_method_arity(ctx, "split_at", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
@@ -6354,8 +6350,8 @@ fn infer_list_method(
                 Type::List(Box::new(t.clone())),
             ])
         }
-        // Mini-tanda Mb8 — `starts_with(prefix)` / `ends_with(suffix)`:
-        // arg `List<T>`, devuelven `Bool`.
+        // Mini-batch Mb8 — `starts_with(prefix)` / `ends_with(suffix)`:
+        // arg `List<T>`, return `Bool`.
         "starts_with" | "ends_with" => {
             if check_method_arity(ctx, method, args_ty, 1, span) {
                 match args_ty[0].base() {
@@ -6388,8 +6384,8 @@ fn infer_list_method(
             }
             Type::Bool
         }
-        // Mini-tanda Mb8 — `insert_at(i, v) -> List<T>`: idx Int, v
-        // compatible con T.
+        // Mini-batch Mb8 — `insert_at(i, v) -> List<T>`: idx Int, v
+        // compatible with T.
         "insert_at" => {
             if check_method_arity(ctx, "insert_at", args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
@@ -6414,7 +6410,7 @@ fn infer_list_method(
             }
             Type::List(Box::new(t.clone()))
         }
-        // Mini-tanda Mb8 — `remove_at(i) -> List<T>`: idx Int.
+        // Mini-batch Mb8 — `remove_at(i) -> List<T>`: idx Int.
         "remove_at" => {
             if check_method_arity(ctx, "remove_at", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
@@ -6429,8 +6425,8 @@ fn infer_list_method(
             }
             Type::List(Box::new(t.clone()))
         }
-        // Mini-tanda Mb8 — `zip_to_map(values) -> Map<K, V>` donde
-        // K = T (el tipo de los elementos de self).
+        // Mini-batch Mb8 — `zip_to_map(values) -> Map<K, V>` where
+        // K = T (the element type of self).
         "zip_to_map" => {
             if !check_method_arity(ctx, "zip_to_map", args_ty, 1, span) {
                 return Type::Map(Box::new(t.clone()), Box::new(Type::Any));
@@ -6451,8 +6447,8 @@ fn infer_list_method(
             };
             Type::Map(Box::new(t.clone()), Box::new(v_ty))
         }
-        // Mini-tanda Mb7 — `take(n)` / `drop(n)` / `cycle(n)`: Int arg,
-        // devuelven `List<T>`.
+        // Mini-batch Mb7 — `take(n)` / `drop(n)` / `cycle(n)`: Int arg,
+        // return `List<T>`.
         "take" | "drop" | "cycle" => {
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
@@ -6468,13 +6464,13 @@ fn infer_list_method(
             }
             Type::List(Box::new(t.clone()))
         }
-        // Mini-tanda Mb7 — `init()` / `tail()`: sin args, `List<T>`.
+        // Mini-batch Mb7 — `init()` / `tail()`: no args, `List<T>`.
         "init" | "tail" => {
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::List(Box::new(t.clone()))
         }
-        // Mini-tanda Mb7 — `intersperse(sep)`: el sep debe ser compatible
-        // con T.
+        // Mini-batch Mb7 — `intersperse(sep)`: sep must be compatible
+        // with T.
         "intersperse" => {
             if check_method_arity(ctx, "intersperse", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], t)
@@ -6490,11 +6486,11 @@ fn infer_list_method(
             }
             Type::List(Box::new(t.clone()))
         }
-        // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
-        // devuelven `Null`. `contains(v)` devuelve `Bool`. El
-        // chequeo de "tipo comparable" para sort se hace en runtime
-        // — el checker no rechaza `List<Any>.sort()` para preservar
-        // el modelo gradual.
+        // S.3 (mini-batch S) — `sort`/`reverse` mutate in-place and
+        // return `Null`. `contains(v)` returns `Bool`. The
+        // "comparable type" check for sort is done at runtime
+        // — the checker does not reject `List<Any>.sort()` to preserve
+        // the gradual model.
         "sort" | "reverse" => {
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::Null
@@ -6514,15 +6510,15 @@ fn infer_list_method(
             }
             Type::Bool
         }
-        // Mini-tanda It — `enumerate()` devuelve `List<(Int, T)>` con
-        // pares (índice, elemento). Encaja natural con tuple
-        // destructuring del for (Md): `for (i, x) in xs.enumerate()`.
+        // Mini-batch It — `enumerate()` returns `List<(Int, T)>` with
+        // (index, element) pairs. Fits naturally with for tuple
+        // destructuring (Md): `for (i, x) in xs.enumerate()`.
         "enumerate" => {
             check_method_arity(ctx, "enumerate", args_ty, 0, span);
             Type::List(Box::new(Type::Tuple(vec![Type::Int, t.clone()])))
         }
-        // Mini-tanda It — `zip(ys)` empareja dos listas, truncando al
-        // más corto. `ys: List<U>` con U arbitrario; devuelve
+        // Mini-batch It — `zip(ys)` pairs two lists, truncating at the
+        // shorter. `ys: List<U>` with arbitrary U; returns
         // `List<(T, U)>`.
         "zip" => {
             if !check_method_arity(ctx, "zip", args_ty, 1, span) {
@@ -6545,8 +6541,8 @@ fn infer_list_method(
             };
             Type::List(Box::new(Type::Tuple(vec![t.clone(), u])))
         }
-        // Mini-tanda It — `chain(ys)` concatena. `ys` debe ser
-        // `List<T>` (mismo tipo). Devuelve `List<T>`.
+        // Mini-batch It — `chain(ys)` concatenates. `ys` must be
+        // `List<T>` (same type). Returns `List<T>`.
         "chain" => {
             if !check_method_arity(ctx, "chain", args_ty, 1, span) {
                 return Type::List(Box::new(t.clone()));
@@ -6580,8 +6576,8 @@ fn infer_list_method(
             }
             Type::List(Box::new(t.clone()))
         }
-        // Mini-tanda Mb — `flatten()` requiere `List<List<U>>` y
-        // devuelve `List<U>`. Si T no es List (o no Any), error claro.
+        // Mini-batch Mb — `flatten()` requires `List<List<U>>` and
+        // returns `List<U>`. If T is not List (or not Any), clear error.
         "flatten" => {
             if !check_method_arity(ctx, "flatten", args_ty, 0, span) {
                 return Type::Any;
@@ -6601,8 +6597,8 @@ fn infer_list_method(
                 }
             }
         }
-        // Mini-tanda Mb — `sort_by(cmp)`. El callback es `fn(T, T) -> Int`.
-        // Muta in-place, devuelve Null (paralelo a `sort`).
+        // Mini-batch Mb — `sort_by(cmp)`. The callback is `fn(T, T) -> Int`.
+        // Mutates in-place, returns Null (parallel to `sort`).
         "sort_by" => {
             if !check_method_arity(ctx, "sort_by", args_ty, 1, span) {
                 return Type::Null;
@@ -6638,7 +6634,7 @@ fn infer_list_method(
                     }
                 }
                 Type::Any => {
-                    // Gradual: callback sin tipo concreto, no chequeo.
+                    // Gradual: callback without concrete type, no check.
                 }
                 other => {
                     ctx.error_at(
@@ -6718,27 +6714,27 @@ fn infer_map_method(
             check_method_arity(ctx, "keys", args_ty, 0, span);
             Type::List(Box::new(k.clone()))
         }
-        // Mini-tanda Mb2 — `keys_sorted()`: igual que `keys()` pero
-        // ordenadas. La validación de "K es comparable" (Int/Float/
-        // Str/Bool) se hace en runtime (paralelo a `list_sort`); el
-        // checker no rechaza para preservar el modelo gradual.
+        // Mini-batch Mb2 — `keys_sorted()`: same as `keys()` but
+        // sorted. The "K is comparable" validation (Int/Float/
+        // Str/Bool) is done at runtime (parallel to `list_sort`); the
+        // checker does not reject to preserve the gradual model.
         "keys_sorted" => {
             check_method_arity(ctx, "keys_sorted", args_ty, 0, span);
             Type::List(Box::new(k.clone()))
         }
-        // Mini-tanda Mb3 — `entries()`: devuelve `List<(K, V)>` con
-        // los pares clave-valor. Inversa de `xs.to_map()`.
+        // Mini-batch Mb3 — `entries()`: returns `List<(K, V)>` with
+        // the key-value pairs. Inverse of `xs.to_map()`.
         "entries" => {
             check_method_arity(ctx, "entries", args_ty, 0, span);
             Type::List(Box::new(Type::Tuple(vec![k.clone(), v.clone()])))
         }
-        // Mini-tanda Mb4 — `invert()`: swap K ↔ V. Ret: `Map<V, K>`.
+        // Mini-batch Mb4 — `invert()`: swap K ↔ V. Ret: `Map<V, K>`.
         "invert" => {
             check_method_arity(ctx, "invert", args_ty, 0, span);
             Type::Map(Box::new(v.clone()), Box::new(k.clone()))
         }
-        // Mini-tanda Mb9 — `has_value(v) -> Bool`: chequea si v está
-        // como value en algún par del Map. Paralelo a `has(k)`.
+        // Mini-batch Mb9 — `has_value(v) -> Bool`: checks if v is
+        // a value in some pair of the Map. Parallel to `has(k)`.
         "has_value" => {
             if check_method_arity(ctx, "has_value", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], v)
@@ -6754,8 +6750,8 @@ fn infer_map_method(
             }
             Type::Bool
         }
-        // Mini-tanda Mb7 — `with(k, v) -> Map<K, V>`: functional update.
-        // Devuelve Map nuevo con `k → v`. Si `k` existe, sobreescribe.
+        // Mini-batch Mb7 — `with(k, v) -> Map<K, V>`: functional update.
+        // Returns a new Map with `k → v`. If `k` exists, overwrites.
         "with" => {
             if !check_method_arity(ctx, "with", args_ty, 2, span) {
                 return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
@@ -6782,9 +6778,9 @@ fn infer_map_method(
             }
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
-        // Mini-tanda Mb6 — `merge_with(other, fn(V, V) -> V) -> Map<K, V>`.
-        // Generaliza merge: el callback decide qué value queda cuando
-        // hay conflict.
+        // Mini-batch Mb6 — `merge_with(other, fn(V, V) -> V) -> Map<K, V>`.
+        // Generalizes merge: the callback decides which value remains when
+        // there is a conflict.
         "merge_with" => {
             if !check_method_arity(ctx, "merge_with", args_ty, 2, span) {
                 return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
@@ -6828,24 +6824,24 @@ fn infer_map_method(
             check_method_arity(ctx, "len", args_ty, 0, span);
             Type::Int
         }
-        // Mini-tanda Ex — transformaciones funcionales sobre Map.
-        // `filter(pred)` con callback `fn(K, V) -> Bool` devuelve un
-        // Map<K, V> nuevo. `map_values(fn)` con callback `fn(V) -> U`
-        // devuelve Map<K, U>.
+        // Mini-batch Ex — functional transformations over Map.
+        // `filter(pred)` with callback `fn(K, V) -> Bool` returns a
+        // new Map<K, V>. `map_values(fn)` with callback `fn(V) -> U`
+        // returns Map<K, U>.
         "filter" => {
             if check_method_arity(ctx, "filter", args_ty, 1, span) {
                 check_binary_callback(ctx, &args_ty[0], k, v, "filter", Some(&Type::Bool), span);
             }
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
-        // Mini-tanda Up — `update(k, fn(V) -> V) -> Map<K, V>`.
-        // Aplica el callback al value asociado a `k` (si existe);
-        // devuelve un Map nuevo. Si `k` no está, no-op.
+        // Mini-batch Up — `update(k, fn(V) -> V) -> Map<K, V>`.
+        // Applies the callback to the value associated with `k` (if it exists);
+        // returns a new Map. If `k` is not there, no-op.
         "update" => {
             if !check_method_arity(ctx, "update", args_ty, 2, span) {
                 return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
             }
-            // Arg 0: key, debe ser compatible con K.
+            // Arg 0: key, must be compatible with K.
             if !is_compatible(&args_ty[0], k) {
                 ctx.error_at(
                     span,
@@ -6857,12 +6853,12 @@ fn infer_map_method(
                     ),
                 );
             }
-            // Arg 1: callback fn(V) -> V (mismo V, no transforma tipo).
+            // Arg 1: callback fn(V) -> V (same V, doesn't transform type).
             check_unary_callback(ctx, &args_ty[1], v, "update", Some(v), span);
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
-        // Mini-tanda Ex2 — `merge(other)` combina dos `Map<K, V>` en
-        // uno nuevo con política last-write-wins. Devuelve `Map<K, V>`.
+        // Mini-batch Ex2 — `merge(other)` combines two `Map<K, V>` into
+        // a new one with last-write-wins policy. Returns `Map<K, V>`.
         "merge" => {
             if !check_method_arity(ctx, "merge", args_ty, 1, span) {
                 return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
@@ -6901,8 +6897,8 @@ fn infer_map_method(
             if !check_method_arity(ctx, "map_values", args_ty, 1, span) {
                 return Type::Map(Box::new(k.clone()), Box::new(Type::Any));
             }
-            // Callback es `fn(V) -> U`. Si es FnExpr inline con ret
-            // anotado o inferido, sacamos U; si es Any, fallback Any.
+            // Callback is `fn(V) -> U`. If it's an inline FnExpr with
+            // annotated or inferred ret, we extract U; if Any, fallback Any.
             let cb_ret = match &args_ty[0] {
                 Type::Function { params, ret } => {
                     if params.len() != 1 {
@@ -6956,9 +6952,9 @@ fn infer_map_method(
     }
 }
 
-/// Mini-tanda Ex — Valida un callback binario (2 params). Usado por
-/// `Map.filter(pred)`. Más simple que `check_unary_callback` extendido
-/// porque solo necesitamos las 2 firmas conocidas (Map.filter).
+/// Mini-batch Ex — Validates a binary callback (2 params). Used by
+/// `Map.filter(pred)`. Simpler than extended `check_unary_callback`
+/// because we only need the 2 known signatures (Map.filter).
 fn check_binary_callback(
     ctx: &mut CheckCtx,
     cb_ty: &Type,
@@ -7018,7 +7014,7 @@ fn check_binary_callback(
             }
         }
         Type::Any => {
-            // Gradual: callback sin tipo concreto, no chequeo.
+            // Gradual: callback without concrete type, no check.
         }
         other => {
             ctx.error_at(
@@ -7033,26 +7029,26 @@ fn check_binary_callback(
     }
 }
 
-/// Fase 9.w.2 + 9.w.2-wsconn-bidir — métodos sobre `WsConn`.
-/// Paramétricos sobre `recv` y `send` (que pueden ser el mismo
-/// tipo para `WsConn<T>` simétrico, o distintos para `WsConn<In,
-/// Out>` asimétrico). Ambos viajan por el wire como JSON
-/// automático (o binary raw cuando T = Bytes).
+/// Phase 9.w.2 + 9.w.2-wsconn-bidir — methods on `WsConn`.
+/// Parametric over `recv` and `send` (which can be the same
+/// type for symmetric `WsConn<T>`, or different for asymmetric
+/// `WsConn<In, Out>`). Both travel on the wire as automatic JSON
+/// (or raw binary when T = Bytes).
 ///
-/// Métodos:
-///   - `recv() -> Result<RECV>` — bloquea (async) hasta que llegue un
-///     frame. `Err(Str)` si la conn se cerró o el frame no parsea
-///     contra `RECV`.
-///   - `send(msg: SEND) -> Result<Null>` — envía un frame con
-///     `SEND` serializado. `Err` si la conn está cerrada.
-///   - `broadcast(msg: SEND) -> Result<Null>` — envía a TODOS los
-///     conns vivos del endpoint, **incluyendo** el sender
-///     (convención Socket.IO/Phoenix). `Err` si serialización
-///     falla; conns individuales caídos se ignoran silenciosamente.
-///   - `close() -> Null` — cierra la conn explícitamente.
+/// Methods:
+///   - `recv() -> Result<RECV>` — blocks (async) until a frame
+///     arrives. `Err(Str)` if the conn closed or the frame doesn't
+///     parse against `RECV`.
+///   - `send(msg: SEND) -> Result<Null>` — sends a frame with
+///     serialized `SEND`. `Err` if the conn is closed.
+///   - `broadcast(msg: SEND) -> Result<Null>` — sends to ALL live
+///     conns of the endpoint, **including** the sender
+///     (Socket.IO/Phoenix convention). `Err` if serialization
+///     fails; individual downed conns are silently ignored.
+///   - `close() -> Null` — explicitly closes the conn.
 ///
-/// Todos retornan `Result<...>` excepto `close` (sin recovery
-/// path significativo: si ya está cerrada, no pasa nada).
+/// All return `Result<...>` except `close` (no significant recovery
+/// path: if already closed, nothing happens).
 fn infer_wsconn_method(
     ctx: &mut CheckCtx,
     recv_ty: &Type,
@@ -7061,8 +7057,8 @@ fn infer_wsconn_method(
     args_ty: &[Type],
     span: Span,
 ) -> Type {
-    // Para los mensajes de error, formateamos el tipo del WsConn
-    // completo (`WsConn<T>` simétrico o `WsConn<In, Out>` asimétrico).
+    // For error messages, we format the full WsConn type
+    // (`WsConn<T>` symmetric or `WsConn<In, Out>` asymmetric).
     let conn_disp = if recv_ty == send_ty {
         format!("WsConn<{}>", recv_ty.display(ctx.types))
     } else {
@@ -7135,22 +7131,22 @@ fn infer_wsconn_method(
     }
 }
 
-/// Fase 10.7 (v0.10.14) — métodos del `DbConn` (driver Postgres
-/// nativo). Antes de v0.10.14 caían al catch-all "tipo X no tiene
-/// el método Y", que rechazaba todo lo que NO fuera primitivo
-/// built-in. Ahora dispatchamos al match dedicado.
+/// Phase 10.7 (v0.10.14) — methods of `DbConn` (native Postgres
+/// driver). Before v0.10.14 they fell into the catch-all "type X
+/// does not have method Y", which rejected everything NOT a built-in
+/// primitive. Now we dispatch to the dedicated match.
 ///
-/// **Signaturas**:
+/// **Signatures**:
 ///   - `query(sql: Str, args: List<Any>) -> Future<Result<List<DbRow>>>`
 ///   - `exec(sql: Str, args: List<Any>) -> Future<Result<Int>>`
 ///   - `close() -> Future<Result<Null>>`
 ///   - `is_closed() -> Future<Bool>`
 ///   - `transaction(fn(tx: DbConn) -> Result<T>) -> Future<Result<T>>`
-///     (commit/rollback automático según Ok/Err del callback)
+///     (automatic commit/rollback based on callback's Ok/Err)
 ///
-/// El tipo `T` del `transaction` se infiere del callback (FnExpr
-/// inline o fn nombrada). Para el caso gradual (callback con tipo
-/// `Any`), retornamos `Future<Result<Any>>`.
+/// The `T` type of `transaction` is inferred from the callback (inline
+/// FnExpr or named fn). For the gradual case (callback with type
+/// `Any`), we return `Future<Result<Any>>`.
 fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "query" => {
@@ -7179,15 +7175,15 @@ fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span
             Type::Future(Box::new(Type::Bool))
         }
         "transaction" => {
-            // Esperamos 1 arg: una `Function` (FnExpr inline o fn
-            // nombrada). Infereremos el `T` del Result desde su ret
-            // type. Si el callback no tipa como Function o no retorna
-            // Result, error claro.
+            // We expect 1 arg: a `Function` (inline FnExpr or named fn).
+            // We will infer the `T` of the Result from its ret
+            // type. If the callback doesn't type as Function or doesn't return
+            // Result, clear error.
             check_method_arity(ctx, "transaction", args_ty, 1, span);
             let ok_ty = match args_ty.first() {
                 Some(Type::Function { ret, .. }) => {
-                    // El ret del callback puede ser `Result<T, _>`
-                    // (sync) o `Future<Result<T, _>>` (async fn).
+                    // The callback's ret can be `Result<T, _>`
+                    // (sync) or `Future<Result<T, _>>` (async fn).
                     let unwrapped = match ret.as_ref() {
                         Type::Future(inner) => inner.as_ref().clone(),
                         other => other.clone(),
@@ -7207,8 +7203,8 @@ fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span
                     }
                 }
                 Some(Type::Any) => {
-                    // Callback con tipo Any (gradual) — no podemos
-                    // inferir el T del Result. Retornamos Any.
+                    // Callback with Any type (gradual) — we cannot
+                    // infer the T of the Result. We return Any.
                     Type::Any
                 }
                 Some(other) => {
@@ -7241,7 +7237,7 @@ fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span
     }
 }
 
-/// Mini-tanda Bytes — métodos del primitivo `Bytes`.
+/// Mini-batch Bytes — methods of the `Bytes` primitive.
 fn infer_bytes_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "len" => {
@@ -7272,26 +7268,26 @@ fn infer_bytes_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
     }
 }
 
-/// v0.10.22 — Métodos sobre `DbRow` (row crudo del query result).
-/// Habilita parsear fields del row en `fitz build` (antes solo
-/// funcionaba en intérprete porque ahí los rows son `Value::Map`).
+/// v0.10.22 — Methods on `DbRow` (raw row of the query result).
+/// Enables parsing row fields in `fitz build` (previously only
+/// worked in the interpreter because there rows are `Value::Map`).
 ///
-/// Decisión MVP: en vez de `.get(col) -> Result<Any>` (que requeriría
-/// infraestructura de coerce `Any → Int/Str/Float/Bool` en codegen,
-/// no trivial), exponemos **4 variantes tipadas**:
+/// MVP decision: instead of `.get(col) -> Result<Any>` (which would require
+/// infrastructure to coerce `Any → Int/Str/Float/Bool` in codegen,
+/// non-trivial), we expose **4 typed variants**:
 ///
 ///   - `get_int(name: Str) -> Result<Int>`
 ///   - `get_str(name: Str) -> Result<Str>`
 ///   - `get_float(name: Str) -> Result<Float>`
 ///   - `get_bool(name: Str) -> Result<Bool>`
-///   - `len() -> Int` — cantidad de columnas.
+///   - `len() -> Int` — number of columns.
 ///
-/// Cada uno valida que (a) la columna existe y (b) el tipo PG matchea
-/// el destino esperado. `Err` con mensaje específico si no.
+/// Each one validates that (a) the column exists and (b) the PG type matches
+/// the expected destination. `Err` with specific message otherwise.
 ///
-/// Las queries con shape variable (e.g. jsonb) siguen como deuda:
-/// el user puede devolver `Result<List<DbRow>>` directo desde el
-/// handler (Deuda A v0.10.22) en lugar de inspeccionar field a field.
+/// Queries with variable shape (e.g. jsonb) remain debt:
+/// the user can return `Result<List<DbRow>>` directly from the
+/// handler (Debt A v0.10.22) instead of inspecting field by field.
 fn infer_db_row_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     let typed_get = |ok_ty: Type| -> Type {
         Type::Result {
@@ -7351,9 +7347,9 @@ fn infer_db_row_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span:
     }
 }
 
-/// v0.10.24 — methods sobre `Date`. Extracción (year/month/day/weekday
-/// devuelven Int), conversión (to_str→Str, to_datetime→DateTime),
-/// formato custom (format(fmt: Str)→Str).
+/// v0.10.24 — methods on `Date`. Extraction (year/month/day/weekday
+/// return Int), conversion (to_str→Str, to_datetime→DateTime),
+/// custom format (format(fmt: Str)→Str).
 fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "year" | "month" | "day" | "weekday" => {
@@ -7382,9 +7378,9 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
             }
             Type::Str
         }
-        // v0.10.30 B.1/B.2 — aritmética symétrica add_*/subtract_*. Todos
-        // toman `Int` (signed; negativos OK en add_*; subtract es sugar
-        // de add con negate runtime). Retornan `Date`.
+        // v0.10.30 B.1/B.2 — symmetric add_*/subtract_* arithmetic. All
+        // take `Int` (signed; negatives OK in add_*; subtract is sugar
+        // for add with runtime negate). Return `Date`.
         "add_days" | "add_months" | "add_years" | "subtract_days" | "subtract_months"
         | "subtract_years" => {
             if check_method_arity(ctx, method, args_ty, 1, span)
@@ -7401,7 +7397,7 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
             }
             Type::Date
         }
-        // v0.10.30 B.3 — diff entre dos Date, signed Int días.
+        // v0.10.30 B.3 — diff between two Dates, signed Int days.
         "diff_days" => {
             if check_method_arity(ctx, "diff_days", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Date)
@@ -7429,9 +7425,9 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
     }
 }
 
-/// v0.10.24 — methods sobre `DateTime`. Extracción (year/month/day/hour/
-/// minute/second devuelven Int), timestamp Unix epoch (Int),
-/// conversión (to_str→Str, date→Date), formato custom.
+/// v0.10.24 — methods on `DateTime`. Extraction (year/month/day/hour/
+/// minute/second return Int), Unix epoch timestamp (Int),
+/// conversion (to_str→Str, date→Date), custom format.
 fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "year" | "month" | "day" | "hour" | "minute" | "second" | "timestamp" => {
@@ -7460,9 +7456,9 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
             }
             Type::Str
         }
-        // v0.10.30 B.1/B.2 — aritmética add_*/subtract_*. Sub-second
+        // v0.10.30 B.1/B.2 — add_*/subtract_* arithmetic. Sub-second
         // units (seconds/minutes/hours) + calendar units (days/months/
-        // years). Todos `Int → DateTime`.
+        // years). All `Int → DateTime`.
         "add_seconds" | "add_minutes" | "add_hours" | "add_days" | "add_months" | "add_years"
         | "subtract_seconds" | "subtract_minutes" | "subtract_hours" | "subtract_days"
         | "subtract_months" | "subtract_years" => {
@@ -7480,7 +7476,7 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
             }
             Type::DateTime
         }
-        // v0.10.30 B.3 — diff entre DateTime, signed Int en la unidad.
+        // v0.10.30 B.3 — diff between DateTimes, signed Int in the unit.
         "diff_seconds" | "diff_minutes" | "diff_hours" | "diff_days" => {
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::DateTime)
@@ -7496,9 +7492,9 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
             }
             Type::Int
         }
-        // v0.10.30 B.7 — display helpers. `to_local()` formatea en TZ
-        // del sistema (ISO 8601 + offset). `in_tz(iana)` formatea en una
-        // zona IANA → `Result<Str>` (Err si IANA name desconocido).
+        // v0.10.30 B.7 — display helpers. `to_local()` formats in system
+        // TZ (ISO 8601 + offset). `in_tz(iana)` formats in an
+        // IANA zone → `Result<Str>` (Err if IANA name unknown).
         "to_local" => {
             check_method_arity(ctx, "to_local", args_ty, 0, span);
             Type::Str
@@ -7533,9 +7529,9 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
     }
 }
 
-/// v0.10.24 — methods sobre `Uuid`. MVP acotado: `to_str() -> Str` y
-/// `is_nil() -> Bool` cubren el 99% del caso real. Extracción de
-/// versión/variant/bytes raw queda como deuda post-MVP si pide.
+/// v0.10.24 — methods on `Uuid`. Bounded MVP: `to_str() -> Str` and
+/// `is_nil() -> Bool` cover 99% of the real case. Extraction of
+/// version/variant/raw bytes remains as post-MVP debt if requested.
 fn infer_uuid_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "to_str" => {
@@ -7569,8 +7565,8 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::Str
         }
-        // S.1 (mini-tanda S) — `contains`/`starts_with`/`ends_with`
-        // toman un `Str` y devuelven `Bool`. Mismo shape para los 3.
+        // S.1 (mini-batch S) — `contains`/`starts_with`/`ends_with`
+        // take a `Str` and return `Bool`. Same shape for all 3.
         "contains" | "starts_with" | "ends_with" => {
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Str)
@@ -7586,14 +7582,14 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
             Type::Bool
         }
-        // Mini-tanda Mb3 — `chars()`: devuelve `List<Str>` con cada
-        // char del string como Str de 1 caracter.
+        // Mini-batch Mb3 — `chars()`: returns `List<Str>` with each
+        // char of the string as a 1-char Str.
         "chars" => {
             check_method_arity(ctx, "chars", args_ty, 0, span);
             Type::List(Box::new(Type::Str))
         }
-        // Mini-tanda Mb4 — `split_at(idx)`: divide en char idx →
-        // `(Str, Str)`. `idx` debe ser Int.
+        // Mini-batch Mb4 — `split_at(idx)`: splits at char idx →
+        // `(Str, Str)`. `idx` must be Int.
         "split_at" => {
             if check_method_arity(ctx, "split_at", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
@@ -7608,7 +7604,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
             Type::Tuple(vec![Type::Str, Type::Str])
         }
-        // Mini-tanda Mb5 — `lines() -> List<Str>` y `is_empty() -> Bool`.
+        // Mini-batch Mb5 — `lines() -> List<Str>` and `is_empty() -> Bool`.
         "lines" => {
             check_method_arity(ctx, "lines", args_ty, 0, span);
             Type::List(Box::new(Type::Str))
@@ -7617,7 +7613,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             check_method_arity(ctx, "is_empty", args_ty, 0, span);
             Type::Bool
         }
-        // Mini-tanda Mb9 — `swap_case() / title() -> Str` y
+        // Mini-batch Mb9 — `swap_case() / title() -> Str` and
         // `is_alpha() / is_digit() / is_numeric() -> Bool`.
         "swap_case" | "title" => {
             check_method_arity(ctx, method, args_ty, 0, span);
@@ -7627,7 +7623,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::Bool
         }
-        // Mini-tanda Mb8 — `left(n)` / `right(n)`: primeros/últimos n
+        // Mini-batch Mb8 — `left(n)` / `right(n)`: first/last n
         // chars. `n: Int`.
         "left" | "right" => {
             if check_method_arity(ctx, method, args_ty, 1, span)
@@ -7644,8 +7640,8 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
             Type::Str
         }
-        // Mini-tanda Mb8 — `center(width, ch) -> Str`: similar a
-        // pad_start/pad_end (Mb2). width Int, ch Str (1 char en runtime).
+        // Mini-batch Mb8 — `center(width, ch) -> Str`: similar to
+        // pad_start/pad_end (Mb2). width Int, ch Str (1 char at runtime).
         "center" => {
             if check_method_arity(ctx, "center", args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
@@ -7669,8 +7665,8 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
             Type::Str
         }
-        // Mini-tanda Mb7 — `repeat_with(n, sep) -> Str`: variante de
-        // repeat que intercala `sep` entre repeticiones.
+        // Mini-batch Mb7 — `repeat_with(n, sep) -> Str`: variant of
+        // repeat that intersperses `sep` between repetitions.
         "repeat_with" => {
             if check_method_arity(ctx, "repeat_with", args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
@@ -7694,7 +7690,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
             Type::Str
         }
-        // S.2 — manipulación de strings:
+        // S.2 — string manipulation:
         "split" => {
             if check_method_arity(ctx, "split", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Str)
@@ -7713,7 +7709,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             check_method_arity(ctx, "trim", args_ty, 0, span);
             Type::Str
         }
-        // Mini-tanda Mb — trim_start / trim_end (variantes parciales).
+        // Mini-batch Mb — trim_start / trim_end (partial variants).
         "trim_start" | "trim_end" => {
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::Str
@@ -7749,10 +7745,10 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
             Type::Str
         }
-        // Mini-tanda Mb2 — `pad_start(width, ch)` / `pad_end(width, ch)`.
-        // `width: Int`, `ch: Str` (1 char). Devuelven `Str`. La
-        // validación de "ch es 1 char" se hace en runtime (no en
-        // static, paralelo a Python).
+        // Mini-batch Mb2 — `pad_start(width, ch)` / `pad_end(width, ch)`.
+        // `width: Int`, `ch: Str` (1 char). Return `Str`. The
+        // "ch is 1 char" validation is done at runtime (not in
+        // static, parallel to Python).
         "pad_start" | "pad_end" => {
             if check_method_arity(ctx, method, args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
@@ -7778,8 +7774,8 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
             Type::Str
         }
-        // Mini-tanda Ex — search en strings: find / index_of /
-        // last_index_of. Todos toman `Str` y devuelven `Result<Int>`.
+        // Mini-batch Ex — string search: find / index_of /
+        // last_index_of. All take `Str` and return `Result<Int>`.
         "find" | "index_of" | "last_index_of" => {
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Str)
@@ -7805,9 +7801,9 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
     }
 }
 
-/// Actualiza las flags de cobertura `Result` walkando el patrón.
-/// Para `Pattern::Or` recursea en cada sub-pattern (cualquier
-/// branch que cubra Ok cuenta para Ok, etc.). R.2.1 (mini-fase R).
+/// Updates the `Result` coverage flags walking the pattern.
+/// For `Pattern::Or` recurses into each sub-pattern (any
+/// branch that covers Ok counts for Ok, etc.). R.2.1 (mini-phase R).
 fn update_result_coverage(
     pat: &crate::ast::Pattern,
     has_ok: &mut bool,
@@ -7824,24 +7820,23 @@ fn update_result_coverage(
                 update_result_coverage(sub, has_ok, has_err, has_catchall);
             }
         }
-        // Tuples (mini-tanda T): un Tuple pattern NO cubre Ok/Err
-        // ni es catch-all sobre Result — tipa solo contra tuples.
-        // No suma a la cobertura.
+        // Tuples (mini-batch T): a Tuple pattern does NOT cover Ok/Err
+        // nor is it catch-all over Result — only types against tuples.
+        // Does not contribute to coverage.
         Pattern::Tuple(_) => {}
         _ => {}
     }
 }
 
-/// Mini-tanda Md — Bindea un Pattern del `for` contra el tipo del
-/// elemento del iter, declarando las vars correspondientes en el
-/// scope actual. Cubre Ident/Wildcard/Tuple recursivo. Otros patterns
-/// (literales, Ok/Err, Range) emiten error "patrón no admitido en
-/// for".
-/// Mini-tanda Cmp+ — chequea una clause `for <pat> in <iter>` de una
-/// comprehension: tipa el iter como List/Range, deriva el tipo del
-/// elemento, y bindea el pattern en el scope actual. Para múltiples
-/// `for` clauses se llama una vez por cada (todas comparten el mismo
-/// scope acumulativo del checker).
+/// Mini-batch Md — Binds a `for` Pattern against the iter's element
+/// type, declaring the corresponding vars in the current scope.
+/// Covers Ident/Wildcard/Tuple recursively. Other patterns
+/// (literals, Ok/Err, Range) emit "pattern not allowed in for".
+/// Mini-batch Cmp+ — checks a `for <pat> in <iter>` clause of a
+/// comprehension: types the iter as List/Range, derives the element
+/// type, and binds the pattern in the current scope. For multiple
+/// `for` clauses it's called once per each (all share the same
+/// cumulative checker scope).
 fn check_comp_clause_in_checker(
     ctx: &mut CheckCtx,
     pat: &crate::ast::Pattern,
@@ -7876,8 +7871,8 @@ fn bind_for_pattern_in_checker(
     use crate::ast::Pattern;
     match pat {
         Pattern::Ident(name, ident_span) => {
-            // S1 (2026-06-05) — span propio del pattern como def_span +
-            // registro en TypeInfo para hover sobre el var del for.
+            // S1 (2026-06-05) — pattern's own span as def_span +
+            // registration in TypeInfo for hover over the for's var.
             let def_span = if ident_span.column > 0 {
                 *ident_span
             } else {
@@ -7889,10 +7884,10 @@ fn bind_for_pattern_in_checker(
             }
         }
         Pattern::Wildcard => {
-            // Sin binding — el elemento se descarta.
+            // No binding — the element is discarded.
         }
         Pattern::Tuple(subs) => {
-            // El elem tiene que ser una tupla del mismo largo.
+            // The elem must be a tuple of the same length.
             match elem_ty.base() {
                 Type::Tuple(item_tys) if item_tys.len() == subs.len() => {
                     for (sub, t) in subs.iter().zip(item_tys.iter()) {
@@ -7900,7 +7895,7 @@ fn bind_for_pattern_in_checker(
                     }
                 }
                 Type::Any => {
-                    // Gradual — bindeamos cada ident del pattern como Any.
+                    // Gradual — we bind each ident of the pattern as Any.
                     for sub in subs {
                         bind_for_pattern_in_checker(ctx, sub, &Type::Any, fallback_span);
                     }
@@ -7929,15 +7924,15 @@ fn bind_for_pattern_in_checker(
     }
 }
 
-/// Mini-tanda Fm — valida que un `FormatSpec` sea aplicable al tipo
-/// del expr interpolado. Reglas (paralelas a Python):
-///   - `f`/`F`/`e`/`E`/`g`/`G`/`%` exigen Float o Int (promoción
-///     transparente).
-///   - `d`/`b`/`o`/`x`/`X`/`c` exigen Int (sin promoción de Float).
-///   - `s` acepta Str (o cualquier tipo via Display).
-///   - Sin `kind`, cualquier tipo es válido (uses Display por default).
-///   - Alineación, fill, width, sign, alternate y precision son válidos
-///     para cualquier tipo (precision con Str es longitud máxima).
+/// Mini-batch Fm — validates that a `FormatSpec` is applicable to the
+/// type of the interpolated expr. Rules (parallel to Python):
+///   - `f`/`F`/`e`/`E`/`g`/`G`/`%` require Float or Int (transparent
+///     promotion).
+///   - `d`/`b`/`o`/`x`/`X`/`c` require Int (without Float promotion).
+///   - `s` accepts Str (or any type via Display).
+///   - Without `kind`, any type is valid (uses Display by default).
+///   - Alignment, fill, width, sign, alternate, and precision are valid
+///     for any type (precision with Str is maximum length).
 fn validate_format_spec_for_type(
     ctx: &mut CheckCtx,
     spec: &crate::ast::FormatSpec,
@@ -7992,12 +7987,12 @@ fn validate_format_spec_for_type(
     }
 }
 
-/// Chequea exhaustividad de un `match` sobre `Result<T>`. Los arms
-/// deben cubrir tanto `Ok` como `Err`, o tener un catch-all
-/// (wildcard `_` o ident binding). Patrones literales/de rango
-/// sobre un Result no aportan a la exhaustividad — son
-/// "imposibles" pero no los rechazamos acá (sería un check
-/// separado).
+/// Checks exhaustiveness of a `match` over `Result<T>`. The arms
+/// must cover both `Ok` and `Err`, or have a catch-all
+/// (wildcard `_` or ident binding). Literal/range patterns
+/// over a Result don't contribute to exhaustiveness — they are
+/// "impossible" but we don't reject them here (that would be a
+/// separate check).
 fn check_result_match_exhaustiveness(
     ctx: &mut CheckCtx,
     arms: &[crate::ast::MatchArm],
@@ -8007,9 +8002,9 @@ fn check_result_match_exhaustiveness(
     let mut has_err = false;
     let mut has_catchall = false;
     for arm in arms {
-        // R.2.2: arms con guard NO cuentan para exhaustividad
-        // (paralelo a Rust). El guard puede fallar en runtime y
-        // dejar el match incompleto.
+        // R.2.2: arms with guard do NOT count for exhaustiveness
+        // (parallel to Rust). The guard can fail at runtime and
+        // leave the match incomplete.
         if arm.guard.is_some() {
             continue;
         }
@@ -8032,13 +8027,13 @@ fn check_result_match_exhaustiveness(
     );
 }
 
-/// W2 (v0.10.6) — `true` si el patrón cubre `null`. Usado por el
-/// checker de `match` para refinar `Nullable<T>` a `T` en arms
-/// posteriores (flow-sensitive). Conservador: cubre `Pattern::Null`
-/// directo y `Pattern::Or` que contenga al menos un sub-pattern Null.
-/// `Pattern::Wildcard`/`Pattern::Ident` NO se consideran cubrimiento
-/// específico (matchean todo, incluido null — pero su lugar es
-/// catch-all, no refinable).
+/// W2 (v0.10.6) — `true` if the pattern covers `null`. Used by the
+/// `match` checker to refine `Nullable<T>` to `T` in subsequent
+/// arms (flow-sensitive). Conservative: covers direct `Pattern::Null`
+/// and `Pattern::Or` containing at least one Null sub-pattern.
+/// `Pattern::Wildcard`/`Pattern::Ident` are NOT considered specific
+/// cover (they match everything, including null — but their place is
+/// catch-all, not refinable).
 fn pattern_cubre_null(pat: &crate::ast::Pattern) -> bool {
     use crate::ast::Pattern;
     match pat {
@@ -8048,21 +8043,21 @@ fn pattern_cubre_null(pat: &crate::ast::Pattern) -> bool {
     }
 }
 
-/// Bindea las variables introducidas por un patrón en el scope
-/// actual. `scrutinee` es el tipo del valor que se está matcheando.
-/// `arm_span` es el span de aproximación que el binding usa como
-/// `def_span` (Fase 9.x.3) — sin span propio en `Pattern` (deuda
-/// S1), el caller pasa el span del body del MatchArm.
+/// Binds the variables introduced by a pattern in the current scope.
+/// `scrutinee` is the type of the value being matched.
+/// `arm_span` is the approximation span the binding uses as
+/// `def_span` (Phase 9.x.3) — without a `Pattern`'s own span (S1
+/// debt), the caller passes the MatchArm's body span.
 fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type, arm_span: Span) {
     use crate::ast::Pattern;
     match pat {
         Pattern::Ident(name, ident_span) => {
-            // S1 (2026-06-05) — usar el span propio del pattern como
-            // def_span (en vez del arm_span aproximado) y registrar el
-            // tipo en TypeInfo para habilitar hover sobre el nombre del
-            // binding (`i` en `for i in 0..10`, `n` en `match x { Ok(n) => n }`).
-            // Si el span del pattern es ZERO (pattern sintético), usa
-            // arm_span como fallback.
+            // S1 (2026-06-05) — use the pattern's own span as
+            // def_span (instead of the approximate arm_span) and register the
+            // type in TypeInfo to enable hover over the binding's name
+            // (`i` in `for i in 0..10`, `n` in `match x { Ok(n) => n }`).
+            // If the pattern's span is ZERO (synthetic pattern), uses
+            // arm_span as fallback.
             let def_span = if ident_span.column > 0 {
                 *ident_span
             } else {
@@ -8074,7 +8069,7 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type,
             }
         }
         Pattern::OkBinding(name, ident_span) => {
-            // `Ok(x)` desempaca `Result<T>` — x es T.
+            // `Ok(x)` unwraps `Result<T>` — x is T.
             let inner = match scrutinee {
                 Type::Result { ok: t, err: _ } => (**t).clone(),
                 _ => Type::Any,
@@ -8090,10 +8085,10 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type,
             }
         }
         Pattern::ErrBinding(name, ident_span) => {
-            // Mini-tanda Re+ — `Err(e)` desempaca `Result<T, E>` y `e`
-            // queda con el tipo E inferido. Para Result legacy (sin E
-            // explícito, default Str) o cualquier Any, fallback a la
-            // semántica anterior (e: Str / e: Any).
+            // Mini-batch Re+ — `Err(e)` unwraps `Result<T, E>` and `e`
+            // gets the inferred E type. For legacy Result (without explicit
+            // E, default Str) or any Any, fallback to the
+            // previous semantics (e: Str / e: Any).
             let inner = match scrutinee {
                 Type::Result { ok: _, err: e } => (**e).clone(),
                 _ => Type::Any,
@@ -8117,17 +8112,17 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type,
         | Pattern::Bool(_)
         | Pattern::Null
         | Pattern::Range { .. } => {
-            // No introducen bindings.
+            // Do not introduce bindings.
         }
         Pattern::Or(_) => {
-            // R.2.1: or-patterns no introducen bindings por
-            // contrato del parser (rechaza Ident/OkBinding/
-            // ErrBinding adentro). No hace falta walkear.
+            // R.2.1: or-patterns do not introduce bindings by
+            // parser contract (rejects Ident/OkBinding/
+            // ErrBinding inside). No need to walk.
         }
-        // Tuples (mini-tanda T): recursea en cada slot con el tipo
-        // correspondiente. Si scrutinee no es `Tuple` o difiere en
-        // longitud, los sub-patterns igual se chequean con Any
-        // (gradual) — el evaluator hace el match real.
+        // Tuples (mini-batch T): recurses into each slot with the
+        // corresponding type. If scrutinee is not `Tuple` or differs in
+        // length, sub-patterns are still checked with Any
+        // (gradual) — the evaluator does the real match.
         Pattern::Tuple(subs) => {
             let slot_tys: Vec<Type> = match scrutinee {
                 Type::Tuple(items) if items.len() == subs.len() => items.clone(),
@@ -8140,17 +8135,17 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type,
     }
 }
 
-/// Sintetiza el tipo de un BinOp dado los tipos de sus operandos.
-/// Aplica coerción Int→Float donde corresponde.
+/// Synthesizes the type of a BinOp given the types of its operands.
+/// Applies Int→Float coercion where appropriate.
 fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: Span) -> Type {
-    // Si cualquiera de los operandos es Any, no podemos chequear
-    // con confianza — devolvemos Any sin error.
+    // If either operand is Any, we cannot check with confidence —
+    // we return Any without error.
     if matches!(lt, Type::Any) || matches!(rt, Type::Any) {
         return Type::Any;
     }
     match op {
         BinOpKind::Add => {
-            // Numérico o Str+Str.
+            // Numeric or Str+Str.
             match (lt, rt) {
                 (Type::Int, Type::Int) => Type::Int,
                 (Type::Int, Type::Float)
@@ -8196,9 +8191,9 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                 }
             }
         }
-        // R.1.2 — operador `%` solo Int. Float % Float queda como
-        // sub-paso futuro (la ambigüedad entre `fmod` y
-        // `rem_euclid` sobre Float requiere decisión de diseño).
+        // R.1.2 — `%` operator only Int. Float % Float remains a
+        // future sub-step (ambiguity between `fmod` and
+        // `rem_euclid` over Float requires a design decision).
         BinOpKind::Mod => match (lt, rt) {
             (Type::Int, Type::Int) | (Type::Any, _) | (_, Type::Any) => Type::Int,
             _ => {
@@ -8214,9 +8209,9 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
             }
         },
         BinOpKind::Lt | BinOpKind::LtEq | BinOpKind::Gt | BinOpKind::GtEq => {
-            // Comparación: numéricos, ambos Str, o ambos Date/DateTime
-            // (v0.10.30 B.4 — `chrono::NaiveDate` y `DateTime<Utc>` impl
-            // `Ord`, mapping natural a `<`/`<=`/`>`/`>=`).
+            // Comparison: numeric, both Str, or both Date/DateTime
+            // (v0.10.30 B.4 — `chrono::NaiveDate` and `DateTime<Utc>` impl
+            // `Ord`, natural mapping to `<`/`<=`/`>`/`>=`).
             let ok = matches!(
                 (lt, rt),
                 (Type::Int, Type::Int)
@@ -8240,8 +8235,8 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
             Type::Bool
         }
         BinOpKind::Eq | BinOpKind::NotEq => {
-            // Igualdad: cualquier par. El evaluator hace coerción Int↔Float
-            // adentro de listas/mapas/etc. No emitimos warning.
+            // Equality: any pair. The evaluator does Int↔Float coercion
+            // inside lists/maps/etc. We don't emit warning.
             Type::Bool
         }
         BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
@@ -8265,8 +8260,8 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
             }
             Type::Bool
         }
-        // Mini-tanda Bits — todos los bitwise solo Int. Cualquier
-        // otro tipo dispara error de tipo claro.
+        // Mini-batch Bits — all bitwise only Int. Any
+        // other type fires a clear type error.
         BinOpKind::BitAnd
         | BinOpKind::BitOr
         | BinOpKind::BitXor
@@ -8305,34 +8300,34 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
     }
 }
 
-/// Compatibilidad para asignación / paso de argumento: `actual` se
-/// puede usar donde se espera `expected`?
+/// Compatibility for assignment / argument passing: can `actual` be
+/// used where `expected` is expected?
 ///
-/// Reglas:
-///   - `Any` matchea con cualquier cosa (gradual, en ambas direcciones).
-///   - `Null` matchea con `T?` para cualquier T.
-///   - `T` matchea con `T?` si el inner es compatible.
-///   - `Int` matchea con `Float` (coerción implícita en aritmética
-///     y asignación).
-///   - Generics built-in (`List`/`Map`/`Result`/`Nullable`) y
-///     `Function` se comparan recursivamente — así `Result<Any>`
-///     pasa por `Result<User>`, `List<Int>` por `List<Float>`, etc.
-///   - Resto: igualdad estructural.
+/// Rules:
+///   - `Any` matches anything (gradual, in both directions).
+///   - `Null` matches `T?` for any T.
+///   - `T` matches `T?` if the inner is compatible.
+///   - `Int` matches `Float` (implicit coercion in arithmetic
+///     and assignment).
+///   - Built-in generics (`List`/`Map`/`Result`/`Nullable`) and
+///     `Function` are compared recursively — so `Result<Any>`
+///     passes for `Result<User>`, `List<Int>` for `List<Float>`, etc.
+///   - Otherwise: structural equality.
 pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
     if matches!(actual, Type::Any) || matches!(expected, Type::Any) {
         return true;
     }
-    // Fase 8.4 — `PyAny` es gradual igual que `Any` pero conserva
-    // identidad propia para que el checker pueda distinguir "esto
-    // viene de Python" de "esto es Any general" (relevante en
-    // `infer_call` para tipar calls Python como `Result<Any>`).
+    // Phase 8.4 — `PyAny` is gradual like `Any` but retains
+    // its own identity so the checker can distinguish "this
+    // comes from Python" from "this is general Any" (relevant in
+    // `infer_call` to type Python calls as `Result<Any>`).
     if matches!(actual, Type::PyAny) || matches!(expected, Type::PyAny) {
         return true;
     }
     if matches!(actual, Type::Null) && expected.is_nullable() {
         return true;
     }
-    // `T` compatible con `T?` (un valor no-null donde se acepta nullable).
+    // `T` compatible with `T?` (a non-null value where nullable is accepted).
     if let Type::Nullable(inner) = expected {
         if is_compatible(actual, inner) {
             return true;
@@ -8344,7 +8339,7 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
     match (actual, expected) {
         (Type::List(a), Type::List(b)) => is_compatible(a, b),
         (Type::Map(ka, va), Type::Map(kb, vb)) => is_compatible(ka, kb) && is_compatible(va, vb),
-        // Mini-tanda Re+: ambos lados (ok y err) deben ser compatibles.
+        // Mini-batch Re+: both sides (ok and err) must be compatible.
         (
             Type::Result {
                 ok: a_ok,
@@ -8371,40 +8366,40 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
                 && pa.iter().zip(pb.iter()).all(|(a, b)| is_compatible(a, b))
                 && is_compatible(ra, rb)
         }
-        // Tuples (mini-tanda T): compatible si misma longitud y cada
-        // slot es compatible. `(Int, Str)` ↔ `(Float, Str)` por la
-        // promoción Int→Float en cada slot.
+        // Tuples (mini-batch T): compatible if same length and each
+        // slot is compatible. `(Int, Str)` ↔ `(Float, Str)` due to
+        // Int→Float promotion in each slot.
         (Type::Tuple(a), Type::Tuple(b)) => {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| is_compatible(x, y))
         }
-        // Fase 10.3+ — QueryBuilder<Row> compatible si el row type
-        // es compatible. Useful para retornar QB de fns helper.
+        // Phase 10.3+ — QueryBuilder<Row> compatible if the row type
+        // is compatible. Useful for returning QB from helper fns.
         (Type::QueryBuilder(a), Type::QueryBuilder(b)) => is_compatible(a, b),
         (Type::Aggregated(a), Type::Aggregated(b)) => is_compatible(a, b),
         _ => actual == expected,
     }
 }
 
-/// Walkea una lista de Stmt en orden, manteniendo el scope actual.
+/// Walks a list of Stmt in order, maintaining the current scope.
 fn check_block(ctx: &mut CheckCtx, body: &[Stmt]) {
     for s in body {
         check_stmt(ctx, s);
     }
 }
 
-/// Walkea una sola Stmt: chequea sus expresiones, abre scopes,
-/// declara variables.
+/// Walks a single Stmt: checks its expressions, opens scopes,
+/// declares variables.
 fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
     match stmt {
-        // Mini-tanda T — destructuring. Inferimos el tipo del RHS y
-        // bindeamos cada slot del pattern.
+        // Mini-batch T — destructuring. We infer the RHS's type and
+        // bind each slot of the pattern.
         Stmt::Destructure {
             pattern,
             value,
             span,
         } => {
             let value_ty = infer_expr(ctx, value);
-            // Si el value tipa como Tuple, validamos arity.
+            // If the value types as Tuple, we validate arity.
             if let Type::Tuple(items) = &value_ty {
                 if let crate::ast::Pattern::Tuple(subs) = pattern {
                     if items.len() != subs.len() {
@@ -8426,13 +8421,13 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             value,
             span,
         } => {
-            // L2 expandido (2026-06-05) — Inferencia bidireccional
-            // desde anotaciones `Fn(T1, T2) -> R` en `let f: Fn(...) -> ... = fn(...) => ...`.
-            // Si la anotación resuelve a `Type::Function { params, .. }`
-            // y el RHS es directamente un FnExpr, empujamos los params
-            // del Function como hint ANTES de sintetizar el RHS. El
-            // handler de Expr::FnExpr lo consume al pop, propagando
-            // los tipos esperados a los params sin anotación del FnExpr.
+            // L2 expanded (2026-06-05) — Bidirectional inference
+            // from `Fn(T1, T2) -> R` annotations in `let f: Fn(...) -> ... = fn(...) => ...`.
+            // If the annotation resolves to `Type::Function { params, .. }`
+            // and the RHS is directly a FnExpr, we push the Function's
+            // params as hint BEFORE synthesizing the RHS. The
+            // Expr::FnExpr handler consumes it on pop, propagating
+            // the expected types to the FnExpr's unannotated params.
             if matches!(value, Expr::FnExpr { .. }) {
                 if let Some(ann) = type_ {
                     let declared_for_hint = resolve_type_expr(ann, ctx.types).unwrap_or(Type::Any);
@@ -8445,14 +8440,14 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             }
             let value_ty = infer_expr(ctx, value);
             if let AssignTarget::Ident(name, target_span) = target {
-                // V2 (2026-06-05) — registrar el tipo del binding bajo
-                // el span del LHS Ident en TypeInfo. Habilita hover
-                // sobre el nombre de la variable (no solo sobre el RHS).
-                // Para anotaciones explícitas (`let x: Int = ...`), el
-                // tipo declarado prevalece sobre el inferido — eso lo
-                // resuelve el match siguiente. Acá usamos el tipo final
-                // determinado abajo (no `value_ty` directo) — por eso
-                // el record lo hacemos DESPUÉS del match, no antes.
+                // V2 (2026-06-05) — register the binding's type under
+                // the LHS Ident span in TypeInfo. Enables hover
+                // over the variable's name (not just on the RHS).
+                // For explicit annotations (`let x: Int = ...`), the
+                // declared type prevails over the inferred — that's
+                // resolved by the match below. Here we use the final
+                // type determined below (not `value_ty` directly) — that's why
+                // we do the record AFTER the match, not before.
                 let final_ty: Type;
                 match type_ {
                     Some(ann) => {
@@ -8468,20 +8463,20 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                 ),
                             );
                         }
-                        // Una anotación explícita "redeclara" el binding
-                        // con el tipo declarado y marca annotated=true.
-                        // `def_span = span` del Stmt::Assign: en caso de
-                        // reasignación, go-to-def salta al ÚLTIMO
-                        // binding stmt (semántica simplificada del MVP).
+                        // An explicit annotation "redeclares" the binding
+                        // with the declared type and marks annotated=true.
+                        // `def_span = span` of Stmt::Assign: on
+                        // reassignment, go-to-def jumps to the LAST
+                        // binding stmt (simplified MVP semantics).
                         ctx.declare_var_annotated(name.clone(), declared.clone(), *span);
                         final_ty = declared;
                     }
                     None => {
-                        // Sin anotación nueva: si la variable ya existe
-                        // con anotación previa, exigimos que el valor
-                        // nuevo sea compatible con ese tipo. Si la
-                        // variable se infirió sin anotación, el modelo
-                        // gradual permite que el tipo cambie.
+                        // Without new annotation: if the variable already exists
+                        // with previous annotation, we require the new
+                        // value to be compatible with that type. If the
+                        // variable was inferred without annotation, the
+                        // gradual model allows the type to change.
                         match ctx.lookup_binding(name) {
                             Some(existing) if existing.annotated => {
                                 let existing_ty = existing.ty.clone();
@@ -8496,8 +8491,8 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                         ),
                                     );
                                 }
-                                // Conservamos el binding anotado — la
-                                // reasignación no relaja el tipo.
+                                // We keep the annotated binding — the
+                                // reassignment does not relax the type.
                                 ctx.declare_var_annotated(name.clone(), existing_ty.clone(), *span);
                                 final_ty = existing_ty;
                             }
@@ -8508,33 +8503,33 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         }
                     }
                 }
-                // V2 — record final del LHS bajo su span propio.
+                // V2 — final record of the LHS under its own span.
                 ctx.type_info.record(*target_span, final_ty);
             }
-            // AssignTarget::Field { object, field }: validar que el
-            // receptor es un tipo nominal con ese campo y que el tipo
-            // del valor es compatible con el declarado. Cubre el
-            // agujero documentado en deudas-post-5b (F2): antes solo
-            // se atajaba en runtime.
+            // AssignTarget::Field { object, field }: validate that the
+            // receiver is a nominal type with that field and the value's
+            // type is compatible with the declared. Covers the
+            // hole documented in deudas-post-5b (F2): previously
+            // only caught at runtime.
             else if let AssignTarget::Field { object, field } = target {
                 let obj_ty = infer_expr(ctx, object);
                 match &obj_ty {
                     Type::Any => {
-                        // Gradual escape — no chequeamos (matchea
-                        // `Expr::Field` en `infer_expr`).
+                        // Gradual escape — we don't check (matches
+                        // `Expr::Field` in `infer_expr`).
                     }
                     Type::Nominal(id) => {
                         let info = ctx.types.info(*id);
                         let type_name = info.name.clone();
-                        // Si los fields no están resueltos (declaración
-                        // con error previo), no chequeamos para no
-                        // doblar el error.
+                        // If fields are not resolved (declaration
+                        // with previous error), we don't check to avoid
+                        // duplicating the error.
                         if let Some(declared_fields) = info.fields.clone() {
                             match declared_fields.iter().find(|f| &f.name == field) {
                                 Some(f) => {
-                                    // Mini-tanda Vp — asignar a un campo
-                                    // privado solo se permite desde
-                                    // métodos del propio tipo.
+                                    // Mini-batch Vp — assigning to a private
+                                    // field is only allowed from
+                                    // methods of the type itself.
                                     if is_private_field(field) && ctx.current_type != Some(*id) {
                                         ctx.error_at(*span, format!(
                                             "el campo `{}.{}` es privado (prefijo `_`); no se puede asignar desde afuera del tipo `{}`",
@@ -8579,10 +8574,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     }
                 }
             }
-            // R.1.3 — `objeto[indice] = value` (mini-fase R).
-            // Validar receptor `List<T>` con index `Int`, RHS
-            // compatible con T. O receptor `Map<K, V>` con index
-            // compatible con K, RHS compatible con V.
+            // R.1.3 — `object[index] = value` (mini-phase R).
+            // Validate receiver `List<T>` with `Int` index, RHS
+            // compatible with T. Or receiver `Map<K, V>` with index
+            // compatible with K, RHS compatible with V.
             else if let AssignTarget::Index { object, index } = target {
                 let obj_ty = infer_expr(ctx, object);
                 let idx_ty = infer_expr(ctx, index);
@@ -8647,20 +8642,20 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::Return(e, span) => {
-            // Inferimos siempre para que los errores adentro afloren.
+            // We always infer so errors inside surface.
             let ret_ty = infer_expr(ctx, e);
-            // R.2.4 (F3): `return` huérfano (fuera de fn) → error
-            // estático claro. El evaluator también lo emitía en
-            // runtime, pero el checker lo caza antes.
+            // R.2.4 (F3): orphan `return` (outside fn) → clear
+            // static error. The evaluator also emitted it at
+            // runtime, but the checker catches it earlier.
             if ctx.return_stack.is_empty() {
                 ctx.error_at(
                     *span,
                     "`return` solo puede usarse adentro de una función".to_string(),
                 );
             }
-            // Si estamos adentro de una función con return_type
-            // declarado (y resoluble), validamos. Fuera de fn o con
-            // return_type ausente (Any), no chequeamos.
+            // If we are inside a function with declared (and resolvable)
+            // return_type, we validate. Outside fn or with
+            // missing return_type (Any), we don't check.
             if let Some(expected) = ctx.return_stack.last().cloned() {
                 if !is_compatible(&ret_ty, &expected) {
                     ctx.error_at(
@@ -8673,9 +8668,9 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     );
                 }
             }
-            // Alimentamos el frame inferido de la fn contenedora.
-            // Para FnDef se descarta al pop; para FnExpr lo usa para
-            // sintetizar `ret`.
+            // We feed the containing fn's inferred frame.
+            // For FnDef it's discarded on pop; for FnExpr it's used to
+            // synthesize `ret`.
             if let Some(frame) = ctx.inferred_returns.last_mut() {
                 frame.push(ret_ty);
             }
@@ -8686,19 +8681,19 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::ReturnStatus { status, body, span } => {
-            // Inferimos las exprs para que errores adentro afloren.
+            // We infer the exprs so errors inside surface.
             let status_ty = infer_expr(ctx, status);
             let body_ty = body.as_ref().map(|b| infer_expr(ctx, b));
-            // Regla: solo válido adentro de un handler HTTP. Fuera de
-            // eso es error claro — sintaxis nueva del spec, restringida
-            // a handlers para no abrir return polimórfico en cualquier fn.
+            // Rule: only valid inside an HTTP handler. Outside of
+            // that is a clear error — new syntax in the spec, restricted
+            // to handlers to not open polymorphic return in any fn.
             let in_handler = ctx.in_http_handler.last().copied().unwrap_or(false);
             if !in_handler {
                 ctx.error_at(*span,
                     "`return <status> { ... }` solo se admite adentro de un handler HTTP (`@get`/`@post`/`@put`/`@delete`) o una fn aplicada como `@middleware(...)`".to_string()
                 );
             }
-            // Status debe ser Int (rango 100-599 se valida en runtime).
+            // Status must be Int (range 100-599 validated at runtime).
             if !is_compatible(&status_ty, &Type::Int) {
                 ctx.error_at(
                     *span,
@@ -8708,11 +8703,11 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     ),
                 );
             }
-            // El body puede ser cualquier valor serializable; no chequeamos
-            // contra el `return_type` formal del handler (es polimórfico:
-            // el spec permite que un handler con `-> User` también haga
-            // `return 404 { ... }`). El cuerpo se serializa a JSON en
-            // runtime con `value_to_json`.
+            // The body can be any serializable value; we don't check
+            // against the handler's formal `return_type` (it's polymorphic:
+            // the spec allows a handler with `-> User` to also do
+            // `return 404 { ... }`). The body is serialized to JSON at
+            // runtime with `value_to_json`.
             let _ = body_ty;
         }
 
@@ -8725,76 +8720,76 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             is_async,
             span: fn_span,
         } => {
-            // Abrimos scope nuevo para params y locales. Los params se
-            // bindean con su tipo declarado (o Any). Empujamos el
-            // return type esperado al stack para que los `return`
-            // adentro lo vean. Sin anotación → `Any` (no chequea).
-            // También pusheamos un frame en `inferred_returns` para
-            // mantener consistencia con FnExpr (los frames van en
-            // paralelo); el contenido se descarta acá porque FnDef
-            // ya tiene `return_type` declarado.
+            // We open a new scope for params and locals. Params are
+            // bound with their declared type (or Any). We push the
+            // expected return type to the stack so `return`s
+            // inside see it. Without annotation → `Any` (doesn't check).
+            // We also push a frame in `inferred_returns` to
+            // maintain consistency with FnExpr (frames go in
+            // parallel); the content is discarded here because FnDef
+            // already has declared `return_type`.
             //
-            // Async (6.2): la firma EXTERNA de una `async fn` envuelve
-            // su return type en `Future<T>` (eso se construye en
-            // `preregister_fn_signatures` para que las llamadas a la
-            // fn tipen correctamente). Pero adentro del body, los
-            // `return x` siguen produciendo `T` puro (no `Future<T>`)
-            // — `async` es transparente desde adentro. Por eso al
-            // pushear el `return_stack` usamos `T` (no envuelto).
+            // Async (6.2): the EXTERNAL signature of an `async fn` wraps
+            // its return type in `Future<T>` (that's built in
+            // `preregister_fn_signatures` so calls to the
+            // fn type correctly). But inside the body, the
+            // `return x` still produces pure `T` (not `Future<T>`)
+            // — `async` is transparent from inside. That's why when
+            // pushing the `return_stack` we use `T` (not wrapped).
             let ret = match return_type {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
             };
-            // "Contexto HTTP" para el chequeo de `Stmt::ReturnStatus`:
-            // handlers HTTP (`@get`/`@post`/`@put`/`@delete`/`@ws`) y
-            // fns referenciadas por `@middleware(name)` en otro FnDef.
-            // El pre-scan llena `ctx.middleware_fn_names` antes del walk.
-            // Fase 9.w.2: `@ws("/path")` también cuenta como HTTP-like —
-            // permite `return <status> { ... }` antes del upgrade.
+            // "HTTP context" for the `Stmt::ReturnStatus` check:
+            // HTTP handlers (`@get`/`@post`/`@put`/`@delete`/`@ws`) and
+            // fns referenced by `@middleware(name)` in another FnDef.
+            // The pre-scan fills `ctx.middleware_fn_names` before the walk.
+            // Phase 9.w.2: `@ws("/path")` also counts as HTTP-like —
+            // allows `return <status> { ... }` before the upgrade.
             let is_http_handler = decorators
                 .iter()
                 .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete" | "ws"))
                 || ctx.middleware_fn_names.contains(fn_name);
-            // Fase 9.w.1 — validar `@authenticated`/`@admin` contra el
-            // `@auth_provider` recolectado pre-walk. Errores van a
-            // `ctx.errors`; no interrumpe el chequeo del body.
+            // Phase 9.w.1 — validate `@authenticated`/`@admin` against the
+            // `@auth_provider` collected pre-walk. Errors go to
+            // `ctx.errors`; doesn't interrupt body checking.
             check_auth_decorators(ctx, fn_name, params, decorators, *fn_span);
-            // Fase 9.w.2 — validar `@ws(...)` handlers: async fn que
-            // recibe exactamente un `WsConn<T>` + (opcional) un `user:
-            // User` si tiene `@authenticated`/`@admin`.
+            // Phase 9.w.2 — validate `@ws(...)` handlers: async fn
+            // receiving exactly one `WsConn<T>` + (optional) a `user:
+            // User` if it has `@authenticated`/`@admin`.
             check_ws_handler(ctx, fn_name, params, *is_async, decorators, *fn_span);
-            // Fase 9.w.3 — validar `@cron("expr")` (jobs periódicos) y
-            // `@background` (fns ejecutables vía spawn). Cada uno tiene
-            // reglas propias; conflictos `@cron + @background` o
-            // `@cron + @get/@post/...` se rechazan.
+            // Phase 9.w.3 — validate `@cron("expr")` (periodic jobs) and
+            // `@background` (fns executable via spawn). Each has its
+            // own rules; conflicts `@cron + @background` or
+            // `@cron + @get/@post/...` are rejected.
             check_cron_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
             check_background_decorator(ctx, fn_name, decorators, *fn_span);
-            // Fase 12.1.a — validar `@healthz`/`@readyz` (probes K8s
-            // estilo). Singletons, sin args/kwargs/params, return
-            // `Bool`/`Result<Null>`/`Result<Bool>` (sync o async). NO
-            // combinables con `@get/@post/@put/@delete/@ws/@cron/
+            // Phase 12.1.a — validate `@healthz`/`@readyz` (K8s-style
+            // probes). Singletons, no args/kwargs/params, return
+            // `Bool`/`Result<Null>`/`Result<Bool>` (sync or async). NOT
+            // combinable with `@get/@post/@put/@delete/@ws/@cron/
             // @background/@auth_provider/@authenticated/@admin/@test/
-            // @command`. El runtime y el codegen auto-mount `/healthz`
-            // y `/readyz` cuando estos decorators están declarados.
+            // @command`. The runtime and codegen auto-mount `/healthz`
+            // and `/readyz` when these decorators are declared.
             check_health_decorators(ctx, fn_name, params, &ret, decorators, *fn_span);
-            // Fase 13 (v0.11.0) — `@command("name", desc="...")` declara
-            // una fn como comando CLI. Valida que la fn no tenga conflictos
-            // con decorators de servidor/job/test, que los params sean
-            // CLI-marshallables (Str/Int/Float/Bool/Str?), y que el return
-            // sea Int (exit code).
+            // Phase 13 (v0.11.0) — `@command("name", desc="...")` declares
+            // a fn as a CLI command. Validates that the fn has no conflicts
+            // with server/job/test decorators, that params are
+            // CLI-marshallable (Str/Int/Float/Bool/Str?), and that the return
+            // is Int (exit code).
             check_command_decorator(ctx, fn_name, params, &ret, decorators, *fn_span);
-            // Fase 12.7 — `@trace(name="X")` y `@metric(name="X")`
-            // sobre fns user (business logic). Rechaza apilamiento
-            // sobre handlers HTTP (auto-instrumentation 12.3 cubre).
-            // Acepta solo kwarg `name` opcional.
+            // Phase 12.7 — `@trace(name="X")` and `@metric(name="X")`
+            // on user fns (business logic). Rejects stacking
+            // on HTTP handlers (12.3 auto-instrumentation covers them).
+            // Accepts only optional `name` kwarg.
             check_trace_metric_decorators(ctx, fn_name, decorators, *fn_span);
-            // Fase 12.8 — `@flag("name")` gate de fn entera. Valida shape
-            // sintáctico: 1 arg positional Str literal (el flag name), sin
-            // kwargs. Apilable sobre cualquier fn (HTTP/WS/regular). Cuando
-            // está activo, el runtime y codegen wrappean la invocación
-            // chequeando el registry (env var `FITZ_FLAG_<NAME>` o default
-            // del manifest); si la flag está off, los handlers HTTP/WS
-            // retornan 404, las fns normales retornan Null/default según
+            // Phase 12.8 — `@flag("name")` gate for the whole fn. Validates
+            // syntactic shape: 1 positional arg Str literal (the flag name), no
+            // kwargs. Stackable on any fn (HTTP/WS/regular). When
+            // active, the runtime and codegen wrap the invocation
+            // checking the registry (env var `FITZ_FLAG_<NAME>` or manifest
+            // default); if the flag is off, HTTP/WS handlers
+            // return 404, normal fns return Null/default according to
             // return type.
             check_flag_decorator(ctx, fn_name, decorators, *fn_span);
             ctx.push_scope();
@@ -8802,25 +8797,25 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.inferred_returns.push(Vec::new());
             ctx.in_http_handler.push(is_http_handler);
             ctx.await_stack.push(*is_async);
-            // R.2.4 (F3): break/continue NO escapan funciones. Guardamos
-            // el loop_depth previo, reseteamos a 0 para el body, y
-            // restauramos al salir.
+            // R.2.4 (F3): break/continue do NOT escape functions. We save
+            // the previous loop_depth, reset to 0 for the body, and
+            // restore on exit.
             let saved_loop_depth = ctx.loop_depth;
             ctx.loop_depth = 0;
             for p in params {
                 let elem_ty = ann_to_type(p.type_.as_ref(), ctx.types);
-                // Fp.2 — varargs: adentro del body, el binding tipa
-                // como `List<T>` (T = tipo anotado o Any). El call site
-                // colecciona 0+ args extra en una List.
+                // Fp.2 — varargs: inside the body, the binding types
+                // as `List<T>` (T = annotated type or Any). The call site
+                // collects 0+ extra args into a List.
                 let pty = if p.varargs {
                     Type::List(Box::new(elem_ty))
                 } else {
                     elem_ty
                 };
-                // S1 (2026-06-05) — `Param` ahora tiene `name_span` propio.
-                // Lo usamos como def_span y registramos el tipo en TypeInfo
-                // (hover sobre el nombre del param funciona). Fallback a
-                // fn_span si name_span es ZERO (params sintéticos).
+                // S1 (2026-06-05) — `Param` now has its own `name_span`.
+                // We use it as def_span and register the type in TypeInfo
+                // (hover over the param's name works). Fallback to
+                // fn_span if name_span is ZERO (synthetic params).
                 let def_span = if p.name_span.column > 0 {
                     p.name_span
                 } else {
@@ -8841,7 +8836,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::TypeDef { .. } => {
-            // Ya validada por resolve_program.
+            // Already validated by resolve_program.
         }
 
         Stmt::While {
@@ -8882,9 +8877,9 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             span,
             ..
         } => {
-            // Mini-tanda Md — `var` ahora es un Pattern. Tipo del elem
-            // depende del iter: List<T> → T; Range → Int; Map<K, V> →
-            // Tuple([K, V]) (cada iteración produce un par).
+            // Mini-batch Md — `var` is now a Pattern. The elem type
+            // depends on the iter: List<T> → T; Range → Int; Map<K, V> →
+            // Tuple([K, V]) (each iteration produces a pair).
             let iter_ty = infer_expr(ctx, iter);
             let elem_ty = match &iter_ty {
                 Type::List(t) => (**t).clone(),
@@ -8911,9 +8906,9 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::Break(value, _label, span) => {
-            // Mini-tanda L: chequear el valor si está y empujarlo
-            // al `break_value_stack` para que el `Expr::Loop`
-            // contenedor lo unifique como tipo de retorno.
+            // Mini-batch L: check the value if present and push it
+            // to `break_value_stack` so the containing `Expr::Loop`
+            // unifies it as the return type.
             let v_ty = if let Some(e) = value {
                 infer_expr(ctx, e)
             } else {
@@ -8922,7 +8917,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             if let Some(frame) = ctx.break_value_stack.last_mut() {
                 frame.push(v_ty);
             }
-            // R.2.4 (F3): `break` huérfano (fuera de loop) → error.
+            // R.2.4 (F3): orphan `break` (outside loop) → error.
             if ctx.loop_depth == 0 {
                 ctx.error_at(
                     *span,
@@ -8932,7 +8927,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             }
         }
         Stmt::Continue(_label, span) => {
-            // R.2.4 (F3): `continue` huérfano (fuera de loop) → error.
+            // R.2.4 (F3): orphan `continue` (outside loop) → error.
             if ctx.loop_depth == 0 {
                 ctx.error_at(
                     *span,
@@ -8943,49 +8938,49 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::Import { path, alias, span } => {
-            // `import a.b.c` bindea `c` (o `alias` si está) como Module.
-            // 8.4: si el path arranca con `python` (prefijo reservado de
-            // interop), el binding tipa como `PyAny` para que el
-            // checker pueda refinar el tipo de los calls a
-            // `Result<Any>`. Resto sigue como `Any` (gradual estándar).
+            // `import a.b.c` binds `c` (or `alias` if present) as Module.
+            // 8.4: if the path starts with `python` (reserved interop
+            // prefix), the binding types as `PyAny` so the
+            // checker can refine the type of calls to
+            // `Result<Any>`. The rest stays as `Any` (standard gradual).
             let from_python = path.first().map(|s| s.as_str()) == Some("python");
             let binding = alias.clone().or_else(|| path.last().cloned());
             if let Some(name) = binding {
                 let ty = if from_python { Type::PyAny } else { Type::Any };
-                // go-to-def sobre el binding salta a la línea del
-                // import (al stmt, no al módulo remoto — cross-module
-                // def es deuda visible del MVP de 9.x.3).
+                // go-to-def on the binding jumps to the import
+                // line (to the stmt, not to the remote module — cross-module
+                // def is visible debt of the 9.x.3 MVP).
                 ctx.declare_var(name, ty, *span);
             }
         }
 
         Stmt::FromImport { path, names, span } => {
-            // Cada nombre se trae al scope como var. Algunos pueden
-            // ser tipos (los chequea StructLit vía TypeEnv, ya
-            // registrados en resolve_program), otros funciones o
-            // values — sin info del módulo importado, `Any` es lo
-            // mejor que tenemos en 5.3.1. Con alias, el binding local
-            // usa el alias en lugar del nombre original.
+            // Each name is brought into scope as a var. Some can
+            // be types (StructLit checks them via TypeEnv, already
+            // registered in resolve_program), others functions or
+            // values — without info from the imported module, `Any` is the
+            // best we have in 5.3.1. With alias, the local binding
+            // uses the alias instead of the original name.
             //
-            // 8.4: `from python import X` bindea `X` como `PyAny` para
-            // que los call sites se refinen a `Result<Any>` en
-            // `infer_call`. Submódulos `from python.X import Y` también
-            // tipan como `PyAny` — todo lo que viene de Python es
-            // opaco para el checker.
+            // 8.4: `from python import X` binds `X` as `PyAny` so
+            // call sites refine to `Result<Any>` in
+            // `infer_call`. Submodules `from python.X import Y` also
+            // type as `PyAny` — anything coming from Python is
+            // opaque to the checker.
             //
-            // 8-pyi.C (v0.9.57): si hay un stub `.pyi` adyacente
-            // cargado por `pyi_loader::load_callables`, bindeamos el
-            // nombre con `Type::Nominal(synth_id)` donde synth es el
-            // nominal sintético que tiene un field por cada fn/var
-            // del stub. Field access (`X.fn`) entonces resuelve a la
-            // signature declarada en el .pyi en lugar de devolver
-            // `PyAny`. Sin stub, fallback al PyAny gradual.
+            // 8-pyi.C (v0.9.57): if there's an adjacent `.pyi` stub
+            // loaded by `pyi_loader::load_callables`, we bind the
+            // name with `Type::Nominal(synth_id)` where synth is the
+            // synthetic nominal that has one field per fn/var of the
+            // stub. Field access (`X.fn`) then resolves to the
+            // signature declared in the .pyi instead of returning
+            // `PyAny`. Without a stub, fallback to gradual PyAny.
             let from_python = path.first().map(|s| s.as_str()) == Some("python");
             for (n, alias) in names {
                 let binding = alias.clone().unwrap_or_else(|| n.clone());
                 let ty = if from_python {
-                    // El stub se cargó bajo el `binding` (alias si
-                    // está, sino name) — ver `pyi_loader::load_callables`.
+                    // The stub was loaded under the `binding` (alias if
+                    // present, else name) — see `pyi_loader::load_callables`.
                     match ctx.types.pyi_module(&binding) {
                         Some(id) => Type::Nominal(id),
                         None => Type::PyAny,
@@ -8993,24 +8988,24 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 } else {
                     Type::Any
                 };
-                // go-to-def sobre el binding salta a la línea del
-                // `from foo import ...` — cross-module def remoto
-                // queda como deuda visible del MVP.
+                // go-to-def on the binding jumps to the line of
+                // `from foo import ...` — remote cross-module def
+                // remains visible debt of the MVP.
                 ctx.declare_var(binding, ty, *span);
             }
         }
 
-        // Fase 9.0.1 (F15): paralelo a `Expr::Error`. `Stmt::Error`
-        // se ignora silenciosamente — el error real ya está en
-        // `recovered_errors` del parser. No queremos emitir errores
-        // derivados desde el checker sobre el mismo punto.
+        // Phase 9.0.1 (F15): parallel to `Expr::Error`. `Stmt::Error`
+        // is silently ignored — the real error is already in
+        // the parser's `recovered_errors`. We don't want to emit
+        // derived errors from the checker on the same point.
         Stmt::Error(_) => {}
     }
 }
 
-/// Pre-registra las firmas de los `Stmt::FnDef` top-level como
-/// `Type::Function` en el scope global. Esto destraba referencias
-/// hacia adelante y mutuas entre funciones top-level.
+/// Pre-registers the signatures of top-level `Stmt::FnDef`s as
+/// `Type::Function` in the global scope. This unblocks forward
+/// and mutual references between top-level functions.
 fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
     for stmt in program {
         if let Stmt::FnDef {
@@ -9030,30 +9025,30 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
             };
-            // Async (6.2): la firma EXTERNA envuelve el return type
-            // en `Future<T>`. Llamar a `async_fn(args)` produce
-            // `Future<T>`, que se desempaca con `.await`. Incluso
-            // sin anotación (T = Any), envolvemos como `Future<Any>`
-            // — el roadmap (cross-cutting #3) lo formaliza así:
-            // toda async fn produce un Future al llamarse, sin
-            // excepciones. `is_compatible` y `.await` ya tratan a
-            // `Any` como gradual escape, así que `Future<Any>`
-            // sigue dejando pasar todo.
+            // Async (6.2): the EXTERNAL signature wraps the return type
+            // in `Future<T>`. Calling `async_fn(args)` produces
+            // `Future<T>`, unwrapped with `.await`. Even
+            // without annotation (T = Any), we wrap as `Future<Any>`
+            // — the roadmap (cross-cutting #3) formalizes it like this:
+            // every async fn produces a Future when called, without
+            // exceptions. `is_compatible` and `.await` already treat
+            // `Any` as gradual escape, so `Future<Any>`
+            // still lets everything through.
             let outer_ret = if *is_async {
                 Type::Future(Box::new(ret))
             } else {
                 ret
             };
-            // Fp — defaults_count = cantidad de params con `default`
-            // al final. La aridad mínima del callee es
-            // `params.len() - defaults_count`. El parser garantiza que
-            // todos los defaults son consecutivos al final.
+            // Fp — defaults_count = number of params with `default`
+            // at the end. The callee's minimum arity is
+            // `params.len() - defaults_count`. The parser guarantees that
+            // all defaults are consecutive at the end.
             let defaults_count = params.iter().filter(|p| p.default.is_some()).count();
-            // Fp.2 — has_varargs si el último param es variádico.
+            // Fp.2 — has_varargs if the last param is variadic.
             let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
-            // go-to-def sobre el uso de la fn salta al span del FnDef
-            // (que apunta al `fn` keyword). Aproximación; precisión
-            // por nombre requiere span propio del identificador.
+            // go-to-def on the fn's use jumps to the FnDef span
+            // (which points to the `fn` keyword). Approximation; precision
+            // by name requires the identifier's own span.
             ctx.declare_fn(
                 name.clone(),
                 Type::Function {
@@ -9068,10 +9063,10 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
     }
 }
 
-/// Fp — aridad mínima del callee. Si es un Ident resoluble a una fn con
-/// defaults registrada, devuelve `params.len() - defaults_count`. Si no,
-/// devuelve `total` (fallback estricto — callbacks/fns como var no
-/// tienen info de defaults en `Type::Function`).
+/// Fp — callee's minimum arity. If it's an Ident resolvable to a fn with
+/// defaults registered, returns `params.len() - defaults_count`. Otherwise,
+/// returns `total` (strict fallback — callbacks/fns as var don't
+/// have defaults info in `Type::Function`).
 fn required_arity_for_callee(ctx: &CheckCtx, callee: &Expr, total: usize) -> usize {
     if let Expr::Ident(name, _) = callee {
         if let Some(b) = ctx.lookup_binding(name) {
@@ -9081,9 +9076,9 @@ fn required_arity_for_callee(ctx: &CheckCtx, callee: &Expr, total: usize) -> usi
     total
 }
 
-/// Fp.2 — `true` si el callee es una fn con varargs (último param es
-/// variádico). Cuando es varargs, el call site acepta cualquier cantidad
-/// `>= required` de args (en lugar de máximo = `total`).
+/// Fp.2 — `true` if the callee is a fn with varargs (last param is
+/// variadic). When it's varargs, the call site accepts any quantity
+/// `>= required` of args (instead of max = `total`).
 fn callee_has_varargs(ctx: &CheckCtx, callee: &Expr) -> bool {
     if let Expr::Ident(name, _) = callee {
         if let Some(b) = ctx.lookup_binding(name) {
@@ -9093,28 +9088,28 @@ fn callee_has_varargs(ctx: &CheckCtx, callee: &Expr) -> bool {
     false
 }
 
-/// Entrada pública del checker estático completo: corre resolución
-/// de anotaciones (`resolve_program`) y luego chequeo de expresiones.
-/// Devuelve el env, el side-table de tipos por nodo (`TypeInfo`, Fase
-/// 9.0 — F16), el side-table de definiciones por uso (`DefinitionInfo`,
-/// Fase 9.x.3) y la lista de errores acumulados.
+/// Public entry to the full static checker: runs annotation
+/// resolution (`resolve_program`) and then expression checking.
+/// Returns the env, the per-node types side-table (`TypeInfo`, Phase
+/// 9.0 — F16), the per-use definitions side-table (`DefinitionInfo`,
+/// Phase 9.x.3) and the accumulated errors list.
 ///
-/// Los side-tables se llenan durante el chequeo: cada nodo `Expr` con
-/// `Span` conocido tipa en `TypeInfo`; cada `Expr::Ident` resuelto a
-/// una binding con `def_span` conocido registra `(use_span → def_span)`
-/// en `DefinitionInfo`. La CLI (`fitz run`/`build`/`check`) descarta
-/// ambos; el LSP (Fase 9.x) los consume para hover y go-to-definition.
+/// The side-tables are populated during checking: every `Expr` node with
+/// known `Span` types in `TypeInfo`; every `Expr::Ident` resolved to
+/// a binding with known `def_span` registers `(use_span → def_span)`
+/// in `DefinitionInfo`. The CLI (`fitz run`/`build`/`check`) discards
+/// both; the LSP (Phase 9.x) consumes them for hover and go-to-definition.
 pub fn check_program(program: &Program) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
     let (env, errors) = resolve_program(program);
     check_with_env(program, env, errors)
 }
 
-/// Variante de `check_program` que recibe un `TypeEnv` ya pre-llenado
-/// (típicamente por `resolve_program` + side effects del loader de
-/// stubs `.pyi` adyacentes — ver `pyi_loader`). El `errors` acumulado
-/// del resolve se preserva y se extiende con los errores del check.
+/// Variant of `check_program` receiving a pre-filled `TypeEnv`
+/// (typically by `resolve_program` + side effects from the adjacent
+/// `.pyi` stubs loader — see `pyi_loader`). The accumulated `errors`
+/// from the resolve are preserved and extended with the check's errors.
 ///
-/// **Uso esperado** (8-pyi.B, v0.9.57):
+/// **Expected use** (8-pyi.B, v0.9.57):
 ///
 /// ```ignore
 /// let (mut env, errors) = types::resolve_program(&program);
@@ -9123,38 +9118,38 @@ pub fn check_program(program: &Program) -> (TypeEnv, TypeInfo, DefinitionInfo, V
 ///     types::check_with_env(&program, env, errors);
 /// ```
 ///
-/// Los call sites internos sin contexto de `.pyi` deben seguir usando
-/// `check_program(program)` que invoca `resolve_program` interno.
+/// Internal call sites without `.pyi` context should keep using
+/// `check_program(program)` which invokes `resolve_program` internally.
 pub fn check_with_env(
     program: &Program,
     env: TypeEnv,
     mut errors: Vec<FitzError>,
 ) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
-    // Encapsulamos `ctx` en un bloque para que su préstamo sobre `env`
-    // termine antes del return: queremos mover `env`, `ctx.type_info`
-    // y `ctx.def_info` por separado al caller.
+    // We encapsulate `ctx` in a block so its borrow on `env`
+    // ends before the return: we want to move `env`, `ctx.type_info`
+    // and `ctx.def_info` separately to the caller.
     let (type_info, def_info) = {
         let mut ctx = CheckCtx::new(&env);
         preregister_fn_signatures(&mut ctx, program);
         collect_middleware_fn_names(&mut ctx, program);
-        // Fase 9.w.1 — recolectar `@auth_provider` (singleton) y exponer
-        // su info en `ctx.auth_provider`. El walk posterior chequea
-        // `@authenticated`/`@admin` contra esta info.
+        // Phase 9.w.1 — collect `@auth_provider` (singleton) and expose
+        // its info in `ctx.auth_provider`. The subsequent walk checks
+        // `@authenticated`/`@admin` against this info.
         collect_auth_provider(&mut ctx, program);
-        // Fase 9.w.3 — recolectar nombres de fns con `@background`. El
-        // chequeo de `spawn(call)` exige que el target sea una fn
-        // declarada con `@background` (opt-in para evitar usos
-        // accidentales sobre fns regulares).
+        // Phase 9.w.3 — collect names of fns with `@background`. The
+        // `spawn(call)` check requires the target to be a fn
+        // declared with `@background` (opt-in to avoid accidental
+        // uses on regular fns).
         collect_background_fns(&mut ctx, program);
         check_block(&mut ctx, program);
-        // R.3 — chequear bodies de los métodos custom de cada
-        // `type`. Esto sucede DESPUÉS del check_block normal para
-        // que los nominales declarados como `type X { ... }` ya
-        // estén disponibles. Cada method body se chequea con:
-        //  - scope hijo del global con los fields del tipo
-        //    pre-declarados como locales (opción A).
-        //  - params del método sobre el mismo scope (locales).
-        //  - return_stack con el return_type declarado (o Any).
+        // R.3 — check bodies of custom methods of each
+        // `type`. This happens AFTER the normal check_block so
+        // the nominals declared as `type X { ... }` are already
+        // available. Each method body is checked with:
+        //  - global child scope with the type's fields
+        //    pre-declared as locals (option A).
+        //  - method's params over the same scope (locals).
+        //  - return_stack with the declared return_type (or Any).
         check_custom_methods(&mut ctx, program);
         errors.append(&mut ctx.errors);
         (ctx.type_info, ctx.def_info)
@@ -9162,10 +9157,10 @@ pub fn check_with_env(
     (env, type_info, def_info, errors)
 }
 
-/// R.3 — chequea cada body de método custom adentro de los `type`
-/// declarados en el programa. Vuelta separada de `check_block` para
-/// que los fields del tipo (ya resueltos en `resolve_program`) estén
-/// disponibles como locales en el scope del body.
+/// R.3 — checks each custom method body inside the `type`s
+/// declared in the program. Separate pass from `check_block` so
+/// the type's fields (already resolved in `resolve_program`) are
+/// available as locals in the body's scope.
 fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
     for stmt in program {
         let Stmt::TypeDef { name, methods, .. } = stmt else {
@@ -9174,9 +9169,9 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
         if methods.is_empty() {
             continue;
         }
-        // Recuperar los fields resueltos del tipo (poblados por
-        // `resolve_program`). Si el tipo no existe → silencioso
-        // (ya hubo error en resolve_program).
+        // Recover the type's resolved fields (populated by
+        // `resolve_program`). If the type doesn't exist → silent
+        // (there was already an error in resolve_program).
         let Some(id) = ctx.types.lookup(name) else {
             continue;
         };
@@ -9185,7 +9180,7 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
             None => continue,
         };
         for m in methods {
-            // Return type del método.
+            // Method's return type.
             let ret_ty = match &m.return_type {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
@@ -9197,25 +9192,25 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
             ctx.await_stack.push(m.is_async);
             let saved_loop_depth = ctx.loop_depth;
             ctx.loop_depth = 0;
-            // Mini-tanda Vp — marcamos que estamos adentro del body
-            // de un método del tipo `id`. Habilita acceso a campos
-            // privados (`_field`) desde acá.
+            // Mini-batch Vp — we mark that we are inside the body
+            // of a method of type `id`. Enables access to private
+            // fields (`_field`) from here.
             let saved_current_type = ctx.current_type;
             ctx.current_type = Some(id);
-            // Pre-declarar fields como locales (opción A). Mini-tanda
-            // St: los static methods NO reciben fields como locales,
-            // así que skipeamos cuando `is_static`.
+            // Pre-declare fields as locals (option A). Mini-batch
+            // St: static methods do NOT receive fields as locals,
+            // so we skip when `is_static`.
             if !m.is_static {
                 for f in &resolved_fields {
                     ctx.declare_var(f.name.clone(), f.type_.clone(), m.span);
                 }
             }
-            // Declarar params (sobreescriben fields homónimos en el
-            // scope local — `declare_var` reemplaza el binding al
-            // entrar a la misma var).
+            // Declare params (overwrite homonymous fields in the
+            // local scope — `declare_var` replaces the binding when
+            // entering the same var).
             for p in &m.params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
-                // S1 (2026-06-05) — usar p.name_span si está presente.
+                // S1 (2026-06-05) — use p.name_span if present.
                 let def_span = if p.name_span.column > 0 {
                     p.name_span
                 } else {
@@ -9238,63 +9233,63 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
     }
 }
 
-/// W12 (v0.10.8) — Información de un `@auth_provider` declarado en un
-/// módulo importado (no en el program local). El caller (main.rs)
-/// extrae esto del AST de cada módulo importado con
-/// `extract_auth_provider_signature` y lo registra en el TypeEnv del
-/// importer con `set_imported_auth_provider`.
+/// W12 (v0.10.8) — Info of an `@auth_provider` declared in an
+/// imported module (not in the local program). The caller (main.rs)
+/// extracts this from each imported module's AST with
+/// `extract_auth_provider_signature` and registers it in the importer's
+/// TypeEnv with `set_imported_auth_provider`.
 ///
-/// Cuando `collect_auth_provider` no encuentra provider local, hace
-/// fallback a este slot. El `user_type_name` se matchea por NOMBRE
-/// contra el nominal del importer (registrado vía `from <mod> import
-/// <T>` en la vuelta 1b de `resolve_program`).
+/// When `collect_auth_provider` does not find a local provider, it falls
+/// back to this slot. The `user_type_name` is matched by NAME
+/// against the importer's nominal (registered via `from <mod> import
+/// <T>` in `resolve_program`'s pass 1b).
 ///
-/// **`has_role_field` viene del módulo de origen**: extraído por
-/// `extract_auth_provider_signature` mirando los fields declarados en
-/// `type <T> { role: Str ... }` del AST del módulo. Esto permite que
-/// `@admin` cross-module valide estáticamente la presencia de `role`
-/// sin necesidad de copiar fields nominales (que arrastrarían TypeIds
-/// del módulo de origen).
+/// **`has_role_field` comes from the source module**: extracted by
+/// `extract_auth_provider_signature` looking at the fields declared in
+/// `type <T> { role: Str ... }` of the module's AST. This allows
+/// `@admin` cross-module to statically validate the presence of `role`
+/// without needing to copy nominal fields (which would drag TypeIds
+/// from the source module).
 #[derive(Debug, Clone)]
 pub struct ImportedAuthProvider {
-    /// Nombre del módulo donde vive el provider. El codegen lo usa
-    /// para emitir `<module>::<fn>(...)` cuando invoca al provider
-    /// desde el wrapper de un handler protegido. Debe coincidir con el
-    /// nombre de mod del crate Rust generado (típicamente derivado
-    /// del stem del archivo: `auth.fitz` → `auth`).
+    /// Name of the module where the provider lives. Codegen uses it
+    /// to emit `<module>::<fn>(...)` when invoking the provider
+    /// from the wrapper of a protected handler. Must match the
+    /// mod name of the generated Rust crate (typically derived
+    /// from the file stem: `auth.fitz` → `auth`).
     pub module_name: String,
-    /// Nombre de la fn marcada con `@auth_provider`.
+    /// Name of the fn marked with `@auth_provider`.
     pub fn_name: String,
-    /// `true` si la fn es `async fn`. El codegen lo consulta para
-    /// emitir `.await` después del call.
+    /// `true` if the fn is `async fn`. Codegen consults it to
+    /// emit `.await` after the call.
     pub is_async: bool,
-    /// Nombre del tipo `T` del `Result<T>` que retorna el provider.
-    /// El checker lo matchea por nombre con el nominal del importer
-    /// (registrado por `from <module> import <T>`).
+    /// Name of type `T` of the `Result<T>` returned by the provider.
+    /// The checker matches it by name against the importer's nominal
+    /// (registered by `from <module> import <T>`).
     pub user_type_name: String,
-    /// `true` si `T` tiene un campo `role: Str` (no nullable) en el
-    /// módulo de origen. Exigido por `@admin`. Lo determina el scanner
-    /// mirando el AST del módulo.
+    /// `true` if `T` has a `role: Str` (non-nullable) field in the
+    /// source module. Required by `@admin`. The scanner determines it
+    /// looking at the module's AST.
     pub has_role_field: bool,
 }
 
-/// W12 (v0.10.8) — Scanner público que extrae el `@auth_provider`
-/// declarado en `program` (el AST de un módulo importado, ya
-/// parseado). Devuelve `None` si el módulo no declara provider.
+/// W12 (v0.10.8) — Public scanner that extracts the `@auth_provider`
+/// declared in `program` (the AST of an already-parsed imported
+/// module). Returns `None` if the module does not declare a provider.
 ///
-/// El caller (main.rs) invoca esto sobre cada módulo importado, antes
-/// del check del importer. Si hay provider, lo registra en el TypeEnv
-/// del importer con `set_imported_auth_provider`.
+/// The caller (main.rs) invokes this over each imported module, before
+/// the importer's check. If there is a provider, it registers it in the
+/// importer's TypeEnv with `set_imported_auth_provider`.
 ///
-/// **No valida shape exhaustivamente**: el chequeo completo del
-/// provider (signature, return type, fields) lo hace el checker
-/// del propio módulo cuando se chequea ese módulo aparte. Acá solo
-/// extraemos lo justo para que el importer pueda validar
-/// `@authenticated`/`@admin` contra el provider.
+/// **Does not validate shape exhaustively**: the full provider check
+/// (signature, return type, fields) is done by the module's own
+/// checker when that module is checked separately. Here we only
+/// extract the minimum so the importer can validate
+/// `@authenticated`/`@admin` against the provider.
 ///
-/// `module_name` lo provee el caller — típicamente el stem del
-/// archivo importado (`auth.fitz` → `"auth"`), para que el codegen
-/// pueda emitir invocaciones module-qualified.
+/// `module_name` is provided by the caller — typically the stem of
+/// the imported file (`auth.fitz` → `"auth"`), so codegen
+/// can emit module-qualified invocations.
 pub fn extract_auth_provider_signature(
     program: &Program,
     module_name: &str,
@@ -9302,7 +9297,7 @@ pub fn extract_auth_provider_signature(
     let mut user_type_name: Option<String> = None;
     let mut fn_name: Option<String> = None;
     let mut is_async = false;
-    // 1) Encontrar la fn con `@auth_provider`.
+    // 1) Find the fn with `@auth_provider`.
     for stmt in program {
         let Stmt::FnDef {
             name,
@@ -9317,9 +9312,9 @@ pub fn extract_auth_provider_signature(
         if !decorators.iter().any(|d| d.name == "auth_provider") {
             continue;
         }
-        // Extraer el nombre del tipo `T` del `Result<T>`. Sin return
-        // type declarado o con shape distinto, abortamos — el checker
-        // del módulo lo reportará con un error claro.
+        // Extract the name of type `T` from `Result<T>`. Without a
+        // declared return type or with a different shape, we abort —
+        // the module's checker will report it with a clear error.
         let Some(ret) = return_type else { return None };
         let TypeExpr::Generic { name: head, args } = ret else {
             return None;
@@ -9337,10 +9332,10 @@ pub fn extract_auth_provider_signature(
     }
     let user_type_name = user_type_name?;
     let fn_name = fn_name?;
-    // 2) Determinar `has_role_field` mirando el `type <T> { ... }` del
-    // mismo módulo. Si T no está declarado localmente (improbable —
-    // significaría que el provider retorna un tipo importado a su vez,
-    // caso fuera del MVP), `has_role_field = false`.
+    // 2) Determine `has_role_field` by looking at the `type <T> { ... }` of the
+    // same module. If T is not declared locally (unlikely —
+    // would mean the provider returns an imported type in turn,
+    // case out of the MVP), `has_role_field = false`.
     let has_role_field = program.iter().any(|stmt| {
         let Stmt::TypeDef { name, fields, .. } = stmt else {
             return false;
@@ -9349,8 +9344,8 @@ pub fn extract_auth_provider_signature(
             return false;
         }
         fields.iter().any(|f| {
-            // `role` no nullable de tipo `Str`. Nullable Str no basta
-            // (paralelo a la validación local de `collect_auth_provider`).
+            // `role` non-nullable of type `Str`. Nullable Str is not enough
+            // (parallel to local validation of `collect_auth_provider`).
             f.name == "role" && matches!(&f.type_, TypeExpr::Named(n) if n == "Str")
         })
     });
@@ -9363,50 +9358,50 @@ pub fn extract_auth_provider_signature(
     })
 }
 
-/// Fase 9.w.1 — Información del `@auth_provider` registrado en el
-/// programa. Lo construye `collect_auth_provider` al pre-scanear el
-/// programa antes del walk del checker. Si hay más de un
-/// `@auth_provider`, se reporta error y se preserva el primero.
+/// Phase 9.w.1 — Info of the `@auth_provider` registered in the
+/// program. Built by `collect_auth_provider` when pre-scanning the
+/// program before the checker walk. If there is more than one
+/// `@auth_provider`, error is reported and the first is preserved.
 ///
-/// Lo consulta el chequeo de `@authenticated`/`@admin` para:
-/// - Exigir que cada handler protegido declare un param compatible con
-///   `user_type_id` (el `T` del `Result<T>` que retorna el provider).
-/// - Validar que `T` tenga campo `role: Str` cuando aparece `@admin` en
-///   el programa.
+/// Consulted by the `@authenticated`/`@admin` check to:
+/// - Require each protected handler to declare a param compatible with
+///   `user_type_id` (the `T` of `Result<T>` returned by the provider).
+/// - Validate that `T` has a `role: Str` field when `@admin` appears in
+///   the program.
 ///
-/// Privado al módulo: el evaluator (`fitz run`, 9.w.1.c) y el codegen
-/// (`fitz build`, 9.w.1.d) re-recolectan por su cuenta. El checker no
-/// necesita exportar la info; solo valida estáticamente.
+/// Private to the module: the evaluator (`fitz run`, 9.w.1.c) and codegen
+/// (`fitz build`, 9.w.1.d) re-collect on their own. The checker does not
+/// need to export the info; it only validates statically.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 struct AuthProviderInfo {
-    /// Nombre de la fn marcada con `@auth_provider`.
+    /// Name of the fn marked with `@auth_provider`.
     name: String,
-    /// Span de la fn (para mensajes de error sobre duplicados).
+    /// Span of the fn (for duplicate error messages).
     span: Span,
-    /// `TypeId` del `T` nominal en el `Result<T>` que retorna el
-    /// provider. Los handlers `@authenticated`/`@admin` deben declarar
-    /// un param de este tipo (el `user` inyectado por el runtime).
+    /// `TypeId` of the nominal `T` in the `Result<T>` returned by the
+    /// provider. `@authenticated`/`@admin` handlers must declare
+    /// a param of this type (the `user` injected by the runtime).
     user_type_id: TypeId,
-    /// Nombre del tipo `T`, para mensajes de error.
+    /// Name of type `T`, for error messages.
     user_type_name: String,
-    /// `true` si `T` tiene un campo `role: Str` (no nullable). Lo exige
-    /// `@admin` para discriminar admins; los `@authenticated` puros no
-    /// lo necesitan.
+    /// `true` if `T` has a `role: Str` (non-nullable) field. Required by
+    /// `@admin` to discriminate admins; pure `@authenticated`s don't
+    /// need it.
     has_role_field: bool,
 }
 
-/// Fase 9.w.1 — Pre-scan del programa para encontrar el `@auth_provider`
-/// único registrado. Valida:
-/// - Decorator sin args ni kwargs.
-/// - La fn tiene exactamente 1 param de tipo `Map<Str, Str>` (headers
-///   HTTP).
-/// - El return type es `Result<T>` con `T` nominal (un `type` custom).
-/// - Hay como máximo un `@auth_provider` en el programa.
+/// Phase 9.w.1 — Pre-scan of the program to find the unique
+/// registered `@auth_provider`. Validates:
+/// - Decorator without args nor kwargs.
+/// - The fn has exactly 1 param of type `Map<Str, Str>` (HTTP
+///   headers).
+/// - The return type is `Result<T>` with nominal `T` (a custom `type`).
+/// - There is at most one `@auth_provider` in the program.
 ///
-/// Errores van directo a `ctx.errors`. La info del primer provider
-/// válido se persiste en `ctx.auth_provider` (consumida por el walk
-/// posterior al chequear handlers `@authenticated`/`@admin`).
+/// Errors go directly to `ctx.errors`. The info of the first valid
+/// provider is persisted in `ctx.auth_provider` (consumed by the
+/// subsequent walk when checking `@authenticated`/`@admin` handlers).
 fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
     let mut first: Option<(String, Span)> = None;
     for stmt in program {
@@ -9425,8 +9420,8 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
             if deco.name != "auth_provider" {
                 continue;
             }
-            // 1) Sin args ni kwargs (`@auth_provider` puro, sin paréntesis
-            // o con `()`).
+            // 1) No args nor kwargs (`@auth_provider` pure, without parens
+            // or with `()`).
             if !deco.args.is_empty() || !deco.kwargs.is_empty() {
                 ctx.errors.push(FitzError::new(
                     ErrorKind::TypeError,
@@ -9454,7 +9449,7 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                 ));
                 continue;
             }
-            // 3) Exactamente 1 param Map<Str, Str>.
+            // 3) Exactly 1 Map<Str, Str> param.
             if params.len() != 1 {
                 ctx.errors.push(FitzError::new(
                     ErrorKind::TypeError,
@@ -9487,11 +9482,11 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                 ));
                 continue;
             }
-            // 4) Return type Result<T> con T nominal.
+            // 4) Return type Result<T> with nominal T.
             let ret = match return_type {
                 Some(r) => match resolve_type_expr(r, ctx.types) {
                     Ok(t) => t,
-                    Err(_) => continue, // resolve_program ya reportó el error
+                    Err(_) => continue, // resolve_program already reported the error
                 },
                 None => {
                     ctx.errors.push(FitzError::new(
@@ -9537,7 +9532,7 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                     continue;
                 }
             };
-            // 5) Persistir info para la validación de handlers.
+            // 5) Persist info for handler validation.
             let info = ctx.types.info(user_id);
             let user_type_name = info.name.clone();
             let has_role_field = info
@@ -9559,32 +9554,32 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
         }
     }
 
-    // W12 (v0.10.8) — Fallback cross-module. Si no se encontró
-    // `@auth_provider` local pero el caller registró uno desde un
-    // módulo importado (`TypeEnv::set_imported_auth_provider`), lo
-    // promovemos a `ctx.auth_provider` para que `check_auth_decorators`
-    // valide handlers `@authenticated`/`@admin` contra él. El
-    // `user_type_id` se resuelve por NOMBRE en el TypeEnv del
-    // importer: `from auth import User` ya registró un nominal con ese
-    // nombre en la vuelta 1b de `resolve_program`, así que `lookup`
-    // devuelve un TypeId válido.
+    // W12 (v0.10.8) — Cross-module fallback. If no local
+    // `@auth_provider` was found but the caller registered one from an
+    // imported module (`TypeEnv::set_imported_auth_provider`), we
+    // promote it to `ctx.auth_provider` so `check_auth_decorators`
+    // validates `@authenticated`/`@admin` handlers against it. The
+    // `user_type_id` is resolved by NAME in the importer's TypeEnv:
+    // `from auth import User` already registered a nominal with that
+    // name in `resolve_program`'s pass 1b, so `lookup`
+    // returns a valid TypeId.
     //
-    // Si el importer NO importó el `User` (caso de programación
-    // común: olvidó `from auth import User` en el archivo que tiene
-    // los handlers), `lookup` devuelve `None` y dejamos
-    // `ctx.auth_provider = None`. Los handlers fallan con el mismo
-    // mensaje "no hay `@auth_provider`" — pero el mensaje real útil
-    // ("falta param de tipo `User`") va a aparecer también en
-    // `check_auth_decorators` cuando el handler declare param User
-    // sin importarlo. Aceptable como diagnóstico actual.
+    // If the importer did NOT import `User` (common programming
+    // case: forgot `from auth import User` in the file with the
+    // handlers), `lookup` returns `None` and we leave
+    // `ctx.auth_provider = None`. The handlers fail with the same
+    // "no `@auth_provider`" message — but the actual useful message
+    // ("missing param of type `User`") will also appear in
+    // `check_auth_decorators` when the handler declares a User param
+    // without importing it. Acceptable as current diagnostic.
     if ctx.auth_provider.is_none() {
         if let Some(imported) = ctx.types.imported_auth_provider() {
             if let Some(user_id) = ctx.types.lookup(&imported.user_type_name) {
-                // Si el importer también declara fields para `User`
-                // (caso: tiene su propio `type User { ... }` local que
-                // shadowea el importado — improbable pero válido),
-                // preferimos los fields del importer. Si no, usamos
-                // `has_role_field` del módulo de origen.
+                // If the importer also declares fields for `User`
+                // (case: has its own local `type User { ... }` that
+                // shadows the imported one — unlikely but valid),
+                // we prefer the importer's fields. Otherwise, we use
+                // the source module's `has_role_field`.
                 let has_role_field = ctx
                     .types
                     .info(user_id)
@@ -9597,11 +9592,11 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                     .unwrap_or(imported.has_role_field);
                 ctx.auth_provider = Some(AuthProviderInfo {
                     name: imported.fn_name.clone(),
-                    // Span sintético — el provider vive en otro
-                    // archivo. Si hay error de duplicación (caso
-                    // imposible hoy porque el caller exige unicidad
-                    // global pre-check), mostraríamos línea 0; el
-                    // mensaje cita el nombre y eso ya orienta.
+                    // Synthetic span — the provider lives in another
+                    // file. If there's a duplication error (case
+                    // impossible today because the caller requires
+                    // global pre-check uniqueness), we would show line 0;
+                    // the message cites the name and that already orients.
                     span: Span::default(),
                     user_type_id: user_id,
                     user_type_name: imported.user_type_name.clone(),
@@ -9612,13 +9607,13 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
     }
 }
 
-/// Fase 9.w.1 — Valida los decoradores `@authenticated` y `@admin` sobre
-/// un `Stmt::FnDef` candidato a handler HTTP. Se invoca desde el walker
-/// de `Stmt::FnDef` adentro de `check_block`, después de que el provider
-/// haya sido recolectado por `collect_auth_provider`.
+/// Phase 9.w.1 — Validates the `@authenticated` and `@admin` decorators on
+/// a candidate HTTP handler `Stmt::FnDef`. Invoked from the
+/// `Stmt::FnDef` walker inside `check_block`, after the provider
+/// has been collected by `collect_auth_provider`.
 ///
-/// Errores van a `ctx.errors`. No interrumpe el chequeo del body de la
-/// fn — los chequeos del body siguen su curso normal.
+/// Errors go to `ctx.errors`. Does not interrupt the body check of the
+/// fn — body checks continue normally.
 fn check_auth_decorators(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -9632,9 +9627,9 @@ fn check_auth_decorators(
             "authenticated" | "admin" | "requires" => deco.name.as_str(),
             _ => continue,
         };
-        // 1) Validación de shape:
-        //    - `@authenticated`/`@admin`: sin args ni kwargs.
-        //    - `@requires`: 1 arg Str literal, sin kwargs. Fase 9.w.1.iter2.a.
+        // 1) Shape validation:
+        //    - `@authenticated`/`@admin`: no args nor kwargs.
+        //    - `@requires`: 1 Str literal arg, no kwargs. Phase 9.w.1.iter2.a.
         if kind == "requires" {
             if !deco.kwargs.is_empty() {
                 ctx.errors.push(FitzError::new(
@@ -9701,8 +9696,8 @@ fn check_auth_decorators(
             ));
             continue;
         }
-        // 2) Solo sobre handlers HTTP (incluye `@ws` desde Fase 9.w.2 —
-        // el wrapper de auth corre antes del upgrade HTTP→WS).
+        // 2) Only on HTTP handlers (includes `@ws` since Phase 9.w.2 —
+        // the auth wrapper runs before the HTTP→WS upgrade).
         let is_handler = decorators
             .iter()
             .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete" | "ws"));
@@ -9718,7 +9713,7 @@ fn check_auth_decorators(
             ));
             continue;
         }
-        // 3) Exige provider registrado.
+        // 3) Requires a registered provider.
         let provider = match &ctx.auth_provider {
             Some(p) => p.clone(),
             None => {
@@ -9735,7 +9730,7 @@ fn check_auth_decorators(
                 continue;
             }
         };
-        // 4) Handler debe declarar un param compatible con el User type.
+        // 4) Handler must declare a param compatible with the User type.
         let user_ty = Type::Nominal(provider.user_type_id);
         let has_user_param = params.iter().any(|p| {
             let pty = ann_to_type(p.type_.as_ref(), ctx.types);
@@ -9753,7 +9748,7 @@ fn check_auth_decorators(
                 ),
             ));
         }
-        // 5) `@admin` y `@requires` exigen campo `role: Str` en el User type.
+        // 5) `@admin` and `@requires` require a `role: Str` field in the User type.
         if (kind == "admin" || kind == "requires") && !provider.has_role_field {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -9769,14 +9764,14 @@ fn check_auth_decorators(
     }
 }
 
-/// Mini-fase MW.1: pre-scan del programa para recolectar nombres de fns
-/// que aparecen como argumento de un `@middleware(name)` en cualquier
-/// FnDef. Esos nombres se marcan en `ctx.middleware_fn_names` para que
-/// el chequeo de `Stmt::ReturnStatus` los acepte como "contexto HTTP"
-/// (un middleware puede hacer `return 401 { ... }`). Solo capturamos
-/// referencias por `Expr::Ident` (la forma documentada); cualquier otra
-/// forma (call, lambda, etc.) la captura el evaluator en runtime con su
-/// propio error claro.
+/// Mini-phase MW.1: pre-scans the program to collect names of fns
+/// that appear as argument of a `@middleware(name)` in any
+/// FnDef. Those names are marked in `ctx.middleware_fn_names` so
+/// the `Stmt::ReturnStatus` check accepts them as "HTTP context"
+/// (a middleware can do `return 401 { ... }`). We only capture
+/// references by `Expr::Ident` (the documented form); any other
+/// form (call, lambda, etc.) is captured by the evaluator at runtime with its
+/// own clear error.
 fn collect_middleware_fn_names(ctx: &mut CheckCtx, program: &Program) {
     for stmt in program {
         if let Stmt::FnDef { decorators, .. } = stmt {
@@ -9794,17 +9789,17 @@ fn collect_middleware_fn_names(ctx: &mut CheckCtx, program: &Program) {
     }
 }
 
-/// Fase 9.w.2 — Valida el shape de un handler `@ws("/path")`:
-/// - Decorator con exactamente 1 arg `Str` (el path); sin kwargs.
-/// - El handler debe ser `async fn` (los WS naturalmente son async
+/// Phase 9.w.2 — Validates the shape of a `@ws("/path")` handler:
+/// - Decorator with exactly 1 `Str` arg (the path); no kwargs.
+/// - The handler must be `async fn` (WSs are naturally async
 ///   — `recv().await`/`send().await`).
-/// - Debe declarar exactamente 1 param de tipo `WsConn<T>` (T
-///   concreto, no `Any`), opcionalmente más 1 param de tipo del
-///   `@auth_provider` si hay `@authenticated`/`@admin` apilado.
-/// - Path no requiere validación de query/path-params (a diferencia
-///   de los handlers HTTP), pero sí debe parsear como Str literal.
+/// - Must declare exactly 1 param of type `WsConn<T>` (concrete T,
+///   not `Any`), optionally plus 1 param of the `@auth_provider`
+///   type if there's `@authenticated`/`@admin` stacked.
+/// - Path does not require query/path-param validation (unlike
+///   HTTP handlers), but must parse as a Str literal.
 ///
-/// Errores van a `ctx.errors`. No interrumpe el chequeo del body.
+/// Errors go to `ctx.errors`. Does not interrupt body checking.
 fn check_ws_handler(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -9817,8 +9812,8 @@ fn check_ws_handler(
         Some(d) => d,
         None => return,
     };
-    // 1) `@ws` debe tener exactamente 1 arg Str (el path) y sin
-    //    kwargs en el MVP. Sintaxis: `@ws("/chat")`.
+    // 1) `@ws` must have exactly 1 Str arg (the path) and no
+    //    kwargs in the MVP. Syntax: `@ws("/chat")`.
     if ws_deco.args.len() != 1 || !ws_deco.kwargs.is_empty() {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -9846,8 +9841,8 @@ fn check_ws_handler(
             return;
         }
     }
-    // 2) async fn obligatorio — `recv()`/`send()` son async por
-    //    naturaleza.
+    // 2) async fn required — `recv()`/`send()` are async by
+    //    nature.
     if !is_async {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -9859,8 +9854,8 @@ fn check_ws_handler(
             ),
         ));
     }
-    // 3) Exactamente 1 param `WsConn<T>` con T concreto + opcional
-    //    1 param User si hay `@authenticated`/`@admin`.
+    // 3) Exactly 1 `WsConn<T>` param with concrete T + optional
+    //    1 User param if there's `@authenticated`/`@admin`.
     let has_auth = decorators
         .iter()
         .any(|d| matches!(d.name.as_str(), "authenticated" | "admin"));
@@ -9885,15 +9880,15 @@ fn check_ws_handler(
         ));
         return;
     }
-    // Identificar el param WsConn y validar shape.
+    // Identify the WsConn param and validate shape.
     let mut wsconn_params = 0;
     for p in params {
         let pty = ann_to_type(p.type_.as_ref(), ctx.types);
         if let Type::WsConn { recv, send } = &pty {
             wsconn_params += 1;
-            // 9.w.2-wsconn-bidir: ambos recv y send deben ser
-            // concretos. Si alguno es Any, error (paralelo al check
-            // simétrico pre-bidir).
+            // 9.w.2-wsconn-bidir: both recv and send must be
+            // concrete. If either is Any, error (parallel to the
+            // symmetric pre-bidir check).
             if matches!(recv.as_ref(), Type::Any) || matches!(send.as_ref(), Type::Any) {
                 ctx.errors.push(FitzError::new(
                     ErrorKind::TypeError,
@@ -9920,26 +9915,26 @@ fn check_ws_handler(
     }
 }
 
-/// Fase 9.w.3 — checker para `spawn(fn_call)`. El callsite `spawn(...)`
-/// devuelve `Future<T>` donde T es el ret type de la fn target. El
-/// dispatch dispara solo cuando el binding de `spawn` es el builtin
-/// (no override del user).
+/// Phase 9.w.3 — checker for `spawn(fn_call)`. The `spawn(...)`
+/// callsite returns `Future<T>` where T is the ret type of the target fn.
+/// The dispatch fires only when the `spawn` binding is the builtin
+/// (no user override).
 ///
-/// Validaciones:
-///   1. Exactamente 1 arg, que debe ser un `Expr::Call` literal. No
-///      aceptamos `spawn(x)` donde `x` es var (el target debe ser
-///      claro estáticamente para validar `@background`).
-///   2. El callee del inner call debe ser un Ident resoluble. No
-///      aceptamos `spawn(obj.method())` (los métodos custom no llevan
+/// Validations:
+///   1. Exactly 1 arg, which must be a literal `Expr::Call`. We don't
+///      accept `spawn(x)` where `x` is a var (the target must be
+///      clear statically to validate `@background`).
+///   2. The callee of the inner call must be a resolvable Ident. We
+///      don't accept `spawn(obj.method())` (custom methods don't carry
 ///      `@background`).
-///   3. La fn target debe estar en `ctx.background_fns`. Sin
-///      `@background`, el checker rechaza con mensaje claro.
+///   3. The target fn must be in `ctx.background_fns`. Without
+///      `@background`, the checker rejects with a clear message.
 ///
-/// El ret type del spawn se sintetiza siguiendo el ret type de la fn
-/// target: si la fn ya devuelve `Future<T>` (async fn), spawn devuelve
-/// `Future<T>` (no doble wrap). Si la fn sync devuelve `T` puro,
-/// spawn devuelve `Future<T>`. Paridad con `tokio::spawn` que envuelve
-/// el output en JoinHandle pero la API expone solo el `T` final via
+/// The spawn's ret type is synthesized following the target fn's ret
+/// type: if the fn already returns `Future<T>` (async fn), spawn returns
+/// `Future<T>` (no double wrap). If the sync fn returns pure `T`,
+/// spawn returns `Future<T>`. Parity with `tokio::spawn` which wraps
+/// the output in JoinHandle but the API only exposes the final `T` via
 /// `.await`.
 fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
     if args.len() != 1 {
@@ -9996,8 +9991,8 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
                 span.column,
                 "spawn: el callee del inner call debe ser una fn top-level con `@background`, no un method call ni una expression compuesta.".to_string(),
             ));
-            // Tipamos los args para que afloren errores adentro y
-            // devolvemos Future<Any> sin parar el chequeo.
+            // We type the args so errors inside surface and
+            // we return Future<Any> without stopping the check.
             for a in inner_args {
                 infer_expr(ctx, a);
             }
@@ -10014,19 +10009,19 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
                 target_name, target_name
             ),
         ));
-        // Tipamos los args + devolvemos Future<Any> para no romper
-        // el chequeo del caller.
+        // We type the args + return Future<Any> to not break
+        // the caller's check.
         for a in inner_args {
             infer_expr(ctx, a);
         }
         return Type::Future(Box::new(Type::Any));
     }
-    // OK: target es una fn `@background` declarada. Tipamos el inner
-    // call delegando al synthesize estándar (valida aridad + arg
-    // types contra la firma real de la fn target). El ret type del
-    // inner call es lo que envolvemos en `Future` — excepto si ya
-    // viene como Future (async fn), en cuyo caso pasthrough sin
-    // doble wrap.
+    // OK: target is a declared `@background` fn. We type the inner
+    // call delegating to standard synthesize (validates arity + arg
+    // types against the target fn's real signature). The inner
+    // call's ret type is what we wrap in `Future` — except if it
+    // already comes as Future (async fn), in which case passthrough without
+    // double wrap.
     let inner_ret = infer_expr(ctx, &args[0]);
     match inner_ret {
         Type::Future(_) => inner_ret,
@@ -10035,16 +10030,16 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
     }
 }
 
-/// Fase 9.w.3 — pre-scan de las fns top-level con `@background`. El
-/// chequeo de `spawn(call)` (en `synthesize_expr` para `Expr::Call`
-/// cuyo callee es Ident `"spawn"`) consulta este set para validar
-/// que el target del spawn esté declarado como background.
+/// Phase 9.w.3 — pre-scans top-level fns with `@background`. The
+/// `spawn(call)` check (in `synthesize_expr` for `Expr::Call`
+/// whose callee is Ident `"spawn"`) consults this set to validate
+/// that the spawn target is declared as background.
 ///
-/// Política: `@background` no admite args/kwargs. `@background` y
-/// `@cron` son mutuamente excluyentes (lo valida `check_cron_decorator`
-/// y `check_background_decorator`). El walk del checker emite errores
-/// si el shape del decorator es inválido; acá solo recolectamos
-/// nombres para tener el set listo antes del walk.
+/// Policy: `@background` does not accept args/kwargs. `@background` and
+/// `@cron` are mutually exclusive (validated by `check_cron_decorator`
+/// and `check_background_decorator`). The checker walk emits errors
+/// if the decorator's shape is invalid; here we just collect
+/// names to have the set ready before the walk.
 fn collect_background_fns(ctx: &mut CheckCtx, program: &Program) {
     for stmt in program {
         let Stmt::FnDef {
@@ -10059,28 +10054,28 @@ fn collect_background_fns(ctx: &mut CheckCtx, program: &Program) {
     }
 }
 
-/// Fase 9.w.3 — valida `@cron("cron-expr")` sobre `fn` top-level.
-/// Reglas:
-///   1. Args: exactamente 1 Str literal con cron expression.
-///      Aceptamos 5 fields (Unix clásico) o 6/7 fields (con seconds
-///      y/o year) — el parser del runtime usa el crate `cron`.
-///   2. Sin kwargs.
-///   3. La fn no admite params (los jobs no reciben input).
-///   4. Return type: `Null`, `Result<Null>`, `Result<T>` con T cualquiera,
-///      o `Future<X>` cuando es async (paralelo a otros handlers async).
-///      Aceptamos también `Any` (gradual / sin anotar).
-///   5. No combinable con `@get`/`@post`/`@put`/`@delete`/`@ws` (un job
-///      cron no es un endpoint HTTP) ni con `@background` (semánticas
-///      distintas: cron es periódico programado, background es
-///      fire-and-forget desde un handler).
+/// Phase 9.w.3 — validates `@cron("cron-expr")` on top-level `fn`s.
+/// Rules:
+///   1. Args: exactly 1 Str literal with cron expression.
+///      We accept 5 fields (classic Unix) or 6/7 fields (with seconds
+///      and/or year) — the runtime parser uses the `cron` crate.
+///   2. No kwargs.
+///   3. The fn does not accept params (jobs receive no input).
+///   4. Return type: `Null`, `Result<Null>`, `Result<T>` with any T,
+///      or `Future<X>` when async (parallel to other async handlers).
+///      We also accept `Any` (gradual / unannotated).
+///   5. Not combinable with `@get`/`@post`/`@put`/`@delete`/`@ws` (a
+///      cron job is not an HTTP endpoint) nor with `@background` (different
+///      semantics: cron is periodic scheduled, background is
+///      fire-and-forget from a handler).
 ///
-/// Validación sintáctica del cron expression: se hace en runtime/codegen
-/// (no en el checker) porque importar `cron` acá implica una dep en el
-/// path del checker. El checker valida shape; el runtime valida sintaxis.
-/// 9.w.3.iter2 — Extrae un valor `i64` de un literal Int, contemplando
-/// el caso `-N` que el parser emite como `UnaryOp { Neg, Int(N) }` (no
-/// como `Int(-N)` directo). Devuelve `None` si la expr no es un literal
-/// numérico simple.
+/// Syntactic validation of the cron expression: done at runtime/codegen
+/// (not in the checker) because importing `cron` here implies a dep on the
+/// checker path. The checker validates shape; the runtime validates syntax.
+/// 9.w.3.iter2 — Extracts an `i64` value from an Int literal, considering
+/// the `-N` case that the parser emits as `UnaryOp { Neg, Int(N) }` (not
+/// as `Int(-N)` directly). Returns `None` if the expr is not a simple
+/// numeric literal.
 fn extract_int_literal(expr: &Expr) -> Option<i64> {
     match expr {
         Expr::Int(n, _) => Some(*n),
@@ -10096,35 +10091,35 @@ fn extract_int_literal(expr: &Expr) -> Option<i64> {
     }
 }
 
-/// 9.w.3.iter2 — Valida los kwargs opcionales aceptados por `@cron` y
-/// `@background`. La lista `allowed` define qué kwargs son válidos para
-/// el decorator en cuestión (`@cron` acepta los 4; `@background` solo
-/// `tz` y `retry`).
+/// 9.w.3.iter2 — Validates the optional kwargs accepted by `@cron` and
+/// `@background`. The `allowed` list defines which kwargs are valid for
+/// the decorator in question (`@cron` accepts the 4; `@background` only
+/// `tz` and `retry`).
 ///
-/// Reglas comunes:
-/// - **Duplicados** → error (`tz="A", tz="B"`).
-/// - **Desconocido** → error con la lista de aceptados.
-/// - **`tz`**: `Expr::Str` literal. La validación IANA real (que la
-///   string sea un timezone conocido) la hace el runtime al registrar
-///   el job — el crate `chrono-tz` produce un error claro con sugerencia
-///   si no matchea.
-/// - **`retry`**: `Expr::Map` literal con keys del subset:
-///     - `max: Int` (>=0, default 0 = sin retry).
-///     - `backoff: Str` literal con valor en
+/// Common rules:
+/// - **Duplicates** → error (`tz="A", tz="B"`).
+/// - **Unknown** → error with the list of accepted ones.
+/// - **`tz`**: `Expr::Str` literal. Real IANA validation (that the
+///   string is a known timezone) is done by the runtime when registering
+///   the job — the `chrono-tz` crate produces a clear error with suggestion
+///   if it doesn't match.
+/// - **`retry`**: `Expr::Map` literal with keys from the subset:
+///     - `max: Int` (>=0, default 0 = no retry).
+///     - `backoff: Str` literal with value in
 ///       `{"exponential", "linear", "constant"}` (default `"exponential"`).
 ///     - `initial_secs: Int` (>=1, default 1).
 ///     - `max_secs: Int` (>=1, default 60).
 ///
-///   Keys desconocidas, valores con tipo incorrecto, o `backoff` fuera
-///   del whitelist → error.
+///   Unknown keys, values with incorrect type, or `backoff` outside
+///   the whitelist → error.
 /// - **`catch_up`**: `Expr::Bool` literal.
-/// - **`store`**: cualquier expresión. El checker NO valida que resuelva
-///   a `DbConn` (eso requeriría re-correr `infer_expr` adentro de este
-///   helper, que se llama fuera del walk principal). El runtime emite
-///   error claro si el valor no es `Value::DbConn`.
+/// - **`store`**: any expression. The checker does NOT validate that it resolves
+///   to `DbConn` (that would require re-running `infer_expr` inside this
+///   helper, which is called outside the main walk). The runtime emits
+///   a clear error if the value is not `Value::DbConn`.
 ///
-/// Devuelve `true` si todos los kwargs pasan; `false` si hubo al menos
-/// un error (el caller decide si seguir o cortar).
+/// Returns `true` if all kwargs pass; `false` if there was at least
+/// one error (the caller decides whether to continue or stop).
 fn check_job_kwargs(
     ctx: &mut CheckCtx,
     deco_name: &str,
@@ -10136,7 +10131,7 @@ fn check_job_kwargs(
     let mut ok = true;
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for (k, v) in kwargs {
-        // Desconocido.
+        // Unknown.
         if !allowed.contains(&k.as_str()) {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10157,7 +10152,7 @@ fn check_job_kwargs(
             ok = false;
             continue;
         }
-        // Duplicado.
+        // Duplicate.
         if !seen.insert(k.as_str()) {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10171,7 +10166,7 @@ fn check_job_kwargs(
             ok = false;
             continue;
         }
-        // Validar shape del valor.
+        // Validate the value's shape.
         match k.as_str() {
             "tz" => {
                 if !matches!(v, Expr::Str(_, _)) {
@@ -10202,9 +10197,9 @@ fn check_job_kwargs(
                 }
             }
             "store" => {
-                // Cualquier expr — el tipo se chequea en runtime.
-                // Validación mínima: no `Null` literal (`store=null`
-                // no tiene sentido y revela un bug del autor).
+                // Any expr — the type is checked at runtime.
+                // Minimum validation: no `Null` literal (`store=null`
+                // makes no sense and reveals a bug from the author).
                 if matches!(v, Expr::Null(_)) {
                     ctx.errors.push(FitzError::new(
                         ErrorKind::TypeError,
@@ -10229,10 +10224,10 @@ fn check_job_kwargs(
     ok
 }
 
-/// 9.w.3.iter2 — valida el shape del Map literal pasado como
-/// `retry={...}`. Acepta solo keys conocidos y validates los tipos.
+/// 9.w.3.iter2 — validates the shape of the Map literal passed as
+/// `retry={...}`. Accepts only known keys and validates the types.
 ///
-/// Si no es un Map literal en absoluto → error sugiriendo la sintaxis.
+/// If it's not a Map literal at all → error suggesting the syntax.
 fn check_retry_map(
     ctx: &mut CheckCtx,
     deco_name: &str,
@@ -10259,10 +10254,10 @@ fn check_retry_map(
     let mut ok = true;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (k_expr, v_expr) in entries {
-        // El parser para `{a=1}` en posición de Map literal puede emitir
-        // tanto `Expr::Str("a", ...)` (clave Str estándar) como
-        // `Expr::Ident("a", ...)` cuando la key se escribe sin comillas
-        // (sintaxis abreviada estilo `cors({...})`). Aceptamos las dos.
+        // The parser for `{a=1}` in Map literal position can emit
+        // both `Expr::Str("a", ...)` (standard Str key) and
+        // `Expr::Ident("a", ...)` when the key is written without quotes
+        // (abbreviated syntax `cors({...})` style). We accept both.
         let key_name = match k_expr {
             Expr::Str(s, _) => s.clone(),
             Expr::Ident(s, _) => s.clone(),
@@ -10406,18 +10401,18 @@ fn check_cron_decorator(
         Some(d) => d,
         None => return,
     };
-    // 1) Args: exactamente 1 Str literal positional.
+    // 1) Args: exactly 1 positional Str literal.
     //
-    // 9.w.3.iter2 — kwargs opcionales aceptados:
+    // 9.w.3.iter2 — optional accepted kwargs:
     //   - `tz: Str` (IANA timezone, default UTC)
-    //   - `retry: Map literal` con keys `max`/`backoff`/`initial_secs`/
-    //     `max_secs`. Default: sin retry.
-    //   - `catch_up: Bool` (política de missed runs tras restart;
+    //   - `retry: Map literal` with keys `max`/`backoff`/`initial_secs`/
+    //     `max_secs`. Default: no retry.
+    //   - `catch_up: Bool` (missed runs policy after restart;
     //     default false = skip).
-    //   - `store: <expr>` que debe resolver a `DbConn` en runtime
-    //     (típico: `store=db` con `db` un binding del scope). El checker
-    //     NO valida el tipo de la expr — eso se hace al registrar el
-    //     job en runtime/codegen. Sin `store` → in-memory (MVP).
+    //   - `store: <expr>` which must resolve to `DbConn` at runtime
+    //     (typical: `store=db` with `db` a binding from scope). The checker
+    //     does NOT validate the expr's type — that's done when registering
+    //     the job at runtime/codegen. Without `store` → in-memory (MVP).
     if cron_deco.args.len() != 1 {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -10445,8 +10440,8 @@ fn check_cron_decorator(
             return;
         }
     }
-    // 1b) Kwargs opcionales (9.w.3.iter2): valida shape de cada uno y
-    //     rechaza desconocidos/duplicados.
+    // 1b) Optional kwargs (9.w.3.iter2): validates each one's shape and
+    //     rejects unknown/duplicates.
     if !check_job_kwargs(
         ctx,
         "@cron",
@@ -10457,7 +10452,7 @@ fn check_cron_decorator(
     ) {
         return;
     }
-    // 2) Conflictos con otros decoradores HTTP / WS / background.
+    // 2) Conflicts with other HTTP / WS / background decorators.
     let conflicting = [
         "get",
         "post",
@@ -10482,7 +10477,7 @@ fn check_cron_decorator(
             return;
         }
     }
-    // 3) Sin params.
+    // 3) No params.
     if !params.is_empty() {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -10496,20 +10491,20 @@ fn check_cron_decorator(
         ));
         return;
     }
-    // 4) Return type: aceptamos Null/Result/Future (async)/Any.
-    //    Otros tipos concretos (Int/Float/Str/...) → error claro (un
-    //    job no produce un valor consumible).
+    // 4) Return type: we accept Null/Result/Future (async)/Any.
+    //    Other concrete types (Int/Float/Str/...) → clear error (a
+    //    job does not produce a consumable value).
     //
-    //    Para async fns, el `ret` que llega ya está post-async
-    //    transparente (el body produce `T`, el caller ve `Future<T>`).
-    //    Aceptamos Null o Result<...> también acá.
-    let _ = is_async; // is_async ya está implícito en la forma de `ret`.
+    //    For async fns, the incoming `ret` is already post-async
+    //    transparent (the body produces `T`, the caller sees `Future<T>`).
+    //    We accept Null or Result<...> here too.
+    let _ = is_async; // is_async is already implicit in the shape of `ret`.
     match ret {
         Type::Null | Type::Any => {}
         Type::Result { .. } => {}
         Type::Future(inner) => {
-            // Para async fns, ret es Future<T>. El T interno debe ser
-            // Null o Result o Any.
+            // For async fns, ret is Future<T>. The inner T must be
+            // Null or Result or Any.
             match inner.as_ref() {
                 Type::Null | Type::Any => {}
                 Type::Result { .. } => {}
@@ -10542,17 +10537,17 @@ fn check_cron_decorator(
     }
 }
 
-/// Fase 9.w.3 — valida `@background` sobre `fn` top-level. Reglas:
-///   1. Sin args ni kwargs.
-///   2. No combinable con `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
-///      `@auth_provider` (semánticas distintas: background es opt-in
-///      del lado del autor para marcar que la fn puede ejecutarse vía
-///      `spawn(...)`; HTTP handlers consumen request/response;
-///      cron/auth_provider tienen sus propios runtimes).
+/// Phase 9.w.3 — validates `@background` on top-level `fn`s. Rules:
+///   1. No args nor kwargs.
+///   2. Not combinable with `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
+///      `@auth_provider` (different semantics: background is opt-in
+///      on the author's side to mark that the fn can be executed via
+///      `spawn(...)`; HTTP handlers consume request/response;
+///      cron/auth_provider have their own runtimes).
 ///
-/// La política de `@background` es solo marcador: no cambia el shape
-/// de la fn ni su return type. El chequeo del callsite (`spawn(call)`)
-/// es lo que consulta `ctx.background_fns` para autorizar el spawn.
+/// The `@background` policy is just a marker: it doesn't change the fn's
+/// shape nor its return type. The callsite check (`spawn(call)`)
+/// is what consults `ctx.background_fns` to authorize the spawn.
 fn check_background_decorator(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -10563,11 +10558,11 @@ fn check_background_decorator(
         Some(d) => d,
         None => return,
     };
-    // 9.w.3.iter2 — `@background` ahora admite kwargs opcionales `tz`
-    // y `retry` (mismo shape que `@cron`). `store` y `catch_up` NO se
-    // aceptan en `@background` (persistencia de spawn jobs queda
-    // diferida a iter3 — los args del spawn requieren serialización
-    // JSON + tabla `fitz_bg_jobs` separada).
+    // 9.w.3.iter2 — `@background` now accepts optional kwargs `tz`
+    // and `retry` (same shape as `@cron`). `store` and `catch_up` are NOT
+    // accepted on `@background` (persistence of spawn jobs is
+    // deferred to iter3 — spawn args require JSON serialization
+    // + separate `fitz_bg_jobs` table).
     if !bg_deco.args.is_empty() {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -10587,9 +10582,9 @@ fn check_background_decorator(
         &["tz", "retry"],
         fn_span,
     ) {
-        // Si el shape de los kwargs es inválido, igual seguimos con la
-        // validación de conflictos (más errores arriba en el mismo
-        // walk del checker es mejor que abortar acá).
+        // If the kwargs shape is invalid, we still continue with the
+        // conflict validation (more errors above in the same
+        // checker walk is better than aborting here).
     }
     let conflicting = [
         "get",
@@ -10617,38 +10612,38 @@ fn check_background_decorator(
     }
 }
 
-// Fase 12.1.a — `@healthz`/`@readyz` declaran probes K8s estilo.
-// El runtime y el codegen auto-mount `GET /healthz` y `GET /readyz`
-// cuando estos decorators están declarados (paralelo a
-// `/openapi.json` autoregistrado).
+// Phase 12.1.a — `@healthz`/`@readyz` declare K8s-style probes.
+// The runtime and codegen auto-mount `GET /healthz` and `GET /readyz`
+// when these decorators are declared (parallel to
+// `/openapi.json` auto-registered).
 //
-// **Reglas validadas** (idénticas para `@healthz` y `@readyz`):
-// - Sin args ni kwargs (`@healthz` puro, opcionalmente con `()` vacío).
-// - Singleton: máximo uno por programa.
-// - Sin params (las probes no reciben input).
-// - Return type: `Bool` / `Result<Null>` / `Result<Bool>`. Si la fn
-//   es `async fn`, los Future de los anteriores también.
-// - NO combinable con `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
+// **Validated rules** (identical for `@healthz` and `@readyz`):
+// - No args nor kwargs (`@healthz` pure, optionally with empty `()`).
+// - Singleton: at most one per program.
+// - No params (probes receive no input).
+// - Return type: `Bool` / `Result<Null>` / `Result<Bool>`. If the fn
+//   is `async fn`, the Futures of the above too.
+// - NOT combinable with `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
 //   `@background`/`@auth_provider`/`@authenticated`/`@admin`/`@test`/
-//   `@command`. Las probes son rutas auto-mounted; el handler NO
-//   debe ser HTTP normal ni job ni test.
+//   `@command`. Probes are auto-mounted routes; the handler must NOT
+//   be normal HTTP nor job nor test.
 //
-// Errores van directo a `ctx.errors`. El singleton se trackea en
-// `ctx.healthz_first` y `ctx.readyz_first` (Some al ver el primero).
+// Errors go directly to `ctx.errors`. The singleton is tracked in
+// `ctx.healthz_first` and `ctx.readyz_first` (Some on seeing the first).
 
-/// Fase 12.7 — valida `@trace(name="X")` y `@metric(name="X")` sobre
-/// fns user (business logic). Apilables entre sí. Rechaza
-/// apilamiento sobre `@get`/`@post`/`@put`/`@delete`/`@ws` con error
-/// claro citando que la auto-instrumentation de Fase 12.3 (spans HTTP
-/// automáticos + métricas) ya cubre ese caso.
+/// Phase 12.7 — validates `@trace(name="X")` and `@metric(name="X")` on
+/// user fns (business logic). Stackable with each other. Rejects
+/// stacking on `@get`/`@post`/`@put`/`@delete`/`@ws` with clear error
+/// citing that Phase 12.3 auto-instrumentation (automatic HTTP spans +
+/// metrics) already covers that case.
 ///
-/// Sintaxis aceptada:
-///   `@trace` — span con `<fn_name>` como name.
-///   `@trace(name="custom")` — override del name del span.
-///   `@metric` — Counter + Histogram con `<fn_name>` como name.
+/// Accepted syntax:
+///   `@trace` — span with `<fn_name>` as name.
+///   `@trace(name="custom")` — override of span's name.
+///   `@metric` — Counter + Histogram with `<fn_name>` as name.
 ///   `@metric(name="custom")` — override.
 ///
-/// Sin args positionals. Sin otros kwargs en el MVP.
+/// No positional args. No other kwargs in the MVP.
 fn check_trace_metric_decorators(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -10692,7 +10687,7 @@ fn check_trace_metric_decorators(
             }
             has_metric = true;
         }
-        // 1) Sin args positionals.
+        // 1) No positional args.
         if !deco.args.is_empty() {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10705,7 +10700,7 @@ fn check_trace_metric_decorators(
             ));
             continue;
         }
-        // 2) Solo kwarg `name="X"` (Str literal) opcional.
+        // 2) Only optional `name="X"` kwarg (Str literal).
         for (k, v) in &deco.kwargs {
             if k != "name" {
                 ctx.errors.push(FitzError::new(
@@ -10732,8 +10727,8 @@ fn check_trace_metric_decorators(
             }
         }
     }
-    // 3) Rechazar apilamiento sobre handlers HTTP/WS (auto-instrumentation
-    // 12.3 ya cubre esos casos).
+    // 3) Reject stacking on HTTP/WS handlers (12.3 auto-instrumentation
+    // already covers those cases).
     if has_trace || has_metric {
         let is_http_handler = decorators
             .iter()
@@ -10752,12 +10747,12 @@ fn check_trace_metric_decorators(
     }
 }
 
-/// Fase 12.8 — valida shape de `@flag("name")`: 1 arg positional Str
-/// literal (el flag name), sin kwargs, sin duplicados. Apilable sobre
-/// cualquier fn. El nombre del flag se valida no-vacío + chars
-/// `[a-zA-Z0-9_-]`. La semántica runtime (404 para HTTP/WS, no-op para
-/// fns regulares) la implementa el wrapper de routing en `http.rs` y
-/// el codegen del wrapper en `codegen.rs`.
+/// Phase 12.8 — validates shape of `@flag("name")`: 1 positional Str
+/// literal arg (the flag name), no kwargs, no duplicates. Stackable on
+/// any fn. The flag name is validated non-empty + chars
+/// `[a-zA-Z0-9_-]`. The runtime semantics (404 for HTTP/WS, no-op for
+/// regular fns) is implemented by the routing wrapper in `http.rs` and
+/// the wrapper codegen in `codegen.rs`.
 fn check_flag_decorator(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -10782,7 +10777,7 @@ fn check_flag_decorator(
             continue;
         }
         seen = true;
-        // 1) Exactamente un arg positional.
+        // 1) Exactly one positional arg.
         if deco.args.len() != 1 {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10796,7 +10791,7 @@ fn check_flag_decorator(
             ));
             continue;
         }
-        // 2) El arg debe ser Str literal.
+        // 2) The arg must be a Str literal.
         let name = match &deco.args[0] {
             Expr::Str(s, _) => s.clone(),
             _ => {
@@ -10812,7 +10807,7 @@ fn check_flag_decorator(
                 continue;
             }
         };
-        // 3) No-vacío + chars válidos.
+        // 3) Non-empty + valid chars.
         if name.is_empty() {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10840,7 +10835,7 @@ fn check_flag_decorator(
             ));
             continue;
         }
-        // 4) Sin kwargs en MVP.
+        // 4) No kwargs in MVP.
         if !deco.kwargs.is_empty() {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10869,7 +10864,7 @@ fn check_health_decorators(
             "readyz" => "readyz",
             _ => continue,
         };
-        // 1) Sin args ni kwargs.
+        // 1) No args nor kwargs.
         if !deco.args.is_empty() || !deco.kwargs.is_empty() {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10902,7 +10897,7 @@ fn check_health_decorators(
             ));
             continue;
         }
-        // 3) Conflictos con otros decoradores.
+        // 3) Conflicts with other decorators.
         let conflicting = [
             "get",
             "post",
@@ -10923,8 +10918,8 @@ fn check_health_decorators(
                 conflict = Some(other.name.clone());
                 break;
             }
-            // El otro probe en la misma fn también es conflicto.
-            // Ejemplo: `@healthz @readyz fn check() -> Bool { ... }`.
+            // The other probe on the same fn is also a conflict.
+            // Example: `@healthz @readyz fn check() -> Bool { ... }`.
             if other.name != deco.name && (other.name == "healthz" || other.name == "readyz") {
                 conflict = Some(other.name.clone());
                 break;
@@ -10941,7 +10936,7 @@ fn check_health_decorators(
             ));
             continue;
         }
-        // 4) Sin params.
+        // 4) No params.
         if !params.is_empty() {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10955,8 +10950,8 @@ fn check_health_decorators(
             continue;
         }
         // 5) Return type: Bool / Result<Null> / Result<Bool> / Future
-        //    de los anteriores (transparente para async fns). Aceptamos
-        //    también `Any` (escape gradual del checker).
+        //    of the above (transparent for async fns). We accept
+        //    `Any` too (checker's gradual escape).
         if !is_valid_health_return(ret) {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -10969,7 +10964,7 @@ fn check_health_decorators(
             ));
             continue;
         }
-        // 6) Persistir el primer válido para detectar duplicados.
+        // 6) Persist the first valid one to detect duplicates.
         let slot = if kind == "healthz" {
             &mut ctx.healthz_first
         } else {
@@ -10979,14 +10974,14 @@ fn check_health_decorators(
     }
 }
 
-/// Helper de `check_health_decorators`: ¿es el return type aceptable
-/// para una probe? Aceptamos:
-/// - `Bool` directo.
-/// - `Null` (rare pero válido si la fn solo logea y siempre "pasa").
+/// Helper of `check_health_decorators`: is the return type acceptable
+/// for a probe? We accept:
+/// - `Bool` directly.
+/// - `Null` (rare but valid if the fn only logs and always "passes").
 /// - `Result<Null>` (Ok = healthy, Err = unhealthy).
-/// - `Result<Bool>` (Ok(true) healthy, Ok(false) unhealthy, Err también).
-/// - `Future<T>` con T cualquiera de los anteriores (async fn).
-/// - `Any` como escape gradual del checker.
+/// - `Result<Bool>` (Ok(true) healthy, Ok(false) unhealthy, Err too).
+/// - `Future<T>` with T being any of the above (async fn).
+/// - `Any` as checker's gradual escape.
 fn is_valid_health_return(ret: &Type) -> bool {
     match ret {
         Type::Bool | Type::Null | Type::Any => true,
@@ -10996,33 +10991,33 @@ fn is_valid_health_return(ret: &Type) -> bool {
     }
 }
 
-/// Fase 13 (v0.11.0) — `@command("name", desc="...")` declara una
-/// fn como comando CLI. El binario producido por `fitz build` parsea
-/// `std::env::args()` y dispatcha al comando correspondiente.
+/// Phase 13 (v0.11.0) — `@command("name", desc="...")` declares a
+/// fn as a CLI command. The binary produced by `fitz build` parses
+/// `std::env::args()` and dispatches to the corresponding command.
 ///
-/// Reglas validadas:
-/// - Args: exactamente 1 Str literal (nombre del comando, ej `"greet"`).
-/// - Kwargs opcionales: `desc="..."` (descripción para `--help`).
-/// - El return type debe ser `Int` (exit code; `0` éxito, otros = error).
-/// - Conflictos con decorators de servidor/job/test: `@command` NO
-///   combina con `@get/@post/@put/@delete/@server/@ws/@cron/@background/
-///   @auth_provider/@test`. La fn marcada como `@command` ES un
-///   comando CLI; no puede ser handler HTTP, cron job, ni test.
-/// - Params tipos válidos: `Str`, `Int`, `Float`, `Bool`, `Str?`,
-///   y opcionalmente con default value.
+/// Validated rules:
+/// - Args: exactly 1 Str literal (command name, e.g. `"greet"`).
+/// - Optional kwargs: `desc="..."` (description for `--help`).
+/// - Return type must be `Int` (exit code; `0` success, others = error).
+/// - Conflicts with server/job/test decorators: `@command` does NOT
+///   combine with `@get/@post/@put/@delete/@server/@ws/@cron/@background/
+///   @auth_provider/@test`. The fn marked as `@command` IS a
+///   CLI command; cannot be HTTP handler, cron job, nor test.
+/// - Valid param types: `Str`, `Int`, `Float`, `Bool`, `Str?`,
+///   and optionally with default value.
 ///
-/// **Convención sin decorators en params** (decisión MVP — evita
-/// tocar `ast::Param`):
-/// - Param **sin default** → positional arg requerido (`mybin <name>`).
-/// - Param **con default** → flag opcional (`--name <value>` o `--name`
-///   si es Bool sin valor).
-/// - Bool con default `false` → flag bool (`--loud` lo prende a true).
-/// - Otros tipos con default → flag value (`--count 5`).
+/// **No-decorators-on-params convention** (MVP decision — avoids
+/// touching `ast::Param`):
+/// - Param **without default** → required positional arg (`mybin <name>`).
+/// - Param **with default** → optional flag (`--name <value>` or `--name`
+///   if Bool without value).
+/// - Bool with default `false` → bool flag (`--loud` turns it on to true).
+/// - Other types with default → value flag (`--count 5`).
 ///
-/// Esto es la convención usada por Click/Fire (Python) y Plumbum
-/// (Python). Reduce verbosidad vs requerir `@arg`/`@flag` en cada
-/// param. Trade-off: NO se puede tener positional optional args
-/// (los con default son flags).
+/// This is the convention used by Click/Fire (Python) and Plumbum
+/// (Python). Reduces verbosity vs requiring `@arg`/`@flag` on each
+/// param. Trade-off: CANNOT have positional optional args
+/// (the ones with default are flags).
 fn check_command_decorator(
     ctx: &mut CheckCtx,
     fn_name: &str,
@@ -11035,7 +11030,7 @@ fn check_command_decorator(
         Some(d) => d,
         None => return,
     };
-    // 1) Args: exactamente 1 Str literal (nombre del comando).
+    // 1) Args: exactly 1 Str literal (command name).
     if cmd_deco.args.len() != 1 {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -11063,7 +11058,7 @@ fn check_command_decorator(
             return;
         }
     }
-    // 2) Kwargs: solo `desc="..."` aceptado.
+    // 2) Kwargs: only `desc="..."` accepted.
     for (key, value) in &cmd_deco.kwargs {
         match key.as_str() {
             "desc" => match value {
@@ -11095,7 +11090,7 @@ fn check_command_decorator(
             }
         }
     }
-    // 3) Conflictos con otros decoradores.
+    // 3) Conflicts with other decorators.
     let conflicting = [
         "get",
         "post",
@@ -11123,7 +11118,7 @@ fn check_command_decorator(
             return;
         }
     }
-    // 4) Return type debe ser Int (exit code).
+    // 4) Return type must be Int (exit code).
     if !matches!(ret, Type::Int | Type::Any) {
         ctx.errors.push(FitzError::new(
             ErrorKind::TypeError,
@@ -11136,7 +11131,7 @@ fn check_command_decorator(
             ),
         ));
     }
-    // 5) Params: solo tipos CLI-marshallables (Str/Int/Float/Bool/Str?).
+    // 5) Params: only CLI-marshallable types (Str/Int/Float/Bool/Str?).
     for p in params {
         if p.varargs {
             ctx.errors.push(FitzError::new(
@@ -11151,12 +11146,12 @@ fn check_command_decorator(
             return;
         }
         let p_type = ann_to_type(p.type_.as_ref(), ctx.types);
-        // v0.11.1 (Fase 13 polish) — `List<Str>` permitido como
-        // **variadic** (positional final que absorbe N tokens). Solo
-        // como último param positional (sin default). Otros tipos
-        // List<T> quedan como deuda futura (List<Int> requiere
-        // coerción per-token; el caso real cubre Str para args
-        // tipo `mybin run file1 file2 file3`).
+        // v0.11.1 (Phase 13 polish) — `List<Str>` allowed as
+        // **variadic** (final positional that absorbs N tokens). Only
+        // as the last positional param (no default). Other types of
+        // List<T> remain future debt (List<Int> requires
+        // per-token coercion; the real case covers Str for args
+        // like `mybin run file1 file2 file3`).
         let is_str_list_variadic = matches!(
             &p_type,
             Type::List(inner) if matches!(**inner, Type::Str)
@@ -11180,14 +11175,14 @@ fn check_command_decorator(
             ));
             return;
         }
-        // v0.11.1 — variadic List<Str> debe ser el ÚLTIMO param del
-        // comando entero (no del último-sin-default), porque acumula
-        // los tokens positional restantes. Convención: el user
-        // escribe `files: List<Str> = []` (con default `[]`) para
-        // satisfacer la regla del parser "después de un default, todos
-        // los siguientes también". El `= []` es semánticamente
-        // redundante (variadic siempre empieza vacío + acumula) pero
-        // necesario para shape syntáctico.
+        // v0.11.1 — variadic List<Str> must be the LAST param of the
+        // entire command (not the last-without-default), because it accumulates
+        // the remaining positional tokens. Convention: the user
+        // writes `files: List<Str> = []` (with default `[]`) to
+        // satisfy the parser rule "after a default, all
+        // subsequent ones also". The `= []` is semantically
+        // redundant (variadic always starts empty + accumulates) but
+        // needed for syntactic shape.
         if is_str_list_variadic {
             let this_idx = params.iter().position(|q| std::ptr::eq(q, p)).unwrap();
             if this_idx != params.len() - 1 {
@@ -11203,11 +11198,11 @@ fn check_command_decorator(
                 return;
             }
         }
-        // v0.11.1 (Fase 13 polish) — `Bool = true` ahora soportado.
-        // El parser de argv reconoce `--no-<name>` para negar el
-        // default. Ej: `verbose: Bool = true` → `--no-verbose` lo
-        // setea a false; presencia de `--verbose` redundante pero
-        // tolerada. Sin override → queda en true.
+        // v0.11.1 (Phase 13 polish) — `Bool = true` now supported.
+        // The argv parser recognizes `--no-<name>` to negate the
+        // default. E.g. `verbose: Bool = true` → `--no-verbose` sets
+        // it to false; presence of `--verbose` redundant but
+        // tolerated. Without override → stays true.
     }
 }
 
@@ -11245,8 +11240,8 @@ mod tests {
 
     #[test]
     fn error_de_asignacion_con_tipo_incompatible_cita_linea_real() {
-        // B.1: el error apunta al `let` del stmt (línea/col reales),
-        // no al genérico `0:0` que se usaba antes.
+        // B.1: the error points to the stmt's `let` (real line/col),
+        // not the generic `0:0` used before.
         let errors = errors_of("\n\nlet x: Int = \"texto\"");
         assert_eq!(errors.len(), 1, "esperaba 1 error, fue {:?}", errors);
         let e = &errors[0];
@@ -11254,12 +11249,12 @@ mod tests {
         assert_eq!(e.column, 1, "esperaba col 1, fue {}", e.column);
     }
 
-    // ---- Fase 6.2: type checker para async/await ----
+    // ---- Phase 6.2: type checker for async/await ----
 
     #[test]
     fn future_se_resuelve_como_generico_built_in() {
-        // `Future<T>` reusa `TypeExpr::Generic` (decisión de 6.1) y
-        // 6.2 lo mapea a `Type::Future(Box<T>)`. Aridad fija 1.
+        // `Future<T>` reuses `TypeExpr::Generic` (6.1 decision) and
+        // 6.2 maps it to `Type::Future(Box<T>)`. Fixed arity 1.
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "Future".into(),
@@ -11300,10 +11295,10 @@ mod tests {
 
     #[test]
     fn await_top_level_es_valido() {
-        // Fase 6.7: el top-level acepta `.await` — el evaluator arranca
-        // el runtime tokio ahí y el codegen emite `#[tokio::main]
-        // async fn main()` automáticamente. Solo las fns sync
-        // explícitas (FnDef no-async o FnExpr) lo rechazan.
+        // Phase 6.7: top-level accepts `.await` — the evaluator starts
+        // the tokio runtime there and codegen emits `#[tokio::main]
+        // async fn main()` automatically. Only explicit sync fns
+        // (non-async FnDef or FnExpr) reject it.
         let errors = errors_of(
             "async fn fetch() -> Int {\n\
                  return 0\n\
@@ -11319,8 +11314,8 @@ mod tests {
 
     #[test]
     fn await_dentro_de_fn_sync_es_error() {
-        // FnDef sin `async` cuenta como contexto sync → `.await`
-        // adentro emite error claro.
+        // FnDef without `async` counts as sync context → `.await`
+        // inside emits a clear error.
         let errors = errors_of(
             "async fn fetch() -> Int {\n\
                  return 0\n\
@@ -11343,7 +11338,7 @@ mod tests {
 
     #[test]
     fn await_sobre_no_future_es_error() {
-        // Operando concreto distinto de `Future<T>` → error.
+        // Concrete operand distinct from `Future<T>` → error.
         let errors = errors_of(
             "async fn f() -> Int {\n\
                  let x: Int = 42\n\
@@ -11361,9 +11356,9 @@ mod tests {
 
     #[test]
     fn await_sobre_future_dentro_de_async_fn_pasa() {
-        // Caso happy: async fn que llama a otra async fn y await-ea
-        // el resultado. La llamada a `inner()` tipa `Future<Int>`,
-        // `.await` desempaca a `Int`, return Int matchea.
+        // Happy case: async fn calling another async fn and await-ing
+        // the result. The `inner()` call types `Future<Int>`,
+        // `.await` unwraps to `Int`, return Int matches.
         let errors = errors_of(
             "async fn inner() -> Int {\n\
                  return 1\n\
@@ -11377,10 +11372,10 @@ mod tests {
 
     #[test]
     fn async_fn_referenciada_como_ident_tipa_function_con_future() {
-        // Una `async fn f() -> Int` referenciada como valor (sin
-        // call) tipa `Function { ret: Future<Int> }`. La firma
-        // EXTERNA del async fn envuelve en Future. Validamos via
-        // un `let g: Future<Int> = f()` que el checker acepte.
+        // An `async fn f() -> Int` referenced as a value (without
+        // call) types `Function { ret: Future<Int> }`. The EXTERNAL
+        // signature of the async fn wraps in Future. We validate via
+        // a `let g: Future<Int> = f()` that the checker accepts.
         let errors = errors_of(
             "async fn f() -> Int {\n\
                  return 0\n\
@@ -11392,9 +11387,9 @@ mod tests {
 
     #[test]
     fn return_dentro_de_async_fn_no_envuelve_en_future() {
-        // El `async` es transparente desde adentro: un `return x: Int`
-        // adentro de `async fn -> Int` tipa Int contra Int, no
-        // Int contra Future<Int>.
+        // `async` is transparent from inside: a `return x: Int`
+        // inside `async fn -> Int` types Int against Int, not
+        // Int against Future<Int>.
         let errors = errors_of(
             "async fn f() -> Int {\n\
                  return 42\n\
@@ -11405,10 +11400,10 @@ mod tests {
 
     #[test]
     fn await_adentro_de_fnexpr_es_error_aunque_padre_sea_async() {
-        // FnExpr (closure) siempre pushea `await_stack` con false —
-        // el lenguaje no soporta `async fn(...)` anónimas. `.await`
-        // adentro del closure es error aunque el contenedor sea
-        // async fn.
+        // FnExpr (closure) always pushes `await_stack` with false —
+        // the language doesn't support anonymous `async fn(...)`. `.await`
+        // inside the closure is an error even if the container is
+        // an async fn.
         let errors = errors_of(
             "async fn fetch() -> Int {\n\
                  return 0\n\
@@ -11432,19 +11427,19 @@ mod tests {
 
     #[test]
     fn await_sobre_any_es_gradual_y_no_chequea() {
-        // Una fn sin anotación de return tipa `Function { ret: Any }`.
-        // La llamada produce Any; `.await` sobre Any pasa por
-        // escape gradual (resultado Any). Sin errores.
+        // A fn without return annotation types `Function { ret: Any }`.
+        // The call produces Any; `.await` over Any passes through
+        // gradual escape (result Any). No errors.
         let errors = errors_of(
             "fn untyped() => 0\n\
              async fn outer() -> Int {\n\
                  return untyped().await\n\
              }",
         );
-        // El `.await` no debería disparar el error de "no es Future"
-        // porque el operando es Any (gradual escape). Si hay errores
-        // otros, los inspeccionamos — pero el mensaje específico de
-        // "Future" no debe aparecer.
+        // The `.await` should not fire the "not a Future" error
+        // because the operand is Any (gradual escape). If there are
+        // other errors, we inspect them — but the specific "Future"
+        // message must not appear.
         let any_future_err = errors
             .iter()
             .any(|e| e.message.contains("Future") && e.message.contains(".await"));
@@ -11455,13 +11450,13 @@ mod tests {
         );
     }
 
-    // ---- Fase 6.3: built-in `sleep` ----
+    // ---- Phase 6.3: built-in `sleep` ----
 
     #[test]
     fn sleep_tipa_su_call_como_future_null() {
-        // `sleep(100)` tipa `Future<Null>`. Validamos vía una
-        // anotación destino — si el RHS no fuera `Future<Null>`,
-        // el checker emitiría error de incompatibilidad.
+        // `sleep(100)` types `Future<Null>`. We validate via a
+        // destination annotation — if the RHS were not `Future<Null>`,
+        // the checker would emit an incompatibility error.
         let errors = errors_of("let r: Future<Null> = sleep(100)");
         assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
@@ -11492,8 +11487,8 @@ mod tests {
 
     #[test]
     fn sleep_await_dentro_de_async_fn_tipa_null() {
-        // Integración con 6.2: `sleep(50).await` adentro de `async fn`
-        // tipa `Null`. La fn declara `-> Null` y el return matchea.
+        // Integration with 6.2: `sleep(50).await` inside `async fn`
+        // types `Null`. The fn declares `-> Null` and the return matches.
         let errors = errors_of(
             "async fn pausa() -> Null {\n\
                  return sleep(50).await\n\
@@ -11502,7 +11497,7 @@ mod tests {
         assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
 
-    // ---- C-F2: field assignment chequeo ----
+    // ---- C-F2: field assignment check ----
 
     #[test]
     fn field_assign_con_tipo_compatible_pasa_checker() {
@@ -11534,14 +11529,14 @@ mod tests {
         );
     }
 
-    // ---- Status codes custom (return <int> { ... }) ----
+    // ---- Custom status codes (return <int> { ... }) ----
 
     #[test]
     fn return_status_dentro_de_handler_http_pasa_checker() {
-        // `return 401 { ... }` adentro de un handler con `@get` es
-        // válido. El checker lo permite sin importar el return_type
-        // formal del handler (decisión: polimorfismo solo en handlers
-        // HTTP).
+        // `return 401 { ... }` inside a handler with `@get` is
+        // valid. The checker allows it regardless of the handler's
+        // formal return_type (decision: polymorphism only in HTTP
+        // handlers).
         let errors = errors_of(
             "@get(\"/x\") fn protected() -> Str {\n\
                  return 401 {\"msg\": \"no autorizado\"}\n\
@@ -11552,8 +11547,8 @@ mod tests {
 
     #[test]
     fn return_status_fuera_de_handler_es_error() {
-        // `return 401 { ... }` adentro de una fn sin decorator HTTP
-        // → error claro. Bloquea uso accidental fuera de handlers.
+        // `return 401 { ... }` inside a fn without HTTP decorator
+        // → clear error. Blocks accidental use outside handlers.
         let errors = errors_of(
             "fn helper() -> Str {\n\
                  return 401 {\"msg\": \"x\"}\n\
@@ -11570,8 +11565,8 @@ mod tests {
 
     #[test]
     fn return_status_top_level_es_error() {
-        // `return 401 { ... }` a nivel top-level (sin fn contenedora)
-        // tampoco es válido — el checker lo rechaza por la misma regla.
+        // `return 401 { ... }` at top-level (without containing fn)
+        // is also not valid — the checker rejects it by the same rule.
         let errors = errors_of("return 401 {\"x\": 1}");
         assert!(!errors.is_empty(), "esperaba error");
         let msg = &errors[0].message;
@@ -11580,9 +11575,9 @@ mod tests {
 
     #[test]
     fn return_status_no_chequea_contra_return_type_formal() {
-        // Spec: un handler `-> User` puede hacer `return user` (User) y
-        // también `return 404 { ... }`. El checker NO valida el body
-        // del ReturnStatus contra el return type — es polimórfico.
+        // Spec: a `-> User` handler can do `return user` (User) and
+        // also `return 404 { ... }`. The checker does NOT validate the
+        // ReturnStatus body against the return type — it's polymorphic.
         let errors = errors_of(
             "type User { id: Int }\n\
              @get(\"/u\") fn get_u() -> User {\n\
@@ -11592,13 +11587,13 @@ mod tests {
         assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
 
-    // ---- Mini-fase MW.1: middleware ----
+    // ---- Mini-phase MW.1: middleware ----
 
     #[test]
     fn request_y_response_son_built_in_referenciables() {
-        // Un middleware referencia `Request` y `Response` sin declararlos
-        // — los registra `register_http_builtin_types`. Sin ese pre-registro,
-        // el checker se quejaría con "tipo desconocido `Request`".
+        // A middleware references `Request` and `Response` without declaring them
+        // — registered by `register_http_builtin_types`. Without that pre-registration,
+        // the checker would complain with "unknown type `Request`".
         let errors = errors_of(
             "fn auth(req: Request) -> Response? {\n\
                  return null\n\
@@ -11609,9 +11604,9 @@ mod tests {
 
     #[test]
     fn return_status_dentro_de_middleware_pasa_checker() {
-        // Una fn aplicada como `@middleware(fn)` puede hacer
-        // `return <int> { ... }` — el pre-scan de MW.1 la marca como
-        // contexto HTTP y el checker no se queja.
+        // A fn applied as `@middleware(fn)` can do
+        // `return <int> { ... }` — the MW.1 pre-scan marks it as
+        // HTTP context and the checker doesn't complain.
         let errors = errors_of(
             "fn auth(req: Request) {\n\
                  return 401 {\"error\": \"no autorizado\"}\n\
@@ -11625,9 +11620,9 @@ mod tests {
 
     #[test]
     fn return_status_en_fn_no_referenciada_como_middleware_es_error() {
-        // Solo las fns que aparecen en `@middleware(name)` se marcan
-        // como contexto HTTP. Una fn random con `return <int>` sigue
-        // disparando el error existente.
+        // Only fns that appear in `@middleware(name)` are marked
+        // as HTTP context. A random fn with `return <int>` still
+        // fires the existing error.
         let errors = errors_of(
             "fn helper() {\n\
                  return 401 {\"x\": 1}\n\
@@ -11674,22 +11669,22 @@ mod tests {
 
     #[test]
     fn field_assign_sobre_any_no_chequea() {
-        // El binding `m` viene de `from foo import m` → tipo Any.
-        // El checker debe permitir el assign sin chequear el field
+        // The binding `m` comes from `from foo import m` → type Any.
+        // The checker should allow the assign without checking the field
         // (gradual escape).
-        // Simulamos con una var sin anotación que parser/checker
-        // tratan como Any en el contexto adecuado. Usamos
-        // `from import` que registra como Any.
+        // We simulate with a var without annotation that parser/checker
+        // treat as Any in the appropriate context. We use
+        // `from import` which registers as Any.
         let errors = errors_of(
             "from external import obj\n\
              obj.anything = 42",
         );
-        // Aceptamos que falle la carga del módulo (no existe), pero
-        // si llega al checker el assign sobre Any debería silenciar.
-        // En la práctica el checker solo registra la var como Any
-        // si el FromImport pasa.
-        // Filtramos el error de import si lo hay y verificamos que
-        // NO haya error específico sobre el field.
+        // We accept that the module load fails (doesn't exist), but
+        // if it reaches the checker the assign over Any should silence.
+        // In practice the checker only registers the var as Any
+        // if the FromImport passes.
+        // We filter the import error if any and verify there is
+        // NO specific error about the field.
         let field_errors: Vec<_> = errors
             .iter()
             .filter(|e| e.message.contains("campo") || e.message.contains(".anything"))
@@ -11703,7 +11698,7 @@ mod tests {
 
     #[test]
     fn field_assign_con_nullable_acepta_null() {
-        // `email: Str?` admite null o Str. Asignar null debe pasar.
+        // `email: Str?` accepts null or Str. Assigning null must pass.
         let errors = errors_of(
             "type U { email: Str? }\n\
              let u = U { email: \"x\" }\n\
@@ -11751,7 +11746,7 @@ mod tests {
 
     #[test]
     fn resolve_primitivo_con_args_es_error_de_aridad() {
-        // `Int<Str>` no tiene sentido — Int es aridad 0.
+        // `Int<Str>` doesn't make sense — Int is arity 0.
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
             name: "Int".into(),
@@ -11776,13 +11771,13 @@ mod tests {
     #[test]
     fn resolve_list_aridad_incorrecta() {
         let env = TypeEnv::new();
-        // List sin args
+        // List without args
         let t1 = TypeExpr::named("List");
         let err = resolve_type_expr(&t1, &env).unwrap_err();
         assert!(err.message.contains("`List`"));
         assert!(err.message.contains("1 argumento"));
 
-        // List con dos args
+        // List with two args
         let t2 = TypeExpr::Generic {
             name: "List".into(),
             args: vec![TypeExpr::named("Int"), TypeExpr::named("Str")],
@@ -11876,7 +11871,7 @@ mod tests {
 
     #[test]
     fn resolve_nominal_con_args_es_error() {
-        // El usuario escribe `User<Int>` pero User no es genérico.
+        // The user writes `User<Int>` but User is not generic.
         let env = env_with(&["User"]);
         let t = TypeExpr::Generic {
             name: "User".into(),
@@ -11888,7 +11883,7 @@ mod tests {
 
     #[test]
     fn resolve_generic_con_arg_invalido_propaga_error() {
-        // List<Usuario> — Usuario no existe.
+        // List<Usuario> — Usuario does not exist.
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
             name: "List".into(),
@@ -11925,10 +11920,10 @@ mod tests {
     fn programa_vacio_no_da_errores() {
         let (env, errors) = resolve_str("");
         assert!(errors.is_empty());
-        // Mini-fase MW.1: `Request` y `Response` se pre-registran como
-        // nominales built-in del runtime HTTP, incluso en programas
-        // vacíos. Mini-tanda MP2 sumó `File` como tercer built-in.
-        // El usuario los puede referenciar sin declararlos.
+        // Mini-phase MW.1: `Request` and `Response` are pre-registered as
+        // HTTP runtime built-in nominals, even in empty programs.
+        // Mini-batch MP2 added `File` as a third built-in.
+        // The user can reference them without declaring them.
         assert_eq!(env.nominal_count(), 3);
         assert!(env.lookup("Request").is_some());
         assert!(env.lookup("Response").is_some());
@@ -12042,13 +12037,13 @@ mod tests {
 
     #[test]
     fn default_no_literal_se_acepta_pending_para_5_3() {
-        // Default es una expresión (no literal): suma. El checker la
-        // deja pasar — 5.3 chequea expresiones contra tipos.
+        // Default is an expression (not literal): sum. The checker
+        // lets it pass — 5.3 checks expressions against types.
         let (_, errors) = resolve_str("type Cfg { port: Int = 3000 + 1 }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
-    // ---- anotaciones de FnDef y Assign ----
+    // ---- FnDef and Assign annotations ----
 
     #[test]
     fn fndef_con_anotaciones_resueltas() {
@@ -12076,7 +12071,7 @@ mod tests {
 
     #[test]
     fn fndef_con_generico_invalido_reporta_error() {
-        // `List<Foo>` donde Foo no existe.
+        // `List<Foo>` where Foo doesn't exist.
         let (_, errors) = resolve_str("fn f(xs: List<Foo>) { return xs }");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("Foo"));
@@ -12097,7 +12092,7 @@ mod tests {
 
     #[test]
     fn anotaciones_dentro_del_body_de_fn_se_validan() {
-        // El let `y: Foo` está adentro del fn — la pasada baja y lo encuentra.
+        // The `y: Foo` let is inside the fn — the pass descends and finds it.
         let (_, errors) = resolve_str(
             "fn f() {\n\
                 let y: Foo = 0\n\
@@ -12115,7 +12110,7 @@ mod tests {
              let y: Bar = 0\n\
              fn f(z: Baz) { return z }",
         );
-        // Esperamos 3: Foo, Bar, Baz.
+        // We expect 3: Foo, Bar, Baz.
         assert_eq!(errors.len(), 3);
         let combined: String = errors.iter().map(|e| e.message.clone()).collect();
         assert!(combined.contains("Foo"));
@@ -12123,13 +12118,12 @@ mod tests {
         assert!(combined.contains("Baz"));
     }
 
-    // ---- construcciones AST directas, sin parser ----
+    // ---- direct AST constructions, without parser ----
 
     #[test]
     fn resolve_program_construye_env_via_ast_directo() {
-        // Sanity: armamos el AST a mano sin pasar por parser para
-        // confirmar que resolve_program no depende de detalles del
-        // parser.
+        // Sanity: we build the AST by hand without going through the parser
+        // to confirm that resolve_program does not depend on parser details.
         use crate::ast::TypeExpr as TE;
         let program: Program = vec![
             Stmt::TypeDef {
@@ -12173,11 +12167,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — checker de expresiones (Fase 5.3.1)
+    // Tests — expression checker (Phase 5.3.1)
     //
-    // Cubrimos la pasada nueva: synth de literales/ident/BinOp/UnaryOp/
-    // StrInterp/If/List/Map/StructLit/Field/Range, asignaciones con
-    // anotación, scope local (FnDef/FnExpr/Match arms), e imports.
+    // We cover the new pass: synth of literals/ident/BinOp/UnaryOp/
+    // StrInterp/If/List/Map/StructLit/Field/Range, annotated
+    // assignments, local scope (FnDef/FnExpr/Match arms), and imports.
     // -----------------------------------------------------------------------
 
     fn check_str(src: &str) -> (TypeEnv, Vec<FitzError>) {
@@ -12225,14 +12219,14 @@ mod tests {
     #[test]
     fn ident_tipo_nominal_como_value_es_any() {
         // `type User { ... }; let u = User { id: 1, name: "x" }` —
-        // el StructLit usa el tipo; usar User pelado tampoco rompe.
-        // El evaluator registra el type como Value en el env.
+        // the StructLit uses the type; using bare User also doesn't break.
+        // The evaluator registers the type as Value in the env.
         assert_ok("type User { id: Int }\nprint(User)");
     }
 
     #[test]
     fn builtin_print_y_len_se_consideran_definidos() {
-        // print y len existen por defecto.
+        // print and len exist by default.
         assert_ok("print(\"hola\")\nlen([1, 2, 3])");
     }
 
@@ -12245,7 +12239,7 @@ mod tests {
 
     #[test]
     fn binop_int_mas_float_es_float() {
-        // Float := Int + Float (coerción).
+        // Float := Int + Float (coercion).
         assert_ok("let x: Float = 1 + 2.0");
     }
 
@@ -12301,7 +12295,7 @@ mod tests {
         assert_error_with("let x = -\"hola\"", &["negación", "Int", "Str"]);
     }
 
-    // ---- R.1.1 — `not` (mini-fase R) ----
+    // ---- R.1.1 — `not` (mini-phase R) ----
 
     #[test]
     fn unary_not_sobre_bool_literal_es_ok() {
@@ -12325,17 +12319,17 @@ mod tests {
 
     #[test]
     fn unary_not_en_condicion_de_if_es_ok() {
-        // Bool en condición ✓.
+        // Bool in condition ✓.
         assert_ok("let active = false\nif (not active) { print(\"x\") }");
     }
 
     #[test]
     fn unary_not_anidado_tipa_bool() {
-        // `not not x` con x: Bool → Bool.
+        // `not not x` with x: Bool → Bool.
         assert_ok("let x = true\nlet y: Bool = not not x");
     }
 
-    // ---- R.1.2 — operador `%` (mini-fase R) ----
+    // ---- R.1.2 — operator `%` (mini-phase R) ----
 
     #[test]
     fn op_modulo_int_int_es_ok() {
@@ -12359,14 +12353,14 @@ mod tests {
 
     #[test]
     fn op_modulo_devuelve_int_no_any() {
-        // El tipo sintetizado tiene que ser Int concreto (no Any),
-        // así que un binding Bool falla — Bool no admite Int.
-        // (Float SÍ admite Int por promoción Int→Float, por eso no
-        // testeamos eso.)
+        // The synthesized type must be concrete Int (not Any),
+        // so a Bool binding fails — Bool doesn't admit Int.
+        // (Float DOES admit Int via Int→Float promotion, which is why
+        // we don't test that case.)
         assert_error_with("let r: Bool = 7 % 3", &["Bool", "Int"]);
     }
 
-    // ---- R.1.3 — asignación a índice (mini-fase R) ----
+    // ---- R.1.3 — index assignment (mini-phase R) ----
 
     #[test]
     fn assign_index_list_int_int_es_ok() {
@@ -12375,7 +12369,7 @@ mod tests {
 
     #[test]
     fn assign_index_list_str_index_es_error() {
-        // List<T> exige Int en el index.
+        // List<T> requires Int as the index.
         assert_error_with(
             "let xs: List<Int> = [1, 2]\nxs[\"a\"] = 99",
             &["List", "Int", "Str"],
@@ -12430,13 +12424,13 @@ mod tests {
 
     #[test]
     fn list_homogenea_int_es_list_int() {
-        // No hay error; el tipo inferido es List<Int>.
+        // No error; the inferred type is List<Int>.
         assert_ok("let xs: List<Int> = [1, 2, 3]");
     }
 
     #[test]
     fn list_anotada_con_tipo_incompatible_es_error() {
-        // El RHS sintetiza List<Str>; la anotación es List<Int>.
+        // The RHS synthesizes List<Str>; the annotation is List<Int>.
         assert_error_with(
             "let xs: List<Int> = [\"a\", \"b\"]",
             &["xs", "List<Int>", "List<Str>"],
@@ -12485,7 +12479,7 @@ mod tests {
 
     #[test]
     fn field_access_de_nominal_devuelve_tipo_del_campo() {
-        // Si u.id es Int, asignarlo a un Int es OK.
+        // If u.id is Int, assigning it to an Int is OK.
         assert_ok(
             "type User { id: Int, name: Str }\n\
              let u = User { id: 1, name: \"x\" }\n\
@@ -12503,7 +12497,7 @@ mod tests {
         );
     }
 
-    // ---- Assign con anotación ----
+    // ---- Assign with annotation ----
 
     #[test]
     fn assign_int_a_int_es_ok() {
@@ -12527,7 +12521,7 @@ mod tests {
 
     #[test]
     fn assign_str_a_nullable_str_es_ok() {
-        // T compatible con T?.
+        // T compatible with T?.
         assert_ok("let x: Str? = \"hola\"");
     }
 
@@ -12550,8 +12544,8 @@ mod tests {
 
     #[test]
     fn for_sobre_range_bindea_var_como_int() {
-        // Adentro del for, i debe usarse como Int y la suma debe
-        // tipear bien.
+        // Inside the for, i must be used as Int and the sum must
+        // type-check correctly.
         assert_ok("for i in 0..10 { let n: Int = i + 1 }");
     }
 
@@ -12568,25 +12562,25 @@ mod tests {
         assert_error_with("for x in 42 { print(x) }", &["for", "List", "Range", "Int"]);
     }
 
-    // ---- FnDef / params bindeados ----
+    // ---- FnDef / bound params ----
 
     #[test]
     fn fndef_param_se_bindea_en_body() {
-        // El parámetro n es Int por su anotación.
+        // The parameter n is Int from its annotation.
         assert_ok("fn double(n: Int) -> Int { return n * 2 }");
     }
 
     #[test]
     fn fndef_param_sin_anotacion_es_any() {
-        // Sin anotación, n es Any — no se queja de la suma.
+        // Without annotation, n is Any — it doesn't complain about the sum.
         assert_ok("fn double(n) { return n * 2 }");
     }
 
-    // ---- FnExpr / params bindeados ----
+    // ---- FnExpr / bound params ----
 
     #[test]
     fn fn_expr_bindea_su_param() {
-        // Si no bindeara, `u` seria desconocido.
+        // If it didn't bind, `u` would be unknown.
         assert_ok(
             "type User { id: Int }\n\
              let users = [User { id: 1 }]\n\
@@ -12594,11 +12588,11 @@ mod tests {
         );
     }
 
-    // ---- Match con bindings ----
+    // ---- Match with bindings ----
 
     #[test]
     fn match_ident_pattern_bindea_var() {
-        // El brazo `x => ...` bindea x como el tipo del scrutinee.
+        // The arm `x => ...` binds x as the type of the scrutinee.
         assert_ok(
             "let v = 42\n\
              let s = match v {\n\
@@ -12610,9 +12604,9 @@ mod tests {
 
     #[test]
     fn match_ok_pattern_bindea_inner_de_result() {
-        // Ok(v) en match sobre Result<Int> → v es Int.
-        // En 5.3.1 el scrutinee es Ok(Int) que tiene tipo Result<Int>,
-        // y v se bindea con Int. Verificamos sumando v con un Int.
+        // Ok(v) in match over Result<Int> → v is Int.
+        // In 5.3.1 the scrutinee is Ok(Int) which has type Result<Int>,
+        // and v is bound as Int. We verify by adding v with an Int.
         assert_ok(
             "let r = Ok(5)\n\
              let s = match r {\n\
@@ -12625,9 +12619,9 @@ mod tests {
     #[test]
     fn match_nullable_refinement_arm_post_null_w2() {
         // W2 (v0.10.6) — `match user { null => ..., u => u.name }`
-        // refina `u` de `User?` a `User` (sin Nullable) porque el arm
-        // previo cubrió null. Antes el binding quedaba como `User?` y
-        // `u.name` fallaba el checker con "field access sobre Nullable".
+        // refines `u` from `User?` to `User` (without Nullable) because the
+        // previous arm covered null. Before, the binding stayed as `User?` and
+        // `u.name` failed the checker with "field access over Nullable".
         assert_ok(
             "type User { name: Str }\n\
              type Profile { user: User? }\n\
@@ -12639,17 +12633,17 @@ mod tests {
         );
     }
 
-    // (El test "Ident antes de Null no se refina" fue removido: el
-    // checker hoy permite `u.name` sobre `u: Nullable<User>` siempre
-    // (lenient con field access sobre Nullable). El refinement W2
-    // del checker es nice-to-have pero no detecta el caso problemático
-    // — éste se observa en el CODEGEN donde rustc rechaza el código
-    // por type mismatch. Ver el E2E `db_match_nullable_refinement_w2`
-    // en tests/compile_e2e.rs para el cierre real del W2.)
+    // (The test "Ident before Null doesn't refine" was removed: the
+    // checker today allows `u.name` over `u: Nullable<User>` always
+    // (lenient with field access over Nullable). The W2 refinement
+    // of the checker is nice-to-have but doesn't detect the problematic
+    // case — that one shows up in CODEGEN where rustc rejects the code
+    // due to type mismatch. See the E2E `db_match_nullable_refinement_w2`
+    // in tests/compile_e2e.rs for the real W2 closure.)
 
     #[test]
     fn match_err_pattern_bindea_inner_como_str() {
-        // Err(e) bindea e como Str — concatenable con Str.
+        // Err(e) binds e as Str — concatenable with Str.
         assert_ok(
             "let r = Err(\"boom\")\n\
              let s = match r {\n\
@@ -12663,9 +12657,9 @@ mod tests {
 
     #[test]
     fn from_import_bindea_nombres_en_scope() {
-        // No podemos cargar un módulo real acá sin tocar disco. Lo
-        // que validamos: el ident traído por `from` no se reporta
-        // como desconocido.
+        // We can't load a real module here without touching disk.
+        // What we validate: the ident brought in by `from` is not
+        // reported as unknown.
         assert_ok(
             "from utils import slugify\n\
              let s = slugify",
@@ -12674,7 +12668,7 @@ mod tests {
 
     #[test]
     fn import_bindea_modulo_como_var() {
-        // `import foo` deja `foo` accesible como variable.
+        // `import foo` leaves `foo` accessible as a variable.
         assert_ok(
             "import utils\n\
              let m = utils",
@@ -12683,16 +12677,16 @@ mod tests {
 
     #[test]
     fn struct_lit_de_tipo_importado_es_ok() {
-        // `from foo import User; User { ... }` no falla porque
-        // FromImport registra el nombre como nominal sin fields.
-        // El checker no valida campos (no los conoce) y deja pasar.
+        // `from foo import User; User { ... }` doesn't fail because
+        // FromImport registers the name as a nominal without fields.
+        // The checker doesn't validate fields (it doesn't know them) and lets it pass.
         assert_ok(
             "from foo import User\n\
              let u = User { id: 1, name: \"x\" }",
         );
     }
 
-    // ---- Múltiples errores acumulados ----
+    // ---- Multiple accumulated errors ----
 
     #[test]
     fn checker_acumula_varios_errores_de_expresiones() {
@@ -12709,7 +12703,7 @@ mod tests {
         );
     }
 
-    // ---- 5.3.2: llamadas y return ----
+    // ---- 5.3.2: calls and return ----
 
     #[test]
     fn call_aridad_correcta_y_tipos_ok() {
@@ -12764,8 +12758,8 @@ mod tests {
 
     #[test]
     fn call_recursion_top_level_compila() {
-        // El pre-registro de firmas debe ver a `fact` antes de chequear
-        // su body para que la llamada recursiva no se queje.
+        // The signature pre-registration must see `fact` before checking
+        // its body so that the recursive call doesn't complain.
         assert_ok(
             "fn fact(n: Int) -> Int {\n\
                  if (n <= 1) { return 1 }\n\
@@ -12776,7 +12770,7 @@ mod tests {
 
     #[test]
     fn call_forward_reference_cross_fn_compila() {
-        // `a` llama a `b` definida después. El pre-registro lo hace
+        // `a` calls `b` defined later. The pre-registration makes it
         // visible.
         assert_ok(
             "fn a(n: Int) -> Int { return b(n) + 1 }\n\
@@ -12786,20 +12780,20 @@ mod tests {
 
     #[test]
     fn call_sobre_callee_no_funcion_es_error() {
-        // `1(2)` no es una función llamable.
+        // `1(2)` is not a callable function.
         assert_error_with("let r = (1)(2)", &["no es una función", "Int"]);
     }
 
     #[test]
     fn call_fn_expr_inline_pasa() {
-        // (fn(x) => x + 1)(2) — el callee se resuelve a Function.
-        // Aridad y param Any → cualquier arg pasa.
+        // (fn(x) => x + 1)(2) — the callee resolves to Function.
+        // Arity and Any param → any arg passes.
         assert_ok("let r = (fn(x) => x + 1)(2)");
     }
 
     #[test]
     fn call_fn_expr_inline_aridad_falla() {
-        // Aridad chequeada incluso en FnExpr inline.
+        // Arity checked even in inline FnExpr.
         assert_error_with(
             "let r = (fn(x, y) => x + y)(1)",
             &["2 argumento", "recibió 1"],
@@ -12828,11 +12822,11 @@ mod tests {
 
     #[test]
     fn print_es_variadic_no_chequea_aridad() {
-        // print sigue siendo Any → cualquier número de args pasa.
+        // print is still Any → any number of args passes.
         assert_ok("print()\nprint(\"x\")\nprint(1, 2, 3, \"y\")");
     }
 
-    // ---- Stmt::Return contra return_type ----
+    // ---- Stmt::Return against return_type ----
 
     #[test]
     fn return_tipo_compatible_pasa() {
@@ -12849,13 +12843,13 @@ mod tests {
 
     #[test]
     fn return_sin_anotacion_no_chequea() {
-        // Sin return_type → Any → no chequea.
+        // Without return_type → Any → no check.
         assert_ok("fn f() { return \"cualquier cosa\" }");
     }
 
     #[test]
     fn return_arrow_implicito_chequea_contra_return_type() {
-        // `fn f() -> Int => "x"` se desugarea a `body: [Stmt::Return("x", Span::ZERO)]`.
+        // `fn f() -> Int => "x"` desugars to `body: [Stmt::Return("x", Span::ZERO)]`.
         assert_error_with(
             "fn id(x: Int) -> Int => \"no soy int\"",
             &["return", "Int", "Str"],
@@ -12869,7 +12863,7 @@ mod tests {
 
     #[test]
     fn return_ok_contra_result_pasa() {
-        // Ok(user) tipea como Result<User>; debe matchear con
+        // Ok(user) types as Result<User>; must match against
         // -> Result<User>.
         assert_ok(
             "type User { id: Int, name: Str }\n\
@@ -12881,8 +12875,8 @@ mod tests {
 
     #[test]
     fn return_err_contra_result_pasa_por_is_compatible_recursivo() {
-        // Err(_) tipea como Result<Any>. Sin recursividad de
-        // is_compatible esto fallaría contra Result<User>.
+        // Err(_) types as Result<Any>. Without recursion in
+        // is_compatible this would fail against Result<User>.
         assert_ok(
             "type User { id: Int }\n\
              fn make() -> Result<User> {\n\
@@ -12893,25 +12887,25 @@ mod tests {
 
     #[test]
     fn return_huerfano_chequea() {
-        // R.2.4 (F3): `return` fuera de fn ahora es error estático
-        // del checker. Antes pasaba al evaluator y se reportaba en
-        // runtime; ahora lo cazamos antes.
+        // R.2.4 (F3): `return` outside of fn is now a static error
+        // from the checker. Before, it passed to the evaluator and
+        // was reported at runtime; now we catch it earlier.
         let (_, errors) = check_str("return 1");
         assert!(errors
             .iter()
             .any(|e| e.message.contains("return") && e.message.contains("función")));
     }
 
-    // ---- is_compatible recursivo en generics ----
+    // ---- is_compatible recursive on generics ----
 
     #[test]
     fn is_compatible_list_recursivo() {
-        // List<Int> vs List<Float> pasa por coerción Int→Float adentro.
+        // List<Int> vs List<Float> passes via Int→Float coercion inside.
         assert!(is_compatible(
             &Type::List(Box::new(Type::Int)),
             &Type::List(Box::new(Type::Float)),
         ));
-        // List<Str> vs List<Int> no pasa.
+        // List<Str> vs List<Int> doesn't pass.
         assert!(!is_compatible(
             &Type::List(Box::new(Type::Str)),
             &Type::List(Box::new(Type::Int)),
@@ -12920,7 +12914,7 @@ mod tests {
 
     #[test]
     fn is_compatible_result_recursivo() {
-        // Result<Any> matchea Result<User>.
+        // Result<Any> matches Result<User>.
         let env = env_with(&["User"]);
         let user = Type::Nominal(env.lookup("User").unwrap());
         assert!(is_compatible(
@@ -12933,7 +12927,7 @@ mod tests {
                 err: Box::new(Type::Str)
             },
         ));
-        // Result<Int> no matchea Result<Str>.
+        // Result<Int> doesn't match Result<Str>.
         assert!(!is_compatible(
             &Type::Result {
                 ok: Box::new(Type::Int),
@@ -12948,12 +12942,12 @@ mod tests {
 
     #[test]
     fn is_compatible_map_recursivo() {
-        // Map<Str, Int> matchea Map<Str, Float>.
+        // Map<Str, Int> matches Map<Str, Float>.
         assert!(is_compatible(
             &Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
             &Type::Map(Box::new(Type::Str), Box::new(Type::Float)),
         ));
-        // Map<Int, X> no matchea Map<Str, X> (clave incompatible).
+        // Map<Int, X> doesn't match Map<Str, X> (incompatible key).
         assert!(!is_compatible(
             &Type::Map(Box::new(Type::Int), Box::new(Type::Int)),
             &Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
@@ -12962,7 +12956,7 @@ mod tests {
 
     #[test]
     fn is_compatible_function_estructural() {
-        // fn(Int) -> Int matchea fn(Int) -> Int.
+        // fn(Int) -> Int matches fn(Int) -> Int.
         let a = Type::Function {
             params: vec![Type::Int],
             ret: Box::new(Type::Int),
@@ -12972,7 +12966,7 @@ mod tests {
             ret: Box::new(Type::Int),
         };
         assert!(is_compatible(&a, &b));
-        // fn(Int) -> Int no matchea fn(Int, Int) -> Int (aridad distinta).
+        // fn(Int) -> Int doesn't match fn(Int, Int) -> Int (different arity).
         let c = Type::Function {
             params: vec![Type::Int, Type::Int],
             ret: Box::new(Type::Int),
@@ -12980,12 +12974,12 @@ mod tests {
         assert!(!is_compatible(&a, &c));
     }
 
-    // ---- 5.3.3: `?` y match exhaustivo sobre Result ----
+    // ---- 5.3.3: `?` and exhaustive match over Result ----
 
     #[test]
     fn try_sobre_result_adentro_de_fn_result_pasa() {
-        // El operando es Result<Int>; la fn declara -> Result<Int>.
-        // El `?` desempaca a Int.
+        // The operand is Result<Int>; the fn declares -> Result<Int>.
+        // The `?` unpacks to Int.
         assert_ok(
             "fn f(r: Result<Int>) -> Result<Int> {\n\
                  let v: Int = r?\n\
@@ -12996,8 +12990,8 @@ mod tests {
 
     #[test]
     fn try_sobre_any_no_chequea() {
-        // `users.find(...)` es método built-in: callee Field → Any.
-        // `?` sobre Any pasa sin chequear (gradual, hasta 5.3.4).
+        // `users.find(...)` is a built-in method: callee Field → Any.
+        // `?` over Any passes without checking (gradual, until 5.3.4).
         assert_ok(
             "type User { id: Int }\n\
              fn h(id: Int) {\n\
@@ -13010,7 +13004,7 @@ mod tests {
 
     #[test]
     fn try_sobre_no_result_es_error() {
-        // `?` sobre un Int no tiene sentido.
+        // `?` over an Int makes no sense.
         assert_error_with(
             "fn f() -> Result<Int> { let x = 1?\n return Ok(x) }",
             &["?", "Result", "Int"],
@@ -13019,9 +13013,9 @@ mod tests {
 
     #[test]
     fn try_adentro_de_fn_no_result_es_error() {
-        // La fn retorna Int (no Result) y adentro hay un `?`. El
-        // operando es Result<Int> concreto, así que disparamos la
-        // regla "fn debe retornar Result".
+        // The fn returns Int (not Result) and inside there's a `?`. The
+        // operand is concrete Result<Int>, so we fire the
+        // "fn must return Result" rule.
         assert_error_with(
             "fn f(r: Result<Int>) -> Int {\n\
                  let v = r?\n\
@@ -13033,9 +13027,9 @@ mod tests {
 
     #[test]
     fn try_adentro_de_fn_sin_return_type_no_chequea() {
-        // Sin anotación → return_stack es Any → no chequeamos la
-        // regla de la fn contenedora. El operando sí tiene que ser
-        // Result, así que el `?` desempaca a Int sin warnings.
+        // Without annotation → return_stack is Any → we don't check the
+        // containing fn rule. The operand still must be
+        // Result, so the `?` unpacks to Int without warnings.
         assert_ok(
             "fn f(r: Result<Int>) {\n\
                  let v: Int = r?\n\
@@ -13046,21 +13040,21 @@ mod tests {
 
     #[test]
     fn try_top_level_no_chequea_la_regla_de_fn_contenedora() {
-        // `?` adentro del scope global — sin return_stack, no
-        // disparamos la regla "fn debe retornar Result". El operando
-        // sí se chequea: Result<Int> → desempaca a Int.
+        // `?` inside the global scope — without return_stack, we don't
+        // fire the "fn must return Result" rule. The operand
+        // is checked: Result<Int> → unpacks to Int.
         assert_ok("let r: Result<Int> = Ok(1)\nlet v: Int = r?");
     }
 
     #[test]
     fn w13_try_adentro_de_http_handler_no_result_pasa() {
-        // W13 (v0.10.9) — handler HTTP que retorna `User` (no Result)
-        // y usa `?` adentro. Antes del fix el checker rechazaba con
-        // "el operador `?` solo puede usarse adentro de una función
-        // que retorne `Result<...>`". Ahora pasa: el wrapper del
-        // runtime/codegen convierte el Err propagado por `?` en una
-        // respuesta 500 automática, así que el checker confía en esa
-        // semántica cuando estamos `in_http_handler`.
+        // W13 (v0.10.9) — HTTP handler that returns `User` (not Result)
+        // and uses `?` inside. Before the fix, the checker rejected with
+        // "the `?` operator can only be used inside a function
+        // that returns `Result<...>`". Now it passes: the runtime/codegen
+        // wrapper converts the Err propagated by `?` into an automatic
+        // 500 response, so the checker trusts that
+        // semantics when we are `in_http_handler`.
         assert_ok(
             "type User { id: Int }\n\
              fn parse(s: Str) -> Result<Int> { return Ok(1) }\n\
@@ -13074,11 +13068,11 @@ mod tests {
 
     #[test]
     fn w13_try_fuera_de_http_handler_sigue_siendo_error() {
-        // W13 negative — la relajación SOLO aplica adentro de un
-        // handler HTTP (`@get/@post/etc`). Una fn normal que retorna
-        // un tipo no-Result y usa `?` sigue siendo error (paralelo a
-        // `try_adentro_de_fn_no_result_es_error`). Esto evita que la
-        // ergonomía gradual del W13 contamine código no-HTTP.
+        // W13 negative — the relaxation ONLY applies inside an
+        // HTTP handler (`@get/@post/etc`). A regular fn returning
+        // a non-Result type and using `?` is still an error (parallel to
+        // `try_adentro_de_fn_no_result_es_error`). This avoids the
+        // gradual ergonomics of W13 contaminating non-HTTP code.
         assert_error_with(
             "fn helper(r: Result<Int>) -> Int {\n\
                  let v = r?\n\
@@ -13090,7 +13084,7 @@ mod tests {
 
     #[test]
     fn try_encadenado_con_field_access_funciona() {
-        // r?.id sobre Result<User> → User → Int.
+        // r?.id over Result<User> → User → Int.
         assert_ok(
             "type User { id: Int, name: Str }\n\
              fn f(r: Result<User>) -> Result<Int> {\n\
@@ -13100,7 +13094,7 @@ mod tests {
         );
     }
 
-    // ---- match exhaustivo sobre Result ----
+    // ---- exhaustive match over Result ----
 
     #[test]
     fn match_result_con_ok_y_err_es_exhaustivo() {
@@ -13158,8 +13152,8 @@ mod tests {
 
     #[test]
     fn match_result_con_ident_catchall_es_exhaustivo() {
-        // Un ident binding (catch-all) cubre cualquier valor — el
-        // evaluator lo trata como wildcard.
+        // An ident binding (catch-all) covers any value — the
+        // evaluator treats it as a wildcard.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r {\n\
@@ -13170,8 +13164,8 @@ mod tests {
 
     #[test]
     fn match_sobre_int_no_exige_exhaustividad() {
-        // Match sobre un tipo no-Result: el checker no exige
-        // exhaustividad en 5.3.3.
+        // Match over a non-Result type: the checker does not require
+        // exhaustiveness in 5.3.3.
         assert_ok(
             "let n = 1\n\
              let s = match n {\n\
@@ -13183,8 +13177,8 @@ mod tests {
 
     #[test]
     fn match_sobre_any_no_exige_exhaustividad() {
-        // Match sobre un valor de tipo Any (gradual escape): no se
-        // exige exhaustividad.
+        // Match over a value of type Any (gradual escape): no
+        // exhaustiveness is required.
         assert_ok(
             "fn pick() { return Ok(1) }\n\
              let s = match pick() {\n\
@@ -13193,7 +13187,7 @@ mod tests {
         );
     }
 
-    // ---- 5.3.4: métodos built-in con templates paramétricos ----
+    // ---- 5.3.4: built-in methods with parametric templates ----
 
     // List<T>: push
 
@@ -13227,7 +13221,7 @@ mod tests {
 
     #[test]
     fn list_pop_devuelve_t() {
-        // Si pop sobre List<Int> devuelve Int, asignarlo a Int es OK.
+        // If pop over List<Int> returns Int, assigning it to Int is OK.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let last: Int = xs.pop()",
@@ -13246,7 +13240,7 @@ mod tests {
 
     #[test]
     fn list_map_devuelve_list_del_ret_del_callback() {
-        // map sobre List<Int> con callback fn(Int) -> Str → List<Str>.
+        // map over List<Int> with callback fn(Int) -> Str → List<Str>.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let strs: List<Str> = xs.map(fn(x: Int) -> Str { return \"x\" })",
@@ -13264,9 +13258,9 @@ mod tests {
 
     #[test]
     fn list_map_con_callback_sin_anotaciones_es_any() {
-        // Callback sin anotaciones → params = [Any], ret = Any.
-        // El map devuelve List<Any>; asignarlo a List<Int> pasa por
-        // is_compatible recursivo + Any.
+        // Callback without annotations → params = [Any], ret = Any.
+        // The map returns List<Any>; assigning it to List<Int> passes via
+        // recursive is_compatible + Any.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.map(fn(x) => x * 2)",
@@ -13285,10 +13279,10 @@ mod tests {
 
     #[test]
     fn list_filter_callback_aridad_incorrecta_es_error() {
-        // El FnExpr siempre tiene `ret = Any` hasta 5.3.5, así que
-        // no podemos detectar "ret no es Bool" sobre un FnExpr inline.
-        // Lo que sí captamos es aridad del callback: filter espera
-        // fn(T) -> Bool con un solo param.
+        // FnExpr always has `ret = Any` until 5.3.5, so
+        // we can't detect "ret is not Bool" over an inline FnExpr.
+        // What we DO catch is the callback arity: filter expects
+        // fn(T) -> Bool with a single param.
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.filter(fn(x, y) => true)",
@@ -13300,7 +13294,7 @@ mod tests {
 
     #[test]
     fn list_find_devuelve_result_t() {
-        // find sobre List<User> devuelve Result<User>.
+        // find over List<User> returns Result<User>.
         assert_ok(
             "type User { id: Int }\n\
              let xs: List<User> = [User { id: 1 }]\n\
@@ -13310,8 +13304,8 @@ mod tests {
 
     #[test]
     fn list_find_con_try_destrabba_t() {
-        // xs.find(...)? adentro de una fn -> Result<User> debería
-        // desempacar a User.
+        // xs.find(...)? inside a fn -> Result<User> should
+        // unpack to User.
         assert_ok(
             "type User { id: Int }\n\
              fn first(xs: List<User>) -> Result<User> {\n\
@@ -13321,7 +13315,7 @@ mod tests {
         );
     }
 
-    // List<T>: método desconocido
+    // List<T>: unknown method
 
     #[test]
     fn list_metodo_desconocido_es_error() {
@@ -13490,7 +13484,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Mb2 + Rg ----
+    // ---- Mini-batch Mb2 + Rg ----
 
     #[test]
     fn mb2_list_min_max_sobre_list_int_devuelve_result_int() {
@@ -13583,7 +13577,7 @@ mod tests {
         assert_error_with("let xs = (0..10).step_by(\"x\")", &["step_by", "Int"]);
     }
 
-    // ---- Mini-tanda Mb3: reduce + product + chars + entries + to_map ----
+    // ---- Mini-batch Mb3: reduce + product + chars + entries + to_map ----
 
     #[test]
     fn mb3_list_reduce_acc_int_devuelve_int() {
@@ -13595,7 +13589,7 @@ mod tests {
 
     #[test]
     fn mb3_list_reduce_acc_distinto_a_t_funciona() {
-        // Acc puede ser Str aunque T sea Int.
+        // Acc can be Str even if T is Int.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let s: Str = xs.reduce(\"\", fn(acc: Str, x: Int) => acc)",
@@ -13658,7 +13652,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Mb4 + Cmp+ ----
+    // ---- Mini-batch Mb4 + Cmp+ ----
 
     #[test]
     fn mb4_list_unique_devuelve_list_t() {
@@ -13714,7 +13708,7 @@ mod tests {
 
     #[test]
     fn cmp_multi_for_var_anidado_visible_en_expr() {
-        // El binding `y` del segundo for está visible en el expr.
+        // The binding `y` from the second for is visible in the expr.
         assert_ok(
             "let xs: List<Int> = [1, 2]\n\
              let ys: List<Int> = [10]\n\
@@ -13732,7 +13726,7 @@ mod tests {
         assert_error_with("let m = {n: n for n in 0..3 if n}", &["filtro", "Bool"]);
     }
 
-    // ---- Mini-tanda Mb5 + Async-cl ----
+    // ---- Mini-batch Mb5 + Async-cl ----
 
     #[test]
     fn mb5_list_group_by_devuelve_map_k_list_t() {
@@ -13790,9 +13784,9 @@ mod tests {
 
     #[test]
     fn async_cl_inline_tipa_como_function_con_future() {
-        // El tipo del FnExpr async tiene ret = Future<T>, así que el
-        // checker valida `.await` adentro y permite usarlo desde una
-        // async fn caller.
+        // The type of the async FnExpr has ret = Future<T>, so the
+        // checker validates `.await` inside and lets it be used from an
+        // async caller fn.
         assert_ok(
             "async fn run() -> Int {\n\
                  let f = async fn(n: Int) -> Int { return n * 2 }\n\
@@ -13801,7 +13795,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Mb6 ----
+    // ---- Mini-batch Mb6 ----
 
     #[test]
     fn mb6_list_scan_devuelve_list_acc() {
@@ -13846,7 +13840,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Mb8 + Bits-extras ----
+    // ---- Mini-batch Mb8 + Bits-extras ----
 
     #[test]
     fn mb8_list_starts_with_devuelve_bool() {
@@ -13918,7 +13912,7 @@ mod tests {
         assert_error_with("let r = popcount(\"oops\")", &["popcount", "Int"]);
     }
 
-    // ---- Mini-tanda Mb7 ----
+    // ---- Mini-batch Mb7 ----
 
     #[test]
     fn mb7_list_take_drop_devuelven_list_t() {
@@ -14013,7 +14007,7 @@ mod tests {
 
     #[test]
     fn async_cl_sync_no_acepta_await_dentro() {
-        // FnExpr sync (sin `async`) rechaza `.await` adentro.
+        // Sync FnExpr (without `async`) rejects `.await` inside.
         assert_error_with(
             "fn run() -> Int {\n\
                  let f = fn(n: Int) -> Int {\n\
@@ -14026,11 +14020,11 @@ mod tests {
         );
     }
 
-    // ---- I.1: indexing con tipos ----
+    // ---- I.1: indexing with types ----
 
     #[test]
     fn str_index_devuelve_str() {
-        // I.1: `s[i]` ahora tipa como Str (antes era error).
+        // I.1: `s[i]` now types as Str (previously was an error).
         assert_ok(
             "let s = \"hola\"\n\
              let c: Str = s[0]",
@@ -14096,21 +14090,21 @@ mod tests {
         );
     }
 
-    // Encadenado
+    // Chained
 
     #[test]
     fn metodo_encadenado_map_filter() {
-        // map(...).filter(...) en una sola línea — el ret de map
-        // (List<Any> por FnExpr.ret=Any hasta 5.3.5) alimenta al
-        // filter. Encadenamiento multi-línea sigue siendo deuda
-        // explícita del parser (3.4).
+        // map(...).filter(...) on a single line — the ret of map
+        // (List<Any> because FnExpr.ret=Any until 5.3.5) feeds the
+        // filter. Multi-line chaining is still explicit
+        // parser debt (3.4).
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.map(fn(x) => x * 2).filter(fn(y) => true)",
         );
     }
 
-    // Receptores que no tienen métodos built-in
+    // Receivers without built-in methods
 
     #[test]
     fn metodo_sobre_int_es_error() {
@@ -14121,14 +14115,14 @@ mod tests {
         );
     }
 
-    // Nominal: gradual, no chequea ni rechaza
+    // Nominal: gradual, doesn't check or reject
 
     #[test]
     fn metodo_sobre_nominal_no_chequea() {
-        // type sin métodos custom: user.greet() pasa sin warning
-        // (el evaluator lo emite en runtime). Es la regla gradual
-        // de 5.3.4 — los métodos custom sobre `type` no existen
-        // todavía, no rompemos código que use ese patrón.
+        // type without custom methods: user.greet() passes without warning
+        // (the evaluator emits it at runtime). It's the gradual rule
+        // of 5.3.4 — custom methods over `type` don't exist
+        // yet, we don't break code using that pattern.
         assert_ok(
             "type User { id: Int }\n\
              let u = User { id: 1 }\n\
@@ -14138,13 +14132,13 @@ mod tests {
 
     // ---- 5.3.5: FnExpr.ret inferido + Expr::Index ----
 
-    // FnExpr ret inferido — formas básicas
+    // FnExpr inferred ret — basic forms
 
     #[test]
     fn fn_expr_arrow_devuelve_tipo_del_expr() {
-        // `fn(x: Int) => x * 2` se desugarea a body=[Return(x*2)];
-        // ret inferido = Int. Filter exige Bool, así que esto debe
-        // disparar el chequeo de ret.
+        // `fn(x: Int) => x * 2` desugars to body=[Return(x*2)];
+        // inferred ret = Int. Filter requires Bool, so this must
+        // fire the ret check.
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.filter(fn(x: Int) => x * 2)",
@@ -14154,7 +14148,7 @@ mod tests {
 
     #[test]
     fn fn_expr_arrow_bool_pasa_filter() {
-        // Mismo escenario pero con ret Bool — filter acepta.
+        // Same scenario but with ret Bool — filter accepts.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.filter(fn(x: Int) => x > 0)",
@@ -14163,7 +14157,7 @@ mod tests {
 
     #[test]
     fn fn_expr_block_un_solo_return_infiere_ese_tipo() {
-        // Forma bloque con un return — ret = tipo del return.
+        // Block form with one return — ret = type of the return.
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.find(fn(x: Int) { return x * 2 })",
@@ -14173,19 +14167,19 @@ mod tests {
 
     #[test]
     fn fn_expr_sin_return_es_null() {
-        // Una fn que no retorna explícitamente — ret = Null. Para
-        // un map, los elementos quedan como List<Null>.
+        // A fn that doesn't explicitly return — ret = Null. For
+        // a map, elements end up as List<Null>.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Null> = xs.map(fn(x: Int) { print(x) })",
         );
     }
 
-    // FnExpr ret inferido — unificación (lub) sobre varios returns
+    // FnExpr inferred ret — unification (lub) over several returns
 
     #[test]
     fn fn_expr_lub_int_float_es_float() {
-        // Dos returns: Int y Float → Float (coerción).
+        // Two returns: Int and Float → Float (coercion).
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Float> = xs.map(fn(x: Int) {\n\
@@ -14197,7 +14191,7 @@ mod tests {
 
     #[test]
     fn fn_expr_lub_null_y_t_es_nullable() {
-        // Una rama devuelve null, otra Int → ret = Int?.
+        // One branch returns null, another Int → ret = Int?.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int?> = xs.map(fn(x: Int) {\n\
@@ -14210,8 +14204,8 @@ mod tests {
     #[test]
     fn fn_expr_lub_result_ok_y_err_es_result_concreto() {
         // Ok(User) + Err("...") → lub(Result<User>, Result<Any>)
-        // = Result<User>. Detecta que el FnExpr puede usarse donde
-        // se espera Result<User>.
+        // = Result<User>. Detects that the FnExpr can be used where
+        // Result<User> is expected.
         assert_ok(
             "type User { id: Int }\n\
              let xs: List<User> = [User { id: 1 }]\n\
@@ -14278,14 +14272,14 @@ mod tests {
 
     #[test]
     fn index_sobre_any_no_chequea() {
-        // Receptor Any (var traída por import) → gradual.
+        // Any receiver (var brought in by import) → gradual.
         assert_ok(
             "from foo import xs\n\
              let n = xs[0]",
         );
     }
 
-    // lub directo
+    // lub direct
 
     #[test]
     fn lub_funciones_basicas() {
@@ -14299,7 +14293,7 @@ mod tests {
             lub(&Type::Null, &Type::Int),
             Type::Nullable(Box::new(Type::Int))
         );
-        // Int + Str → Any (mix arbitrario).
+        // Int + Str → Any (arbitrary mix).
         assert_eq!(lub(&Type::Int, &Type::Str), Type::Any);
     }
 
@@ -14321,16 +14315,16 @@ mod tests {
 
     #[test]
     fn unify_returns_vacio_es_null() {
-        // Sin returns explícitos → Null (matchea el evaluator).
+        // Without explicit returns → Null (matches the evaluator).
         assert_eq!(unify_returns(&[]), Type::Null);
     }
 
-    // ---- Deuda residual de 5a: reasignación contra tipo previo ----
+    // ---- Residual debt from 5a: reassignment against previous type ----
 
     #[test]
     fn reasignacion_sin_anotacion_a_var_anotada_falla() {
-        // `m: Int = 1; m = "x"` — la primera asignación marcó `m`
-        // como anotada Int; la segunda sin anotación viola eso.
+        // `m: Int = 1; m = "x"` — the first assignment marked `m`
+        // as Int-annotated; the second without annotation violates that.
         assert_error_with(
             "let m: Int = 1\n\
              m = \"no soy int\"",
@@ -14340,8 +14334,8 @@ mod tests {
 
     #[test]
     fn reasignacion_sin_anotacion_a_var_inferida_pasa() {
-        // `n = 1; n = "x"` — la primera asignación NO tenía anotación,
-        // así que el modelo gradual permite cambiar el tipo.
+        // `n = 1; n = "x"` — the first assignment had NO annotation,
+        // so the gradual model allows changing the type.
         assert_ok(
             "let n = 1\n\
              n = \"ahora soy texto\"",
@@ -14350,7 +14344,7 @@ mod tests {
 
     #[test]
     fn reasignacion_compatible_a_var_anotada_pasa() {
-        // `m: Int = 1; m = 2` — la reasignación respeta el tipo.
+        // `m: Int = 1; m = 2` — the reassignment respects the type.
         assert_ok(
             "let m: Int = 1\n\
              m = 2",
@@ -14359,7 +14353,7 @@ mod tests {
 
     #[test]
     fn reasignacion_int_a_float_anotado_pasa_por_coercion() {
-        // `f: Float = 1.0; f = 2` — Int → Float por coerción.
+        // `f: Float = 1.0; f = 2` — Int → Float via coercion.
         assert_ok(
             "let f: Float = 1.0\n\
              f = 2",
@@ -14368,10 +14362,10 @@ mod tests {
 
     #[test]
     fn re_anotacion_con_otro_tipo_pasa_como_redeclaracion() {
-        // `m: Int = 1; m: Str = "x"` — el segundo `m: Str = ...` es
-        // una redeclaración explícita; el modelo gradual la permite
-        // (el evaluator hace lo mismo). El bug que cierra esta deuda
-        // es la reasignación SIN anotación nueva.
+        // `m: Int = 1; m: Str = "x"` — the second `m: Str = ...` is
+        // an explicit redeclaration; the gradual model allows it
+        // (the evaluator does the same). The bug closed by this debt
+        // is reassignment WITHOUT a new annotation.
         assert_ok(
             "let m: Int = 1\n\
              let m: Str = \"x\"",
@@ -14380,7 +14374,7 @@ mod tests {
 
     #[test]
     fn match_result_con_ok_wildcard_y_err_wildcard_es_exhaustivo() {
-        // `Ok(_)` y `Err(_)` cubren las dos variantes — no falta nada.
+        // `Ok(_)` and `Err(_)` cover the two variants — nothing missing.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r {\n\
@@ -14392,8 +14386,8 @@ mod tests {
 
     #[test]
     fn match_result_con_solo_ok_wildcard_falta_err() {
-        // OkWildcard cuenta como variante Ok, no como catch-all.
-        // Si falta Err, error de exhaustividad.
+        // OkWildcard counts as the Ok variant, not as a catch-all.
+        // If Err is missing, exhaustiveness error.
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r {\n\
@@ -14403,12 +14397,12 @@ mod tests {
         );
     }
 
-    // ---- R.2.1: or-patterns en exhaustividad ----
+    // ---- R.2.1: or-patterns in exhaustiveness ----
 
     #[test]
     fn or_pattern_ok_wildcard_y_err_wildcard_juntos_es_exhaustivo() {
-        // `Ok(_) | Err(_)` en un solo arm cubre ambas variantes —
-        // el `update_result_coverage` recursea en `Pattern::Or`.
+        // `Ok(_) | Err(_)` in a single arm covers both variants —
+        // `update_result_coverage` recurses on `Pattern::Or`.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { Ok(_) | Err(_) => \"siempre\" }",
@@ -14417,7 +14411,7 @@ mod tests {
 
     #[test]
     fn or_pattern_solo_ok_wildcards_combinados_falta_err() {
-        // `Ok(_) | Ok(_) =>` solo cubre Ok, falta Err.
+        // `Ok(_) | Ok(_) =>` only covers Ok, missing Err.
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { Ok(_) | Ok(_) => \"x\" }",
@@ -14427,7 +14421,7 @@ mod tests {
 
     #[test]
     fn or_pattern_con_literales_int_no_dispara_exhaustividad() {
-        // Scrutinee `Int`, no `Result`. `1 | 2 | 3` está OK con `_`.
+        // Scrutinee `Int`, not `Result`. `1 | 2 | 3` is OK with `_`.
         assert_ok("let s = match 1 { 1 | 2 | 3 => \"chico\", _ => \"otro\" }");
     }
 
@@ -14441,16 +14435,16 @@ mod tests {
 
     #[test]
     fn or_pattern_con_wildcard_subcase_es_catchall() {
-        // Si un sub-pattern del Or es `_`, el arm es catch-all
-        // (cubre cualquier cosa). Aunque en la práctica el usuario
-        // no escribiría `Ok(_) | _`, validamos que recursea correcto.
+        // If a sub-pattern of the Or is `_`, the arm is catch-all
+        // (covers anything). Although in practice the user wouldn't
+        // write `Ok(_) | _`, we validate it recurses correctly.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { 1 | _ => \"x\" }",
         );
     }
 
-    // ---- R.2.2: guards en match ----
+    // ---- R.2.2: guards in match ----
 
     #[test]
     fn guard_bool_es_valido() {
@@ -14459,7 +14453,7 @@ mod tests {
 
     #[test]
     fn guard_no_bool_es_error() {
-        // `x if x` con x: Int → guard no es Bool.
+        // `x if x` with x: Int → guard is not Bool.
         assert_error_with(
             "let s = match 5 { x if x => \"y\", _ => \"z\" }",
             &["guard", "Bool", "Int"],
@@ -14468,8 +14462,8 @@ mod tests {
 
     #[test]
     fn guard_referencia_binding_del_pattern() {
-        // El binding del pattern (`v` de `Ok(v)`) debe ser visible
-        // en el guard.
+        // The pattern binding (`v` from `Ok(v)`) must be visible
+        // in the guard.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { Ok(v) if v > 0 => \"pos\", Ok(_) => \"neg\", Err(_) => \"err\" }",
@@ -14478,8 +14472,8 @@ mod tests {
 
     #[test]
     fn arm_con_guard_no_cuenta_para_exhaustividad_result() {
-        // Solo `Ok(_) if true` cubre Ok con guard; no cuenta como Ok
-        // y falta Err.
+        // Only `Ok(_) if true` covers Ok with guard; doesn't count as Ok
+        // and Err is missing.
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { Ok(_) if true => \"x\" }",
@@ -14489,7 +14483,7 @@ mod tests {
 
     #[test]
     fn arm_con_guard_no_cuenta_como_catchall() {
-        // `_ if cond` no es catch-all real (cond puede ser false).
+        // `_ if cond` is not a real catch-all (cond may be false).
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { _ if true => \"x\" }",
@@ -14499,14 +14493,14 @@ mod tests {
 
     #[test]
     fn arm_con_guard_seguido_de_catchall_es_exhaustivo() {
-        // Con un catch-all sin guard al final, el match es exhaustivo.
+        // With a catch-all without guard at the end, the match is exhaustive.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { Ok(v) if v > 0 => \"pos\", _ => \"otro\" }",
         );
     }
 
-    // ---- R.2.4 (F3): return/break/continue huérfanos ----
+    // ---- R.2.4 (F3): orphan return/break/continue ----
 
     #[test]
     fn return_huerfano_top_level_es_error() {
@@ -14573,10 +14567,10 @@ mod tests {
 
     #[test]
     fn break_adentro_de_fn_interna_no_escapa_loop_externo() {
-        // El parser de Fitz NO permite fns nested (top-level only),
-        // pero FnExpr (closures) sí. break adentro de un closure
-        // que aparece adentro de un loop NO está adentro de un loop
-        // para fines del checker.
+        // Fitz's parser does NOT allow nested fns (top-level only),
+        // but FnExpr (closures) is allowed. break inside a closure
+        // that appears inside a loop is NOT inside a loop
+        // for checker purposes.
         assert_error_with(
             "for i in 0..3 {\n\
                  let f = fn() => 0\n\
@@ -14590,7 +14584,7 @@ mod tests {
 
     #[test]
     fn return_huerfano_y_break_huerfano_ambos_reportados() {
-        // Ambos errores deberían aparecer en el mismo programa.
+        // Both errors should appear in the same program.
         let (_, errors) = check_str("return 42\nbreak");
         let return_errs = errors
             .iter()
@@ -14610,7 +14604,7 @@ mod tests {
         );
     }
 
-    // ---- R.3: métodos custom sobre type ----
+    // ---- R.3: custom methods on type ----
 
     #[test]
     fn metodo_lee_field_como_local_es_valido() {
@@ -14659,9 +14653,9 @@ mod tests {
 
     #[test]
     fn metodo_param_shadowea_field_compila() {
-        // Cuando un param tiene el mismo nombre que un field, el
-        // param gana en el scope. El checker permite la combinación
-        // sin error.
+        // When a param has the same name as a field, the
+        // param wins in scope. The checker allows the combination
+        // without error.
         assert_ok(
             "type U {\n\
                  name: Str\n\
@@ -14672,8 +14666,8 @@ mod tests {
 
     #[test]
     fn metodo_break_es_orfano_si_no_hay_loop_local() {
-        // Un `break` dentro del body de un método sin loop local es
-        // huérfano. (R.2.4 reset de loop_depth en cada fn body.)
+        // A `break` inside the body of a method without a local loop is
+        // orphan. (R.2.4 resets loop_depth at each fn body.)
         assert_error_with(
             "type U {\n\
                  fn f() {\n\
@@ -14686,16 +14680,16 @@ mod tests {
 
     #[test]
     fn reasignacion_anotada_propaga_a_uso_posterior() {
-        // Verifica que el binding sigue siendo `Int` después de un
-        // intento de reasignación incompatible: el uso posterior
-        // espera Int.
+        // Verify that the binding is still `Int` after an
+        // incompatible reassignment attempt: the subsequent use
+        // expects Int.
         let (_, errors) = check_str(
             "let m: Int = 1\n\
              m = \"no soy int\"\n\
              let n: Int = m + 1",
         );
-        // Esperamos solo el error de la reasignación, no errores
-        // adicionales del `m + 1` (porque m sigue siendo Int).
+        // We expect only the reassignment error, no additional errors
+        // from `m + 1` (because m is still Int).
         let count_reassign = errors
             .iter()
             .filter(|e| e.message.contains("m") && e.message.contains("Str"))
@@ -14705,7 +14699,7 @@ mod tests {
             "esperaba error de reasignación, hubo: {:?}",
             errors.iter().map(|e| &e.message).collect::<Vec<_>>()
         );
-        // El uso posterior `m + 1` tipa OK (m sigue siendo Int).
+        // The subsequent use `m + 1` types OK (m is still Int).
         let count_plus = errors
             .iter()
             .filter(|e| e.message.contains("operador") && e.message.contains("+"))
@@ -14718,11 +14712,11 @@ mod tests {
         );
     }
 
-    // ---- Tipo función `Fn(...) -> U` (higher-order, F12) ----
+    // ---- Function type `Fn(...) -> U` (higher-order, F12) ----
 
     #[test]
     fn type_expr_function_resuelve_a_type_function() {
-        // type Box { f: Fn(Int) -> Int } — el field tiene tipo función.
+        // type Box { f: Fn(Int) -> Int } — the field has a function type.
         let (env, errors) = resolve_str("type Box { f: Fn(Int) -> Int }");
         assert!(errors.is_empty(), "errores: {:?}", errors);
         let id = env.lookup("Box").unwrap();
@@ -14753,7 +14747,7 @@ mod tests {
 
     #[test]
     fn type_expr_function_higher_order_resuelve() {
-        // Fn(Fn(Int) -> Int, Int) -> Int — param es a su vez función.
+        // Fn(Fn(Int) -> Int, Int) -> Int — param is itself a function.
         let (env, errors) = resolve_str("type Apply { f: Fn(Fn(Int) -> Int, Int) -> Int }");
         assert!(errors.is_empty(), "errores: {:?}", errors);
         let id = env.lookup("Apply").unwrap();
@@ -14782,13 +14776,13 @@ mod tests {
     #[test]
     fn anotacion_function_en_param_de_fndef_pasa_checker() {
         // fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
-        // El checker debe tipar la llamada `f(x)` contra la firma.
+        // The checker must type the call `f(x)` against the signature.
         assert_ok("fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }");
     }
 
     #[test]
     fn anotacion_function_en_param_detecta_aridad_mala() {
-        // apply pasa 2 args a un f que toma 1.
+        // apply passes 2 args to an f that takes 1.
         assert_error_with(
             "fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x, x) }",
             &["espera 1", "argumento"],
@@ -14796,19 +14790,19 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — Span en errores expr-level (S1.2 sub-paso 2)
+    // Tests — Span on expr-level errors (S1.2 sub-step 2)
     //
-    // Antes de S1.2 los errores sobre expresiones heredaban la línea
-    // del `Stmt` contenedor (correcta) pero con columna degradada
-    // (la del primer token del stmt). Tras este sub-paso, cada error
-    // de tipo sobre BinOp/Call/Field/Index/UnaryOp/Try/Match/Range/
-    // StructLit/Ident apunta a la columna del nodo problemático.
+    // Before S1.2 errors on expressions inherited the line
+    // of the containing `Stmt` (correct) but with a degraded column
+    // (that of the first token of the stmt). After this sub-step, each type
+    // error on BinOp/Call/Field/Index/UnaryOp/Try/Match/Range/
+    // StructLit/Ident points to the column of the problematic node.
     //
-    // Estos tests fijan posiciones concretas para que cualquier
-    // pérdida de span se note en la suite.
+    // These tests fix concrete positions so that any span
+    // loss is noticed in the suite.
     // -----------------------------------------------------------------------
 
-    /// Helper que devuelve el primer error reportado, o panica si no hay.
+    /// Helper that returns the first reported error, or panics if none.
     fn first_error(src: &str) -> FitzError {
         let (_, mut errors) = check_str(src);
         assert!(!errors.is_empty(), "esperado al menos un error en: {}", src);
@@ -14817,8 +14811,8 @@ mod tests {
 
     #[test]
     fn span_binop_apunta_a_columna_del_operador() {
-        // `let x: Int = 1 + "a"` — el `+` está en columna 16. El error
-        // ahora reporta la columna del operador, no la del `let`.
+        // `let x: Int = 1 + "a"` — `+` is at column 16. The error
+        // now reports the column of the operator, not the column of the `let`.
         let e = first_error("let x: Int = 1 + \"a\"");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 16);
@@ -14827,26 +14821,26 @@ mod tests {
 
     #[test]
     fn span_call_aridad_apunta_a_paren_del_call() {
-        // `fn f(x: Int) -> Int => x` y `let _ = f(1, 2)` — el `(` del
-        // call está en columna 41 (después de `fn f(x: Int) -> Int => x\n`,
-        // contando que `let _ = f(` arranca en línea 2).
+        // `fn f(x: Int) -> Int => x` and `let _ = f(1, 2)` — the `(` of the
+        // call is at column 41 (after `fn f(x: Int) -> Int => x\n`,
+        // accounting that `let _ = f(` starts on line 2).
         let src = "fn f(x: Int) -> Int => x\nlet _ = f(1, 2)";
         let e = first_error(src);
         assert_eq!(e.line, 2);
-        // `let _ = f` ocupa columnas 1-9, así que `(` está en 10.
+        // `let _ = f` spans columns 1-9, so `(` is at 10.
         assert_eq!(e.column, 10);
         assert!(e.message.contains("espera 1"), "msg: {}", e.message);
     }
 
     #[test]
     fn span_call_arg_apunta_al_argumento_concreto() {
-        // El error de "argumento N espera X recibió Y" apunta al
-        // argumento, no al `(`. Permite distinguir cuál de varios args
-        // tiene mal tipo.
+        // The "argument N expects X, received Y" error points to the
+        // argument, not to the `(`. Lets us distinguish which of several args
+        // has the wrong type.
         let src = "fn f(x: Int) -> Int => x\nlet _ = f(\"hola\")";
         let e = first_error(src);
         assert_eq!(e.line, 2);
-        // `let _ = f(` ocupa 1-10, el `"hola"` arranca en 11.
+        // `let _ = f(` spans 1-10, `"hola"` starts at 11.
         assert_eq!(e.column, 11);
         assert!(
             e.message.contains("argumento 1") && e.message.contains("Int"),
@@ -14857,7 +14851,7 @@ mod tests {
 
     #[test]
     fn span_unary_apunta_al_menos() {
-        // `let s = -"a"` — el `-` está en columna 9.
+        // `let s = -"a"` — `-` is at column 9.
         let e = first_error("let s = -\"a\"");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 9);
@@ -14866,24 +14860,24 @@ mod tests {
 
     #[test]
     fn span_index_apunta_al_indice_concreto() {
-        // `let xs: List<Int> = [1, 2, 3]\nlet _ = xs["k"]` — el `"k"`
-        // está en columna 12 de la línea 2.
+        // `let xs: List<Int> = [1, 2, 3]\nlet _ = xs["k"]` — `"k"`
+        // is at column 12 of line 2.
         let src = "let xs: List<Int> = [1, 2, 3]\nlet _ = xs[\"k\"]";
         let e = first_error(src);
         assert_eq!(e.line, 2);
-        // `let _ = xs[` ocupa 1-11, `"k"` arranca en 12.
+        // `let _ = xs[` spans 1-11, `"k"` starts at 12.
         assert_eq!(e.column, 12);
         assert!(e.message.contains("Int"), "msg: {}", e.message);
     }
 
     #[test]
     fn span_field_struct_extra_apunta_al_valor_del_extra() {
-        // `type U { id: Int }; let u = U { id: 1, x: 2 }` — el `2` del
-        // field extra está en columna 44.
+        // `type U { id: Int }; let u = U { id: 1, x: 2 }` — the `2` of the
+        // extra field is at column 44.
         let src = "type U { id: Int }\nlet u = U { id: 1, x: 2 }";
         let e = first_error(src);
         assert_eq!(e.line, 2);
-        // `let u = U { id: 1, x: ` ocupa 1-22, `2` arranca en 23.
+        // `let u = U { id: 1, x: ` spans 1-22, `2` starts at 23.
         assert_eq!(e.column, 23);
         assert!(
             e.message.contains("no tiene un campo") && e.message.contains("`x`"),
@@ -14894,7 +14888,7 @@ mod tests {
 
     #[test]
     fn span_ident_desconocido_apunta_al_ident() {
-        // `let _ = no_existe` — `no_existe` arranca en columna 9.
+        // `let _ = no_existe` — `no_existe` starts at column 9.
         let e = first_error("let _ = no_existe");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 9);
@@ -14903,7 +14897,7 @@ mod tests {
 
     #[test]
     fn span_try_apunta_al_signo_pregunta() {
-        // `let _ = 42?` — el `?` está en columna 11.
+        // `let _ = 42?` — `?` is at column 11.
         let e = first_error("let _ = 42?");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 11);
@@ -14912,7 +14906,7 @@ mod tests {
 
     #[test]
     fn span_range_apunta_al_extremo_problematico() {
-        // `let _ = 1..\"a\"` — el `"a"` está en columna 12.
+        // `let _ = 1..\"a\"` — `"a"` is at column 12.
         let e = first_error("let _ = 1..\"a\"");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 12);
@@ -14920,30 +14914,30 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Fase 8.4.1 — Type::PyAny + bindings de `from python import` +
-    // calls Python tipan como Result<Any> en el checker.
+    // Phase 8.4.1 — Type::PyAny + bindings of `from python import` +
+    // Python calls type as Result<Any> in the checker.
     // -----------------------------------------------------------------------
     //
-    // Estos tests funcionan SIN la feature `python` activa porque el
-    // checker solo mira el shape del AST: `path[0] == "python"` activa
-    // la rama PyAny independiente de si el binario lincó libpython.
-    // El runtime solo se invoca con la feature, pero el chequeo
-    // estático corre siempre.
+    // These tests work WITHOUT the `python` feature active because the
+    // checker only looks at the AST shape: `path[0] == "python"` activates
+    // the PyAny branch independently of whether the binary linked libpython.
+    // The runtime is only invoked with the feature, but the static check
+    // always runs.
 
     #[test]
     fn checker_from_python_import_bindea_como_pyany_no_any() {
-        // El checker acepta `from python import math` y bindea `math`
-        // con tipo PyAny. Cualquier uso pasa por las reglas asimétricas
-        // de PyAny (calls → Result<Any>, field access → PyAny).
+        // The checker accepts `from python import math` and binds `math`
+        // with type PyAny. Any use goes through the asymmetric rules
+        // of PyAny (calls → Result<Any>, field access → PyAny).
         let (_, errors) = check_str("from python import math\nlet x = math\n");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     #[test]
     fn checker_call_python_tipa_como_result_any() {
-        // 8.4.2 (entró junto con 8.4.1): la llamada `math.sqrt(16.0)`
-        // tipa como `Result<Any>` — usar el resultado como `Float`
-        // directo SIN desempaquetar dispara error de tipo.
+        // 8.4.2 (landed alongside 8.4.1): the call `math.sqrt(16.0)`
+        // types as `Result<Any>` — using the result as `Float`
+        // directly WITHOUT unpacking fires a type error.
         assert_error_with(
             "from python import math\nlet f: Float = math.sqrt(16.0)\n",
             &["Float", "Result"],
@@ -14952,9 +14946,9 @@ mod tests {
 
     #[test]
     fn checker_call_python_con_match_compila_limpio() {
-        // El patrón canónico (match para desempaquetar) tipa OK.
-        // Cubre la regla de exhaustividad sobre Result (5.3.3) — `Ok`
-        // + `Err` exhaustivo es suficiente.
+        // The canonical pattern (match to unpack) types OK.
+        // Covers the exhaustiveness rule over Result (5.3.3) — `Ok`
+        // + `Err` exhaustive is enough.
         let (_, errors) = check_str(
             "from python import math\n\
              let f = match math.sqrt(16.0) { Ok(v) => v, Err(_) => -1.0 }\n",
@@ -14964,9 +14958,9 @@ mod tests {
 
     #[test]
     fn checker_call_python_match_no_exhaustivo_es_error() {
-        // La regla de 5.3.3 ahora pega con calls Python: `match` que
-        // omite `Err` (sin catch-all) dispara error de exhaustividad
-        // porque el scrutinee tipa como Result<Any>.
+        // The 5.3.3 rule now applies to Python calls: a `match` that
+        // omits `Err` (without catch-all) fires an exhaustiveness error
+        // because the scrutinee types as Result<Any>.
         assert_error_with(
             "from python import math\n\
              let f = match math.sqrt(16.0) { Ok(v) => v }\n",
@@ -14976,10 +14970,10 @@ mod tests {
 
     #[test]
     fn checker_try_operator_sobre_call_python_compila_dentro_de_fn_result() {
-        // El `?` adentro de una fn que retorna `Result<T>` desempaca
-        // el `Result<Any>` Python al `Any` interno (que matchea
-        // cualquier T por gradual). En éxito devuelve el valor; en
-        // falla propaga el Err al caller.
+        // `?` inside a fn that returns `Result<T>` unpacks
+        // the Python `Result<Any>` to the internal `Any` (which matches
+        // any T via gradual). On success returns the value; on
+        // failure propagates the Err to the caller.
         let (_, errors) = check_str(
             "from python import math\n\
              fn root(x: Float) -> Result<Float> { return Ok(math.sqrt(x)?) }\n",
@@ -14989,12 +14983,12 @@ mod tests {
 
     #[test]
     fn checker_try_operator_sobre_call_python_fn_no_result_es_error() {
-        // La regla de 5.3.3 sobre `?` también pega con calls Python:
-        // dentro de una fn que retorna `Int` (no `Result<...>`), `?`
-        // sobre `math.sqrt(...)` dispara error porque el contenedor
-        // no puede recibir el `Err` propagado.
-        // (`?` a nivel top no se chequea en el checker — se reporta
-        // en runtime, decisión heredada de 5.3.3.)
+        // The 5.3.3 rule on `?` also applies to Python calls:
+        // inside a fn that returns `Int` (not `Result<...>`), `?`
+        // on `math.sqrt(...)` fires an error because the container
+        // cannot receive the propagated `Err`.
+        // (`?` at top level is not checked by the checker — it's reported
+        // at runtime, inherited decision from 5.3.3.)
         assert_error_with(
             "from python import math\n\
              fn bad(x: Float) -> Int { return 0 + math.sqrt(x)? }\n",
@@ -15004,10 +14998,10 @@ mod tests {
 
     #[test]
     fn checker_field_access_sobre_pyany_devuelve_pyany() {
-        // `os.path` es field access sobre PyAny — el tipo del binding
-        // sigue siendo PyAny. El check pasa sin errores y un call
-        // sobre el submódulo (`os.path.join(...)`) sigue tipando
-        // como Result<Any>.
+        // `os.path` is field access over PyAny — the type of the binding
+        // is still PyAny. The check passes without errors and a call
+        // on the submodule (`os.path.join(...)`) keeps typing
+        // as Result<Any>.
         let (_, errors) = check_str(
             "from python import os\n\
              let p = os.path\n\
@@ -15018,10 +15012,10 @@ mod tests {
 
     #[test]
     fn checker_pyany_es_compatible_con_anotacion_concreta() {
-        // El patrón canónico del roadmap: `let row: User = py_call()?`.
-        // Estáticamente, el `?` desempaca Result<Any> a Any; la
-        // anotación User pasa por gradual escape (PyAny/Any → User).
-        // El runtime hace la coerción real en 8.4.3.
+        // The canonical roadmap pattern: `let row: User = py_call()?`.
+        // Statically, `?` unpacks Result<Any> to Any; the
+        // User annotation passes via gradual escape (PyAny/Any → User).
+        // The runtime does the real coercion in 8.4.3.
         let (_, errors) = check_str(
             "type User { id: Int, name: Str }\n\
              from python import json\n\
@@ -15032,17 +15026,17 @@ mod tests {
 
     #[test]
     fn checker_import_normal_no_es_pyany() {
-        // `import utils` (sin prefijo `python`) sigue siendo Any,
-        // no PyAny — la lógica de refinar calls a Result<Any> solo
-        // aplica a `from python import`. Validación: una llamada a
-        // un módulo normal sigue siendo Any, así que un binding
-        // tipado a Float pasa por gradual sin error.
+        // `import utils` (without `python` prefix) is still Any,
+        // not PyAny — the logic that refines calls to Result<Any> only
+        // applies to `from python import`. Validation: a call to
+        // a normal module is still Any, so a Float-typed binding
+        // passes via gradual without error.
         let (_, errors) = check_str("import utils\nlet f: Float = utils.something(1)\n");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     // -----------------------------------------------------------------
-    // Mini-tanda Vp — campos privados (`_field`) en `type`.
+    // Mini-batch Vp — private fields (`_field`) in `type`.
     // -----------------------------------------------------------------
 
     #[test]
@@ -15059,9 +15053,9 @@ mod tests {
 
     #[test]
     fn vp_field_access_desde_adentro_de_metodo_es_ok() {
-        // El método ya tiene `_x` como local (opción A), pero si el
-        // método recibe otra instancia del mismo tipo y accede a
-        // `other._x`, también debe permitirse.
+        // The method already has `_x` as local (option A), but if the
+        // method receives another instance of the same type and accesses
+        // `other._x`, that must also be allowed.
         let (_, errors) = check_str(
             "type C {\n\
                  _x: Int = 0\n\
@@ -15107,8 +15101,8 @@ mod tests {
 
     #[test]
     fn vp_struct_lit_con_field_privado_desde_adentro_es_ok() {
-        // Patrón canónico: `static fn new(...)` construye via struct lit
-        // con los `_field` privados. Adentro del type body es legítimo.
+        // Canonical pattern: `static fn new(...)` builds via struct lit
+        // with the `_field` private fields. Inside the type body it's legitimate.
         let (_, errors) = check_str(
             "type C {\n\
                  _x: Int = 0\n\
@@ -15132,7 +15126,7 @@ mod tests {
         );
     }
 
-    // ---- Mini-tanda Vm — métodos privados (`_method`) ----
+    // ---- Mini-batch Vm — private methods (`_method`) ----
 
     #[test]
     fn vm_call_a_metodo_privado_desde_afuera_es_error() {
@@ -15154,10 +15148,10 @@ mod tests {
 
     #[test]
     fn vm_call_a_metodo_privado_desde_adentro_es_ok() {
-        // Usando `static fn` para pasar la instancia y llamar al
-        // privado (el patrón canónico — los métodos de instancia
-        // no pueden llamar otros métodos del mismo type sin
-        // `self` explícito).
+        // Using `static fn` to pass the instance and call the
+        // private one (the canonical pattern — instance methods
+        // can't call other methods of the same type without
+        // explicit `self`).
         let (_, errors) = check_str(
             "type C {\n\
                  x: Int = 0\n\
@@ -15201,24 +15195,24 @@ mod tests {
 
     #[test]
     fn vp_field_publico_no_se_afecta_por_la_regla() {
-        // Sanity: campos sin prefijo `_` siguen siendo públicos.
+        // Sanity: fields without `_` prefix are still public.
         let (_, errors) = check_str("type C { x: Int = 0 }\nlet c = C { x: 5 }\nprint(c.x)\n");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     // -----------------------------------------------------------------
-    // Fase 9.0.2 — el checker es silencioso sobre nodos Error del AST
-    // (los emite solo `parse_with_recovery`). Sin estas garantías, el
-    // LSP corriendo `check_program` sobre un AST recuperado generaría
-    // cascadas de errores derivados sobre el mismo punto que ya está
-    // reportado en la lista del parser.
+    // Phase 9.0.2 — the checker is silent on Error AST nodes
+    // (only `parse_with_recovery` emits them). Without these guarantees, the
+    // LSP running `check_program` over a recovered AST would generate
+    // cascades of derived errors on the same point that's already
+    // reported in the parser's list.
     // -----------------------------------------------------------------
 
-    /// Helper específico de los tests de 9.0.2: corre el pipeline
-    /// completo del LSP (`parse_with_recovery` → `check_program`) y
-    /// devuelve los errores que reportaría el checker. Los errores del
-    /// parser quedan separados — el caller los pide aparte si los
-    /// necesita.
+    /// Helper specific to 9.0.2 tests: runs the full LSP pipeline
+    /// (`parse_with_recovery` → `check_program`) and
+    /// returns the errors the checker would report. Parser errors
+    /// stay separate — the caller asks for them apart if it
+    /// needs them.
     fn check_recovering(src: &str) -> Vec<FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let (program, _parser_errors) = crate::parser::parse_with_recovery(tokens);
@@ -15228,9 +15222,9 @@ mod tests {
 
     #[test]
     fn checker_stmt_error_no_emite_errores_propios() {
-        // El parser produce un `Stmt::Error` en el lugar del stmt
-        // roto. El checker no debe agregar ningún error sobre ese
-        // nodo (los errores reales viven en la lista del parser).
+        // The parser produces a `Stmt::Error` in place of the broken
+        // stmt. The checker must not add any error on that
+        // node (real errors live in the parser's list).
         let src = "let x = 1 +\nlet y: Int = 2";
         let errors = check_recovering(src);
         assert!(
@@ -15242,10 +15236,10 @@ mod tests {
 
     #[test]
     fn checker_stmt_error_silencioso_pero_errores_reales_se_reportan() {
-        // El checker silencia el Stmt::Error pero sigue reportando
-        // errores genuinos del código bueno. El `let z: Int = "no"`
-        // tiene tipo incompatible — el checker lo debe captar aunque
-        // haya un Stmt::Error antes.
+        // The checker silences the Stmt::Error but keeps reporting
+        // genuine errors from valid code. The `let z: Int = "no"`
+        // has an incompatible type — the checker must catch it even if
+        // there's a Stmt::Error before.
         let src = "let x = 1 +\nlet z: Int = \"no\"";
         let errors = check_recovering(src);
         assert_eq!(
@@ -15254,23 +15248,23 @@ mod tests {
             "esperaba 1 error de tipo del stmt válido: {:?}",
             errors
         );
-        // El error es del stmt válido en la línea 2, no del Error node.
+        // The error is from the valid stmt on line 2, not from the Error node.
         assert_eq!(errors[0].line, 2);
     }
 
     #[test]
     fn checker_stmt_error_en_fn_body_no_aborta_check() {
-        // `fn foo() { ... }` con un stmt roto adentro: el checker
-        // sigue chequeando el resto del programa (la fn `bar` y su
-        // anotación de tipo incorrecta) sin abortar por el Error
-        // node intermedio.
+        // `fn foo() { ... }` with a broken stmt inside: the checker
+        // keeps checking the rest of the program (the `bar` fn and its
+        // incorrect type annotation) without aborting because of the
+        // intermediate Error node.
         let src = "fn foo() {\n  let a = 1 +\n}\nfn bar() -> Int { return \"no\" }\n";
         let errors = check_recovering(src);
-        // El error de la anotación de retorno (`Int` vs `Str`) DEBE
-        // reportarse. Otros errores derivados del Error node NO.
-        // (Cantidad exacta puede variar según refinamientos futuros;
-        // lo crítico es: al menos un error de tipo del stmt válido, y
-        // ninguno que mencione el Error node directamente.)
+        // The return annotation error (`Int` vs `Str`) MUST
+        // be reported. Other errors derived from the Error node must NOT.
+        // (Exact count may vary with future refinements;
+        // the critical thing is: at least one type error from the valid stmt, and
+        // none that directly mentions the Error node.)
         assert!(
             errors.iter().any(|e| e.line == 4),
             "esperaba al menos un error de tipo en la línea 4 (return mal tipado): {:?}",
@@ -15280,15 +15274,15 @@ mod tests {
 
     #[test]
     fn checker_pipeline_recovering_no_panic_sobre_buffer_muy_roto() {
-        // Smoke: programa salpicado de errores no debe crashear el
-        // checker. La validación real es que `check_program` retorne
-        // (no panic) sobre el AST con varios Error nodes.
+        // Smoke: a program peppered with errors must not crash the
+        // checker. The real validation is that `check_program` returns
+        // (no panic) on the AST with several Error nodes.
         let src = "let a = +\nlet b: Int = \"no\"\nlet c = *\nfn ok() -> Int { return 7 }\n";
         let errors = check_recovering(src);
-        // Garantía: al menos el error genuino del `let b: Int = "no"`
-        // se reporta (línea 2). El resto puede o no tener errores
-        // derivados — el contrato es "no panic" + "errores genuinos
-        // del código bueno".
+        // Guarantee: at least the genuine error from `let b: Int = "no"`
+        // is reported (line 2). The rest may or may not have derived
+        // errors — the contract is "no panic" + "genuine errors
+        // from valid code".
         assert!(
             errors.iter().any(|e| e.line == 2),
             "esperaba error de tipo en la línea 2: {:?}",
@@ -15298,14 +15292,14 @@ mod tests {
 
     #[test]
     fn checker_expr_error_se_propaga_como_any_sin_emitir_error() {
-        // `Expr::Error` directo en el AST debe sintetizar `Type::Any`
-        // y no emitir ningún error desde el checker. Construimos el
-        // nodo manualmente porque el parser en 9.0.1 solo produce
-        // Stmt::Error (recovery sub-expression llega después).
+        // `Expr::Error` directly in the AST must synthesize `Type::Any`
+        // and not emit any error from the checker. We build the
+        // node manually because the parser in 9.0.1 only produces
+        // Stmt::Error (sub-expression recovery comes later).
         //
-        // Caso: `let x: Int = <Expr::Error>` — anotación Int + valor
-        // Any. La regla de gradual (`is_compatible(Any, _)` siempre
-        // true) hace que no haya error de tipo.
+        // Case: `let x: Int = <Expr::Error>` — Int annotation + Any
+        // value. The gradual rule (`is_compatible(Any, _)` always
+        // true) makes there be no type error.
         use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let program = vec![Stmt::Assign {
             target: AssignTarget::Ident("x".into(), Span::default()),
@@ -15322,18 +15316,18 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Fase 9.0 — F16: IR tipado persistido por nodo.
+    // Phase 9.0 — F16: typed IR persisted by node.
     //
-    // Tests sobre el side-table `TypeInfo` que se devuelve desde
-    // `check_program`. Cubrimos: literales, Ident, BinOp, Call, Field,
-    // StructLit, Match — los nodos que el LSP va a consultar para hover
-    // y completion contextual. También validamos las dos políticas de
-    // poblamiento: Span::ZERO se omite, Expr::Error se persiste como Any.
+    // Tests on the side-table `TypeInfo` returned by
+    // `check_program`. We cover: literals, Ident, BinOp, Call, Field,
+    // StructLit, Match — the nodes the LSP will query for hover
+    // and contextual completion. We also validate the two population
+    // policies: Span::ZERO is omitted, Expr::Error is persisted as Any.
     // -----------------------------------------------------------------------
 
-    /// Helper: corre el pipeline completo lex → parse → check y devuelve
-    /// el `TypeInfo`. Útil para los tests de F16 que quieren mirar
-    /// directamente el side-table.
+    /// Helper: runs the full lex → parse → check pipeline and returns
+    /// the `TypeInfo`. Useful for F16 tests that want to look
+    /// directly at the side-table.
     fn types_of(src: &str) -> TypeInfo {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
@@ -15343,13 +15337,13 @@ mod tests {
 
     #[test]
     fn types_info_persiste_tipos_de_literales() {
-        // Programa con un literal de cada primitivo. Cada uno debe
-        // quedar en el side-table con el tipo correspondiente.
+        // Program with one literal of each primitive. Each one must
+        // end up in the side-table with the corresponding type.
         let info =
             types_of("let a = 1\nlet b = 1.5\nlet c = \"hola\"\nlet d = true\nlet e = null\n");
-        // El parser emite columnas 1-indexed; los RHS arrancan en la
-        // columna del valor literal. No matcheamos columnas exactas
-        // — buscamos por línea + tipo.
+        // The parser emits 1-indexed columns; RHS start at the
+        // column of the literal value. We don't match exact columns
+        // — we look up by line + type.
         let by_line: std::collections::HashMap<usize, Vec<Type>> = info
             .inner
             .iter()
@@ -15387,12 +15381,12 @@ mod tests {
 
     #[test]
     fn types_info_persiste_ident_y_binop() {
-        // `let x = 10` declara x: Int. `let y = x + 5` accede al
-        // ident `x` (debe tipar Int) y produce un BinOp (debe tipar
-        // Int también).
+        // `let x = 10` declares x: Int. `let y = x + 5` accesses the
+        // ident `x` (must type Int) and produces a BinOp (must type
+        // Int as well).
         let info = types_of("let x = 10\nlet y = x + 5\n");
-        // Buscamos en la línea 2 un Int — el ident `x` y el BinOp
-        // `x + 5` ambos deben aparecer.
+        // We look up an Int on line 2 — the ident `x` and the BinOp
+        // `x + 5` both must appear.
         let int_count_line2 = info
             .inner
             .iter()
@@ -15407,8 +15401,8 @@ mod tests {
 
     #[test]
     fn types_info_persiste_call_y_field() {
-        // Programa con tipo custom + call de fn + field access. Cada
-        // nodo `Expr` debe quedar persistido con su tipo sintetizado.
+        // Program with custom type + fn call + field access. Each
+        // `Expr` node must be persisted with its synthesized type.
         let src = "\
 type User { id: Int, name: Str }
 fn greet(u: User) -> Str => u.name
@@ -15416,8 +15410,8 @@ let u = User { id: 1, name: \"Fitz\" }
 let s = greet(u)
 ";
         let info = types_of(src);
-        // El call `greet(u)` está en la línea 4 (última línea con
-        // código) — debe tipar Str porque `greet` retorna Str.
+        // The call `greet(u)` is on line 4 (last line with
+        // code) — must type Str because `greet` returns Str.
         let any_str_call = info
             .inner
             .iter()
@@ -15427,7 +15421,7 @@ let s = greet(u)
             "línea 4 debe tener Str (resultado del call greet(u)): {:?}",
             info.inner
         );
-        // El struct lit `User { ... }` está en línea 3 — debe tipar
+        // The struct lit `User { ... }` is on line 3 — must type
         // Nominal(User).
         let any_nominal_struct = info
             .inner
@@ -15442,9 +15436,9 @@ let s = greet(u)
 
     #[test]
     fn types_info_persiste_match_arms() {
-        // Match sobre Result<Int>: cada arm tipa su body, el match
-        // entero hereda el tipo del primer arm. Verificamos que algún
-        // nodo de las ramas haya quedado persistido.
+        // Match over Result<Int>: each arm types its body, the whole
+        // match inherits the type of the first arm. We verify that some
+        // node from the branches has been persisted.
         let src = "\
 fn divide(a: Int, b: Int) -> Result<Int> {
   if (b == 0) { return Err(\"div0\") }
@@ -15457,8 +15451,8 @@ let v = match r {
 }
 ";
         let info = types_of(src);
-        // El match en sí debe quedar registrado con Int (tipo del
-        // primer arm `x` que es Int).
+        // The match itself must be recorded with Int (type of the
+        // first arm `x` which is Int).
         let has_int_in_match = info
             .inner
             .iter()
@@ -15472,10 +15466,10 @@ let v = match r {
 
     #[test]
     fn types_info_omite_span_zero() {
-        // Construimos un programa con un nodo sintético (Span::ZERO)
-        // y validamos que NO aparezca en el side-table. La política
-        // documentada en `TypeInfo::record` es omitir Span::ZERO para
-        // evitar colisiones entre sintéticos.
+        // We build a program with a synthetic node (Span::ZERO)
+        // and validate that it does NOT appear in the side-table. The policy
+        // documented in `TypeInfo::record` is to omit Span::ZERO to
+        // avoid collisions between synthetics.
         use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let program = vec![Stmt::Assign {
             target: AssignTarget::Ident("x".into(), Span::default()),
@@ -15484,10 +15478,10 @@ let v = match r {
             span: Span::ZERO,
         }];
         let (_env, type_info, _defs, _errors) = check_program(&program);
-        // El Int(42, Span::ZERO) NO debe quedar en el side-table —
-        // su span no es known. Cualquier otra cosa (si el parser
-        // emite algo) tampoco tiene span real porque el programa fue
-        // construido a mano. Total esperado: 0.
+        // The Int(42, Span::ZERO) must NOT end up in the side-table —
+        // its span is not known. Anything else (if the parser
+        // emits something) also has no real span because the program was
+        // built by hand. Expected total: 0.
         assert_eq!(
             type_info.len(),
             0,
@@ -15498,13 +15492,13 @@ let v = match r {
 
     #[test]
     fn types_info_expr_error_se_persiste_como_any() {
-        // Un `Stmt::Assign` con `Expr::Error` como valor debe persistir
-        // el Error node como `Type::Any` en el side-table (siempre que
-        // su span sea known). Política documentada en `TypeInfo` —
-        // uniforme con el comportamiento del checker (synthesize_expr
-        // devuelve `Type::Any` para Error nodes).
+        // A `Stmt::Assign` with `Expr::Error` as value must persist
+        // the Error node as `Type::Any` in the side-table (as long as
+        // its span is known). Policy documented in `TypeInfo` —
+        // uniform with checker behavior (synthesize_expr
+        // returns `Type::Any` for Error nodes).
         use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
-        let span = Span::new(7, 11); // span arbitrario "known"
+        let span = Span::new(7, 11); // arbitrary "known" span
         let program = vec![Stmt::Assign {
             target: AssignTarget::Ident("x".into(), Span::default()),
             type_: None,
@@ -15522,16 +15516,16 @@ let v = match r {
 
     #[test]
     fn types_info_type_at_devuelve_none_para_span_desconocido() {
-        // Lookup por un span que el checker nunca registró debe
-        // devolver None. Caso típico: el LSP pide hover sobre una
-        // posición vacía (entre tokens).
+        // Lookup by a span the checker never registered must
+        // return None. Typical case: the LSP requests hover over an
+        // empty position (between tokens).
         let info = types_of("let x = 1\n");
-        // Span en una línea que el programa no toca.
+        // Span on a line the program doesn't touch.
         assert!(
             info.type_at(Span::new(999, 999)).is_none(),
             "span ausente debe devolver None"
         );
-        // Span::ZERO también devuelve None por política.
+        // Span::ZERO also returns None by policy.
         assert!(
             info.type_at(Span::ZERO).is_none(),
             "Span::ZERO debe devolver None"
@@ -15540,10 +15534,10 @@ let v = match r {
 
     #[test]
     fn types_info_smoke_programa_real() {
-        // Smoke sobre un programa con variedad de constructos. No
-        // matcheamos el N exacto (frágil contra cambios futuros del
-        // parser/checker), solo un piso conservador: al menos un
-        // puñado de nodos quedaron registrados.
+        // Smoke on a program with a variety of constructs. We don't
+        // match the exact N (fragile against future
+        // parser/checker changes), only a conservative floor: at least
+        // a handful of nodes got recorded.
         let src = "\
 type Point { x: Int, y: Int }
 fn sum(p: Point) -> Int => p.x + p.y
@@ -15561,14 +15555,14 @@ print(total)
     }
 
     // -----------------------------------------------------------------------
-    // Fase 9.x.3 — DefinitionInfo: side-table de uso → declaración.
+    // Phase 9.x.3 — DefinitionInfo: use → declaration side-table.
     //
-    // Tests sobre la población del side-table desde el wrapper
-    // `infer_expr` cuando ve un `Expr::Ident`. Cubrimos: var local, fn
-    // top-level, no-registro para builtins (def_span Span::ZERO).
+    // Tests on side-table population from the `infer_expr` wrapper
+    // when it sees an `Expr::Ident`. We cover: local var, top-level fn,
+    // non-registration for builtins (def_span Span::ZERO).
     // -----------------------------------------------------------------------
 
-    /// Helper: corre el pipeline y devuelve el `DefinitionInfo`.
+    /// Helper: runs the pipeline and returns the `DefinitionInfo`.
     fn defs_of(src: &str) -> DefinitionInfo {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
@@ -15578,15 +15572,15 @@ print(total)
 
     #[test]
     fn def_info_registra_uso_de_variable_local() {
-        // `let x = 1` en línea 1, `let y = x` en línea 2. El uso de
-        // `x` en línea 2 debe registrar (use_span, def_span) con
-        // def_span apuntando al Stmt::Assign de la línea 1.
+        // `let x = 1` on line 1, `let y = x` on line 2. The use of
+        // `x` on line 2 must register (use_span, def_span) with
+        // def_span pointing to the Stmt::Assign on line 1.
         let defs = defs_of("let x = 1\nlet y = x\n");
         assert!(
             !defs.is_empty(),
             "uso de variable local debe registrarse en DefinitionInfo"
         );
-        // Al menos un entry tiene def_span en línea 1 (el let de x).
+        // At least one entry has def_span on line 1 (the let of x).
         let has_def_in_line_1 = defs.iter().any(|(_, def_span)| def_span.line == 1);
         assert!(
             has_def_in_line_1,
@@ -15597,13 +15591,13 @@ print(total)
 
     #[test]
     fn def_info_no_registra_builtins() {
-        // `print` es builtin con def_span = Span::ZERO. Usar `print`
-        // no debe agregar entries a DefinitionInfo (Span::ZERO se
-        // omite por política — no hay archivo donde saltar).
+        // `print` is a builtin with def_span = Span::ZERO. Using `print`
+        // must not add entries to DefinitionInfo (Span::ZERO is
+        // omitted by policy — there's no file to jump to).
         let defs = defs_of("print(42)\n");
-        // Solo el ident `print` produciría una entry; el literal `42`
-        // no es un Ident. Verificamos que NO hay registros (DefInfo
-        // vacío) — el filtro de Span::ZERO descarta el builtin.
+        // Only the ident `print` would produce an entry; the literal `42`
+        // is not an Ident. We verify there are NO records (empty DefInfo)
+        // — the Span::ZERO filter discards the builtin.
         assert!(
             defs.is_empty(),
             "uso de builtin no debe registrarse en DefinitionInfo: {:?}",
@@ -15613,9 +15607,9 @@ print(total)
 
     #[test]
     fn def_info_registra_uso_de_fn_top_level() {
-        // `fn dobla(n: Int) -> Int => n * 2` en línea 1.
-        // `dobla(21)` en línea 2 — el uso del nombre `dobla` debe
-        // registrar def_span en línea 1.
+        // `fn dobla(n: Int) -> Int => n * 2` on line 1.
+        // `dobla(21)` on line 2 — the use of the name `dobla` must
+        // register def_span on line 1.
         let defs = defs_of("fn dobla(n: Int) -> Int => n * 2\nlet x = dobla(21)\n");
         assert!(!defs.is_empty(), "uso de fn top-level debe registrarse");
         let has_def_in_line_1 = defs.iter().any(|(_, def_span)| def_span.line == 1);
@@ -15628,12 +15622,12 @@ print(total)
 
     #[test]
     fn def_info_registra_uso_de_param_de_fn() {
-        // El uso del param `n` adentro del body de `fn dobla` se
-        // registra como Ident con def_span en la línea del FnDef
-        // (sin span propio en `Param`, aproximamos al FnDef).
+        // The use of the param `n` inside the body of `fn dobla` is
+        // registered as Ident with def_span on the FnDef's line
+        // (without own span in `Param`, we approximate to the FnDef).
         let defs = defs_of("fn dobla(n: Int) -> Int => n * 2\n");
-        // El cuerpo flecha contiene un uso del ident `n` en línea 1.
-        // El def_span del param también es línea 1 (mismo Stmt).
+        // The arrow body contains a use of ident `n` on line 1.
+        // The param's def_span is also line 1 (same Stmt).
         assert!(!defs.is_empty(), "uso del param debe registrarse");
         let entry = defs.iter().next().unwrap();
         let (use_span, def_span) = entry;
@@ -15656,9 +15650,9 @@ print(total)
 
     #[test]
     fn def_info_no_registra_uso_de_ident_no_definido() {
-        // El ident `nope` no existe en scope — el checker emite
-        // error, pero no debe registrar entries en DefinitionInfo
-        // (no hay binding al cual apuntar).
+        // The ident `nope` doesn't exist in scope — the checker emits
+        // an error, but must not register entries in DefinitionInfo
+        // (no binding to point to).
         let defs = defs_of("let y = nope\n");
         assert!(
             defs.is_empty(),
@@ -15667,12 +15661,12 @@ print(total)
         );
     }
 
-    // ---- Mini-tanda C — list comprehensions ----
+    // ---- Mini-batch C — list comprehensions ----
 
     #[test]
     fn checker_list_comp_simple_tipa_como_list_del_expr() {
-        // `[x * 2 for x in [1, 2, 3]]` debe tipar como `List<Int>`
-        // (el expr es Int, el iter es List<Int>).
+        // `[x * 2 for x in [1, 2, 3]]` must type as `List<Int>`
+        // (the expr is Int, the iter is List<Int>).
         let src = "let r: List<Int> = [x * 2 for x in [1, 2, 3]]\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15680,8 +15674,8 @@ print(total)
 
     #[test]
     fn checker_list_comp_sobre_range_tipa_int_en_var() {
-        // El var de la comprehension sobre Range debe tipar Int.
-        // Si el expr usa `var * 2`, el resultado es List<Int>.
+        // The comprehension var over Range must type Int.
+        // If the expr uses `var * 2`, the result is List<Int>.
         let src = "let r: List<Int> = [n * 2 for n in 0..10]\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15689,7 +15683,7 @@ print(total)
 
     #[test]
     fn checker_list_comp_filter_no_bool_es_error() {
-        // El filter debe ser `Bool`. Si es Int → error de tipo.
+        // The filter must be `Bool`. If it's Int → type error.
         let src = "let r = [x for x in [1, 2, 3] if x]\n";
         let errors = check_recovering(src);
         assert!(
@@ -15703,7 +15697,7 @@ print(total)
 
     #[test]
     fn checker_list_comp_iter_no_iterable_es_error() {
-        // Iter Int → error de tipo (no es List ni Range).
+        // Iter Int → type error (not List nor Range).
         let src = "let r = [x for x in 42]\n";
         let errors = check_recovering(src);
         assert!(
@@ -15717,9 +15711,9 @@ print(total)
 
     #[test]
     fn checker_list_comp_var_no_escapa_al_caller() {
-        // El scope local del var significa que tras la comprehension,
-        // `x` no está visible afuera. Usar `x` afuera debe emitir
-        // "variable no definida".
+        // The var's local scope means that after the comprehension,
+        // `x` is not visible outside. Using `x` outside must emit
+        // "variable not defined".
         let src = "let r = [x for x in [1, 2, 3]]\nlet y = x\n";
         let errors = check_recovering(src);
         assert!(
@@ -15730,7 +15724,7 @@ print(total)
         );
     }
 
-    // ---- Mini-tanda Fm — format spec compatibilidad ----
+    // ---- Mini-batch Fm — format spec compatibility ----
 
     #[test]
     fn checker_fm_spec_f_con_float_compila_limpio() {
@@ -15741,7 +15735,7 @@ print(total)
 
     #[test]
     fn checker_fm_spec_f_con_int_compila_limpio() {
-        // Promoción Int → Float transparente.
+        // Transparent Int → Float promotion.
         let src = "let n: Int = 42\nlet s = \"{n:.2f}\"\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15775,18 +15769,18 @@ print(total)
 
     #[test]
     fn checker_fm_spec_string_es_compatible_con_cualquier_tipo() {
-        // El kind `s` acepta cualquier tipo (vía Display).
+        // The `s` kind accepts any type (via Display).
         let src = "let n: Int = 42\nlet r = \"{n:s}\"\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 
-    // ---- Mini-tanda Md — for con Pattern en `var` ----
+    // ---- Mini-batch Md — for with Pattern in `var` ----
 
     #[test]
     fn checker_for_tuple_pattern_sobre_map_bindea_k_y_v_con_tipos_correctos() {
-        // `for (k, v) in m` con m: Map<Str, Int> debe bindear k: Str y v: Int.
-        // Si los uso correctamente, sin errores.
+        // `for (k, v) in m` with m: Map<Str, Int> must bind k: Str and v: Int.
+        // If I use them correctly, no errors.
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nfor (k, v) in m {\n    let len_k: Int = k.len()\n    let v2: Int = v + 1\n}\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15794,8 +15788,8 @@ print(total)
 
     #[test]
     fn checker_for_wildcard_pattern_compila_sin_binding() {
-        // `for _ in xs` no bindea nada, no debe haber errores aún si `_`
-        // se usaría adentro del body (no existe).
+        // `for _ in xs` binds nothing, must not error even if `_`
+        // would be used inside the body (doesn't exist).
         let src = "let xs: List<Int> = [1, 2, 3]\nfor _ in xs {\n    print(\"hola\")\n}\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15803,7 +15797,7 @@ print(total)
 
     #[test]
     fn checker_for_tuple_pattern_sobre_list_es_error() {
-        // `for (a, b) in xs` con xs: List<Int> no tiene sentido — error.
+        // `for (a, b) in xs` with xs: List<Int> makes no sense — error.
         let src = "let xs: List<Int> = [1, 2, 3]\nfor (a, b) in xs {\n    print(a)\n}\n";
         let errors = check_recovering(src);
         assert!(
@@ -15815,7 +15809,7 @@ print(total)
 
     #[test]
     fn checker_for_pattern_int_literal_es_error() {
-        // `for 42 in xs` — pattern literal no admitido como for var.
+        // `for 42 in xs` — literal pattern not allowed as for var.
         let src = "for 42 in [1, 2] { print(\"x\") }\n";
         let errors = check_recovering(src);
         assert!(
@@ -15827,11 +15821,11 @@ print(total)
         );
     }
 
-    // ---- Mini-tanda It — iteradores enumerate/zip/chain ----
+    // ---- Mini-batch It — iterators enumerate/zip/chain ----
 
     #[test]
     fn checker_list_enumerate_tipa_como_list_tuple_int_t() {
-        // `xs.enumerate()` con xs: List<Int> debe tipar `List<(Int, Int)>`.
+        // `xs.enumerate()` with xs: List<Int> must type `List<(Int, Int)>`.
         let src = "let xs: List<Int> = [1, 2, 3]\nlet ys: List<(Int, Int)> = xs.enumerate()\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15839,7 +15833,7 @@ print(total)
 
     #[test]
     fn checker_list_zip_con_tipos_distintos_tipa_list_tuple_t_u() {
-        // `xs.zip(ys)` con xs: List<Int>, ys: List<Str> debe tipar
+        // `xs.zip(ys)` with xs: List<Int>, ys: List<Str> must type
         // `List<(Int, Str)>`.
         let src =
             "let xs: List<Int> = [1, 2]\nlet ys: List<Str> = [\"a\", \"b\"]\nlet pairs: List<(Int, Str)> = xs.zip(ys)\n";
@@ -15849,7 +15843,7 @@ print(total)
 
     #[test]
     fn checker_list_chain_con_tipos_iguales_compila() {
-        // `xs.chain(ys)` con ambos List<Int> debe tipar `List<Int>`.
+        // `xs.chain(ys)` with both List<Int> must type `List<Int>`.
         let src =
             "let xs: List<Int> = [1, 2]\nlet ys: List<Int> = [3, 4]\nlet zs: List<Int> = xs.chain(ys)\n";
         let errors = check_recovering(src);
@@ -15858,7 +15852,7 @@ print(total)
 
     #[test]
     fn checker_list_chain_con_tipos_incompatibles_es_error() {
-        // `xs.chain(ys)` con xs: List<Int>, ys: List<Str> → error.
+        // `xs.chain(ys)` with xs: List<Int>, ys: List<Str> → error.
         let src =
             "let xs: List<Int> = [1, 2]\nlet ys: List<Str> = [\"a\"]\nlet zs = xs.chain(ys)\n";
         let errors = check_recovering(src);
@@ -15871,9 +15865,9 @@ print(total)
         );
     }
 
-    // ---- Mini-tanda Bits — operadores bit-a-bit ----
+    // ---- Mini-batch Bits — bit-wise operators ----
 
-    // ---- Mini-tanda Re+ — Type::Result { ok, err } tipado ----
+    // ---- Mini-batch Re+ — Type::Result { ok, err } typed ----
 
     #[test]
     fn checker_re_plus_result_t_e_anotacion_explicita() {
@@ -15884,7 +15878,7 @@ print(total)
 
     #[test]
     fn checker_re_plus_match_err_bindea_e_con_tipo_inferido() {
-        // El binding `e` del `Err(e)` ahora tipa con el E del Result.
+        // The `e` binding from `Err(e)` now types with the E of the Result.
         let src = "type ApiError { status: Int, msg: Str }\nfn fetch() -> Result<Int, ApiError> {\n    return Err(ApiError { status: 503, msg: \"x\" })\n}\nlet code: Int = match fetch() {\n    Ok(v) => v,\n    Err(e) => e.status\n}\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15892,7 +15886,7 @@ print(total)
 
     #[test]
     fn checker_re_plus_result_legacy_sin_e_explicito_sigue_andando() {
-        // `Result<T>` sin E debe seguir funcionando (default Str).
+        // `Result<T>` without E must keep working (default Str).
         let src = "fn div(a: Int, b: Int) -> Result<Int> {\n    if b == 0 { return Err(\"zero\") }\n    return Ok(a / b)\n}\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
@@ -15900,7 +15894,7 @@ print(total)
 
     #[test]
     fn checker_re_plus_result_aridad_invalida_es_error() {
-        // `Result<T, E, X>` con 3 args es error.
+        // `Result<T, E, X>` with 3 args is an error.
         let src = "let r: Result<Int, Str, Bool> = Ok(1)\n";
         let errors = check_recovering(src);
         assert!(
@@ -15924,9 +15918,9 @@ print(total)
             ok: Box::new(Type::Int),
             err: Box::new(Type::Int),
         };
-        // E = Str (default) → omite E.
+        // E = Str (default) → omits E.
         assert_eq!(r1.display(&env), "Result<Int>");
-        // E ≠ Str (Int) → forma completa.
+        // E ≠ Str (Int) → full form.
         assert_eq!(r2.display(&env), "Result<Int, Int>");
     }
 
@@ -15978,18 +15972,18 @@ print(total)
 
     #[test]
     fn checker_list_enumerate_se_compone_con_for_destructuring_de_md() {
-        // El caso canónico que motiva la mini-tanda: `for (i, x) in xs.enumerate()`.
+        // The canonical case that motivates the mini-batch: `for (i, x) in xs.enumerate()`.
         let src = "let xs: List<Str> = [\"a\", \"b\"]\nfor (i, x) in xs.enumerate() {\n    let idx: Int = i\n    let val: Str = x\n}\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 
-    // ---- Mini-tanda Math + Mb9 + Int/Float methods ----
+    // ---- Mini-batch Math + Mb9 + Int/Float methods ----
 
     #[test]
     fn math_builtins_polimorficos_aceptan_int_y_float() {
-        // Los builtins de Math tipan como Any en el scope[0] — el codegen
-        // hace el dispatch concreto. El checker solo valida que existan.
+        // Math builtins type as Any in scope[0] — codegen
+        // does the concrete dispatch. The checker only validates that they exist.
         assert_ok("let a = abs(-5)");
         assert_ok("let b = min(3, 5)");
         assert_ok("let c = pow(2, 10)");
@@ -16066,11 +16060,11 @@ print(total)
         );
     }
 
-    // ---- Mini-tanda Fp — default params ----
+    // ---- Mini-batch Fp — default params ----
 
     #[test]
     fn fp_call_sin_args_a_fn_con_default_pasa() {
-        // `fn greet(name = "amigo") -> Str` puede invocarse sin args.
+        // `fn greet(name = "amigo") -> Str` can be invoked without args.
         assert_ok(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r: Str = greet()",
@@ -16087,7 +16081,7 @@ print(total)
 
     #[test]
     fn fp_call_con_mezcla_required_y_default() {
-        // Required + default: 1 o 2 args válidos, 0 o 3+ falla.
+        // Required + default: 1 or 2 valid args, 0 or 3+ fails.
         assert_ok(
             "fn add(a: Int, b: Int = 1) -> Int { return a + b }\n\
              let r1: Int = add(10)\n\
@@ -16097,7 +16091,7 @@ print(total)
 
     #[test]
     fn fp_call_muy_pocos_args_es_error() {
-        // `fn add(a, b)` sin defaults — call con 0 args es error.
+        // `fn add(a, b)` without defaults — call with 0 args is an error.
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let r = add()",
@@ -16116,12 +16110,12 @@ print(total)
 
     #[test]
     fn fp_default_tipo_incorrecto_es_error_en_llamada() {
-        // El default `"texto"` no matchea `Int`. Al chequear el call
-        // sin args, el default debería triggerear un type error. Hoy
-        // el checker NO valida el default expr — el runtime lo hará.
-        // Test "negativo" del scope: assert que SÍ pasa (no rompe nada).
-        // El default mismo será un error de runtime si nunca se llama
-        // el default path.
+        // The default `"texto"` doesn't match `Int`. When checking the
+        // call without args, the default should trigger a type error. Today
+        // the checker does NOT validate the default expr — the runtime will.
+        // "Negative" scope test: assert it DOES pass (doesn't break anything).
+        // The default itself will be a runtime error if the default path
+        // is never called.
         assert_ok(
             "fn f(x: Int = 5) -> Int { return x }\n\
              let r: Int = f()",
@@ -16129,18 +16123,18 @@ print(total)
     }
 
     // ----------------------------------------------------------------
-    // Fase 9.w.1.a — Auth nativa: checker para
+    // Phase 9.w.1.a — Native auth: checker for
     // `@auth_provider` / `@authenticated` / `@admin`.
     // ----------------------------------------------------------------
 
-    /// Helper: chequea que el programa pase sin errores.
+    /// Helper: checks that the program passes without errors.
     fn assert_auth_ok(src: &str) {
         let errors = errors_of(src);
         assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
 
-    /// Helper: chequea que el programa produzca al menos un error cuyo
-    /// mensaje contenga el substring esperado.
+    /// Helper: checks that the program produces at least one error whose
+    /// message contains the expected substring.
     fn assert_auth_err(src: &str, expected_substr: &str) {
         let errors = errors_of(src);
         let matched = errors.iter().any(|e| e.message.contains(expected_substr));
@@ -16153,9 +16147,9 @@ print(total)
 
     #[test]
     fn auth_provider_signature_valida_no_da_error() {
-        // Provider mínimo: 1 param Map<Str,Str>, return Result<User>.
-        // Cualquier `type User { ... }` declarado en el programa basta;
-        // el provider NO ejecuta — solo registra la firma.
+        // Minimal provider: 1 param Map<Str,Str>, return Result<User>.
+        // Any `type User { ... }` declared in the program is enough;
+        // the provider does NOT execute — it just registers the signature.
         let src = "type User { id: Int, name: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16166,7 +16160,7 @@ print(total)
 
     #[test]
     fn auth_provider_con_args_es_error() {
-        // `@auth_provider` no admite args ni kwargs en el MVP.
+        // `@auth_provider` doesn't accept args or kwargs in the MVP.
         let src = "type User { id: Int }\n\
                    @auth_provider(123)\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16177,7 +16171,7 @@ print(total)
 
     #[test]
     fn auth_provider_param_incorrecto_es_error() {
-        // El param debe ser `Map<Str, Str>` (headers HTTP).
+        // The param must be `Map<Str, Str>` (HTTP headers).
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
                    fn check(token: Str) -> Result<User> {\n\
@@ -16188,7 +16182,7 @@ print(total)
 
     #[test]
     fn auth_provider_aridad_incorrecta_es_error() {
-        // Debe tener exactamente 1 param.
+        // Must have exactly 1 param.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
                    fn check() -> Result<User> {\n\
@@ -16199,7 +16193,7 @@ print(total)
 
     #[test]
     fn auth_provider_return_no_result_es_error() {
-        // El return debe ser `Result<T>` con T nominal.
+        // The return must be `Result<T>` with T nominal.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> User {\n\
@@ -16210,7 +16204,7 @@ print(total)
 
     #[test]
     fn auth_provider_result_de_primitivo_es_error() {
-        // `Result<Str>` no sirve — T debe ser un type custom (nominal).
+        // `Result<Str>` doesn't work — T must be a custom (nominal) type.
         let src = "@auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<Str> {\n\
                        return Ok(\"sin user type\")\n\
@@ -16220,7 +16214,7 @@ print(total)
 
     #[test]
     fn auth_provider_duplicado_es_error() {
-        // Solo un `@auth_provider` por programa.
+        // Only one `@auth_provider` per program.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
                    fn check1(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16235,8 +16229,8 @@ print(total)
 
     #[test]
     fn authenticated_sin_provider_es_error() {
-        // `@authenticated` exige que haya un `@auth_provider` en el
-        // programa.
+        // `@authenticated` requires a `@auth_provider` in the
+        // program.
         let src = "type User { id: Int }\n\
                    @authenticated\n\
                    @get(\"/me\")\n\
@@ -16246,7 +16240,7 @@ print(total)
 
     #[test]
     fn admin_sin_provider_es_error() {
-        // `@admin` exige que haya un `@auth_provider` en el programa.
+        // `@admin` requires a `@auth_provider` in the program.
         let src = "type User { id: Int, role: Str }\n\
                    @admin\n\
                    @delete(\"/x\")\n\
@@ -16256,9 +16250,9 @@ print(total)
 
     #[test]
     fn authenticated_handler_sin_param_user_es_error() {
-        // El handler protegido debe declarar un param compatible con el
-        // tipo que retorna el provider (`User`). El runtime lo inyecta
-        // tras autenticación exitosa.
+        // The protected handler must declare a param compatible with the
+        // type the provider returns (`User`). The runtime injects it
+        // after successful authentication.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16272,8 +16266,8 @@ print(total)
 
     #[test]
     fn authenticated_handler_con_param_user_no_da_error() {
-        // Handler con param `user: User` (mismo tipo que retorna el
-        // provider) chequea limpio.
+        // Handler with param `user: User` (same type the provider
+        // returns) checks clean.
         let src = "type User { id: Int, name: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16287,8 +16281,8 @@ print(total)
 
     #[test]
     fn authenticated_sin_handler_http_es_error() {
-        // `@authenticated` sobre una fn que NO tiene
-        // `@get`/`@post`/`@put`/`@delete` no tiene sentido.
+        // `@authenticated` over a fn that does NOT have
+        // `@get`/`@post`/`@put`/`@delete` makes no sense.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16301,8 +16295,8 @@ print(total)
 
     #[test]
     fn admin_sin_role_field_en_user_es_error() {
-        // `@admin` exige que el `User` (return del provider) tenga campo
-        // `role: Str` para discriminar admins. Sin ese campo, error.
+        // `@admin` requires that the `User` (provider's return) has a
+        // `role: Str` field to discriminate admins. Without that field, error.
         let src = "type User { id: Int, name: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16316,7 +16310,7 @@ print(total)
 
     #[test]
     fn admin_con_role_field_no_da_error() {
-        // Programa válido completo: provider + handler `@admin` con
+        // Complete valid program: provider + `@admin` handler with
         // `User { ..., role: Str }`.
         let src = "type User { id: Int, name: Str, role: Str }\n\
                    @auth_provider\n\
@@ -16331,7 +16325,7 @@ print(total)
 
     #[test]
     fn auth_decorators_con_args_son_error() {
-        // `@authenticated` y `@admin` no admiten args ni kwargs.
+        // `@authenticated` and `@admin` don't accept args or kwargs.
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16343,12 +16337,12 @@ print(total)
         assert_auth_err(src, "no admite args ni kwargs");
     }
 
-    // ----- Fase 9.w.1.iter2.a — @requires("role") (RBAC custom) -----
+    // ----- Phase 9.w.1.iter2.a — @requires("role") (custom RBAC) -----
 
     #[test]
     fn requires_con_role_str_literal_no_da_error() {
-        // Patrón canónico: `@requires("editor")` sobre handler HTTP con
-        // provider declarado y User.role: Str. Compila limpio.
+        // Canonical pattern: `@requires("editor")` over an HTTP handler with
+        // a declared provider and User.role: Str. Compiles clean.
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16362,7 +16356,7 @@ print(total)
 
     #[test]
     fn requires_sin_role_field_en_user_es_error() {
-        // Como `@admin`, `@requires` exige `role: Str` en el User type.
+        // Like `@admin`, `@requires` demands `role: Str` in the User type.
         let src = "type User { id: Int, name: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16376,8 +16370,8 @@ print(total)
 
     #[test]
     fn requires_apilado_con_dos_roles_no_da_error() {
-        // Apilar dos `@requires` distintos = OR (el user.role debe matchear
-        // al menos uno).
+        // Stacking two distinct `@requires` = OR (user.role must match
+        // at least one).
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16453,7 +16447,7 @@ print(total)
 
     #[test]
     fn requires_sin_param_user_es_error() {
-        // `@requires` necesita el user inyectado para chequear el role.
+        // `@requires` needs the injected user to check the role.
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16465,7 +16459,7 @@ print(total)
         assert_auth_err(src, "falta param de tipo");
     }
 
-    // ----- Fase 12.7 — @trace/@metric (instrumentation explícita) -----
+    // ----- Phase 12.7 — @trace/@metric (explicit instrumentation) -----
 
     #[test]
     fn trace_sin_args_ni_kwargs_compila_limpio() {
@@ -16511,7 +16505,7 @@ print(total)
 
     #[test]
     fn trace_sobre_get_handler_es_error() {
-        // Auto-instrumentation 12.3 ya cubre handlers HTTP.
+        // Auto-instrumentation 12.3 already covers HTTP handlers.
         let src = "@trace\n@get(\"/x\")\nfn h() -> Str => \"ok\"";
         assert_auth_err(src, "auto-instrumentation");
     }
@@ -16542,8 +16536,8 @@ print(total)
 
     #[test]
     fn auth_provider_con_role_field_nullable_no_basta_para_admin() {
-        // El campo `role` debe ser `Str` (no nullable). Si es `Str?`,
-        // discriminar admins no compone (un Null no es admin).
+        // The `role` field must be `Str` (not nullable). If it's `Str?`,
+        // admin discrimination doesn't compose (a Null is not admin).
         let src = "type User { id: Int, role: Str? }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16556,19 +16550,19 @@ print(total)
     }
 
     // ----------------------------------------------------------------
-    // Fase 9.w.2.a — WebSockets tipados: tipo `WsConn<T>` + checker
+    // Phase 9.w.2.a — Typed WebSockets: type `WsConn<T>` + checker
     // ----------------------------------------------------------------
 
     #[test]
     fn wsconn_se_resuelve_como_generico_built_in() {
-        // `WsConn<Str>` reusa `TypeExpr::Generic`. Aridad fija 1.
+        // `WsConn<Str>` reuses `TypeExpr::Generic`. Fixed arity 1.
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "WsConn".into(),
             args: vec![TypeExpr::Named("Str".into())],
         };
         let ty = resolve_type_expr(&te, &env).expect("WsConn<Str>");
-        // 9.w.2-wsconn-bidir: `WsConn<T>` (aridad 1) = simétrico,
+        // 9.w.2-wsconn-bidir: `WsConn<T>` (arity 1) = symmetric,
         // recv == send == T.
         assert_eq!(
             ty,
@@ -16645,7 +16639,7 @@ print(total)
 
     #[test]
     fn ws_handler_minimal_pasa_checker() {
-        // Handler mínimo: `async fn` + `@ws("/chat")` + WsConn<Str>.
+        // Minimal handler: `async fn` + `@ws("/chat")` + WsConn<Str>.
         let src = "@ws(\"/chat\")\n\
                    async fn echo(conn: WsConn<Str>) -> Null {\n\
                        match conn.recv() {\n\
@@ -16675,7 +16669,7 @@ print(total)
 
     #[test]
     fn ws_handler_wsconn_con_t_concreto_compila() {
-        // `WsConn<ChatMsg>` con tipo custom. El checker debe aceptarlo.
+        // `WsConn<ChatMsg>` with custom type. The checker must accept it.
         let src = "type ChatMsg { user: Str, text: Str }\n\
                    @ws(\"/chat\")\n\
                    async fn chat(conn: WsConn<ChatMsg>) -> Null { return null }";
@@ -16691,8 +16685,8 @@ print(total)
 
     #[test]
     fn ws_method_recv_devuelve_result_t() {
-        // `conn.recv()` debe tipar como `Result<T>` donde T es el
-        // parámetro del WsConn.
+        // `conn.recv()` must type as `Result<T>` where T is the
+        // WsConn parameter.
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Str>) -> Null {\n\
                        let r: Result<Str> = conn.recv()\n\
@@ -16703,7 +16697,7 @@ print(total)
 
     #[test]
     fn ws_method_send_con_tipo_distinto_es_error() {
-        // `conn.send(msg: T)` debe rechazar args de tipo distinto a T.
+        // `conn.send(msg: T)` must reject args of a different type than T.
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Str>) -> Null {\n\
                        let _r = conn.send(42)\n\
@@ -16734,7 +16728,7 @@ print(total)
 
     #[test]
     fn ws_handler_con_authenticated_acepta_2_params() {
-        // `@authenticated @ws("/me-chat")` con (WsConn<Str>, user: User).
+        // `@authenticated @ws("/me-chat")` with (WsConn<Str>, user: User).
         let src = "type User { id: Int, name: Str }\n\
                    @auth_provider\n\
                    fn check(h: Map<Str, Str>) -> Result<User> { return Err(\"x\") }\n\
@@ -16746,7 +16740,7 @@ print(total)
 
     #[test]
     fn ws_handler_wsconn_any_es_error() {
-        // `WsConn<Any>` no se acepta — T debe ser concreto.
+        // `WsConn<Any>` is not accepted — T must be concrete.
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Any>) -> Null { return null }";
         assert_auth_err(src, "T` concreto");
@@ -16754,12 +16748,12 @@ print(total)
 
     // ---- 9.w.2-binary-frames — `WsConn<Bytes>` ----
     //
-    // El checker es paramétrico sobre T en `infer_wsconn_method` y trata
-    // `Bytes` como cualquier otro tipo concreto. Estos tests blindean
-    // el contrato: `WsConn<Bytes>` se acepta, `recv()` tipa
-    // `Result<Bytes>`, `send`/`broadcast` aceptan `Bytes` y rechazan
-    // tipos incompatibles. La discriminación binary-vs-text vive en
-    // runtime (evaluator + http.rs) y codegen.
+    // The checker is parametric over T in `infer_wsconn_method` and treats
+    // `Bytes` as any other concrete type. These tests guard
+    // the contract: `WsConn<Bytes>` is accepted, `recv()` types
+    // `Result<Bytes>`, `send`/`broadcast` accept `Bytes` and reject
+    // incompatible types. Binary-vs-text discrimination lives in
+    // runtime (evaluator + http.rs) and codegen.
 
     #[test]
     fn ws_handler_wsconn_bytes_compila() {
@@ -16798,8 +16792,8 @@ print(total)
 
     #[test]
     fn ws_method_send_bytes_rechaza_str() {
-        // `conn.send("hola")` sobre `WsConn<Bytes>` da error: el arg
-        // es `Str`, el método espera `Bytes`.
+        // `conn.send("hola")` over `WsConn<Bytes>` errors: the arg
+        // is `Str`, the method expects `Bytes`.
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Bytes>) -> Null {\n\
                        let _r = conn.send(\"hola\")\n\
@@ -16808,13 +16802,13 @@ print(total)
         assert_auth_err(src, "WsConn<Bytes>.send");
     }
 
-    // ---- Fase 9.w.3 — checker @cron + @background + spawn ----
+    // ---- Phase 9.w.3 — checker @cron + @background + spawn ----
 
     #[test]
     fn cron_simple_sin_params_async_pasa_checker() {
-        // `@cron("0 0 * * *")` sobre async fn sin params + return Null:
-        // shape válido del MVP. El checker no valida sintaxis del cron
-        // (eso se hace en runtime/codegen).
+        // `@cron("0 0 * * *")` over async fn without params + return Null:
+        // valid MVP shape. The checker doesn't validate cron syntax
+        // (that's done in runtime/codegen).
         let src = "@cron(\"0 0 * * *\")\n\
                    async fn cleanup() -> Null { return null }";
         let errors = errors_of(src);
@@ -16823,9 +16817,9 @@ print(total)
 
     #[test]
     fn cron_sync_fn_pasa_checker() {
-        // El MVP acepta `@cron` sobre sync y async (decisión confirmada
-        // por el autor al arrancar 9.w.3). Sync se ejecuta directo, async
-        // con `.await` adentro del scheduler.
+        // The MVP accepts `@cron` on sync and async (decision confirmed
+        // by the author when starting 9.w.3). Sync runs directly, async
+        // with `.await` inside the scheduler.
         let src = "@cron(\"*/5 * * * *\")\n\
                    fn tick() -> Null { return null }";
         let errors = errors_of(src);
@@ -16910,8 +16904,8 @@ print(total)
 
     #[test]
     fn cron_return_result_es_ok() {
-        // `Result<Null>` es válido — sirve para loguear fallas del job
-        // sin abortar el scheduler.
+        // `Result<Null>` is valid — useful for logging job failures
+        // without aborting the scheduler.
         let src = "@cron(\"0 0 * * *\")\nfn h() -> Result<Null> { return Ok(null) }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
@@ -16951,14 +16945,14 @@ print(total)
     }
 
     // -------------------------------------------------------------
-    // 9.w.3.iter2 — kwargs nuevos en `@cron` y `@background`.
-    // tz / retry / catch_up / store en `@cron`; tz / retry en `@bg`.
+    // 9.w.3.iter2 — new kwargs in `@cron` and `@background`.
+    // tz / retry / catch_up / store in `@cron`; tz / retry in `@bg`.
     // -------------------------------------------------------------
 
     #[test]
     fn cron_con_tz_valida_pasa_checker() {
-        // El checker NO valida la cadena IANA (eso es runtime); solo
-        // que sea Str literal.
+        // The checker does NOT validate the IANA string (that's runtime); only
+        // that it's a Str literal.
         let src = "@cron(\"0 0 * * *\", tz=\"America/Argentina/Buenos_Aires\")\n\
                    fn h() -> Null { return null }";
         let errors = errors_of(src);
@@ -16988,8 +16982,8 @@ print(total)
 
     #[test]
     fn cron_con_retry_solo_max_pasa_checker() {
-        // Defaults razonables para los 3 sub-params restantes (los
-        // chequea el runtime, no el checker).
+        // Reasonable defaults for the 3 remaining sub-params (the
+        // runtime checks them, not the checker).
         let src = "@cron(\"0 0 * * *\", retry={max: 5})\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
@@ -17083,14 +17077,14 @@ print(total)
 
     #[test]
     fn cron_con_store_ident_pasa_checker() {
-        // El checker NO chequea que `db` resuelva a DbConn — eso es
-        // runtime. Acepta cualquier expr no-null.
+        // The checker does NOT check that `db` resolves to DbConn — that's
+        // runtime. Accepts any non-null expr.
         let src = "let db = 1\n@cron(\"0 0 * * *\", store=db)\nfn h() -> Null { return null }";
         let errors = errors_of(src);
-        // `db` resuelve a Int en este programa sintético, pero el
-        // checker NO valida shape del store (queda runtime). El único
-        // error que podría aparecer es por la asignación `let db = 1`,
-        // que NO toca el decorator.
+        // `db` resolves to Int in this synthetic program, but the
+        // checker does NOT validate store shape (left to runtime). The only
+        // error that could appear is from the `let db = 1` assignment,
+        // which does NOT touch the decorator.
         assert!(
             !errors.iter().any(|e| e.message.contains("store")),
             "no debería haber error sobre store: {:?}",
@@ -17124,11 +17118,11 @@ print(total)
         );
     }
 
-    // NOTA: kwargs duplicados a nivel decorator (`tz=A, tz=B`) los
-    // rechaza el PARSER, no el checker, con el mensaje "argumento por
-    // nombre 'X=' ya fue dado en el mismo decorador". El helper
-    // `check_job_kwargs` igual lleva una rama defensiva por si el
-    // parser cambia. Sin test acá porque `errors_of` paneas en
+    // NOTE: duplicate kwargs at decorator level (`tz=A, tz=B`) are
+    // rejected by the PARSER, not the checker, with the message "named
+    // argument 'X=' was already given in the same decorator". The
+    // `check_job_kwargs` helper still carries a defensive branch in case the
+    // parser changes. No test here because `errors_of` panics on
     // `parse(...).expect("parse OK")`.
 
     #[test]
@@ -17164,8 +17158,8 @@ print(total)
 
     #[test]
     fn background_con_store_es_error() {
-        // `store` NO es válido en `@background` (persistencia de spawn
-        // jobs queda diferida a iter3).
+        // `store` is NOT valid in `@background` (spawn job persistence
+        // is deferred to iter3).
         let src = "let db = 1\n@background(store=db)\nfn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17179,7 +17173,7 @@ print(total)
 
     #[test]
     fn background_con_catch_up_es_error() {
-        // `catch_up` tampoco aplica a `@background` (no es scheduling).
+        // `catch_up` also doesn't apply to `@background` (it's not scheduling).
         let src = "@background(catch_up=true)\nfn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17193,8 +17187,8 @@ print(total)
 
     #[test]
     fn background_con_args_posicional_sigue_siendo_error() {
-        // Confirmamos que el comportamiento heredado (no admite
-        // positionals) se mantiene tras agregar kwargs.
+        // We confirm that the inherited behavior (doesn't accept
+        // positionals) is preserved after adding kwargs.
         let src = "@background(\"x\")\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17207,17 +17201,17 @@ print(total)
 
     #[test]
     fn spawn_sobre_background_devuelve_future() {
-        // `spawn(fn_background())` tipa como `Future<T>`. Validamos
-        // via shape de programa: el `let f = spawn(...)` debería
-        // permitir `.await` adentro de async fn.
+        // `spawn(fn_background())` types as `Future<T>`. We validate
+        // via program shape: the `let f = spawn(...)` should
+        // allow `.await` inside an async fn.
         let src = "@background\nasync fn job() -> Int { return 42 }\n\
                    async fn caller() -> Int {\n\
                        let f = spawn(job())\n\
                        return f.await\n\
                    }\n";
         let errors = errors_of(src);
-        // El return type Int es válido porque `spawn(job())` →
-        // `Future<Int>`, y `.await` desempaca a `Int`.
+        // The Int return type is valid because `spawn(job())` →
+        // `Future<Int>`, and `.await` unpacks to `Int`.
         assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
     }
 
@@ -17239,8 +17233,8 @@ print(total)
 
     #[test]
     fn spawn_con_var_es_error() {
-        // `spawn(x)` donde x es var no se acepta — el target debe ser
-        // un call literal a fn `@background`.
+        // `spawn(x)` where x is a var is not accepted — the target must be
+        // a literal call to a `@background` fn.
         let src = "async fn caller() -> Null {\n\
                        let x = 1\n\
                        let _ = spawn(x)\n\
@@ -17271,16 +17265,16 @@ print(total)
 
     #[test]
     fn spawn_userdefined_override_no_dispara_dispatch_especial() {
-        // Si el usuario define su propia `spawn`, el dispatch especial
-        // NO aplica (el lookup retorna `Function{...}` distinto de
-        // `Any`). El call se valida por la ruta general.
+        // If the user defines their own `spawn`, the special dispatch
+        // does NOT apply (the lookup returns `Function{...}` distinct from
+        // `Any`). The call is validated via the general path.
         let src = "fn spawn(x: Int) -> Int { return x }\n\
                    fn main() -> Int { return spawn(42) }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
     }
 
-    // ===== Fase 10.3.a — checker de decoradores ORM =====
+    // ===== Phase 10.3.a — ORM decorator checker =====
 
     #[test]
     fn checker_table_decorator_registra_metadata() {
@@ -17349,7 +17343,7 @@ print(total)
 
     #[test]
     fn checker_decorador_de_field_sin_table_es_error() {
-        // `@primary` sobre un field necesita que el type tenga `@table`.
+        // `@primary` on a field requires the type to have `@table`.
         let src = "type X {\n  @primary\n  id: Int\n}";
         let errs = errors_of(src);
         assert!(
@@ -17361,9 +17355,9 @@ print(total)
 
     #[test]
     fn checker_dos_primary_componen_composite_pk_v27() {
-        // v0.10.27 (F2) — 2 `@primary` ahora son composite PK
-        // (antes era error). El checker acepta; primary_fields
-        // queda con N entries en orden de aparición.
+        // v0.10.27 (F2) — 2 `@primary` are now composite PK
+        // (previously was an error). The checker accepts; primary_fields
+        // ends up with N entries in order of appearance.
         let src = "@table type T {\n  @primary\n  a: Int\n  @primary\n  b: Int\n}";
         let errs = errors_of(src);
         assert!(
@@ -17375,9 +17369,9 @@ print(total)
 
     #[test]
     fn checker_primary_sobre_mismo_field_dos_veces_es_error() {
-        // El check de duplicado se preserva, pero ahora aplica solo
-        // si el MISMO field aparece dos veces (no si hay 2 fields
-        // distintos con @primary, que es composite).
+        // The duplicate check is preserved, but now applies only
+        // if the SAME field appears twice (not if there are 2 distinct
+        // fields with @primary, which is composite).
         let src = "@table type T {\n  @primary\n  @primary\n  a: Int\n}";
         let errs = errors_of(src);
         assert!(
@@ -17432,7 +17426,7 @@ print(total)
         );
     }
 
-    // ===== Fase 10.4.a — relaciones =====
+    // ===== Phase 10.4.a — relations =====
 
     #[test]
     fn checker_belongs_to_basico() {
@@ -17487,7 +17481,7 @@ print(total)
         let rel = meta.relations.get("posts").unwrap();
         assert_eq!(rel.kind, RelationKind::HasMany);
         assert_eq!(rel.target_type, "Post");
-        // Default `via` para has_many sobre `User` = "user_id".
+        // Default `via` for has_many over `User` = "user_id".
         assert_eq!(rel.fk_field, "user_id");
     }
 
@@ -17579,23 +17573,23 @@ print(total)
         assert_eq!(CascadeAction::NoAction.as_sql(), "NO ACTION");
     }
 
-    // ===== Fase 10.b.7 — navigation methods sobre Instance con @table =====
+    // ===== Phase 10.b.7 — navigation methods over Instance with @table =====
     //
-    // El checker refina `instance.<rel>(db)` a `Future<Result<Target>>`
-    // (BelongsTo/HasOne) o `Future<Result<List<Target>>>` (HasMany) en
-    // vez de Any. Validamos que la divergencia con un tipo anotado
-    // incompatible dispara error — eso prueba que el tipo concreto se
-    // sintetizó (Any nunca dispararía).
+    // The checker refines `instance.<rel>(db)` to `Future<Result<Target>>`
+    // (BelongsTo/HasOne) or `Future<Result<List<Target>>>` (HasMany) instead
+    // of Any. We validate that divergence with an incompatible
+    // annotated type fires an error — that proves the concrete type was
+    // synthesized (Any would never fire).
 
     #[test]
     fn checker_belongs_to_navigation_devuelve_future_result_target() {
-        // CONVENCIÓN: navigation usa el NAME del field decorado, NO el
-        // name del target type. `@belongs_to("User") user_id: Int` se
-        // navega con `post.user_id(db)`. Paralelo a evaluator (~4463:
+        // CONVENTION: navigation uses the NAME of the decorated field, NOT the
+        // name of the target type. `@belongs_to("User") user_id: Int` is
+        // navigated with `post.user_id(db)`. Parallel to the evaluator (~4463:
         // `meta.relations.get(method)` — key = field name).
         //
-        // `let n: Int = post.user_id(db).await?` debe ser ERROR
-        // (User no es Int). Sin refinement el call tipaba Any → Int OK.
+        // `let n: Int = post.user_id(db).await?` must be ERROR
+        // (User is not Int). Without refinement the call typed Any → Int OK.
         let src = "@table type User { id: Int }\n\
                    @table type Post {\n  \
                      id: Int\n  \
@@ -17616,9 +17610,9 @@ print(total)
 
     #[test]
     fn checker_belongs_to_navigation_con_anotacion_correcta_compila_limpio() {
-        // `let u: User = post.user_id(db).await?` debe compilar OK
-        // — el refinement devuelve Future<Result<User>>, await? extrae
-        // User, asignación a User OK.
+        // `let u: User = post.user_id(db).await?` must compile OK
+        // — the refinement returns Future<Result<User>>, await? extracts
+        // User, assigning to User OK.
         let src = "@table type User { id: Int }\n\
                    @table type Post {\n  \
                      id: Int\n  \
@@ -17638,9 +17632,9 @@ print(total)
 
     #[test]
     fn checker_has_many_navigation_devuelve_future_result_list_target() {
-        // `let p: Post = user.posts(db).await?` debe ser ERROR
-        // (List<Post> no es compatible con Post — la relation es plural).
-        // El field virtual `posts` es la key en meta.relations.
+        // `let p: Post = user.posts(db).await?` must be ERROR
+        // (List<Post> is not compatible with Post — the relation is plural).
+        // The virtual field `posts` is the key in meta.relations.
         let src = "@table type Post { id: Int, user_id: Int }\n\
                    @table type User {\n  \
                      id: Int\n  \
@@ -17661,8 +17655,8 @@ print(total)
 
     #[test]
     fn checker_has_one_navigation_devuelve_future_result_target() {
-        // `let n: Int = user.profile(db).await?` debe ser ERROR
-        // (Profile no es Int). Field virtual `profile`.
+        // `let n: Int = user.profile(db).await?` must be ERROR
+        // (Profile is not Int). Virtual field `profile`.
         let src = "@table type Profile { id: Int, user_id: Int }\n\
                    @table type User {\n  \
                      id: Int\n  \
@@ -17683,11 +17677,11 @@ print(total)
 
     #[test]
     fn checker_navigation_no_colisiona_con_static_orm_methods() {
-        // `User.where(...).all(db)` sigue tipando como `Future<Result<List<User>>>`,
-        // NO como navigation method. Los names de static ORM methods
-        // (where/all/insert/etc.) no pueden ser names de field/relation.
-        // Test defensivo: el refinement de navigation no rompe el dispatch
-        // ORM existente.
+        // `User.where(...).all(db)` still types as `Future<Result<List<User>>>`,
+        // NOT as navigation method. The names of static ORM methods
+        // (where/all/insert/etc.) cannot be names of fields/relations.
+        // Defensive test: the navigation refinement doesn't break the existing
+        // ORM dispatch.
         let src = "@table type User { id: Int }\n\
                    async fn boot(db: Any) -> Result<Null> {\n  \
                      let xs: List<User> = User.where(fn(u) => u.id > 0).all(db).await?\n  \
@@ -17701,9 +17695,9 @@ print(total)
         );
     }
 
-    // v0.10.22 — Deuda B: métodos tipados sobre `DbRow`.
-    // Habilitan parseo de columnas crudas de `db.query` directamente en
-    // `fitz build` (antes solo el intérprete despachaba `.get`).
+    // v0.10.22 — Debt B: typed methods over `DbRow`.
+    // Enable parsing of raw `db.query` columns directly in
+    // `fitz build` (previously only the interpreter dispatched `.get`).
 
     #[test]
     fn checker_db_row_get_int_devuelve_result_int() {
@@ -17739,8 +17733,8 @@ print(total)
 
     #[test]
     fn checker_db_row_get_int_anotacion_str_es_error() {
-        // `let name: Str = r.get_int("id")?` debe ser ERROR: get_int
-        // refina a `Result<Int>`, `?` extrae Int, asignar a Str → fail.
+        // `let name: Str = r.get_int("id")?` must be ERROR: get_int
+        // refines to `Result<Int>`, `?` extracts Int, assigning to Str → fail.
         let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
                      let rows = db.query(\"SELECT id FROM users\", []).await?\n  \
                      let r: DbRow = rows[0]\n  \
@@ -17778,8 +17772,8 @@ print(total)
     // v0.10.28 — @index(col, using="...") method override
     // ============================================================
 
-    /// Cada uno de los 6 methods whitelisteados de Postgres debe
-    /// ser aceptado sin error por el checker, y populado en
+    /// Each of the 6 whitelisted Postgres methods must
+    /// be accepted without error by the checker, and populated in
     /// `TableMetadata.indexes[i].using`.
     #[test]
     fn checker_at_index_using_methods_whitelisteados_ok() {
@@ -17798,8 +17792,8 @@ print(total)
                 "method `{method}` debería ser aceptado, errors: {:?}",
                 errs
             );
-            // Validar que el using se popula (None para btree default,
-            // Some(lower) para el resto).
+            // Validate that the using is populated (None for default btree,
+            // Some(lower) for the rest).
             let tokens = tokenize(&src).expect("lex");
             let program = parse(tokens).expect("parse");
             let (env, _, _, _) = check_program(&program);
@@ -17809,7 +17803,7 @@ print(total)
             if method == "btree" {
                 assert_eq!(
                     meta.indexes[0].using, None,
-                    "btree default queda como None (no se emite USING redundante)"
+                    "btree default stays as None (no redundant USING is emitted)"
                 );
             } else {
                 assert_eq!(
@@ -17821,7 +17815,7 @@ print(total)
         }
     }
 
-    /// Method no whitelisteado emite error claro citando los soportados.
+    /// A non-whitelisted method emits a clear error citing the supported ones.
     #[test]
     fn checker_at_index_using_method_invalido_es_error() {
         let src = "@table(\"docs\")\n\
@@ -17837,7 +17831,7 @@ print(total)
         );
     }
 
-    /// `using=` con tipo no-Str es error.
+    /// `using=` with non-Str type is an error.
     #[test]
     fn checker_at_index_using_no_str_es_error() {
         let src = "@table(\"docs\")\n\
@@ -18082,13 +18076,13 @@ print(total)
     }
 
     // ============================================================
-    // Fase 12.1.a — @healthz / @readyz tests
+    // Phase 12.1.a — @healthz / @readyz tests
     // ============================================================
 
-    /// Helper local — replica de `assert_auth_ok` para los tests de
-    /// las probes K8s. No reusa el del bloque @auth_provider porque
-    /// vive en un sub-módulo `tests` separado y el visibility no
-    /// llega; copiarlo es más simple.
+    /// Local helper — replica of `assert_auth_ok` for the K8s probe
+    /// tests. We don't reuse the one from the @auth_provider block
+    /// because it lives in a separate `tests` sub-module and visibility
+    /// doesn't reach; copying it is simpler.
     fn assert_no_health_err(src: &str) {
         let errs = errors_of(src);
         let related: Vec<_> = errs
@@ -18102,8 +18096,8 @@ print(total)
         );
     }
 
-    /// Helper local — el programa debe producir al menos un error
-    /// cuyo mensaje contenga `expected_substr`.
+    /// Local helper — the program must produce at least one error
+    /// whose message contains `expected_substr`.
     fn assert_health_err(src: &str, expected_substr: &str) {
         let errs = errors_of(src);
         let matched = errs.iter().any(|e| e.message.contains(expected_substr));
@@ -18116,8 +18110,8 @@ print(total)
 
     #[test]
     fn healthz_basico_compila() {
-        // `@healthz fn liveness() -> Bool { return true }` debe compilar
-        // sin errores de tipo.
+        // `@healthz fn liveness() -> Bool { return true }` must compile
+        // without type errors.
         let src = "@healthz\n\
                    fn liveness() -> Bool {\n  return true\n}";
         assert_no_health_err(src);
@@ -18132,7 +18126,7 @@ print(total)
 
     #[test]
     fn healthz_con_result_null_compila() {
-        // `Result<Null>` también es válido: Ok = healthy, Err = unhealthy.
+        // `Result<Null>` is also valid: Ok = healthy, Err = unhealthy.
         let src = "@healthz\n\
                    fn liveness() -> Result<Null> {\n  return Ok(null)\n}";
         assert_no_health_err(src);
@@ -18147,7 +18141,7 @@ print(total)
 
     #[test]
     fn healthz_async_compila() {
-        // async fn liveness() -> Bool — el ret es Future<Bool>, válido.
+        // async fn liveness() -> Bool — the ret is Future<Bool>, valid.
         let src = "async fn pausar(ms: Int) -> Int { return ms }\n\
                    @healthz\n\
                    async fn liveness() -> Bool {\n  let _ = pausar(0).await\n  return true\n}";
@@ -18170,7 +18164,7 @@ print(total)
 
     #[test]
     fn healthz_con_params_es_error() {
-        // Las probes no reciben input — params es error.
+        // Probes don't receive input — params is an error.
         let src = "@healthz\n\
                    fn liveness(x: Int) -> Bool {\n  return true\n}";
         assert_health_err(src, "no admite params");
@@ -18178,7 +18172,7 @@ print(total)
 
     #[test]
     fn healthz_return_type_invalido_es_error() {
-        // Return debe ser Bool / Result<Null> / Result<Bool>.
+        // Return must be Bool / Result<Null> / Result<Bool>.
         let src = "@healthz\n\
                    fn liveness() -> Int {\n  return 200\n}";
         assert_health_err(src, "Bool");
@@ -18186,7 +18180,7 @@ print(total)
 
     #[test]
     fn healthz_duplicado_es_error() {
-        // Singleton: dos @healthz disparan error citando el primero.
+        // Singleton: two @healthz fire an error citing the first.
         let src = "@healthz\n\
                    fn first() -> Bool {\n  return true\n}\n\
                    @healthz\n\
@@ -18205,8 +18199,8 @@ print(total)
 
     #[test]
     fn healthz_y_readyz_separados_compilan() {
-        // `@healthz` + `@readyz` en distintas fns está OK — son
-        // singletons separados.
+        // `@healthz` + `@readyz` on different fns is OK — they are
+        // separate singletons.
         let src = "@healthz\n\
                    fn liveness() -> Bool {\n  return true\n}\n\
                    @readyz\n\
@@ -18216,7 +18210,7 @@ print(total)
 
     #[test]
     fn healthz_y_readyz_juntos_en_misma_fn_es_error() {
-        // Apilados sobre la misma fn → conflicto.
+        // Stacked on the same fn → conflict.
         let src = "@healthz\n\
                    @readyz\n\
                    fn both() -> Bool {\n  return true\n}";
@@ -18225,7 +18219,7 @@ print(total)
 
     #[test]
     fn healthz_con_get_es_error() {
-        // Conflicto con decorator HTTP normal.
+        // Conflict with normal HTTP decorator.
         let src = "@healthz\n\
                    @get(\"/probe\")\n\
                    fn probe() -> Bool {\n  return true\n}";
@@ -18250,7 +18244,7 @@ print(total)
 
     #[test]
     fn healthz_con_authenticated_es_error() {
-        // Las probes NO deben ser autenticadas (K8s no manda bearer).
+        // Probes must NOT be authenticated (K8s doesn't send bearer).
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n  return Err(\"x\")\n}\n\
@@ -18261,22 +18255,22 @@ print(total)
     }
 
     // ============================================================
-    // Fase 12.2.a — Secret<T> tipo opaco + secret/config builtins
+    // Phase 12.2.a — Secret<T> opaque type + secret/config builtins
     // ============================================================
 
     #[test]
     fn secret_type_se_resuelve_y_display_es_redactable() {
-        // `Secret<Str>` debe resolver correctamente. Su display
-        // estructural mantiene el shape (para mensajes de error
-        // tipados). La redacción solo aplica al Display de Value.
+        // `Secret<Str>` must resolve correctly. Its structural
+        // display preserves the shape (for typed error messages).
+        // Redaction only applies to Value's Display.
         let src = "let p: Secret<Str> = secret(\"K\")?";
         let errs = errors_of(src);
-        // `?` adentro de top-level + `secret` que devuelve
-        // `Result<Secret<Str>>` debería tipar OK. El uso de `?` en
-        // top-level requiere fn padre Result o async fn (15.3.3 rule
-        // de la fase 5). Para test simple: envolver.
-        // Wrapping required: usamos async fn.
-        let _ = errs; // suficiente con que el shape esté declarable
+        // `?` inside top-level + `secret` that returns
+        // `Result<Secret<Str>>` should type OK. Using `?` at
+        // top-level requires a parent Result fn or async fn (15.3.3 rule
+        // of phase 5). For a simple test: wrap.
+        // Wrapping required: we use async fn.
+        let _ = errs; // enough that the shape is declarable
         let src2 = "async fn pp() -> Result<Null> {\n  let p: Secret<Str> = secret(\"K\")?\n  return Ok(null)\n}";
         let errs2 = errors_of(src2);
         assert!(errs2.is_empty(), "esperaba sin errores, fue: {:?}", errs2);
@@ -18284,8 +18278,8 @@ print(total)
 
     #[test]
     fn secret_expose_devuelve_el_inner_tipado() {
-        // `.expose()` en `Secret<Str>` debe tipar `Str` (no Any).
-        // Esto permite chains tipadas: `secret("X")?.expose().len()`.
+        // `.expose()` on `Secret<Str>` must type `Str` (not Any).
+        // This enables typed chains: `secret("X")?.expose().len()`.
         let src = "async fn pp() -> Result<Int> {\n\
                    let p = secret(\"K\")?\n\
                    let exposed: Str = p.expose()\n\
@@ -18297,8 +18291,8 @@ print(total)
 
     #[test]
     fn secret_metodo_desconocido_es_error() {
-        // Cualquier método que no sea `.expose()` debe fallar con
-        // mensaje claro.
+        // Any method other than `.expose()` must fail with a
+        // clear message.
         let src = "async fn pp() -> Result<Null> {\n\
                    let p = secret(\"K\")?\n\
                    let _ = p.unwrap()\n\
@@ -18335,8 +18329,8 @@ print(total)
 
     #[test]
     fn config_tipa_como_any_independiente_del_default() {
-        // `config(key, default)` retorna Any (refinement futuro).
-        // El user anota destino con `let port: Int = config("P", 8080)`.
+        // `config(key, default)` returns Any (future refinement).
+        // The user annotates the destination with `let port: Int = config("P", 8080)`.
         let src = "let port: Int = config(\"PORT\", 8080)";
         let errs = errors_of(src);
         assert!(
@@ -18348,7 +18342,7 @@ print(total)
 
     #[test]
     fn secret_builtin_arg_debe_ser_str() {
-        // `secret(42)` con Int como key → error de tipo.
+        // `secret(42)` with Int as key → type error.
         let src = "let _ = secret(42)";
         let errs = errors_of(src);
         let matched = errs
@@ -18357,7 +18351,7 @@ print(total)
         assert!(matched, "esperaba error de tipo en arg, fue: {:?}", errs);
     }
 
-    // ---- Fase 12.8 — @flag decorator checker ----
+    // ---- Phase 12.8 — @flag decorator checker ----
 
     #[test]
     fn flag_decorator_shape_valido_compila_limpio() {
@@ -18424,9 +18418,9 @@ print(total)
 
     #[test]
     fn flag_decorator_apilable_sobre_http_handler() {
-        // El decorator @flag NO está restringido a fns regulares —
-        // es válido sobre handlers HTTP/WS. Esa combinación es
-        // exactamente el caso 90% (gate de feature en una ruta).
+        // The @flag decorator is NOT restricted to regular fns —
+        // it's valid on HTTP/WS handlers. That combination is
+        // exactly the 90% case (feature gate on a route).
         assert_ok(
             "@flag(\"new-checkout\")\n\
              @get(\"/v2/checkout\")\n\
@@ -18436,18 +18430,18 @@ print(total)
 
     #[test]
     fn flag_builtin_se_resuelve_como_any() {
-        // `flag(...)` está en el global scope como Type::Any (mismo
-        // patrón que jwt/hash/auth) — los calls no se chequean static
-        // pero el binding existe.
+        // `flag(...)` is in the global scope as Type::Any (same
+        // pattern as jwt/hash/auth) — calls are not checked statically
+        // but the binding exists.
         assert_ok("let v = flag(\"foo\")");
         assert_ok("let v = flags.is_enabled(\"foo\")");
         assert_ok("let v = flags.list()");
     }
 
-    // ---- V2 (2026-06-05) — hover sobre LHS de `let` registra tipo ----
+    // ---- V2 (2026-06-05) — hover on LHS of `let` records type ----
 
-    /// Helper de los tests V2 — parsea + chequea y devuelve el `TypeInfo`
-    /// para hacer lookups por `(line, column)` del LHS de un `let`.
+    /// Helper for V2 tests — parses + checks and returns the `TypeInfo`
+    /// to do lookups by `(line, column)` of the LHS of a `let`.
     fn types_at_position(src: &str, line: usize, column: usize) -> Option<Type> {
         let tokens = tokenize(src).expect("tokenize");
         let program = parse(tokens).expect("parse");
@@ -18462,16 +18456,16 @@ print(total)
 
     #[test]
     fn v2_hover_sobre_lhs_de_let_sin_anotacion_registra_tipo_inferido() {
-        // `let edad = 200` — span del LHS `edad` está en (1, 5).
+        // `let edad = 200` — span of the LHS `edad` is at (1, 5).
         let ty = types_at_position("let edad = 200\n", 1, 5);
         assert_eq!(ty, Some(Type::Int), "hover sobre `edad` debe ser Int");
     }
 
     #[test]
     fn v2_hover_sobre_lhs_de_let_con_anotacion_registra_tipo_declarado() {
-        // `let datos: Int? = null` — span del LHS `datos` en (1, 5).
-        // El tipo registrado debe ser Nullable(Int) (el declarado),
-        // no Null (el inferido del RHS).
+        // `let datos: Int? = null` — span of the LHS `datos` at (1, 5).
+        // The registered type must be Nullable(Int) (the declared one),
+        // not Null (the one inferred from the RHS).
         let ty = types_at_position("let datos: Int? = null\n", 1, 5);
         match ty {
             Some(Type::Nullable(inner)) => {
@@ -18496,25 +18490,25 @@ print(total)
         assert_eq!(ty, Some(Type::Bool));
     }
 
-    // ---- L2 (2026-06-05) — Inferencia bidireccional de callbacks ----
+    // ---- L2 (2026-06-05) — Bidirectional inference of callbacks ----
 
-    /// Helper L2 — extrae el tipo del último `Stmt::Assign` del `Program`
-    /// para tests del shape `let r = <expr>`. Usamos `lookup_binding`
-    /// porque `TypeInfo` graba el tipo del valor en su span, no en el
-    /// nombre de la variable.
+    /// L2 Helper — extracts the type of the last `Stmt::Assign` of the `Program`
+    /// for tests of the `let r = <expr>` shape. We use `lookup_binding`
+    /// because `TypeInfo` records the type of the value at its span, not at the
+    /// name of the variable.
     fn type_of_last_let(src: &str) -> Option<Type> {
         let tokens = tokenize(src).expect("tokenize");
         let program = parse(tokens).expect("parse");
         let (env, _types_info, _def, _errs) = check_program(&program);
-        // El binding de la última var top-level lo recupera el TypeEnv
-        // global. Como `check_program` no expone bindings,
-        // re-implementamos un mini check con `CheckCtx` para alcanzar
+        // The binding of the last top-level var is retrieved by the global
+        // TypeEnv. Since `check_program` doesn't expose bindings,
+        // we re-implement a mini check with `CheckCtx` to reach
         // `lookup_binding`.
         let mut ctx = CheckCtx::new(&env);
         for stmt in &program {
             check_stmt(&mut ctx, stmt);
         }
-        // Buscar el último `let X = ...` y consultar su binding.
+        // Find the last `let X = ...` and look up its binding.
         let mut last_name = None;
         for stmt in &program {
             if let Stmt::Assign {
@@ -18531,10 +18525,10 @@ print(total)
 
     #[test]
     fn l2_map_sobre_list_int_sin_anotar_callback_tipa_como_list_int() {
-        // Caso pedagógico del cap M1.C5 del curso. Antes de L2 esto
-        // tipaba como `List<Any>` porque `x` quedaba como `Any` sin
-        // anotación, y `Any * Int` también es `Any`. Ahora L2 propaga
-        // el `Int` del receptor al callback.
+        // Pedagogical case from the M1.C5 cap of the course. Before L2 this
+        // typed as `List<Any>` because `x` stayed as `Any` without
+        // annotation, and `Any * Int` is also `Any`. Now L2 propagates
+        // the `Int` of the receiver to the callback.
         let ty = type_of_last_let("let r = [1, 2, 3].map(fn(x) => x * 10)\n");
         match ty {
             Some(Type::List(inner)) => assert_eq!(
@@ -18549,9 +18543,9 @@ print(total)
 
     #[test]
     fn l2_filter_sobre_list_int_sin_anotar_tipa_callback_int_y_ret_bool() {
-        // `xs.filter(fn(x) => x > 0)` sobre `List<Int>` debe tipar
-        // `List<Int>` (filter preserva el T). Adentro del callback,
-        // `x > 0` requiere `x: Int` (Int vs Int OK).
+        // `xs.filter(fn(x) => x > 0)` on `List<Int>` must type
+        // `List<Int>` (filter preserves T). Inside the callback,
+        // `x > 0` requires `x: Int` (Int vs Int OK).
         let ty = type_of_last_let("let r = [1, 2, 3].filter(fn(x) => x > 0)\n");
         match ty {
             Some(Type::List(inner)) => assert_eq!(*inner, Type::Int),
@@ -18561,9 +18555,9 @@ print(total)
 
     #[test]
     fn l2_map_sobre_list_str_propaga_a_metodos_str() {
-        // `xs.map(fn(s) => s.upper())` sobre `List<Str>` debe tipar
-        // `List<Str>` — el `.upper()` requiere que `s: Str`. Si L2
-        // no propagara, `s: Any` y el resultado sería `List<Any>`.
+        // `xs.map(fn(s) => s.upper())` on `List<Str>` must type
+        // `List<Str>` — `.upper()` requires `s: Str`. If L2
+        // didn't propagate, `s: Any` and the result would be `List<Any>`.
         let ty = type_of_last_let("let r = [\"a\", \"b\"].map(fn(s) => s.upper())\n");
         match ty {
             Some(Type::List(inner)) => assert_eq!(*inner, Type::Str),
@@ -18573,11 +18567,11 @@ print(total)
 
     #[test]
     fn l2_param_con_anotacion_explicita_gana_sobre_hint() {
-        // Si el alumno anota `fn(x: Float) => ...` sobre `List<Int>`,
-        // la anotación gana. El tipo del callback param es Float (no
-        // Int del hint). Eso puede dispararse como error si el body
-        // hace algo incompatible, pero el tipo del retorno depende de
-        // la anotación.
+        // If the student annotates `fn(x: Float) => ...` on `List<Int>`,
+        // the annotation wins. The callback param type is Float (not
+        // Int from the hint). That may trigger an error if the body
+        // does something incompatible, but the return type depends on
+        // the annotation.
         let ty = type_of_last_let("let r = [1, 2, 3].map(fn(x: Float) => x * 2.0)\n");
         match ty {
             Some(Type::List(inner)) => assert_eq!(
@@ -18592,7 +18586,7 @@ print(total)
 
     #[test]
     fn l2_find_sobre_list_int_tipa_callback_y_devuelve_result_int() {
-        // `xs.find(fn(x) => x == 2)` sobre `List<Int>` → `Result<Int>`.
+        // `xs.find(fn(x) => x == 2)` on `List<Int>` → `Result<Int>`.
         let ty = type_of_last_let("let r = [1, 2, 3].find(fn(x) => x == 2)\n");
         match ty {
             Some(Type::Result { ok, .. }) => assert_eq!(*ok, Type::Int),
@@ -18600,17 +18594,17 @@ print(total)
         }
     }
 
-    // ---- L2 expandido (2026-06-05) — inferencia bidireccional para Fn ----
+    // ---- L2 expanded (2026-06-05) — bidirectional inference for Fn ----
 
     #[test]
     fn l2x_let_con_anotacion_fn_propaga_a_fnexpr_sin_anotacion() {
-        // `let f: Fn(Int) -> Int = fn(n) => n * 2` — el param `n` del
-        // FnExpr debe inferirse como Int desde la anotación del let.
+        // `let f: Fn(Int) -> Int = fn(n) => n * 2` — the param `n` of the
+        // FnExpr must be inferred as Int from the let annotation.
         let src = "let f: Fn(Int) -> Int = fn(n) => n * 2\n";
         let tokens = tokenize(src).expect("tokenize");
         let program = parse(tokens).expect("parse");
         let (env, _ti, _di, errs) = check_program(&program);
-        // No debe haber errores — n: Int * 2: Int → Int, compatible con Fn(Int) -> Int.
+        // No errors should appear — n: Int * 2: Int → Int, compatible with Fn(Int) -> Int.
         assert!(
             errs.is_empty(),
             "esperaba sin errores, recibió: {:?}",
@@ -18622,8 +18616,8 @@ print(total)
     #[test]
     fn l2x_fn_user_defined_con_param_fn_propaga_a_arg_fnexpr() {
         // `fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
-        //  let r = apply(fn(n) => n * 2, 5)` — el `n` del callback se
-        // debe inferir como Int desde el param `f: Fn(Int) -> Int`.
+        //  let r = apply(fn(n) => n * 2, 5)` — the `n` of the callback
+        // must be inferred as Int from the `f: Fn(Int) -> Int` param.
         let src = "\
 fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
 let r = apply(fn(n) => n * 2, 5)
@@ -18641,10 +18635,10 @@ let r = apply(fn(n) => n * 2, 5)
 
     #[test]
     fn l2x_anotacion_explicita_del_fnexpr_gana_sobre_hint() {
-        // Si el FnExpr tiene anotación explícita del param que no es
-        // compatible con la anotación del let, el checker emite error.
+        // If the FnExpr has an explicit param annotation that's not
+        // compatible with the let's annotation, the checker emits an error.
         // `let f: Fn(Int) -> Int = fn(n: Str) => n.upper()` — error
-        // porque Fn(Str) -> Str no es compatible con Fn(Int) -> Int.
+        // because Fn(Str) -> Str is not compatible with Fn(Int) -> Int.
         let src = "let f: Fn(Int) -> Int = fn(n: Str) => n.upper()\n";
         let tokens = tokenize(src).expect("tokenize");
         let program = parse(tokens).expect("parse");
@@ -18655,29 +18649,29 @@ let r = apply(fn(n) => n * 2, 5)
         );
     }
 
-    // ---- S1 (2026-06-05) — spans propios para Param/Pattern ----
+    // ---- S1 (2026-06-05) — own spans for Param/Pattern ----
 
     #[test]
     fn s1_hover_sobre_param_de_fn_def_muestra_tipo_anotado() {
-        // `fn double(n: Int) => n * 2` — span del param `n` en col 11.
-        // El checker debería registrar `Int` bajo ese span en TypeInfo.
+        // `fn double(n: Int) => n * 2` — span of param `n` at col 11.
+        // The checker should record `Int` under that span in TypeInfo.
         let ty = types_at_position("fn double(n: Int) => n * 2\n", 1, 11);
         assert_eq!(ty, Some(Type::Int), "hover sobre `n` (param) debe ser Int");
     }
 
     #[test]
     fn s1_hover_sobre_param_sin_anotacion_muestra_any() {
-        // `fn f(x) => x + 1` — sin anotación, x: Any.
+        // `fn f(x) => x + 1` — without annotation, x: Any.
         let ty = types_at_position("fn f(x) => x + 1\n", 1, 6);
         assert_eq!(ty, Some(Type::Any), "param sin anotación tipa como Any");
     }
 
     #[test]
     fn s1_hover_sobre_var_de_for_in_range_muestra_int() {
-        // `for i in 0..10 { print(i) }` — span del `i` en col 5.
-        // El range produce Int, el pattern Ident bindea como Int.
-        // Recordá que `for` actualmente expande a un `Stmt::For`
-        // donde `var: Pattern` ya tiene `Pattern::Ident(name, span)`.
+        // `for i in 0..10 { print(i) }` — span of `i` at col 5.
+        // The range produces Int, the Ident pattern binds as Int.
+        // Note that `for` currently expands to a `Stmt::For`
+        // where `var: Pattern` already has `Pattern::Ident(name, span)`.
         let ty = types_at_position("for i in 0..10 { print(i) }\n", 1, 5);
         assert_eq!(
             ty,
@@ -18688,12 +18682,12 @@ let r = apply(fn(n) => n * 2, 5)
 
     #[test]
     fn s1_hover_sobre_binding_de_match_ok_muestra_inner_type() {
-        // `match Ok(42) { Ok(n) => n, Err(_) => 0 }` — span del `n` en
-        // `Ok(n)`. n debe tipar como Int (inner del Result).
-        // El span del `n` es donde aparece el ident `n` adentro del
-        // paréntesis del pattern.
+        // `match Ok(42) { Ok(n) => n, Err(_) => 0 }` — span of `n` in
+        // `Ok(n)`. n must type as Int (inner of the Result).
+        // The span of `n` is where the ident `n` appears inside the
+        // pattern's parentheses.
         let src = "let r: Int = match Ok(42) { Ok(n) => n, Err(_) => 0 }\n";
-        // Posición del `n` en `Ok(n)`: col 32.
+        // Position of `n` in `Ok(n)`: col 32.
         let ty = types_at_position(src, 1, 32);
         assert_eq!(
             ty,
@@ -18704,7 +18698,7 @@ let r = apply(fn(n) => n * 2, 5)
 
     #[test]
     fn s1_hover_sobre_param_de_metodo_custom_funciona() {
-        // Método `double` sobre `type Counter { val: Int }`.
+        // `double` method on `type Counter { val: Int }`.
         let src = "\
 type Counter { val: Int = 0 }
 type Counter {
@@ -18713,17 +18707,17 @@ type Counter {
 let c = Counter { }
 let r = c.double(5)
 ";
-        // Span del param `amount: Int` en la línea 3, col 15.
+        // Span of param `amount: Int` on line 3, col 15.
         let ty = types_at_position(src, 3, 15);
         assert_eq!(ty, Some(Type::Int), "hover sobre `amount` debe ser Int");
     }
 
     #[test]
     fn l2_nested_callbacks_no_se_contaminan() {
-        // FnExpr anidado: el hint del externo no debe "filtrar" al
-        // interno. Caso: `xs.map(fn(x) => [x, x+1].map(fn(y) => y * 2))`.
-        // El interno `fn(y)` recibe hint `Int` del receptor `[x, x+1]`,
-        // no del callback externo.
+        // Nested FnExpr: the outer's hint must not "leak" into the
+        // inner. Case: `xs.map(fn(x) => [x, x+1].map(fn(y) => y * 2))`.
+        // The inner `fn(y)` receives the `Int` hint from the receiver `[x, x+1]`,
+        // not from the outer callback.
         let ty = type_of_last_let("let r = [1, 2].map(fn(x) => [x, x + 1].map(fn(y) => y * 2))\n");
         match ty {
             Some(Type::List(outer)) => match outer.as_ref() {
