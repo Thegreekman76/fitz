@@ -1,20 +1,20 @@
-// fitz-lsp — Language Server Protocol para Fitz (Fase 9.x).
+// fitz-lsp — Language Server Protocol for Fitz (Phase 9.x).
 //
-// Bin separado del CLI principal (`fitz`) por convención del ecosistema:
-// rust-analyzer, gopls, tsserver, pyright son todos binarios aparte que
-// el cliente (extensión VSCode, plugin Neovim, etc.) spawnea como
-// proceso hijo y se comunica por stdio con JSON-RPC.
+// Separate bin from the main CLI (`fitz`) by ecosystem convention:
+// rust-analyzer, gopls, tsserver, pyright are all separate binaries
+// that the client (VSCode extension, Neovim plugin, etc.) spawns as
+// a child process and communicates with via stdio + JSON-RPC.
 //
-// Estado:
-// - 9.x.1.a: handshake initialize/initialized/shutdown.
-// - 9.x.1.b: did_open/did_change/did_close + diagnósticos en vivo
-//   sobre el pipeline `parse_with_recovery → check_program`. La
-//   lógica vive en `fitz::lsp` (lib, unit-testeable); este bin es
-//   solo la capa fina que mapea handlers de tower-lsp al pipeline.
+// Status:
+// - 9.x.1.a: initialize/initialized/shutdown handshake.
+// - 9.x.1.b: did_open/did_change/did_close + live diagnostics over
+//   the `parse_with_recovery → check_program` pipeline. The logic
+//   lives in `fitz::lsp` (lib, unit-testable); this bin is just the
+//   thin layer that maps tower-lsp handlers to the pipeline.
 //
-// Build: `cargo build --features lsp` (la dep `tower-lsp` es opt-in;
-// `required-features = ["lsp"]` evita errores de link en el flujo
-// default).
+// Build: `cargo build --features lsp` (the `tower-lsp` dep is
+// opt-in; `required-features = ["lsp"]` avoids link errors in the
+// default flow).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -40,16 +40,16 @@ use fitz::lsp::{
 };
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
-/// Estado por documento abierto. Persiste el último texto recibido por
-/// `did_open`/`did_change`, el AST parseado (Fase 9.x.4 — completion
-/// scope-level enumera top-level), y los side-tables del último
-/// chequeo: `TypeEnv` (resuelve nombres nominales para hover/
-/// completion), `TypeInfo` (tipo por nodo — hover, completion
-/// after-dot), `DefinitionInfo` (uso → declaración — go-to-definition).
+/// Per-open-document state. Persists the last text received by
+/// `did_open`/`did_change`, the parsed AST (Phase 9.x.4 — scope-level
+/// completion enumerates top-level), and the side-tables of the last
+/// check: `TypeEnv` (resolves nominal names for hover/completion),
+/// `TypeInfo` (per-node type — hover, after-dot completion),
+/// `DefinitionInfo` (use → declaration — go-to-definition).
 //
-// `text` lo lee el handler `completion` (9.x.4.b) para detectar el
-// contexto walkeando hacia atrás desde el cursor. `program` también
-// es usado por completion (scope-level).
+// `text` is read by the `completion` handler (9.x.4.b) to detect the
+// context by walking backwards from the cursor. `program` is also
+// used by completion (scope-level).
 #[derive(Debug)]
 struct DocumentState {
     text: String,
@@ -62,24 +62,23 @@ struct DocumentState {
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    /// Estado por documento abierto. Se popula en `did_open`, se
-    /// actualiza completo en `did_change` (anunciamos `FULL` sync), y
-    /// se borra en `did_close`. `parking_lot::Mutex` (no `tokio`)
-    /// porque las secciones críticas son ~microsegundos: lock,
-    /// get/insert, unlock — sin awaits adentro. La pipeline del checker
-    /// corre fuera del lock.
+    /// Per-open-document state. Populated in `did_open`, fully
+    /// updated in `did_change` (we announce `FULL` sync), and cleared
+    /// in `did_close`. `parking_lot::Mutex` (not `tokio`) because the
+    /// critical sections are ~microseconds: lock, get/insert, unlock
+    /// — no awaits inside. The checker pipeline runs outside the lock.
     documents: Arc<Mutex<HashMap<Url, DocumentState>>>,
 }
 
 impl Backend {
-    /// Corre el pipeline LSP-style sobre `text`, persiste el resultado
-    /// en `documents`, y publica los diagnósticos. Devuelve nada — la
-    /// notificación es fire-and-forget.
+    /// Runs the LSP-style pipeline over `text`, persists the result
+    /// in `documents`, and publishes the diagnostics. Returns
+    /// nothing — the notification is fire-and-forget.
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
         let (program, type_env, type_info, def_info, errors) = check_source_with_types(&text);
-        // LSPy — diagnostics con Range exacto del símbolo bajo el
-        // cursor (no 1-char dummy). Requiere el source para extraer
-        // el ident en cada posición.
+        // LSPy — diagnostics with the exact Range of the symbol
+        // under the cursor (no 1-char dummy). Requires the source
+        // to extract the ident at each position.
         let diagnostics = fitz_errors_to_diagnostics_with_source(&errors, &text);
         self.documents.lock().insert(
             uri.clone(),
@@ -100,88 +99,94 @@ impl Backend {
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(&self, _params: InitializeParams) -> LspResult<InitializeResult> {
-        // Capabilities: anunciamos `FULL` sync — recibimos el documento
-        // entero en cada `did_change` y re-corremos el pipeline. La
-        // alternativa `INCREMENTAL` requiere mantener el buffer y
-        // aplicar edits, más eficiente sobre archivos grandes pero suma
-        // complejidad. FULL es el default razonable para el MVP; la
-        // migración es decisión de perf que dejamos para cuando aparezca
-        // presión real.
+        // Capabilities: we announce `FULL` sync — we receive the
+        // whole document on each `did_change` and re-run the
+        // pipeline. The `INCREMENTAL` alternative requires keeping
+        // the buffer and applying edits, more efficient for large
+        // files but adds complexity. FULL is the reasonable default
+        // for the MVP; migration is a perf decision we leave for
+        // when real pressure shows up.
         Ok(InitializeResult {
             server_info: Some(ServerInfo {
                 name: "fitz-lsp".into(),
                 version: Some(env!("CARGO_PKG_VERSION").into()),
             }),
             capabilities: ServerCapabilities {
-                // v0.13.2 — omitimos `position_encoding` para que el
-                // cliente asuma el default UTF-16 del spec LSP. El
-                // intento de v0.9.51 de anunciar `utf-8` se rompió
-                // contra `vscode-languageclient@9.0.1`, que hard-codea
+                // v0.13.2 — we omit `position_encoding` so the
+                // client assumes the LSP spec's UTF-16 default. The
+                // v0.9.51 attempt to announce `utf-8` broke against
+                // `vscode-languageclient@9.0.1`, which hard-codes
                 // `generalCapabilities.positionEncodings = ['utf-16']`
-                // (client.js:1370) y rechaza cualquier encoding del
-                // server distinto de `utf-16` o `undefined`
-                // (client.js:835). El handshake fallaba con
-                // "Unsupported position encoding (utf-8)" antes de
-                // poder hablar JSON-RPC, dejando la extensión 0.13.1
-                // inservible en VSCode fresh.
+                // (client.js:1370) and rejects any server encoding
+                // other than `utf-16` or `undefined` (client.js:835).
+                // The handshake failed with "Unsupported position
+                // encoding (utf-8)" before being able to speak
+                // JSON-RPC, leaving the 0.13.1 extension unusable on
+                // fresh VSCode.
                 //
-                // Migración completa: `position_to_offset` /
-                // `offset_to_position` en `src/lsp.rs` ahora cuentan
-                // UTF-16 code units (vía `ch.len_utf16()`) para
-                // coincidir con el spec. Para el lookup en
-                // `TypeInfo` / `DefinitionInfo` que sigue indexado
-                // por chars Unicode del lexer, los handlers `hover` /
-                // `goto_definition` traducen `pos.character` con
+                // Full migration: `position_to_offset` /
+                // `offset_to_position` in `src/lsp.rs` now count
+                // UTF-16 code units (via `ch.len_utf16()`) to match
+                // the spec. For the `TypeInfo` / `DefinitionInfo`
+                // lookup that's still indexed by Unicode chars of
+                // the lexer, the `hover` / `goto_definition`
+                // handlers translate `pos.character` with
                 // `utf16_to_unicode_char(text, line, char_utf16)`
-                // antes de llamar a `hover_for_position` /
-                // `definition_for_position`. Soporta chars del
-                // Supplementary Multilingual Plane (emoji, símbolos
-                // matemáticos avanzados) sin off-by-one. Deuda
-                // residual cosmética: `make_definition_location` y
-                // `ident_range_from_def` retornan Range LSP en chars
-                // Unicode en lugar de UTF-16 — pero como las líneas
-                // de def son siempre ASCII en la parte ANTES del
-                // ident (keywords + identifiers son ASCII por reglas
-                // del lexer), char_unicode == char_utf16 en práctica.
+                // before calling `hover_for_position` /
+                // `definition_for_position`. Supports
+                // Supplementary Multilingual Plane chars (emoji,
+                // advanced math symbols) without off-by-one.
+                // Cosmetic residual debt:
+                // `make_definition_location` and
+                // `ident_range_from_def` return LSP Range in
+                // Unicode chars instead of UTF-16 — but because the
+                // def lines are always ASCII in the part BEFORE the
+                // ident (keywords + identifiers are ASCII per lexer
+                // rules), char_unicode == char_utf16 in practice.
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
-                // Fase 9.x.2 — anunciamos que respondemos
-                // `textDocument/hover` con el tipo del nodo bajo el
-                // cursor. La heurística de lookup y el formato de
-                // respuesta viven en `fitz::lsp`.
+                // Phase 9.x.2 — we announce we respond to
+                // `textDocument/hover` with the type of the node
+                // under the cursor. The lookup heuristic and the
+                // response format live in `fitz::lsp`.
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
-                // Fase 9.x.3 — anunciamos que respondemos
-                // `textDocument/definition`. Devolvemos un solo
-                // `Location` (no multi-definición — Fitz no tiene
-                // overloading), por eso `OneOf::Left(true)` (forma
-                // simple) en lugar de `DefinitionOptions`.
+                // Phase 9.x.3 — we announce we respond to
+                // `textDocument/definition`. We return a single
+                // `Location` (no multi-definition — Fitz has no
+                // overloading), hence `OneOf::Left(true)` (simple
+                // form) instead of `DefinitionOptions`.
                 definition_provider: Some(OneOf::Left(true)),
-                // Fase 9.x.4 — anunciamos completion contextual.
-                // `trigger_characters = [".".into(), "@".into()]` hace
-                // que VSCode invoque automáticamente la completion tras
-                // un `.` (caso after-dot) o un `@` (caso AfterAt,
-                // v0.10.12 — lista de decorators). Para typing normal,
-                // el cliente invoca por su cuenta. `resolve_provider:
-                // false` porque mandamos toda la info en el item (no
-                // usamos `completionItem/resolve` para detalles lazy).
+                // Phase 9.x.4 — we announce contextual completion.
+                // `trigger_characters = [".".into(), "@".into()]`
+                // makes VSCode invoke completion automatically after
+                // a `.` (after-dot case) or `@` (AfterAt case,
+                // v0.10.12 — list of decorators). For normal typing,
+                // the client invokes on its own. `resolve_provider:
+                // false` because we send all the info in the item
+                // (we don't use `completionItem/resolve` for lazy
+                // details).
                 completion_provider: Some(CompletionOptions {
                     trigger_characters: Some(vec![".".into(), "@".into()]),
                     resolve_provider: Some(false),
                     ..CompletionOptions::default()
                 }),
-                // V3 (2026-06-05) — anunciamos `textDocument/formatting`
-                // delegando al formatter `fitz fmt` ya existente
-                // (`src/fmt.rs::format_source`). El cliente VSCode con
-                // `editor.formatOnSave = true` invoca el handler `formatting`
-                // al guardar. Sin esto, el usuario tenía que correr `fitz fmt`
-                // a mano o configurar un formatter externo apuntando al binario.
+                // V3 (2026-06-05) — we announce
+                // `textDocument/formatting` delegating to the
+                // existing `fitz fmt` formatter
+                // (`src/fmt.rs::format_source`). The VSCode client
+                // with `editor.formatOnSave = true` invokes the
+                // `formatting` handler on save. Without it, the user
+                // had to run `fitz fmt` by hand or configure an
+                // external formatter pointing at the binary.
                 document_formatting_provider: Some(OneOf::Left(true)),
-                // V4 (2026-06-05) — anunciamos `textDocument/signatureHelp`
-                // con trigger chars `(` y `,`. Al tipear `f(` o `f(a, `
-                // el cliente invoca el handler que muestra la firma de la
-                // fn top-level con el param actual resaltado. MVP: solo
-                // fns user-defined del programa; builtins quedan deuda menor.
+                // V4 (2026-06-05) — we announce
+                // `textDocument/signatureHelp` with trigger chars
+                // `(` and `,`. When typing `f(` or `f(a, ` the
+                // client invokes the handler which shows the
+                // signature of the top-level fn with the current
+                // param highlighted. MVP: only user-defined fns
+                // from the program; builtins remain minor debt.
                 signature_help_provider: Some(SignatureHelpOptions {
                     trigger_characters: Some(vec!["(".into(), ",".into()]),
                     retrigger_characters: None,
@@ -212,10 +217,10 @@ impl LanguageServer for Backend {
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
         let uri = params.text_document.uri;
         let version = params.text_document.version;
-        // Con `TextDocumentSyncKind::FULL`, la spec garantiza un solo
-        // entry en `content_changes` y su `text` es el documento entero
-        // (sin `range`). Tomamos el último por defensa contra clientes
-        // que manden múltiples eventos.
+        // With `TextDocumentSyncKind::FULL`, the spec guarantees a
+        // single entry in `content_changes` whose `text` is the
+        // entire document (no `range`). We take the last one as a
+        // defense against clients that send multiple events.
         let text = params
             .content_changes
             .into_iter()
@@ -228,17 +233,17 @@ impl LanguageServer for Backend {
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
         let uri = params.text_document.uri;
         self.documents.lock().remove(&uri);
-        // Convención LSP: al cerrar, mandamos un publish con lista
-        // vacía para que VSCode limpie los marcadores del archivo.
+        // LSP convention: on close we send a publish with an empty
+        // list so VSCode clears the file's markers.
         self.client.publish_diagnostics(uri, vec![], None).await;
     }
 
     async fn hover(&self, params: HoverParams) -> LspResult<Option<Hover>> {
-        // Resolvemos todo bajo el lock — clonamos lo mínimo (un `Type`
-        // y formateamos contra el env) para soltarlo antes de devolver.
-        // El env no se clona; el `make_hover` corre adentro del lock
-        // porque solo lee y serializa a string. Sin awaits → sin
-        // deadlock risk.
+        // We resolve everything under the lock — we clone the
+        // minimum (one `Type` and format against the env) so we can
+        // release it before returning. The env is not cloned;
+        // `make_hover` runs inside the lock because it only reads
+        // and serializes to a string. No awaits → no deadlock risk.
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let documents = self.documents.lock();
@@ -246,21 +251,21 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        // v0.13.2 — `pos.character` llega del cliente como UTF-16
-        // code units (default del spec LSP). `hover_for_position` y
-        // `make_hover_with_range` esperan chars Unicode (TypeInfo
-        // indexa por chars del lexer, `ident_range_at_position` usa
-        // `Vec<char>`). Traducimos una vez con el helper y pasamos
-        // el char_unicode a ambas. Para código sin SMP (todo en la
-        // práctica) la traducción es la identidad.
+        // v0.13.2 — `pos.character` arrives from the client as
+        // UTF-16 code units (LSP spec default). `hover_for_position`
+        // and `make_hover_with_range` expect Unicode chars
+        // (TypeInfo indexes by lexer chars, `ident_range_at_position`
+        // uses `Vec<char>`). We translate once with the helper and
+        // pass char_unicode to both. For code without SMP (all real
+        // code in practice) the translation is the identity.
         let char_unicode = utf16_to_unicode_char(&state.text, pos.line, pos.character);
-        // LSPy — hover con Range del símbolo bajo el cursor para
-        // que VSCode highlightee el token en lugar de solo mostrar
-        // el tooltip aislado.
+        // LSPy — hover with Range of the symbol under the cursor so
+        // VSCode highlights the token instead of only showing the
+        // isolated tooltip.
         let hover = hover_for_position(&state.type_info, pos.line, char_unicode).map(|ty| {
-            // v0.10.32 (Tier D.2) — pasamos `program` para que el LSP
-            // pueda augmentar el hover con el CREATE TABLE SQL si el
-            // tipo es un `@table` type.
+            // v0.10.32 (Tier D.2) — we pass `program` so the LSP can
+            // augment the hover with the CREATE TABLE SQL if the
+            // type is a `@table` type.
             make_hover_with_range(
                 ty,
                 &state.type_env,
@@ -277,13 +282,14 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> LspResult<Option<GotoDefinitionResponse>> {
-        // Resolvemos `(uri, pos) → def_span` bajo el lock. Para defs
-        // locales, devolvemos el Location del doc abierto. Mini-tanda
-        // LSPx — si el def_span apunta a un Stmt::Import/FromImport,
-        // intentamos resolver el módulo target y apuntar a la
-        // declaración real en ese archivo. El nombre del ident bajo
-        // el cursor se extrae heurísticamente desde la línea — basta
-        // con la "palabra" alphanum bajo la posición.
+        // We resolve `(uri, pos) → def_span` under the lock. For
+        // local defs we return the Location of the open doc. LSPx
+        // mini-batch — if def_span points at a
+        // Stmt::Import/FromImport, we try to resolve the target
+        // module and point at the actual declaration in that file.
+        // The name of the ident under the cursor is extracted
+        // heuristically from the line — the alphanum "word" under
+        // the position is enough.
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let documents = self.documents.lock();
@@ -291,25 +297,27 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        // v0.13.2 — traducimos UTF-16 → chars Unicode una vez (mismo
-        // motivo que en `hover`). `definition_for_position` busca en
-        // DefinitionInfo indexado por chars Unicode del lexer;
-        // `ident_under_cursor` usa `Vec<char>` y `char_idx` directo.
+        // v0.13.2 — we translate UTF-16 → Unicode chars once (same
+        // reason as in `hover`). `definition_for_position` looks up
+        // DefinitionInfo indexed by lexer Unicode chars;
+        // `ident_under_cursor` uses `Vec<char>` and `char_idx`
+        // directly.
         let char_unicode = utf16_to_unicode_char(&state.text, pos.line, pos.character);
         let Some(def_span) = definition_for_position(&state.def_info, pos.line, char_unicode)
         else {
             return Ok(None);
         };
-        // Intentar cross-module resolution si el def_span coincide con
-        // un Stmt::Import / Stmt::FromImport del program. Extraemos el
-        // nombre del ident bajo el cursor de la línea del documento.
+        // Attempt cross-module resolution if the def_span matches a
+        // Stmt::Import / Stmt::FromImport of the program. We
+        // extract the name of the ident under the cursor from the
+        // document line.
         let target_name = ident_under_cursor(&state.text, pos.line as usize, char_unicode as usize);
         let cross = target_name
             .as_deref()
             .and_then(|name| resolve_cross_module_definition(&state.program, &uri, def_span, name));
-        // LSPy — Location con Range exacto del ident en la línea
-        // del def. Para defs locales, source = doc abierto; para
-        // cross-module, source = archivo target (re-leemos del FS).
+        // LSPy — Location with exact Range of the ident on the def
+        // line. For local defs, source = open doc; for cross-
+        // module, source = target file (we re-read from the FS).
         let location = match cross {
             Some((target_uri, target_span)) => {
                 let target_source = target_uri
@@ -328,9 +336,9 @@ impl LanguageServer for Backend {
     }
 
     async fn completion(&self, params: CompletionParams) -> LspResult<Option<CompletionResponse>> {
-        // Detección de contexto + lookup en TypeInfo/Program bajo el
-        // lock. El helper `completion_at_position` es pure-function;
-        // sin awaits dentro del lock.
+        // Context detection + TypeInfo/Program lookup under the
+        // lock. The `completion_at_position` helper is pure
+        // function; no awaits inside the lock.
         let uri = params.text_document_position.text_document.uri;
         let pos = params.text_document_position.position;
         let documents = self.documents.lock();
@@ -345,24 +353,26 @@ impl LanguageServer for Backend {
             &state.type_env,
             pos.line,
             pos.character,
-            // v0.9.47 — pasa el doc_uri para que el contexto
-            // `from <mod> import |` resuelva el archivo del módulo
-            // target y enumere sus exports.
+            // v0.9.47 — pass the doc_uri so the `from <mod> import |`
+            // context resolves the target module file and
+            // enumerates its exports.
             Some(&uri),
         );
         Ok(Some(CompletionResponse::Array(items)))
     }
 
-    /// V3 (2026-06-05) — `textDocument/formatting`. Delega al formatter
-    /// pure-function `fitz::fmt::format_source` que ya existe (Fase 9.z.1)
-    /// y devuelve UN `TextEdit` que reemplaza el documento entero
-    /// (`(0,0)..(end_of_doc)` → texto formateado). Si el doc tiene
-    /// errores de parser, `format_source` retorna `Err` y devolvemos
-    /// `Ok(None)` silencioso — no abortamos el save del usuario.
+    /// V3 (2026-06-05) — `textDocument/formatting`. Delegates to
+    /// the pure-function formatter `fitz::fmt::format_source` that
+    /// already exists (Phase 9.z.1) and returns ONE `TextEdit` that
+    /// replaces the entire document
+    /// (`(0,0)..(end_of_doc)` → formatted text). If the doc has
+    /// parser errors, `format_source` returns `Err` and we return
+    /// `Ok(None)` silently — we don't abort the user's save.
     ///
-    /// Patrón estándar para formatters non-incremental (rust-analyzer,
-    /// black, prettier hacen igual). Usamos `TextDocumentSyncKind::FULL`
-    /// así que el `state.text` siempre tiene el contenido completo.
+    /// Standard pattern for non-incremental formatters
+    /// (rust-analyzer, black, prettier do the same). We use
+    /// `TextDocumentSyncKind::FULL` so `state.text` always has the
+    /// full content.
     async fn formatting(
         &self,
         params: DocumentFormattingParams,
@@ -377,15 +387,16 @@ impl LanguageServer for Backend {
             Ok(s) => s,
             Err(_) => return Ok(None),
         };
-        // Si el output coincide bit-a-bit con el input, no emitimos
-        // edits — evita marcar el doc como modificado por save sin
-        // cambios reales.
+        // If the output matches the input bit-by-bit, we emit no
+        // edits — avoids marking the doc as modified by save
+        // without real changes.
         if formatted == state.text {
             return Ok(Some(Vec::new()));
         }
-        // Range del doc entero: desde (0,0) hasta (last_line, last_col).
-        // Posiciones en UTF-16 code units (LSP default). Para el final
-        // del doc, calculamos last_line + last_col del state.text.
+        // Range of the entire doc: from (0,0) to
+        // (last_line, last_col). Positions in UTF-16 code units
+        // (LSP default). For the end of the doc, we compute
+        // last_line + last_col of state.text.
         let (end_line, end_char_utf16) = end_position_utf16(&state.text);
         let edit = TextEdit {
             range: Range {
@@ -397,16 +408,16 @@ impl LanguageServer for Backend {
         Ok(Some(vec![edit]))
     }
 
-    /// V4 (2026-06-05) — `textDocument/signatureHelp`. Detecta el `Call`
-    /// enclosing en el documento, identifica el callee por nombre y
-    /// resuelve la signature contra fns top-level del `Program`. MVP:
-    /// solo fns user-defined; builtins y method calls quedan como deuda
-    /// menor.
+    /// V4 (2026-06-05) — `textDocument/signatureHelp`. Detects the
+    /// enclosing `Call` in the document, identifies the callee by
+    /// name, and resolves the signature against top-level fns of
+    /// the `Program`. MVP: only user-defined fns; builtins and
+    /// method calls remain minor debt.
     ///
-    /// Heurística del walkback: cuenta `(`/`)` para encontrar el `(` no
-    /// balanceado del call enclosing, y `,` a depth 0 para el
-    /// `active_parameter`. No respeta strings ni comments (deuda menor
-    /// — patrón raro en práctica).
+    /// Walkback heuristic: counts `(`/`)` to find the unbalanced
+    /// `(` of the enclosing call, and `,` at depth 0 for
+    /// `active_parameter`. Doesn't respect strings or comments
+    /// (minor debt — rare pattern in practice).
     async fn signature_help(
         &self,
         params: SignatureHelpParams,
@@ -418,7 +429,7 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        // v0.13.2 — UTF-16 → chars Unicode una vez (mismo motivo que en
+        // v0.13.2 — UTF-16 → Unicode chars once (same reason as in
         // `hover`/`goto_definition`).
         let char_unicode = utf16_to_unicode_char(&state.text, pos.line, pos.character);
         Ok(signature_help_at_position(
@@ -430,11 +441,11 @@ impl LanguageServer for Backend {
     }
 }
 
-/// V3 (2026-06-05) — calcula la `Position` LSP del final del documento
-/// en UTF-16 code units (default del spec LSP). Devuelve
-/// `(last_line, last_col_utf16)` apuntando ANTES del último char
-/// emitido (o `(0, 0)` para doc vacío). Sigue la convención del LSP
-/// donde el `end` de un Range es exclusivo.
+/// V3 (2026-06-05) — computes the LSP `Position` of the end of the
+/// document in UTF-16 code units (LSP spec default). Returns
+/// `(last_line, last_col_utf16)` pointing BEFORE the last emitted
+/// char (or `(0, 0)` for an empty doc). Follows the LSP convention
+/// where the `end` of a Range is exclusive.
 fn end_position_utf16(text: &str) -> (u32, u32) {
     if text.is_empty() {
         return (0, 0);
@@ -452,12 +463,12 @@ fn end_position_utf16(text: &str) -> (u32, u32) {
     (line, col_utf16)
 }
 
-/// Mini-tanda LSPx — extrae el identificador (run de chars alphanum +
-/// `_`) bajo el cursor `(line, character)` (ambos 0-based LSP). Usado
-/// por `goto_definition` para nombrar el símbolo a resolver
-/// cross-module. Si el cursor cae sobre un char no-ident, busca el
-/// run a la IZQUIERDA inmediata. Devuelve `None` si no hay ident
-/// adyacente.
+/// LSPx mini-batch — extracts the identifier (run of alphanum + `_`
+/// chars) under the cursor `(line, character)` (both 0-based LSP).
+/// Used by `goto_definition` to name the symbol to resolve cross-
+/// module. If the cursor falls on a non-ident char, it looks for the
+/// run immediately to the LEFT. Returns `None` if no ident is
+/// adjacent.
 fn ident_under_cursor(text: &str, line_idx: usize, char_idx: usize) -> Option<String> {
     let line = text.lines().nth(line_idx)?;
     let chars: Vec<char> = line.chars().collect();
@@ -467,8 +478,8 @@ fn ident_under_cursor(text: &str, line_idx: usize, char_idx: usize) -> Option<St
     let is_ident_char = |c: char| c.is_alphanumeric() || c == '_';
     let cursor = char_idx.min(chars.len());
 
-    // Si el cursor está sobre o adyacente a un char ident, encontrar
-    // los límites del run.
+    // If the cursor is on or adjacent to an ident char, find the
+    // bounds of the run.
     let mut start = cursor;
     while start > 0 && is_ident_char(chars[start - 1]) {
         start -= 1;
@@ -485,11 +496,11 @@ fn ident_under_cursor(text: &str, line_idx: usize, char_idx: usize) -> Option<St
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    // current_thread alcanza para el LSP: el server es I/O-bound (lee
-    // stdin, escribe stdout, despacha handlers) y no necesita el work
-    // stealing del scheduler multi-thread. Mantiene el binario chico
-    // y deja la decisión de runtime ortogonal a la del CLI HTTP que
-    // sí pide multi-thread (Fase F17).
+    // current_thread is enough for the LSP: the server is I/O-bound
+    // (reads stdin, writes stdout, dispatches handlers) and doesn't
+    // need work stealing from the multi-thread scheduler. Keeps the
+    // binary small and leaves the runtime decision orthogonal to
+    // the HTTP CLI's, which DOES need multi-thread (Phase F17).
     let stdin = tokio::io::stdin();
     let stdout = tokio::io::stdout();
     let (service, socket) = LspService::new(|client| Backend {
