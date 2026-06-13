@@ -1,40 +1,41 @@
-//! Git deps — clonado + cache local (Fase 9.y.3.c).
+//! Git deps — cloning + local cache (Phase 9.y.3.c).
 //!
-//! Habilita `[dependencies] foo = { git = "https://...", tag = "v1.0.0" }`
-//! en `fitz.toml`. El primer acceso clona el repo a
-//! `<cache>/git/<sanitized-url>@<ref>/` (cache global) y reusa el dir
-//! en accesos siguientes.
+//! Enables `[dependencies] foo = { git = "https://...", tag = "v1.0.0" }`
+//! in `fitz.toml`. The first access clones the repo to
+//! `<cache>/git/<sanitized-url>@<ref>/` (global cache) and reuses the
+//! dir on subsequent accesses.
 //!
-//! **Decisiones técnicas tomadas**:
+//! **Technical decisions made**:
 //!
-//! - **Subprocess `git`** en lugar de crate (`git2`/`gix`): cero deps
-//!   adicionales, asume `git` en el `PATH` (lo cual ya es el caso para
-//!   cualquier dev de Fitz). Si falla, error claro.
-//! - **`tag` o `rev`**, NUNCA `branch`: branches mutan upstream y
-//!   rompen reproducibilidad. Esta restricción se valida acá.
-//! - **`tag` y `rev` mutuamente exclusivos**: ambos especifican un
-//!   "punto fijo"; mezclar genera ambigüedad.
-//! - **Cache directory naming**: URL sanitizada + `@` + ref. Sin
-//!   hashing, determinístico y human-readable
-//!   (`github.com_foo_bar@v1.0.0/`). Trade-off: URLs muy largas o con
-//!   chars exóticos podrían colisionar; en MVP truncamos a 200 chars
-//!   y aceptamos el caso 99%.
-//! - **Cache reuse**: si el dir ya existe, asumimos clonado correcto
-//!   y solo leemos el commit hash. Sin re-clone automático.
-//!   Invalidación manual (borrar el dir o `fitz cache clean` post-MVP).
-//! - **Override del cache via env var `FITZ_CACHE_DIR`**: para tests
-//!   (que necesitan tempdirs aislados) y power users que quieran
-//!   compartir cache entre máquinas o moverlo de disco.
+//! - **`git` subprocess** instead of a crate (`git2`/`gix`): zero
+//!   additional deps, assumes `git` in the `PATH` (which is already
+//!   the case for any Fitz dev). If it fails, clear error.
+//! - **`tag` or `rev`**, NEVER `branch`: branches mutate upstream and
+//!   break reproducibility. This restriction is validated here.
+//! - **`tag` and `rev` mutually exclusive**: both specify a "fixed
+//!   point"; mixing them generates ambiguity.
+//! - **Cache directory naming**: sanitized URL + `@` + ref. No
+//!   hashing, deterministic and human-readable
+//!   (`github.com_foo_bar@v1.0.0/`). Trade-off: very long URLs or
+//!   ones with exotic chars could collide; in the MVP we truncate to
+//!   200 chars and accept the 99% case.
+//! - **Cache reuse**: if the dir already exists, we assume a correct
+//!   previous clone and only read the commit hash. No automatic
+//!   re-clone. Manual invalidation (delete the dir or
+//!   `fitz cache clean` post-MVP).
+//! - **Cache override via env var `FITZ_CACHE_DIR`**: for tests
+//!   (which need isolated tempdirs) and power users who want to
+//!   share cache between machines or move it across disks.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Nombre de la env var que override-a el root del cache.
+/// Name of the env var that overrides the cache root.
 pub const CACHE_DIR_ENV: &str = "FITZ_CACHE_DIR";
 
-/// Devuelve el root del cache: `$FITZ_CACHE_DIR` si está seteada, si
-/// no `~/.fitz/cache`. Si tampoco hay home, falla — sin cache root
-/// no podemos manejar git deps.
+/// Returns the cache root: `$FITZ_CACHE_DIR` if set, otherwise
+/// `~/.fitz/cache`. If there is no home either, fails — without a
+/// cache root we cannot handle git deps.
 pub fn cache_root() -> Result<PathBuf, GitDepError> {
     if let Ok(override_dir) = std::env::var(CACHE_DIR_ENV) {
         if !override_dir.is_empty() {
@@ -45,13 +46,14 @@ pub fn cache_root() -> Result<PathBuf, GitDepError> {
     Ok(home.join(".fitz").join("cache"))
 }
 
-/// Subdirectorio del cache donde viven los clones git.
+/// Cache subdirectory where the git clones live.
 pub fn git_cache_root() -> Result<PathBuf, GitDepError> {
     Ok(cache_root()?.join("git"))
 }
 
-/// Devuelve el path absoluto del home del usuario. En Windows usa
-/// `USERPROFILE`; en Unix `HOME`. Sin dep externa (no usamos `dirs`).
+/// Returns the absolute path of the user's home directory. On Windows
+/// uses `USERPROFILE`; on Unix `HOME`. No external dep (we do not use
+/// `dirs`).
 fn home_dir() -> Option<PathBuf> {
     if cfg!(windows) {
         std::env::var_os("USERPROFILE").map(PathBuf::from)
@@ -60,8 +62,8 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
-/// Ref pedida en el manifest para una git dep. Mutuamente exclusivos:
-/// `Tag(s)` o `Rev(s)`, nunca ambos.
+/// Ref requested in the manifest for a git dep. Mutually exclusive:
+/// `Tag(s)` or `Rev(s)`, never both.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum GitRef {
     Tag(String),
@@ -69,9 +71,9 @@ pub enum GitRef {
 }
 
 impl GitRef {
-    /// String usado en el cache dir y en el lockfile. Mismo para tag
-    /// y rev — el lockfile distingue por contexto (commit hash en
-    /// `source`) si hace falta diferenciar.
+    /// String used in the cache dir and the lockfile. Same for tag
+    /// and rev — the lockfile disambiguates by context (commit hash
+    /// in `source`) if differentiation is needed.
     pub fn as_str(&self) -> &str {
         match self {
             GitRef::Tag(s) | GitRef::Rev(s) => s.as_str(),
@@ -79,22 +81,22 @@ impl GitRef {
     }
 }
 
-/// Errores del módulo. Independiente de `ManifestError` — el caller
-/// hace `From` o wrap cuando integra.
+/// Module errors. Independent of `ManifestError` — the caller does
+/// `From` or wrap on integration.
 #[derive(Debug)]
 pub enum GitDepError {
-    /// `git` no está en el `PATH` o no se pudo ejecutar.
+    /// `git` is not in the `PATH` or could not be executed.
     GitNotFound(std::io::Error),
-    /// `git clone` o `git checkout` o `git rev-parse` falló.
-    /// Lleva el comando + el stderr para el mensaje.
+    /// `git clone` or `git checkout` or `git rev-parse` failed.
+    /// Carries the command + the stderr for the message.
     GitCommandFailed { command: String, stderr: String },
-    /// No se pudo determinar el home directory (sin `HOME` ni
-    /// `USERPROFILE`) y `FITZ_CACHE_DIR` tampoco está seteada.
+    /// Could not determine the home directory (no `HOME` or
+    /// `USERPROFILE`) and `FITZ_CACHE_DIR` is not set either.
     NoHomeDir,
-    /// Error de I/O al manipular el cache directory.
+    /// I/O error while manipulating the cache directory.
     Io(std::io::Error),
-    /// La validación del shape de la dep falló: por ejemplo, ambos
-    /// `tag` y `rev` están presentes, o ninguno.
+    /// Validation of the dep's shape failed: e.g., both `tag` and
+    /// `rev` are present, or neither.
     InvalidGitDep(String),
 }
 
@@ -126,16 +128,17 @@ impl std::fmt::Display for GitDepError {
 
 impl std::error::Error for GitDepError {}
 
-/// Sanitiza una URL para usarla como componente de path. Reemplaza
-/// caracteres problemáticos por `_` y trunca a 200 chars para no
-/// pasarse del límite de filesystem en Windows.
+/// Sanitizes a URL for use as a path component. Replaces problematic
+/// characters with `_` and truncates to 200 chars so as not to exceed
+/// the filesystem limit on Windows.
 ///
-/// No es un hash — es transformación textual. Colisiones teóricas
-/// existen (dos URLs muy distintas con prefijo común podrían
-/// truncarse al mismo string) pero son irrelevantes en el caso 99%.
+/// It is not a hash — it is a textual transformation. Theoretical
+/// collisions exist (two very different URLs with a common prefix
+/// could truncate to the same string) but they are irrelevant in the
+/// 99% case.
 pub fn sanitize_url(url: &str) -> String {
-    // Strip prefijo del schema para que el cache no se llene de
-    // `https___...`. Aceptamos http, https, git, ssh, y file.
+    // Strip the schema prefix so the cache does not fill up with
+    // `https___...`. We accept http, https, git, ssh, and file.
     let stripped = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
@@ -159,36 +162,37 @@ pub fn sanitize_url(url: &str) -> String {
     }
 }
 
-/// Construye el path absoluto del cache directory para una (url, ref)
-/// dada, sin tocar disco. Útil para tests + para reportar errores
-/// que mencionan la ubicación esperada.
+/// Builds the absolute cache directory path for a given (url, ref)
+/// pair, without touching disk. Useful for tests + for reporting
+/// errors that mention the expected location.
 pub fn cache_path_for(url: &str, gitref: &GitRef) -> Result<PathBuf, GitDepError> {
     let dir_name = format!("{}@{}", sanitize_url(url), sanitize_url(gitref.as_str()));
     Ok(git_cache_root()?.join(dir_name))
 }
 
-/// Resultado de resolver un git dep contra el cache.
+/// Result of resolving a git dep against the cache.
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitClonedRepo {
-    /// Path absoluto al directorio del repo clonado.
+    /// Absolute path to the cloned repo's directory.
     pub abs_path: PathBuf,
-    /// Commit hash exacto (`git rev-parse HEAD` después del checkout).
-    /// Se persiste en el lockfile como `source = "git+<url>#<commit>"`.
+    /// Exact commit hash (`git rev-parse HEAD` after checkout).
+    /// Persisted in the lockfile as `source = "git+<url>#<commit>"`.
     pub commit_hash: String,
 }
 
-/// Garantiza que el repo esté clonado y checkeado al `gitref` pedido.
-/// Si el cache ya existe, asume que el clone previo es válido y solo
-/// lee el commit hash. Si no existe, clona desde cero.
+/// Guarantees the repo is cloned and checked out to the requested
+/// `gitref`. If the cache already exists, assumes the previous clone
+/// is valid and only reads the commit hash. If it does not exist,
+/// clones from scratch.
 ///
-/// El clone usa `--depth 1 --branch <tag-or-rev>`. Para revs (commit
-/// SHA), git acepta como `--branch` solo si es resoluble pre-fetch;
-/// si falla, hacemos fallback a clone completo + checkout explícito.
+/// The clone uses `--depth 1 --branch <tag-or-rev>`. For revs (commit
+/// SHA), git accepts `--branch` only if it is pre-fetch resolvable;
+/// if that fails, we fall back to a full clone + explicit checkout.
 pub fn clone_or_use_cache(url: &str, gitref: &GitRef) -> Result<GitClonedRepo, GitDepError> {
     let target = cache_path_for(url, gitref)?;
 
     if !target.exists() {
-        // Asegurar que el directorio padre existe.
+        // Ensure the parent directory exists.
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(GitDepError::Io)?;
         }
@@ -202,14 +206,14 @@ pub fn clone_or_use_cache(url: &str, gitref: &GitRef) -> Result<GitClonedRepo, G
     })
 }
 
-/// Clone fresh: dos estrategias.
+/// Clone fresh: two strategies.
 ///
-/// 1. Si `gitref` es Tag: `git clone --depth 1 --branch <tag> <url> <target>`
-///    funciona y es eficiente.
-/// 2. Si `gitref` es Rev (commit SHA): `--branch` no acepta SHAs.
-///    Hacemos `git clone <url> <target>` full + `git checkout <sha>`.
-///    Wasteful pero correcto. Optimización con `--filter=blob:none`
-///    queda como deuda.
+/// 1. If `gitref` is Tag: `git clone --depth 1 --branch <tag> <url> <target>`
+///    works and is efficient.
+/// 2. If `gitref` is Rev (commit SHA): `--branch` does not accept
+///    SHAs. We do a full `git clone <url> <target>` + `git checkout
+///    <sha>`. Wasteful but correct. Optimization with
+///    `--filter=blob:none` stays as debt.
 fn clone_fresh(url: &str, gitref: &GitRef, target: &Path) -> Result<(), GitDepError> {
     match gitref {
         GitRef::Tag(tag) => run_git(&[
@@ -228,8 +232,8 @@ fn clone_fresh(url: &str, gitref: &GitRef, target: &Path) -> Result<(), GitDepEr
     }
 }
 
-/// `git rev-parse HEAD` adentro del repo en `path`. Devuelve el SHA
-/// completo (40 chars hex) sin trailing newline.
+/// `git rev-parse HEAD` inside the repo at `path`. Returns the full
+/// SHA (40 hex chars) without trailing newline.
 pub fn git_rev_parse_head(path: &Path) -> Result<String, GitDepError> {
     let output = Command::new("git")
         .args(["rev-parse", "HEAD"])
@@ -246,7 +250,8 @@ pub fn git_rev_parse_head(path: &Path) -> Result<String, GitDepError> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
-/// Ejecuta `git <args>` en el cwd actual. Reporta stderr en errors.
+/// Executes `git <args>` in the current cwd. Reports stderr on
+/// errors.
 fn run_git(args: &[&str]) -> Result<(), GitDepError> {
     let output = Command::new("git")
         .args(args)
@@ -261,7 +266,7 @@ fn run_git(args: &[&str]) -> Result<(), GitDepError> {
     Ok(())
 }
 
-/// Ejecuta `git <args>` desde `cwd`. Reporta stderr en errors.
+/// Executes `git <args>` from `cwd`. Reports stderr on errors.
 fn run_git_in(args: &[&str], cwd: &Path) -> Result<(), GitDepError> {
     let output = Command::new("git")
         .args(args)
@@ -277,8 +282,8 @@ fn run_git_in(args: &[&str], cwd: &Path) -> Result<(), GitDepError> {
     Ok(())
 }
 
-/// Construye el string que va al lockfile en `source` para una git
-/// dep ya resuelta. Formato Cargo-style: `git+<url>#<commit-hash>`.
+/// Builds the string that goes in the lockfile's `source` for a git
+/// dep already resolved. Cargo-style format: `git+<url>#<commit-hash>`.
 pub fn lockfile_source_string(url: &str, commit_hash: &str) -> String {
     format!("git+{url}#{commit_hash}")
 }
@@ -320,7 +325,7 @@ mod tests {
 
     #[test]
     fn sanitize_url_sin_prefix_acepta_input_raw() {
-        // URLs sin scheme (raras) se aceptan tal cual.
+        // URLs without scheme (rare) are accepted as-is.
         assert_eq!(sanitize_url("just/a/path"), "just_a_path");
     }
 
@@ -333,7 +338,7 @@ mod tests {
     #[test]
     fn cache_path_for_combina_url_sanitizada_y_ref() {
         let tmp = tempfile::tempdir().unwrap();
-        // Override del cache para no tocar el home real durante tests.
+        // Override the cache so as not to touch the real home during tests.
         let prev = std::env::var(CACHE_DIR_ENV).ok();
         std::env::set_var(CACHE_DIR_ENV, tmp.path());
 
@@ -342,12 +347,12 @@ mod tests {
             &GitRef::Tag("v1.0.0".to_string()),
         )
         .unwrap();
-        // El path debe estar bajo el override + /git/<sanitized>@<ref>.
+        // The path must live under the override + /git/<sanitized>@<ref>.
         assert!(p.starts_with(tmp.path()));
         assert!(p.ends_with("github.com_foo_bar@v1.0.0"));
 
-        // Restaurar la env var (otros tests podrían correr en paralelo
-        // con env vars distintas — atención, ver nota abajo).
+        // Restore the env var (other tests might run in parallel with
+        // different env vars — note, see the comment below).
         match prev {
             Some(v) => std::env::set_var(CACHE_DIR_ENV, v),
             None => std::env::remove_var(CACHE_DIR_ENV),
@@ -366,9 +371,9 @@ mod tests {
         );
     }
 
-    // NOTA: los tests de clone_or_use_cache (que invocan git real
-    // sobre repos bare locales) viven en tests/cli_e2e.rs porque
-    // necesitan setup más elaborado (crear bare repo + commits + tag)
-    // y se benefician de tempdirs aislados que no compiten por la
-    // env var FITZ_CACHE_DIR.
+    // NOTE: the clone_or_use_cache tests (which invoke real git
+    // against local bare repos) live in tests/cli_e2e.rs because they
+    // need more elaborate setup (create bare repo + commits + tag)
+    // and benefit from isolated tempdirs that do not compete for the
+    // FITZ_CACHE_DIR env var.
 }

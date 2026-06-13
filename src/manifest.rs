@@ -1,42 +1,42 @@
-//! Manifest del proyecto (`fitz.toml`) — Fase 9.y.1.
+//! Project manifest (`fitz.toml`) — Phase 9.y.1.
 //!
-//! Primer pieza del package manager. Define el formato del archivo que
-//! describe un proyecto Fitz (nombre, versión, entry point, deps) y la
-//! API mínima para leerlo, escribirlo, y resolverlo desde un directorio
-//! arbitrario.
+//! First piece of the package manager. Defines the file format that
+//! describes a Fitz project (name, version, entry point, deps) and the
+//! minimal API to read it, write it, and resolve it from an arbitrary
+//! directory.
 //!
-//! En 9.y.1 el manifest todavía no afecta a `fitz run`/`build`/`check`
-//! — esos consumidores llegan en 9.y.2. Acá solo entregamos el formato
-//! + `fitz new`/`fitz init` que lo crean.
+//! In 9.y.1 the manifest does not yet affect `fitz run`/`build`/`check`
+//! — those consumers land in 9.y.2. Here we only deliver the format
+//! + `fitz new`/`fitz init` that create it.
 //!
-//! Convenciones cerradas en 9.y.1 (ver `docs/roadmap.md` → 9.y):
-//! - Formato: TOML (`fitz.toml`).
-//! - Estructura: `src/main.fitz` como entry point por default.
-//! - Field versionado: `edition = "2026"` (Cargo-style year).
-//! - Bin único en MVP (`[bin] main = "..."`). Multi-bin con `[[bin]]`
-//!   queda como deuda 9.y.8+.
-//! - Validación de nombre: `^[a-z][a-z0-9_-]{0,63}$` (política
-//!   crates.io: lowercase + alfanumérico + `-`/`_`).
+//! Conventions closed in 9.y.1 (see `docs/roadmap.md` → 9.y):
+//! - Format: TOML (`fitz.toml`).
+//! - Structure: `src/main.fitz` as the default entry point.
+//! - Versioned field: `edition = "2026"` (Cargo-style year).
+//! - Single bin in MVP (`[bin] main = "..."`). Multi-bin with `[[bin]]`
+//!   stays as debt 9.y.8+.
+//! - Name validation: `^[a-z][a-z0-9_-]{0,63}$` (crates.io policy:
+//!   lowercase + alphanumeric + `-`/`_`).
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// Edición del lenguaje vigente para `fitz new`. Cargo-style year;
-/// permite romper compatibilidad sin tocar la versión semántica del
-/// compilador.
+/// Current language edition for `fitz new`. Cargo-style year; lets us
+/// break compatibility without touching the compiler's semantic
+/// version.
 pub const CURRENT_EDITION: &str = "2026";
 
-/// Nombre del archivo de manifest.
+/// Manifest file name.
 pub const MANIFEST_FILE: &str = "fitz.toml";
 
-/// Manifest completo de un proyecto Fitz.
+/// Full manifest of a Fitz project.
 ///
-/// **Sobre `[bin]` vs `[lib]`** (Fase 9.y.3.a): un proyecto puede ser
-/// ejecutable (`[bin]`), librería (`[lib]`), o ambos. `fitz run`/
-/// `build` exigen `[bin]`. Los path deps de OTROS proyectos exigen
-/// `[lib]` (un proyecto solo-bin no se puede importar desde otro).
+/// **About `[bin]` vs `[lib]`** (Phase 9.y.3.a): a project can be
+/// executable (`[bin]`), library (`[lib]`), or both. `fitz run`/
+/// `build` require `[bin]`. Path deps from OTHER projects require
+/// `[lib]` (a bin-only project cannot be imported from another).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Manifest {
     pub package: Package,
@@ -46,17 +46,17 @@ pub struct Manifest {
     pub lib: Option<Lib>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dependencies: BTreeMap<String, Dependency>,
-    /// Fase 12.8 — Feature flags declaradas en el manifest. Sección
-    /// `[flags]` mapea `flag-name = bool` para defaults compile-time.
-    /// Override runtime via env vars `FITZ_FLAG_<UPPERCASE>`.
-    /// Ejemplo TOML:
+    /// Phase 12.8 — Feature flags declared in the manifest. Section
+    /// `[flags]` maps `flag-name = bool` for compile-time defaults.
+    /// Runtime override via env vars `FITZ_FLAG_<UPPERCASE>`.
+    /// TOML example:
     /// ```toml
     /// [flags]
     /// new-checkout = false
     /// dark-mode = true
     /// ```
-    /// El binario cargado por `fitz run`/`build` lee esta sección al
-    /// boot y la pasa a `evaluator::set_flag_defaults`.
+    /// The binary loaded by `fitz run`/`build` reads this section at
+    /// boot and passes it to `evaluator::set_flag_defaults`.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub flags: BTreeMap<String, bool>,
 }
@@ -79,23 +79,23 @@ pub struct Bin {
     pub main: String,
 }
 
-/// Sección `[lib]` del manifest. Marca al proyecto como librería
-/// importable desde otros proyectos vía path/git deps.
+/// Section `[lib]` of the manifest. Marks the project as a library
+/// importable from other projects via path/git deps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Lib {
-    /// Path relativo al manifest del entry de la librería. Por
-    /// convención `src/lib.fitz`, paralelo a `[bin].main`.
+    /// Path relative to the manifest of the library's entry. By
+    /// convention `src/lib.fitz`, parallel to `[bin].main`.
     pub entry: String,
 }
 
-/// Declaración de una dependencia en `[dependencies]`. Acepta dos
-/// formas TOML gracias a `serde(untagged)`:
+/// Declaration of a dependency in `[dependencies]`. Accepts two TOML
+/// forms thanks to `serde(untagged)`:
 ///
-/// - **Versión plana** `foo = "1.2.3"` → `Dependency::Version("1.2.3")`.
-///   Reservada para 9.y.5 (registry). Al resolver hoy → error claro.
-/// - **Detallada** `foo = { path = "../foo" }` → `Dependency::Detailed`.
-///   Soporta `path` (9.y.3.a) y los campos `git`/`tag`/`rev` que
-///   reservamos para 9.y.3.c (rechazo controlado al resolver).
+/// - **Plain version** `foo = "1.2.3"` → `Dependency::Version("1.2.3")`.
+///   Reserved for 9.y.5 (registry). When resolving today → clear error.
+/// - **Detailed** `foo = { path = "../foo" }` → `Dependency::Detailed`.
+///   Supports `path` (9.y.3.a) and the `git`/`tag`/`rev` fields we
+///   reserve for 9.y.3.c (controlled rejection at resolve time).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Dependency {
@@ -103,73 +103,73 @@ pub enum Dependency {
     Detailed(DetailedDependency),
 }
 
-/// Forma detallada de una dependencia. Todos los campos son opcionales
-/// para permitir el roadmap incremental:
+/// Detailed form of a dependency. All fields are optional to allow the
+/// incremental roadmap:
 ///
-/// - 9.y.3.a usa `path`.
-/// - 9.y.3.c agrega `git` + `tag`/`rev`.
-/// - 9.y.4 puede sumar `version` para combinar con git/registry.
+/// - 9.y.3.a uses `path`.
+/// - 9.y.3.c adds `git` + `tag`/`rev`.
+/// - 9.y.4 may add `version` to combine with git/registry.
 ///
-/// La validación cruzada (no permitir `path` + `git`, etc.) ocurre al
-/// resolver, no al parsear — el manifest acepta cualquier combinación
-/// y el resolver emite errores específicos.
+/// Cross-validation (disallowing `path` + `git`, etc.) happens at
+/// resolve time, not at parse — the manifest accepts any combination
+/// and the resolver emits specific errors.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DetailedDependency {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// Reservado para 9.y.3.c (git deps).
+    /// Reserved for 9.y.3.c (git deps).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub git: Option<String>,
-    /// Reservado para 9.y.3.c — tag a checkear en el git dep.
+    /// Reserved for 9.y.3.c — tag to check out in the git dep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tag: Option<String>,
-    /// Reservado para 9.y.3.c — commit sha a checkear en el git dep.
+    /// Reserved for 9.y.3.c — commit sha to check out in the git dep.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rev: Option<String>,
 }
 
-/// Errores del manifest. Sin integrar con `FitzError` (que es del
-/// pipeline del lenguaje) — esto es tooling de proyecto.
+/// Manifest errors. Not integrated with `FitzError` (which is from the
+/// language pipeline) — this is project tooling.
 #[derive(Debug)]
 pub enum ManifestError {
-    /// El nombre no matchea `^[a-z][a-z0-9_-]{0,63}$`.
+    /// Name does not match `^[a-z][a-z0-9_-]{0,63}$`.
     InvalidName(String),
-    /// Fallo al parsear el TOML.
+    /// Failure parsing the TOML.
     Parse(toml::de::Error),
-    /// Fallo al serializar a TOML.
+    /// Failure serializing to TOML.
     Serialize(toml::ser::Error),
-    /// Dep que requiere algo todavía no implementado (versión sin
-    /// registry, git, etc.). Lleva el nombre de la dep y el sub-paso
-    /// futuro que la habilita, para que el mensaje sea accionable.
+    /// Dep that requires something not yet implemented (version without
+    /// registry, git, etc.). Carries the dep name and the future
+    /// sub-step that enables it, so the message is actionable.
     DepNotImplemented { name: String, reason: String },
-    /// Dep `{path = "..."}` cuyo path no existe en disco.
+    /// Dep `{path = "..."}` whose path does not exist on disk.
     DepPathNotFound { name: String, path: PathBuf },
-    /// Dep `{path = "..."}` cuyo manifest existe pero no parsea.
+    /// Dep `{path = "..."}` whose manifest exists but does not parse.
     DepManifestInvalid {
         name: String,
         path: PathBuf,
         source: Box<ManifestError>,
     },
-    /// Dep `{path = "..."}` cuyo manifest no tiene sección `[lib]`.
-    /// Las path deps son librerías por definición — si solo tiene
-    /// `[bin]`, no se puede importar.
+    /// Dep `{path = "..."}` whose manifest has no `[lib]` section.
+    /// Path deps are libraries by definition — if it only has `[bin]`,
+    /// it cannot be imported.
     DepMissingLib { name: String, path: PathBuf },
-    /// Dep con forma inválida: ni `path`, ni `git`, ni nada
-    /// resoluble.
+    /// Dep with invalid shape: neither `path`, nor `git`, nor anything
+    /// resolvable.
     DepInvalidShape { name: String },
-    /// Dep `git` con shape inválido: combinación prohibida o falta
-    /// de tag/rev. El `reason` ya viene formateado para el usuario.
+    /// `git` dep with invalid shape: forbidden combination or missing
+    /// tag/rev. `reason` is already formatted for the user.
     DepInvalidGitShape { name: String, reason: String },
-    /// Falló el clone/checkout/rev-parse de una git dep. Wrappea el
-    /// error del módulo `git_dep` con el nombre de la dep para que
-    /// el mensaje sea accionable.
+    /// Clone/checkout/rev-parse of a git dep failed. Wraps the error
+    /// from the `git_dep` module with the dep name so the message is
+    /// actionable.
     DepGitError {
         name: String,
         source: crate::git_dep::GitDepError,
     },
-    /// Error parseando el manifest con `toml_edit` (camino de edición
-    /// preservando formato — `fitz add`/`remove`). Separado de
-    /// `Parse` porque ese viene del serde-toml flow.
+    /// Error parsing the manifest with `toml_edit` (format-preserving
+    /// edit path — `fitz add`/`remove`). Separate from `Parse` because
+    /// that one comes from the serde-toml flow.
     EditParse(toml_edit::TomlError),
 }
 
@@ -224,13 +224,13 @@ impl fmt::Display for ManifestError {
 impl std::error::Error for ManifestError {}
 
 impl Manifest {
-    /// Construye un manifest default para un proyecto nuevo:
+    /// Builds a default manifest for a new project:
     /// - version `0.1.0`
-    /// - edition vigente
-    /// - bin con entry `src/main.fitz`
-    /// - sin deps
+    /// - current edition
+    /// - bin with entry `src/main.fitz`
+    /// - no deps
     ///
-    /// Valida el nombre.
+    /// Validates the name.
     pub fn new_default(name: &str) -> Result<Self, ManifestError> {
         if !is_valid_package_name(name) {
             return Err(ManifestError::InvalidName(name.to_string()));
@@ -253,20 +253,20 @@ impl Manifest {
         })
     }
 
-    /// Parsea un manifest desde texto TOML.
+    /// Parses a manifest from TOML text.
     pub fn parse(input: &str) -> Result<Self, ManifestError> {
         toml::from_str(input).map_err(ManifestError::Parse)
     }
 
-    /// Serializa el manifest a TOML.
+    /// Serializes the manifest to TOML.
     pub fn to_toml_string(&self) -> Result<String, ManifestError> {
         toml::to_string(self).map_err(ManifestError::Serialize)
     }
 }
 
-/// Valida un nombre de paquete contra la política crates.io-style:
-/// `^[a-z][a-z0-9_-]{0,63}$`. Implementación a mano para evitar dep
-/// de `regex` (es chica; no justifica el peso ahora).
+/// Validates a package name against the crates.io-style policy:
+/// `^[a-z][a-z0-9_-]{0,63}$`. Hand-written implementation to avoid a
+/// `regex` dep (it's small; doesn't justify the weight right now).
 pub fn is_valid_package_name(name: &str) -> bool {
     if name.is_empty() || name.len() > 64 {
         return false;
@@ -282,12 +282,12 @@ pub fn is_valid_package_name(name: &str) -> bool {
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
 }
 
-/// Busca el `fitz.toml` más cercano subiendo desde `start`. Cargo-style:
-/// el manifest puede estar en el directorio actual o en un ancestro.
-/// Devuelve la ruta absoluta al archivo si lo encuentra.
+/// Searches for the nearest `fitz.toml` walking up from `start`. Cargo-style:
+/// the manifest may live in the current directory or an ancestor.
+/// Returns the absolute path to the file if found.
 ///
-/// Consumido por `resolve_entry` en `main.rs` desde Fase 9.y.2 (cuando
-/// `fitz run`/`build`/`check` aceptan ser invocados sin archivo).
+/// Consumed by `resolve_entry` in `main.rs` since Phase 9.y.2 (when
+/// `fitz run`/`build`/`check` accept being invoked without a file).
 pub fn find_manifest(start: &Path) -> Option<PathBuf> {
     let mut current = start.to_path_buf();
     if current.is_relative() {
@@ -306,10 +306,10 @@ pub fn find_manifest(start: &Path) -> Option<PathBuf> {
     }
 }
 
-// ---- Fase 9.y.4 — edición del manifest preservando formato ----
+// ---- Phase 9.y.4 — format-preserving manifest editing ----
 
-/// Especificación de una dep para `fitz add`. Aliasing del shape que
-/// el CLI parsea desde flags (`--path`, `--git`, `--tag`, `--rev`).
+/// Spec of a dep for `fitz add`. Alias of the shape the CLI parses
+/// from flags (`--path`, `--git`, `--tag`, `--rev`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddDepSpec {
     Path {
@@ -321,13 +321,13 @@ pub enum AddDepSpec {
     },
 }
 
-/// Agrega una dep al `fitz.toml` (texto). Preserva comentarios y
-/// formatting del usuario gracias a `toml_edit`. Si ya existía una
-/// entry con el mismo nombre, la sobreescribe (cargo-style). Si no
-/// existía `[dependencies]`, la crea.
+/// Adds a dep to `fitz.toml` (text). Preserves user comments and
+/// formatting thanks to `toml_edit`. If an entry with the same name
+/// already existed, it overwrites it (cargo-style). If `[dependencies]`
+/// did not exist, it creates it.
 ///
-/// Devuelve el texto TOML actualizado. No persiste a disco — eso es
-/// responsabilidad del caller (típicamente `main.rs::add_dep`).
+/// Returns the updated TOML text. Does not persist to disk — that is
+/// the caller's responsibility (typically `main.rs::add_dep`).
 pub fn add_dep_to_manifest(
     existing_text: &str,
     name: &str,
@@ -336,7 +336,7 @@ pub fn add_dep_to_manifest(
     let mut doc: toml_edit::DocumentMut =
         existing_text.parse().map_err(ManifestError::EditParse)?;
 
-    // Asegurar [dependencies] como table existing.
+    // Ensure [dependencies] exists as a table.
     if !doc.contains_key("dependencies") {
         doc["dependencies"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
@@ -344,7 +344,7 @@ pub fn add_dep_to_manifest(
         .as_table_mut()
         .ok_or_else(|| ManifestError::InvalidName("[dependencies] no es una tabla".to_string()))?;
 
-    // Construir la inline table para la nueva dep.
+    // Build the inline table for the new dep.
     let inline = build_inline_dep_table(spec);
     deps.insert(
         name,
@@ -354,11 +354,11 @@ pub fn add_dep_to_manifest(
     Ok(doc.to_string())
 }
 
-/// Quita una dep del `fitz.toml` (texto). Si la dep no existe en
-/// `[dependencies]`, devuelve `false` (sin error — el caller decide
-/// si reportar como warning o error según el comando). Si `[dependencies]`
-/// queda vacío tras quitar la entry, la sección se borra entera para
-/// no dejar ruido.
+/// Removes a dep from `fitz.toml` (text). If the dep does not exist in
+/// `[dependencies]`, returns `false` (no error — the caller decides
+/// whether to report it as warning or error depending on the command).
+/// If `[dependencies]` ends up empty after removing the entry, the
+/// section is deleted entirely so as not to leave noise.
 pub fn remove_dep_from_manifest(
     existing_text: &str,
     name: &str,
@@ -381,9 +381,9 @@ pub fn remove_dep_from_manifest(
     Ok((doc.to_string(), removed))
 }
 
-/// Construye la inline table TOML para una dep agregada por
-/// `fitz add`. La forma es `{ path = "..." }` o `{ git = "...",
-/// tag = "..." }` / `{ git = "...", rev = "..." }`.
+/// Builds the TOML inline table for a dep added by `fitz add`. The
+/// shape is `{ path = "..." }` or `{ git = "...", tag = "..." }` /
+/// `{ git = "...", rev = "..." }`.
 fn build_inline_dep_table(spec: &AddDepSpec) -> toml_edit::InlineTable {
     let mut table = toml_edit::InlineTable::new();
     match spec {
@@ -405,86 +405,85 @@ fn build_inline_dep_table(spec: &AddDepSpec) -> toml_edit::InlineTable {
     table
 }
 
-// ---- Fase 9.y.3.b — registry de deps consumido por evaluator + codegen ----
+// ---- Phase 9.y.3.b — dep registry consumed by evaluator + codegen ----
 
-/// Map liviano `dep-name → lib_entry-absoluto` que pasamos al loader
-/// del evaluator (`fitz run`) y al loader del codegen (`fitz build`).
+/// Lightweight map `dep-name → absolute-lib_entry` that we pass to the
+/// evaluator's loader (`fitz run`) and the codegen's loader (`fitz build`).
 ///
-/// Fase 9.y.3.b: el loader chequea esto ANTES de fallback a paths
-/// relativos del importer. Cuando `from utils_lib import X` aparece y
-/// `utils_lib` está acá, el loader carga directo desde `lib_entry`.
+/// Phase 9.y.3.b: the loader checks this BEFORE falling back to paths
+/// relative to the importer. When `from utils_lib import X` appears and
+/// `utils_lib` is here, the loader loads directly from `lib_entry`.
 ///
-/// Hyphens en nombres de paquete: aceptados en el manifest, pero NO
-/// pueden aparecer en imports Fitz porque el parser no acepta `-` en
-/// identificadores. Una dep `utils-lib` queda en el registry pero
-/// `from utils-lib import X` no parsea. Convención hasta 9.y.4:
-/// nombrar deps con `_` o sin separador si vas a importarlas.
+/// Hyphens in package names: accepted in the manifest, but CANNOT
+/// appear in Fitz imports because the parser does not accept `-` in
+/// identifiers. A dep `utils-lib` ends up in the registry but
+/// `from utils-lib import X` does not parse. Convention until 9.y.4:
+/// name deps with `_` or no separator if you plan to import them.
 pub type DepRegistry = std::collections::HashMap<String, PathBuf>;
 
-/// Helper: arma el registry desde una lista de `ResolvedDep`. Cada dep
-/// entra una vez por su `name` (el nombre con el que aparece en
-/// `[dependencies]` del importer).
+/// Helper: builds the registry from a list of `ResolvedDep`s. Each dep
+/// goes in once by its `name` (the name with which it appears in the
+/// importer's `[dependencies]`).
 pub fn build_dep_registry(deps: &[ResolvedDep]) -> DepRegistry {
     deps.iter()
         .map(|d| (d.name.clone(), d.lib_entry.clone()))
         .collect()
 }
 
-// ---- Fase 9.y.3.a — resolución de dependencias ----
+// ---- Phase 9.y.3.a — dependency resolution ----
 
-/// Una dep resuelta a path absoluto + metadata necesaria para que el
-/// lockfile y (eventualmente, 9.y.3.b) el loader puedan localizar el
-/// código.
+/// A dep resolved to an absolute path + metadata needed by the lockfile
+/// and (eventually, 9.y.3.b) the loader to locate the code.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedDep {
-    /// Nombre con el que la dep aparece en `[dependencies]` del
-    /// importer. Puede ser distinto al `package.name` del manifest de
-    /// la dep si el usuario usa aliasing (futuro 9.y.4); por ahora
-    /// son iguales.
+    /// Name under which the dep appears in the importer's
+    /// `[dependencies]`. May differ from the `package.name` of the
+    /// dep's manifest if the user uses aliasing (future 9.y.4); for
+    /// now they are equal.
     pub name: String,
-    /// `[package].version` del manifest de la dep. Para path deps esto
-    /// es solo informativo (no se valida contra rangos — el roadmap
-    /// para constraints semver entra con 9.y.5).
+    /// `[package].version` from the dep's manifest. For path deps this
+    /// is purely informational (not validated against ranges — the
+    /// roadmap for semver constraints lands with 9.y.5).
     pub version: String,
-    /// Path absoluto al directorio raíz de la dep (donde vive su
-    /// `fitz.toml`).
+    /// Absolute path to the dep's root directory (where its `fitz.toml`
+    /// lives).
     pub abs_path: PathBuf,
-    /// Path absoluto al entry de la librería (`[lib].entry` de la
-    /// dep, resuelto contra `abs_path`).
+    /// Absolute path to the library's entry (`[lib].entry` of the dep,
+    /// resolved against `abs_path`).
     pub lib_entry: PathBuf,
-    /// Tipo de source, para diferenciar en el lockfile y (futuro
-    /// 9.y.3.b) en el cache. Por ahora solo `Path`.
+    /// Source kind, to distinguish in the lockfile and (future 9.y.3.b)
+    /// in the cache. For now only `Path`.
     pub source: ResolvedDepSource,
 }
 
-/// Tipo de origen de una dep resuelta.
+/// Origin kind of a resolved dep.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedDepSource {
-    /// Path dep. El campo guarda el path tal cual aparece en el
-    /// manifest del importer (no canonicalizado) para preservar la
-    /// intención del usuario en mensajes y diffs del lockfile.
+    /// Path dep. The field stores the path exactly as it appears in
+    /// the importer's manifest (not canonicalized) to preserve the
+    /// user's intent in messages and lockfile diffs.
     Path { declared: String },
-    /// Git dep (9.y.3.c). `url` es la URL tal como la declaró el
-    /// usuario; `requested` distingue Tag/Rev; `commit_hash` es el
-    /// SHA exacto que terminamos checkout-eando (consumido por el
-    /// lockfile como `source = "git+<url>#<commit>"`).
+    /// Git dep (9.y.3.c). `url` is the URL exactly as the user
+    /// declared it; `requested` distinguishes Tag/Rev; `commit_hash`
+    /// is the exact SHA we ended up checking out (consumed by the
+    /// lockfile as `source = "git+<url>#<commit>"`).
     Git {
         url: String,
         requested: crate::git_dep::GitRef,
         commit_hash: String,
     },
-    // `Registry { url, version }` llega en 9.y.5.
+    // `Registry { url, version }` lands in 9.y.5.
 }
 
-/// Resuelve TODAS las deps del manifest contra el filesystem.
-/// Devuelve `ResolvedDep` ordenados por nombre (determinístico,
-/// importante para diffs del lockfile).
+/// Resolves ALL deps from the manifest against the filesystem.
+/// Returns `ResolvedDep`s sorted by name (deterministic, important
+/// for lockfile diffs).
 ///
-/// El `manifest_dir` es el directorio que contiene el `fitz.toml`
-/// del importer; sirve para resolver los `path` relativos.
+/// `manifest_dir` is the directory that contains the importer's
+/// `fitz.toml`; it is used to resolve relative `path`s.
 ///
-/// Errores: corta en la primera dep que falla. Si querés acumular
-/// todos los errores, hace falta refactor (sub-paso futuro).
+/// Errors: stops at the first dep that fails. If you want to
+/// accumulate all errors, a refactor is needed (future sub-step).
 pub fn resolve_dependencies(
     manifest: &Manifest,
     manifest_dir: &Path,
@@ -513,7 +512,7 @@ fn resolve_single_dep(
             let has_path = d.path.is_some();
             let has_git = d.git.is_some();
 
-            // path + git: combinación inválida (cuál prioridad?).
+            // path + git: invalid combination (which priority?).
             if has_path && has_git {
                 return Err(ManifestError::DepInvalidGitShape {
                     name: name.to_string(),
@@ -524,10 +523,10 @@ fn resolve_single_dep(
             }
 
             if has_path {
-                // path-only deps (9.y.3.a) — el resto de los fields
-                // git-relacionados se ignoran silenciosamente. No
-                // erroneamos para no romper el caso donde el usuario
-                // está iterando entre `path` y `git`.
+                // path-only deps (9.y.3.a) — the remaining git-related
+                // fields are silently ignored. We do not error out so
+                // as not to break the case where the user is iterating
+                // between `path` and `git`.
                 let path_str = d.path.as_ref().expect("has_path checked");
                 return resolve_path_dep(name, path_str, manifest_dir);
             }
@@ -538,8 +537,8 @@ fn resolve_single_dep(
                 return resolve_git_dep(name, url, gitref);
             }
 
-            // Ni path ni git pero alguno de tag/rev — usuario olvidó
-            // el url. Mensaje específico.
+            // Neither path nor git but one of tag/rev — user forgot
+            // the url. Specific message.
             if d.tag.is_some() || d.rev.is_some() {
                 return Err(ManifestError::DepInvalidGitShape {
                     name: name.to_string(),
@@ -554,7 +553,7 @@ fn resolve_single_dep(
     }
 }
 
-/// Valida tag/rev: exactamente uno de los dos debe estar presente.
+/// Validates tag/rev: exactly one of the two must be present.
 fn parse_git_ref(
     name: &str,
     tag: Option<&str>,
@@ -592,9 +591,9 @@ fn parse_git_ref(
     }
 }
 
-/// Resolución de git deps (9.y.3.c). Clona o reusa el cache, lee el
-/// manifest de la dep, valida `[lib]`, y devuelve un `ResolvedDep`
-/// con `source = ResolvedDepSource::Git { ... }`.
+/// Resolution of git deps (9.y.3.c). Clones or reuses the cache, reads
+/// the dep's manifest, validates `[lib]`, and returns a `ResolvedDep`
+/// with `source = ResolvedDepSource::Git { ... }`.
 fn resolve_git_dep(
     name: &str,
     url: &str,
@@ -788,8 +787,8 @@ mod tests {
     fn serializacion_omite_fields_opcionales_vacios() {
         let m = Manifest::new_default("mi-app").unwrap();
         let toml = m.to_toml_string().unwrap();
-        // `authors`, `description`, `license`, `dependencies` deben
-        // estar omitidos cuando están vacíos (skip_serializing_if).
+        // `authors`, `description`, `license`, `dependencies` must be
+        // omitted when empty (skip_serializing_if).
         assert!(!toml.contains("authors"));
         assert!(!toml.contains("description"));
         assert!(!toml.contains("license"));
@@ -842,7 +841,7 @@ http-helpers = "0.3.2"
         }
     }
 
-    // ---- Fase 12.8 — sección [flags] ----
+    // ---- Phase 12.8 — [flags] section ----
 
     #[test]
     fn flags_seccion_vacia_o_ausente_default_empty_map() {
@@ -878,8 +877,8 @@ beta_feature = true
 
     #[test]
     fn flags_no_bool_value_es_error_de_parse() {
-        // TOML strict: el campo `[flags]` espera bool, si el value es
-        // string falla con parse error claro.
+        // TOML strict: the `[flags]` field expects bool; if the value
+        // is a string it fails with a clear parse error.
         let toml_text = r#"
 [package]
 name = "mi-app"
@@ -917,8 +916,8 @@ name = "mi-app"
         )
         .unwrap();
         let found = find_manifest(tmp.path()).unwrap();
-        // Canonicalizar ambos lados — en Windows el tmp puede expandir
-        // `~/AppData/Local/Temp` a un path distinto al de tempfile.
+        // Canonicalize both sides — on Windows the tmp can expand
+        // `~/AppData/Local/Temp` to a different path than tempfile's.
         assert_eq!(
             std::fs::canonicalize(&found).unwrap(),
             std::fs::canonicalize(&manifest_path).unwrap()
@@ -943,7 +942,7 @@ name = "mi-app"
         );
     }
 
-    // ---- Fase 9.y.3.a — Dependency / Lib / resolve_dependencies ----
+    // ---- Phase 9.y.3.a — Dependency / Lib / resolve_dependencies ----
 
     #[test]
     fn parse_dependency_version_corta() {
@@ -1023,9 +1022,9 @@ entry = "src/lib.fitz"
         assert!(m.bin.is_none());
     }
 
-    /// Helper: crea un proyecto path-dep candidato (manifest con
-    /// `[lib]` + entry file vacío) en `target/`. Devuelve el path
-    /// absoluto al directorio creado.
+    /// Helper: creates a candidate path-dep project (manifest with
+    /// `[lib]` + empty entry file) in `target/`. Returns the absolute
+    /// path to the created directory.
     fn scaffold_lib_dep(target: &Path, name: &str, version: &str) -> PathBuf {
         let dir = target.join(name);
         std::fs::create_dir_all(dir.join("src")).unwrap();
@@ -1087,12 +1086,12 @@ entry = "src/lib.fitz"
         assert!(msg.contains("foo"), "msg: {msg}");
     }
 
-    // (El test viejo `resolve_dependencies_git_aborta_citando_9y3c`
-    // se eliminó al cerrar 9.y.3.c — git deps son ahora soportadas.
-    // La validación de shape la cubren los tests `resolve_git_dep_*`
-    // arriba.)
+    // (The old test `resolve_dependencies_git_aborta_citando_9y3c`
+    // was removed when 9.y.3.c closed — git deps are now supported.
+    // Shape validation is covered by the `resolve_git_dep_*` tests
+    // above.)
 
-    // ---- Fase 9.y.4 — edición del manifest (add/remove preservan formato) ----
+    // ---- Phase 9.y.4 — manifest editing (add/remove preserve format) ----
 
     #[test]
     fn add_dep_a_manifest_sin_dependencies_crea_la_seccion() {
@@ -1103,7 +1102,7 @@ entry = "src/lib.fitz"
         let updated = add_dep_to_manifest(original, "utils", &spec).unwrap();
         assert!(updated.contains("[dependencies]"));
         assert!(updated.contains("utils = { path = \"../utils\" }"));
-        // El resto del manifest sigue intacto.
+        // The rest of the manifest stays intact.
         assert!(updated.contains("[package]"));
         assert!(updated.contains("[bin]"));
     }
@@ -1116,7 +1115,7 @@ entry = "src/lib.fitz"
         };
         let updated = add_dep_to_manifest(original, "nuevo", &spec).unwrap();
         assert!(updated.contains("nuevo = { path = \"../nuevo\" }"));
-        // La dep previa sigue ahí.
+        // The previous dep is still there.
         assert!(updated.contains("ya = { path = \"../ya\" }"));
     }
 
@@ -1188,7 +1187,7 @@ entry = "src/lib.fitz"
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nuno = { path = \"../uno\" }\n";
         let (updated, removed) = remove_dep_from_manifest(original, "no-existe").unwrap();
         assert!(!removed);
-        // El manifest queda intacto.
+        // The manifest stays intact.
         assert!(updated.contains("uno = { path = \"../uno\" }"));
     }
 
@@ -1213,10 +1212,10 @@ entry = "src/lib.fitz"
 
     #[test]
     fn add_y_remove_son_inverso_aproximadamente() {
-        // Tras add+remove de la MISMA dep, el manifest debe quedar
-        // semánticamente equivalente al original. Acepto pequeñas
-        // diferencias de formatting (toml_edit puede normalizar
-        // whitespace) pero el shape es el mismo.
+        // After add+remove of the SAME dep, the manifest must end up
+        // semantically equivalent to the original. We accept small
+        // formatting differences (toml_edit may normalize whitespace)
+        // but the shape is the same.
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
         let after_add = add_dep_to_manifest(
             original,
@@ -1228,7 +1227,7 @@ entry = "src/lib.fitz"
         .unwrap();
         let (after_remove, removed) = remove_dep_from_manifest(&after_add, "tmp").unwrap();
         assert!(removed);
-        // El parser debe ver el mismo manifest semánticamente.
+        // The parser must see the same manifest semantically.
         let m1 = Manifest::parse(original).unwrap();
         let m2 = Manifest::parse(&after_remove).unwrap();
         assert_eq!(m1, m2);
@@ -1256,7 +1255,7 @@ entry = "src/lib.fitz"
         let tmp = tempfile::tempdir().unwrap();
         let dep_dir = tmp.path().join("solo-bin");
         std::fs::create_dir_all(dep_dir.join("src")).unwrap();
-        // Manifest solo con [bin], sin [lib] — no se puede importar.
+        // Manifest with only [bin], no [lib] — cannot be imported.
         std::fs::write(
             dep_dir.join("fitz.toml"),
             "[package]\nname = \"solo-bin\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n",
@@ -1278,13 +1277,13 @@ entry = "src/lib.fitz"
         );
         let err = resolve_dependencies(&m, &importer_dir).unwrap_err();
         assert!(matches!(err, ManifestError::DepMissingLib { .. }));
-        // El mensaje sugiere agregar [lib].
+        // The message suggests adding [lib].
         let msg = err.to_string();
         assert!(msg.contains("[lib]"), "msg: {msg}");
         assert!(msg.contains("entry"), "msg: {msg}");
     }
 
-    // ---- Fase 9.y.3.c — validaciones de shape de git deps ----
+    // ---- Phase 9.y.3.c — git deps shape validations ----
 
     fn git_dep(
         path: Option<&str>,
@@ -1403,9 +1402,9 @@ entry = "src/lib.fitz"
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("a").join("b");
         std::fs::create_dir_all(&nested).unwrap();
-        // No creamos fitz.toml. Sube hasta el root del FS sin
-        // encontrarlo (asumiendo que no hay un fitz.toml en root del
-        // sistema, lo cual es razonable).
+        // We do not create fitz.toml. Walks up to the FS root without
+        // finding it (assuming there is no fitz.toml at the system
+        // root, which is reasonable).
         assert!(find_manifest(&nested).is_none());
     }
 }
