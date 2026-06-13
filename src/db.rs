@@ -1,33 +1,33 @@
-//! Driver Postgres puro Fitz — Fase 10.1.
+//! Pure Fitz Postgres driver — Phase 10.1.
 //!
-//! Implementación nativa del PostgreSQL wire protocol v3.0 sin
-//! dependencias externas de DB (sin libpq, sin tokio-postgres, sin
-//! sqlx). Solo `tokio::net::TcpStream` para I/O + crates de
-//! crypto pure-Rust (sha2/hmac/base64) para SCRAM-SHA-256.
+//! Native implementation of PostgreSQL wire protocol v3.0 without
+//! external DB dependencies (no libpq, no tokio-postgres, no
+//! sqlx). Only `tokio::net::TcpStream` for I/O + pure-Rust crypto
+//! crates (sha2/hmac/base64) for SCRAM-SHA-256.
 //!
-//! Decisiones de diseño (cerradas 2026-05-25, ver
-//! `docs/roadmap.md` → Fase 10):
-//!  - Driver puro Fitz, sin libpq → binario standalone preservado.
-//!  - API toda async → encaja con tokio + handlers HTTP de 9.w.
-//!  - Sin pool en 10.1 (llega en 10.2). Una conexión por
+//! Design decisions (closed 2026-05-25, see
+//! `docs/roadmap.md` → Phase 10):
+//!  - Pure Fitz driver, no libpq → standalone binary preserved.
+//!  - Fully async API → fits tokio + HTTP handlers from 9.w.
+//!  - No pool in 10.1 (arrives in 10.2). One connection per
 //!    `connect(url)`.
-//!  - Postgres 14+ (SCRAM-SHA-256 default, JSONB maduro).
-//!  - URI estándar `postgres://user:pass@host:port/db?sslmode=...`.
-//!  - SSL/TLS pospuesto a sub-paso futuro. En 10.1 solo
-//!    `sslmode=disable` (default); `sslmode=require` aborta con
-//!    mensaje claro.
-//!  - Sin Extended Query Protocol cache de prepared statements
-//!    (cada query parsea desde cero).
-//!  - Tipos OID core en MVP: Int4/Int8/Float4/Float8/Text/
+//!  - Postgres 14+ (SCRAM-SHA-256 default, mature JSONB).
+//!  - Standard URI `postgres://user:pass@host:port/db?sslmode=...`.
+//!  - SSL/TLS postponed to future sub-step. In 10.1 only
+//!    `sslmode=disable` (default); `sslmode=require` aborts with
+//!    clear message.
+//!  - No Extended Query Protocol prepared-statement cache
+//!    (each query parses from scratch).
+//!  - Core OID types in MVP: Int4/Int8/Float4/Float8/Text/
 //!    Varchar/Bool/Timestamp/Timestamptz/UUID/Bytea. JSONB +
-//!    arrays + dates avanzados llegan en 10.5.
+//!    arrays + advanced dates land in 10.5.
 //!
-//! El módulo está deliberadamente **aislado** del resto del
-//! crate en 10.1.a — no integra todavía con `evaluator` ni
-//! `value::Value::DbConn`. La integración como built-in módulo
-//! `db` accesible desde código Fitz llega en 10.1.b.
+//! The module is deliberately **isolated** from the rest of the
+//! crate in 10.1.a — it does not yet integrate with `evaluator`
+//! nor `value::Value::DbConn`. Integration as the built-in `db`
+//! module accessible from Fitz code arrives in 10.1.b.
 
-#![allow(dead_code)] // 10.1.a — APIs públicas se consumen en 10.1.b cuando llegue la integración con evaluator.
+#![allow(dead_code)] // 10.1.a — public APIs are consumed in 10.1.b when integration with evaluator lands.
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
@@ -45,44 +45,44 @@ type HmacSha256 = Hmac<Sha256>;
 // Errors
 // =============================================================
 
-/// Error específico del driver Postgres. Mantenemos un enum
-/// dedicado (en lugar de envolver `FitzError` directo) porque el
-/// driver vive como módulo aislado en 10.1.a; la traducción a
-/// `FitzError` (con span, posición, etc.) sucede en la capa de
-/// integración 10.1.b.
+/// Postgres driver–specific error. We keep a dedicated enum
+/// (instead of wrapping `FitzError` directly) because the driver
+/// lives as an isolated module in 10.1.a; translation to
+/// `FitzError` (with span, position, etc.) happens in the
+/// integration layer 10.1.b.
 #[derive(Debug)]
 pub enum DbError {
-    /// URL de conexión inválida (formato, parsing, valores fuera
-    /// de rango).
+    /// Invalid connection URL (format, parsing, out-of-range
+    /// values).
     InvalidUrl(String),
-    /// Falla de I/O (TCP, lectura/escritura del socket).
+    /// I/O failure (TCP, socket read/write).
     Io(io::Error),
-    /// Protocolo Postgres devolvió algo inesperado (mensaje fuera
-    /// de secuencia, longitud inválida, etc.).
+    /// Postgres protocol returned something unexpected (out-of-
+    /// sequence message, invalid length, etc.).
     Protocol(String),
-    /// Auth fallida (credenciales incorrectas, SCRAM mismatch, no
-    /// soportado).
+    /// Auth failed (wrong credentials, SCRAM mismatch, not
+    /// supported).
     Auth(String),
-    /// Error del servidor Postgres (`ErrorResponse`). Formato
-    /// canónico `"<severity>: <message>"` paralelo a
+    /// Postgres server error (`ErrorResponse`). Canonical format
+    /// `"<severity>: <message>"` parallel to
     /// `jwt`/`hash`/etc.
     Server {
         severity: String,
         code: String,
         message: String,
     },
-    /// Tipo OID Postgres sin soporte en MVP. El error cita el OID
-    /// numérico para que el user vea claramente qué tipo agregar
-    /// al refinamiento del MVP en 10.5.
+    /// Postgres OID type unsupported in MVP. The error cites the
+    /// numeric OID so the user clearly sees which type to add to
+    /// the MVP refinement in 10.5.
     UnsupportedType(u32),
-    /// Feature pedida por el user que aún no llegó en 10.1
-    /// (sslmode=require, tipos avanzados, etc.). Mensaje incluye
-    /// referencia al sub-paso de cierre.
+    /// Feature requested by the user that hasn't landed in 10.1
+    /// (sslmode=require, advanced types, etc.). Message includes
+    /// reference to the closing sub-step.
     NotImplemented(String),
-    /// v0.10.23 (Fase 10.1.b) — fallo del path TLS: SSLRequest
-    /// rechazado por el server ('N'/'E'), handshake roto (chain
-    /// inválida, hostname mismatch en verify-full, signature
-    /// inválida), o sslrootcert ilegible/malformado.
+    /// v0.10.23 (Phase 10.1.b) — TLS path failure: SSLRequest
+    /// rejected by the server ('N'/'E'), broken handshake (invalid
+    /// chain, hostname mismatch on verify-full, invalid
+    /// signature), or unreadable/malformed sslrootcert.
     Tls(String),
 }
 
@@ -93,11 +93,12 @@ impl fmt::Display for DbError {
             DbError::Io(e) => write!(f, "I/O: {e}"),
             DbError::Protocol(m) => write!(f, "protocolo: {m}"),
             DbError::Auth(m) => write!(f, "auth: {m}"),
-            // v0.10.29 — Suma el SQLSTATE entre corchetes cuando
-            // está disponible (Postgres siempre lo incluye en
-            // ErrorResponse). El user puede grep por código
+            // v0.10.29 — Adds the SQLSTATE in brackets when
+            // available (Postgres always includes it in
+            // ErrorResponse). The user can grep by code
             // (`[23505]` = unique violation, `[23503]` = FK
-            // violation, etc.) sin parsear el mensaje libre.
+            // violation, etc.) without parsing the free-form
+            // message.
             DbError::Server {
                 severity,
                 code,
@@ -118,13 +119,13 @@ impl fmt::Display for DbError {
     }
 }
 
-/// v0.10.29 — Enriquece un `DbError::Server` con el contexto del
-/// SQL + params que dispararon el error. Aplica la misma redaction
-/// de secrets que `FITZ_DB_LOG=verbose` para evitar leakear
-/// passwords/tokens en stderr o en logs estructurados. El sufijo
-/// es `[sql: <query truncado> params=[$1=..., ...]]`. Si el error
-/// no es `Server` (e.g. I/O, Protocol), passes through sin cambio
-/// — el contexto no aplica.
+/// v0.10.29 — Enriches a `DbError::Server` with the context of the
+/// SQL + params that triggered the error. Applies the same secret
+/// redaction as `FITZ_DB_LOG=verbose` to avoid leaking
+/// passwords/tokens to stderr or structured logs. The suffix is
+/// `[sql: <truncated query> params=[$1=..., ...]]`. If the error
+/// is not `Server` (e.g. I/O, Protocol), it passes through
+/// unchanged — the context does not apply.
 pub(crate) fn enrich_db_error_with_context(err: DbError, sql: &str, args: &[PgValue]) -> DbError {
     if let DbError::Server {
         severity,
@@ -132,7 +133,8 @@ pub(crate) fn enrich_db_error_with_context(err: DbError, sql: &str, args: &[PgVa
         message,
     } = err
     {
-        // SQL one-line truncado a 200 chars para no inflar mensajes.
+        // One-line SQL truncated to 200 chars to avoid inflating
+        // messages.
         let sql_oneline = sql
             .replace(['\n', '\r'], " ")
             .split_whitespace()
@@ -184,27 +186,26 @@ impl From<io::Error> for DbError {
 pub type DbResult<T> = Result<T, DbError>;
 
 // =============================================================
-// ConnectionConfig — parsing del connection string
+// ConnectionConfig — parsing of the connection string
 // =============================================================
 
-/// Configuración resuelta de una conexión Postgres. Se construye
-/// vía `ConnectionConfig::parse(url)` desde el URI estándar
+/// Resolved configuration for a Postgres connection. Built via
+/// `ConnectionConfig::parse(url)` from the standard URI
 /// `postgres://user:pass@host:port/dbname?sslmode=...`.
 ///
-/// Soportado en 10.1:
-///  - Schemes: `postgres://` y `postgresql://` (alias estándar).
-///  - User obligatorio. Password opcional (auth trust/peer no
-///    necesita password).
-///  - Host: literal (IPv4, IPv6 entre brackets `[::1]`, o
-///    hostname).
-///  - Port: opcional, default 5432.
-///  - Dbname: obligatorio en MVP. Default a username si query
-///    string lo permite, llega en 10.x.
-///  - Query: `sslmode=disable|require|allow|prefer`. Solo
-///    `disable` soportado en 10.1; el resto aborta con mensaje
-///    claro citando el sub-paso futuro.
-///  - `application_name=...` ignorado silenciosamente en MVP
-///    (no daña, no afecta).
+/// Supported in 10.1:
+///  - Schemes: `postgres://` and `postgresql://` (standard alias).
+///  - User required. Password optional (trust/peer auth does not
+///    need a password).
+///  - Host: literal (IPv4, IPv6 in brackets `[::1]`, or hostname).
+///  - Port: optional, default 5432.
+///  - Dbname: required in MVP. Defaulting to username when the
+///    query string allows it lands in 10.x.
+///  - Query: `sslmode=disable|require|allow|prefer`. Only
+///    `disable` supported in 10.1; the rest aborts with a clear
+///    message citing the future sub-step.
+///  - `application_name=...` silently ignored in MVP (does no
+///    harm, has no effect).
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     pub host: String,
@@ -213,39 +214,41 @@ pub struct ConnectionConfig {
     pub password: Option<String>,
     pub dbname: String,
     pub sslmode: SslMode,
-    /// Fase 10.1.b — kwarg `sslrootcert=path/to/ca.pem` opcional para
-    /// custom CA. Si `None` y sslmode es `VerifyCa`/`VerifyFull`, el
-    /// driver usa el Mozilla root CA bundle de `webpki-roots`. Path
-    /// se resuelve relativo al CWD del proceso. Solo formato PEM.
+    /// Phase 10.1.b — optional kwarg `sslrootcert=path/to/ca.pem`
+    /// for a custom CA. If `None` and sslmode is
+    /// `VerifyCa`/`VerifyFull`, the driver uses the Mozilla root
+    /// CA bundle from `webpki-roots`. Path is resolved relative
+    /// to the process CWD. PEM format only.
     pub sslrootcert: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SslMode {
-    /// Sin TLS — el handshake va plain sobre TCP. Default si la URL
-    /// no especifica `sslmode`.
+    /// No TLS — the handshake goes plain over TCP. Default if the
+    /// URL does not specify `sslmode`.
     Disable,
-    /// Fase 10.1.b — TLS obligatorio, pero NO verifica nada del cert
-    /// del server (acepta self-signed, expirado, hostname mismatch).
-    /// Útil para dev/staging contra Postgres internos sin CA. NO USAR
-    /// en producción — vulnerable a MITM.
+    /// Phase 10.1.b — TLS required, but NO server cert verification
+    /// at all (accepts self-signed, expired, hostname mismatch).
+    /// Useful for dev/staging against internal Postgres without a
+    /// CA. DO NOT USE in production — vulnerable to MITM.
     Require,
-    /// Fase 10.1.b — TLS obligatorio + verifica que el cert venga de
-    /// una CA confiable (chain), pero IGNORA el hostname. Útil para
-    /// configuraciones donde el cert tiene un CN distinto al hostname
-    /// (proxies, port forwarding). Verifica autenticidad del operador
-    /// pero no de la identidad específica.
+    /// Phase 10.1.b — TLS required + verifies the cert comes from a
+    /// trusted CA (chain), but IGNORES the hostname. Useful for
+    /// configurations where the cert has a CN distinct from the
+    /// hostname (proxies, port forwarding). Verifies operator
+    /// authenticity but not specific identity.
     VerifyCa,
-    /// Fase 10.1.b — TLS obligatorio + chain valida + hostname matchea
-    /// SAN/CN del cert. **Recomendado para producción**. Es el modo
-    /// que usan Heroku, RDS, Supabase, Neon, Aiven, Render PG.
+    /// Phase 10.1.b — TLS required + valid chain + hostname matches
+    /// the cert's SAN/CN. **Recommended for production**. This is
+    /// the mode used by Heroku, RDS, Supabase, Neon, Aiven, Render
+    /// PG.
     VerifyFull,
 }
 
 impl ConnectionConfig {
-    /// Parsea `postgres://user:pass@host:port/dbname?sslmode=...`.
-    /// El formato está alineado con libpq / psycopg2 / pgx / sqlx
-    /// (mismo URI para todos los drivers Postgres del ecosistema).
+    /// Parses `postgres://user:pass@host:port/dbname?sslmode=...`.
+    /// The format is aligned with libpq / psycopg2 / pgx / sqlx
+    /// (same URI for all Postgres drivers in the ecosystem).
     pub fn parse(url: &str) -> DbResult<Self> {
         let rest = url
             .strip_prefix("postgres://")
@@ -256,10 +259,10 @@ impl ConnectionConfig {
                 ))
             })?;
 
-        // Split en la última '@' que NO esté dentro de la query
-        // string. Práctica: split en la primera '?' antes (separa
-        // auth+host+path de query), después la última '@' del
-        // segmento previo.
+        // Split on the last '@' that is NOT inside the query
+        // string. Practical: split on the first '?' first
+        // (separates auth+host+path from query), then the last
+        // '@' of the previous segment.
         let (pre_query, query) = match rest.split_once('?') {
             Some((p, q)) => (p, Some(q)),
             None => (rest, None),
@@ -319,8 +322,8 @@ fn split_host_port(s: &str) -> DbResult<(String, u16)> {
     if s.is_empty() {
         return Err(DbError::InvalidUrl("host vacío".into()));
     }
-    // IPv6 literal: `[::1]:5432`. El bracket cierra antes del ':'
-    // del puerto.
+    // IPv6 literal: `[::1]:5432`. The bracket closes before the
+    // ':' of the port.
     if let Some(rest) = s.strip_prefix('[') {
         let (addr, tail) = rest
             .split_once(']')
@@ -347,10 +350,11 @@ fn parse_port(s: &str) -> DbResult<u16> {
         .map_err(|_| DbError::InvalidUrl(format!("puerto inválido '{s}'")))
 }
 
-/// v0.10.23 (Fase 10.1.b) — parser de los params SSL del query
-/// string. Devuelve `(sslmode, sslrootcert)`. Sin sslmode → Disable.
-/// `prefer`/`allow` (negociación dinámica) quedan out-of-scope MVP
-/// con mensaje claro citando el patrón compat (`disable`/`require`).
+/// v0.10.23 (Phase 10.1.b) — parser for the SSL params from the
+/// query string. Returns `(sslmode, sslrootcert)`. No sslmode →
+/// Disable. `prefer`/`allow` (dynamic negotiation) remain
+/// out-of-scope MVP with a clear message citing the compat
+/// pattern (`disable`/`require`).
 fn parse_ssl_params(query: Option<&str>) -> DbResult<(SslMode, Option<std::path::PathBuf>)> {
     let mut mode = SslMode::Disable;
     let mut root_cert: Option<std::path::PathBuf> = None;
@@ -394,14 +398,15 @@ fn parse_ssl_params(query: Option<&str>) -> DbResult<(SslMode, Option<std::path:
                 root_cert = Some(std::path::PathBuf::from(percent_decode(v)?));
             }
             // application_name, connect_timeout, etc. — silently
-            // ignored en MVP. No daña, no afecta correctness.
+            // ignored in MVP. Does no harm, does not affect
+            // correctness.
             _ => continue,
         }
     }
 
-    // Combinaciones inválidas — mejor fallar temprano con mensaje
-    // claro que dejar al user con un binario que se conecta sin TLS
-    // pensando que estaba protegido.
+    // Invalid combinations — better to fail early with a clear
+    // message than to leave the user with a binary that connects
+    // without TLS thinking they were protected.
     if !mode_seen && root_cert.is_some() {
         return Err(DbError::InvalidUrl(
             "sslrootcert= sin sslmode= no tiene sentido: el cert no \
@@ -428,23 +433,23 @@ fn parse_ssl_params(query: Option<&str>) -> DbResult<(SslMode, Option<std::path:
 }
 
 // =============================================================
-// TLS (Fase 10.1.b)
+// TLS (Phase 10.1.b)
 // =============================================================
 //
-// El driver soporta TLS contra Postgres con 3 niveles de strictness:
+// The driver supports TLS to Postgres at 3 strictness levels:
 //
-//   `sslmode=require`     — TLS sí, verificación NO.
-//   `sslmode=verify-ca`   — TLS sí, chain validado, hostname IGNORADO.
-//   `sslmode=verify-full` — TLS sí, chain + hostname (recomendado prod).
+//   `sslmode=require`     — TLS yes, verification NO.
+//   `sslmode=verify-ca`   — TLS yes, chain validated, hostname IGNORED.
+//   `sslmode=verify-full` — TLS yes, chain + hostname (recommended prod).
 //
-// Implementación: rustls 0.23 + tokio-rustls 0.26 + webpki-roots
-// para el Mozilla CA bundle in-binary. `ring` como crypto provider
-// (pure Rust + assembly, sin system C deps tipo CMake/OpenSSL).
+// Implementation: rustls 0.23 + tokio-rustls 0.26 + webpki-roots
+// for the in-binary Mozilla CA bundle. `ring` as crypto provider
+// (pure Rust + assembly, no system C deps like CMake/OpenSSL).
 //
-// `Once` para instalar el crypto provider de ring solo la primera
-// vez que se construye un `TlsConnector` — rustls 0.23 cambió a un
-// modelo donde el provider DEBE estar instalado antes de cualquier
-// `ClientConfig::builder()`. Sin esto:
+// `Once` to install the ring crypto provider only the first time
+// a `TlsConnector` is built — rustls 0.23 switched to a model
+// where the provider MUST be installed before any
+// `ClientConfig::builder()`. Without this:
 //   "no process-level CryptoProvider available -- call
 //   CryptoProvider::install_default()"
 
@@ -452,31 +457,32 @@ static RUSTLS_PROVIDER_INSTALLED: std::sync::Once = std::sync::Once::new();
 
 fn ensure_rustls_provider() {
     RUSTLS_PROVIDER_INSTALLED.call_once(|| {
-        // El `install_default()` retorna Result — falla si ya hay
-        // otro provider instalado. Como esto es nuestro código y
-        // somos el único caller, ignoramos el Err (idempotente).
+        // `install_default()` returns Result — fails if another
+        // provider is already installed. Since this is our code
+        // and we are the only caller, we ignore the Err
+        // (idempotent).
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
 }
 
-/// SSLRequest: 8 bytes, magic 80877103 (0x04D2162F). El server
-/// responde 1 byte:
+/// SSLRequest: 8 bytes, magic 80877103 (0x04D2162F). The server
+/// responds with 1 byte:
 ///   'S' → TLS supported, proceed with handshake
-///   'N' → TLS no soportado por el server
-///   'E' → ErrorResponse a continuación
+///   'N' → TLS not supported by the server
+///   'E' → ErrorResponse follows
 const SSL_REQUEST_MAGIC: u32 = 80877103;
 
-/// Hace el SSLRequest dance + TLS handshake sobre el TcpStream
-/// recibido y devuelve el `TlsStream` upgrade-ado listo para el
-/// startup normal. Si el server responde 'N' o 'E', falla con
-/// mensaje claro (el caller pidió TLS y no lo recibió).
+/// Performs the SSLRequest dance + TLS handshake on the received
+/// TcpStream and returns the upgraded `TlsStream` ready for the
+/// normal startup. If the server responds 'N' or 'E', fails with
+/// a clear message (the caller asked for TLS and didn't get it).
 async fn upgrade_to_tls(
     mut tcp_stream: TcpStream,
     config: &ConnectionConfig,
 ) -> DbResult<tokio_rustls::client::TlsStream<TcpStream>> {
     // SSLRequest = 4-byte big-endian length (8) + 4-byte big-endian
-    // magic. NO hay startup ni body — es un mensaje especial pre-
-    // startup que el server interpreta literalmente.
+    // magic. NO startup or body — it is a special pre-startup
+    // message that the server interprets literally.
     let mut ssl_request = [0u8; 8];
     ssl_request[..4].copy_from_slice(&8u32.to_be_bytes());
     ssl_request[4..].copy_from_slice(&SSL_REQUEST_MAGIC.to_be_bytes());
@@ -493,7 +499,7 @@ async fn upgrade_to_tls(
 
     match response[0] {
         b'S' => {
-            // Server acepta TLS — procedemos con el handshake.
+            // Server accepts TLS — proceed with the handshake.
         }
         b'N' => {
             return Err(DbError::Tls(format!(
@@ -504,8 +510,9 @@ async fn upgrade_to_tls(
             )));
         }
         b'E' => {
-            // Server respondió ErrorResponse al SSLRequest. Drenamos
-            // el resto del mensaje para extraer la causa real.
+            // Server responded ErrorResponse to the SSLRequest.
+            // Drain the rest of the message to extract the real
+            // cause.
             let mut header = [0u8; 4];
             tcp_stream
                 .read_exact(&mut header)
@@ -530,14 +537,14 @@ async fn upgrade_to_tls(
         }
     }
 
-    // Build TLS connector según el sslmode + sslrootcert.
+    // Build TLS connector according to sslmode + sslrootcert.
     ensure_rustls_provider();
     let tls_config = build_tls_client_config(config)?;
     let connector = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls_config));
 
-    // ServerName: usado para SNI + (en verify-full) hostname check.
-    // Para require/verify-ca, lo mandamos igual al server (SNI es
-    // info pública del handshake) pero no validamos contra él.
+    // ServerName: used for SNI + (on verify-full) hostname check.
+    // For require/verify-ca, we still send it to the server (SNI
+    // is public handshake info) but don't validate against it.
     let server_name =
         rustls::pki_types::ServerName::try_from(config.host.clone()).map_err(|e| {
             DbError::Tls(format!(
@@ -561,14 +568,14 @@ fn sslmode_str(m: SslMode) -> &'static str {
     }
 }
 
-/// Construye el `ClientConfig` rustls según el sslmode + sslrootcert:
-///   - `require`     → NoVerifier (acepta cualquier cert)
-///   - `verify-ca`   → chain validado, hostname IGNORADO (wrapper
-///     que cachea el error "NotValidForName" y lo trata como Ok)
+/// Builds the rustls `ClientConfig` based on sslmode + sslrootcert:
+///   - `require`     → NoVerifier (accepts any cert)
+///   - `verify-ca`   → chain validated, hostname IGNORED (wrapper
+///     that catches the "NotValidForName" error and treats it as Ok)
 ///   - `verify-full` → default WebPkiServerVerifier (chain + hostname)
 ///
-/// Si `sslrootcert` está seteado, se usa como root store en vez de
-/// webpki-roots. Solo formato PEM.
+/// If `sslrootcert` is set, it is used as the root store instead
+/// of webpki-roots. PEM format only.
 fn build_tls_client_config(config: &ConnectionConfig) -> DbResult<rustls::ClientConfig> {
     use rustls::ClientConfig;
 
@@ -638,18 +645,18 @@ fn build_root_store(custom_pem: Option<&std::path::Path>) -> DbResult<rustls::Ro
             )));
         }
     } else {
-        // Default: Mozilla CA bundle de webpki-roots, in-binary.
-        // Cubre Heroku, RDS, Supabase, Neon, Aiven, Render PG, etc.
+        // Default: in-binary Mozilla CA bundle from webpki-roots.
+        // Covers Heroku, RDS, Supabase, Neon, Aiven, Render PG, etc.
         store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     }
     Ok(store)
 }
 
-/// Verifier para `sslmode=require` — acepta cualquier cert, sin
-/// validar nada. Equivalente a `curl --insecure`. NO USAR en
-/// producción. Útil para dev/staging contra servers internos sin
-/// CA, o para verificar conectividad TLS sin entrar al lío de
-/// cert chains.
+/// Verifier for `sslmode=require` — accepts any cert, validates
+/// nothing. Equivalent to `curl --insecure`. DO NOT USE in
+/// production. Useful for dev/staging against internal servers
+/// without a CA, or to verify TLS connectivity without getting
+/// into the mess of cert chains.
 #[derive(Debug)]
 struct NoVerifier;
 
@@ -684,9 +691,9 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        // Lista completa — el wrapper acepta cualquier sig de todas
-        // formas, pero rustls necesita conocer las que soportamos
-        // para que el handshake elija una mutuamente válida.
+        // Full list — the wrapper accepts any sig anyway, but
+        // rustls needs to know which ones we support so the
+        // handshake picks a mutually valid one.
         vec![
             rustls::SignatureScheme::RSA_PKCS1_SHA1,
             rustls::SignatureScheme::ECDSA_SHA1_Legacy,
@@ -705,11 +712,11 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
     }
 }
 
-/// Verifier para `sslmode=verify-ca` — delega chain validation al
-/// WebPkiServerVerifier estándar, pero catchea `NotValidForName`
-/// (hostname mismatch) y lo trata como Ok. Mantiene autenticidad
-/// del operador (cert venido de una CA confiable) sin exigir que
-/// el hostname matchee.
+/// Verifier for `sslmode=verify-ca` — delegates chain validation
+/// to the standard WebPkiServerVerifier, but catches
+/// `NotValidForName` (hostname mismatch) and treats it as Ok.
+/// Maintains operator authenticity (cert from a trusted CA)
+/// without requiring the hostname to match.
 #[derive(Debug)]
 struct NoHostnameVerifier(std::sync::Arc<rustls::client::WebPkiServerVerifier>);
 
@@ -730,8 +737,8 @@ impl rustls::client::danger::ServerCertVerifier for NoHostnameVerifier {
             Err(rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
                 Ok(rustls::client::danger::ServerCertVerified::assertion())
             }
-            // rustls 0.23.x agregó `NotValidForNameContext` con info
-            // estructurada del SAN/CN. Tratamos ambos casos.
+            // rustls 0.23.x added `NotValidForNameContext` with
+            // structured SAN/CN info. We handle both cases.
             Err(rustls::Error::InvalidCertificate(
                 rustls::CertificateError::NotValidForNameContext { .. },
             )) => Ok(rustls::client::danger::ServerCertVerified::assertion()),
@@ -802,51 +809,51 @@ fn hex_digit(b: u8) -> DbResult<u8> {
 }
 
 // =============================================================
-// Wire protocol — mensajes Postgres v3.0
+// Wire protocol — Postgres v3.0 messages
 // =============================================================
 //
-// El protocolo Postgres tiene dos clases de mensajes:
+// The Postgres protocol has two classes of messages:
 //
-//  - Frontend → Backend (cliente → servidor): cada mensaje tiene
-//    1 byte de tipo (ASCII) + 4 bytes de longitud big-endian +
-//    payload. EXCEPCIÓN: `StartupMessage` y `SSLRequest` no tienen
-//    byte de tipo (la longitud arranca el mensaje).
+//  - Frontend → Backend (client → server): each message has
+//    1 byte of type (ASCII) + 4 bytes of big-endian length +
+//    payload. EXCEPTION: `StartupMessage` and `SSLRequest` do not
+//    have a type byte (the length starts the message).
 //
-//  - Backend → Frontend (servidor → cliente): 1 byte de tipo +
-//    4 bytes de longitud + payload. Sin excepción.
+//  - Backend → Frontend (server → client): 1 byte of type +
+//    4 bytes of length + payload. No exception.
 //
-// Convención: la longitud INCLUYE los 4 bytes de longitud pero
-// EXCLUYE el byte de tipo (cuando hay tipo). Eso es lo que dice
-// la spec; al codear, restamos 4 al leer/sumamos 4 al escribir.
+// Convention: length INCLUDES the 4 length bytes but EXCLUDES the
+// type byte (when there is a type). That's what the spec says;
+// while coding, we subtract 4 on read / add 4 on write.
 
-/// Mensajes que enviamos al servidor.
+/// Messages we send to the server.
 #[derive(Debug)]
 pub enum FrontendMessage<'a> {
-    /// Inicia la conexión. Sin byte de tipo. Payload:
-    /// `version(4) | param1\0val1\0...\0` donde el último param
-    /// debe ser seguido de `\0` (terminador de lista).
+    /// Starts the connection. No type byte. Payload:
+    /// `version(4) | param1\0val1\0...\0` where the last param
+    /// must be followed by `\0` (list terminator).
     Startup { user: &'a str, database: &'a str },
-    /// Respuesta a `AuthenticationCleartextPassword` o
+    /// Response to `AuthenticationCleartextPassword` or
     /// `AuthenticationMD5Password`.
     Password { password: &'a [u8] },
-    /// Inicio del flow SASL: `AuthenticationSASL` recibido,
-    /// emitimos el client-first-message.
+    /// Start of the SASL flow: `AuthenticationSASL` received, we
+    /// emit the client-first-message.
     SaslInitialResponse {
         mechanism: &'a str,
         initial_response: &'a [u8],
     },
-    /// Continuación del flow SASL: client-final-message.
+    /// Continuation of the SASL flow: client-final-message.
     SaslResponse { response: &'a [u8] },
-    /// Simple Query: ejecuta el statement con auto-commit y
-    /// devuelve el resultado en un solo round-trip.
+    /// Simple Query: executes the statement with auto-commit and
+    /// returns the result in a single round-trip.
     Query { sql: &'a str },
-    /// Extended Query — declara un statement parseable.
+    /// Extended Query — declares a parseable statement.
     Parse {
         statement_name: &'a str,
         sql: &'a str,
         param_types: &'a [u32], // OIDs; 0 = let server decide
     },
-    /// Extended Query — bindea params concretos a un statement.
+    /// Extended Query — binds concrete params to a statement.
     Bind {
         portal_name: &'a str,
         statement_name: &'a str,
@@ -854,25 +861,25 @@ pub enum FrontendMessage<'a> {
         param_values: &'a [Option<&'a [u8]>], // None = NULL
         result_formats: &'a [i16],
     },
-    /// Extended Query — ejecuta un portal.
+    /// Extended Query — executes a portal.
     Execute {
         portal_name: &'a str,
         max_rows: i32, // 0 = unlimited
     },
-    /// Extended Query — flush + commit del round.
+    /// Extended Query — flush + commit of the round.
     Sync,
-    /// Cierra el statement o portal.
+    /// Closes the statement or portal.
     Close { kind: u8, name: &'a str }, // 'S' = statement, 'P' = portal
-    /// Describe un statement o portal.
+    /// Describe a statement or portal.
     Describe { kind: u8, name: &'a str },
-    /// Termina la conexión cooperativamente.
+    /// Cooperatively terminates the connection.
     Terminate,
 }
 
 impl<'a> FrontendMessage<'a> {
-    /// Serializa el mensaje a bytes prontos para `write_all`. El
-    /// caller no necesita preocuparse del framing — todo (tag +
-    /// length + payload) viene en el buffer.
+    /// Serializes the message to bytes ready for `write_all`. The
+    /// caller doesn't need to worry about framing — everything
+    /// (tag + length + payload) comes in the buffer.
     pub fn encode(&self) -> Vec<u8> {
         match self {
             FrontendMessage::Startup { user, database } => {
@@ -884,15 +891,16 @@ impl<'a> FrontendMessage<'a> {
                 write_cstr(&mut payload, "database");
                 write_cstr(&mut payload, database);
                 payload.extend_from_slice(&[
-                    // application_name = "fitz"  (puramente
-                    // informativo del lado server; ayuda al user
-                    // a identificar la conexión en pg_stat_activity)
+                    // application_name = "fitz"  (purely
+                    // informational on the server side; helps the
+                    // user identify the connection in
+                    // pg_stat_activity)
                 ]);
                 write_cstr(&mut payload, "application_name");
                 write_cstr(&mut payload, "fitz");
                 write_cstr(&mut payload, "client_encoding");
                 write_cstr(&mut payload, "UTF8");
-                payload.push(0); // terminador de lista
+                payload.push(0); // list terminator
                 frame_no_tag(&payload)
             }
             FrontendMessage::Password { password } => frame_tag(b'p', password),
@@ -1008,10 +1016,10 @@ fn frame_tag(tag: u8, payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Mensajes que el servidor nos manda. Solo modelamos los tipos
-/// que el driver necesita en 10.1: auth + simple/extended query +
-/// estado. Mensajes informativos como ParameterStatus o
-/// NoticeResponse se parsean pero el driver los descarta.
+/// Messages the server sends us. We only model the types the
+/// driver needs in 10.1: auth + simple/extended query + state.
+/// Informational messages like ParameterStatus or NoticeResponse
+/// are parsed but discarded by the driver.
 #[derive(Debug)]
 pub enum BackendMessage {
     AuthenticationOk,
@@ -1059,11 +1067,10 @@ pub enum BackendMessage {
         oids: Vec<u32>,
     },
     PortalSuspended,
-    /// Cualquier mensaje que parseamos pero no procesamos
-    /// específicamente. El tag se guarda para diagnostics si
-    /// algo va mal. Hoy no se emite — todos los mensajes
-    /// conocidos del wire están en variantes específicas; si
-    /// aparece uno nuevo, agregamos variante.
+    /// Any message we parse but do not process specifically. The
+    /// tag is kept for diagnostics if something goes wrong. Not
+    /// emitted today — all known wire messages have specific
+    /// variants; if a new one appears, we add a variant.
     Unknown {
         tag: u8,
         len: usize,
@@ -1105,7 +1112,7 @@ impl ErrorFields {
                 b'H' => ef.hint = Some(val),
                 b'P' => ef.position = Some(val),
                 b'W' => ef.where_ = Some(val),
-                _ => {} // F (file), L (line), R (routine), etc. — ignorados
+                _ => {} // F (file), L (line), R (routine), etc. — ignored
             }
         }
         ef
@@ -1113,17 +1120,18 @@ impl ErrorFields {
 }
 
 // =============================================================
-// Frame I/O — leer/escribir mensajes sobre TcpStream
+// Frame I/O — read/write messages over TcpStream
 // =============================================================
 
-/// Lee UN mensaje del servidor: tag(1) + length(4) + payload.
-/// Bloquea hasta tener el mensaje completo o error de I/O.
+/// Reads ONE message from the server: tag(1) + length(4) + payload.
+/// Blocks until the full message is in hand or an I/O error
+/// occurs.
 ///
-/// v0.10.23 (Fase 10.1.b) — genérico sobre `R: AsyncRead + Unpin`
-/// (antes hard-coded `TcpStream`) para soportar `TlsStream<TcpStream>`
-/// transparente cuando sslmode != Disable. `Box<dyn DbReadWrite>`
-/// implementa `AsyncRead` via deref, así que el call site del
-/// `Connection::read` sigue siendo idéntico.
+/// v0.10.23 (Phase 10.1.b) — generic over `R: AsyncRead + Unpin`
+/// (was hard-coded `TcpStream` before) to transparently support
+/// `TlsStream<TcpStream>` when sslmode != Disable.
+/// `Box<dyn DbReadWrite>` implements `AsyncRead` via deref, so the
+/// call site in `Connection::read` stays identical.
 pub async fn read_message<R: AsyncRead + Unpin>(stream: &mut R) -> DbResult<BackendMessage> {
     let mut header = [0u8; 5];
     stream.read_exact(&mut header).await?;
@@ -1234,9 +1242,9 @@ fn parse_auth(payload: &[u8]) -> DbResult<BackendMessage> {
             })
         }
         10 => {
-            // Lista de mechanism strings terminada por \0
-            // adicional. Recorremos el slice extrayendo cstrs
-            // hasta encontrar uno vacío.
+            // List of mechanism strings terminated by an extra
+            // \0. We walk the slice extracting cstrs until we
+            // find an empty one.
             let mut mechanisms = Vec::new();
             let mut buf = rest;
             loop {
@@ -1355,18 +1363,18 @@ fn read_cstr(buf: &[u8]) -> DbResult<(String, &[u8])> {
 // Flow:
 //   1. Client → Server: client-first-message
 //      "n,,n=<user>,r=<client_nonce>"
-//      (en SASL, "n,," = "no channel binding").
+//      (in SASL, "n,," = "no channel binding").
 //   2. Server → Client: server-first-message
 //      "r=<server_nonce>,s=<base64_salt>,i=<iterations>"
-//      donde server_nonce = client_nonce + server_random_part.
+//      where server_nonce = client_nonce + server_random_part.
 //   3. Client → Server: client-final-message
 //      "c=biws,r=<server_nonce>,p=<base64_client_proof>"
 //      (biws = base64("n,,") = "biws").
 //   4. Server → Client: server-final-message
 //      "v=<base64_server_signature>"
-//      o "e=<error>".
+//      or "e=<error>".
 //
-// Derivación de keys:
+// Key derivation:
 //   SaltedPassword = PBKDF2-HMAC-SHA256(password, salt, iterations)
 //   ClientKey      = HMAC-SHA256(SaltedPassword, "Client Key")
 //   StoredKey      = SHA256(ClientKey)
@@ -1378,24 +1386,24 @@ fn read_cstr(buf: &[u8]) -> DbResult<(String, &[u8])> {
 //   ServerKey       = HMAC-SHA256(SaltedPassword, "Server Key")
 //   ServerSignature = HMAC-SHA256(ServerKey, AuthMessage)
 //
-// MVP 10.1: SCRAM-SHA-256 sin channel binding (sin SCRAM-SHA-256-PLUS).
-// Channel binding requiere TLS; lo agregamos cuando llegue TLS en
-// el sub-paso futuro.
+// MVP 10.1: SCRAM-SHA-256 without channel binding (no
+// SCRAM-SHA-256-PLUS). Channel binding requires TLS; we add it
+// when TLS lands in the future sub-step.
 
 pub struct ScramClient {
     username: String,
     password: String,
     client_nonce: String,
-    /// Estado intermedio para client_final() y verify().
-    /// Populated por client_final().
+    /// Intermediate state for client_final() and verify().
+    /// Populated by client_final().
     server_signature: Option<Vec<u8>>,
 }
 
 impl ScramClient {
-    /// Construye un cliente SCRAM-SHA-256 con un nonce aleatorio
-    /// de 24 bytes base64-encoded (~32 chars). El nonce es la
-    /// pieza de aleatoriedad del cliente; el servidor lo
-    /// extiende con su propia aleatoriedad.
+    /// Builds a SCRAM-SHA-256 client with a random 24-byte
+    /// base64-encoded nonce (~32 chars). The nonce is the
+    /// client's randomness contribution; the server extends it
+    /// with its own randomness.
     pub fn new(username: &str, password: &str) -> DbResult<Self> {
         Ok(ScramClient {
             username: username.to_string(),
@@ -1405,7 +1413,7 @@ impl ScramClient {
         })
     }
 
-    /// Constructor para tests con nonce fijo (vectores RFC 7677).
+    /// Constructor for tests with a fixed nonce (RFC 7677 vectors).
     #[cfg(test)]
     pub fn new_with_nonce(username: &str, password: &str, nonce: &str) -> Self {
         ScramClient {
@@ -1416,20 +1424,21 @@ impl ScramClient {
         }
     }
 
-    /// Genera el client-first-message para enviar como payload
-    /// del `SaslInitialResponse`. SASL header "n,," = no
-    /// channel binding. SCRAM por SPEC ignora el username del
-    /// SASL message (Postgres usa el que vino en startup), pero
-    /// lo incluimos por completitud.
+    /// Generates the client-first-message to send as the payload
+    /// of `SaslInitialResponse`. SASL header "n,," = no channel
+    /// binding. SCRAM per SPEC ignores the username in the SASL
+    /// message (Postgres uses the one passed in startup), but we
+    /// include it for completeness.
     pub fn client_first(&self) -> String {
         format!("n,,{}", self.client_first_bare())
     }
 
     fn client_first_bare(&self) -> String {
-        // SCRAM permite username vacío (Postgres lo ignora); pero
-        // si está, va escapeado SASLprep — para los caracteres
-        // típicos (ASCII) es identidad. Soportamos solo ASCII en
-        // 10.1; Unicode complejo queda como deuda menor.
+        // SCRAM allows an empty username (Postgres ignores it);
+        // if present, it is SASLprep-escaped — for typical
+        // characters (ASCII) the transform is identity. We
+        // support only ASCII in 10.1; complex Unicode is left as
+        // minor debt.
         format!(
             "n={},r={}",
             saslprep_minimal(&self.username),
@@ -1437,17 +1446,16 @@ impl ScramClient {
         )
     }
 
-    /// Procesa el `server-first-message` recibido en
-    /// `AuthenticationSASLContinue` y devuelve el
-    /// `client-final-message` para enviar como `SaslResponse`.
-    /// Después de esta llamada, `server_signature` queda cacheada
-    /// para `verify()`.
+    /// Processes the `server-first-message` received in
+    /// `AuthenticationSASLContinue` and returns the
+    /// `client-final-message` to send as `SaslResponse`. After
+    /// this call, `server_signature` is cached for `verify()`.
     pub fn client_final(&mut self, server_first: &str) -> DbResult<String> {
         // Parse "r=<nonce>,s=<salt>,i=<iters>"
         let (server_nonce, salt_b64, iterations) = parse_server_first(server_first)?;
 
-        // El servidor debe extender NUESTRO nonce — si no
-        // empieza con `client_nonce`, alguien está al medio.
+        // The server must extend OUR nonce — if it does not start
+        // with `client_nonce`, someone is in the middle.
         if !server_nonce.starts_with(&self.client_nonce) {
             return Err(DbError::Auth(
                 "SCRAM: server nonce no extiende el client nonce".into(),
@@ -1505,10 +1513,11 @@ impl ScramClient {
         Ok(format!("{},p={}", cfin_no_proof, proof_b64))
     }
 
-    /// Valida el `server-final-message` (`v=<base64_signature>`).
-    /// Falla si el `v=` recibido no matchea el server signature
-    /// que computamos en `client_final()` — eso implicaría que el
-    /// servidor no conoce nuestra password, no aceptamos.
+    /// Validates the `server-final-message` (`v=<base64_signature>`).
+    /// Fails if the received `v=` does not match the server
+    /// signature we computed in `client_final()` — that would
+    /// imply the server does not know our password, which we do
+    /// not accept.
     pub fn verify(&self, server_final: &str) -> DbResult<()> {
         if let Some(rest) = server_final.strip_prefix("v=") {
             let sig_received = BASE64.decode(rest).map_err(|e| {
@@ -1550,7 +1559,7 @@ fn parse_server_first(s: &str) -> DbResult<(String, String, u32)> {
                     .map_err(|_| DbError::Auth(format!("SCRAM: iters inválido '{v}'")))?,
             );
         } else if part.starts_with("m=") {
-            // mandatory extension — si aparece, debemos rechazar
+            // mandatory extension — if it appears, we must reject
             return Err(DbError::Auth(format!(
                 "SCRAM: extension mandatoria del servidor '{part}'"
             )));
@@ -1565,14 +1574,14 @@ fn parse_server_first(s: &str) -> DbResult<(String, String, u32)> {
 }
 
 fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
-    // PBKDF2 con HMAC-SHA-256, derivando 32 bytes (un solo bloque
-    // SHA-256). dkLen = 32 = hLen, así que la fórmula se reduce a
-    //   U1 = HMAC(password, salt || INT(1))   donde INT(1) = 4 bytes big-endian
+    // PBKDF2 with HMAC-SHA-256, deriving 32 bytes (a single
+    // SHA-256 block). dkLen = 32 = hLen, so the formula reduces to
+    //   U1 = HMAC(password, salt || INT(1))   where INT(1) = 4 big-endian bytes
     //   Ui = HMAC(password, U(i-1))
     //   T  = U1 XOR U2 XOR ... XOR U_iterations
-    // Para SCRAM-SHA-256 dkLen es siempre 32 (hLen de SHA-256),
-    // y solo necesitamos i=1, por eso el código está
-    // simplificado vs el PBKDF2 genérico.
+    // For SCRAM-SHA-256 dkLen is always 32 (SHA-256's hLen), and
+    // we only need i=1, hence the code is simplified vs generic
+    // PBKDF2.
     let mut salt_block = Vec::with_capacity(salt.len() + 4);
     salt_block.extend_from_slice(salt);
     salt_block.extend_from_slice(&1u32.to_be_bytes());
@@ -1611,13 +1620,13 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 fn generate_nonce() -> DbResult<String> {
-    // 18 bytes aleatorios → base64 = 24 chars. RFC dice "at
-    // least 64 bits" — 18*8 = 144 bits, sobra.
+    // 18 random bytes → base64 = 24 chars. RFC says "at least 64
+    // bits" — 18*8 = 144 bits, plenty.
     let mut bytes = [0u8; 18];
-    // rand_core::OsRng está disponible vía argon2 → password-hash
-    // → rand_core, ya como dep no-opcional. Lo invocamos vía la
-    // trait RngCore::try_fill_bytes para no depender del feature
-    // rand del wrapper.
+    // rand_core::OsRng is available via argon2 → password-hash →
+    // rand_core, already a non-optional dep. We invoke it via the
+    // RngCore::try_fill_bytes trait to avoid depending on the
+    // wrapper's `rand` feature.
     use rand_core::{OsRng, RngCore};
     OsRng
         .try_fill_bytes(&mut bytes)
@@ -1626,17 +1635,16 @@ fn generate_nonce() -> DbResult<String> {
 }
 
 fn saslprep_minimal(s: &str) -> String {
-    // SASLprep completo (RFC 4013) es complejo — Unicode
-    // normalization NFKC + mapping de chars de control + check de
-    // bidirectional. Para 10.1 implementamos un subset que cubre
-    // ASCII (lo típico de usernames y passwords): rechazamos chars
-    // de control bajos y mapeamos espacios non-ASCII a U+0020.
-    // Para usernames Postgres en práctica casi siempre son ASCII;
-    // si entra demanda real de unicode complejo, sumamos
-    // `stringprep` crate.
+    // Full SASLprep (RFC 4013) is complex — NFKC Unicode
+    // normalization + control-char mapping + bidirectional check.
+    // For 10.1 we implement a subset that covers ASCII (typical
+    // for usernames and passwords): we reject low control chars
+    // and map non-ASCII spaces to U+0020. Postgres usernames in
+    // practice are almost always ASCII; if real demand for
+    // complex Unicode appears, we add the `stringprep` crate.
     //
-    // En SCRAM, los chars '=' y ',' deben escaparse en el
-    // username (forman parte de la sintaxis del mensaje).
+    // In SCRAM, the chars '=' and ',' must be escaped in the
+    // username (they are part of the message syntax).
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
@@ -1649,29 +1657,27 @@ fn saslprep_minimal(s: &str) -> String {
 }
 
 // =============================================================
-// Tipos OID — mapping Postgres → Fitz
+// OID types — Postgres → Fitz mapping
 // =============================================================
 //
-// Postgres usa OIDs (object identifiers, u32) para identificar
-// tipos en el wire protocol. Los OIDs de tipos built-in son
-// estables y están documentados en `pg_type.h` del kernel
-// Postgres.
+// Postgres uses OIDs (object identifiers, u32) to identify types
+// in the wire protocol. OIDs for built-in types are stable and
+// documented in the Postgres kernel's `pg_type.h`.
 //
-// 10.1 cubre los 11 tipos enumerados en el roadmap. Tipos
-// avanzados (JSONB, arrays, Date/Time/Timestamp con timezone
-// detalle, UUID, etc.) llegan en 10.5 — el código actual los
-// recibe como `Bytes` opacos si llegaran y emite
-// `UnsupportedType` con el OID concreto para que el user vea
-// claramente qué pedir.
+// 10.1 covers the 11 types enumerated in the roadmap. Advanced
+// types (JSONB, arrays, Date/Time/Timestamp with timezone detail,
+// UUID, etc.) arrive in 10.5 — current code receives them as
+// opaque `Bytes` if they show up and emits `UnsupportedType` with
+// the concrete OID so the user clearly sees what to request.
 
 pub mod oid {
     pub const BOOL: u32 = 16;
     pub const BYTEA: u32 = 17;
-    /// v0.10.18 — `name` (system identifier, 63 bytes). Devuelto
-    /// por queries sobre `information_schema` (typeado como
-    /// `sql_identifier` que es alias de `name`) y `pg_catalog`.
-    /// Lo tratamos como Text para que las queries de introspect
-    /// del módulo `migrations` funcionen.
+    /// v0.10.18 — `name` (system identifier, 63 bytes). Returned
+    /// by queries over `information_schema` (typed as
+    /// `sql_identifier`, which is an alias for `name`) and
+    /// `pg_catalog`. We treat it as Text so that introspect
+    /// queries from the `migrations` module work.
     pub const NAME: u32 = 19;
     pub const INT8: u32 = 20;
     pub const INT2: u32 = 21;
@@ -1688,14 +1694,14 @@ pub mod oid {
     pub const UUID: u32 = 2950;
     pub const JSONB: u32 = 3802;
     pub const JSON: u32 = 114;
-    /// `void` — devuelto por fns como `pg_sleep()`, `pg_notify()`,
-    /// etc. Postgres lo serializa como string vacío en text format.
-    /// Mapeamos a `PgValue::Null` para que SELECT sobre fns void
-    /// no falle con `UnsupportedType`.
+    /// `void` — returned by fns like `pg_sleep()`, `pg_notify()`,
+    /// etc. Postgres serializes it as an empty string in text
+    /// format. We map it to `PgValue::Null` so that SELECT over
+    /// void fns does not fail with `UnsupportedType`.
     pub const VOID: u32 = 2278;
 
-    // Fase 10.5.b — arrays nativos. Cada tipo escalar tiene su OID
-    // de array hardcoded en `pg_type` del catálogo de Postgres.
+    // Phase 10.5.b — native arrays. Each scalar type has its
+    // array OID hard-coded in Postgres' `pg_type` catalog.
     pub const BOOL_ARRAY: u32 = 1000;
     pub const INT2_ARRAY: u32 = 1005;
     pub const INT4_ARRAY: u32 = 1007;
@@ -1709,8 +1715,8 @@ pub mod oid {
     pub const TIMESTAMPTZ_ARRAY: u32 = 1185;
     pub const UUID_ARRAY: u32 = 2951;
 
-    /// Mapea un OID de array a su OID escalar de elemento.
-    /// Devuelve `None` si `oid` no es un array soportado.
+    /// Maps an array OID to its element scalar OID. Returns
+    /// `None` if `oid` is not a supported array.
     pub fn array_elem_oid(array_oid: u32) -> Option<u32> {
         match array_oid {
             BOOL_ARRAY => Some(BOOL),
@@ -1729,9 +1735,9 @@ pub mod oid {
         }
     }
 
-    /// Inverso: dado un OID escalar, devuelve el OID del array
-    /// correspondiente. Usado al emitir casts `::int8[]` en INSERTs
-    /// con columnas array.
+    /// Inverse: given a scalar OID, returns the corresponding
+    /// array OID. Used when emitting `::int8[]`-style casts in
+    /// INSERTs with array columns.
     pub fn elem_to_array_oid(elem_oid: u32) -> Option<u32> {
         match elem_oid {
             BOOL => Some(BOOL_ARRAY),
@@ -1751,10 +1757,10 @@ pub mod oid {
     }
 }
 
-/// Valor escalar Postgres parseado del wire. La representación
-/// es mínima en 10.1: solo los primitivos del MVP. Tipos
-/// avanzados (JSONB structurado, arrays tipados, etc.) llegan
-/// en 10.5 con variantes específicas.
+/// Postgres scalar value parsed from the wire. The
+/// representation is minimal in 10.1: only the MVP primitives.
+/// Advanced types (structured JSONB, typed arrays, etc.) arrive
+/// in 10.5 with specific variants.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PgValue {
     Null,
@@ -1763,12 +1769,12 @@ pub enum PgValue {
     Text(String),
     Bool(bool),
     Bytes(Vec<u8>),
-    /// Fase 10.5.b — array Postgres. `elem_oid` indica el tipo de
-    /// los elementos (INT4, TEXT, etc.) para que el encoder sepa
-    /// qué cast emitir (`$N::int4[]`) y cómo formatear cada item.
-    /// Los elementos pueden ser `PgValue::Null` (Postgres soporta
-    /// `{1,NULL,3}`). Anidamiento no soportado en MVP — los elem
-    /// son escalares.
+    /// Phase 10.5.b — Postgres array. `elem_oid` indicates the
+    /// element type (INT4, TEXT, etc.) so the encoder knows which
+    /// cast to emit (`$N::int4[]`) and how to format each item.
+    /// Elements can be `PgValue::Null` (Postgres supports
+    /// `{1,NULL,3}`). Nesting not supported in MVP — elements are
+    /// scalars.
     Array {
         elem_oid: u32,
         values: Vec<PgValue>,
@@ -1798,11 +1804,11 @@ impl fmt::Display for PgValue {
     }
 }
 
-/// Parsea un valor del wire (text format — el default de Simple
-/// Query). Cuando llegue Extended Query con format=binary en
-/// 10.1.b, agregamos `parse_binary` paralelo.
+/// Parses a value from the wire (text format — the Simple Query
+/// default). When Extended Query with format=binary lands in
+/// 10.1.b, we add a parallel `parse_binary`.
 ///
-/// `bytes = None` → NULL (length -1 en DataRow).
+/// `bytes = None` → NULL (length -1 in DataRow).
 pub fn parse_text_value(oid: u32, bytes: Option<&[u8]>) -> DbResult<PgValue> {
     let raw = match bytes {
         None => return Ok(PgValue::Null),
@@ -1832,13 +1838,13 @@ pub fn parse_text_value(oid: u32, bytes: Option<&[u8]>) -> DbResult<PgValue> {
         | oid::UUID
         | oid::JSON
         | oid::JSONB => Ok(PgValue::Text(s.to_string())),
-        // `void` siempre devuelve un string vacío en text format.
-        // Lo modelamos como Null para que `SELECT pg_sleep(...)` no
-        // falle con UnsupportedType.
+        // `void` always returns an empty string in text format.
+        // We model it as Null so that `SELECT pg_sleep(...)` does
+        // not fail with UnsupportedType.
         oid::VOID => Ok(PgValue::Null),
         oid::BYTEA => {
-            // Wire format text para BYTEA es "\x<hex>". Si no
-            // matchea, devolvemos los bytes raw.
+            // Wire text format for BYTEA is "\x<hex>". If it
+            // doesn't match, we return the raw bytes.
             if let Some(hex) = s.strip_prefix("\\x") {
                 let mut out = Vec::with_capacity(hex.len() / 2);
                 let bytes = hex.as_bytes();
@@ -1856,39 +1862,39 @@ pub fn parse_text_value(oid: u32, bytes: Option<&[u8]>) -> DbResult<PgValue> {
             }
         }
         _ => {
-            // Fase 10.5.b — arrays nativos. Detectamos por OID y
-            // delegamos a parse_array_text que parsea el formato
-            // `{a,b,c}` de Postgres.
+            // Phase 10.5.b — native arrays. We detect by OID and
+            // delegate to parse_array_text which parses Postgres'
+            // `{a,b,c}` format.
             if let Some(elem_oid) = oid::array_elem_oid(oid) {
                 let values = parse_array_text(s, elem_oid)?;
                 return Ok(PgValue::Array { elem_oid, values });
             }
-            // Tipos no soportados en 10.1: devolvemos UnsupportedType
-            // con el OID concreto. El user ve qué tipo agregar.
+            // Types unsupported in 10.1: we return UnsupportedType
+            // with the concrete OID. The user sees which type to
+            // add.
             Err(DbError::UnsupportedType(oid))
         }
     }
 }
 
-/// Fase 10.5.b — parser del formato text de arrays de Postgres.
+/// Phase 10.5.b — parser for the text format of Postgres arrays.
 ///
-/// Gramática (simplificada, MVP — sin anidamiento, sin dimensiones
-/// custom):
+/// Grammar (simplified, MVP — no nesting, no custom dimensions):
 ///
 /// ```text
 /// array     = '{' [ element (',' element)* ] '}'
 /// element   = unquoted | quoted | NULL
 /// quoted    = '"' (char | '\\' char | '\\"' )* '"'
-/// unquoted  = chars sin ',', '{', '}', '"', '\\', whitespace
+/// unquoted  = chars without ',', '{', '}', '"', '\\', whitespace
 /// ```
 ///
-/// `NULL` sin comillas → `PgValue::Null`; `"NULL"` con comillas →
-/// `PgValue::Text("NULL")` (literal). Whitespace alrededor de los
-/// elementos no quoted se trimea (consistente con Postgres).
+/// `NULL` without quotes → `PgValue::Null`; `"NULL"` quoted →
+/// `PgValue::Text("NULL")` (literal). Whitespace around unquoted
+/// elements is trimmed (consistent with Postgres).
 fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
     let bytes = s.as_bytes();
     let mut idx = 0;
-    // Trim whitespace inicial.
+    // Trim leading whitespace.
     while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
         idx += 1;
     }
@@ -1903,18 +1909,18 @@ fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
         idx += 1;
     }
     let mut out = Vec::new();
-    // Array vacío: '{}'.
+    // Empty array: '{}'.
     if idx < bytes.len() && bytes[idx] == b'}' {
         return Ok(out);
     }
     loop {
-        // Parsear un elemento.
+        // Parse one element.
         let (elem_raw, was_quoted, new_idx) = parse_array_element(bytes, idx)?;
         let value = if !was_quoted && elem_raw.eq_ignore_ascii_case("NULL") {
             PgValue::Null
         } else {
-            // Parseamos el elemento como un valor escalar usando
-            // parse_text_value con el OID del elemento.
+            // Parse the element as a scalar value using
+            // parse_text_value with the element OID.
             parse_text_value(elem_oid, Some(elem_raw.as_bytes()))?
         };
         out.push(value);
@@ -1931,7 +1937,7 @@ fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
         match bytes[idx] {
             b',' => {
                 idx += 1;
-                // Skip whitespace antes del próximo elemento.
+                // Skip whitespace before next element.
                 while idx < bytes.len() && bytes[idx].is_ascii_whitespace() {
                     idx += 1;
                 }
@@ -1947,8 +1953,9 @@ fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
     }
 }
 
-/// Lee un elemento de un array text. Devuelve `(content, was_quoted, new_idx)`.
-/// Se llama con `idx` apuntando al primer caracter del elemento.
+/// Reads one element from a text array. Returns
+/// `(content, was_quoted, new_idx)`. Called with `idx` pointing at
+/// the first char of the element.
 fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, usize)> {
     if start >= bytes.len() {
         return Err(DbError::Protocol(
@@ -1956,8 +1963,8 @@ fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, us
         ));
     }
     if bytes[start] == b'"' {
-        // Quoted element. Leemos hasta el cierre, deshaciendo escapes
-        // `\\` → `\` y `\"` → `"`.
+        // Quoted element. Read up to the closing quote, undoing
+        // escapes `\\` → `\` and `\"` → `"`.
         let mut out = String::new();
         let mut idx = start + 1;
         while idx < bytes.len() {
@@ -1975,7 +1982,7 @@ fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, us
         }
         Err(DbError::Protocol("array element: quoted no cerrado".into()))
     } else {
-        // Unquoted: leemos hasta ',' o '}'.
+        // Unquoted: read until ',' or '}'.
         let mut idx = start;
         while idx < bytes.len() && bytes[idx] != b',' && bytes[idx] != b'}' {
             idx += 1;
@@ -1992,10 +1999,10 @@ fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, us
     }
 }
 
-/// Codifica un valor para envío al servidor (text format en MVP).
-/// El servidor parsea según el OID del statement; si pasamos OID 0
-/// en `Parse`, Postgres infiere. Para Bytes usamos el formato
-/// hex "\x<hex>".
+/// Encodes a value for sending to the server (text format in
+/// MVP). The server parses according to the statement OID; if we
+/// pass OID 0 in `Parse`, Postgres infers. For Bytes we use the
+/// hex format "\x<hex>".
 pub fn encode_text_value(v: &PgValue) -> Option<Vec<u8>> {
     match v {
         PgValue::Null => None,
@@ -2016,9 +2023,9 @@ pub fn encode_text_value(v: &PgValue) -> Option<Vec<u8>> {
     }
 }
 
-/// Fase 10.5.b — codifica un Vec<PgValue> al text format de arrays
-/// Postgres: `{elem1,elem2,...}`. Los elementos quoted llevan `"`
-/// alrededor y escapes `\\` para `\` y `"`. Null sin quotes.
+/// Phase 10.5.b — encodes a Vec<PgValue> to Postgres' text array
+/// format: `{elem1,elem2,...}`. Quoted elements carry `"` around
+/// and escapes `\\` for `\` and `"`. Null without quotes.
 fn encode_array_text(values: &[PgValue]) -> String {
     let mut out = String::from("{");
     for (i, v) in values.iter().enumerate() {
@@ -2038,7 +2045,7 @@ fn encode_array_element(out: &mut String, v: &PgValue) {
         PgValue::Float(x) => out.push_str(&x.to_string()),
         PgValue::Bool(b) => out.push(if *b { 't' } else { 'f' }),
         PgValue::Text(s) => {
-            // Strings siempre quoted en arrays (safe default).
+            // Strings always quoted in arrays (safe default).
             out.push('"');
             for ch in s.chars() {
                 if ch == '"' || ch == '\\' {
@@ -2049,9 +2056,9 @@ fn encode_array_element(out: &mut String, v: &PgValue) {
             out.push('"');
         }
         PgValue::Bytes(b) => {
-            // bytea en arrays: hex con escape `\\x...`. Lo serializamos
-            // como string quoted para que el parser del server lo
-            // reciba como `\x...`.
+            // bytea in arrays: hex with escape `\\x...`. We
+            // serialize as a quoted string so the server parser
+            // receives it as `\x...`.
             out.push('"');
             out.push_str("\\\\x");
             for byte in b {
@@ -2061,23 +2068,24 @@ fn encode_array_element(out: &mut String, v: &PgValue) {
             out.push('"');
         }
         PgValue::Array { values, .. } => {
-            // Anidamiento: emitimos el sub-array recursivo. Postgres
-            // soporta multi-dimensional pero el MVP no lo expone como
-            // shape Fitz — esto solo entra si se construye a mano.
+            // Nesting: we emit the sub-array recursively. Postgres
+            // supports multi-dimensional but the MVP does not
+            // expose it as a Fitz shape — this only kicks in if
+            // built by hand.
             out.push_str(&encode_array_text(values));
         }
     }
 }
 
 // =============================================================
-// Row — resultado de una query
+// Row — query result
 // =============================================================
 
-/// Un row del resultset. Mantiene los nombres de las columnas
-/// (para acceso `row.get("name")`) y los valores en orden. Los
-/// nombres son `Arc<str>` cuando el row vive más allá de una
-/// query — en MVP los duplicamos en cada row (cost low, ~2 KB
-/// per row para 10 columnas), optimizable si entra demanda.
+/// A row from the result set. Keeps the column names (for
+/// `row.get("name")` access) and the values in order. Names are
+/// `Arc<str>` when the row outlives one query — in MVP we
+/// duplicate them per row (low cost, ~2 KB per row for 10
+/// columns), optimizable if demand appears.
 #[derive(Debug, Clone)]
 pub struct Row {
     columns: Vec<(String, u32)>, // (name, type_oid)
@@ -2102,10 +2110,11 @@ impl Row {
         self.values.get(idx)
     }
 
-    /// v0.10.24 — devuelve `(PgValue, OID)` para que el caller pueda
-    /// refinar el tipo del valor según el OID de la columna (date,
-    /// timestamptz, uuid). Sin esto, el caller (evaluador) solo ve
-    /// `PgValue::Text` sin poder distinguir entre `text`/`date`/etc.
+    /// v0.10.24 — returns `(PgValue, OID)` so the caller can
+    /// refine the value's type according to the column OID (date,
+    /// timestamptz, uuid). Without this, the caller (evaluator)
+    /// only sees `PgValue::Text` without being able to distinguish
+    /// between `text`/`date`/etc.
     pub fn get_with_oid(&self, name: &str) -> Option<(&PgValue, u32)> {
         let idx = self.columns.iter().position(|(n, _)| n == name)?;
         let v = self.values.get(idx)?;
@@ -2126,8 +2135,8 @@ impl Row {
     }
 }
 
-/// Resultado completo de una query: rows + el tag del
-/// CommandComplete (típicamente "SELECT 42" o "INSERT 0 1").
+/// Full result of a query: rows + the CommandComplete tag
+/// (typically "SELECT 42" or "INSERT 0 1").
 #[derive(Debug, Clone)]
 pub struct QueryResult {
     pub rows: Vec<Row>,
@@ -2135,9 +2144,10 @@ pub struct QueryResult {
 }
 
 impl QueryResult {
-    /// Devuelve el rowcount inferido del `command_tag`.
-    /// `"INSERT 0 5"` → 5, `"UPDATE 3"` → 3. Si no parsea (caso
-    /// "SELECT"), devuelve el número de rows del resultset.
+    /// Returns the rowcount inferred from `command_tag`.
+    /// `"INSERT 0 5"` → 5, `"UPDATE 3"` → 3. If it does not parse
+    /// (case "SELECT"), returns the number of rows in the result
+    /// set.
     pub fn rows_affected(&self) -> u64 {
         let parts: Vec<&str> = self.command_tag.split_whitespace().collect();
         match parts.as_slice() {
@@ -2152,45 +2162,48 @@ impl QueryResult {
 // Connection — handshake + queries
 // =============================================================
 
-/// Una conexión Postgres viva. Owns el TcpStream + estado de la
-/// conexión. NO es Send+Sync por construcción (TcpStream lo es;
-/// el pool de 10.2 envuelve en `Arc<Mutex<Connection>>` para
-/// múltiple acceso). En 10.1 una sola tarea posee el `Connection`
-/// y lo usa exclusivamente.
-/// v0.10.23 (Fase 10.1.b) — helper trait que permite tener un
-/// `Box<dyn DbReadWrite>` único como stream del `Connection`, sin
-/// importar si abajo hay un `TcpStream` plano (sslmode=disable) o
-/// un `tokio_rustls::client::TlsStream<TcpStream>` (sslmode=require/
-/// verify-ca/verify-full). Costo: una vtable lookup por read/write
-/// (~3ns), irrelevante vs el round-trip TCP.
+/// A live Postgres connection. Owns the TcpStream + the
+/// connection state. NOT Send+Sync by construction (TcpStream is;
+/// the 10.2 pool wraps it in `Arc<Mutex<Connection>>` for
+/// concurrent access). In 10.1 a single task owns the
+/// `Connection` and uses it exclusively.
+/// v0.10.23 (Phase 10.1.b) — helper trait that allows having a
+/// single `Box<dyn DbReadWrite>` as the `Connection` stream,
+/// regardless of whether underneath there is a plain `TcpStream`
+/// (sslmode=disable) or a
+/// `tokio_rustls::client::TlsStream<TcpStream>`
+/// (sslmode=require/verify-ca/verify-full). Cost: one vtable
+/// lookup per read/write (~3ns), irrelevant vs the TCP
+/// round-trip.
 pub trait DbReadWrite: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> DbReadWrite for T {}
 
 pub struct Connection {
     stream: Box<dyn DbReadWrite>,
-    /// Status de la transacción actual: 'I' idle, 'T' in tx,
-    /// 'E' in failed tx. Lo actualizamos en cada `ReadyForQuery`.
-    /// Útil para diagnostics y para 10.7 (transactions).
+    /// Current transaction status: 'I' idle, 'T' in tx, 'E' in
+    /// failed tx. Updated on each `ReadyForQuery`. Useful for
+    /// diagnostics and for 10.7 (transactions).
     tx_status: u8,
-    /// Process ID + secret_key del backend. Útil para cancelar
-    /// queries (mensaje `CancelRequest` por conexión paralela).
-    /// Cancellation no implementado en 10.1 — campo presente para
-    /// el sub-paso futuro.
+    /// Process ID + secret_key from the backend. Useful to cancel
+    /// queries (`CancelRequest` message on a parallel
+    /// connection). Cancellation not implemented in 10.1 — field
+    /// present for the future sub-step.
     backend_pid: i32,
     backend_secret_key: i32,
-    /// Parámetros del servidor reportados durante el startup
-    /// (server_version, server_encoding, etc.). Útil para
-    /// diagnostics + features que dependen de la versión.
+    /// Server parameters reported during startup
+    /// (server_version, server_encoding, etc.). Useful for
+    /// diagnostics + features that depend on the version.
     server_params: Vec<(String, String)>,
 }
 
 impl Connection {
-    /// Abre TCP, hace startup + auth, deja la conexión lista
-    /// para queries. Timeout total ~10 seg. v0.10.23 (Fase 10.1.b):
-    /// si `config.sslmode != Disable`, hace SSLRequest dance + TLS
-    /// handshake antes del startup. El startup va sobre el stream
-    /// upgrade-ado (cifrado), de forma transparente al resto del
-    /// driver gracias al `Box<dyn DbReadWrite>`.
+    /// Opens TCP, does startup + auth, leaves the connection
+    /// ready for queries. Total timeout ~10 s. v0.10.23
+    /// (Phase 10.1.b): if `config.sslmode != Disable`, does the
+    /// SSLRequest dance + TLS handshake before startup. The
+    /// startup goes over the upgraded (encrypted) stream
+    /// transparently to the rest of the driver thanks to
+    /// `Box<dyn DbReadWrite>`.
     pub async fn connect(config: &ConnectionConfig) -> DbResult<Self> {
         let addr = format!("{}:{}", config.host, config.port);
         let tcp_stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
@@ -2198,21 +2211,22 @@ impl Connection {
             .map_err(|_| DbError::Io(io::Error::new(io::ErrorKind::TimedOut, "connect timeout")))?
             .map_err(DbError::Io)?;
 
-        // v0.10.13 (B-1 fix) — TCP_NODELAY deshabilita Nagle's
-        // algorithm. CRÍTICO para el Extended Query Protocol:
-        // mandamos 5 mensajes consecutivos (Parse/Bind/Describe/
-        // Execute/Sync) sin esperar respuesta del server entre
-        // ellos. Con Nagle activo, el kernel TCP retrasa cada
-        // mensaje pequeño esperando ACK del previo, sumando hasta
-        // ~40ms de delayed-ACK por query — bug observado en
-        // benchmark v2 (GET /users/{id} 43ms vs simple query 4ms).
-        // Sin Nagle, los 5 mensajes se mandan inmediatamente
-        // batched (aún más rápido con el fix de batching abajo).
+        // v0.10.13 (B-1 fix) — TCP_NODELAY disables Nagle's
+        // algorithm. CRITICAL for the Extended Query Protocol: we
+        // send 5 consecutive messages
+        // (Parse/Bind/Describe/Execute/Sync) without waiting for
+        // a server response between them. With Nagle active, the
+        // TCP kernel delays each small message waiting for the
+        // ACK of the previous one, adding up to ~40ms of
+        // delayed-ACK per query — bug observed in benchmark v2
+        // (GET /users/{id} 43ms vs simple query 4ms). Without
+        // Nagle, the 5 messages go out batched immediately (even
+        // faster with the batching fix below).
         let _ = tcp_stream.set_nodelay(true);
 
-        // v0.10.23 (Fase 10.1.b) — TLS upgrade si corresponde.
-        // Sub-paso 1: SSLRequest dance (1-byte response: 'S'/'N'/'E')
-        // Sub-paso 2: TLS handshake con verifier según sslmode.
+        // v0.10.23 (Phase 10.1.b) — TLS upgrade if applicable.
+        // Sub-step 1: SSLRequest dance (1-byte response: 'S'/'N'/'E')
+        // Sub-step 2: TLS handshake with verifier per sslmode.
         let stream: Box<dyn DbReadWrite> = if config.sslmode == SslMode::Disable {
             Box::new(tcp_stream)
         } else {
@@ -2296,7 +2310,7 @@ impl Connection {
                     })
                     .await?;
 
-                    // Esperamos AuthenticationSASLContinue
+                    // We expect AuthenticationSASLContinue
                     let cont = match self.read().await? {
                         BackendMessage::AuthenticationSaslContinue { data } => data,
                         BackendMessage::ErrorResponse(ef) => {
@@ -2320,7 +2334,7 @@ impl Connection {
                     })
                     .await?;
 
-                    // Esperamos AuthenticationSASLFinal
+                    // We expect AuthenticationSASLFinal
                     let final_data = match self.read().await? {
                         BackendMessage::AuthenticationSaslFinal { data } => data,
                         BackendMessage::ErrorResponse(ef) => {
@@ -2339,8 +2353,8 @@ impl Connection {
                     let server_final = std::str::from_utf8(&final_data)
                         .map_err(|_| DbError::Auth("SCRAM: server-final no UTF-8".into()))?;
                     scram.verify(server_final)?;
-                    // El próximo mensaje debe ser AuthenticationOk.
-                    // Loop continúa.
+                    // Next message must be AuthenticationOk.
+                    // Loop continues.
                 }
                 BackendMessage::ErrorResponse(ef) => {
                     return Err(DbError::Server {
@@ -2357,7 +2371,7 @@ impl Connection {
             }
         }
 
-        // Drain de ParameterStatus + BackendKeyData hasta
+        // Drain ParameterStatus + BackendKeyData until
         // ReadyForQuery.
         loop {
             match self.read().await? {
@@ -2383,7 +2397,7 @@ impl Connection {
                     });
                 }
                 BackendMessage::NoticeResponse(_) => {
-                    // ignoramos notices durante startup
+                    // ignore notices during startup
                 }
                 other => {
                     return Err(DbError::Protocol(format!(
@@ -2394,9 +2408,10 @@ impl Connection {
         }
     }
 
-    /// Simple Query: ejecuta el SQL en un solo round-trip. No
-    /// admite parámetros (el caller arma el SQL completo). Para
-    /// queries con args, usar `extended_query()` en su lugar.
+    /// Simple Query: executes the SQL in a single round-trip.
+    /// Does not accept parameters (the caller builds the full
+    /// SQL). For queries with args, use `extended_query()`
+    /// instead.
     pub async fn simple_query(&mut self, sql: &str) -> DbResult<QueryResult> {
         self.write(FrontendMessage::Query { sql }).await?;
         let mut rows = Vec::new();
@@ -2425,12 +2440,12 @@ impl Connection {
                     command_tag = "EMPTY".into();
                 }
                 BackendMessage::NoticeResponse(_) => {
-                    // ignorado en MVP — un sub-paso futuro puede
-                    // exponer notices al user (logging callback)
+                    // ignored in MVP — a future sub-step can
+                    // expose notices to the user (logging callback)
                 }
                 BackendMessage::ErrorResponse(ef) => {
-                    // Drain hasta ReadyForQuery para dejar conn
-                    // utilizable.
+                    // Drain until ReadyForQuery so the conn is
+                    // usable again.
                     self.drain_until_ready().await?;
                     return Err(DbError::Server {
                         severity: ef.severity,
@@ -2451,34 +2466,36 @@ impl Connection {
         }
     }
 
-    /// Extended Query: parsea + bindea + ejecuta con parámetros.
-    /// Usa text format en ambas direcciones para simplificar (los
-    /// tipos OID core parsean igual con format=0). Binary format
-    /// llega en 10.5 cuando lo necesitemos para JSONB/timestamps.
+    /// Extended Query: parses + binds + executes with parameters.
+    /// Uses text format in both directions to keep it simple
+    /// (core OID types parse the same with format=0). Binary
+    /// format arrives in 10.5 when we need it for JSONB/timestamps.
     pub async fn extended_query(&mut self, sql: &str, args: &[PgValue]) -> DbResult<QueryResult> {
         // Encode args to text format
         let encoded: Vec<Option<Vec<u8>>> = args.iter().map(encode_text_value).collect();
         let bind_refs: Vec<Option<&[u8]>> = encoded.iter().map(|opt| opt.as_deref()).collect();
 
-        // v0.10.13 (B-1 fix) — batchear los 5 mensajes del Extended
-        // Query Protocol en UN solo write al socket. Antes hacíamos
-        // 5 `self.write(...).await?` separados, cada uno con su
-        // syscall write(); aún con TCP_NODELAY activo, los syscalls
-        // separados sumaban latencia significativa por cada round
-        // de await + scheduling. Benchmark v0.10.13 confirmó:
-        // GET /users/{id} pasó de 43ms p50 → ~2ms p50 con este
-        // batch, dejando Fitz como ganador absoluto en single-read
-        // (vs Python ~34ms antes).
+        // v0.10.13 (B-1 fix) — batch the 5 messages of the
+        // Extended Query Protocol into a SINGLE socket write.
+        // Before we did 5 separate `self.write(...).await?`, each
+        // with its own write() syscall; even with TCP_NODELAY
+        // active, separate syscalls added significant latency per
+        // await + scheduling round. Benchmark v0.10.13 confirmed:
+        // GET /users/{id} dropped from 43ms p50 → ~2ms p50 with
+        // this batch, leaving Fitz as absolute winner in
+        // single-read (vs Python ~34ms before).
         //
-        // El server Postgres NO responde hasta el Sync — los 5
-        // mensajes son "pipelined" en el sentido protocolar, no es
-        // un cambio semántico. Solo eliminamos overhead client-side.
+        // The Postgres server does NOT respond until the Sync —
+        // the 5 messages are "pipelined" in the protocol sense,
+        // not a semantic change. We just eliminate client-side
+        // overhead.
         //
-        // Parse — name vacío = statement anónimo (lifetime de un
-        // round). No usamos prepared statements cache en MVP.
-        // Describe(Portal "") — CRÍTICO: sin esto, el server NO
-        // envía RowDescription tras BindComplete y solo manda
-        // DataRow opacos sin nombres de columna.
+        // Parse — empty name = anonymous statement (lifetime of
+        // one round). We do not use a prepared-statements cache
+        // in MVP.
+        // Describe(Portal "") — CRITICAL: without this, the
+        // server does NOT send RowDescription after BindComplete
+        // and only delivers opaque DataRow without column names.
         let zero_format = [0i16];
         let mut batch: Vec<u8> = Vec::with_capacity(sql.len() + 256);
         batch.extend_from_slice(
@@ -2528,7 +2545,7 @@ impl Connection {
                     columns = fields.into_iter().map(|f| (f.name, f.type_oid)).collect();
                 }
                 BackendMessage::NoData => {
-                    // No retorna rows (INSERT sin RETURNING)
+                    // Does not return rows (INSERT without RETURNING)
                 }
                 BackendMessage::DataRow { values } => {
                     let parsed = values
@@ -2581,25 +2598,25 @@ impl Connection {
         }
     }
 
-    /// Cierra la conexión cooperativamente. Manda `Terminate` y
-    /// dropea el TcpStream. No reusable después.
+    /// Closes the connection cooperatively. Sends `Terminate` and
+    /// drops the TcpStream. Not reusable afterwards.
     pub async fn close(mut self) -> DbResult<()> {
-        // El Terminate puede fallar si la conn ya está cerrada
-        // del lado del server; lo ignoramos.
+        // Terminate may fail if the conn is already closed on the
+        // server side; we ignore it.
         let _ = self.write(FrontendMessage::Terminate).await;
         Ok(())
     }
 
-    /// Fase 10.7 — Transactions ORM. Wrappers simples sobre
-    /// `simple_query` con las 3 instrucciones SQL estándar. La
-    /// orquestación BEGIN/COMMIT/ROLLBACK + auto-rollback en
-    /// error/panic vive arriba (en `DbConnHandle::transaction`),
-    /// estos métodos son solo las primitivas wire-level.
+    /// Phase 10.7 — ORM transactions. Simple wrappers over
+    /// `simple_query` with the 3 standard SQL instructions. The
+    /// BEGIN/COMMIT/ROLLBACK orchestration + auto-rollback on
+    /// error/panic lives upstream (in `DbConnHandle::transaction`);
+    /// these methods are just the wire-level primitives.
     ///
-    /// Nota: en Postgres `BEGIN` también acepta sinónimos
-    /// `START TRANSACTION`; usamos `BEGIN` por compatibilidad
-    /// histórica. Sin niveles de aislamiento explícitos — usa el
-    /// default del server (típicamente READ COMMITTED).
+    /// Note: in Postgres `BEGIN` also accepts the synonym
+    /// `START TRANSACTION`; we use `BEGIN` for historical
+    /// compatibility. No explicit isolation levels — uses the
+    /// server default (typically READ COMMITTED).
     pub async fn begin(&mut self) -> DbResult<()> {
         self.simple_query("BEGIN").await?;
         Ok(())
@@ -2627,7 +2644,7 @@ impl Connection {
     }
 }
 
-/// MD5 password hash en formato Postgres:
+/// MD5 password hash in Postgres format:
 ///   "md5" || md5_hex(md5_hex(password || username) || salt)
 fn md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     let inner = md5_hex(&[password.as_bytes(), user.as_bytes()].concat());
@@ -2637,10 +2654,9 @@ fn md5_password(user: &str, password: &str, salt: &[u8; 4]) -> String {
     format!("md5{outer}")
 }
 
-/// MD5 implementación mini para auth legacy. Solo lo usamos para
-/// el método MD5 deprecated de Postgres pre-14; en 14+ ya es
-/// SCRAM-SHA-256 por default. Mantenemos por compat con DBs
-/// viejas en dev.
+/// Mini MD5 implementation for legacy auth. Only used for the
+/// deprecated MD5 method in Postgres pre-14; on 14+ it's already
+/// SCRAM-SHA-256 by default. Kept for compat with old DBs in dev.
 fn md5_hex(data: &[u8]) -> String {
     let digest = md5_compute(data);
     let mut hex = String::with_capacity(32);
@@ -2651,9 +2667,9 @@ fn md5_hex(data: &[u8]) -> String {
     hex
 }
 
-/// MD5 RFC 1321. ~50 LoC pure. Solo para auth legacy.
+/// MD5 RFC 1321. ~50 LoC pure. Only for legacy auth.
 fn md5_compute(input: &[u8]) -> [u8; 16] {
-    // Constantes
+    // Constants
     const S: [u32; 64] = [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
         9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
@@ -2736,55 +2752,55 @@ fn md5_compute(input: &[u8]) -> [u8; 16] {
 }
 
 // =============================================================
-// DbPool — pool de conexiones con reconnect + health check
+// DbPool — connection pool with reconnect + health check
 // =============================================================
 //
-// Fase 10.2: `DbConnHandle` ahora envuelve un pool de N conexiones
-// (default 10) en lugar de una sola. Múltiples tareas pueden
-// invocar `query()` en paralelo y cada una agarra una conexión
-// libre del pool sin bloquearse entre sí — esencial para que el
-// throughput HTTP no se serialice por la DB.
+// Phase 10.2: `DbConnHandle` now wraps a pool of N connections
+// (default 10) instead of a single one. Multiple tasks can call
+// `query()` in parallel and each picks a free connection from the
+// pool without blocking each other — essential so HTTP throughput
+// does not serialize on the DB.
 //
-// Modelo:
-//   - `DbPool` mantiene un vector de conexiones idle bajo `Mutex`
-//     std (sin parking_lot — `src/db.rs` es self-contained para
-//     ser embebido vía `include_str!` en el codegen de 10.1.c).
-//   - `tokio::sync::Semaphore` limita el número máximo de conns
-//     en uso simultáneo. Si N tareas hacen `query` y el pool
-//     ya emitió N conns, la N+1 espera hasta que una se libere.
-//   - `PooledConn` mantiene la conexión + un `OwnedSemaphorePermit`.
-//     Al hacer `Drop`, la conn vuelve al pool idle y el permit
-//     se libera automáticamente.
-//   - El `acquire` lazy crece el pool on-demand: si no hay idle,
-//     abre una conn TCP nueva (hasta `max_conns`).
-//   - Health check spawneado en background hace `SELECT 1` sobre
-//     todas las conns idle cada 30s y descarta las que fallan.
+// Model:
+//   - `DbPool` keeps a vector of idle connections under a std
+//     `Mutex` (no parking_lot — `src/db.rs` is self-contained for
+//     embedding via `include_str!` in the 10.1.c codegen).
+//   - `tokio::sync::Semaphore` limits the maximum number of conns
+//     in use concurrently. If N tasks call `query` and the pool
+//     already emitted N conns, the N+1 waits until one is freed.
+//   - `PooledConn` keeps the connection + an
+//     `OwnedSemaphorePermit`. On `Drop`, the conn returns to the
+//     idle pool and the permit is released automatically.
+//   - `acquire` lazy-grows the pool on demand: if there is no
+//     idle, it opens a new TCP conn (up to `max_conns`).
+//   - A background health-check task does `SELECT 1` on all idle
+//     conns every 30s and discards failing ones.
 //
-// `connect_url(url)` es eager — abre la primera conn al boot
-// para validar credentials y URL antes de devolver el handle.
-// Las conns adicionales se abren lazy en `acquire()`.
+// `connect_url(url)` is eager — opens the first conn at boot to
+// validate credentials and URL before returning the handle.
+// Additional conns open lazily in `acquire()`.
 
 const DEFAULT_MAX_CONNS: usize = 10;
 const HEALTH_CHECK_INTERVAL_SECS: u64 = 30;
 
-/// v0.10.29 — `FITZ_DB_MAX_CONNS` env var opt-in para overridear
-/// el pool size del driver. Útil para apps que esperan mucho
-/// concurrent load (> 10 requests simultáneos hitting la DB) o
-/// para apps con muy poco load donde 10 conns es overkill.
+/// v0.10.29 — `FITZ_DB_MAX_CONNS` opt-in env var to override the
+/// driver pool size. Useful for apps that expect a lot of
+/// concurrent load (> 10 simultaneous requests hitting the DB) or
+/// for apps with very little load where 10 conns is overkill.
 ///
-/// Parseada una sola vez por proceso (`LazyLock`) — cambios
-/// mid-run NO se reflejan (mismo modelo que `FITZ_DB_LOG`).
-/// Valores inválidos o vacíos → fallback a `DEFAULT_MAX_CONNS`.
-/// Clamp: min 1, max 200 (más allá es probablemente un typo y
-/// satura Postgres `max_connections`).
+/// Parsed once per process (`LazyLock`) — mid-run changes are NOT
+/// reflected (same model as `FITZ_DB_LOG`). Invalid or empty
+/// values → fallback to `DEFAULT_MAX_CONNS`. Clamp: min 1, max
+/// 200 (beyond that is probably a typo and saturates Postgres'
+/// `max_connections`).
 pub static FITZ_DB_MAX_CONNS: std::sync::LazyLock<usize> =
     std::sync::LazyLock::new(|| match std::env::var("FITZ_DB_MAX_CONNS") {
         Ok(s) => parse_max_conns_value(&s),
         Err(_) => DEFAULT_MAX_CONNS,
     });
 
-/// v0.10.29 — Parser puro testeable. Trim + parse + clamp [1, 200].
-/// Valores no parseables o fuera de rango → DEFAULT_MAX_CONNS.
+/// v0.10.29 — Pure testable parser. Trim + parse + clamp [1, 200].
+/// Unparseable or out-of-range values → DEFAULT_MAX_CONNS.
 pub(crate) fn parse_max_conns_value(s: &str) -> usize {
     match s.trim().parse::<usize>() {
         Ok(n) if (1..=200).contains(&n) => n,
@@ -2792,37 +2808,37 @@ pub(crate) fn parse_max_conns_value(s: &str) -> usize {
     }
 }
 
-/// Resuelve el max_conns efectivo del pool: env var > default.
+/// Resolves the effective max_conns of the pool: env var > default.
 pub(crate) fn effective_max_conns() -> usize {
     *FITZ_DB_MAX_CONNS
 }
 
-/// Pool interno del `DbConnHandle`. NO se expone al evaluator
-/// directamente — el handle delega aquí. Compartido por
-/// `Arc<DbPool>` para que el spawned health check task pueda
-/// mantener un weak reference sin extender la vida del pool.
+/// Internal pool of the `DbConnHandle`. NOT exposed directly to
+/// the evaluator — the handle delegates here. Shared via
+/// `Arc<DbPool>` so the spawned health-check task can hold a
+/// weak reference without extending the pool's lifetime.
 pub struct DbPool {
     config: ConnectionConfig,
-    /// Cola de conexiones libres listas para usar. `parking_lot`
-    /// no se usa porque `src/db.rs` se embebe en el output de
-    /// `fitz build` y queremos mantener el archivo self-contained
-    /// sin sumar deps al crate generado. `std::sync::Mutex` con
-    /// scope corto (push/pop) — sin riesgo de poison porque los
-    /// guards no cruzan `.await`.
+    /// Queue of free connections ready to use. `parking_lot` is
+    /// not used because `src/db.rs` is embedded into `fitz build`
+    /// output and we want to keep the file self-contained without
+    /// adding deps to the generated crate. `std::sync::Mutex`
+    /// with short scope (push/pop) — no poison risk because
+    /// guards do not cross `.await`.
     idle: std::sync::Mutex<Vec<Connection>>,
-    /// Limitador de concurrencia: el pool no entrega más de
-    /// `max_conns` conns a la vez. Tareas extra esperan en
+    /// Concurrency limiter: the pool does not hand out more than
+    /// `max_conns` conns at a time. Extra tasks wait in
     /// `acquire`.
     permits: std::sync::Arc<tokio::sync::Semaphore>,
-    /// Marca cooperativa de cierre. Las próximas `acquire()`
-    /// fallan con `Protocol("...cerrado")` después de `close()`.
+    /// Cooperative closure marker. Subsequent `acquire()` calls
+    /// fail with `Protocol("...cerrado")` after `close()`.
     closed: std::sync::atomic::AtomicBool,
 }
 
 impl DbPool {
-    /// Intenta agarrar una conn libre del pool. Si no hay,
-    /// abre una nueva (lazy growth). Si el pool ya alcanzó
-    /// `max_conns` conns vivas, espera en el semaphore.
+    /// Tries to grab a free conn from the pool. If none, opens a
+    /// new one (lazy growth). If the pool has reached `max_conns`
+    /// live conns, waits on the semaphore.
     async fn acquire(self: &std::sync::Arc<Self>) -> DbResult<PooledConn> {
         use std::sync::atomic::Ordering;
         if self.closed.load(Ordering::Acquire) {
@@ -2830,21 +2846,21 @@ impl DbPool {
                 "la conexión fue cerrada con .close()".into(),
             ));
         }
-        // Esperar permit primero (limita concurrencia). El
-        // OwnedSemaphorePermit se libera automáticamente cuando
-        // PooledConn se dropea.
+        // Wait for a permit first (limits concurrency). The
+        // OwnedSemaphorePermit is released automatically when
+        // PooledConn is dropped.
         let permit = self
             .permits
             .clone()
             .acquire_owned()
             .await
             .map_err(|_| DbError::Protocol("pool: semaphore cerrado".into()))?;
-        // Intentar agarrar una conn idle (fast path).
+        // Try to grab an idle conn (fast path).
         let maybe_idle = self.idle.lock().expect("pool mutex poisoned").pop();
         let conn = match maybe_idle {
             Some(c) => c,
             None => {
-                // Slow path: abrir conn nueva.
+                // Slow path: open a new conn.
                 Connection::connect(&self.config).await?
             }
         };
@@ -2855,25 +2871,25 @@ impl DbPool {
         })
     }
 
-    /// Devuelve una conn al pool idle. Llamada solo por
+    /// Returns a conn to the idle pool. Only called from
     /// `PooledConn::drop`.
     fn release(&self, conn: Connection) {
         if self.closed.load(std::sync::atomic::Ordering::Acquire) {
-            // Pool cerrado — descartamos la conn (su Drop
-            // eventualmente cerrará el TcpStream).
+            // Pool closed — discard the conn (its Drop will
+            // eventually close the TcpStream).
             return;
         }
         self.idle.lock().expect("pool mutex poisoned").push(conn);
     }
 }
 
-/// RAII wrapper sobre una conn del pool. Mientras vive, la conn
-/// está fuera del pool. Al hacer `Drop`, vuelve al idle queue
-/// (si el pool no está cerrado).
+/// RAII wrapper around a pool conn. While alive, the conn is
+/// outside the pool. On `Drop`, it returns to the idle queue (if
+/// the pool is not closed).
 pub struct PooledConn {
     pool: std::sync::Arc<DbPool>,
-    /// `Option` para poder hacer `take()` desde `Drop` (que
-    /// solo recibe `&mut self`, no `self`).
+    /// `Option` so we can `take()` from `Drop` (which only
+    /// receives `&mut self`, not `self`).
     conn: Option<Connection>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 }
@@ -2891,44 +2907,45 @@ impl Drop for PooledConn {
         if let Some(conn) = self.conn.take() {
             self.pool.release(conn);
         }
-        // El `_permit` se libera automático en el drop del field.
+        // The `_permit` is auto-released on the field's drop.
     }
 }
 
 // =============================================================
-// DbConnHandle — wrapper Send + Sync para el evaluator
+// DbConnHandle — Send + Sync wrapper for the evaluator
 // =============================================================
 //
-// `Connection` (definida arriba) es la abstracción interna del
-// driver: contiene el `TcpStream` y el estado del protocolo. NO
-// la exponemos directo al evaluator porque el evaluator necesita
-// un handle que pueda compartirse entre múltiples tasks (vía Arc)
-// y que serialice las operaciones I/O (vía Mutex).
+// `Connection` (defined above) is the driver's internal
+// abstraction: holds the `TcpStream` and protocol state. We do
+// NOT expose it directly to the evaluator because the evaluator
+// needs a handle shareable across multiple tasks (via Arc) and
+// that serializes I/O operations (via Mutex).
 //
-// 10.2: el handle ahora envuelve un `Arc<DbPool>` en lugar de una
-// `Mutex<Option<Connection>>`. La API pública (`query`/`exec`/
-// `close`/`is_closed`) se mantiene idéntica.
+// 10.2: the handle now wraps an `Arc<DbPool>` instead of a
+// `Mutex<Option<Connection>>`. The public API
+// (`query`/`exec`/`close`/`is_closed`) stays identical.
 
-/// Handle opaco a un pool de conexiones Postgres. Construido por
-/// `connect_url()` y pasado al evaluator como
+/// Opaque handle to a Postgres connection pool. Built by
+/// `connect_url()` and passed to the evaluator as
 /// `Value::DbConn(Arc<DbConnHandle>)`.
 ///
-/// El struct NO implementa `Clone` directamente — el evaluator
-/// usa el `Arc` externo para sharing.
+/// The struct does NOT implement `Clone` directly — the evaluator
+/// uses the external `Arc` for sharing.
 pub struct DbConnHandle {
     pool: std::sync::Arc<DbPool>,
-    /// URL original sin password — útil para Display y errores.
+    /// Original URL without password — useful for Display and
+    /// errors.
     pub url_redacted: String,
-    /// v0.10.31 (Tier A.4) — profundidad de tx anidada. 0 = no estamos
-    /// en una tx. >0 = estamos adentro de `transaction(...)` con esa
-    /// cantidad de nestings. El depth se incrementa al entrar y se
-    /// decrementa al salir; la outer-tx usa `BEGIN/COMMIT/ROLLBACK`
-    /// y las inner-txs usan `SAVEPOINT/RELEASE/ROLLBACK TO SAVEPOINT`.
+    /// v0.10.31 (Tier A.4) — nested tx depth. 0 = we are not in a
+    /// tx. >0 = we are inside `transaction(...)` with that many
+    /// nestings. Depth increments on enter and decrements on
+    /// exit; the outer tx uses `BEGIN/COMMIT/ROLLBACK` and inner
+    /// txs use `SAVEPOINT/RELEASE/ROLLBACK TO SAVEPOINT`.
     ///
-    /// Compartido entre el handle outer y los handles "sub-pool" que
-    /// `transaction()` crea para pasarle al callback — todos miran y
-    /// modifican el mismo Arc, así que el inner detecta correctamente
-    /// que está nested.
+    /// Shared between the outer handle and the "sub-pool" handles
+    /// that `transaction()` creates to pass to the callback — all
+    /// look at and modify the same Arc, so the inner correctly
+    /// detects it is nested.
     pub(crate) tx_depth: std::sync::Arc<std::sync::atomic::AtomicI32>,
 }
 
@@ -2939,19 +2956,19 @@ impl std::fmt::Debug for DbConnHandle {
 }
 
 // =====================================================================
-// v0.10.28 (Tier S, sub-paso 3) — FITZ_DB_LOG: query logging opt-in
+// v0.10.28 (Tier S, sub-step 3) — FITZ_DB_LOG: opt-in query logging
 // =====================================================================
 
-/// Mode del logging del driver. Activado por la env var `FITZ_DB_LOG`:
+/// Driver logging mode. Activated by the env var `FITZ_DB_LOG`:
 ///
-/// - vacío / `=0` / no seteado → `Off` (default, zero overhead).
-/// - `=1` / `=true` → `Simple` (SQL + elapsed, sin params).
-/// - `=verbose` → `Verbose` (SQL + elapsed + params, truncated a
-///   80 chars cada uno para no inundar el log con BLOBs grandes).
+/// - empty / `=0` / unset → `Off` (default, zero overhead).
+/// - `=1` / `=true` → `Simple` (SQL + elapsed, no params).
+/// - `=verbose` → `Verbose` (SQL + elapsed + params, truncated to
+///   80 chars each so the log is not flooded with large BLOBs).
 ///
-/// Cualquier otro valor cae a `Off` (silencioso, no error — para
-/// que setear `FITZ_DB_LOG=true,verbose` accidentalmente no rompa
-/// el programa).
+/// Any other value falls back to `Off` (silent, no error — so
+/// accidentally setting `FITZ_DB_LOG=true,verbose` does not break
+/// the program).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DbLogMode {
     Off,
@@ -2959,11 +2976,12 @@ pub enum DbLogMode {
     Verbose,
 }
 
-/// Lee `FITZ_DB_LOG` una sola vez por proceso. Cambios mid-run de
-/// la env var NO se reflejan — el mode queda fijado al primer
-/// acceso (lazy). Compatible con `fitz run`, `fitz build` (el
-/// binario producido reusa el mismo `db.rs` via `pub use`), y
-/// tests (cada proceso de test relee la env var en su LazyLock).
+/// Reads `FITZ_DB_LOG` once per process. Mid-run changes to the
+/// env var are NOT reflected — the mode is locked at first
+/// access (lazy). Compatible with `fitz run`, `fitz build` (the
+/// produced binary reuses the same `db.rs` via `pub use`), and
+/// tests (each test process re-reads the env var in its
+/// LazyLock).
 pub static DB_LOG_MODE: std::sync::LazyLock<DbLogMode> =
     std::sync::LazyLock::new(|| match std::env::var("FITZ_DB_LOG").as_deref() {
         Ok("verbose") => DbLogMode::Verbose,
@@ -2971,8 +2989,9 @@ pub static DB_LOG_MODE: std::sync::LazyLock<DbLogMode> =
         _ => DbLogMode::Off,
     });
 
-/// Trunca un string a `max` chars (chars, no bytes — UTF-8 safe).
-/// Si el original era más largo, sufija `…` para indicarlo.
+/// Truncates a string to `max` chars (chars, not bytes — UTF-8
+/// safe). If the original was longer, suffixes with `…` to mark
+/// it.
 fn truncate_for_log(s: &str, max: usize) -> String {
     let mut chars = s.chars();
     let prefix: String = chars.by_ref().take(max).collect();
@@ -2983,9 +3002,10 @@ fn truncate_for_log(s: &str, max: usize) -> String {
     }
 }
 
-/// Formatea un solo `PgValue` para el log verbose. Strings y bytes
-/// se truncan a 80 chars (`MAX_LOG_VALUE`); el resto va sin
-/// truncar (Int/Float/Bool/Null/Array son cortos por naturaleza).
+/// Formats a single `PgValue` for the verbose log. Strings and
+/// bytes are truncated to 80 chars (`MAX_LOG_VALUE`); the rest
+/// goes untruncated (Int/Float/Bool/Null/Array are short by
+/// nature).
 const MAX_LOG_VALUE: usize = 80;
 
 fn format_log_value(v: &PgValue) -> String {
@@ -3004,9 +3024,8 @@ fn format_log_value(v: &PgValue) -> String {
     }
 }
 
-/// Formatea una línea de log lista para emitir a stderr. Pure
-/// function para que el unit test pueda asertir el output sin
-/// tocar stderr.
+/// Formats a log line ready to emit to stderr. Pure function so
+/// the unit test can assert the output without touching stderr.
 pub fn format_db_log_line(
     elapsed: std::time::Duration,
     sql: &str,
@@ -3014,9 +3033,9 @@ pub fn format_db_log_line(
     mode: DbLogMode,
 ) -> String {
     let ms = elapsed.as_secs_f64() * 1000.0;
-    // SQL one-line: colapso de \n / \r / runs de whitespace para
-    // que queries multi-línea queden legibles en una sola línea
-    // del log (el formato canónico de uvicorn/rails también así).
+    // SQL one-line: collapse \n / \r / runs of whitespace so
+    // multi-line queries stay readable on a single log line (the
+    // canonical uvicorn/rails format does the same).
     let sql_oneline = sql
         .replace(['\n', '\r'], " ")
         .split_whitespace()
@@ -3051,11 +3070,11 @@ pub fn format_db_log_line(
     }
 }
 
-/// v0.10.29 — Keywords que indican que el valor del param es un
-/// secret y debe enmascarse en el log verbose. Cubre los nombres
-/// canónicos en SQL (mayoría en inglés porque las columnas en la
-/// industria son típicamente inglés, aunque el comment del query
-/// sea en otro idioma). Incluye varias formas comunes.
+/// v0.10.29 — Keywords indicating the param value is a secret
+/// and must be masked in the verbose log. Covers canonical SQL
+/// names (mostly in English because columns in the industry are
+/// typically English, even when the query comment is in another
+/// language). Includes several common forms.
 const SENSITIVE_LOG_KEYWORDS: &[&str] = &[
     "password",
     "passwd",
@@ -3076,12 +3095,13 @@ const SENSITIVE_LOG_KEYWORDS: &[&str] = &[
     "csrf_token",
 ];
 
-/// v0.10.29 — Palabras SQL que indican "cambio de cláusula" entre
-/// el keyword y el placeholder. Si una de estas aparece entre el
-/// keyword sensible y el `$N`, el placeholder pertenece a otra
-/// parte del statement y NO debe redactarse (e.g. `UPDATE x SET
-/// password = $1 WHERE id = $2` — `$2` corresponde a `id`, no a
-/// `password`, porque `WHERE` separa las dos cláusulas).
+/// v0.10.29 — SQL words indicating a "clause change" between the
+/// keyword and the placeholder. If one of these appears between
+/// the sensitive keyword and `$N`, the placeholder belongs to a
+/// different part of the statement and must NOT be redacted (e.g.
+/// `UPDATE x SET password = $1 WHERE id = $2` — `$2` belongs to
+/// `id`, not `password`, because `WHERE` separates the two
+/// clauses).
 const CONTEXT_BREAKERS: &[&str] = &[
     " where ",
     " and ",
@@ -3098,37 +3118,37 @@ const CONTEXT_BREAKERS: &[&str] = &[
     " offset ",
 ];
 
-/// v0.10.29 — Heurística best-effort para decidir si el param
-/// `$N` debe enmascararse en el log. Mira los ~50 chars previos al
-/// placeholder en el SQL (case-insensitive) y matchea keywords
-/// sensibles como sub-string + verifica que no haya context
-/// breaker entre el keyword y el placeholder.
+/// v0.10.29 — Best-effort heuristic to decide whether param `$N`
+/// must be masked in the log. Looks at the ~50 chars before the
+/// placeholder in the SQL (case-insensitive) and matches
+/// sensitive keywords as a sub-string + verifies there is no
+/// context breaker between the keyword and the placeholder.
 ///
-/// Trade-offs documentados:
-/// - **Falsos positivos**: en INSERT con varias columnas (`INSERT
-///   INTO users (name, password) VALUES ($1, $2)`), la ventana
-///   antes de `$1` puede contener "password" → name queda redacted
-///   innecesariamente. Aceptable: sobre-redactar es preferible a
-///   leaks reales en logs.
-/// - **Falsos negativos**: si el keyword está muy lejos del
-///   placeholder (>50 chars), no matchea. El user debería evitar
-///   logging verbose en queries con secrets si quiere garantía
-///   total — la heurística cubre los casos típicos (UPDATE / WHERE
-///   / INSERT compactos).
-/// - **Caso especial `$10`, `$11`, etc.**: el needle `$1` no debe
-///   matchear adentro de `$10`/`$11`/`$12`/... por eso chequeamos
-///   que el char inmediatamente después no sea dígito.
+/// Documented trade-offs:
+/// - **False positives**: in INSERT with several columns (`INSERT
+///   INTO users (name, password) VALUES ($1, $2)`), the window
+///   before `$1` may contain "password" → name is unnecessarily
+///   redacted. Acceptable: over-redacting beats real leaks in
+///   logs.
+/// - **False negatives**: if the keyword is too far from the
+///   placeholder (>50 chars), it does not match. The user should
+///   avoid verbose logging on queries with secrets if they want a
+///   total guarantee — the heuristic covers the typical cases
+///   (compact UPDATE / WHERE / INSERT).
+/// - **Special case `$10`, `$11`, etc.**: the needle `$1` must
+///   not match inside `$10`/`$11`/`$12`/..., so we check that the
+///   immediately following char is not a digit.
 ///
-/// `sql_lower` es el SQL ya en lowercase (cached por el caller
-/// para evitar re-allocar por cada param).
+/// `sql_lower` is the SQL already in lowercase (cached by the
+/// caller to avoid re-allocating per param).
 pub(crate) fn should_redact_param(sql_lower: &str, position: usize) -> bool {
     let needle = format!("${position}");
     let mut start = 0;
     while let Some(rel) = sql_lower[start..].find(&needle) {
         let abs = start + rel;
         let end = abs + needle.len();
-        // Skip si el char siguiente es dígito (buscando $1 pero
-        // matcheó adentro de $10/$11/...).
+        // Skip if the next char is a digit (we were looking for
+        // $1 but it matched inside $10/$11/...).
         if let Some(next_ch) = sql_lower[end..].chars().next() {
             if next_ch.is_ascii_digit() {
                 start = end;
@@ -3139,9 +3159,10 @@ pub(crate) fn should_redact_param(sql_lower: &str, position: usize) -> bool {
         let window = &sql_lower[win_start..abs];
         for kw in SENSITIVE_LOG_KEYWORDS {
             if let Some(kw_pos) = window.rfind(kw) {
-                // Verifica que entre el keyword y el placeholder
-                // no haya context breaker (WHERE/AND/OR/etc.) — si
-                // lo hay, el placeholder pertenece a otra cláusula.
+                // Check that between the keyword and the
+                // placeholder there is no context breaker
+                // (WHERE/AND/OR/etc.) — if there is, the
+                // placeholder belongs to another clause.
                 let after_kw = &window[kw_pos + kw.len()..];
                 let mut broken = false;
                 for breaker in CONTEXT_BREAKERS {
@@ -3160,8 +3181,8 @@ pub(crate) fn should_redact_param(sql_lower: &str, position: usize) -> bool {
     false
 }
 
-/// Emite el log line a stderr si el mode es activo. Cheap cuando
-/// `DbLogMode::Off` — un single load + match, sin allocations.
+/// Emits the log line to stderr if the mode is active. Cheap
+/// when `DbLogMode::Off` — a single load + match, no allocations.
 fn log_db_query(elapsed: std::time::Duration, sql: &str, args: &[PgValue]) {
     let mode = *DB_LOG_MODE;
     if matches!(mode, DbLogMode::Off) {
@@ -3172,33 +3193,35 @@ fn log_db_query(elapsed: std::time::Duration, sql: &str, args: &[PgValue]) {
 }
 
 impl DbConnHandle {
-    /// Construye un handle a partir de una conexión inicial. El
-    /// pool empieza con esa conn en `idle` y crece on-demand
-    /// hasta `max_conns`.
+    /// Builds a handle from an initial connection. The pool
+    /// starts with that conn in `idle` and grows on demand up to
+    /// `max_conns`.
     pub fn new(initial_conn: Connection, url_redacted: String, config: ConnectionConfig) -> Self {
         let pool = std::sync::Arc::new(DbPool {
             config,
             idle: std::sync::Mutex::new(vec![initial_conn]),
-            // v0.10.29 — Usa `effective_max_conns()` que respeta la
-            // env var `FITZ_DB_MAX_CONNS` (override opt-in).
+            // v0.10.29 — Uses `effective_max_conns()` which
+            // respects the `FITZ_DB_MAX_CONNS` env var (opt-in
+            // override).
             permits: std::sync::Arc::new(tokio::sync::Semaphore::new(effective_max_conns())),
             closed: std::sync::atomic::AtomicBool::new(false),
         });
         DbConnHandle {
             pool,
             url_redacted,
-            // v0.10.31 (Tier A.4) — depth=0 = no estamos en tx.
+            // v0.10.31 (Tier A.4) — depth=0 = we are not in a tx.
             tx_depth: std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0)),
         }
     }
 
-    /// Constructor para tests del evaluator: produce un handle
-    /// con pool en estado "cerrado". Las queries fallan con
-    /// `Protocol("...cerrado")` pero el dispatch_method funciona
-    /// — útil para validar la integración sin Postgres real.
+    /// Constructor for evaluator tests: produces a handle whose
+    /// pool starts in "closed" state. Queries fail with
+    /// `Protocol("...cerrado")` but the dispatch_method works —
+    /// useful for validating integration without a real Postgres.
     #[cfg(any(test, debug_assertions))]
     pub fn new_for_test_closed(url_redacted: String) -> Self {
-        // Config dummy — nunca se usa porque el pool arranca cerrado.
+        // Dummy config — never used because the pool starts
+        // closed.
         let dummy_config = ConnectionConfig {
             host: "test-host".into(),
             port: 5432,
@@ -3221,18 +3244,18 @@ impl DbConnHandle {
         }
     }
 
-    /// Ejecuta una query con args. Agarra una conn del pool,
-    /// ejecuta, la devuelve al pool al terminar (vía Drop del
-    /// PooledConn). Si el pool está cerrado o no puede abrir
-    /// conn nueva, error claro.
+    /// Runs a query with args. Grabs a conn from the pool, runs
+    /// it, returns it to the pool on completion (via PooledConn's
+    /// Drop). If the pool is closed or cannot open a new conn,
+    /// clear error.
     ///
-    /// v0.10.28 — Si `FITZ_DB_LOG` está activo, emite a stderr
-    /// `[fitz-db Nms] <sql>` (Simple) o además params (Verbose)
-    /// post-ejecución, incluyendo el tiempo de adquisición de la
-    /// conn del pool. Loguea también las queries que fallan (el
-    /// log incluye SQL + tiempo; el error sale por el `?`
-    /// caller-side normal). En `Off` (default) el overhead es un
-    /// single atomic load.
+    /// v0.10.28 — If `FITZ_DB_LOG` is active, emits
+    /// `[fitz-db Nms] <sql>` (Simple) or additionally the params
+    /// (Verbose) post-execution to stderr, including the pool
+    /// acquire time. Also logs queries that fail (the log
+    /// includes SQL + time; the error flows via the normal `?` on
+    /// the caller side). On `Off` (default) the overhead is one
+    /// atomic load.
     pub async fn query(&self, sql: &str, args: &[PgValue]) -> DbResult<QueryResult> {
         let start = std::time::Instant::now();
         let result = async {
@@ -3246,34 +3269,35 @@ impl DbConnHandle {
         }
         .await;
         log_db_query(start.elapsed(), sql, args);
-        // v0.10.29 — Si el query falla con un error del servidor,
-        // enriquecemos el mensaje con el SQL one-line + params
-        // (respeta redaction de secrets). Sin esto, el error
-        // canónico de Postgres es `ERROR: duplicate key value` sin
-        // pista de qué query falló — el user tenía que mirar el
-        // stack trace para deducir el callsite.
+        // v0.10.29 — If the query fails with a server error, we
+        // enrich the message with the one-line SQL + params
+        // (respecting secret redaction). Without this, Postgres'
+        // canonical error is `ERROR: duplicate key value` without
+        // a hint of which query failed — the user had to look at
+        // the stack trace to deduce the callsite.
         result.map_err(|e| enrich_db_error_with_context(e, sql, args))
     }
 
-    /// Ejecuta un statement que no espera rows (INSERT/UPDATE/
-    /// DELETE/DDL sin RETURNING). Devuelve el número de rows
-    /// afectadas inferido del `CommandComplete` tag.
+    /// Runs a statement that does not expect rows
+    /// (INSERT/UPDATE/DELETE/DDL without RETURNING). Returns the
+    /// number of affected rows inferred from the `CommandComplete`
+    /// tag.
     pub async fn exec(&self, sql: &str, args: &[PgValue]) -> DbResult<u64> {
         let result = self.query(sql, args).await?;
         Ok(result.rows_affected())
     }
 
-    /// Cierra el pool cooperativamente. Marca como cerrado y
-    /// drainea las conns idle (envía Terminate a cada una).
-    /// Idempotente — múltiples `close()` no son error.
-    /// Conns checked-out al momento del close se descartan al
-    /// devolverse (release ve `closed=true` y skipea push).
+    /// Cooperatively closes the pool. Marks it as closed and
+    /// drains the idle conns (sends Terminate to each). Idempotent
+    /// — multiple `close()` calls are not an error. Conns
+    /// checked-out at close time are discarded on return (release
+    /// sees `closed=true` and skips the push).
     pub async fn close(&self) -> DbResult<()> {
         use std::sync::atomic::Ordering;
         if self.pool.closed.swap(true, Ordering::AcqRel) {
-            return Ok(()); // ya estaba cerrado
+            return Ok(()); // was already closed
         }
-        // Drain idle queue + cerrar cada conn.
+        // Drain the idle queue + close each conn.
         let drained = {
             let mut idle = self.pool.idle.lock().expect("pool mutex poisoned");
             std::mem::take(&mut *idle)
@@ -3281,62 +3305,64 @@ impl DbConnHandle {
         for conn in drained {
             let _ = conn.close().await;
         }
-        // Cerrar el semaphore para que `acquire_owned` en
-        // tareas pendientes despierten con error.
+        // Close the semaphore so `acquire_owned` on pending tasks
+        // wakes up with an error.
         self.pool.permits.close();
         Ok(())
     }
 
-    /// `true` si el pool fue cerrado con `close()`.
+    /// `true` if the pool was closed via `close()`.
     pub async fn is_closed(&self) -> bool {
         self.pool.closed.load(std::sync::atomic::Ordering::Acquire)
     }
 
-    /// Fase 10.7 — Transactions ORM. Ejecuta `f` adentro de una
-    /// transacción Postgres. Internamente:
+    /// Phase 10.7 — ORM transactions. Runs `f` inside a Postgres
+    /// transaction. Internally:
     ///
-    /// 1. Acquire una conn del pool (mantiene el slot del
-    ///    semaphore reservado durante toda la tx).
-    /// 2. `BEGIN` sobre esa conn.
-    /// 3. Wrappea la conn en un `DbConnHandle` "single-conn pool"
-    ///    pegado a esa conn física. El callback recibe ese handle
-    ///    y lo usa como `db` normal — todos los `.insert/.update/
-    ///    .delete/.first/.all` del ORM funcionan sin cambios.
-    /// 4. Si `f` retorna `Ok(v)`: `COMMIT` + devuelve `Ok(v)`.
-    /// 5. Si `f` retorna `Err(e)`: `ROLLBACK` automático +
-    ///    propaga `Err(e)`. Imposible olvidarse.
-    /// 6. La conn vuelve al pool original (no se pierde).
+    /// 1. Acquires a conn from the pool (keeps the semaphore slot
+    ///    reserved for the whole tx).
+    /// 2. `BEGIN` on that conn.
+    /// 3. Wraps the conn in a "single-conn pool" `DbConnHandle`
+    ///    pinned to that physical conn. The callback receives
+    ///    that handle and uses it as a regular `db` — all
+    ///    `.insert/.update/.delete/.first/.all` ORM methods work
+    ///    unchanged.
+    /// 4. If `f` returns `Ok(v)`: `COMMIT` + returns `Ok(v)`.
+    /// 5. If `f` returns `Err(e)`: automatic `ROLLBACK` +
+    ///    propagates `Err(e)`. Impossible to forget.
+    /// 6. The conn returns to the original pool (not lost).
     ///
-    /// **Garantías**:
-    /// - **Atómica**: o todas las queries del callback persisten
-    ///   (COMMIT) o ninguna (ROLLBACK).
-    /// - **Aislada**: el callback usa SIEMPRE la misma conn física
-    ///   — Postgres garantiza isolation por conn según el nivel
-    ///   default del server (típicamente READ COMMITTED).
-    /// - **Auto-cleanup**: si el callback paniquea (futuro fix:
-    ///   `catch_unwind` async), la conn vuelve al pool y NO queda
-    ///   colgada en estado tx abierta.
+    /// **Guarantees**:
+    /// - **Atomic**: either all callback queries persist (COMMIT)
+    ///   or none (ROLLBACK).
+    /// - **Isolated**: the callback ALWAYS uses the same physical
+    ///   conn — Postgres guarantees isolation per conn at the
+    ///   server's default level (typically READ COMMITTED).
+    /// - **Auto-cleanup**: if the callback panics (future fix:
+    ///   async `catch_unwind`), the conn returns to the pool and
+    ///   does NOT stay hung in an open-tx state.
     ///
-    /// v0.10.31 (Tier A.4 + A.9) — nested transactions vía SAVEPOINT +
-    /// isolation levels custom. Sigue funcionando con la firma original
-    /// `transaction(closure)`; el isolation se setea via
-    /// `transaction_with_isolation(level, closure)`.
+    /// v0.10.31 (Tier A.4 + A.9) — nested transactions via
+    /// SAVEPOINT + custom isolation levels. Still works with the
+    /// original `transaction(closure)` signature; isolation is
+    /// set via `transaction_with_isolation(level, closure)`.
     ///
-    /// **Garantías** (sin cambios desde v0.10.14):
-    /// - **Atómica**: Ok → COMMIT, Err → ROLLBACK.
-    /// - **Aislada**: misma conn física durante toda la tx.
-    /// - **Auto-cleanup**: rollback automático en Err.
+    /// **Guarantees** (unchanged since v0.10.14):
+    /// - **Atomic**: Ok → COMMIT, Err → ROLLBACK.
+    /// - **Isolated**: same physical conn for the whole tx.
+    /// - **Auto-cleanup**: automatic rollback on Err.
     ///
-    /// **v0.10.31 — Nuevo**:
-    /// - **Nesting**: `tx.transaction(g)` adentro del callback outer
-    ///   usa `SAVEPOINT/RELEASE SAVEPOINT/ROLLBACK TO SAVEPOINT`
-    ///   en lugar de `BEGIN/COMMIT/ROLLBACK`. Detectado via
-    ///   `tx_depth` shared. El rollback inner deja al outer
-    ///   intacto, paralelo a la semántica nested de Postgres.
-    /// - **Isolation level**: outer tx (depth=0) puede setear
+    /// **v0.10.31 — New**:
+    /// - **Nesting**: `tx.transaction(g)` inside the outer
+    ///   callback uses `SAVEPOINT/RELEASE
+    ///   SAVEPOINT/ROLLBACK TO SAVEPOINT` instead of
+    ///   `BEGIN/COMMIT/ROLLBACK`. Detected via shared `tx_depth`.
+    ///   The inner rollback leaves the outer intact, parallel to
+    ///   Postgres' nested semantics.
+    /// - **Isolation level**: outer tx (depth=0) can set
     ///   `READ COMMITTED` / `REPEATABLE READ` / `SERIALIZABLE` /
     ///   `READ ONLY` via `transaction_with_isolation`. Inner txs
-    ///   ignoran el isolation (Postgres lo fija al outer BEGIN).
+    ///   ignore isolation (Postgres pins it on the outer BEGIN).
     pub async fn transaction<F, Fut, T>(self: &std::sync::Arc<Self>, f: F) -> DbResult<T>
     where
         F: FnOnce(std::sync::Arc<DbConnHandle>) -> Fut,
@@ -3345,11 +3371,11 @@ impl DbConnHandle {
         self.transaction_with_isolation(None, f).await
     }
 
-    /// v0.10.31 (Tier A.9) — variante que acepta isolation level.
-    /// `None` = default Postgres (READ COMMITTED). `Some("...")` =
-    /// emite `BEGIN ISOLATION LEVEL <...>`. Si depth > 0 (nested),
-    /// el isolation se ignora silenciosamente — Postgres lo fija al
-    /// outer BEGIN.
+    /// v0.10.31 (Tier A.9) — variant that accepts an isolation
+    /// level. `None` = Postgres default (READ COMMITTED).
+    /// `Some("...")` = emits `BEGIN ISOLATION LEVEL <...>`. If
+    /// depth > 0 (nested), isolation is silently ignored —
+    /// Postgres pins it on the outer BEGIN.
     pub async fn transaction_with_isolation<F, Fut, T>(
         self: &std::sync::Arc<Self>,
         isolation: Option<&str>,
@@ -3361,9 +3387,9 @@ impl DbConnHandle {
     {
         use std::sync::atomic::Ordering;
 
-        // v0.10.31 (Tier A.4) — depth tracking compartido entre outer
-        // y todas las nested. Incrementa al entrar, decrementa al
-        // salir. Decisivo para emitir BEGIN vs SAVEPOINT.
+        // v0.10.31 (Tier A.4) — depth tracking shared between
+        // outer and all nested. Increments on entry, decrements
+        // on exit. Decides whether to emit BEGIN vs SAVEPOINT.
         let depth_before = self.tx_depth.fetch_add(1, Ordering::SeqCst);
 
         let (begin_sql, commit_sql, rollback_sql) = if depth_before == 0 {
@@ -3375,9 +3401,9 @@ impl DbConnHandle {
             (begin, "COMMIT".to_string(), "ROLLBACK".to_string())
         } else {
             // Nested tx: SAVEPOINT / RELEASE / ROLLBACK TO SAVEPOINT.
-            // Isolation ignorado — Postgres no permite ISOLATION en
-            // SAVEPOINT, y el nivel lo fija el outer BEGIN para toda
-            // la duración de la tx.
+            // Isolation ignored — Postgres does not allow
+            // ISOLATION on SAVEPOINT, and the level is pinned by
+            // the outer BEGIN for the entire tx.
             let sp_name = format!("fitz_sp_{}", depth_before);
             (
                 format!("SAVEPOINT {}", sp_name),
@@ -3394,9 +3420,9 @@ impl DbConnHandle {
         result
     }
 
-    /// v0.10.31 (Tier A.4) — body común de outer y nested tx.
-    /// Toma los 3 SQL strings (BEGIN/COMMIT/ROLLBACK o SAVEPOINT/
-    /// RELEASE/ROLLBACK TO), ejecuta el dance estándar:
+    /// v0.10.31 (Tier A.4) — shared body of outer and nested tx.
+    /// Takes the 3 SQL strings (BEGIN/COMMIT/ROLLBACK or
+    /// SAVEPOINT/RELEASE/ROLLBACK TO), runs the standard dance:
     /// acquire conn → BEGIN → sub_pool dance → run f → COMMIT/ROLLBACK.
     async fn do_tx_inner<F, Fut, T>(
         self: &std::sync::Arc<Self>,
@@ -3411,19 +3437,19 @@ impl DbConnHandle {
     {
         use std::sync::atomic::Ordering;
 
-        // 1. Acquire conn del pool.
+        // 1. Acquire a conn from the pool.
         let mut pooled = self.pool.acquire().await?;
 
-        // 2. BEGIN o SAVEPOINT.
+        // 2. BEGIN or SAVEPOINT.
         pooled.as_mut().simple_query(begin_sql).await?;
 
-        // 3. Mover la conn fuera del PooledConn (igual que el legacy).
+        // 3. Move the conn out of the PooledConn (same as legacy).
         let conn = pooled
             .conn
             .take()
             .expect("pooled.conn None inmediatamente post-acquire — bug");
 
-        // 4. Construir sub_pool single-conn.
+        // 4. Build the single-conn sub_pool.
         let sub_pool = std::sync::Arc::new(DbPool {
             config: self.pool.config.clone(),
             idle: std::sync::Mutex::new(vec![conn]),
@@ -3433,15 +3459,16 @@ impl DbConnHandle {
         let sub_handle = std::sync::Arc::new(DbConnHandle {
             pool: sub_pool.clone(),
             url_redacted: self.url_redacted.clone(),
-            // v0.10.31 — SHARED tx_depth Arc. El callback recursivo
-            // ve y mutará el mismo contador que el outer.
+            // v0.10.31 — SHARED tx_depth Arc. The recursive
+            // callback sees and will mutate the same counter as
+            // the outer.
             tx_depth: self.tx_depth.clone(),
         });
 
-        // 5. Run callback.
+        // 5. Run the callback.
         let result = f(sub_handle).await;
 
-        // 6. Recuperar la conn del sub_pool.
+        // 6. Recover the conn from the sub_pool.
         let conn_opt = {
             let mut idle = sub_pool.idle.lock().expect("sub_pool mutex poisoned");
             idle.pop()
@@ -3455,13 +3482,13 @@ impl DbConnHandle {
             }
         };
 
-        // 7. COMMIT/ROLLBACK (o RELEASE/ROLLBACK TO SAVEPOINT).
+        // 7. COMMIT/ROLLBACK (or RELEASE/ROLLBACK TO SAVEPOINT).
         match &result {
             Ok(_) => {
                 if let Err(commit_err) = conn.simple_query(commit_sql).await {
-                    // Cleanup defensivo — el rollback puede fallar
-                    // también, lo ignoramos para devolver el commit_err
-                    // original (más informativo).
+                    // Defensive cleanup — the rollback may fail
+                    // too; we ignore it to return the original
+                    // commit_err (more informative).
                     let _ = conn.simple_query(rollback_sql).await;
                     self.pool.release(conn);
                     return Err(commit_err);
@@ -3472,64 +3499,66 @@ impl DbConnHandle {
             }
         }
 
-        // 8. Devolver conn al pool del self (outer pool o tx_pool
-        //    según depth_before).
+        // 8. Return conn to self's pool (outer pool or tx_pool
+        //    depending on depth_before).
         self.pool.release(conn);
 
         result
     }
 
-    /// Número máximo de conns concurrentes que el pool puede
-    /// emitir. v0.10.29 — Respeta la env var `FITZ_DB_MAX_CONNS`
-    /// si está seteada (clamp [1, 200]); fallback
-    /// `DEFAULT_MAX_CONNS = 10`. Kwarg `db.connect(url, max_conns=N)`
-    /// queda como deuda menor para iteración 2 (requiere wire del
-    /// kwarg desde evaluator + codegen).
+    /// Maximum number of concurrent conns the pool can hand out.
+    /// v0.10.29 — Respects the `FITZ_DB_MAX_CONNS` env var if set
+    /// (clamp [1, 200]); fallback `DEFAULT_MAX_CONNS = 10`. The
+    /// kwarg `db.connect(url, max_conns=N)` remains as minor debt
+    /// for iteration 2 (requires wiring the kwarg from evaluator
+    /// + codegen).
     pub fn max_conns(&self) -> usize {
         effective_max_conns()
     }
 
-    /// 10.2 — diagnostics: número de conns idle en este instante.
-    /// Útil para tests del pool. NO sirve para concurrency
-    /// (race entre `idle()` y la próxima query).
+    /// 10.2 — diagnostics: number of idle conns right now. Useful
+    /// for pool tests. NOT useful for concurrency (race between
+    /// `idle()` and the next query).
     pub fn idle_count(&self) -> usize {
         self.pool.idle.lock().expect("pool mutex poisoned").len()
     }
 }
 
-/// Health check: cada `HEALTH_CHECK_INTERVAL_SECS` segundos,
-/// itera las conns idle y manda `SELECT 1`. Las conns que fallan
-/// se descartan silenciosamente — el próximo `acquire` abrirá
-/// una nueva. El task usa un `Weak<DbPool>` para que el pool
-/// pueda ser garbage-collected cuando el handle se dropea, y el
-/// task se autodescarte al ver que el upgrade del Weak falla.
+/// Health check: every `HEALTH_CHECK_INTERVAL_SECS` seconds,
+/// iterates idle conns and sends `SELECT 1`. Failing conns are
+/// silently discarded — the next `acquire` will open a new one.
+/// The task uses a `Weak<DbPool>` so the pool can be
+/// garbage-collected when the handle is dropped, and the task
+/// auto-terminates when the Weak upgrade fails.
 async fn health_check_task(weak_pool: std::sync::Weak<DbPool>) {
     let interval = std::time::Duration::from_secs(HEALTH_CHECK_INTERVAL_SECS);
     loop {
         tokio::time::sleep(interval).await;
         let pool = match weak_pool.upgrade() {
             Some(p) => p,
-            None => return, // pool dropeado, task se autotermina
+            None => return, // pool dropped, task auto-terminates
         };
         if pool.closed.load(std::sync::atomic::Ordering::Acquire) {
             return;
         }
-        // Drenar el idle queue, validar cada conn, devolver las vivas.
+        // Drain the idle queue, validate each conn, return the
+        // live ones.
         let mut to_check = {
             let mut idle = pool.idle.lock().expect("pool mutex poisoned");
             std::mem::take(&mut *idle)
         };
         let mut alive = Vec::with_capacity(to_check.len());
         while let Some(mut conn) = to_check.pop() {
-            // SELECT 1 ligero — si falla, descartamos.
+            // Light SELECT 1 — if it fails, discard.
             match conn.simple_query("SELECT 1").await {
                 Ok(_) => alive.push(conn),
                 Err(_) => {
-                    // Conn dead — el Drop del Connection cierra el TcpStream.
+                    // Conn dead — Connection's Drop closes the
+                    // TcpStream.
                 }
             }
         }
-        // Re-poblar idle con las vivas.
+        // Re-populate idle with the live ones.
         if !alive.is_empty() {
             let mut idle = pool.idle.lock().expect("pool mutex poisoned");
             idle.append(&mut alive);
@@ -3537,41 +3566,41 @@ async fn health_check_task(weak_pool: std::sync::Weak<DbPool>) {
     }
 }
 
-/// Abre una conexión Postgres desde un URL estándar. Punto de
-/// entrada principal para integración con el evaluator: el
-/// builtin `db.connect(url)` lo invoca y envuelve el resultado
-/// en `Value::DbConn(handle)` (ya como `Arc<DbConnHandle>`).
+/// Opens a Postgres connection from a standard URL. Main entry
+/// point for integration with the evaluator: the `db.connect(url)`
+/// builtin invokes it and wraps the result in
+/// `Value::DbConn(handle)` (already as `Arc<DbConnHandle>`).
 ///
-/// **10.9.2 (v0.10.9) — singleton per URL**: el primer call con
-/// una URL nueva crea el handle + pool. Calls posteriores con la
-/// MISMA URL devuelven clone del Arc existente — TODAS las
-/// conns TCP se comparten via el pool único. Esto cierra el
-/// "connection pool leak" anterior donde cada `db.connect(url)`
-/// creaba pool nuevo (después de N requests Postgres se quedaba
-/// sin slots y `acquire()` colgaba).
+/// **10.9.2 (v0.10.9) — singleton per URL**: the first call with
+/// a new URL creates the handle + pool. Later calls with the SAME
+/// URL return a clone of the existing Arc — ALL TCP conns are
+/// shared via the single pool. This closes the previous
+/// "connection pool leak" where each `db.connect(url)` created a
+/// new pool (after N requests Postgres ran out of slots and
+/// `acquire()` hung).
 ///
-/// El cache vive en `POOL_CACHE` (global, lazy). Los handles
-/// persisten hasta el cierre del proceso (no se evictan). Trade-
-/// off aceptado: si nunca te volvés a conectar a una URL, el
-/// pool sobrevive sin uso. La memoria es despreciable (~24 KB
-/// por pool idle).
+/// The cache lives in `POOL_CACHE` (global, lazy). Handles
+/// persist until process exit (no eviction). Accepted trade-off:
+/// if you never reconnect to a URL, the pool survives unused.
+/// Memory is negligible (~24 KB per idle pool).
 ///
-/// Eager: la primera conn TCP + handshake + auth sucede acá para
-/// validar credentials + URL antes de devolver el handle. Si
-/// falla, el handle no se crea y el caller ve el error directo.
-/// Conns adicionales se abren lazy en `acquire()` cuando el pool
-/// las necesita.
+/// Eager: the first TCP conn + handshake + auth happens here to
+/// validate credentials + URL before returning the handle. If it
+/// fails, the handle is not created and the caller sees the error
+/// directly. Additional conns are opened lazily in `acquire()`
+/// when the pool needs them.
 pub async fn connect_url(url: &str) -> DbResult<std::sync::Arc<DbConnHandle>> {
-    // 10.9.2 (v0.10.9) — singleton per URL. El cache global cachea el
-    // Arc<DbConnHandle> por URL; calls subsiguientes con la misma URL
-    // devuelven clone del Arc — TODAS las conns TCP se comparten via el
-    // pool único. Cierra el "connection pool leak" del v0.10.8: cada
-    // `db.connect(url)` creaba pool nuevo con 10 permits + TCP conns,
-    // saturando Postgres (`max_connections=100` default) tras N
-    // requests y dejando `acquire()` colgado eternamente.
+    // 10.9.2 (v0.10.9) — singleton per URL. The global cache
+    // caches the Arc<DbConnHandle> per URL; subsequent calls with
+    // the same URL return a clone of the Arc — ALL TCP conns are
+    // shared via the single pool. Closes the v0.10.8 "connection
+    // pool leak": each `db.connect(url)` created a new pool with
+    // 10 permits + TCP conns, saturating Postgres
+    // (`max_connections=100` default) after N requests and
+    // leaving `acquire()` hanging forever.
     //
-    // Trade-off: los handles persisten hasta el cierre del proceso (no
-    // se evictan). Memoria despreciable (~24 KB por pool idle).
+    // Trade-off: handles persist until process exit (no
+    // eviction). Memory is negligible (~24 KB per idle pool).
     static POOL_CACHE: std::sync::OnceLock<
         std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<DbConnHandle>>>,
     > = std::sync::OnceLock::new();
@@ -3588,12 +3617,13 @@ pub async fn connect_url(url: &str) -> DbResult<std::sync::Arc<DbConnHandle>> {
             {
                 return Ok(std::sync::Arc::clone(existing));
             }
-            // Si el handle fue cerrado con `.close()`, creamos uno
-            // nuevo — el caller hizo close explícito y quiere reabrir.
+            // If the handle was closed via `.close()`, we create
+            // a new one — the caller did an explicit close and
+            // wants to reopen.
         }
     }
 
-    // Miss: crear handle nuevo + insertarlo en el cache.
+    // Miss: create a new handle + insert it into the cache.
     let config = ConnectionConfig::parse(url)?;
     let url_redacted = redact_url(url);
     let initial_conn = Connection::connect(&config).await?;
@@ -3607,8 +3637,9 @@ pub async fn connect_url(url: &str) -> DbResult<std::sync::Arc<DbConnHandle>> {
     Ok(handle)
 }
 
-/// Elimina la password del URL para diagnostics seguros. Reemplaza
-/// `user:pass@host` por `user:***@host`. No-op si no hay password.
+/// Strips the password from the URL for safe diagnostics.
+/// Replaces `user:pass@host` with `user:***@host`. No-op if there
+/// is no password.
 fn redact_url(url: &str) -> String {
     let prefix_len = if let Some(p) = url.strip_prefix("postgres://") {
         url.len() - p.len()
@@ -3694,8 +3725,9 @@ mod tests {
         assert!(matches!(r, Err(DbError::InvalidUrl(_))));
     }
 
-    // v0.10.23 (Fase 10.1.b) — sslmode require/verify-ca/verify-full
-    // ahora parsean OK. prefer/allow siguen como NotImplemented.
+    // v0.10.23 (Phase 10.1.b) — sslmode
+    // require/verify-ca/verify-full now parse OK. prefer/allow
+    // remain NotImplemented.
 
     #[test]
     fn url_sslmode_require_parsea_ok() {
@@ -3761,7 +3793,7 @@ mod tests {
 
     #[test]
     fn url_sslrootcert_con_sslmode_disable_es_error() {
-        // Combinación contradictoria: aclarar al user explícito.
+        // Contradictory combo: make it explicit to the user.
         let r = ConnectionConfig::parse(
             "postgres://user@host/db?sslmode=disable&sslrootcert=/etc/ssl/ca.pem",
         );
@@ -3770,8 +3802,8 @@ mod tests {
 
     #[test]
     fn url_sslrootcert_con_sslmode_require_es_error() {
-        // require NO valida nada — pasarle un rootcert es señal de
-        // confusión, mejor abortar.
+        // require validates NOTHING — passing a rootcert is a
+        // sign of confusion; better to abort.
         let r = ConnectionConfig::parse(
             "postgres://user@host/db?sslmode=require&sslrootcert=/etc/ssl/ca.pem",
         );
@@ -3802,13 +3834,13 @@ mod tests {
             database: "myapp",
         };
         let bytes = msg.encode();
-        // Sin byte de tipo: arranca con length(4).
+        // No type byte: starts with length(4).
         let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
         assert_eq!(len, bytes.len());
         // Bytes 4..8 = protocol version = 196608
         let version = u32::from_be_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
         assert_eq!(version, 196608);
-        // Contiene "user\0alice\0database\0myapp\0..."
+        // Contains "user\0alice\0database\0myapp\0..."
         let payload = &bytes[8..];
         let s = std::str::from_utf8(payload).unwrap();
         assert!(s.contains("user\0alice\0"));
@@ -3823,7 +3855,7 @@ mod tests {
         let bytes = msg.encode();
         assert_eq!(bytes[0], b'Q');
         let len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
-        assert_eq!(len, bytes.len() - 1); // length excluye el tag
+        assert_eq!(len, bytes.len() - 1); // length excludes the tag
         assert_eq!(&bytes[5..bytes.len() - 1], b"SELECT 1");
         assert_eq!(bytes[bytes.len() - 1], 0);
     }
@@ -3837,7 +3869,7 @@ mod tests {
         };
         let bytes = msg.encode();
         assert_eq!(bytes[0], b'P');
-        // Payload empieza después del header (tag + length = 5)
+        // Payload starts after the header (tag + length = 5)
         let payload = &bytes[5..];
         assert!(payload.starts_with(b"s1\0SELECT $1\0"));
     }
@@ -3869,7 +3901,7 @@ mod tests {
         payload.extend_from_slice(&10u32.to_be_bytes());
         payload.extend_from_slice(b"SCRAM-SHA-256\0");
         payload.extend_from_slice(b"SCRAM-SHA-256-PLUS\0");
-        payload.push(0); // terminador de lista
+        payload.push(0); // list terminator
         let msg = parse_backend_message(b'R', &payload).unwrap();
         match msg {
             BackendMessage::AuthenticationSasl { mechanisms } => {
@@ -3957,7 +3989,7 @@ mod tests {
         payload.extend_from_slice(b"42P01\0");
         payload.push(b'M');
         payload.extend_from_slice(b"relation \"users\" does not exist\0");
-        payload.push(0); // terminador
+        payload.push(0); // terminator
 
         let msg = parse_backend_message(b'E', &payload).unwrap();
         match msg {
@@ -3972,7 +4004,7 @@ mod tests {
 
     // ----- SCRAM-SHA-256 -----
     //
-    // Vectores de RFC 7677 §3 (SCRAM-SHA-256 test vector):
+    // Vectors from RFC 7677 §3 (SCRAM-SHA-256 test vector):
     //   username = "user"
     //   password = "pencil"
     //   client_nonce = "rOprNGfwEbeRWgbNEkqO"
@@ -4020,7 +4052,7 @@ mod tests {
         let server_first =
             "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
         client.client_final(server_first).unwrap();
-        // Server final con signature tampered (random bytes)
+        // Server final with tampered signature (random bytes)
         let r = client.verify("v=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=");
         assert!(matches!(r, Err(DbError::Auth(_))));
     }
@@ -4034,16 +4066,16 @@ mod tests {
 
     #[test]
     fn pbkdf2_sha256_no_panic_iter_alto() {
-        // El test "real" del vector RFC 7677 vive en
-        // `scram_rfc7677_test_vector` (cubre el resultado de
-        // pbkdf2 indirecto vía el server-signature). Acá solo
-        // chequeamos que `pbkdf2_hmac_sha256` no entre en loop
-        // infinito ni panique con un iter count razonable.
+        // The "real" RFC 7677 vector test lives in
+        // `scram_rfc7677_test_vector` (covers the pbkdf2 result
+        // indirectly via the server-signature). Here we just
+        // check that `pbkdf2_hmac_sha256` does not loop forever
+        // nor panic with a reasonable iter count.
         let salt = BASE64.decode("W22ZaJ0SNY7soEsUEjb6gQ==").unwrap();
         let salted = pbkdf2_hmac_sha256(b"pencil", &salt, 4096);
         assert_eq!(salted.len(), 32);
-        // El resultado NO debe ser todo ceros (cubrirá bugs
-        // estúpidos del XOR loop).
+        // The result must NOT be all zeros (catches silly XOR
+        // loop bugs).
         assert!(salted.iter().any(|&b| b != 0));
     }
 
@@ -4078,19 +4110,20 @@ mod tests {
 
     #[test]
     fn md5_password_postgres_format() {
-        // El hash MD5 de Postgres es:
+        // Postgres' MD5 hash is:
         //   "md5" || md5_hex(md5_hex("pwduser") || salt)
-        // Para password="pwd", user="user", salt=[0x12,0x34,0x56,0x78]:
+        // For password="pwd", user="user",
+        // salt=[0x12,0x34,0x56,0x78]:
         //   inner = md5_hex("pwduser") = ?
         //   outer = md5_hex(inner_bytes || salt)
         let hash = md5_password("user", "pwd", &[0x12, 0x34, 0x56, 0x78]);
-        // Verificamos que tiene prefix correcto y longitud correcta:
-        // "md5" + 32 hex chars = 35 chars total.
+        // Verify it has the right prefix and length: "md5" + 32
+        // hex chars = 35 chars total.
         assert!(hash.starts_with("md5"));
         assert_eq!(hash.len(), 35);
     }
 
-    // ----- Tipos OID -----
+    // ----- OID types -----
 
     #[test]
     fn parse_int4() {
@@ -4150,13 +4183,13 @@ mod tests {
     #[test]
     fn parse_uuid() {
         let v = parse_text_value(oid::UUID, Some(b"550e8400-e29b-41d4-a716-446655440000")).unwrap();
-        // En MVP 10.1, UUID se trata como Text. 10.5 lo refina.
+        // In MVP 10.1, UUID is treated as Text. 10.5 refines it.
         assert!(matches!(v, PgValue::Text(_)));
     }
 
     #[test]
     fn parse_oid_no_soportado() {
-        // OID 1700 = numeric (no soportado en MVP)
+        // OID 1700 = numeric (unsupported in MVP)
         let r = parse_text_value(1700, Some(b"42.5"));
         assert!(matches!(r, Err(DbError::UnsupportedType(1700))));
     }
@@ -4180,7 +4213,7 @@ mod tests {
         );
     }
 
-    // ----- Fase 10.5.b — arrays nativos -----
+    // ----- Phase 10.5.b — native arrays -----
 
     #[test]
     fn parse_array_int4_basico() {
@@ -4258,7 +4291,7 @@ mod tests {
 
     #[test]
     fn parse_array_null_quoted_es_literal() {
-        // {"NULL"} → ["NULL"] como texto, no null.
+        // {"NULL"} → ["NULL"] as text, not null.
         let v = parse_text_value(oid::TEXT_ARRAY, Some(b"{\"NULL\"}")).unwrap();
         match v {
             PgValue::Array { values, .. } => {
@@ -4306,9 +4339,9 @@ mod tests {
 
     #[test]
     fn parse_array_uuid_via_text_array() {
-        // UUIDs llegan como TEXT_ARRAY[uuid-strings]; el ORM acepta
-        // UUID por su OID escalar, pero también via list<Str> con
-        // el cast `::uuid[]` explícito.
+        // UUIDs come through as TEXT_ARRAY[uuid-strings]; the ORM
+        // accepts UUID via its scalar OID, but also via list<Str>
+        // with the explicit `::uuid[]` cast.
         let v = parse_text_value(
             oid::UUID_ARRAY,
             Some(b"{550e8400-e29b-41d4-a716-446655440000}"),
@@ -4359,7 +4392,7 @@ mod tests {
             elem_oid: oid::TEXT,
             values: vec![PgValue::Text("c\"d".into()), PgValue::Text("e\\f".into())],
         };
-        // "c\"d" → "c\\\"d"  (escape para Postgres)
+        // "c\"d" → "c\\\"d"  (escape for Postgres)
         // "e\\f" → "e\\\\f"
         assert_eq!(
             encode_text_value(&v),
@@ -4461,17 +4494,17 @@ mod tests {
 
     #[test]
     fn redact_url_otros_schemes_passthrough() {
-        // Si el URL no es postgres://, devolvemos tal cual (el
-        // caller ya falló al parsear; redact es solo defensa).
+        // If the URL is not postgres://, return as-is (the caller
+        // already failed to parse; redact is just defense).
         assert_eq!(redact_url("mysql://x:y@h/d"), "mysql://x:y@h/d");
     }
 
-    // ----- DbConnHandle lifecycle (sin Postgres real) -----
+    // ----- DbConnHandle lifecycle (without real Postgres) -----
     //
-    // No podemos testear `query/exec` end-to-end sin un Postgres
-    // real, pero sí el ciclo "closed → operations fail". Usamos
-    // `new_for_test_closed` que construye un pool en estado
-    // closed sin abrir TCP.
+    // We cannot test `query/exec` end-to-end without a real
+    // Postgres, but we can test the "closed → operations fail"
+    // cycle. We use `new_for_test_closed` which builds a pool in
+    // closed state without opening TCP.
 
     #[tokio::test]
     async fn db_conn_handle_closed_falla_query() {
@@ -4484,17 +4517,17 @@ mod tests {
     #[tokio::test]
     async fn db_conn_handle_close_idempotente() {
         let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
-        // close() sobre un handle ya cerrado es no-op (no error).
+        // close() on an already-closed handle is no-op (no error).
         handle.close().await.unwrap();
         handle.close().await.unwrap();
     }
 
-    // ----- 10.2 — pool de conexiones -----
+    // ----- 10.2 — connection pool -----
 
     #[tokio::test]
     async fn db_pool_max_conns_default() {
-        // El pool default expone DEFAULT_MAX_CONNS conns
-        // concurrentes. La API pública del handle lo expone vía
+        // The default pool exposes DEFAULT_MAX_CONNS concurrent
+        // conns. The handle's public API exposes it via
         // `max_conns()`.
         let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
         assert_eq!(handle.max_conns(), DEFAULT_MAX_CONNS);
@@ -4502,17 +4535,18 @@ mod tests {
 
     #[tokio::test]
     async fn db_pool_idle_count_inicia_en_cero_cuando_closed() {
-        // El handle de test arranca en estado closed, pool vacío.
+        // The test handle starts in closed state with an empty
+        // pool.
         let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
         assert_eq!(handle.idle_count(), 0);
     }
 
     #[test]
     fn db_pool_struct_es_send_sync() {
-        // DbPool tiene que ser Send + Sync para que el handle
-        // pueda compartirse entre tasks. Esto valida que toda la
-        // composición (Mutex<Vec>/Arc<Semaphore>/AtomicBool) sigue
-        // marcando los traits que `Value::DbConn(Arc<...>)` necesita.
+        // DbPool must be Send + Sync so the handle can be shared
+        // across tasks. This validates that the whole composition
+        // (Mutex<Vec>/Arc<Semaphore>/AtomicBool) still satisfies
+        // the traits that `Value::DbConn(Arc<...>)` needs.
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<DbPool>();
         assert_send_sync::<DbConnHandle>();
@@ -4520,8 +4554,8 @@ mod tests {
 
     #[tokio::test]
     async fn db_pool_acquire_falla_cuando_closed() {
-        // acquire() sobre pool closed debe devolver Protocol
-        // error claro (no panic, no hang).
+        // acquire() on a closed pool must return a clear Protocol
+        // error (no panic, no hang).
         let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
         let r = handle.pool.acquire().await;
         assert!(matches!(r, Err(DbError::Protocol(_))));
@@ -4531,9 +4565,10 @@ mod tests {
     async fn db_pool_close_idempotente_y_marca_closed_flag() {
         let handle = DbConnHandle::new_for_test_closed("postgres://test@host/db".into());
         assert!(handle.is_closed().await);
-        // Primera close — no-op porque ya está closed; sin errores.
+        // First close — no-op because it is already closed; no
+        // errors.
         handle.close().await.unwrap();
-        // Segunda close — tampoco error.
+        // Second close — also no error.
         handle.close().await.unwrap();
         assert!(handle.is_closed().await);
     }
@@ -4567,7 +4602,7 @@ mod tests {
             line.contains("SELECT id FROM users WHERE id = $1"),
             "{line}"
         );
-        // Simple NO loguea params.
+        // Simple does NOT log params.
         assert!(
             !line.contains("params="),
             "Simple no debe loguear params: {line}"
@@ -4601,8 +4636,8 @@ mod tests {
             &[PgValue::Text(huge)],
             DbLogMode::Verbose,
         );
-        // El string original tiene 200 chars; truncado a 80 + `…`.
-        // El log no debe contener la run completa de 200 'x'.
+        // The original string has 200 chars; truncated to 80 + `…`.
+        // The log must not contain the full 200-'x' run.
         assert!(line.contains("…"), "debería truncar: {line}");
         assert!(
             !line.contains(&"x".repeat(200)),
@@ -4619,8 +4654,8 @@ mod tests {
             &[PgValue::Int(1)],
             DbLogMode::Simple,
         );
-        // Multi-line debe quedar en una sola línea (whitespace
-        // colapsado).
+        // Multi-line must end up on a single line (whitespace
+        // collapsed).
         assert!(!line.contains('\n'), "log debe ser one-line: {line}");
         assert!(
             line.contains("SELECT id, name FROM users WHERE id = $1"),
@@ -4638,7 +4673,7 @@ mod tests {
         );
         assert!(line.contains("verbose"), "{line}");
         assert!(line.contains("BEGIN"), "{line}");
-        // Sin args, no debería aparecer la sección params.
+        // Without args, the params section should not appear.
         assert!(
             !line.contains("params="),
             "sin args no debe haber sección params: {line}"
@@ -4647,8 +4682,8 @@ mod tests {
 
     #[test]
     fn truncate_for_log_utf8_safe() {
-        // emoji = 4 bytes pero 1 char; el truncate cuenta chars,
-        // no bytes — no debe panic.
+        // emoji = 4 bytes but 1 char; truncate counts chars, not
+        // bytes — must not panic.
         let s = "🦀".repeat(50);
         let t = truncate_for_log(&s, 10);
         // 10 emojis + '…' = 11 chars.
@@ -4656,7 +4691,7 @@ mod tests {
         assert!(t.ends_with('…'));
     }
 
-    // v0.10.29 — redaction de secrets en FITZ_DB_LOG=verbose
+    // v0.10.29 — secret redaction in FITZ_DB_LOG=verbose
 
     #[test]
     fn should_redact_param_detecta_password_en_where() {
@@ -4704,26 +4739,26 @@ mod tests {
 
     #[test]
     fn should_redact_param_no_confunde_dolar_1_con_dolar_10() {
-        // Edge case: el needle `$1` no debe matchear adentro de `$10`.
+        // Edge case: the needle `$1` must not match inside `$10`.
         let sql = "select * from users where id = $10 and email = $1";
-        // $1 → no debe redact (email no es sensitive).
+        // $1 → must not redact (email is not sensitive).
         assert!(!should_redact_param(sql, 1));
-        // $10 → tampoco (id no es sensitive).
+        // $10 → also no (id is not sensitive).
         assert!(!should_redact_param(sql, 10));
     }
 
     #[test]
     fn should_redact_param_es_case_insensitive() {
         let sql = "select * from t where PASSWORD = $1";
-        // El caller pasa siempre lowercase, así que el match es
-        // case-insensitive de hecho.
+        // The caller always passes lowercase, so the match is
+        // effectively case-insensitive.
         assert!(should_redact_param(&sql.to_ascii_lowercase(), 1));
     }
 
     #[test]
     fn format_db_log_line_verbose_redacta_password() {
-        // El integrador completo: verbose con password en el SQL
-        // debe enmascarar el value real con `<redacted>`.
+        // Full integrator: verbose with a password in the SQL
+        // must mask the real value with `<redacted>`.
         let line = format_db_log_line(
             std::time::Duration::from_millis(1),
             "UPDATE users SET password = $1 WHERE id = $2",
@@ -4738,13 +4773,13 @@ mod tests {
             !line.contains("super_secret_xyz"),
             "el secret NO debe aparecer en el log: {line}"
         );
-        // El $2 (id = 42) sigue visible — no es sensitive.
+        // $2 (id = 42) stays visible — not sensitive.
         assert!(line.contains("$2=42"), "{line}");
     }
 
     #[test]
     fn format_db_log_line_verbose_no_redacta_email_normal() {
-        // Sanity: queries normales sin secrets siguen mostrando params.
+        // Sanity: normal queries without secrets still show params.
         let line = format_db_log_line(
             std::time::Duration::from_millis(1),
             "SELECT * FROM users WHERE email = $1",
@@ -4757,7 +4792,7 @@ mod tests {
         );
     }
 
-    // v0.10.29 — DbError con SQL contexto + SQLSTATE en Display
+    // v0.10.29 — DbError with SQL context + SQLSTATE in Display
 
     // v0.10.29 — FITZ_DB_MAX_CONNS parser
 
@@ -4870,8 +4905,8 @@ mod tests {
 
     #[test]
     fn format_db_log_line_verbose_redacta_api_key_en_insert() {
-        // INSERT positional: el log captura "api_key" en la lista
-        // de columnas y redacta el $N correspondiente.
+        // Positional INSERT: the log captures "api_key" in the
+        // column list and redacts the corresponding $N.
         let line = format_db_log_line(
             std::time::Duration::from_millis(1),
             "INSERT INTO tokens (name, api_key) VALUES ($1, $2)",
@@ -4881,7 +4916,7 @@ mod tests {
             ],
             DbLogMode::Verbose,
         );
-        // $2 corresponde a api_key → redacted.
+        // $2 corresponds to api_key → redacted.
         assert!(
             line.contains("$2=<redacted>"),
             "esperaba api_key redacted, fue: {line}"
