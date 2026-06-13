@@ -1711,8 +1711,8 @@ fn pip_inputs_hash(bundle_pip: &[String], requirements_contents: &[Vec<u8>]) -> 
 
 /// Builds with embedded CPython. The output is a single file that
 /// internally carries: PBS tarball (install_only_stripped 3.14.x)
-/// + real binary + standalone Rust launcher. The first run
-/// extracts to `$TMPDIR/fitz-py-<hash>/`, sets PYTHONHOME +
+/// plus the real binary plus a standalone Rust launcher. The first
+/// run extracts to `$TMPDIR/fitz-py-<hash>/`, sets PYTHONHOME and
 /// LD_LIBRARY_PATH/DYLD/PATH depending on the OS, then execs the
 /// real binary. Subsequent runs are instant (TMP cache).
 ///
@@ -3116,9 +3116,9 @@ fn fmt_one_file(path: &std::path::Path, check_only: bool) -> Result<FmtResult, S
 }
 
 /// Discovers `.fitz` files in the current project via the
-/// manifest. Reads `[bin].main` and `[lib].entry` (if they exist)
-/// + recursive walk of `src/`. Excludes `target/` and hidden dirs
-/// (`.git/`, etc.).
+/// manifest. Reads `[bin].main` and `[lib].entry` (if they exist),
+/// then recursive walks `src/`. Excludes `target/` and hidden
+/// directories (`.git/`, etc.).
 fn discover_project_fitz_files() -> Vec<PathBuf> {
     let manifest_path = find_local_manifest_or_exit();
     let manifest_dir = manifest_path

@@ -1,27 +1,28 @@
-// deploy.rs — Fase 12.6 (`fitz deploy` orchestrator)
+// deploy.rs — Phase 12.6 (`fitz deploy` orchestrator)
 //
-// Sub-comando `fitz deploy <target>` que ejecuta el deployment según el
-// target seleccionado. Targets MVP: `docker` (build + push) y `compose`
-// (up local). Targets extendibles a futuro: `fly`, `railway`, `k8s`.
+// The `fitz deploy <target>` sub-command runs the deployment according
+// to the selected target. MVP targets: `docker` (build + push) and
+// `compose` (local up). Future extensible targets: `fly`, `railway`,
+// `k8s`.
 //
-// Modelo: thin wrapper. NO replicamos lógica de docker; solo invocamos
-// los CLIs correspondientes (`docker build/push`, `docker compose up`)
-// con args derivados del manifest del proyecto. Si el user necesita
-// flags avanzados que no exponemos (multi-arch, --no-cache, etc.),
-// puede correr docker/compose directo.
+// Model: thin wrapper. We do NOT replicate docker logic; we just invoke
+// the corresponding CLIs (`docker build/push`, `docker compose up`)
+// with args derived from the project's manifest. If the user needs
+// advanced flags we do not expose (multi-arch, --no-cache, etc.), they
+// can run docker/compose directly.
 //
-// Detección AST-only (paralelo a `fitz docker init`): leemos el entry
-// point del manifest para verificar que existe + para validar que el
-// proyecto está listo (Dockerfile/compose.yml). Sin paridad codegen
-// porque deploy NO emite código Rust — solo invoca herramientas externas.
+// AST-only detection (parallel to `fitz docker init`): we read the
+// manifest entry point to verify it exists + to validate that the
+// project is ready (Dockerfile/compose.yml). No codegen parity because
+// deploy does NOT emit Rust code — it just invokes external tools.
 
 use crate::manifest::Manifest;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Target del deploy. MVP: docker + compose. Extendibles documentados
-/// como deuda visible.
+/// Deploy target. MVP: docker + compose. Extensible targets documented
+/// as visible debt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeployTarget {
     /// `docker build -t <pkg.name>:<tag> . && docker push <pkg.name>:<tag>`
@@ -53,12 +54,13 @@ impl DeployTarget {
     }
 }
 
-/// Opciones del deploy. Algunas son target-specific:
-/// - `tag` aplica solo a `docker` (override del default `<pkg>:latest`).
-/// - `push` aplica solo a `docker` (skip push si false — útil para
-///   builds locales sin registry).
-/// - `detach` aplica solo a `compose` (default true — `up -d`).
-/// - `build` aplica solo a `compose` (default true — `--build`).
+/// Deploy options. Some are target-specific:
+/// - `tag` applies only to `docker` (override of the default
+///   `<pkg>:latest`).
+/// - `push` applies only to `docker` (skip push if false — useful for
+///   local builds without a registry).
+/// - `detach` applies only to `compose` (default true — `up -d`).
+/// - `build` applies only to `compose` (default true — `--build`).
 #[derive(Debug, Clone, Default)]
 pub struct DeployOptions {
     pub tag: Option<String>,
@@ -67,8 +69,8 @@ pub struct DeployOptions {
     pub no_build: bool,
 }
 
-/// Resultado del deploy: target ejecutado + comando(s) invocados + exit
-/// codes. Útil para logging y tests.
+/// Deploy result: executed target + invoked command(s) + exit codes.
+/// Useful for logging and tests.
 #[derive(Debug, Clone)]
 pub struct DeployResult {
     pub target: DeployTarget,
@@ -82,25 +84,26 @@ pub struct DeployCommand {
     pub exit_code: i32,
 }
 
-/// Error del deploy: pre-flight checks fallidos o invocación de CLI
-/// externo falló.
+/// Deploy error: failed pre-flight checks or failed invocation of an
+/// external CLI.
 #[derive(Debug)]
 pub enum DeployError {
-    /// El proyecto no tiene un `Dockerfile` que el deploy necesita
-    /// (target = `docker` o `compose`).
+    /// The project does not have a `Dockerfile` that the deploy
+    /// requires (target = `docker` or `compose`).
     MissingDockerfile { manifest_dir: PathBuf },
-    /// El proyecto no tiene `docker-compose.yml` (target = `compose`).
+    /// The project does not have `docker-compose.yml` (target =
+    /// `compose`).
     MissingComposeFile { manifest_dir: PathBuf },
-    /// El binario `docker` no está en el PATH del sistema.
+    /// The `docker` binary is not in the system PATH.
     DockerNotInstalled,
-    /// Un comando externo falló con exit code != 0. El stderr ya fue
-    /// volcado por el child process (heredamos stdio).
+    /// An external command failed with exit code != 0. The stderr was
+    /// already dumped by the child process (we inherit stdio).
     CommandFailed {
         bin: String,
         args: Vec<String>,
         exit_code: i32,
     },
-    /// Error de IO al invocar un sub-proceso.
+    /// IO error invoking a sub-process.
     Io(std::io::Error),
 }
 
@@ -148,18 +151,18 @@ impl fmt::Display for DeployError {
     }
 }
 
-/// Ejecuta el deploy del target seleccionado. Validación pre-flight,
-/// invocación de los comandos externos, y captura de exit codes.
+/// Runs the deploy for the selected target. Pre-flight validation,
+/// invocation of the external commands, and capture of exit codes.
 ///
-/// `manifest_dir` es el directorio raíz del proyecto (donde vive
-/// `fitz.toml`). Los comandos se ejecutan con `current_dir(manifest_dir)`.
+/// `manifest_dir` is the project root (where `fitz.toml` lives). The
+/// commands run with `current_dir(manifest_dir)`.
 pub fn run_deploy(
     target: DeployTarget,
     manifest: &Manifest,
     manifest_dir: &Path,
     options: &DeployOptions,
 ) -> Result<DeployResult, DeployError> {
-    // Pre-flight: chequear que `docker` está instalado.
+    // Pre-flight: check that `docker` is installed.
     if !docker_available() {
         return Err(DeployError::DockerNotInstalled);
     }
@@ -170,9 +173,9 @@ pub fn run_deploy(
     }
 }
 
-/// Chequea si el binario `docker` está en el PATH ejecutando
-/// `docker --version` y validando exit code 0. Más confiable que un
-/// `which docker` cross-platform.
+/// Checks if the `docker` binary is in the PATH by running
+/// `docker --version` and validating exit code 0. More reliable than
+/// a cross-platform `which docker`.
 fn docker_available() -> bool {
     Command::new("docker")
         .arg("--version")
@@ -181,9 +184,9 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Target `docker`: `docker build -t <tag> .` + (opcional) `docker push
-/// <tag>`. Tag default = `<package.name>:latest`. Override con
-/// `options.tag`. Skip push con `--no-push`.
+/// Target `docker`: `docker build -t <tag> .` + (optional) `docker
+/// push <tag>`. Default tag = `<package.name>:latest`. Override with
+/// `options.tag`. Skip push with `--no-push`.
 fn run_docker_deploy(
     manifest: &Manifest,
     manifest_dir: &Path,
@@ -224,7 +227,7 @@ fn run_docker_deploy(
         });
     }
 
-    // 2) docker push <tag> (opcional)
+    // 2) docker push <tag> (optional)
     if !options.no_push {
         let push_args = vec!["push".to_string(), tag.clone()];
         let push_status = invoke_command("docker", &push_args, manifest_dir)?;
@@ -248,8 +251,8 @@ fn run_docker_deploy(
     })
 }
 
-/// Target `compose`: `docker compose up -d --build`. Flags `--no-detach`
-/// quita el `-d`; `--no-build` quita el `--build`.
+/// Target `compose`: `docker compose up -d --build`. Flag
+/// `--no-detach` removes the `-d`; `--no-build` removes the `--build`.
 fn run_compose_deploy(
     manifest_dir: &Path,
     options: &DeployOptions,
@@ -289,9 +292,9 @@ fn run_compose_deploy(
     })
 }
 
-/// Invoca un sub-proceso con stdio heredado (al user le aparece la
-/// salida en tiempo real). Devuelve el exit code; cualquier error de IO
-/// se propaga como `DeployError::Io`.
+/// Invokes a sub-process with inherited stdio (the user sees output
+/// in real time). Returns the exit code; any IO error propagates as
+/// `DeployError::Io`.
 fn invoke_command(bin: &str, args: &[String], cwd: &Path) -> Result<i32, DeployError> {
     let status = Command::new(bin)
         .args(args)

@@ -1,90 +1,89 @@
-//! Launcher template para `fitz build --bundle-python` (Fase 8.b.3).
+//! Launcher template for `fitz build --bundle-python` (Phase 8.b.3).
 //!
-//! Cuando `--bundle-python` está activo, el output de `fitz build` es un
-//! binario standalone Rust ("launcher") que internamente lleva embebidos:
-//!  - El tarball PBS (CPython 3.13.x install_only_stripped)
-//!  - El "real binary" (transpile estándar del programa Fitz con
-//!    feature `python`, linkea libpython como hoy)
+//! When `--bundle-python` is active, the output of `fitz build` is a
+//! standalone Rust binary ("launcher") that internally embeds:
+//!  - The PBS tarball (CPython 3.13.x install_only_stripped)
+//!  - The "real binary" (standard transpile of the Fitz program with
+//!    the `python` feature, links libpython as today)
 //!
-//! En primer run, el launcher extrae todo a `$TMPDIR/fitz-py-<hash>/`,
-//! setea `PYTHONHOME` + `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/
-//! `PATH` según el OS, y exec/spawn-and-wait del real binary. Runs
-//! subsecuentes reusan el dir extraído (sentinel `.extracted` marca
-//! completitud).
+//! On the first run, the launcher extracts everything to
+//! `$TMPDIR/fitz-py-<hash>/`, sets `PYTHONHOME` +
+//! `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/`PATH` depending on
+//! the OS, and exec/spawn-and-wait of the real binary. Subsequent runs
+//! reuse the extracted dir (the `.extracted` sentinel marks completion).
 //!
-//! **Timing observado en Windows 11 SSD** (CPython 3.14.5 install_only_stripped,
-//! 21 MB comprimido → 61 MB extraído, bsdtar nativo):
-//!  - Cold first run (cache TMP vacío): ~3-5s (extracción tar +
-//!    boot de CPython adentro del real binary).
-//!  - Warm subsequent runs: ~50-100ms (cache hit, sentinel `.extracted`
-//!    presente, solo se hace exec/spawn del real binary).
+//! **Timing observed on Windows 11 SSD** (CPython 3.14.5 install_only_stripped,
+//! 21 MB compressed → 61 MB extracted, native bsdtar):
+//!  - Cold first run (empty TMP cache): ~3-5s (tar extraction +
+//!    CPython boot inside the real binary).
+//!  - Warm subsequent runs: ~50-100ms (cache hit, `.extracted` sentinel
+//!    present, only exec/spawn of the real binary).
 //!
-//! **Patrón validado en producción**: Datasette Desktop (Simon
-//! Willison, 2021) ships así con bsdtar + PBS. Es el modelo
-//! recomendado por la investigación del 2026-05-23 después de
-//! descartar:
-//!  - "Extract on first run + set PYTHONHOME in main()": no funciona,
-//!    el OS resuelve libpython ANTES de main() (Linux: `DT_NEEDED`
-//!    vía ld.so; macOS: `LC_LOAD_DYLIB` vía dyld; Windows: import
+//! **Pattern validated in production**: Datasette Desktop (Simon
+//! Willison, 2021) ships this way with bsdtar + PBS. It is the model
+//! recommended by the 2026-05-23 research after discarding:
+//!  - "Extract on first run + set PYTHONHOME in main()": does not
+//!    work, the OS resolves libpython BEFORE main() (Linux: `DT_NEEDED`
+//!    via ld.so; macOS: `LC_LOAD_DYLIB` via dyld; Windows: import
 //!    table).
-//!  - Linking estático con PBS "full": "multi-month rabbit hole",
-//!    PyOxidizer ralentizado desde 2024.
-//!  - Manual delay-load/dlopen: sin soporte documentado en PyO3,
-//!    brittle entre versiones.
+//!  - Static linking with "full" PBS: "multi-month rabbit hole",
+//!    PyOxidizer slowed down since 2024.
+//!  - Manual delay-load/dlopen: no documented support in PyO3,
+//!    brittle across versions.
 //!
-//! **Decisiones técnicas tomadas**:
+//! **Technical decisions made**:
 //!
-//! - **Subprocess `tar -xzf`**: cero deps Rust en el launcher.
-//!   bsdtar/GNU tar disponible nativo en Windows 11
-//!   (`C:\WINDOWS\system32\tar.exe`), macOS, y todo Linux moderno.
-//! - **Placeholders `__FITZ_REPLACE_*__`**: strings literales Rust
-//!   válidos. Si el template no se sustituye (bug del codegen),
-//!   `include_bytes!` falla con "no such file" — buena señal de
-//!   error en build time, no en runtime.
-//! - **`exec` en Unix vs `Command::status` en Windows**: en Unix
-//!   `execv` reemplaza el proceso (signals/stdin/stdout transparentes,
-//!   el OS forwarea todo). En Windows no hay exec real; usamos
-//!   `Command::status` con inherit handles + propagamos el exit code.
-//! - **Sentinel `.extracted`**: última cosa que escribimos. Si crash
-//!   durante extract, el sentinel no existe y la próxima corrida
-//!   re-extrae (no corrupción persistente).
-//! - **Rename atómico**: extraemos a `<base>.tmp` + `fs::rename` a
-//!   `<base>`. Si otra corrida concurrente nos ganó (race), el
-//!   second rename falla y descartamos nuestro tmp — el resultado
-//!   del primero es igual porque el tarball es determinístico.
-//! - **TARBALL_HASH como string**: calculado por el `fitz build`
-//!   (SHA256 truncado a 16 chars) y embebido. Cambio del tarball =
-//!   cambio del hash = extract dir nuevo (cache automático por
-//!   versión).
+//! - **`tar -xzf` subprocess**: zero Rust deps in the launcher.
+//!   bsdtar/GNU tar available natively on Windows 11
+//!   (`C:\WINDOWS\system32\tar.exe`), macOS, and all modern Linux.
+//! - **`__FITZ_REPLACE_*__` placeholders**: valid Rust string
+//!   literals. If the template is not substituted (codegen bug),
+//!   `include_bytes!` fails with "no such file" — good error signal
+//!   at build time, not runtime.
+//! - **`exec` on Unix vs `Command::status` on Windows**: on Unix
+//!   `execv` replaces the process (transparent signals/stdin/stdout,
+//!   the OS forwards everything). On Windows there is no real exec;
+//!   we use `Command::status` with inherit handles + propagate the
+//!   exit code.
+//! - **`.extracted` sentinel**: the last thing we write. If we crash
+//!   during extract, the sentinel does not exist and the next run
+//!   re-extracts (no persistent corruption).
+//! - **Atomic rename**: we extract to `<base>.tmp` + `fs::rename` to
+//!   `<base>`. If another concurrent run beat us (race), the second
+//!   rename fails and we discard our tmp — the result of the first
+//!   one is the same because the tarball is deterministic.
+//! - **TARBALL_HASH as string**: computed by `fitz build` (SHA256
+//!   truncated to 16 chars) and embedded. Tarball change = hash
+//!   change = new extract dir (automatic cache per version).
 
-/// Placeholder reemplazado por el codegen con el path absoluto al
-/// tarball PBS (resuelto vía `pbs::ensure_tarball(triple)?`).
+/// Placeholder replaced by codegen with the absolute path to the PBS
+/// tarball (resolved via `pbs::ensure_tarball(triple)?`).
 pub const PLACEHOLDER_TARBALL_PATH: &str = "__FITZ_REPLACE_PBS_TARBALL_PATH__";
 
-/// Placeholder reemplazado con el path absoluto al real binary
-/// (recién buildeado por el codegen del sub-paso 8.b.2).
+/// Placeholder replaced with the absolute path to the real binary
+/// (just built by the codegen of sub-step 8.b.2).
 pub const PLACEHOLDER_REAL_BINARY_PATH: &str = "__FITZ_REPLACE_REAL_BINARY_PATH__";
 
-/// Placeholder reemplazado con un hash corto del tarball (16 chars
-/// hex). Identifica el extract dir en `$TMPDIR`. Cuando hay pip
-/// packages, este hash combina PBS + pip para que dos proyectos con
-/// distintos packages tengan extract dirs distintos.
+/// Placeholder replaced with a short hash of the tarball (16 hex
+/// chars). Identifies the extract dir in `$TMPDIR`. When there are
+/// pip packages, this hash combines PBS + pip so that two projects
+/// with different packages have different extract dirs.
 pub const PLACEHOLDER_TARBALL_HASH: &str = "__FITZ_REPLACE_TARBALL_HASH__";
 
-/// Placeholder donde se inyecta la declaración del tarball de paquetes
-/// pip (Fase 8.c). Sin `--bundle-pip` queda como string vacío. Con
-/// `--bundle-pip`, se reemplaza por una línea adicional:
+/// Placeholder where the pip-packages tarball declaration is injected
+/// (Phase 8.c). Without `--bundle-pip` it stays as an empty string.
+/// With `--bundle-pip`, it is replaced with an extra line:
 /// `const PIP_PACKAGES: &[u8] = include_bytes!("<path>");`
 pub const PLACEHOLDER_PIP_DECL_BLOCK: &str = "__FITZ_REPLACE_PIP_DECL_BLOCK__";
 
-/// Placeholder donde se inyecta la extracción de los paquetes pip
-/// adentro de `python/Lib/site-packages/`. Sin `--bundle-pip` queda
-/// vacío. Con `--bundle-pip`, se inyecta el bloque de extracción.
+/// Placeholder where the extraction of pip packages into
+/// `python/Lib/site-packages/` is injected. Without `--bundle-pip` it
+/// stays empty. With `--bundle-pip`, the extraction block is injected.
 pub const PLACEHOLDER_PIP_EXTRACT_BLOCK: &str = "__FITZ_REPLACE_PIP_EXTRACT_BLOCK__";
 
-/// Template Rust del `main.rs` del launcher. Los placeholders se
-/// reemplazan vía `gen_launcher_main_rs()` antes de escribirlo al
-/// Cargo project del launcher.
+/// Rust template of the launcher's `main.rs`. The placeholders are
+/// replaced via `gen_launcher_main_rs()` before writing it to the
+/// launcher's Cargo project.
 pub const LAUNCHER_MAIN_RS_TEMPLATE: &str = r#"// Auto-generado por `fitz build --bundle-python`.
 // NO editar — re-generado en cada build.
 //
@@ -237,10 +236,10 @@ fn prepend_path_env(name: &str, dir: &Path) {
 }
 "#;
 
-/// Cargo.toml del launcher. Cero deps externas — solo std. El nombre
-/// del package es `__fitz_launcher__` (placeholder) para evitar
-/// colisión con el real binary (que usa el package name del fuente
-/// `.fitz` sanitizado).
+/// The launcher's Cargo.toml. Zero external deps — std only. The
+/// package name is `__fitz_launcher__` (placeholder) to avoid a
+/// collision with the real binary (which uses the sanitized package
+/// name from the `.fitz` source).
 pub const LAUNCHER_CARGO_TOML_TEMPLATE: &str = r#"[package]
 name = "fitz_launcher"
 version = "0.0.0"
@@ -267,23 +266,23 @@ strip = true
 panic = "abort"
 "#;
 
-/// Placeholder en `LAUNCHER_CARGO_TOML_TEMPLATE` para el nombre del
-/// binario final (sanitizado del stem del `.fitz` original).
+/// Placeholder in `LAUNCHER_CARGO_TOML_TEMPLATE` for the final
+/// binary name (sanitized from the stem of the original `.fitz`).
 pub const PLACEHOLDER_BIN_NAME: &str = "__FITZ_REPLACE_BIN_NAME__";
 
-/// Personaliza el template del `main.rs` del launcher con paths reales
-/// y el hash del tarball. Devuelve el código Rust listo para escribir
-/// al Cargo project del launcher.
+/// Customizes the launcher's `main.rs` template with real paths and
+/// the tarball hash. Returns the Rust code ready to write to the
+/// launcher's Cargo project.
 ///
-/// Los paths se escapan para que sean string literales Rust válidos
-/// (backslashes de Windows → `\\`, doble quotes → `\"`).
+/// Paths are escaped to be valid Rust string literals (Windows
+/// backslashes → `\\`, double quotes → `\"`).
 ///
-/// Fase 8.c — Si `pip_packages_path` es `Some(<path>)`, el launcher
-/// embebe un segundo tarball con paquetes pip pre-instalados y los
-/// extrae adentro de `python/Lib/site-packages/` después del PBS
-/// base extract. Si es `None` (sin `--bundle-pip`), los bloques de
-/// pip se reemplazan por string vacío — el launcher resultante es
-/// bit-a-bit idéntico al 8.b.
+/// Phase 8.c — If `pip_packages_path` is `Some(<path>)`, the launcher
+/// embeds a second tarball with pre-installed pip packages and
+/// extracts them into `python/Lib/site-packages/` after the base PBS
+/// extract. If `None` (without `--bundle-pip`), the pip blocks are
+/// replaced with empty strings — the resulting launcher is
+/// bit-by-bit identical to 8.b.
 pub fn gen_launcher_main_rs(
     tarball_path: &str,
     real_binary_path: &str,
@@ -366,30 +365,30 @@ pub fn gen_launcher_main_rs(
         .replace(PLACEHOLDER_PIP_EXTRACT_BLOCK, &pip_extract_block)
 }
 
-/// Personaliza el template del Cargo.toml del launcher con el nombre
-/// del binario final.
+/// Customizes the launcher's Cargo.toml template with the final
+/// binary name.
 pub fn gen_launcher_cargo_toml(bin_name: &str) -> String {
     LAUNCHER_CARGO_TOML_TEMPLATE.replace(PLACEHOLDER_BIN_NAME, bin_name)
 }
 
-/// Escapa una string para que sea un string literal Rust válido.
-/// Maneja backslash (Windows paths), double quote, y newlines.
+/// Escapes a string so it is a valid Rust string literal. Handles
+/// backslash (Windows paths), double quote, and newlines.
 fn escape_rust_string_literal(s: &str) -> String {
     s.replace('\\', "\\\\")
         .replace('"', "\\\"")
         .replace('\n', "\\n")
 }
 
-/// Calcula un hash corto (16 chars hex) determinístico del tarball PBS.
-/// Usa una implementación simple de FNV-1a 64-bit — no necesita ser
-/// criptográfico, solo identificar de forma única el contenido del
-/// tarball para el dir name en `$TMPDIR`.
+/// Computes a deterministic short hash (16 hex chars) of the PBS
+/// tarball. Uses a simple 64-bit FNV-1a implementation — it does not
+/// need to be cryptographic, just uniquely identify the tarball
+/// contents for the dir name in `$TMPDIR`.
 ///
-/// FNV-1a es suficiente porque:
-///  - El input es un tarball PBS conocido (no atacante adversario).
-///  - Colisión accidental entre dos tarballs PBS distintos es
-///    astronómicamente improbable.
-///  - Cero deps: implementación de 8 LoC.
+/// FNV-1a is enough because:
+///  - The input is a known PBS tarball (no adversarial attacker).
+///  - Accidental collision between two different PBS tarballs is
+///    astronomically improbable.
+///  - Zero deps: 8-LoC implementation.
 pub fn tarball_hash_short(tarball_bytes: &[u8]) -> String {
     const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
     const FNV_PRIME: u64 = 0x100_0000_01b3;
@@ -407,8 +406,8 @@ mod tests {
 
     #[test]
     fn placeholders_son_strings_validos_rust() {
-        // Los placeholders deben ser identificadores entre comillas
-        // dobles, válidos como string literal Rust.
+        // The placeholders must be identifiers between double quotes,
+        // valid as Rust string literals.
         assert!(PLACEHOLDER_TARBALL_PATH.starts_with("__FITZ_REPLACE_"));
         assert!(PLACEHOLDER_REAL_BINARY_PATH.starts_with("__FITZ_REPLACE_"));
         assert!(PLACEHOLDER_TARBALL_HASH.starts_with("__FITZ_REPLACE_"));
@@ -431,9 +430,9 @@ mod tests {
 
     #[test]
     fn template_cargo_toml_incluye_deps_tar_y_flate2() {
-        // El launcher precisa `tar` + `flate2` para extraer el PBS
-        // (y opcionalmente el pip tarball) sin invocar el binario
-        // `tar` del sistema. Habilita runtimes minimalistas distroless.
+        // The launcher needs `tar` + `flate2` to extract the PBS
+        // (and optionally the pip tarball) without invoking the
+        // system's `tar` binary. Enables distroless minimal runtimes.
         assert!(
             LAUNCHER_CARGO_TOML_TEMPLATE.contains("tar = \"0.4\""),
             "Cargo.toml del launcher debe declarar `tar = \"0.4\"`"
@@ -446,13 +445,13 @@ mod tests {
 
     #[test]
     fn template_main_rs_define_extract_tar_gz_y_no_invoca_tar_subprocess() {
-        // El helper debe existir.
+        // The helper must exist.
         assert!(
             LAUNCHER_MAIN_RS_TEMPLATE.contains("fn extract_tar_gz"),
             "template debe definir `fn extract_tar_gz`"
         );
-        // Y NO debe quedar ningún `Command::new("tar")` — ese era el
-        // patrón pre-fix que rompía en distroless.
+        // And no `Command::new("tar")` must remain — that was the
+        // pre-fix pattern that broke on distroless.
         assert!(
             !LAUNCHER_MAIN_RS_TEMPLATE.contains("Command::new(\"tar\")"),
             "template NO debe invocar `Command::new(\"tar\")` (subprocess fallaría en distroless)"
@@ -461,8 +460,8 @@ mod tests {
 
     #[test]
     fn gen_launcher_main_rs_pip_block_usa_extract_tar_gz() {
-        // Cuando hay pip embebido, el bloque inyectado debe usar el
-        // helper Rust nativo, no subprocess.
+        // When pip is embedded, the injected block must use the
+        // native Rust helper, not a subprocess.
         let result = gen_launcher_main_rs(
             "/tmp/pbs.tar.gz",
             "/tmp/fitz-real",
@@ -483,20 +482,20 @@ mod tests {
     fn gen_launcher_main_rs_sustituye_los_3_placeholders() {
         let result = gen_launcher_main_rs("/tmp/tarball.tar.gz", "/tmp/fitz-real", "abc123", None);
 
-        // Los placeholders ya no deben aparecer en el output.
+        // The placeholders must no longer appear in the output.
         assert!(!result.contains(PLACEHOLDER_TARBALL_PATH));
         assert!(!result.contains(PLACEHOLDER_REAL_BINARY_PATH));
         assert!(!result.contains(PLACEHOLDER_TARBALL_HASH));
-        // Sin pip, los bloques de pip también deben estar reemplazados (por vacío).
+        // Without pip, the pip blocks must also be replaced (with empty).
         assert!(!result.contains(PLACEHOLDER_PIP_DECL_BLOCK));
         assert!(!result.contains(PLACEHOLDER_PIP_EXTRACT_BLOCK));
 
-        // Los valores reemplazados deben aparecer.
+        // The replaced values must appear.
         assert!(result.contains("/tmp/tarball.tar.gz"));
         assert!(result.contains("/tmp/fitz-real"));
         assert!(result.contains("abc123"));
 
-        // Sin pip, NO debe haber referencia a PIP_PACKAGES en el output.
+        // Without pip, there must be NO reference to PIP_PACKAGES in the output.
         assert!(!result.contains("PIP_PACKAGES"));
     }
 
@@ -509,15 +508,15 @@ mod tests {
             None,
         );
 
-        // En Rust source, los backslashes deben aparecer escapados.
+        // In the Rust source, backslashes must appear escaped.
         assert!(
             result.contains(r"C:\\Users\\test\\tarball.tar.gz"),
             "el path Windows debería tener backslashes escapados"
         );
         assert!(result.contains(r"C:\\Users\\test\\fitz-real.exe"));
 
-        // Los backslashes raw NO deben aparecer en el include_bytes!
-        // (string literal Rust con `\` raw es ilegal salvo en raw strings).
+        // Raw backslashes must NOT appear in the include_bytes!
+        // (a Rust string literal with raw `\` is illegal outside raw strings).
         let include_bytes_line = result
             .lines()
             .find(|l| l.contains("PBS_TARBALL: &[u8]"))
@@ -528,8 +527,8 @@ mod tests {
 
     #[test]
     fn gen_launcher_main_rs_escapa_double_quotes() {
-        // Edge case improbable pero posible (paths con espacios y
-        // comillas en Windows — no es típico pero válido).
+        // Improbable but possible edge case (paths with spaces and
+        // quotes on Windows — not typical but valid).
         let result = gen_launcher_main_rs("/tmp/a\"b.tar.gz", "/tmp/real", "h", None);
         assert!(result.contains("/tmp/a\\\"b.tar.gz"));
     }
@@ -543,11 +542,11 @@ mod tests {
             Some("/tmp/pip_packages.tar.gz"),
         );
 
-        // Placeholders deben estar resueltos.
+        // Placeholders must be resolved.
         assert!(!result.contains(PLACEHOLDER_PIP_DECL_BLOCK));
         assert!(!result.contains(PLACEHOLDER_PIP_EXTRACT_BLOCK));
 
-        // Bloque de declaración: const PIP_PACKAGES + include_bytes!.
+        // Declaration block: const PIP_PACKAGES + include_bytes!.
         assert!(
             result.contains("const PIP_PACKAGES: &[u8] = include_bytes!"),
             "debe declarar PIP_PACKAGES como include_bytes!"
@@ -557,7 +556,7 @@ mod tests {
             "debe incluir el path del tarball pip"
         );
 
-        // Bloque de extracción: writes + tar.
+        // Extraction block: writes + tar.
         assert!(
             result.contains("__fitz_pip.tar.gz"),
             "debe escribir el tarball pip a un archivo temp"
@@ -577,9 +576,9 @@ mod tests {
             Some(r"C:\Users\test\pip_packages.tar.gz"),
         );
 
-        // El path Windows del pip debe estar escapado adentro del include_bytes!.
+        // The Windows pip path must be escaped inside include_bytes!.
         assert!(result.contains(r"C:\\Users\\test\\pip_packages.tar.gz"));
-        // Backslash raw NO debe aparecer en el código generado.
+        // A raw backslash must NOT appear in the generated code.
         let pip_line = result
             .lines()
             .find(|l| l.contains("PIP_PACKAGES: &[u8]"))
@@ -617,12 +616,12 @@ mod tests {
 
     #[test]
     fn tarball_hash_short_empty_input_devuelve_offset() {
-        // FNV-1a sobre vacío devuelve el offset basis.
+        // FNV-1a over empty input returns the offset basis.
         let h = tarball_hash_short(b"");
         assert_eq!(h, "cbf29ce484222325");
     }
 
-    // NOTA: que el código generado COMPILE como Rust válido se valida
-    // en `tests/cli_e2e.rs` con un `cargo build` real sobre el output
-    // de `gen_launcher_main_rs` (sub-paso 8.b.4/8.b.5).
+    // NOTE: that the generated code COMPILES as valid Rust is
+    // validated in `tests/cli_e2e.rs` with a real `cargo build` over
+    // the output of `gen_launcher_main_rs` (sub-step 8.b.4/8.b.5).
 }

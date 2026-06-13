@@ -1,62 +1,62 @@
-//! python-build-standalone (PBS) — descarga + cache local del tarball
-//! CPython para `fitz build --bundle-python` (Fase 8.b).
+//! python-build-standalone (PBS) — download + local cache of the
+//! CPython tarball for `fitz build --bundle-python` (Phase 8.b).
 //!
-//! Descarga el tarball `install_only_stripped` de la release pinned de
-//! PBS para el triple destino y lo guarda en
-//! `<cache>/pbs/<tarball-name>` (cache global compartido entre builds).
+//! Downloads the `install_only_stripped` tarball of the pinned PBS
+//! release for the target triple and saves it to
+//! `<cache>/pbs/<tarball-name>` (global cache shared across builds).
 //!
-//! **Decisiones técnicas tomadas**:
+//! **Technical decisions made**:
 //!
-//! - **Release pinned** (constante `PBS_RELEASE`): builds reproducibles.
-//!   Bump manual c/3-6 meses. Misma política que `Cargo.lock`.
-//! - **CPython 3.14.x**: versión más reciente estable disponible en
-//!   PBS y dentro del rango `abi3-py310` (3.10-3.14+). PyO3 con
-//!   `abi3-py310` + `auto-initialize` linkea dinámico contra
-//!   libpython específica del builder; bundlear PBS 3.14 exige
-//!   builder con Python 3.14.x. Cuando cierre
-//!   `R.bug-pyo3-abi3-portable-link`, el constraint desaparece
-//!   (linkea contra `libpython3.so` stable ABI).
-//! - **Sabor `install_only_stripped`**: drop-in Python directory
-//!   portable (extrae a temp dir + corre `python.exe` directo), sin
-//!   debug symbols. ~70% más chico que `install_only` (Linux x64: 33
-//!   MB vs 117 MB comprimido).
-//! - **Subprocess `curl`** para descarga: cero deps Rust nuevas, curl
-//!   está garantizado en Windows 11/macOS/Linux moderno. Trade-off:
-//!   no hay progress bar. Si aparece presión sumamos `ureq` o
-//!   `reqwest` después.
-//! - **Override del cache via `FITZ_CACHE_DIR`**: paralelo a
-//!   `git_dep.rs`. Para tests (tempdirs aislados) y power users.
-//! - **Cache key por tarball name** (no por release+triple separados):
-//!   permite tener múltiples versiones de Python coexistiendo en el
-//!   cache sin overwrites (útil para futuras versiones soportadas).
+//! - **Pinned release** (constant `PBS_RELEASE`): reproducible builds.
+//!   Manual bump every 3-6 months. Same policy as `Cargo.lock`.
+//! - **CPython 3.14.x**: the most recent stable version available on
+//!   PBS and inside the `abi3-py310` range (3.10-3.14+). PyO3 with
+//!   `abi3-py310` + `auto-initialize` dynamic-links against the
+//!   builder-specific libpython; bundling PBS 3.14 requires a builder
+//!   with Python 3.14.x. When `R.bug-pyo3-abi3-portable-link` closes,
+//!   the constraint disappears (it links against `libpython3.so`
+//!   stable ABI).
+//! - **`install_only_stripped` flavor**: drop-in portable Python
+//!   directory (extracts to a temp dir + runs `python.exe` directly),
+//!   without debug symbols. ~70% smaller than `install_only` (Linux
+//!   x64: 33 MB vs 117 MB compressed).
+//! - **`curl` subprocess** for download: zero new Rust deps, curl is
+//!   guaranteed on modern Windows 11/macOS/Linux. Trade-off: no
+//!   progress bar. If pressure arises we add `ureq` or `reqwest`
+//!   later.
+//! - **Cache override via `FITZ_CACHE_DIR`**: parallel to
+//!   `git_dep.rs`. For tests (isolated tempdirs) and power users.
+//! - **Cache key by tarball name** (not by release+triple separately):
+//!   lets multiple Python versions coexist in the cache without
+//!   overwrites (useful for future supported versions).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-// === Constantes pinned ===
+// === Pinned constants ===
 
-/// Release de PBS pinned (formato YYYYMMDD). Bump manual.
+/// Pinned PBS release (YYYYMMDD format). Manual bump.
 pub const PBS_RELEASE: &str = "20260510";
 
-/// Versión de CPython embebida (debe estar disponible en `PBS_RELEASE`).
+/// Embedded CPython version (must be available in `PBS_RELEASE`).
 pub const PYTHON_VERSION: &str = "3.14.5";
 
-/// Sabor del tarball. `install_only_stripped` tiene los mismos archivos
-/// que `install_only` pero sin debug symbols.
+/// Tarball flavor. `install_only_stripped` has the same files as
+/// `install_only` but without debug symbols.
 pub const TARBALL_FLAVOR: &str = "install_only_stripped";
 
-/// Extensión del archivo de descarga.
+/// Download file extension.
 pub const TARBALL_EXTENSION: &str = "tar.gz";
 
-/// Nombre de la env var que override-a el root del cache (compartida
-/// con `git_dep.rs`).
+/// Name of the env var that overrides the cache root (shared with
+/// `git_dep.rs`).
 pub const CACHE_DIR_ENV: &str = "FITZ_CACHE_DIR";
 
-// === Triples soportados ===
+// === Supported triples ===
 
-/// Lista de triples Rust para los que PBS publica tarballs y nosotros
-/// soportamos para bundling. Si el usuario está en otro triple,
-/// `host_triple()` falla con error claro.
+/// List of Rust triples for which PBS publishes tarballs and that we
+/// support for bundling. If the user is on a different triple,
+/// `host_triple()` fails with a clear error.
 pub fn supported_triples() -> &'static [&'static str] {
     &[
         "x86_64-unknown-linux-gnu",
@@ -67,9 +67,9 @@ pub fn supported_triples() -> &'static [&'static str] {
     ]
 }
 
-/// Triple del host actual, detectado via `cfg!`. Match exhaustivo
-/// contra los 5 triples que PBS publica. Si no matchea ninguno (ej.
-/// musl, freebsd, riscv), devuelve `PbsError::UnsupportedTriple`.
+/// Current host triple, detected via `cfg!`. Exhaustive match against
+/// the 5 triples PBS publishes. If none match (e.g. musl, freebsd,
+/// riscv), returns `PbsError::UnsupportedTriple`.
 pub fn host_triple() -> Result<&'static str, PbsError> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Ok("x86_64-unknown-linux-gnu")
@@ -88,8 +88,8 @@ pub fn host_triple() -> Result<&'static str, PbsError> {
 
 // === URL + naming ===
 
-/// Nombre del archivo tarball para un triple dado. Formato canónico
-/// usado por PBS: `cpython-<version>+<release>-<triple>-<flavor>.<ext>`.
+/// Tarball file name for a given triple. Canonical format used by
+/// PBS: `cpython-<version>+<release>-<triple>-<flavor>.<ext>`.
 pub fn tarball_name(triple: &str) -> String {
     format!(
         "cpython-{}+{}-{}-{}.{}",
@@ -97,7 +97,7 @@ pub fn tarball_name(triple: &str) -> String {
     )
 }
 
-/// URL de descarga del tarball en GitHub Releases de PBS.
+/// Download URL of the tarball on PBS's GitHub Releases.
 pub fn download_url(triple: &str) -> String {
     format!(
         "https://github.com/astral-sh/python-build-standalone/releases/download/{}/{}",
@@ -108,8 +108,8 @@ pub fn download_url(triple: &str) -> String {
 
 // === Cache ===
 
-/// Devuelve el root del cache: `$FITZ_CACHE_DIR` si está seteada, si
-/// no `~/.fitz/cache`. Comparte la convención con `git_dep.rs`.
+/// Returns the cache root: `$FITZ_CACHE_DIR` if set, otherwise
+/// `~/.fitz/cache`. Shares the convention with `git_dep.rs`.
 pub fn cache_root() -> Result<PathBuf, PbsError> {
     if let Ok(override_dir) = std::env::var(CACHE_DIR_ENV) {
         if !override_dir.is_empty() {
@@ -120,20 +120,22 @@ pub fn cache_root() -> Result<PathBuf, PbsError> {
     Ok(home.join(".fitz").join("cache"))
 }
 
-/// Subdirectorio del cache donde viven los tarballs PBS descargados.
+/// Cache sub-directory where the downloaded PBS tarballs live.
 pub fn pbs_cache_root() -> Result<PathBuf, PbsError> {
     Ok(cache_root()?.join("pbs"))
 }
 
-/// Path absoluto del tarball cacheado para un triple. No toca disco.
+/// Absolute path of the cached tarball for a triple. Does not touch
+/// disk.
 pub fn cache_path_for(triple: &str) -> Result<PathBuf, PbsError> {
     Ok(pbs_cache_root()?.join(tarball_name(triple)))
 }
 
-/// Garantiza que el tarball PBS para `triple` esté en cache. Si ya
-/// existe, devuelve su path. Si no, lo descarga via `curl` y devuelve
-/// el path resultante. La descarga es atómica: descarga a `<path>.tmp`
-/// + rename al final (evita estado parcial si interrupted).
+/// Ensures the PBS tarball for `triple` is in cache. If it already
+/// exists, returns its path. Otherwise downloads it via `curl` and
+/// returns the resulting path. The download is atomic: downloads to
+/// `<path>.tmp` + rename at the end (avoids partial state if
+/// interrupted).
 pub fn ensure_tarball(triple: &str) -> Result<PathBuf, PbsError> {
     let target = cache_path_for(triple)?;
 
@@ -149,23 +151,23 @@ pub fn ensure_tarball(triple: &str) -> Result<PathBuf, PbsError> {
     Ok(target)
 }
 
-/// Descarga el tarball a `target` via `curl`. Usa archivo `.tmp` +
-/// rename para que el cache no quede con archivos parciales si la
-/// descarga se interrumpe.
+/// Downloads the tarball to `target` via `curl`. Uses a `.tmp` file
+/// then renames it so the cache is never left with partial files if
+/// the download is interrupted.
 fn download_tarball(triple: &str, target: &Path) -> Result<(), PbsError> {
     let url = download_url(triple);
     let tmp = target.with_extension("tar.gz.tmp");
 
-    // Borrar `.tmp` previo si quedó de una corrida interrumpida.
+    // Remove previous `.tmp` if it was left from an interrupted run.
     if tmp.exists() {
         std::fs::remove_file(&tmp).map_err(PbsError::Io)?;
     }
 
-    // -s: silent (sin progress bar — el output sería ruido en CI).
-    // -L: follow redirects (GitHub redirecciona a fastly).
-    // --fail: exit code != 0 si HTTP 4xx/5xx (sin esto, curl
-    //         "exitosamente" descarga la página 404 de GitHub).
-    // -o: archivo destino.
+    // -s: silent (no progress bar — the output would be noise in CI).
+    // -L: follow redirects (GitHub redirects to fastly).
+    // --fail: exit code != 0 on HTTP 4xx/5xx (without this, curl
+    //         "successfully" downloads the GitHub 404 page).
+    // -o: destination file.
     let output = Command::new("curl")
         .args(["-sL", "--fail", "-o", &tmp.to_string_lossy(), url.as_str()])
         .output()
@@ -180,10 +182,10 @@ fn download_tarball(triple: &str, target: &Path) -> Result<(), PbsError> {
         });
     }
 
-    // Rename atómico (cross-platform). Si target apareció mientras
-    // descargábamos (race con otra corrida concurrente), rename lo
-    // sobreescribe — no es problema porque el contenido es el mismo
-    // (release pinned).
+    // Atomic rename (cross-platform). If target appeared while we
+    // were downloading (race with another concurrent run), rename
+    // overwrites it — not a problem because the content is the same
+    // (pinned release).
     std::fs::rename(&tmp, target).map_err(PbsError::Io)?;
     Ok(())
 }
@@ -198,24 +200,24 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
-// === Errores ===
+// === Errors ===
 
 #[derive(Debug)]
 pub enum PbsError {
-    /// El triple del host no está entre los 5 que PBS publica y
-    /// nosotros soportamos.
+    /// The host triple is not among the 5 that PBS publishes and we
+    /// support.
     UnsupportedHostTriple,
-    /// `curl` no está en el `PATH` o no se pudo ejecutar.
+    /// `curl` is not in `PATH` or could not be executed.
     CurlNotFound(std::io::Error),
-    /// La descarga HTTP falló (404, timeout, etc.).
+    /// The HTTP download failed (404, timeout, etc.).
     DownloadFailed {
         url: String,
         triple: String,
         stderr: String,
     },
-    /// No se pudo determinar el home directory.
+    /// Could not determine the home directory.
     NoHomeDir,
-    /// Error de I/O al manipular el cache.
+    /// I/O error while manipulating the cache.
     Io(std::io::Error),
 }
 
@@ -266,27 +268,28 @@ impl std::error::Error for PbsError {}
 mod tests {
     use super::*;
 
-    /// Serializa los tests que mutan la env var global `FITZ_CACHE_DIR`.
-    /// `cargo test` corre por default en paralelo y el env es proceso-
-    /// global; sin lock, un test podía leer mientras otro hacía
-    /// `remove_var` y devolver el path default `~/.fitz/cache` en vez
-    /// del override del `tempdir`. El CI de Windows lo cazaba flake.
-    /// `parking_lot::Mutex` (vs `std::sync::Mutex`) no envenena en
-    /// panic — si un test `assert!` adentro del guard panic-ea, los
-    /// que esperan siguen adelante sin propagar el poison.
+    /// Serializes the tests that mutate the global `FITZ_CACHE_DIR`
+    /// env var. `cargo test` runs in parallel by default and the env
+    /// is process-global; without a lock, one test could read while
+    /// another was doing `remove_var` and return the default path
+    /// `~/.fitz/cache` instead of the `tempdir` override. The Windows
+    /// CI caught it flaking. `parking_lot::Mutex` (vs
+    /// `std::sync::Mutex`) does not poison on panic — if a test
+    /// `assert!` inside the guard panics, the others waiting continue
+    /// without propagating the poison.
     static ENV_VAR_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
     fn pbs_release_es_string_yyyymmdd() {
-        // Sanity check sobre el formato del release pinned.
+        // Sanity check on the format of the pinned release.
         assert_eq!(PBS_RELEASE.len(), 8, "release debería ser YYYYMMDD");
         assert!(PBS_RELEASE.chars().all(|c| c.is_ascii_digit()));
     }
 
     #[test]
     fn python_version_es_3_14_x() {
-        // Sanity check: estamos pineados a CPython 3.14.x (último
-        // stable dentro del rango `abi3-py310` que PyO3 soporta).
+        // Sanity check: we are pinned to CPython 3.14.x (latest
+        // stable inside the `abi3-py310` range that PyO3 supports).
         assert!(PYTHON_VERSION.starts_with("3.14."));
     }
 
@@ -327,9 +330,9 @@ mod tests {
 
     #[test]
     fn host_triple_detecta_el_host_actual() {
-        // En cualquier plataforma soportada esto debe devolver Ok.
-        // Si el test corre en una plataforma no soportada (ej. musl),
-        // devuelve Err — aceptable, no es nuestro target.
+        // On any supported platform this must return Ok. If the test
+        // runs on an unsupported platform (e.g. musl), it returns Err
+        // — acceptable, it is not our target.
         let detected = host_triple();
         if cfg!(any(
             all(target_os = "linux", target_arch = "x86_64"),
@@ -408,7 +411,8 @@ mod tests {
         assert!(s.contains("404"));
     }
 
-    // NOTA: tests de descarga real (ensure_tarball / download_tarball
-    // contra GitHub) viven en `tests/cli_e2e.rs` porque son lentos
-    // (~5-30s), requieren red, y se benefician de tempdirs aislados.
+    // NOTE: real download tests (ensure_tarball / download_tarball
+    // against GitHub) live in `tests/cli_e2e.rs` because they are
+    // slow (~5-30s), require network, and benefit from isolated
+    // tempdirs.
 }
