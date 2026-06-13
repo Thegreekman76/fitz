@@ -1,46 +1,46 @@
-// pyi_stub.rs — Parser de `.pyi` stubs Python (PEP 484/561).
+// pyi_stub.rs — Parser for Python `.pyi` stubs (PEP 484/561).
 //
-// Quick win pyi-stubs (v0.9.39): cuando un programa Fitz hace
-// `from python import foo` y existe `foo.pyi` adyacente, el loader
-// parsea el stub y registra los tipos en el TypeEnv/module env. El
-// checker entonces ve tipos reales (Int, Str, ChatMsg) en lugar de
-// `PyAny` opaco.
+// pyi-stubs quick win (v0.9.39): when a Fitz program does
+// `from python import foo` and `foo.pyi` exists alongside, the loader
+// parses the stub and registers the types in TypeEnv/module env. The
+// checker then sees real types (Int, Str, ChatMsg) instead of
+// opaque `PyAny`.
 //
-// **Scope MVP**:
+// **MVP scope**:
 //   - Top-level `def name(args...) -> ret: ...`
-//   - Top-level `class Name: ...` con fields anotados (sin métodos
-//     por ahora — los métodos quedan como deuda menor).
-//   - Top-level vars `name: type` y `name: type = default`.
+//   - Top-level `class Name: ...` with annotated fields (no methods
+//     for now — methods stay as minor debt).
+//   - Top-level vars `name: type` and `name: type = default`.
 //   - Type expressions: `int`, `str`, `float`, `bool`, `bytes`, `None`,
 //     `Any`, `list[T]`, `dict[K, V]`, `Optional[T]`, `Union[T, None]`,
 //     `T | None` (PEP 604).
 //
-// **NO en el MVP** (deuda residual explícita):
-//   - Generics genéricos definidos por el user (`class Foo(Generic[T]): ...`).
+// **NOT in MVP** (explicit residual debt):
+//   - User-defined generics (`class Foo(Generic[T]): ...`).
 //   - Protocol / TypedDict / overload.
-//   - Métodos de clase con `self`.
+//   - Class methods with `self`.
 //   - Decorators (`@property`, `@staticmethod`, etc.).
-//   - Imports relativos / re-exports.
+//   - Relative imports / re-exports.
 //
-// **Diseño**: tokenizer + recursive descent parser sobre un subset
-// estricto de la sintaxis. NO usamos un parser Python completo (sería
-// ~50× el código de este módulo) ni dependemos de tree-sitter — el
-// scope es chico y este enfoque acotado mantiene el control.
+// **Design**: tokenizer + recursive descent parser over a strict
+// subset of the syntax. We do NOT use a complete Python parser (it
+// would be ~50× the code of this module) and we do not depend on
+// tree-sitter — the scope is small and this bounded approach keeps control.
 
 use crate::types::{ResolvedField, Type, TypeEnv, TypeId};
 
 // ---------------------------------------------------------------------------
-// AST de stubs
+// Stub AST
 // ---------------------------------------------------------------------------
 
-/// Item top-level de un stub `.pyi`. Sub-set mínimo del PEP 484.
+/// Top-level item of a `.pyi` stub. Minimum subset of PEP 484.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StubItem {
-    /// `def name(args...) -> ret: ...` (sync o `async def`).
+    /// `def name(args...) -> ret: ...` (sync or `async def`).
     Fn(StubFn),
-    /// `class Name: <body>` con fields anotados.
+    /// `class Name: <body>` with annotated fields.
     Class(StubClass),
-    /// `name: type` o `name: type = default` a nivel top-level.
+    /// `name: type` or `name: type = default` at top level.
     Var(StubVar),
 }
 
@@ -77,17 +77,17 @@ pub struct StubVar {
     pub ty: StubType,
 }
 
-/// Type expression de Python. Sub-set del PEP 484.
+/// Python type expression. Subset of PEP 484.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StubType {
-    /// Identifier simple: `int`, `str`, `MyClass`, etc.
+    /// Simple identifier: `int`, `str`, `MyClass`, etc.
     Named(String),
     /// `name[args]`: `list[int]`, `dict[str, T]`, `Optional[int]`.
     Generic(String, Vec<StubType>),
-    /// `T | None` (PEP 604) o `Union[T, None]`. Almacenamos los alts
-    /// expandidos en una lista.
+    /// `T | None` (PEP 604) or `Union[T, None]`. We store the
+    /// expanded alts in a list.
     Union(Vec<StubType>),
-    /// `Any` o `...` u otros tipos no soportados — fall-through.
+    /// `Any` or `...` or other unsupported types — fall-through.
     Any,
 }
 
@@ -95,9 +95,9 @@ pub enum StubType {
 // Parser
 // ---------------------------------------------------------------------------
 
-/// Error de parsing del stub. No usamos `FitzError` porque los stubs
-/// vienen de archivos Python (no Fitz), tienen su propia indexación
-/// de errores (línea Python original).
+/// Stub parsing error. We do not use `FitzError` because stubs
+/// come from Python (not Fitz) files; they have their own error
+/// indexing (original Python line).
 #[derive(Debug, Clone, PartialEq)]
 pub struct StubParseError {
     pub line: usize,
@@ -110,14 +110,14 @@ impl std::fmt::Display for StubParseError {
     }
 }
 
-/// Parsea el contenido de un archivo `.pyi`. Devuelve el listado de
-/// items top-level. Items no reconocidos (ej. `from x import y`,
-/// `class Foo(Base)` con bases) se skipean silenciosamente — el
-/// parser es robust por diseño (un stub malformado debería degradar
-/// a `PyAny` opaco, no romper el build).
+/// Parses the contents of a `.pyi` file. Returns the list of
+/// top-level items. Unrecognized items (e.g. `from x import y`,
+/// `class Foo(Base)` with bases) are silently skipped — the
+/// parser is robust by design (a malformed stub should degrade
+/// to opaque `PyAny`, not break the build).
 ///
-/// Imports y otros constructs que el parser no entiende se descartan;
-/// solo los items reconocibles vuelven al caller.
+/// Imports and other constructs the parser does not understand are discarded;
+/// only recognizable items come back to the caller.
 pub fn parse_stub(source: &str) -> Result<Vec<StubItem>, StubParseError> {
     let mut items = Vec::new();
     let mut lines = source.lines().enumerate().peekable();
@@ -126,7 +126,7 @@ pub fn parse_stub(source: &str) -> Result<Vec<StubItem>, StubParseError> {
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        // Skip al primer no-whitespace que sea identificador, def, class, async.
+        // Skip to the first non-whitespace that is identifier, def, class, async.
         if let Some(item) = parse_top_level(raw_line, line_no, &mut lines)? {
             items.push(item);
         }
@@ -134,13 +134,13 @@ pub fn parse_stub(source: &str) -> Result<Vec<StubItem>, StubParseError> {
     Ok(items)
 }
 
-/// Intenta parsear UN top-level item desde `line` (la línea actual).
-/// Devuelve `None` si la línea no introduce un item reconocido
-/// (e.g. `import`, decorator, línea suelta).
+/// Tries to parse ONE top-level item from `line` (the current line).
+/// Returns `None` if the line does not introduce a recognized item
+/// (e.g. `import`, decorator, stray line).
 ///
-/// Para `class`, lee el body completo (líneas indentadas) hasta
-/// encontrar una línea no indentada — usa el peekable `lines` para
-/// consumirlas.
+/// For `class`, reads the full body (indented lines) until
+/// finding a non-indented line — uses the peekable `lines` to
+/// consume them.
 fn parse_top_level<'a, I>(
     line: &str,
     line_no: usize,
@@ -152,9 +152,9 @@ where
     let trimmed = line.trim_start();
     let indent = line.len() - trimmed.len();
     if indent > 0 {
-        // Línea indentada a nivel top: solo aplica adentro de un class
-        // body. El caller (parse_stub) la skipea — nos contamos como
-        // "no item reconocido aquí".
+        // Indented line at top level: only applies inside a class
+        // body. The caller (parse_stub) skips it — we count as
+        // "no recognized item here".
         return Ok(None);
     }
     // def fn / async def fn
@@ -169,18 +169,18 @@ where
         let (cls, _) = parse_class(rest, line_no, lines)?;
         return Ok(Some(StubItem::Class(cls)));
     }
-    // Var top-level: `name: type` o `name: type = default`.
+    // Top-level var: `name: type` or `name: type = default`.
     if let Some(var) = try_parse_var(trimmed, line_no)? {
         return Ok(Some(StubItem::Var(var)));
     }
-    // Cualquier otra cosa (imports, decorators sueltos, líneas raras)
-    // se ignora silenciosamente para no romper el build cuando el .pyi
-    // tiene construcciones que no soportamos.
+    // Anything else (imports, stray decorators, unusual lines)
+    // is silently ignored so the build does not break when the .pyi
+    // contains constructs we do not support.
     Ok(None)
 }
 
-/// Parsea la signature de una función desde después del `def `/`async def `.
-/// Espera: `name(params) -> ret: ...`.
+/// Parses a function signature from after `def `/`async def `.
+/// Expects: `name(params) -> ret: ...`.
 fn parse_fn_sig(s: &str, line_no: usize, is_async: bool) -> Result<StubFn, StubParseError> {
     let (name, rest) = take_ident(s).ok_or_else(|| StubParseError {
         line: line_no + 1,
@@ -204,7 +204,7 @@ fn parse_fn_sig(s: &str, line_no: usize, is_async: bool) -> Result<StubFn, StubP
         let (ty, _) = parse_type(after_arrow, line_no)?;
         ty
     } else {
-        // Sin -> ret: stub mal formado o muy compactado. Asumimos `None`.
+        // Without -> ret: malformed or overly compacted stub. We assume `None`.
         StubType::Named("None".to_string())
     };
     Ok(StubFn {
@@ -215,7 +215,7 @@ fn parse_fn_sig(s: &str, line_no: usize, is_async: bool) -> Result<StubFn, StubP
     })
 }
 
-/// Parsea params: lista CSV de `name: type` (o `name: type = default`).
+/// Parses params: CSV list of `name: type` (or `name: type = default`).
 fn parse_params(s: &str, line_no: usize) -> Result<Vec<StubParam>, StubParseError> {
     let mut params = Vec::new();
     let trimmed = s.trim();
@@ -227,13 +227,13 @@ fn parse_params(s: &str, line_no: usize) -> Result<Vec<StubParam>, StubParseErro
         if piece.is_empty() {
             continue;
         }
-        // Skip self/cls (métodos de clase). El parser top-level no
-        // entra a class methods en el MVP, pero defensa de profundidad.
+        // Skip self/cls (class methods). The top-level parser does not
+        // enter class methods in the MVP, but defense in depth.
         if piece == "self" || piece == "cls" {
             continue;
         }
-        // Skip `*`/`**` (variadic args en stubs) — el MVP no los
-        // representa. Su tipo se trata como Any.
+        // Skip `*`/`**` (variadic args in stubs) — the MVP does not
+        // represent them. Their type is treated as Any.
         if piece.starts_with('*') {
             continue;
         }
@@ -241,7 +241,7 @@ fn parse_params(s: &str, line_no: usize) -> Result<Vec<StubParam>, StubParseErro
         let (name, after_colon) = match piece.split_once(':') {
             Some((n, after)) => (n.trim(), after.trim()),
             None => {
-                // Param sin anotación — Python lo permite, lo mapeamos a Any.
+                // Param without annotation — Python allows it; we map to Any.
                 params.push(StubParam {
                     name: piece.to_string(),
                     ty: StubType::Any,
@@ -250,9 +250,9 @@ fn parse_params(s: &str, line_no: usize) -> Result<Vec<StubParam>, StubParseErro
                 continue;
             }
         };
-        // Detectar default. `name: type = default` — el `=` es
-        // top-level del param string (no adentro de un Optional[...]
-        // u otro generic). Usamos detección balanceada.
+        // Detect default. `name: type = default` — the `=` is
+        // top-level of the param string (not inside an Optional[...]
+        // or other generic). We use balanced detection.
         let (ty_str, has_default) = match find_top_eq(after_colon) {
             Some(eq_pos) => (after_colon[..eq_pos].trim(), true),
             None => (after_colon, false),
@@ -267,8 +267,8 @@ fn parse_params(s: &str, line_no: usize) -> Result<Vec<StubParam>, StubParseErro
     Ok(params)
 }
 
-/// Parsea `class Name [(Bases)]: ...` y su body (líneas indentadas
-/// con fields). Devuelve el class + número de líneas consumidas.
+/// Parses `class Name [(Bases)]: ...` and its body (indented lines
+/// with fields). Returns the class + number of consumed lines.
 fn parse_class<'a, I>(
     s: &str,
     line_no: usize,
@@ -281,7 +281,7 @@ where
         line: line_no + 1,
         message: format!("esperaba nombre de class, fue: {}", s),
     })?;
-    // Skip bases: `(Base, ...)`. No las usamos en el MVP.
+    // Skip bases: `(Base, ...)`. We do not use them in the MVP.
     let after_name = rest.trim_start();
     let after_bases = if let Some(rest) = after_name.strip_prefix('(') {
         match take_balanced(rest, '(', ')') {
@@ -296,10 +296,10 @@ where
     } else {
         after_name
     };
-    // Esperamos `:` después del header.
+    // We expect `:` after the header.
     let _ = after_bases.strip_prefix(':');
 
-    // Body: líneas indentadas hasta encontrar una línea no indentada.
+    // Body: indented lines until finding a non-indented line.
     let mut fields = Vec::new();
     let mut consumed = 0;
     while let Some(&(next_line_no, raw)) = lines.peek() {
@@ -311,30 +311,30 @@ where
             continue;
         }
         if indent == 0 {
-            // Salimos del class body.
+            // We leave the class body.
             break;
         }
-        // Skip métodos del class (MVP no los procesa). Reconocemos
-        // `def`/`async def` para consumir múltiples líneas si el body
-        // del método ocupa varias (raro en stubs pero defensivo).
+        // Skip class methods (MVP does not process them). We recognize
+        // `def`/`async def` to consume multiple lines if the method's
+        // body spans several (rare in stubs but defensive).
         if trimmed.starts_with("def ") || trimmed.starts_with("async def ") {
             lines.next();
             consumed += 1;
             continue;
         }
-        // Skip decorators de field/method.
+        // Skip field/method decorators.
         if trimmed.starts_with('@') {
             lines.next();
             consumed += 1;
             continue;
         }
-        // Skip `...` y `pass`.
+        // Skip `...` and `pass`.
         if trimmed == "..." || trimmed == "pass" {
             lines.next();
             consumed += 1;
             continue;
         }
-        // Field anotado: `name: type` o `name: type = default`.
+        // Annotated field: `name: type` or `name: type = default`.
         if let Some(field) = try_parse_field(trimmed, next_line_no)? {
             fields.push(field);
         }
@@ -388,12 +388,12 @@ fn try_parse_var(s: &str, line_no: usize) -> Result<Option<StubVar>, StubParseEr
     }))
 }
 
-/// Parsea una expresión de tipo Python. Reconoce primitivos, generics
+/// Parses a Python type expression. Recognizes primitives, generics
 /// (`list[T]`, `dict[K, V]`, `Optional[T]`), Union (PEP 604: `T | None`).
 fn parse_type(s: &str, line_no: usize) -> Result<(StubType, &str), StubParseError> {
     let s = s.trim_start();
-    // Detectar Union con `|`: parseamos un primer término y vamos
-    // acumulando si vemos `|`.
+    // Detect Union with `|`: we parse a first term and keep
+    // accumulating if we see `|`.
     let (first, mut rest) = parse_type_atom(s, line_no)?;
     let mut alts = vec![first];
     loop {
@@ -416,12 +416,12 @@ fn parse_type(s: &str, line_no: usize) -> Result<(StubType, &str), StubParseErro
 
 fn parse_type_atom(s: &str, line_no: usize) -> Result<(StubType, &str), StubParseError> {
     let s = s.trim_start();
-    // `...` → Any (típico en stubs sin tipo concreto).
+    // `...` → Any (typical in stubs without a concrete type).
     if let Some(rest) = s.strip_prefix("...") {
         return Ok((StubType::Any, rest));
     }
-    // String literal — usado en forward refs `"Foo"`. Lo tratamos
-    // como Named(contenido).
+    // String literal — used in forward refs `"Foo"`. We treat it
+    // as Named(content).
     if let Some(rest) = s.strip_prefix('"') {
         let end = rest.find('"').ok_or_else(|| StubParseError {
             line: line_no + 1,
@@ -438,14 +438,14 @@ fn parse_type_atom(s: &str, line_no: usize) -> Result<(StubType, &str), StubPars
         let inner = &rest[..end];
         return Ok((StubType::Named(inner.to_string()), &rest[end + 1..]));
     }
-    // Identifier (posiblemente `module.Name`).
+    // Identifier (possibly `module.Name`).
     let (name, after_name) = take_ident(s).ok_or_else(|| StubParseError {
         line: line_no + 1,
         message: format!("esperaba identifier de tipo, fue: {:?}", s),
     })?;
-    // Si hay `.`, consume `module.Name`. El nombre canónico es la
-    // parte después del último `.` (corrida: módulo es opcional en
-    // el contexto Fitz; nos quedamos con el last segment).
+    // If there is a `.`, consume `module.Name`. The canonical name is the
+    // part after the last `.` (shorthand: module is optional in
+    // the Fitz context; we keep the last segment).
     let mut full_name = name.to_string();
     let mut after = after_name;
     while after.starts_with('.') {
@@ -485,7 +485,7 @@ fn parse_type_args(s: &str, line_no: usize) -> Result<Vec<StubType>, StubParseEr
 }
 
 // ---------------------------------------------------------------------------
-// Tokenizer helpers (no parser Python completo)
+// Tokenizer helpers (not a complete Python parser)
 // ---------------------------------------------------------------------------
 
 fn take_ident(s: &str) -> Option<(&str, &str)> {
@@ -521,9 +521,9 @@ fn is_valid_ident(s: &str) -> bool {
     }
 }
 
-/// Toma el contenido entre `open` y su `close` balanceado, devolviendo
-/// `(contenido, resto_después_del_close)`. Asume que `s` empieza
-/// JUSTO DESPUÉS del `open`.
+/// Takes the content between `open` and its balanced `close`, returning
+/// `(content, rest_after_close)`. Assumes that `s` starts
+/// JUST AFTER the `open`.
 fn take_balanced(s: &str, open: char, close: char) -> Option<(&str, &str)> {
     let mut depth = 1usize;
     let mut end = None;
@@ -542,8 +542,8 @@ fn take_balanced(s: &str, open: char, close: char) -> Option<(&str, &str)> {
     Some((&s[..end], &s[end + close.len_utf8()..]))
 }
 
-/// Split CSV teniendo en cuenta paréntesis y brackets balanceados —
-/// `list[int, str]` cuenta como UN solo arg.
+/// CSV split taking balanced parentheses and brackets into account —
+/// `list[int, str]` counts as ONE single arg.
 fn split_commas_balanced(s: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut depth = 0i32;
@@ -565,9 +565,9 @@ fn split_commas_balanced(s: &str) -> Vec<&str> {
     out
 }
 
-/// Encuentra la primera ocurrencia top-level (depth=0) de `=` en `s`.
-/// `==` se descarta (no es asignación). Usado para separar `type` de
-/// `default` en params/vars.
+/// Finds the first top-level (depth=0) occurrence of `=` in `s`.
+/// `==` is discarded (not assignment). Used to separate `type` from
+/// `default` in params/vars.
 fn find_top_eq(s: &str) -> Option<usize> {
     let mut depth = 0i32;
     let mut chars = s.char_indices().peekable();
@@ -576,7 +576,7 @@ fn find_top_eq(s: &str) -> Option<usize> {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
             '=' if depth == 0 => {
-                // Skip `==` (igualdad), no asignación.
+                // Skip `==` (equality), not assignment.
                 if let Some(&(_, next)) = chars.peek() {
                     if next == '=' {
                         chars.next();
@@ -592,17 +592,17 @@ fn find_top_eq(s: &str) -> Option<usize> {
 }
 
 // ---------------------------------------------------------------------------
-// Mapper StubType → Type Fitz
+// Mapper StubType → Fitz Type
 // ---------------------------------------------------------------------------
 
-/// Convierte un `StubType` (sintáctico Python) a un `Type` Fitz.
+/// Converts a `StubType` (Python syntactic) to a Fitz `Type`.
 ///
-/// `env` se consulta para resolver nominales: si el stub menciona
-/// `Foo` y `Foo` no es un primitivo conocido, lookupeamos en `env`.
-/// Si tampoco existe ahí, lo registramos como nominal nuevo (sin
-/// fields todavía — los rellenan los `StubItem::Class` más adelante).
-/// Tipos no representables (Callable, Protocol, Generic[T] con T no
-/// resoluble) → `Type::Any` como fallback gradual.
+/// `env` is consulted to resolve nominals: if the stub mentions
+/// `Foo` and `Foo` is not a known primitive, we look up in `env`.
+/// If it does not exist there either, we register it as a new nominal
+/// (without fields yet — the `StubItem::Class` later fill them in).
+/// Non-representable types (Callable, Protocol, Generic[T] with non-resolvable T)
+/// → `Type::Any` as gradual fallback.
 pub fn stub_type_to_fitz_type(ty: &StubType, env: &mut TypeEnv) -> Type {
     match ty {
         StubType::Named(name) => named_to_fitz_type(name, env),
@@ -621,11 +621,11 @@ fn named_to_fitz_type(name: &str, env: &mut TypeEnv) -> Type {
         "None" | "NoneType" => Type::Null,
         "bytes" | "bytearray" => Type::Bytes,
         "Any" | "object" => Type::Any,
-        // List/Dict sin args (raros en stubs modernos pero defensivos):
-        // los tratamos como Any porque no tenemos el inner type.
+        // List/Dict without args (rare in modern stubs but defensive):
+        // we treat them as Any because we do not have the inner type.
         "list" | "List" | "dict" | "Dict" | "tuple" | "Tuple" => Type::Any,
-        // Cualquier otro identifier es un nominal: lookupeamos en el
-        // env; si no existe, lo registramos como nominal nuevo.
+        // Any other identifier is a nominal: look up in the
+        // env; if it does not exist, we register it as a new nominal.
         _ => {
             if let Some(id) = env.lookup(name) {
                 Type::Nominal(id)
@@ -646,17 +646,17 @@ fn generic_to_fitz_type(name: &str, args: &[StubType], env: &mut TypeEnv) -> Typ
         ),
         ("Optional", 1) => Type::Nullable(Box::new(stub_type_to_fitz_type(&args[0], env))),
         ("Union", _) => union_to_fitz_type(args, env),
-        // `Callable[...]` — no representable en Fitz hoy (no podemos
-        // recuperar la signature precisa sin el shape de PEP 484).
-        // Fallback a Any.
+        // `Callable[...]` — not representable in Fitz today (we cannot
+        // recover the precise signature without PEP 484's shape).
+        // Fall back to Any.
         ("Callable", _) => Type::Any,
-        // Generic desconocido: si name es nominal, lookup; sino Any.
+        // Unknown generic: if name is a nominal, lookup; else Any.
         _ => named_to_fitz_type(name, env),
     }
 }
 
 fn union_to_fitz_type(alts: &[StubType], env: &mut TypeEnv) -> Type {
-    // Caso típico: `T | None` o `Union[T, None]` → `T?`.
+    // Typical case: `T | None` or `Union[T, None]` → `T?`.
     let mut non_null: Vec<&StubType> = Vec::new();
     let mut has_null = false;
     for alt in alts {
@@ -673,98 +673,98 @@ fn union_to_fitz_type(alts: &[StubType], env: &mut TypeEnv) -> Type {
     if non_null.len() == 1 && !has_null {
         return stub_type_to_fitz_type(non_null[0], env);
     }
-    // Union de varios tipos no nullable → Any (Fitz no tiene unions
-    // genéricas; el modelo gradual lo cubre).
+    // Union of several non-nullable types → Any (Fitz has no generic
+    // unions; the gradual model covers it).
     Type::Any
 }
 
-/// Registra un nominal "stub-only" en el TypeEnv. Los fields se
-/// rellenan después cuando procesamos los `StubItem::Class` que lo
-/// definen. Si el class aparece después en el mismo stub, el `id`
-/// queda con fields vacíos y se actualiza posteriormente.
+/// Registers a "stub-only" nominal in the TypeEnv. The fields get
+/// filled in later when we process the `StubItem::Class` that
+/// defines it. If the class appears later in the same stub, the `id`
+/// has empty fields and gets updated afterwards.
 ///
-/// Si el nombre ya estaba registrado, devuelve el id existente
-/// (lookup) — `declare_nominal` falla con "tipo redeclarado" pero
-/// nosotros queremos resolver-o-crear.
+/// If the name was already registered, returns the existing id
+/// (lookup) — `declare_nominal` fails with "type redeclared" but
+/// we want resolve-or-create.
 fn register_unknown_nominal(env: &mut TypeEnv, name: &str) -> TypeId {
     if let Some(id) = env.lookup(name) {
         return id;
     }
-    // Si llegó acá, no estaba — declare_nominal no debería fallar.
-    // Si falla por race entre lookup y declare, fallback a un id
-    // dummy (no debería pasar en práctica — pyi_stub corre
-    // secuencialmente).
+    // If we get here, it was not there — declare_nominal should not fail.
+    // If it fails due to a race between lookup and declare, fall back to a
+    // dummy id (should not happen in practice — pyi_stub runs
+    // sequentially).
     env.declare_nominal(name.to_string())
         .unwrap_or_else(|_| panic!("declare_nominal falló inesperadamente"))
 }
 
 // ---------------------------------------------------------------------------
-// API pública: registrar items de un stub al TypeEnv
+// Public API: register stub items into the TypeEnv
 // ---------------------------------------------------------------------------
 
-/// Item resuelto del stub listo para consumo del checker. Mapea cada
-/// `StubItem` a su contraparte tipada Fitz. Las fns y vars top-level
-/// se exponen como bindings del módulo Python tipado; las classes ya
-/// quedan en el TypeEnv como nominales.
+/// Resolved stub item ready for the checker to consume. Maps each
+/// `StubItem` to its Fitz typed counterpart. Top-level fns and vars
+/// are exposed as bindings of the typed Python module; classes already
+/// live in the TypeEnv as nominals.
 ///
-/// 8-pyi.B: lo construye `register_stub_items_into_env` y lo consume
-/// el checker (a través de `LoadedStub` en `pyi_loader.rs`) para
-/// refinar bindings de `from python import foo` con `foo.pyi` adyacente.
+/// 8-pyi.B: built by `register_stub_items_into_env` and consumed by
+/// the checker (via `LoadedStub` in `pyi_loader.rs`) to
+/// refine bindings of `from python import foo` with the adjacent `foo.pyi`.
 #[derive(Debug, Clone)]
 pub enum ResolvedStubItem {
-    /// `def name(args...) -> ret` — refleja firma como `Type::Function`.
+    /// `def name(args...) -> ret` — reflects the signature as `Type::Function`.
     Fn {
         name: String,
         params: Vec<Type>,
         ret: Type,
     },
-    /// `class Name: <fields>` — ya registrada como Nominal en env. Llevamos el id
-    /// para consumo posterior (e.g. field access tipado en 8-pyi.C).
+    /// `class Name: <fields>` — already registered as Nominal in env. We carry the id
+    /// for later consumption (e.g. typed field access in 8-pyi.C).
     Class { name: String, id: TypeId },
-    /// `name: type` top-level del stub — bindea con el tipo declarado.
+    /// Top-level stub `name: type` — bind with the declared type.
     Var { name: String, ty: Type },
 }
 
-/// Registra todos los items de un `.pyi` parseado al TypeEnv:
+/// Registers all items of a parsed `.pyi` into the TypeEnv:
 ///
-/// 1. Pre-scan de classes: declara cada nominal vacío (sin fields)
-///    para que el resto de los items pueda referirlos forward.
-/// 2. Procesa cada class: setea los fields resolviendo cada `StubType`
-///    al `Type` Fitz correspondiente.
-/// 3. Procesa fns y vars: las resuelve a `ResolvedStubItem` para que
-///    el checker pueda bindear el módulo Python tipado.
+/// 1. Class pre-scan: declares each empty nominal (no fields)
+///    so the rest of the items can refer to them forward.
+/// 2. Processes each class: sets fields resolving each `StubType`
+///    to its corresponding Fitz `Type`.
+/// 3. Processes fns and vars: resolves them to `ResolvedStubItem` so
+///    the checker can bind the typed Python module.
 ///
-/// **Política de errores**: si una clase intenta redeclarar un nominal
-/// ya existente con el mismo nombre (e.g. el programa Fitz declara
-/// `type Foo` y el stub también declara `class Foo`), reusamos el
-/// nominal existente sin reemplazar sus fields — el programa Fitz
-/// gana. Esto preserva la compatibilidad con el patrón
+/// **Error policy**: if a class tries to redeclare a nominal that
+/// already exists with the same name (e.g. the Fitz program declares
+/// `type Foo` and the stub also declares `class Foo`), we reuse the
+/// existing nominal without replacing its fields — the Fitz program
+/// wins. This preserves compatibility with the pattern
 /// `fitz py-stubs requests.pyi --out requests.fitz` + `from python
-/// import requests` (los tipos ya están registrados desde el .fitz).
+/// import requests` (the types are already registered from the .fitz).
 ///
-/// Devuelve el listado resuelto en el mismo orden que `items`.
+/// Returns the resolved listing in the same order as `items`.
 pub fn register_stub_items_into_env(
     items: &[StubItem],
     env: &mut TypeEnv,
 ) -> Vec<ResolvedStubItem> {
-    // Pre-scan: registrar todas las classes como nominales vacíos
-    // para destrabar forward refs (class A refencia B en field, B
-    // declarado después).
+    // Pre-scan: register all classes as empty nominals
+    // to unblock forward refs (class A references B in a field, B
+    // declared later).
     for item in items {
         if let StubItem::Class(c) = item {
             register_unknown_nominal(env, &c.name);
         }
     }
 
-    // Procesar items en orden.
+    // Process items in order.
     let mut resolved = Vec::with_capacity(items.len());
     for item in items {
         match item {
             StubItem::Class(c) => {
                 let id = register_unknown_nominal(env, &c.name);
-                // Solo setear fields si el nominal NO tiene fields ya
-                // (preserva clases declaradas por el programa Fitz —
-                // política "el .fitz gana sobre el .pyi").
+                // Only set fields if the nominal does NOT already have fields
+                // (preserves classes declared by the Fitz program —
+                // "the .fitz wins over the .pyi" policy).
                 if env.info(id).fields.is_none() {
                     let fields: Vec<ResolvedField> = c
                         .fields
@@ -806,8 +806,8 @@ pub fn register_stub_items_into_env(
     resolved
 }
 
-/// Devuelve el `ResolvedField` declarado de un nominal en el TypeEnv,
-/// si tiene fields seteados.
+/// Returns the declared `ResolvedField` of a nominal in the TypeEnv,
+/// if it has fields set.
 pub fn nominal_fields(env: &TypeEnv, id: TypeId) -> Option<&[ResolvedField]> {
     env.info(id).fields.as_deref()
 }
@@ -878,8 +878,8 @@ mod tests {
 
     #[test]
     fn parser_class_skip_methods() {
-        // Métodos NO entran a fields en el MVP — se ignoran sin
-        // romper el parse.
+        // Methods do NOT become fields in the MVP — they are ignored
+        // without breaking the parse.
         let src = "class User:\n    id: int\n    def greet(self) -> str: ...\n";
         let items = parse(src);
         if let StubItem::Class(c) = &items[0] {
@@ -911,7 +911,7 @@ mod tests {
     fn parser_skip_imports_y_decorators() {
         let src = "from typing import Any\nimport os\n@deprecated\ndef foo() -> int: ...\n";
         let items = parse(src);
-        // Solo `foo` debería ser reconocido (decoradores ignorados).
+        // Only `foo` should be recognized (decorators ignored).
         let fns = items
             .iter()
             .filter(|i| matches!(i, StubItem::Fn(_)))
@@ -976,7 +976,7 @@ mod tests {
 
     #[test]
     fn parser_forward_ref_string() {
-        // Stubs con forward ref: `"Foo"` como tipo.
+        // Stubs with forward ref: `"Foo"` as a type.
         let items = parse("def make() -> \"Foo\": ...");
         if let StubItem::Fn(f) = &items[0] {
             assert_eq!(f.ret, StubType::Named("Foo".into()));
@@ -985,14 +985,14 @@ mod tests {
 
     #[test]
     fn parser_module_dotted() {
-        // `os.PathLike` → tomamos el último segmento.
+        // `os.PathLike` → we take the last segment.
         let items = parse("def open(path: os.PathLike) -> int: ...");
         if let StubItem::Fn(f) = &items[0] {
             assert_eq!(f.params[0].ty, StubType::Named("PathLike".into()));
         }
     }
 
-    // ---- Mapper StubType → Type Fitz ----
+    // ---- Mapper StubType → Fitz Type ----
 
     #[test]
     fn mapper_primitivos() {
@@ -1065,7 +1065,7 @@ mod tests {
             StubType::Named("str".into()),
         ]);
         let fitz_ty = stub_type_to_fitz_type(&t, &mut env);
-        // Union no-null → Any (fallback gradual).
+        // Non-null Union → Any (gradual fallback).
         assert_eq!(fitz_ty, Type::Any);
     }
 
@@ -1074,9 +1074,9 @@ mod tests {
         let mut env = TypeEnv::new();
         let t = StubType::Named("User".into());
         let fitz_ty = stub_type_to_fitz_type(&t, &mut env);
-        // Debería haberse registrado y devolver Nominal.
+        // Should have been registered and return Nominal.
         assert!(matches!(fitz_ty, Type::Nominal(_)));
-        // Y `User` ahora aparece en el env.
+        // And `User` now appears in the env.
         assert!(env.lookup("User").is_some());
     }
 }

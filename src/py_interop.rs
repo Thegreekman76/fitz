@@ -1,24 +1,24 @@
-// py_interop.rs — Fase 8.1.2: interop con CPython via PyO3
+// py_interop.rs — Phase 8.1.2: CPython interop via PyO3
 //
-// Punto único de entrada al runtime Python embebido desde el evaluator.
-// Todo el resto del compilador habla `Value` Fitz y `FitzError`; este
-// módulo se encarga de cruzar la frontera: tomar el GIL, llamar APIs
-// de PyO3, traducir excepciones Python a `FitzError`, envolver el
-// `Py<PyAny>` resultante en `Value::PyObject`.
+// Single entry point to the embedded Python runtime from the evaluator.
+// The rest of the compiler speaks Fitz `Value` and `FitzError`; this
+// module crosses the boundary: take the GIL, call PyO3 APIs,
+// translate Python exceptions to `FitzError`, wrap the resulting
+// `Py<PyAny>` in `Value::PyObject`.
 //
-// Existe solo cuando se compila con `--features python`. El binario
-// `fitz` default (sin la feature) ni siquiera linkea libpython.
+// Only exists when compiled with `--features python`. The default
+// `fitz` binary (without the feature) does not even link libpython.
 //
-// Política de GIL: un `Python::with_gil` por cada operación pública de
-// este módulo. Eso quiere decir: el GIL se toma y suelta en cada
-// `import_module`. Para casos típicos (un `from python import math`
-// por programa) el costo es despreciable. Cuando llegue Fase 8.6
-// (async + tokio + asyncio bridge), revisamos.
+// GIL policy: one `Python::with_gil` per public operation of
+// this module. That means: the GIL is acquired and released on each
+// `import_module`. For typical cases (one `from python import math`
+// per program) the cost is negligible. When Phase 8.6 lands
+// (async + tokio + asyncio bridge), we revisit.
 //
-// Política de errores: cualquier `PyErr` se traduce a `FitzError` con
-// mensaje "<ClassName>: <message>". La conversión a `Result<T>`
-// automática llega en Fase 8.3 — en 8.1 el error aborta el programa
-// igual que un panic del intérprete.
+// Error policy: any `PyErr` is translated to `FitzError` with
+// the message "<ClassName>: <message>". Automatic conversion to `Result<T>`
+// lands in Phase 8.3 — in 8.1 the error aborts the program
+// just like an interpreter panic.
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
@@ -27,16 +27,16 @@ use std::sync::{Once, OnceLock};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::value::{FitzFuture, PyObjectHandle, ResultVariant, Value};
 
-/// Mini-tanda Cleanup-Residual+ (2026-05-22) — inicializa el
-/// intérprete Python una sola vez (idempotente). Llamado desde
-/// `import_module` antes del primer `Python::attach`. Reemplaza la
-/// feature `auto-initialize` de PyO3 que era incompatible con
-/// `abi3-py310` (auto-initialize linkeaba contra libpython
-/// específica del builder, perdiendo la portabilidad abi3).
+/// Cleanup-Residual+ mini-batch (2026-05-22) — initializes the
+/// Python interpreter exactly once (idempotent). Called from
+/// `import_module` before the first `Python::attach`. Replaces PyO3's
+/// `auto-initialize` feature, which was incompatible with
+/// `abi3-py310` (auto-initialize linked against the builder-specific
+/// libpython, losing abi3 portability).
 ///
-/// El `Once` garantiza que `prepare_freethreaded_python()` corra
-/// exactamente una vez por proceso, sin importar cuántos imports
-/// haga el programa Fitz.
+/// The `Once` guarantees that `prepare_freethreaded_python()` runs
+/// exactly once per process, regardless of how many imports the
+/// Fitz program makes.
 fn ensure_python_initialized() {
     static INIT: Once = Once::new();
     INIT.call_once(|| {
@@ -44,39 +44,39 @@ fn ensure_python_initialized() {
     });
 }
 
-/// Importa un módulo Python dado su path "punteado" (`"math"`,
-/// `"sqlalchemy.orm"`, etc.) y lo devuelve envuelto en `Value::PyObject`.
+/// Imports a Python module given its "dotted" path (`"math"`,
+/// `"sqlalchemy.orm"`, etc.) and returns it wrapped in `Value::PyObject`.
 ///
-/// Internamente delega en `Bound::<PyModule>::import(py, dotted)` —
-/// equivalente al `import <dotted>` de un script Python con el `sys.path`
-/// estándar del intérprete embebido. Política de venvs (8.1): el
-/// usuario activa su venv antes de `fitz run`; Python lo detecta vía
-/// `VIRTUAL_ENV` al boot. Sin venv, los packages se buscan en el
-/// site-packages global del intérprete base contra el que se linkeó.
+/// Internally delegates to `Bound::<PyModule>::import(py, dotted)` —
+/// equivalent to a script's `import <dotted>` with the standard
+/// `sys.path` of the embedded interpreter. Venv policy (8.1): the
+/// user activates their venv before `fitz run`; Python detects it via
+/// `VIRTUAL_ENV` at boot. Without a venv, packages are looked up in the
+/// global site-packages of the base interpreter that was linked against.
 ///
-/// Errores: si el módulo no existe (`ModuleNotFoundError`), si el path
-/// es inválido, o si Python explota inicializando, devolvemos
-/// `FitzError` con la línea/columna del caller (que se inyecta arriba)
-/// y mensaje "<ClassName>: <message>".
+/// Errors: if the module does not exist (`ModuleNotFoundError`), if the path
+/// is invalid, or if Python blows up while initializing, we return a
+/// `FitzError` with the caller's line/column (injected above)
+/// and message "<ClassName>: <message>".
 pub fn import_module(dotted: &str) -> FitzResult<Value> {
-    // Mini-tanda Cleanup-Residual+ (2026-05-22) — sin feature
-    // `auto-initialize`, el primer `Python::attach` requiere que
-    // el intérprete Python esté inicializado. `prepare_freethreaded_python()`
-    // es idempotente, podemos llamarlo en cada import (caso common).
-    // Junto con `abi3-py310`, esto produce un binario realmente
-    // portable: un solo binario corre contra Python 3.10/3.11/3.12/
-    // 3.13/3.14 sin reconfigurar.
+    // Cleanup-Residual+ mini-batch (2026-05-22) — without the
+    // `auto-initialize` feature, the first `Python::attach` requires
+    // the Python interpreter to be initialized. `prepare_freethreaded_python()`
+    // is idempotent, we can call it on every import (common case).
+    // Together with `abi3-py310`, this produces a truly portable
+    // binary: a single binary runs against Python 3.10/3.11/3.12/
+    // 3.13/3.14 without reconfiguration.
     ensure_python_initialized();
-    // `Python::attach` reemplazó a `Python::with_gil` en pyo3 0.23+;
-    // la API es idéntica en uso (closure recibe `Python<'_>`). Sobre
-    // runs subsiguientes es un fetch + lock.
+    // `Python::attach` replaced `Python::with_gil` in pyo3 0.23+;
+    // the API is identical in use (closure receives `Python<'_>`). On
+    // subsequent runs it is a fetch + lock.
     Python::attach(|py| match py.import(dotted) {
         Ok(module) => {
-            // `module: Bound<'py, PyModule>`. Lo convertimos a
-            // `Py<PyAny>` 'static para guardarlo en `Value::PyObject`
-            // sin atarnos al lifetime del GIL token. `.into_any()` baja
-            // el tipo de `PyModule` a `PyAny` (subtipo); `.unbind()`
-            // libera el lifetime del `Bound` y devuelve `Py<PyAny>`.
+            // `module: Bound<'py, PyModule>`. We convert it to
+            // `Py<PyAny>` 'static to store it in `Value::PyObject`
+            // without tying ourselves to the GIL token lifetime. `.into_any()`
+            // downcasts `PyModule` to `PyAny` (subtype); `.unbind()`
+            // releases the `Bound` lifetime and returns `Py<PyAny>`.
             let py_any: Py<PyAny> = module.into_any().unbind();
             Ok(Value::PyObject(PyObjectHandle::new(py_any)))
         }
@@ -84,22 +84,22 @@ pub fn import_module(dotted: &str) -> FitzResult<Value> {
     })
 }
 
-/// Fase 8.1.3 — acceso a atributo sobre un objeto Python con
-/// auto-coerción primitiva. Implementa la mecánica de `math.pi`
-/// (constante Float), `math.sqrt` (función opaca → `Value::PyObject`),
-/// y por extensión cualquier `obj.attr` donde `obj: Value::PyObject`.
+/// Phase 8.1.3 — attribute access on a Python object with
+/// primitive auto-coercion. Implements the mechanics of `math.pi`
+/// (Float constant), `math.sqrt` (opaque function → `Value::PyObject`),
+/// and by extension any `obj.attr` where `obj: Value::PyObject`.
 ///
-/// Política de coerción en 8.1:
+/// 8.1 coercion policy:
 ///   - `None` → `Value::Null`
-///   - `bool` → `Value::Bool` (chequea **antes** que int — en Python
+///   - `bool` → `Value::Bool` (checked **before** int — in Python
 ///     `bool ⊂ int`).
-///   - `int` → `Value::Int` si cabe en `i64`. Si excede, error
-///     explícito (deuda menor: bignum support cuando entre demanda).
+///   - `int` → `Value::Int` if it fits in `i64`. If it overflows, explicit
+///     error (minor debt: bignum support when demand appears).
 ///   - `float` → `Value::Float`.
 ///   - `str` → `Value::Str`.
-///   - cualquier otro tipo (función, clase, instancia, list, dict,
-///     submódulo, etc.) → `Value::PyObject` opaco. Marshaling para
-///     `list/dict` específicos llega en 8.2.
+///   - any other type (function, class, instance, list, dict,
+///     submodule, etc.) → opaque `Value::PyObject`. Marshaling for
+///     specific `list/dict` lands in 8.2.
 pub fn get_attr(handle: &PyObjectHandle, name: &str) -> FitzResult<Value> {
     Python::attach(|py| {
         let bound = handle.0.bind(py);
@@ -110,43 +110,43 @@ pub fn get_attr(handle: &PyObjectHandle, name: &str) -> FitzResult<Value> {
     })
 }
 
-/// Fase 8.3 — invocar un PyObject callable (función, método, clase)
-/// con args ya evaluados a `Value` Fitz. **Toda llamada Python desde
-/// Fitz se envuelve automáticamente en `Result<T>`**: éxito produce
-/// `Value::Result(Ok(v))` con el valor coercionado adentro; cualquier
-/// falla del path Python (excepción Python, marshaling de args
-/// imposible, etc.) produce `Value::Result(Err(Str("<ClassName>:
-/// <message>")))` sin abortar el programa.
+/// Phase 8.3 — invokes a callable PyObject (function, method, class)
+/// with args already evaluated to Fitz `Value`. **Every Python call from
+/// Fitz is automatically wrapped in `Result<T>`**: success produces
+/// `Value::Result(Ok(v))` with the coerced value inside; any
+/// failure from the Python path (Python exception, marshaling of args
+/// impossible, etc.) produces `Value::Result(Err(Str("<ClassName>:
+/// <message>")))` without aborting the program.
 ///
-/// Esta convención preserva el modelo de errores de Fitz (sin
-/// excepciones): el usuario es forzado a manejar la falla con
-/// `match` o el operador `?`, igual que con `find`/`get`/`json.loads`
-/// nativos. Excepciones Python ya no se cuelan como panics opacos.
+/// This convention preserves Fitz's error model (no
+/// exceptions): the user is forced to handle the failure with
+/// `match` or the `?` operator, just like native `find`/`get`/`json.loads`.
+/// Python exceptions no longer leak as opaque panics.
 ///
-/// El path de la firma `FitzResult<Value>` se mantiene solo para
-/// errores catastróficos del propio runtime de Fitz (que no han
-/// aparecido en la práctica); en el flujo normal devolvemos
-/// `Ok(Value::Result(...))` siempre.
+/// The `FitzResult<Value>` signature path is kept only for
+/// catastrophic errors of Fitz's own runtime (which have not
+/// appeared in practice); in the normal flow we always return
+/// `Ok(Value::Result(...))`.
 ///
-/// **Errores cubiertos por el `Result::Err`**:
-///   - Excepción Python lanzada por el callable (ValueError,
-///     TypeError, etc.) — incluyendo KeyboardInterrupt/SystemExit
-///     según roadmap (no hay forma de matar el runtime Fitz desde
-///     una excepción Python).
-///   - Marshaling de args fallido (tipo Fitz no representable en
-///     Python — Range/Function/Type/Module/etc. con breadcrumb
-///     informativo via `path`).
-///   - Marshaling del return fallido (raro: int Python > i64).
-///   - Construcción de la tupla de args (defensive — debería ser
-///     infalible en práctica).
+/// **Errors covered by `Result::Err`**:
+///   - Python exception raised by the callable (ValueError,
+///     TypeError, etc.) — including KeyboardInterrupt/SystemExit
+///     per roadmap (there is no way to kill the Fitz runtime from
+///     a Python exception).
+///   - Failed args marshaling (Fitz type not representable in
+///     Python — Range/Function/Type/Module/etc. with informative
+///     breadcrumb via `path`).
+///   - Failed return marshaling (rare: Python int > i64).
+///   - Args tuple construction (defensive — should be
+///     infallible in practice).
 pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
     Python::attach(|py| {
         let bound = handle.0.bind(py);
-        // Convertir cada arg Fitz → PyObject. Errores de marshaling
-        // (Range/Function/etc., o keys no hashables) se envuelven en
-        // `Result::Err` con el mensaje del FitzError. Esto unifica
-        // todo el path: el usuario ve UN solo punto de error
-        // (`?` o `match`) independiente de qué falló.
+        // Convert each Fitz arg → PyObject. Marshaling errors
+        // (Range/Function/etc., or unhashable keys) are wrapped in
+        // `Result::Err` with the FitzError's message. This unifies
+        // the whole path: the user sees ONE single point of error
+        // (`?` or `match`) regardless of what failed.
         let py_args_result: FitzResult<Vec<Py<PyAny>>> = args
             .iter()
             .enumerate()
@@ -156,22 +156,22 @@ pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
             Ok(v) => v,
             Err(e) => return Ok(err_value_from_message(e.message)),
         };
-        // `call1` toma una tupla posicional sin kwargs. Es el caso típico
-        // de `math.sqrt(16.0)` y `os.path.join("a", "b")`. Kwargs llega
-        // como deuda menor cuando entre demanda real.
+        // `call1` takes a positional tuple without kwargs. This is the typical
+        // case of `math.sqrt(16.0)` and `os.path.join("a", "b")`. Kwargs is
+        // minor debt for when real demand appears.
         let args_tuple = match pyo3::types::PyTuple::new(py, py_args) {
             Ok(t) => t,
             Err(e) => return Ok(err_value_from_message(py_err_to_fitz(py, e).message)),
         };
         match bound.call1(args_tuple) {
             Ok(ret) => {
-                // Fase 8.6: si el return es una corutina Python
-                // (caso típico cuando se llama una `async def`),
-                // convertimos a `Value::Future` en lugar de `PyObject`
-                // opaco. Esto destraba `py_async_fn().await` desde
-                // Fitz sin glue manual — el `.await` postfix existente
-                // (Fase 6) desempaca el `Value::Future` y devuelve el
-                // valor coercionado.
+                // Phase 8.6: if the return is a Python coroutine
+                // (typical case when calling an `async def`),
+                // we convert it to `Value::Future` instead of opaque
+                // `PyObject`. This unblocks `py_async_fn().await` from
+                // Fitz without manual glue — the existing postfix
+                // `.await` (Phase 6) unwraps the `Value::Future` and
+                // returns the coerced value.
                 if is_coroutine(py, &ret) {
                     return match py_coro_to_fitz_future(&ret) {
                         Ok(fut) => Ok(Value::Result(ResultVariant::Ok(Box::new(
@@ -190,13 +190,13 @@ pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
     })
 }
 
-/// Fase 8.6 — chequea si un objeto Python es awaitable (una corutina
-/// `async def`, un Task, o cualquier objeto con `__await__`). Usa
-/// `inspect.isawaitable`, que es la forma canónica en Python stdlib.
+/// Phase 8.6 — checks whether a Python object is awaitable (a coroutine
+/// `async def`, a Task, or any object with `__await__`). Uses
+/// `inspect.isawaitable`, which is the canonical form in Python stdlib.
 ///
-/// Tomamos el GIL implícito (el caller ya lo tiene). Devolvemos
-/// `false` si la introspección falla — es defensivo: mejor tratar el
-/// objeto como no-awaitable que producir un wrap incorrecto.
+/// We hold the GIL implicitly (the caller already has it). We return
+/// `false` if introspection fails — defensive: better treat the
+/// object as non-awaitable than produce an incorrect wrap.
 fn is_coroutine<'py>(py: Python<'py>, obj: &Bound<'py, PyAny>) -> bool {
     let inspect = match py.import("inspect") {
         Ok(m) => m,
@@ -209,49 +209,49 @@ fn is_coroutine<'py>(py: Python<'py>, obj: &Bound<'py, PyAny>) -> bool {
 }
 
 // ============================================================================
-// Fase 8.6-bis — Bridge asyncio con event loop persistente.
+// Phase 8.6-bis — asyncio bridge with persistent event loop.
 //
-// Diseño: un único thread Python dedicado mantiene un event loop vivo
-// y procesa requests serialmente desde un canal mpsc Rust. Cada
-// `.await` desde Fitz construye una request con el `Py<PyAny>` de la
-// corutina + un `tokio::sync::oneshot::Sender`, la envía al thread
-// Python, y `.await`-ea el receiver.
+// Design: a single dedicated Python thread keeps an event loop alive
+// and processes requests serially from a Rust mpsc channel. Each
+// `.await` from Fitz builds a request with the coroutine's `Py<PyAny>`
+// + a `tokio::sync::oneshot::Sender`, sends it to the Python
+// thread, and `.await`s the receiver.
 //
-// **Beneficios sobre el approach "baseline blocking" de 8.6.1**:
-//   - **Cero overhead per-call**: el loop se crea UNA vez. No hay
-//     `new_event_loop()` + `close()` por cada `.await`.
-//   - **No consume el blocking pool de tokio**: solo un thread Python
-//     dedicado. Cientos de awaits Fitz pendientes encolan pero no
-//     saturan threads.
-//   - **Reuso de estado asyncio**: DB pools, HTTP clients y otros
-//     primitives que cachean por loop sobreviven entre calls.
+// **Benefits over the "baseline blocking" approach of 8.6.1**:
+//   - **Zero per-call overhead**: the loop is created ONCE. There is no
+//     `new_event_loop()` + `close()` for each `.await`.
+//   - **Does not consume tokio's blocking pool**: only one dedicated
+//     Python thread. Hundreds of pending Fitz awaits queue up but do not
+//     saturate threads.
+//   - **asyncio state reuse**: DB pools, HTTP clients and other
+//     loop-cached primitives survive between calls.
 //
-// **Limitación del MVP**: los requests se serializan en el thread del
-// loop (uno por vez con `run_until_complete`). Es lo mismo que pasaba
-// con 8.6.1 a causa del GIL; el approach se puede iterar a
-// concurrencia real si entra demanda (sub-loops via gather,
+// **MVP limitation**: requests are serialized in the loop thread
+// (one at a time with `run_until_complete`). Same as happened
+// with 8.6.1 because of the GIL; the approach can be iterated to
+// real concurrency if demand appears (sub-loops via gather,
 // multi-process, etc.).
 //
-// **Por qué no `run_coroutine_threadsafe`**: el approach
-// "loop.run_forever en un thread + threadsafe schedule desde otros
-// threads" choca con la coordinación GIL en PyO3 0.28 cuando no se
-// usa `pyo3-asyncio` (que requiere control del runtime tokio,
-// incompatible con el setup de Fitz). El thread del loop necesita el
-// GIL para reaccionar a la tarea recién agendada, pero el thread que
-// la programa lo tiene tomado durante el call a
-// `run_coroutine_threadsafe`. Diseño descartado tras intento real.
+// **Why not `run_coroutine_threadsafe`**: the
+// "loop.run_forever on a thread + threadsafe schedule from other
+// threads" approach clashes with GIL coordination in PyO3 0.28 when
+// `pyo3-asyncio` is not used (it requires control of the tokio
+// runtime, incompatible with Fitz's setup). The loop thread needs the
+// GIL to react to the newly scheduled task, but the thread that
+// schedules it holds the GIL during the call to
+// `run_coroutine_threadsafe`. Design discarded after a real attempt.
 // ============================================================================
 
-/// Request al thread del loop: corutina a ejecutar + sender para
-/// devolver el resultado al caller.
+/// Request to the loop thread: coroutine to execute + sender to
+/// return the result to the caller.
 struct AsyncioRequest {
     coro: Py<PyAny>,
     response: tokio::sync::oneshot::Sender<FitzResult<Value>>,
 }
 
-// Py<PyAny> es Send-safe en PyO3 (acceso siempre via GIL). La
-// estructura entera lo es por composición. Lo marcamos explícito
-// porque el canal mpsc lo exige.
+// Py<PyAny> is Send-safe in PyO3 (access is always via GIL). The
+// whole struct is Send by composition. We mark it explicitly
+// because the mpsc channel requires it.
 unsafe impl Send for AsyncioRequest {}
 
 struct AsyncioBridge {
@@ -260,9 +260,9 @@ struct AsyncioBridge {
 
 static ASYNCIO_BRIDGE: OnceLock<AsyncioBridge> = OnceLock::new();
 
-/// Garantiza que el thread del loop está corriendo y devuelve el
-/// sender para programar trabajo. Idempotente: el thread se
-/// inicializa solo la primera vez.
+/// Ensures the loop thread is running and returns the
+/// sender to schedule work. Idempotent: the thread is
+/// initialized only the first time.
 fn ensure_asyncio_bridge() -> &'static AsyncioBridge {
     ASYNCIO_BRIDGE.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel::<AsyncioRequest>();
@@ -274,14 +274,14 @@ fn ensure_asyncio_bridge() -> &'static AsyncioBridge {
     })
 }
 
-/// Bucle principal del thread del loop. Inicializa el event loop UNA
-/// vez (bajo `Python::attach`), después procesa requests del canal:
-/// el `recv()` se hace FUERA del attach para no holdear el GIL
-/// durante la espera (otros threads que construyen la próxima
-/// corutina necesitan el GIL para hacer marshaling Fitz → Python).
+/// Main loop of the bridge thread. Initializes the event loop ONCE
+/// (under `Python::attach`), then processes requests from the channel:
+/// the `recv()` happens OUTSIDE attach so we do not hold the GIL
+/// during the wait (other threads building the next coroutine
+/// need the GIL to do Fitz → Python marshaling).
 fn asyncio_worker_loop(rx: std::sync::mpsc::Receiver<AsyncioRequest>) {
-    // Inicializar el loop. Lo guardamos como `Py<PyAny>` (Send-safe,
-    // unbound del Python<'_>) para reusarlo en cada iteration.
+    // Initialize the loop. We keep it as `Py<PyAny>` (Send-safe,
+    // unbound from `Python<'_>`) to reuse it on each iteration.
     let event_loop_init: Option<Py<PyAny>> = Python::attach(|py| {
         let asyncio = py.import("asyncio").ok()?;
         let loop_obj = asyncio.call_method0("new_event_loop").ok()?;
@@ -293,9 +293,9 @@ fn asyncio_worker_loop(rx: std::sync::mpsc::Receiver<AsyncioRequest>) {
         None => return,
     };
 
-    // Procesar requests. `rx.recv()` está FUERA del Python::attach
-    // → no holdea GIL durante la espera. Cuando llega una request,
-    // re-atachamos para correrla.
+    // Process requests. `rx.recv()` is OUTSIDE `Python::attach`
+    // → does not hold the GIL during the wait. When a request
+    // arrives, we re-attach to run it.
     while let Ok(req) = rx.recv() {
         let AsyncioRequest { coro, response } = req;
         let result: FitzResult<Value> = Python::attach(|py| {
@@ -311,37 +311,37 @@ fn asyncio_worker_loop(rx: std::sync::mpsc::Receiver<AsyncioRequest>) {
                 )),
             }
         });
-        // El receiver puede estar dropeado si el FitzFuture se
-        // canceló antes de completar; ignoramos el send_err.
+        // The receiver may be dropped if the FitzFuture was
+        // canceled before completing; we ignore the send_err.
         let _ = response.send(result);
     }
-    // Salimos del while → cerrar el loop. Best-effort.
+    // Exit the while → close the loop. Best-effort.
     Python::attach(|py| {
         let bound = event_loop.bind(py);
         let _ = bound.call_method0("close");
     });
 }
 
-/// Fase 8.6 — convierte una corutina Python en un `FitzFuture` que
-/// el `Value::Future` Fitz puede envolver. El usuario escribe
-/// `py_async_fn().await` y el bridge es invisible.
+/// Phase 8.6 — converts a Python coroutine to a `FitzFuture` that
+/// Fitz `Value::Future` can wrap. The user writes
+/// `py_async_fn().await` and the bridge is invisible.
 ///
-/// **Implementación 8.6-bis ("event loop persistente"; ver doc del
-/// módulo arriba)**: encola la corutina en el thread Python
-/// dedicado via mpsc y `.await`-ea sobre un `tokio::sync::oneshot::
-/// Receiver`. El FitzFuture es asincrónico de verdad — no ocupa
-/// blocking thread del runtime tokio, solo un slot en la cola del
-/// thread asyncio.
+/// **8.6-bis implementation ("persistent event loop"; see module doc
+/// above)**: enqueues the coroutine on the dedicated Python thread
+/// via mpsc and `.await`s a `tokio::sync::oneshot::
+/// Receiver`. The FitzFuture is truly asynchronous — it does not occupy
+/// a tokio blocking thread, only a slot in the asyncio
+/// thread's queue.
 ///
-/// **Lifetime del thread**: el thread asyncio queda vivo hasta que
-/// el proceso termine. Como no es daemon, el runtime tokio espera a
-/// terminar todos los threads — pero el thread asyncio bloquea en
-/// `rx.recv()` indefinidamente. Solución pragmática: el caller
-/// dropea el `Sender` cuando termina el `main`, el `rx.recv()`
-/// devuelve `Err`, y el thread sale del while. **En la práctica,
-/// confiamos en `process::exit` para limpiar todo** — el `Drop` del
-/// canal global no corre. No es ideal pero es lo que ya pasaba con
-/// 8.6.1 (los blocking workers tampoco se limpian).
+/// **Thread lifetime**: the asyncio thread stays alive until
+/// the process exits. Since it is not a daemon, the tokio runtime waits
+/// for all threads to terminate — but the asyncio thread blocks on
+/// `rx.recv()` indefinitely. Pragmatic solution: the caller
+/// drops the `Sender` when `main` exits, `rx.recv()`
+/// returns `Err`, and the thread leaves the while. **In practice,
+/// we rely on `process::exit` to clean up everything** — the global
+/// channel's `Drop` does not run. Not ideal, but the same was
+/// already true with 8.6.1 (blocking workers were not cleaned up either).
 fn py_coro_to_fitz_future(coro: &Bound<'_, PyAny>) -> PyResult<FitzFuture> {
     let bridge = ensure_asyncio_bridge();
     let coro_owned: Py<PyAny> = coro.clone().unbind();
@@ -369,42 +369,42 @@ fn py_coro_to_fitz_future(coro: &Bound<'_, PyAny>) -> PyResult<FitzFuture> {
     Ok(fitz_future)
 }
 
-/// Helper para construir el `Value::Result(Err(Str(msg)))` que envuelve
-/// los errores de una llamada Python. El `msg` ya viene con formato
-/// `"<ClassName>: <message>"` desde `py_err_to_fitz` (excepciones
-/// Python) o desde el `FitzError.message` de los marshaling fallos.
+/// Helper to build the `Value::Result(Err(Str(msg)))` that wraps
+/// errors from a Python call. The `msg` already comes with format
+/// `"<ClassName>: <message>"` from `py_err_to_fitz` (Python
+/// exceptions) or from the `FitzError.message` of marshaling failures.
 fn err_value_from_message(msg: String) -> Value {
     Value::Result(ResultVariant::Err(Box::new(Value::Str(msg))))
 }
 
-/// Convierte un `Value` Fitz a un `Py<PyAny>` para pasarlo a Python.
-/// Política 8.2 (primitivos + compuestos):
+/// Converts a Fitz `Value` to a `Py<PyAny>` to pass to Python.
+/// 8.2 policy (primitives + compounds):
 ///
 ///   - `Int`   → `int`
 ///   - `Float` → `float`
 ///   - `Str`   → `str`
 ///   - `Bool`  → `bool`
 ///   - `Null`  → `None`
-///   - `PyObject(h)` → passthrough con `clone_ref` (refcount bump);
-///     un round-trip Fitz→Python→Fitz preserva identidad.
-///   - `List<T>` → `list` (copia eager elemento por elemento; cada
-///     elemento se marshalla recursivo).
-///   - `Map<K, V>` → `dict` (copia eager; las keys deben ser
-///     primitivos hashables Python — Int/Float/Str/Bool/Null —
-///     porque `dict` requiere `__hash__`).
-///   - `Instance { type_name, fields }` → `dict` con field names
-///     como keys (traducción nominal). El tipo Fitz se "olvida" del
-///     lado Python — recoverlo en el round-trip requiere anotación
-///     destino (deuda 8.4).
+///   - `PyObject(h)` → passthrough with `clone_ref` (refcount bump);
+///     a Fitz→Python→Fitz round-trip preserves identity.
+///   - `List<T>` → `list` (eager element-by-element copy; each
+///     element is marshaled recursively).
+///   - `Map<K, V>` → `dict` (eager copy; keys must be
+///     Python-hashable primitives — Int/Float/Str/Bool/Null —
+///     because `dict` requires `__hash__`).
+///   - `Instance { type_name, fields }` → `dict` with field names
+///     as keys (nominal translation). The Fitz type is "forgotten" on
+///     the Python side — recovering it on the round-trip requires a
+///     destination annotation (8.4 debt).
 ///
-/// Tipos no marshalleables (`Range`, `Function`, `Future`, etc.) →
-/// error con `path` que apunta al sitio exacto adentro de la
-/// estructura (ej. `arg0.users[2].email`).
+/// Non-marshaleable types (`Range`, `Function`, `Future`, etc.) →
+/// error with `path` pointing to the exact site inside the
+/// structure (e.g. `arg0.users[2].email`).
 ///
-/// Política "copia eager" (decisión cross-cutting #4 del roadmap):
-/// no compartimos estado entre los dos GCs. Una `List<T>` Fitz que
-/// va a Python se convierte en una `list` Python independiente; si
-/// la `list` Python se muta, la `List<T>` Fitz original no se entera.
+/// "Eager copy" policy (cross-cutting decision #4 of the roadmap):
+/// we do not share state between the two GCs. A Fitz `List<T>` that
+/// goes to Python becomes an independent Python `list`; if
+/// the Python `list` is mutated, the original Fitz `List<T>` is unaware.
 fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny>> {
     use pyo3::types::{PyDict, PyList};
     use pyo3::IntoPyObject;
@@ -425,24 +425,24 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
             .into_any()
             .unbind()),
         Value::Bool(b) => {
-            // `bool::into_pyobject` devuelve `Borrowed<'py, PyBool>` (no
-            // un `Bound`), porque True/False son singletons compartidos.
-            // Lo convertimos a `Py<PyAny>` via `.to_owned().into_any()`.
+            // `bool::into_pyobject` returns `Borrowed<'py, PyBool>` (not
+            // a `Bound`), because True/False are shared singletons.
+            // We convert it to `Py<PyAny>` via `.to_owned().into_any()`.
             let bound = b
                 .into_pyobject(py)
                 .map_err(|e| py_err_to_fitz(py, e.into()))?;
             Ok(bound.to_owned().into_any().unbind())
         }
         Value::Null => Ok(py.None()),
-        // Passthrough: un `Value::PyObject` que cruza de vuelta a Python
-        // es el mismo objeto. Clonamos el `Py<PyAny>` (refcount bump).
+        // Passthrough: a `Value::PyObject` that crosses back to Python
+        // is the same object. We clone the `Py<PyAny>` (refcount bump).
         Value::PyObject(h) => Ok(h.0.clone_ref(py)),
 
-        // Fase 8.2 — compuestos.
+        // Phase 8.2 — compounds.
         Value::List(items) => {
-            // Clonamos el Vec adentro del lock para no mantener el
-            // MutexGuard vivo durante la recursión: cada elemento
-            // toma su propio lock potencialmente (Lists anidadas).
+            // We clone the Vec inside the lock so we do not hold the
+            // MutexGuard alive during recursion: each element
+            // potentially takes its own lock (nested Lists).
             let snapshot: Vec<Value> = items.lock().clone();
             let mut py_items: Vec<Py<PyAny>> = Vec::with_capacity(snapshot.len());
             for (i, v) in snapshot.iter().enumerate() {
@@ -456,10 +456,10 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
             let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
             let dict = PyDict::new(py);
             for (k, v) in snapshot.iter() {
-                // Las keys deben ser primitivos hashables Python.
-                // Tipos compuestos (List/Map/Instance) no son hashables
-                // y romperían `dict.__setitem__`. Detectamos antes de
-                // tocar Python para dar mensaje específico.
+                // Keys must be Python-hashable primitives.
+                // Compound types (List/Map/Instance) are not hashable
+                // and would break `dict.__setitem__`. We detect before
+                // touching Python to give a specific message.
                 let py_k = marshal_map_key(py, k, path)?;
                 let v_path = format!("{}[{}]", path, fmt_map_key(k));
                 let py_v = value_to_py(py, v, &v_path)?;
@@ -471,10 +471,10 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
         Value::Instance { type_name, fields } => {
             let snapshot: Vec<(String, Value)> = fields.lock().clone();
             let dict = PyDict::new(py);
-            // Instance se traduce a dict con field names como keys.
-            // Si el path arranca vacío (caso top-level, raro porque
-            // `call` siempre setea `arg<i>`), usamos `type_name`
-            // como prefijo para que el error sea legible.
+            // Instance translates to a dict with field names as keys.
+            // If `path` starts empty (top-level case, rare because
+            // `call` always sets `arg<i>`), we use `type_name`
+            // as prefix so the error is readable.
             let prefix: String = if path.is_empty() {
                 type_name.clone()
             } else {
@@ -489,10 +489,10 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
             Ok(dict.into_any().unbind())
         }
 
-        // Resto (Range, Function/Builtin, Type, Module, HttpResponse,
-        // CorsConfig, Future, Result): no son marshalleables. El
-        // `Result` se traduce mejor del lado handler HTTP (Ok→200,
-        // Err→500); cruzar a Python como objeto no tiene semántica útil.
+        // Rest (Range, Function/Builtin, Type, Module, HttpResponse,
+        // CorsConfig, Future, Result): not marshaleable. The
+        // `Result` translates better on the HTTP handler side (Ok→200,
+        // Err→500); crossing to Python as an object has no useful semantics.
         other => Err(FitzError::new(
             ErrorKind::TypeMismatch {
                 expected: "primitivo, compuesto (List/Map/Instance) o PyObject".into(),
@@ -511,11 +511,11 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
     }
 }
 
-/// Valida que una `key` de `Map` Fitz sea hashable en Python (Int/
-/// Float/Str/Bool/Null) y la marshalla. Compuestos como key →
-/// error claro, porque Python `dict` exige `__hash__` y List/Map/
-/// Instance no lo tienen (igual que `list`/`dict` en Python no son
-/// hashables).
+/// Validates that a Fitz `Map` `key` is Python-hashable (Int/
+/// Float/Str/Bool/Null) and marshals it. Compound types as a key →
+/// clear error, because Python `dict` requires `__hash__` and List/Map/
+/// Instance do not have it (just like Python `list`/`dict` are not
+/// hashable).
 fn marshal_map_key(py: Python<'_>, k: &Value, path: &str) -> FitzResult<Py<PyAny>> {
     match k {
         Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Bool(_) | Value::Null => {
@@ -539,9 +539,9 @@ fn marshal_map_key(py: Python<'_>, k: &Value, path: &str) -> FitzResult<Py<PyAny
     }
 }
 
-/// Formatea una `key` de `Map` para usarla como segmento en el
-/// breadcrumb del path. `Str("a")` → `"\"a\""`, `Int(42)` → `42`,
-/// resto → su `Display`. Solo cosmético — no afecta el marshalling.
+/// Formats a `Map` `key` to use it as a segment of the
+/// path breadcrumb. `Str("a")` → `"\"a\""`, `Int(42)` → `42`,
+/// rest → its `Display`. Cosmetic only — does not affect marshaling.
 fn fmt_map_key(k: &Value) -> String {
     match k {
         Value::Str(s) => format!("\"{}\"", s),
@@ -549,25 +549,25 @@ fn fmt_map_key(k: &Value) -> String {
     }
 }
 
-/// Convierte un `Bound<'_, PyAny>` a `Value` Fitz aplicando la política
-/// de coerción primitiva. Helper reusable: lo consumen `get_attr`
-/// (8.1.3) y `call` (8.1.4) para procesar el return value.
+/// Converts a `Bound<'_, PyAny>` to Fitz `Value` applying the primitive
+/// coercion policy. Reusable helper: consumed by `get_attr`
+/// (8.1.3) and `call` (8.1.4) to process the return value.
 ///
-/// Pre-condición: el caller ya tomó el GIL (parámetro `py` lo testifica).
+/// Pre-condition: the caller already holds the GIL (the `py` parameter testifies).
 fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
     if obj.is_none() {
         return Ok(Value::Null);
     }
-    // bool ANTES que int: en Python `isinstance(True, int) == True`, así
-    // que un chequeo de int primero capturaría True/False como 1/0.
+    // bool BEFORE int: in Python `isinstance(True, int) == True`, so
+    // an int check first would capture True/False as 1/0.
     if obj.is_instance_of::<PyBool>() {
         let b: bool = obj.extract().map_err(|e| py_err_to_fitz(py, e))?;
         return Ok(Value::Bool(b));
     }
     if obj.is_instance_of::<PyInt>() {
-        // `extract::<i64>()` falla si el int Python excede el rango de
-        // i64 (`2^63`). En 8.1 reportamos error claro citando el
-        // límite; bignum support quedaría como deuda menor de 8.2+.
+        // `extract::<i64>()` fails if the Python int exceeds the
+        // i64 (`2^63`) range. In 8.1 we report a clear error citing the
+        // limit; bignum support would be minor debt for 8.2+.
         return match obj.extract::<i64>() {
             Ok(n) => Ok(Value::Int(n)),
             Err(_) => Err(FitzError::new(
@@ -596,13 +596,13 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
         return Ok(Value::Str(s));
     }
 
-    // Fase 8.2.2 — compuestos.
+    // Phase 8.2.2 — compounds.
     //
-    // `list` Python → `Value::List` (copia eager; cada elemento
-    // recursivo via `py_to_value`). El resultado es semánticamente
-    // `List<Any>` desde el lado Fitz porque Python no nos da tipo
-    // estático; las anotaciones del lado Fitz para refinar a
-    // `List<T>` concreto llegan en 8.4.
+    // Python `list` → `Value::List` (eager copy; each element
+    // recursive via `py_to_value`). The result is semantically
+    // `List<Any>` from the Fitz side because Python does not give us
+    // a static type; Fitz-side annotations to refine to
+    // a concrete `List<T>` land in 8.4.
     if obj.is_instance_of::<PyList>() {
         let list = obj
             .cast::<PyList>()
@@ -614,14 +614,14 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
         return Ok(Value::new_list(items));
     }
 
-    // `dict` Python → `Value::Map`. CPython 3.7+ garantiza orden de
-    // inserción para `dict`; preservarlo nos da paridad bit-a-bit con
-    // `serde_json::preserve_order` que ya usa el resto del proyecto.
-    // Cada par (key, value) se recursa via `py_to_value` — keys
-    // típicamente son primitivos pero permitimos cualquier hashable
-    // (Python valida; si la clave es un PyObject opaco, queda como
-    // tal). No se auto-coerciona dict → Instance: eso requiere
-    // anotación destino del lado Fitz (deuda 8.4).
+    // Python `dict` → `Value::Map`. CPython 3.7+ guarantees insertion
+    // order for `dict`; preserving it gives us bit-exact parity with
+    // `serde_json::preserve_order` that the rest of the project already uses.
+    // Each (key, value) pair recurses via `py_to_value` — keys
+    // are typically primitives but we allow any hashable
+    // (Python validates; if the key is an opaque PyObject, it stays
+    // that way). dict → Instance is not auto-coerced: that requires
+    // a destination annotation on the Fitz side (8.4 debt).
     if obj.is_instance_of::<PyDict>() {
         let dict = obj
             .cast::<PyDict>()
@@ -635,24 +635,24 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
         return Ok(Value::new_map(pairs));
     }
 
-    // Fallback: tipos restantes (función, clase, instancia, submódulo,
-    // tuple, set, bytes, etc.) los envolvemos como `Value::PyObject`
-    // opaco para que el usuario los pase a otra función Python o haga
-    // field access. Tuples/sets/bytes podrían marshallar a List/Map
-    // en una fase futura si entra demanda real.
+    // Fallback: remaining types (function, class, instance, submodule,
+    // tuple, set, bytes, etc.) we wrap as opaque `Value::PyObject`
+    // so the user can pass them to another Python function or do
+    // field access. Tuples/sets/bytes could marshal to List/Map
+    // in a future phase if real demand appears.
     let owned: Py<PyAny> = obj.clone().unbind();
     Ok(Value::PyObject(PyObjectHandle::new(owned)))
 }
 
-/// Convierte un `PyErr` a un `FitzError` con mensaje
-/// "<ClassName>: <message>". El formato matchea la convención que la
-/// Fase 8.3 va a estabilizar cuando los wraps a `Result<T>` lleguen —
-/// el `Err(...)` que va a recibir el usuario será el mismo string que
-/// hoy aparece en el `FitzError`.
+/// Converts a `PyErr` to a `FitzError` with message
+/// "<ClassName>: <message>". The format matches the convention that
+/// Phase 8.3 will stabilize when the `Result<T>` wraps land —
+/// the `Err(...)` the user will receive will be the same string that
+/// today appears in `FitzError`.
 ///
-/// Si la introspección de la excepción falla (caso raro: error del
-/// propio PyO3 al consultar el type), devolvemos un mensaje genérico
-/// sin colgar el programa.
+/// If introspection of the exception fails (rare case: PyO3's own
+/// error querying the type), we return a generic message
+/// without crashing the program.
 fn py_err_to_fitz(py: Python<'_>, err: PyErr) -> FitzError {
     let class = err
         .get_type(py)
@@ -691,7 +691,7 @@ mod tests {
 
     #[test]
     fn importa_submodulo_devuelve_pyobject() {
-        // `os.path` existe siempre en cualquier instalación de Python.
+        // `os.path` always exists in any Python installation.
         let v = import_module("os.path").expect("os.path debería importar");
         assert!(matches!(v, Value::PyObject(_)));
     }
@@ -715,9 +715,9 @@ mod tests {
 
     #[test]
     fn dos_imports_del_mismo_modulo_son_iguales() {
-        // Python cachea los imports (sys.modules), así que dos
-        // `import math` devuelven el mismo objeto. Nuestro `PartialEq`
-        // sobre `Value::PyObject` (Py::as_ptr) debería reflejar eso.
+        // Python caches imports (sys.modules), so two
+        // `import math` return the same object. Our `PartialEq`
+        // on `Value::PyObject` (Py::as_ptr) should reflect that.
         let a = import_module("math").unwrap();
         let b = import_module("math").unwrap();
         assert_eq!(a, b);
@@ -731,7 +731,7 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // 8.1.3 — get_attr + auto-coerción primitiva
+    // 8.1.3 — get_attr + primitive auto-coercion
     // -------------------------------------------------------------------
 
     fn handle_of(v: Value) -> PyObjectHandle {
@@ -741,10 +741,10 @@ mod tests {
         }
     }
 
-    /// Helper post-8.3: el `call` ahora envuelve siempre en `Result`.
-    /// Para tests del happy path, desempaquetamos `Ok(inner)` y devolvemos
-    /// el `Value` adentro. Si llega `Err(...)`, el test falla con el
-    /// mensaje (útil para debugging cuando algo cambia inesperadamente).
+    /// Post-8.3 helper: `call` now always wraps in `Result`.
+    /// For happy-path tests, we unwrap `Ok(inner)` and return
+    /// the `Value` inside. If `Err(...)` arrives, the test fails with the
+    /// message (useful for debugging when something changes unexpectedly).
     fn ok_inner(v: Value) -> Value {
         match v {
             Value::Result(ResultVariant::Ok(inner)) => *inner,
@@ -755,10 +755,10 @@ mod tests {
         }
     }
 
-    /// Helper post-8.3: extrae el mensaje de `Err(Str(...))` que produce
-    /// un call Python fallido. Si el `Value` no es `Result::Err(Str)`,
-    /// el test falla — útil para chequear el formato `"<Class>: <msg>"`
-    /// sin asumir el shape.
+    /// Post-8.3 helper: extracts the message from `Err(Str(...))` that a
+    /// failed Python call produces. If `Value` is not `Result::Err(Str)`,
+    /// the test fails — useful to check the `"<Class>: <msg>"` format
+    /// without assuming the shape.
     fn err_message(v: Value) -> String {
         match v {
             Value::Result(ResultVariant::Err(inner)) => match *inner {
@@ -778,8 +778,8 @@ mod tests {
         let v = get_attr(&math, "pi").expect("math.pi debería existir");
         match v {
             Value::Float(f) => {
-                // Comparación aproximada — el valor exacto de math.pi
-                // está pinneado, pero usamos un epsilon por las dudas.
+                // Approximate comparison — math.pi's exact value
+                // is pinned, but we use an epsilon just in case.
                 assert!((f - std::f64::consts::PI).abs() < 1e-15, "got {}", f);
             }
             other => panic!("se esperaba Float, fue: {:?}", other),
@@ -788,8 +788,8 @@ mod tests {
 
     #[test]
     fn get_attr_math_sqrt_es_pyobject_opaco() {
-        // `sqrt` es una función Python — no es primitivo, debe
-        // envolverse como PyObject opaco para invocación en 8.1.4.
+        // `sqrt` is a Python function — not a primitive, must
+        // wrap as an opaque PyObject for invocation in 8.1.4.
         let math = handle_of(import_module("math").unwrap());
         let v = get_attr(&math, "sqrt").expect("math.sqrt debería existir");
         assert!(matches!(v, Value::PyObject(_)), "got: {:?}", v);
@@ -816,8 +816,8 @@ mod tests {
 
     #[test]
     fn py_to_value_coerciona_bool_true() {
-        // Construimos un PyBool sin pasar por un módulo: importamos
-        // `builtins` y leemos `True`.
+        // We build a PyBool without going through a module: import
+        // `builtins` and read `True`.
         let builtins = handle_of(import_module("builtins").unwrap());
         let v = get_attr(&builtins, "True").unwrap();
         assert_eq!(v, Value::Bool(true));
@@ -825,8 +825,8 @@ mod tests {
 
     #[test]
     fn py_to_value_coerciona_int_chico() {
-        // `sys.maxsize` es un int Python — en sistemas 64-bit es 2^63 - 1,
-        // que cabe justo en i64. Lo usamos para verificar que int → Int.
+        // `sys.maxsize` is a Python int — on 64-bit systems it is 2^63 - 1,
+        // which fits exactly in i64. We use it to verify int → Int.
         let sys = handle_of(import_module("sys").unwrap());
         let v = get_attr(&sys, "maxsize").unwrap();
         assert_eq!(v, Value::Int(i64::MAX));
@@ -834,14 +834,14 @@ mod tests {
 
     #[test]
     fn py_to_value_coerciona_none() {
-        // `sys.__interactivehook__` no siempre es None, mejor un atributo
-        // que sea explícitamente None. Usamos `ctypes` que en algunos
-        // sistemas puede no estar; mejor usar un truco: `sys.flags` tiene
-        // sub-atributos, pero todos son int. Usamos `inspect.Parameter.empty`
-        // que es un sentinel — pero ese no es None. Vamos por el camino
-        // directo: importar `dataclasses` y leer `MISSING` no funciona
-        // porque es objeto. Mejor: evaluamos el atributo `None` de
-        // `builtins`, que ES el singleton Python None.
+        // `sys.__interactivehook__` is not always None; better an attribute
+        // that is explicitly None. We use `ctypes`, which on some
+        // systems may not exist; better to use a trick: `sys.flags` has
+        // sub-attributes, but all are int. We use `inspect.Parameter.empty`
+        // which is a sentinel — but that is not None. Take the direct
+        // route: importing `dataclasses` and reading `MISSING` does not work
+        // because it is an object. Better: we evaluate the `None` attribute of
+        // `builtins`, which IS the Python None singleton.
         let builtins = handle_of(import_module("builtins").unwrap());
         let v = get_attr(&builtins, "None").unwrap();
         assert_eq!(v, Value::Null);
@@ -869,8 +869,8 @@ mod tests {
 
     #[test]
     fn call_str_upper_via_call_no_aplica_es_metodo() {
-        // `str.upper("hola")` es válido en Python (unbound method). Usamos
-        // este caso para verificar que un argumento Str se marshalla bien.
+        // `str.upper("hola")` is valid in Python (unbound method). We use
+        // this case to verify that a Str argument marshals correctly.
         let builtins = handle_of(import_module("builtins").unwrap());
         let str_cls = handle_of(get_attr(&builtins, "str").unwrap());
         let upper = handle_of(get_attr(&str_cls, "upper").unwrap());
@@ -880,7 +880,7 @@ mod tests {
 
     #[test]
     fn call_arg_int_coerciona_a_pyint() {
-        // `abs(-7)` debería darnos `7`. Validamos que Int → int Python.
+        // `abs(-7)` should give us `7`. We validate that Int → Python int.
         let builtins = handle_of(import_module("builtins").unwrap());
         let abs_fn = handle_of(get_attr(&builtins, "abs").unwrap());
         let v = ok_inner(call(&abs_fn, &[Value::Int(-7)]).unwrap());
@@ -889,8 +889,8 @@ mod tests {
 
     #[test]
     fn call_arg_bool_coerciona_a_pybool() {
-        // `bool.__class__.__name__` de True → "bool". Mejor: `int(True)`
-        // → 1. Confirmamos que el Bool va como Python bool, no como int.
+        // `bool.__class__.__name__` of True → "bool". Better: `int(True)`
+        // → 1. We confirm that Bool goes as Python bool, not as int.
         let builtins = handle_of(import_module("builtins").unwrap());
         let int_cls = handle_of(get_attr(&builtins, "int").unwrap());
         let v = ok_inner(call(&int_cls, &[Value::Bool(true)]).unwrap());
@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn call_arg_null_coerciona_a_none() {
-        // `str(None)` da "None". Verifica que Null → Python None.
+        // `str(None)` gives "None". Verifies that Null → Python None.
         let builtins = handle_of(import_module("builtins").unwrap());
         let str_cls = handle_of(get_attr(&builtins, "str").unwrap());
         let v = ok_inner(call(&str_cls, &[Value::Null]).unwrap());
@@ -908,9 +908,9 @@ mod tests {
 
     #[test]
     fn call_excepcion_python_envuelve_en_result_err() {
-        // 8.3: `math.sqrt(-1)` lanza ValueError en Python. El call no
-        // aborta — devuelve `Value::Result(Err(Str("ValueError: ...")))`.
-        // El usuario tiene que manejarlo con `match` o `?`.
+        // 8.3: `math.sqrt(-1)` raises ValueError in Python. The call does
+        // not abort — it returns `Value::Result(Err(Str("ValueError: ...")))`.
+        // The user has to handle it with `match` or `?`.
         let math = handle_of(import_module("math").unwrap());
         let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
         let v = call(&sqrt, &[Value::Float(-1.0)]).unwrap();
@@ -924,10 +924,10 @@ mod tests {
 
     #[test]
     fn call_arg_no_marshalleable_envuelve_en_result_err() {
-        // 8.3: Range no es marshalleable. En vez de abortar con
-        // FitzError, el error se envuelve en `Result::Err(Str(...))`
-        // — uniformidad: TODO error del path call se ve como `Err` para
-        // el usuario, sea excepción Python o marshaling fail.
+        // 8.3: Range is not marshaleable. Instead of aborting with
+        // FitzError, the error is wrapped in `Result::Err(Str(...))`
+        // — uniformity: EVERY error from the call path looks like `Err` to
+        // the user, whether Python exception or marshaling failure.
         let math = handle_of(import_module("math").unwrap());
         let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
         let v = call(&sqrt, &[Value::Range { start: 0, end: 10 }]).unwrap();
@@ -941,12 +941,12 @@ mod tests {
 
     #[test]
     fn call_pyobject_passthrough_preserva_identidad() {
-        // Pasar un Value::PyObject como arg: debería llegar al callable
-        // Python sin cambios. Validamos con `id(x) == id(x)` via `is`.
+        // Pass a Value::PyObject as arg: should reach the Python callable
+        // unchanged. We validate with `id(x) == id(x)` via `is`.
         let builtins = handle_of(import_module("builtins").unwrap());
         let id_fn = handle_of(get_attr(&builtins, "id").unwrap());
         let math = import_module("math").unwrap();
-        // Mismo objeto pasado dos veces: `id` debe devolver el mismo Int.
+        // Same object passed twice: `id` must return the same Int.
         let id1 = ok_inner(call(&id_fn, std::slice::from_ref(&math)).unwrap());
         let id2 = ok_inner(call(&id_fn, &[math]).unwrap());
         assert_eq!(id1, id2);
@@ -958,9 +958,9 @@ mod tests {
 
     #[test]
     fn list_de_ints_se_marshalla_a_list_python() {
-        // `json.dumps([1, 2, 3])` → "[1, 2, 3]". El round-trip vía
-        // json valida que la list Python que produjimos tiene los
-        // elementos correctos en orden.
+        // `json.dumps([1, 2, 3])` → "[1, 2, 3]". The round-trip via
+        // json validates that the Python list we produced has the
+        // correct elements in order.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
@@ -979,7 +979,7 @@ mod tests {
 
     #[test]
     fn list_heterogenea_se_marshalla_ok() {
-        // Python permite mezcla en una list: `[1, "dos", true]`.
+        // Python allows mixing in a list: `[1, "dos", true]`.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![
@@ -988,8 +988,8 @@ mod tests {
             Value::Bool(true),
         ]);
         let v = ok_inner(call(&dumps, &[list]).unwrap());
-        // JSON serializa true como `true`. Confirma que Bool Fitz
-        // cruza como bool Python (no como int).
+        // JSON serializes true as `true`. Confirms that Fitz Bool
+        // crosses as Python bool (not as int).
         assert_eq!(v, Value::Str("[1, \"dos\", true]".into()));
     }
 
@@ -1006,9 +1006,9 @@ mod tests {
     #[test]
     fn map_de_str_a_int_se_marshalla_a_dict() {
         // `json.dumps({"a": 1, "b": 2})` → '{"a": 1, "b": 2}'.
-        // PyDict preserva el orden de inserción (Python 3.7+), igual
-        // que `serde_json::preserve_order` que ya usa el resto del
-        // proyecto.
+        // PyDict preserves insertion order (Python 3.7+), same
+        // as `serde_json::preserve_order` that the rest of the
+        // project already uses.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let map = Value::new_map(vec![
@@ -1021,8 +1021,8 @@ mod tests {
 
     #[test]
     fn map_con_keys_no_hashables_es_error_con_path() {
-        // 8.3: List como key → `Result::Err(Str)` con mensaje que cita
-        // el path "arg0" y la restricción "hashable".
+        // 8.3: List as key → `Result::Err(Str)` with message citing
+        // the path "arg0" and the "hashable" restriction.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let bad_key = Value::new_list(vec![Value::Int(1)]);
@@ -1038,10 +1038,10 @@ mod tests {
 
     #[test]
     fn instance_se_marshalla_a_dict_por_field_name() {
-        // Una `Instance` con type_name="User" y fields ordenados
-        // {id: 1, name: "x"} → `{"id": 1, "name": "x"}` después de
-        // `json.dumps`. Verifica que el orden de campos se preserva
-        // (PyDict en CPython 3.7+).
+        // An `Instance` with type_name="User" and ordered fields
+        // {id: 1, name: "x"} → `{"id": 1, "name": "x"}` after
+        // `json.dumps`. Verifies that field order is preserved
+        // (PyDict in CPython 3.7+).
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let user = Value::new_instance(
@@ -1057,8 +1057,8 @@ mod tests {
 
     #[test]
     fn list_de_instances_se_marshalla() {
-        // Caso pre-canónico del roadmap: `List<User>` pasado a una
-        // función Python. La lista se marshalla a list[dict].
+        // Pre-canonical case from the roadmap: `List<User>` passed to a
+        // Python function. The list marshals to list[dict].
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let users = Value::new_list(vec![
@@ -1099,8 +1099,8 @@ mod tests {
 
     #[test]
     fn elemento_no_marshalleable_en_list_es_error_con_path() {
-        // 8.3: Range adentro de list → `Result::Err(Str)` con path
-        // "arg0[1]" en el mensaje.
+        // 8.3: Range inside list → `Result::Err(Str)` with path
+        // "arg0[1]" in the message.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![
@@ -1145,8 +1145,8 @@ mod tests {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
         let v = ok_inner(call(&loads, &[Value::Str("{\"a\": 1, \"b\": 2}".into())]).unwrap());
-        // Python 3.7+ garantiza orden de inserción para dict;
-        // verificamos que llega en el orden serializado del JSON.
+        // Python 3.7+ guarantees insertion order for dict;
+        // we verify it arrives in the order serialized in JSON.
         assert_eq!(
             v,
             Value::new_map(vec![
@@ -1213,9 +1213,9 @@ mod tests {
 
     #[test]
     fn round_trip_list_via_json() {
-        // dumps + loads → la lista debería volver igual.
-        // 8.3: cada call envuelve en Ok, así que tenemos que
-        // desempaquetar el `s` antes de pasarlo al siguiente call.
+        // dumps + loads → the list should come back the same.
+        // 8.3: each call wraps in Ok, so we have to
+        // unwrap `s` before passing it to the next call.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
@@ -1232,9 +1232,9 @@ mod tests {
 
     #[test]
     fn pylist_directo_de_python_se_coerce_a_list() {
-        // `list("abc")` en Python da `['a', 'b', 'c']`. Cruzamos un
-        // PyList vivo, no un JSON deserializado, para validar que el
-        // dispatch sobre PyList funciona aunque venga de cualquier API.
+        // `list("abc")` in Python gives `['a', 'b', 'c']`. We cross a
+        // live PyList, not a deserialized JSON, to validate that
+        // dispatch over PyList works regardless of which API it comes from.
         let builtins = handle_of(import_module("builtins").unwrap());
         let list_cls = handle_of(get_attr(&builtins, "list").unwrap());
         let v = ok_inner(call(&list_cls, &[Value::Str("abc".into())]).unwrap());
@@ -1250,8 +1250,8 @@ mod tests {
 
     #[test]
     fn pydict_directo_de_python_se_coerce_a_map() {
-        // `dict(zip(["a", "b"], [1, 2]))` en Python da `{"a": 1, "b": 2}`.
-        // Validamos un dict construido en runtime, no un JSON loads.
+        // `dict(zip(["a", "b"], [1, 2]))` in Python gives `{"a": 1, "b": 2}`.
+        // We validate a dict built at runtime, not a JSON loads.
         let builtins = handle_of(import_module("builtins").unwrap());
         let dict_cls = handle_of(get_attr(&builtins, "dict").unwrap());
         let zip_fn = handle_of(get_attr(&builtins, "zip").unwrap());
@@ -1270,8 +1270,8 @@ mod tests {
 
     #[test]
     fn campo_no_marshalleable_en_instance_es_error_con_path() {
-        // 8.3: Range como valor de un field → `Result::Err(Str)` con
-        // path "arg0.User.<field>" o similar.
+        // 8.3: Range as a field value → `Result::Err(Str)` with
+        // path "arg0.User.<field>" or similar.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let user = Value::new_instance(
@@ -1285,7 +1285,7 @@ mod tests {
         let msg = err_message(v);
         assert!(
             msg.contains("Range")
-                && msg.contains("range")  // el field se llama "range"
+                && msg.contains("range")  // the field is called "range"
                 && msg.contains("arg0"),
             "msg: {}",
             msg,
@@ -1293,14 +1293,14 @@ mod tests {
     }
 
     // -------------------------------------------------------------------
-    // 8.3 — Wrap automático en Result<T> + formato de error
+    // 8.3 — Automatic wrap in Result<T> + error format
     // -------------------------------------------------------------------
 
     #[test]
     fn call_exitoso_devuelve_value_result_ok() {
-        // Validación explícita del shape: el `Value` que devuelve `call`
-        // siempre es `Value::Result(Ok(...))` para éxito (no
-        // `Value::Float` directo). Confirma el invariante del 8.3.
+        // Explicit shape validation: the `Value` returned by `call`
+        // is always `Value::Result(Ok(...))` for success (not
+        // `Value::Float` directly). Confirms the 8.3 invariant.
         let math = handle_of(import_module("math").unwrap());
         let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
         let v = call(&sqrt, &[Value::Float(16.0)]).unwrap();
@@ -1313,7 +1313,7 @@ mod tests {
 
     #[test]
     fn call_jsonloads_malformado_es_err_con_jsondecodeerror() {
-        // Criterio textual del roadmap 8.3:
+        // Textual criterion of the 8.3 roadmap:
         //   match parse("{ malformado") {
         //     Ok(m)  => print("ok: {m}"),
         //     Err(e) => print("error: {e}")
@@ -1332,8 +1332,8 @@ mod tests {
 
     #[test]
     fn call_typeerror_python_se_envuelve_no_aborta() {
-        // `int("no es un número")` lanza ValueError. El call no
-        // aborta — el Err contiene el mensaje legible.
+        // `int("no es un número")` raises ValueError. The call does not
+        // abort — the Err contains the readable message.
         let builtins = handle_of(import_module("builtins").unwrap());
         let int_cls = handle_of(get_attr(&builtins, "int").unwrap());
         let v = call(&int_cls, &[Value::Str("no es un número".into())]).unwrap();
@@ -1347,15 +1347,15 @@ mod tests {
 
     #[test]
     fn call_formato_err_es_classname_dos_puntos_message() {
-        // El formato canónico `<ClassName>: <message>` queda estable
-        // bit-a-bit entre 8.1 y 8.3 (solo cambia el envoltorio:
-        // FitzError → Value::Result(Err(Str))). Tests futuros que
-        // dependan del formato exacto se apoyan en esto.
+        // The canonical `<ClassName>: <message>` format stays bit-exact
+        // between 8.1 and 8.3 (only the wrapper changes:
+        // FitzError → Value::Result(Err(Str))). Future tests that
+        // depend on the exact format lean on this.
         let builtins = handle_of(import_module("builtins").unwrap());
         let int_cls = handle_of(get_attr(&builtins, "int").unwrap());
         let v = call(&int_cls, &[Value::Str("zz".into())]).unwrap();
         let msg = err_message(v);
-        // Forma esperada: "ValueError: invalid literal for int() with base 10: 'zz'"
+        // Expected form: "ValueError: invalid literal for int() with base 10: 'zz'"
         let parts: Vec<&str> = msg.splitn(2, ": ").collect();
         assert_eq!(
             parts.len(),

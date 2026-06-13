@@ -1,46 +1,46 @@
-// py_types.rs — Fase 8.5: auto-mapeo de modelos SQLAlchemy a `type`
-// de Fitz.
+// py_types.rs — Phase 8.5: auto-mapping of SQLAlchemy models to Fitz
+// `type`s.
 //
-// El sub-comando `fitz py-types <archivo.py> [--out <archivo.fitz>]`
-// invoca `generate_from_file(path)` que:
+// The `fitz py-types <file.py> [--out <file.fitz>]` sub-command
+// invokes `generate_from_file(path)` which:
 //
-//   1. Toma el GIL via `Python::attach`.
-//   2. Importa el archivo Python como módulo dinámico via
+//   1. Takes the GIL via `Python::attach`.
+//   2. Imports the Python file as a dynamic module via
 //      `importlib.util.spec_from_file_location` + `module_from_spec`.
-//   3. Itera el `__dict__` del módulo buscando clases (top-level) con
-//      atributo `__table__.columns`. Duck typing: compatible con
-//      SQLAlchemy real (`DeclarativeBase` subclasses) y con mocks que
-//      cumplan el mismo contract (`column.name`, `column.type`,
+//   3. Iterates the module's `__dict__` looking for (top-level) classes with
+//      `__table__.columns` attribute. Duck typing: compatible with
+//      real SQLAlchemy (`DeclarativeBase` subclasses) and with mocks that
+//      satisfy the same contract (`column.name`, `column.type`,
 //      `column.nullable`, `column.default`).
-//   4. Por cada clase, emite un bloque `type ClassName { f1: T1, ... }`
-//      siguiendo el mapping del roadmap.
+//   4. For each class, emits a `type ClassName { f1: T1, ... }` block
+//      following the roadmap mapping.
 //
-// Decisiones de diseño (alineadas con roadmap 8.5):
+// Design decisions (aligned with the 8.5 roadmap):
 //
-//   - **In-process via PyO3** (no subprocess). Reusa el GIL + dep
-//     PyO3 ya disponible con `--features python`. Sin feature el
-//     sub-comando aborta antes de llegar acá.
-//   - **Duck typing** (`__table__.columns`) en vez de `isinstance`
-//     contra `DeclarativeBase`. Permite tests con mocks sin requerir
-//     SQLAlchemy real instalado; funciona igual con SQLAlchemy real.
-//   - **Solo top-level del archivo** importado. Modelos heredados
-//     de bases externas (`from app.models_base import Base`) se
-//     detectan por el shape, no por la herencia.
-//   - **Mapping conservador**: tipos primitivos directos, DateTime
-//     → Str (ISO 8601), desconocidos → `Any` con comentario `// ?`
-//     para que el usuario los marque a mano.
-//   - **Defaults solo literales** (Int/Float/Str/Bool/None). Defaults
-//     callable (`default=datetime.utcnow`) se ignoran silenciosamente
-//     — emitir `= func()` no aporta y puede confundir.
+//   - **In-process via PyO3** (no subprocess). Reuses the GIL + PyO3
+//     dep already available with `--features python`. Without the feature
+//     the sub-command aborts before getting here.
+//   - **Duck typing** (`__table__.columns`) instead of `isinstance`
+//     against `DeclarativeBase`. Allows tests with mocks without requiring
+//     real SQLAlchemy installed; works the same with real SQLAlchemy.
+//   - **Only top-level of the imported file**. Models inherited
+//     from external bases (`from app.models_base import Base`) are
+//     detected by shape, not by inheritance.
+//   - **Conservative mapping**: direct primitive types, DateTime
+//     → Str (ISO 8601), unknowns → `Any` with a `// ?` comment
+//     so the user can mark them by hand.
+//   - **Only literal defaults** (Int/Float/Str/Bool/None). Callable
+//     defaults (`default=datetime.utcnow`) are silently ignored
+//     — emitting `= func()` adds no value and can confuse.
 
 use std::path::Path;
 
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyString};
 
-/// Punto de entrada. Importa `source` con PyO3 + introspecciona +
-/// genera el texto Fitz. Devuelve el texto generado o un error
-/// legible para el caller (que decide stdout vs archivo).
+/// Entry point. Imports `source` with PyO3 + introspects +
+/// generates the Fitz text. Returns the generated text or a readable
+/// error for the caller (which decides stdout vs file).
 pub fn generate_from_file(source: &Path) -> Result<String, String> {
     let abs = source
         .canonicalize()
@@ -74,11 +74,11 @@ pub fn generate_from_file(source: &Path) -> Result<String, String> {
     })
 }
 
-/// Importa un archivo Python como módulo dinámico usando
-/// `importlib.util`. El nombre del módulo es solo cosmético — lo
-/// importante es la ruta absoluta. La importación ejecuta el código
-/// top-level (definiciones de clases, etc.), así que si el archivo
-/// tiene side-effects pesados (conexiones DB, etc.) van a correr.
+/// Imports a Python file as a dynamic module using
+/// `importlib.util`. The module name is only cosmetic — what
+/// matters is the absolute path. The import runs the top-level
+/// code (class definitions, etc.), so if the file
+/// has heavy side-effects (DB connections, etc.) they will run.
 fn import_file_as_module<'py>(
     py: Python<'py>,
     abs_path: &str,
@@ -98,8 +98,8 @@ fn import_file_as_module<'py>(
     Ok(module)
 }
 
-/// Recolecta los modelos del módulo importado. Un "modelo" es
-/// cualquier clase top-level con atributo `__table__.columns`.
+/// Collects models from the imported module. A "model" is
+/// any top-level class with `__table__.columns` attribute.
 fn collect_models<'py>(py: Python<'py>, module: &Bound<'py, PyAny>) -> PyResult<Vec<Model>> {
     let module_name: String = module.getattr("__name__")?.extract()?;
     let dict = module.getattr("__dict__")?;
@@ -110,11 +110,11 @@ fn collect_models<'py>(py: Python<'py>, module: &Bound<'py, PyAny>) -> PyResult<
             Ok(s) => s.to_string(),
             Err(_) => continue,
         };
-        // Filtrar dunders.
+        // Filter dunders.
         if name.starts_with('_') {
             continue;
         }
-        // Tiene que ser una clase.
+        // Has to be a class.
         let builtins = py.import("builtins")?;
         let isinstance: bool = builtins
             .call_method1("isinstance", (&value_obj, builtins.getattr("type")?))?
@@ -122,8 +122,8 @@ fn collect_models<'py>(py: Python<'py>, module: &Bound<'py, PyAny>) -> PyResult<
         if !isinstance {
             continue;
         }
-        // Solo clases definidas EN este módulo (filtra los re-exports
-        // de SQLAlchemy mismo: `Base`, `Column`, `Integer`, etc.).
+        // Only classes defined IN this module (filters out re-exports
+        // of SQLAlchemy itself: `Base`, `Column`, `Integer`, etc.).
         let cls_module: String = match value_obj.getattr("__module__") {
             Ok(m) => m.extract().unwrap_or_default(),
             Err(_) => continue,
@@ -131,7 +131,7 @@ fn collect_models<'py>(py: Python<'py>, module: &Bound<'py, PyAny>) -> PyResult<
         if cls_module != module_name {
             continue;
         }
-        // Duck typing: ¿tiene __table__.columns?
+        // Duck typing: does it have __table__.columns?
         let table = match value_obj.getattr("__table__") {
             Ok(t) => t,
             Err(_) => continue,
@@ -146,8 +146,8 @@ fn collect_models<'py>(py: Python<'py>, module: &Bound<'py, PyAny>) -> PyResult<
     Ok(models)
 }
 
-/// Recolecta los campos de la colección `columns` de una tabla. La
-/// colección debe ser iterable y dar objetos con
+/// Collects the fields of a table's `columns` collection. The
+/// collection must be iterable and yield objects with
 /// `(name, type, nullable, default)`.
 fn collect_fields<'py>(py: Python<'py>, columns: &Bound<'py, PyAny>) -> PyResult<Vec<Field>> {
     let iter = columns.try_iter()?;
@@ -172,19 +172,19 @@ fn collect_fields<'py>(py: Python<'py>, columns: &Bound<'py, PyAny>) -> PyResult
     Ok(fields)
 }
 
-/// Mapea un tipo SQLAlchemy a un nombre de tipo Fitz. La inspección
-/// es por nombre de clase del objeto `Column.type` para no requerir
-/// importar sqlalchemy directamente. Tipos desconocidos producen
-/// `Any` (con `// ?` en el output como pista al usuario).
+/// Maps a SQLAlchemy type to a Fitz type name. Inspection
+/// is by the class name of the `Column.type` object so we do not need
+/// to import sqlalchemy directly. Unknown types produce
+/// `Any` (with `// ?` in the output as a hint to the user).
 fn python_type_to_fitz_type<'py>(
     _py: Python<'py>,
     py_type: &Bound<'py, PyAny>,
 ) -> PyResult<FitzType> {
     let cls = py_type.get_type();
     let cls_name: String = cls.name()?.to_string();
-    // El mapping va por el nombre canónico de la clase SQLAlchemy.
-    // Soporta tanto `Column(Integer)` (donde `type` es una instancia
-    // de `Integer`) como type-as-class (raro pero posible).
+    // The mapping is by the canonical SQLAlchemy class name.
+    // Supports both `Column(Integer)` (where `type` is an instance
+    // of `Integer`) and type-as-class (rare but possible).
     let mapped = match cls_name.as_str() {
         "Integer" | "BigInteger" | "SmallInteger" | "INTEGER" | "BIGINT" | "SMALLINT" => {
             FitzType::Int
@@ -198,11 +198,11 @@ fn python_type_to_fitz_type<'py>(
     Ok(mapped)
 }
 
-/// Extrae el valor del default si es un literal simple (Int/Float/
-/// Str/Bool/None). Defaults callable (`default=datetime.utcnow`) se
-/// ignoran silenciosamente. SQLAlchemy envuelve los defaults en
-/// `ColumnDefault(arg=<valor>)` — accedemos a `.arg` y filtramos
-/// callables con `inspect.isfunction`/`callable`.
+/// Extracts the default value if it is a simple literal (Int/Float/
+/// Str/Bool/None). Callable defaults (`default=datetime.utcnow`) are
+/// silently ignored. SQLAlchemy wraps defaults in
+/// `ColumnDefault(arg=<value>)` — we access `.arg` and filter out
+/// callables with `inspect.isfunction`/`callable`.
 fn extract_default<'py>(
     py: Python<'py>,
     column: &Bound<'py, PyAny>,
@@ -211,13 +211,13 @@ fn extract_default<'py>(
         Ok(d) if !d.is_none() => d,
         _ => return Ok(None),
     };
-    // SQLAlchemy: `default` puede ser un `ColumnDefault` con `.arg`,
-    // o un literal directo. Probamos ambos.
+    // SQLAlchemy: `default` can be a `ColumnDefault` with `.arg`,
+    // or a direct literal. We try both.
     let value = match default.getattr("arg") {
         Ok(arg) => arg,
         Err(_) => default,
     };
-    // Si es callable, lo ignoramos.
+    // If it is callable, we ignore it.
     let builtins = py.import("builtins")?;
     let is_callable: bool = builtins.call_method1("callable", (&value,))?.extract()?;
     if is_callable {
@@ -226,7 +226,7 @@ fn extract_default<'py>(
     if value.is_none() {
         return Ok(Some(FitzLiteral::Null));
     }
-    // Tipo Python → literal Fitz. Cuidado: bool antes que int.
+    // Python type → Fitz literal. Care: bool before int.
     if let Ok(b) = value.extract::<bool>() {
         let bool_type = builtins.getattr("bool")?;
         let is_bool: bool = builtins
@@ -245,11 +245,11 @@ fn extract_default<'py>(
     if let Ok(s) = value.extract::<String>() {
         return Ok(Some(FitzLiteral::Str(s)));
     }
-    // Tipo no representable como literal Fitz — lo ignoramos.
+    // Type not representable as a Fitz literal — we ignore it.
     Ok(None)
 }
 
-/// Emite un bloque `type Name { ... }` con los fields.
+/// Emits a `type Name { ... }` block with the fields.
 fn emit_type(model: &Model, out: &mut String) {
     out.push_str(&format!("type {} {{\n", model.name));
     let n = model.fields.len();
@@ -270,7 +270,7 @@ fn emit_type(model: &Model, out: &mut String) {
             Some(lit) => format!(" = {}", emit_literal(lit)),
             None => String::new(),
         };
-        // Comentario para tipos desconocidos: pista para el usuario.
+        // Comment for unknown types: hint for the user.
         let comment = match &f.fitz_type {
             FitzType::Unknown(name) => format!("  // ? tipo SQLAlchemy `{}` mapeado a Any", name),
             _ => String::new(),
@@ -315,13 +315,13 @@ fn pyerr_to_string(py: Python<'_>, err: PyErr) -> String {
     }
 }
 
-/// Suprime warnings de unused — usado solo en el path de
-/// introspección que itera el `__dict__` del módulo.
+/// Suppresses unused warnings — used only in the introspection
+/// path that iterates the module's `__dict__`.
 #[allow(dead_code)]
 fn _suppress_unused(_pl: &PyList) {}
 
 // ---------------------------------------------------------------------------
-// Datos internos
+// Internal data
 // ---------------------------------------------------------------------------
 
 struct Model {
@@ -362,9 +362,9 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
-    /// Helper: escribe `code` Python a un archivo temporal y corre
-    /// `generate_from_file` contra él. Devuelve el output emitido o
-    /// el mensaje de error.
+    /// Helper: writes `code` Python to a temp file and runs
+    /// `generate_from_file` against it. Returns the emitted output or
+    /// the error message.
     fn run(code: &str) -> Result<String, String> {
         let mut f = NamedTempFile::with_suffix(".py").expect("tempfile");
         f.write_all(code.as_bytes()).expect("write");
@@ -372,8 +372,8 @@ mod tests {
         generate_from_file(f.path())
     }
 
-    /// Mock de un modelo SQLAlchemy. Cumple el contract `__table__.columns`
-    /// que la introspección espera, sin requerir SQLAlchemy instalado.
+    /// Mock of a SQLAlchemy model. Satisfies the `__table__.columns`
+    /// contract that introspection expects, without requiring SQLAlchemy installed.
     const MOCK_BOILERPLATE: &str = "\
 class Column:
     def __init__(self, type_, nullable=False, default=None):
@@ -385,8 +385,8 @@ class _Columns:
     def __init__(self, items):
         self._items = items
         for c in items:
-            # Hack para que el iter dé el nombre: el caller setea
-            # `name` antes de meter la Column en _Columns.
+            # Hack so the iter yields the name: the caller sets
+            # `name` before putting the Column into _Columns.
             pass
     def __iter__(self):
         return iter(self._items)
@@ -460,8 +460,8 @@ class DateTime: pass
 
     #[test]
     fn default_callable_se_ignora() {
-        // `default=callable` es común en SQLAlchemy (`default=datetime.utcnow`);
-        // emitir `= func()` no aporta, lo ignoramos.
+        // `default=callable` is common in SQLAlchemy (`default=datetime.utcnow`);
+        // emitting `= func()` adds nothing, we ignore it.
         let code = format!(
             "{}\nimport datetime\nclass T:\n    __table__ = _Table([\n        _named('created_at', Column(DateTime(), default=datetime.datetime.utcnow)),\n    ])\n",
             MOCK_BOILERPLATE
@@ -518,7 +518,7 @@ class DateTime: pass
 
     #[test]
     fn clases_sin_table_attribute_se_ignoran() {
-        // `Helper` no tiene `__table__` — debe filtrarse.
+        // `Helper` does not have `__table__` — must be filtered out.
         let code = format!(
             "{}\nclass Helper:\n    def hello(self): pass\nclass User:\n    __table__ = _Table([_named('id', Column(Integer()))])\n",
             MOCK_BOILERPLATE

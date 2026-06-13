@@ -1,41 +1,41 @@
-// pyi_loader.rs — Auto-pickup de stubs `.pyi` adyacentes al .fitz raíz.
+// pyi_loader.rs — Auto-pickup of `.pyi` stubs adjacent to the root .fitz.
 //
-// Fase 8-pyi.B (v0.9.57): cuando el programa contiene `from python
-// import foo` (o `from python import foo as bar`), buscamos
-// `<base_dir>/foo.pyi` adyacente al archivo `.fitz` que arranca la
-// ejecución. Si existe, parseamos con `pyi_stub::parse_stub` y
-// registramos los nominales declarados al `TypeEnv` ANTES de invocar
-// al checker. Resultado: el user puede escribir `let u: User =
-// requests.fetch(...)?` con `User` declarado en `requests.pyi`, y el
-// checker resuelve el nominal en lugar de fallar con "tipo
-// desconocido".
+// Phase 8-pyi.B (v0.9.57): when the program contains `from python
+// import foo` (or `from python import foo as bar`), we look for
+// `<base_dir>/foo.pyi` adjacent to the `.fitz` file that starts
+// execution. If it exists, we parse with `pyi_stub::parse_stub` and
+// register the declared nominals in the `TypeEnv` BEFORE invoking
+// the checker. Result: the user can write `let u: User =
+// requests.fetch(...)?` with `User` declared in `requests.pyi`, and the
+// checker resolves the nominal instead of failing with "unknown
+// type".
 //
-// **Política de errores** (silent fallback):
-// - `foo.pyi` no existe → no hay stub, binding sigue como
-//   `Type::PyAny` opaco (comportamiento actual).
-// - `foo.pyi` existe pero falla al parsear → warning a stderr,
-//   binding sigue como `Type::PyAny` (no rompe el build).
-// - `foo.pyi` parsea OK pero un item tiene tipo no resoluble →
-//   `stub_type_to_fitz_type` ya devuelve `Type::Any` como fallback
-//   gradual (cero overhead extra).
+// **Error policy** (silent fallback):
+// - `foo.pyi` does not exist → no stub, binding stays as
+//   opaque `Type::PyAny` (current behavior).
+// - `foo.pyi` exists but fails to parse → warning to stderr,
+//   binding stays as `Type::PyAny` (does not break the build).
+// - `foo.pyi` parses OK but an item has a non-resolvable type →
+//   `stub_type_to_fitz_type` already returns `Type::Any` as gradual
+//   fallback (zero extra overhead).
 //
-// **Política de búsqueda** (decisión 8-pyi.B): solo adyacente al
-// `.fitz` raíz. NO recorre `PYTHONPATH` ni `site-packages`. La idea
-// es que el user copie/genere el `.pyi` proyecto-local (vía
-// `fitz py-stubs <archivo.py>`) y lo commitee — paridad
-// reproducible entre máquinas, cero magia ambiente.
+// **Search policy** (8-pyi.B decision): only adjacent to the
+// root `.fitz`. We do NOT walk `PYTHONPATH` or `site-packages`. The idea
+// is that the user copies/generates the project-local `.pyi` (via
+// `fitz py-stubs <file.py>`) and commits it — reproducible
+// parity across machines, zero environment magic.
 //
-// **Cobertura del MVP**:
-// - Nominales (`class Foo:`): registrados en `TypeEnv` con fields. ✓
-// - Fns (`def name(args) -> ret`): resueltos para uso futuro (8-pyi.C
-//   field access tipado), no bindeados todavía como Function al scope
-//   del checker en este sub-paso.
-// - Vars top-level (`name: type`): idem fns — resueltos pero no
-//   bindeados a scope en 8-pyi.B.
+// **MVP coverage**:
+// - Nominals (`class Foo:`): registered in `TypeEnv` with fields. ✓
+// - Fns (`def name(args) -> ret`): resolved for future use (8-pyi.C
+//   typed field access), not yet bound as Function to the checker's
+//   scope in this sub-step.
+// - Top-level vars (`name: type`): same as fns — resolved but not
+//   bound to scope in 8-pyi.B.
 //
-// El binding `foo` del `from python import foo` sigue tipando como
-// `Type::PyAny` en 8-pyi.B; field access tipado (`foo.bar`) llega
-// en 8-pyi.C.
+// The `foo` binding of `from python import foo` still types as
+// `Type::PyAny` in 8-pyi.B; typed field access (`foo.bar`) arrives
+// in 8-pyi.C.
 
 use crate::ast::{Program, Stmt};
 use crate::pyi_stub::{self, ResolvedStubItem, StubItem};
@@ -43,56 +43,56 @@ use crate::types::{ResolvedField, Type, TypeEnv};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Stub cargado desde disco, parseado y con sus items resueltos
-/// contra el TypeEnv. El `module_name` es el nombre original del
-/// import (`from python import foo` → `module_name = "foo"`). El
-/// `alias` es el binding local (`from python import foo as bar` →
+/// Stub loaded from disk, parsed and with items resolved
+/// against the TypeEnv. The `module_name` is the original
+/// import name (`from python import foo` → `module_name = "foo"`). The
+/// `alias` is the local binding (`from python import foo as bar` →
 /// `module_name = "foo"`, `alias = Some("bar")`).
 #[derive(Debug, Clone)]
 pub struct LoadedStub {
-    /// Nombre del módulo Python (el `foo` de `from python import foo`).
-    /// Coincide con el stem del archivo `.pyi`.
+    /// Name of the Python module (the `foo` of `from python import foo`).
+    /// Matches the stem of the `.pyi` file.
     pub module_name: String,
-    /// Alias local si el import usa `as` (`from python import foo as bar`
-    /// → `Some("bar")`). Sin alias → `None`.
+    /// Local alias if the import uses `as` (`from python import foo as bar`
+    /// → `Some("bar")`). No alias → `None`.
     pub alias: Option<String>,
-    /// Items resueltos del stub, con tipos Fitz ya materializados.
+    /// Resolved items from the stub, with Fitz types already materialized.
     pub items: Vec<ResolvedStubItem>,
-    /// Path absoluto al archivo `.pyi` cargado. Útil para diagnósticos
-    /// y go-to-definition futuro.
+    /// Absolute path to the loaded `.pyi` file. Useful for diagnostics
+    /// and future go-to-definition.
     pub stub_path: PathBuf,
 }
 
 impl LoadedStub {
-    /// Devuelve el nombre con el que el binding aparece en el scope
-    /// local del checker (alias si está, sino module_name).
+    /// Returns the name with which the binding appears in the checker's
+    /// local scope (alias if present, otherwise module_name).
     pub fn binding_name(&self) -> &str {
         self.alias.as_deref().unwrap_or(&self.module_name)
     }
 }
 
-/// Walkea el `program` buscando `Stmt::FromImport { path: ["python"],
-/// names }`, intenta cargar `<base_dir>/<name>.pyi` por cada nombre,
-/// parsea, registra los items en `env`, y devuelve la lista de stubs
-/// cargados. Errores no críticos (archivo no existe, parse error)
-/// degradan silentemente — el binding sigue como `Type::PyAny`.
+/// Walks `program` looking for `Stmt::FromImport { path: ["python"],
+/// names }`, tries to load `<base_dir>/<name>.pyi` for each name,
+/// parses, registers the items in `env`, and returns the list of loaded
+/// stubs. Non-critical errors (file does not exist, parse error)
+/// degrade silently — the binding stays as `Type::PyAny`.
 ///
-/// `base_dir` es el directorio donde vive el archivo `.fitz` raíz que
-/// arranca `fitz run`/`fitz build`/`fitz check`. Para `fitz check`/`run`
-/// con manifest mode, sigue siendo el dir del entry `.fitz` resuelto.
+/// `base_dir` is the directory where the root `.fitz` that
+/// starts `fitz run`/`fitz build`/`fitz check` lives. For `fitz check`/`run`
+/// with manifest mode, it is still the dir of the resolved `.fitz` entry.
 ///
-/// El `env` se muta en cada call (cada nominal del stub se registra
-/// como side-effect). Pasarlo como `&mut` simplifica el ownership;
-/// devolver el listado `LoadedStub` permite que el checker bindee los
-/// alias correctamente.
+/// `env` is mutated on each call (each stub nominal is registered
+/// as a side-effect). Passing it as `&mut` simplifies ownership;
+/// returning the `LoadedStub` listing allows the checker to bind the
+/// aliases correctly.
 pub fn load_stubs(program: &Program, base_dir: &Path, env: &mut TypeEnv) -> Vec<LoadedStub> {
-    // 8-pyi.B: pre-scan del programa para identificar tipos que el
-    // .fitz ya declara. Skipeamos classes del stub con ese nombre para
-    // evitar `declare_nominal` redundante en `resolve_program` después
-    // (política "el .fitz gana sobre el .pyi"). Built-ins del runtime
-    // HTTP (`Request`, `Response`, `File`) también van al skip set:
-    // resolve_program los registra incondicionalmente en vuelta 0 y un
-    // stub `class Request: ...` haría panic.
+    // 8-pyi.B: pre-scan the program to identify types that the
+    // .fitz already declares. We skip stub classes with that name to
+    // avoid redundant `declare_nominal` in `resolve_program` later
+    // ("the .fitz wins over the .pyi" policy). Built-ins from the HTTP
+    // runtime (`Request`, `Response`, `File`) also go to the skip set:
+    // resolve_program registers them unconditionally in round 0 and a
+    // `class Request: ...` stub would panic.
     let mut skip_class_names = pre_scan_program_type_names(program);
     skip_class_names.insert("Request".to_string());
     skip_class_names.insert("Response".to_string());
@@ -101,7 +101,7 @@ pub fn load_stubs(program: &Program, base_dir: &Path, env: &mut TypeEnv) -> Vec<
     let mut loaded = Vec::new();
     for stmt in program {
         if let Stmt::FromImport { path, names, .. } = stmt {
-            // Solo nos interesa `from python import X[, Y as z]`.
+            // We only care about `from python import X[, Y as z]`.
             if path.first().map(String::as_str) != Some("python") {
                 continue;
             }
@@ -117,9 +117,9 @@ pub fn load_stubs(program: &Program, base_dir: &Path, env: &mut TypeEnv) -> Vec<
     loaded
 }
 
-/// Devuelve el set de nombres de tipos declarados por el programa
-/// (`type X { ... }` top-level). Usado por `load_stubs` para skipear
-/// classes del stub con el mismo nombre.
+/// Returns the set of type names declared by the program
+/// (top-level `type X { ... }`). Used by `load_stubs` to skip
+/// stub classes with the same name.
 fn pre_scan_program_type_names(program: &Program) -> HashSet<String> {
     let mut names = HashSet::new();
     for stmt in program {
@@ -130,14 +130,14 @@ fn pre_scan_program_type_names(program: &Program) -> HashSet<String> {
     names
 }
 
-/// Intenta cargar `<base_dir>/<name>.pyi`. Devuelve `Some(LoadedStub)`
-/// si encuentra y parsea OK; `None` si el archivo no existe o el parse
-/// falla. En caso de parse fallido emite un warning a stderr citando
-/// el archivo y el mensaje, pero no aborta — política silent fallback.
+/// Tries to load `<base_dir>/<name>.pyi`. Returns `Some(LoadedStub)`
+/// if found and parsed OK; `None` if the file does not exist or the parse
+/// fails. On a failed parse it emits a warning to stderr citing
+/// the file and the message, but does not abort — silent fallback policy.
 ///
-/// `skip_class_names`: classes del stub con nombre en este set se
-/// excluyen del registro al TypeEnv (evita choque con `type X` del
-/// programa que `resolve_program` declara más adelante).
+/// `skip_class_names`: stub classes whose name is in this set are
+/// excluded from TypeEnv registration (avoids clashing with the
+/// program's `type X` that `resolve_program` declares later).
 fn load_one_stub(
     name: &str,
     alias: Option<&str>,
@@ -171,20 +171,20 @@ fn load_one_stub(
             return None;
         }
     };
-    // 8-pyi.B: solo materializamos `class` declarations (registramos
-    // los nominales en el TypeEnv). Fns y vars top-level se ignoran
-    // en este sub-paso — su uso real es para field access tipado
-    // (`api.fetch_user(...)`), que llega en 8-pyi.C. Procesarlas acá
-    // tiene un side-effect indeseado: `stub_type_to_fitz_type` sobre
-    // el ret/params de una fn que referencia una class skipeada (la
-    // declara el .fitz) auto-registraría ese nominal en el env, y
-    // después `resolve_program` haría panic con "tipo declarado más
-    // de una vez".
+    // 8-pyi.B: we only materialize `class` declarations (register
+    // the nominals in the TypeEnv). Top-level fns and vars are ignored
+    // in this sub-step — their real use is for typed field access
+    // (`api.fetch_user(...)`), which arrives in 8-pyi.C. Processing them here
+    // has an undesired side-effect: `stub_type_to_fitz_type` over
+    // the ret/params of a fn that references a skipped class (declared by the
+    // .fitz) would auto-register that nominal in the env, and
+    // later `resolve_program` would panic with "type declared more
+    // than once".
     let filtered: Vec<StubItem> = items
         .into_iter()
         .filter(|it| match it {
             StubItem::Class(c) => !skip_class_names.contains(&c.name),
-            // Skip fns y vars top-level por completo en B; llegan en C.
+            // Skip top-level fns and vars entirely in B; they come in C.
             _ => false,
         })
         .collect();
@@ -197,29 +197,29 @@ fn load_one_stub(
     })
 }
 
-/// 8-pyi.C: pase 2 del loader. Procesa fns y vars top-level de cada
-/// stub cargado en pase 1 (`load_stubs`) y registra un nominal
-/// sintético por módulo con un field por cada callable o variable.
-/// Llamado por el caller (típicamente `main.rs`) DESPUÉS de
-/// `resolve_program` para que los nominales declarados en el .fitz
-/// (que las fns del stub pueden mencionar en su ret type) ya estén
-/// disponibles.
+/// 8-pyi.C: loader pass 2. Processes top-level fns and vars of each
+/// stub loaded in pass 1 (`load_stubs`) and registers a synthetic
+/// nominal per module with one field per callable or variable.
+/// Called by the caller (typically `main.rs`) AFTER
+/// `resolve_program` so that the nominals declared in the .fitz
+/// (which the stub fns may mention in their ret type) are already
+/// available.
 ///
-/// El nominal sintético se llama `__pyi_module_<binding_name>`
-/// (`binding_name` = alias si el import lo tiene, sino module_name).
-/// El mapeo se guarda en `env.set_pyi_module(binding, id)` para que
-/// el checker pueda consultarlo desde `Stmt::FromImport`.
+/// The synthetic nominal is named `__pyi_module_<binding_name>`
+/// (`binding_name` = alias if the import has it, else module_name).
+/// The mapping is saved in `env.set_pyi_module(binding, id)` so
+/// the checker can look it up from `Stmt::FromImport`.
 ///
-/// **Convención de ret type para fns**: las fns del stub se
-/// materializan con su `ret` envuelto en `Result<ret, Str>` para
-/// reflejar el modelo runtime de 8.3 (calls Python se wrapean
-/// automáticamente en `Result` por el evaluator). Esto permite que
-/// el call site `foo.fn(x)` tipe directo a `Result<T>` sin extra
-/// refinamiento.
+/// **Ret type convention for fns**: the stub fns are
+/// materialized with their `ret` wrapped in `Result<ret, Str>` to
+/// reflect the 8.3 runtime model (Python calls are wrapped
+/// automatically in `Result` by the evaluator). This lets
+/// the `foo.fn(x)` call site type directly as `Result<T>` without extra
+/// refinement.
 ///
-/// **Silent fallback**: si re-leer el stub falla (race rara: el
-/// archivo se borró entre pase 1 y pase 2), simplemente skipea ese
-/// módulo. El binding queda como `Type::PyAny` opaco.
+/// **Silent fallback**: if re-reading the stub fails (rare race: the
+/// file was deleted between pass 1 and pass 2), we simply skip that
+/// module. The binding stays as opaque `Type::PyAny`.
 pub fn load_callables(stubs: &[LoadedStub], env: &mut TypeEnv) {
     for stub in stubs {
         load_callables_for_one(stub, env);
@@ -246,10 +246,10 @@ fn load_callables_for_one(stub: &LoadedStub, env: &mut TypeEnv) {
                     .map(|p| pyi_stub::stub_type_to_fitz_type(&p.ty, env))
                     .collect();
                 let ret = pyi_stub::stub_type_to_fitz_type(&f.ret, env);
-                // Auto-wrap en Result<ret, Str> — paralelo al modelo
-                // runtime de 8.3 donde TODA call Python se envuelve en
-                // Result. Así el call site `foo.fn(x)` tipa directo a
-                // `Result<T>` y el checker exige match/`?` exhaustivo.
+                // Auto-wrap in Result<ret, Str> — parallel to the 8.3
+                // runtime model where EVERY Python call is wrapped in
+                // Result. This way the `foo.fn(x)` call site types directly as
+                // `Result<T>` and the checker requires exhaustive match/`?`.
                 let ret_wrapped = Type::Result {
                     ok: Box::new(ret),
                     err: Box::new(Type::Str),
@@ -269,17 +269,17 @@ fn load_callables_for_one(stub: &LoadedStub, env: &mut TypeEnv) {
                     type_: ty,
                 });
             }
-            StubItem::Class(_) => continue, // ya procesado en pase 1
+            StubItem::Class(_) => continue, // already processed in pass 1
         }
     }
 
-    // Nombre sintético del nominal: prefijo `__pyi_module_` para no
-    // chocar con types del programa.
+    // Synthetic name of the nominal: `__pyi_module_` prefix to not
+    // clash with program types.
     let binding = stub.binding_name();
     let synth_name = format!("__pyi_module_{}", binding);
-    // Si por alguna razón el nominal sintético ya existe (re-corrida
-    // del mismo loader sobre el mismo env, raro pero posible en
-    // tests), reusamos el id existente y reescribimos los fields.
+    // If for some reason the synthetic nominal already exists (re-run
+    // of the same loader on the same env, rare but possible in
+    // tests), we reuse the existing id and overwrite the fields.
     let id = match env.lookup(&synth_name) {
         Some(existing) => existing,
         None => match env.declare_nominal(synth_name) {
@@ -299,14 +299,14 @@ mod tests {
     use crate::types::Type;
     use std::fs;
 
-    /// Builder helper para los tests: parsea source Fitz a Program.
+    /// Builder helper for tests: parses Fitz source to Program.
     fn parse_program(src: &str) -> Program {
         let tokens = tokenize(src).expect("lex OK");
         parse(tokens).expect("parse OK")
     }
 
-    /// Crea un dir temporal con un `.pyi` adyacente. Devuelve el path
-    /// del dir (para usarlo como base_dir) y se autoborra al final.
+    /// Creates a temp dir with an adjacent `.pyi`. Returns the dir's path
+    /// (to use as base_dir); it auto-deletes at the end.
     fn temp_dir_with_stub(stub_name: &str, content: &str) -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir OK");
         let stub_path = dir.path().join(format!("{}.pyi", stub_name));
@@ -329,7 +329,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let mut env = TypeEnv::new();
         let stubs = load_stubs(&program, dir.path(), &mut env);
-        // No hay math.pyi adyacente → silent fallback.
+        // No adjacent math.pyi → silent fallback.
         assert!(stubs.is_empty());
     }
 
@@ -350,7 +350,7 @@ class Order:
         assert_eq!(stubs[0].module_name, "api");
         assert_eq!(stubs[0].alias, None);
         assert_eq!(stubs[0].binding_name(), "api");
-        // `User` y `Order` quedaron registrados como nominales con fields.
+        // `User` and `Order` were registered as nominals with fields.
         let user_id = env.lookup("User").expect("User registrado");
         let user_fields = env
             .info(user_id)
@@ -388,26 +388,26 @@ class Order:
 
     #[test]
     fn loader_pyi_malformado_silent_fallback() {
-        // Stub completamente roto (sintaxis Python inválida que el
-        // parser de pyi_stub debería rechazar).
+        // Completely broken stub (invalid Python syntax that the
+        // pyi_stub parser should reject).
         let stub_src = "def fn( -> oops\n";
         let dir = temp_dir_with_stub("broken", stub_src);
         let program = parse_program("from python import broken");
         let mut env = TypeEnv::new();
         let stubs = load_stubs(&program, dir.path(), &mut env);
-        // Silent fallback: no crashea, devuelve vacío.
+        // Silent fallback: does not crash, returns empty.
         assert!(stubs.is_empty());
-        // Y `broken` no quedó como nominal contaminando el env.
+        // And `broken` did not stay as a nominal contaminating the env.
         assert!(env.lookup("broken").is_none());
     }
 
     #[test]
     fn loader_pyi_solo_fns_skipea_fns_en_b_porque_son_para_c() {
-        // 8-pyi.B política: solo materializamos `class`. Fns/vars del
-        // stub se skipean hasta 8-pyi.C (field access tipado).
-        // Verificamos que `LoadedStub.items` queda vacío para un stub
-        // que solo tiene fns, y que la fn NO contamina el TypeEnv
-        // (auto-registro de nominales del ret type, etc.).
+        // 8-pyi.B policy: we only materialize `class`. Stub fns/vars
+        // are skipped until 8-pyi.C (typed field access).
+        // We verify that `LoadedStub.items` stays empty for a stub
+        // that only has fns, and that the fn does NOT contaminate the TypeEnv
+        // (auto-registration of ret type nominals, etc.).
         let stub_src = "def add(a: int, b: int) -> int: ...\n";
         let dir = temp_dir_with_stub("calc", stub_src);
         let program = parse_program("from python import calc");
@@ -420,7 +420,7 @@ class Order:
         );
     }
 
-    // 8-pyi.C: tests del pase 2 (load_callables).
+    // 8-pyi.C: pass-2 tests (load_callables).
 
     #[test]
     fn callables_registra_nominal_sintetico_con_field_por_fn() {
@@ -477,7 +477,7 @@ def greet(name: str) -> str: ...
         let mut env = TypeEnv::new();
         let stubs = load_stubs(&program, dir.path(), &mut env);
         load_callables(&stubs, &mut env);
-        // El binding del checker es `g`, no `greetings`.
+        // The checker's binding is `g`, not `greetings`.
         assert!(env.pyi_module("g").is_some());
         assert!(env.pyi_module("greetings").is_none());
     }
@@ -500,7 +500,7 @@ def fetch_user(uid: int) -> User: ...
         match &fetch.type_ {
             Type::Function { ret, .. } => match &**ret {
                 Type::Result { ok, .. } => {
-                    // ok side debería ser Nominal(User)
+                    // ok side should be Nominal(User)
                     let user_id = env.lookup("User").expect("User registrado");
                     assert_eq!(**ok, Type::Nominal(user_id));
                 }
@@ -525,13 +525,13 @@ def fetch_user(uid: int) -> User: ...
 
     #[test]
     fn loader_fn_que_referencia_class_skipeada_no_contamina_env() {
-        // Regresión bug 8-pyi.B: el stub tenía `def fn(...) -> User`
-        // donde User ya estaba en skip_set (el programa lo declara
-        // como `type`). Procesar la fn hacía
-        // `stub_type_to_fitz_type(User)` que auto-registraba el
-        // nominal antes de que resolve_program lo declarara,
-        // generando "tipo declarado más de una vez". Fix: skipear
-        // fns/vars en B (no procesarlas para nada).
+        // 8-pyi.B regression bug: the stub had `def fn(...) -> User`
+        // where User was already in skip_set (the program declares it
+        // as `type`). Processing the fn called
+        // `stub_type_to_fitz_type(User)` which auto-registered the
+        // nominal before resolve_program declared it,
+        // producing "type declared more than once". Fix: skip
+        // fns/vars in B (do not process them at all).
         let stub_src = "\
 class User:
     id: int
@@ -542,9 +542,9 @@ def list_users() -> list[User]: ...
         let program = parse_program("type User { id: Int, name: Str }\nfrom python import api\n");
         let mut env = TypeEnv::new();
         let _stubs = load_stubs(&program, dir.path(), &mut env);
-        // El loader NO debe registrar User (el .fitz lo declara).
-        // Tampoco debe haber sido auto-registrado por la fn que lo
-        // referencia.
+        // The loader must NOT register User (the .fitz declares it).
+        // It must also not have been auto-registered by the fn that
+        // references it.
         assert!(
             env.lookup("User").is_none(),
             "User no debe existir en el env hasta que resolve_program lo declare"
@@ -553,27 +553,27 @@ def list_users() -> list[User]: ...
 
     #[test]
     fn loader_no_toca_imports_fitz_normales() {
-        // `from utils import X` (sin `python` prefix) debe ignorarse.
+        // `from utils import X` (without `python` prefix) must be ignored.
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("utils.pyi"), "class Foo:\n    z: int\n").unwrap();
         let program = parse_program("from utils import X");
         let mut env = TypeEnv::new();
         let stubs = load_stubs(&program, dir.path(), &mut env);
-        // No es from python, así que utils.pyi NO se mira.
+        // It is not from python, so utils.pyi is NOT looked at.
         assert!(stubs.is_empty());
         assert!(env.lookup("Foo").is_none());
     }
 
     #[test]
     fn loader_fitz_type_gana_sobre_pyi() {
-        // Si el programa ya tiene `type User { ... }` y el .pyi
-        // también declara `class User: ...`, los fields del .fitz
-        // ganan (no se sobreescriben).
+        // If the program already has `type User { ... }` and the .pyi
+        // also declares `class User: ...`, the .fitz fields
+        // win (they do not get overwritten).
         let stub_src = "class User:\n    id_from_pyi: int\n";
         let dir = temp_dir_with_stub("api", stub_src);
         let program = parse_program("type User { id: Int, name: Str }\nfrom python import api\n");
-        // Primero registramos el nominal Fitz con fields del programa
-        // (simulando lo que hace `resolve_program` antes del loader).
+        // First we register the Fitz nominal with the program's fields
+        // (simulating what `resolve_program` does before the loader).
         let user_id = env_new_with_user_fields(&mut TypeEnv::new());
         let mut env = TypeEnv::new();
         let id = env
@@ -592,13 +592,13 @@ def list_users() -> list[User]: ...
                 },
             ],
         );
-        let _ = (user_id, program); // dummies del scaffold del helper
+        let _ = (user_id, program); // dummies from the helper scaffold
         let _stubs = load_stubs(
             &parse_program("from python import api\n"),
             dir.path(),
             &mut env,
         );
-        // Los fields originales del .fitz siguen intactos.
+        // The original .fitz fields remain intact.
         let info = env.info(id);
         let fields = info.fields.as_ref().expect("User tiene fields");
         assert_eq!(fields[0].name, "id");
@@ -606,8 +606,8 @@ def list_users() -> list[User]: ...
         assert_eq!(fields.len(), 2);
     }
 
-    /// Helper local del test anterior: no hace nada real, solo asegura
-    /// que TypeEnv::new() compila sin imports.
+    /// Local helper for the previous test: does nothing real, just ensures
+    /// that TypeEnv::new() compiles without imports.
     fn env_new_with_user_fields(_env: &mut TypeEnv) -> Option<crate::types::TypeId> {
         None
     }
