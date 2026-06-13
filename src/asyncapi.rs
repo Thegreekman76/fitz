@@ -1,45 +1,46 @@
-// asyncapi.rs — Fase 9.w.2.d
+// asyncapi.rs — Phase 9.w.2.d
 //
-// Generador AsyncAPI 3.0 para handlers `@ws("/path")`. Paralelo a
-// `openapi.rs` pero para el contrato de WebSockets:
+// AsyncAPI 3.0 generator for `@ws("/path")` handlers. Parallel to
+// `openapi.rs` but for the WebSockets contract:
 //
-//   - `OpenAPI 3.1` documenta endpoints HTTP request/response — no
-//     captura el shape de mensajes WS bidireccionales.
-//   - `AsyncAPI 3.0` es el estándar de la industria para event-driven
-//     y streaming APIs: WebSockets, MQTT, Kafka, etc.
+//   - `OpenAPI 3.1` documents HTTP request/response endpoints — it
+//     does not capture the shape of bidirectional WS messages.
+//   - `AsyncAPI 3.0` is the industry standard for event-driven and
+//     streaming APIs: WebSockets, MQTT, Kafka, etc.
 //
-// Fitz emite ambos (sin que el usuario haga nada): `/openapi.json`
-// para los `@get`/`@post`/etc., `/asyncapi.json` para los `@ws`.
-// Cada handler `@ws` contribuye un channel + dos operations (receive
-// y send), con el tipo `T` del `WsConn<T>` serializado a JSON Schema.
-// Auth (`@authenticated`/`@admin`) se documenta con security scheme
-// bearer (paralelo a OpenAPI 9.w.1.e).
+// Fitz emits both (without the user having to do anything):
+// `/openapi.json` for `@get`/`@post`/etc., `/asyncapi.json` for
+// `@ws`. Each `@ws` handler contributes a channel + two operations
+// (receive and send), with the `T` type of `WsConn<T>` serialized
+// to JSON Schema. Auth (`@authenticated`/`@admin`) is documented
+// with the bearer security scheme (parallel to OpenAPI 9.w.1.e).
 //
-// Decisiones de diseño:
+// Design decisions:
 //
-//   - **Emit unconditional cuando hay handlers @ws**: si el programa
-//     tiene al menos un `@ws`, `/asyncapi.json` se sirve. Programas
-//     sin WS no exponen la ruta — paralelo a `/openapi.json` que solo
-//     se emite cuando hay handlers HTTP.
+//   - **Unconditional emit when there are @ws handlers**: if the
+//     program has at least one `@ws`, `/asyncapi.json` is served.
+//     Programs without WS don't expose the route — parallel to
+//     `/openapi.json` which is only emitted when there are HTTP
+//     handlers.
 //
-//   - **Channel por `@ws("/path")`**: cada path declarado es un
-//     channel. El nombre del channel es el path mismo (`/chat`).
+//   - **Channel per `@ws("/path")`**: each declared path is a
+//     channel. The channel name is the path itself (`/chat`).
 //
-//   - **Una message por channel**: el tipo `T` del `WsConn<T>` define
-//     el shape (mismo schema en ambas direcciones — receive y send).
-//     Si en el futuro se soportan direcciones tipadas distintas
-//     (`WsConn<In, Out>`), se separan acá.
+//   - **One message per channel**: the `T` type of `WsConn<T>`
+//     defines the shape (same schema in both directions — receive
+//     and send). If different typed directions are supported in the
+//     future (`WsConn<In, Out>`), they are split here.
 //
-//   - **Operations receive + send**: dos operations por channel, una
-//     en cada dirección. `receive` = cliente → server (`conn.recv()`);
-//     `send` = server → cliente (`conn.send()` / `conn.broadcast()`).
-//     Mismo message ref para ambas.
+//   - **receive + send operations**: two operations per channel,
+//     one in each direction. `receive` = client → server
+//     (`conn.recv()`); `send` = server → client (`conn.send()` /
+//     `conn.broadcast()`). Same message ref for both.
 //
-//   - **Schema embebido in-line por T nominal** (no `$ref`): los
-//     `components/schemas` son OpenAPI-specific. AsyncAPI 3.0 los
-//     soporta también, pero para simplicidad inicial emitimos el
-//     schema directo en `messages.<name>.payload`. Sub-paso futuro
-//     puede unificar ambos via `$ref` cross-spec.
+//   - **In-line embedded schema per nominal T** (not `$ref`):
+//     `components/schemas` is OpenAPI-specific. AsyncAPI 3.0
+//     supports them too, but for initial simplicity we emit the
+//     schema directly under `messages.<name>.payload`. A future
+//     sub-step may unify both via cross-spec `$ref`.
 
 use std::collections::BTreeMap;
 
@@ -49,40 +50,40 @@ use crate::ast::{Decorator, Expr, Program, Stmt, TypeExpr};
 use crate::http::{AuthSpec, HttpRegistry, RouteSpec};
 use crate::openapi::{headers_from_decorators, type_expr_to_schema};
 
-/// 9.w.2-asyncapi-ui — UI embebida estilo Scalar para el schema
-/// AsyncAPI 3.0. Carga el bundle `@asyncapi/react-component` via CDN
-/// y lo apunta a `/asyncapi.json`. Mismo modelo que `SCALAR_HTML` del
-/// openapi (carga liviana, primera vez requiere red; el navegador
-/// cachea el bundle después).
+/// 9.w.2-asyncapi-ui — Scalar-style embedded UI for the AsyncAPI 3.0
+/// schema. Loads the `@asyncapi/react-component` bundle via CDN and
+/// points it at `/asyncapi.json`. Same model as openapi's
+/// `SCALAR_HTML` (lightweight load, first time requires network; the
+/// browser caches the bundle afterwards).
 pub const ASYNCAPI_HTML: &str = include_str!("templates/asyncapi.html");
 
-/// Vista liviana de un endpoint `@ws("/path")` para el generador
-/// AsyncAPI. Paralelo a `OpenApiRouteInfo` pero solo para campos WS.
+/// Lightweight view of a `@ws("/path")` endpoint for the AsyncAPI
+/// generator. Parallel to `OpenApiRouteInfo` but only for WS fields.
 #[derive(Debug, Clone)]
 pub struct AsyncApiChannelInfo {
-    /// Path del endpoint (e.g. `"/chat"`).
+    /// Endpoint path (e.g. `"/chat"`).
     pub path: String,
-    /// Nombre del handler Fitz — sirve como base para los IDs de
-    /// operations (`receive<Handler>` / `send<Handler>`).
+    /// Name of the Fitz handler — serves as the base for operation
+    /// IDs (`receive<Handler>` / `send<Handler>`).
     pub handler_name: String,
-    /// `TypeExpr` del `T` en `WsConn<T>` (o `In` en `WsConn<In, Out>`).
-    /// Schema usado para la operation `receive` (cliente → server).
-    /// `None` solo en builds malformados donde el evaluator no pudo
-    /// identificar el T.
+    /// `TypeExpr` of the `T` in `WsConn<T>` (or `In` in
+    /// `WsConn<In, Out>`). Schema used for the `receive` operation
+    /// (client → server). `None` only in malformed builds where the
+    /// evaluator could not identify T.
     pub msg_type: Option<TypeExpr>,
-    /// 9.w.2-wsconn-bidir (v0.9.38): `TypeExpr` del `Out` en
-    /// `WsConn<In, Out>`. Schema usado para la operation `send`
-    /// (server → cliente). Para `WsConn<T>` simétrico, es el mismo
-    /// que `msg_type`.
+    /// 9.w.2-wsconn-bidir (v0.9.38): `TypeExpr` of the `Out` in
+    /// `WsConn<In, Out>`. Schema used for the `send` operation
+    /// (server → client). For symmetric `WsConn<T>`, it's the same
+    /// as `msg_type`.
     pub send_type: Option<TypeExpr>,
-    /// Política de auth de la ruta. `Authenticated`/`Admin` →
-    /// security requirement con bearer en el channel.
+    /// Route's auth policy. `Authenticated`/`Admin` → security
+    /// requirement with bearer on the channel.
     pub auth: AuthSpec,
 }
 
-/// Adapter desde el `HttpRegistry` del runtime al schema. Filtra
-/// solo las rutas WS (`is_ws == true`); las HTTP se ignoran (van por
-/// OpenAPI).
+/// Adapter from the runtime `HttpRegistry` to the schema. Filters
+/// only the WS routes (`is_ws == true`); HTTP ones are ignored
+/// (they go through OpenAPI).
 pub fn channels_from_registry(reg: &HttpRegistry) -> Vec<AsyncApiChannelInfo> {
     reg.routes
         .iter()
@@ -101,32 +102,31 @@ fn channel_info_from_spec(s: &RouteSpec) -> AsyncApiChannelInfo {
     }
 }
 
-/// Adapter desde el AST (build-time, `fitz build`) para construir las
-/// vistas sin necesidad de evaluar el programa. Espejo de
-/// `openapi::pseudo_routes_from_ast` pero filtra `@ws` solamente.
+/// Adapter from the AST (build-time, `fitz build`) for building the
+/// views without needing to evaluate the program. Mirror of
+/// `openapi::pseudo_routes_from_ast` but filters `@ws` only.
 pub fn pseudo_channels_from_ast(
     program: &Program,
 ) -> Result<Vec<AsyncApiChannelInfo>, crate::error::FitzError> {
     pseudo_channels_from_program_and_modules(program, &[])
 }
 
-/// 10.8.6 (v0.10.8) — variante cross-module aware de
-/// `pseudo_channels_from_ast`. Combina los handlers `@ws` del
-/// `program` (main) y de los `module_ws_stmts` (slices capturados
-/// por 10.8.6 en `LoadedModule.ws_fn_stmts`, paralelo a W16).
-/// Resultado: el schema AsyncAPI 3.0 emitido contiene TODOS los
-/// canales WS, incluyendo los de módulos importados.
+/// 10.8.6 (v0.10.8) — cross-module aware variant of
+/// `pseudo_channels_from_ast`. Combines the `@ws` handlers from the
+/// `program` (main) and from the `module_ws_stmts` (slices captured
+/// by 10.8.6 in `LoadedModule.ws_fn_stmts`, parallel to W16).
+/// Result: the emitted AsyncAPI 3.0 schema contains ALL WS channels,
+/// including those from imported modules.
 ///
-/// Antes del fix #4 v0.10.8, `pseudo_channels_from_ast` solo
-/// miraba el main → schema vacío y `/asyncapi.json` no se
-/// emitía cuando los `@ws` vivían cross-module (404 en
-/// handshake).
+/// Before the v0.10.8 fix #4, `pseudo_channels_from_ast` only looked
+/// at main → empty schema and `/asyncapi.json` was not emitted when
+/// the `@ws` lived cross-module (404 on handshake).
 pub fn pseudo_channels_from_program_and_modules(
     program: &Program,
     module_ws_stmts: &[&[Stmt]],
 ) -> Result<Vec<AsyncApiChannelInfo>, crate::error::FitzError> {
-    // Concatenar todos los stmts: main primero, después los
-    // módulos en orden de carga.
+    // Concatenate all stmts: main first, then the modules in load
+    // order.
     let mut all_stmts: Vec<&Stmt> = program.iter().collect();
     for module_stmts in module_ws_stmts {
         for s in *module_stmts {
@@ -154,10 +154,10 @@ pub fn pseudo_channels_from_program_and_modules(
             };
             let path = match path_arg {
                 Expr::Str(s, _) => s.clone(),
-                _ => continue, // checker ya rechazó esto
+                _ => continue, // checker already rejected this
             };
-            // Detectar el WsConn<T> o WsConn<In, Out> param para
-            // extraer recv (msg_type) y send (send_type).
+            // Detect the WsConn<T> or WsConn<In, Out> param to
+            // extract recv (msg_type) and send (send_type).
             let (msg_type, send_type) = params
                 .iter()
                 .find_map(|p| match &p.type_ {
@@ -175,7 +175,7 @@ pub fn pseudo_channels_from_program_and_modules(
                     _ => None,
                 })
                 .unwrap_or((None, None));
-            // Auth desde decorators.
+            // Auth from decorators.
             let mut auth = AuthSpec::None;
             for dd in decorators {
                 match dd.name.as_str() {
@@ -186,9 +186,9 @@ pub fn pseudo_channels_from_program_and_modules(
                     _ => {}
                 }
             }
-            // `header_params` y otros no aplican a `@ws` (no se
-            // declaran `@header` sobre handlers WS); mantenemos el
-            // helper de openapi disponible por consistencia futura.
+            // `header_params` and others don't apply to `@ws`
+            // (`@header` is not declared on WS handlers); we keep
+            // openapi's helper available for future consistency.
             let _ = headers_from_decorators(decorators, params);
             out.push(AsyncApiChannelInfo {
                 path,
@@ -202,10 +202,10 @@ pub fn pseudo_channels_from_program_and_modules(
     Ok(out)
 }
 
-/// Genera el schema AsyncAPI 3.0 completo. Output listo para
+/// Generates the full AsyncAPI 3.0 schema. Output ready for
 /// `serde_json::to_string` → `/asyncapi.json`.
 ///
-/// Estructura emitida:
+/// Emitted structure:
 ///
 /// ```json
 /// {
@@ -233,8 +233,9 @@ pub fn generate_asyncapi(channels: &[AsyncApiChannelInfo], program: &Program) ->
     generate_asyncapi_with_version(channels, program, None)
 }
 
-/// Variante que acepta `info.version` override. El runtime y el
-/// codegen leen `@server(api_version=...)` igual que para OpenAPI.
+/// Variant that accepts an `info.version` override. The runtime and
+/// codegen read `@server(api_version=...)` the same way they do for
+/// OpenAPI.
 pub fn generate_asyncapi_with_version(
     channels: &[AsyncApiChannelInfo],
     program: &Program,
@@ -244,18 +245,18 @@ pub fn generate_asyncapi_with_version(
     let mut channels_obj: Map<String, Value> = Map::new();
     let mut operations_obj: Map<String, Value> = Map::new();
 
-    // Mapa ordenado para emitir channels en orden determinista (path
-    // ascendente — paralelo al orden de declaración para reuso de UX).
+    // Ordered map to emit channels in deterministic order
+    // (ascending path — parallel to declaration order for UX reuse).
     let mut sorted: BTreeMap<&str, &AsyncApiChannelInfo> = BTreeMap::new();
     for c in channels {
         sorted.insert(c.path.as_str(), c);
     }
 
     for (path, ch) in &sorted {
-        // 9.w.2-wsconn-bidir: cuando recv != send, emitimos DOS
-        // messages (`msg_in` para receive, `msg_out` para send) con
-        // sus respectivos schemas. Cuando son iguales (símétrico o
-        // canal con un solo tipo), un solo message `msg`.
+        // 9.w.2-wsconn-bidir: when recv != send, we emit TWO
+        // messages (`msg_in` for receive, `msg_out` for send) with
+        // their respective schemas. When they are equal (symmetric
+        // or single-type channel), a single message `msg`.
         let symmetric = match (&ch.msg_type, &ch.send_type) {
             (Some(a), Some(b)) => a == b,
             _ => true,
@@ -299,7 +300,7 @@ pub fn generate_asyncapi_with_version(
                 }),
             );
         } else {
-            // recv != send — dos messages distintos.
+            // recv != send — two distinct messages.
             let send_schema = ch
                 .send_type
                 .as_ref()
@@ -360,9 +361,9 @@ pub fn generate_asyncapi_with_version(
         );
 
         // Operations: receive (client→server) + send (server→client).
-        // En AsyncAPI 3.0 los $ref usan JSON Pointer; `/` se escapa
-        // como `~1` y `~` como `~0`. El path Fitz típicamente no tiene
-        // `~`, pero el `/` inicial sí necesita el escape.
+        // In AsyncAPI 3.0 $ref uses JSON Pointer; `/` is escaped as
+        // `~1` and `~` as `~0`. The Fitz path typically has no `~`,
+        // but the leading `/` does need escaping.
         let path_ref = path.replace('~', "~0").replace('/', "~1");
         let channel_ref = format!("#/channels/{}", path_ref);
         let recv_msg_ref = if symmetric {
@@ -415,8 +416,8 @@ pub fn generate_asyncapi_with_version(
         );
     }
 
-    // Components: securitySchemes (bearerAuth) si al menos un channel
-    // tiene auth.
+    // Components: securitySchemes (bearerAuth) if at least one
+    // channel has auth.
     let has_auth = channels.iter().any(|c| c.auth != AuthSpec::None);
     let mut components = Map::new();
     if has_auth {
@@ -451,10 +452,10 @@ pub fn generate_asyncapi_with_version(
     Value::Object(root)
 }
 
-/// Capitaliza la primera letra del nombre del handler para armar
-/// IDs de operations consistentes (`receivechat` → `receiveChat`).
-/// Naïve — solo ASCII; nombres con caracteres no-ASCII pasan tal cual
-/// (caso muy raro en handler names).
+/// Capitalizes the first letter of the handler's name to build
+/// consistent operation IDs (`receivechat` → `receiveChat`).
+/// Naïve — ASCII only; names with non-ASCII characters pass through
+/// as-is (very rare case in handler names).
 fn capitalize(s: &str) -> String {
     let mut chars = s.chars();
     match chars.next() {
@@ -464,10 +465,11 @@ fn capitalize(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Decorator/Expr unused-import shims — `crate::ast::Decorator` lo
-// referenciamos al iterar `decorators` adentro de `pseudo_channels_from_ast`,
-// pero el binding visible vive solo dentro de `for d in decorators`. El
-// import explícito está para futuro uso (e.g. heartbeat docs en 9.w.2.e).
+// Decorator/Expr unused-import shims — we reference
+// `crate::ast::Decorator` when iterating `decorators` inside
+// `pseudo_channels_from_ast`, but the visible binding lives only
+// within `for d in decorators`. The explicit import is here for
+// future use (e.g. heartbeat docs in 9.w.2.e).
 #[allow(dead_code)]
 const _USE_DECORATOR: fn(&Decorator) = |_| {};
 
@@ -502,7 +504,7 @@ mod tests {
         let s = schema_for(src);
         let ch = &s["channels"]["/echo"];
         assert_eq!(ch["address"], json!("/echo"));
-        // Schema del msg es type=string.
+        // The msg's schema is type=string.
         let payload = &ch["messages"]["msg"]["payload"];
         assert_eq!(payload["type"], json!("string"));
     }
@@ -528,7 +530,7 @@ mod tests {
                    async fn chat(conn: WsConn<ChatMsg>) -> Null { return null }";
         let s = schema_for(src);
         let payload = &s["channels"]["/chat"]["messages"]["msg"]["payload"];
-        // Tipo nominal → $ref a components/schemas.
+        // Nominal type → $ref to components/schemas.
         assert!(
             payload["$ref"].is_string(),
             "esperaba $ref, fue: {:?}",
@@ -553,11 +555,11 @@ mod tests {
                    @ws(\"/me\")\n\
                    async fn me(conn: WsConn<Str>, user: User) -> Null { return null }";
         let s = schema_for(src);
-        // components.securitySchemes.bearerAuth presente.
+        // components.securitySchemes.bearerAuth present.
         let scheme = &s["components"]["securitySchemes"]["bearerAuth"];
         assert_eq!(scheme["type"], json!("http"));
         assert_eq!(scheme["scheme"], json!("bearer"));
-        // Operation lleva security.
+        // Operation carries security.
         let recv = &s["operations"]["receiveMe"];
         let sec = recv["security"].as_array().expect("security array");
         assert_eq!(sec.len(), 1);
@@ -569,7 +571,7 @@ mod tests {
         let src = "@ws(\"/x\")\n\
                    async fn x(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
-        // Sin auth, components puede no estar.
+        // Without auth, components may not be present.
         let comp = s.get("components");
         assert!(comp.is_none() || comp.unwrap().get("securitySchemes").is_none());
     }
@@ -578,23 +580,23 @@ mod tests {
 
     #[test]
     fn asyncapi_wsconn_bidir_emite_dos_messages_distintos() {
-        // 9.w.2-wsconn-bidir — canal asimétrico genera `msg_in`
-        // (receive) y `msg_out` (send) en lugar del único `msg`.
+        // 9.w.2-wsconn-bidir — asymmetric channel generates `msg_in`
+        // (receive) and `msg_out` (send) instead of the single `msg`.
         let src = "type ChatMsg { user: Str, text: Str }\n\
                    @ws(\"/cmd\")\n\
                    async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null { return null }";
         let s = schema_for(src);
         let messages = &s["channels"]["/cmd"]["messages"];
-        // Dos messages: msg_in y msg_out, sin `msg` único.
+        // Two messages: msg_in and msg_out, no single `msg`.
         assert!(messages["msg_in"].is_object());
         assert!(messages["msg_out"].is_object());
         assert!(
             messages["msg"].is_null(),
             "no debería existir `msg` único en bidir asimétrico"
         );
-        // msg_in payload es Str (recv).
+        // msg_in payload is Str (recv).
         assert_eq!(messages["msg_in"]["payload"]["type"], json!("string"));
-        // msg_out payload es ChatMsg (send, nominal $ref).
+        // msg_out payload is ChatMsg (send, nominal $ref).
         assert!(messages["msg_out"]["payload"]["$ref"].is_string());
     }
 
@@ -622,8 +624,8 @@ mod tests {
 
     #[test]
     fn asyncapi_wsconn_simetrico_sigue_emitiendo_msg_unico() {
-        // Compat: `WsConn<T>` (simétrico) sigue emitiendo `msg`
-        // único (no rompe consumers existentes).
+        // Compat: `WsConn<T>` (symmetric) still emits the single
+        // `msg` (does not break existing consumers).
         let src = "@ws(\"/c\")\n\
                    async fn c(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
@@ -664,8 +666,8 @@ mod tests {
 
     #[test]
     fn asyncapi_wsconn_str_no_se_pisa_con_bytes() {
-        // Sanity: T = Str sigue emitiendo `application/json`, no se
-        // contamina con el ajuste de Bytes.
+        // Sanity: T = Str still emits `application/json`, doesn't
+        // get contaminated by the Bytes adjustment.
         let src = "@ws(\"/c\")\n\
                    async fn c(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
