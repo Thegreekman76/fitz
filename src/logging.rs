@@ -1,32 +1,32 @@
-//! Fase 12.3.a.2 — Structured logging built-in (output JSON real con
+//! Phase 12.3.a.2 — Structured logging built-in (real JSON output with
 //! tracing-subscriber + TTY detection + Secret redaction).
 //!
-//! Implementación del sink real de los 4 builtins (`log.info`/`log.warn`/
-//! `log.error`/`log.debug`) registrados en el evaluator en 12.3.a.1. El
-//! módulo expone `emit_log_record(level, msg, kvs)` que:
+//! Real sink implementation for the 4 builtins (`log.info`/`log.warn`/
+//! `log.error`/`log.debug`) registered in the evaluator in 12.3.a.1. The
+//! module exposes `emit_log_record(level, msg, kvs)` which:
 //!
-//! 1. Pasa por el level gate (`tracing::enabled!(target: "fitz::log", L)`
-//!    contra el `EnvFilter` instalado al boot via `init_logging()`).
-//!    Default level = `INFO` si `RUST_LOG` no se setea.
-//! 2. Determina el format (`Json` vs `Pretty`):
-//!    - Override explícito vía `FITZ_LOG_FORMAT=json|pretty`.
-//!    - Auto-detect: stderr es TTY → `Pretty`; sino → `Json` (containers/
-//!      CI/redirección).
-//! 3. Emite el registro a stderr (no contamina stdout del programa
-//!    Fitz, donde van los `print(...)` del user).
-//! 4. Redacta automáticamente `Value::Secret(_)` como `"<redacted>"` —
-//!    en kwargs directos y dentro de List/Map (preview de 12.3.c).
+//! 1. Goes through the level gate (`tracing::enabled!(target: "fitz::log", L)`
+//!    against the `EnvFilter` installed at boot via `init_logging()`).
+//!    Default level = `INFO` if `RUST_LOG` is not set.
+//! 2. Determines the format (`Json` vs `Pretty`):
+//!    - Explicit override via `FITZ_LOG_FORMAT=json|pretty`.
+//!    - Auto-detect: stderr is TTY → `Pretty`; otherwise → `Json`
+//!      (containers/CI/redirection).
+//! 3. Emits the record to stderr (does not contaminate the Fitz
+//!    program's stdout, where the user's `print(...)` calls go).
+//! 4. Automatically redacts `Value::Secret(_)` as `"<redacted>"` — in
+//!    direct kwargs and inside List/Map (preview of 12.3.c).
 //!
-//! Approach híbrido con tracing (decisión 12.3.a.2): el filter de nivel
-//! se delega a `tracing` (via `EnvFilter` + `tracing::enabled!`), pero
-//! el JSON output lo emite Fitz manual con `serde_json` porque los
-//! kwargs heterogéneos runtime no se modelan limpios con las macros
-//! `event!` que esperan field names en compile-time. El subscriber
-//! queda instalado igual para 12.3.b (auto-trace HTTP + spans +
-//! correlación `trace_id` en logs).
+//! Hybrid approach with tracing (decision 12.3.a.2): the level filter
+//! is delegated to `tracing` (via `EnvFilter` + `tracing::enabled!`),
+//! but Fitz emits the JSON output manually with `serde_json` because
+//! the heterogeneous runtime kwargs are not cleanly modeled with the
+//! `event!` macros that expect field names at compile-time. The
+//! subscriber is installed anyway for 12.3.b (HTTP auto-trace + spans +
+//! `trace_id` correlation in logs).
 //!
-//! No reemplaza el helper `emit_log_record` del evaluator — lo
-//! reexporta. El evaluator solo importa esta fn pública y la llama.
+//! Does not replace the evaluator's `emit_log_record` helper — it
+//! re-exports it. The evaluator only imports this public fn and calls it.
 
 use std::io::{IsTerminal, Stderr, Write};
 use std::sync::{Mutex, OnceLock};
@@ -35,42 +35,43 @@ use serde_json::{Map as JsonMap, Value as JsonValue};
 
 use crate::value::Value;
 
-/// Sink global de stderr. `Mutex` porque varios threads pueden emitir
-/// concurrente (handler HTTP + cron + background) — necesitamos escritura
-/// atómica por registro para que las líneas no se intercalen.
+/// Global stderr sink. `Mutex` because multiple threads can emit
+/// concurrently (HTTP handler + cron + background) — we need atomic
+/// per-record writes so lines don't interleave.
 ///
-/// `OnceLock` para inicialización lazy thread-safe: el primer call a
-/// `emit_log_record` (o a `init_logging`) lo construye.
+/// `OnceLock` for lazy thread-safe initialization: the first call to
+/// `emit_log_record` (or to `init_logging`) constructs it.
 static STDERR_LOCK: OnceLock<Mutex<Stderr>> = OnceLock::new();
 
 fn stderr_lock() -> &'static Mutex<Stderr> {
     STDERR_LOCK.get_or_init(|| Mutex::new(std::io::stderr()))
 }
 
-/// Format del output. La elección por default depende de TTY detection
-/// + override `FITZ_LOG_FORMAT`.
+/// Output format. The default choice depends on TTY detection +
+/// `FITZ_LOG_FORMAT` override.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LogFormat {
-    /// JSON flat — un objeto JSON por línea con `timestamp`, `level`,
-    /// `msg` y los kwargs al mismo nivel. Default cuando stderr NO es
-    /// TTY (containers/CI/redirección).
+    /// Flat JSON — one JSON object per line with `timestamp`, `level`,
+    /// `msg` and the kwargs at the same level. Default when stderr is
+    /// NOT a TTY (containers/CI/redirection).
     Json,
-    /// Pretty — `<ts> <LEVEL> <msg> k1=v1 k2=v2` con ANSI colors por
-    /// level. Default cuando stderr es TTY (dev local).
+    /// Pretty — `<ts> <LEVEL> <msg> k1=v1 k2=v2` with per-level ANSI
+    /// colors. Default when stderr is a TTY (local dev).
     Pretty,
 }
 
-/// Detecta el format a usar según TTY + `FITZ_LOG_FORMAT`. Override
-/// gana sobre auto-detect; valor inválido cae silencioso a auto-detect
-/// (no quiero abortar el programa por una env var mal seteada).
+/// Detects the format to use based on TTY + `FITZ_LOG_FORMAT`. Override
+/// wins over auto-detect; an invalid value silently falls back to
+/// auto-detect (we don't want to abort the program over a misconfigured
+/// env var).
 pub fn detect_format() -> LogFormat {
     if let Ok(v) = std::env::var("FITZ_LOG_FORMAT") {
         match v.to_lowercase().as_str() {
             "json" => return LogFormat::Json,
             "pretty" => return LogFormat::Pretty,
-            // Valor desconocido — fallback silencioso a auto-detect.
-            // No imprimimos warning porque el sink mismo del warning
-            // dependería de esta var y bootstrapearía mal.
+            // Unknown value — silent fallback to auto-detect. We don't
+            // print a warning because the warning's own sink would
+            // depend on this var and would bootstrap badly.
             _ => {}
         }
     }
@@ -81,45 +82,46 @@ pub fn detect_format() -> LogFormat {
     }
 }
 
-/// Inicializa el subscriber `tracing` al boot del binario `fitz`. Se
-/// llama una vez desde `main.rs` ANTES de ejecutar el programa user.
-/// Idempotente: si ya está inicializado, no-op.
+/// Initializes the `tracing` subscriber at boot of the `fitz` binary.
+/// Called once from `main.rs` BEFORE executing the user program.
+/// Idempotent: if already initialized, no-op.
 ///
-/// Razón de instalar el subscriber aunque el output JSON lo emitamos
-/// manual: para que `tracing::enabled!(target: "fitz::log", LEVEL)`
-/// respete `RUST_LOG`. El `EnvFilter::try_from_default_env()` lee la
-/// env var; si no está, default a `info` (más verboso que el default
-/// estándar del crate, que es `error` — para Fitz `info` es más útil).
+/// Reason for installing the subscriber even though we emit the JSON
+/// output manually: so that `tracing::enabled!(target: "fitz::log", LEVEL)`
+/// respects `RUST_LOG`. `EnvFilter::try_from_default_env()` reads the
+/// env var; if it's not set, defaults to `info` (more verbose than the
+/// crate's standard default, which is `error` — for Fitz, `info` is
+/// more useful).
 ///
-/// El layer instalado es no-op (`with_writer(std::io::sink)`) — no
-/// emite nada. Está solo para satisfacer la API de `tracing_subscriber::
-/// registry()` y mantener el filter activo. En 12.3.b sumamos layers
-/// que emiten spans HTTP (auto-trace).
+/// The installed layer is no-op (`with_writer(std::io::sink)`) — it
+/// emits nothing. It's only there to satisfy the
+/// `tracing_subscriber::registry()` API and keep the filter active. In
+/// 12.3.b we add layers that emit HTTP spans (auto-trace).
 pub fn init_logging() {
     use tracing_subscriber::util::SubscriberInitExt;
     use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter};
 
-    // Idempotente: si el subscriber global ya está set, set_global_default
-    // falla — lo ignoramos.
+    // Idempotent: if the global subscriber is already set,
+    // set_global_default fails — we ignore it.
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let noop_layer = fmt::layer().with_writer(std::io::sink);
 
-    // try_init falla si ya hay subscriber instalado — perfect para
-    // idempotencia (tests, REPL, fitz dev re-ejecutando, etc.).
+    // try_init fails if there is already a subscriber installed —
+    // perfect for idempotency (tests, REPL, fitz dev re-executing, etc.).
     let _ = tracing_subscriber::registry()
         .with(filter)
         .with(noop_layer)
         .try_init();
 }
 
-/// API pública del módulo. Llamada por el evaluator desde
-/// `dispatch_builtin_kwargs` (path con kwargs) y desde
-/// `builtin_log_<level>` (path positional-only). Implementa el gate
-/// de nivel + format detection + emit a stderr.
+/// Public API of the module. Called by the evaluator from
+/// `dispatch_builtin_kwargs` (kwargs path) and from
+/// `builtin_log_<level>` (positional-only path). Implements the level
+/// gate + format detection + emit to stderr.
 ///
-/// `level_str` es uno de `"info"`/`"warn"`/`"error"`/`"debug"`
-/// (lowercase, viene del dispatch de Fitz). Internamente se mapea al
-/// `tracing::Level` correspondiente para el gate.
+/// `level_str` is one of `"info"`/`"warn"`/`"error"`/`"debug"`
+/// (lowercase, comes from the Fitz dispatch). Internally mapped to the
+/// corresponding `tracing::Level` for the gate.
 pub fn emit_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
     use tracing::Level;
     let level = match level_str {
@@ -127,13 +129,13 @@ pub fn emit_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
         "warn" => Level::WARN,
         "error" => Level::ERROR,
         "debug" => Level::DEBUG,
-        // Defensive: nivel desconocido, lo dejamos pasar como INFO.
-        // El dispatch del evaluator ya valida el nombre del método.
+        // Defensive: unknown level, we let it through as INFO. The
+        // evaluator's dispatch already validates the method name.
         _ => Level::INFO,
     };
-    // Gate de level via tracing — respeta RUST_LOG.
-    // tracing::enabled! es macro: el level debe ser const, despachamos
-    // por match manual.
+    // Level gate via tracing — respects RUST_LOG.
+    // tracing::enabled! is a macro: the level must be const, so we
+    // dispatch with a manual match.
     let enabled = match level {
         Level::ERROR => tracing::enabled!(target: "fitz::log", Level::ERROR),
         Level::WARN => tracing::enabled!(target: "fitz::log", Level::WARN),
@@ -151,45 +153,45 @@ pub fn emit_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
         LogFormat::Pretty => format_pretty(level_str, msg, kvs),
     };
 
-    // Lock + write + flush atómico por línea. Ignoramos errores de
-    // escritura (stderr cerrado, pipe roto) — el sink de logs no debe
-    // tirar el programa abajo.
+    // Atomic lock + write + flush per line. We ignore write errors
+    // (stderr closed, broken pipe) — the log sink must not tear the
+    // program down.
     if let Ok(mut stderr) = stderr_lock().lock() {
         let _ = writeln!(stderr, "{}", line);
         let _ = stderr.flush();
     }
 
-    // Fase 12.3.iter2.b — emit paralelo al backend OTel cuando el
-    // provider está instalado. Sin OTel activo, `logger_provider()`
-    // devuelve `None` y este bloque es no-op (zero overhead). Los
-    // logs en stderr siguen intactos — el bridge es ADITIVO, no
-    // reemplazo. El batch processor del SDK acumula los records y los
-    // envía async via OTLP HTTP/proto al endpoint `/v1/logs`.
+    // Phase 12.3.iter2.b — parallel emit to the OTel backend when the
+    // provider is installed. Without OTel active, `logger_provider()`
+    // returns `None` and this block is no-op (zero overhead). The logs
+    // in stderr remain intact — the bridge is ADDITIVE, not a
+    // replacement. The SDK's batch processor accumulates records and
+    // sends them async via OTLP HTTP/proto to the `/v1/logs` endpoint.
     if crate::observability::is_otel_enabled() {
         emit_otel_log_record(level_str, msg, kvs);
     }
 }
 
-/// Fase 12.3.iter2.b — emite el log record al provider OTel global
-/// cuando está instalado. Llamado desde `emit_log_record` después del
-/// write a stderr (emit ADITIVO, no reemplazo).
+/// Phase 12.3.iter2.b — emits the log record to the global OTel
+/// provider when it is installed. Called from `emit_log_record` after
+/// the stderr write (ADDITIVE emit, not a replacement).
 ///
-/// Estructura del LogRecord exportado:
-/// - `severity_number` + `severity_text`: mapeo 1:1 del `level_str`
-///   (`info`/`warn`/`error`/`debug` → `Severity::Info`/etc + texto
-///   uppercase).
-/// - `body`: `AnyValue::String(msg)` — el mensaje crudo, como en stderr.
-/// - `observed_timestamp`: `SystemTime::now()` — el SDK lo usa cuando
-///   el `timestamp` source no está set (caso típico).
-/// - `trace_context`: derivado del `SpanContext` activo via
-///   `current_span_context()`. Cuando hay OTel activo, el SpanContext
-///   ya está sincronizado con el span OTel (cierre iter2.a), así que
-///   esto produce correlación trace_id/span_id automática entre logs y
-///   spans en el backend (Jaeger/Tempo/Datadog).
-/// - `attributes`: cada `(k, v)` de los kwargs Fitz → `Key` + `AnyValue`.
-///   Valores complejos (List/Map/Instance) van como `ListAny`/`Map`
-///   estructurados (preserva el shape). Valores `Secret` van como
-///   `"***"` (redacción consistente con el output stderr).
+/// Exported LogRecord structure:
+/// - `severity_number` + `severity_text`: 1:1 mapping from `level_str`
+///   (`info`/`warn`/`error`/`debug` → `Severity::Info`/etc + uppercase
+///   text).
+/// - `body`: `AnyValue::String(msg)` — the raw message, same as stderr.
+/// - `observed_timestamp`: `SystemTime::now()` — the SDK uses it when
+///   the `timestamp` source is not set (typical case).
+/// - `trace_context`: derived from the active `SpanContext` via
+///   `current_span_context()`. When OTel is active, the SpanContext is
+///   already synchronized with the OTel span (iter2.a closure), so
+///   this produces automatic trace_id/span_id correlation between logs
+///   and spans in the backend (Jaeger/Tempo/Datadog).
+/// - `attributes`: each `(k, v)` from the Fitz kwargs → `Key` +
+///   `AnyValue`. Complex values (List/Map/Instance) go as structured
+///   `ListAny`/`Map` (preserves the shape). `Secret` values go as
+///   `"***"` (redaction consistent with the stderr output).
 fn emit_otel_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
     use opentelemetry::logs::{AnyValue, LogRecord as _, Logger, LoggerProvider, Severity};
     use opentelemetry::trace::{SpanId, TraceId};
@@ -214,10 +216,10 @@ fn emit_otel_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
     record.set_body(AnyValue::String(msg.to_string().into()));
     record.set_observed_timestamp(SystemTime::now());
 
-    // Trace context derivado del SpanContext activo. Cierre iter2.a
-    // garantiza que los IDs ya son los del span OTel cuando hay OTel
-    // activo — esto produce correlación automática logs↔spans en el
-    // backend.
+    // Trace context derived from the active SpanContext. The iter2.a
+    // closure guarantees that the IDs are already those of the OTel
+    // span when OTel is active — this produces automatic
+    // logs↔spans correlation in the backend.
     if let Some(ctx) = current_span_context() {
         if let (Ok(trace_id), Ok(span_id)) = (
             TraceId::from_hex(&ctx.trace_id),
@@ -236,9 +238,10 @@ fn emit_otel_log_record(level_str: &str, msg: &str, kvs: &[(String, Value)]) {
     logger.emit(record);
 }
 
-/// Fase 12.3.iter2.b — convierte un `Value` Fitz a un `AnyValue` OTel
-/// para el LogRecord. Recursivo para List/Map; primitivos directos.
-/// `Secret` se redacta a `"***"` (consistente con el output stderr).
+/// Phase 12.3.iter2.b — converts a Fitz `Value` to an OTel `AnyValue`
+/// for the LogRecord. Recursive for List/Map; primitives go through
+/// directly. `Secret` is redacted to `"***"` (consistent with the
+/// stderr output).
 fn value_to_any_value(v: &Value) -> Option<opentelemetry::logs::AnyValue> {
     use opentelemetry::logs::AnyValue;
     use opentelemetry::Key;
@@ -268,22 +271,22 @@ fn value_to_any_value(v: &Value) -> Option<opentelemetry::logs::AnyValue> {
             }
             Some(AnyValue::Map(Box::new(map)))
         }
-        // Tipos no triviales (Instance, Function, Future, etc.) —
-        // fallback al Display de Fitz para no perder info. El OTel
-        // backend lo recibe como string serializado.
+        // Non-trivial types (Instance, Function, Future, etc.) —
+        // fallback to Fitz's Display so as not to lose info. The OTel
+        // backend receives it as a serialized string.
         _ => Some(AnyValue::String(format!("{}", v).into())),
     }
 }
 
-/// Construye el JSON flat: `{"timestamp": "...", "level": "INFO",
+/// Builds the flat JSON: `{"timestamp": "...", "level": "INFO",
 /// "msg": "...", "trace_id": "...", "span_id": "...", <kwargs>}`.
-/// Reservados (`level`/`msg`/`timestamp`/`trace_id`/`span_id`) ya
-/// fueron rechazados en el evaluator — no hay riesgo de colisión.
+/// Reserved names (`level`/`msg`/`timestamp`/`trace_id`/`span_id`)
+/// were already rejected in the evaluator — no risk of collision.
 ///
-/// Fase 12.3.b.1 — `trace_id`/`span_id` se insertan automáticamente
-/// si hay span context activo via `with_span_context(...)`. Sin
-/// span activo, esos fields se omiten (no se emiten como `null`
-/// para no contaminar el shape).
+/// Phase 12.3.b.1 — `trace_id`/`span_id` are inserted automatically if
+/// there is an active span context via `with_span_context(...)`.
+/// Without an active span, those fields are omitted (we don't emit
+/// them as `null` so as not to pollute the shape).
 fn format_json(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String {
     let span_ctx = current_span_context();
     let extra = span_ctx.as_ref().map(|_| 2).unwrap_or(0);
@@ -298,9 +301,9 @@ fn format_json(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String {
     for (k, v) in kvs {
         obj.insert(k.clone(), value_to_json_redacted(v));
     }
-    // `serde_json::to_string` sobre `JsonValue::Object` — preserve_order
-    // está activo en nuestra dep (feature `preserve_order`), así que el
-    // shape sale en orden de inserción: timestamp, level, msg, kwargs.
+    // `serde_json::to_string` over `JsonValue::Object` — preserve_order
+    // is enabled in our dep (feature `preserve_order`), so the shape
+    // comes out in insertion order: timestamp, level, msg, kwargs.
     serde_json::to_string(&JsonValue::Object(obj)).unwrap_or_else(|_| {
         format!(
             "{{\"level\":\"{}\",\"msg\":\"<serialize_error>\"}}",
@@ -309,15 +312,16 @@ fn format_json(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String {
     })
 }
 
-/// Construye la línea pretty: `<ts> <LEVEL> <msg> trace=xxx span=yyy
-/// k=v k="str" k=null` con ANSI colors por level. La detección de
-/// color usa el mismo TTY que detect_format — si llegamos acá es
-/// porque format == Pretty, que implica TTY o override pretty.
+/// Builds the pretty line: `<ts> <LEVEL> <msg> trace=xxx span=yyy
+/// k=v k="str" k=null` with per-level ANSI colors. Color detection
+/// uses the same TTY as detect_format — if we got here it's because
+/// format == Pretty, which implies TTY or explicit pretty override.
 ///
-/// Fase 12.3.b.1 — `trace=xxx span=yyy` se inyecta automáticamente
-/// si hay span context activo via `with_span_context(...)`. Sin span
-/// activo, los fields se omiten (paralelo a JSON). Forma dim para no
-/// dominar visualmente sobre el msg + kwargs del user.
+/// Phase 12.3.b.1 — `trace=xxx span=yyy` is injected automatically if
+/// there is an active span context via `with_span_context(...)`.
+/// Without an active span, the fields are omitted (parallel to JSON).
+/// Dim form so it doesn't visually dominate over the user's msg +
+/// kwargs.
 fn format_pretty(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String {
     let level_upper = level_str.to_uppercase();
     let level_colored = colorize_level(&level_upper);
@@ -335,16 +339,16 @@ fn format_pretty(level_str: &str, msg: &str, kvs: &[(String, Value)]) -> String 
             .collect();
         format!(" {}", parts.join(" "))
     };
-    // ANSI dim sobre el timestamp para que el ojo vaya al level + msg
-    // primero. Sin colors si stdout no soporta — el detect_format ya
-    // garantiza Pretty solo en TTY o override explícito.
+    // ANSI dim over the timestamp so the eye goes to the level + msg
+    // first. No colors if stdout doesn't support them — detect_format
+    // already guarantees Pretty only on TTY or explicit override.
     format!(
         "\x1b[2m{}\x1b[0m {} {}{}{}",
         ts, level_colored, msg, span_part, kvs_part
     )
 }
 
-/// ANSI color por level. Convención bunyan/pino/uvicorn:
+/// Per-level ANSI color. Convention from bunyan/pino/uvicorn:
 /// DEBUG=magenta, INFO=green, WARN=yellow, ERROR=red, bold.
 fn colorize_level(level_upper: &str) -> String {
     let (code, padding) = match level_upper {
@@ -357,18 +361,18 @@ fn colorize_level(level_upper: &str) -> String {
     format!("{}{}\x1b[0m", code, padding)
 }
 
-/// Timestamp ISO 8601 / RFC 3339 con milisegundos en UTC. Ejemplo:
-/// `2026-06-02T14:23:01.123Z`. Compatible con queries Loki/Datadog
-/// y con la mayoría de los parsers de log timestamps.
+/// ISO 8601 / RFC 3339 timestamp with milliseconds in UTC. Example:
+/// `2026-06-02T14:23:01.123Z`. Compatible with Loki/Datadog queries
+/// and with most log timestamp parsers.
 fn now_rfc3339() -> String {
     use chrono::SecondsFormat;
     chrono::Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
 }
 
-/// Convierte `Value` Fitz a `serde_json::Value` para JSON output con
-/// **redacción recursiva** de `Value::Secret`. Versión específica del
-/// logger (no usa `http::value_to_json` porque ese rechaza Secret con
-/// error — para logs queremos auto-redacción silenciosa).
+/// Converts a Fitz `Value` to `serde_json::Value` for JSON output with
+/// **recursive redaction** of `Value::Secret`. Logger-specific version
+/// (we don't use `http::value_to_json` because that one rejects Secret
+/// with an error — for logs we want silent auto-redaction).
 fn value_to_json_redacted(v: &Value) -> JsonValue {
     match v {
         Value::Null => JsonValue::Null,
@@ -376,7 +380,7 @@ fn value_to_json_redacted(v: &Value) -> JsonValue {
         Value::Int(n) => JsonValue::Number((*n).into()),
         Value::Float(f) => serde_json::Number::from_f64(*f)
             .map(JsonValue::Number)
-            // NaN/Infinity no son JSON-válidos — emitimos como string.
+            // NaN/Infinity are not JSON-valid — we emit as string.
             .unwrap_or_else(|| JsonValue::String(format!("{}", f))),
         Value::Str(s) => JsonValue::String(s.clone()),
         Value::Secret(_) => JsonValue::String("<redacted>".to_string()),
@@ -397,17 +401,17 @@ fn value_to_json_redacted(v: &Value) -> JsonValue {
             }
             JsonValue::Object(obj)
         }
-        // Resto: el evaluator ya rechazó tipos no serializables en el
-        // dispatch (Function/Type/Module/DbConn/etc). Si llega algo
-        // raro acá es bug — emitimos `null` defensive en lugar de
-        // panicar el sink de logs.
+        // Rest: the evaluator already rejected non-serializable types
+        // in the dispatch (Function/Type/Module/DbConn/etc). If
+        // something odd reaches here it's a bug — we emit `null`
+        // defensively instead of panicking the log sink.
         _ => JsonValue::Null,
     }
 }
 
-/// Format pretty de un value para `k=v` inline. Strings con comillas
-/// dobles (consistente con `print(...)` adentro de containers),
-/// Secret redactado, List/Map con shape compacto JSON-like.
+/// Pretty format of a value for inline `k=v`. Strings with double
+/// quotes (consistent with `print(...)` inside containers), Secret
+/// redacted, List/Map with compact JSON-like shape.
 fn value_to_pretty(v: &Value) -> String {
     match v {
         Value::Null => "null".to_string(),
@@ -446,52 +450,52 @@ fn value_to_pretty(v: &Value) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Fase 12.3.b.1 — SpanContext + correlación trace_id/span_id en logs.
+// Phase 12.3.b.1 — SpanContext + trace_id/span_id correlation in logs.
 //
-// Infraestructura del span context para correlacionar logs emitidos
-// adentro de un mismo request HTTP (o cualquier scope que los wrap-ee).
-// Cuando hay un span activo via `with_span_context(ctx, fut)`, todos los
-// `log.info/warn/error/debug` emitidos adentro suman automáticamente
-// `trace_id` (32 hex chars, compartido por toda la cadena) y `span_id`
-// (16 hex chars, único por span) al output JSON / pretty.
+// Span context infrastructure for correlating logs emitted inside the
+// same HTTP request (or any scope that wraps them). When there is an
+// active span via `with_span_context(ctx, fut)`, all the
+// `log.info/warn/error/debug` emitted inside automatically add
+// `trace_id` (32 hex chars, shared by the whole chain) and `span_id`
+// (16 hex chars, unique per span) to the JSON / pretty output.
 //
-// Approach: storage propio con `tokio::task_local!` (vs tracing nativo
-// `Span::extensions`). Razones:
-// - Simplicidad — sin Subscriber/Layer custom de tracing.
-// - Control total del shape del SpanContext (compatible con OTel sin
-//   forzar la jerarquía de tracing).
-// - `task_local!` atraviesa thread boundaries del runtime tokio
-//   multi-thread (handlers HTTP saltan workers).
+// Approach: own storage with `tokio::task_local!` (vs. native tracing
+// `Span::extensions`). Reasons:
+// - Simplicity — no custom tracing Subscriber/Layer.
+// - Full control over the SpanContext shape (OTel-compatible without
+//   forcing the tracing hierarchy).
+// - `task_local!` crosses thread boundaries of the multi-thread tokio
+//   runtime (HTTP handlers jump workers).
 //
-// En 12.3.b.2 viene el wrapper HTTP que abre el span automático antes
-// de invocar el handler; en 12.3.c migramos al SpanContext de
-// OpenTelemetry sin cambiar la API pública.
+// In 12.3.b.2 comes the HTTP wrapper that opens the span automatically
+// before invoking the handler; in 12.3.c we migrate to the
+// OpenTelemetry SpanContext without changing the public API.
 //
-// IDs OTel-compatibles:
-// - trace_id = 32 hex chars (16 bytes random sin guiones).
-// - span_id = 16 hex chars (8 bytes random sin guiones).
-// Generados con `uuid::Uuid::new_v4()` (ya en deps no opcional).
+// OTel-compatible IDs:
+// - trace_id = 32 hex chars (16 random bytes, no hyphens).
+// - span_id = 16 hex chars (8 random bytes, no hyphens).
+// Generated with `uuid::Uuid::new_v4()` (already in non-optional deps).
 
-/// Contexto de span activo para correlacionar logs. Inmutable —
-/// nuevos spans se construyen con `new_child()` que clona el `trace_id`
-/// y genera un `span_id` nuevo.
+/// Active span context for correlating logs. Immutable — new spans
+/// are built with `new_child()` which clones the `trace_id` and
+/// generates a new `span_id`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpanContext {
-    /// 32 hex chars. Constante a lo largo de toda la cadena de spans
-    /// nested (un request HTTP entero comparte el mismo trace_id).
+    /// 32 hex chars. Constant throughout the whole chain of nested
+    /// spans (an entire HTTP request shares the same trace_id).
     pub trace_id: String,
-    /// 16 hex chars. Único por span — cada `new_child()` genera uno
-    /// nuevo.
+    /// 16 hex chars. Unique per span — each `new_child()` generates a
+    /// new one.
     pub span_id: String,
-    /// `span_id` del padre si este es un span anidado. `None` para
-    /// spans root (típicamente el del handler HTTP inicial).
+    /// `span_id` of the parent if this is a nested span. `None` for
+    /// root spans (typically that of the initial HTTP handler).
     pub parent_span_id: Option<String>,
 }
 
 impl SpanContext {
-    /// Crea un span root (sin parent). Genera `trace_id` y `span_id`
-    /// fresh. Llamado típicamente por el wrapper HTTP al recibir un
-    /// request (12.3.b.2).
+    /// Creates a root span (no parent). Generates a fresh `trace_id`
+    /// and `span_id`. Typically called by the HTTP wrapper upon
+    /// receiving a request (12.3.b.2).
     pub fn new_root() -> Self {
         Self {
             trace_id: generate_trace_id(),
@@ -500,9 +504,10 @@ impl SpanContext {
         }
     }
 
-    /// Crea un span hijo del actual. Comparte el `trace_id`, genera
-    /// `span_id` nuevo, registra el `span_id` del padre. Usado para
-    /// spans anidados (e.g. `db.query` adentro de un handler HTTP).
+    /// Creates a child span of the current one. Shares the
+    /// `trace_id`, generates a new `span_id`, records the parent's
+    /// `span_id`. Used for nested spans (e.g. `db.query` inside an
+    /// HTTP handler).
     pub fn new_child(&self) -> Self {
         Self {
             trace_id: self.trace_id.clone(),
@@ -511,16 +516,16 @@ impl SpanContext {
         }
     }
 
-    /// Construye un `SpanContext` con `trace_id` y `span_id` provistos.
-    /// Llamado típicamente cuando hay un span OTel activo y queremos
-    /// que nuestro `trace_id`/`span_id` (emitidos en logs stderr/JSON)
-    /// matcheen exactamente los del span OTel — habilita
-    /// **cross-pipeline queries**: el `trace_id` que el usuario ve en
-    /// Jaeger/Tempo/Datadog/Honeycomb es EL MISMO que aparece en los
-    /// logs stderr/Loki del request.
+    /// Builds a `SpanContext` with the provided `trace_id` and
+    /// `span_id`. Typically called when there is an active OTel span
+    /// and we want our `trace_id`/`span_id` (emitted in stderr/JSON
+    /// logs) to match exactly those of the OTel span — enables
+    /// **cross-pipeline queries**: the `trace_id` that the user sees
+    /// in Jaeger/Tempo/Datadog/Honeycomb is THE SAME one that appears
+    /// in the request's stderr/Loki logs.
     ///
-    /// Fase 12.3.iter2.a — cierre de la deuda "correlación trace_id
-    /// Fitz↔OTel" derivada de Fase 12.3.
+    /// Phase 12.3.iter2.a — closes the debt "Fitz↔OTel trace_id
+    /// correlation" derived from Phase 12.3.
     pub fn with_ids(trace_id: String, span_id: String) -> Self {
         Self {
             trace_id,
@@ -530,13 +535,13 @@ impl SpanContext {
     }
 }
 
-/// Genera un trace_id = 32 hex chars (16 bytes random). Formato
-/// OTel-compatible: las cadenas downstream (Datadog/Jaeger/Tempo) lo
-/// aceptan tal cual sin transformación.
+/// Generates a trace_id = 32 hex chars (16 random bytes).
+/// OTel-compatible format: downstream chains (Datadog/Jaeger/Tempo)
+/// accept it as-is without transformation.
 fn generate_trace_id() -> String {
     let uuid = uuid::Uuid::new_v4();
     let bytes = uuid.as_bytes();
-    // hex de 16 bytes = 32 chars
+    // hex of 16 bytes = 32 chars
     let mut s = String::with_capacity(32);
     for b in bytes.iter() {
         s.push_str(&format!("{:02x}", b));
@@ -544,9 +549,9 @@ fn generate_trace_id() -> String {
     s
 }
 
-/// Genera un span_id = 16 hex chars (8 bytes random). Tomamos los
-/// primeros 8 bytes de un Uuid v4 — suficiente entropía para
-/// uniqueness práctica (2^64 espacio).
+/// Generates a span_id = 16 hex chars (8 random bytes). We take the
+/// first 8 bytes of a Uuid v4 — enough entropy for practical
+/// uniqueness (2^64 space).
 fn generate_span_id() -> String {
     let uuid = uuid::Uuid::new_v4();
     let bytes = uuid.as_bytes();
@@ -558,25 +563,25 @@ fn generate_span_id() -> String {
 }
 
 tokio::task_local! {
-    /// Span context activo del task actual. Set por
-    /// `with_span_context(ctx, fut)`. Leído por `current_span_context()`.
-    /// Sin set, las consultas devuelven `None`.
+    /// Active span context of the current task. Set by
+    /// `with_span_context(ctx, fut)`. Read by `current_span_context()`.
+    /// Without a set value, queries return `None`.
     static SPAN_CONTEXT: SpanContext;
 }
 
-/// Devuelve el SpanContext activo del task tokio actual, si hay uno
-/// instalado. Llamado por `emit_log_record` para inyectar trace_id/
-/// span_id al output. Sin span activo → `None`.
+/// Returns the active SpanContext of the current tokio task, if one
+/// is installed. Called by `emit_log_record` to inject trace_id/
+/// span_id into the output. Without an active span → `None`.
 pub fn current_span_context() -> Option<SpanContext> {
     SPAN_CONTEXT.try_with(|ctx| ctx.clone()).ok()
 }
 
-/// Ejecuta el future `fut` con `ctx` como span context activo.
-/// Wrapper sobre `LocalKey::scope`. Llamado típicamente por el
-/// wrapper HTTP al boot del request (12.3.b.2).
+/// Executes the future `fut` with `ctx` as the active span context.
+/// Wrapper over `LocalKey::scope`. Typically called by the HTTP
+/// wrapper at the request boot (12.3.b.2).
 ///
-/// Adentro del scope, `current_span_context()` devuelve `Some(ctx)`.
-/// Spans anidados se crean con `ctx.new_child()` + nueva llamada a
+/// Inside the scope, `current_span_context()` returns `Some(ctx)`.
+/// Nested spans are created with `ctx.new_child()` + a new call to
 /// `with_span_context(child, ...)`.
 pub async fn with_span_context<F, Fut, T>(ctx: SpanContext, f: F) -> T
 where
@@ -593,8 +598,8 @@ mod tests {
     use parking_lot::Mutex as PlMutex;
     use std::sync::Arc;
 
-    /// Helper: construye un `Value::Map` con `Vec<(Value, Value)>`
-    /// adentro de `Arc<parking_lot::Mutex<...>>` (shape post-F17).
+    /// Helper: builds a `Value::Map` with `Vec<(Value, Value)>` inside
+    /// `Arc<parking_lot::Mutex<...>>` (post-F17 shape).
     fn make_map(pairs: Vec<(Value, Value)>) -> Value {
         Value::Map(Arc::new(PlMutex::new(pairs)))
     }
@@ -615,7 +620,7 @@ mod tests {
             ("active".into(), Value::Bool(true)),
         ];
         let line = format_json("info", "login ok", &kvs);
-        // Parseamos para no depender del exacto whitespace.
+        // We parse so we don't depend on the exact whitespace.
         let parsed: JsonValue = serde_json::from_str(&line).expect("debería ser JSON válido");
         let obj = parsed.as_object().expect("Object esperado");
         assert_eq!(obj.get("level"), Some(&JsonValue::String("INFO".into())));
@@ -623,7 +628,7 @@ mod tests {
         assert_eq!(obj.get("user_id"), Some(&JsonValue::Number(42.into())));
         assert_eq!(obj.get("role"), Some(&JsonValue::String("admin".into())));
         assert_eq!(obj.get("active"), Some(&JsonValue::Bool(true)));
-        // timestamp es ISO 8601 que termina en `Z`.
+        // timestamp is ISO 8601 ending in `Z`.
         let ts = obj
             .get("timestamp")
             .and_then(|v| v.as_str())
@@ -649,7 +654,7 @@ mod tests {
             .and_then(|v| v.as_str())
             .expect("token field esperado");
         assert_eq!(token, "<redacted>");
-        // El secret real NUNCA debe filtrarse en el output.
+        // The real secret must NEVER leak into the output.
         assert!(
             !line.contains("super-secret"),
             "el secret se filtró: {}",
@@ -668,7 +673,7 @@ mod tests {
             ]),
         )];
         let line = format_json("info", "rotating", &kvs);
-        // El secret no se debe filtrar ni siquiera adentro de la lista.
+        // The secret must not leak even from inside the list.
         assert!(!line.contains("hidden-token"), "filtración: {}", line);
         assert!(
             line.contains("<redacted>"),
@@ -704,7 +709,7 @@ mod tests {
     fn format_json_orden_de_campos_estable_timestamp_level_msg_kwargs() {
         let kvs = vec![("a".into(), Value::Int(1)), ("b".into(), Value::Int(2))];
         let line = format_json("error", "fail", &kvs);
-        // serde_json con preserve_order respeta orden de inserción.
+        // serde_json with preserve_order respects insertion order.
         let ts_pos = line.find("\"timestamp\"").expect("timestamp");
         let level_pos = line.find("\"level\"").expect("level");
         let msg_pos = line.find("\"msg\"").expect("msg");
@@ -723,7 +728,7 @@ mod tests {
             ("active".into(), Value::Bool(true)),
         ];
         let line = format_pretty("info", "login ok", &kvs);
-        // Strip ANSI para comparar el contenido textual.
+        // Strip ANSI to compare textual content.
         let stripped = strip_ansi(&line);
         assert!(stripped.contains("INFO"));
         assert!(stripped.contains("login ok"));
@@ -764,13 +769,13 @@ mod tests {
 
     #[test]
     fn detect_format_respeta_override_env_json() {
-        // Salvamos el valor previo para no contaminar otros tests.
+        // Save the previous value so we don't contaminate other tests.
         let prev = std::env::var("FITZ_LOG_FORMAT").ok();
         unsafe {
             std::env::set_var("FITZ_LOG_FORMAT", "json");
         }
         let fmt = detect_format();
-        // Restaurar antes de assertear.
+        // Restore before asserting.
         match prev {
             Some(v) => unsafe { std::env::set_var("FITZ_LOG_FORMAT", v) },
             None => unsafe { std::env::remove_var("FITZ_LOG_FORMAT") },
@@ -803,23 +808,24 @@ mod tests {
             Some(v) => unsafe { std::env::set_var("FITZ_LOG_FORMAT", v) },
             None => unsafe { std::env::remove_var("FITZ_LOG_FORMAT") },
         }
-        // Auto-detect: depende del TTY del runner — en CI no es TTY,
-        // así que esperamos Json. Si en local con TTY queda Pretty, OK
-        // — la assertion es que NO crashea ni devuelve un format
-        // inválido, no qué valor concreto da.
+        // Auto-detect: depends on the runner's TTY — in CI it's not a
+        // TTY, so we expect Json. If running locally with a TTY it
+        // comes out Pretty, OK — the assertion is that it does NOT
+        // crash nor return an invalid format, not what concrete value
+        // it returns.
         assert!(matches!(fmt, LogFormat::Json | LogFormat::Pretty));
     }
 
-    /// Pequeño stripper de secuencias ANSI escape para tests de format
-    /// pretty. Maneja `\x1b[...m` (los códigos que usamos en
-    /// `colorize_level` y el `\x1b[2m...\x1b[0m` del timestamp).
+    /// Small ANSI escape sequence stripper for pretty format tests.
+    /// Handles `\x1b[...m` (the codes we use in `colorize_level` and
+    /// the timestamp's `\x1b[2m...\x1b[0m`).
     fn strip_ansi(s: &str) -> String {
         let mut out = String::with_capacity(s.len());
         let mut chars = s.chars().peekable();
         while let Some(c) = chars.next() {
             if c == '\x1b' && chars.peek() == Some(&'[') {
                 chars.next(); // skip `[`
-                              // Consumir hasta `m` inclusive.
+                              // Consume up to and including `m`.
                 for c2 in chars.by_ref() {
                     if c2 == 'm' {
                         break;
@@ -834,13 +840,13 @@ mod tests {
 
     #[test]
     fn strip_ansi_test_helper_quita_secuencias() {
-        // Self-check del helper: si la lógica anti-ANSI rompe, todos
-        // los tests pretty pueden pasar falsos.
+        // Self-check of the helper: if the anti-ANSI logic breaks,
+        // all the pretty tests can pass falsely.
         let s = "\x1b[1;32mINFO\x1b[0m hola";
         assert_eq!(strip_ansi(s), "INFO hola");
     }
 
-    // ---- Fase 12.3.b.1 — SpanContext + correlación trace_id en logs ----
+    // ---- Phase 12.3.b.1 — SpanContext + trace_id correlation in logs ----
 
     #[test]
     fn span_context_new_root_genera_ids_otel_compatible() {
@@ -851,7 +857,7 @@ mod tests {
         // span_id = 16 hex chars (8 bytes × 2).
         assert_eq!(ctx.span_id.len(), 16);
         assert!(ctx.span_id.chars().all(|c| c.is_ascii_hexdigit()));
-        // Root no tiene parent.
+        // Root has no parent.
         assert_eq!(ctx.parent_span_id, None);
     }
 
@@ -884,16 +890,17 @@ mod tests {
         let root = SpanContext::new_root();
         let child = root.new_child();
         let grandchild = child.new_child();
-        // El trace_id es estable across la cadena entera.
+        // The trace_id is stable across the entire chain.
         assert_eq!(grandchild.trace_id, root.trace_id);
-        // El parent del grandchild es el child, NO el root.
+        // The grandchild's parent is the child, NOT the root.
         assert_eq!(grandchild.parent_span_id, Some(child.span_id.clone()));
     }
 
     #[test]
     fn iter2b_value_to_any_value_primitivos_mapean_directo() {
-        // Fase 12.3.iter2.b — `value_to_any_value` convierte Value Fitz
-        // a AnyValue OTel para el LogRecord. Primitivos van directo.
+        // Phase 12.3.iter2.b — `value_to_any_value` converts a Fitz
+        // Value to an OTel AnyValue for the LogRecord. Primitives go
+        // through directly.
         use opentelemetry::logs::AnyValue;
         // Int → Int
         match value_to_any_value(&Value::Int(42)) {
@@ -924,8 +931,9 @@ mod tests {
 
     #[test]
     fn iter2b_value_to_any_value_secret_se_redacta() {
-        // Fase 12.3.iter2.b — Secret se exporta como `"***"` al OTel
-        // backend, paralelo a la redacción de Fase 12.3.a en stderr.
+        // Phase 12.3.iter2.b — Secret is exported as `"***"` to the
+        // OTel backend, parallel to the Phase 12.3.a redaction in
+        // stderr.
         use opentelemetry::logs::AnyValue;
         let secret = make_secret(Value::Str("super-secret-token".into()));
         match value_to_any_value(&secret) {
@@ -943,8 +951,8 @@ mod tests {
 
     #[test]
     fn iter2b_value_to_any_value_list_y_map_son_recursivos() {
-        // Fase 12.3.iter2.b — List/Map estructurados van como
-        // ListAny/Map preservando el shape (no como string).
+        // Phase 12.3.iter2.b — structured List/Map go as ListAny/Map
+        // preserving the shape (not as string).
         use opentelemetry::logs::AnyValue;
         let list = make_list(vec![Value::Int(1), Value::Int(2)]);
         match value_to_any_value(&list) {
@@ -967,11 +975,11 @@ mod tests {
 
     #[test]
     fn iter2a_span_context_with_ids_preserva_ids_pasados_y_parent_es_none() {
-        // Fase 12.3.iter2.a — constructor para correlación trace_id
-        // Fitz↔OTel. `dispatch_request` lo usa para derivar el
-        // SpanContext propio desde el span OTel cuando el provider
-        // está instalado, así el trace_id en logs stderr matchea el
-        // del backend OTel (Jaeger/Tempo/Datadog).
+        // Phase 12.3.iter2.a — constructor for Fitz↔OTel trace_id
+        // correlation. `dispatch_request` uses it to derive its own
+        // SpanContext from the OTel span when the provider is
+        // installed, so the trace_id in stderr logs matches the one
+        // in the OTel backend (Jaeger/Tempo/Datadog).
         let ctx = SpanContext::with_ids(
             "0123456789abcdef0123456789abcdef".to_string(),
             "fedcba9876543210".to_string(),
@@ -983,7 +991,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn current_span_context_devuelve_none_fuera_de_scope() {
-        // Sin `with_span_context(...)`, el TaskLocal no está set.
+        // Without `with_span_context(...)`, the TaskLocal is not set.
         assert!(current_span_context().is_none());
     }
 
@@ -998,13 +1006,14 @@ mod tests {
             assert_eq!(observed.span_id, span_id_expected);
         })
         .await;
-        // Después del scope, el TaskLocal queda fuera de scope.
+        // After the scope, the TaskLocal goes out of scope.
         assert!(current_span_context().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn format_json_sin_span_omite_trace_id_y_span_id() {
-        // Sin span activo, el JSON NO incluye trace_id ni span_id.
+        // Without an active span, the JSON does NOT include trace_id
+        // or span_id.
         let line = format_json("info", "test", &[]);
         let parsed: JsonValue = serde_json::from_str(&line).unwrap();
         let obj = parsed.as_object().unwrap();
@@ -1029,7 +1038,7 @@ mod tests {
                 obj.get("span_id").and_then(|v| v.as_str()),
                 Some(span_id_expected.as_str())
             );
-            // Los kwargs del user siguen presentes.
+            // The user's kwargs are still present.
             assert_eq!(obj.get("user_id"), Some(&JsonValue::Number(42.into())));
         })
         .await;
@@ -1037,9 +1046,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn format_json_orden_es_timestamp_level_msg_trace_span_kwargs() {
-        // El orden es importante para queryability — trace_id/span_id
-        // van entre msg y kwargs para que herramientas downstream los
-        // encuentren con un pattern fijo.
+        // The order matters for queryability — trace_id/span_id go
+        // between msg and kwargs so that downstream tools find them
+        // with a fixed pattern.
         let ctx = SpanContext::new_root();
         with_span_context(ctx, || async move {
             let line = format_json("info", "x", &[("user_id".into(), Value::Int(1))]);
@@ -1096,9 +1105,9 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn format_pretty_con_span_e_inclusion_de_kwargs() {
-        // El orden visual: ts LEVEL msg trace= span= k=v
-        // Validamos que ambos están presentes y que los kwargs van
-        // después del span info.
+        // Visual order: ts LEVEL msg trace= span= k=v
+        // We validate that both are present and that the kwargs go
+        // after the span info.
         let ctx = SpanContext::new_root();
         with_span_context(ctx, || async move {
             let line = format_pretty("info", "msg", &[("user_id".into(), Value::Int(42))]);

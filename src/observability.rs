@@ -1,104 +1,107 @@
-//! Fase 12.3.c.1 — OTLP exporter para spans HTTP.
+//! Phase 12.3.c.1 — OTLP exporter for HTTP spans.
 //!
-//! Conecta los spans que abre `dispatch_request` (12.3.b.2) a un
-//! backend OTel real (Jaeger, Tempo, Honeycomb, Datadog, etc.) cuando
-//! la env var `OTEL_EXPORTER_OTLP_ENDPOINT` está seteada. Sin esa var,
-//! `init_otel()` es no-op silencioso — zero overhead, zero conexiones
-//! de red, zero spans enviados a ningún lado.
+//! Connects the spans opened by `dispatch_request` (12.3.b.2) to a
+//! real OTel backend (Jaeger, Tempo, Honeycomb, Datadog, etc.) when
+//! the `OTEL_EXPORTER_OTLP_ENDPOINT` env var is set. Without that
+//! var, `init_otel()` is a silent no-op — zero overhead, zero
+//! network connections, zero spans sent anywhere.
 //!
 //! ## Env vars (OTel-standard)
 //!
-//! - `OTEL_EXPORTER_OTLP_ENDPOINT` — URL del collector
-//!   (e.g. `http://localhost:4318` para un OTel Collector local).
-//!   **Sin default**: si no está, `init_otel()` no instala nada.
-//! - `OTEL_SERVICE_NAME` — nombre del servicio que aparece en el
-//!   backend. Default: `"fitz-app"`.
-//! - `OTEL_TRACES_SAMPLER_ARG` — ratio de sampling como Float entre
-//!   `0.0` y `1.0`. Default: `1.0` (100% de los spans se envían).
+//! - `OTEL_EXPORTER_OTLP_ENDPOINT` — collector URL
+//!   (e.g. `http://localhost:4318` for a local OTel Collector).
+//!   **No default**: if it's not set, `init_otel()` installs nothing.
+//! - `OTEL_SERVICE_NAME` — service name that appears in the backend.
+//!   Default: `"fitz-app"`.
+//! - `OTEL_TRACES_SAMPLER_ARG` — sampling ratio as a Float between
+//!   `0.0` and `1.0`. Default: `1.0` (100% of spans are sent).
 //!
-//! ## Lo que NO está en 12.3.c.1
+//! ## What is NOT in 12.3.c.1
 //!
-//! - Métricas OTel (`metrics::counter!` / `histogram!` siguen
-//!   despachando a recorder global vacío; el bridge OTel queda como
-//!   sub-paso futuro).
-//! - ~~Logs OTel~~ **CERRADO en Fase 12.3.iter2.b (2026-06-03)**:
-//!   cuando `is_otel_enabled()` es `true`, `emit_log_record` emite
-//!   en paralelo el LogRecord al OTel logger global vía OTLP HTTP/proto
-//!   (endpoint `/v1/logs`). Logs en stderr siguen intactos; los logs
-//!   adentro de un request HTTP heredan `trace_id`/`span_id` del
-//!   span OTel activo (paralelo a la correlación de iter2.a).
-//! - ~~Correlación trace_id Fitz↔OTel~~ **CERRADO en Fase 12.3.iter2.a
-//!   (2026-06-03)**: cuando `is_otel_enabled()` es `true`,
-//!   `dispatch_request` deriva el `SpanContext` propio del span OTel
-//!   abierto (vía `SpanContext::with_ids(trace_id, span_id)`). El
-//!   `trace_id` que aparece en los logs stderr/JSON es EL MISMO que
-//!   el del span OTel en Jaeger/Tempo/Datadog/Honeycomb — habilita
-//!   queries cross-pipeline. Sin OTel, `SpanContext::new_root()`
-//!   sigue generando IDs propios via uuid.
+//! - OTel metrics (`metrics::counter!` / `histogram!` still dispatch
+//!   to an empty global recorder; the OTel bridge is left as a future
+//!   sub-step).
+//! - ~~OTel logs~~ **CLOSED in Phase 12.3.iter2.b (2026-06-03)**:
+//!   when `is_otel_enabled()` is `true`, `emit_log_record` emits the
+//!   LogRecord in parallel to the global OTel logger via OTLP
+//!   HTTP/proto (endpoint `/v1/logs`). Logs in stderr remain intact;
+//!   logs inside an HTTP request inherit `trace_id`/`span_id` from
+//!   the active OTel span (parallel to the iter2.a correlation).
+//! - ~~Fitz↔OTel trace_id correlation~~ **CLOSED in Phase
+//!   12.3.iter2.a (2026-06-03)**: when `is_otel_enabled()` is `true`,
+//!   `dispatch_request` derives its own `SpanContext` from the opened
+//!   OTel span (via `SpanContext::with_ids(trace_id, span_id)`). The
+//!   `trace_id` that appears in stderr/JSON logs is THE SAME as the
+//!   OTel span's in Jaeger/Tempo/Datadog/Honeycomb — enables
+//!   cross-pipeline queries. Without OTel, `SpanContext::new_root()`
+//!   keeps generating its own IDs via uuid.
 //!
 //! ## API
 //!
-//! - `init_otel()` — llamar UNA vez al boot del binario, después de
-//!   `init_logging()`. Idempotente.
-//! - `is_otel_enabled()` — `true` si el provider OTel fue instalado.
-//!   `dispatch_request` lo consulta para decidir si abrir un span
-//!   adicional OTel (paralelo al SpanContext propio).
-//! - `tracer()` — devuelve el tracer global con nombre `"fitz"` para
-//!   abrir spans HTTP. Llamar solo si `is_otel_enabled()` es `true`.
+//! - `init_otel()` — call ONCE at boot of the binary, after
+//!   `init_logging()`. Idempotent.
+//! - `is_otel_enabled()` — `true` if the OTel provider was installed.
+//!   `dispatch_request` consults it to decide whether to open an
+//!   additional OTel span (parallel to the own SpanContext).
+//! - `tracer()` — returns the global tracer named `"fitz"` for
+//!   opening HTTP spans. Call only if `is_otel_enabled()` is `true`.
 
 use std::sync::OnceLock;
 
 use opentelemetry_sdk::logs::SdkLoggerProvider;
 
-/// Flag global que `init_otel()` setea cuando logra instalar el
-/// provider OTel. `dispatch_request` lo consulta para decidir si
-/// abrir un span OTel adicional. Sin OTel instalado, el flag queda
-/// `false` y los handlers HTTP corren con la instrumentación
-/// existente (SpanContext + access log + métricas) sin enviar nada
-/// al backend.
+/// Global flag that `init_otel()` sets when it manages to install the
+/// OTel provider. `dispatch_request` consults it to decide whether to
+/// open an additional OTel span. Without OTel installed, the flag
+/// stays `false` and HTTP handlers run with the existing
+/// instrumentation (SpanContext + access log + metrics) without
+/// sending anything to the backend.
 static OTEL_ENABLED: OnceLock<bool> = OnceLock::new();
 
-/// Fase 12.3.iter2.b — LoggerProvider OTel global del proceso.
-/// `init_otel()` lo instala cuando `OTEL_EXPORTER_OTLP_ENDPOINT` está
-/// seteada. `emit_log_record` lo consulta para emitir el LogRecord
-/// en paralelo a stderr cuando el provider está activo.
+/// Phase 12.3.iter2.b — process-global OTel LoggerProvider.
+/// `init_otel()` installs it when `OTEL_EXPORTER_OTLP_ENDPOINT` is
+/// set. `emit_log_record` consults it to emit the LogRecord in
+/// parallel to stderr when the provider is active.
 ///
-/// Nota arquitectónica: la API `opentelemetry::logs::*` está marcada
-/// como "no intended for application developers" — el patrón
-/// idiomático sería `opentelemetry-appender-tracing` como `tracing::Layer`.
-/// Pero nuestro `emit_log_record` emite directo a stderr (no usa
-/// `tracing::event!`), por lo que el appender no captura nada. La
-/// alternativa idiomática implica refactorizar el formatter custom
-/// JSON/pretty de Fase 12.3.a a una implementación de `FormatEvent`
-/// — costo no justificado para el caso. Usamos la SDK directa
-/// guardando el provider en un static. Fitz es un runtime, no una
-/// app típica; gestionar el SDK directamente es razonable.
+/// Architectural note: the `opentelemetry::logs::*` API is marked as
+/// "not intended for application developers" — the idiomatic pattern
+/// would be `opentelemetry-appender-tracing` as a `tracing::Layer`.
+/// But our `emit_log_record` emits directly to stderr (it doesn't use
+/// `tracing::event!`), so the appender captures nothing. The
+/// idiomatic alternative implies refactoring the custom JSON/pretty
+/// formatter of Phase 12.3.a into a `FormatEvent` implementation —
+/// cost not justified for the case. We use the SDK directly by
+/// holding the provider in a static. Fitz is a runtime, not a
+/// typical app; managing the SDK directly is reasonable.
 static OTEL_LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
 
-/// `true` si `init_otel()` instaló el provider OTel y los spans se
-/// envían al backend. `false` cuando `OTEL_EXPORTER_OTLP_ENDPOINT`
-/// no está seteada o el init falló por algún error de transporte.
+/// `true` if `init_otel()` installed the OTel provider and spans are
+/// being sent to the backend. `false` when
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` is not set or the init failed due to
+/// some transport error.
 pub fn is_otel_enabled() -> bool {
     OTEL_ENABLED.get().copied().unwrap_or(false)
 }
 
-/// Inicializa el provider OTel global cuando `OTEL_EXPORTER_OTLP_ENDPOINT`
-/// está seteada. Idempotente: si ya está inicializado, no-op.
+/// Initializes the global OTel provider when
+/// `OTEL_EXPORTER_OTLP_ENDPOINT` is set. Idempotent: if already
+/// initialized, no-op.
 ///
-/// **Llamado desde `main.rs` al boot del binario, después de
-/// `init_logging()`**. Sin la env var, esta fn no toca nada — los
-/// handlers HTTP siguen con la instrumentación existente (SpanContext
-/// + access log + métricas) sin enviar nada por la red.
+/// **Called from `main.rs` at boot of the binary, after
+/// `init_logging()`**. Without the env var, this fn touches nothing
+/// — HTTP handlers keep running with the existing instrumentation
+/// (SpanContext + access log + metrics) without sending anything over
+/// the network.
 ///
-/// Instala **dos providers** cuando la env var está activa:
-/// 1. `SdkTracerProvider` — spans HTTP exportados a `/v1/traces`.
-/// 2. `SdkLoggerProvider` (Fase 12.3.iter2.b) — log records emitidos
-///    por `emit_log_record` exportados en paralelo a `/v1/logs`.
+/// Installs **two providers** when the env var is active:
+/// 1. `SdkTracerProvider` — HTTP spans exported to `/v1/traces`.
+/// 2. `SdkLoggerProvider` (Phase 12.3.iter2.b) — log records emitted
+///    by `emit_log_record` exported in parallel to `/v1/logs`.
 ///
-/// Errores de instalación (endpoint malformado, no se puede conectar
-/// al collector, etc.) se silencian — escribimos a stderr una nota
-/// breve y dejamos el flag `OTEL_ENABLED` en `false`. Esto evita que
-/// un error de configuración del operador haga crashear el binario.
+/// Installation errors (malformed endpoint, can't connect to the
+/// collector, etc.) are silenced — we write a brief note to stderr
+/// and leave the `OTEL_ENABLED` flag at `false`. This prevents an
+/// operator's misconfiguration from crashing the binary.
 pub fn init_otel() {
     use opentelemetry::trace::TracerProvider as _;
     use opentelemetry::KeyValue;
@@ -107,14 +110,15 @@ pub fn init_otel() {
     use opentelemetry_sdk::trace::{Sampler, SdkTracerProvider};
     use opentelemetry_sdk::Resource;
 
-    // Idempotente: solo el primer call instala. Si ya hay flag set,
-    // no-op silencioso (sirve para tests/REPL/fitz dev re-ejecutando).
+    // Idempotent: only the first call installs. If the flag is
+    // already set, silent no-op (useful for tests/REPL/fitz dev
+    // re-executing).
     if OTEL_ENABLED.get().is_some() {
         return;
     }
 
     let Ok(endpoint) = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT") else {
-        // Sin endpoint, no instalamos nada y dejamos el flag en false.
+        // No endpoint, we install nothing and leave the flag at false.
         let _ = OTEL_ENABLED.set(false);
         return;
     };
@@ -128,8 +132,8 @@ pub fn init_otel() {
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(1.0);
-    // Clamp a [0.0, 1.0] — valores fuera de rango se silencian al
-    // borde más cercano. Mejor que rechazar el init.
+    // Clamp to [0.0, 1.0] — out-of-range values are silenced to the
+    // nearest edge. Better than rejecting the init.
     let sampler_arg = sampler_arg.clamp(0.0, 1.0);
 
     let span_exporter = match opentelemetry_otlp::SpanExporter::builder()
@@ -158,18 +162,19 @@ pub fn init_otel() {
         .with_sampler(Sampler::TraceIdRatioBased(sampler_arg))
         .build();
 
-    // Smoke check: el provider se puede crear sin endpoint vivo. El
-    // envío real falla async cuando se intenta exportar — ese error
-    // queda silenciado por el batch processor.
+    // Smoke check: the provider can be created without a live
+    // endpoint. The real send fails async when export is attempted —
+    // that error gets silenced by the batch processor.
     let _tracer = tracer_provider.tracer("fitz");
     opentelemetry::global::set_tracer_provider(tracer_provider);
 
-    // Fase 12.3.iter2.b — LoggerProvider paralelo al TracerProvider.
-    // Cuando el span exporter funcionó, asumimos que el endpoint OTLP
-    // es válido y armamos el log exporter sobre `/v1/logs`. Si el log
-    // exporter falla, log a stderr y seguimos con el tracer instalado
-    // (mejor degradación parcial que abortar el init entero — los
-    // spans siguen llegando al backend aunque los logs no).
+    // Phase 12.3.iter2.b — LoggerProvider parallel to the
+    // TracerProvider. When the span exporter worked, we assume the
+    // OTLP endpoint is valid and build the log exporter over
+    // `/v1/logs`. If the log exporter fails, log to stderr and keep
+    // going with the tracer installed (better partial degradation
+    // than aborting the whole init — spans still reach the backend
+    // even if the logs don't).
     match opentelemetry_otlp::LogExporter::builder()
         .with_http()
         .with_endpoint(format!("{}/v1/logs", endpoint.trim_end_matches('/')))
@@ -180,9 +185,9 @@ pub fn init_otel() {
                 .with_batch_exporter(log_exporter)
                 .with_resource(resource)
                 .build();
-            // El provider vive el resto del proceso adentro del
-            // OnceLock — necesario para que el batch processor pueda
-            // seguir flushando logs hasta el shutdown.
+            // The provider lives the rest of the process inside the
+            // OnceLock — necessary so the batch processor can keep
+            // flushing logs until shutdown.
             let _ = OTEL_LOGGER_PROVIDER.set(logger_provider);
         }
         Err(err) => {
@@ -196,62 +201,64 @@ pub fn init_otel() {
     let _ = OTEL_ENABLED.set(true);
 }
 
-/// Devuelve el `SdkLoggerProvider` global cuando está instalado.
-/// `emit_log_record` lo consulta antes de armar un LogRecord para
-/// exportar via OTLP. `None` cuando OTel no está activo o el
-/// LogExporter falló al inicializarse (caso de degradación parcial).
+/// Returns the global `SdkLoggerProvider` when it is installed.
+/// `emit_log_record` consults it before building a LogRecord to
+/// export via OTLP. `None` when OTel is not active or the LogExporter
+/// failed to initialize (partial degradation case).
 ///
-/// Fase 12.3.iter2.b — getter público sobre `OTEL_LOGGER_PROVIDER`.
+/// Phase 12.3.iter2.b — public getter over `OTEL_LOGGER_PROVIDER`.
 pub fn logger_provider() -> Option<&'static SdkLoggerProvider> {
     OTEL_LOGGER_PROVIDER.get()
 }
 
-/// Fase 12.3.iter2.Tier3 — handle del recorder Prometheus cuando está
-/// instalado. El handle se usa por el endpoint `/metrics` para
-/// renderear la exposition format en cada scrape. `None` cuando
-/// Prometheus no fue habilitado (default).
+/// Phase 12.3.iter2.Tier3 — Prometheus recorder handle when installed.
+/// The handle is used by the `/metrics` endpoint to render the
+/// exposition format on each scrape. `None` when Prometheus was not
+/// enabled (default).
 static PROMETHEUS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
 
-/// Inicializa el recorder Prometheus global cuando `enabled` es `true`.
-/// Idempotente: el `OnceLock` solo acepta el primer set; sub-secuentes
-/// calls retornan el handle ya instalado.
+/// Initializes the global Prometheus recorder when `enabled` is
+/// `true`. Idempotent: the `OnceLock` only accepts the first set;
+/// subsequent calls return the already-installed handle.
 ///
-/// Decisión: el endpoint `/metrics` se monta en el axum del usuario
-/// (NO en un puerto separado vía `http-listener` feature) — usa el
-/// mismo puerto + transporte que el resto de la app. Menos surface
-/// área, menos config (port forwarding, firewall rules, etc.).
+/// Decision: the `/metrics` endpoint is mounted on the user's axum
+/// (NOT on a separate port via the `http-listener` feature) — it uses
+/// the same port + transport as the rest of the app. Less surface
+/// area, less config (port forwarding, firewall rules, etc.).
 ///
-/// Activación dual:
-/// - Compile-time: `@server(prometheus=true)` en el código Fitz.
+/// Dual activation:
+/// - Compile-time: `@server(prometheus=true)` in the Fitz code.
 /// - Runtime: env var `FITZ_PROMETHEUS=1`/`true` (override).
 ///
-/// Si AMBAS están: env var precedence (`true` o `false`). Sin
-/// ninguna: recorder no se instala, `/metrics` no se monta.
+/// If BOTH are present: env var precedence (`true` or `false`).
+/// Without either: recorder is not installed, `/metrics` is not
+/// mounted.
 ///
-/// Fase 12.3.iter2.Tier3 — cierre de la deuda residual #4 de Fase 12.3.
+/// Phase 12.3.iter2.Tier3 — closes residual debt #4 of Phase 12.3.
 pub fn init_prometheus(enabled: bool) {
     if !enabled || PROMETHEUS_HANDLE.get().is_some() {
         return;
     }
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
-    // `set_global_recorder` falla si ya hay uno instalado. Lo
-    // ignoramos — el caso típico es REPL/tests/fitz dev re-ejecutando.
+    // `set_global_recorder` fails if there is already one installed.
+    // We ignore it — the typical case is REPL/tests/fitz dev
+    // re-executing.
     let _ = metrics::set_global_recorder(recorder);
     let _ = PROMETHEUS_HANDLE.set(handle);
 }
 
-/// Devuelve el handle Prometheus para renderear la exposition format.
-/// `None` cuando el recorder no fue instalado. El endpoint `/metrics`
-/// del usuario lo consulta; si `None`, no monta la ruta.
+/// Returns the Prometheus handle to render the exposition format.
+/// `None` when the recorder was not installed. The user's `/metrics`
+/// endpoint consults it; if `None`, it doesn't mount the route.
 pub fn prometheus_handle() -> Option<&'static metrics_exporter_prometheus::PrometheusHandle> {
     PROMETHEUS_HANDLE.get()
 }
 
-/// Devuelve el tracer global con nombre `"fitz"` para abrir spans
-/// HTTP. Llamar SOLO cuando `is_otel_enabled()` retorna `true` —
-/// sin provider instalado, el tracer es no-op pero igual paga la
-/// overhead de lookup global.
+/// Returns the global tracer named `"fitz"` for opening HTTP spans.
+/// Call ONLY when `is_otel_enabled()` returns `true` — without an
+/// installed provider, the tracer is a no-op but it still pays the
+/// global lookup overhead.
 pub fn tracer() -> opentelemetry::global::BoxedTracer {
     opentelemetry::global::tracer("fitz")
 }
@@ -262,18 +269,18 @@ mod tests {
 
     #[test]
     fn init_otel_sin_env_var_es_noop_y_flag_false() {
-        // El OnceLock es global del proceso — un test anterior
-        // podría haber instalado uno. Como no podemos limpiarlo
-        // determinístico, solo aseveramos que `is_otel_enabled()`
-        // no panic.
+        // The OnceLock is process-global — an earlier test might
+        // have installed one. Since we can't clear it
+        // deterministically, we only assert that `is_otel_enabled()`
+        // doesn't panic.
         let _ = is_otel_enabled();
     }
 
     #[test]
     fn tracer_devuelve_boxed_tracer_aun_sin_init() {
-        // Sin provider instalado, `global::tracer` devuelve un NoOp
-        // que no panicquea ni envía nada. Validamos que la API
-        // existe y no aborta.
+        // Without a provider installed, `global::tracer` returns a
+        // NoOp that neither panics nor sends anything. We validate
+        // that the API exists and does not abort.
         let _t = tracer();
     }
 }
