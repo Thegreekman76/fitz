@@ -1,34 +1,34 @@
-//! Fase 10.6 — Migraciones automáticas del ORM.
+//! Phase 10.6 — Automatic ORM migrations.
 //!
-//! Provee 4 capacidades:
+//! Provides 4 capabilities:
 //!
-//! 1. **Introspección PG** ([`introspect_schema`]): consulta el
-//!    schema actual de la DB (tablas/columnas/índices/FKs) via
-//!    `information_schema` + `pg_catalog`. Devuelve un [`Schema`]
-//!    que es la "fotografía" del estado real.
-//! 2. **Schema desde @table types** ([`schema_from_program`]):
-//!    walka el AST del programa Fitz + el `TypeEnv` con las
-//!    `TableMetadata` resueltas por el checker → devuelve el
-//!    [`Schema`] "esperado" (target).
-//! 3. **Diff algorithm** ([`diff_schemas`]): compara `current` vs
-//!    `target` y emite una lista de [`Change`] ordenadas (CREATE
-//!    TABLE antes de INDEX, FK al final, etc.).
-//! 4. **SQL emission** ([`changes_to_sql`]): cada [`Change`] sabe
-//!    cómo generarse como statement DDL Postgres.
+//! 1. **PG introspection** ([`introspect_schema`]): queries the
+//!    current schema of the DB (tables/columns/indexes/FKs) via
+//!    `information_schema` + `pg_catalog`. Returns a [`Schema`]
+//!    that is the "snapshot" of the real state.
+//! 2. **Schema from @table types** ([`schema_from_program`]):
+//!    walks the AST of the Fitz program + the `TypeEnv` with the
+//!    `TableMetadata` resolved by the checker → returns the
+//!    "expected" [`Schema`] (target).
+//! 3. **Diff algorithm** ([`diff_schemas`]): compares `current` vs
+//!    `target` and emits an ordered list of [`Change`] (CREATE
+//!    TABLE before INDEX, FK at the end, etc.).
+//! 4. **SQL emission** ([`changes_to_sql`]): each [`Change`] knows
+//!    how to generate itself as a Postgres DDL statement.
 //!
-//! El módulo NO se embebe en el output del codegen (`fitz build`)
-//! — vive solo en el binario `fitz` CLI. Los binarios del usuario
-//! no necesitan capacidad de introspección/migration; eso es del
-//! lado del desarrollador.
+//! The module is NOT embedded in the codegen output (`fitz build`)
+//! — it lives only in the `fitz` CLI binary. User binaries do not
+//! need introspection/migration capabilities; that is on the
+//! developer side.
 
 use crate::db::{DbConnHandle, DbError, DbResult, PgValue};
 
 // =================================================================
-// Modelo del schema
+// Schema model
 // =================================================================
 
-/// Snapshot del schema de una DB Postgres. Construido tanto via
-/// introspección de la DB real como derivado del programa Fitz.
+/// Snapshot of a Postgres DB schema. Built both via introspection
+/// of the real DB and derived from the Fitz program.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Schema {
     pub tables: Vec<Table>,
@@ -40,38 +40,40 @@ pub struct Table {
     pub columns: Vec<Column>,
     pub indexes: Vec<Index>,
     pub foreign_keys: Vec<ForeignKey>,
-    /// v0.10.17 (10.6.b.2) — Si está, hint al diff de que la
-    /// tabla SE LLAMABA `renamed_from` antes; emite `ALTER TABLE
-    /// "old" RENAME TO "new"` en vez de `DROP + CREATE`. Solo
-    /// poblado en el snapshot "target" (desde `schema_from_program`);
-    /// `introspect_schema` lo deja en `None`.
+    /// v0.10.17 (10.6.b.2) — When present, hints to the diff that
+    /// the table USED TO BE NAMED `renamed_from` before; emits
+    /// `ALTER TABLE "old" RENAME TO "new"` instead of
+    /// `DROP + CREATE`. Only populated in the "target" snapshot
+    /// (from `schema_from_program`); `introspect_schema` leaves
+    /// it as `None`.
     pub renamed_from: Option<String>,
-    /// v0.10.21 (10.6.e.3) — Schema Postgres custom. `None` =
-    /// `public` (default). Cuando `Some(s)`, el SQL emit usa
+    /// v0.10.21 (10.6.e.3) — Custom Postgres schema. `None` =
+    /// `public` (default). When `Some(s)`, the SQL emit uses
     /// `"s"."name"` qualified everywhere.
     pub schema: Option<String>,
-    /// v0.10.27 (F2) — composite PK. Si está y `len() >= 2`, el
-    /// CREATE TABLE emite `PRIMARY KEY (a, b)` como constraint
-    /// table-level (los columns individuales NO emiten `PRIMARY
-    /// KEY` inline). Si está y `len() == 1`, redundante con
-    /// `Column.is_primary` — preferimos el inline en ese caso. Si
-    /// vacío o None, no hay composite. La introspect popula desde
-    /// `pg_constraint` con contype='p'.
+    /// v0.10.27 (F2) — composite PK. If present and `len() >= 2`,
+    /// the CREATE TABLE emits `PRIMARY KEY (a, b)` as a table-level
+    /// constraint (individual columns do NOT emit `PRIMARY KEY`
+    /// inline). If present and `len() == 1`, redundant with
+    /// `Column.is_primary` — we prefer the inline in that case. If
+    /// empty or None, there is no composite. The introspect
+    /// populates from `pg_constraint` with contype='p'.
     pub composite_pk: Vec<String>,
-    /// v0.10.29 — `CHECK (<expr>)` constraints declarados con
-    /// `@check_constraint("expr", name="optional")` a nivel type.
-    /// Vacío = sin checks. Solo poblado en el snapshot "target"
-    /// del migrator (desde `schema_from_program`); `introspect_schema`
-    /// NO los lee del `pg_constraint` (MVP — deuda menor).
-    /// Consecuencia: el diff NO detecta drift de checks. Si el user
-    /// cambia un `expr` Fitz-side sin recrear la table, la DB sigue
-    /// con el viejo. Workaround: drop + create manual.
+    /// v0.10.29 — `CHECK (<expr>)` constraints declared with
+    /// `@check_constraint("expr", name="optional")` at the type
+    /// level. Empty = no checks. Only populated in the migrator
+    /// "target" snapshot (from `schema_from_program`);
+    /// `introspect_schema` does NOT read them from `pg_constraint`
+    /// (MVP — minor debt). Consequence: the diff does NOT detect
+    /// drift of checks. If the user changes an `expr` Fitz-side
+    /// without recreating the table, the DB stays with the old
+    /// one. Workaround: manual drop + create.
     pub check_constraints: Vec<CheckConstraint>,
 }
 
-/// v0.10.29 — Constraint CHECK declarado con `@check_constraint(...)`.
-/// El `expr` es la expresión SQL booleana que Postgres valida en
-/// INSERT/UPDATE. El `name` se auto-genera si no se especifica
+/// v0.10.29 — CHECK constraint declared with `@check_constraint(...)`.
+/// The `expr` is the boolean SQL expression that Postgres validates
+/// on INSERT/UPDATE. The `name` is auto-generated if not specified
 /// (`<table>_<idx>_check`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckConstraint {
@@ -80,11 +82,10 @@ pub struct CheckConstraint {
 }
 
 impl Table {
-    /// v0.10.21 — Identidad cross-schema. Dos tables son la
-    /// misma sí y solo sí su `(schema, name)` matchea. `None`
-    /// schema se trata como `"public"` para comparación canónica
-    /// (matchea cualquier introspect que reporte explícitamente
-    /// `public`).
+    /// v0.10.21 — Cross-schema identity. Two tables are the same
+    /// if and only if their `(schema, name)` matches. `None`
+    /// schema is treated as `"public"` for canonical comparison
+    /// (matches any introspect that reports `public` explicitly).
     pub fn qualified_id(&self) -> (String, String) {
         let s = self.schema.as_deref().unwrap_or("public");
         (s.to_string(), self.name.clone())
@@ -94,17 +95,17 @@ impl Table {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Column {
     pub name: String,
-    /// Tipo SQL canonicalizado (`bigint`/`text`/`boolean`/etc.).
+    /// Canonicalized SQL type (`bigint`/`text`/`boolean`/etc.).
     pub sql_type: String,
     pub nullable: bool,
-    /// `DEFAULT <expr>` declarado, sin la palabra `DEFAULT`. `None`
-    /// si el column no tiene default.
+    /// `DEFAULT <expr>` declared, without the `DEFAULT` keyword.
+    /// `None` if the column has no default.
     pub default: Option<String>,
     pub is_primary: bool,
-    /// v0.10.17 (10.6.b.2) — Si está, hint al diff de que el
-    /// column SE LLAMABA `renamed_from` antes; emite `ALTER
-    /// TABLE ... RENAME COLUMN "old" TO "new"` en vez de
-    /// `DROP + ADD`. Solo poblado en target.
+    /// v0.10.17 (10.6.b.2) — When present, hints to the diff that
+    /// the column USED TO BE NAMED `renamed_from` before; emits
+    /// `ALTER TABLE ... RENAME COLUMN "old" TO "new"` instead of
+    /// `DROP + ADD`. Only populated in target.
     pub renamed_from: Option<String>,
 }
 
@@ -113,28 +114,29 @@ pub struct Index {
     pub name: String,
     pub columns: Vec<String>,
     pub unique: bool,
-    /// v0.10.27 (F3) — WHERE clause SQL para partial indexes
+    /// v0.10.27 (F3) — SQL WHERE clause for partial indexes
     /// (`CREATE INDEX ... WHERE deleted_at IS NULL`). `None` = full
-    /// index. Si está, el diff compara la string exacta vs lo que
-    /// Postgres reporta (los espacios/canonical form pueden diferir
-    /// — best-effort match, fallback regenerar el índice).
+    /// index. When present, the diff compares the exact string vs
+    /// what Postgres reports (whitespace/canonical form may differ
+    /// — best-effort match, fallback to regenerate the index).
     pub where_clause: Option<String>,
     /// v0.10.28 — Access method (`USING <method>`). `None` = btree
-    /// (default Postgres, no se emite `USING` redundante).
-    /// `Some("gin"|"gist"|"brin"|"hash"|"spgist")` para overrides.
-    /// La introspect lee `pg_am.amname`; el target schema lo carga
-    /// desde `IndexSpec.using`. Diff name-based (igual que
-    /// where_clause) — cambiar SOLO el method no dispara DROP/CREATE;
-    /// renombrá el índice para forzar regen (deuda menor — sigue
-    /// pattern de v0.10.27 con where_clause).
+    /// (Postgres default, redundant `USING` is not emitted).
+    /// `Some("gin"|"gist"|"brin"|"hash"|"spgist")` for overrides.
+    /// Introspect reads `pg_am.amname`; the target schema loads it
+    /// from `IndexSpec.using`. Name-based diff (same as
+    /// where_clause) — changing ONLY the method does not trigger
+    /// DROP/CREATE; rename the index to force regen (minor debt —
+    /// follows the v0.10.27 pattern with where_clause).
     pub using: Option<String>,
-    /// v0.10.32 (Tier C.2) — Expression index. Cuando está,
-    /// `columns` se ignora y el CREATE INDEX usa el expression raw
-    /// (ej: `lower(email)`, `to_tsvector('english', body)`). Diff
-    /// name-based con la misma limitación que where_clause/using:
-    /// la introspect NO parsea `pg_index.indexprs` para detectar el
-    /// expression, así que un cambio del expression con mismo name
-    /// NO se detecta como drift (refactorá el name para forzar regen).
+    /// v0.10.32 (Tier C.2) — Expression index. When present,
+    /// `columns` is ignored and the CREATE INDEX uses the raw
+    /// expression (e.g.: `lower(email)`, `to_tsvector('english', body)`).
+    /// Name-based diff with the same limitation as
+    /// where_clause/using: introspect does NOT parse
+    /// `pg_index.indexprs` to detect the expression, so a change
+    /// of the expression with the same name is NOT detected as
+    /// drift (refactor the name to force regen).
     pub expression: Option<String>,
 }
 
@@ -144,41 +146,40 @@ pub struct ForeignKey {
     pub column: String,
     pub references_table: String,
     pub references_column: String,
-    /// v0.10.29 — Schema custom del target. `None` = mismo schema
-    /// que el current table (paridad con la convención Postgres
-    /// `public`). Cuando `Some(s)`, el SQL emit usa `REFERENCES
-    /// "s"."table"(col)` qualified, habilitando FKs cross-schema
-    /// transparentes (el user sigue declarando `@belongs_to("User")`
-    /// con nombre Fitz — Fitz resuelve el schema del target desde
-    /// su `@table("schema.name")`). La introspect lo deja en
-    /// `None` por simplicidad MVP — drift cross-schema queda como
-    /// deuda menor.
+    /// v0.10.29 — Custom target schema. `None` = same schema as the
+    /// current table (parallel to the Postgres `public` convention).
+    /// When `Some(s)`, the SQL emit uses `REFERENCES "s"."table"(col)`
+    /// qualified, enabling transparent cross-schema FKs (the user
+    /// keeps declaring `@belongs_to("User")` with a Fitz name —
+    /// Fitz resolves the target schema from its `@table("schema.name")`).
+    /// Introspect leaves it as `None` for MVP simplicity —
+    /// cross-schema drift remains a minor debt.
     pub references_schema: Option<String>,
-    /// `CASCADE` / `SET NULL` / `RESTRICT` / `NO ACTION`. None si
-    /// no se declaró (= NO ACTION default de Postgres).
+    /// `CASCADE` / `SET NULL` / `RESTRICT` / `NO ACTION`. None if
+    /// not declared (= NO ACTION Postgres default).
     pub on_delete: Option<String>,
 }
 
 // =================================================================
-// Introspección PG
+// PG introspection
 // =================================================================
 
-/// Consulta el schema actual de la DB conectada via `conn` y
-/// devuelve un [`Schema`] con todas las user-tables (excluye
-/// `pg_catalog`, `information_schema`, y la tabla interna
-/// `_fitz_migrations` que tracking del migrate).
+/// Queries the current schema of the DB connected via `conn` and
+/// returns a [`Schema`] with all user-tables (excludes
+/// `pg_catalog`, `information_schema`, and the internal table
+/// `_fitz_migrations` that tracks migrate).
 ///
-/// Política de exclusión:
-/// - Schemas considerados: TODOS los user schemas (excluye
-///   `pg_catalog`, `information_schema`, `pg_toast`, `pg_temp_*`).
-/// - `table_type = 'BASE TABLE'` (skipea views).
-/// - Excluye explícitamente `_fitz_migrations`.
+/// Exclusion policy:
+/// - Considered schemas: ALL user schemas (excludes `pg_catalog`,
+///   `information_schema`, `pg_toast`, `pg_temp_*`).
+/// - `table_type = 'BASE TABLE'` (skips views).
+/// - Explicitly excludes `_fitz_migrations`.
 ///
-/// v0.10.21 (10.6.e.3) — Multi-schema: introspect iterar TODAS
-/// las user schemas, no solo `public`. Tables en schemas
-/// custom aparecen con `Table.schema = Some("schema_name")`;
-/// tables en `public` siguen con `schema = None` por
-/// convención (compat con código pre-v0.10.21).
+/// v0.10.21 (10.6.e.3) — Multi-schema: introspect iterates ALL
+/// user schemas, not just `public`. Tables in custom schemas
+/// appear with `Table.schema = Some("schema_name")`; tables in
+/// `public` keep `schema = None` by convention (compat with
+/// pre-v0.10.21 code).
 pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Schema> {
     let qualified = list_user_tables_qualified(conn).await?;
     let mut tables = Vec::with_capacity(qualified.len());
@@ -186,31 +187,32 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
         let columns = introspect_columns(conn, schema, name).await?;
         let indexes = introspect_indexes(conn, schema, name).await?;
         let foreign_keys = introspect_foreign_keys(conn, schema, name).await?;
-        // v0.10.31 (Tier A.7) — CHECK constraints declarados a nivel
-        // tabla (pg_constraint.contype='c'). Habilita drift check: si
-        // el target declara `@check_constraint("...")` distinto al de
-        // la DB, el diff emite DROP+ADD. Antes de v0.10.31, current
-        // siempre quedaba vacío y el diff no detectaba cambios — la
-        // versión vieja del CHECK quedaba en la DB hasta drop manual.
+        // v0.10.31 (Tier A.7) — table-level CHECK constraints
+        // (pg_constraint.contype='c'). Enables drift check: if the
+        // target declares `@check_constraint("...")` different from
+        // the DB, the diff emits DROP+ADD. Before v0.10.31, current
+        // was always empty and the diff did not detect changes — the
+        // old version of the CHECK stayed in the DB until manual drop.
         let check_constraints = introspect_check_constraints(conn, schema, name).await?;
         let schema_for_struct = if schema == "public" {
             None
         } else {
             Some(schema.clone())
         };
-        // v0.10.27 (F2) — composite PK: si hay >=2 columns con
-        // is_primary=true post-introspect, los acumulamos acá. Single
-        // PK queda en Column.is_primary inline (composite_pk vacío).
+        // v0.10.27 (F2) — composite PK: if there are >=2 columns
+        // with is_primary=true post-introspect, we accumulate them
+        // here. Single PK stays in Column.is_primary inline
+        // (composite_pk empty).
         let pk_cols_introspected: Vec<String> = columns
             .iter()
             .filter(|c| c.is_primary)
             .map(|c| c.name.clone())
             .collect();
         let composite_pk = if pk_cols_introspected.len() >= 2 {
-            // Limpiar is_primary inline (la fuente de verdad para
-            // composite es la lista a nivel table) — sino diff vs
-            // target (que tiene composite_pk + is_primary=false en
-            // cols) emite falsos cambios.
+            // Clear is_primary inline (the source of truth for
+            // composite is the table-level list) — otherwise diff vs
+            // target (which has composite_pk + is_primary=false on
+            // cols) emits false changes.
             let mut cols_normalized = columns.clone();
             for c in cols_normalized.iter_mut() {
                 if c.is_primary {
@@ -242,15 +244,15 @@ pub async fn introspect_schema(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
             check_constraints,
         });
     }
-    // Orden determinístico: schema primero, después name. `public`
-    // tables (schema=None → "public" para sort) primero por orden
-    // alfabético del nombre canónico.
+    // Deterministic order: schema first, then name. `public`
+    // tables (schema=None → "public" for sort) first by alphabetical
+    // order of the canonical name.
     tables.sort_by_key(|a| a.qualified_id());
     Ok(Schema { tables })
 }
 
-/// v0.10.21 — Lista user-tables con su schema. Devuelve `(schema,
-/// name)` tuples ordenados. Excluye system schemas y
+/// v0.10.21 — Lists user-tables with their schema. Returns ordered
+/// `(schema, name)` tuples. Excludes system schemas and
 /// `_fitz_migrations`.
 async fn list_user_tables_qualified(
     conn: &std::sync::Arc<DbConnHandle>,
@@ -272,9 +274,9 @@ async fn list_user_tables_qualified(
     Ok(out)
 }
 
-/// Lista las user-tables del schema `public`. Excluye system
-/// tables + `_fitz_migrations`. Mantenido por compat — preferí
-/// `list_user_tables_qualified` para multi-schema.
+/// Lists the user-tables of the `public` schema. Excludes system
+/// tables + `_fitz_migrations`. Kept for compat — prefer
+/// `list_user_tables_qualified` for multi-schema.
 #[allow(dead_code)]
 async fn list_user_tables(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Vec<String>> {
     let sql = "SELECT table_name FROM information_schema.tables \
@@ -289,16 +291,16 @@ async fn list_user_tables(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Vec<S
         .collect()
 }
 
-/// Lista columnas de una tabla en orden de declaración
-/// (`ordinal_position`). Detecta `is_primary` via cruce con
-/// `pg_catalog.pg_index` (la PK no aparece como tal en
+/// Lists columns of a table in declaration order
+/// (`ordinal_position`). Detects `is_primary` by joining with
+/// `pg_catalog.pg_index` (the PK does not appear as such in
 /// `information_schema.columns`).
 async fn introspect_columns(
     conn: &std::sync::Arc<DbConnHandle>,
     schema: &str,
     table: &str,
 ) -> DbResult<Vec<Column>> {
-    // Cols base: nombre + tipo + nullable + default.
+    // Base cols: name + type + nullable + default.
     let sql_cols = "SELECT column_name, data_type, udt_name, is_nullable, column_default \
                     FROM information_schema.columns \
                     WHERE table_schema = $1 AND table_name = $2 \
@@ -324,12 +326,12 @@ async fn introspect_columns(
             sql_type: canonicalize_sql_type(&data_type, &udt_name),
             nullable: is_nullable.eq_ignore_ascii_case("YES"),
             default,
-            is_primary: false, // se completa más abajo
+            is_primary: false, // filled in below
             renamed_from: None,
         });
     }
-    // PK: cruce con pg_index para marcar `is_primary`. La
-    // `regclass` cast resuelve `schema.table` correctamente.
+    // PK: join with pg_index to flag `is_primary`. The `regclass`
+    // cast resolves `schema.table` correctly.
     let sql_pk = "SELECT a.attname AS column_name \
                   FROM pg_index i \
                   JOIN pg_attribute a ON a.attrelid = i.indrelid \
@@ -346,10 +348,10 @@ async fn introspect_columns(
     for c in columns.iter_mut() {
         if pk_cols.contains(&c.name) {
             c.is_primary = true;
-            // v0.10.16 — PG reporta `column_default = nextval(...)`
-            // para `bigserial` PK; el target schema NUNCA lo emite
-            // (es implícito del `PRIMARY KEY` con `bigserial`).
-            // Limpiamos para evitar falso positivo en el diff.
+            // v0.10.16 — PG reports `column_default = nextval(...)`
+            // for `bigserial` PK; the target schema NEVER emits it
+            // (it's implicit from `PRIMARY KEY` with `bigserial`).
+            // We clear it to avoid a false positive in the diff.
             if let Some(d) = &c.default {
                 if d.starts_with("nextval(") {
                     c.default = None;
@@ -360,21 +362,21 @@ async fn introspect_columns(
     Ok(columns)
 }
 
-/// Lista indexes user-defined de una tabla. Excluye los auto-PK
-/// (que tienen `indisprimary = true`) y los auto-UNIQUE
-/// constraints (que ya están representados a nivel del column en
-/// nuestra abstracción, no como Index separado).
+/// Lists user-defined indexes of a table. Excludes the auto-PK
+/// (which have `indisprimary = true`) and the auto-UNIQUE
+/// constraints (already represented at column level in our
+/// abstraction, not as a separate Index).
 async fn introspect_indexes(
     conn: &std::sync::Arc<DbConnHandle>,
     schema: &str,
     table: &str,
 ) -> DbResult<Vec<Index>> {
-    // v0.10.27 (F3) — `pg_get_expr(i.indpred, i.indrelid)` devuelve la
-    // WHERE clause de partial indexes (`NULL` para full).
-    // v0.10.28 — `am.amname` devuelve el access method del índice
-    // (`btree`/`gin`/`gist`/`hash`/`brin`/`spgist`). Mapeo a `using`:
-    // `"btree"` → `None` (default, no se vuelve a emitir el `USING
-    // btree` redundante); resto → `Some(lowercase)`.
+    // v0.10.27 (F3) — `pg_get_expr(i.indpred, i.indrelid)` returns
+    // the WHERE clause of partial indexes (`NULL` for full).
+    // v0.10.28 — `am.amname` returns the index access method
+    // (`btree`/`gin`/`gist`/`hash`/`brin`/`spgist`). Mapping to `using`:
+    // `"btree"` → `None` (default, redundant `USING btree` is not
+    // re-emitted); rest → `Some(lowercase)`.
     let sql = "SELECT \
                    c.relname AS index_name, \
                    i.indisunique AS is_unique, \
@@ -401,7 +403,7 @@ async fn introspect_indexes(
         let cols_csv = extract_string(row, "column_names")?;
         let cols: Vec<String> = cols_csv.split(',').map(|s| s.trim().to_string()).collect();
         let is_unique = extract_bool(row, "is_unique").unwrap_or(false);
-        // pg_get_expr devuelve NULL (= PgValue::Null) si no es partial.
+        // pg_get_expr returns NULL (= PgValue::Null) if not partial.
         let where_clause = match row.get("where_clause") {
             Some(PgValue::Text(s)) if !s.is_empty() => Some(s.clone()),
             _ => None,
@@ -416,10 +418,10 @@ async fn introspect_indexes(
             unique: is_unique,
             where_clause,
             using,
-            // v0.10.32 (Tier C.2) — introspect NO parsea
-            // `pg_index.indexprs` para expression indexes. El user
-            // que declara `@index(expression="...")` debe nombrarlo
-            // explícito con `name=` para que el diff lo matchee.
+            // v0.10.32 (Tier C.2) — introspect does NOT parse
+            // `pg_index.indexprs` for expression indexes. The user
+            // who declares `@index(expression="...")` must name it
+            // explicitly with `name=` so that the diff matches it.
             expression: None,
         });
     }
@@ -427,22 +429,22 @@ async fn introspect_indexes(
     Ok(indexes)
 }
 
-/// Lista FKs declarados sobre una tabla. Cada FK = un column local
-/// que apunta a `(referenced_table, referenced_column)` con la
-/// regla `ON DELETE` declarada.
+/// Lists FKs declared on a table. Each FK = one local column
+/// that points to `(referenced_table, referenced_column)` with
+/// the declared `ON DELETE` rule.
 async fn introspect_foreign_keys(
     conn: &std::sync::Arc<DbConnHandle>,
     schema: &str,
     table: &str,
 ) -> DbResult<Vec<ForeignKey>> {
-    // v0.10.31 (Tier A.8) — cross-schema FK drift. Pulleamos también
-    // `ccu.table_schema AS ref_schema` para detectar FKs que apuntan a
-    // tablas en otros schemas (`@belongs_to("schema.User")`). Si el
-    // schema del target == schema del local (mismo `tc.table_schema`),
-    // lo dejamos `None` para matchear la convención de
-    // `schema_from_program` (same-schema → None). Si difieren →
-    // `Some(ref_schema)` para que el diff compare cross-schema sin
-    // falsos cambios.
+    // v0.10.31 (Tier A.8) — cross-schema FK drift. We also pull
+    // `ccu.table_schema AS ref_schema` to detect FKs that point to
+    // tables in other schemas (`@belongs_to("schema.User")`). If
+    // the target schema == local schema (same `tc.table_schema`),
+    // we leave it as `None` to match the `schema_from_program`
+    // convention (same-schema → None). If they differ →
+    // `Some(ref_schema)` so that the diff compares cross-schema
+    // without false changes.
     let sql = "SELECT \
                    tc.constraint_name AS name, \
                    kcu.column_name AS local_column, \
@@ -481,19 +483,20 @@ async fn introspect_foreign_keys(
         let ref_table = extract_string(row, "ref_table")?;
         let ref_column = extract_string(row, "ref_column")?;
         let on_delete = extract_string_opt(row, "on_delete").and_then(|s| {
-            // PG devuelve "NO ACTION" como string literal; lo
-            // normalizamos a None para no diferir vs schemas que
-            // NO declararon on_delete (mismo default).
+            // PG returns "NO ACTION" as a literal string; we
+            // normalize it to None to avoid differing vs schemas
+            // that did NOT declare on_delete (same default).
             if s.eq_ignore_ascii_case("NO ACTION") {
                 None
             } else {
                 Some(s)
             }
         });
-        // v0.10.31 (Tier A.8) — references_schema solo cuando difiere
-        // del schema local (paridad con la convención same-schema=None
-        // del `schema_from_program`). Esto preserva que el diff no
-        // emita falsos cambios para FKs same-schema legacy.
+        // v0.10.31 (Tier A.8) — references_schema only when it
+        // differs from the local schema (parallel to the
+        // same-schema=None convention of `schema_from_program`).
+        // This preserves that the diff does not emit false changes
+        // for legacy same-schema FKs.
         let references_schema = if ref_schema_raw == schema {
             None
         } else {
@@ -511,17 +514,19 @@ async fn introspect_foreign_keys(
     Ok(fks)
 }
 
-/// v0.10.31 (Tier A.7) — Lista CHECK constraints declarados a nivel
-/// tabla. Lee `pg_constraint` con `contype = 'c'` (los únicos table-
-/// level checks; column-level checks como `CHECK (n > 0)` inline en
-/// `ADD COLUMN` también son `contype='c'` en PG). El `pg_get_constraintdef`
-/// devuelve la expresión SQL canonicalizada (`CHECK (price >= 0)`),
-/// que recortamos a `(price >= 0)` para matchear el shape que el user
-/// pasa en `@check_constraint("price >= 0")`.
+/// v0.10.31 (Tier A.7) — Lists table-level CHECK constraints
+/// declared. Reads `pg_constraint` with `contype = 'c'` (the only
+/// table-level checks; column-level checks like `CHECK (n > 0)`
+/// inline in `ADD COLUMN` are also `contype='c'` in PG). The
+/// `pg_get_constraintdef` returns the canonicalized SQL
+/// expression (`CHECK (price >= 0)`), which we trim to
+/// `(price >= 0)` to match the shape the user passes in
+/// `@check_constraint("price >= 0")`.
 ///
-/// Excluye constraints heredados (con `conislocal = false`) y los
-/// auto-generados por NOT NULL (no aparecen como contype='c' en PG
-/// 14+, pero algunos legacy sí — los filtramos por `convalidated`).
+/// Excludes inherited constraints (with `conislocal = false`) and
+/// those auto-generated by NOT NULL (they do not appear as
+/// contype='c' in PG 14+, but some legacy ones do — we filter
+/// them by `convalidated`).
 async fn introspect_check_constraints(
     conn: &std::sync::Arc<DbConnHandle>,
     schema: &str,
@@ -551,33 +556,35 @@ async fn introspect_check_constraints(
     for row in &qr.rows {
         let name = extract_string(row, "name")?;
         let def = extract_string(row, "def")?;
-        // `pg_get_constraintdef` devuelve `CHECK ((expr))` con
-        // double-paren por convención PG. Lo normalizamos a `expr`
-        // (sin `CHECK` ni paréntesis envolventes) para matchear el
-        // shape que `schema_from_program` carga desde el decorator.
+        // `pg_get_constraintdef` returns `CHECK ((expr))` with
+        // double-paren by PG convention. We normalize it to `expr`
+        // (without `CHECK` or wrapping parens) to match the shape
+        // that `schema_from_program` loads from the decorator.
         let expr = parse_check_def(&def);
         checks.push(CheckConstraint { name, expr });
     }
     Ok(checks)
 }
 
-/// v0.10.31 (Tier A.7) — extrae el `expr` desde el output de
-/// `pg_get_constraintdef`. PG emite `CHECK (<expr>)` o `CHECK ((<expr>))`
-/// (a veces double paren si la expr es composite). Recortamos `CHECK `
-/// al inicio y todos los pares de paréntesis externos balanceados.
+/// v0.10.31 (Tier A.7) — extracts the `expr` from the output of
+/// `pg_get_constraintdef`. PG emits `CHECK (<expr>)` or
+/// `CHECK ((<expr>))` (sometimes double paren if the expr is
+/// composite). We trim `CHECK ` at the start and all balanced
+/// outer paren pairs.
 ///
-/// El resultado no es necesariamente idéntico a la string original
-/// del user (PG canonicaliza espacios, mayúsculas, etc.) — el diff
-/// usa comparación trim+exact, así que un cambio puramente cosmético
-/// puede disparar DROP+ADD espurio. Deuda menor — refinable con un
-/// normalizer SQL parser si aparece presión.
+/// The result is not necessarily identical to the user's original
+/// string (PG canonicalizes whitespace, case, etc.) — the diff
+/// uses trim+exact comparison, so a purely cosmetic change may
+/// trigger a spurious DROP+ADD. Minor debt — refinable with a
+/// SQL normalizer parser if pressure appears.
 fn parse_check_def(def: &str) -> String {
     let trimmed = def.trim();
     let after_check = trimmed.strip_prefix("CHECK ").unwrap_or(trimmed).trim();
-    // Iteramos: si los paréntesis externos están balanceados (i.e., el
-    // primer `(` cierra exactamente en el último `)`), pelamos un
-    // nivel. `(a) AND (b)` NO se pela (el primer `)` cierra en posición
-    // interna). PG emite a veces 2 niveles para exprs complejas.
+    // Iterate: if the outer parens are balanced (i.e., the first
+    // `(` closes exactly at the last `)`), we peel one level.
+    // `(a) AND (b)` is NOT peeled (the first `)` closes at an
+    // internal position). PG sometimes emits 2 levels for complex
+    // exprs.
     let mut current = after_check.to_string();
     loop {
         let s = current.trim().to_string();
@@ -593,8 +600,8 @@ fn parse_check_def(def: &str) -> String {
                 b')' => {
                     depth -= 1;
                     if depth == 0 && i < bytes.len() - 1 {
-                        // Los paréntesis externos no envuelven todo
-                        // (caso `(a) AND (b)`).
+                        // The outer parens do not wrap everything
+                        // (case `(a) AND (b)`).
                         closes_at_end = false;
                         break;
                     }
@@ -610,36 +617,37 @@ fn parse_check_def(def: &str) -> String {
 }
 
 // =================================================================
-// Schema desde @table types del programa Fitz
+// Schema from @table types of the Fitz program
 // =================================================================
 
-/// Construye el [`Schema`] "esperado" walkeando el AST del programa
-/// + cruzando con [`crate::types::TypeEnv`] para resolver
-///   [`crate::types::TableMetadata`] de cada `@table` type.
+/// Builds the "expected" [`Schema`] by walking the AST of the
+/// program + joining with [`crate::types::TypeEnv`] to resolve the
+/// [`crate::types::TableMetadata`] of each `@table` type.
 ///
-/// Reglas de mapping:
-/// - Cada `@table("name") type T { ... }` → 1 [`Table`] con
+/// Mapping rules:
+/// - Each `@table("name") type T { ... }` → 1 [`Table`] with
 ///   `name = TableMetadata.sql_name`.
-/// - Fields sin decorator → 1 [`Column`] con tipo SQL derivado.
-/// - Fields con `@belongs_to(...)` → 1 [`Column`] (FK real) + 1
-///   [`ForeignKey`] con referenced_table/column + on_delete.
-/// - Fields con `@has_one`/`@has_many` / `BelongsToCompanion` →
-///   **skip** (virtuales, no van a la DB).
-/// - Fields con `@index` → 1 [`Index`] (single-column, name
-///   estándar `<table>_<col>_idx`).
-/// - Fields con `@unique` → 1 [`Index`] con `unique=true` (PG
-///   crea unique constraint backed by unique index).
-/// - Field con `@primary` → marca [`Column.is_primary = true`].
-///   El default `Int = 0` se traduce a `bigserial` (PG auto-increment).
+/// - Fields without decorator → 1 [`Column`] with derived SQL type.
+/// - Fields with `@belongs_to(...)` → 1 [`Column`] (real FK) + 1
+///   [`ForeignKey`] with referenced_table/column + on_delete.
+/// - Fields with `@has_one`/`@has_many` / `BelongsToCompanion` →
+///   **skip** (virtual, do not go to the DB).
+/// - Fields with `@index` → 1 [`Index`] (single-column, standard
+///   name `<table>_<col>_idx`).
+/// - Fields with `@unique` → 1 [`Index`] with `unique=true` (PG
+///   creates unique constraint backed by unique index).
+/// - Field with `@primary` → flags [`Column.is_primary = true`].
+///   The default `Int = 0` is translated to `bigserial` (PG
+///   auto-increment).
 ///
-/// Tipos Fitz → SQL:
-/// - `Int` → `bigint` (o `bigserial` si `@primary`)
+/// Fitz types → SQL:
+/// - `Int` → `bigint` (or `bigserial` if `@primary`)
 /// - `Float` → `double precision`
 /// - `Str` → `text`
 /// - `Bool` → `boolean`
-/// - `List<T>` → `<T>[]` (array Postgres)
+/// - `List<T>` → `<T>[]` (Postgres array)
 /// - `Map<Str, _>` → `jsonb`
-/// - `Nullable<T>` → mismo SQL type del inner, `nullable = true`
+/// - `Nullable<T>` → same SQL type as inner, `nullable = true`
 pub fn schema_from_program(
     program: &crate::ast::Program,
     type_env: &crate::types::TypeEnv,
@@ -664,9 +672,9 @@ pub fn schema_from_program(
         let table = build_table_from_type(name, ast_fields, meta, type_env)?;
         tables.push(table);
     }
-    // v0.10.21 — Orden por (schema, name) canónico para que el
-    // diff sea determinístico cross-schema (`public.users` ANTES
-    // que `analytics.events` lex).
+    // v0.10.21 — Order by canonical (schema, name) so that the
+    // diff is deterministic cross-schema (`public.users` BEFORE
+    // `analytics.events` lex).
     tables.sort_by_key(|a| a.qualified_id());
     Ok(Schema { tables })
 }
@@ -683,41 +691,43 @@ fn build_table_from_type(
     let mut foreign_keys = Vec::new();
 
     for f in ast_fields {
-        // Skip virtuales (has_one/has_many/companion).
+        // Skip virtuals (has_one/has_many/companion).
         if meta.is_virtual_field(&f.name) {
             continue;
         }
         let col_meta = meta.columns.get(&f.name);
-        // v0.10.27 (F2) — composite PK: el field es PK si está en
-        // `primary_fields` (no solo si es el ÚNICO). Para single PK
-        // sigue funcionando idéntico.
+        // v0.10.27 (F2) — composite PK: the field is PK if it is in
+        // `primary_fields` (not only if it is the ONLY one). For
+        // single PK it keeps working identically.
         let is_primary = meta.primary_fields.iter().any(|p| p == &f.name);
-        // v0.10.27 (F2) — el CREATE TABLE inline `<col> <type> PRIMARY KEY`
-        // solo se emite si SINGLE PK (1 field). Para composite PK,
-        // el constraint va al final `PRIMARY KEY (a, b)` y los cols
-        // individuales solo emiten `NOT NULL` (el inline rompería).
+        // v0.10.27 (F2) — the CREATE TABLE inline `<col> <type> PRIMARY KEY`
+        // is only emitted if SINGLE PK (1 field). For composite PK,
+        // the constraint goes at the end `PRIMARY KEY (a, b)` and
+        // the individual cols only emit `NOT NULL` (inline would
+        // break).
         let is_inline_pk = is_primary && meta.primary_fields.len() == 1;
 
-        // Tipo Fitz → resolver via TypeExpr → SQL.
+        // Fitz type → resolve via TypeExpr → SQL.
         let (fitz_inner_ty, nullable) = unwrap_nullable_typeexpr(&f.type_);
-        // v0.10.27 (F2) — `bigserial` (auto-increment) solo se emite
-        // para SINGLE PK Int. Composite PK: cada col es `bigint`
-        // normal (el user provee valores explícitos del PK tuple).
+        // v0.10.27 (F2) — `bigserial` (auto-increment) is only
+        // emitted for SINGLE PK Int. Composite PK: each col is a
+        // normal `bigint` (the user provides explicit values for
+        // the PK tuple).
         let sql_type = fitz_typeexpr_to_sql_type(&fitz_inner_ty, is_inline_pk, col_meta)?;
         let sql_name = col_meta
             .and_then(|c| c.sql_name.clone())
             .unwrap_or_else(|| f.name.clone());
 
-        // Default SQL: el ORM emite el CREATE TABLE sin DEFAULTS
-        // explícitos (los defaults se aplican client-side al
-        // construir la instancia). EXCEPCIONES:
-        // - `@primary Int = 0` → `bigserial` ya implica default
-        //   nextval; NO emitimos DEFAULT extra.
-        // - `@db_default("<sql>")` (v0.10.16) — el user pasa la
-        //   expresión SQL explícita y el diff la emite en
+        // SQL default: the ORM emits the CREATE TABLE without
+        // explicit DEFAULTS (defaults are applied client-side when
+        // constructing the instance). EXCEPTIONS:
+        // - `@primary Int = 0` → `bigserial` already implies
+        //   default nextval; we do NOT emit an extra DEFAULT.
+        // - `@db_default("<sql>")` (v0.10.16) — the user passes the
+        //   explicit SQL expression and the diff emits it in
         //   `CREATE TABLE` / `ADD COLUMN` (e.g. `DEFAULT NOW()`).
-        // - `@db_default` sin args sigue siendo marker-only (skip
-        //   INSERT, sin default específico en la migration).
+        // - `@db_default` without args stays marker-only (skip
+        //   INSERT, without a specific default in the migration).
         let default = col_meta.and_then(|c| c.db_default_sql.clone());
 
         columns.push(Column {
@@ -725,8 +735,9 @@ fn build_table_from_type(
             sql_type,
             nullable,
             default,
-            // v0.10.27 (F2) — solo single PK emite `PRIMARY KEY` inline;
-            // composite PK emite el constraint table-level abajo.
+            // v0.10.27 (F2) — only single PK emits `PRIMARY KEY`
+            // inline; composite PK emits the table-level constraint
+            // below.
             is_primary: is_inline_pk,
             renamed_from: col_meta.and_then(|c| c.renamed_from.clone()),
         });
@@ -755,10 +766,10 @@ fn build_table_from_type(
             }
         }
 
-        // FK desde @belongs_to.
+        // FK from @belongs_to.
         if let Some(rel) = meta.relations.get(&f.name) {
             if rel.kind == crate::types::RelationKind::BelongsTo {
-                // Resolver target table name vía type_env.
+                // Resolve target table name via type_env.
                 let target_meta = type_env
                     .lookup(&rel.target_type)
                     .and_then(|tid| type_env.table_metadata(tid))
@@ -769,27 +780,29 @@ fn build_table_from_type(
                         )
                     })?;
                 let target_table = target_meta.sql_name.clone();
-                // v0.10.29 — Cross-schema FK. Si el target type
-                // declara `@table("schema.name")` distinto al
-                // schema del current type, el FK emit usa
+                // v0.10.29 — Cross-schema FK. If the target type
+                // declares `@table("schema.name")` different from
+                // the current type's schema, the FK emit uses
                 // `REFERENCES "schema"."name"(col)` qualified.
-                // Same-schema → references_schema = None (matchea
-                // convención Postgres `public` implícito).
+                // Same-schema → references_schema = None (matches
+                // implicit `public` Postgres convention).
                 let target_schema = target_meta.schema.clone();
                 let same_schema = target_schema.as_deref().unwrap_or("public")
                     == meta.schema.as_deref().unwrap_or("public");
                 let references_schema = if same_schema { None } else { target_schema };
-                // PK column del target. En PG las PK columns no tienen
-                // prefijo de tabla.
+                // PK column of the target. In PG, PK columns do
+                // not have a table prefix.
                 //
-                // v0.10.31 (Tier A.6) — error claro pre-DDL si el target
-                // tiene composite PK. Postgres rechaza FK single-column
-                // referenciando composite PK (no es UNIQUE por sí solo).
-                // Antes de v0.10.31 se hacía fallback silencioso a `"id"`,
-                // que típicamente no existía y daba un error de Postgres
-                // críptico en `fitz db migrate`. Ahora el error aborta
-                // `schema_from_program` con mensaje específico citando
-                // los fields de la PK composite y sugiriendo workarounds.
+                // v0.10.31 (Tier A.6) — clear pre-DDL error if the
+                // target has composite PK. Postgres rejects FK
+                // single-column referencing composite PK (it is not
+                // UNIQUE on its own). Before v0.10.31 there was a
+                // silent fallback to `"id"`, which typically did
+                // not exist and gave a cryptic Postgres error in
+                // `fitz db migrate`. Now the error aborts
+                // `schema_from_program` with a specific message
+                // citing the composite PK fields and suggesting
+                // workarounds.
                 let target_pk_field = match target_meta.single_pk() {
                     Some(pk) => pk.to_string(),
                     None => {
@@ -818,9 +831,9 @@ fn build_table_from_type(
                     .get(&target_pk_field)
                     .and_then(|c| c.sql_name.clone())
                     .unwrap_or_else(|| target_pk_field.clone());
-                // Convención: nombre del constraint usa el
-                // schema "<table>_<col>_fkey" que PG usa por
-                // default cuando inline en CREATE TABLE.
+                // Convention: constraint name uses the schema
+                // "<table>_<col>_fkey" that PG uses by default
+                // when inline in CREATE TABLE.
                 let constraint_name = format!("{}_{}_fkey", table_name, sql_name);
                 let on_delete = match rel.on_delete {
                     crate::types::CascadeAction::Cascade => Some("CASCADE".to_string()),
@@ -840,17 +853,17 @@ fn build_table_from_type(
         }
     }
 
-    // v0.10.27 (F3) — Indexes desde `@index(...)` decorators a
-    // nivel type (composite + partial + unique). Auto-generamos el
-    // name si el user no lo pasó: `idx_<table>_<col1>_<col2>...`
-    // con sufijo `_uniq` si unique. El nombre debe matchear lo que
-    // Postgres reporta vía pg_indexes para que el drift check no
-    // dispare CREATE/DROP en cada corrida.
+    // v0.10.27 (F3) — Indexes from `@index(...)` decorators at the
+    // type level (composite + partial + unique). We auto-generate
+    // the name if the user did not pass one:
+    // `idx_<table>_<col1>_<col2>...` with `_uniq` suffix if unique.
+    // The name must match what Postgres reports via pg_indexes so
+    // the drift check does not trigger CREATE/DROP on every run.
     for idx in &meta.indexes {
-        // v0.10.32 (Tier C.2) — auto-naming para expression indexes:
-        // `idx_<table>_expr_<N>` con N basado en posición. El user es
-        // strongly recommended a nombrar explícitamente con `name=`
-        // para drift detection.
+        // v0.10.32 (Tier C.2) — auto-naming for expression indexes:
+        // `idx_<table>_expr_<N>` with N based on position. The user
+        // is strongly recommended to name explicitly with `name=`
+        // for drift detection.
         let auto_name = || {
             let mut s = String::from("idx_");
             s.push_str(&table_name);
@@ -878,13 +891,13 @@ fn build_table_from_type(
         });
     }
 
-    // Orden determinístico de indexes y FKs (para diffs estables).
+    // Deterministic order of indexes and FKs (for stable diffs).
     indexes.sort_by(|a, b| a.name.cmp(&b.name));
     foreign_keys.sort_by(|a, b| a.name.cmp(&b.name));
 
-    // v0.10.27 (F2) — composite PK: resolver SQL names de los PK
-    // fields (respeta @column(name=...)). Solo poblamos si N>=2;
-    // single PK queda como `Column.is_primary` inline.
+    // v0.10.27 (F2) — composite PK: resolve SQL names of the PK
+    // fields (respects @column(name=...)). We only populate if
+    // N>=2; single PK stays as `Column.is_primary` inline.
     let composite_pk: Vec<String> = if meta.primary_fields.len() >= 2 {
         meta.primary_fields
             .iter()
@@ -899,10 +912,11 @@ fn build_table_from_type(
         Vec::new()
     };
 
-    // v0.10.29 — CHECK constraints declarados con
-    // `@check_constraint("expr", name="optional")` a nivel type.
-    // Auto-naming: `chk_<table>_<idx>` cuando el user no especifica
-    // `name=`. Determinístico por orden de aparición en el AST.
+    // v0.10.29 — CHECK constraints declared with
+    // `@check_constraint("expr", name="optional")` at the type
+    // level. Auto-naming: `chk_<table>_<idx>` when the user does
+    // not specify `name=`. Deterministic by order of appearance in
+    // the AST.
     let check_constraints: Vec<CheckConstraint> = meta
         .check_constraints
         .iter()
@@ -928,8 +942,8 @@ fn build_table_from_type(
     })
 }
 
-/// Si el TypeExpr es `T?` (Nullable), devuelve (T, true). Si no,
-/// (T, false).
+/// If the TypeExpr is `T?` (Nullable), returns (T, true).
+/// Otherwise, (T, false).
 fn unwrap_nullable_typeexpr(t: &crate::ast::TypeExpr) -> (crate::ast::TypeExpr, bool) {
     match t {
         crate::ast::TypeExpr::Nullable(inner) => ((**inner).clone(), true),
@@ -937,15 +951,15 @@ fn unwrap_nullable_typeexpr(t: &crate::ast::TypeExpr) -> (crate::ast::TypeExpr, 
     }
 }
 
-/// Convierte un TypeExpr Fitz a su SQL type Postgres. Aplica
-/// override de `col_meta.sql_type` si está declarado (escape hatch
-/// para tipos no estándar como `uuid`/`numeric(10,2)`/etc.).
+/// Converts a Fitz TypeExpr to its Postgres SQL type. Applies
+/// override of `col_meta.sql_type` if declared (escape hatch for
+/// non-standard types like `uuid`/`numeric(10,2)`/etc.).
 fn fitz_typeexpr_to_sql_type(
     t: &crate::ast::TypeExpr,
     is_primary: bool,
     col_meta: Option<&crate::types::ColumnMetadata>,
 ) -> Result<String, String> {
-    // Override declarado tiene prioridad.
+    // Declared override has priority.
     if let Some(cm) = col_meta {
         if let Some(sql) = &cm.sql_type {
             return Ok(sql.clone());
@@ -954,8 +968,8 @@ fn fitz_typeexpr_to_sql_type(
     let head = t.head_name();
     match head {
         "Int" => {
-            // @primary Int → bigserial (auto-increment Postgres).
-            // Resto → bigint.
+            // @primary Int → bigserial (Postgres auto-increment).
+            // Rest → bigint.
             if is_primary {
                 Ok("bigserial".to_string())
             } else {
@@ -966,11 +980,11 @@ fn fitz_typeexpr_to_sql_type(
         "Str" => Ok("text".to_string()),
         "Bool" => Ok("boolean".to_string()),
         "Bytes" => Ok("bytea".to_string()),
-        // v0.10.24 — tipos temporales y UUID nativos. Mapeos canonical
-        // Postgres: Date → date (4 bytes), DateTime → timestamptz (8
-        // bytes UTC con offset), Uuid → uuid (16 bytes). El ORM
-        // marshaling (driver wire + JSON) se encarga de la conversión
-        // text ↔ binario.
+        // v0.10.24 — native temporal and UUID types. Canonical
+        // Postgres mappings: Date → date (4 bytes), DateTime →
+        // timestamptz (8 bytes UTC with offset), Uuid → uuid (16
+        // bytes). The ORM marshaling (driver wire + JSON) handles
+        // the text ↔ binary conversion.
         "Date" => Ok("date".to_string()),
         "DateTime" => Ok("timestamptz".to_string()),
         "Uuid" => Ok("uuid".to_string()),
@@ -992,7 +1006,7 @@ fn fitz_typeexpr_to_sql_type(
             Ok(format!("{}[]", inner_sql))
         }
         "Map" => {
-            // Map<Str, _> → jsonb. Otros key types no soportados.
+            // Map<Str, _> → jsonb. Other key types not supported.
             Ok("jsonb".to_string())
         }
         _ => Err(format!(
@@ -1007,13 +1021,14 @@ fn fitz_typeexpr_to_sql_type(
 // Diff algorithm: current vs target → Vec<Change>
 // =================================================================
 
-/// Una operación DDL para llevar el schema `current` al `target`.
-/// El diff las emite en orden seguro para ejecución secuencial:
+/// A DDL operation to bring schema `current` to `target`. The
+/// diff emits them in safe order for sequential execution:
 /// CREATE TABLE → ADD/DROP/ALTER COLUMN → CREATE/DROP INDEX →
 /// DROP FK → ADD FK → DROP TABLE.
-/// v0.10.21 (10.6.e.3) — Referencia a una tabla con schema
-/// optativo. `schema = None` significa `public` (default Postgres).
-/// El `quote_qualified` emite `"schema"."name"` o `"name"` según.
+/// v0.10.21 (10.6.e.3) — Reference to a table with optional
+/// schema. `schema = None` means `public` (Postgres default). The
+/// `quote_qualified` emits `"schema"."name"` or `"name"`
+/// accordingly.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableRef {
     pub schema: Option<String>,
@@ -1021,7 +1036,7 @@ pub struct TableRef {
 }
 
 impl TableRef {
-    /// Constructor para tables en `public` (compat v0.10.0-v0.10.20).
+    /// Constructor for tables in `public` (compat v0.10.0-v0.10.20).
     pub fn public(name: impl Into<String>) -> Self {
         Self {
             schema: None,
@@ -1029,7 +1044,7 @@ impl TableRef {
         }
     }
 
-    /// Constructor para tables en schema custom.
+    /// Constructor for tables in a custom schema.
     pub fn qualified(schema: impl Into<String>, name: impl Into<String>) -> Self {
         Self {
             schema: Some(schema.into()),
@@ -1037,7 +1052,7 @@ impl TableRef {
         }
     }
 
-    /// Construye TableRef desde un `Table` (read schema field).
+    /// Builds TableRef from a `Table` (read schema field).
     pub fn from_table(t: &Table) -> Self {
         Self {
             schema: t.schema.clone(),
@@ -1046,17 +1061,18 @@ impl TableRef {
     }
 }
 
-/// v0.10.31 (Tier A.1) — clasificación de impacto de un `Change` para el
-/// flag `fitz db diff --check-destructive`. La política es opinionada
-/// pero conservadora:
+/// v0.10.31 (Tier A.1) — impact classification of a `Change` for
+/// the `fitz db diff --check-destructive` flag. The policy is
+/// opinionated but conservative:
 ///
-/// - **Safe**: no toca data existente y no puede fallar por shape.
-///   Ej: `CREATE TABLE`, `ADD COLUMN nullable`, `DROP FOREIGN KEY`.
-/// - **Risky**: puede fallar runtime (NOT NULL sobre rows existentes,
-///   cast con pérdida de precisión) pero NO destruye data si tiene
-///   éxito. El SQL emitido sigue siendo válido — el usuario revisa.
-/// - **Destructive**: pérdida de data garantizada si se aplica.
-///   Ej: `DROP TABLE`, `DROP COLUMN`.
+/// - **Safe**: does not touch existing data and cannot fail by
+///   shape. E.g.: `CREATE TABLE`, `ADD COLUMN nullable`, `DROP
+///   FOREIGN KEY`.
+/// - **Risky**: may fail at runtime (NOT NULL over existing rows,
+///   cast with precision loss) but does NOT destroy data if it
+///   succeeds. The emitted SQL is still valid — the user reviews.
+/// - **Destructive**: guaranteed data loss if applied. E.g.:
+///   `DROP TABLE`, `DROP COLUMN`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
     Safe,
@@ -1065,7 +1081,7 @@ pub enum Severity {
 }
 
 impl Severity {
-    /// Etiqueta corta para comentarios en el SQL output del diff con
+    /// Short label for comments in the SQL output of the diff with
     /// `--check-destructive`. `[SAFE]`/`[RISKY]`/`[DESTRUCTIVE]`.
     pub fn label(&self) -> &'static str {
         match self {
@@ -1098,11 +1114,11 @@ pub enum Change {
         column: String,
         nullable: bool,
     },
-    /// v0.10.16 — Cambio del DEFAULT de un column existente.
+    /// v0.10.16 — Change to the DEFAULT of an existing column.
     /// `new_default = Some(sql)` → `SET DEFAULT <sql>`; `None` →
-    /// `DROP DEFAULT`. La normalización para el diff es
-    /// case-insensitive sobre función calls SQL (`now()` matchea
-    /// `NOW()` y `Now()`).
+    /// `DROP DEFAULT`. Normalization for the diff is
+    /// case-insensitive over SQL function calls (`now()` matches
+    /// `NOW()` and `Now()`).
     AlterColumnDefault {
         table: TableRef,
         column: String,
@@ -1113,9 +1129,9 @@ pub enum Change {
         index: Index,
     },
     DropIndex {
-        /// Schema del index (= schema de la tabla a la que pertenece).
-        /// `None` = public. Postgres `DROP INDEX` quotes con schema
-        /// si non-public.
+        /// Index schema (= schema of the table it belongs to).
+        /// `None` = public. Postgres `DROP INDEX` quotes with
+        /// schema if non-public.
         schema: Option<String>,
         index_name: String,
     },
@@ -1127,51 +1143,50 @@ pub enum Change {
         table: TableRef,
         fk_name: String,
     },
-    /// v0.10.17 (10.6.b.2) — Rename de tabla preservando datos.
-    /// Emitido cuando el target Table tiene `renamed_from = Some(old)`
-    /// y existe en current con ese nombre. Va PRIMERO en el output
-    /// (antes de cualquier ALTER de columns) para que las acciones
-    /// siguientes operen sobre el nombre nuevo. El rename ocurre
-    /// dentro del mismo schema (no se soporta cross-schema rename
-    /// en MVP).
+    /// v0.10.17 (10.6.b.2) — Rename of table preserving data.
+    /// Emitted when the target Table has `renamed_from = Some(old)`
+    /// and exists in current with that name. Goes FIRST in the
+    /// output (before any column ALTER) so that following actions
+    /// operate on the new name. The rename occurs within the same
+    /// schema (cross-schema rename not supported in MVP).
     RenameTable {
         schema: Option<String>,
         old_name: String,
         new_name: String,
     },
     /// v0.10.21 (10.6.e.3) — `CREATE SCHEMA IF NOT EXISTS "name"`.
-    /// Emitido cuando el target referencia un schema custom que NO
-    /// existe en current. Va PRIMERO en el output (antes de
-    /// CREATE TABLE en ese schema), idempotente vía `IF NOT EXISTS`.
+    /// Emitted when the target references a custom schema that does
+    /// NOT exist in current. Goes FIRST in the output (before
+    /// CREATE TABLE in that schema), idempotent via `IF NOT EXISTS`.
     CreateSchema {
         name: String,
     },
-    /// v0.10.17 (10.6.b.2) — Rename de column preservando datos.
-    /// Emitido cuando un target Column tiene `renamed_from = Some(old)`
-    /// y existe en current.columns con ese nombre. Va inmediatamente
-    /// después de RenameTable y antes de ADD/DROP COLUMN.
+    /// v0.10.17 (10.6.b.2) — Rename of column preserving data.
+    /// Emitted when a target Column has `renamed_from = Some(old)`
+    /// and exists in current.columns with that name. Goes
+    /// immediately after RenameTable and before ADD/DROP COLUMN.
     RenameColumn {
         table: TableRef,
         old_name: String,
         new_name: String,
     },
     /// v0.10.31 (Tier A.5) — `ALTER TABLE ... ADD CONSTRAINT <name>
-    /// CHECK (<expr>)`. Emitido cuando el target type declara un
-    /// `@check_constraint(...)` que no existe en el current schema.
-    /// Requiere que la tabla ya exista (no se usa en CREATE TABLE —
-    /// los CHECKs del CREATE van inline en `create_table_sql`).
+    /// CHECK (<expr>)`. Emitted when the target type declares a
+    /// `@check_constraint(...)` that does not exist in the current
+    /// schema. Requires the table to already exist (not used in
+    /// CREATE TABLE — CREATE CHECKs go inline in `create_table_sql`).
     AddCheckConstraint {
         table: TableRef,
         name: String,
         expr: String,
     },
     /// v0.10.31 (Tier A.5) — `ALTER TABLE ... DROP CONSTRAINT <name>`.
-    /// Emitido cuando el current schema tiene un CHECK que ya no
-    /// está en el target. **NOTA**: la introspect actual (v0.10.31)
-    /// no popula `current.check_constraints` hasta cerrar A.7
-    /// (pg_constraint.contype='c'). Hasta entonces, DROP CHECK no
-    /// se dispara (current siempre vacío), pero el variant + emit
-    /// están listos para cuando A.7 cierre.
+    /// Emitted when the current schema has a CHECK that is no
+    /// longer in the target. **NOTE**: current introspect (v0.10.31)
+    /// does not populate `current.check_constraints` until A.7
+    /// closes (pg_constraint.contype='c'). Until then, DROP CHECK
+    /// is not triggered (current always empty), but the variant +
+    /// emit are ready for when A.7 closes.
     DropCheckConstraint {
         table: TableRef,
         name: String,
@@ -1179,24 +1194,25 @@ pub enum Change {
 }
 
 impl Change {
-    /// v0.10.31 (Tier A.1) — clasifica el `Change` por nivel de impacto.
+    /// v0.10.31 (Tier A.1) — classifies the `Change` by impact
+    /// level.
     ///
-    /// Ver `Severity` para la política. Resumen:
-    /// - DropTable / DropColumn → **Destructive** (pérdida de data).
-    /// - AddColumn NOT NULL sin default, AlterColumnType,
-    ///   AlterColumnNullable false, AlterColumnDefault, DropIndex →
-    ///   **Risky** (puede fallar runtime o impactar performance).
-    /// - Todo el resto → **Safe**.
+    /// See `Severity` for the policy. Summary:
+    /// - DropTable / DropColumn → **Destructive** (data loss).
+    /// - AddColumn NOT NULL without default, AlterColumnType,
+    ///   AlterColumnNullable false, AlterColumnDefault, DropIndex
+    ///   → **Risky** (may fail at runtime or impact performance).
+    /// - Everything else → **Safe**.
     pub fn severity(&self) -> Severity {
         match self {
-            // Pérdida de data garantizada.
+            // Guaranteed data loss.
             Change::DropTable(_) => Severity::Destructive,
             Change::DropColumn { .. } => Severity::Destructive,
 
-            // Puede fallar o impactar performance, pero no destruye data.
+            // May fail or impact performance, but does not destroy data.
             Change::AddColumn { column, .. } => {
                 if !column.nullable && column.default.is_none() {
-                    // NOT NULL sin default → falla si la tabla tiene rows.
+                    // NOT NULL without default → fails if the table has rows.
                     Severity::Risky
                 } else {
                     Severity::Safe
@@ -1205,21 +1221,21 @@ impl Change {
             Change::AlterColumnType { .. } => Severity::Risky,
             Change::AlterColumnNullable { nullable, .. } => {
                 if !nullable {
-                    // SET NOT NULL → falla si hay rows con NULL.
+                    // SET NOT NULL → fails if there are rows with NULL.
                     Severity::Risky
                 } else {
-                    // DROP NOT NULL → siempre safe.
+                    // DROP NOT NULL → always safe.
                     Severity::Safe
                 }
             }
             Change::AlterColumnDefault { .. } => Severity::Risky,
             Change::DropIndex { .. } => Severity::Risky,
-            // v0.10.31 (Tier A.5) — ADD CHECK puede fallar si rows
-            // existentes violan el predicado. DROP CHECK es safe
-            // (solo remueve la regla, no toca data).
+            // v0.10.31 (Tier A.5) — ADD CHECK may fail if existing
+            // rows violate the predicate. DROP CHECK is safe (only
+            // removes the rule, does not touch data).
             Change::AddCheckConstraint { .. } => Severity::Risky,
 
-            // Seguros: no tocan data, no fallan por shape.
+            // Safe: do not touch data, do not fail by shape.
             Change::CreateSchema { .. } => Severity::Safe,
             Change::CreateTable(_) => Severity::Safe,
             Change::CreateIndex { .. } => Severity::Safe,
@@ -1232,18 +1248,18 @@ impl Change {
     }
 }
 
-/// v0.10.31 (Tier A.1) — emite el SQL del diff con comentarios de
-/// severity por cada change. Versión enriquecida de `changes_to_sql`
-/// para el modo `--check-destructive`.
+/// v0.10.31 (Tier A.1) — emits the SQL of the diff with severity
+/// comments for each change. Enriched version of `changes_to_sql`
+/// for the `--check-destructive` mode.
 ///
-/// Cada change se emite como:
+/// Each change is emitted as:
 ///
 /// ```sql
 /// -- [SAFE] short_label
 /// SQL;
 /// ```
 ///
-/// El `short_label` es informativo (tipo + tabla/colaborable).
+/// The `short_label` is informative (type + table/collaborable).
 pub fn changes_to_sql_with_severity(changes: &[Change]) -> String {
     let mut out = String::new();
     for c in changes {
@@ -1255,8 +1271,8 @@ pub fn changes_to_sql_with_severity(changes: &[Change]) -> String {
     out
 }
 
-/// Helper para `changes_to_sql_with_severity` — etiqueta corta
-/// human-readable de un change ("AddColumn email to users").
+/// Helper for `changes_to_sql_with_severity` — short
+/// human-readable label of a change ("AddColumn email to users").
 fn change_short_label(c: &Change) -> String {
     match c {
         Change::CreateTable(t) => format!("CreateTable {}", t.name),
@@ -1313,8 +1329,8 @@ fn change_short_label(c: &Change) -> String {
     }
 }
 
-/// v0.10.31 (Tier A.1) — cuenta los changes por severity. Útil para
-/// el summary del modo `--check-destructive`.
+/// v0.10.31 (Tier A.1) — counts changes by severity. Useful for
+/// the summary of the `--check-destructive` mode.
 pub fn count_by_severity(changes: &[Change]) -> (usize, usize, usize) {
     let mut safe = 0;
     let mut risky = 0;
@@ -1329,53 +1345,54 @@ pub fn count_by_severity(changes: &[Change]) -> (usize, usize, usize) {
     (safe, risky, destructive)
 }
 
-/// Compara `current` (snapshot via [`introspect_schema`]) con
-/// `target` (snapshot via [`schema_from_program`]) y emite la
-/// lista ordenada de [`Change`] necesaria para sincronizar.
+/// Compares `current` (snapshot via [`introspect_schema`]) with
+/// `target` (snapshot via [`schema_from_program`]) and emits the
+/// ordered list of [`Change`] needed to synchronize.
 ///
-/// Garantías:
-/// - Idempotente: `diff(target, target) == []` (sin cambios).
-/// - Determinístico: el output es estable entre corridas
-///   (categorías ordenadas + items dentro de cada categoría
-///   sorted alfabéticamente).
-/// - Seguro para ejecución secuencial: el orden permite aplicar
-///   los Changes sin errores intermedios (CREATE TABLE antes
-///   que ALTER, DROP FK antes que DROP TABLE/COLUMN).
+/// Guarantees:
+/// - Idempotent: `diff(target, target) == []` (no changes).
+/// - Deterministic: the output is stable between runs
+///   (categories ordered + items within each category sorted
+///   alphabetically).
+/// - Safe for sequential execution: the order allows applying
+///   the Changes without intermediate errors (CREATE TABLE
+///   before ALTER, DROP FK before DROP TABLE/COLUMN).
 ///
-/// Limitaciones MVP:
-/// - **Renames detectados solo via `@renamed_from(...)`** (v0.10.17).
-///   Sin el decorator, un rename de `name` → `full_name` se ve como
-///   `DROP COLUMN name` + `ADD COLUMN full_name`, perdiendo los datos.
-///   El user marca explícitamente el rename con `@renamed_from("old")`
-///   sobre el field/type para que el diff emita `RENAME COLUMN`/
-///   `RENAME TABLE` preservando los datos.
-/// - **`AlterColumnType` directo sin USING** — si los datos NO
-///   convierten al nuevo tipo, Postgres falla. El user debe
-///   editar la migration para agregar `USING (col::new_type)` o
+/// MVP limitations:
+/// - **Renames detected only via `@renamed_from(...)`** (v0.10.17).
+///   Without the decorator, a rename from `name` → `full_name` is
+///   seen as `DROP COLUMN name` + `ADD COLUMN full_name`, losing
+///   the data. The user explicitly marks the rename with
+///   `@renamed_from("old")` on the field/type so that the diff
+///   emits `RENAME COLUMN`/`RENAME TABLE` preserving data.
+/// - **Direct `AlterColumnType` without USING** — if the data
+///   does NOT convert to the new type, Postgres fails. The user
+///   must edit the migration to add `USING (col::new_type)` or a
 ///   data migration script.
 pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     let mut changes = Vec::new();
 
-    // --- 0. RENAMES (v0.10.17, 10.6.b.2). Pre-procesa los hints
-    // `renamed_from` del target: emite RenameTable + RenameColumn
-    // PRIMERO, y construye un `current_renamed` con los nombres ya
-    // actualizados para que el resto del diff (CREATE/DROP/ALTER)
-    // compare contra el estado post-rename — sin esto, una table
-    // renombrada se vería como DROP+CREATE perdiendo datos.
+    // --- 0. RENAMES (v0.10.17, 10.6.b.2). Pre-processes the
+    // `renamed_from` hints of the target: emits RenameTable +
+    // RenameColumn FIRST, and builds a `current_renamed` with the
+    // names already updated so that the rest of the diff
+    // (CREATE/DROP/ALTER) compares against the post-rename state —
+    // without this, a renamed table would look like DROP+CREATE
+    // losing data.
     let current = apply_renames_from_target(current, target, &mut changes);
     let current = &current;
 
-    // v0.10.21 — Identidad de tabla = (schema, name). Las tables
-    // del current se comparan por qualified_id contra las del
-    // target, no por name plano.
+    // v0.10.21 — Table identity = (schema, name). Tables of the
+    // current are compared by qualified_id against those of the
+    // target, not by flat name.
     let current_ids: std::collections::HashSet<(String, String)> =
         current.tables.iter().map(|t| t.qualified_id()).collect();
     let target_ids: std::collections::HashSet<(String, String)> =
         target.tables.iter().map(|t| t.qualified_id()).collect();
 
-    // --- 0.5. CREATE SCHEMA IF NOT EXISTS para schemas custom del
-    // target que no existen en current. Va PRIMERO (antes de CREATE
-    // TABLE en ese schema). Idempotente.
+    // --- 0.5. CREATE SCHEMA IF NOT EXISTS for custom schemas of
+    // the target that do not exist in current. Goes FIRST (before
+    // CREATE TABLE in that schema). Idempotent.
     let current_schemas: std::collections::HashSet<String> = current
         .tables
         .iter()
@@ -1393,7 +1410,7 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         changes.push(Change::CreateSchema { name: s.clone() });
     }
 
-    // --- 1. CREATE TABLE (target tables no presentes en current).
+    // --- 1. CREATE TABLE (target tables not present in current).
     let mut create_tables: Vec<&Table> = target
         .tables
         .iter()
@@ -1402,13 +1419,13 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     create_tables.sort_by_key(|a| a.qualified_id());
     for t in &create_tables {
         changes.push(Change::CreateTable((*t).clone()));
-        // v0.10.27 (F3) — indexes definidos por `@index(...)` para
-        // tablas nuevas también van como CREATE INDEX separados (no
-        // inline en el CREATE TABLE para mantener simétrico con el
-        // diff path de tablas existentes). Auto-PK y auto-UNIQUE de
-        // columnas individuales NO entran acá — son parte del CREATE
-        // TABLE inline. Sólo emitimos los indexes "extra" del @index
-        // decorator o de @column.indexed/unique.
+        // v0.10.27 (F3) — indexes defined by `@index(...)` for new
+        // tables also go as separate CREATE INDEX (not inline in the
+        // CREATE TABLE to stay symmetric with the diff path of
+        // existing tables). Auto-PK and auto-UNIQUE of individual
+        // columns do NOT go here — they are part of the CREATE
+        // TABLE inline. We only emit the "extra" indexes from the
+        // @index decorator or from @column.indexed/unique.
         let mut idx_to_create: Vec<&Index> = t.indexes.iter().collect();
         idx_to_create.sort_by(|a, b| a.name.cmp(&b.name));
         let table_ref = TableRef::from_table(t);
@@ -1420,7 +1437,7 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         }
     }
 
-    // --- 2. ALTER de tablas en AMBOS (cross-schema match por
+    // --- 2. ALTER of tables in BOTH (cross-schema match by
     // qualified_id).
     let mut tables_to_alter: Vec<(&Table, &Table)> = current
         .tables
@@ -1435,18 +1452,18 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         .collect();
     tables_to_alter.sort_by_key(|a| a.0.qualified_id());
 
-    // 2.1. Per-tabla: columns + indexes + checks.
+    // 2.1. Per-table: columns + indexes + checks.
     for (current_t, target_t) in &tables_to_alter {
         diff_columns(current_t, target_t, &mut changes);
         diff_indexes(current_t, target_t, &mut changes);
-        // v0.10.31 (Tier A.5) — ADD/DROP CHECK constraints sobre
-        // tabla existente. La function `diff_check_constraints` solo
-        // dispara DropCheckConstraint cuando A.7 esté cerrado
-        // (current.check_constraints lleno desde introspect).
+        // v0.10.31 (Tier A.5) — ADD/DROP CHECK constraints on
+        // existing table. The `diff_check_constraints` function
+        // only triggers DropCheckConstraint when A.7 is closed
+        // (current.check_constraints populated from introspect).
         diff_check_constraints(current_t, target_t, &mut changes);
     }
 
-    // --- 3. DROP FK (antes de DROP TABLE / DROP COLUMN).
+    // --- 3. DROP FK (before DROP TABLE / DROP COLUMN).
     for (current_t, target_t) in &tables_to_alter {
         let target_fk_names: std::collections::HashSet<&str> = target_t
             .foreign_keys
@@ -1467,7 +1484,7 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         }
     }
 
-    // --- 4. ADD FK (después de tener todas las tables y cols).
+    // --- 4. ADD FK (after having all tables and cols).
     for t in &create_tables {
         let mut fks: Vec<&ForeignKey> = t.foreign_keys.iter().collect();
         fks.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1498,7 +1515,7 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
         }
     }
 
-    // --- 5. DROP TABLE (current tables no en target).
+    // --- 5. DROP TABLE (current tables not in target).
     let mut drop_tables: Vec<&Table> = current
         .tables
         .iter()
@@ -1512,33 +1529,34 @@ pub fn diff_schemas(current: &Schema, target: &Schema) -> Vec<Change> {
     changes
 }
 
-/// v0.10.17 (10.6.b.2) — Detecta los hints `renamed_from` del
-/// `target` schema y:
-/// 1. Emite los `Change::RenameTable` / `Change::RenameColumn`
-///    al frente de `changes` (orden: tables primero, después
+/// v0.10.17 (10.6.b.2) — Detects the `renamed_from` hints of the
+/// `target` schema and:
+/// 1. Emits the `Change::RenameTable` / `Change::RenameColumn`
+///    at the front of `changes` (order: tables first, then
 ///    columns).
-/// 2. Devuelve una versión renombrada de `current` para que el
-///    resto del diff compare por nombres post-rename.
+/// 2. Returns a renamed version of `current` so that the rest of
+///    the diff compares by post-rename names.
 ///
-/// **Política**:
-/// - Rename activo solo si: target tiene `renamed_from = Some(old)`
-///   Y current.tables contiene una tabla con ese `old` name Y
-///   current.tables NO contiene una tabla con el nombre target
-///   (evita colisión accidental).
-/// - Renames de column adentro de una tabla renombrada usan el
-///   nombre target (post-rename) en el `RenameColumn.table`.
-/// - Hints sin match en `current` (ej: usuario dejó el decorator
-///   tras aplicar la migration) se ignoran silenciosamente — son
-///   no-op, no error. El user puede limpiarlos cuando quiera.
+/// **Policy**:
+/// - Rename active only if: target has `renamed_from = Some(old)`
+///   AND current.tables contains a table with that `old` name AND
+///   current.tables does NOT contain a table with the target name
+///   (avoids accidental collision).
+/// - Column renames inside a renamed table use the target
+///   (post-rename) name in `RenameColumn.table`.
+/// - Hints without match in `current` (e.g.: user left the
+///   decorator after applying the migration) are silently
+///   ignored — they are no-op, not an error. The user can clean
+///   them up whenever.
 fn apply_renames_from_target(
     current: &Schema,
     target: &Schema,
     changes: &mut Vec<Change>,
 ) -> Schema {
-    // v0.10.21 — Rename ahora es schema-aware. La identidad de
-    // tabla es `(schema, name)`. Renames cross-schema NO se
-    // soportan en MVP — el `renamed_from` se interpreta dentro
-    // del schema actual de la table target.
+    // v0.10.21 — Rename is now schema-aware. Table identity is
+    // `(schema, name)`. Cross-schema renames are NOT supported in
+    // MVP — the `renamed_from` is interpreted within the current
+    // schema of the target table.
     let mut renamed_tables: std::collections::HashMap<(Option<String>, String), String> =
         std::collections::HashMap::new();
     let current_qual: std::collections::HashSet<(Option<String>, String)> = current
@@ -1567,7 +1585,7 @@ fn apply_renames_from_target(
         renamed_tables.insert((schema.clone(), old.clone()), new.clone());
     }
 
-    // 2. Construir current renombrado (a nivel tabla).
+    // 2. Build renamed current (at table level).
     let mut new_tables: Vec<Table> = current
         .tables
         .iter()
@@ -1581,8 +1599,8 @@ fn apply_renames_from_target(
         })
         .collect();
 
-    // 3. Detectar renames de column dentro de tablas que existen
-    // en ambos schemas (post-rename, match por qualified_id).
+    // 3. Detect column renames within tables that exist in both
+    // schemas (post-rename, match by qualified_id).
     for target_t in &target.tables {
         let Some(current_t) = new_tables
             .iter_mut()
@@ -1610,8 +1628,8 @@ fn apply_renames_from_target(
                 old_name: old.clone(),
                 new_name: new.clone(),
             });
-            // Renombrar in-place en current_t para que el resto
-            // del diff vea el nombre nuevo.
+            // Rename in-place in current_t so that the rest of the
+            // diff sees the new name.
             if let Some(col) = current_t.columns.iter_mut().find(|c| &c.name == old) {
                 col.name = new.clone();
             }
@@ -1628,7 +1646,7 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         target.columns.iter().map(|c| c.name.as_str()).collect();
     let table_ref = TableRef::from_table(target);
 
-    // Drop columns no en target.
+    // Drop columns not in target.
     let mut to_drop: Vec<&Column> = current
         .columns
         .iter()
@@ -1642,7 +1660,7 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         });
     }
 
-    // Add columns no en current.
+    // Add columns not in current.
     let mut to_add: Vec<&Column> = target
         .columns
         .iter()
@@ -1656,13 +1674,13 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         });
     }
 
-    // Alter columns en AMBOS con diferencias.
+    // Alter columns in BOTH with differences.
     for tc in &target.columns {
         if let Some(cc) = current.columns.iter().find(|c| c.name == tc.name) {
-            // Type change. Pero ignoramos `bigserial` vs `bigint`
-            // como mismo type — PG reporta `bigint` para columns
-            // tipo `bigserial` (la auto-increment está reflejada
-            // en `column_default = nextval(...)`).
+            // Type change. But we ignore `bigserial` vs `bigint`
+            // as the same type — PG reports `bigint` for columns
+            // of `bigserial` type (the auto-increment is reflected
+            // in `column_default = nextval(...)`).
             let current_type = normalize_sql_type_for_diff(&cc.sql_type);
             let target_type = normalize_sql_type_for_diff(&tc.sql_type);
             if current_type != target_type {
@@ -1692,31 +1710,32 @@ fn diff_columns(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     }
 }
 
-/// v0.10.16 — Normaliza una expresión SQL de default para
-/// comparación en el diff. El objetivo es ser permisivo con
-/// variaciones cosméticas que no cambian semántica:
+/// v0.10.16 — Normalizes a SQL default expression for comparison
+/// in the diff. The goal is to be permissive with cosmetic
+/// variations that do not change semantics:
 ///
-/// - Lowercase de la expresión completa (PG normaliza `NOW()` →
-///   `now()` en `column_default`).
-/// - Strip de casts redundantes que PG agrega automáticamente
+/// - Lowercase of the full expression (PG normalizes `NOW()` →
+///   `now()` in `column_default`).
+/// - Strip of redundant casts that PG adds automatically
 ///   (`'public'::text` → `'public'`, `42::bigint` → `42`).
-/// - Trim de whitespace.
+/// - Trim whitespace.
 ///
-/// NO intenta evaluar expresiones equivalentes (`now()` vs
-/// `CURRENT_TIMESTAMP` son ambos válidos para `timestamptz` pero
-/// se ven distintos — los tratamos como distintos).
+/// Does NOT try to evaluate equivalent expressions (`now()` vs
+/// `CURRENT_TIMESTAMP` are both valid for `timestamptz` but look
+/// different — we treat them as different).
 fn normalize_default_for_diff(s: &str) -> String {
     let lower = s.trim().to_lowercase();
-    // Strip casts `::tipo` cuando el tipo es alfanumérico simple.
-    // Conservador: solo strip al final, no en medio (no rompemos
-    // expresiones complejas como `(a::int) + (b::int)`).
+    // Strip `::type` casts when the type is a simple alphanumeric.
+    // Conservative: only strip at the end, not in the middle (we
+    // do not break complex expressions like `(a::int) + (b::int)`).
     let no_cast = strip_trailing_pg_cast(&lower);
     no_cast.to_string()
 }
 
 fn strip_trailing_pg_cast(s: &str) -> &str {
-    // Busca el último `::` y si lo que sigue es alfanumérico
-    // simple (`text`, `bigint`, `timestamptz`, etc.), lo recorta.
+    // Look for the last `::` and if what follows is a simple
+    // alphanumeric (`text`, `bigint`, `timestamptz`, etc.), trim
+    // it.
     if let Some(idx) = s.rfind("::") {
         let tail = &s[idx + 2..];
         if !tail.is_empty()
@@ -1743,7 +1762,7 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         .collect();
     let table_ref = TableRef::from_table(target);
 
-    // Drop indexes no en target.
+    // Drop indexes not in target.
     let mut to_drop: Vec<&Index> = current
         .indexes
         .iter()
@@ -1757,7 +1776,7 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         });
     }
 
-    // Create indexes no en current.
+    // Create indexes not in current.
     let mut to_add: Vec<&Index> = target
         .indexes
         .iter()
@@ -1771,21 +1790,22 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
         });
     }
 
-    // v0.10.29 — Cierre de deuda v0.10.27/v0.10.28: para indexes
-    // con el MISMO nombre en current y target, comparar shape
-    // (columns, unique, where_clause, using). Si difieren → DROP +
-    // CREATE para regenerar con el shape nuevo. Antes el diff era
-    // name-based puro: el user tenía que cambiar el `name=` para
-    // forzar regeneración cuando solo cambiaba `using=` o
-    // `where_=`, lo que es ergonómicamente roto.
+    // v0.10.29 — Closes the v0.10.27/v0.10.28 debt: for indexes
+    // with the SAME name in current and target, compare the shape
+    // (columns, unique, where_clause, using). If they differ →
+    // DROP + CREATE to regenerate with the new shape. Before, the
+    // diff was purely name-based: the user had to change the
+    // `name=` to force regeneration when only `using=` or
+    // `where_=` changed, which is ergonomically broken.
     //
-    // Notas:
-    // - `where_clause` se compara via `where_clauses_match` (lectura
-    //   defensiva: Postgres lo canonicaliza con paréntesis extra y
-    //   espacios). El comparator hace match case-insensitive +
-    //   whitespace-collapsed. Empate → preservar (no regen espurio).
-    // - `using` se compara case-insensitive; `None`/`Some("btree")`
-    //   se consideran equivalentes (btree es el default Postgres).
+    // Notes:
+    // - `where_clause` is compared via `where_clauses_match`
+    //   (defensive reading: Postgres canonicalizes it with extra
+    //   parens and whitespace). The comparator matches
+    //   case-insensitive + whitespace-collapsed. Tie → preserve
+    //   (no spurious regen).
+    // - `using` is compared case-insensitive; `None`/`Some("btree")`
+    //   are considered equivalent (btree is the Postgres default).
     let mut changed: Vec<(&Index, &Index)> = Vec::new();
     for (name, target_idx) in target_by_name.iter() {
         if let Some(current_idx) = current_by_name.get(name) {
@@ -1807,11 +1827,11 @@ fn diff_indexes(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     }
 }
 
-/// v0.10.29 — Comparator para diff de indexes (mismo nombre,
-/// comparar shape). Best-effort match — Postgres canonicaliza el
-/// `where_clause` con paréntesis y espacios extra al
-/// reintrospectear, por lo que comparamos case-insensitive +
-/// whitespace-collapsed para no disparar regens espurios.
+/// v0.10.29 — Comparator for index diff (same name, compare
+/// shape). Best-effort match — Postgres canonicalizes the
+/// `where_clause` with extra parens and whitespace on
+/// re-introspect, so we compare case-insensitive +
+/// whitespace-collapsed to avoid triggering spurious regens.
 fn indexes_equivalent_for_diff(a: &Index, b: &Index) -> bool {
     if a.columns != b.columns || a.unique != b.unique {
         return false;
@@ -1826,10 +1846,11 @@ fn indexes_equivalent_for_diff(a: &Index, b: &Index) -> bool {
     a_where == b_where
 }
 
-/// Best-effort canonicalization para comparar WHERE clauses entre
-/// la string declarada por el user y la que Postgres reporta tras
-/// re-introspect. Normaliza whitespace + case. NO parsea SQL —
-/// solo evita falsos positivos del diff por reformatting trivial.
+/// Best-effort canonicalization to compare WHERE clauses between
+/// the string declared by the user and the one Postgres reports
+/// after re-introspect. Normalizes whitespace + case. Does NOT
+/// parse SQL — only avoids false positives of the diff from
+/// trivial reformatting.
 fn canonicalize_where_clause(s: &str) -> String {
     s.split_whitespace()
         .collect::<Vec<_>>()
@@ -1837,12 +1858,12 @@ fn canonicalize_where_clause(s: &str) -> String {
         .to_ascii_lowercase()
 }
 
-/// Para evitar falsos positivos del diff: `bigserial` y `bigint`
-/// son equivalentes en la DB (la auto-increment es metadata
-/// separada via default `nextval(...)`). Cuando el AST declara
-/// `@primary Int = 0` el target sql_type es `bigserial`, pero la
-/// DB lo reporta como `bigint`. Sin esta normalización, el diff
-/// dispararía `AlterColumnType` espurio en cada corrida.
+/// To avoid false positives of the diff: `bigserial` and `bigint`
+/// are equivalent in the DB (the auto-increment is separate
+/// metadata via default `nextval(...)`). When the AST declares
+/// `@primary Int = 0` the target sql_type is `bigserial`, but the
+/// DB reports it as `bigint`. Without this normalization, the diff
+/// would trigger a spurious `AlterColumnType` on every run.
 fn normalize_sql_type_for_diff(sql: &str) -> String {
     match sql.to_ascii_lowercase().as_str() {
         "bigserial" => "bigint".to_string(),
@@ -1856,10 +1877,10 @@ fn normalize_sql_type_for_diff(sql: &str) -> String {
 // SQL emission: Change → DDL Postgres
 // =================================================================
 
-/// Convierte una lista de [`Change`] a SQL DDL Postgres. Cada
-/// statement termina en `;\n\n` para legibilidad cuando se escriben
-/// a archivos `.sql`. La salida es ejecutable directo via
-/// `psql -f` o `db.exec(...)`.
+/// Converts a list of [`Change`] to Postgres DDL SQL. Each
+/// statement ends in `;\n\n` for readability when written to
+/// `.sql` files. The output is executable directly via
+/// `psql -f` or `db.exec(...)`.
 pub fn changes_to_sql(changes: &[Change]) -> String {
     let mut out = String::new();
     for c in changes {
@@ -1904,19 +1925,21 @@ fn change_to_sql(change: &Change) -> String {
             column,
             new_type,
         } => {
-            // v0.10.31 (Tier A.2) — emit `USING <col>::<new_type>`
-            // siempre. Postgres acepta el cast explicit incluso para
-            // auto-castable (`int → bigint`), y es required para casts
-            // non-auto (`text → int`, `varchar → int`, casts con
-            // precision distinta). El syntax `col::type(n)` funciona
-            // para tipos parametrizados (`varchar(50)`/`numeric(10,2)`)
-            // y para arrays (`int8[]`).
+            // v0.10.31 (Tier A.2) — always emit
+            // `USING <col>::<new_type>`. Postgres accepts the
+            // explicit cast even for auto-castable (`int → bigint`),
+            // and it is required for non-auto casts (`text → int`,
+            // `varchar → int`, casts with different precision). The
+            // `col::type(n)` syntax works for parameterized types
+            // (`varchar(50)`/`numeric(10,2)`) and for arrays
+            // (`int8[]`).
             //
-            // Para casts que Postgres no soporta directo (ej bytea →
-            // text en encoding específico, `timestamptz` ↔ `date` con
-            // format custom), el user edita el SQL emitido para usar
-            // la función adecuada (`USING encode(col, 'utf8')` /
-            // `USING col::date AT TIME ZONE 'UTC'`/etc.).
+            // For casts Postgres does not support directly (e.g.
+            // bytea → text in a specific encoding, `timestamptz` ↔
+            // `date` with custom format), the user edits the
+            // emitted SQL to use the right function (`USING
+            // encode(col, 'utf8')` / `USING col::date AT TIME
+            // ZONE 'UTC'`/etc.).
             let col = quote_ident(column);
             format!(
                 "ALTER TABLE {} ALTER COLUMN {} TYPE {} USING {}::{};",
@@ -1965,10 +1988,11 @@ fn change_to_sql(change: &Change) -> String {
         }
         Change::CreateIndex { table, index } => {
             let unique = if index.unique { "UNIQUE " } else { "" };
-            // v0.10.32 (Tier C.2) — expression index. Si `expression`
-            // está, el index se crea sobre la expresión literal en
-            // lugar de columnas (`CREATE INDEX ON tbl (lower(email))`).
-            // El user pasa la expression raw — Fitz no la parsea.
+            // v0.10.32 (Tier C.2) — expression index. If
+            // `expression` is set, the index is created on the
+            // literal expression instead of columns
+            // (`CREATE INDEX ON tbl (lower(email))`). The user
+            // passes the raw expression — Fitz does not parse it.
             let target_expr = match &index.expression {
                 Some(expr) => format!("({})", expr),
                 None => {
@@ -1977,16 +2001,16 @@ fn change_to_sql(change: &Change) -> String {
                 }
             };
             // v0.10.28 — method override (USING gin/gist/brin/etc.).
-            // `None` = btree default Postgres, no se emite USING.
+            // `None` = btree Postgres default, USING is not emitted.
             let using_clause = match &index.using {
                 Some(m) => format!(" USING {}", m),
                 None => String::new(),
             };
             // v0.10.27 (F3) — partial index: append `WHERE <clause>`.
-            // El user pasa la SQL clause RAW (sin `WHERE`); Postgres
-            // valida el predicate al CREATE INDEX. Si la clause
-            // referencia cols inexistentes, el CREATE falla con
-            // mensaje claro.
+            // The user passes the RAW SQL clause (without `WHERE`);
+            // Postgres validates the predicate on CREATE INDEX. If
+            // the clause references non-existent cols, the CREATE
+            // fails with a clear message.
             let where_suffix = match &index.where_clause {
                 Some(w) => format!(" WHERE {}", w),
                 None => String::new(),
@@ -2002,8 +2026,9 @@ fn change_to_sql(change: &Change) -> String {
             )
         }
         Change::DropIndex { schema, index_name } => {
-            // Postgres DROP INDEX requiere el schema si non-public
-            // (sino busca en search_path y puede no encontrarlo).
+            // Postgres DROP INDEX requires the schema if non-public
+            // (otherwise it searches in search_path and may not
+            // find it).
             let qualified = match schema {
                 Some(s) => format!("{}.{}", quote_ident(s), quote_ident(index_name)),
                 None => quote_ident(index_name),
@@ -2016,10 +2041,10 @@ fn change_to_sql(change: &Change) -> String {
                 .as_deref()
                 .map(|action| format!(" ON DELETE {}", action))
                 .unwrap_or_default();
-            // v0.10.29 — Cross-schema FK. Si `references_schema`
-            // está, emite `REFERENCES "schema"."table"(col)` con
-            // schema qualifier. None = same-schema (paridad con
-            // convención `public` implícito de Postgres).
+            // v0.10.29 — Cross-schema FK. If `references_schema`
+            // is set, emit `REFERENCES "schema"."table"(col)` with
+            // schema qualifier. None = same-schema (parallel to
+            // the implicit `public` Postgres convention).
             let target_ref = TableRef {
                 schema: fk.references_schema.clone(),
                 name: fk.references_table.clone(),
@@ -2050,8 +2075,8 @@ fn change_to_sql(change: &Change) -> String {
                 schema: schema.clone(),
                 name: old_name.clone(),
             };
-            // El nuevo name va SIN schema prefix (RENAME TO espera
-            // solo el name; el schema se preserva).
+            // The new name goes WITHOUT schema prefix (RENAME TO
+            // expects only the name; the schema is preserved).
             format!(
                 "ALTER TABLE {} RENAME TO {};",
                 quote_qualified(&old),
@@ -2073,9 +2098,9 @@ fn change_to_sql(change: &Change) -> String {
         Change::CreateSchema { name } => {
             format!("CREATE SCHEMA IF NOT EXISTS {};", quote_ident(name))
         }
-        // v0.10.31 (Tier A.5) — ADD/DROP CHECK constraint. El name
-        // se cita como identifier, el expr va RAW (el user escribe
-        // SQL válido adentro del `@check_constraint("...")`).
+        // v0.10.31 (Tier A.5) — ADD/DROP CHECK constraint. The
+        // name is quoted as identifier, the expr goes RAW (the
+        // user writes valid SQL inside `@check_constraint("...")`).
         Change::AddCheckConstraint { table, name, expr } => {
             format!(
                 "ALTER TABLE {} ADD CONSTRAINT {} CHECK ({});",
@@ -2094,20 +2119,21 @@ fn change_to_sql(change: &Change) -> String {
     }
 }
 
-/// v0.10.31 (Tier A.5) — diff de CHECK constraints entre current y
-/// target. Emite `Change::AddCheckConstraint` para los del target
-/// que no están en current, y `Change::DropCheckConstraint` para los
-/// del current que no están en target. La identidad es por `name`
-/// (matching de pg_constraint.conname). Si el `expr` cambia con el
-/// mismo name, se emite DROP + ADD (Postgres no soporta ALTER de la
-/// expresión, requiere drop + add explícito).
+/// v0.10.31 (Tier A.5) — diff of CHECK constraints between current
+/// and target. Emits `Change::AddCheckConstraint` for those of the
+/// target not in current, and `Change::DropCheckConstraint` for
+/// those of current not in target. Identity is by `name` (matching
+/// pg_constraint.conname). If the `expr` changes with the same
+/// name, DROP + ADD is emitted (Postgres does not support ALTER of
+/// the expression, requires explicit drop + add).
 ///
-/// **NOTA pre-A.7**: hasta cerrar A.7, `current.check_constraints`
-/// está siempre vacío (la introspect no lee `pg_constraint.contype='c'`).
-/// Eso significa que en esta versión `DropCheckConstraint` NO se
-/// dispara y un cambio de `expr` con mismo name se ve como solo ADD
-/// (la regla vieja queda en la DB). Workaround documentado: el user
-/// hace DROP manual antes de re-correr. A.7 cierra esto.
+/// **NOTE pre-A.7**: until A.7 closes, `current.check_constraints`
+/// is always empty (introspect does not read
+/// `pg_constraint.contype='c'`). That means in this version
+/// `DropCheckConstraint` is NOT triggered and a change of `expr`
+/// with the same name looks like only ADD (the old rule stays in
+/// the DB). Documented workaround: the user does a manual DROP
+/// before re-running. A.7 closes this.
 fn diff_check_constraints(current: &Table, target: &Table, changes: &mut Vec<Change>) {
     let current_names: std::collections::HashSet<&str> = current
         .check_constraints
@@ -2121,7 +2147,7 @@ fn diff_check_constraints(current: &Table, target: &Table, changes: &mut Vec<Cha
         .collect();
     let table_ref = TableRef::from_table(target);
 
-    // Drops primero (mismo orden que diff_columns / diff_indexes).
+    // Drops first (same order as diff_columns / diff_indexes).
     let mut to_drop: Vec<&CheckConstraint> = current
         .check_constraints
         .iter()
@@ -2170,11 +2196,11 @@ fn diff_check_constraints(current: &Table, target: &Table, changes: &mut Vec<Cha
     }
 }
 
-/// v0.10.32 (Tier D.2) — wrapper público para uso desde el LSP
-/// (`fitz::lsp::try_table_create_sql`). Devuelve el mismo SQL que
-/// `change_to_sql(Change::CreateTable(t))` emite. Mantenido como
-/// alias para mantener `create_table_sql` privado al módulo (no
-/// queremos exponer toda la API interna del migrator).
+/// v0.10.32 (Tier D.2) — public wrapper for use from the LSP
+/// (`fitz::lsp::try_table_create_sql`). Returns the same SQL that
+/// `change_to_sql(Change::CreateTable(t))` emits. Kept as alias
+/// to keep `create_table_sql` private to the module (we do not
+/// want to expose the entire internal API of the migrator).
 pub fn create_table_sql_for(t: &Table) -> String {
     create_table_sql(t)
 }
@@ -2183,7 +2209,7 @@ fn create_table_sql(t: &Table) -> String {
     let mut lines = Vec::with_capacity(t.columns.len() + 1);
     for c in &t.columns {
         let nullable = if c.is_primary {
-            // PRIMARY KEY implica NOT NULL — no agregar redundante.
+            // PRIMARY KEY implies NOT NULL — do not add redundant.
             " PRIMARY KEY".to_string()
         } else if c.nullable {
             String::new()
@@ -2203,16 +2229,16 @@ fn create_table_sql(t: &Table) -> String {
             default,
         ));
     }
-    // v0.10.27 (F2) — composite PK constraint table-level cuando
-    // `composite_pk.len() >= 2`. Single PK queda como `is_primary`
-    // inline en la columna (más legible y matchea introspect).
+    // v0.10.27 (F2) — table-level composite PK constraint when
+    // `composite_pk.len() >= 2`. Single PK stays as `is_primary`
+    // inline on the column (more readable and matches introspect).
     if t.composite_pk.len() >= 2 {
         let cols: Vec<String> = t.composite_pk.iter().map(|c| quote_ident(c)).collect();
         lines.push(format!("    PRIMARY KEY ({})", cols.join(", ")));
     }
-    // v0.10.29 — CHECK constraints table-level (`@check_constraint`).
-    // Cada uno emite `CONSTRAINT "name" CHECK (<expr>)` adentro del
-    // CREATE TABLE para que Postgres valide en INSERT/UPDATE.
+    // v0.10.29 — table-level CHECK constraints (`@check_constraint`).
+    // Each one emits `CONSTRAINT "name" CHECK (<expr>)` inside the
+    // CREATE TABLE so Postgres validates on INSERT/UPDATE.
     for chk in &t.check_constraints {
         lines.push(format!(
             "    CONSTRAINT {} CHECK ({})",
@@ -2220,8 +2246,8 @@ fn create_table_sql(t: &Table) -> String {
             chk.expr
         ));
     }
-    // FKs NO inline acá — el diff las emite como ADD CONSTRAINT
-    // separados para destrabar ciclos entre tablas nuevas.
+    // FKs NOT inline here — the diff emits them as separate ADD
+    // CONSTRAINT to unblock cycles between new tables.
     format!(
         "CREATE TABLE {} (\n{}\n);",
         quote_qualified(&TableRef::from_table(t)),
@@ -2229,21 +2255,21 @@ fn create_table_sql(t: &Table) -> String {
     )
 }
 
-/// Quote PG-style un identificador. Solo encerramos en `"` los
-/// nombres que tienen chars no-ASCII-alphanumeric o que matchean
-/// palabras reservadas. Para simplicidad MVP: SIEMPRE quoteamos —
-/// trade-off: SQL más verboso, pero 100% seguro contra reserved
-/// words y case sensitivity de PG.
+/// PG-style quote of an identifier. We only wrap in `"` names
+/// that have non-ASCII-alphanumeric chars or that match reserved
+/// words. For MVP simplicity: we ALWAYS quote — trade-off: more
+/// verbose SQL, but 100% safe against reserved words and PG case
+/// sensitivity.
 fn quote_ident(name: &str) -> String {
-    // Escapar `"` adentro del nombre (raro pero posible).
+    // Escape `"` inside the name (rare but possible).
     let escaped = name.replace('"', "\"\"");
     format!("\"{}\"", escaped)
 }
 
-/// v0.10.21 (10.6.e.3) — Quote PG-style con schema qualifier
-/// opcional. `schema = None` → `"name"`; `schema = Some(s)` →
-/// `"s"."name"`. El SQL emit de Change usa siempre este helper
-/// para que las tables en schemas custom funcionen.
+/// v0.10.21 (10.6.e.3) — PG-style quote with optional schema
+/// qualifier. `schema = None` → `"name"`; `schema = Some(s)` →
+/// `"s"."name"`. The Change SQL emit always uses this helper so
+/// that tables in custom schemas work.
 fn quote_qualified(t: &TableRef) -> String {
     match &t.schema {
         Some(s) => format!("{}.{}", quote_ident(s), quote_ident(&t.name)),
@@ -2252,22 +2278,23 @@ fn quote_qualified(t: &TableRef) -> String {
 }
 
 // =================================================================
-// Tracking + ejecutor (apply_pending_migrations)
+// Tracking + executor (apply_pending_migrations)
 // =================================================================
 
-/// Nombre de la tabla interna donde Fitz trackea qué migrations
-/// corrieron. Idempotente — re-correr `migrate` no aplica las ya
-/// aplicadas.
+/// Name of the internal table where Fitz tracks which migrations
+/// ran. Idempotent — re-running `migrate` does not apply ones
+/// already applied.
 const TRACKING_TABLE: &str = "_fitz_migrations";
 
-/// Una migration encontrada en el directorio `migrations/`. La
-/// `version` es el prefijo del filename (típicamente timestamp
-/// `YYYYMMDDHHMMSS_descripcion.sql`). Postgres ordena por
-/// `version` lexicográfico = orden cronológico real.
+/// A migration found in the `migrations/` directory. The `version`
+/// is the filename prefix (typically timestamp
+/// `YYYYMMDDHHMMSS_description.sql`). Postgres orders by
+/// lexicographic `version` = real chronological order.
 ///
-/// v0.10.17 (10.6.b.1) — el SQL se split en `up_sql` y `down_sql`
-/// vía markers `-- UP` / `-- DOWN`. Backward-compat: archivos sin
-/// marcadores → todo es UP, `down_sql = None` (no soporta rollback).
+/// v0.10.17 (10.6.b.1) — the SQL is split into `up_sql` and
+/// `down_sql` via `-- UP` / `-- DOWN` markers. Backward-compat:
+/// files without markers → everything is UP, `down_sql = None`
+/// (does not support rollback).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrationFile {
     pub version: String,
@@ -2275,53 +2302,52 @@ pub struct MigrationFile {
     pub kind: MigrationKind,
 }
 
-/// v0.10.19 (10.6.d) — Tipo de migration según su backend.
+/// v0.10.19 (10.6.d) — Migration type according to its backend.
 ///
-/// - `Sql`: archivo `.sql` con SQL crudo splittable en `-- UP` /
-///   `-- DOWN` (mantiene la semántica de v0.10.17).
-/// - `Fitz` (v0.10.19): archivo `.fitz` que declara `async fn
-///   migrate(db: DbConn) -> Result<Null>` y opcionalmente
-///   `async fn rollback(db: DbConn) -> Result<Null>`. El runner
-///   parsea + invoca la fn adentro de tx con `db` bindeado.
-///   Habilita transforms con lógica que SQL crudo no expresa
-///   (parseo JSON viejo → cols nuevas, back-fills condicionales,
-///   etc.).
+/// - `Sql`: `.sql` file with raw SQL splittable into `-- UP` /
+///   `-- DOWN` (keeps v0.10.17 semantics).
+/// - `Fitz` (v0.10.19): `.fitz` file that declares `async fn
+///   migrate(db: DbConn) -> Result<Null>` and optionally
+///   `async fn rollback(db: DbConn) -> Result<Null>`. The runner
+///   parses + invokes the fn inside tx with `db` bound. Enables
+///   transforms with logic that raw SQL cannot express (parsing
+///   old JSON → new cols, conditional back-fills, etc.).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationKind {
     Sql {
-        /// SQL a ejecutar en `migrate` (forward). Siempre presente.
+        /// SQL to execute in `migrate` (forward). Always present.
         up_sql: String,
-        /// SQL a ejecutar en `rollback`. `None` si la migration
-        /// no declaró sección `-- DOWN`.
+        /// SQL to execute in `rollback`. `None` if the migration
+        /// did not declare a `-- DOWN` section.
         down_sql: Option<String>,
     },
     Fitz {
-        /// Path absoluto al archivo `.fitz`. Lo guardamos por si
-        /// el runner necesita base_dir para resolver imports
-        /// relativos del module loader.
+        /// Absolute path to the `.fitz` file. We keep it in case
+        /// the runner needs base_dir to resolve relative imports
+        /// from the module loader.
         path: std::path::PathBuf,
-        /// Source completo del archivo. Cacheado en read para
-        /// evitar I/O extra durante el dispatch.
+        /// Full source of the file. Cached on read to avoid extra
+        /// I/O during dispatch.
         source: String,
     },
 }
 
 impl MigrationFile {
-    /// `true` si la migration es un `.fitz` script con lógica
-    /// (necesita el runner del lenguaje, no `db.exec` directo).
+    /// `true` if the migration is a `.fitz` script with logic
+    /// (needs the language runner, not direct `db.exec`).
     pub fn is_fitz(&self) -> bool {
         matches!(self.kind, MigrationKind::Fitz { .. })
     }
 }
 
-/// Estado de una migration: aplicada en la DB, o pendiente.
+/// State of a migration: applied in the DB, or pending.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MigrationStatus {
     Applied,
     Pending,
 }
 
-/// Crea la tabla de tracking si no existe. Idempotente.
+/// Creates the tracking table if it does not exist. Idempotent.
 pub async fn ensure_tracking_table(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<()> {
     let sql = format!(
         "CREATE TABLE IF NOT EXISTS {} ( \
@@ -2334,7 +2360,7 @@ pub async fn ensure_tracking_table(conn: &std::sync::Arc<DbConnHandle>) -> DbRes
     Ok(())
 }
 
-/// Lista las versiones ya aplicadas, en orden cronológico.
+/// Lists the already-applied versions, in chronological order.
 pub async fn applied_versions(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Vec<String>> {
     ensure_tracking_table(conn).await?;
     let sql = format!(
@@ -2348,10 +2374,10 @@ pub async fn applied_versions(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<V
         .collect()
 }
 
-/// Lee migrations files del directorio `dir`. Filtra `*.sql`,
-/// extrae version del filename (prefix hasta `_` o el filename
-/// entero sin extensión). Orden lexicográfico = cronológico si
-/// usás timestamps `YYYYMMDDHHMMSS_*`.
+/// Reads migration files from the `dir` directory. Filters
+/// `*.sql`, extracts version from the filename (prefix up to `_`
+/// or the full filename without extension). Lexicographic order
+/// = chronological if you use `YYYYMMDDHHMMSS_*` timestamps.
 pub fn read_migrations_dir(dir: &std::path::Path) -> Result<Vec<MigrationFile>, String> {
     if !dir.exists() {
         return Ok(Vec::new());
@@ -2369,8 +2395,8 @@ pub fn read_migrations_dir(dir: &std::path::Path) -> Result<Vec<MigrationFile>, 
             continue;
         };
         let filename = filename_os.to_string_lossy().into_owned();
-        // v0.10.19 — aceptamos `.sql` Y `.fitz`. El runner despacha
-        // por `MigrationKind` después.
+        // v0.10.19 — we accept `.sql` AND `.fitz`. The runner
+        // dispatches by `MigrationKind` afterwards.
         let ext = if filename.ends_with(".sql") {
             ".sql"
         } else if filename.ends_with(".fitz") {
@@ -2407,26 +2433,27 @@ pub fn read_migrations_dir(dir: &std::path::Path) -> Result<Vec<MigrationFile>, 
     Ok(migrations)
 }
 
-/// v0.10.17 (10.6.b.1) — Split del contenido `.sql` en secciones
-/// `-- UP` y `-- DOWN`. Reglas:
+/// v0.10.17 (10.6.b.1) — Split of `.sql` content into `-- UP` and
+/// `-- DOWN` sections. Rules:
 ///
-/// - Si NO hay marcador `-- UP` ni `-- DOWN` → todo el contenido
-///   es UP, `down_sql = None`. Backward-compat con migrations
-///   v0.10.16 sin secciones explícitas.
-/// - Si hay `-- UP` (con o sin `-- DOWN`) → UP es el rango entre
-///   `-- UP` y `-- DOWN` (o EOF si no hay DOWN).
-/// - Si hay `-- DOWN` sin `-- UP` previo → todo lo previo es UP,
-///   lo siguiente es DOWN. (Caso: user pone el marker DOWN
-///   sin marker UP explícito.)
-/// - Marcador case-insensitive en una línea propia (whitespace
-///   permitido antes y después, sin chars adicionales adentro).
-///   `-- up`, `-- Up`, `--  UP` matchean; `-- UP foo` no.
-/// - Si `down_sql` queda como string vacío/whitespace → `None`
-///   (sección DOWN declarada pero vacía equivale a no declararla).
+/// - If there is NO `-- UP` or `-- DOWN` marker → all content is
+///   UP, `down_sql = None`. Backward-compat with v0.10.16
+///   migrations without explicit sections.
+/// - If there is `-- UP` (with or without `-- DOWN`) → UP is the
+///   range between `-- UP` and `-- DOWN` (or EOF if no DOWN).
+/// - If there is `-- DOWN` without a previous `-- UP` → everything
+///   before is UP, what follows is DOWN. (Case: user places the
+///   DOWN marker without explicit UP marker.)
+/// - Case-insensitive marker on its own line (whitespace allowed
+///   before and after, no additional chars inside). `-- up`,
+///   `-- Up`, `--  UP` match; `-- UP foo` does not.
+/// - If `down_sql` ends up as empty/whitespace string → `None`
+///   (declared DOWN section but empty is equivalent to not
+///   declaring it).
 fn split_up_down(raw: &str) -> (String, Option<String>) {
     let mut up_lines: Vec<&str> = Vec::new();
     let mut down_lines: Vec<&str> = Vec::new();
-    // Modos: 0 = pre-marker (cuenta como UP), 1 = en UP, 2 = en DOWN.
+    // Modes: 0 = pre-marker (counts as UP), 1 = in UP, 2 = in DOWN.
     let mut mode: u8 = 0;
     let mut saw_up_marker = false;
     let mut saw_down_marker = false;
@@ -2462,19 +2489,19 @@ fn split_up_down(raw: &str) -> (String, Option<String>) {
     } else {
         None
     };
-    // Backward-compat sanity: si NO había marker UP ni DOWN,
-    // el up_sql es el contenido entero (modo 0 todo el archivo).
+    // Backward-compat sanity: if there was NO UP or DOWN marker,
+    // up_sql is the entire content (mode 0 = whole file).
     let _ = saw_up_marker;
     (up_sql, down_sql)
 }
 
-/// Aplica una migration adentro de una transaction. Si el SQL
-/// falla, la tx se revierte y NO se trackea en `_fitz_migrations`.
-/// Si OK, se inserta en tracking + COMMIT atomic.
+/// Applies a migration inside a transaction. If the SQL fails,
+/// the tx is reverted and it is NOT tracked in `_fitz_migrations`.
+/// If OK, it is inserted into tracking + COMMIT atomically.
 ///
-/// **Garantía atomicidad**: la migration entera (todos sus
-/// statements + el insert en tracking) corre en 1 BEGIN/COMMIT.
-/// O todo persiste, o nada — sin estados intermedios.
+/// **Atomicity guarantee**: the entire migration (all its
+/// statements + the insert into tracking) runs in 1 BEGIN/COMMIT.
+/// Either everything persists or nothing — no intermediate states.
 pub async fn apply_migration(
     conn: &std::sync::Arc<DbConnHandle>,
     migration: &MigrationFile,
@@ -2497,13 +2524,13 @@ pub async fn apply_migration(
         let sql = sql.clone();
         let tracking_table = tracking_table.clone();
         async move {
-            // Postgres `simple_query` permite múltiples statements
-            // separados por `;` en una sola llamada (a diferencia
-            // del Extended Query Protocol que es 1 stmt por
-            // request). Usamos `query` que internamente despacha
-            // a simple_query cuando args is_empty.
+            // Postgres `simple_query` allows multiple statements
+            // separated by `;` in a single call (unlike the
+            // Extended Query Protocol which is 1 stmt per request).
+            // We use `query` which internally dispatches to
+            // simple_query when args is_empty.
             tx.query(&sql, &[]).await?;
-            // Track la version. INSERT en la misma tx — atomic.
+            // Track the version. INSERT in the same tx — atomic.
             let insert_sql = format!(
                 "INSERT INTO {} (version) VALUES ($1)",
                 quote_ident(&tracking_table),
@@ -2515,19 +2542,20 @@ pub async fn apply_migration(
     .await
 }
 
-/// v0.10.19 (10.6.d) — Helper para que el caller (main.rs) marque
-/// una `.fitz` migration como aplicada DESPUÉS de que el runner
-/// del lenguaje haya ejecutado `async fn migrate(db)` exitosamente.
-/// La tx de la fn del usuario ya commiteó (vía `db.transaction`
-/// adentro de la invocación), así que acá solo insertamos en
-/// `_fitz_migrations` como acto separado.
+/// v0.10.19 (10.6.d) — Helper for the caller (main.rs) to mark a
+/// `.fitz` migration as applied AFTER the language runner has
+/// successfully executed `async fn migrate(db)`. The user fn's tx
+/// already committed (via `db.transaction` inside the invocation),
+/// so here we only insert into `_fitz_migrations` as a separate
+/// act.
 ///
-/// **Nota de atomicidad**: `.fitz` migrations NO son atómicas
-/// con respecto al tracking — si el `INSERT INTO _fitz_migrations`
-/// falla después de que el script ya commiteó, queda en estado
-/// "aplicada pero no trackeada". `migrate` la re-aplicaría en la
-/// próxima corrida. Es responsabilidad del script ser idempotente
-/// (paralelo a `CREATE TABLE IF NOT EXISTS` en `.sql`).
+/// **Atomicity note**: `.fitz` migrations are NOT atomic with
+/// respect to tracking — if the `INSERT INTO _fitz_migrations`
+/// fails after the script already committed, it stays in
+/// "applied but not tracked" state. `migrate` would re-apply it
+/// on the next run. It is the script's responsibility to be
+/// idempotent (parallel to `CREATE TABLE IF NOT EXISTS` in
+/// `.sql`).
 pub async fn track_fitz_migration_applied(
     conn: &std::sync::Arc<DbConnHandle>,
     version: &str,
@@ -2542,9 +2570,9 @@ pub async fn track_fitz_migration_applied(
     Ok(())
 }
 
-/// v0.10.19 (10.6.d) — Borra el tracking de una `.fitz` migration
-/// revertida exitosamente. Paralelo a `track_fitz_migration_applied`
-/// para el path rollback.
+/// v0.10.19 (10.6.d) — Deletes the tracking of a successfully
+/// reverted `.fitz` migration. Parallel to
+/// `track_fitz_migration_applied` for the rollback path.
 pub async fn untrack_fitz_migration(
     conn: &std::sync::Arc<DbConnHandle>,
     version: &str,
@@ -2559,17 +2587,18 @@ pub async fn untrack_fitz_migration(
     Ok(())
 }
 
-/// v0.10.17 (10.6.b.1) — Revierte una migration: ejecuta su
-/// sección `-- DOWN` adentro de tx + borra el registro de
-/// `_fitz_migrations`. Atomic: o todo persiste o nada.
+/// v0.10.17 (10.6.b.1) — Reverts a migration: executes its
+/// `-- DOWN` section inside tx + deletes the `_fitz_migrations`
+/// record. Atomic: either everything persists or nothing.
 ///
-/// **Errores**:
-/// - Si `down_sql` es `None` (migration sin `-- DOWN`): retorna
-///   `DbError::Protocol` con mensaje claro citando el filename.
-///   El caller debe abortar el rollback entero — sin DOWN no hay
-///   forma segura de revertir.
-/// - Si el SQL del DOWN falla: la tx se revierte (no se borra el
-///   registro de tracking) — el rollback parcial NO se persiste.
+/// **Errors**:
+/// - If `down_sql` is `None` (migration without `-- DOWN`):
+///   returns `DbError::Protocol` with a clear message citing the
+///   filename. The caller must abort the entire rollback — without
+///   DOWN there is no safe way to revert.
+/// - If the DOWN SQL fails: the tx is reverted (the tracking
+///   record is not deleted) — the partial rollback is NOT
+///   persisted.
 pub async fn revert_migration(
     conn: &std::sync::Arc<DbConnHandle>,
     migration: &MigrationFile,
@@ -2611,26 +2640,26 @@ pub async fn revert_migration(
     .await
 }
 
-/// v0.10.17 (10.6.b.1) — Rollback de las últimas `n` migrations
-/// aplicadas. Lee `_fitz_migrations` ordenado por `applied_at DESC`,
-/// cruza con los archivos del dir, y aplica `revert_migration` en
-/// ese orden (más reciente primero).
+/// v0.10.17 (10.6.b.1) — Rollback of the last `n` applied
+/// migrations. Reads `_fitz_migrations` ordered by
+/// `applied_at DESC`, joins with the dir's files, and applies
+/// `revert_migration` in that order (most recent first).
 ///
-/// Retorna las versiones revertidas (vacío si no había nada
-/// aplicado o `n=0`).
+/// Returns the reverted versions (empty if nothing was applied
+/// or `n=0`).
 ///
-/// **Errores fatales** (abortan ANTES de tocar la DB):
-/// - Alguna migration applied NO tiene file en el dir (archivo
-///   fue borrado tras applicar): no podemos revertir sin el
-///   `-- DOWN`. Error específico.
-/// - Alguna migration target del rollback NO tiene `-- DOWN`:
-///   error específico citando filename.
+/// **Fatal errors** (abort BEFORE touching the DB):
+/// - Some applied migration has NO file in the dir (file was
+///   deleted after applying): we cannot revert without the
+///   `-- DOWN`. Specific error.
+/// - Some rollback target migration has NO `-- DOWN`: specific
+///   error citing filename.
 ///
-/// **Comportamiento incremental**: si la revert N falla
-/// runtime, las anteriores YA persistieron (cada `revert_migration`
-/// es atómico individual). Para rollback "todo o nada" sobre N
-/// migrations habría que envolver en outer transaction — deuda
-/// menor (raro tener N>1 en rollback típico).
+/// **Incremental behavior**: if the Nth revert fails at runtime,
+/// the previous ones ALREADY persisted (each `revert_migration`
+/// is individually atomic). For "all or nothing" rollback over N
+/// migrations one would have to wrap in an outer transaction —
+/// minor debt (rare to have N>1 in a typical rollback).
 pub async fn rollback_n(
     conn: &std::sync::Arc<DbConnHandle>,
     migrations: &[MigrationFile],
@@ -2640,18 +2669,18 @@ pub async fn rollback_n(
         return Ok(Vec::new());
     }
     ensure_tracking_table(conn).await?;
-    // Versiones aplicadas, ordenadas por applied_at DESC (más
-    // reciente primero). Lectura directa de _fitz_migrations.
+    // Applied versions, ordered by applied_at DESC (most recent
+    // first). Direct read from _fitz_migrations.
     let applied_desc = applied_versions_desc(conn).await?;
     if applied_desc.is_empty() {
         return Ok(Vec::new());
     }
     let target_versions: Vec<&String> = applied_desc.iter().take(n).collect();
-    // Buscar cada version en el dir de migrations.
+    // Look up each version in the migrations dir.
     let by_version: std::collections::HashMap<&str, &MigrationFile> =
         migrations.iter().map(|m| (m.version.as_str(), m)).collect();
-    // Pre-flight: validar que TODAS las versions target tienen
-    // file + DOWN, ANTES de empezar a revertir. Falla fast.
+    // Pre-flight: validate that ALL target versions have file +
+    // DOWN, BEFORE starting to revert. Fail fast.
     for v in &target_versions {
         let m = by_version.get(v.as_str()).ok_or_else(|| {
             DbError::Protocol(format!(
@@ -2660,10 +2689,10 @@ pub async fn rollback_n(
                  archivo o stampealá manualmente con SQL."
             ))
         })?;
-        // v0.10.19 — `.fitz` migrations en el path SQL-rollback son
-        // un error fast: el CLI las debe despachar al runner del
-        // lenguaje antes de invocar `rollback_n`. Por defensa,
-        // rechazamos acá.
+        // v0.10.19 — `.fitz` migrations on the SQL-rollback path
+        // are a fast error: the CLI must dispatch them to the
+        // language runner before invoking `rollback_n`. As a
+        // defense, we reject here.
         match &m.kind {
             MigrationKind::Fitz { .. } => {
                 return Err(DbError::Protocol(format!(
@@ -2695,23 +2724,24 @@ pub async fn rollback_n(
     Ok(reverted)
 }
 
-/// v0.10.20 (10.6.e.1) — Entrada del audit log de migraciones
-/// aplicadas. Lo emite `fitz db history`. `applied_at` viene como
-/// string ISO 8601 desde Postgres (el caller decide el display).
+/// v0.10.20 (10.6.e.1) — Entry of the audit log of applied
+/// migrations. Emitted by `fitz db history`. `applied_at` comes
+/// as an ISO 8601 string from Postgres (the caller decides
+/// display).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
     pub version: String,
     pub applied_at: String,
-    /// Filename del archivo en el dir, si existe. `None` si la
-    /// version está aplicada pero el archivo fue removido (caso
-    /// típico: `db stamp <legacy_version>` sin archivo, o squash
-    /// que movió el viejo a `migrations/squashed/`).
+    /// Filename of the file in the dir, if it exists. `None` if
+    /// the version is applied but the file was removed (typical
+    /// case: `db stamp <legacy_version>` without file, or squash
+    /// that moved the old one to `migrations/squashed/`).
     pub filename: Option<String>,
 }
 
-/// v0.10.20 (10.6.e.1) — Audit log de migraciones aplicadas.
-/// Devuelve las entries ordenadas por `applied_at DESC` (más
-/// reciente primero) — orden natural para "qué se aplicó última".
+/// v0.10.20 (10.6.e.1) — Audit log of applied migrations.
+/// Returns the entries ordered by `applied_at DESC` (most recent
+/// first) — natural order for "what was applied last".
 pub async fn history(
     conn: &std::sync::Arc<DbConnHandle>,
     dir: &std::path::Path,
@@ -2745,20 +2775,20 @@ pub async fn history(
     Ok(entries)
 }
 
-/// v0.10.18 (10.6.c.2) — Marca una version como aplicada en
-/// `_fitz_migrations` SIN ejecutar el SQL del archivo. Útil
-/// para adoptar Fitz en una DB legacy donde el schema ya está
-/// aplicado manualmente — sin stamp, `migrate` intentaría
-/// re-aplicar el `CREATE TABLE IF NOT EXISTS ...` que tal vez
-/// es fine pero el seed data o ALTER ya estaba.
+/// v0.10.18 (10.6.c.2) — Marks a version as applied in
+/// `_fitz_migrations` WITHOUT executing the file's SQL. Useful
+/// to adopt Fitz on a legacy DB where the schema is already
+/// applied manually — without stamp, `migrate` would try to
+/// re-apply the `CREATE TABLE IF NOT EXISTS ...` which might be
+/// fine but the seed data or ALTER may already be there.
 ///
-/// Devuelve:
-/// - `Ok(true)` si insertó (la version no estaba registrada).
-/// - `Ok(false)` si la version YA estaba aplicada (no-op).
+/// Returns:
+/// - `Ok(true)` if it inserted (the version was not registered).
+/// - `Ok(false)` if the version was ALREADY applied (no-op).
 ///
-/// **NO valida** que la version exista en el dir de migrations
-/// — el caller (handler CLI `db_stamp_cmd`) decide la política
-/// y muestra warning si no existe en el dir.
+/// **Does NOT validate** that the version exists in the
+/// migrations dir — the caller (CLI handler `db_stamp_cmd`)
+/// decides the policy and shows warning if not in the dir.
 pub async fn stamp_version(conn: &std::sync::Arc<DbConnHandle>, version: &str) -> DbResult<bool> {
     ensure_tracking_table(conn).await?;
     let select_sql = format!(
@@ -2771,8 +2801,8 @@ pub async fn stamp_version(conn: &std::sync::Arc<DbConnHandle>, version: &str) -
     if !qr.rows.is_empty() {
         return Ok(false);
     }
-    // INSERT con ON CONFLICT DO NOTHING como defensa contra
-    // race: dos `stamp` concurrentes sobre la misma version.
+    // INSERT with ON CONFLICT DO NOTHING as a defense against
+    // race: two concurrent `stamp`s on the same version.
     let insert_sql = format!(
         "INSERT INTO {} (version) VALUES ($1) ON CONFLICT (version) DO NOTHING",
         quote_ident(TRACKING_TABLE),
@@ -2782,11 +2812,11 @@ pub async fn stamp_version(conn: &std::sync::Arc<DbConnHandle>, version: &str) -
     Ok(true)
 }
 
-/// v0.10.18 (10.6.c.2) — Marca TODAS las migrations pendientes
-/// del dir como aplicadas sin ejecutar SQL. Devuelve las
-/// versiones nuevamente stamped (vacío si todas ya estaban).
-/// Útil para adoptar Fitz en proyectos con schema legacy +
-/// múltiples migrations ya aplicadas a mano.
+/// v0.10.18 (10.6.c.2) — Marks ALL pending migrations of the dir
+/// as applied without executing SQL. Returns the newly stamped
+/// versions (empty if all were already stamped). Useful to adopt
+/// Fitz in projects with legacy schema + multiple migrations
+/// already applied by hand.
 pub async fn stamp_all_pending(
     conn: &std::sync::Arc<DbConnHandle>,
     migrations: &[MigrationFile],
@@ -2805,9 +2835,9 @@ pub async fn stamp_all_pending(
     Ok(stamped)
 }
 
-/// Versiones aplicadas ordenadas por `applied_at DESC` (más
-/// reciente primero). Usado por `rollback_n` para tomar las
-/// últimas N revertibles.
+/// Applied versions ordered by `applied_at DESC` (most recent
+/// first). Used by `rollback_n` to take the last N revertible
+/// ones.
 async fn applied_versions_desc(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<Vec<String>> {
     ensure_tracking_table(conn).await?;
     let sql = format!(
@@ -2821,10 +2851,10 @@ async fn applied_versions_desc(conn: &std::sync::Arc<DbConnHandle>) -> DbResult<
         .collect()
 }
 
-/// Aplica TODAS las migrations pendientes en orden. Skipea las
-/// ya aplicadas (idempotente).
+/// Applies ALL pending migrations in order. Skips already-applied
+/// ones (idempotent).
 ///
-/// Retorna las versiones que aplicó (vacío si nada pendiente).
+/// Returns the applied versions (empty if nothing pending).
 pub async fn apply_pending_migrations(
     conn: &std::sync::Arc<DbConnHandle>,
     migrations: &[MigrationFile],
@@ -2842,9 +2872,9 @@ pub async fn apply_pending_migrations(
     Ok(new_versions)
 }
 
-/// Status report: cruza files en `dir` con applied_versions →
-/// devuelve `(version, filename, status)` por migration. Útil
-/// para `fitz db status`.
+/// Status report: joins files in `dir` with applied_versions →
+/// returns `(version, filename, status)` per migration. Useful
+/// for `fitz db status`.
 pub async fn status(
     conn: &std::sync::Arc<DbConnHandle>,
     dir: &std::path::Path,
@@ -2865,7 +2895,7 @@ pub async fn status(
 }
 
 // =================================================================
-// Helpers de extracción de rows
+// Row extraction helpers
 // =================================================================
 
 fn extract_string(row: &crate::db::Row, col: &str) -> DbResult<String> {
@@ -2902,19 +2932,19 @@ fn extract_bool(row: &crate::db::Row, col: &str) -> Option<bool> {
     }
 }
 
-/// Canonicaliza el tipo SQL que reporta `information_schema` para
-/// que matchee con lo que generamos del lado @table type. PG
-/// reporta nombres como "double precision" en `data_type` pero
-/// "float8" en `udt_name`; preferimos el nombre legible más
-/// estándar (`text`, `bigint`, `boolean`, etc.).
+/// Canonicalizes the SQL type that `information_schema` reports
+/// so that it matches what we generate from the @table type
+/// side. PG reports names like "double precision" in `data_type`
+/// but "float8" in `udt_name`; we prefer the more readable
+/// standard name (`text`, `bigint`, `boolean`, etc.).
 fn canonicalize_sql_type(data_type: &str, udt_name: &str) -> String {
-    // `data_type` suele ser el nombre estándar SQL ("bigint",
+    // `data_type` is usually the SQL standard name ("bigint",
     // "text", "boolean", "timestamp with time zone", "jsonb",
-    // "ARRAY"). Para ARRAY necesitamos el `udt_name` con prefijo
-    // `_` (ej: `_text` para `text[]`) para reconstruir.
+    // "ARRAY"). For ARRAY we need the `udt_name` with `_` prefix
+    // (e.g.: `_text` for `text[]`) to reconstruct.
     if data_type == "ARRAY" {
-        // udt_name viene como `_text`/`_int8`/etc. Convertimos al
-        // sufijo `[]` que es más legible.
+        // udt_name comes as `_text`/`_int8`/etc. We convert to
+        // the more readable `[]` suffix.
         if let Some(elem) = udt_name.strip_prefix('_') {
             let elem_canon = match elem {
                 "int8" => "bigint",
@@ -2932,14 +2962,13 @@ fn canonicalize_sql_type(data_type: &str, udt_name: &str) -> String {
 }
 
 // =================================================================
-// v0.10.28 — `fitz db inspect`: formatters de schema introspectado
+// v0.10.28 — `fitz db inspect`: formatters of introspected schema
 // =================================================================
 
-/// Filtra las tables del schema según `schema_filter` (default
-/// `"public"` si `None`) y `table_filter` opcional. Devuelve un
-/// nuevo vec con las tables que matchean; orden preservado del
-/// input (ya viene ordenado por `(schema, name)` desde
-/// `introspect_schema`).
+/// Filters schema tables according to `schema_filter` (default
+/// `"public"` if `None`) and optional `table_filter`. Returns a
+/// new vec with the matching tables; order preserved from input
+/// (already ordered by `(schema, name)` from `introspect_schema`).
 fn filter_inspect_tables<'a>(
     schema: &'a Schema,
     schema_filter: Option<&str>,
@@ -2960,10 +2989,10 @@ fn filter_inspect_tables<'a>(
         .collect()
 }
 
-/// Vista texto plano legible del schema introspectado. Pensada
-/// para humanos en terminal — alineación tabular de columns,
-/// PK/FK/indexes anotados, schema-qualified si el filter pide
-/// algo distinto a `public`.
+/// Readable plain-text view of the introspected schema. Designed
+/// for humans in terminal — tabular alignment of columns,
+/// PK/FK/indexes annotated, schema-qualified if the filter asks
+/// for something other than `public`.
 pub fn format_inspection_text(
     schema: &Schema,
     schema_filter: Option<&str>,
@@ -3000,7 +3029,7 @@ pub fn format_inspection_text(
             if t.columns.len() == 1 { "" } else { "s" }
         ));
 
-        // Ancho dinámico para alinear nombre + tipo en columna.
+        // Dynamic width to align name + type per column.
         let max_name = t.columns.iter().map(|c| c.name.len()).max().unwrap_or(0);
         let max_type = t
             .columns
@@ -3125,10 +3154,10 @@ pub fn format_inspection_text(
 /// }
 /// ```
 ///
-/// `serde_json` con feature `preserve_order` garantiza orden estable
-/// de fields. Tablas y columnas vienen en el orden que devolvió la
-/// introspect (sort canónico de `(schema, name)` y orden de
-/// declaración respectivamente).
+/// `serde_json` with `preserve_order` feature guarantees stable
+/// field order. Tables and columns come in the order returned by
+/// introspect (canonical sort by `(schema, name)` and declaration
+/// order respectively).
 pub fn format_inspection_json(
     schema: &Schema,
     schema_filter: Option<&str>,
@@ -3207,11 +3236,11 @@ pub fn format_inspection_json(
     serde_json::to_string_pretty(&report).map_err(|e| format!("serde_json: {e}"))
 }
 
-/// v0.10.29 — Lista los schemas user-defined detectados por la
-/// introspect, en orden alfabético determinístico, con sus tablas
-/// agrupadas. Cada tabla sin schema explícito se trata como
-/// `public`. Útil para auditar bases multi-schema sin tener que
-/// correr `fitz db inspect --schema X` por cada uno.
+/// v0.10.29 — Lists the user-defined schemas detected by the
+/// introspect, in deterministic alphabetic order, with their
+/// tables grouped. Each table without explicit schema is treated
+/// as `public`. Useful to audit multi-schema DBs without having
+/// to run `fitz db inspect --schema X` for each one.
 fn collect_schemas_from_tables(schema: &Schema) -> Vec<&str> {
     let mut set: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
     for t in &schema.tables {
@@ -3220,10 +3249,10 @@ fn collect_schemas_from_tables(schema: &Schema) -> Vec<&str> {
     set.into_iter().collect()
 }
 
-/// v0.10.29 — Variante de [`format_inspection_text`] que itera
-/// TODOS los schemas detectados. Output: cada schema con su header
-/// + sub-vista. Si `table_filter` está, filtra el nombre en TODOS
-///   los schemas — un mismo nombre puede aparecer en varios.
+/// v0.10.29 — Variant of [`format_inspection_text`] that iterates
+/// ALL detected schemas. Output: each schema with its header +
+/// sub-view. If `table_filter` is set, filters the name across
+///   ALL schemas — the same name may appear in several.
 pub fn format_inspection_text_all_schemas(schema: &Schema, table_filter: Option<&str>) -> String {
     let mut out = String::new();
     let schemas = collect_schemas_from_tables(schema);
@@ -3244,10 +3273,10 @@ pub fn format_inspection_text_all_schemas(schema: &Schema, table_filter: Option<
     out
 }
 
-/// v0.10.29 — Variante de [`format_inspection_json`] que emite un
-/// reporte JSON con los schemas user-defined agrupados. Shape:
+/// v0.10.29 — Variant of [`format_inspection_json`] that emits a
+/// JSON report with user-defined schemas grouped. Shape:
 /// `{"schemas": [{"schema": "public", "tables": [...]}, ...]}`.
-/// Determinístico (alphabetic sort de schema names).
+/// Deterministic (alphabetic sort of schema names).
 pub fn format_inspection_json_all_schemas(
     schema: &Schema,
     table_filter: Option<&str>,
@@ -3267,7 +3296,7 @@ pub fn format_inspection_json_all_schemas(
 }
 
 // =================================================================
-// Tests unitarios — solo lo que no requiere DB real
+// Unit tests — only what does not require a real DB
 // =================================================================
 
 #[cfg(test)]
@@ -3429,7 +3458,7 @@ mod tests {
             tables: vec![table_users()],
         };
         let mut target_users = table_users();
-        // email: text → varchar (cambio de tipo)
+        // email: text → varchar (type change)
         target_users
             .columns
             .iter_mut()
@@ -3546,15 +3575,15 @@ mod tests {
         assert_eq!(dropped, vec!["users_email_idx"]);
     }
 
-    // v0.10.29 — Diff completo de indexes: detectar cambios en
-    // `using` / `where_clause` / `unique` / `columns` cuando los
-    // nombres matchean. Antes el diff era name-based puro y el
-    // user tenía que cambiar `name=` para forzar regeneración.
+    // v0.10.29 — Full index diff: detect changes in
+    // `using` / `where_clause` / `unique` / `columns` when names
+    // match. Before, the diff was purely name-based and the user
+    // had to change `name=` to force regeneration.
 
     #[test]
     fn diff_indexes_cambio_de_using_dispara_drop_create() {
-        // index nombre + cols iguales, solo cambia `using` btree→gin
-        // → debe regenerar (DROP + CREATE).
+        // index name + cols equal, only `using` changes btree→gin
+        // → must regenerate (DROP + CREATE).
         let mut current_users = table_users();
         current_users.indexes.push(Index {
             name: "users_meta_idx".to_string(),
@@ -3602,7 +3631,7 @@ mod tests {
 
     #[test]
     fn diff_indexes_cambio_de_where_clause_dispara_drop_create() {
-        // Partial index: cambio del WHERE → regenerar.
+        // Partial index: WHERE change → regenerate.
         let mut current_users = table_users();
         current_users.indexes.push(Index {
             name: "users_active_email_idx".to_string(),
@@ -3648,11 +3677,11 @@ mod tests {
 
     #[test]
     fn diff_indexes_canonicaliza_where_clause_para_evitar_regens_espurios() {
-        // Misma semántica del WHERE pero distinto formatting
-        // (whitespace + case + paréntesis triviales): NO debe
-        // disparar regeneración. Esto cierra el caso típico
-        // donde Postgres reintrospectea el clause con paréntesis
-        // o case distinto al declarado.
+        // Same WHERE semantics but different formatting
+        // (whitespace + case + trivial parens): must NOT trigger
+        // regeneration. This closes the typical case where
+        // Postgres re-introspects the clause with parens or case
+        // different from the declared one.
         let mut current_users = table_users();
         current_users.indexes.push(Index {
             name: "users_active_idx".to_string(),
@@ -3678,11 +3707,11 @@ mod tests {
             tables: vec![target_users],
         };
         let changes = diff_schemas(&current, &target);
-        // El comparator NO normaliza paréntesis (solo whitespace
-        // + case). Esperamos regen — documentado como limitación
-        // honesta del MVP. Caso ideal sería parsing del WHERE con
-        // canonicalización formal, deuda menor.
-        // El caso "solo whitespace" SÍ se canonicaliza:
+        // The comparator does NOT normalize parens (only
+        // whitespace + case). We expect regen — documented as an
+        // honest MVP limitation. Ideal case would be WHERE parsing
+        // with formal canonicalization, minor debt. The
+        // "whitespace-only" case IS canonicalized:
         let mut current_b = table_users();
         current_b.indexes.push(Index {
             name: "users_b_idx".to_string(),
@@ -3718,7 +3747,7 @@ mod tests {
             "esperaba 0 cambios (whitespace+case canonicalizado), fueron: {:?}",
             changes_b
         );
-        // El otro caso (paréntesis extra) sí dispara — documentado.
+        // The other case (extra parens) does trigger — documented.
         let regen_count_a = changes
             .iter()
             .filter(|c| matches!(c, Change::CreateIndex { .. } | Change::DropIndex { .. }))
@@ -3728,7 +3757,7 @@ mod tests {
 
     #[test]
     fn diff_indexes_cambio_de_unique_dispara_drop_create() {
-        // Cambio unique → regenerar.
+        // unique change → regenerate.
         let mut current_users = table_users();
         current_users.indexes.push(Index {
             name: "users_email_idx".to_string(),
@@ -3772,9 +3801,9 @@ mod tests {
 
     #[test]
     fn diff_indexes_btree_vs_none_son_equivalentes() {
-        // `using: None` y `using: Some("btree")` deben tratarse
-        // como equivalentes (btree es el default Postgres). No
-        // debe disparar regen.
+        // `using: None` and `using: Some("btree")` must be treated
+        // as equivalent (btree is the Postgres default). Must not
+        // trigger regen.
         let mut current_users = table_users();
         current_users.indexes.push(Index {
             name: "users_email_idx".to_string(),
@@ -4237,8 +4266,8 @@ type Plain {
 
     #[test]
     fn diff_default_idempotente_case_insensitive() {
-        // PG devuelve `now()` lowercase; el user pasó `NOW()`.
-        // El diff debe ser vacío (idempotente).
+        // PG returns `now()` lowercase; the user passed `NOW()`.
+        // The diff must be empty (idempotent).
         let current = Schema {
             tables: vec![Table {
                 name: "events".to_string(),
@@ -4280,8 +4309,8 @@ type Plain {
 
     #[test]
     fn diff_default_idempotente_strip_pg_cast() {
-        // PG devuelve `'public'::text` para literales Str; el user
-        // pasó `'public'`. El diff debe ser vacío.
+        // PG returns `'public'::text` for Str literals; the user
+        // passed `'public'`. The diff must be empty.
         let current = Schema {
             tables: vec![Table {
                 name: "settings".to_string(),
@@ -4371,8 +4400,8 @@ type Plain {
 "#;
         let (prog, env) = parse_and_check(src);
         let schema = schema_from_program(&prog, &env).expect("schema");
-        // Simular "current" como si PG devolviera el default con
-        // formato canonical lowercase.
+        // Simulate "current" as if PG returned the default with
+        // canonical lowercase format.
         let mut current = schema.clone();
         if let Some(t) = current.tables.first_mut() {
             for c in &mut t.columns {
@@ -4439,10 +4468,10 @@ type Plain {
 
     #[test]
     fn split_up_down_marker_con_chars_extra_no_es_marker() {
-        // `-- UP foo` NO es marcador (chars adicionales)
+        // `-- UP foo` is NOT a marker (extra chars)
         let raw = "-- UP foo\nA;\n";
         let (up, down) = split_up_down(raw);
-        // Todo es UP (el "-- UP foo" es comment SQL inocuo)
+        // Everything is UP (the "-- UP foo" is an innocuous SQL comment)
         assert!(up.contains("-- UP foo"));
         assert!(up.contains("A;"));
         assert!(down.is_none());
@@ -4474,8 +4503,8 @@ type Plain {
 
     #[test]
     fn read_migrations_dir_detecta_fitz_files() {
-        // v0.10.19 (10.6.d) — `.fitz` y `.sql` se intercalan según
-        // orden alfabético. La variante `kind` indica el backend.
+        // v0.10.19 (10.6.d) — `.fitz` and `.sql` interleave by
+        // alphabetic order. The `kind` variant indicates the backend.
         let tmp = std::env::temp_dir().join(format!("fitz_test_fitzmig_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -4489,7 +4518,7 @@ type Plain {
         .unwrap();
         let migrations = read_migrations_dir(&tmp).unwrap();
         assert_eq!(migrations.len(), 2);
-        // Orden alfabético: 100000 < 120000 → sql primero, fitz segundo.
+        // Alphabetic order: 100000 < 120000 → sql first, fitz second.
         assert_eq!(migrations[0].version, "20260530100000");
         assert!(matches!(migrations[0].kind, MigrationKind::Sql { .. }));
         assert!(!migrations[0].is_fitz());
@@ -4536,7 +4565,7 @@ type Plain {
             }],
         };
         let changes = diff_schemas(&current, &target);
-        // Debe emitir solo RenameTable; el resto del diff es no-op.
+        // Must emit only RenameTable; the rest of the diff is no-op.
         let renames: Vec<_> = changes
             .iter()
             .filter_map(|c| match c {
@@ -4549,7 +4578,7 @@ type Plain {
             })
             .collect();
         assert_eq!(renames, vec![("old_users", "users")]);
-        // No debería emitir CREATE TABLE ni DROP TABLE.
+        // Must not emit CREATE TABLE or DROP TABLE.
         for c in &changes {
             assert!(
                 !matches!(c, Change::CreateTable(_) | Change::DropTable(_)),
@@ -4561,7 +4590,7 @@ type Plain {
     #[test]
     fn diff_emits_rename_column_when_renamed_from_set() {
         let mut current_users = table_users();
-        // Reemplazar `email` por `old_email` en current.
+        // Replace `email` with `old_email` in current.
         current_users.columns = vec![
             col("id", "bigint", false, true),
             col("old_email", "text", false, false),
@@ -4597,7 +4626,7 @@ type Plain {
             })
             .collect();
         assert_eq!(renames, vec![("users", "old_email", "email")]);
-        // No debería emitir ADD/DROP COLUMN.
+        // Must not emit ADD/DROP COLUMN.
         for c in &changes {
             assert!(
                 !matches!(c, Change::AddColumn { .. } | Change::DropColumn { .. }),
@@ -4636,10 +4665,10 @@ type Plain {
 
     #[test]
     fn renamed_from_sin_old_en_current_es_noop_silencioso() {
-        // User dejó el decorator @renamed_from("old") pero ya
-        // aplicó la migration y la old_name ya no existe en current
-        // (current ya está renombrada). El diff NO debe emitir
-        // RenameTable spurio.
+        // User left the @renamed_from("old") decorator but already
+        // applied the migration and old_name no longer exists in
+        // current (current is already renamed). The diff must NOT
+        // emit a spurious RenameTable.
         let current = Schema {
             tables: vec![Table {
                 name: "users".to_string(),
@@ -4673,12 +4702,12 @@ type Plain {
 
     #[test]
     fn rename_table_seguido_de_alter_column_orden_seguro() {
-        // current: tabla "old_x" con col `name`.
-        // target: tabla "x" renamed_from="old_x" con col `name`
-        // marcado nullable=true (current era false). El diff debe
-        // emitir RenameTable PRIMERO, después AlterColumnNullable
-        // referenciando el nombre NUEVO ("x"). Si no se renombra
-        // primero, el ALTER falla porque "x" no existe.
+        // current: table "old_x" with col `name`.
+        // target: table "x" renamed_from="old_x" with col `name`
+        // flagged nullable=true (current was false). The diff must
+        // emit RenameTable FIRST, then AlterColumnNullable
+        // referencing the NEW name ("x"). If we do not rename
+        // first, the ALTER fails because "x" does not exist.
         let current = Schema {
             tables: vec![Table {
                 name: "old_x".to_string(),
@@ -4719,7 +4748,7 @@ type Plain {
             rename_idx.unwrap() < alter_idx.unwrap(),
             "RenameTable debe ir antes que AlterColumnNullable"
         );
-        // El AlterColumn debe referenciar el nombre NUEVO.
+        // The AlterColumn must reference the NEW name.
         for c in &changes {
             if let Change::AlterColumnNullable { table, .. } = c {
                 assert_eq!(
@@ -4762,9 +4791,9 @@ type Plain {
     // v0.10.18 (10.6.c) — check + stamp
     // ============================================================
     //
-    // El handler `db_check_cmd` reusa `diff_schemas` (ya cubierto
-    // por los tests de diff arriba) + decide exit code basado en
-    // `changes.is_empty()`. Acá testeamos la decisión.
+    // The `db_check_cmd` handler reuses `diff_schemas` (already
+    // covered by the diff tests above) + decides the exit code
+    // based on `changes.is_empty()`. Here we test the decision.
 
     #[test]
     fn check_es_verde_cuando_diff_es_vacio() {
@@ -4791,16 +4820,16 @@ type Plain {
         );
     }
 
-    // Los stamps requieren conn real — los tests unitarios sin DB
-    // solo pueden verificar que los símbolos están exportados.
-    // La validación end-to-end vive en el CI con DB real (job
-    // `db-postgres`) y en el smoke local del autor contra el
-    // Postgres 15 instalado.
+    // The stamps require a real conn — unit tests without a DB
+    // can only verify that the symbols are exported. End-to-end
+    // validation lives in CI with a real DB (job `db-postgres`)
+    // and in the author's local smoke against the installed
+    // Postgres 15.
 
     #[test]
     fn stamp_version_y_stamp_all_pending_estan_exportadas() {
-        // Smoke "el símbolo existe y es callable" — si alguien
-        // renombra o cambia firma, este test rompe a compilar.
+        // "Symbol exists and is callable" smoke — if someone
+        // renames or changes signature, this test fails to compile.
         let _f1: fn(_, _) -> _ = stamp_version;
         let _f2: fn(_, _) -> _ = stamp_all_pending;
     }
@@ -4811,8 +4840,8 @@ type Plain {
 
     #[test]
     fn history_entry_shape() {
-        // Smoke estructural: HistoryEntry expone los 3 fields que
-        // el CLI usa para format. Si alguien renombra rompe acá.
+        // Structural smoke: HistoryEntry exposes the 3 fields the
+        // CLI uses for format. If someone renames, it breaks here.
         let e = HistoryEntry {
             version: "20260530100000".to_string(),
             applied_at: "2026-05-30 10:00:00+00".to_string(),
@@ -4821,7 +4850,7 @@ type Plain {
         assert_eq!(e.version, "20260530100000");
         assert!(e.applied_at.contains("2026-05-30"));
         assert_eq!(e.filename.as_deref(), Some("init.sql"));
-        // None filename para versions stamped sin archivo en dir.
+        // None filename for stamped versions without a file in dir.
         let e2 = HistoryEntry {
             version: "19990101000000".to_string(),
             applied_at: "ago".to_string(),
@@ -4832,17 +4861,17 @@ type Plain {
 
     #[test]
     fn history_signature_compila() {
-        // El símbolo `history` existe y devuelve el tipo esperado.
+        // The `history` symbol exists and returns the expected type.
         let _f: fn(_, _) -> _ = history;
     }
 
     // ============================================================
-    // v0.10.28 — formatters de `fitz db inspect`
+    // v0.10.28 — `fitz db inspect` formatters
     // ============================================================
 
-    /// Schema mock con 2 tables: `users` (PK + UNIQUE partial index)
-    /// y `posts` (FK ON DELETE CASCADE). Cubre la mayoría de casos
-    /// que el formatter tiene que mostrar.
+    /// Mock schema with 2 tables: `users` (PK + UNIQUE partial
+    /// index) and `posts` (FK ON DELETE CASCADE). Covers most
+    /// cases the formatter has to show.
     fn inspect_schema_fixture() -> Schema {
         Schema {
             tables: vec![
@@ -4903,9 +4932,9 @@ type Plain {
     fn format_inspection_text_header_y_tables_completas() {
         let s = inspect_schema_fixture();
         let text = format_inspection_text(&s, None, None);
-        // Header del schema default.
+        // Default schema header.
         assert!(text.starts_with("Schema: public\n"), "text: {text}");
-        // Ambas tablas aparecen con su count de cols.
+        // Both tables appear with their cols count.
         assert!(
             text.contains("Table: users (3 cols)\n"),
             "missing users header: {text}"
@@ -4914,15 +4943,15 @@ type Plain {
             text.contains("Table: posts (3 cols)\n"),
             "missing posts header: {text}"
         );
-        // Cols con tipo + nullability + tag PK donde corresponde.
+        // Cols with type + nullability + PK tag where applicable.
         assert!(text.contains("id"), "missing id col: {text}");
         assert!(text.contains("bigint"), "missing bigint: {text}");
         assert!(text.contains("NOT NULL"), "missing NOT NULL: {text}");
         assert!(text.contains("PK"), "missing PK tag: {text}");
-        // Nullable col se anota NULL.
+        // Nullable col is annotated as NULL.
         assert!(text.contains("deleted_at"), "missing deleted_at: {text}");
         assert!(text.contains("NULL "), "missing NULL tag: {text}");
-        // Index unique con WHERE clause.
+        // Unique index with WHERE clause.
         assert!(
             text.contains("idx_users_email_active"),
             "missing index name: {text}"
@@ -4935,12 +4964,12 @@ type Plain {
             text.contains("WHERE (deleted_at IS NULL)"),
             "missing WHERE: {text}"
         );
-        // Index no-unique sale sin label UNIQUE.
+        // Non-unique index comes out without UNIQUE label.
         assert!(
             text.contains("idx_posts_author"),
             "missing non-unique index: {text}"
         );
-        // FK con ON DELETE.
+        // FK with ON DELETE.
         assert!(
             text.contains("fk_posts_author: author_id -> users(id) ON DELETE CASCADE"),
             "missing FK line: {text}"
@@ -4986,20 +5015,20 @@ type Plain {
     fn format_inspection_json_shape_estable() {
         let s = inspect_schema_fixture();
         let json_str = format_inspection_json(&s, None, None).expect("json should serialize");
-        // Parsea de vuelta para validar shape (no comparar string
-        // bit-a-bit porque el pretty-printer mete spaces que pueden
-        // cambiar entre versiones de serde_json).
+        // Parse back to validate the shape (do not compare string
+        // bit-by-bit because the pretty-printer puts spaces that
+        // may change between serde_json versions).
         let v: serde_json::Value = serde_json::from_str(&json_str).expect("valid JSON");
-        // Shape top-level.
+        // Top-level shape.
         assert_eq!(v["schema"], "public");
         let tables = v["tables"].as_array().expect("tables is array");
         assert_eq!(tables.len(), 2);
-        // Primera tabla (users) — orden preservado de fixture.
+        // First table (users) — fixture order preserved.
         let users = &tables[0];
         assert_eq!(users["name"], "users");
         assert_eq!(users["schema"], "public");
         assert_eq!(users["primary_key"], serde_json::json!(["id"]));
-        // Cols dentro de users — orden preservado, shape estable.
+        // Cols inside users — order preserved, shape stable.
         let cols = users["columns"].as_array().unwrap();
         assert_eq!(cols.len(), 3);
         assert_eq!(cols[0]["name"], "id");
@@ -5007,12 +5036,12 @@ type Plain {
         assert_eq!(cols[0]["nullable"], false);
         assert_eq!(cols[0]["is_primary"], true);
         assert!(cols[0]["default"].is_null());
-        // Index con where_clause aparece.
+        // Index with where_clause appears.
         let idx = &users["indexes"][0];
         assert_eq!(idx["name"], "idx_users_email_active");
         assert_eq!(idx["unique"], true);
         assert_eq!(idx["where_clause"], "(deleted_at IS NULL)");
-        // posts FK serializa con on_delete.
+        // posts FK serializes with on_delete.
         let posts = &tables[1];
         let fk = &posts["foreign_keys"][0];
         assert_eq!(fk["name"], "fk_posts_author");
@@ -5032,8 +5061,9 @@ type Plain {
 
     #[test]
     fn format_inspection_text_composite_pk_se_lista_separado() {
-        // Composite PK no marca is_primary inline en columns — el
-        // formatter debe leer `composite_pk` y emitir línea aparte.
+        // Composite PK does not mark is_primary inline on columns
+        // — the formatter must read `composite_pk` and emit a
+        // separate line.
         let schema = Schema {
             tables: vec![Table {
                 name: "memberships".to_string(),
@@ -5055,7 +5085,7 @@ type Plain {
             text.contains("Primary key: (user_id, group_id)"),
             "composite PK debería listarse: {text}"
         );
-        // No debería marcar PK inline en cols (porque is_primary=false).
+        // Must not mark PK inline on cols (because is_primary=false).
         assert!(
             !text.contains("user_id  bigint    NOT NULL  PK"),
             "composite PK no debería tagear PK inline: {text}"
@@ -5088,7 +5118,7 @@ type Plain {
             sql.contains("USING gin"),
             "SQL debe contener `USING gin`: {sql}"
         );
-        // Forma esperada: `CREATE INDEX "idx_..." ON "docs" USING gin ("body");`
+        // Expected form: `CREATE INDEX "idx_..." ON "docs" USING gin ("body");`
         assert!(
             sql.contains("ON \"docs\" USING gin (\"body\")"),
             "SQL completo: {sql}"
@@ -5137,11 +5167,11 @@ type Plain {
             },
         };
         let sql = changes_to_sql(&[change]);
-        // Orden: CREATE UNIQUE INDEX ... ON tbl USING ... (cols) WHERE ...
+        // Order: CREATE UNIQUE INDEX ... ON tbl USING ... (cols) WHERE ...
         assert!(sql.starts_with("CREATE UNIQUE INDEX"), "{sql}");
         assert!(sql.contains("USING btree"), "{sql}");
         assert!(sql.contains("WHERE deleted_at IS NULL"), "{sql}");
-        // El `;` final.
+        // Trailing `;`.
         assert!(sql.trim_end().ends_with(';'), "{sql}");
     }
 
@@ -5205,8 +5235,8 @@ type Plain {
 
     #[test]
     fn format_inspection_filter_por_schema_custom() {
-        // Tables en schemas distintos a public deben aparecer cuando
-        // pasamos --schema <name>, y NO cuando filtramos a public.
+        // Tables in non-public schemas must appear when we pass
+        // --schema <name>, and NOT when we filter to public.
         let schema = Schema {
             tables: vec![
                 Table {
@@ -5231,14 +5261,14 @@ type Plain {
                 },
             ],
         };
-        // Default público: solo users.
+        // Default public: only users.
         let text = format_inspection_text(&schema, None, None);
         assert!(text.contains("Table: users"), "users aparece: {text}");
         assert!(
             !text.contains("Table: tenants_data"),
             "tenants_data NO aparece bajo public: {text}"
         );
-        // Filter explícito tenant_a: solo tenants_data.
+        // Explicit filter tenant_a: only tenants_data.
         let text2 = format_inspection_text(&schema, Some("tenant_a"), None);
         assert!(
             text2.contains("Schema: tenant_a"),
@@ -5302,7 +5332,7 @@ type Plain {
             fk,
         };
         let sql = change_to_sql(&change);
-        // Sin schema qualifier — compat con tests previos.
+        // Without schema qualifier — compat with previous tests.
         assert!(
             sql.contains("REFERENCES \"users\" (\"id\")"),
             "esperaba REFERENCES sin qualifier: {sql}"
@@ -5390,19 +5420,19 @@ type Plain {
     fn format_inspection_text_all_schemas_muestra_todos_los_schemas() {
         let s = multi_schema_fixture();
         let text = format_inspection_text_all_schemas(&s, None);
-        // Header con los schemas detectados (orden alfabético).
+        // Header with detected schemas (alphabetic order).
         assert!(
             text.starts_with("Schemas detectados: ops, public, tenant_a\n"),
             "header: {text}"
         );
-        // Cada schema aparece como sección.
+        // Each schema appears as a section.
         assert!(text.contains("public"), "missing public section: {text}");
         assert!(text.contains("ops"), "missing ops section: {text}");
         assert!(
             text.contains("tenant_a"),
             "missing tenant_a section: {text}"
         );
-        // Las tablas de cada schema aparecen.
+        // Tables of each schema appear.
         assert!(text.contains("Table: users"), "missing users: {text}");
         assert!(text.contains("Table: tenants"), "missing tenants: {text}");
         assert!(
@@ -5417,12 +5447,12 @@ type Plain {
         let json_str = format_inspection_json_all_schemas(&s, None).expect("json OK");
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         let schemas = v["schemas"].as_array().expect("schemas array");
-        // 3 schemas: ops, public, tenant_a (orden alfabético).
+        // 3 schemas: ops, public, tenant_a (alphabetic order).
         assert_eq!(schemas.len(), 3);
         assert_eq!(schemas[0]["schema"], "ops");
         assert_eq!(schemas[1]["schema"], "public");
         assert_eq!(schemas[2]["schema"], "tenant_a");
-        // Cada uno con su tabla.
+        // Each one with its table.
         assert_eq!(schemas[0]["tables"][0]["name"], "audit_log");
         assert_eq!(schemas[1]["tables"][0]["name"], "users");
         assert_eq!(schemas[2]["tables"][0]["name"], "tenants");
@@ -5430,8 +5460,8 @@ type Plain {
 
     #[test]
     fn format_inspection_text_all_schemas_con_table_filter_aplica_global() {
-        // `--table users` con `--all-schemas` debe mostrar solo
-        // las tablas con ese nombre en CUALQUIER schema.
+        // `--table users` with `--all-schemas` must show only the
+        // tables with that name in ANY schema.
         let s = multi_schema_fixture();
         let text = format_inspection_text_all_schemas(&s, Some("users"));
         assert!(text.contains("Table: users"), "users debe aparecer: {text}");

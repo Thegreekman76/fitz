@@ -1,28 +1,28 @@
-//! Fase 9.w.3 — Registry + scheduler de jobs programados con `@cron`.
+//! Phase 9.w.3 — Registry + scheduler for scheduled jobs with `@cron`.
 //!
-//! El módulo expone:
-//! - `CronJob`: una fn `@cron("expr")` con su schedule parseado.
-//! - `CronRegistry`: contenedor de jobs, paralelo a `HttpRegistry`.
-//!   El evaluator lo guarda en `HttpRegistry.cron_registry` para
-//!   reusar el lifecycle compartido entre HTTP server y CLI sin
-//!   server (cron-only mode).
-//! - `spawn_cron_scheduler`: arranca un `tokio::spawn` por job, cada
-//!   uno con su propio loop `sleep_until(next_tick) -> invoke`.
+//! The module exposes:
+//! - `CronJob`: a `@cron("expr")` fn with its parsed schedule.
+//! - `CronRegistry`: jobs container, parallel to `HttpRegistry`.
+//!   The evaluator stores it in `HttpRegistry.cron_registry` to
+//!   reuse the shared lifecycle between HTTP server and CLI
+//!   without server (cron-only mode).
+//! - `spawn_cron_scheduler`: starts one `tokio::spawn` per job,
+//!   each with its own loop `sleep_until(next_tick) -> invoke`.
 //!
-//! Diseño de scheduling:
-//! - Cada job es independiente: `tokio::spawn(loop { sleep_until +
-//!   invoke })`. Si un job es lento, no bloquea a los demás.
-//! - El invoke del handler usa el `EnvRef` capturado al registro,
-//!   con un scope hijo nuevo por cada disparo (no comparten state
-//!   accidentalmente entre runs).
-//! - Errores del handler (return `Err(...)` o panic) se loguean a
-//!   stderr; el scheduler sigue vivo. Política: jobs fallidos NO
-//!   abortan al proceso entero (paralelo a `tokio::spawn` que
-//!   silencia panics de tasks individuales).
+//! Scheduling design:
+//! - Each job is independent: `tokio::spawn(loop { sleep_until +
+//!   invoke })`. If a job is slow, it does not block the others.
+//! - The handler invoke uses the `EnvRef` captured at registration,
+//!   with a new child scope per fire (they do not accidentally
+//!   share state between runs).
+//! - Handler errors (`return Err(...)` or panic) are logged to
+//!   stderr; the scheduler keeps running. Policy: failed jobs do
+//!   NOT abort the whole process (parallel to `tokio::spawn` that
+//!   silences panics of individual tasks).
 //!
-//! Sin persistencia en MVP — los jobs viven en memoria. Restart del
-//! proceso pierde el state. Persistencia llega en 9.w iteración 2
-//! post-Fase 10 (requiere DB nativa).
+//! No persistence in MVP — jobs live in memory. Process restart
+//! loses the state. Persistence arrives in 9.w iteration 2
+//! post-Phase 10 (requires native DB).
 
 use crate::env::EnvRef;
 use crate::value::Value;
@@ -33,28 +33,30 @@ use std::sync::Arc;
 use std::time::Duration;
 
 // ============================================================
-// 9.w.3.iter2 — Retry config + timezone + persistencia opts.
+// 9.w.3.iter2 — Retry config + timezone + persistence opts.
 // ============================================================
 
-/// Estrategia de backoff entre retries. Acordado D5: tres kinds desde
-/// el día 1; default `Exponential`.
+/// Backoff strategy between retries. Agreed D5: three kinds from
+/// day 1; default `Exponential`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BackoffKind {
-    /// `delay = initial_secs * 2^(attempt-1)`. Recomendado para
-    /// jobs con dependencias externas que pueden bouncear (DB, HTTP).
+    /// `delay = initial_secs * 2^(attempt-1)`. Recommended for
+    /// jobs with external dependencies that can bounce (DB, HTTP).
     #[default]
     Exponential,
-    /// `delay = initial_secs * attempt`. Más predecible que exponential.
+    /// `delay = initial_secs * attempt`. More predictable than
+    /// exponential.
     Linear,
-    /// `delay = initial_secs`. Útil cuando ya sabés el rate-limit del
-    /// upstream y querés un ritmo fijo.
+    /// `delay = initial_secs`. Useful when you already know the
+    /// upstream's rate-limit and want a fixed pace.
     Constant,
 }
 
 impl BackoffKind {
-    /// Parsea el string aceptado en `retry={backoff: "..."}`. El
-    /// checker (9.w.3.iter2.a) ya garantiza que solo lleguen valores
-    /// del whitelist, pero replicamos defensivamente en runtime.
+    /// Parses the string accepted in `retry={backoff: "..."}`. The
+    /// checker (9.w.3.iter2.a) already guarantees that only
+    /// whitelist values arrive, but we replicate defensively at
+    /// runtime.
     pub fn from_str_strict(s: &str) -> Result<Self, String> {
         match s {
             "exponential" => Ok(Self::Exponential),
@@ -68,19 +70,21 @@ impl BackoffKind {
     }
 }
 
-/// Config de retries por job. `max=0` desactiva retry (= MVP); con
-/// `max>0` cada job que falle vuelve a intentar hasta `max+1` veces
-/// total (la primera + N retries) con el backoff calculado.
+/// Per-job retry config. `max=0` disables retry (= MVP); with
+/// `max>0` each failing job retries up to `max+1` times total
+/// (the first + N retries) with the computed backoff.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryConfig {
-    /// Cantidad máxima de **reintentos**. 0 = una sola corrida (igual
-    /// que sin retry). 3 = primera + hasta 3 retries = 4 intentos max.
+    /// Maximum number of **retries**. 0 = one single run (same
+    /// as without retry). 3 = first + up to 3 retries = 4 max
+    /// attempts.
     pub max: u32,
-    /// Estrategia entre retries.
+    /// Strategy between retries.
     pub backoff: BackoffKind,
-    /// Delay base en segundos. Cap mínimo 1.
+    /// Base delay in seconds. Minimum cap 1.
     pub initial_secs: u64,
-    /// Cap máximo del delay calculado. Evita que exponential explote.
+    /// Maximum cap of the computed delay. Avoids exponential
+    /// blowing up.
     pub max_secs: u64,
 }
 
@@ -96,9 +100,9 @@ impl Default for RetryConfig {
 }
 
 impl RetryConfig {
-    /// Calcula el delay antes del retry `attempt` (1-indexed: `attempt=1`
-    /// es el primer retry tras un fallo, `attempt=2` el segundo, etc).
-    /// Capeado por `max_secs`.
+    /// Computes the delay before retry `attempt` (1-indexed:
+    /// `attempt=1` is the first retry after a failure, `attempt=2`
+    /// the second, etc). Capped by `max_secs`.
     pub fn delay_for_attempt(&self, attempt: u32) -> Duration {
         let base = self.initial_secs.max(1);
         let cap = self.max_secs.max(1);
@@ -114,22 +118,23 @@ impl RetryConfig {
     }
 }
 
-/// Opciones acumuladas de los kwargs de `@cron("...", tz=..., retry=...,
-/// catch_up=..., store=...)`. El evaluator/codegen parsean los kwargs
-/// del `Decorator` a esta struct y se la pasan al registry.
+/// Accumulated options from the kwargs of `@cron("...", tz=...,
+/// retry=..., catch_up=..., store=...)`. The evaluator/codegen
+/// parse the `Decorator` kwargs to this struct and pass it to the
+/// registry.
 #[derive(Debug, Clone)]
 pub struct CronJobOptions {
-    /// Timezone IANA usada para calcular el próximo tick. Default `Utc`
-    /// (comportamiento idéntico al MVP).
+    /// IANA timezone used to compute the next tick. Default `Utc`
+    /// (behavior identical to MVP).
     pub tz: chrono_tz::Tz,
-    /// Política de retry tras fallo. `None` = un solo intento (= MVP).
+    /// Retry policy on failure. `None` = single attempt (= MVP).
     pub retry: Option<RetryConfig>,
-    /// Política de missed runs tras restart. `false` = skip (default),
-    /// `true` = ejecutar UN run inmediato para el último tick perdido
-    /// (no N, evita spam).
+    /// Missed runs policy after restart. `false` = skip (default),
+    /// `true` = execute ONE immediate run for the last missed
+    /// tick (not N, avoids spam).
     pub catch_up: bool,
-    /// Conn DB para persistencia del job. `None` = in-memory (= MVP,
-    /// backwards-compat con programas viejos).
+    /// DB conn for job persistence. `None` = in-memory (= MVP,
+    /// backwards-compat with old programs).
     pub store: Option<Arc<crate::db::DbConnHandle>>,
 }
 
@@ -144,17 +149,18 @@ impl Default for CronJobOptions {
     }
 }
 
-/// Normaliza una cron expression del usuario al formato del crate `cron`.
+/// Normalizes a user cron expression to the `cron` crate format.
 ///
-/// El crate `cron = "0.12"` exige 6 o 7 fields (con seconds al inicio
-/// como primer field). El usuario típico viene de Linux/macOS cron que
-/// usa 5 fields (sin seconds). Para preservar la UX familiar,
-/// detectamos 5 fields y prependeamos `"0 "` (segundo 0 del minuto)
-/// — semántica idéntica al cron Unix tradicional.
+/// The `cron = "0.12"` crate requires 6 or 7 fields (with seconds
+/// at the start as the first field). The typical user comes from
+/// Linux/macOS cron which uses 5 fields (without seconds). To
+/// preserve familiar UX, we detect 5 fields and prepend `"0 "`
+/// (second 0 of the minute) — semantics identical to traditional
+/// Unix cron.
 ///
-/// Trim defensivo del input por las dudas; el resto del parsing lo
-/// hace el crate (rangos, listas con `,`, steps con `/`, wildcards
-/// con `*`, ordinales con `L`/`#`/etc.).
+/// Defensive trim of the input just in case; the rest of the
+/// parsing is done by the crate (ranges, lists with `,`, steps
+/// with `/`, wildcards with `*`, ordinals with `L`/`#`/etc.).
 fn normalize_cron_expression(expr: &str) -> String {
     let trimmed = expr.trim();
     let field_count = trimmed.split_whitespace().count();
@@ -165,43 +171,45 @@ fn normalize_cron_expression(expr: &str) -> String {
     }
 }
 
-/// Un job programado: fn `@cron("expr")` con su schedule parseado y
-/// el handler que invoca al disparar.
+/// A scheduled job: `@cron("expr")` fn with its parsed schedule
+/// and the handler to invoke on fire.
 #[derive(Clone)]
 pub struct CronJob {
-    /// Nombre de la fn — para logging y debugging.
+    /// Name of the fn — for logging and debugging.
     pub name: String,
-    /// Schedule parseado del crate `cron`. La sintaxis del MVP acepta
-    /// 5 fields (Unix clásico, sin seconds), 6 fields (con seconds al
-    /// inicio) o 7 fields (con year al final). Ejemplos válidos:
-    /// `"0 0 * * *"` cada medianoche; `"*/5 * * * *"` cada 5 min;
-    /// `"0 */30 * * * *"` cada 30 segundos.
+    /// Parsed schedule of the `cron` crate. The MVP syntax
+    /// accepts 5 fields (classic Unix, without seconds), 6 fields
+    /// (with seconds at start), or 7 fields (with year at end).
+    /// Valid examples: `"0 0 * * *"` every midnight;
+    /// `"*/5 * * * *"` every 5 min; `"0 */30 * * * *"` every 30
+    /// seconds.
     pub schedule: Schedule,
-    /// El `Value::Function` registrado. El scheduler lo invoca con
-    /// args vacíos (el checker garantiza que la fn no tiene params).
+    /// The registered `Value::Function`. The scheduler invokes it
+    /// with empty args (the checker guarantees the fn has no
+    /// params).
     pub handler: Value,
-    /// `true` si la fn declarada es `async fn`. El scheduler ajusta
-    /// el dispatch: async fns retornan `Value::Future` que awaitamos;
-    /// sync fns retornan el value directo.
+    /// `true` if the declared fn is `async fn`. The scheduler
+    /// adjusts dispatch: async fns return `Value::Future` that
+    /// we await; sync fns return the value directly.
     pub is_async: bool,
-    /// `EnvRef` capturado al momento del registro — los lookups de
-    /// vars top-level (consts, builtins) ven el mismo estado que el
-    /// resto del programa.
+    /// `EnvRef` captured at registration time — top-level var
+    /// lookups (consts, builtins) see the same state as the rest
+    /// of the program.
     pub env: EnvRef,
-    /// 9.w.3.iter2 — timezone IANA usada para calcular el próximo
-    /// tick. El scheduler hace `chrono::DateTime<Tz>::with_timezone`
-    /// antes de pasar el "now" al `Schedule::upcoming`. Default UTC
-    /// (paridad con el MVP).
+    /// 9.w.3.iter2 — IANA timezone used to compute the next tick.
+    /// The scheduler does
+    /// `chrono::DateTime<Tz>::with_timezone` before passing "now"
+    /// to `Schedule::upcoming`. Default UTC (parallel to MVP).
     pub tz: chrono_tz::Tz,
-    /// 9.w.3.iter2 — política de retry. `None` = una sola corrida
-    /// por tick (= MVP). `Some(cfg)` = retry hasta `cfg.max` veces
-    /// con el backoff de `cfg.backoff`.
+    /// 9.w.3.iter2 — retry policy. `None` = single run per tick
+    /// (= MVP). `Some(cfg)` = retry up to `cfg.max` times with
+    /// the backoff of `cfg.backoff`.
     pub retry: Option<RetryConfig>,
-    /// 9.w.3.iter2 — política de missed runs tras restart. `false` =
-    /// skip ticks perdidos (default). `true` = ejecutar UN run
-    /// inmediato si hubo missed runs (no N — evita spam).
+    /// 9.w.3.iter2 — missed runs policy after restart. `false` =
+    /// skip lost ticks (default). `true` = execute ONE immediate
+    /// run if there were missed runs (not N — avoids spam).
     pub catch_up: bool,
-    /// 9.w.3.iter2 — conn DB para persistencia del job (registry +
+    /// 9.w.3.iter2 — DB conn for job persistence (registry +
     /// runs). `None` = in-memory (= MVP).
     pub store: Option<Arc<crate::db::DbConnHandle>>,
 }
@@ -223,11 +231,11 @@ impl std::fmt::Debug for CronJob {
     }
 }
 
-/// Registry de cron jobs registrados en el programa. Igual que
-/// `HttpRegistry`, vive adentro de un `Arc<...>` compartido entre el
-/// thread main y los workers tokio. Mutex por insertion durante el
-/// evaluation (single-threaded en `current_thread`), después solo
-/// read-only durante el scheduling.
+/// Registry of cron jobs registered in the program. Like
+/// `HttpRegistry`, it lives inside an `Arc<...>` shared between
+/// the main thread and tokio workers. Mutex for insertion during
+/// evaluation (single-threaded in `current_thread`), then only
+/// read-only during scheduling.
 #[derive(Default)]
 pub struct CronRegistry {
     jobs: parking_lot::Mutex<Vec<CronJob>>,
@@ -247,18 +255,18 @@ impl CronRegistry {
         Self::default()
     }
 
-    /// Registra un job nuevo. Si el cron expression es inválido,
-    /// devuelve `Err(msg)` para que el caller emita un FitzError.
+    /// Registers a new job. If the cron expression is invalid,
+    /// returns `Err(msg)` so the caller emits a FitzError.
     ///
-    /// **Sintaxis aceptada**:
-    /// - **5 fields Unix clásico**: `"min hora día mes día-semana"`.
-    ///   Ejemplo: `"0 0 * * *"` cada medianoche. Internamente
-    ///   prependeamos `"0 "` (segundo 0) — semántica idéntica al
-    ///   cron tradicional de Linux/macOS.
-    /// - **6 fields con seconds**: `"sec min hora día mes día-semana"`.
-    ///   Ejemplo: `"0 */30 * * * *"` cada 30 segundos.
-    /// - **7 fields con year**: `"sec min hora día mes día-semana año"`.
-    ///   Ejemplo: `"0 0 0 1 1 * 2027"` el 1 de enero de 2027.
+    /// **Accepted syntax**:
+    /// - **5 fields classic Unix**: `"min hour day month day-of-week"`.
+    ///   Example: `"0 0 * * *"` every midnight. Internally we
+    ///   prepend `"0 "` (second 0) — semantics identical to
+    ///   traditional Linux/macOS cron.
+    /// - **6 fields with seconds**: `"sec min hour day month day-of-week"`.
+    ///   Example: `"0 */30 * * * *"` every 30 seconds.
+    /// - **7 fields with year**: `"sec min hour day month day-of-week year"`.
+    ///   Example: `"0 0 0 1 1 * 2027"` on January 1st, 2027.
     pub fn register(
         &self,
         name: String,
@@ -299,22 +307,22 @@ impl CronRegistry {
         Ok(())
     }
 
-    /// `true` si hay al menos un job registrado. Lo usa el evaluator
-    /// para decidir si arrancar el scheduler standalone (cron-only
-    /// mode) cuando no hay handlers HTTP.
+    /// `true` if at least one job is registered. The evaluator
+    /// uses it to decide whether to start the standalone
+    /// scheduler (cron-only mode) when there are no HTTP handlers.
     pub fn has_jobs(&self) -> bool {
         !self.jobs.lock().is_empty()
     }
 
-    /// Lee la lista de jobs registrados (clone). Útil para el
-    /// scheduler que arranca un task por job.
+    /// Reads the list of registered jobs (clone). Useful for the
+    /// scheduler that starts one task per job.
     pub fn jobs_snapshot(&self) -> Vec<CronJob> {
         self.jobs.lock().clone()
     }
 }
 
 // ============================================================
-// 9.w.3.iter2 — Helpers SQL para persistencia opcional de jobs.
+// 9.w.3.iter2 — SQL helpers for optional job persistence.
 // ============================================================
 //
 // Schema:
@@ -325,7 +333,7 @@ impl CronRegistry {
 //       last_run_at TIMESTAMPTZ,
 //       last_status TEXT,        -- 'ok' | 'failed'
 //       last_error TEXT,
-//       next_run_at TIMESTAMPTZ  -- reservado para visibility futura
+//       next_run_at TIMESTAMPTZ  -- reserved for future visibility
 //   );
 //   CREATE TABLE fitz_cron_runs (
 //       id BIGSERIAL PRIMARY KEY,
@@ -339,17 +347,17 @@ impl CronRegistry {
 //   CREATE INDEX idx_fitz_cron_runs_job_started
 //       ON fitz_cron_runs (job_name, started_at DESC);
 //
-// Decisiones:
-// - `CREATE TABLE IF NOT EXISTS` al boot del scheduler — sin
-//   ceremonia, seguro contra múltiples instancias arrancando.
-// - `name PRIMARY KEY` evita duplicados entre restarts.
-// - `last_run_at` se actualiza al finalizar UN job run completo
-//   (con éxito o tras agotar retries). No se actualiza por cada
-//   attempt intermedio.
-// - `fitz_cron_runs.attempt` empieza en 1 (el primer intento). Si
-//   `retry.max=3` entonces hay hasta 4 rows por tick (1+3).
-// - `error` es TEXT libre, sin tipado del FitzError — buffer de
-//   debug. El user puede limpiar la tabla manualmente.
+// Decisions:
+// - `CREATE TABLE IF NOT EXISTS` at scheduler boot — no
+//   ceremony, safe against multiple instances starting.
+// - `name PRIMARY KEY` avoids duplicates between restarts.
+// - `last_run_at` is updated when ONE complete job run finishes
+//   (successfully or after exhausting retries). It is not
+//   updated per intermediate attempt.
+// - `fitz_cron_runs.attempt` starts at 1 (the first attempt).
+//   If `retry.max=3` there are up to 4 rows per tick (1+3).
+// - `error` is free TEXT, without typed FitzError — debug
+//   buffer. The user can clean the table manually.
 
 const SQL_CREATE_TABLE_JOBS: &str = "\
 CREATE TABLE IF NOT EXISTS fitz_cron_jobs (\
@@ -377,22 +385,22 @@ const SQL_CREATE_INDEX_RUNS: &str = "\
 CREATE INDEX IF NOT EXISTS idx_fitz_cron_runs_job_started \
 ON fitz_cron_runs (job_name, started_at DESC)";
 
-/// Crea las dos tablas `fitz_cron_jobs` y `fitz_cron_runs` + el índice
-/// si no existen.
+/// Creates the two tables `fitz_cron_jobs` and `fitz_cron_runs`
+/// + the index if they do not exist.
 ///
-/// **Importante**: NO es seguro contra concurrencia llamado directo
-/// — `CREATE TABLE IF NOT EXISTS` de Postgres tiene una race condition
-/// documentada cuando dos sesiones lo ejecutan en paralelo sobre la
-/// misma tabla, donde una de las dos sesiones puede romper con
+/// **Important**: NOT concurrency-safe when called directly —
+/// Postgres `CREATE TABLE IF NOT EXISTS` has a documented race
+/// condition when two sessions execute it in parallel on the
+/// same table, where one of the two sessions can break with
 /// `duplicate key value violates unique constraint
-/// "pg_type_typname_nsp_index"` (race en el catálogo `pg_type`).
-/// Bug documentado upstream desde ~2020.
+/// "pg_type_typname_nsp_index"` (race on the `pg_type` catalog).
+/// Bug documented upstream since ~2020.
 ///
-/// Para uso desde `run_cron_job` (que spawnea N jobs en paralelo al
-/// boot), siempre usar [`ensure_storage_initialized`] que serializa
-/// el primer init con un `OnceCell` global. Esta fn queda pública
-/// principalmente para tests + casos donde el caller garantiza que
-/// es la única invocación en vuelo.
+/// For use from `run_cron_job` (which spawns N jobs in parallel
+/// at boot), always use [`ensure_storage_initialized`] which
+/// serializes the first init with a global `OnceCell`. This fn
+/// stays public mainly for tests + cases where the caller
+/// guarantees it is the only invocation in flight.
 #[doc(hidden)]
 pub async fn init_storage(conn: &crate::db::DbConnHandle) -> Result<(), String> {
     conn.exec(SQL_CREATE_TABLE_JOBS, &[])
@@ -407,44 +415,44 @@ pub async fn init_storage(conn: &crate::db::DbConnHandle) -> Result<(), String> 
     Ok(())
 }
 
-/// v0.15.13 — `OnceCell` global que serializa el primer
-/// `init_storage` del proceso. Cierre de la deuda URGENTE-1
-/// (`docs/deudas-post-5b.md` → "init_storage de @cron con
-/// persistencia: race condition en CREATE TABLE").
+/// v0.15.13 — Global `OnceCell` that serializes the first
+/// `init_storage` of the process. Closes the URGENT-1 debt
+/// (`docs/deudas-post-5b.md` → "init_storage of @cron with
+/// persistence: race condition in CREATE TABLE").
 ///
-/// Cuando el binario tiene N `@cron(store=db_result)` y los spawns
-/// arrancan en paralelo, los N corrían `init_storage` simultáneamente
-/// contra Postgres y golpeaban el race del catálogo `pg_type`.
-/// `OnceCell::get_or_init` garantiza que el async closure de init
-/// corra exactamente UNA vez por proceso; los demás callers esperan
-/// al primero y clonan el `Result<(), String>` almacenado.
+/// When the binary has N `@cron(store=db_result)` and the spawns
+/// start in parallel, the N ran `init_storage` simultaneously
+/// against Postgres and hit the `pg_type` catalog race.
+/// `OnceCell::get_or_init` guarantees that the async init closure
+/// runs exactly ONCE per process; the other callers wait for the
+/// first one and clone the stored `Result<(), String>`.
 ///
-/// Decisiones:
-/// - **Global** (no por instancia): asume un solo DB destino por
-///   proceso (caso 99% de los apps). Si en el futuro un binario
-///   conecta a varias DBs y declara crons sobre cada una, mover esto
-///   a un `Arc<OnceCell>` dentro de `CronRegistry`.
-/// - **Resultado cacheado** (no `get_or_try_init`): si el primer
-///   init falla (ej: DB down al boot), los demás jobs obtienen el
-///   mismo error y abortan de la misma forma. Reintento NO se hace
-///   automáticamente — restart del proceso resetea el OnceCell.
-/// - **`tokio::sync::OnceCell`** (no `std::sync::OnceLock`): permite
-///   init async sin bloquear el runtime de tokio.
+/// Decisions:
+/// - **Global** (not per instance): assumes a single DB target
+///   per process (99% case for apps). If in the future a binary
+///   connects to several DBs and declares crons on each, move
+///   this to an `Arc<OnceCell>` inside `CronRegistry`.
+/// - **Cached result** (not `get_or_try_init`): if the first
+///   init fails (e.g.: DB down at boot), the other jobs get the
+///   same error and abort the same way. Retry is NOT done
+///   automatically — process restart resets the OnceCell.
+/// - **`tokio::sync::OnceCell`** (not `std::sync::OnceLock`):
+///   allows async init without blocking the tokio runtime.
 static INIT_STORAGE_ONCE: tokio::sync::OnceCell<Result<(), String>> =
     tokio::sync::OnceCell::const_new();
 
-/// v0.15.13 — Wrapper concurrency-safe sobre [`init_storage`].
+/// v0.15.13 — Concurrency-safe wrapper over [`init_storage`].
 ///
-/// La primera llamada del proceso ejecuta `init_storage(conn)` real.
-/// Las llamadas siguientes (concurrentes o secuenciales) esperan al
-/// `OnceCell` y devuelven el resultado cacheado. Sin race entre
-/// jobs paralelos.
+/// The first call of the process executes the real
+/// `init_storage(conn)`. Subsequent calls (concurrent or
+/// sequential) wait for the `OnceCell` and return the cached
+/// result. No race between parallel jobs.
 ///
-/// **No es seguro entre procesos** — si dos binarios fitz arrancan
-/// simultáneamente contra la misma DB, ambos van a intentar el
-/// primer init de su propio OnceCell. Para multi-proceso usar
-/// `pg_advisory_lock` adentro de `init_storage` (deuda menor abierta
-/// — los casos típicos despliegan UN container por servicio).
+/// **Not safe across processes** — if two fitz binaries start
+/// simultaneously against the same DB, both will attempt the
+/// first init of their own OnceCell. For multi-process use
+/// `pg_advisory_lock` inside `init_storage` (minor open debt —
+/// typical cases deploy ONE container per service).
 #[doc(hidden)]
 pub async fn ensure_storage_initialized(conn: &crate::db::DbConnHandle) -> Result<(), String> {
     INIT_STORAGE_ONCE
@@ -453,32 +461,34 @@ pub async fn ensure_storage_initialized(conn: &crate::db::DbConnHandle) -> Resul
         .clone()
 }
 
-/// v0.15.13 — Helper test-only para resetear el `OnceCell` global
-/// entre tests. Cargo test corre tests del mismo crate en el mismo
-/// proceso; sin reset, el segundo test que llame
-/// `ensure_storage_initialized` reusaría el resultado del primero
-/// (probable contra otra DB).
+/// v0.15.13 — Test-only helper to reset the global `OnceCell`
+/// between tests. Cargo test runs tests of the same crate in the
+/// same process; without reset, the second test calling
+/// `ensure_storage_initialized` would reuse the first one's
+/// result (probably against a different DB).
 ///
-/// **No usar fuera de tests** — el comportamiento concurrente del
-/// reset no es seguro. Marcado `#[doc(hidden)]` para que no aparezca
-/// en la doc generada y `#[allow(dead_code)]` porque en builds sin
-/// integration tests queda sin call sites.
+/// **Do not use outside tests** — the reset's concurrent
+/// behavior is not safe. Marked `#[doc(hidden)]` so it does not
+/// appear in generated docs and `#[allow(dead_code)]` because in
+/// builds without integration tests it has no call sites.
 #[doc(hidden)]
 #[allow(dead_code)]
 pub fn reset_init_storage_once_for_tests() {
-    // tokio::sync::OnceCell tiene `take()` para drop del valor cacheado
-    // pero requiere `&mut self`. Como nuestro OnceCell es `static`,
-    // necesitamos `unsafe` para obtener acceso mutable — alternativa
-    // sería usar `lazy_static!` con un `Mutex<Option<...>>`, pero
-    // sumar dep solo para tests es overkill. El patrón "&mut static"
-    // adentro de tests es estándar (compatible con miri si single-thread).
+    // tokio::sync::OnceCell has `take()` to drop the cached value
+    // but requires `&mut self`. Since our OnceCell is `static`, we
+    // need `unsafe` to obtain mutable access — alternative would
+    // be to use `lazy_static!` with a `Mutex<Option<...>>`, but
+    // adding a dep just for tests is overkill. The "&mut static"
+    // pattern inside tests is standard (compatible with miri if
+    // single-threaded).
     //
-    // SAFETY: solo se llama desde tests serializados con un Mutex
-    // externo o tests `#[ignore]` opt-in con `--test-threads=1`.
+    // SAFETY: only called from tests serialized with an external
+    // Mutex or opt-in `#[ignore]` tests with `--test-threads=1`.
     unsafe {
-        // El borrow checker no permite tomar &mut de un static. Usamos
-        // un cast vía raw pointer (UB-safe porque OnceCell::take solo
-        // requiere lectura sincronizada del estado interno).
+        // The borrow checker does not allow taking &mut of a
+        // static. We use a cast via raw pointer (UB-safe because
+        // OnceCell::take only requires synchronized read of the
+        // internal state).
         let cell_ptr: *const tokio::sync::OnceCell<Result<(), String>> =
             std::ptr::addr_of!(INIT_STORAGE_ONCE);
         let cell_mut = &mut *(cell_ptr as *mut tokio::sync::OnceCell<Result<(), String>>);
@@ -486,10 +496,11 @@ pub fn reset_init_storage_once_for_tests() {
     }
 }
 
-/// `INSERT ... ON CONFLICT (name) DO UPDATE` que registra/actualiza el
-/// job en `fitz_cron_jobs`. Al reiniciar el proceso con la misma fn
-/// `@cron("...", store=db)` el schedule/tz se sincronizan sin perder
-/// `last_run_at` ni `last_status`.
+/// `INSERT ... ON CONFLICT (name) DO UPDATE` that registers /
+/// updates the job in `fitz_cron_jobs`. When restarting the
+/// process with the same `@cron("...", store=db)` fn the
+/// schedule/tz sync without losing `last_run_at` or
+/// `last_status`.
 #[doc(hidden)]
 pub async fn upsert_job_row(
     conn: &crate::db::DbConnHandle,
@@ -512,8 +523,8 @@ pub async fn upsert_job_row(
 }
 
 /// `INSERT INTO fitz_cron_runs (... status='running') RETURNING id`.
-/// Devuelve el id BIGSERIAL para que `record_run_finish` lo actualice
-/// más tarde.
+/// Returns the BIGSERIAL id so that `record_run_finish` updates
+/// it later.
 #[doc(hidden)]
 pub async fn record_run_start(
     conn: &crate::db::DbConnHandle,
@@ -537,8 +548,9 @@ pub async fn record_run_start(
         .ok_or_else(|| format!("fitz_cron_runs insert no devolvió id para '{}'", name))?;
     match row.get_at(0) {
         Some(crate::db::PgValue::Int(n)) => Ok(*n),
-        // El driver puede devolver el BIGSERIAL como Text si el wire
-        // format es text (Simple Query). Aceptamos ambas representaciones.
+        // The driver may return the BIGSERIAL as Text if the wire
+        // format is text (Simple Query). We accept both
+        // representations.
         Some(crate::db::PgValue::Text(s)) => s
             .parse::<i64>()
             .map_err(|_| format!("fitz_cron_runs id `{}` no parsea a Int", s)),
@@ -600,9 +612,9 @@ pub async fn update_job_last_run(
     Ok(())
 }
 
-/// `SELECT last_run_at FROM fitz_cron_jobs WHERE name=$1`. Devuelve
-/// `Ok(None)` si la fila no existe (primer arranque del job) o si
-/// `last_run_at` es NULL.
+/// `SELECT last_run_at FROM fitz_cron_jobs WHERE name=$1`. Returns
+/// `Ok(None)` if the row does not exist (first boot of the job) or
+/// if `last_run_at` is NULL.
 #[doc(hidden)]
 pub async fn read_last_run_at(
     conn: &crate::db::DbConnHandle,
@@ -621,9 +633,10 @@ pub async fn read_last_run_at(
     match row.get_at(0) {
         Some(crate::db::PgValue::Null) | None => Ok(None),
         Some(crate::db::PgValue::Text(s)) => {
-            // Postgres text format para TIMESTAMPTZ: "2026-06-02 12:34:56.789+00".
-            // chrono::DateTime parsea con `parse_from_str` o el formato RFC3339
-            // si reformateamos el espacio a 'T'. Usamos un parse defensivo.
+            // Postgres text format for TIMESTAMPTZ: "2026-06-02 12:34:56.789+00".
+            // chrono::DateTime parses with `parse_from_str` or the
+            // RFC3339 format if we reformat the space to 'T'. We
+            // use a defensive parse.
             parse_pg_timestamptz(s).map(Some)
         }
         other => Err(format!(
@@ -633,12 +646,13 @@ pub async fn read_last_run_at(
     }
 }
 
-/// Parsea un timestamptz Postgres text-format al `DateTime<Utc>`.
-/// Postgres emite el offset de tz **sin minutos** (`+00`, `-03`,
-/// `+05`) cuando son enteros, y con minutos cuando hay fracción
-/// (`+05:30`). RFC3339 exige siempre `±HH:MM`. Normalizamos:
-///   1. Espacio entre fecha y hora → `T`.
-///   2. Offset sin minutos al final → agregamos `:00`.
+/// Parses a Postgres text-format timestamptz to `DateTime<Utc>`.
+/// Postgres emits the tz offset **without minutes** (`+00`,
+/// `-03`, `+05`) when they are whole, and with minutes when there
+/// is a fraction (`+05:30`). RFC3339 always requires `±HH:MM`.
+/// We normalize:
+///   1. Space between date and time → `T`.
+///   2. Offset without minutes at end → add `:00`.
 fn parse_pg_timestamptz(s: &str) -> Result<chrono::DateTime<Utc>, String> {
     let normalized = s.replacen(' ', "T", 1);
     let with_offset = normalize_pg_tz_offset(&normalized);
@@ -647,16 +661,16 @@ fn parse_pg_timestamptz(s: &str) -> Result<chrono::DateTime<Utc>, String> {
         .map_err(|e| format!("parsing timestamptz `{}`: {}", s, e))
 }
 
-/// Si el string termina en `±DD` (offset Postgres sin minutos),
-/// agregamos `:00`. Casos cubiertos: `+00`, `-03`, `+05`. Si ya
-/// trae `:MM` o termina en `Z`, no toca.
+/// If the string ends in `±DD` (Postgres offset without
+/// minutes), we add `:00`. Covered cases: `+00`, `-03`, `+05`.
+/// If it already brings `:MM` or ends in `Z`, do not touch.
 fn normalize_pg_tz_offset(s: &str) -> String {
     let bytes = s.as_bytes();
     let n = bytes.len();
     if n < 3 {
         return s.to_string();
     }
-    // Últimos 3 chars: `±DD`. Detectamos `+/-` en pos n-3 + dos dígitos.
+    // Last 3 chars: `±DD`. Detect `+/-` at pos n-3 + two digits.
     let sign = bytes[n - 3];
     let d1 = bytes[n - 2];
     let d2 = bytes[n - 1];
@@ -666,15 +680,15 @@ fn normalize_pg_tz_offset(s: &str) -> String {
     s.to_string()
 }
 
-/// Spawnea un `tokio::spawn` por cada cron job registrado. Cada task
-/// loopea con `tokio::time::sleep_until(next_tick) -> invoke`. El
-/// caller debe estar adentro de un runtime tokio (typical: el de
-/// `serve()` para HTTP o el de `run_scheduler_only()` para cron-only).
+/// Spawns one `tokio::spawn` per registered cron job. Each task
+/// loops with `tokio::time::sleep_until(next_tick) -> invoke`.
+/// The caller must be inside a tokio runtime (typical: `serve()`
+/// for HTTP or `run_scheduler_only()` for cron-only).
 ///
-/// El scheduler arranca todos los jobs y retorna inmediatamente — las
-/// tasks corren detached. La política de shutdown depende del caller:
-/// `serve()` usa graceful shutdown vía ctrl_c; `run_scheduler_only()`
-/// hace lo mismo y mata los tasks al recibir la señal.
+/// The scheduler starts all jobs and returns immediately — tasks
+/// run detached. Shutdown policy depends on the caller: `serve()`
+/// uses graceful shutdown via ctrl_c; `run_scheduler_only()`
+/// does the same and kills the tasks on signal.
 pub fn spawn_cron_scheduler(registry: Arc<CronRegistry>) {
     let jobs = registry.jobs_snapshot();
     if jobs.is_empty() {
@@ -689,30 +703,33 @@ pub fn spawn_cron_scheduler(registry: Arc<CronRegistry>) {
     }
 }
 
-/// 9.w.3.iter2 — Loop principal de un cron job, con tz-aware schedule,
-/// retry con backoff, persistencia opcional y catch_up de missed runs.
+/// 9.w.3.iter2 — Main loop of a cron job, with tz-aware schedule,
+/// retry with backoff, optional persistence, and catch_up of
+/// missed runs.
 ///
 /// Boot:
-/// 1. Si `job.store.is_some()`: init storage + upsert del job row.
-///    Falla del init → log y abort del task (sin storage no podemos
-///    cumplir el contrato; otros jobs siguen corriendo).
-/// 2. Si `job.catch_up && job.store.is_some()`: leer `last_run_at`,
-///    detectar missed runs (≥1 tick entre last_run_at y now), si los
-///    hay ejecutar UN run inmediato (no N — evita spam).
+/// 1. If `job.store.is_some()`: init storage + upsert of the job
+///    row. Init failure → log and abort the task (without storage
+///    we cannot fulfill the contract; other jobs keep running).
+/// 2. If `job.catch_up && job.store.is_some()`: read
+///    `last_run_at`, detect missed runs (≥1 tick between
+///    last_run_at and now), if any execute ONE immediate run (not
+///    N — avoids spam).
 ///
 /// Loop:
-/// 1. Calcular `next` con `Schedule::upcoming(job.tz)` y dormir hasta
-///    ahí (convertido a UTC para el sleep).
-/// 2. Llamar a `invoke_with_retry` que aplica la política de retry.
+/// 1. Compute `next` with `Schedule::upcoming(job.tz)` and sleep
+///    until then (converted to UTC for the sleep).
+/// 2. Call `invoke_with_retry` which applies the retry policy.
 async fn run_cron_job(job: CronJob) {
-    // ---- Boot: persistencia + catch_up ----
+    // ---- Boot: persistence + catch_up ----
     if let Some(conn) = job.store.clone() {
-        // v0.15.13 — usar `ensure_storage_initialized` (wrapper sobre
-        // un OnceCell global) en lugar de `init_storage` directo.
-        // Con N jobs spawneados en paralelo (caso TaskHub con 2 crons),
-        // la versión directa golpeaba un race en el catálogo `pg_type`
-        // de Postgres y uno de los jobs abortaba silenciosamente al boot.
-        // Cierra URGENTE-1 de docs/deudas-post-5b.md.
+        // v0.15.13 — use `ensure_storage_initialized` (wrapper
+        // over a global OnceCell) instead of `init_storage`
+        // directly. With N jobs spawned in parallel (TaskHub case
+        // with 2 crons), the direct version hit a race in the
+        // Postgres `pg_type` catalog and one of the jobs aborted
+        // silently at boot. Closes URGENT-1 of
+        // docs/deudas-post-5b.md.
         if let Err(e) = ensure_storage_initialized(&conn).await {
             eprintln!(
                 "🕐 cron job '{}' no pudo inicializar storage, abortando task: {}",
@@ -732,10 +749,11 @@ async fn run_cron_job(job: CronJob) {
         if job.catch_up {
             match read_last_run_at(&conn, &job.name).await {
                 Ok(Some(last)) => {
-                    // Hay missed runs si al menos UN tick programado cae
-                    // entre `last` y `now`. Usamos `Schedule::after(last)`
-                    // en la tz del job y pedimos el primero — si existe y
-                    // es <= ahora, hubo missed runs.
+                    // There are missed runs if at least ONE
+                    // scheduled tick falls between `last` and
+                    // `now`. We use `Schedule::after(last)` in the
+                    // job's tz and ask for the first — if it
+                    // exists and is <= now, there were missed runs.
                     let last_in_tz = last.with_timezone(&job.tz);
                     let now_in_tz = Utc::now().with_timezone(&job.tz);
                     let missed = job
@@ -754,21 +772,21 @@ async fn run_cron_job(job: CronJob) {
                     }
                 }
                 Ok(None) => {
-                    // Primer arranque del job — no hay last_run_at, no
-                    // tiene sentido hablar de missed runs.
+                    // First boot of the job — no last_run_at, no
+                    // sense talking about missed runs.
                 }
                 Err(e) => {
                     eprintln!(
                         "🕐 cron job '{}' catch_up: error leyendo last_run_at: {}",
                         job.name, e
                     );
-                    // No abortamos — seguimos al loop normal.
+                    // We do not abort — continue to the normal loop.
                 }
             }
         }
     }
 
-    // ---- Loop normal ----
+    // ---- Normal loop ----
     loop {
         let Some(next_in_tz) = job.schedule.upcoming(job.tz).next() else {
             eprintln!("🕐 cron job '{}' agotó su schedule, terminando.", job.name);
@@ -783,17 +801,18 @@ async fn run_cron_job(job: CronJob) {
     }
 }
 
-/// 9.w.3.iter2 — Invoca el handler aplicando la política de retry.
-/// Persiste cada attempt en `fitz_cron_runs` si `job.store.is_some()`.
-/// Actualiza `fitz_cron_jobs.last_*` al finalizar el último intento.
+/// 9.w.3.iter2 — Invokes the handler applying the retry policy.
+/// Persists each attempt in `fitz_cron_runs` if
+/// `job.store.is_some()`. Updates `fitz_cron_jobs.last_*` when
+/// the last attempt finishes.
 ///
-/// Cantidad total de intentos = `1 + retry.max` (la primera corrida
-/// más N retries). Si no hay `retry`, es 1 (paridad con MVP).
+/// Total number of attempts = `1 + retry.max` (the first run +
+/// N retries). If there is no `retry`, it is 1 (parallel to MVP).
 async fn invoke_with_retry(job: &CronJob) {
     let max_attempts = 1 + job.retry.map(|r| r.max).unwrap_or(0);
     let mut attempt: u32 = 1;
     loop {
-        // 1) Persist run start (si hay storage).
+        // 1) Persist run start (if there is storage).
         let run_id = if let Some(conn) = job.store.as_ref() {
             match record_run_start(conn, &job.name, attempt).await {
                 Ok(id) => Some(id),
@@ -809,7 +828,7 @@ async fn invoke_with_retry(job: &CronJob) {
             None
         };
 
-        // 2) Invocar el handler.
+        // 2) Invoke the handler.
         let result = invoke_cron_handler(job).await;
         let is_last_attempt = attempt >= max_attempts;
 
@@ -822,8 +841,8 @@ async fn invoke_with_retry(job: &CronJob) {
                 return;
             }
             Err(msg) => {
-                // Persist el run con `failed` (último) o `retrying`
-                // (siguientes intentos restantes).
+                // Persist the run with `failed` (last) or `retrying`
+                // (next remaining attempts).
                 let status = if is_last_attempt {
                     "failed"
                 } else {
@@ -842,7 +861,7 @@ async fn invoke_with_retry(job: &CronJob) {
                     }
                     return;
                 }
-                // Hay retry pendiente: dormir el backoff y seguir.
+                // Retry pending: sleep the backoff and continue.
                 let retry_cfg = job.retry.expect("max_attempts > 1 implica retry.is_some()");
                 let delay = retry_cfg.delay_for_attempt(attempt);
                 eprintln!(
@@ -856,10 +875,10 @@ async fn invoke_with_retry(job: &CronJob) {
     }
 }
 
-/// Invoca el handler de un cron job. Async fns devuelven `Future` que
-/// awaiteamos; sync fns devuelven el value directo. El return value
-/// se descarta (los jobs son fire-and-forget desde el punto de vista
-/// del scheduler).
+/// Invokes a cron job's handler. Async fns return a `Future` that
+/// we await; sync fns return the value directly. The return value
+/// is discarded (jobs are fire-and-forget from the scheduler's
+/// point of view).
 async fn invoke_cron_handler(job: &CronJob) -> Result<(), String> {
     use crate::ast::Span;
     use crate::evaluator::invoke_value;
@@ -867,8 +886,8 @@ async fn invoke_cron_handler(job: &CronJob) -> Result<(), String> {
     let result = invoke_value(job.handler.clone(), Vec::new(), &job.name, Span::ZERO).await;
     match result {
         Ok(value) => {
-            // Si la fn es async, el value es un Future — lo
-            // await-eamos. Si es sync, el value ya es el final.
+            // If the fn is async, the value is a Future — we
+            // await it. If sync, the value is already the final.
             match value {
                 Value::Future(cell) => {
                     let inner = cell.0.lock().take();
@@ -881,23 +900,23 @@ async fn invoke_cron_handler(job: &CronJob) -> Result<(), String> {
             }
         }
         Err(signal) => {
-            // EvalSignal::Error / Return / Break / Continue — solo
-            // Error es relevante para logging; los otros no deberían
-            // escapar un body de fn @cron (el checker validó).
+            // EvalSignal::Error / Return / Break / Continue — only
+            // Error is relevant for logging; the others should not
+            // escape a @cron fn body (the checker validated).
             Err(format!("{:?}", signal))
         }
     }
 }
 
-/// Cron-only mode: cuando el programa NO tiene `@server` pero SÍ tiene
-/// `@cron`, este helper arma un runtime tokio multi-thread, arranca
-/// el scheduler, y bloquea hasta SIGINT/Ctrl+C. Paralelo a `serve()`
-/// pero sin axum.
+/// Cron-only mode: when the program does NOT have `@server` but
+/// DOES have `@cron`, this helper sets up a multi-thread tokio
+/// runtime, starts the scheduler, and blocks until SIGINT/Ctrl+C.
+/// Parallel to `serve()` but without axum.
 ///
-/// Decisión confirmada con el autor al arrancar 9.w.3: el proceso
-/// queda vivo bloqueante (modo systemd-friendly). Modo "run-once" no
-/// está en el MVP — workaround para tests: matar el proceso después
-/// del primer tick.
+/// Decision confirmed with the author when starting 9.w.3: the
+/// process stays alive blocking (systemd-friendly mode). "Run-once"
+/// mode is NOT in the MVP — workaround for tests: kill the
+/// process after the first tick.
 pub fn run_scheduler_only(registry: Arc<CronRegistry>) -> std::io::Result<()> {
     if !registry.has_jobs() {
         return Ok(());
@@ -907,8 +926,8 @@ pub fn run_scheduler_only(registry: Arc<CronRegistry>) -> std::io::Result<()> {
         .build()?;
     runtime.block_on(async move {
         spawn_cron_scheduler(registry);
-        // Bloqueamos hasta ctrl_c. Cuando llega, dropeamos el runtime
-        // y los tasks spawneados se cancelan.
+        // We block until ctrl_c. When it arrives, we drop the
+        // runtime and the spawned tasks are cancelled.
         match tokio::signal::ctrl_c().await {
             Ok(()) => {
                 eprintln!("\n🕐 Fitz scheduler recibió Ctrl+C, terminando.");
@@ -922,7 +941,7 @@ pub fn run_scheduler_only(registry: Arc<CronRegistry>) -> std::io::Result<()> {
 }
 
 // ============================================================
-// 9.w.3.iter2 — Tests del registry extension.
+// 9.w.3.iter2 — Registry extension tests.
 // ============================================================
 
 #[cfg(test)]
@@ -962,9 +981,9 @@ mod tests {
             initial_secs: 1,
             max_secs: 10,
         };
-        // attempt=5 → 16s sin cap, capeado a 10s.
+        // attempt=5 → 16s without cap, capped to 10s.
         assert_eq!(cfg.delay_for_attempt(5), Duration::from_secs(10));
-        // attempts grandes nunca pasan el cap.
+        // Large attempts never exceed the cap.
         assert_eq!(cfg.delay_for_attempt(20), Duration::from_secs(10));
     }
 
@@ -1026,7 +1045,7 @@ mod tests {
 
     #[test]
     fn registry_register_con_defaults_es_backwards_compat() {
-        // Sin tz/retry/catch_up/store: comportamiento equivale al MVP.
+        // Without tz/retry/catch_up/store: behavior equals MVP.
         let registry = CronRegistry::new();
         let env = Environment::new();
         let res = registry.register(
