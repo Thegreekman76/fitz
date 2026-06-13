@@ -1,47 +1,47 @@
-// lint.rs — Fase 9.z.5 (`fitz lint`)
+// lint.rs — Phase 9.z.5 (`fitz lint`)
 //
-// Linter de patrones más allá de tipos. El checker estático
-// (`types.rs`) captura errores duros (type mismatch, exhaustividad
-// de match, aridad de fn). El linter captura patrones que SÍ
-// compilan pero son code smells: vars no usadas, imports muertos,
-// match con un solo arm catch-all, concatenación de strings en
-// lugar de interpolación.
+// Linter for patterns beyond types. The static checker
+// (`types.rs`) catches hard errors (type mismatch, match
+// exhaustiveness, fn arity). The linter catches patterns that DO
+// compile but are code smells: unused vars, dead imports,
+// match with a single catch-all arm, string concatenation
+// instead of interpolation.
 //
-// Decisiones del MVP:
+// MVP decisions:
 //
 // - **4 lints**: `unused_variable`, `unused_import`, `useless_match`,
-//   `string_concat`. El roadmap original menciona también
-//   `panic_in_test_only` y `redundant_clone`; el primero NO aplica
-//   (Fitz no tiene `panic!` builtin propio), el segundo requiere
-//   análisis de movimientos que el compilador todavía no hace.
+//   `string_concat`. The original roadmap also mentions
+//   `panic_in_test_only` and `redundant_clone`; the first does NOT apply
+//   (Fitz has no `panic!` builtin of its own), and the second requires
+//   move analysis that the compiler does not do yet.
 //
-// - **Default warning**: `fitz lint` siempre exit 0, salvo que el
-//   user pase `--deny <lint>` con un lint que aparezca en el output.
+// - **Default warning**: `fitz lint` always exits 0, unless the
+//   user passes `--deny <lint>` with a lint that appears in the output.
 //   Cargo-clippy style.
 //
-// - **Supresión** con comment `// @allow(<name>)` en la línea
-//   INMEDIATAMENTE ANTERIOR al stmt offending. Inspección del source
-//   raw (no trivia stream del lexer): pragmático y suficiente.
+// - **Suppression** with the `// @allow(<name>)` comment on the
+//   IMMEDIATELY PREVIOUS line of the offending stmt. Inspection of the raw
+//   source (no trivia stream from the lexer): pragmatic and sufficient.
 //
-// - **Auto-fix** (`--fix`) solo para `string_concat` (transformación
-//   trivial a interpolación). El resto exige edición a mano.
+// - **Auto-fix** (`--fix`) only for `string_concat` (trivial
+//   transformation to interpolation). The rest requires manual editing.
 //
-// - **Catálogo cerrado**: los 4 lints viven en este archivo. Plugins
-//   futuros no son scope del MVP.
+// - **Closed catalog**: the 4 lints live in this file. Future
+//   plugins are not in the MVP scope.
 //
-// El linter trabaja sobre el AST + el source crudo (para
-// suppression). NO usa el checker: lints como `unused_variable` no
-// dependen de información de tipos. Esto mantiene la separación
-// `check` (tipos) / `lint` (patrones).
+// The linter works over the AST + raw source (for
+// suppression). It does NOT use the checker: lints like `unused_variable`
+// do not depend on type information. This keeps the
+// `check` (types) / `lint` (patterns) separation.
 
 use crate::ast::{AssignTarget, BinOpKind, Expr, MatchArm, Param, Pattern, Program, Stmt, StrPart};
 
 // ---------------------------------------------------------------------------
-// Tipos públicos
+// Public types
 // ---------------------------------------------------------------------------
 
-/// Un finding producido por algún lint. El runner los imprime
-/// estilo cargo-clippy:
+/// A finding produced by some lint. The runner prints them
+/// cargo-clippy style:
 /// ```text
 /// warning: variable `x` declarada pero no usada
 ///   --> src/main.fitz:3:5
@@ -50,25 +50,25 @@ use crate::ast::{AssignTarget, BinOpKind, Expr, MatchArm, Param, Pattern, Progra
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct LintFinding {
-    /// Nombre canónico del lint (matchea el `// @allow(<name>)`).
-    /// Ej: `"unused_variable"`, `"string_concat"`.
+    /// Canonical name of the lint (matches `// @allow(<name>)`).
+    /// E.g.: `"unused_variable"`, `"string_concat"`.
     pub name: &'static str,
-    /// Mensaje principal (estilo "warning: ...").
+    /// Main message ("warning: ..." style).
     pub message: String,
-    /// 1-based, paralelo a `FitzError`.
+    /// 1-based, parallel to `FitzError`.
     pub line: usize,
     pub column: usize,
-    /// Hint opcional debajo del mensaje principal.
+    /// Optional hint under the main message.
     pub hint: Option<String>,
-    /// Si el lint tiene auto-fix, el reemplazo del fragmento sobre el
-    /// rango `(start_line, start_col)..(end_line, end_col)`. Hoy solo
-    /// `string_concat` lo emite.
+    /// If the lint has auto-fix, the replacement of the fragment over the
+    /// `(start_line, start_col)..(end_line, end_col)` range. Today only
+    /// `string_concat` emits it.
     pub fix: Option<LintFix>,
 }
 
-/// Patch literal del source para `--fix`. Reemplaza el rango
-/// `(start_line, start_col)..(end_line, end_col)` con `replacement`.
-/// Posiciones 1-based como las del lexer.
+/// Literal source patch for `--fix`. Replaces the
+/// `(start_line, start_col)..(end_line, end_col)` range with `replacement`.
+/// 1-based positions, like the lexer's.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LintFix {
     pub start_line: usize,
@@ -78,14 +78,14 @@ pub struct LintFix {
     pub replacement: String,
 }
 
-/// Entry point del linter. Walkea el `program` recogiendo findings
-/// y aplica supresiones leyendo `source` raw. Devuelve los findings
-/// en el orden estable (line, column).
+/// Linter entry point. Walks `program` collecting findings
+/// and applies suppressions reading the raw `source`. Returns findings
+/// in stable order (line, column).
 pub fn lint_source(source: &str, program: &Program) -> Vec<LintFinding> {
     let mut findings: Vec<LintFinding> = Vec::new();
 
-    // Pre-collect: todos los `Expr::Ident(name)` del programa.
-    // Lo necesitan `unused_variable` y `unused_import`.
+    // Pre-collect: all `Expr::Ident(name)` of the program.
+    // Needed by `unused_variable` and `unused_import`.
     let uses = collect_ident_uses(program);
 
     lint_unused_variables(program, &uses, &mut findings);
@@ -95,20 +95,20 @@ pub fn lint_source(source: &str, program: &Program) -> Vec<LintFinding> {
 
     apply_suppressions(source, &mut findings);
 
-    // Orden estable: por línea+columna para que el output sea
-    // predecible cuando hay múltiples findings.
+    // Stable order: by line+column so the output is
+    // predictable when there are multiple findings.
     findings.sort_by_key(|f| (f.line, f.column, f.name));
     findings
 }
 
 // ---------------------------------------------------------------------------
-// Recolección de uses
+// Use collection
 // ---------------------------------------------------------------------------
 
-/// Colecciona todos los nombres referenciados (`Expr::Ident(name)`)
-/// en el programa. Set único (HashSet) — no nos importa la cantidad
-/// de uses ni dónde, solo si AL MENOS uno existe. Walkea recursivo
-/// sobre exprs adentro de stmts (incluyendo bodies de fn anidadas).
+/// Collects all referenced names (`Expr::Ident(name)`)
+/// in the program. Single set (HashSet) — we do not care about how
+/// many uses or where, only whether AT LEAST one exists. Recursive walk
+/// over exprs inside stmts (including nested fn bodies).
 fn collect_ident_uses(program: &Program) -> std::collections::HashSet<String> {
     let mut uses = std::collections::HashSet::new();
     for stmt in program {
@@ -120,15 +120,15 @@ fn collect_ident_uses(program: &Program) -> std::collections::HashSet<String> {
 fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut std::collections::HashSet<String>) {
     match stmt {
         Stmt::Destructure { value, .. } => {
-            // El pattern declara names (no uses). El value SÍ es use.
+            // The pattern declares names (not uses). The value IS a use.
             collect_uses_in_expr(value, uses);
         }
         Stmt::Assign { target, value, .. } => {
-            // El target NO es use (es definición/reasignación). El
-            // value SÍ se walkea (puede contener idents).
+            // The target is NOT a use (it is definition/reassignment). The
+            // value IS walked (it can contain idents).
             collect_uses_in_expr(value, uses);
-            // Excepción: si el target es `obj.field = ...`, el `obj`
-            // es un use. `AssignTarget::Field { object }` lo expone.
+            // Exception: if the target is `obj.field = ...`, then `obj`
+            // is a use. `AssignTarget::Field { object }` exposes it.
             if let AssignTarget::Field { object, .. } = target {
                 collect_uses_in_expr(object, uses);
             }
@@ -147,7 +147,7 @@ fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut std::collections::HashSet<String
             for s in body {
                 collect_uses_in_stmt(s, uses);
             }
-            // Decorators: pueden referenciar fns (ej. `@middleware(logger)`).
+            // Decorators: can reference fns (e.g. `@middleware(logger)`).
             for d in decorators {
                 for a in &d.args {
                     collect_uses_in_expr(a, uses);
@@ -158,7 +158,7 @@ fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut std::collections::HashSet<String
             }
         }
         Stmt::TypeDef { fields, .. } => {
-            // Los defaults pueden referenciar consts del scope.
+            // Defaults can reference consts in scope.
             for f in fields {
                 if let Some(default) = &f.default {
                     collect_uses_in_expr(default, uses);
@@ -259,9 +259,9 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
                 collect_uses_in_expr(i, uses);
             }
         }
-        // Mini-tanda C + Cmp+ — list comprehension. Walkeamos iter
-        // del primer clause + extras + filter + expr. Los `var`s se
-        // BINDEAN adentro, no son usos.
+        // C + Cmp+ mini-batches — list comprehension. We walk the iter
+        // of the first clause + extras + filter + expr. The `var`s
+        // are BOUND inside, they are not uses.
         Expr::ListComp {
             expr,
             iter,
@@ -278,7 +278,7 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             }
             collect_uses_in_expr(expr, uses);
         }
-        // Mini-tanda Cmp+ — map comprehension.
+        // Cmp+ mini-batch — map comprehension.
         Expr::MapComp {
             key,
             value,
@@ -339,7 +339,7 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             collect_uses_in_expr(inner, uses);
         }
-        // Fp.3 — NamedArg passthrough al value.
+        // Fp.3 — NamedArg passthrough to the value.
         Expr::NamedArg { value, .. } => {
             collect_uses_in_expr(value, uses);
         }
@@ -350,20 +350,20 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
 // Lint: unused_variable
 // ---------------------------------------------------------------------------
 
-/// `unused_variable`: detecta `let x = ...` (o `x = ...` declaración
-/// inicial) cuyo nombre NUNCA aparece en `Expr::Ident` del programa.
+/// `unused_variable`: detects `let x = ...` (or `x = ...` initial
+/// declaration) whose name NEVER appears in `Expr::Ident` of the program.
 ///
-/// Caveats del MVP:
-/// - **Shadowing no se detecta**: `let x = 5; let x = 10; x` reporta
-///   correcto que `x` se usa (no flagueo); el shadowing del primero
-///   queda invisible.
-/// - **Reasignación cuenta como uso**: NO; el target de `Stmt::Assign`
-///   no se cuenta como use, solo el value y los Idents en otras exprs.
-/// - **Prefijo `_`**: vars que arrancan con `_` se ignoran (convención
-///   "intencionalmente no usada", paralelo a Rust).
-/// - **Params de fns**: NO se flaguean en MVP (muchos handlers HTTP /
-///   callbacks reciben params que no necesitan usar; flaguearlos
-///   sería ruido).
+/// MVP caveats:
+/// - **Shadowing is not detected**: `let x = 5; let x = 10; x` correctly
+///   reports that `x` is used (no flag); the shadowing of the first
+///   stays invisible.
+/// - **Reassignment counts as a use**: NO; the target of `Stmt::Assign`
+///   is not counted as a use, only the value and the Idents in other exprs.
+/// - **`_` prefix**: vars starting with `_` are ignored (the
+///   "intentionally unused" convention, parallel to Rust).
+/// - **Fn params**: NOT flagged in MVP (many HTTP handlers /
+///   callbacks receive params that they do not need to use; flagging
+///   them would be noise).
 fn lint_unused_variables(
     program: &Program,
     uses: &std::collections::HashSet<String>,
@@ -416,10 +416,10 @@ fn check_unused_var_in_stmt(
 // Lint: unused_import
 // ---------------------------------------------------------------------------
 
-/// `unused_import`: detecta `import X` y `from X import Y` cuyo
-/// binding NO se referencia. Para `import foo as f`, el binding es
-/// `f`. Para `from foo import bar as b`, los bindings son los
-/// `b` (uno por entry). `from foo import bar` el binding es `bar`.
+/// `unused_import`: detects `import X` and `from X import Y` whose
+/// binding is NOT referenced. For `import foo as f`, the binding is
+/// `f`. For `from foo import bar as b`, the bindings are the
+/// `b`s (one per entry). For `from foo import bar` the binding is `bar`.
 fn lint_unused_imports(
     program: &Program,
     uses: &std::collections::HashSet<String>,
@@ -428,7 +428,7 @@ fn lint_unused_imports(
     for stmt in program {
         match stmt {
             Stmt::Import { path, alias, span } => {
-                // El binding default es el ÚLTIMO segmento del path.
+                // The default binding is the LAST segment of the path.
                 let binding = match alias {
                     Some(a) => a.clone(),
                     None => path.last().cloned().unwrap_or_default(),
@@ -476,13 +476,13 @@ fn lint_unused_imports(
 // Lint: useless_match
 // ---------------------------------------------------------------------------
 
-/// `useless_match`: detecta `match expr { _ => body }` (o
-/// `match expr { ident => body }`) con UN solo arm catch-all. El
-/// match no aporta nada; el user puede reemplazarlo con un `let`
-/// directo (`let _ = expr; body` o `let ident = expr; body`).
+/// `useless_match`: detects `match expr { _ => body }` (or
+/// `match expr { ident => body }`) with ONE single catch-all arm. The
+/// match contributes nothing; the user can replace it with a direct
+/// `let` (`let _ = expr; body` or `let ident = expr; body`).
 ///
-/// NO flaguea matches con catch-all + otros arms (eso sí es útil).
-/// NO flaguea matches con 0 arms (parser ya los rechaza).
+/// Does NOT flag matches with catch-all + other arms (those are useful).
+/// Does NOT flag matches with 0 arms (the parser already rejects them).
 fn lint_useless_match(program: &Program, findings: &mut Vec<LintFinding>) {
     for stmt in program {
         walk_exprs_in_stmt(stmt, &mut |expr| {
@@ -515,22 +515,22 @@ fn lint_useless_match(program: &Program, findings: &mut Vec<LintFinding>) {
 // Lint: string_concat
 // ---------------------------------------------------------------------------
 
-/// `string_concat`: detecta `"a" + "b"` y similares (cualquier `+`
-/// donde AMBOS operandos son `Expr::Str` literales). Sugiere
-/// reemplazar con interpolación: `"ab"` o `"{x}{y}"`.
+/// `string_concat`: detects `"a" + "b"` and similar (any `+`
+/// where BOTH operands are `Expr::Str` literals). Suggests
+/// replacing with interpolation: `"ab"` or `"{x}{y}"`.
 ///
-/// **Auto-fix**: para el caso "ambos literales", emite el
-/// reemplazo concatenando los strings y produciendo un único
-/// literal. Casos más complejos (`"hola, " + name`) NO emiten fix
-/// porque requieren convertir a interpolación, que necesita
-/// parsing del nombre y escape — sub-paso futuro.
+/// **Auto-fix**: for the "both literals" case, emits the
+/// replacement concatenating the strings and producing a single
+/// literal. More complex cases (`"hola, " + name`) do NOT emit a fix
+/// because they require converting to interpolation, which needs
+/// parsing the name and escaping — future sub-step.
 ///
-/// Heredamos los spans `start` del literal izquierdo y `end` del
-/// literal derecho del source raw. Para hacerlo bien necesitamos
-/// `end_span` que el AST hoy no tiene (deuda S1 residual);
-/// workaround: leer el source y buscar el rango. Para el MVP de
-/// 9.z.5, **sin auto-fix** (lo difiero) — solo emitimos la
-/// advertencia con sugerencia textual.
+/// We inherit the `start` spans of the left literal and the `end`
+/// of the right literal from the raw source. To do it well we need
+/// `end_span`, which the AST does not have today (residual S1 debt);
+/// workaround: read the source and look up the range. For the MVP of
+/// 9.z.5, **no auto-fix** (deferred) — we only emit the
+/// warning with a textual suggestion.
 fn lint_string_concat(_source: &str, program: &Program, findings: &mut Vec<LintFinding>) {
     for stmt in program {
         walk_exprs_in_stmt(stmt, &mut |expr| {
@@ -566,9 +566,9 @@ fn lint_string_concat(_source: &str, program: &Program, findings: &mut Vec<LintF
 // Walker helpers
 // ---------------------------------------------------------------------------
 
-/// Walk recursivo sobre las expresiones de un stmt, invocando `f`
-/// por cada Expr visitada. Útil para lints que detectan patrones de
-/// expresión sin importar el stmt contenedor.
+/// Recursive walk over the expressions of a stmt, invoking `f`
+/// for each Expr visited. Useful for lints that detect expression
+/// patterns regardless of the containing stmt.
 fn walk_exprs_in_stmt(stmt: &Stmt, f: &mut impl FnMut(&Expr)) {
     match stmt {
         Stmt::Assign { value, .. } => walk_expr(value, f),
@@ -686,8 +686,8 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
                 walk_expr(i, f);
             }
         }
-        // Mini-tanda C + Cmp+ — list comprehension. Walkeamos los
-        // sub-Exprs de cada clause + filter + expr.
+        // C + Cmp+ mini-batches — list comprehension. We walk the
+        // sub-Exprs of each clause + filter + expr.
         Expr::ListComp {
             expr,
             iter,
@@ -704,7 +704,7 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             }
             walk_expr(expr, f);
         }
-        // Mini-tanda Cmp+ — map comprehension.
+        // Cmp+ mini-batch — map comprehension.
         Expr::MapComp {
             key,
             value,
@@ -752,11 +752,11 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         Expr::Match { value, arms, .. } => {
             walk_expr(value, f);
             for arm in arms {
-                // Sp.2 — body es Vec<Stmt>. Iteramos solo las Expr más
-                // comunes (Stmt::Expr / Return / ReturnStatus) sin
-                // recursión a través de walk_exprs_in_stmt (genera
-                // monomorphization recursion limit con closures
-                // anidados).
+                // Sp.2 — body is Vec<Stmt>. We iterate only the most
+                // common Exprs (Stmt::Expr / Return / ReturnStatus) without
+                // recursion through walk_exprs_in_stmt (it triggers
+                // monomorphization recursion limit with nested
+                // closures).
                 for s in &arm.body {
                     match s {
                         Stmt::Expr(e, _) | Stmt::Return(e, _) => walk_expr(e, f),
@@ -784,21 +784,21 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
     }
 }
 
-// Stubs para que el código compile sin warnings de unused (Param y
-// MatchArm los importamos por completitud del walker en futuros
-// lints, aunque hoy no los tocamos directo).
+// Stubs so the code compiles without unused warnings (Param and
+// MatchArm are imported for walker completeness in future
+// lints, although we do not touch them directly today).
 #[allow(dead_code)]
 fn _refs(_: &Param, _: &MatchArm) {}
 
 // ---------------------------------------------------------------------------
-// Supresión con `// @allow(<name>)`
+// Suppression with `// @allow(<name>)`
 // ---------------------------------------------------------------------------
 
-/// Inspecciona el source raw: si la línea inmediatamente anterior
-/// al finding contiene `// @allow(<name>)`, lo silenciamos.
+/// Inspects the raw source: if the line immediately before
+/// the finding contains `// @allow(<name>)`, we silence it.
 ///
-/// Decisión MVP: lookahead solo a la línea anterior (no múltiples
-/// líneas, no inline). Simple, predecible.
+/// MVP decision: lookahead only to the previous line (no multiple
+/// lines, no inline). Simple, predictable.
 fn apply_suppressions(source: &str, findings: &mut Vec<LintFinding>) {
     let lines: Vec<&str> = source.lines().collect();
     findings.retain(|f| {
@@ -934,7 +934,7 @@ mod tests {
 
     #[test]
     fn string_concat_con_var_no_se_flaguea() {
-        // Solo "ambos literales" dispara. Concat con var queda OK.
+        // Only "both literals" triggers. Concat with var stays OK.
         let src = "let x = \"a\"\nlet y = x + \"b\"\nprint(y)";
         let findings = lint(src);
         let sc: Vec<&LintFinding> = findings
@@ -957,14 +957,14 @@ mod tests {
         let src = "let z = 1\nlet a = 2\nprint(\"hola\")";
         let findings = lint(src);
         assert_eq!(findings.len(), 2);
-        // `z` está en línea 1, `a` está en línea 2.
+        // `z` is on line 1, `a` is on line 2.
         assert!(findings[0].line < findings[1].line);
     }
 
     #[test]
     fn supresion_solo_aplica_a_la_linea_inmediata_anterior() {
-        // El comment está 2 líneas arriba; la suppress NO debería
-        // funcionar (solo aplica a la inmediata anterior).
+        // The comment is 2 lines above; the suppress should NOT
+        // work (it only applies to the immediately previous line).
         let src = "// @allow(unused_variable)\n\nlet x = 5\nprint(\"hola\")";
         let findings = lint(src);
         assert_eq!(names(&findings), vec!["unused_variable"]);

@@ -1,47 +1,47 @@
-//! Formatter de Fitz (`fitz fmt`) — Fase 9.z.1.a.
+//! Fitz formatter (`fitz fmt`) — Phase 9.z.1.a.
 //!
-//! Pretty-printer escrito a mano sobre el AST. Cero config —
-//! convenciones fijas (4 espacios indent, comillas dobles, trailing
-//! comma solo multi-línea, max 100 chars soft).
+//! Hand-written pretty-printer over the AST. Zero config —
+//! fixed conventions (4-space indent, double quotes, trailing
+//! comma only multi-line, max 100 chars soft).
 //!
-//! Flujo: `format_source(src)` → tokenize → parse → walk del AST →
-//! string. El caller decide qué hacer con el string (write o compare).
+//! Flow: `format_source(src)` → tokenize → parse → walk the AST →
+//! string. The caller decides what to do with the string (write or compare).
 //!
-//! ## ⚠ LIMITACIÓN CRÍTICA DE 9.z.1.a — comments + blank lines se borran
+//! ## ⚠ CRITICAL LIMITATION OF 9.z.1.a — comments + blank lines get erased
 //!
-//! El lexer strippea comentarios antes de llegar al AST, y el
-//! formatter no preserva blank lines del usuario. Por lo tanto, al
-//! reescribir un archivo, **se pierden comentarios (`//`) y todas
-//! las líneas en blanco intencionales del autor**.
+//! The lexer strips comments before reaching the AST, and the
+//! formatter does not preserve user blank lines. Therefore, when
+//! rewriting a file, **comments (`//`) and all of the author's
+//! intentional blank lines get lost**.
 //!
-//! Esto es **table-stakes faltante** para un formatter de
-//! producción (gofmt, prettier, black todos preservan). Se cierra
-//! en **9.z.1.b**:
+//! This is **missing table-stakes** for a production-grade
+//! formatter (gofmt, prettier, black all preserve). It closes
+//! in **9.z.1.b**:
 //!
-//! - lexer emite comments como tokens (side stream)
-//! - parser arma una side-table `Vec<(SpanKey, Comment)>` adyacente
-//!   al AST
-//! - formatter threadea los comments de vuelta al output según
-//!   posición original
+//! - lexer emits comments as tokens (side stream)
+//! - parser builds a side-table `Vec<(SpanKey, Comment)>` adjacent
+//!   to the AST
+//! - formatter threads the comments back into the output according
+//!   to original position
 //!
-//! Mientras 9.z.1.b no aterriza, `fitz fmt` (modo write) emite un
-//! warning loud al usuario advirtiendo la pérdida. El modo
-//! `--check` (read-only) no necesita warning — no rompe nada.
+//! While 9.z.1.b is not landed, `fitz fmt` (write mode) emits a
+//! loud warning to the user about the loss. The `--check`
+//! (read-only) mode does not need a warning — it does not break anything.
 //!
-//! ## Otras deudas (no bloquean MVP)
+//! ## Other debts (do not block the MVP)
 //!
-//! - **`is_let` perdido en el AST**: el parser produce el mismo
-//!   `Stmt::Assign` para `let x = 1` y `x = 1` (re-asignación). El
-//!   formatter inspecciona la línea del source via `Span` para
-//!   detectar `let` y preservarlo. Refactor del AST (agregar
-//!   `is_let: bool`) es deuda menor; el hack actual está aislado
-//!   en `stmt_has_let_keyword`.
-//! - **Nodos no manejados** caen al fallback `// <inválido>`. En el
-//!   MVP cubrimos los nodos del AST que aparecen en >90% del código
-//!   de la guía; los raros se completan iterativamente.
-//! - **Auto-wrap de líneas > 100 chars**: NO implementado. El
-//!   formatter no rompe líneas largas. Auto-wrap requiere análisis
-//!   de break-points sensato — deuda futura si aparece presión.
+//! - **`is_let` lost in the AST**: the parser produces the same
+//!   `Stmt::Assign` for `let x = 1` and `x = 1` (reassignment). The
+//!   formatter inspects the source line via `Span` to detect
+//!   `let` and preserve it. Refactoring the AST (adding
+//!   `is_let: bool`) is minor debt; the current hack is isolated
+//!   in `stmt_has_let_keyword`.
+//! - **Unhandled nodes** fall back to `// <invalid>`. In the
+//!   MVP we cover the AST nodes that appear in >90% of guide
+//!   code; rare ones get completed iteratively.
+//! - **Auto-wrap of lines > 100 chars**: NOT implemented. The
+//!   formatter does not break long lines. Auto-wrap requires
+//!   sensible break-point analysis — future debt if pressure appears.
 
 use crate::ast::{
     AssignTarget, BinOpKind, Decorator, Expr, MatchArm, Param, Pattern, Span, Stmt, StrPart,
@@ -51,26 +51,26 @@ use crate::error::FitzError;
 use crate::lexer::{tokenize_with_trivia, Comment, CommentKind, Trivia};
 use crate::parser::parse;
 
-/// Estilo del formatter — cero config en 9.z.1, pero centralizado
-/// acá por si en el futuro se introduce `fitz.toml [fmt]`.
+/// Formatter style — zero config in 9.z.1, but centralized
+/// here in case `fitz.toml [fmt]` is introduced in the future.
 struct Style;
 impl Style {
-    const INDENT: &'static str = "    "; // 4 espacios
+    const INDENT: &'static str = "    "; // 4 spaces
 }
 
-/// Estado del formatter durante el walk del AST.
+/// Formatter state during the AST walk.
 struct FmtCtx<'a> {
     indent_level: usize,
     output: String,
-    /// Source original — usado para detectar `let` keyword en
-    /// `Stmt::Assign` y para fallback de nodos no manejados via Span.
+    /// Original source — used to detect the `let` keyword in
+    /// `Stmt::Assign` and to fall back for unhandled nodes via Span.
     source: &'a str,
-    /// Fase 9.z.1.b — trivia capturada por el lexer (comments +
-    /// blank lines). Empty cuando se llama desde `format_source_only_ast`
-    /// (path interno de tests que no necesitan threading de trivia).
+    /// Phase 9.z.1.b — trivia captured by the lexer (comments +
+    /// blank lines). Empty when called from `format_source_only_ast`
+    /// (internal test path that does not need trivia threading).
     trivia: &'a Trivia,
-    /// Cursor sobre `trivia.comments` para emitirlos en orden de
-    /// aparición sin re-escanear.
+    /// Cursor over `trivia.comments` to emit them in order of
+    /// appearance without re-scanning.
     comment_cursor: usize,
 }
 
@@ -106,16 +106,16 @@ impl<'a> FmtCtx<'a> {
     }
 }
 
-/// Entry point público. Parsea el source y produce su forma
-/// formateada. Si el source tiene errores de sintaxis, falla — el
-/// formatter no intenta arreglar código que el parser no entiende.
+/// Public entry point. Parses the source and produces its
+/// formatted form. If the source has syntax errors, it fails — the
+/// formatter does not try to fix code that the parser does not understand.
 ///
-/// Fase 9.z.1.b: usa `tokenize_with_trivia` para capturar
-/// comentarios y blank lines del source, y los re-emite en sus
-/// posiciones originales en el output.
+/// Phase 9.z.1.b: uses `tokenize_with_trivia` to capture
+/// comments and blank lines from the source, and re-emits them at
+/// their original positions in the output.
 ///
-/// Idempotencia: `format_source(format_source(x)) == format_source(x)`
-/// para cualquier código válido (testeado en unit tests).
+/// Idempotence: `format_source(format_source(x)) == format_source(x)`
+/// for any valid code (tested in unit tests).
 pub fn format_source(source: &str) -> Result<String, FitzError> {
     let (tokens, trivia) = tokenize_with_trivia(source)?;
     let program = parse(tokens)?;
@@ -124,71 +124,71 @@ pub fn format_source(source: &str) -> Result<String, FitzError> {
     Ok(ctx.output)
 }
 
-// ---- Programa + statements ----
+// ---- Program + statements ----
 
 fn format_program(ctx: &mut FmtCtx, program: &[Stmt]) {
     fmt_stmt_list(ctx, program, /* in_block = */ false);
 }
 
-/// Renderiza una lista de stmts top-level o adentro de un bloque,
-/// threading los comments + blank lines de `ctx.trivia` en sus
-/// posiciones originales del source.
+/// Renders a list of top-level stmts or stmts inside a block,
+/// threading the comments + blank lines of `ctx.trivia` at their
+/// original source positions.
 ///
-/// Algoritmo:
+/// Algorithm:
 ///
-/// 1. Para cada stmt en orden:
-///    - (a) Emit "leading" trivia: comments con
-///      `line < stmt.start_line` que todavía no se emitieron.
-///    - (b) Si entre el stmt anterior (o el comment anterior) y
-///      este hay una blank line preservada, emit blank.
-///    - (c) Render el stmt.
-///    - (d) Emit "trailing" trivia: comment en la misma línea de
-///      fin del stmt (al lado, con 2 espacios).
-/// 2. Después del último stmt: emit cualquier comment/blank
-///    remanente (post-último).
+/// 1. For each stmt in order:
+///    - (a) Emit "leading" trivia: comments with
+///      `line < stmt.start_line` that have not yet been emitted.
+///    - (b) If between the previous stmt (or the previous comment)
+///      and this one there is a preserved blank line, emit blank.
+///    - (c) Render the stmt.
+///    - (d) Emit "trailing" trivia: comment on the same line as
+///      the stmt's end (side-by-side, with 2 spaces).
+/// 2. After the last stmt: emit any remaining comment/blank
+///    (post-last).
 fn fmt_stmt_list(ctx: &mut FmtCtx, stmts: &[Stmt], in_block: bool) {
-    // `prev_end_line` rastrea el límite superior de "ya emitido" para
-    // decidir si una línea blank fue preservada en el original.
-    // En top-level arranca en 0; adentro de un bloque, en la línea
-    // de apertura del bloque (mid-stream).
+    // `prev_end_line` tracks the upper bound of "already emitted" to
+    // decide whether a blank line was preserved in the original.
+    // At top-level it starts at 0; inside a block, at the block's
+    // opening line (mid-stream).
     let mut prev_end_line: usize = 0;
 
     for stmt in stmts {
         let stmt_start = stmt.span().line;
         let stmt_end = end_line_of_stmt(stmt);
 
-        // 1a. Leading comments (cualquier comment con line < stmt_start
-        // que todavía no se emitió). Esto incluye comentarios del
-        // "header" del archivo antes del primer stmt.
+        // 1a. Leading comments (any comment with line < stmt_start
+        // that has not yet been emitted). This includes file-header
+        // comments before the first stmt.
         emit_leading_comments(ctx, prev_end_line, stmt_start);
 
-        // 1b. Blank line en el gap entre prev y stmt — dos sources:
-        //  (a) Preservada del original: trivia.blank_lines contiene
-        //      una línea en (after_what, stmt_start).
-        //  (b) Smart heuristic top-level: entre dos stmts donde al
-        //      menos uno es fn/type, insertamos blank (mejora
-        //      legibilidad). PERO suprimida si acabamos de emitir
-        //      un leading comment para el stmt actual — los
-        //      comments "se atan" al stmt siguiente y no queremos
-        //      separarlos.
+        // 1b. Blank line in the gap between prev and stmt — two sources:
+        //  (a) Preserved from the original: trivia.blank_lines contains
+        //      a line in (after_what, stmt_start).
+        //  (b) Top-level smart heuristic: between two stmts where at
+        //      least one is fn/type, we insert blank (improves
+        //      readability). BUT suppressed if we just emitted
+        //      a leading comment for the current stmt — comments
+        //      "stick to" the following stmt and we do not want to
+        //      separate them.
         //
-        // Skip totalmente si es el primer stmt del file/block.
+        // Skip entirely if this is the first stmt of the file/block.
         //
-        // **Bug fix (post-9.z.5)**: cuando estamos `in_block=true` y
-        // este es el primer stmt del bloque (`prev_end_line == 0`), NO
-        // chequear blanks. Sin esta guarda, `last_emitted_comment_line`
-        // puede traer un valor del scope outer (por ej. un trailing
-        // comment del stmt anterior al bloque) y `has_blank_between`
-        // reportar blanks que están FUERA del bloque actual,
-        // insertando un blank spurio adentro.
+        // **Bug fix (post-9.z.5)**: when we are `in_block=true` and
+        // this is the first stmt in the block (`prev_end_line == 0`), do NOT
+        // check blanks. Without this guard, `last_emitted_comment_line`
+        // may carry a value from the outer scope (e.g. a trailing
+        // comment from the stmt before the block) and `has_blank_between`
+        // may report blanks that are OUTSIDE the current block,
+        // inserting a spurious blank inside.
         //
-        // Pero en top-level con leading comments (header del file),
-        // `prev_end_line == 0` y queremos preservar la blank entre
-        // los comments y el primer stmt. La condición distingue:
-        //   - In block: solo si hubo stmt previo (prev_end_line > 0).
-        //   - Top-level: si hubo stmt previo O si hubo comments
-        //     leading (last_emitted_comment_line > 0) — el header
-        //     del file puede ir seguido de blank antes del primer stmt.
+        // But at top-level with leading comments (file header),
+        // `prev_end_line == 0` and we do want to preserve the blank between
+        // the comments and the first stmt. The condition distinguishes:
+        //   - In block: only if there was a previous stmt (prev_end_line > 0).
+        //   - Top-level: if there was a previous stmt OR if there were
+        //     leading comments (last_emitted_comment_line > 0) — the file
+        //     header can be followed by a blank before the first stmt.
         let after_what = std::cmp::max(prev_end_line, last_emitted_comment_line(ctx));
         let block_allows_blank = if in_block {
             prev_end_line > 0
@@ -197,9 +197,9 @@ fn fmt_stmt_list(ctx: &mut FmtCtx, stmts: &[Stmt], in_block: bool) {
         };
         let had_blank_in_source =
             block_allows_blank && has_blank_between(ctx.trivia, after_what, stmt_start);
-        // Si el último comment emitido pertenece "al gap" entre prev_end_line
-        // y stmt_start, suppress smart_blank (comment ya cumple esa función
-        // de separación visual + queremos que el comment quede pegado al stmt).
+        // If the last emitted comment belongs to "the gap" between prev_end_line
+        // and stmt_start, suppress smart_blank (the comment already plays the role
+        // of visual separator + we want the comment to stay attached to the stmt).
         let leading_comment_just_emitted = last_emitted_comment_line(ctx) > prev_end_line;
         let smart_blank = !in_block
             && prev_end_line > 0
@@ -209,10 +209,10 @@ fn fmt_stmt_list(ctx: &mut FmtCtx, stmts: &[Stmt], in_block: bool) {
             ctx.newline();
         }
 
-        // 1c. Render el stmt.
+        // 1c. Render the stmt.
         fmt_stmt(ctx, stmt);
 
-        // 1d. Trailing comment en la misma línea del fin del stmt.
+        // 1d. Trailing comment on the same line as the stmt's end.
         let trailing_text = peek_comment_at_line(ctx, stmt_end).map(|c| c.text.clone());
         if let Some(text) = trailing_text {
             ctx.write("  // ");
@@ -224,32 +224,32 @@ fn fmt_stmt_list(ctx: &mut FmtCtx, stmts: &[Stmt], in_block: bool) {
         prev_end_line = stmt_end;
     }
 
-    // Post-última-stmt: solo emit footer comments si estamos
-    // top-level. Adentro de un bloque, los comments restantes
-    // quedan en el cursor — los procesa el caller exterior cuando
-    // emit comments leading del siguiente stmt outer.
+    // Post-last-stmt: only emit footer comments if we are at
+    // top-level. Inside a block, the remaining comments stay in
+    // the cursor — they get processed by the outer caller when it
+    // emits leading comments for the next outer stmt.
     //
-    // Deuda menor: comments INSIDE un block, después del último stmt
-    // pero antes del `}` (ej. `fn f() { x = 1; // trailing\n }`),
-    // terminan saliendo del block en el output formateado. Caso
-    // raro en práctica — documentado.
+    // Minor debt: comments INSIDE a block, after the last stmt
+    // but before the `}` (e.g. `fn f() { x = 1; // trailing\n }`),
+    // end up leaving the block in the formatted output. Rare in
+    // practice — documented.
     if !in_block {
         emit_trailing_comments(ctx, prev_end_line);
     }
 }
 
-/// Emite todos los comments con `line < upper_bound` que todavía no
-/// se emitieron. Los pone como líneas propias con su indent actual.
-/// Trailing comments (los de la línea de un stmt) los maneja el
-/// caller por separado.
+/// Emits all comments with `line < upper_bound` that have not yet
+/// been emitted. Puts them on their own lines with the current
+/// indent. Trailing comments (those on a stmt's line) are handled
+/// by the caller separately.
 fn emit_leading_comments(ctx: &mut FmtCtx, prev_end_line: usize, upper_bound: usize) {
     while ctx.comment_cursor < ctx.trivia.comments.len() {
         let c = &ctx.trivia.comments[ctx.comment_cursor];
         if c.line >= upper_bound {
             break;
         }
-        // Blank line antes del comment si en el original había una
-        // entre el último item emitido y este comment.
+        // Blank line before the comment if in the original there was one
+        // between the last emitted item and this comment.
         let after_what = std::cmp::max(
             prev_end_line,
             last_emitted_comment_line_excluding_current(ctx),
@@ -262,9 +262,9 @@ fn emit_leading_comments(ctx: &mut FmtCtx, prev_end_line: usize, upper_bound: us
     }
 }
 
-/// Emite los comments restantes (cualquier line >= prev_end_line +
-/// que no haya sido emitido todavía). Útil para footer comments
-/// post-último-stmt.
+/// Emits remaining comments (any line >= prev_end_line +
+/// that has not yet been emitted). Useful for footer comments
+/// post-last-stmt.
 fn emit_trailing_comments(ctx: &mut FmtCtx, prev_end_line: usize) {
     while ctx.comment_cursor < ctx.trivia.comments.len() {
         let c = &ctx.trivia.comments[ctx.comment_cursor];
@@ -284,7 +284,7 @@ fn emit_single_comment(ctx: &mut FmtCtx, c: &Comment) {
     ctx.write_indent();
     match c.kind {
         CommentKind::Line => {
-            // Normalizar `//foo` → `// foo` (espacio post-`//`).
+            // Normalize `//foo` → `// foo` (space after `//`).
             ctx.write("//");
             let trimmed = c.text.trim_start();
             if !trimmed.is_empty() {
@@ -293,7 +293,7 @@ fn emit_single_comment(ctx: &mut FmtCtx, c: &Comment) {
             }
         }
         CommentKind::Block => {
-            // Mantenemos el `/* ... */` igual; el contenido raw.
+            // Keep `/* ... */` as-is; content raw.
             ctx.write("/*");
             ctx.write(&c.text);
             ctx.write("*/");
@@ -319,9 +319,9 @@ fn last_emitted_comment_line(ctx: &FmtCtx) -> usize {
     }
 }
 
-/// Igual que la anterior pero useful cuando estamos por DECIDIR si
-/// emitir blank antes de un comment todavía no emitido — necesitamos
-/// el "anterior" sin contar el actual.
+/// Same as the previous one but useful when we are about to DECIDE
+/// whether to emit a blank before a not-yet-emitted comment — we need
+/// the "previous" one without counting the current.
 fn last_emitted_comment_line_excluding_current(ctx: &FmtCtx) -> usize {
     last_emitted_comment_line(ctx)
 }
@@ -333,10 +333,10 @@ fn has_blank_between(trivia: &Trivia, lower_exclusive: usize, upper_exclusive: u
         .any(|&bl| bl > lower_exclusive && bl < upper_exclusive)
 }
 
-/// Heurística top-level: si el stmt anterior o el actual es un
-/// fn/type def, queremos blank entre ellos aunque el source no la
-/// tuviera. Mejora legibilidad sin contradecir intención (el user
-/// no puso blank pero no objeta que la haya).
+/// Top-level heuristic: if the previous or current stmt is a
+/// fn/type def, we want a blank between them even if the source
+/// did not have one. Improves readability without contradicting
+/// intent (the user did not put a blank but does not object to having one).
 fn needs_blank_line_before_smart(prev: Option<&Stmt>, curr: &Stmt) -> bool {
     let Some(prev) = prev else {
         return false;
@@ -348,9 +348,9 @@ fn is_complex_top_level(stmt: &Stmt) -> bool {
     matches!(stmt, Stmt::FnDef { .. } | Stmt::TypeDef { .. })
 }
 
-/// Devuelve el stmt anterior dentro de `stmts` al que tiene
-/// `start_line == cur_start_line`. Linear pero stmts típicamente
-/// son pocos por bloque.
+/// Returns the stmt before the one in `stmts` whose
+/// `start_line == cur_start_line`. Linear, but stmts are usually
+/// few per block.
 fn prev_stmt_at(stmts: &[Stmt], cur_start_line: usize) -> Option<&Stmt> {
     let mut prev: Option<&Stmt> = None;
     for s in stmts {
@@ -362,9 +362,9 @@ fn prev_stmt_at(stmts: &[Stmt], cur_start_line: usize) -> Option<&Stmt> {
     prev
 }
 
-/// Recursivamente computa la línea más alta de cualquier descendiente
-/// del stmt. Necesario para detectar trailing comments (que viven en
-/// `stmt.end_line`, no en `stmt.start_line`).
+/// Recursively computes the highest line of any descendant of
+/// the stmt. Needed to detect trailing comments (which live at
+/// `stmt.end_line`, not at `stmt.start_line`).
 fn end_line_of_stmt(stmt: &Stmt) -> usize {
     let start = stmt.span().line;
     let nested = match stmt {
@@ -501,7 +501,7 @@ fn end_line_of_expr(expr: &Expr) -> usize {
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             Some(end_line_of_expr(inner))
         }
-        // Fp.3 — NamedArg passthrough al value.
+        // Fp.3 — NamedArg passthrough to the value.
         Expr::NamedArg { value, .. } => Some(end_line_of_expr(value)),
         Expr::StrInterp(parts, _) => parts
             .iter()
@@ -615,8 +615,8 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
             var, iter, body, ..
         } => {
             ctx.write("for ");
-            // Mini-tanda Md: var es Pattern (puede ser Ident, Wildcard,
-            // Tuple). `fmt_pattern` ya cubre los 3 casos.
+            // Md mini-batch: var is a Pattern (can be Ident, Wildcard,
+            // Tuple). `fmt_pattern` already covers the 3 cases.
             fmt_pattern(ctx, var);
             ctx.write(" in ");
             fmt_expr(ctx, iter);
@@ -645,8 +645,8 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
             ctx.write(&parts.join(", "));
         }
         Stmt::Error(_) => {
-            // El strict parser no produce esto; defensive fallback.
-            ctx.write("// <stmt inválido>");
+            // The strict parser does not produce this; defensive fallback.
+            ctx.write("// <invalid stmt>");
         }
     }
 }
@@ -658,12 +658,12 @@ fn fmt_assign(
     value: &Expr,
     span: Span,
 ) {
-    // El AST no preserva si había `let` keyword. Recuperamos del
-    // source — deuda documentada en el header del módulo.
+    // The AST does not preserve whether the `let` keyword was there.
+    // We recover it from the source — debt documented in the module header.
     let has_let = match target {
         AssignTarget::Ident(_, _) => stmt_has_let_keyword(ctx.source, span),
-        AssignTarget::Field { .. } => false, // `obj.f = v` nunca lleva let
-        AssignTarget::Index { .. } => false, // `xs[i] = v` nunca lleva let
+        AssignTarget::Field { .. } => false, // `obj.f = v` never carries let
+        AssignTarget::Index { .. } => false, // `xs[i] = v` never carries let
     };
 
     if has_let {
@@ -695,14 +695,14 @@ fn fmt_assign_target(ctx: &mut FmtCtx, target: &AssignTarget) {
     }
 }
 
-/// Inspecciona la línea del source en `span` para ver si el stmt
-/// arranca con `let`. Spans son 1-based. Hack contenido para
-/// suplir info que el AST no preserva (ver header del módulo).
+/// Inspects the source line at `span` to see if the stmt
+/// starts with `let`. Spans are 1-based. Contained hack to
+/// supply info that the AST does not preserve (see module header).
 fn stmt_has_let_keyword(source: &str, span: Span) -> bool {
     if !span.is_known() {
-        // Stmts sintéticos (fn body de flecha, tests construyendo
-        // AST a mano) — preferimos NO emitir `let` por consistencia
-        // con código que típicamente no lo lleva.
+        // Synthetic stmts (arrow-fn body, tests building the
+        // AST by hand) — we prefer NOT to emit `let` for consistency
+        // with code that does not typically carry it.
         return false;
     }
     let line_idx = span.line.saturating_sub(1);
@@ -740,7 +740,7 @@ fn fmt_fndef(
     is_async: bool,
     decorators: &[Decorator],
 ) {
-    // Decorators uno por línea, en orden.
+    // Decorators one per line, in order.
     for deco in decorators {
         fmt_decorator(ctx, deco);
         ctx.newline();
@@ -797,8 +797,8 @@ fn fmt_typedef(
             }
             ctx.newline();
         }
-        // R.3 — métodos custom. Blank line entre items consecutivos:
-        // entre fields y el primer método, y entre métodos sucesivos.
+        // R.3 — custom methods. Blank line between consecutive items:
+        // between fields and the first method, and between successive methods.
         for (i, m) in methods.iter().enumerate() {
             let needs_blank = i > 0 || !fields.is_empty();
             if needs_blank {
@@ -850,9 +850,9 @@ fn fmt_decorator(ctx: &mut FmtCtx, deco: &Decorator) {
 
 fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
     match expr {
-        // Fp.3 — NamedArg solo válido en Call.args. El fmt de Call ya
-        // maneja el caso `name: value` antes de llegar acá. Si aterriza
-        // un NamedArg suelto, emitimos la sintaxis como fallback.
+        // Fp.3 — NamedArg only valid in Call.args. Call's fmt already
+        // handles the `name: value` case before reaching here. If a
+        // loose NamedArg lands here, we emit the syntax as fallback.
         Expr::NamedArg { name, value, .. } => {
             ctx.write(name);
             ctx.write(": ");
@@ -864,9 +864,9 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
         Expr::Bool(b, _) => ctx.write(if *b { "true" } else { "false" }),
         Expr::Null(_) => ctx.write("null"),
         Expr::Bytes(bs, _) => {
-            // Mini-tanda Bytes — formato `b"..."` paralelo al Display
-            // de Value::Bytes. ASCII printable + escapes comunes; el
-            // resto va como `\xHH`.
+            // Bytes mini-batch — `b"..."` format parallel to the Display
+            // of Value::Bytes. ASCII printable + common escapes; the
+            // rest goes as `\xHH`.
             ctx.write("b\"");
             for &b in bs.iter() {
                 match b {
@@ -954,9 +954,9 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             ctx.write(&parts.join(", "));
             ctx.write("]");
         }
-        // Mini-tanda C + Cmp+ — `[expr for var in iter ([for ...]*) (if filter)?]`.
-        // Una línea con espacios canónicos. Multi-línea queda como
-        // deuda residual si entra demanda.
+        // C + Cmp+ mini-batches — `[expr for var in iter ([for ...]*) (if filter)?]`.
+        // One line with canonical spacing. Multi-line stays as
+        // residual debt if demand appears.
         Expr::ListComp {
             expr,
             var,
@@ -983,7 +983,7 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             }
             ctx.write("]");
         }
-        // Mini-tanda Cmp+ — `{key: value for var in iter (for ...)* (if cond)?}`.
+        // Cmp+ mini-batch — `{key: value for var in iter (for ...)* (if cond)?}`.
         Expr::MapComp {
             key,
             value,
@@ -1074,14 +1074,14 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             ctx.write(".await");
         }
         Expr::FnExpr { params, body, .. } => fmt_fnexpr(ctx, params, body),
-        Expr::Error(_) => ctx.write("/* <expr inválida> */"),
+        Expr::Error(_) => ctx.write("/* <invalid expr> */"),
     }
 }
 
-/// Para evitar regenerar el FmtCtx, las expresiones que aparecen
-/// adentro de una sola línea (args de fn, items de lista, etc.) se
-/// formatean a String aparte y se concatenan. No threading de trivia
-/// — comments adentro de expresiones inline son deuda futura.
+/// To avoid regenerating the FmtCtx, expressions that appear
+/// inside a single line (fn args, list items, etc.) are
+/// formatted into a separate String and concatenated. No trivia
+/// threading — comments inside inline expressions are future debt.
 fn expr_to_inline_string(expr: &Expr) -> String {
     let empty = Trivia::default();
     let mut ctx = FmtCtx::new("", &empty);
@@ -1090,7 +1090,7 @@ fn expr_to_inline_string(expr: &Expr) -> String {
 }
 
 fn fmt_expr_with_parens_if_needed(ctx: &mut FmtCtx, expr: &Expr) {
-    // Heurística mínima: UnaryOp sobre BinOp necesita parens.
+    // Minimal heuristic: UnaryOp over BinOp needs parens.
     let needs = matches!(expr, Expr::BinOp { .. });
     if needs {
         ctx.write("(");
@@ -1125,7 +1125,7 @@ fn binop_str(op: &BinOpKind) -> &'static str {
         BinOpKind::And => "and",
         BinOpKind::Or => "or",
         BinOpKind::Xor => "xor",
-        // Mini-tanda Bits — operadores bit-a-bit.
+        // Bits mini-batch — bitwise operators.
         BinOpKind::BitAnd => "&",
         BinOpKind::BitOr => "|",
         BinOpKind::BitXor => "^",
@@ -1139,8 +1139,8 @@ fn fmt_str_interp(ctx: &mut FmtCtx, parts: &[StrPart]) {
     for part in parts {
         match part {
             StrPart::Lit(s) => {
-                // Escapamos solo `"` y `\`; el resto pasa raw para
-                // preservar emojis, unicode, etc.
+                // We only escape `"` and `\`; the rest passes raw to
+                // preserve emojis, unicode, etc.
                 for c in s.chars() {
                     match c {
                         '"' => ctx.write("\\\""),
@@ -1155,9 +1155,9 @@ fn fmt_str_interp(ctx: &mut FmtCtx, parts: &[StrPart]) {
                 ctx.write("{");
                 let inline = expr_to_inline_string(e);
                 ctx.write(&inline);
-                // Mini-tanda Fm — re-emitir el spec si está presente.
-                // `FormatSpec::to_source()` reconstruye la sintaxis
-                // canónica `[fill]align[sign]#0width,prec_type`.
+                // Fm mini-batch — re-emit the spec if present.
+                // `FormatSpec::to_source()` reconstructs the canonical
+                // `[fill]align[sign]#0width,prec_type` syntax.
                 if let Some(s) = spec {
                     ctx.write(":");
                     ctx.write(&s.to_source());
@@ -1182,23 +1182,23 @@ fn fmt_match(ctx: &mut FmtCtx, value: &Expr, arms: &[MatchArm]) {
         for arm in arms {
             ctx.write_indent();
             fmt_pattern(ctx, &arm.pattern);
-            // R.2.2 — guard opcional `if <cond>` entre pattern y `=>`.
+            // R.2.2 — optional `if <cond>` guard between pattern and `=>`.
             if let Some(guard) = &arm.guard {
                 ctx.write(" if ");
                 let inline = expr_to_inline_string(guard);
                 ctx.write(&inline);
             }
             ctx.write(" => ");
-            // Sp.2 — body es Vec<Stmt>. Caso típico: 1 Stmt::Expr —
-            // emitimos inline como expression. Caso bloque (>1 stmt o
-            // Stmt::Return/etc.): emitimos como `{ ... }` con stmts
-            // adentro indentados.
+            // Sp.2 — body is Vec<Stmt>. Typical case: 1 Stmt::Expr —
+            // we emit inline as an expression. Block case (>1 stmt or
+            // Stmt::Return/etc.): we emit as `{ ... }` with stmts
+            // inside indented.
             if arm.body.len() == 1 {
                 if let Stmt::Expr(e, _) = &arm.body[0] {
                     fmt_expr(ctx, e);
                 } else {
-                    // Stmt::Return/Break/Continue → emitir como stmt
-                    // pelado (sin llaves) para preservar la forma.
+                    // Stmt::Return/Break/Continue → emit as a bare stmt
+                    // (no braces) to preserve the form.
                     fmt_stmt(ctx, &arm.body[0]);
                 }
             } else {
@@ -1253,11 +1253,11 @@ fn fmt_pattern(ctx: &mut FmtCtx, pat: &Pattern) {
             ctx.write(&end.to_string());
         }
         Pattern::Or(subs) => {
-            // R.2.1 — or-pattern. Emitimos `p1 | p2 | p3` con espacios
-            // alrededor del separador. Cada sub-pattern se formatea
-            // con la misma fn (no hay or-patterns anidados en el AST
-            // real porque el parser aplana, pero esto los maneja
-            // bien si llegan).
+            // R.2.1 — or-pattern. We emit `p1 | p2 | p3` with spaces
+            // around the separator. Each sub-pattern is formatted
+            // with the same fn (no nested or-patterns in the real
+            // AST because the parser flattens them, but this handles
+            // them well if they arrive).
             for (i, sub) in subs.iter().enumerate() {
                 if i > 0 {
                     ctx.write(" | ");
@@ -1286,7 +1286,7 @@ fn fmt_fnexpr(ctx: &mut FmtCtx, params: &[Param], body: &[Stmt]) {
     let param_strs: Vec<String> = params.iter().map(fmt_param_to_string).collect();
     ctx.write(&param_strs.join(", "));
     ctx.write(")");
-    // Si el body es un único return, usar la sintaxis flecha.
+    // If the body is a single return, use the arrow syntax.
     if let [Stmt::Return(expr, _)] = body {
         ctx.write(" => ");
         let inline = expr_to_inline_string(expr);
@@ -1297,10 +1297,10 @@ fn fmt_fnexpr(ctx: &mut FmtCtx, params: &[Param], body: &[Stmt]) {
     }
 }
 
-// ---- Helpers de formato de literales ----
+// ---- Literal-format helpers ----
 
-/// Float literal con al menos un decimal (`1.0` no `1`) para
-/// distinguir visualmente de Int.
+/// Float literal with at least one decimal (`1.0`, not `1`) to
+/// visually distinguish from Int.
 fn format_float_literal(f: f64) -> String {
     let s = format!("{f}");
     if s.contains('.') || s.contains('e') || s.contains('E') {
@@ -1310,7 +1310,7 @@ fn format_float_literal(f: f64) -> String {
     }
 }
 
-/// Str literal con escaping mínimo (igual que en StrInterp).
+/// Str literal with minimal escaping (same as in StrInterp).
 fn format_str_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');
@@ -1331,7 +1331,7 @@ fn format_str_literal(s: &str) -> String {
 mod tests {
     use super::*;
 
-    /// Asserta que `format_source(input)` == `expected`.
+    /// Asserts that `format_source(input)` == `expected`.
     fn check(input: &str, expected: &str) {
         let actual = format_source(input).unwrap_or_else(|e| panic!("parse: {e}"));
         assert_eq!(
@@ -1340,7 +1340,7 @@ mod tests {
         );
     }
 
-    /// Asserta que `format_source` es idempotente sobre `input`.
+    /// Asserts that `format_source` is idempotent on `input`.
     fn check_idempotent(input: &str) {
         let once = format_source(input).unwrap_or_else(|e| panic!("parse(once): {e}"));
         let twice = format_source(&once).unwrap_or_else(|e| panic!("parse(twice): {e}"));
@@ -1362,7 +1362,7 @@ mod tests {
 
     #[test]
     fn formatea_assign_sin_let_preserva() {
-        // Si el source no tiene `let`, el formatter tampoco lo emite.
+        // If the source does not have `let`, the formatter does not emit it either.
         check("name = \"Patagonia\"\n", "name = \"Patagonia\"\n");
     }
 
@@ -1381,10 +1381,10 @@ mod tests {
 
     #[test]
     fn formatea_fn_def_arrow_se_normaliza_a_bloque() {
-        // La forma flecha (`=> expr`) el parser la convierte a
-        // `body: [Return(expr)]`. Como el AST no preserva la forma
-        // flecha vs bloque, el formatter siempre emite bloque.
-        // Deuda menor — refactor del AST si pinta como ergonomic.
+        // The parser converts the arrow form (`=> expr`) to
+        // `body: [Return(expr)]`. Since the AST does not preserve the
+        // arrow form vs block, the formatter always emits a block.
+        // Minor debt — AST refactor if it looks worthwhile.
         check(
             "fn add(a, b) => a + b\n",
             "fn add(a, b) {\n    return a + b\n}\n",
@@ -1527,7 +1527,7 @@ fn main() {
         );
     }
 
-    // ---- Fase 9.z.1.b — comment + blank line preservation ----
+    // ---- Phase 9.z.1.b — comment + blank line preservation ----
 
     #[test]
     fn preserva_comment_de_linea_antes_de_stmt() {
@@ -1551,7 +1551,7 @@ fn main() {
 
     #[test]
     fn normaliza_comment_sin_espacio_post_slash() {
-        // `//foo` se normaliza a `// foo`.
+        // `//foo` is normalized to `// foo`.
         check("//foo\nlet x = 1\n", "// foo\nlet x = 1\n");
     }
 
@@ -1595,8 +1595,8 @@ fn main() {
 
     #[test]
     fn preserva_smoke_de_02_hola_de_la_guia() {
-        // Replica el contenido de examples/guide/02-hola.fitz.
-        // El smoke a mano confirmó que el round-trip preserva todo.
+        // Replicates the contents of examples/guide/02-hola.fitz.
+        // The manual smoke confirmed that the round-trip preserves everything.
         let original = "// 02-hola.fitz — El primer programa de la guía.\n\
                        // Muestra: print, asignación sin tipo, interpolación de strings.\n\
                        \n\
@@ -1609,7 +1609,7 @@ fn main() {
 
     #[test]
     fn multiples_blanks_consecutivas_se_colapsan_a_una() {
-        // El user podría tener 3 blanks; el formatter colapsa a 1.
+        // The user could have 3 blanks; the formatter collapses to 1.
         check("let x = 1\n\n\n\nlet y = 2\n", "let x = 1\n\nlet y = 2\n");
     }
 

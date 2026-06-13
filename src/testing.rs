@@ -1,28 +1,28 @@
-// testing.rs — Fase 9.z.2 (testing built-in)
+// testing.rs — Phase 9.z.2 (built-in testing)
 //
-// Runtime de tests de Fitz. Mecánica análoga al `HttpRegistry`:
+// Fitz tests runtime. Mechanics analogous to `HttpRegistry`:
 //
-//   1. Durante `eval`, cuando se ve un `Stmt::FnDef` con un decorator
-//      `@test`, el evaluator empuja una `TestSpec` al `TestRegistry`
-//      activo via thread_local.
-//   2. El sub-comando `fitz test` (9.z.2.b) instala el registry vía
-//      `with_active_test_registry`, evalúa el archivo (lo que descubre
-//      los tests + carga los módulos), y al salir itera el registry
-//      invocando cada handler. `fitz run` NO instala registry — los
-//      decorators `@test` se vuelven no-op silencioso (paralelo a
-//      `#[cfg(test)]` de Rust).
+//   1. During `eval`, when a `Stmt::FnDef` is seen with a `@test`
+//      decorator, the evaluator pushes a `TestSpec` onto the
+//      `TestRegistry` active via thread_local.
+//   2. The `fitz test` sub-command (9.z.2.b) installs the registry via
+//      `with_active_test_registry`, evaluates the file (which discovers
+//      the tests + loads the modules), and on exit iterates the registry
+//      invoking each handler. `fitz run` does NOT install a registry — the
+//      `@test` decorators turn into silent no-ops (parallel to
+//      Rust's `#[cfg(test)]`).
 //
-// No hay paralelismo entre tests: el runner los corre serie en el
-// orden de descubrimiento. La paralelización es deuda menor si aparece
-// presión (los tests inline + en módulos suelen ser rápidos; el costo
-// real está en setup/teardown que no existe en el MVP).
+// There is no parallelism between tests: the runner runs them serially in the
+// order of discovery. Parallelization is minor debt if pressure
+// appears (inline tests + tests in modules tend to be fast; the real
+// cost is in setup/teardown, which does not exist in the MVP).
 //
-// Sub-pasos:
-//   - 9.z.2.a (este archivo + branch en `process_decorator` +
+// Sub-steps:
+//   - 9.z.2.a (this file + branch in `process_decorator` +
 //     assertion builtins): registry + decorator + builtins.
 //   - 9.z.2.b: CLI `fitz test` + discovery (lib/bin + `tests/*.fitz`)
-//     + runner con output estilo cargo + filtrado.
-//   - 9.z.2.c: cap en la guía + ejemplos + cierre formal.
+//     + runner with cargo-style output + filtering.
+//   - 9.z.2.c: chapter in the guide + examples + formal close.
 
 use std::cell::RefCell;
 
@@ -30,24 +30,24 @@ use crate::ast::Span;
 use crate::value::Value;
 
 // ---------------------------------------------------------------------------
-// Tipos base
+// Base types
 // ---------------------------------------------------------------------------
 
-/// Una fn marcada con `@test`. El `handler` es un `Value::Function`
-/// clonado del env del intérprete — el `closure: EnvRef` mantiene
-/// viva la env del módulo donde se declaró, igual que `RouteSpec`.
+/// A fn marked with `@test`. The `handler` is a `Value::Function`
+/// cloned from the interpreter's env — the `closure: EnvRef` keeps
+/// alive the env of the module where it was declared, same as `RouteSpec`.
 ///
-/// `is_async` se preserva del FnDef para que el runner pueda
-/// elegir entre invocar sync o await-ear el `Value::Future`
-/// resultante. `span` apunta al `@test` (no a la fn) — útil para
-/// reportes "test X declarado en línea:Y falló por ...".
+/// `is_async` is preserved from the FnDef so the runner can
+/// choose between invoking sync or awaiting the resulting
+/// `Value::Future`. `span` points to `@test` (not the fn) — useful for
+/// "test X declared at line:Y failed because ..." reports.
 ///
-/// `source_file` es `Some(path)` cuando el test se descubrió
-/// adentro de `with_test_source(path, ...)` (caso manifest mode
-/// del runner — etiqueta cada archivo cargado para que el output
-/// pueda prefijar el nombre del test con `<file>::<test>`). En
-/// single-file mode o cuando el evaluator se invoca desde un test
-/// unitario, `None`.
+/// `source_file` is `Some(path)` when the test was discovered
+/// inside `with_test_source(path, ...)` (manifest-mode case
+/// of the runner — tags each loaded file so the output can
+/// prefix the test name with `<file>::<test>`). In
+/// single-file mode or when the evaluator is invoked from a unit
+/// test, `None`.
 #[derive(Debug, Clone)]
 pub struct TestSpec {
     pub name: String,
@@ -57,10 +57,9 @@ pub struct TestSpec {
     pub source_file: Option<String>,
 }
 
-/// Colección de tests descubiertos durante la evaluación. Preserva
-/// el orden de declaración (insertion order) — el runner los corre
-/// en ese orden, que típicamente coincide con el orden de lectura
-/// del usuario.
+/// Collection of tests discovered during evaluation. Preserves
+/// declaration order (insertion order) — the runner runs them in
+/// that order, which typically matches the user's reading order.
 #[derive(Debug, Clone, Default)]
 pub struct TestRegistry {
     tests: Vec<TestSpec>,
@@ -75,8 +74,8 @@ impl TestRegistry {
         self.tests.push(spec);
     }
 
-    /// Vista inmutable de los tests registrados, en orden de
-    /// descubrimiento. El runner los itera con esto.
+    /// Immutable view of registered tests, in discovery order.
+    /// The runner iterates them with this.
     pub fn tests(&self) -> &[TestSpec] {
         &self.tests
     }
@@ -91,29 +90,29 @@ impl TestRegistry {
 }
 
 // ---------------------------------------------------------------------------
-// Thread-local registry — mismo patrón que `http::HTTP_REGISTRY`.
+// Thread-local registry — same pattern as `http::HTTP_REGISTRY`.
 // ---------------------------------------------------------------------------
 
 thread_local! {
     static TEST_REGISTRY: RefCell<Option<TestRegistry>> = const { RefCell::new(None) };
 
-    /// File source actual del que se están descubriendo tests. El
-    /// runner (`fitz test`) setea esto vía `with_test_source` antes
-    /// de evaluar cada archivo del proyecto; `register_test` lo lee
-    /// para etiquetar el `TestSpec`. `None` significa "no etiquetar"
-    /// (single-file mode o llamada desde tests unitarios).
+    /// Current source file from which tests are being discovered. The
+    /// runner (`fitz test`) sets this via `with_test_source` before
+    /// evaluating each project file; `register_test` reads it
+    /// to label the `TestSpec`. `None` means "do not label"
+    /// (single-file mode or call from unit tests).
     static CURRENT_TEST_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// Instala un registry vacío para el thread actual durante la
-/// duración del closure. Al terminar lo devuelve. Pensado para el
-/// sub-comando `fitz test` (9.z.2.b): instalar registry, evaluar
-/// los archivos del proyecto (lib/bin + tests/), recibir el
-/// registry poblado y correr el runner.
+/// Installs an empty registry for the current thread for the
+/// duration of the closure. Returns it when finished. Designed for the
+/// `fitz test` sub-command (9.z.2.b): install registry, evaluate
+/// the project files (lib/bin + tests/), receive the
+/// populated registry, and run the runner.
 ///
-/// Si `f()` retorna `Err` o paniquea, el registry previo se
-/// restaura igual (semántica del `with_*` de `http.rs`).
-#[allow(dead_code)] // 9.z.2.a registra; 9.z.2.b instala desde el CLI
+/// If `f()` returns `Err` or panics, the previous registry is
+/// still restored (`with_*` semantics from `http.rs`).
+#[allow(dead_code)] // 9.z.2.a registers; 9.z.2.b installs from the CLI
 pub fn with_active_test_registry<F, T>(f: F) -> (T, TestRegistry)
 where
     F: FnOnce() -> T,
@@ -131,10 +130,10 @@ where
     })
 }
 
-/// Variante async de `with_active_test_registry`. Misma semántica
-/// pero acepta una closure que devuelve un `Future` — necesaria
-/// porque el evaluator es async desde Fase 6.4.
-#[allow(dead_code)] // 9.z.2.b consumirá esta API
+/// Async variant of `with_active_test_registry`. Same semantics
+/// but accepts a closure that returns a `Future` — needed
+/// because the evaluator is async since Phase 6.4.
+#[allow(dead_code)] // 9.z.2.b will consume this API
 pub async fn with_active_test_registry_async<F, Fut, T>(f: F) -> (T, TestRegistry)
 where
     F: FnOnce() -> Fut,
@@ -157,17 +156,17 @@ where
     (out, registry)
 }
 
-/// `true` si hay un registry de tests activo en el thread actual.
-/// El evaluator lo consulta antes de procesar un `@test`: si no hay,
-/// el decorator es no-op silencioso (paralelo a `#[cfg(test)]` Rust:
-/// `fitz run` ignora los `@test` sin instalar registry).
+/// `true` if there is an active test registry on the current thread.
+/// The evaluator checks this before processing a `@test`: if there is none,
+/// the decorator is a silent no-op (parallel to Rust's `#[cfg(test)]`:
+/// `fitz run` ignores `@test`s without installing a registry).
 pub fn has_active_test_registry() -> bool {
     TEST_REGISTRY.with(|cell| cell.borrow().is_some())
 }
 
-/// Empuja un test al registry activo. Llamarlo solo después de
-/// chequear `has_active_test_registry()` — si no hay registry,
-/// pánico (bug del evaluator).
+/// Pushes a test onto the active registry. Call it only after
+/// checking `has_active_test_registry()` — if there is no registry,
+/// panic (evaluator bug).
 pub fn push_test(spec: TestSpec) {
     TEST_REGISTRY.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -178,21 +177,20 @@ pub fn push_test(spec: TestSpec) {
     });
 }
 
-/// Devuelve el `source_file` actual seteado por
-/// `with_test_source`, o `None` si no estamos adentro de un scope
-/// de source tracking. El branch `@test` del evaluator lo lee al
-/// construir un `TestSpec`.
+/// Returns the current `source_file` set by
+/// `with_test_source`, or `None` if we are not inside a source
+/// tracking scope. The evaluator's `@test` branch reads it when
+/// building a `TestSpec`.
 pub fn current_test_source() -> Option<String> {
     CURRENT_TEST_SOURCE.with(|cell| cell.borrow().clone())
 }
 
-/// Instala el `source_file` actual para el thread durante la
-/// duración del closure. El runner (`fitz test`) usa esto antes
-/// de evaluar cada archivo del proyecto: los `TestSpec` que se
-/// pushen adentro quedan etiquetados con `path`. Anida limpio
-/// (restaura el previo al salir), pero no se espera anidación
-/// real en uso normal.
-#[allow(dead_code)] // 9.z.2.b consume esta API desde el CLI
+/// Installs the current `source_file` for the thread for the
+/// duration of the closure. The runner (`fitz test`) uses this before
+/// evaluating each project file: any `TestSpec`s pushed inside
+/// get labeled with `path`. Nests cleanly (restores the previous
+/// one on exit), but real nesting is not expected in normal use.
+#[allow(dead_code)] // 9.z.2.b consumes this API from the CLI
 pub fn with_test_source<F, T>(path: String, f: F) -> T
 where
     F: FnOnce() -> T,
@@ -207,9 +205,9 @@ where
     out
 }
 
-/// Variante async de `with_test_source`. Misma semántica + tolera
-/// awaits adentro de la closure (el evaluator es async desde 6.4).
-#[allow(dead_code)] // 9.z.2.b consume esta API desde el CLI
+/// Async variant of `with_test_source`. Same semantics + tolerates
+/// awaits inside the closure (the evaluator is async since 6.4).
+#[allow(dead_code)] // 9.z.2.b consumes this API from the CLI
 pub async fn with_test_source_async<F, Fut, T>(path: String, f: F) -> T
 where
     F: FnOnce() -> Fut,
@@ -226,7 +224,7 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Tests del registry
+// Registry tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -278,10 +276,10 @@ mod tests {
 
     #[test]
     fn has_active_registry_es_false_por_default() {
-        // Fuera de `with_active_test_registry`, el thread_local es None.
-        // No podemos asegurar el estado adentro de otros tests del
-        // mismo binary (corren en threads distintos), pero a falta de
-        // setup explícito en este test, debería ser false.
+        // Outside `with_active_test_registry`, the thread_local is None.
+        // We cannot guarantee the state inside other tests of the
+        // same binary (they run on different threads), but absent
+        // explicit setup in this test, it should be false.
         assert!(!has_active_test_registry());
     }
 
@@ -310,9 +308,9 @@ mod tests {
 
     #[test]
     fn with_active_test_registry_anidados_se_aislan() {
-        // Caso defensivo: si dos `with_active` se anidan, el del inner
-        // no contamina al outer. Mirror del comportamiento de
-        // `http::with_active_registry`.
+        // Defensive case: if two `with_active` nest, the inner one
+        // does not contaminate the outer one. Mirror of the
+        // `http::with_active_registry` behavior.
         let (_, outer) = with_active_test_registry(|| {
             push_test(TestSpec {
                 name: "outer".into(),
@@ -339,10 +337,10 @@ mod tests {
 
     #[test]
     fn with_test_source_etiqueta_los_specs() {
-        // 9.z.2.b: el runner usa `with_test_source` para etiquetar
-        // los tests con el archivo del que vienen. Acá validamos el
-        // flujo: dentro del scope, `current_test_source` devuelve el
-        // path; al salir vuelve a None.
+        // 9.z.2.b: the runner uses `with_test_source` to label
+        // tests with the file they come from. Here we validate the
+        // flow: inside the scope, `current_test_source` returns the
+        // path; on exit it goes back to None.
         assert!(current_test_source().is_none());
 
         let result = with_test_source("tests/math.fitz".to_string(), || {
@@ -360,14 +358,14 @@ mod tests {
             with_test_source("inner.fitz".to_string(), || {
                 assert_eq!(current_test_source(), Some("inner.fitz".to_string()));
             });
-            // El outer se restaura tras el inner.
+            // The outer one is restored after the inner.
             assert_eq!(current_test_source(), Some("outer.fitz".to_string()));
         });
     }
 
     #[tokio::test]
     async fn with_active_test_registry_async_funciona() {
-        // Tokio test para validar la variante async.
+        // Tokio test to validate the async variant.
         let (out, reg) = with_active_test_registry_async(|| async {
             push_test(TestSpec {
                 name: "async_smoke".into(),
