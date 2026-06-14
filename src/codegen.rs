@@ -14179,7 +14179,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             BinOpKind::Mod => {
                 if !matches!(lt, Type::Int) || !matches!(rt, Type::Int) {
                     return Err(self.err_at(span, format!(
-                        "operador `%` requiere Int en ambos lados (recibió `{}` y `{}`)",
+                        "operator `%` requires Int on both sides (got `{}` and `{}`)",
                         type_name(&lt),
                         type_name(&rt)
                     )));
@@ -14271,7 +14271,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if let (Type::Nominal(id_l), Type::Nominal(id_r)) = (&lt, &rt) {
                     if id_l != id_r {
                         return Err(self.err(
-                            "igualdad entre instancias de tipos distintos: el checker debería haberlo cazado",
+                            "equality between instances of different types: the checker should have caught this",
                         ));
                     }
                     let code = if is_eq {
@@ -14463,7 +14463,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 call_span,
                                 format!(
-                                    "`flags.is_enabled(name)` espera 1 argumento (Str), recibió {}",
+                                    "`flags.is_enabled(name)` expects 1 argument (Str), got {}",
                                     args.len()
                                 ),
                             ));
@@ -14480,7 +14480,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 call_span,
                                 format!(
-                                    "`flags.list()` no acepta argumentos, recibió {}",
+                                    "`flags.list()` does not accept arguments, got {}",
                                     args.len()
                                 ),
                             ));
@@ -14510,7 +14510,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "el módulo `{}` no exporta una función llamada `{}`",
+                            "module `{}` does not export a function named `{}`",
                             ns, field
                         ),
                     ));
@@ -14521,7 +14521,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         let Expr::Ident(name, _) = callee else {
             return Err(self.err_at(
                 callee.span(),
-                "llamadas con callee complejo (FnExpr inline u otro Expr): no soportadas",
+                "calls with complex callee (inline FnExpr or other Expr): not supported",
             ));
         };
         // Phase 8.7.2: if the callee is a Python binding (ident with
@@ -14550,7 +14550,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if name == "print" {
             return Err(self.err_at(
                 call_span,
-                "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
+                "`print(...)` can only be used as a statement, not as an expression in 5b.1",
             ));
         }
         // Phase 9.w.3.c — `spawn(fn_call)` builtin dispatch. The target
@@ -14577,7 +14577,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`{}` espera 1 argumento, recibió {}", name, args.len()),
+                    format!("`{}` expects 1 argument, got {}", name, args.len()),
                 ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
@@ -14598,7 +14598,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`{}` espera 2 argumentos (n, bits), recibió {}",
+                        "`{}` expects 2 arguments (n, bits), got {}",
                         name,
                         args.len()
                     ),
@@ -14629,7 +14629,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`abs(x)` espera 1 argumento, recibió {}", args.len()),
+                    format!("`abs(x)` expects 1 argument, got {}", args.len()),
                 ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
@@ -14639,7 +14639,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 other => Err(self.err_at(
                     call_span,
                     format!(
-                        "`abs(x)` espera `Int` o `Float`, recibió `{}`",
+                        "`abs(x)` expects `Int` or `Float`, got `{}`",
                         display_type(&other, self.env)
                     ),
                 )),
@@ -14649,7 +14649,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 2 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`{}(a, b)` espera 2 args, recibió {}", name, args.len()),
+                    format!("`{}(a, b)` expects 2 args, got {}", name, args.len()),
                 ));
             }
             let (a_code, a_ty) = self.gen_expr(&args[0])?;
@@ -14671,7 +14671,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 (a, b) => Err(self.err_at(
                     call_span,
                     format!(
-                        "`{}(a, b)`: args deben ser ambos Int o ambos Float, recibió `{}` y `{}`",
+                        "`{}(a, b)`: args must be both Int or both Float, got `{}` and `{}`",
                         name,
                         display_type(a, self.env),
                         display_type(b, self.env)
@@ -14683,7 +14683,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 2 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`pow(base, exp)` espera 2 args, recibió {}", args.len()),
+                    format!("`pow(base, exp)` expects 2 args, got {}", args.len()),
                 ));
             }
             let (a_code, a_ty) = self.gen_expr(&args[0])?;
@@ -14695,7 +14695,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`pow(base, exp)`: base debe ser Int o Float, recibió `{}`",
+                            "`pow(base, exp)`: base must be Int or Float, got `{}`",
                             display_type(&other, self.env)
                         ),
                     ))
@@ -14708,7 +14708,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`pow(base, exp)`: exp debe ser Int o Float, recibió `{}`",
+                            "`pow(base, exp)`: exp must be Int or Float, got `{}`",
                             display_type(&other, self.env)
                         ),
                     ))
@@ -14720,7 +14720,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`sqrt(x)` espera 1 argumento, recibió {}", args.len()),
+                    format!("`sqrt(x)` expects 1 argument, got {}", args.len()),
                 ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
@@ -14731,7 +14731,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`sqrt(x)` espera `Int` o `Float`, recibió `{}`",
+                            "`sqrt(x)` expects `Int` or `Float`, got `{}`",
                             display_type(&other, self.env)
                         ),
                     ))
@@ -14743,7 +14743,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`{}(x)` espera 1 argumento, recibió {}", name, args.len()),
+                    format!("`{}(x)` expects 1 argument, got {}", name, args.len()),
                 ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
@@ -14753,7 +14753,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 other => Err(self.err_at(
                     call_span,
                     format!(
-                        "`{}(x)` espera `Float` o `Int`, recibió `{}`",
+                        "`{}(x)` expects `Float` or `Int`, got `{}`",
                         name,
                         display_type(&other, self.env)
                     ),
@@ -14764,7 +14764,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 3 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`clamp(x, lo, hi)` espera 3 args, recibió {}", args.len()),
+                    format!("`clamp(x, lo, hi)` expects 3 args, got {}", args.len()),
                 ));
             }
             let (x_code, x_ty) = self.gen_expr(&args[0])?;
@@ -14780,7 +14780,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::Float,
                 )),
                 (a, b, c) => Err(self.err_at(call_span, format!(
-                    "`clamp(x, lo, hi)`: los 3 args deben ser del mismo tipo Int o Float, recibió `{}`, `{}`, `{}`",
+                    "`clamp(x, lo, hi)`: all 3 args must be the same type Int or Float, got `{}`, `{}`, `{}`",
                     display_type(a, self.env),
                     display_type(b, self.env),
                     display_type(c, self.env),
@@ -14796,7 +14796,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if args.len() != 1 {
                 return Err(self.err_at(
                     call_span,
-                    format!("`env(key)` espera 1 argumento, recibió {}", args.len()),
+                    format!("`env(key)` expects 1 argument, got {}", args.len()),
                 ));
             }
             let (k_code, k_ty) = self.gen_expr(&args[0])?;
@@ -14814,7 +14814,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`env_or(key, default)` espera 2 argumentos, recibió {}",
+                        "`env_or(key, default)` expects 2 arguments, got {}",
                         args.len()
                     ),
                 ));
@@ -14833,7 +14833,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`load_env(path)` espera 1 argumento, recibió {}",
+                        "`load_env(path)` expects 1 argument, got {}",
                         args.len()
                     ),
                 ));
@@ -14856,7 +14856,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`secret(key)` espera 1 argumento (Str), recibió {}",
+                        "`secret(key)` expects 1 argument (Str), got {}",
                         args.len()
                     ),
                 ));
@@ -14881,7 +14881,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`config(key, default)` espera 2 argumentos (Str, T), recibió {}",
+                        "`config(key, default)` expects 2 arguments (Str, T), got {}",
                         args.len()
                     ),
                 ));
@@ -14912,7 +14912,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`config(key, default)` solo soporta defaults primitivos (Int/Float/Bool/Str), recibió `{}`",
+                            "`config(key, default)` only supports primitive defaults (Int/Float/Bool/Str), got `{}`",
                             display_type(other, self.env)
                         ),
                     ));
@@ -14929,7 +14929,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`flag(name)` espera 1 argumento (Str), recibió {}",
+                        "`flag(name)` expects 1 argument (Str), got {}",
                         args.len()
                     ),
                 ));
@@ -14950,7 +14950,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`sleep` espera 1 argumento (ms: Int), recibió {}",
+                        "`sleep` expects 1 argument (ms: Int), got {}",
                         args.len()
                     ),
                 ));
@@ -14974,7 +14974,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`ws_broadcast(endpoint: Str, msg)` espera 2 argumentos, recibió {}",
+                        "`ws_broadcast(endpoint: Str, msg)` expects 2 arguments, got {}",
                         args.len()
                     ),
                 ));
@@ -15020,7 +15020,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 other => Err(self.err_at(
                     arg_span,
                     format!(
-                        "`len(...)`: no aplica a `{}` — solo Str, Bytes, List<T> y Map<K, V>",
+                        "`len(...)`: does not apply to `{}` — only Str, Bytes, List<T> and Map<K, V>",
                         display_type(&other, self.env)
                     ),
                 )),
@@ -15036,7 +15036,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     arg_span,
                     format!(
-                        "`bytes(...)`: el argumento debe ser Str, recibió `{}`",
+                        "`bytes(...)`: argument must be Str, got `{}`",
                         display_type(&arg_ty, self.env)
                     ),
                 ));
@@ -15087,7 +15087,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .fn_sigs
             .get(name)
             .cloned()
-            .ok_or_else(|| self.err(format!("función `{}` desconocida en codegen", name)))?;
+            .ok_or_else(|| self.err(format!("unknown function `{}` in codegen", name)))?;
         self.gen_call_with_sig(name, &sig, args, call_span)
     }
 
@@ -15125,7 +15125,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "spawn: espera exactamente 1 argumento (un call a fn `@background`), recibió {}.",
+                    "spawn: expects exactly 1 argument (a call to a `@background` fn), got {}.",
                     args.len()
                 ),
             ));
@@ -15138,13 +15138,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         else {
             return Err(self.err_at(
                 call_span,
-                "spawn: el argumento debe ser un call literal a una fn `@background`.".to_string(),
+                "spawn: argument must be a literal call to a `@background` fn.".to_string(),
             ));
         };
         let Expr::Ident(target_name, _) = inner_callee.as_ref() else {
             return Err(self.err_at(
                 call_span,
-                "spawn: el callee del inner call debe ser una fn top-level con `@background`."
+                "spawn: callee of inner call must be a top-level fn with `@background`."
                     .to_string(),
             ));
         };
@@ -15154,7 +15154,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.err_at(
                 call_span,
                 format!(
-                    "spawn: la fn `{}` no está definida en este scope.",
+                    "spawn: fn `{}` is not defined in this scope.",
                     target_name
                 ),
             )
@@ -15164,7 +15164,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "spawn: la fn `{}` espera {} args, recibió {}.",
+                    "spawn: fn `{}` expects {} args, got {}.",
                     target_name,
                     sig.params.len(),
                     inner_args.len()
@@ -15261,7 +15261,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                    "`{}` no soporta argumentos nombrados (callee indirecto sin info de nombres)",
+                    "`{}` does not support named arguments (indirect callee without name info)",
                     callee_expr
                 ),
                 ));
@@ -15293,7 +15293,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             self.err_at(
                                 call_span,
                                 format!(
-                                    "`{}` no tiene un parámetro llamado `{}`",
+                                    "`{}` has no parameter named `{}`",
                                     callee_expr, name
                                 ),
                             )
@@ -15301,14 +15301,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     if slots[idx].is_some() {
                         return Err(self.err_at(
                             call_span,
-                            format!("`{}`: el argumento `{}` está duplicado", callee_expr, name),
+                            format!("`{}`: argument `{}` is duplicated", callee_expr, name),
                         ));
                     }
                     slots[idx] = Some((**value).clone());
                 } else {
                     if after_named {
                         return Err(self.err_at(call_span, format!(
-                            "`{}`: no se puede pasar un argumento posicional después de uno nombrado",
+                            "`{}`: cannot pass a positional argument after a named one",
                             callee_expr
                         )));
                     }
@@ -15316,7 +15316,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             call_span,
                             format!(
-                                "`{}` espera {} argumento(s), recibió más",
+                                "`{}` expects {} argument(s), got more",
                                 callee_expr,
                                 sig.param_names.len()
                             ),
@@ -15336,7 +15336,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             self.err_at(
                                 call_span,
                                 format!(
-                                    "`{}`: falta el argumento `{}` (no tiene default)",
+                                    "`{}`: missing argument `{}` (no default)",
                                     callee_expr, sig.param_names[i]
                                 ),
                             )
@@ -15363,21 +15363,21 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 call_span,
                 if sig.has_varargs {
                     format!(
-                        "`{}` espera al menos {} argumento(s), recibió {}",
+                        "`{}` expects at least {} argument(s), got {}",
                         callee_expr,
                         required,
                         args.len(),
                     )
                 } else if required == sig.params.len() {
                     format!(
-                        "`{}` espera {} argumento(s), recibió {}",
+                        "`{}` expects {} argument(s), got {}",
                         callee_expr,
                         sig.params.len(),
                         args.len(),
                     )
                 } else {
                     format!(
-                        "`{}` espera entre {} y {} argumento(s), recibió {}",
+                        "`{}` expects between {} and {} argument(s), got {}",
                         callee_expr,
                         required,
                         sig.params.len(),
@@ -15409,7 +15409,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     self.err_at(
                         call_span,
                         format!(
-                        "`{}`: el parámetro {} no tiene default y no fue provisto (bug interno)",
+                        "`{}`: parameter {} has no default and was not provided (internal bug)",
                         callee_expr, i + 1,
                     ),
                     )
@@ -15490,7 +15490,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`log.{}` requiere el primer arg posicional (msg: Str) + kwargs opcionales (k: v)",
+                    "`log.{}` requires the first positional arg (msg: Str) + optional kwargs (k: v)",
                     level
                 ),
             ));
@@ -15501,7 +15501,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 msg_arg.span(),
                 format!(
-                    "`log.{}` requiere el primer arg posicional (msg: Str), no kwarg",
+                    "`log.{}` requires the first positional arg (msg: Str), not kwarg",
                     level
                 ),
             ));
@@ -15512,7 +15512,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 msg_arg.span(),
                 format!(
-                    "`log.{}`: msg debe ser Str, recibió `{}`",
+                    "`log.{}`: msg must be Str, got `{}`",
                     level,
                     msg_ty.display(self.env)
                 ),
@@ -15530,7 +15530,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         arg.span(),
                         format!(
-                            "`log.{}` solo acepta 1 arg posicional (msg: Str); el resto deben ser kwargs (k: v)",
+                            "`log.{}` only accepts 1 positional arg (msg: Str); the rest must be kwargs (k: v)",
                             level
                         ),
                     ));
@@ -15547,7 +15547,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     key_span,
                     format!(
-                        "`log.{}`: el kwarg `{}` está reservado (el logger lo emite automáticamente)",
+                        "`log.{}`: kwarg `{}` is reserved (the logger emits it automatically)",
                         level, key
                     ),
                 ));
@@ -15555,7 +15555,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             if !seen_kwargs.insert(key.clone()) {
                 return Err(self.err_at(
                     key_span,
-                    format!("`log.{}`: el kwarg `{}` está duplicado", level, key),
+                    format!("`log.{}`: kwarg `{}` is duplicated", level, key),
                 ));
             }
             let (v_code, v_ty) = self.gen_expr(value_expr)?;
@@ -15663,7 +15663,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     ) -> Result<(String, Type), FitzError> {
         if args.len() < 2 || args.len() > 3 {
             return Err(self.err_at(call_span, format!(
-                "`jwt.encode` espera 2 o 3 argumentos (payload: Map<Str, Str>, secret: Str, alg: Str?), recibió {}",
+                "`jwt.encode` expects 2 or 3 arguments (payload: Map<Str, Str>, secret: Str, alg: Str?), got {}",
                 args.len()
             )));
         }
@@ -15707,7 +15707,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     ) -> Result<(String, Type), FitzError> {
         if args.len() < 2 || args.len() > 3 {
             return Err(self.err_at(call_span, format!(
-                "`jwt.decode` espera 2 o 3 argumentos (token: Str, secret: Str, alg: Str?), recibió {}",
+                "`jwt.decode` expects 2 or 3 arguments (token: Str, secret: Str, alg: Str?), got {}",
                 args.len()
             )));
         }
@@ -15740,7 +15740,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`hash.password` espera 1 argumento (plain: Str), recibió {}",
+                    "`hash.password` expects 1 argument (plain: Str), got {}",
                     args.len()
                 ),
             ));
@@ -15759,7 +15759,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`hash.verify` espera 2 argumentos (plain: Str, hashed: Str), recibió {}",
+                    "`hash.verify` expects 2 arguments (plain: Str, hashed: Str), got {}",
                     args.len()
                 ),
             ));
@@ -15789,7 +15789,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`auth.blacklist` espera 3 argumentos (db: DbConn, jti: Str, expires_at: Int), recibió {}",
+                    "`auth.blacklist` expects 3 arguments (db: DbConn, jti: Str, expires_at: Int), got {}",
                     args.len()
                 ),
             ));
@@ -15820,7 +15820,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`auth.is_blacklisted` espera 2 argumentos (db: DbConn, jti: Str), recibió {}",
+                    "`auth.is_blacklisted` expects 2 arguments (db: DbConn, jti: Str), got {}",
                     args.len()
                 ),
             ));
@@ -15849,7 +15849,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`auth.cleanup_expired` espera 1 argumento (db: DbConn), recibió {}",
+                    "`auth.cleanup_expired` expects 1 argument (db: DbConn), got {}",
                     args.len()
                 ),
             ));
@@ -16052,7 +16052,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             other => Err(self.err_at(
                 other.span(),
                 format!(
-                    "expresión no soportada en `.where(...)` MVP: {:?}",
+                    "expression not supported in `.where(...)` MVP: {:?}",
                     std::mem::discriminant(other)
                 ),
             )),
@@ -16090,7 +16090,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             *span,
                             format!(
-                                "method call en `.where(...)` solo admite la forma `{}.<field>.<método>(...)`",
+                                "method call in `.where(...)` only supports the form `{}.<field>.<method>(...)`",
                                 param_name
                             ),
                         ));
@@ -16100,7 +16100,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         *span,
                         format!(
-                            "method call en `.where(...)` solo admite la forma `{}.<field>.<método>(...)`",
+                            "method call in `.where(...)` only supports the form `{}.<field>.<method>(...)`",
                             param_name
                         ),
                     ));
@@ -16109,7 +16109,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             _ => {
                 return Err(self.err_at(
                     callee.span(),
-                    "expresión no soportada como callee en `.where(...)`",
+                    "expression not supported as callee in `.where(...)`",
                 ));
             }
         };
@@ -16160,7 +16160,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.is_in([...])` espera 1 arg (List literal)",
+                            "`{}.{}.is_in([...])` expects 1 arg (List literal)",
                             param_name, col_name
                         ),
                     ));
@@ -16170,7 +16170,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     _ => {
                         return Err(self.err_at(
                             args[0].span(),
-                            "`is_in` MVP: el arg debe ser una List literal `[a, b, c]`",
+                            "`is_in` MVP: arg must be a List literal `[a, b, c]`",
                         ));
                     }
                 };
@@ -16196,7 +16196,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.{}(pattern)` espera 1 arg",
+                            "`{}.{}.{}(pattern)` expects 1 arg",
                             param_name, col_name, method
                         ),
                     ));
@@ -16220,7 +16220,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.has(value)` requiere que `{}` sea `List<Int|Float|Str|Bool>`, no lo es",
+                            "`{}.{}.has(value)` requires `{}` to be `List<Int|Float|Str|Bool>`, but it is not",
                             param_name, col_name, col_name
                         ),
                     )
@@ -16229,7 +16229,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.has(value)` espera 1 arg (value), recibió {}",
+                            "`{}.{}.has(value)` expects 1 arg (value), got {}",
                             param_name,
                             col_name,
                             args.len()
@@ -16291,7 +16291,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         self.err_at(
                             callee_span,
                             format!(
-                                "`{}.{}.{}([...])` requiere que `{}` sea `List<Int|Float|Str|Bool>`",
+                                "`{}.{}.{}([...])` requires `{}` to be `List<Int|Float|Str|Bool>`",
                                 param_name, col_name, method, col_name
                             ),
                         )
@@ -16300,7 +16300,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.{}([...])` espera 1 arg (List literal del mismo tipo del array)",
+                            "`{}.{}.{}([...])` expects 1 arg (List literal of the same type as the array)",
                             param_name, col_name, method
                         ),
                     ));
@@ -16311,7 +16311,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             args[0].span(),
                             format!(
-                                "`.{}([...])` MVP: el arg debe ser List literal `[a, b, c]`",
+                                "`.{}([...])` MVP: arg must be List literal `[a, b, c]`",
                                 method
                             ),
                         ));
@@ -16333,7 +16333,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 it.span(),
                                 format!(
-                                    "`.{}([...])` MVP: cada item debe ser literal del tipo {} (igual al elem del array)",
+                                    "`.{}([...])` MVP: each item must be a literal of type {} (same as the array elem)",
                                     method, pg_variant
                                 ),
                             ));
@@ -16365,7 +16365,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.between(low, high)` espera 2 args (low, high), recibió {}",
+                            "`{}.{}.between(low, high)` expects 2 args (low, high), got {}",
                             param_name,
                             col_name,
                             args.len()
@@ -16385,7 +16385,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`{}.{}.{}(s)` espera 1 arg Str",
+                            "`{}.{}.{}(s)` expects 1 arg Str",
                             param_name, col_name, method
                         ),
                     ));
@@ -16462,7 +16462,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         callee_span,
                         format!(
-                            "`.{method}(...)` requiere que `{col_name}` sea `Map<Str, ...>` (columna jsonb), pero es de otro tipo"
+                            "`.{method}(...)` requires `{col_name}` to be `Map<Str, ...>` (jsonb column), but it is another type"
                         ),
                     ));
                 }
@@ -16485,7 +16485,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if args.len() != 1 {
                     return Err(self.err_at(
                         callee_span,
-                        format!("`.{method}(query)` espera 1 arg Str"),
+                        format!("`.{method}(query)` expects 1 arg Str"),
                     ));
                 }
                 let q = self.translate_closure_to_sql(
@@ -16534,7 +16534,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             "has_key" | "get" => {
                 if args.len() != 1 {
                     return Err(
-                        self.err_at(callee_span, format!("`.{method}(key)` espera 1 arg Str"))
+                        self.err_at(callee_span, format!("`.{method}(key)` expects 1 arg Str"))
                     );
                 }
                 let key_frag = self
@@ -16551,7 +16551,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if args.len() != 1 {
                     return Err(self.err_at(
                         callee_span,
-                        format!("`.{method}([keys...])` espera 1 arg (List literal Str)"),
+                        format!("`.{method}([keys...])` expects 1 arg (List literal Str)"),
                     ));
                 }
                 let items = match &args[0] {
@@ -16559,7 +16559,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     _ => {
                         return Err(self.err_at(
                             args[0].span(),
-                            format!("`.{method}([keys...])` MVP: el arg debe ser List literal"),
+                            format!("`.{method}([keys...])` MVP: arg must be List literal"),
                         ));
                     }
                 };
@@ -16581,7 +16581,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 it.span(),
                                 format!(
-                                    "`.{method}([keys...])` MVP: cada item debe ser string literal"
+                                    "`.{method}([keys...])` MVP: each item must be a string literal"
                                 ),
                             ));
                         }
@@ -16610,7 +16610,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if args.len() != 1 {
                     return Err(self.err_at(
                         callee_span,
-                        "`.contains_json(map)` espera 1 arg Map (subset jsonb)",
+                        "`.contains_json(map)` expects 1 arg Map (jsonb subset)",
                     ));
                 }
                 let map_items = match &args[0] {
@@ -16618,7 +16618,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     _ => {
                         return Err(self.err_at(
                             args[0].span(),
-                            "`.contains_json(map)` MVP: el arg debe ser Map literal `{k: v, ...}`",
+                            "`.contains_json(map)` MVP: arg must be Map literal `{k: v, ...}`",
                         ));
                     }
                 };
@@ -16632,7 +16632,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         _ => {
                             return Err(self.err_at(
                                 k_expr.span(),
-                                "`.contains_json(map)` MVP: cada key debe ser string literal",
+                                "`.contains_json(map)` MVP: each key must be a string literal",
                             ));
                         }
                     };
@@ -16648,7 +16648,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 v_expr.span(),
                                 format!(
-                                    "`.contains_json(map)` MVP: value para `{key}` debe ser literal primitivo"
+                                    "`.contains_json(map)` MVP: value for `{key}` must be a primitive literal"
                                 ),
                             ));
                         }
@@ -16678,7 +16678,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if args.len() != 1 {
                     return Err(self.err_at(
                         callee_span,
-                        format!("`.{method}([k1, k2, ...])` espera 1 arg (List literal Str)"),
+                        format!("`.{method}([k1, k2, ...])` expects 1 arg (List literal Str)"),
                     ));
                 }
                 let items = match &args[0] {
@@ -16686,7 +16686,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     _ => {
                         return Err(self.err_at(
                             args[0].span(),
-                            format!("`.{method}([k1, k2, ...])` MVP: el arg debe ser List literal"),
+                            format!("`.{method}([k1, k2, ...])` MVP: arg must be List literal"),
                         ));
                     }
                 };
@@ -16694,7 +16694,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         args[0].span(),
                         format!(
-                            "`.{method}([])` con path vacío no tiene semántica útil — usá `.is_not_null()` para chequear el field entero"
+                            "`.{method}([])` with empty path has no useful semantics — use `.is_not_null()` to check the whole field"
                         ),
                     ));
                 }
@@ -16706,7 +16706,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 it.span(),
                                 format!(
-                                    "`.{method}([k1, k2, ...])` MVP: cada key del path debe ser string literal"
+                                    "`.{method}([k1, k2, ...])` MVP: each key of the path must be a string literal"
                                 ),
                             ));
                         }
@@ -16757,7 +16757,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         field_span,
                         format!(
-                            "`db.connect` espera 1 argumento (url: Str), recibió {}",
+                            "`db.connect` expects 1 argument (url: Str), got {}",
                             args.len()
                         ),
                     ));
@@ -16774,7 +16774,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             other => Err(self.err_at(
                 field_span,
-                format!("el módulo `db` no tiene `{}` (soportado: connect)", other),
+                format!("module `db` has no `{}` (supported: connect)", other),
             )),
         }
     }
@@ -16795,7 +16795,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             self.err_at(
                 field_span,
                 format!(
-                    "`{}.{}` espera {} argumento(s), recibió {}",
+                    "`{}.{}` expects {} argument(s), got {}",
                     recv, field, expected, got
                 ),
             )
@@ -16992,7 +16992,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         if args.len() != 1 {
             return Err(self.err_at(
                 call_span,
-                format!("`{}(n)` espera 1 arg Int, recibió {}", method, args.len()),
+                format!("`{}(n)` expects 1 arg Int, got {}", method, args.len()),
             ));
         }
         let (n_code, n_ty) = self.gen_expr(&args[0])?;
@@ -17011,7 +17011,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}(other)` espera 1 arg Date, recibió {}",
+                    "`{}(other)` expects 1 arg Date, got {}",
                     method,
                     args.len()
                 ),
@@ -17022,7 +17022,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`Date.{}(other)` espera `Date`, recibió `{}`",
+                    "`Date.{}(other)` expects `Date`, got `{}`",
                     method,
                     type_name(&ty)
                 ),
@@ -17042,7 +17042,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}(other)` espera 1 arg DateTime, recibió {}",
+                    "`{}(other)` expects 1 arg DateTime, got {}",
                     method,
                     args.len()
                 ),
@@ -17053,7 +17053,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`DateTime.{}(other)` espera `DateTime`, recibió `{}`",
+                    "`DateTime.{}(other)` expects `DateTime`, got `{}`",
                     method,
                     type_name(&ty)
                 ),
@@ -17088,7 +17088,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`DbConn.{}` espera 2 argumentos (sql: Str, args: List), recibió {}",
+                            "`DbConn.{}` expects 2 arguments (sql: Str, args: List), got {}",
                             method,
                             args.len()
                         ),
@@ -17187,7 +17187,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`DbConn.transaction` espera 1 argumento (fn callback), recibió {}",
+                            "`DbConn.transaction` expects 1 argument (fn callback), got {}",
                             args.len()
                         ),
                     ));
@@ -17200,7 +17200,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                     args[0].span(),
                                     format!(
-                                        "`DbConn.transaction`: la fn `{}` no está declarada o no tiene signature visible",
+                                        "`DbConn.transaction`: fn `{}` is not declared or has no visible signature",
                                         fn_name
                                     ),
                                 ));
@@ -17210,7 +17210,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             args[0].span(),
                             format!(
-                                "`DbConn.transaction`: el callback debe tomar 1 param (tx: DbConn), `{}` toma {}",
+                                "`DbConn.transaction`: callback must take 1 param (tx: DbConn), `{}` takes {}",
                                 fn_name, sig_params.len()
                             ),
                         ));
@@ -17219,7 +17219,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             args[0].span(),
                             format!(
-                                "`DbConn.transaction`: el callback debe recibir `DbConn` como param, `{}` recibe `{}`",
+                                "`DbConn.transaction`: callback must receive `DbConn` as param, `{}` receives `{}`",
                                 fn_name,
                                 display_type(&sig_params[0], self.env),
                             ),
@@ -17235,7 +17235,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 args[0].span(),
                                 format!(
-                                    "`DbConn.transaction`: el callback `{}` debe retornar `Result<T, _>` (o `Future<Result<T, _>>` si es async); retorna `{}`",
+                                    "`DbConn.transaction`: callback `{}` must return `Result<T, _>` (or `Future<Result<T, _>>` if async); returns `{}`",
                                     fn_name,
                                     display_type(&sig_ret, self.env),
                                 ),
@@ -17266,7 +17266,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             args[0].span(),
                             format!(
-                                "`DbConn.transaction`: el callback inline debe tomar 1 param (tx), recibió {}",
+                                "`DbConn.transaction`: inline callback must take 1 param (tx), got {}",
                                 params.len()
                             ),
                         ));
@@ -17297,7 +17297,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 args[0].span(),
                                 format!(
-                                    "`DbConn.transaction`: el callback inline debe retornar `Result<T, _>` (o `Future<Result<T, _>>` si async); infirió `{}`",
+                                    "`DbConn.transaction`: inline callback must return `Result<T, _>` (or `Future<Result<T, _>>` if async); inferred `{}`",
                                     display_type(&inferred, self.env),
                                 ),
                             ));
@@ -17504,7 +17504,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`<{}>.<rel>(db?)` espera 0 args (QueryBuilder chain) o 1 arg (db, terminal directo), recibió {}",
+                    "`<{}>.<rel>(db?)` expects 0 args (QueryBuilder chain) or 1 arg (db, direct terminal), got {}",
                     this_type_name,
                     args.len()
                 ),
@@ -17580,7 +17580,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 self.err_at(
                     call_span,
                     format!(
-                        "navigation: el type `{}` no tiene el field `{}` (esperado para extraer el FK)",
+                        "navigation: type `{}` has no field `{}` (expected to extract the FK)",
                         this_type_name, value_field_name
                     ),
                 )
@@ -17713,7 +17713,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .ok_or_else(|| {
                 self.err_at(
                     call_span,
-                    format!("type `{}` no tiene `@table` metadata", type_name),
+                    format!("type `{}` has no `@table` metadata", type_name),
                 )
             })?
             .clone();
@@ -17770,7 +17770,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.all(db)` espera 1 argumento (db: DbConn), recibió {}",
+                    "`{}.all(db)` expects 1 argument (db: DbConn), got {}",
                     type_name,
                     args.len()
                 ),
@@ -17827,7 +17827,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.first(db)` espera 1 argumento (db: DbConn), recibió {}",
+                    "`{}.first(db)` expects 1 argument (db: DbConn), got {}",
                     type_name,
                     args.len()
                 ),
@@ -17878,7 +17878,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.count(db)` espera 1 argumento (db: DbConn), recibió {}",
+                    "`{}.count(db)` expects 1 argument (db: DbConn), got {}",
                     type_name,
                     args.len()
                 ),
@@ -17941,7 +17941,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.insert(db, record)` espera 2 argumentos (db, record), recibió {}",
+                    "`{}.insert(db, record)` expects 2 arguments (db, record), got {}",
                     type_name,
                     args.len()
                 ),
@@ -18198,7 +18198,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.bulk_insert(rows, db)` o `{}.bulk_insert(rows, db, batch_size)` espera 2 o 3 args, recibió {}",
+                    "`{}.bulk_insert(rows, db)` or `{}.bulk_insert(rows, db, batch_size)` expects 2 or 3 args, got {}",
                     type_name, type_name, args.len()
                 ),
             ));
@@ -18533,7 +18533,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`{}.preload(name)` espera 1 argumento (Str), recibió {}",
+                    "`{}.preload(name)` expects 1 argument (Str), got {}",
                     type_name,
                     args.len()
                 ),
@@ -18544,7 +18544,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             _ => {
                 return Err(self.err_at(
                     args[0].span(),
-                    "`.preload(name)` MVP: el arg debe ser string literal",
+                    "`.preload(name)` MVP: arg must be a string literal",
                 ));
             }
         };
@@ -18602,7 +18602,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "QueryBuilder sobre tipo `{}` no soportado (esperaba un type con `@table`)",
+                        "QueryBuilder over type `{}` not supported (expected a type with `@table`)",
                         other.display(self.env)
                     ),
                 ));
@@ -18615,7 +18615,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             .ok_or_else(|| {
                 self.err_at(
                     call_span,
-                    format!("type `{}` no tiene `@table` metadata", type_name),
+                    format!("type `{}` has no `@table` metadata", type_name),
                 )
             })?
             .clone();
@@ -18697,14 +18697,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if is_aggregated {
                     return Err(self.err_at(
                         call_span,
-                        "`.preload(...)` no es válido sobre un GROUP BY (Aggregated)".to_string(),
+                        "`.preload(...)` is not valid over a GROUP BY (Aggregated)".to_string(),
                     ));
                 }
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.preload(name)` espera 1 arg (nombre de relation @has_many), recibió {}",
+                            "`.preload(name)` expects 1 arg (name of @has_many relation), got {}",
                             args.len()
                         ),
                     ));
@@ -18714,7 +18714,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     _ => {
                         return Err(self.err_at(
                             args[0].span(),
-                            "`.preload(name)` MVP: el arg debe ser string literal",
+                            "`.preload(name)` MVP: arg must be a string literal",
                         ));
                     }
                 };
@@ -18764,13 +18764,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if is_aggregated {
                     return Err(self.err_at(
                         call_span,
-                        "`.all(db)` no es válido sobre un GROUP BY (Aggregated); usá un aggregate (count/sum/avg/min/max) para colapsar los grupos".to_string(),
+                        "`.all(db)` is not valid over a GROUP BY (Aggregated); use an aggregate (count/sum/avg/min/max) to collapse the groups".to_string(),
                     ));
                 }
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
-                        format!("`.all(db)` espera 1 argumento (db), recibió {}", args.len()),
+                        format!("`.all(db)` expects 1 argument (db), got {}", args.len()),
                     ));
                 }
                 let (db_code, _) = self.gen_expr(&args[0])?;
@@ -18811,14 +18811,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if is_aggregated {
                     return Err(self.err_at(
                         call_span,
-                        "`.first(db)` no es válido sobre un GROUP BY (Aggregated)".to_string(),
+                        "`.first(db)` is not valid over a GROUP BY (Aggregated)".to_string(),
                     ));
                 }
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.first(db)` espera 1 argumento (db), recibió {}",
+                            "`.first(db)` expects 1 argument (db), got {}",
                             args.len()
                         ),
                     ));
@@ -18866,7 +18866,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.count(db)` espera 1 argumento (db), recibió {}",
+                            "`.count(db)` expects 1 argument (db), got {}",
                             args.len()
                         ),
                     ));
@@ -18906,7 +18906,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if is_aggregated {
                     return Err(self.err_at(
                         call_span,
-                        "`.update(db, ...)` no es válido sobre un GROUP BY (Aggregated)"
+                        "`.update(db, ...)` is not valid over a GROUP BY (Aggregated)"
                             .to_string(),
                     ));
                 }
@@ -18914,7 +18914,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.update(db, changes)` espera 2 argumentos, recibió {}",
+                            "`.update(db, changes)` expects 2 arguments, got {}",
                             args.len()
                         ),
                     ));
@@ -18960,14 +18960,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if is_aggregated {
                     return Err(self.err_at(
                         call_span,
-                        "`.delete(db)` no es válido sobre un GROUP BY (Aggregated)".to_string(),
+                        "`.delete(db)` is not valid over a GROUP BY (Aggregated)".to_string(),
                     ));
                 }
                 if args.len() != 1 {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.delete(db)` espera 1 argumento (db), recibió {}",
+                            "`.delete(db)` expects 1 argument (db), got {}",
                             args.len()
                         ),
                     ));
@@ -18991,7 +18991,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if is_aggregated {
                     return Err(self.err_at(
                         call_span,
-                        "`.merge_jsonb(db, field, patch)` no es válido sobre un GROUP BY (Aggregated)"
+                        "`.merge_jsonb(db, field, patch)` is not valid over a GROUP BY (Aggregated)"
                             .to_string(),
                     ));
                 }
@@ -18999,7 +18999,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.merge_jsonb(db, field, patch)` espera 3 args, recibió {}",
+                            "`.merge_jsonb(db, field, patch)` expects 3 args, got {}",
                             args.len()
                         ),
                     ));
@@ -19010,7 +19010,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     _ => {
                         return Err(self.err_at(
                             call_span,
-                            "`.merge_jsonb(db, field, patch)`: el field name debe ser Str literal en MVP",
+                            "`.merge_jsonb(db, field, patch)`: field name must be a Str literal in MVP",
                         ));
                     }
                 };
@@ -19031,7 +19031,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.merge_jsonb`: field `{}` no es jsonb (tipo Fitz `Map<...>`)",
+                            "`.merge_jsonb`: field `{}` is not jsonb (Fitz type `Map<...>`)",
                             field_name
                         ),
                     ));
@@ -19044,7 +19044,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.merge_jsonb`: patch debe ser Map, recibió `{}`",
+                            "`.merge_jsonb`: patch must be Map, got `{}`",
                             crate::codegen::type_name(&patch_ty)
                         ),
                     ));
@@ -19093,7 +19093,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.{}(closure, db)` espera 2 argumentos, recibió {}",
+                            "`.{}(closure, db)` expects 2 arguments, got {}",
                             method,
                             args.len()
                         ),
@@ -19118,7 +19118,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 call_span,
                                 format!(
-                                    "`.{}(closure)` solo admite `{}.field`",
+                                    "`.{}(closure)` only supports `{}.field`",
                                     method, param_name
                                 ),
                             ));
@@ -19128,7 +19128,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             call_span,
                             format!(
-                                "`.{}(closure)`: el body debe ser `{}.field`",
+                                "`.{}(closure)`: body must be `{}.field`",
                                 method, param_name
                             ),
                         ));
@@ -19203,7 +19203,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         *span,
                         format!(
-                            "`.{}(closure)` espera una closure con 1 parámetro, recibió {}",
+                            "`.{}(closure)` expects a closure with 1 parameter, got {}",
                             method,
                             params.len()
                         ),
@@ -19217,7 +19217,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             *span,
                             format!(
-                                "`.{}(closure)` MVP: el body del closure debe ser una sola expresión",
+                                "`.{}(closure)` MVP: closure body must be a single expression",
                                 method
                             ),
                         ));
@@ -19228,7 +19228,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             other => Err(self.err_at(
                 other.span(),
                 format!(
-                    "`.{}(closure)` espera una closure literal (fn(<param>) => <expr>)",
+                    "`.{}(closure)` expects a literal closure (fn(<param>) => <expr>)",
                     method
                 ),
             )),
@@ -19247,7 +19247,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`.where(closure)` espera 1 argumento (closure), recibió {}",
+                    "`.where(closure)` expects 1 argument (closure), got {}",
                     args.len()
                 ),
             ));
@@ -19295,7 +19295,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`.order_by(closure)` espera 1 argumento, recibió {}",
+                    "`.order_by(closure)` expects 1 argument, got {}",
                     args.len()
                 ),
             ));
@@ -19340,7 +19340,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                     return Err(self.err_at(
                                         call_span,
                                         format!(
-                                            "`{}.{}.{}(q)` espera 1 arg Str",
+                                            "`{}.{}.{}(q)` expects 1 arg Str",
                                             param_name, col, method
                                         ),
                                     ));
@@ -19359,7 +19359,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                     _ => {
                                         return Err(self.err_at(
                                             call_span,
-                                            format!("`.{method}(q)` en order_by espera Str literal (MVP)"),
+                                            format!("`.{method}(q)` in order_by expects Str literal (MVP)"),
                                         ));
                                     }
                                 };
@@ -19405,7 +19405,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`.order_by(closure)` solo admite `{}.field` (opcionalmente con `-`)",
+                            "`.order_by(closure)` only supports `{}.field` (optionally with `-`)",
                             param_name
                         ),
                     ));
@@ -19414,7 +19414,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             _ => {
                 return Err(self.err_at(
                     call_span,
-                    "`.order_by(closure)`: el body debe ser `u.field` o `-u.field` (o `u.field.rank(\"q\")` para full-text — v0.10.32)",
+                    "`.order_by(closure)`: body must be `u.field` or `-u.field` (or `u.field.rank(\"q\")` for full-text — v0.10.32)",
                 ));
             }
         };
@@ -19442,7 +19442,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`.limit(n)` espera 1 argumento (Int), recibió {}",
+                    "`.limit(n)` expects 1 argument (Int), got {}",
                     args.len()
                 ),
             ));
@@ -19466,7 +19466,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`.offset(n)` espera 1 argumento (Int), recibió {}",
+                    "`.offset(n)` expects 1 argument (Int), got {}",
                     args.len()
                 ),
             ));
@@ -19492,7 +19492,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 call_span,
                 format!(
-                    "`.group_by(closure)` espera 1 argumento, recibió {}",
+                    "`.group_by(closure)` expects 1 argument, got {}",
                     args.len()
                 ),
             ));
@@ -19512,14 +19512,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 _ => {
                     return Err(self.err_at(
                         call_span,
-                        format!("`.group_by(closure)` solo admite `{}.field`", param_name),
+                        format!("`.group_by(closure)` only supports `{}.field`", param_name),
                     ));
                 }
             },
             _ => {
                 return Err(self.err_at(
                     call_span,
-                    "`.group_by(closure)`: el body debe ser `u.field`",
+                    "`.group_by(closure)`: body must be `u.field`",
                 ));
             }
         };
@@ -19779,7 +19779,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         changes_arg.span(),
                         format!(
-                            "`.update(db, changes)`: el segundo arg debe ser un Map literal `{{\"col\": v, ...}}` o una var `Map<Str, Any>`, recibió `{}`",
+                            "`.update(db, changes)`: second arg must be a Map literal `{{\"col\": v, ...}}` or a `Map<Str, Any>` var, got `{}`",
                             changes_ty.display(self.env),
                         ),
                     ));
@@ -19805,7 +19805,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 _ => {
                     return Err(self.err_at(
                         key_expr.span(),
-                        "`.update`: las keys del Map deben ser strings literales",
+                        "`.update`: Map keys must be string literals",
                     ));
                 }
             };
@@ -19866,7 +19866,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             value_expr.span(),
                             format!(
-                                "`.update`: field `{}` es array (`List<{}>`); el value debe ser List literal `[a, b, ...]`",
+                                "`.update`: field `{}` is array (`List<{}>`); value must be List literal `[a, b, ...]`",
                                 key_str, pg_variant
                             ),
                         ));
@@ -20069,7 +20069,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                                 f = f.name,
                             ),
                             _ => return Err(self.err(format!(
-                                "`.update(db, Map var)` con field `{}: {}` no soportado todavía — usá Map literal o convertí a tipo escalar",
+                                "`.update(db, Map var)` with field `{}: {}` not supported yet — use Map literal or convert to a scalar type",
                                 f.name,
                                 f.type_.display(self.env),
                             ))),
@@ -20077,7 +20077,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }
                     other => {
                         return Err(self.err(format!(
-                            "`.update(db, Map var)` con field `{}: {}` no soportado todavía — usá Map literal",
+                            "`.update(db, Map var)` with field `{}: {}` not supported yet — use Map literal",
                             f.name,
                             other.display(self.env),
                         )));
@@ -20176,7 +20176,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                             return Err(self.err_at(
                                 call_span,
                                 format!(
-                                    "`WsConn.{}(msg)` espera 1 arg, recibió {}",
+                                    "`WsConn.{}(msg)` expects 1 arg, got {}",
                                     method,
                                     args.len()
                                 ),
@@ -20206,7 +20206,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }
                     _ => {
                         return Err(self.err_at(call_span, format!(
-                            "`WsConn<T>` no tiene método `{}` (soportados: recv, send, broadcast, close)",
+                            "`WsConn<T>` has no method `{}` (supported: recv, send, broadcast, close)",
                             method,
                         )));
                     }
@@ -20229,7 +20229,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             call_span,
                             format!(
-                                "`DbRow.{}(name)` espera 1 arg Str, recibió {}",
+                                "`DbRow.{}(name)` expects 1 arg Str, got {}",
                                 method,
                                 args.len()
                             ),
@@ -20281,7 +20281,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`DbRow` no tiene método `{}` (soportados: get_int, get_str, get_float, get_bool, len)",
+                            "`DbRow` has no method `{}` (supported: get_int, get_str, get_float, get_bool, len)",
                             method
                         ),
                     ));
@@ -20352,7 +20352,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             call_span,
                             format!(
-                                "`Date.format(fmt)` espera 1 arg Str, recibió {}",
+                                "`Date.format(fmt)` expects 1 arg Str, got {}",
                                 args.len()
                             ),
                         ));
@@ -20435,7 +20435,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`Date` no tiene método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
+                            "`Date` has no method `{}` (supported: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
                             method
                         ),
                     ));
@@ -20511,7 +20511,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             call_span,
                             format!(
-                                "`DateTime.format(fmt)` espera 1 arg Str, recibió {}",
+                                "`DateTime.format(fmt)` expects 1 arg Str, got {}",
                                 args.len()
                             ),
                         ));
@@ -20655,7 +20655,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             call_span,
                             format!(
-                                "`DateTime.in_tz(name)` espera 1 arg Str, recibió {}",
+                                "`DateTime.in_tz(name)` expects 1 arg Str, got {}",
                                 args.len()
                             ),
                         ));
@@ -20683,7 +20683,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`DateTime` no tiene método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
+                            "`DateTime` has no method `{}` (supported: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
                             method
                         ),
                     ));
@@ -20701,7 +20701,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             call_span,
                             format!(
-                                "Secret.expose() no admite argumentos, recibió {}",
+                                "Secret.expose() does not accept arguments, got {}",
                                 args.len()
                             ),
                         ));
@@ -20712,7 +20712,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`Secret<{}>` no tiene método `{}` (único soportado: `.expose()`)",
+                            "`Secret<{}>` has no method `{}` (only supported: `.expose()`)",
                             display_type(&inner, self.env),
                             other
                         ),
@@ -20740,7 +20740,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         call_span,
                         format!(
-                            "`Uuid` no tiene método `{}` (soportados: to_str, is_nil)",
+                            "`Uuid` has no method `{}` (supported: to_str, is_nil)",
                             method
                         ),
                     ));
@@ -20778,7 +20778,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 if let Some(m) = methods.iter().find(|md| md.name == method).cloned() {
                     if !m.is_static {
                         return Err(self.err_at(call_span, format!(
-                            "`{}.{}()` es método de instancia; invocá como `<instancia>.{}(...)`, no como `{}.{}(...)`",
+                            "`{}.{}()` is an instance method; call as `<instance>.{}(...)`, not as `{}.{}(...)`",
                             name, method, method, name, method,
                         )));
                     }
@@ -21336,7 +21336,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Ok((code, Type::Str))
             }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty/repeat_with/left/right/center/swap_case/title/is_alpha/is_digit/is_numeric)",
+                "Str has no method `{}` in the compiled subset (today: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty/repeat_with/left/right/center/swap_case/title/is_alpha/is_digit/is_numeric)",
                 other
             ))),
 
@@ -21381,7 +21381,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::List(inner) => (**inner).clone(),
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`zip` espera `List<U>`, recibió `{}`",
+                            "`zip` expects `List<U>`, got `{}`",
                             display_type(other, self.env)
                         )));
                     }
@@ -21403,7 +21403,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::List(inner) if lub(t, inner).is_ok() => {}
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`chain` espera `List<{}>`, recibió `{}`",
+                            "`chain` expects `List<{}>`, got `{}`",
                             display_type(t, self.env),
                             display_type(other, self.env)
                         )));
@@ -21424,7 +21424,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::List(inner) => inner.clone(),
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.flatten()` requiere `List<List<U>>`, el receptor es `List<{}>`",
+                            "`.flatten()` requires `List<List<U>>`, receiver is `List<{}>`",
                             display_type(other, self.env)
                         )));
                     }
@@ -21541,7 +21541,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::List(u) => (**u).clone(),
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.flat_map()`: el callback debe retornar `List<U>`, retorna `{}`",
+                            "`.flat_map()`: callback must return `List<U>`, returns `{}`",
                             display_type(other, self.env)
                         )));
                     }
@@ -21632,7 +21632,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                            "`.{}()` only applies to `List<Int>` or `List<Float>`, got `List<{}>`",
                             method, display_type(other, self.env)
                         )));
                     }
@@ -21647,7 +21647,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::Int | Type::Float => rust_type_for(t, self.env)?,
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.sum()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                            "`.sum()` only applies to `List<Int>` or `List<Float>`, got `List<{}>`",
                             display_type(other, self.env)
                         )));
                     }
@@ -21665,7 +21665,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::Int | Type::Float => rust_type_for(t, self.env)?,
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.product()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                            "`.product()` only applies to `List<Int>` or `List<Float>`, got `List<{}>`",
                             display_type(other, self.env)
                         )));
                     }
@@ -21757,7 +21757,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     }
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.to_map()` requiere `List<(K, V)>` (Tuple aridad 2), recibió `List<{}>`",
+                            "`.to_map()` requires `List<(K, V)>` (Tuple arity 2), got `List<{}>`",
                             display_type(other, self.env)
                         )));
                     }
@@ -21816,7 +21816,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::List(inner) => (**inner).clone(),
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.zip_with()` espera `List<U>` como primer arg, recibió `{}`",
+                            "`.zip_with()` expects `List<U>` as first arg, got `{}`",
                             display_type(other, self.env)
                         )));
                     }
@@ -21984,7 +21984,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::List(_) => {}
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.{}()` espera una `List`, recibió `{}`",
+                            "`.{}()` expects a `List`, got `{}`",
                             method,
                             display_type(other, self.env)
                         )));
@@ -22055,7 +22055,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::List(inner) => (**inner).clone(),
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.zip_to_map()` espera `List<V>`, recibió `{}`",
+                            "`.zip_to_map()` expects `List<V>`, got `{}`",
                             display_type(other, self.env)
                         )));
                     }
@@ -22163,7 +22163,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Ok((code, Type::List(Box::new((**t).clone()))))
             }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows/take/drop/init/tail/intersperse/cycle/starts_with/ends_with/insert_at/remove_at/zip_to_map/split_at)",
+                "List has no method `{}` in the compiled subset (today: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows/take/drop/init/tail/intersperse/cycle/starts_with/ends_with/insert_at/remove_at/zip_to_map/split_at)",
                 other
             ))),
 
@@ -22260,7 +22260,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Type::Float => "__keys.sort_by(|__a, __b| __a.partial_cmp(__b).unwrap_or(std::cmp::Ordering::Equal));".to_string(),
                     other => {
                         return Err(self.err_at(call_span, format!(
-                            "`.keys_sorted()` solo soporta keys `Int`/`Float`/`Str`/`Bool`, recibió `Map<{}, _>`",
+                            "`.keys_sorted()` only supports `Int`/`Float`/`Str`/`Bool` keys, got `Map<{}, _>`",
                             display_type(other, self.env)
                         )));
                     }
@@ -22284,7 +22284,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (other_code, other_ty) = self.gen_expr(&args[0])?;
                 if !matches!(&other_ty, Type::Map(_, _) | Type::Any) {
                     return Err(self.err_at(call_span, format!(
-                        "`.merge_with()` espera otro `Map`, recibió `{}`",
+                        "`.merge_with()` expects another `Map`, got `{}`",
                         display_type(&other_ty, self.env)
                     )));
                 }
@@ -22317,7 +22317,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 let (other_code, other_ty) = self.gen_expr(&args[0])?;
                 if !matches!(&other_ty, Type::Map(_, _) | Type::Any) {
                     return Err(self.err_at(call_span, format!(
-                        "`.merge()` espera otro `Map`, recibió `{}`",
+                        "`.merge()` expects another `Map`, got `{}`",
                         display_type(&other_ty, self.env)
                     )));
                 }
@@ -22405,7 +22405,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Ok((code, Type::Map(k.clone(), v.clone())))
             }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with/with/has_value)",
+                "Map has no method `{}` in the compiled subset (today: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with/with/has_value)",
                 other
             ))),
 
@@ -22463,7 +22463,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     Some(md) => md,
                     None => {
                         return Err(self.err_at(call_span, format!(
-                            "el tipo `{}` no tiene un método llamado `{}`",
+                            "type `{}` has no method named `{}`",
                             type_name, m
                         )));
                     }
@@ -22510,13 +22510,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         for p in &method.params {
             let pty_expr = p.type_.as_ref().ok_or_else(|| {
                 self.err(format!(
-                    "método `{}.{}`: el parámetro `{}` necesita una anotación de tipo para el codegen (5b.1)",
+                    "method `{}.{}`: parameter `{}` needs a type annotation for codegen (5b.1)",
                     type_name, method.name, p.name
                 ))
             })?;
             let pty = crate::types::resolve_type_expr(pty_expr, self.env).map_err(|e| {
                 self.err(format!(
-                    "método `{}.{}`: tipo del parámetro `{}` no resoluble: {:?}",
+                    "method `{}.{}`: type of parameter `{}` not resolvable: {:?}",
                     type_name, method.name, p.name, e
                 ))
             })?;
@@ -22525,13 +22525,13 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         }
         let ret_ty_expr = method.return_type.as_ref().ok_or_else(|| {
             self.err(format!(
-                "método `{}.{}`: falta anotación de tipo de retorno para el codegen (5b.1)",
+                "method `{}.{}`: missing return type annotation for codegen (5b.1)",
                 type_name, method.name
             ))
         })?;
         let ret_ty = crate::types::resolve_type_expr(ret_ty_expr, self.env).map_err(|e| {
             self.err(format!(
-                "método `{}.{}`: tipo de retorno no resoluble: {:?}",
+                "method `{}.{}`: return type not resolvable: {:?}",
                 type_name, method.name, e
             ))
         })?;
@@ -22690,7 +22690,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 call_span,
                 if required == method_def.params.len() {
                     format!(
-                        "el método estático `{}.{}` espera {} argumento(s), recibió {}",
+                        "static method `{}.{}` expects {} argument(s), got {}",
                         type_name,
                         method_def.name,
                         method_def.params.len(),
@@ -22698,7 +22698,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     )
                 } else {
                     format!(
-                        "el método estático `{}.{}` espera entre {} y {} argumento(s), recibió {}",
+                        "static method `{}.{}` expects between {} and {} argument(s), got {}",
                         type_name,
                         method_def.name,
                         required,
@@ -22772,14 +22772,14 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 call_span,
                 if required == method_def.params.len() {
                     format!(
-                        "el método `.{}()` espera {} argumento(s), recibió {}",
+                        "method `.{}()` expects {} argument(s), got {}",
                         method_def.name,
                         method_def.params.len(),
                         args.len(),
                     )
                 } else {
                     format!(
-                        "el método `.{}()` espera entre {} y {} argumento(s), recibió {}",
+                        "method `.{}()` expects between {} and {} argument(s), got {}",
                         method_def.name,
                         required,
                         method_def.params.len(),
@@ -22939,7 +22939,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
     }
 
     /// `xs.find(callback)` → block that iterates the snapshot and returns
-    /// `Ok(item)` on the first match, `Err("no encontrado")` if nothing matches.
+    /// `Ok(item)` on the first match, `Err("not found")` if nothing matches.
     /// Returns `Result<T, String>`. Enables the canonical pattern
     /// `users.find(fn(u) => u.id == id)?` (with `?` propagating the Err).
     fn gen_list_find(
@@ -22995,7 +22995,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     call_span,
                     format!(
-                        "`.sort()` no soporta `List<{}>` en `fitz build` (hoy: Int/Float/Str/Bool)",
+                        "`.sort()` does not support `List<{}>` in `fitz build` (today: Int/Float/Str/Bool)",
                         display_type(other, self.env),
                     ),
                 ));
@@ -23169,7 +23169,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         arg_span,
                         format!(
-                            "el callback de `.{}` toma 1 parámetro, la fn `{}` declara {}",
+                            "the `.{}` callback takes 1 parameter, fn `{}` declares {}",
                             method,
                             name,
                             sig_params.len(),
@@ -23180,7 +23180,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         arg_span,
                         format!(
-                            "el callback `{}` espera `{}`, pero el elemento es `{}`",
+                            "callback `{}` expects `{}`, but the element is `{}`",
                             name,
                             display_type(&sig_params[0], self.env),
                             display_type(param_ty, self.env),
@@ -23192,7 +23192,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                         return Err(self.err_at(
                             arg_span,
                             format!(
-                                "el callback `{}` debe retornar `{}`, retorna `{}`",
+                                "callback `{}` must return `{}`, returns `{}`",
                                 name,
                                 display_type(want, self.env),
                                 display_type(&sig_ret, self.env),
@@ -23220,7 +23220,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             return Err(self.err_at(
                 arg_span,
                 format!(
-                    "el callback de `.{}` toma 1 parámetro, recibió {}",
+                    "the `.{}` callback takes 1 parameter, got {}",
                     method,
                     params.len()
                 ),
@@ -23334,7 +23334,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         arg_span,
                         format!(
-                            "el callback `{}` espera `{}` en el param[0], recibe `{}`",
+                            "callback `{}` expects `{}` at param[0], gets `{}`",
                             name,
                             display_type(&sig_params[0], self.env),
                             display_type(param0_ty, self.env),
@@ -23345,7 +23345,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         arg_span,
                         format!(
-                            "el callback `{}` espera `{}` en el param[1], recibe `{}`",
+                            "callback `{}` expects `{}` at param[1], gets `{}`",
                             name,
                             display_type(&sig_params[1], self.env),
                             display_type(param1_ty, self.env),
@@ -23356,7 +23356,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         arg_span,
                         format!(
-                            "el callback `{}` debe retornar `{}`, retorna `{}`",
+                            "callback `{}` must return `{}`, returns `{}`",
                             name,
                             display_type(&expected_ret, self.env),
                             display_type(&sig_ret, self.env),
@@ -23473,7 +23473,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             let t = resolve_type_expr(te, self.env).map_err(|e| {
                 self.err_at(
                     fn_span,
-                    format!("función anónima: parámetro `{}`: {}", p.name, e.message),
+                    format!("anonymous function: parameter `{}`: {}", p.name, e.message),
                 )
             })?;
             param_types.push(t);
@@ -23780,7 +23780,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             }
             other => {
                 Err(self.err_at(inner.span(), format!(
-                    "`Err({})` no soportado en `fitz build` — el tipo del Err debe ser primitivo, nominal, List o Map. Usá `fitz run` para preservar el value, o convertí explícitamente con interpolación: `Err(\"...{{x}}...\")`",
+                    "`Err({})` not supported in `fitz build` — the Err type must be primitive, nominal, List or Map. Use `fitz run` to preserve the value, or convert explicitly with interpolation: `Err(\"...{{x}}...\")`",
                     display_type(other, self.env)
                 )))
             }
@@ -23807,7 +23807,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     inner_span,
                     format!(
-                        "operador `?` sobre `{}`: el operando debe ser `Result<T>`",
+                        "operator `?` over `{}`: operand must be `Result<T>`",
                         display_type(other, self.env)
                     ),
                 ));
@@ -24008,7 +24008,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         //   - the scrutinee is Result<T> and we have at least one Ok and one Err.
         let result_exhaustive = inner_ok_ty.is_some() && has_ok && has_err;
         if !has_catch_all && (!result_exhaustive || has_or_arm) {
-            arm_pieces.push("_ => panic!(\"el `match` no matcheó ningún brazo\")".to_string());
+            arm_pieces.push("_ => panic!(\"`match` did not match any arm\")".to_string());
         }
 
         // Output type: lub of the arms; if they fail to unify, Any.
@@ -24210,7 +24210,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 Err(FitzError::new(
                     crate::error::ErrorKind::InvalidSyntax,
                     0, 0,
-                    "or-patterns no admiten bindings (bug interno: el parser debería haberlo rechazado)",
+                    "or-patterns do not allow bindings (internal bug: parser should have rejected this)",
                 ))
             }
             Pattern::Or(_) => {
@@ -24337,7 +24337,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     f.span(),
                     format!(
-                        "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
+                        "the `if` filter of the list comprehension must be `Bool`, got `{}`",
                         display_type(&ft, self.env)
                     ),
                 ));
@@ -24350,7 +24350,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.pop_scope();
         if matches!(expr_ty, Type::Any) {
             return Err(self.err_at(span,
-                "la expresión de la list comprehension tipa como `Any`: el subset compilado exige tipo concreto"
+                "list comprehension expression types as `Any`: the compiled subset requires a concrete type"
                     .to_string(),
             ));
         }
@@ -24399,7 +24399,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                 return Err(self.err_at(
                     f.span(),
                     format!(
-                        "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
+                        "the `if` filter of the map comprehension must be `Bool`, got `{}`",
                         display_type(&ft, self.env)
                     ),
                 ));
@@ -24413,7 +24413,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
         self.pop_scope();
         if matches!(k_ty, Type::Any) || matches!(v_ty, Type::Any) {
             return Err(self.err_at(span,
-                "key/value de la map comprehension tipan como `Any`: el subset compilado exige tipos concretos"
+                "key/value of map comprehension type as `Any`: the compiled subset requires concrete types"
                     .to_string(),
             ));
         }
@@ -24472,7 +24472,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
                     return Err(self.err_at(
                         iter.span(),
                         format!(
-                        "comprehension necesita un iterable (`Range` o `List<T>`), recibió `{}`",
+                        "comprehension needs an iterable (`Range` or `List<T>`), got `{}`",
                         display_type(other, self.env)
                     ),
                     ));
@@ -24480,7 +24480,7 @@ fn __fitz_pg_normalize_timestamptz(s: &str) -> String {
             };
             if matches!(elem_ty, Type::Any) {
                 return Err(self.err_at(iter.span(),
-                    "comprehension sobre `List<Any>`: el subset compilado exige tipo homogéneo concreto"
+                    "comprehension over `List<Any>`: the compiled subset requires a concrete homogeneous type"
                         .to_string(),
                 ));
             }
@@ -34500,8 +34500,8 @@ mod tests {
         let r = gen(src);
         let err = r.unwrap_err();
         assert!(
-            err.message.contains("reservado") && err.message.contains("level"),
-            "expected mention of 'reservado' + 'level' in error: {}",
+            err.message.contains("reserved") && err.message.contains("level"),
+            "expected mention of 'reserved' + 'level' in error: {}",
             err.message
         );
     }
@@ -34512,8 +34512,8 @@ mod tests {
         let r = gen(src);
         let err = r.unwrap_err();
         assert!(
-            err.message.contains("duplicado"),
-            "expected mention of 'duplicado': {}",
+            err.message.contains("duplicated"),
+            "expected mention of 'duplicated': {}",
             err.message
         );
     }
@@ -38883,13 +38883,13 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
             ast_test::count_macro_calls(stmts, "panic") >= 1,
-            "expected al menos un panic! (catch-all artificial)"
+            "expected at least one panic! (synthetic catch-all)"
         );
         // The panic message matches the interpreter's.
         let last = ast_test::ts(stmts.last().unwrap());
         assert!(
-            last.contains("no matche") && last.contains("ning") && last.contains("brazo"),
-            "expected mensaje del panic sobre brazo no matcheado, fue: {}",
+            last.contains("did not match") && last.contains("arm"),
+            "expected panic message about unmatched arm, was: {}",
             last
         );
     }
@@ -41973,10 +41973,10 @@ mod tests {
                        let _t = Order.sum(fn(o) => o.price * 2, db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de codegen por body no-field");
+        let err = gen(src).expect_err("expected codegen error for non-field body");
         assert!(
-            err.message.contains("body debe ser") || err.message.contains("solo admite"),
-            "expected mención de que el body solo admite u.field, fue: {}",
+            err.message.contains("body must be") || err.message.contains("only supports"),
+            "expected mention that body only supports u.field, was: {}",
             err.message
         );
     }
@@ -42913,10 +42913,10 @@ mod tests {
                        let _ = Event.where(fn(e) => e.data.has_path([])).all(db).await?\n  \
                        return Ok(null)\n\
                    }\n";
-        let err = gen(src).expect_err("expected error de path vacío");
+        let err = gen(src).expect_err("expected error for empty path");
         assert!(
-            err.message.contains("path vacío"),
-            "expected mención de `path vacío`, fue: {}",
+            err.message.contains("empty path"),
+            "expected mention of `empty path`, was: {}",
             err.message
         );
     }
