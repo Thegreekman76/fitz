@@ -8202,7 +8202,7 @@ fn h(user: User) -> Str => user.role\n\
         .await;
         let err = res.expect_err("expected error due to duplicate @auth_provider");
         assert!(
-            err.message.contains("@auth_provider duplicado"),
+            err.message.contains("@auth_provider duplicate"),
             "expected mention of duplicate provider, was: {}",
             err.message
         );
@@ -8228,7 +8228,7 @@ fn me(user: User) -> Str => \"x\"\n\
         .await;
         let err = res.expect_err("expected error due to @authenticated without @auth_provider");
         assert!(
-            err.message.contains("@auth_provider") && err.message.contains("antes"),
+            err.message.contains("@auth_provider") && err.message.contains("before"),
             "expected mention of @auth_provider and order, was: {}",
             err.message
         );

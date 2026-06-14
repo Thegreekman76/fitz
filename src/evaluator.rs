@@ -2970,7 +2970,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    format!("status code HTTP fuera de rango (100-599): {}", n),
+                    format!("HTTP status code out of range (100-599): {}", n),
                 )));
             }
             let body_v = match body {
@@ -8401,7 +8401,7 @@ fn list_remove_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
             span.line,
             span.column,
             format!(
-                "`.remove_at()`: idx {} fuera de rango (len = {})",
+                "`.remove_at()`: idx {} out of range (len = {})",
                 idx,
                 snapshot.len(),
             ),
@@ -12622,7 +12622,7 @@ fn builtin_datetime_from_timestamp(args: &[Value]) -> FitzResult<Value> {
         )))),
         None => Ok(Value::Result(crate::value::ResultVariant::Err(Box::new(
             Value::Str(format!(
-                "DateTime.from_timestamp: {} fuera de rango (-9999-01-01..9999-12-31)",
+                "DateTime.from_timestamp: {} out of range (-9999-01-01..9999-12-31)",
                 secs
             )),
         )))),
@@ -18528,7 +18528,7 @@ mod tests {
         .expect_err("segundo await debería fallar");
         match err {
             EvalSignal::Error(fitz_err) => {
-                assert!(fitz_err.message.contains("consumido"));
+                assert!(fitz_err.message.contains("consumed"));
             }
             other => panic!("se esperaba Error, fue {:?}", other),
         }
@@ -19344,7 +19344,7 @@ mod tests {
         let (_env, res) = parse_eval_into_env("let xs = [1, 2]\nxs[5] = 99").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("fuera de rango"),
+            err.message.contains("out of range"),
             "mensaje inesperado: {}",
             err.message
         );
@@ -19357,7 +19357,7 @@ mod tests {
         let (_env, res) = parse_eval_into_env("let xs = [1, 2]\nxs[-99] = 99").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("fuera de rango"),
+            err.message.contains("out of range"),
             "mensaje inesperado: {}",
             err.message
         );
@@ -21480,7 +21480,7 @@ print(factorial(5))
         .await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("no definida") || err.message.contains("value"),
+            err.message.contains("undefined") || err.message.contains("value"),
             "esperaba mensaje sobre `value` no definida, fue: {}",
             err.message,
         );
@@ -21520,7 +21520,7 @@ print(factorial(5))
         .await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("instancia"),
+            err.message.contains("instance method"),
             "esperaba mensaje sobre método de instancia, fue: {}",
             err.message,
         );
@@ -21554,7 +21554,7 @@ print(factorial(5))
         )
         .await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("espera 1"));
+        assert!(err.message.contains("expects 1"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -21647,7 +21647,7 @@ print(factorial(5))
         let err = res.unwrap_err();
         match err {
             EvalSignal::Error(e) => {
-                assert!(e.message.contains("fuera de rango"));
+                assert!(e.message.contains("out of range"));
             }
             _ => panic!("se esperaba Error"),
         }
@@ -21720,7 +21720,7 @@ print(factorial(5))
         .await;
         let err = res.unwrap_err();
         match err {
-            EvalSignal::Error(e) => assert!(e.message.contains("clave no encontrada")),
+            EvalSignal::Error(e) => assert!(e.message.contains("key not found")),
             _ => panic!("se esperaba Error"),
         }
     }
@@ -21967,7 +21967,7 @@ let first_y = zs[0].1
         let src = "let r: Int = 1 << -1\n";
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("shift fuera de rango") || err.message.contains("0..64"));
+        assert!(err.message.contains("shift out of range") || err.message.contains("0..64"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -21975,7 +21975,7 @@ let first_y = zs[0].1
         let src = "let r: Int = 1 << 64\n";
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("shift fuera de rango") || err.message.contains("0..64"));
+        assert!(err.message.contains("shift out of range") || err.message.contains("0..64"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -22624,7 +22624,7 @@ let r = match n {
             Err(EvalSignal::Error(err)) => {
                 assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
                 assert!(
-                    err.message.contains("operador `?`"),
+                    err.message.contains("operator `?`"),
                     "mensaje inesperado: {}",
                     err.message,
                 );
@@ -22759,7 +22759,7 @@ let r = match n {
         assert_eq!(env.lock().get("ok_msg"), Some(Value::Str("ok: 5".into())));
         assert_eq!(
             env.lock().get("err_msg"),
-            Some(Value::Str("err: divisi\u{00f3}n por cero".into())),
+            Some(Value::Str("err: division by zero".into())),
         );
     }
 
@@ -23903,7 +23903,7 @@ let r = match n {
     async fn str_repeat_with_negative_is_error() {
         let (_env, res) = parse_eval_into_env("let a = \"ab\".repeat(-1)").await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("negativo"));
+        assert!(err.message.contains("negative"));
     }
 
     // ---- S.3: List.sort/reverse/contains ----
@@ -24033,7 +24033,7 @@ let r = match n {
         )
         .await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("fuera de rango"));
+        assert!(err.message.contains("out of range"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -24502,7 +24502,7 @@ let r = match n {
         let main = "from utils import b\n";
         let (_env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("no exporta"), "msg: {}", err.message);
+        assert!(err.message.contains("does not export"), "msg: {}", err.message);
         assert!(err.message.contains("`b`"), "msg: {}", err.message);
         assert!(err.message.contains("`utils`"), "msg: {}", err.message);
     }
@@ -24519,7 +24519,7 @@ let r = match n {
         let (_env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("no exporta") && err.message.contains("missing"),
+            err.message.contains("does not export") && err.message.contains("missing"),
             "msg: {}",
             err.message
         );
@@ -25935,7 +25935,7 @@ let r = match n {
                     other => panic!("esperaba Err(Str), fue Err({:?})", other),
                 };
                 assert!(
-                    s.contains("FITZ_TEST_ENV_MISSING_XYZ") && s.contains("no definida"),
+                    s.contains("FITZ_TEST_ENV_MISSING_XYZ") && s.contains("not defined"),
                     "msg no incluye key + 'no definida': {}",
                     s
                 );
@@ -26080,7 +26080,7 @@ let r = match n {
                     other => panic!("esperaba Err(Str), fue Err({:?})", other),
                 };
                 assert!(
-                    s.contains("no se pudo leer"),
+                    s.contains("could not read"),
                     "msg no menciona 'no se pudo leer': {}",
                     s
                 );
@@ -26216,7 +26216,7 @@ let r = match n {
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
             err.message.contains("@get")
-                && err.message.contains("servidor HTTP activo")
+                && err.message.contains("active HTTP server")
                 && err.message.contains("fitz run"),
             "mensaje inesperado: {}",
             err.message,
@@ -26277,7 +26277,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("@get") && err.message.contains("argumento"),
+            err.message.contains("@get") && err.message.contains("argument"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26433,7 +26433,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("rango"),
+            err.message.contains("range"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26459,7 +26459,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("2 args"),
+            err.message.contains("up to 2 positional args"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26585,7 +26585,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("version") && err.message.contains("reconocido"),
+            err.message.contains("version") && err.message.contains("not recognized"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26642,7 +26642,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("`Str` o `Str?`") && err.message.contains("x_count"),
+            err.message.contains("`Str` or `Str?`") && err.message.contains("x_count"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26656,7 +26656,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("declarado dos veces") || err.message.contains("dos veces"),
+            err.message.contains("declared twice") || err.message.contains("twice"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -26670,7 +26670,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("solo aplica sobre handlers HTTP"),
+            err.message.contains("only applies to HTTP handlers"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27015,7 +27015,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("port") && err.message.contains("dos veces"),
+            err.message.contains("port") && err.message.contains("twice"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27031,7 +27031,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("host") && err.message.contains("dos veces"),
+            err.message.contains("host") && err.message.contains("twice"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27063,7 +27063,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("port") && err.message.contains("fuera de rango"),
+            err.message.contains("port") && err.message.contains("out of range"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27115,7 +27115,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("foo") && err.message.contains("nombre"),
+            err.message.contains("foo") && err.message.contains("named"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27178,7 +27178,7 @@ let r = match n {
         let e = first_runtime_error("print(unknown_var)").await;
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 7);
-        assert!(e.message.contains("no definida"));
+        assert!(e.message.contains("undefined"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27189,7 +27189,7 @@ let r = match n {
         let e = first_runtime_error(src).await;
         assert_eq!(e.line, 2);
         assert_eq!(e.column, 9);
-        assert!(e.message.contains("fuera de rango"));
+        assert!(e.message.contains("out of range"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -27200,7 +27200,7 @@ let r = match n {
         let e = first_runtime_error(src).await;
         assert_eq!(e.line, 2);
         assert_eq!(e.column, 10);
-        assert!(e.message.contains("espera 1"));
+        assert!(e.message.contains("expects 1"));
     }
 
     // -----------------------------------------------------------------------
@@ -27260,7 +27260,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("no_existe") && err.message.contains("no definida"),
+            err.message.contains("no_existe") && err.message.contains("undefined"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27279,7 +27279,7 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("@middleware")
-                && err.message.contains("debe ser una fn")
+                && err.message.contains("must be a fn")
                 && err.message.contains("Int"),
             "mensaje inesperado: {}",
             err.message,
@@ -27299,7 +27299,7 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("@middleware")
-                && err.message.contains("ANTES")
+                && err.message.contains("BEFORE")
                 && err.message.contains("@get"),
             "mensaje inesperado: {}",
             err.message,
@@ -27317,7 +27317,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("@middleware") && err.message.contains("handlers HTTP"),
+            err.message.contains("@middleware") && err.message.contains("HTTP handlers"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27354,7 +27354,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("@middleware") && err.message.contains("exactamente un"),
+            err.message.contains("@middleware") && err.message.contains("exactly one"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27529,7 +27529,7 @@ let r = match n {
         let src = "let c = cors({}, {})";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
-            err.message.contains("`cors`") && err.message.contains("0 o 1"),
+            err.message.contains("`cors`") && err.message.contains("0 or 1"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27589,7 +27589,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("cors") && err.message.contains("uno por ruta"),
+            err.message.contains("cors") && err.message.contains("one per route"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27668,7 +27668,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("@test fn t(x: Int) { let y = x }").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("0 params") || err.message.contains("debe tener"),
+            err.message.contains("0 params") || err.message.contains("must have"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27680,7 +27680,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("@test(\"slow\") fn t() { let x = 1 }").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("args posicionales") || err.message.contains("no admite"),
+            err.message.contains("positional args") || err.message.contains("does not accept"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27782,7 +27782,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("assert_eq(1)").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("2 argumentos") || err.message.contains("espera"),
+            err.message.contains("2 arguments") || err.message.contains("expects"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -27799,7 +27799,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("assert_ne(\"x\", \"x\")").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("iguales"),
+            err.message.contains("equal"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -28616,7 +28616,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("let pair: (Str, Str) = \"abc\".split_at(-1)").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("negativo"),
+            err.message.contains("negative"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -28824,7 +28824,7 @@ let r = match n {
         .await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("fuera de rango"),
+            err.message.contains("out of range"),
             "msg: {}",
             err.message
         );
@@ -29045,7 +29045,7 @@ let r = match n {
     async fn mb7_str_repeat_with_n_negative_is_error() {
         let (_, res) = parse_eval_into_env("let r: Str = \"hi\".repeat_with(-1, \",\")").await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("negativo"), "msg fue: {}", err.message);
+        assert!(err.message.contains("negative"), "msg fue: {}", err.message);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -30421,7 +30421,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("log.info(\"test\", level: \"INFO\")").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("reservado") && err.message.contains("level"),
+            err.message.contains("reserved") && err.message.contains("level"),
             "esperaba 'reservado' + 'level', fue: {}",
             err.message
         );
@@ -30432,7 +30432,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("log.info(\"test\", msg: \"override\")").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("reservado") && err.message.contains("msg"),
+            err.message.contains("reserved") && err.message.contains("msg"),
             "esperaba 'reservado' + 'msg', fue: {}",
             err.message
         );
@@ -30443,7 +30443,7 @@ let r = match n {
         let (_, res) = parse_eval_into_env("log.info(\"test\", timestamp: \"now\")").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("reservado") && err.message.contains("timestamp"),
+            err.message.contains("reserved") && err.message.contains("timestamp"),
             "esperaba 'reservado' + 'timestamp', fue: {}",
             err.message
         );
@@ -30459,7 +30459,7 @@ let r = match n {
         .await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("no serializable") || err.message.contains("tipo"),
+            err.message.contains("non-serializable") || err.message.contains("type"),
             "esperaba 'no serializable' o 'tipo', fue: {}",
             err.message
         );
@@ -30560,9 +30560,7 @@ let r = match n {
         let res = result.0;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("inválida")
-                || err.message.contains("invalid")
-                || err.message.contains("cron"),
+            err.message.contains("invalid") || err.message.contains("cron"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -30999,7 +30997,7 @@ let r = match n {
                 .await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("1 argumento"),
+            err.message.contains("1 argument"),
             "mensaje sobre arity: {}",
             err.message,
         );
@@ -31612,7 +31610,7 @@ let r = match n {
         // Passing a loose Int where List is expected → clear error.
         let v = Value::Int(42);
         let err = fitz_list_to_pg_array(&v, crate::db::oid::INT8).unwrap_err();
-        assert!(err.contains("esperaba List<T>"));
+        assert!(err.contains("expected List<T>"));
     }
 
     #[test]

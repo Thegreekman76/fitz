@@ -76,7 +76,7 @@ impl FitzError {
     // — messages already in place keep their shape (so tests
     // matching substrings stay green).
 
-    /// "el tipo `<type_name>` no tiene un método llamado `<method>`".
+    /// "type `<type_name>` has no method named `<method>`".
     /// For the receiver `xs.foo()` where `foo` does not exist in the
     /// receiver type (List/Map/Str/Nominal). Example: dispatch_method
     /// in the evaluator when an unknown name arrives.
@@ -86,13 +86,13 @@ impl FitzError {
             line,
             column,
             format!(
-                "el tipo `{}` no tiene un método llamado `{}`",
+                "type `{}` has no method named `{}`",
                 type_name, method
             ),
         )
     }
 
-    /// "la función `<name>` espera <expected> argumento(s), recibió
+    /// "function `<name>` expects <expected> argument(s), received
     /// <found>". Pluralisation implied by the `(s)`.
     pub fn wrong_arity(
         line: usize,
@@ -106,16 +106,16 @@ impl FitzError {
             line,
             column,
             format!(
-                "la función `{}` espera {} argumento(s), recibió {}",
+                "function `{}` expects {} argument(s), received {}",
                 name, expected, found
             ),
         )
     }
 
-    /// "<context>: esperaba `<expected>`, recibió `<found>`". `context`
-    /// is a short label of where the mismatch happened (e.g. "el arg
-    /// 1 de `add`", "el campo `email` del struct lit", "el return de
-    /// `me`"). Uniform wording with backticks around the types.
+    /// "<context>: expected `<expected>`, received `<found>`". `context`
+    /// is a short label of where the mismatch happened (e.g. "arg 1
+    /// of `add`", "field `email` of struct lit", "return of `me`").
+    /// Uniform wording with backticks around the types.
     pub fn type_mismatch(
         line: usize,
         column: usize,
@@ -130,7 +130,7 @@ impl FitzError {
             },
             line,
             column,
-            format!("{}: esperaba `{}`, recibió `{}`", context, expected, found),
+            format!("{}: expected `{}`, received `{}`", context, expected, found),
         )
     }
 }
