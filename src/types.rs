@@ -832,7 +832,7 @@ impl TypeEnv {
                 ErrorKind::TypeError,
                 0,
                 0,
-                format!("tipo `{}` declarado más de una vez", name),
+                format!("type `{}` declared more than once", name),
             ));
         }
         let id = TypeId(self.nominals.len());
@@ -1156,7 +1156,7 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
                     0,
                     0,
                     format!(
-                        "el tipo `Result` espera 1 o 2 argumentos, recibió {}",
+                        "type `Result` expects 1 or 2 arguments, received {}",
                         args.len()
                     ),
                 ));
@@ -1199,7 +1199,7 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
                     0,
                     0,
                     format!(
-                        "el tipo `WsConn` espera 1 o 2 argumentos (`WsConn<T>` para canal simétrico, `WsConn<In, Out>` para canal asimétrico), recibió {}",
+                        "type `WsConn` expects 1 or 2 arguments (`WsConn<T>` for symmetric channel, `WsConn<In, Out>` for asymmetric channel), received {}",
                         args.len()
                     ),
                 ));
@@ -1225,7 +1225,7 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
                             0,
                             0,
                             format!(
-                                "tipo `{}` no es genérico, no acepta argumentos de tipo",
+                                "type `{}` is not generic, does not accept type arguments",
                                 name
                             ),
                         ));
@@ -1236,7 +1236,7 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
                     ErrorKind::TypeError,
                     0,
                     0,
-                    format!("tipo desconocido `{}`", name),
+                    format!("unknown type `{}`", name),
                 )),
             }
         }
@@ -1269,7 +1269,7 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
     // explicitly (not derived from a Stmt::TypeDef).
     let req_id = env
         .declare_nominal("Request".to_string())
-        .expect("Request es el primer nominal — no puede colisionar");
+        .expect("Request is the first nominal — cannot collide");
     env.set_fields(
         req_id,
         vec![
@@ -1294,7 +1294,7 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
     // The expected use is as a marker in signatures: `fn auth(req) -> Response?`.
     let resp_id = env
         .declare_nominal("Response".to_string())
-        .expect("Response es el segundo nominal — no puede colisionar");
+        .expect("Response is the second nominal — cannot collide");
     env.set_fields(resp_id, vec![]);
 
     // Mini-batch MP2 + File.content Bytes — `File`: built-in nominal
@@ -1310,7 +1310,7 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
     //     use `f.content.to_str() -> Result<Str>`.
     let file_id = env
         .declare_nominal("File".to_string())
-        .expect("File es el tercer nominal built-in — no puede colisionar");
+        .expect("File is the third built-in nominal — cannot collide");
     env.set_fields(
         file_id,
         vec![
@@ -1336,7 +1336,7 @@ fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
         0,
         0,
         format!(
-            "el tipo `{}` espera {} argumento(s) de tipo, recibió {}",
+            "type `{}` expects {} type argument(s), received {}",
             name, expected, found
         ),
     )
@@ -1449,7 +1449,7 @@ pub fn resolve_program_with_env(
                     }
                     Err(e) => errors.push(annotate(
                         e,
-                        &format!("en el campo `{}` del tipo `{}`", f.name, name),
+                        &format!("in field `{}` of type `{}`", f.name, name),
                     )),
                 }
             }
@@ -1555,7 +1555,7 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
                     if let Err(e) = resolve_type_expr(t, env) {
                         errors.push(annotate(
                             e,
-                            &format!("en el parámetro `{}` de la función `{}`", p.name, name),
+                            &format!("in parameter `{}` of function `{}`", p.name, name),
                         ));
                     }
                 }
@@ -1564,7 +1564,7 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
                 if let Err(e) = resolve_type_expr(t, env) {
                     errors.push(annotate(
                         e,
-                        &format!("en el tipo de retorno de la función `{}`", name),
+                        &format!("in return type of function `{}`", name),
                     ));
                 }
             }
@@ -1658,7 +1658,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "`@renamed_from(\"old\")` espera exactamente 1 arg Str, recibió {}",
+                            "`@renamed_from(\"old\")` expects exactly 1 Str arg, received {}",
                             d.args.len()
                         ),
                     ));
@@ -1672,7 +1672,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@renamed_from(\"...\")` no acepta string vacío".to_string(),
+                                "`@renamed_from(\"...\")` does not accept empty string".to_string(),
                             ));
                         } else {
                             table_renamed_from = Some(trimmed.to_string());
@@ -1682,7 +1682,7 @@ pub fn process_table_decorators(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
-                        "`@renamed_from(...)` espera un Str literal con el nombre SQL anterior de la tabla".to_string(),
+                        "`@renamed_from(...)` expects a Str literal with the previous SQL name of the table".to_string(),
                     )),
                 }
             }
@@ -1692,7 +1692,7 @@ pub fn process_table_decorators(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
-                        format!("el tipo `{type_name}` tiene más de un decorador `@table`"),
+                        format!("type `{type_name}` has more than one `@table` decorator"),
                     ));
                     continue;
                 }
@@ -1704,7 +1704,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "`@table` no acepta kwargs; recibió: {:?}",
+                            "`@table` does not accept kwargs; received: {:?}",
                             d.kwargs.iter().map(|(k, _)| k).collect::<Vec<_>>()
                         ),
                     ));
@@ -1737,7 +1737,7 @@ pub fn process_table_decorators(
                             type_span.line,
                             type_span.column,
                             format!(
-                                "`@table` espera un string literal como argumento, recibió `{:?}`",
+                                "`@table` expects a string literal as argument, received `{:?}`",
                                 other
                             ),
                         )),
@@ -1748,7 +1748,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "`@table` espera 0 o 1 argumento (nombre SQL), recibió {}",
+                            "`@table` expects 0 or 1 argument (SQL name), received {}",
                             d.args.len()
                         ),
                     ));
@@ -1772,7 +1772,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "`@index` espera 1 arg posicional (Str con cols separadas por coma) o `expression=...`, recibió {}",
+                            "`@index` expects 1 positional arg (Str with cols separated by comma) or `expression=...`, received {}",
                             d.args.len()
                         ),
                     ));
@@ -1783,7 +1783,7 @@ pub fn process_table_decorators(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
-                        "`@index(expression=...)` NO acepta arg posicional simultáneo. Usá uno u otro.".to_string(),
+                        "`@index(expression=...)` does NOT accept simultaneous positional arg. Use one or the other.".to_string(),
                     ));
                     continue;
                 }
@@ -1797,7 +1797,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@index` espera un Str literal como arg 0 (cols separadas por coma)"
+                                "`@index` expects a Str literal as arg 0 (cols separated by comma)"
                                     .to_string(),
                             ));
                             continue;
@@ -1813,7 +1813,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@index(\"...\")` recibió string vacío; esperaba al menos una columna"
+                            "`@index(\"...\")` received empty string; expected at least one column"
                                 .to_string(),
                         ));
                         continue;
@@ -1833,7 +1833,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@index(unique=...)` espera Bool literal".to_string(),
+                                "`@index(unique=...)` expects Bool literal".to_string(),
                             )),
                         },
                         "name" => match v {
@@ -1842,7 +1842,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@index(name=...)` espera Str literal".to_string(),
+                                "`@index(name=...)` expects Str literal".to_string(),
                             )),
                         },
                         "where_" => match v {
@@ -1851,7 +1851,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@index(where_=...)` espera Str literal con la WHERE clause SQL"
+                                "`@index(where_=...)` expects Str literal with the SQL WHERE clause"
                                     .to_string(),
                             )),
                         },
@@ -1870,8 +1870,8 @@ pub fn process_table_decorators(
                                         type_span.line,
                                         type_span.column,
                                         format!(
-                                            "`@index(using=\"{s}\")`: method desconocido. \
-                                             Soportados: btree, hash, gin, gist, brin, spgist"
+                                            "`@index(using=\"{s}\")`: unknown method. \
+                                             Supported: btree, hash, gin, gist, brin, spgist"
                                         ),
                                     ));
                                 } else if lower != "btree" {
@@ -1887,7 +1887,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@index(using=...)` espera Str literal con el method (\"gin\", \"gist\", etc.)"
+                                "`@index(using=...)` expects Str literal with the method (\"gin\", \"gist\", etc.)"
                                     .to_string(),
                             )),
                         },
@@ -1902,7 +1902,7 @@ pub fn process_table_decorators(
                                         ErrorKind::TypeError,
                                         type_span.line,
                                         type_span.column,
-                                        "`@index(expression=\"\")` no acepta string vacío".to_string(),
+                                        "`@index(expression=\"\")` does not accept empty string".to_string(),
                                     ));
                                 } else {
                                     expression = Some(trimmed.to_string());
@@ -1912,7 +1912,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@index(expression=...)` espera Str literal con la expresión SQL (ej: `\"lower(email)\"`)".to_string(),
+                                "`@index(expression=...)` expects Str literal with the SQL expression (e.g.: `\"lower(email)\"`)".to_string(),
                             )),
                         },
                         other => errors.push(FitzError::new(
@@ -1920,7 +1920,7 @@ pub fn process_table_decorators(
                             type_span.line,
                             type_span.column,
                             format!(
-                                "`@index` kwarg desconocido `{}`. Soportados: unique, name, where_, using, expression",
+                                "`@index` unknown kwarg `{}`. Supported: unique, name, where_, using, expression",
                                 other
                             ),
                         )),
@@ -1949,7 +1949,7 @@ pub fn process_table_decorators(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
-                        "`@unique(col1, col2, ...)` espera al menos 1 columna posicional"
+                        "`@unique(col1, col2, ...)` expects at least 1 positional column"
                             .to_string(),
                     ));
                     continue;
@@ -1974,7 +1974,7 @@ pub fn process_table_decorators(
                                 type_span.line,
                                 type_span.column,
                                 format!(
-                                    "`@unique` arg {}: cada column debe ser un Ident bare (`email`) o Str literal",
+                                    "`@unique` arg {}: each column must be a bare Ident (`email`) or Str literal",
                                     i
                                 ),
                             ));
@@ -1991,7 +1991,7 @@ pub fn process_table_decorators(
                         ErrorKind::TypeError,
                         type_span.line,
                         type_span.column,
-                        "`@unique(...)` no recibió columnas válidas".to_string(),
+                        "`@unique(...)` did not receive valid columns".to_string(),
                     ));
                     continue;
                 }
@@ -2004,7 +2004,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@unique(name=...)` espera Str literal".to_string(),
+                                "`@unique(name=...)` expects Str literal".to_string(),
                             )),
                         },
                         other => errors.push(FitzError::new(
@@ -2012,7 +2012,7 @@ pub fn process_table_decorators(
                             type_span.line,
                             type_span.column,
                             format!(
-                                "`@unique` kwarg desconocido `{}`. Solo soporta `name=\"...\"`; para `where_`/`using`/etc. usar `@index(unique=true, ...)` directo",
+                                "`@unique` unknown kwarg `{}`. Only supports `name=\"...\"`; for `where_`/`using`/etc. use `@index(unique=true, ...)` directly",
                                 other
                             ),
                         )),
@@ -2039,7 +2039,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "`@check_constraint` espera 1 arg posicional (Str con la expresión SQL), recibió {}",
+                            "`@check_constraint` expects 1 positional arg (Str with the SQL expression), received {}",
                             d.args.len()
                         ),
                     ));
@@ -2053,7 +2053,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@check_constraint(\"\")` recibió string vacío".to_string(),
+                                "`@check_constraint(\"\")` received empty string".to_string(),
                             ));
                             continue;
                         }
@@ -2064,7 +2064,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@check_constraint` espera Str literal con la expresión SQL"
+                            "`@check_constraint` expects Str literal with the SQL expression"
                                 .to_string(),
                         ));
                         continue;
@@ -2079,7 +2079,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@check_constraint(name=...)` espera Str literal".to_string(),
+                                "`@check_constraint(name=...)` expects Str literal".to_string(),
                             )),
                         },
                         other => errors.push(FitzError::new(
@@ -2087,7 +2087,7 @@ pub fn process_table_decorators(
                             type_span.line,
                             type_span.column,
                             format!(
-                                "`@check_constraint` kwarg desconocido `{}`. Soportados: name",
+                                "`@check_constraint` unknown kwarg `{}`. Supported: name",
                                 other
                             ),
                         )),
@@ -2101,7 +2101,7 @@ pub fn process_table_decorators(
                     type_span.line,
                     type_span.column,
                     format!(
-                        "decorador `@{other}` no soportado sobre `type`. Reconocidos: `@table`, `@renamed_from`, `@index`, `@unique`, `@check_constraint`."
+                        "decorator `@{other}` not supported on `type`. Recognized: `@table`, `@renamed_from`, `@index`, `@unique`, `@check_constraint`."
                     ),
                 ));
             }
@@ -2143,7 +2143,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@primary` no acepta args ni kwargs".to_string(),
+                            "`@primary` does not accept args or kwargs".to_string(),
                         ));
                     }
                     // v0.10.27 (F2) — composite PK supported: N @primary
@@ -2156,7 +2156,7 @@ pub fn process_table_decorators(
                             type_span.line,
                             type_span.column,
                             format!(
-                                "el tipo `{type_name}` declara `@primary` dos veces sobre el field `{}`",
+                                "type `{type_name}` declares `@primary` twice on field `{}`",
                                 f.name
                             ),
                         ));
@@ -2171,7 +2171,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@column` solo acepta kwargs (`name=`, `sql_type=`), no positionals"
+                            "`@column` only accepts kwargs (`name=`, `sql_type=`), no positionals"
                                 .to_string(),
                         ));
                     }
@@ -2188,7 +2188,7 @@ pub fn process_table_decorators(
                                     ErrorKind::TypeError,
                                     type_span.line,
                                     type_span.column,
-                                    "`@column(name=...)` espera string literal".to_string(),
+                                    "`@column(name=...)` expects string literal".to_string(),
                                 )),
                             },
                             "sql_type" => match v {
@@ -2197,7 +2197,7 @@ pub fn process_table_decorators(
                                     ErrorKind::TypeError,
                                     type_span.line,
                                     type_span.column,
-                                    "`@column(sql_type=...)` espera string literal".to_string(),
+                                    "`@column(sql_type=...)` expects string literal".to_string(),
                                 )),
                             },
                             other_k => errors.push(FitzError::new(
@@ -2205,7 +2205,7 @@ pub fn process_table_decorators(
                                 type_span.line,
                                 type_span.column,
                                 format!(
-                                    "`@column` no reconoce el kwarg `{other_k}`. Soportados: `name`, `sql_type`."
+                                    "`@column` does not recognize kwarg `{other_k}`. Supported: `name`, `sql_type`."
                                 ),
                             )),
                         }
@@ -2218,7 +2218,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@unique` no acepta args ni kwargs".to_string(),
+                            "`@unique` does not accept args or kwargs".to_string(),
                         ));
                     }
                     col_meta.unique = true;
@@ -2230,7 +2230,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@index` no acepta args ni kwargs".to_string(),
+                            "`@index` does not accept args or kwargs".to_string(),
                         ));
                     }
                     col_meta.indexed = true;
@@ -2249,7 +2249,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@db_default` no acepta kwargs".to_string(),
+                            "`@db_default` does not accept kwargs".to_string(),
                         ));
                     }
                     if d.args.len() > 1 {
@@ -2257,7 +2257,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@db_default` acepta como máximo un arg posicional (Str con la expresión SQL del default)".to_string(),
+                            "`@db_default` accepts at most one positional arg (Str with the SQL expression of the default)".to_string(),
                         ));
                     }
                     col_meta.db_default = true;
@@ -2270,7 +2270,8 @@ pub fn process_table_decorators(
                                         ErrorKind::TypeError,
                                         type_span.line,
                                         type_span.column,
-                                        "`@db_default(\"...\")` no acepta string vacío".to_string(),
+                                        "`@db_default(\"...\")` does not accept empty string"
+                                            .to_string(),
                                     ));
                                 } else {
                                     col_meta.db_default_sql = Some(trimmed.to_string());
@@ -2281,7 +2282,7 @@ pub fn process_table_decorators(
                                     ErrorKind::TypeError,
                                     type_span.line,
                                     type_span.column,
-                                    "`@db_default(...)` espera un Str literal con la expresión SQL del default (ej: `@db_default(\"NOW()\")`)".to_string(),
+                                    "`@db_default(...)` expects a Str literal with the SQL expression of the default (e.g.: `@db_default(\"NOW()\")`)".to_string(),
                                 ));
                             }
                         }
@@ -2310,7 +2311,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@hidden` no acepta args ni kwargs".to_string(),
+                            "`@hidden` does not accept args or kwargs".to_string(),
                         ));
                     }
                 }
@@ -2327,7 +2328,7 @@ pub fn process_table_decorators(
                             ErrorKind::TypeError,
                             type_span.line,
                             type_span.column,
-                            "`@renamed_from` no acepta kwargs".to_string(),
+                            "`@renamed_from` does not accept kwargs".to_string(),
                         ));
                     }
                     if d.args.len() != 1 {
@@ -2336,7 +2337,7 @@ pub fn process_table_decorators(
                             type_span.line,
                             type_span.column,
                             format!(
-                                "`@renamed_from(\"old\")` espera exactamente 1 arg Str, recibió {}",
+                                "`@renamed_from(\"old\")` expects exactly 1 Str arg, received {}",
                                 d.args.len()
                             ),
                         ));
@@ -2349,7 +2350,7 @@ pub fn process_table_decorators(
                                         ErrorKind::TypeError,
                                         type_span.line,
                                         type_span.column,
-                                        "`@renamed_from(\"...\")` no acepta string vacío".to_string(),
+                                        "`@renamed_from(\"...\")` does not accept empty string".to_string(),
                                     ));
                                 } else {
                                     col_meta.renamed_from = Some(trimmed.to_string());
@@ -2359,7 +2360,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                "`@renamed_from(...)` espera un Str literal con el nombre SQL anterior del column".to_string(),
+                                "`@renamed_from(...)` expects a Str literal with the previous SQL name of the column".to_string(),
                             )),
                         }
                     }
@@ -2384,10 +2385,7 @@ pub fn process_table_decorators(
                                 ErrorKind::TypeError,
                                 type_span.line,
                                 type_span.column,
-                                format!(
-                                    "el field `{}` tiene más de un decorador de relación",
-                                    f.name
-                                ),
+                                format!("field `{}` has more than one relation decorator", f.name),
                             ));
                         } else {
                             relations.insert(f.name.clone(), meta);
@@ -2400,7 +2398,7 @@ pub fn process_table_decorators(
                         type_span.line,
                         type_span.column,
                         format!(
-                            "decorador `@{other}` no soportado sobre un field. Reconocidos: `@primary`, `@column`, `@unique`, `@index`, `@db_default`, `@hidden`, `@belongs_to`, `@has_one`, `@has_many`, `@renamed_from`."
+                            "decorator `@{other}` not supported on a field. Recognized: `@primary`, `@column`, `@unique`, `@index`, `@db_default`, `@hidden`, `@belongs_to`, `@has_one`, `@has_many`, `@renamed_from`."
                         ),
                     ));
                 }
@@ -2420,7 +2418,7 @@ pub fn process_table_decorators(
             type_span.line,
             type_span.column,
             format!(
-                "el tipo `{type_name}` tiene decoradores ORM sobre fields (`@primary`/`@column`/`@unique`/`@index`) pero falta `@table(...)` sobre el `type`"
+                "type `{type_name}` has ORM decorators on fields (`@primary`/`@column`/`@unique`/`@index`) but is missing `@table(...)` on the `type`"
             ),
         ));
     }
@@ -2466,7 +2464,7 @@ pub fn process_table_decorators(
             let field_decl = fields.iter().find(|f| f.name == *fitz_col);
             if field_decl.is_none() {
                 idx_errors.push(format!(
-                    "`@index(\"{}, ...\")`: el field `{}` no existe en `{}`",
+                    "`@index(\"{}, ...\")`: field `{}` does not exist in `{}`",
                     idx.columns.join(", "),
                     fitz_col,
                     type_name
@@ -2533,11 +2531,11 @@ pub fn process_table_decorators(
 fn split_schema_qualified_table(s: &str) -> Result<(Option<String>, String), String> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return Err("`@table` no acepta string vacío".to_string());
+        return Err("`@table` does not accept empty string".to_string());
     }
     if trimmed.contains(char::is_whitespace) {
         return Err(format!(
-            "`@table(\"{trimmed}\")` contiene whitespace — nombres SQL no deben tener espacios"
+            "`@table(\"{trimmed}\")` contains whitespace — SQL names must not have spaces"
         ));
     }
     let parts: Vec<&str> = trimmed.split('.').collect();
@@ -2546,14 +2544,14 @@ fn split_schema_qualified_table(s: &str) -> Result<(Option<String>, String), Str
         2 => {
             if parts[0].is_empty() || parts[1].is_empty() {
                 Err(format!(
-                    "`@table(\"{trimmed}\")` tiene segmento vacío: el formato `schema.name` requiere ambos no-vacíos"
+                    "`@table(\"{trimmed}\")` has empty segment: the `schema.name` format requires both to be non-empty"
                 ))
             } else {
                 Ok((Some(parts[0].to_string()), parts[1].to_string()))
             }
         }
         _ => Err(format!(
-            "`@table(\"{trimmed}\")` tiene más de un `.` — formato esperado: `\"name\"` o `\"schema.name\"`"
+            "`@table(\"{trimmed}\")` has more than one `.` — expected format: `\"name\"` or `\"schema.name\"`"
         )),
     }
 }
@@ -2643,7 +2641,7 @@ fn parse_relation_decorator(
         // post-process in `register_belongs_to_companions`, never
         // by the user-facing decorator parser.
         RelationKind::BelongsToCompanion => unreachable!(
-            "BelongsToCompanion no es user-facing — parse_relation_decorator solo se llama con kinds parseables"
+            "BelongsToCompanion is not user-facing — parse_relation_decorator is only called with parseable kinds"
         ),
     };
     // Positional arg 1: name of the referenced type.
@@ -2653,7 +2651,7 @@ fn parse_relation_decorator(
             span.line,
             span.column,
             format!(
-                "`{dec_name}` espera 1 arg posicional (nombre del type referenciado), recibió {}",
+                "`{dec_name}` expects 1 positional arg (name of the referenced type), received {}",
                 d.args.len()
             ),
         ));
@@ -2667,7 +2665,7 @@ fn parse_relation_decorator(
                 span.line,
                 span.column,
                 format!(
-                    "`{dec_name}`: el primer arg debe ser un string literal con el nombre del type, recibió `{:?}`",
+                    "`{dec_name}`: first arg must be a string literal with the type name, received `{:?}`",
                     other
                 ),
             ));
@@ -2699,7 +2697,7 @@ fn parse_relation_decorator(
                     span.line,
                     span.column,
                     format!(
-                        "`{dec_name}(on_delete=...)` valor desconocido. Soportados: `cascade`, `set_null`, `restrict`, `no_action`."
+                        "`{dec_name}(on_delete=...)` unknown value. Supported: `cascade`, `set_null`, `restrict`, `no_action`."
                     ),
                 )),
             },
@@ -2710,7 +2708,7 @@ fn parse_relation_decorator(
                     span.line,
                     span.column,
                     format!(
-                        "`{dec_name}(on_update=...)` valor desconocido. Soportados: `cascade`, `set_null`, `restrict`, `no_action`."
+                        "`{dec_name}(on_update=...)` unknown value. Supported: `cascade`, `set_null`, `restrict`, `no_action`."
                     ),
                 )),
             },
@@ -2720,7 +2718,7 @@ fn parse_relation_decorator(
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    format!("`{dec_name}(fk=...)` espera string literal"),
+                    format!("`{dec_name}(fk=...)` expects string literal"),
                 )),
             },
             "via" if matches!(kind, RelationKind::HasOne | RelationKind::HasMany) => match v {
@@ -2729,7 +2727,7 @@ fn parse_relation_decorator(
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    format!("`{dec_name}(via=...)` espera string literal"),
+                    format!("`{dec_name}(via=...)` expects string literal"),
                 )),
             },
             other => {
@@ -2745,7 +2743,7 @@ fn parse_relation_decorator(
                     span.line,
                     span.column,
                     format!(
-                        "`{dec_name}` no reconoce el kwarg `{other}`. Soportados: {valid}."
+                        "`{dec_name}` does not recognize kwarg `{other}`. Supported: {valid}."
                     ),
                 ));
             }
@@ -2823,7 +2821,7 @@ fn check_field_default(
             0,
             0,
             format!(
-                "el campo `{}.{}` declarado como `{}` recibió un default `{}`",
+                "field `{}.{}` declared as `{}` received a default `{}`",
                 type_name,
                 field_name,
                 declared.display(env),
@@ -3706,10 +3704,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         Expr::NamedArg { name, value, span } => {
             ctx.error_at(
                 *span,
-                format!(
-                    "argumento nombrado `{}:` no puede aparecer fuera de una llamada",
-                    name
-                ),
+                format!("named argument `{}:` cannot appear outside a call", name),
             );
             synthesize_expr(ctx, value)
         }
@@ -3753,7 +3748,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             *span,
                             format!(
-                                "tupla de {} elementos no tiene índice `{}`",
+                                "tuple of {} elements does not have index `{}`",
                                 items.len(),
                                 index
                             ),
@@ -3766,7 +3761,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ctx.error_at(
                         *span,
                         format!(
-                            "acceso `.{}` solo aplica a tuplas, recibí `{}`",
+                            "access `.{}` only applies to tuples, received `{}`",
                             index,
                             other.display(ctx.types)
                         ),
@@ -3810,7 +3805,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if ctx.types.lookup(name).is_some() {
                 return Type::Any;
             }
-            ctx.error_at(*span, format!("variable desconocida `{}`", name));
+            ctx.error_at(*span, format!("unknown variable `{}`", name));
             Type::Any
         }
 
@@ -3823,7 +3818,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             *span,
                             format!(
-                                "el operador `-` (negación) espera Int o Float, recibió `{}`",
+                                "operator `-` (negation) expects Int or Float, received `{}`",
                                 other.display(ctx.types)
                             ),
                         );
@@ -3840,7 +3835,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             *span,
                             format!(
-                                "el operador `not` espera Bool, recibió `{}`",
+                                "operator `not` expects Bool, received `{}`",
                                 other.display(ctx.types)
                             ),
                         );
@@ -3854,7 +3849,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             *span,
                             format!(
-                                "el operador `~` espera Int, recibió `{}`",
+                                "operator `~` expects Int, received `{}`",
                                 other.display(ctx.types)
                             ),
                         );
@@ -3889,7 +3884,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ctx.error_at(
                     condition.span(),
                     format!(
-                        "la condición de `if` debe ser Bool, recibió `{}`",
+                        "the `if` condition must be Bool, received `{}`",
                         cond_ty.display(ctx.types)
                     ),
                 );
@@ -3976,7 +3971,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ctx.error_at(
                         f.span(),
                         format!(
-                            "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
+                            "the `if` filter of the list comprehension must be `Bool`, received `{}`",
                             f_ty.display(ctx.types)
                         ),
                     );
@@ -4010,7 +4005,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ctx.error_at(
                         f.span(),
                         format!(
-                            "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
+                            "the `if` filter of the map comprehension must be `Bool`, received `{}`",
                             f_ty.display(ctx.types)
                         ),
                     );
@@ -4050,13 +4045,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // Start and end must be Int (as in the evaluator). The
             // error span points to the problematic endpoint to
             // distinguish which of the two.
-            for (label, e) in [("inicio", start.as_ref()), ("fin", end.as_ref())] {
+            for (label, e) in [("start", start.as_ref()), ("end", end.as_ref())] {
                 let t = infer_expr(ctx, e);
                 if !is_compatible(&t, &Type::Int) {
                     ctx.error_at(
                         e.span(),
                         format!(
-                            "{} del rango debe ser Int, recibió `{}`",
+                            "{} of the range must be Int, received `{}`",
                             label,
                             t.display(ctx.types)
                         ),
@@ -4082,7 +4077,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // non-existent name is the checker's responsibility.
                     ctx.error_at(
                         *span,
-                        format!("no existe el tipo `{}` para instanciar", type_name),
+                        format!("type `{}` does not exist to instantiate", type_name),
                     );
                     // We still evaluate the values to detect errors
                     // inside.
@@ -4109,7 +4104,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     if !declared_names.contains(n.as_str()) {
                         ctx.error_at(
                             *fs,
-                            format!("el tipo `{}` no tiene un campo llamado `{}`", type_name, n),
+                            format!("type `{}` does not have a field named `{}`", type_name, n),
                         );
                     }
                     // Mini-batch Vp — struct lit cannot set private
@@ -4117,7 +4112,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // force use of static constructors (mini-batch St).
                     if is_private_field(n) && ctx.current_type != Some(id) {
                         ctx.error_at(*fs, format!(
-                            "el campo `{}.{}` es privado: no se puede setear desde un struct lit afuera de los métodos del tipo `{}` (usá un constructor estático como `{}.new(...)`)",
+                            "field `{}.{}` is private: cannot be set from a struct lit outside the methods of type `{}` (use a static constructor like `{}.new(...)`)",
                             type_name, n, type_name, type_name
                         ));
                     }
@@ -4133,7 +4128,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             ctx.error_at(
                                 *fs,
                                 format!(
-                                    "el campo `{}.{}` espera `{}`, recibió `{}`",
+                                    "field `{}.{}` expects `{}`, received `{}`",
                                     type_name,
                                     f.name,
                                     f.type_.display(ctx.types),
@@ -4177,7 +4172,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             // of a method of the SAME type.
                             if is_private_field(field) && ctx.current_type != Some(*id) {
                                 ctx.error_at(*span, format!(
-                                    "el campo `{}.{}` es privado (prefijo `_`); solo accesible desde métodos del propio tipo `{}`",
+                                    "field `{}.{}` is private (prefix `_`); only accessible from methods of the type `{}` itself",
                                     type_name, field, type_name
                                 ));
                             }
@@ -4415,21 +4410,21 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             *span,
                             if has_varargs {
                                 format!(
-                                    "{} espera al menos {} argumento(s), recibió {}",
+                                    "{} expects at least {} argument(s), received {}",
                                     label,
                                     required,
                                     args.len(),
                                 )
                             } else if required == params.len() {
                                 format!(
-                                    "{} espera {} argumento(s), recibió {}",
+                                    "{} expects {} argument(s), received {}",
                                     label,
                                     params.len(),
                                     args.len(),
                                 )
                             } else {
                                 format!(
-                                    "{} espera entre {} y {} argumento(s), recibió {}",
+                                    "{} expects between {} and {} argument(s), received {}",
                                     label,
                                     required,
                                     params.len(),
@@ -4455,7 +4450,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                                 ctx.error_at(
                                     args[i].span(),
                                     format!(
-                                        "{}: el argumento {} espera `{}`, recibió `{}`",
+                                        "{}: argument {} expects `{}`, received `{}`",
                                         label,
                                         i + 1,
                                         expected.display(ctx.types),
@@ -4470,7 +4465,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 other => {
                     ctx.error_at(
                         callee.span(),
-                        format!("`{}` no es una función", other.display(ctx.types)),
+                        format!("`{}` is not a function", other.display(ctx.types)),
                     );
                     Type::Any
                 }
@@ -4579,7 +4574,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             inner.span(),
                             format!(
-                                "el `{}` de un slice debe ser Int, recibió `{}`",
+                                "`{}` of a slice must be Int, received `{}`",
                                 name,
                                 t.display(ctx.types),
                             ),
@@ -4595,7 +4590,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ctx.error_at(
                         *span,
                         format!(
-                            "el tipo `{}` no soporta slicing con `[..]`",
+                            "type `{}` does not support slicing with `[..]`",
                             other.display(ctx.types),
                         ),
                     );
@@ -4617,7 +4612,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             index.span(),
                             format!(
-                                "el índice de una `List` debe ser Int, recibió `{}`",
+                                "index of a `List` must be Int, received `{}`",
                                 idx_ty.display(ctx.types)
                             ),
                         );
@@ -4629,7 +4624,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             index.span(),
                             format!(
-                                "el índice de un `Map<{}, {}>` debe ser `{}`, recibió `{}`",
+                                "index of a `Map<{}, {}>` must be `{}`, received `{}`",
                                 k.display(ctx.types),
                                 v.display(ctx.types),
                                 k.display(ctx.types),
@@ -4649,7 +4644,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             index.span(),
                             format!(
-                                "el índice de un `Str` debe ser Int, recibió `{}`",
+                                "index of a `Str` must be Int, received `{}`",
                                 idx_ty.display(ctx.types)
                             ),
                         );
@@ -4664,7 +4659,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ctx.error_at(
                         *span,
                         format!(
-                            "el tipo `{}` no soporta indexing con `[]`",
+                            "type `{}` does not support indexing with `[]`",
                             other.display(ctx.types)
                         ),
                     );
@@ -4727,7 +4722,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ctx.error_at(
                             guard_expr.span(),
                             format!(
-                                "el guard de un arm debe ser Bool, recibí {}",
+                                "the guard of an arm must be Bool, received {}",
                                 guard_ty.display(ctx.types)
                             ),
                         );
@@ -4839,7 +4834,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if matches!(ctx.await_stack.last(), Some(false)) {
                 ctx.error_at(
                     *span,
-                    "`.await` solo es válido adentro de `async fn` o a nivel top-level".to_string(),
+                    "`.await` is only valid inside `async fn` or at top-level".to_string(),
                 );
             }
 
@@ -4863,7 +4858,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ctx.error_at(
                         *span,
                         format!(
-                            "`.await` solo aplica a `Future<T>`, recibió `{}`",
+                            "`.await` only applies to `Future<T>`, received `{}`",
                             other.display(ctx.types)
                         ),
                     );
@@ -4904,7 +4899,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         let is_ok = matches!(expected, Type::Any | Type::Result { .. });
                         if !is_ok && !in_handler {
                             ctx.error_at(*span, format!(
-                                "el operador `?` solo puede usarse adentro de una función que retorne `Result<...>`; esta retorna `{}`",
+                                "operator `?` can only be used inside a function that returns `Result<...>`; this one returns `{}`",
                                 expected.display(ctx.types)
                             ));
                         }
@@ -4915,7 +4910,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     ctx.error_at(
                         *span,
                         format!(
-                            "el operador `?` requiere un `Result`, recibió `{}`",
+                            "operator `?` requires a `Result`, received `{}`",
                             other.display(ctx.types)
                         ),
                     );
@@ -4940,9 +4935,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
 /// we use it; otherwise, a generic label.
 fn describe_callee(callee: &Expr) -> String {
     match callee {
-        Expr::Ident(name, _) => format!("la función `{}`", name),
-        Expr::Field { field, .. } => format!("el método `{}`", field),
-        _ => "esta llamada".into(),
+        Expr::Ident(name, _) => format!("function `{}`", name),
+        Expr::Field { field, .. } => format!("method `{}`", field),
+        _ => "this call".into(),
     }
 }
 
@@ -5222,7 +5217,7 @@ fn infer_method_call(
                             ctx.error_at(
                                 span,
                                 format!(
-                                    "`{}.bulk_insert` espera 2 args (rows, db) o 3 (rows, db, batch_size: Int), recibió {}",
+                                    "`{}.bulk_insert` expects 2 args (rows, db) or 3 (rows, db, batch_size: Int), received {}",
                                     tname, n
                                 ),
                             );
@@ -5266,7 +5261,7 @@ fn infer_method_call(
                         ctx.error_at(
                             span,
                             format!(
-                                "navigation `<instance>.{}(db?)` espera 0 args (QueryBuilder chain) o 1 arg (db, terminal), recibió {}",
+                                "navigation `<instance>.{}(db?)` expects 0 args (QueryBuilder chain) or 1 arg (db, terminal), received {}",
                                 method,
                                 args_ty.len()
                             ),
@@ -5314,7 +5309,7 @@ fn infer_method_call(
                             ctx.error_at(
                                 span,
                                 format!(
-                                    "`{}.{}` espera {} argumento(s), recibió {}",
+                                    "`{}.{}` expects {} argument(s), received {}",
                                     nominal_name,
                                     method,
                                     params.len(),
@@ -5348,7 +5343,7 @@ fn infer_method_call(
                 // Applies to instance and static methods equally.
                 if is_private_field(method) && ctx.current_type != Some(*id) {
                     ctx.error_at(span, format!(
-                        "el método `{}.{}` es privado (prefijo `_`); solo accesible desde métodos del propio tipo `{}`",
+                        "method `{}.{}` is private (prefix `_`); only accessible from methods of the type `{}` itself",
                         info.name, method, info.name
                     ));
                 }
@@ -5357,7 +5352,7 @@ fn infer_method_call(
                     ctx.error_at(
                         span,
                         format!(
-                            "el método `{}.{}` espera {} argumento(s), recibió {}",
+                            "method `{}.{}` expects {} argument(s), received {}",
                             info.name,
                             method,
                             nm.params.len(),
@@ -5378,7 +5373,7 @@ fn infer_method_call(
                         ctx.errors.push(FitzError::type_mismatch(
                             span.line,
                             span.column,
-                            &format!("el método `{}.{}` arg #{}", info.name, method, i),
+                            &format!("method `{}.{}` arg #{}", info.name, method, i),
                             &expected.display(ctx.types),
                             &got.display(ctx.types),
                         ));
@@ -5463,7 +5458,7 @@ fn infer_method_call(
                     ctx.error_at(
                         span,
                         format!(
-                            "Secret.expose() no admite argumentos, recibió {}",
+                            "Secret.expose() does not accept arguments, received {}",
                             args_ty.len()
                         ),
                     );
@@ -5474,7 +5469,7 @@ fn infer_method_call(
                 ctx.error_at(
                     span,
                     format!(
-                        "Secret<{}> no tiene el método `{}`. Único método disponible: `.expose()` (desempaca al inner). Display/Debug/JSON están redactados por diseño.",
+                        "Secret<{}> does not have method `{}`. Only available method: `.expose()` (unwraps the inner). Display/Debug/JSON are redacted by design.",
                         inner.display(ctx.types),
                         other
                     ),
@@ -5489,7 +5484,7 @@ fn infer_method_call(
             ctx.error_at(
                 span,
                 format!(
-                    "el tipo `{}` no tiene el método `{}`",
+                    "type `{}` does not have method `{}`",
                     other.display(ctx.types),
                     method
                 ),
@@ -5612,7 +5607,7 @@ fn infer_query_builder_method(
             ctx.error_at(
                 span,
                 format!(
-                    "el método `QueryBuilder<{}>.{}` no existe (chain: where/order_by/limit/offset/group_by; terminales: all/first/count/sum/avg/min/max/update/delete/merge_jsonb)",
+                    "method `QueryBuilder<{}>.{}` does not exist (chain: where/order_by/limit/offset/group_by; terminals: all/first/count/sum/avg/min/max/update/delete/merge_jsonb)",
                     row.display(ctx.types),
                     other
                 ),
@@ -5646,7 +5641,7 @@ fn infer_aggregated_method(
     span: Span,
 ) -> Type {
     let aggregated = || Type::Aggregated(Box::new(row.clone()));
-    // Shape común de los aggregates con group_by: List<Map<Str, Any>>.
+    // Common shape of the aggregates with group_by: List<Map<Str, Any>>.
     // Each item of the List is a row {group_col: value, agg_name: value}.
     let future_result_list_map = || {
         Type::Future(Box::new(Type::Result {
@@ -5681,7 +5676,7 @@ fn infer_aggregated_method(
             ctx.error_at(
                 span,
                 format!(
-                    "`Aggregated<{}>.{}` no es válido sobre un GROUP BY — usá un aggregate (count/sum/avg/min/max) para colapsar los grupos",
+                    "`Aggregated<{}>.{}` is not valid over a GROUP BY — use an aggregate (count/sum/avg/min/max) to collapse the groups",
                     row.display(ctx.types),
                     method
                 ),
@@ -5692,7 +5687,7 @@ fn infer_aggregated_method(
             ctx.error_at(
                 span,
                 format!(
-                    "el método `Aggregated<{}>.{}` no existe (chain: where/order_by/limit/offset/group_by; terminales: count/sum/avg/min/max)",
+                    "method `Aggregated<{}>.{}` does not exist (chain: where/order_by/limit/offset/group_by; terminals: count/sum/avg/min/max)",
                     row.display(ctx.types),
                     other
                 ),
@@ -5721,7 +5716,7 @@ fn infer_int_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                 ctx.error_at(
                     span,
                     format!(
-                        "`Int.to_str_base()` espera `Int`, recibió `{}`",
+                        "`Int.to_str_base()` expects `Int`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -5732,7 +5727,7 @@ fn infer_int_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             ctx.error_at(
                 span,
                 format!(
-                    "`Int` no tiene el método `{}` (hoy: abs/to_str/to_str_base)",
+                    "`Int` does not have method `{}` (today: abs/to_str/to_str_base)",
                     method,
                 ),
             );
@@ -5759,7 +5754,7 @@ fn infer_float_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
             ctx.error_at(
                 span,
                 format!(
-                    "`Float` no tiene el método `{}` (hoy: abs/to_str/is_nan/is_finite)",
+                    "`Float` does not have method `{}` (today: abs/to_str/is_nan/is_finite)",
                     method,
                 ),
             );
@@ -5788,7 +5783,7 @@ fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
                     ctx.error_at(
                         span,
                         format!(
-                            "`Range.zip()` espera `List<U>`, recibió `{}`",
+                            "`Range.zip()` expects `List<U>`, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -5807,7 +5802,7 @@ fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
                         ctx.error_at(
                             span,
                             format!(
-                                "`Range.chain()` espera `List<Int>`, recibió `List<{}>`",
+                                "`Range.chain()` expects `List<Int>`, received `List<{}>`",
                                 inner.display(ctx.types),
                             ),
                         );
@@ -5818,7 +5813,7 @@ fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
                     ctx.error_at(
                         span,
                         format!(
-                            "`Range.chain()` espera `List<Int>`, recibió `{}`",
+                            "`Range.chain()` expects `List<Int>`, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -5839,7 +5834,7 @@ fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
                 ctx.error_at(
                     span,
                     format!(
-                        "`Range.step_by()` espera `Int`, recibió `{}`",
+                        "`Range.step_by()` expects `Int`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -5850,7 +5845,7 @@ fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
             ctx.error_at(
                 span,
                 format!(
-                    "`Range` no tiene el método `{}` (hoy: enumerate/zip/chain/len/step_by)",
+                    "`Range` does not have method `{}` (today: enumerate/zip/chain/len/step_by)",
                     method,
                 ),
             );
@@ -5884,7 +5879,7 @@ fn check_method_arity(
         ctx.error_at(
             span,
             format!(
-                "el método `{}` espera {} argumento(s), recibió {}",
+                "method `{}` expects {} argument(s), received {}",
                 method,
                 expected,
                 args_ty.len()
@@ -5915,7 +5910,7 @@ fn check_unary_callback(
                 ctx.error_at(
                     span,
                     format!(
-                        "la callback de `.{}()` debe tomar 1 argumento, recibió {}",
+                        "the callback of `.{}()` must take 1 argument, received {}",
                         method,
                         params.len()
                     ),
@@ -5929,7 +5924,7 @@ fn check_unary_callback(
                 ctx.error_at(
                     span,
                     format!(
-                        "la callback de `.{}()` recibe elementos `{}` pero su parámetro es `{}`",
+                        "the callback of `.{}()` receives elements `{}` but its parameter is `{}`",
                         method,
                         elem_ty.display(ctx.types),
                         params[0].display(ctx.types)
@@ -5941,7 +5936,7 @@ fn check_unary_callback(
                     ctx.error_at(
                         span,
                         format!(
-                            "la callback de `.{}()` debe devolver `{}`, devuelve `{}`",
+                            "the callback of `.{}()` must return `{}`, returns `{}`",
                             method,
                             expected.display(ctx.types),
                             ret.display(ctx.types)
@@ -5955,7 +5950,7 @@ fn check_unary_callback(
             ctx.error_at(
                 span,
                 format!(
-                    "la callback de `.{}()` debe ser una función, recibió `{}`",
+                    "the callback of `.{}()` must be a function, received `{}`",
                     method,
                     other.display(ctx.types)
                 ),
@@ -5980,7 +5975,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`push` sobre `List<{}>` recibió `{}`",
+                            "`push` over `List<{}>` received `{}`",
                             t.display(ctx.types),
                             arg.display(ctx.types)
                         ),
@@ -6059,7 +6054,7 @@ fn infer_list_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`.flat_map()`: el callback toma 1 param, tiene {}",
+                                "`.flat_map()`: callback takes 1 param, has {}",
                                 params.len(),
                             ),
                         );
@@ -6069,7 +6064,7 @@ fn infer_list_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`.flat_map()`: param del callback es `{}`, esperaba `{}`",
+                                "`.flat_map()`: callback param is `{}`, expected `{}`",
                                 params[0].display(ctx.types),
                                 t.display(ctx.types),
                             ),
@@ -6082,9 +6077,9 @@ fn infer_list_method(
                             ctx.error_at(
                                 span,
                                 format!(
-                                "`.flat_map()`: el callback debe retornar `List<U>`, retorna `{}`",
-                                other.display(ctx.types),
-                            ),
+                                    "`.flat_map()`: callback must return `List<U>`, returns `{}`",
+                                    other.display(ctx.types),
+                                ),
                             );
                             Type::Any
                         }
@@ -6095,7 +6090,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.flat_map()` espera un callback, recibió `{}`",
+                            "`.flat_map()` expects a callback, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6126,7 +6121,7 @@ fn infer_list_method(
                 },
                 other => {
                     ctx.error_at(span, format!(
-                        "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                        "`.{}()` only applies over `List<Int>` or `List<Float>`, received `List<{}>`",
                         method, other.display(ctx.types),
                     ));
                     Type::Result {
@@ -6143,7 +6138,7 @@ fn infer_list_method(
                 Type::Any => Type::Any,
                 other => {
                     ctx.error_at(span, format!(
-                        "`.sum()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                        "`.sum()` only applies over `List<Int>` or `List<Float>`, received `List<{}>`",
                         other.display(ctx.types),
                     ));
                     Type::Any
@@ -6159,7 +6154,7 @@ fn infer_list_method(
                 Type::Any => Type::Any,
                 other => {
                     ctx.error_at(span, format!(
-                        "`.product()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                        "`.product()` only applies over `List<Int>` or `List<Float>`, received `List<{}>`",
                         other.display(ctx.types),
                     ));
                     Type::Any
@@ -6188,7 +6183,7 @@ fn infer_list_method(
                 Type::Any => Type::Map(Box::new(Type::Any), Box::new(Type::Any)),
                 other => {
                     ctx.error_at(span, format!(
-                        "`.to_map()` requiere `List<(K, V)>` (Tuple de aridad 2), recibió `List<{}>`",
+                        "`.to_map()` requires `List<(K, V)>` (Tuple of arity 2), received `List<{}>`",
                         other.display(ctx.types),
                     ));
                     Type::Map(Box::new(Type::Any), Box::new(Type::Any))
@@ -6237,7 +6232,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.zip_with()` espera `List<U>` como primer arg, recibió `{}`",
+                            "`.zip_with()` expects `List<U>` as first arg, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6250,7 +6245,7 @@ fn infer_list_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`.zip_with()`: el callback toma 2 params, tiene {}",
+                                "`.zip_with()`: callback takes 2 params, has {}",
                                 params.len(),
                             ),
                         );
@@ -6260,7 +6255,7 @@ fn infer_list_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`.zip_with()`: param[0] del callback es `{}`, esperaba `{}`",
+                                "`.zip_with()`: callback param[0] is `{}`, expected `{}`",
                                 params[0].display(ctx.types),
                                 t.display(ctx.types),
                             ),
@@ -6270,7 +6265,7 @@ fn infer_list_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`.zip_with()`: param[1] del callback es `{}`, esperaba `{}`",
+                                "`.zip_with()`: callback param[1] is `{}`, expected `{}`",
                                 params[1].display(ctx.types),
                                 u_ty.display(ctx.types),
                             ),
@@ -6283,7 +6278,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.zip_with()` espera un callback, recibió `{}`",
+                            "`.zip_with()` expects a callback, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6324,7 +6319,7 @@ fn infer_list_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.windows()` espera `Int`, recibió `{}`",
+                        "`.windows()` expects `Int`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -6340,7 +6335,7 @@ fn infer_list_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`List.split_at()` espera `Int`, recibió `{}`",
+                        "`List.split_at()` expects `Int`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -6360,7 +6355,7 @@ fn infer_list_method(
                             ctx.error_at(
                                 span,
                                 format!(
-                                    "`.{}()`: espera `List<{}>`, recibió `List<{}>`",
+                                    "`.{}()`: expects `List<{}>`, received `List<{}>`",
                                     method,
                                     t.display(ctx.types),
                                     inner.display(ctx.types),
@@ -6373,7 +6368,7 @@ fn infer_list_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`.{}()`: espera `List<{}>`, recibió `{}`",
+                                "`.{}()`: expects `List<{}>`, received `{}`",
                                 method,
                                 t.display(ctx.types),
                                 other.display(ctx.types),
@@ -6392,7 +6387,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.insert_at(i, v)`: arg 0 (idx) espera `Int`, recibió `{}`",
+                            "`.insert_at(i, v)`: arg 0 (idx) expects `Int`, received `{}`",
                             args_ty[0].display(ctx.types),
                         ),
                     );
@@ -6401,7 +6396,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.insert_at(i, v)`: v es `{}`, debe ser compatible con `{}`",
+                            "`.insert_at(i, v)`: v is `{}`, must be compatible with `{}`",
                             args_ty[1].display(ctx.types),
                             t.display(ctx.types),
                         ),
@@ -6418,7 +6413,7 @@ fn infer_list_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.remove_at(i)`: idx espera `Int`, recibió `{}`",
+                        "`.remove_at(i)`: idx expects `Int`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -6438,7 +6433,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.zip_to_map()` espera `List<V>`, recibió `{}`",
+                            "`.zip_to_map()` expects `List<V>`, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6456,7 +6451,7 @@ fn infer_list_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.{}()` espera `Int`, recibió `{}`",
+                        "`.{}()` expects `Int`, received `{}`",
                         method,
                         args_ty[0].display(ctx.types),
                     ),
@@ -6478,7 +6473,7 @@ fn infer_list_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.intersperse()`: sep es `{}`, debe ser compatible con `{}`",
+                        "`.intersperse()`: sep is `{}`, must be compatible with `{}`",
                         args_ty[0].display(ctx.types),
                         t.display(ctx.types),
                     ),
@@ -6502,7 +6497,7 @@ fn infer_list_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`List<{}>.contains()` recibió `{}`",
+                        "`List<{}>.contains()` received `{}`",
                         t.display(ctx.types),
                         args_ty[0].display(ctx.types),
                     ),
@@ -6531,7 +6526,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`List<{}>.zip()` espera `List<U>`, recibió `{}`",
+                            "`List<{}>.zip()` expects `List<U>`, received `{}`",
                             t.display(ctx.types),
                             other.display(ctx.types),
                         ),
@@ -6553,7 +6548,7 @@ fn infer_list_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`List<{}>.chain()` espera `List<{}>`, recibió `List<{}>`",
+                                "`List<{}>.chain()` expects `List<{}>`, received `List<{}>`",
                                 t.display(ctx.types),
                                 t.display(ctx.types),
                                 inner.display(ctx.types),
@@ -6566,7 +6561,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`List<{}>.chain()` espera `List<{}>`, recibió `{}`",
+                            "`List<{}>.chain()` expects `List<{}>`, received `{}`",
                             t.display(ctx.types),
                             t.display(ctx.types),
                             other.display(ctx.types),
@@ -6589,7 +6584,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.flatten()` requiere `List<List<U>>`, el receptor es `List<{}>`",
+                            "`.flatten()` requires `List<List<U>>`, the receiver is `List<{}>`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6608,27 +6603,30 @@ fn infer_list_method(
                 Type::Function { params, ret } => {
                     if params.len() != 2 {
                         ctx.error_at(span, format!(
-                            "`.sort_by(cmp)` espera `fn(T, T) -> Int` (2 params); el callback tiene {} params",
+                            "`.sort_by(cmp)` expects `fn(T, T) -> Int` (2 params); the callback has {} params",
                             params.len(),
                         ));
                     } else {
                         for (i, p) in params.iter().enumerate() {
                             if !is_compatible(p, t) && !is_compatible(t, p) {
-                                ctx.error_at(span, format!(
-                                    "`.sort_by(cmp)`: param[{}] del callback es `{}`, esperaba `{}`",
+                                ctx.error_at(
+                                    span,
+                                    format!(
+                                    "`.sort_by(cmp)`: callback param[{}] is `{}`, expected `{}`",
                                     i,
                                     p.display(ctx.types),
                                     t.display(ctx.types),
-                                ));
+                                ),
+                                );
                             }
                         }
                         if !is_compatible(ret, &Type::Int) {
                             ctx.error_at(
                                 span,
                                 format!(
-                                "`.sort_by(cmp)`: el callback debe retornar `Int`, retorna `{}`",
-                                ret.display(ctx.types),
-                            ),
+                                    "`.sort_by(cmp)`: callback must return `Int`, returns `{}`",
+                                    ret.display(ctx.types),
+                                ),
                             );
                         }
                     }
@@ -6640,7 +6638,7 @@ fn infer_list_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.sort_by(cmp)` espera `fn(T, T) -> Int`, recibió `{}`",
+                            "`.sort_by(cmp)` expects `fn(T, T) -> Int`, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6652,7 +6650,7 @@ fn infer_list_method(
             ctx.error_at(
                 span,
                 format!(
-                    "`List<{}>` no tiene el método `{}`",
+                    "`List<{}>` does not have method `{}`",
                     t.display(ctx.types),
                     method
                 ),
@@ -6678,7 +6676,7 @@ fn infer_map_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`get` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
+                            "`get` over `Map<{}, {}>` expects a key `{}`, received `{}`",
                             k.display(ctx.types),
                             v.display(ctx.types),
                             k.display(ctx.types),
@@ -6699,7 +6697,7 @@ fn infer_map_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`has` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
+                            "`has` over `Map<{}, {}>` expects a key `{}`, received `{}`",
                             k.display(ctx.types),
                             v.display(ctx.types),
                             k.display(ctx.types),
@@ -6742,7 +6740,7 @@ fn infer_map_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`Map.has_value()` espera `{}`, recibió `{}`",
+                        "`Map.has_value()` expects `{}`, received `{}`",
                         v.display(ctx.types),
                         args_ty[0].display(ctx.types),
                     ),
@@ -6760,7 +6758,7 @@ fn infer_map_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.with()`: la key debe ser `{}`, recibió `{}`",
+                        "`.with()`: key must be `{}`, received `{}`",
                         k.display(ctx.types),
                         args_ty[0].display(ctx.types),
                     ),
@@ -6770,7 +6768,7 @@ fn infer_map_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.with()`: el value debe ser `{}`, recibió `{}`",
+                        "`.with()`: value must be `{}`, received `{}`",
                         v.display(ctx.types),
                         args_ty[1].display(ctx.types),
                     ),
@@ -6789,14 +6787,14 @@ fn infer_map_method(
                 Type::Map(k2, v2) => {
                     if !is_compatible(k2, k) {
                         ctx.error_at(span, format!(
-                            "`.merge_with()`: keys deben coincidir, recibió `Map<{}, _>` vs `Map<{}, _>`",
+                            "`.merge_with()`: keys must match, received `Map<{}, _>` vs `Map<{}, _>`",
                             k2.display(ctx.types),
                             k.display(ctx.types),
                         ));
                     }
                     if !is_compatible(v2, v) {
                         ctx.error_at(span, format!(
-                            "`.merge_with()`: values deben coincidir, recibió `Map<_, {}>` vs `Map<_, {}>`",
+                            "`.merge_with()`: values must match, received `Map<_, {}>` vs `Map<_, {}>`",
                             v2.display(ctx.types),
                             v.display(ctx.types),
                         ));
@@ -6807,7 +6805,7 @@ fn infer_map_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.merge_with()` espera otro `Map`, recibió `{}`",
+                            "`.merge_with()` expects another `Map`, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6846,7 +6844,7 @@ fn infer_map_method(
                 ctx.error_at(
                     span,
                     format!(
-                        "`Map<{}, _>.update()`: la key debe ser `{}`, recibió `{}`",
+                        "`Map<{}, _>.update()`: key must be `{}`, received `{}`",
                         k.display(ctx.types),
                         k.display(ctx.types),
                         args_ty[0].display(ctx.types),
@@ -6866,15 +6864,18 @@ fn infer_map_method(
             match args_ty[0].base() {
                 Type::Map(k2, v2) => {
                     if !is_compatible(k2, k) {
-                        ctx.error_at(span, format!(
-                            "`Map.merge()`: las keys deben coincidir, recibió `Map<{}, _>` vs `Map<{}, _>`",
+                        ctx.error_at(
+                            span,
+                            format!(
+                            "`Map.merge()`: keys must match, received `Map<{}, _>` vs `Map<{}, _>`",
                             k2.display(ctx.types),
                             k.display(ctx.types),
-                        ));
+                        ),
+                        );
                     }
                     if !is_compatible(v2, v) {
                         ctx.error_at(span, format!(
-                            "`Map.merge()`: los values deben coincidir, recibió `Map<_, {}>` vs `Map<_, {}>`",
+                            "`Map.merge()`: values must match, received `Map<_, {}>` vs `Map<_, {}>`",
                             v2.display(ctx.types),
                             v.display(ctx.types),
                         ));
@@ -6885,7 +6886,7 @@ fn infer_map_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`Map.merge()` espera otro `Map`, recibió `{}`",
+                            "`Map.merge()` expects another `Map`, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6905,7 +6906,7 @@ fn infer_map_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`Map.map_values()`: el callback debe tener 1 param, tiene {}",
+                                "`Map.map_values()`: callback must have 1 param, has {}",
                                 params.len(),
                             ),
                         );
@@ -6915,7 +6916,7 @@ fn infer_map_method(
                         ctx.error_at(
                             span,
                             format!(
-                                "`Map.map_values()`: el callback espera `{}`, los values son `{}`",
+                                "`Map.map_values()`: callback expects `{}`, the values are `{}`",
                                 params[0].display(ctx.types),
                                 v.display(ctx.types),
                             ),
@@ -6928,7 +6929,7 @@ fn infer_map_method(
                     ctx.error_at(
                         span,
                         format!(
-                            "`Map.map_values()` espera un callback, recibió `{}`",
+                            "`Map.map_values()` expects a callback, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -6941,7 +6942,7 @@ fn infer_map_method(
             ctx.error_at(
                 span,
                 format!(
-                    "`Map<{}, {}>` no tiene el método `{}`",
+                    "`Map<{}, {}>` does not have method `{}`",
                     k.display(ctx.types),
                     v.display(ctx.types),
                     method
@@ -6970,7 +6971,7 @@ fn check_binary_callback(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.{}` espera un callback de 2 params, recibió uno de {} params",
+                        "`.{}` expects a callback of 2 params, received one of {} params",
                         method,
                         params.len(),
                     ),
@@ -6981,7 +6982,7 @@ fn check_binary_callback(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.{}`: param[0] del callback es `{}`, esperaba `{}`",
+                        "`.{}`: callback param[0] is `{}`, expected `{}`",
                         method,
                         params[0].display(ctx.types),
                         p0_ty.display(ctx.types),
@@ -6992,7 +6993,7 @@ fn check_binary_callback(
                 ctx.error_at(
                     span,
                     format!(
-                        "`.{}`: param[1] del callback es `{}`, esperaba `{}`",
+                        "`.{}`: callback param[1] is `{}`, expected `{}`",
                         method,
                         params[1].display(ctx.types),
                         p1_ty.display(ctx.types),
@@ -7004,7 +7005,7 @@ fn check_binary_callback(
                     ctx.error_at(
                         span,
                         format!(
-                            "`.{}`: el callback debe retornar `{}`, retorna `{}`",
+                            "`.{}`: callback must return `{}`, returns `{}`",
                             method,
                             want_ret.display(ctx.types),
                             ret.display(ctx.types),
@@ -7020,7 +7021,7 @@ fn check_binary_callback(
             ctx.error_at(
                 span,
                 format!(
-                    "`.{}` espera un callback, recibió `{}`",
+                    "`.{}` expects a callback, received `{}`",
                     method,
                     other.display(ctx.types),
                 ),
@@ -7083,11 +7084,11 @@ fn infer_wsconn_method(
                     ctx.error_at(
                         span,
                         format!(
-                        "el método `{}.send(msg)` espera un argumento de tipo `{}`, recibió `{}`",
-                        conn_disp,
-                        send_ty.display(ctx.types),
-                        arg.display(ctx.types),
-                    ),
+                            "method `{}.send(msg)` expects an argument of type `{}`, received `{}`",
+                            conn_disp,
+                            send_ty.display(ctx.types),
+                            arg.display(ctx.types),
+                        ),
                     );
                 }
             }
@@ -7101,7 +7102,7 @@ fn infer_wsconn_method(
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, send_ty) {
                     ctx.error_at(span, format!(
-                        "el método `{}.broadcast(msg)` espera un argumento de tipo `{}`, recibió `{}`",
+                        "method `{}.broadcast(msg)` expects an argument of type `{}`, received `{}`",
                         conn_disp,
                         send_ty.display(ctx.types),
                         arg.display(ctx.types),
@@ -7121,10 +7122,9 @@ fn infer_wsconn_method(
             ctx.error_at(
                 span,
                 format!(
-                "el tipo `{}` no tiene el método `{}` (soportados: recv, send, broadcast, close)",
-                conn_disp,
-                method,
-            ),
+                    "type `{}` does not have method `{}` (supported: recv, send, broadcast, close)",
+                    conn_disp, method,
+                ),
             );
             Type::Any
         }
@@ -7194,7 +7194,7 @@ fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span
                             ctx.error_at(
                                 span,
                                 format!(
-                                    "el callback de `DbConn.transaction` debe retornar `Result<T, _>` (o `Future<Result<T, _>>` si es async); retorna `{}`",
+                                    "callback of `DbConn.transaction` must return `Result<T, _>` (or `Future<Result<T, _>>` if async); returns `{}`",
                                     ret.display(ctx.types),
                                 ),
                             );
@@ -7211,7 +7211,7 @@ fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span
                     ctx.error_at(
                         span,
                         format!(
-                            "`DbConn.transaction` espera una `fn(tx: DbConn) -> Result<T>` como argumento, recibió `{}`",
+                            "`DbConn.transaction` expects a `fn(tx: DbConn) -> Result<T>` as argument, received `{}`",
                             other.display(ctx.types),
                         ),
                     );
@@ -7228,7 +7228,7 @@ fn infer_db_conn_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span
             ctx.error_at(
                 span,
                 format!(
-                    "el tipo `DbConn` no tiene el método `{}` (soportados: query, exec, close, is_closed, transaction)",
+                    "type `DbConn` does not have method `{}` (supported: query, exec, close, is_closed, transaction)",
                     method
                 ),
             );
@@ -7259,7 +7259,7 @@ fn infer_bytes_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: 
             ctx.error_at(
                 span,
                 format!(
-                    "el tipo `Bytes` no tiene el método `{}` (soportados: len, is_empty, to_str)",
+                    "type `Bytes` does not have method `{}` (supported: len, is_empty, to_str)",
                     method
                 ),
             );
@@ -7301,7 +7301,7 @@ fn infer_db_row_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span:
                 ctx.error_at(
                     span,
                     format!(
-                        "`DbRow.{}(name)` espera Str, recibió `{}`",
+                        "`DbRow.{}(name)` expects Str, received `{}`",
                         name,
                         arg.display(ctx.types),
                     ),
@@ -7338,7 +7338,7 @@ fn infer_db_row_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span:
             ctx.error_at(
                 span,
                 format!(
-                    "el tipo `DbRow` no tiene el método `{}` (soportados: get_int, get_str, get_float, get_bool, len)",
+                    "type `DbRow` does not have method `{}` (supported: get_int, get_str, get_float, get_bool, len)",
                     method
                 ),
             );
@@ -7371,7 +7371,7 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "`Date.format(fmt)` espera `Str`, recibió `{}`",
+                        "`Date.format(fmt)` expects `Str`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -7389,7 +7389,7 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "`Date.{}(n)` espera `Int`, recibió `{}`",
+                        "`Date.{}(n)` expects `Int`, received `{}`",
                         method,
                         args_ty[0].display(ctx.types),
                     ),
@@ -7405,7 +7405,7 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "`Date.diff_days(other)` espera `Date`, recibió `{}`",
+                        "`Date.diff_days(other)` expects `Date`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -7416,7 +7416,7 @@ fn infer_date_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
             ctx.error_at(
                 span,
                 format!(
-                    "`Date` no tiene el método `{}` (soportados: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
+                    "`Date` does not have method `{}` (supported: year, month, day, weekday, to_str, to_datetime, format, add_days, add_months, add_years, subtract_days, subtract_months, subtract_years, diff_days)",
                     method
                 ),
             );
@@ -7449,7 +7449,7 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
                 ctx.error_at(
                     span,
                     format!(
-                        "`DateTime.format(fmt)` espera `Str`, recibió `{}`",
+                        "`DateTime.format(fmt)` expects `Str`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -7468,7 +7468,7 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
                 ctx.error_at(
                     span,
                     format!(
-                        "`DateTime.{}(n)` espera `Int`, recibió `{}`",
+                        "`DateTime.{}(n)` expects `Int`, received `{}`",
                         method,
                         args_ty[0].display(ctx.types),
                     ),
@@ -7484,7 +7484,7 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
                 ctx.error_at(
                     span,
                     format!(
-                        "`DateTime.{}(other)` espera `DateTime`, recibió `{}`",
+                        "`DateTime.{}(other)` expects `DateTime`, received `{}`",
                         method,
                         args_ty[0].display(ctx.types),
                     ),
@@ -7506,7 +7506,7 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
                 ctx.error_at(
                     span,
                     format!(
-                        "`DateTime.in_tz(name)` espera `Str` (IANA tz name), recibió `{}`",
+                        "`DateTime.in_tz(name)` expects `Str` (IANA tz name), received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -7520,7 +7520,7 @@ fn infer_datetime_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], spa
             ctx.error_at(
                 span,
                 format!(
-                    "`DateTime` no tiene el método `{}` (soportados: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
+                    "`DateTime` does not have method `{}` (supported: year, month, day, hour, minute, second, timestamp, to_str, date, format, add_seconds, add_minutes, add_hours, add_days, add_months, add_years, subtract_seconds, subtract_minutes, subtract_hours, subtract_days, subtract_months, subtract_years, diff_seconds, diff_minutes, diff_hours, diff_days, to_local, in_tz)",
                     method
                 ),
             );
@@ -7546,7 +7546,7 @@ fn infer_uuid_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: S
             ctx.error_at(
                 span,
                 format!(
-                    "`Uuid` no tiene el método `{}` (soportados: to_str, is_nil)",
+                    "`Uuid` does not have method `{}` (supported: to_str, is_nil)",
                     method
                 ),
             );
@@ -7574,7 +7574,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                 ctx.error_at(
                     span,
                     format!(
-                        "`Str.{}()` espera `Str`, recibió `{}`",
+                        "`Str.{}()` expects `Str`, received `{}`",
                         method,
                         args_ty[0].display(ctx.types),
                     ),
@@ -7597,7 +7597,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                 ctx.error_at(
                     span,
                     format!(
-                        "`Str.split_at()` espera `Int`, recibió `{}`",
+                        "`Str.split_at()` expects `Int`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -7632,7 +7632,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                 ctx.error_at(
                     span,
                     format!(
-                        "`Str.{}()` espera `Int`, recibió `{}`",
+                        "`Str.{}()` expects `Int`, received `{}`",
                         method,
                         args_ty[0].display(ctx.types),
                     ),
@@ -7648,7 +7648,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                     ctx.error_at(
                         span,
                         format!(
-                            "`Str.center(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
+                            "`Str.center(width, ch)`: arg 0 (width) expects `Int`, received `{}`",
                             args_ty[0].display(ctx.types),
                         ),
                     );
@@ -7657,7 +7657,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                     ctx.error_at(
                         span,
                         format!(
-                            "`Str.center(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
+                            "`Str.center(width, ch)`: arg 1 (ch) expects `Str`, received `{}`",
                             args_ty[1].display(ctx.types),
                         ),
                     );
@@ -7673,7 +7673,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                     ctx.error_at(
                         span,
                         format!(
-                            "`Str.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`",
+                            "`Str.repeat_with()`: arg 0 (n) expects `Int`, received `{}`",
                             args_ty[0].display(ctx.types),
                         ),
                     );
@@ -7682,7 +7682,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                     ctx.error_at(
                         span,
                         format!(
-                            "`Str.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`",
+                            "`Str.repeat_with()`: arg 1 (sep) expects `Str`, received `{}`",
                             args_ty[1].display(ctx.types),
                         ),
                     );
@@ -7698,7 +7698,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                 ctx.error_at(
                     span,
                     format!(
-                        "`Str.split()` espera `Str` como separador, recibió `{}`",
+                        "`Str.split()` expects `Str` as separator, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -7721,7 +7721,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                         ctx.error_at(
                             span,
                             format!(
-                                "`Str.replace({}, ...)` espera `Str`, recibió `{}`",
+                                "`Str.replace({}, ...)` expects `Str`, received `{}`",
                                 name,
                                 args_ty[i].display(ctx.types),
                             ),
@@ -7738,7 +7738,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                 ctx.error_at(
                     span,
                     format!(
-                        "`Str.repeat()` espera `Int`, recibió `{}`",
+                        "`Str.repeat()` expects `Int`, received `{}`",
                         args_ty[0].display(ctx.types),
                     ),
                 );
@@ -7755,7 +7755,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                     ctx.error_at(
                         span,
                         format!(
-                            "`Str.{}(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
+                            "`Str.{}(width, ch)`: arg 0 (width) expects `Int`, received `{}`",
                             method,
                             args_ty[0].display(ctx.types),
                         ),
@@ -7765,7 +7765,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                     ctx.error_at(
                         span,
                         format!(
-                            "`Str.{}(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
+                            "`Str.{}(width, ch)`: arg 1 (ch) expects `Str`, received `{}`",
                             method,
                             args_ty[1].display(ctx.types),
                         ),
@@ -7783,7 +7783,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
                 ctx.error_at(
                     span,
                     format!(
-                        "`Str.{}()` espera `Str`, recibió `{}`",
+                        "`Str.{}()` expects `Str`, received `{}`",
                         method,
                         args_ty[0].display(ctx.types),
                     ),
@@ -7795,7 +7795,7 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Sp
             }
         }
         _ => {
-            ctx.error_at(span, format!("`Str` no tiene el método `{}`", method));
+            ctx.error_at(span, format!("`Str` does not have method `{}`", method));
             Type::Any
         }
     }
@@ -7852,7 +7852,7 @@ fn check_comp_clause_in_checker(
             ctx.error_at(
                 iter.span(),
                 format!(
-                    "comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                    "comprehension needs an iterable (`List` or `Range`), received `{}`",
                     other.display(ctx.types)
                 ),
             );
@@ -7904,10 +7904,10 @@ fn bind_for_pattern_in_checker(
                     ctx.error_at(
                         fallback_span,
                         format!(
-                        "tuple pattern del `for` espera una tupla de {} elementos, recibió `{}`",
-                        subs.len(),
-                        other.display(ctx.types)
-                    ),
+                            "tuple pattern of `for` expects a tuple of {} elements, received `{}`",
+                            subs.len(),
+                            other.display(ctx.types)
+                        ),
                     );
                 }
             }
@@ -7916,7 +7916,7 @@ fn bind_for_pattern_in_checker(
             ctx.error_at(
                 fallback_span,
                 format!(
-                    "patrón `{:?}` no admitido como variable de `for` (usá Ident, `_`, o tupla)",
+                    "pattern `{:?}` not allowed as `for` variable (use Ident, `_`, or tuple)",
                     other
                 ),
             );
@@ -7963,7 +7963,7 @@ fn validate_format_spec_for_type(
         ctx.error_at(
             span,
             format!(
-                "format spec `{}` no es compatible con tipo `{}` (esperaba {})",
+                "format spec `{}` is not compatible with type `{}` (expected {})",
                 kind.to_char(),
                 ty.display(ctx.types),
                 match kind {
@@ -7980,7 +7980,7 @@ fn validate_format_spec_for_type(
                     | FormatKind::HexLower
                     | FormatKind::HexUpper
                     | FormatKind::Char => "Int",
-                    FormatKind::String => "cualquier tipo",
+                    FormatKind::String => "any type",
                 },
             ),
         );
@@ -8021,7 +8021,7 @@ fn check_result_match_exhaustiveness(
     ctx.error_at(
         span,
         format!(
-            "match sobre `Result` no es exhaustivo: falta el caso {}",
+            "match over `Result` is not exhaustive: missing case {}",
             missing
         ),
     );
@@ -8156,7 +8156,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                     ctx.error_at(
                         span,
                         format!(
-                            "el operador `+` no acepta `{}` y `{}`",
+                            "operator `+` does not accept `{}` and `{}`",
                             lt.display(ctx.types),
                             rt.display(ctx.types)
                         ),
@@ -8181,7 +8181,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                     ctx.error_at(
                         span,
                         format!(
-                            "el operador `{}` espera operandos numéricos, recibió `{}` y `{}`",
+                            "operator `{}` expects numeric operands, received `{}` and `{}`",
                             sym,
                             lt.display(ctx.types),
                             rt.display(ctx.types)
@@ -8200,7 +8200,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "el operador `%` espera Int en ambos lados, recibió `{}` y `{}`",
+                        "operator `%` expects Int on both sides, received `{}` and `{}`",
                         lt.display(ctx.types),
                         rt.display(ctx.types)
                     ),
@@ -8226,7 +8226,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "comparación entre `{}` y `{}` no soportada",
+                        "comparison between `{}` and `{}` not supported",
                         lt.display(ctx.types),
                         rt.display(ctx.types)
                     ),
@@ -8244,7 +8244,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "el operador lógico espera Bool, lado izquierdo es `{}`",
+                        "logical operator expects Bool, left side is `{}`",
                         lt.display(ctx.types)
                     ),
                 );
@@ -8253,7 +8253,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "el operador lógico espera Bool, lado derecho es `{}`",
+                        "logical operator expects Bool, right side is `{}`",
                         rt.display(ctx.types)
                     ),
                 );
@@ -8279,7 +8279,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "el operador bit-a-bit `{}` espera Int, lado izquierdo es `{}`",
+                        "bitwise operator `{}` expects Int, left side is `{}`",
                         sym,
                         lt.display(ctx.types)
                     ),
@@ -8289,7 +8289,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: S
                 ctx.error_at(
                     span,
                     format!(
-                        "el operador bit-a-bit `{}` espera Int, lado derecho es `{}`",
+                        "bitwise operator `{}` expects Int, right side is `{}`",
                         sym,
                         rt.display(ctx.types)
                     ),
@@ -8406,9 +8406,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         ctx.error_at(
                             *span,
                             format!(
-                            "destructuring de tupla: el pattern tiene {} slots, el valor tiene {}",
-                            subs.len(), items.len()
-                        ),
+                                "tuple destructuring: the pattern has {} slots, the value has {}",
+                                subs.len(),
+                                items.len()
+                            ),
                         );
                     }
                 }
@@ -8456,7 +8457,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             ctx.error_at(
                                 *span,
                                 format!(
-                                    "`{}` declarado como `{}` recibió un valor `{}`",
+                                    "`{}` declared as `{}` received a value `{}`",
                                     name,
                                     declared.display(ctx.types),
                                     value_ty.display(ctx.types)
@@ -8484,7 +8485,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                     ctx.error_at(
                                         *span,
                                         format!(
-                                            "`{}` declarado como `{}` recibió un valor `{}`",
+                                            "`{}` declared as `{}` received a value `{}`",
                                             name,
                                             existing_ty.display(ctx.types),
                                             value_ty.display(ctx.types)
@@ -8532,7 +8533,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                     // methods of the type itself.
                                     if is_private_field(field) && ctx.current_type != Some(*id) {
                                         ctx.error_at(*span, format!(
-                                            "el campo `{}.{}` es privado (prefijo `_`); no se puede asignar desde afuera del tipo `{}`",
+                                            "field `{}.{}` is private (prefix `_`); cannot be assigned from outside type `{}`",
                                             type_name, field, type_name
                                         ));
                                     }
@@ -8540,7 +8541,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                         ctx.error_at(
                                             *span,
                                             format!(
-                                                "el campo `{}.{}` espera `{}`, recibió `{}`",
+                                                "field `{}.{}` expects `{}`, received `{}`",
                                                 type_name,
                                                 field,
                                                 f.type_.display(ctx.types),
@@ -8553,7 +8554,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                     ctx.error_at(
                                         *span,
                                         format!(
-                                            "el tipo `{}` no tiene un campo llamado `{}`",
+                                            "type `{}` does not have a field named `{}`",
                                             type_name, field
                                         ),
                                     );
@@ -8565,8 +8566,8 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         ctx.error_at(
                             *span,
                             format!(
-                                "asignación a campo `.{}` sobre `{}`: solo se permite \
-                             sobre instancias de un tipo custom",
+                                "assignment to field `.{}` over `{}`: only allowed \
+                             over instances of a custom type",
                                 field,
                                 other.display(ctx.types)
                             ),
@@ -8588,7 +8589,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             ctx.error_at(
                                 *span,
                                 format!(
-                                    "el índice de `List<{}>` debe ser `Int`, recibió `{}`",
+                                    "index of `List<{}>` must be `Int`, received `{}`",
                                     item_ty.display(ctx.types),
                                     idx_ty.display(ctx.types)
                                 ),
@@ -8598,7 +8599,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             ctx.error_at(
                                 *span,
                                 format!(
-                                    "la lista contiene `{}`, no se puede asignar `{}`",
+                                    "the list contains `{}`, cannot assign `{}`",
                                     item_ty.display(ctx.types),
                                     value_ty.display(ctx.types)
                                 ),
@@ -8610,7 +8611,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             ctx.error_at(
                                 *span,
                                 format!(
-                                    "la clave del map es `{}`, recibió `{}`",
+                                    "the map key is `{}`, received `{}`",
                                     k_ty.display(ctx.types),
                                     idx_ty.display(ctx.types)
                                 ),
@@ -8620,7 +8621,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             ctx.error_at(
                                 *span,
                                 format!(
-                                    "el map contiene `{}`, no se puede asignar `{}`",
+                                    "the map contains `{}`, cannot assign `{}`",
                                     v_ty.display(ctx.types),
                                     value_ty.display(ctx.types)
                                 ),
@@ -8631,8 +8632,8 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         ctx.error_at(
                             *span,
                             format!(
-                                "asignación a índice `[...] = v` no soportada sobre `{}` \
-                             (solo `List` y `Map`)",
+                                "assignment to index `[...] = v` not supported over `{}` \
+                             (only `List` and `Map`)",
                                 other.display(ctx.types)
                             ),
                         );
@@ -8650,7 +8651,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             if ctx.return_stack.is_empty() {
                 ctx.error_at(
                     *span,
-                    "`return` solo puede usarse adentro de una función".to_string(),
+                    "`return` can only be used inside a function".to_string(),
                 );
             }
             // If we are inside a function with declared (and resolvable)
@@ -8661,7 +8662,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     ctx.error_at(
                         *span,
                         format!(
-                            "`return` devuelve `{}` pero la función declara `{}`",
+                            "`return` returns `{}` but the function declares `{}`",
                             ret_ty.display(ctx.types),
                             expected.display(ctx.types)
                         ),
@@ -8690,7 +8691,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             let in_handler = ctx.in_http_handler.last().copied().unwrap_or(false);
             if !in_handler {
                 ctx.error_at(*span,
-                    "`return <status> { ... }` solo se admite adentro de un handler HTTP (`@get`/`@post`/`@put`/`@delete`) o una fn aplicada como `@middleware(...)`".to_string()
+                    "`return <status> { ... }` is only allowed inside an HTTP handler (`@get`/`@post`/`@put`/`@delete`) or a fn applied as `@middleware(...)`".to_string()
                 );
             }
             // Status must be Int (range 100-599 validated at runtime).
@@ -8698,7 +8699,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 ctx.error_at(
                     *span,
                     format!(
-                        "el status code de `return` debe ser Int, recibió `{}`",
+                        "the status code of `return` must be Int, received `{}`",
                         status_ty.display(ctx.types)
                     ),
                 );
@@ -8850,7 +8851,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 ctx.error_at(
                     *span,
                     format!(
-                        "la condición de `while` debe ser Bool, recibió `{}`",
+                        "the `while` condition must be Bool, received `{}`",
                         cond_ty.display(ctx.types)
                     ),
                 );
@@ -8890,7 +8891,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     ctx.error_at(
                         *span,
                         format!(
-                            "el iterable de `for` debe ser List, Range o Map, recibió `{}`",
+                            "the `for` iterable must be List, Range or Map, received `{}`",
                             other.display(ctx.types)
                         ),
                     );
@@ -9428,8 +9429,8 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@auth_provider sobre fn '{}': no admite args ni kwargs. \
-                         Sintaxis: `@auth_provider\\nfn nombre(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+                        "@auth_provider on fn '{}': does not accept args or kwargs. \
+                         Syntax: `@auth_provider\\nfn name(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
                         name
                     ),
                 ));
@@ -9442,8 +9443,8 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@auth_provider duplicado: la fn '{}' (línea {}) ya fue declarada como provider; \
-                         la fn '{}' (línea {}) es un segundo provider. Solo se admite uno por programa.",
+                        "duplicate @auth_provider: fn '{}' (line {}) was already declared as provider; \
+                         fn '{}' (line {}) is a second provider. Only one is allowed per program.",
                         prev_name, prev_span.line, name, fn_span.line
                     ),
                 ));
@@ -9456,8 +9457,8 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@auth_provider sobre fn '{}': debe tener exactamente 1 param de tipo `Map<Str, Str>` (headers HTTP), tiene {}. \
-                         Sintaxis: `fn {}(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+                        "@auth_provider on fn '{}': must have exactly 1 param of type `Map<Str, Str>` (HTTP headers), has {}. \
+                         Syntax: `fn {}(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
                         name,
                         params.len(),
                         name
@@ -9474,7 +9475,7 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@auth_provider sobre fn '{}': el param '{}' debe ser `Map<Str, Str>` (headers HTTP), es `{}`.",
+                        "@auth_provider on fn '{}': param '{}' must be `Map<Str, Str>` (HTTP headers), is `{}`.",
                         name,
                         p.name,
                         param_ty.display(ctx.types)
@@ -9494,7 +9495,7 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "@auth_provider sobre fn '{}': falta el return type. Debe ser `Result<User>` donde `User` es un type custom.",
+                            "@auth_provider on fn '{}': missing return type. Must be `Result<User>` where `User` is a custom type.",
                             name
                         ),
                     ));
@@ -9510,7 +9511,7 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                             fn_span.line,
                             fn_span.column,
                             format!(
-                                "@auth_provider sobre fn '{}': el return debe ser `Result<T>` donde `T` es un type custom; T es `{}`.",
+                                "@auth_provider on fn '{}': return must be `Result<T>` where `T` is a custom type; T is `{}`.",
                                 name,
                                 other.display(ctx.types)
                             ),
@@ -9524,7 +9525,7 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "@auth_provider sobre fn '{}': el return debe ser `Result<T>` donde `T` es un type custom; es `{}`.",
+                            "@auth_provider on fn '{}': return must be `Result<T>` where `T` is a custom type; is `{}`.",
                             name,
                             other.display(ctx.types)
                         ),
@@ -9637,7 +9638,7 @@ fn check_auth_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@requires sobre fn '{}': no admite kwargs en el MVP. Sintaxis: `@requires(\"role\")`.",
+                        "@requires on fn '{}': does not accept kwargs in the MVP. Syntax: `@requires(\"role\")`.",
                         fn_name,
                     ),
                 ));
@@ -9649,7 +9650,7 @@ fn check_auth_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@requires sobre fn '{}': espera exactamente 1 arg (el role como Str literal), recibió {}.",
+                        "@requires on fn '{}': expects exactly 1 arg (the role as Str literal), received {}.",
                         fn_name,
                         deco.args.len(),
                     ),
@@ -9663,10 +9664,7 @@ fn check_auth_decorators(
                         ErrorKind::TypeError,
                         fn_span.line,
                         fn_span.column,
-                        format!(
-                            "@requires sobre fn '{}': el arg debe ser Str literal.",
-                            fn_name,
-                        ),
+                        format!("@requires on fn '{}': arg must be Str literal.", fn_name,),
                     ));
                     continue;
                 }
@@ -9677,7 +9675,7 @@ fn check_auth_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@requires sobre fn '{}': role '{}' duplicado en decorators apilados.",
+                        "@requires on fn '{}': duplicate role '{}' in stacked decorators.",
                         fn_name, role,
                     ),
                 ));
@@ -9690,7 +9688,7 @@ fn check_auth_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{} sobre fn '{}': no admite args ni kwargs en el MVP. Sintaxis: `@{}\\n@get(\"/...\")\\nfn ...`.",
+                    "@{} on fn '{}': does not accept args or kwargs in the MVP. Syntax: `@{}\\n@get(\"/...\")\\nfn ...`.",
                     kind, fn_name, kind
                 ),
             ));
@@ -9707,7 +9705,7 @@ fn check_auth_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{} sobre fn '{}': solo se aplica a handlers HTTP (`@get`/`@post`/`@put`/`@delete`/`@ws`).",
+                    "@{} on fn '{}': only applies to HTTP handlers (`@get`/`@post`/`@put`/`@delete`/`@ws`).",
                     kind, fn_name
                 ),
             ));
@@ -9722,8 +9720,8 @@ fn check_auth_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@{} sobre fn '{}': no hay `@auth_provider` registrado en el programa. \
-                         Declará una fn con `@auth_provider\\nfn nombre(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+                    "@{} on fn '{}': no `@auth_provider` registered in the program. \
+                     Declare a fn with `@auth_provider\\nfn name(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
                         kind, fn_name
                     ),
                 ));
@@ -9742,8 +9740,8 @@ fn check_auth_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{} sobre fn '{}': falta param de tipo `{}` (inyectado tras autenticación exitosa). \
-                     Declarálo en la signature: `fn {}(..., user: {}) -> ...`.",
+                    "@{} on fn '{}': missing param of type `{}` (injected after successful authentication). \
+                     Declare it in the signature: `fn {}(..., user: {}) -> ...`.",
                     kind, fn_name, provider.user_type_name, fn_name, provider.user_type_name
                 ),
             ));
@@ -9755,8 +9753,8 @@ fn check_auth_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{} sobre fn '{}': el tipo `{}` (return del `@auth_provider`) debe tener un campo `role: Str` para discriminar roles. \
-                     Agregalo a la declaración de `{}`.",
+                    "@{} on fn '{}': type `{}` (return of `@auth_provider`) must have a `role: Str` field to discriminate roles. \
+                     Add it to the declaration of `{}`.",
                     kind, fn_name, provider.user_type_name, provider.user_type_name
                 ),
             ));
@@ -9820,7 +9818,7 @@ fn check_ws_handler(
             fn_span.line,
             fn_span.column,
             format!(
-                "@ws sobre fn '{}': espera exactamente 1 argumento (path: Str). Sintaxis: `@ws(\"/chat\")`.",
+                "@ws on fn '{}': expects exactly 1 argument (path: Str). Syntax: `@ws(\"/chat\")`.",
                 fn_name
             ),
         ));
@@ -9834,7 +9832,7 @@ fn check_ws_handler(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@ws sobre fn '{}': el argumento debe ser un Str literal (path).",
+                    "@ws on fn '{}': argument must be a Str literal (path).",
                     fn_name
                 ),
             ));
@@ -9849,7 +9847,7 @@ fn check_ws_handler(
             fn_span.line,
             fn_span.column,
             format!(
-                "@ws sobre fn '{}': debe declararse `async fn` — los métodos del `WsConn` (`recv`/`send`/`broadcast`) son async.",
+                "@ws on fn '{}': must be declared `async fn` — `WsConn` methods (`recv`/`send`/`broadcast`) are async.",
                 fn_name
             ),
         ));
@@ -9862,7 +9860,7 @@ fn check_ws_handler(
     let expected_params = if has_auth { 2 } else { 1 };
     if params.len() != expected_params {
         let extra = if has_auth {
-            " (1 `WsConn<T>` + 1 param User del `@auth_provider`)"
+            " (1 `WsConn<T>` + 1 User param from `@auth_provider`)"
         } else {
             " (1 `WsConn<T>`)"
         };
@@ -9871,7 +9869,7 @@ fn check_ws_handler(
             fn_span.line,
             fn_span.column,
             format!(
-                "@ws sobre fn '{}': espera {} param(s){}, recibió {}.",
+                "@ws on fn '{}': expects {} param(s){}, received {}.",
                 fn_name,
                 expected_params,
                 extra,
@@ -9895,7 +9893,7 @@ fn check_ws_handler(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@ws sobre fn '{}': el `WsConn<T>` exige `T` concreto (no `Any`). Anotá el tipo de mensaje: `WsConn<Str>`, `WsConn<ChatMsg>`, etc.",
+                        "@ws on fn '{}': the `WsConn<T>` requires concrete `T` (not `Any`). Annotate the message type: `WsConn<Str>`, `WsConn<ChatMsg>`, etc.",
                         fn_name
                     ),
                 ));
@@ -9908,7 +9906,7 @@ fn check_ws_handler(
             fn_span.line,
             fn_span.column,
             format!(
-                "@ws sobre fn '{}': debe declarar exactamente 1 param de tipo `WsConn<T>` (tiene {}). Ej: `fn {}(conn: WsConn<ChatMsg>) {{ ... }}`.",
+                "@ws on fn '{}': must declare exactly 1 param of type `WsConn<T>` (has {}). E.g.: `fn {}(conn: WsConn<ChatMsg>) {{ ... }}`.",
                 fn_name, wsconn_params, fn_name,
             ),
         ));
@@ -9943,7 +9941,7 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
             span.line,
             span.column,
             format!(
-                "spawn: espera exactamente 1 argumento (un call a fn `@background`), recibió {}. Sintaxis: `spawn(mi_fn(args))`.",
+                "spawn: expects exactly 1 argument (a call to a `@background` fn), received {}. Syntax: `spawn(my_fn(args))`.",
                 args.len()
             ),
         ));
@@ -9966,7 +9964,7 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
                     ErrorKind::TypeError,
                     span.line,
                     span.column,
-                    "spawn: el argumento debe ser un call literal a una fn `@background`, no un valor compuesto. Sintaxis: `spawn(send_email(addr, body))`.".to_string(),
+                    "spawn: the argument must be a literal call to a `@background` fn, not a compound value. Syntax: `spawn(send_email(addr, body))`.".to_string(),
                 ));
                 return Type::Future(Box::new(Type::Any));
             }
@@ -9976,7 +9974,7 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
                 ErrorKind::TypeError,
                 span.line,
                 span.column,
-                "spawn: el argumento debe ser un call literal a una fn `@background`, no una variable o expresión. Sintaxis: `spawn(send_email(addr, body))`.".to_string(),
+                "spawn: the argument must be a literal call to a `@background` fn, not a variable or expression. Syntax: `spawn(send_email(addr, body))`.".to_string(),
             ));
             return Type::Future(Box::new(Type::Any));
         }
@@ -9989,7 +9987,7 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
                 ErrorKind::TypeError,
                 span.line,
                 span.column,
-                "spawn: el callee del inner call debe ser una fn top-level con `@background`, no un method call ni una expression compuesta.".to_string(),
+                "spawn: the callee of the inner call must be a top-level fn with `@background`, not a method call or compound expression.".to_string(),
             ));
             // We type the args so errors inside surface and
             // we return Future<Any> without stopping the check.
@@ -10005,7 +10003,7 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
             span.line,
             span.column,
             format!(
-                "spawn: la fn `{}` no está declarada con `@background`. Marcá la fn con `@background\\nfn {}(...) {{ ... }}` para autorizar su ejecución fire-and-forget vía spawn.",
+                "spawn: fn `{}` is not declared with `@background`. Mark the fn with `@background\\nfn {}(...) {{ ... }}` to authorize fire-and-forget execution via spawn.",
                 target_name, target_name
             ),
         ));
@@ -10138,7 +10136,7 @@ fn check_job_kwargs(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "{} sobre fn '{}': kwarg `{}` no reconocido. Aceptados: {}.",
+                    "{} on fn '{}': unrecognized kwarg `{}`. Accepted: {}.",
                     deco_name,
                     fn_name,
                     k,
@@ -10159,7 +10157,7 @@ fn check_job_kwargs(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "{} sobre fn '{}': kwarg `{}` duplicado.",
+                    "{} on fn '{}': duplicate kwarg `{}`.",
                     deco_name, fn_name, k,
                 ),
             ));
@@ -10175,7 +10173,7 @@ fn check_job_kwargs(
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "{} sobre fn '{}': kwarg `tz` debe ser un Str literal con un IANA timezone (e.g. `tz=\"America/Argentina/Buenos_Aires\"`).",
+                            "{} on fn '{}': kwarg `tz` must be a Str literal with an IANA timezone (e.g. `tz=\"America/Argentina/Buenos_Aires\"`).",
                             deco_name, fn_name,
                         ),
                     ));
@@ -10189,7 +10187,7 @@ fn check_job_kwargs(
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "{} sobre fn '{}': kwarg `catch_up` debe ser un Bool literal (`true`/`false`).",
+                            "{} on fn '{}': kwarg `catch_up` must be a Bool literal (`true`/`false`).",
                             deco_name, fn_name,
                         ),
                     ));
@@ -10206,7 +10204,7 @@ fn check_job_kwargs(
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "{} sobre fn '{}': kwarg `store` no puede ser `null`. Pasá una conn DB (e.g. `store=db` con `db = db.connect(...).await?`).",
+                            "{} on fn '{}': kwarg `store` cannot be `null`. Pass a DB conn (e.g. `store=db` with `db = db.connect(...).await?`).",
                             deco_name, fn_name,
                         ),
                     ));
@@ -10218,7 +10216,7 @@ fn check_job_kwargs(
                     ok = false;
                 }
             }
-            _ => unreachable!("kwarg name validado contra allowed"),
+            _ => unreachable!("kwarg name validated against allowed"),
         }
     }
     ok
@@ -10243,7 +10241,7 @@ fn check_retry_map(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "{} sobre fn '{}': kwarg `retry` debe ser un Map literal (e.g. `retry={{max: 3, backoff: \"exponential\"}}`).",
+                    "{} on fn '{}': kwarg `retry` must be a Map literal (e.g. `retry={{max: 3, backoff: \"exponential\"}}`).",
                     deco_name, fn_name,
                 ),
             ));
@@ -10267,7 +10265,7 @@ fn check_retry_map(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "{} sobre fn '{}': las keys del Map `retry` deben ser identificadores o Str literales (aceptados: {}).",
+                        "{} on fn '{}': keys of the `retry` Map must be identifiers or Str literals (accepted: {}).",
                         deco_name,
                         fn_name,
                         allowed
@@ -10287,7 +10285,7 @@ fn check_retry_map(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "{} sobre fn '{}': key `{}` no reconocida en `retry`. Aceptadas: {}.",
+                    "{} on fn '{}': key `{}` not recognized in `retry`. Accepted: {}.",
                     deco_name,
                     fn_name,
                     key_name,
@@ -10307,7 +10305,7 @@ fn check_retry_map(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "{} sobre fn '{}': key `{}` duplicada en `retry`.",
+                    "{} on fn '{}': duplicate key `{}` in `retry`.",
                     deco_name, fn_name, key_name,
                 ),
             ));
@@ -10323,7 +10321,7 @@ fn check_retry_map(
                             fn_span.line,
                             fn_span.column,
                             format!(
-                                "{} sobre fn '{}': `retry.max` debe ser >= 0 (es {}). Usá 0 para deshabilitar retry.",
+                                "{} on fn '{}': `retry.max` must be >= 0 (is {}). Use 0 to disable retry.",
                                 deco_name, fn_name, n,
                             ),
                         ));
@@ -10334,7 +10332,7 @@ fn check_retry_map(
                             fn_span.line,
                             fn_span.column,
                             format!(
-                                "{} sobre fn '{}': `retry.{}` debe ser >= 1 (es {}).",
+                                "{} on fn '{}': `retry.{}` must be >= 1 (is {}).",
                                 deco_name, fn_name, key_name, n,
                             ),
                         ));
@@ -10347,7 +10345,7 @@ fn check_retry_map(
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "{} sobre fn '{}': `retry.{}` debe ser un Int literal.",
+                            "{} on fn '{}': `retry.{}` must be an Int literal.",
                             deco_name, fn_name, key_name,
                         ),
                     ));
@@ -10362,7 +10360,7 @@ fn check_retry_map(
                             fn_span.line,
                             fn_span.column,
                             format!(
-                                "{} sobre fn '{}': `retry.backoff` debe ser uno de `\"exponential\"`/`\"linear\"`/`\"constant\"` (es `\"{}\"`).",
+                                "{} on fn '{}': `retry.backoff` must be one of `\"exponential\"`/`\"linear\"`/`\"constant\"` (is `\"{}\"`).",
                                 deco_name, fn_name, s,
                             ),
                         ));
@@ -10375,7 +10373,7 @@ fn check_retry_map(
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "{} sobre fn '{}': `retry.backoff` debe ser un Str literal.",
+                            "{} on fn '{}': `retry.backoff` must be a Str literal.",
                             deco_name, fn_name,
                         ),
                     ));
@@ -10419,7 +10417,7 @@ fn check_cron_decorator(
             fn_span.line,
             fn_span.column,
             format!(
-                "@cron sobre fn '{}': espera exactamente 1 argumento positional (cron expression Str). Sintaxis: `@cron(\"0 0 * * *\")` o `@cron(\"0 0 * * *\", tz=\"America/Buenos_Aires\", retry={{max: 3, backoff: \"exponential\"}}, catch_up=true, store=db)`.",
+                "@cron on fn '{}': expects exactly 1 positional argument (cron expression Str). Syntax: `@cron(\"0 0 * * *\")` or `@cron(\"0 0 * * *\", tz=\"America/Buenos_Aires\", retry={{max: 3, backoff: \"exponential\"}}, catch_up=true, store=db)`.",
                 fn_name
             ),
         ));
@@ -10433,7 +10431,7 @@ fn check_cron_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@cron sobre fn '{}': el argumento debe ser un Str literal con la cron expression (e.g. `\"0 0 * * *\"` para cada medianoche).",
+                    "@cron on fn '{}': argument must be a Str literal with the cron expression (e.g. `\"0 0 * * *\"` for every midnight).",
                     fn_name
                 ),
             ));
@@ -10470,7 +10468,7 @@ fn check_cron_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@cron sobre fn '{}' no es combinable con `@{}`: los jobs cron son programados periódicos, no requests HTTP ni fire-and-forget desde un handler.",
+                    "@cron on fn '{}' is not combinable with `@{}`: cron jobs are periodic scheduled tasks, not HTTP requests nor fire-and-forget from a handler.",
                     fn_name, other.name
                 ),
             ));
@@ -10484,7 +10482,7 @@ fn check_cron_decorator(
             fn_span.line,
             fn_span.column,
             format!(
-                "@cron sobre fn '{}': el handler no admite params (los jobs cron no reciben input). Tiene {}.",
+                "@cron on fn '{}': handler does not accept params (cron jobs receive no input). Has {}.",
                 fn_name,
                 params.len()
             ),
@@ -10514,7 +10512,7 @@ fn check_cron_decorator(
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "@cron sobre fn '{}': el return type async debe ser `Future<Null>` o `Future<Result<...>>`, es `Future<{}>`. El runtime descarta el valor — usá `Result` si querés loguear fallas.",
+                            "@cron on fn '{}': async return type must be `Future<Null>` or `Future<Result<...>>`, is `Future<{}>`. The runtime discards the value — use `Result` if you want to log failures.",
                             fn_name,
                             other.display(ctx.types),
                         ),
@@ -10528,7 +10526,7 @@ fn check_cron_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@cron sobre fn '{}': el return type debe ser `Null`, `Result<...>`, o el equivalente async (`Future<...>`). Es `{}`. El runtime descarta el valor del job.",
+                    "@cron on fn '{}': return type must be `Null`, `Result<...>`, or the async equivalent (`Future<...>`). Is `{}`. The runtime discards the job's value.",
                     fn_name,
                     other.display(ctx.types),
                 ),
@@ -10569,7 +10567,7 @@ fn check_background_decorator(
             fn_span.line,
             fn_span.column,
             format!(
-                "@background sobre fn '{}': no admite args positionals. Sintaxis: `@background` o `@background(tz=\"America/Buenos_Aires\", retry={{max: 3, backoff: \"exponential\"}})`.",
+                "@background on fn '{}': does not accept positional args. Syntax: `@background` or `@background(tz=\"America/Buenos_Aires\", retry={{max: 3, backoff: \"exponential\"}})`.",
                 fn_name
             ),
         ));
@@ -10603,7 +10601,7 @@ fn check_background_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@background sobre fn '{}' no es combinable con `@{}`: background es solo un marcador para autorizar `spawn(...)`; los handlers HTTP/WS/cron tienen sus propios runtimes.",
+                    "@background on fn '{}' is not combinable with `@{}`: background is just a marker to authorize `spawn(...)`; HTTP/WS/cron handlers have their own runtimes.",
                     fn_name, other.name
                 ),
             ));
@@ -10665,7 +10663,7 @@ fn check_trace_metric_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@trace sobre fn '{}': duplicado en decorators apilados (un solo @trace por fn).",
+                        "@trace on fn '{}': duplicate in stacked decorators (only one @trace per fn).",
                         fn_name,
                     ),
                 ));
@@ -10679,7 +10677,7 @@ fn check_trace_metric_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@metric sobre fn '{}': duplicado en decorators apilados (un solo @metric por fn).",
+                        "@metric on fn '{}': duplicate in stacked decorators (only one @metric per fn).",
                         fn_name,
                     ),
                 ));
@@ -10694,7 +10692,7 @@ fn check_trace_metric_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{} sobre fn '{}': no acepta args positionals. Sintaxis: `@{}` o `@{}(name=\"X\")`.",
+                    "@{} on fn '{}': does not accept positional args. Syntax: `@{}` or `@{}(name=\"X\")`.",
                     kind, fn_name, kind, kind,
                 ),
             ));
@@ -10708,7 +10706,7 @@ fn check_trace_metric_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@{} sobre fn '{}': kwarg desconocido '{}'. Solo `name=\"X\"` está soportado en el MVP.",
+                        "@{} on fn '{}': unknown kwarg '{}'. Only `name=\"X\"` is supported in the MVP.",
                         kind, fn_name, k,
                     ),
                 ));
@@ -10720,7 +10718,7 @@ fn check_trace_metric_decorators(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@{} sobre fn '{}': el kwarg `name` debe ser Str literal.",
+                        "@{} on fn '{}': kwarg `name` must be Str literal.",
                         kind, fn_name,
                     ),
                 ));
@@ -10739,7 +10737,7 @@ fn check_trace_metric_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "fn '{}': `@trace`/`@metric` NO se apilan sobre handlers HTTP/WS (`@get`/`@post`/`@put`/`@delete`/`@ws`). La auto-instrumentation de Fase 12.3 (spans HTTP + métricas) ya cubre esos casos. Usá `@trace`/`@metric` sobre fns de business logic adentro del handler.",
+                    "fn '{}': `@trace`/`@metric` do NOT stack on HTTP/WS handlers (`@get`/`@post`/`@put`/`@delete`/`@ws`). Phase 12.3 auto-instrumentation (HTTP spans + metrics) already covers those cases. Use `@trace`/`@metric` on business logic fns inside the handler.",
                     fn_name,
                 ),
             ));
@@ -10770,7 +10768,7 @@ fn check_flag_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@flag sobre fn '{}': duplicado en decorators apilados (un solo @flag por fn).",
+                    "@flag on fn '{}': duplicate in stacked decorators (only one @flag per fn).",
                     fn_name,
                 ),
             ));
@@ -10784,7 +10782,7 @@ fn check_flag_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@flag sobre fn '{}': esperaba 1 arg positional (`@flag(\"flag-name\")`), recibió {}.",
+                    "@flag on fn '{}': expected 1 positional arg (`@flag(\"flag-name\")`), received {}.",
                     fn_name,
                     deco.args.len(),
                 ),
@@ -10800,7 +10798,7 @@ fn check_flag_decorator(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@flag sobre fn '{}': el flag name debe ser Str literal.",
+                        "@flag on fn '{}': the flag name must be Str literal.",
                         fn_name,
                     ),
                 ));
@@ -10813,10 +10811,7 @@ fn check_flag_decorator(
                 ErrorKind::TypeError,
                 fn_span.line,
                 fn_span.column,
-                format!(
-                    "@flag sobre fn '{}': el flag name no puede ser vacío.",
-                    fn_name
-                ),
+                format!("@flag on fn '{}': the flag name cannot be empty.", fn_name),
             ));
             continue;
         }
@@ -10829,7 +10824,7 @@ fn check_flag_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@flag sobre fn '{}': flag name '{}' inválido. Solo chars [a-zA-Z0-9_-] permitidos.",
+                    "@flag on fn '{}': flag name '{}' invalid. Only chars [a-zA-Z0-9_-] allowed.",
                     fn_name, name,
                 ),
             ));
@@ -10842,7 +10837,7 @@ fn check_flag_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@flag sobre fn '{}': kwargs no soportados en el MVP. Sintaxis: `@flag(\"flag-name\")`.",
+                    "@flag on fn '{}': kwargs not supported in the MVP. Syntax: `@flag(\"flag-name\")`.",
                     fn_name,
                 ),
             ));
@@ -10871,8 +10866,8 @@ fn check_health_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{kind} sobre fn '{fn_name}': no admite args ni kwargs. \
-                     Sintaxis: `@{kind}\\nfn nombre() -> Bool {{ ... }}` o con `Result<Null>`/`Result<Bool>` (sync o async)."
+                    "@{kind} on fn '{fn_name}': does not accept args or kwargs. \
+                     Syntax: `@{kind}\\nfn name() -> Bool {{ ... }}` or with `Result<Null>`/`Result<Bool>` (sync or async)."
                 ),
             ));
             continue;
@@ -10889,8 +10884,8 @@ fn check_health_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{kind} duplicado: la fn '{prev_name}' (línea {prev_line}) ya fue declarada como probe; \
-                     la fn '{fn_name}' (línea {curr_line}) es una segunda. Solo se admite una por programa.",
+                    "duplicate @{kind}: fn '{prev_name}' (line {prev_line}) was already declared as probe; \
+                     fn '{fn_name}' (line {curr_line}) is a second one. Only one is allowed per program.",
                     prev_line = prev_span.line,
                     curr_line = fn_span.line
                 ),
@@ -10931,7 +10926,7 @@ fn check_health_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{kind} sobre fn '{fn_name}' no es combinable con `@{other}`: las probes son rutas auto-mounted (`/{kind}`); el handler no puede ser HTTP normal, job, test ni CLI command."
+                    "@{kind} on fn '{fn_name}' is not combinable with `@{other}`: probes are auto-mounted routes (`/{kind}`); the handler cannot be normal HTTP, job, test, nor CLI command."
                 ),
             ));
             continue;
@@ -10943,7 +10938,7 @@ fn check_health_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{kind} sobre fn '{fn_name}': la probe no admite params (las probes no reciben input). Tiene {n}.",
+                    "@{kind} on fn '{fn_name}': the probe does not accept params (probes receive no input). Has {n}.",
                     n = params.len()
                 ),
             ));
@@ -10958,7 +10953,7 @@ fn check_health_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{kind} sobre fn '{fn_name}': el return debe ser `Bool`, `Result<Null>` o `Result<Bool>` (sync o async). Es `{ty}`.",
+                    "@{kind} on fn '{fn_name}': return must be `Bool`, `Result<Null>` or `Result<Bool>` (sync or async). Is `{ty}`.",
                     ty = ret.display(ctx.types)
                 ),
             ));
@@ -11037,7 +11032,7 @@ fn check_command_decorator(
             fn_span.line,
             fn_span.column,
             format!(
-                "@command sobre fn '{}': espera exactamente 1 argumento (nombre del comando como Str). Sintaxis: `@command(\"greet\")` o `@command(\"greet\", desc=\"...\")`.",
+                "@command on fn '{}': expects exactly 1 argument (command name as Str). Syntax: `@command(\"greet\")` or `@command(\"greet\", desc=\"...\")`.",
                 fn_name
             ),
         ));
@@ -11051,7 +11046,7 @@ fn check_command_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@command sobre fn '{}': el primer arg debe ser Str literal con el nombre del comando.",
+                    "@command on fn '{}': first arg must be Str literal with the command name.",
                     fn_name
                 ),
             ));
@@ -11069,7 +11064,7 @@ fn check_command_decorator(
                         fn_span.line,
                         fn_span.column,
                         format!(
-                            "@command sobre fn '{}': `desc=...` espera Str literal con la descripción.",
+                            "@command on fn '{}': `desc=...` expects Str literal with the description.",
                             fn_name
                         ),
                     ));
@@ -11082,7 +11077,7 @@ fn check_command_decorator(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@command sobre fn '{}': kwarg desconocido `{}`. Soportado: `desc=\"...\"`.",
+                        "@command on fn '{}': unknown kwarg `{}`. Supported: `desc=\"...\"`.",
                         fn_name, other
                     ),
                 ));
@@ -11111,7 +11106,7 @@ fn check_command_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@command sobre fn '{}' no es combinable con `@{}`: un comando CLI no puede ser handler HTTP, cron, test ni middleware.",
+                    "@command on fn '{}' is not combinable with `@{}`: a CLI command cannot be HTTP handler, cron, test nor middleware.",
                     fn_name, other.name
                 ),
             ));
@@ -11125,7 +11120,7 @@ fn check_command_decorator(
             fn_span.line,
             fn_span.column,
             format!(
-                "@command sobre fn '{}': el return type debe ser `Int` (exit code). Devolvé `0` para éxito, `1+` para error. Recibido: `{}`.",
+                "@command on fn '{}': return type must be `Int` (exit code). Return `0` for success, `1+` for error. Received: `{}`.",
                 fn_name,
                 ret.display(ctx.types)
             ),
@@ -11139,7 +11134,7 @@ fn check_command_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@command sobre fn '{}': varargs (`...nombres: Str`) no soportado en MVP. Usá flags con default value o un `List<Str>` adentro del body.",
+                    "@command on fn '{}': varargs (`...names: Str`) not supported in MVP. Use flags with default value or a `List<Str>` inside the body.",
                     fn_name
                 ),
             ));
@@ -11167,7 +11162,7 @@ fn check_command_decorator(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@command sobre fn '{}': param `{}` tiene tipo `{}` que no es CLI-marshallable. Soportados: `Str`/`Int`/`Float`/`Bool` (con o sin `?`), `List<Str>` solo como variadic final (v0.11.1).",
+                    "@command on fn '{}': param `{}` has type `{}` which is not CLI-marshallable. Supported: `Str`/`Int`/`Float`/`Bool` (with or without `?`), `List<Str>` only as final variadic (v0.11.1).",
                     fn_name,
                     p.name,
                     p_type.display(ctx.types)
@@ -11191,7 +11186,7 @@ fn check_command_decorator(
                     fn_span.line,
                     fn_span.column,
                     format!(
-                        "@command sobre fn '{}': param `{}` (List<Str> variadic) debe ser el ÚLTIMO de TODOS los params. Movelo al final.",
+                        "@command on fn '{}': param `{}` (List<Str> variadic) must be the LAST of ALL params. Move it to the end.",
                         fn_name, p.name
                     ),
                 ));
@@ -11557,7 +11552,7 @@ mod tests {
         assert!(!errors.is_empty(), "esperaba 1 error");
         let msg = &errors[0].message;
         assert!(
-            msg.contains("handler HTTP") && msg.contains("@get"),
+            msg.contains("HTTP handler") && msg.contains("@get"),
             "esperaba mensaje sobre handler HTTP, fue: {}",
             msg
         );
@@ -11570,7 +11565,7 @@ mod tests {
         let errors = errors_of("return 401 {\"x\": 1}");
         assert!(!errors.is_empty(), "esperaba error");
         let msg = &errors[0].message;
-        assert!(msg.contains("handler HTTP"), "fue: {}", msg);
+        assert!(msg.contains("HTTP handler"), "fue: {}", msg);
     }
 
     #[test]
@@ -11646,7 +11641,7 @@ mod tests {
         assert!(!errors.is_empty(), "esperaba error de campo inexistente");
         let msg = &errors[0].message;
         assert!(
-            msg.contains("no tiene un campo llamado `email`"),
+            msg.contains("does not have a field named `email`"),
             "esperaba mensaje sobre campo inexistente, fue: {}",
             msg
         );
@@ -11687,7 +11682,7 @@ mod tests {
         // NO specific error about the field.
         let field_errors: Vec<_> = errors
             .iter()
-            .filter(|e| e.message.contains("campo") || e.message.contains(".anything"))
+            .filter(|e| e.message.contains("field") || e.message.contains(".anything"))
             .collect();
         assert!(
             field_errors.is_empty(),
@@ -11754,7 +11749,7 @@ mod tests {
         };
         let err = resolve_type_expr(&t, &env).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::TypeError));
-        assert!(err.message.contains("espera 0 argumento(s)"));
+        assert!(err.message.contains("expects 0 type argument(s)"));
     }
 
     #[test]
@@ -11775,7 +11770,7 @@ mod tests {
         let t1 = TypeExpr::named("List");
         let err = resolve_type_expr(&t1, &env).unwrap_err();
         assert!(err.message.contains("`List`"));
-        assert!(err.message.contains("1 argumento"));
+        assert!(err.message.contains("1 type argument"));
 
         // List with two args
         let t2 = TypeExpr::Generic {
@@ -11783,7 +11778,7 @@ mod tests {
             args: vec![TypeExpr::named("Int"), TypeExpr::named("Str")],
         };
         let err = resolve_type_expr(&t2, &env).unwrap_err();
-        assert!(err.message.contains("recibió 2"));
+        assert!(err.message.contains("received 2"));
     }
 
     #[test]
@@ -11806,8 +11801,8 @@ mod tests {
         };
         let err = resolve_type_expr(&t, &env).unwrap_err();
         assert!(err.message.contains("`Map`"));
-        assert!(err.message.contains("2 argumento"));
-        assert!(err.message.contains("recibió 1"));
+        assert!(err.message.contains("2 type argument"));
+        assert!(err.message.contains("received 1"));
     }
 
     #[test]
@@ -11865,7 +11860,7 @@ mod tests {
         let env = TypeEnv::new();
         let t = TypeExpr::named("Usuario");
         let err = resolve_type_expr(&t, &env).unwrap_err();
-        assert!(err.message.contains("desconocido"));
+        assert!(err.message.contains("unknown type"));
         assert!(err.message.contains("Usuario"));
     }
 
@@ -11878,7 +11873,7 @@ mod tests {
             args: vec![TypeExpr::named("Int")],
         };
         let err = resolve_type_expr(&t, &env).unwrap_err();
-        assert!(err.message.contains("no es genérico"));
+        assert!(err.message.contains("is not generic"));
     }
 
     #[test]
@@ -11911,7 +11906,7 @@ mod tests {
         env.declare_nominal("Foo".into()).unwrap();
         let err = env.declare_nominal("Foo".into()).unwrap_err();
         assert!(err.message.contains("`Foo`"));
-        assert!(err.message.contains("más de una vez"));
+        assert!(err.message.contains("more than once"));
     }
 
     // ---- resolve_program ----
@@ -11987,9 +11982,9 @@ mod tests {
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
         assert!(msg.contains("Address"));
-        assert!(msg.contains("desconocido"));
-        assert!(msg.contains("campo `home`"));
-        assert!(msg.contains("tipo `User`"));
+        assert!(msg.contains("unknown type"));
+        assert!(msg.contains("field `home`"));
+        assert!(msg.contains("type `User`"));
     }
 
     #[test]
@@ -11997,7 +11992,7 @@ mod tests {
         let (_, errors) = resolve_str("type Foo { x: Int }\ntype Foo { y: Str }");
         assert!(errors
             .iter()
-            .any(|e| e.message.contains("Foo") && e.message.contains("más de una vez")));
+            .any(|e| e.message.contains("Foo") && e.message.contains("more than once")));
     }
 
     #[test]
@@ -12056,8 +12051,8 @@ mod tests {
         let (_, errors) = resolve_str("fn f(x: Foo) { return x }");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("Foo"));
-        assert!(errors[0].message.contains("parámetro `x`"));
-        assert!(errors[0].message.contains("función `f`"));
+        assert!(errors[0].message.contains("parameter `x`"));
+        assert!(errors[0].message.contains("function `f`"));
     }
 
     #[test]
@@ -12065,8 +12060,8 @@ mod tests {
         let (_, errors) = resolve_str("fn f() -> Foo { return 0 }");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("Foo"));
-        assert!(errors[0].message.contains("retorno"));
-        assert!(errors[0].message.contains("función `f`"));
+        assert!(errors[0].message.contains("return type"));
+        assert!(errors[0].message.contains("function `f`"));
     }
 
     #[test]
@@ -12208,7 +12203,7 @@ mod tests {
 
     #[test]
     fn unknown_ident_emits_warning() {
-        assert_error_with("print(no_existe)", &["variable desconocida", "no_existe"]);
+        assert_error_with("print(no_existe)", &["unknown variable", "no_existe"]);
     }
 
     #[test]
@@ -12260,7 +12255,7 @@ mod tests {
 
     #[test]
     fn binop_mul_rejects_str() {
-        assert_error_with("let x = \"a\" * 2", &["`*`", "operandos numéricos", "Str"]);
+        assert_error_with("let x = \"a\" * 2", &["`*`", "numeric operands", "Str"]);
     }
 
     #[test]
@@ -12270,7 +12265,7 @@ mod tests {
 
     #[test]
     fn binop_comparison_str_int_is_error() {
-        assert_error_with("let b = \"a\" < 1", &["comparación", "Str", "Int"]);
+        assert_error_with("let b = \"a\" < 1", &["comparison", "Str", "Int"]);
     }
 
     #[test]
@@ -12280,7 +12275,7 @@ mod tests {
 
     #[test]
     fn binop_and_with_int_is_error() {
-        assert_error_with("let b = 1 and true", &["lógico", "Bool", "Int"]);
+        assert_error_with("let b = 1 and true", &["logical", "Bool", "Int"]);
     }
 
     // ---- UnaryOp ----
@@ -12292,7 +12287,7 @@ mod tests {
 
     #[test]
     fn unary_neg_str_is_error() {
-        assert_error_with("let x = -\"hola\"", &["negación", "Int", "Str"]);
+        assert_error_with("let x = -\"hola\"", &["negation", "Int", "Str"]);
     }
 
     // ---- R.1.1 — `not` (mini-phase R) ----
@@ -12380,7 +12375,7 @@ mod tests {
     fn assign_index_list_wrong_value_type_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\nxs[0] = \"hola\"",
-            &["lista", "Int", "Str"],
+            &["list", "Int", "Str"],
         );
     }
 
@@ -12393,7 +12388,7 @@ mod tests {
     fn assign_index_map_wrong_key_type_is_error() {
         assert_error_with(
             "let m: Map<Str, Int> = {\"a\": 1}\nm[42] = 2",
-            &["clave", "Str", "Int"],
+            &["key", "Str", "Int"],
         );
     }
 
@@ -12411,7 +12406,7 @@ mod tests {
 
     #[test]
     fn range_with_non_int_extremity_is_error() {
-        assert_error_with("let r = 0..\"diez\"", &["rango", "Int", "Str"]);
+        assert_error_with("let r = 0..\"diez\"", &["range", "Int", "Str"]);
     }
 
     // ---- List / Map ----
@@ -12454,7 +12449,7 @@ mod tests {
 
     #[test]
     fn struct_lit_with_unknown_type_is_error() {
-        assert_error_with("let u = Usuario { id: 1 }", &["Usuario", "no existe"]);
+        assert_error_with("let u = Usuario { id: 1 }", &["Usuario", "does not exist"]);
     }
 
     #[test]
@@ -12529,7 +12524,7 @@ mod tests {
 
     #[test]
     fn if_with_non_bool_cond_is_error() {
-        assert_error_with("if 1 { print(\"x\") }", &["condición", "if", "Bool", "Int"]);
+        assert_error_with("if 1 { print(\"x\") }", &["condition", "if", "Bool", "Int"]);
     }
 
     #[test]
@@ -12718,7 +12713,7 @@ mod tests {
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let n = add(1)",
-            &["add", "2 argumento", "recibió 1"],
+            &["add", "2 argument", "received 1"],
         );
     }
 
@@ -12727,7 +12722,7 @@ mod tests {
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let n = add(1, 2, 3)",
-            &["add", "2 argumento", "recibió 3"],
+            &["add", "2 argument", "received 3"],
         );
     }
 
@@ -12736,7 +12731,7 @@ mod tests {
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let n = add(\"hola\", 2)",
-            &["add", "argumento 1", "Int", "Str"],
+            &["add", "argument 1", "Int", "Str"],
         );
     }
 
@@ -12781,7 +12776,7 @@ mod tests {
     #[test]
     fn call_on_non_function_callee_is_error() {
         // `1(2)` is not a callable function.
-        assert_error_with("let r = (1)(2)", &["no es una función", "Int"]);
+        assert_error_with("let r = (1)(2)", &["is not a function", "Int"]);
     }
 
     #[test]
@@ -12796,7 +12791,7 @@ mod tests {
         // Arity checked even in inline FnExpr.
         assert_error_with(
             "let r = (fn(x, y) => x + y)(1)",
-            &["2 argumento", "recibió 1"],
+            &["2 argument", "received 1"],
         );
     }
 
@@ -12809,14 +12804,14 @@ mod tests {
 
     #[test]
     fn len_without_args_is_arity_error() {
-        assert_error_with("let n = len()", &["len", "1 argumento", "recibió 0"]);
+        assert_error_with("let n = len()", &["len", "1 argument", "received 0"]);
     }
 
     #[test]
     fn len_with_two_args_is_arity_error() {
         assert_error_with(
             "let n = len([1], [2])",
-            &["len", "1 argumento", "recibió 2"],
+            &["len", "1 argument", "received 2"],
         );
     }
 
@@ -12893,7 +12888,7 @@ mod tests {
         let (_, errors) = check_str("return 1");
         assert!(errors
             .iter()
-            .any(|e| e.message.contains("return") && e.message.contains("función")));
+            .any(|e| e.message.contains("return") && e.message.contains("function")));
     }
 
     // ---- is_compatible recursive on generics ----
@@ -13114,7 +13109,7 @@ mod tests {
              let s = match r {\n\
                  Ok(v) => \"ok\"\n\
              }",
-            &["match", "Result", "exhaustivo", "Err"],
+            &["match", "Result", "exhaustive", "Err"],
         );
     }
 
@@ -13125,7 +13120,7 @@ mod tests {
              let s = match r {\n\
                  Err(e) => \"err\"\n\
              }",
-            &["match", "Result", "exhaustivo", "Ok"],
+            &["match", "Result", "exhaustive", "Ok"],
         );
     }
 
@@ -13213,7 +13208,7 @@ mod tests {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\n\
              xs.push(1, 2)",
-            &["push", "1 argumento", "recibió 2"],
+            &["push", "1 argument", "received 2"],
         );
     }
 
@@ -13286,7 +13281,7 @@ mod tests {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.filter(fn(x, y) => true)",
-            &["filter", "1 argumento", "recibió 2"],
+            &["filter", "1 argument", "received 2"],
         );
     }
 
@@ -13723,7 +13718,7 @@ mod tests {
 
     #[test]
     fn cmp_map_comp_filter_non_bool_is_error() {
-        assert_error_with("let m = {n: n for n in 0..3 if n}", &["filtro", "Bool"]);
+        assert_error_with("let m = {n: n for n in 0..3 if n}", &["filter", "Bool"]);
     }
 
     // ---- Mini-batch Mb5 + Async-cl ----
@@ -14393,7 +14388,7 @@ mod tests {
              let s = match r {\n\
                  Ok(_) => \"ok\"\n\
              }",
-            &["match", "Result", "exhaustivo", "Err"],
+            &["match", "Result", "exhaustive", "Err"],
         );
     }
 
@@ -14415,7 +14410,7 @@ mod tests {
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { Ok(_) | Ok(_) => \"x\" }",
-            &["match", "Result", "exhaustivo", "Err"],
+            &["match", "Result", "exhaustive", "Err"],
         );
     }
 
@@ -14477,7 +14472,7 @@ mod tests {
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { Ok(_) if true => \"x\" }",
-            &["match", "Result", "exhaustivo"],
+            &["match", "Result", "exhaustive"],
         );
     }
 
@@ -14487,7 +14482,7 @@ mod tests {
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r { _ if true => \"x\" }",
-            &["match", "Result", "exhaustivo"],
+            &["match", "Result", "exhaustive"],
         );
     }
 
@@ -14504,7 +14499,7 @@ mod tests {
 
     #[test]
     fn orphan_return_top_level_is_error() {
-        assert_error_with("return 42", &["return", "función"]);
+        assert_error_with("return 42", &["return", "function"]);
     }
 
     #[test]
@@ -14702,7 +14697,7 @@ mod tests {
         // The subsequent use `m + 1` types OK (m is still Int).
         let count_plus = errors
             .iter()
-            .filter(|e| e.message.contains("operador") && e.message.contains("+"))
+            .filter(|e| e.message.contains("operator") && e.message.contains("+"))
             .count();
         assert_eq!(
             count_plus,
@@ -14785,7 +14780,7 @@ mod tests {
         // apply passes 2 args to an f that takes 1.
         assert_error_with(
             "fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x, x) }",
-            &["espera 1", "argumento"],
+            &["expects 1", "argument"],
         );
     }
 
@@ -14816,7 +14811,7 @@ mod tests {
         let e = first_error("let x: Int = 1 + \"a\"");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 16);
-        assert!(e.message.contains("operador `+`"), "msg: {}", e.message);
+        assert!(e.message.contains("operator `+`"), "msg: {}", e.message);
     }
 
     #[test]
@@ -14829,7 +14824,7 @@ mod tests {
         assert_eq!(e.line, 2);
         // `let _ = f` spans columns 1-9, so `(` is at 10.
         assert_eq!(e.column, 10);
-        assert!(e.message.contains("espera 1"), "msg: {}", e.message);
+        assert!(e.message.contains("expects 1"), "msg: {}", e.message);
     }
 
     #[test]
@@ -14843,7 +14838,7 @@ mod tests {
         // `let _ = f(` spans 1-10, `"hola"` starts at 11.
         assert_eq!(e.column, 11);
         assert!(
-            e.message.contains("argumento 1") && e.message.contains("Int"),
+            e.message.contains("argument 1") && e.message.contains("Int"),
             "msg: {}",
             e.message,
         );
@@ -14855,7 +14850,7 @@ mod tests {
         let e = first_error("let s = -\"a\"");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 9);
-        assert!(e.message.contains("negación"), "msg: {}", e.message);
+        assert!(e.message.contains("negation"), "msg: {}", e.message);
     }
 
     #[test]
@@ -14880,7 +14875,7 @@ mod tests {
         // `let u = U { id: 1, x: ` spans 1-22, `2` starts at 23.
         assert_eq!(e.column, 23);
         assert!(
-            e.message.contains("no tiene un campo") && e.message.contains("`x`"),
+            e.message.contains("does not have a field") && e.message.contains("`x`"),
             "msg: {}",
             e.message,
         );
@@ -14892,7 +14887,7 @@ mod tests {
         let e = first_error("let _ = no_existe");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 9);
-        assert!(e.message.contains("variable desconocida"));
+        assert!(e.message.contains("unknown variable"));
     }
 
     #[test]
@@ -14910,7 +14905,8 @@ mod tests {
         let e = first_error("let _ = 1..\"a\"");
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 12);
-        assert!(e.message.contains("fin del rango"), "msg: {}", e.message);
+        assert!(e.message.contains("end of the range"), "msg: {}", e.message);
+        // Note: "end" matches both label values, but "of the range" anchors to the message.
     }
 
     // -----------------------------------------------------------------------
@@ -14964,7 +14960,7 @@ mod tests {
         assert_error_with(
             "from python import math\n\
              let f = match math.sqrt(16.0) { Ok(v) => v }\n",
-            &["exhaustivo"],
+            &["exhaustive"],
         );
     }
 
@@ -14992,7 +14988,7 @@ mod tests {
         assert_error_with(
             "from python import math\n\
              fn bad(x: Float) -> Int { return 0 + math.sqrt(x)? }\n",
-            &["operador", "?"],
+            &["operator", "?"],
         );
     }
 
@@ -15045,7 +15041,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("privado") && e.message.contains("_x")),
+                .any(|e| e.message.contains("private") && e.message.contains("_x")),
             "esperaba error sobre `_x` privado, fue: {:?}",
             errors,
         );
@@ -15078,7 +15074,7 @@ mod tests {
              }\n",
         );
         assert!(
-            errors.iter().any(|e| e.message.contains("privado")),
+            errors.iter().any(|e| e.message.contains("private")),
             "esperaba error de acceso desde otro tipo, fue: {:?}",
             errors,
         );
@@ -15093,7 +15089,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("privado") && e.message.contains("_balance")),
+                .any(|e| e.message.contains("private") && e.message.contains("_balance")),
             "esperaba error sobre struct lit con `_balance`, fue: {:?}",
             errors,
         );
@@ -15120,7 +15116,7 @@ mod tests {
     fn vp_field_assign_to_private_field_from_outside_is_error() {
         let (_, errors) = check_str("type C { _x: Int = 0 }\nlet c = C {}\nc._x = 5\n");
         assert!(
-            errors.iter().any(|e| e.message.contains("privado")),
+            errors.iter().any(|e| e.message.contains("private")),
             "esperaba error de asignación a campo privado, fue: {:?}",
             errors,
         );
@@ -15140,7 +15136,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("privado") && e.message.contains("_hidden")),
+                .any(|e| e.message.contains("private") && e.message.contains("_hidden")),
             "esperaba error sobre `_hidden` privado, fue: {:?}",
             errors,
         );
@@ -15175,7 +15171,7 @@ mod tests {
              }\n",
         );
         assert!(
-            errors.iter().any(|e| e.message.contains("privado")),
+            errors.iter().any(|e| e.message.contains("private")),
             "esperaba error de acceso desde otro tipo, fue: {:?}",
             errors,
         );
@@ -15718,7 +15714,7 @@ print(total)
         let errors = check_recovering(src);
         assert!(
             errors.iter().any(|e| e.message.contains("variable")
-                && (e.message.contains("x") || e.message.contains("no definida"))),
+                && (e.message.contains("x") || e.message.contains("not defined"))),
             "esperaba error sobre `x` no definida: {:?}",
             errors
         );
@@ -15801,7 +15797,7 @@ print(total)
         let src = "let xs: List<Int> = [1, 2, 3]\nfor (a, b) in xs {\n    print(a)\n}\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("tupla")),
+            errors.iter().any(|e| e.message.contains("tuple")),
             "esperaba error sobre tuple pattern: {:?}",
             errors
         );
@@ -15900,7 +15896,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("Result") && e.message.contains("1 o 2")),
+                .any(|e| e.message.contains("Result") && e.message.contains("1 or 2")),
             "esperaba error sobre aridad: {:?}",
             errors
         );
@@ -15938,7 +15934,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("bit-a-bit") && e.message.contains("Float")),
+                .any(|e| e.message.contains("bitwise") && e.message.contains("Float")),
             "esperaba error sobre bit-a-bit con Float: {:?}",
             errors
         );
@@ -15951,7 +15947,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("bit-a-bit") && e.message.contains("Bool")),
+                .any(|e| e.message.contains("bitwise") && e.message.contains("Bool")),
             "esperaba error sobre `&` con Bool: {:?}",
             errors
         );
@@ -16166,7 +16162,7 @@ print(total)
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
                        return Err(\"x\")\n\
                    }";
-        assert_auth_err(src, "no admite args ni kwargs");
+        assert_auth_err(src, "does not accept args or kwargs");
     }
 
     #[test]
@@ -16188,7 +16184,7 @@ print(total)
                    fn check() -> Result<User> {\n\
                        return Err(\"x\")\n\
                    }";
-        assert_auth_err(src, "exactamente 1 param");
+        assert_auth_err(src, "exactly 1 param");
     }
 
     #[test]
@@ -16209,7 +16205,7 @@ print(total)
                    fn check(headers: Map<Str, Str>) -> Result<Str> {\n\
                        return Ok(\"sin user type\")\n\
                    }";
-        assert_auth_err(src, "type custom");
+        assert_auth_err(src, "custom type");
     }
 
     #[test]
@@ -16224,7 +16220,7 @@ print(total)
                    fn check2(headers: Map<Str, Str>) -> Result<User> {\n\
                        return Err(\"y\")\n\
                    }";
-        assert_auth_err(src, "@auth_provider duplicado");
+        assert_auth_err(src, "duplicate @auth_provider");
     }
 
     #[test]
@@ -16235,7 +16231,7 @@ print(total)
                    @authenticated\n\
                    @get(\"/me\")\n\
                    fn me(user: User) -> User { return user }";
-        assert_auth_err(src, "no hay `@auth_provider`");
+        assert_auth_err(src, "no `@auth_provider`");
     }
 
     #[test]
@@ -16245,7 +16241,7 @@ print(total)
                    @admin\n\
                    @delete(\"/x\")\n\
                    fn del(user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "no hay `@auth_provider`");
+        assert_auth_err(src, "no `@auth_provider`");
     }
 
     #[test]
@@ -16261,7 +16257,7 @@ print(total)
                    @authenticated\n\
                    @get(\"/me\")\n\
                    fn me() -> Str { return \"hola\" }";
-        assert_auth_err(src, "falta param de tipo `User`");
+        assert_auth_err(src, "missing param of type `User`");
     }
 
     #[test]
@@ -16290,7 +16286,7 @@ print(total)
                    }\n\
                    @authenticated\n\
                    fn algo(user: User) -> Str { return \"x\" }";
-        assert_auth_err(src, "solo se aplica a handlers HTTP");
+        assert_auth_err(src, "only applies to HTTP handlers");
     }
 
     #[test]
@@ -16305,7 +16301,7 @@ print(total)
                    @admin\n\
                    @delete(\"/x/{id}\")\n\
                    fn del(id: Int, user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "campo `role: Str`");
+        assert_auth_err(src, "`role: Str` field");
     }
 
     #[test]
@@ -16334,7 +16330,7 @@ print(total)
                    @authenticated(scope=\"x\")\n\
                    @get(\"/me\")\n\
                    fn me(user: User) -> User { return user }";
-        assert_auth_err(src, "no admite args ni kwargs");
+        assert_auth_err(src, "does not accept args or kwargs");
     }
 
     // ----- Phase 9.w.1.iter2.a — @requires("role") (custom RBAC) -----
@@ -16365,7 +16361,7 @@ print(total)
                    @requires(\"editor\")\n\
                    @get(\"/edit\")\n\
                    fn h(user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "campo `role: Str`");
+        assert_auth_err(src, "`role: Str` field");
     }
 
     #[test]
@@ -16395,7 +16391,7 @@ print(total)
                    @requires(\"editor\")\n\
                    @get(\"/x\")\n\
                    fn h(user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "duplicado");
+        assert_auth_err(src, "duplicate");
     }
 
     #[test]
@@ -16404,7 +16400,7 @@ print(total)
                    @requires(\"editor\")\n\
                    @get(\"/x\")\n\
                    fn h(user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "no hay `@auth_provider`");
+        assert_auth_err(src, "no `@auth_provider`");
     }
 
     #[test]
@@ -16416,7 +16412,7 @@ print(total)
                    }\n\
                    @requires(\"editor\")\n\
                    fn algo(user: User) -> Str { return \"x\" }";
-        assert_auth_err(src, "solo se aplica a handlers HTTP");
+        assert_auth_err(src, "only applies to HTTP handlers");
     }
 
     #[test]
@@ -16429,7 +16425,7 @@ print(total)
                    @requires()\n\
                    @get(\"/x\")\n\
                    fn h(user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "espera exactamente 1 arg");
+        assert_auth_err(src, "expects exactly 1 arg");
     }
 
     #[test]
@@ -16442,7 +16438,7 @@ print(total)
                    @requires(role=\"editor\")\n\
                    @get(\"/x\")\n\
                    fn h(user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "no admite kwargs");
+        assert_auth_err(src, "does not accept kwargs");
     }
 
     #[test]
@@ -16456,7 +16452,7 @@ print(total)
                    @requires(\"editor\")\n\
                    @get(\"/x\")\n\
                    fn h() -> Str { return \"ok\" }";
-        assert_auth_err(src, "falta param de tipo");
+        assert_auth_err(src, "missing param of type");
     }
 
     // ----- Phase 12.7 — @trace/@metric (explicit instrumentation) -----
@@ -16476,13 +16472,13 @@ print(total)
     #[test]
     fn trace_with_positional_arg_is_error() {
         let src = "@trace(\"name\")\nfn calc(x: Int) -> Int => x * 2";
-        assert_auth_err(src, "no acepta args positionals");
+        assert_auth_err(src, "does not accept positional args");
     }
 
     #[test]
     fn trace_with_unknown_kwarg_is_error() {
         let src = "@trace(level=\"info\")\nfn calc(x: Int) -> Int => x * 2";
-        assert_auth_err(src, "kwarg desconocido");
+        assert_auth_err(src, "unknown kwarg");
     }
 
     #[test]
@@ -16494,7 +16490,7 @@ print(total)
     #[test]
     fn trace_duplicate_stacked_is_error() {
         let src = "@trace\n@trace(name=\"otro\")\nfn calc(x: Int) -> Int => x * 2";
-        assert_auth_err(src, "duplicado");
+        assert_auth_err(src, "duplicate");
     }
 
     #[test]
@@ -16525,13 +16521,13 @@ print(total)
     #[test]
     fn metric_with_positional_arg_is_error() {
         let src = "@metric(\"name\")\nfn calc(x: Int) -> Int => x * 2";
-        assert_auth_err(src, "no acepta args positionals");
+        assert_auth_err(src, "does not accept positional args");
     }
 
     #[test]
     fn metric_duplicate_stacked_is_error() {
         let src = "@metric\n@metric\nfn calc(x: Int) -> Int => x * 2";
-        assert_auth_err(src, "duplicado");
+        assert_auth_err(src, "duplicate");
     }
 
     #[test]
@@ -16546,7 +16542,7 @@ print(total)
                    @admin\n\
                    @get(\"/x\")\n\
                    fn h(user: User) -> Str { return \"ok\" }";
-        assert_auth_err(src, "campo `role: Str`");
+        assert_auth_err(src, "`role: Str` field");
     }
 
     // ----------------------------------------------------------------
@@ -16680,7 +16676,7 @@ print(total)
     fn ws_decorator_without_path_arg_is_error() {
         let src = "@ws()\n\
                    async fn echo(conn: WsConn<Str>) -> Null { return null }";
-        assert_auth_err(src, "1 argumento");
+        assert_auth_err(src, "1 argument");
     }
 
     #[test]
@@ -16723,7 +16719,7 @@ print(total)
                        let _ = conn.zzz()\n\
                        return null\n\
                    }";
-        assert_auth_err(src, "no tiene el método `zzz`");
+        assert_auth_err(src, "does not have method `zzz`");
     }
 
     #[test]
@@ -16743,7 +16739,7 @@ print(total)
         // `WsConn<Any>` is not accepted — T must be concrete.
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Any>) -> Null { return null }";
-        assert_auth_err(src, "T` concreto");
+        assert_auth_err(src, "concrete `T`");
     }
 
     // ---- 9.w.2-binary-frames — `WsConn<Bytes>` ----
@@ -16833,7 +16829,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("@cron") && e.message.contains("1 argumento")),
+                .any(|e| e.message.contains("@cron") && e.message.contains("1 positional argument")),
             "esperaba msg sobre args: {:?}",
             errors
         );
@@ -16857,7 +16853,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("no admite params")),
+                .any(|e| e.message.contains("does not accept params")),
             "esperaba msg sobre params: {:?}",
             errors
         );
@@ -16870,7 +16866,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("no es combinable") && e.message.contains("get")),
+                .any(|e| e.message.contains("is not combinable") && e.message.contains("get")),
             "esperaba msg sobre combinación con @get: {:?}",
             errors
         );
@@ -16881,9 +16877,9 @@ print(total)
         let src = "@cron(\"0 0 * * *\")\n@background\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.message.contains("no es combinable") && e.message.contains("background")),
+            errors.iter().any(
+                |e| e.message.contains("is not combinable") && e.message.contains("background")
+            ),
             "esperaba msg sobre combinación con @background: {:?}",
             errors
         );
@@ -16925,7 +16921,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("@background") && e.message.contains("no admite")),
+                .any(|e| e.message.contains("@background") && e.message.contains("does not accept")),
             "esperaba msg sobre args: {:?}",
             errors
         );
@@ -16938,7 +16934,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("no es combinable")),
+                .any(|e| e.message.contains("is not combinable")),
             "esperaba msg sobre combinación: {:?}",
             errors
         );
@@ -17112,7 +17108,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("`foo`") && e.message.contains("no reconocido")),
+                .any(|e| e.message.contains("`foo`") && e.message.contains("unrecognized")),
             "esperaba msg sobre kwarg desconocido: {:?}",
             errors
         );
@@ -17165,7 +17161,7 @@ print(total)
         assert!(
             errors.iter().any(|e| e.message.contains("@background")
                 && e.message.contains("`store`")
-                && e.message.contains("no reconocido")),
+                && e.message.contains("unrecognized")),
             "esperaba msg sobre store no aceptado en @background: {:?}",
             errors
         );
@@ -17179,7 +17175,7 @@ print(total)
         assert!(
             errors.iter().any(|e| e.message.contains("@background")
                 && e.message.contains("`catch_up`")
-                && e.message.contains("no reconocido")),
+                && e.message.contains("unrecognized")),
             "esperaba msg sobre catch_up no aceptado en @background: {:?}",
             errors
         );
@@ -17193,7 +17189,7 @@ print(total)
         let errors = errors_of(src);
         assert!(
             errors.iter().any(|e| e.message.contains("@background")
-                && e.message.contains("no admite args positionals")),
+                && e.message.contains("does not accept positional args")),
             "esperaba msg sobre positionals: {:?}",
             errors
         );
@@ -17225,7 +17221,7 @@ print(total)
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("spawn") && e.message.contains("1 argumento")),
+                .any(|e| e.message.contains("spawn") && e.message.contains("1 argument")),
             "esperaba msg sobre args de spawn: {:?}",
             errors
         );
@@ -17242,7 +17238,7 @@ print(total)
                    }";
         let errors = errors_of(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("call literal")),
+            errors.iter().any(|e| e.message.contains("literal call")),
             "esperaba msg sobre call literal: {:?}",
             errors
         );
@@ -17347,7 +17343,7 @@ print(total)
         let src = "type X {\n  @primary\n  id: Int\n}";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("falta `@table")),
+            errs.iter().any(|e| e.message.contains("missing `@table")),
             "esperaba error sobre @table faltante: {:?}",
             errs
         );
@@ -17375,7 +17371,7 @@ print(total)
         let src = "@table type T {\n  @primary\n  @primary\n  a: Int\n}";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("dos veces")),
+            errs.iter().any(|e| e.message.contains("twice")),
             "esperaba error sobre @primary duplicado en mismo field: {:?}",
             errs
         );
@@ -17420,7 +17416,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter()
-                .any(|e| e.message.contains("más de un decorador `@table`")),
+                .any(|e| e.message.contains("more than one `@table` decorator")),
             "esperaba error sobre @table duplicado: {:?}",
             errs
         );
@@ -17559,7 +17555,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter()
-                .any(|e| e.message.contains("más de un decorador de relación")),
+                .any(|e| e.message.contains("more than one relation decorator")),
             "esperaba error sobre duplicado: {:?}",
             errs
         );
@@ -17927,7 +17923,7 @@ print(total)
         let errs = errors_of(src);
         assert!(
             errs.iter().any(|e| e.message.contains("`@unique")
-                && e.message.contains("al menos 1 columna")),
+                && e.message.contains("at least 1 positional column")),
             "esperaba error de aridad: {:?}",
             errs
         );
@@ -18040,8 +18036,8 @@ print(total)
                    type User {\n  id: Int = 0\n}\n";
         let errs = errors_of(src);
         assert!(
-            errs.iter()
-                .any(|e| e.message.contains("@check_constraint") && e.message.contains("1 arg")),
+            errs.iter().any(|e| e.message.contains("@check_constraint")
+                && e.message.contains("1 positional arg")),
             "esperaba error de aridad: {:?}",
             errs
         );
@@ -18054,7 +18050,7 @@ print(total)
                    type User {\n  id: Int = 0\n}\n";
         let errs = errors_of(src);
         assert!(
-            errs.iter().any(|e| e.message.contains("string vacío")),
+            errs.iter().any(|e| e.message.contains("empty string")),
             "esperaba error de string vacío: {:?}",
             errs
         );
@@ -18152,14 +18148,14 @@ print(total)
     fn healthz_with_args_is_error() {
         let src = "@healthz(\"x\")\n\
                    fn liveness() -> Bool {\n  return true\n}";
-        assert_health_err(src, "no admite args ni kwargs");
+        assert_health_err(src, "does not accept args or kwargs");
     }
 
     #[test]
     fn healthz_with_kwargs_is_error() {
         let src = "@healthz(timeout=10)\n\
                    fn liveness() -> Bool {\n  return true\n}";
-        assert_health_err(src, "no admite args ni kwargs");
+        assert_health_err(src, "does not accept args or kwargs");
     }
 
     #[test]
@@ -18167,7 +18163,7 @@ print(total)
         // Probes don't receive input — params is an error.
         let src = "@healthz\n\
                    fn liveness(x: Int) -> Bool {\n  return true\n}";
-        assert_health_err(src, "no admite params");
+        assert_health_err(src, "does not accept params");
     }
 
     #[test]
@@ -18185,7 +18181,7 @@ print(total)
                    fn first() -> Bool {\n  return true\n}\n\
                    @healthz\n\
                    fn second() -> Bool {\n  return false\n}";
-        assert_health_err(src, "@healthz duplicado");
+        assert_health_err(src, "duplicate @healthz");
     }
 
     #[test]
@@ -18194,7 +18190,7 @@ print(total)
                    fn first() -> Bool {\n  return true\n}\n\
                    @readyz\n\
                    fn second() -> Bool {\n  return false\n}";
-        assert_health_err(src, "@readyz duplicado");
+        assert_health_err(src, "duplicate @readyz");
     }
 
     #[test]
@@ -18214,7 +18210,7 @@ print(total)
         let src = "@healthz\n\
                    @readyz\n\
                    fn both() -> Bool {\n  return true\n}";
-        assert_health_err(src, "no es combinable");
+        assert_health_err(src, "is not combinable");
     }
 
     #[test]
@@ -18223,7 +18219,7 @@ print(total)
         let src = "@healthz\n\
                    @get(\"/probe\")\n\
                    fn probe() -> Bool {\n  return true\n}";
-        assert_health_err(src, "no es combinable");
+        assert_health_err(src, "is not combinable");
     }
 
     #[test]
@@ -18231,7 +18227,7 @@ print(total)
         let src = "@healthz\n\
                    @cron(\"0 0 * * *\")\n\
                    fn job() -> Bool {\n  return true\n}";
-        assert_health_err(src, "no es combinable");
+        assert_health_err(src, "is not combinable");
     }
 
     #[test]
@@ -18239,7 +18235,7 @@ print(total)
         let src = "@healthz\n\
                    @background\n\
                    fn job() -> Bool {\n  return true\n}";
-        assert_health_err(src, "no es combinable");
+        assert_health_err(src, "is not combinable");
     }
 
     #[test]
@@ -18251,7 +18247,7 @@ print(total)
                    @healthz\n\
                    @authenticated\n\
                    fn probe(user: User) -> Bool {\n  return true\n}";
-        assert_health_err(src, "no es combinable");
+        assert_health_err(src, "is not combinable");
     }
 
     // ============================================================
@@ -18318,7 +18314,7 @@ print(total)
                    }";
         let errs = errors_of(src);
         let matched = errs.iter().any(|e| {
-            e.message.contains("Secret.expose()") && e.message.contains("no admite argumentos")
+            e.message.contains("Secret.expose()") && e.message.contains("does not accept arguments")
         });
         assert!(
             matched,
@@ -18364,7 +18360,7 @@ print(total)
     fn flag_decorator_without_args_is_error() {
         assert_error_with(
             "@flag()\nfn f() -> Int { return 1 }",
-            &["@flag", "1 arg positional"],
+            &["@flag", "1 positional arg"],
         );
     }
 
@@ -18372,7 +18368,7 @@ print(total)
     fn flag_decorator_with_two_args_is_error() {
         assert_error_with(
             "@flag(\"a\", \"b\")\nfn f() -> Int { return 1 }",
-            &["@flag", "1 arg positional"],
+            &["@flag", "1 positional arg"],
         );
     }
 
@@ -18388,7 +18384,7 @@ print(total)
     fn flag_decorator_empty_name_is_error() {
         assert_error_with(
             "@flag(\"\")\nfn f() -> Int { return 1 }",
-            &["@flag", "no puede ser vacío"],
+            &["@flag", "cannot be empty"],
         );
     }
 
@@ -18396,7 +18392,7 @@ print(total)
     fn flag_decorator_invalid_chars_is_error() {
         assert_error_with(
             "@flag(\"foo!\")\nfn f() -> Int { return 1 }",
-            &["@flag", "inválido"],
+            &["@flag", "invalid"],
         );
     }
 
@@ -18404,7 +18400,7 @@ print(total)
     fn flag_decorator_duplicate_is_error() {
         assert_error_with(
             "@flag(\"a\")\n@flag(\"b\")\nfn f() -> Int { return 1 }",
-            &["@flag", "duplicado"],
+            &["@flag", "duplicate"],
         );
     }
 

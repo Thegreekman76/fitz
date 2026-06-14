@@ -43248,7 +43248,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.message.contains("posts(db?)") && e.message.contains("recibió 2")),
+                .any(|e| e.message.contains("posts(db?)") && e.message.contains("received 2")),
             "expected error del checker sobre aridad de navigation, errores: {:?}",
             errors
         );
