@@ -63,7 +63,7 @@ impl BackoffKind {
             "linear" => Ok(Self::Linear),
             "constant" => Ok(Self::Constant),
             other => Err(format!(
-                "backoff `{}` inválido. Aceptados: `exponential`/`linear`/`constant`.",
+                "invalid backoff `{}`. Accepted: `exponential`/`linear`/`constant`.",
                 other
             )),
         }
@@ -279,11 +279,11 @@ impl CronRegistry {
         let normalized = normalize_cron_expression(cron_expr);
         let schedule = Schedule::from_str(&normalized).map_err(|e| {
             format!(
-                "@cron sobre fn '{}': cron expression `{}` inválida: {}. \
-                 Sintaxis aceptada: 5 fields Unix clásico (\"min hora día mes día-semana\"), \
-                 6 fields con seconds al inicio, o 7 fields con año al final. \
-                 Ejemplos: `\"0 0 * * *\"` (medianoche), `\"*/5 * * * *\"` (cada 5 min), \
-                 `\"0 */30 * * * *\"` (cada 30 segundos).",
+                "@cron on fn '{}': invalid cron expression `{}`: {}. \
+                 Accepted syntax: classic 5-field Unix (\"min hour day month day-of-week\"), \
+                 6 fields with seconds at the start, or 7 fields with year at the end. \
+                 Examples: `\"0 0 * * *\"` (midnight), `\"*/5 * * * *\"` (every 5 min), \
+                 `\"0 */30 * * * *\"` (every 30 seconds).",
                 name, cron_expr, e
             )
         })?;
@@ -405,13 +405,13 @@ ON fitz_cron_runs (job_name, started_at DESC)";
 pub async fn init_storage(conn: &crate::db::DbConnHandle) -> Result<(), String> {
     conn.exec(SQL_CREATE_TABLE_JOBS, &[])
         .await
-        .map_err(|e| format!("inicializando tabla fitz_cron_jobs: {}", e))?;
+        .map_err(|e| format!("initializing table fitz_cron_jobs: {}", e))?;
     conn.exec(SQL_CREATE_TABLE_RUNS, &[])
         .await
-        .map_err(|e| format!("inicializando tabla fitz_cron_runs: {}", e))?;
+        .map_err(|e| format!("initializing table fitz_cron_runs: {}", e))?;
     conn.exec(SQL_CREATE_INDEX_RUNS, &[])
         .await
-        .map_err(|e| format!("inicializando índice fitz_cron_runs: {}", e))?;
+        .map_err(|e| format!("initializing index fitz_cron_runs: {}", e))?;
     Ok(())
 }
 
@@ -545,7 +545,7 @@ pub async fn record_run_start(
     let row = res
         .rows
         .first()
-        .ok_or_else(|| format!("fitz_cron_runs insert no devolvió id para '{}'", name))?;
+        .ok_or_else(|| format!("fitz_cron_runs insert did not return id for '{}'", name))?;
     match row.get_at(0) {
         Some(crate::db::PgValue::Int(n)) => Ok(*n),
         // The driver may return the BIGSERIAL as Text if the wire
@@ -553,9 +553,9 @@ pub async fn record_run_start(
         // representations.
         Some(crate::db::PgValue::Text(s)) => s
             .parse::<i64>()
-            .map_err(|_| format!("fitz_cron_runs id `{}` no parsea a Int", s)),
+            .map_err(|_| format!("fitz_cron_runs id `{}` does not parse to Int", s)),
         other => Err(format!(
-            "fitz_cron_runs id con shape inesperado: {:?}",
+            "fitz_cron_runs id with unexpected shape: {:?}",
             other
         )),
     }
@@ -640,7 +640,7 @@ pub async fn read_last_run_at(
             parse_pg_timestamptz(s).map(Some)
         }
         other => Err(format!(
-            "fitz_cron_jobs.last_run_at shape inesperado: {:?}",
+            "fitz_cron_jobs.last_run_at with unexpected shape: {:?}",
             other
         )),
     }
@@ -694,7 +694,7 @@ pub fn spawn_cron_scheduler(registry: Arc<CronRegistry>) {
     if jobs.is_empty() {
         return;
     }
-    eprintln!("🕐 Fitz scheduler arrancado con {} job(s) cron", jobs.len());
+    eprintln!("🕐 Fitz scheduler started with {} cron job(s)", jobs.len());
     for job in &jobs {
         eprintln!("   @cron  {} ({})", job.name, job.schedule);
     }
@@ -732,7 +732,7 @@ async fn run_cron_job(job: CronJob) {
         // docs/deudas-post-5b.md.
         if let Err(e) = ensure_storage_initialized(&conn).await {
             eprintln!(
-                "🕐 cron job '{}' no pudo inicializar storage, abortando task: {}",
+                "🕐 cron job '{}' could not initialize storage, aborting task: {}",
                 job.name, e
             );
             return;
@@ -741,7 +741,7 @@ async fn run_cron_job(job: CronJob) {
             upsert_job_row(&conn, &job.name, &job.schedule.to_string(), job.tz.name()).await
         {
             eprintln!(
-                "🕐 cron job '{}' no pudo registrar en fitz_cron_jobs, abortando task: {}",
+                "🕐 cron job '{}' could not register in fitz_cron_jobs, aborting task: {}",
                 job.name, e
             );
             return;
@@ -764,8 +764,8 @@ async fn run_cron_job(job: CronJob) {
                         .unwrap_or(false);
                     if missed {
                         eprintln!(
-                            "🕐 cron job '{}' catch_up: missed runs detectados (last={}), \
-                             ejecutando UN run inmediato.",
+                            "🕐 cron job '{}' catch_up: missed runs detected (last={}), \
+                             executing ONE immediate run.",
                             job.name, last
                         );
                         invoke_with_retry(&job).await;
@@ -777,7 +777,7 @@ async fn run_cron_job(job: CronJob) {
                 }
                 Err(e) => {
                     eprintln!(
-                        "🕐 cron job '{}' catch_up: error leyendo last_run_at: {}",
+                        "🕐 cron job '{}' catch_up: error reading last_run_at: {}",
                         job.name, e
                     );
                     // We do not abort — continue to the normal loop.
@@ -789,7 +789,7 @@ async fn run_cron_job(job: CronJob) {
     // ---- Normal loop ----
     loop {
         let Some(next_in_tz) = job.schedule.upcoming(job.tz).next() else {
-            eprintln!("🕐 cron job '{}' agotó su schedule, terminando.", job.name);
+            eprintln!("🕐 cron job '{}' exhausted its schedule, terminating.", job.name);
             return;
         };
         let next_utc = next_in_tz.with_timezone(&Utc);
@@ -818,7 +818,7 @@ async fn invoke_with_retry(job: &CronJob) {
                 Ok(id) => Some(id),
                 Err(e) => {
                     eprintln!(
-                        "🕐 cron job '{}' (attempt {}) record_run_start falló: {}",
+                        "🕐 cron job '{}' (attempt {}) record_run_start failed: {}",
                         job.name, attempt, e
                     );
                     None
@@ -853,7 +853,7 @@ async fn invoke_with_retry(job: &CronJob) {
                 }
                 if is_last_attempt {
                     eprintln!(
-                        "🕐 cron job '{}' falló definitivamente tras {} intento(s): {}",
+                        "🕐 cron job '{}' failed definitively after {} attempt(s): {}",
                         job.name, attempt, msg
                     );
                     if let Some(conn) = job.store.as_ref() {
@@ -862,10 +862,10 @@ async fn invoke_with_retry(job: &CronJob) {
                     return;
                 }
                 // Retry pending: sleep the backoff and continue.
-                let retry_cfg = job.retry.expect("max_attempts > 1 implica retry.is_some()");
+                let retry_cfg = job.retry.expect("max_attempts > 1 implies retry.is_some()");
                 let delay = retry_cfg.delay_for_attempt(attempt);
                 eprintln!(
-                    "🕐 cron job '{}' falló (attempt {}/{}): {} — retry en {:?}",
+                    "🕐 cron job '{}' failed (attempt {}/{}): {} — retry in {:?}",
                     job.name, attempt, max_attempts, msg, delay
                 );
                 tokio::time::sleep(delay).await;
@@ -930,10 +930,10 @@ pub fn run_scheduler_only(registry: Arc<CronRegistry>) -> std::io::Result<()> {
         // runtime and the spawned tasks are cancelled.
         match tokio::signal::ctrl_c().await {
             Ok(()) => {
-                eprintln!("\n🕐 Fitz scheduler recibió Ctrl+C, terminando.");
+                eprintln!("\n🕐 Fitz scheduler received Ctrl+C, terminating.");
             }
             Err(e) => {
-                eprintln!("\n🕐 Fitz scheduler error en signal handler: {}", e);
+                eprintln!("\n🕐 Fitz scheduler error in signal handler: {}", e);
             }
         }
     });

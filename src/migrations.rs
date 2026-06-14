@@ -775,7 +775,7 @@ fn build_table_from_type(
                     .and_then(|tid| type_env.table_metadata(tid))
                     .ok_or_else(|| {
                         format!(
-                            "@belongs_to en `{}.{}` apunta a `{}` que no es @table",
+                            "@belongs_to on `{}.{}` points to `{}` which is not @table",
                             type_name, f.name, rel.target_type
                         )
                     })?;
@@ -996,7 +996,7 @@ fn fitz_typeexpr_to_sql_type(
                 }
                 _ => {
                     return Err(format!(
-                        "List sin parámetro de tipo: `{}` (esperado `List<Int>`/`List<Str>`/etc.)",
+                        "List without type parameter: `{}` (expected `List<Int>`/`List<Str>`/etc.)",
                         t.display_name(),
                     ));
                 }
@@ -1010,8 +1010,8 @@ fn fitz_typeexpr_to_sql_type(
             Ok("jsonb".to_string())
         }
         _ => Err(format!(
-            "tipo Fitz `{}` no tiene mapping SQL automático \
-             (usá @column(sql_type=\"...\") para forzar)",
+            "Fitz type `{}` has no automatic SQL mapping \
+             (use @column(sql_type=\"...\") to force one)",
             t.display_name()
         )),
     }
@@ -2717,7 +2717,7 @@ pub async fn rollback_n(
     }
     let mut reverted = Vec::with_capacity(target_versions.len());
     for v in target_versions {
-        let m = by_version.get(v.as_str()).expect("pre-flight validó");
+        let m = by_version.get(v.as_str()).expect("pre-flight validated");
         revert_migration(conn, m).await?;
         reverted.push(v.clone());
     }
@@ -2902,13 +2902,13 @@ fn extract_string(row: &crate::db::Row, col: &str) -> DbResult<String> {
     match row.get(col) {
         Some(PgValue::Text(s)) => Ok(s.clone()),
         Some(PgValue::Null) => Err(DbError::Protocol(format!(
-            "introspect: columna `{col}` NULL inesperado"
+            "introspect: column `{col}` unexpected NULL"
         ))),
         Some(other) => Err(DbError::Protocol(format!(
-            "introspect: columna `{col}` esperaba Text, recibió {other:?}"
+            "introspect: column `{col}` expected Text, received {other:?}"
         ))),
         None => Err(DbError::Protocol(format!(
-            "introspect: columna `{col}` no presente en row"
+            "introspect: column `{col}` not present in row"
         ))),
     }
 }
@@ -3008,12 +3008,12 @@ pub fn format_inspection_text(
         match table_filter {
             Some(name) => {
                 out.push_str(&format!(
-                    "\n  (no se encontró la tabla `{name}` en el schema `{want_schema}`)\n"
+                    "\n  (table `{name}` not found in schema `{want_schema}`)\n"
                 ));
             }
             None => {
                 out.push_str(&format!(
-                    "\n  (sin tablas user-defined en el schema `{want_schema}`)\n"
+                    "\n  (no user-defined tables in schema `{want_schema}`)\n"
                 ));
             }
         }
@@ -3257,11 +3257,11 @@ pub fn format_inspection_text_all_schemas(schema: &Schema, table_filter: Option<
     let mut out = String::new();
     let schemas = collect_schemas_from_tables(schema);
     if schemas.is_empty() {
-        out.push_str("(sin tablas user-defined detectadas)\n");
+        out.push_str("(no user-defined tables detected)\n");
         return out;
     }
     out.push_str(&format!(
-        "Schemas detectados: {}\n",
+        "Detected schemas: {}\n",
         schemas.to_vec().join(", ")
     ));
     for s in &schemas {
@@ -4996,7 +4996,7 @@ type Plain {
         let text = format_inspection_text(&s, None, None);
         assert!(text.starts_with("Schema: public\n"));
         assert!(
-            text.contains("sin tablas user-defined"),
+            text.contains("no user-defined tables"),
             "mensaje 'sin tablas': {text}"
         );
     }
@@ -5006,7 +5006,7 @@ type Plain {
         let s = inspect_schema_fixture();
         let text = format_inspection_text(&s, None, Some("nonexistent"));
         assert!(
-            text.contains("no se encontró la tabla `nonexistent`"),
+            text.contains("table `nonexistent` not found"),
             "mensaje table inexistente: {text}"
         );
     }
@@ -5422,7 +5422,7 @@ type Plain {
         let text = format_inspection_text_all_schemas(&s, None);
         // Header with detected schemas (alphabetic order).
         assert!(
-            text.starts_with("Schemas detectados: ops, public, tenant_a\n"),
+            text.starts_with("Detected schemas: ops, public, tenant_a\n"),
             "header: {text}"
         );
         // Each schema appears as a section.
@@ -5480,7 +5480,7 @@ type Plain {
         let s = Schema { tables: vec![] };
         let text = format_inspection_text_all_schemas(&s, None);
         assert!(
-            text.contains("sin tablas user-defined detectadas"),
+            text.contains("no user-defined tables detected"),
             "esperaba mensaje vacío, fue: {text}"
         );
     }

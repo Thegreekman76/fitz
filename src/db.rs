@@ -89,9 +89,9 @@ pub enum DbError {
 impl fmt::Display for DbError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            DbError::InvalidUrl(m) => write!(f, "URL inválida: {m}"),
+            DbError::InvalidUrl(m) => write!(f, "invalid URL: {m}"),
             DbError::Io(e) => write!(f, "I/O: {e}"),
-            DbError::Protocol(m) => write!(f, "protocolo: {m}"),
+            DbError::Protocol(m) => write!(f, "protocol: {m}"),
             DbError::Auth(m) => write!(f, "auth: {m}"),
             // v0.10.29 — Adds the SQLSTATE in brackets when
             // available (Postgres always includes it in
@@ -111,9 +111,9 @@ impl fmt::Display for DbError {
                 }
             }
             DbError::UnsupportedType(oid) => {
-                write!(f, "tipo Postgres OID {oid} no soportado en MVP (10.5)")
+                write!(f, "Postgres OID {oid} type not supported in MVP (10.5)")
             }
-            DbError::NotImplemented(m) => write!(f, "no implementado: {m}"),
+            DbError::NotImplemented(m) => write!(f, "not implemented: {m}"),
             DbError::Tls(m) => write!(f, "TLS: {m}"),
         }
     }
@@ -255,7 +255,7 @@ impl ConnectionConfig {
             .or_else(|| url.strip_prefix("postgresql://"))
             .ok_or_else(|| {
                 DbError::InvalidUrl(format!(
-                    "esperaba 'postgres://' o 'postgresql://', no '{url}'"
+                    "expected 'postgres://' or 'postgresql://', not '{url}'"
                 ))
             })?;
 
@@ -281,7 +281,7 @@ impl ConnectionConfig {
                     None => (a, None),
                 };
                 if u.is_empty() {
-                    return Err(DbError::InvalidUrl("usuario vacío".into()));
+                    return Err(DbError::InvalidUrl("empty user".into()));
                 }
                 let pwd_decoded = match p {
                     Some(s) => Some(percent_decode_owned(&s)?),
@@ -289,7 +289,7 @@ impl ConnectionConfig {
                 };
                 (percent_decode(u)?, pwd_decoded)
             }
-            None => return Err(DbError::InvalidUrl("falta usuario antes de '@'".into())),
+            None => return Err(DbError::InvalidUrl("missing user before '@'".into())),
         };
 
         // host_dbname := host[:port][/dbname]
@@ -297,7 +297,7 @@ impl ConnectionConfig {
             Some((h, d)) => (h, d.to_string()),
             None => {
                 return Err(DbError::InvalidUrl(
-                    "falta nombre de la base de datos después de '/'".into(),
+                    "missing database name after '/'".into(),
                 ))
             }
         };
@@ -320,21 +320,21 @@ impl ConnectionConfig {
 
 fn split_host_port(s: &str) -> DbResult<(String, u16)> {
     if s.is_empty() {
-        return Err(DbError::InvalidUrl("host vacío".into()));
+        return Err(DbError::InvalidUrl("empty host".into()));
     }
     // IPv6 literal: `[::1]:5432`. The bracket closes before the
     // ':' of the port.
     if let Some(rest) = s.strip_prefix('[') {
         let (addr, tail) = rest
             .split_once(']')
-            .ok_or_else(|| DbError::InvalidUrl(format!("IPv6 sin ']' en '{s}'")))?;
+            .ok_or_else(|| DbError::InvalidUrl(format!("IPv6 without ']' in '{s}'")))?;
         let port = if let Some(p) = tail.strip_prefix(':') {
             parse_port(p)?
         } else if tail.is_empty() {
             5432
         } else {
             return Err(DbError::InvalidUrl(format!(
-                "esperaba ':<puerto>' o fin tras ']', no '{tail}'"
+                "expected ':<port>' or end after ']', not '{tail}'"
             )));
         };
         return Ok((addr.to_string(), port));
@@ -347,7 +347,7 @@ fn split_host_port(s: &str) -> DbResult<(String, u16)> {
 
 fn parse_port(s: &str) -> DbResult<u16> {
     s.parse::<u16>()
-        .map_err(|_| DbError::InvalidUrl(format!("puerto inválido '{s}'")))
+        .map_err(|_| DbError::InvalidUrl(format!("invalid port '{s}'")))
 }
 
 /// v0.10.23 (Phase 10.1.b) — parser for the SSL params from the
@@ -393,7 +393,7 @@ fn parse_ssl_params(query: Option<&str>) -> DbResult<(SslMode, Option<std::path:
             }
             "sslrootcert" => {
                 if v.is_empty() {
-                    return Err(DbError::InvalidUrl("sslrootcert con value vacío".into()));
+                    return Err(DbError::InvalidUrl("sslrootcert with empty value".into()));
                 }
                 root_cert = Some(std::path::PathBuf::from(percent_decode(v)?));
             }
@@ -548,7 +548,7 @@ async fn upgrade_to_tls(
     let server_name =
         rustls::pki_types::ServerName::try_from(config.host.clone()).map_err(|e| {
             DbError::Tls(format!(
-                "hostname `{}` inválido para TLS SNI: {e}",
+                "hostname `{}` invalid for TLS SNI: {e}",
                 config.host
             ))
         })?;
@@ -556,7 +556,7 @@ async fn upgrade_to_tls(
     connector
         .connect(server_name, tcp_stream)
         .await
-        .map_err(|e| DbError::Tls(format!("handshake TLS falló: {e}")))
+        .map_err(|e| DbError::Tls(format!("TLS handshake failed: {e}")))
 }
 
 fn sslmode_str(m: SslMode) -> &'static str {
@@ -793,7 +793,7 @@ fn percent_decode_owned(s: &str) -> DbResult<String> {
             i += 1;
         }
     }
-    String::from_utf8(out).map_err(|_| DbError::InvalidUrl("URL no es UTF-8 válido".into()))
+    String::from_utf8(out).map_err(|_| DbError::InvalidUrl("URL is not valid UTF-8".into()))
 }
 
 fn hex_digit(b: u8) -> DbResult<u8> {
@@ -802,7 +802,7 @@ fn hex_digit(b: u8) -> DbResult<u8> {
         b'a'..=b'f' => Ok(b - b'a' + 10),
         b'A'..=b'F' => Ok(b - b'A' + 10),
         _ => Err(DbError::InvalidUrl(format!(
-            "hex inválido en URL: '{}'",
+            "invalid hex in URL: '{}'",
             b as char
         ))),
     }
@@ -1139,7 +1139,7 @@ pub async fn read_message<R: AsyncRead + Unpin>(stream: &mut R) -> DbResult<Back
     let len = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
     if len < 4 {
         return Err(DbError::Protocol(format!(
-            "longitud de mensaje inválida: {len} (mínimo 4)"
+            "invalid message length: {len} (minimum 4)"
         )));
     }
     let mut payload = vec![0u8; len - 4];
@@ -1168,7 +1168,7 @@ pub fn parse_backend_message(tag: u8, payload: &[u8]) -> DbResult<BackendMessage
         }
         b'Z' => {
             if payload.is_empty() {
-                return Err(DbError::Protocol("ReadyForQuery vacío".into()));
+                return Err(DbError::Protocol("empty ReadyForQuery".into()));
             }
             Ok(BackendMessage::ReadyForQuery {
                 tx_status: payload[0],
@@ -1234,7 +1234,7 @@ fn parse_auth(payload: &[u8]) -> DbResult<BackendMessage> {
         5 => {
             if rest.len() != 4 {
                 return Err(DbError::Protocol(
-                    "AuthenticationMD5: salt no son 4 bytes".into(),
+                    "AuthenticationMD5: salt is not 4 bytes".into(),
                 ));
             }
             Ok(BackendMessage::AuthenticationMd5Password {
@@ -1264,7 +1264,7 @@ fn parse_auth(payload: &[u8]) -> DbResult<BackendMessage> {
             data: rest.to_vec(),
         }),
         other => Err(DbError::Auth(format!(
-            "método auth desconocido: {other} (solo soportado: ok, cleartext, md5, sasl)"
+            "unknown auth method: {other} (only supported: ok, cleartext, md5, sasl)"
         ))),
     }
 }
@@ -1348,7 +1348,7 @@ fn read_cstr(buf: &[u8]) -> DbResult<(String, &[u8])> {
     match buf.iter().position(|&b| b == 0) {
         Some(idx) => {
             let s = std::str::from_utf8(&buf[..idx])
-                .map_err(|_| DbError::Protocol("cstr no es UTF-8".into()))?
+                .map_err(|_| DbError::Protocol("cstr is not UTF-8".into()))?
                 .to_string();
             Ok((s, &buf[idx + 1..]))
         }
@@ -1458,13 +1458,13 @@ impl ScramClient {
         // with `client_nonce`, someone is in the middle.
         if !server_nonce.starts_with(&self.client_nonce) {
             return Err(DbError::Auth(
-                "SCRAM: server nonce no extiende el client nonce".into(),
+                "SCRAM: server nonce does not extend the client nonce".into(),
             ));
         }
 
         let salt = BASE64
             .decode(&salt_b64)
-            .map_err(|e| DbError::Auth(format!("SCRAM: salt base64 inválido: {e}")))?;
+            .map_err(|e| DbError::Auth(format!("SCRAM: invalid salt base64: {e}")))?;
         if iterations < 1 {
             return Err(DbError::Auth("SCRAM: iterations < 1".into()));
         }
@@ -1521,24 +1521,24 @@ impl ScramClient {
     pub fn verify(&self, server_final: &str) -> DbResult<()> {
         if let Some(rest) = server_final.strip_prefix("v=") {
             let sig_received = BASE64.decode(rest).map_err(|e| {
-                DbError::Auth(format!("SCRAM: server signature base64 inválido: {e}"))
+                DbError::Auth(format!("SCRAM: invalid server signature base64: {e}"))
             })?;
             let sig_expected = self
                 .server_signature
                 .as_ref()
-                .ok_or_else(|| DbError::Auth("SCRAM: client_final() no fue llamado".into()))?;
+                .ok_or_else(|| DbError::Auth("SCRAM: client_final() was not called".into()))?;
             if constant_time_eq(&sig_received, sig_expected) {
                 Ok(())
             } else {
                 Err(DbError::Auth(
-                    "SCRAM: server signature no matchea — credenciales inválidas o MITM".into(),
+                    "SCRAM: server signature does not match — invalid credentials or MITM".into(),
                 ))
             }
         } else if let Some(rest) = server_final.strip_prefix("e=") {
             Err(DbError::Auth(format!("SCRAM error del servidor: {rest}")))
         } else {
             Err(DbError::Auth(format!(
-                "SCRAM: server-final desconocido: '{server_final}'"
+                "SCRAM: unknown server-final: '{server_final}'"
             )))
         }
     }
@@ -1556,7 +1556,7 @@ fn parse_server_first(s: &str) -> DbResult<(String, String, u32)> {
         } else if let Some(v) = part.strip_prefix("i=") {
             iters = Some(
                 v.parse::<u32>()
-                    .map_err(|_| DbError::Auth(format!("SCRAM: iters inválido '{v}'")))?,
+                    .map_err(|_| DbError::Auth(format!("SCRAM: invalid iters '{v}'")))?,
             );
         } else if part.starts_with("m=") {
             // mandatory extension — if it appears, we must reject
@@ -1630,7 +1630,7 @@ fn generate_nonce() -> DbResult<String> {
     use rand_core::{OsRng, RngCore};
     OsRng
         .try_fill_bytes(&mut bytes)
-        .map_err(|e| DbError::Auth(format!("nonce: RNG falló: {e}")))?;
+        .map_err(|e| DbError::Auth(format!("nonce: RNG failed: {e}")))?;
     Ok(BASE64.encode(bytes))
 }
 
@@ -1815,17 +1815,17 @@ pub fn parse_text_value(oid: u32, bytes: Option<&[u8]>) -> DbResult<PgValue> {
         Some(b) => b,
     };
     let s = std::str::from_utf8(raw)
-        .map_err(|_| DbError::Protocol(format!("OID {oid}: value no es UTF-8")))?;
+        .map_err(|_| DbError::Protocol(format!("OID {oid}: value is not UTF-8")))?;
     match oid {
         oid::BOOL => Ok(PgValue::Bool(s == "t" || s == "true")),
         oid::INT2 | oid::INT4 | oid::INT8 | oid::OID => {
             Ok(PgValue::Int(s.parse::<i64>().map_err(|_| {
-                DbError::Protocol(format!("OID {oid}: int inválido '{s}'"))
+                DbError::Protocol(format!("OID {oid}: invalid int '{s}'"))
             })?))
         }
         oid::FLOAT4 | oid::FLOAT8 => {
             Ok(PgValue::Float(s.parse::<f64>().map_err(|_| {
-                DbError::Protocol(format!("OID {oid}: float inválido '{s}'"))
+                DbError::Protocol(format!("OID {oid}: invalid float '{s}'"))
             })?))
         }
         oid::TEXT
@@ -1900,7 +1900,7 @@ fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
     }
     if idx >= bytes.len() || bytes[idx] != b'{' {
         return Err(DbError::Protocol(format!(
-            "array OID {elem_oid}[]: esperaba '{{' al inicio, recibió '{s}'"
+            "array OID {elem_oid}[]: expected '{{' at the start, received '{s}'"
         )));
     }
     idx += 1;
@@ -1931,7 +1931,7 @@ fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
         }
         if idx >= bytes.len() {
             return Err(DbError::Protocol(format!(
-                "array OID {elem_oid}[]: fin inesperado, esperaba ',' o '}}'"
+                "array OID {elem_oid}[]: unexpected end, expected ',' or '}}'"
             )));
         }
         match bytes[idx] {
@@ -1945,7 +1945,7 @@ fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
             b'}' => return Ok(out),
             other => {
                 return Err(DbError::Protocol(format!(
-                    "array OID {elem_oid}[]: esperaba ',' o '}}', recibió '{}'",
+                    "array OID {elem_oid}[]: expected ',' or '}}', received '{}'",
                     other as char
                 )));
             }
@@ -1959,7 +1959,7 @@ fn parse_array_text(s: &str, elem_oid: u32) -> DbResult<Vec<PgValue>> {
 fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, usize)> {
     if start >= bytes.len() {
         return Err(DbError::Protocol(
-            "array element: fin de string inesperado".into(),
+            "array element: unexpected end of string".into(),
         ));
     }
     if bytes[start] == b'"' {
@@ -1994,7 +1994,7 @@ fn parse_array_element(bytes: &[u8], start: usize) -> DbResult<(String, bool, us
             end -= 1;
         }
         let content = std::str::from_utf8(&raw[..end])
-            .map_err(|_| DbError::Protocol("array element: no es UTF-8".into()))?;
+            .map_err(|_| DbError::Protocol("array element: not UTF-8".into()))?;
         Ok((content.to_string(), false, idx))
     }
 }
@@ -2322,7 +2322,7 @@ impl Connection {
                         }
                         other => {
                             return Err(DbError::Protocol(format!(
-                                "esperaba SASLContinue, recibí {other:?}"
+                                "expected SASLContinue, received {other:?}"
                             )))
                         }
                     };
@@ -2346,7 +2346,7 @@ impl Connection {
                         }
                         other => {
                             return Err(DbError::Protocol(format!(
-                                "esperaba SASLFinal, recibí {other:?}"
+                                "expected SASLFinal, received {other:?}"
                             )))
                         }
                     };
@@ -2365,7 +2365,7 @@ impl Connection {
                 }
                 other => {
                     return Err(DbError::Protocol(format!(
-                        "auth: esperaba AuthenticationXxx, recibí {other:?}"
+                        "auth: expected AuthenticationXxx, received {other:?}"
                     )))
                 }
             }
@@ -2401,7 +2401,7 @@ impl Connection {
                 }
                 other => {
                     return Err(DbError::Protocol(format!(
-                        "esperaba ParameterStatus/BackendKeyData/ReadyForQuery, recibí {other:?}"
+                        "expected ParameterStatus/BackendKeyData/ReadyForQuery, received {other:?}"
                     )))
                 }
             }
@@ -2459,7 +2459,7 @@ impl Connection {
                 }
                 other => {
                     return Err(DbError::Protocol(format!(
-                        "simple_query: mensaje inesperado {other:?}"
+                        "simple_query: unexpected message {other:?}"
                     )))
                 }
             }
@@ -2579,7 +2579,7 @@ impl Connection {
                 }
                 other => {
                     return Err(DbError::Protocol(format!(
-                        "extended_query: mensaje inesperado {other:?}"
+                        "extended_query: unexpected message {other:?}"
                     )))
                 }
             }
@@ -2843,7 +2843,7 @@ impl DbPool {
         use std::sync::atomic::Ordering;
         if self.closed.load(Ordering::Acquire) {
             return Err(DbError::Protocol(
-                "la conexión fue cerrada con .close()".into(),
+                "the connection was closed with .close()".into(),
             ));
         }
         // Wait for a permit first (limits concurrency). The
@@ -4885,7 +4885,7 @@ mod tests {
     fn enrich_db_error_pass_through_for_non_server_errors() {
         let err = DbError::Protocol("badly framed message".into());
         let enriched = enrich_db_error_with_context(err, "SELECT 1", &[]);
-        assert_eq!(enriched.to_string(), "protocolo: badly framed message");
+        assert_eq!(enriched.to_string(), "protocol: badly framed message");
     }
 
     #[test]
