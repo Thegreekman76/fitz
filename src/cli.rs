@@ -673,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_register_y_count() {
+    fn registry_register_and_count() {
         let reg = CliRegistry::new();
         assert_eq!(reg.count(), 0);
         reg.register(mkcmd("greet", vec![])).unwrap();
@@ -681,7 +681,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_duplicate_name_rechazado() {
+    fn registry_duplicate_name_rejected() {
         let reg = CliRegistry::new();
         reg.register(mkcmd("greet", vec![])).unwrap();
         let dup = reg.register(mkcmd("greet", vec![]));
@@ -690,7 +690,7 @@ mod tests {
     }
 
     #[test]
-    fn param_is_flag_segun_default() {
+    fn param_is_flag_by_default() {
         let p_no_default = param("name", "Str", false);
         let p_with_default = param("loud", "Bool", true);
         assert!(!param_is_flag(&p_no_default));
@@ -731,7 +731,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_argv_multi_command_dispatcha_subcomando() {
+    fn parse_argv_multi_command_dispatches_subcommand() {
         let reg = CliRegistry::new();
         reg.register(mkcmd("greet", vec![param("name", "Str", false)]))
             .unwrap();
@@ -759,7 +759,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_argv_missing_positional_es_error() {
+    fn parse_argv_missing_positional_is_error() {
         let reg = CliRegistry::new();
         reg.register(mkcmd("greet", vec![param("name", "Str", false)]))
             .unwrap();
@@ -789,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_argv_flag_int_con_valor_siguiente() {
+    fn parse_argv_flag_int_with_next_value() {
         let reg = CliRegistry::new();
         reg.register(mkcmd(
             "greet",
@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_argv_unknown_flag_es_error() {
+    fn parse_argv_unknown_flag_is_error() {
         let reg = CliRegistry::new();
         reg.register(mkcmd("greet", vec![param("name", "Str", false)]))
             .unwrap();
@@ -844,7 +844,7 @@ mod tests {
     }
 
     #[test]
-    fn render_global_help_lista_comandos() {
+    fn render_global_help_lists_commands() {
         let cmds = vec![
             CliCommand {
                 name: "greet".into(),
@@ -869,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn render_command_help_incluye_usage_y_options() {
+    fn render_command_help_includes_usage_and_options() {
         let cmd = CliCommand {
             name: "greet".into(),
             desc: Some("Greet a person".into()),

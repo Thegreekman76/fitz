@@ -11239,7 +11239,7 @@ mod tests {
     }
 
     #[test]
-    fn error_de_asignacion_con_tipo_incompatible_cita_linea_real() {
+    fn assignment_error_with_incompatible_type_cites_real_line() {
         // B.1: the error points to the stmt's `let` (real line/col),
         // not the generic `0:0` used before.
         let errors = errors_of("\n\nlet x: Int = \"texto\"");
@@ -11252,7 +11252,7 @@ mod tests {
     // ---- Phase 6.2: type checker for async/await ----
 
     #[test]
-    fn future_se_resuelve_como_generico_built_in() {
+    fn future_resolves_as_builtin_generic() {
         // `Future<T>` reuses `TypeExpr::Generic` (6.1 decision) and
         // 6.2 maps it to `Type::Future(Box<T>)`. Fixed arity 1.
         let env = TypeEnv::new();
@@ -11265,7 +11265,7 @@ mod tests {
     }
 
     #[test]
-    fn future_sin_argumento_es_error_de_aridad() {
+    fn future_without_argument_is_arity_error() {
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "Future".into(),
@@ -11276,7 +11276,7 @@ mod tests {
     }
 
     #[test]
-    fn future_con_dos_argumentos_es_error_de_aridad() {
+    fn future_with_two_arguments_is_arity_error() {
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "Future".into(),
@@ -11287,14 +11287,14 @@ mod tests {
     }
 
     #[test]
-    fn future_display_muestra_inner() {
+    fn future_display_shows_inner() {
         let env = TypeEnv::new();
         let ty = Type::Future(Box::new(Type::Int));
         assert_eq!(ty.display(&env), "Future<Int>");
     }
 
     #[test]
-    fn await_top_level_es_valido() {
+    fn await_top_level_is_valid() {
         // Phase 6.7: top-level accepts `.await` — the evaluator starts
         // the tokio runtime there and codegen emits `#[tokio::main]
         // async fn main()` automatically. Only explicit sync fns
@@ -11313,7 +11313,7 @@ mod tests {
     }
 
     #[test]
-    fn await_dentro_de_fn_sync_es_error() {
+    fn await_inside_sync_fn_is_error() {
         // FnDef without `async` counts as sync context → `.await`
         // inside emits a clear error.
         let errors = errors_of(
@@ -11337,7 +11337,7 @@ mod tests {
     }
 
     #[test]
-    fn await_sobre_no_future_es_error() {
+    fn await_on_non_future_is_error() {
         // Concrete operand distinct from `Future<T>` → error.
         let errors = errors_of(
             "async fn f() -> Int {\n\
@@ -11355,7 +11355,7 @@ mod tests {
     }
 
     #[test]
-    fn await_sobre_future_dentro_de_async_fn_pasa() {
+    fn await_on_future_inside_async_fn_passes() {
         // Happy case: async fn calling another async fn and await-ing
         // the result. The `inner()` call types `Future<Int>`,
         // `.await` unwraps to `Int`, return Int matches.
@@ -11371,7 +11371,7 @@ mod tests {
     }
 
     #[test]
-    fn async_fn_referenciada_como_ident_tipa_function_con_future() {
+    fn async_fn_referenced_as_ident_types_function_with_future() {
         // An `async fn f() -> Int` referenced as a value (without
         // call) types `Function { ret: Future<Int> }`. The EXTERNAL
         // signature of the async fn wraps in Future. We validate via
@@ -11386,7 +11386,7 @@ mod tests {
     }
 
     #[test]
-    fn return_dentro_de_async_fn_no_envuelve_en_future() {
+    fn return_inside_async_fn_does_not_wrap_in_future() {
         // `async` is transparent from inside: a `return x: Int`
         // inside `async fn -> Int` types Int against Int, not
         // Int against Future<Int>.
@@ -11399,7 +11399,7 @@ mod tests {
     }
 
     #[test]
-    fn await_adentro_de_fnexpr_es_error_aunque_padre_sea_async() {
+    fn await_inside_fnexpr_is_error_even_if_parent_is_async() {
         // FnExpr (closure) always pushes `await_stack` with false —
         // the language doesn't support anonymous `async fn(...)`. `.await`
         // inside the closure is an error even if the container is
@@ -11426,7 +11426,7 @@ mod tests {
     }
 
     #[test]
-    fn await_sobre_any_es_gradual_y_no_chequea() {
+    fn await_on_any_is_gradual_and_does_not_check() {
         // A fn without return annotation types `Function { ret: Any }`.
         // The call produces Any; `.await` over Any passes through
         // gradual escape (result Any). No errors.
@@ -11453,7 +11453,7 @@ mod tests {
     // ---- Phase 6.3: built-in `sleep` ----
 
     #[test]
-    fn sleep_tipa_su_call_como_future_null() {
+    fn sleep_types_its_call_as_future_null() {
         // `sleep(100)` types `Future<Null>`. We validate via a
         // destination annotation — if the RHS were not `Future<Null>`,
         // the checker would emit an incompatibility error.
@@ -11462,7 +11462,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_con_argumento_no_int_es_error() {
+    fn sleep_with_non_int_argument_is_error() {
         let errors = errors_of("let r = sleep(\"x\")");
         assert!(!errors.is_empty(), "esperaba error de tipo");
         let msg = &errors[0].message;
@@ -11474,7 +11474,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_con_aridad_incorrecta_es_error() {
+    fn sleep_with_wrong_arity_is_error() {
         let errors = errors_of("let r = sleep(1, 2)");
         assert!(!errors.is_empty(), "esperaba error de aridad");
         let msg = &errors[0].message;
@@ -11486,7 +11486,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_await_dentro_de_async_fn_tipa_null() {
+    fn sleep_await_inside_async_fn_types_null() {
         // Integration with 6.2: `sleep(50).await` inside `async fn`
         // types `Null`. The fn declares `-> Null` and the return matches.
         let errors = errors_of(
@@ -11500,7 +11500,7 @@ mod tests {
     // ---- C-F2: field assignment check ----
 
     #[test]
-    fn field_assign_con_tipo_compatible_pasa_checker() {
+    fn field_assign_with_compatible_type_passes_checker() {
         let errors = errors_of(
             "type U { name: Str }\n\
              let u = U { name: \"x\" }\n\
@@ -11514,7 +11514,7 @@ mod tests {
     }
 
     #[test]
-    fn field_assign_con_tipo_incompatible_es_error() {
+    fn field_assign_with_incompatible_type_is_error() {
         let errors = errors_of(
             "type U { name: Str }\n\
              let u = U { name: \"x\" }\n\
@@ -11532,7 +11532,7 @@ mod tests {
     // ---- Custom status codes (return <int> { ... }) ----
 
     #[test]
-    fn return_status_dentro_de_handler_http_pasa_checker() {
+    fn return_status_inside_http_handler_passes_checker() {
         // `return 401 { ... }` inside a handler with `@get` is
         // valid. The checker allows it regardless of the handler's
         // formal return_type (decision: polymorphism only in HTTP
@@ -11546,7 +11546,7 @@ mod tests {
     }
 
     #[test]
-    fn return_status_fuera_de_handler_es_error() {
+    fn return_status_outside_handler_is_error() {
         // `return 401 { ... }` inside a fn without HTTP decorator
         // → clear error. Blocks accidental use outside handlers.
         let errors = errors_of(
@@ -11564,7 +11564,7 @@ mod tests {
     }
 
     #[test]
-    fn return_status_top_level_es_error() {
+    fn return_status_top_level_is_error() {
         // `return 401 { ... }` at top-level (without containing fn)
         // is also not valid — the checker rejects it by the same rule.
         let errors = errors_of("return 401 {\"x\": 1}");
@@ -11574,7 +11574,7 @@ mod tests {
     }
 
     #[test]
-    fn return_status_no_chequea_contra_return_type_formal() {
+    fn return_status_does_not_check_against_formal_return_type() {
         // Spec: a `-> User` handler can do `return user` (User) and
         // also `return 404 { ... }`. The checker does NOT validate the
         // ReturnStatus body against the return type — it's polymorphic.
@@ -11590,7 +11590,7 @@ mod tests {
     // ---- Mini-phase MW.1: middleware ----
 
     #[test]
-    fn request_y_response_son_built_in_referenciables() {
+    fn request_and_response_are_referenceable_builtins() {
         // A middleware references `Request` and `Response` without declaring them
         // — registered by `register_http_builtin_types`. Without that pre-registration,
         // the checker would complain with "unknown type `Request`".
@@ -11603,7 +11603,7 @@ mod tests {
     }
 
     #[test]
-    fn return_status_dentro_de_middleware_pasa_checker() {
+    fn return_status_inside_middleware_passes_checker() {
         // A fn applied as `@middleware(fn)` can do
         // `return <int> { ... }` — the MW.1 pre-scan marks it as
         // HTTP context and the checker doesn't complain.
@@ -11619,7 +11619,7 @@ mod tests {
     }
 
     #[test]
-    fn return_status_en_fn_no_referenciada_como_middleware_es_error() {
+    fn return_status_in_fn_not_referenced_as_middleware_is_error() {
         // Only fns that appear in `@middleware(name)` are marked
         // as HTTP context. A random fn with `return <int>` still
         // fires the existing error.
@@ -11637,7 +11637,7 @@ mod tests {
     }
 
     #[test]
-    fn field_assign_a_campo_inexistente_es_error() {
+    fn field_assign_to_nonexistent_field_is_error() {
         let errors = errors_of(
             "type U { name: Str }\n\
              let u = U { name: \"x\" }\n\
@@ -11653,7 +11653,7 @@ mod tests {
     }
 
     #[test]
-    fn field_assign_sobre_no_nominal_es_error() {
+    fn field_assign_on_non_nominal_is_error() {
         let errors = errors_of(
             "let x = 42\n\
              x.foo = 1",
@@ -11668,7 +11668,7 @@ mod tests {
     }
 
     #[test]
-    fn field_assign_sobre_any_no_chequea() {
+    fn field_assign_on_any_does_not_check() {
         // The binding `m` comes from `from foo import m` → type Any.
         // The checker should allow the assign without checking the field
         // (gradual escape).
@@ -11697,7 +11697,7 @@ mod tests {
     }
 
     #[test]
-    fn field_assign_con_nullable_acepta_null() {
+    fn field_assign_with_nullable_accepts_null() {
         // `email: Str?` accepts null or Str. Assigning null must pass.
         let errors = errors_of(
             "type U { email: Str? }\n\
@@ -11714,7 +11714,7 @@ mod tests {
     // ---- fin C-F2 ----
 
     #[test]
-    fn error_de_while_no_bool_cita_linea_real() {
+    fn while_non_bool_error_cites_real_line() {
         let errors = errors_of("\nwhile (42) { let _ = 0 }");
         assert!(!errors.is_empty(), "esperaba error de tipo");
         let e = &errors[0];
@@ -11729,7 +11729,7 @@ mod tests {
     // ---- resolve_type_expr ----
 
     #[test]
-    fn resolve_primitivos() {
+    fn resolve_primitives() {
         let env = TypeEnv::new();
         for (name, expected) in [
             ("Int", Type::Int),
@@ -11745,7 +11745,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_primitivo_con_args_es_error_de_aridad() {
+    fn resolve_primitive_with_args_is_arity_error() {
         // `Int<Str>` doesn't make sense — Int is arity 0.
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
@@ -11758,7 +11758,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_list_de_int() {
+    fn resolve_list_of_int() {
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
             name: "List".into(),
@@ -11769,7 +11769,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_list_aridad_incorrecta() {
+    fn resolve_list_wrong_arity() {
         let env = TypeEnv::new();
         // List without args
         let t1 = TypeExpr::named("List");
@@ -11787,7 +11787,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_map_de_str_int() {
+    fn resolve_map_of_str_int() {
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
             name: "Map".into(),
@@ -11798,7 +11798,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_map_aridad_incorrecta() {
+    fn resolve_map_wrong_arity() {
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
             name: "Map".into(),
@@ -11811,7 +11811,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_result_anidado() {
+    fn resolve_nested_result() {
         // Result<List<Int>>
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
@@ -11832,7 +11832,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_nullable_sobre_primitivo() {
+    fn resolve_nullable_on_primitive() {
         let env = TypeEnv::new();
         let t = TypeExpr::Nullable(Box::new(TypeExpr::named("Str")));
         let r = resolve_type_expr(&t, &env).unwrap();
@@ -11840,7 +11840,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_nullable_sobre_generico() {
+    fn resolve_nullable_on_generic() {
         // List<Int>?
         let env = TypeEnv::new();
         let t = TypeExpr::Nullable(Box::new(TypeExpr::Generic {
@@ -11852,7 +11852,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_nominal_declarado() {
+    fn resolve_declared_nominal() {
         let env = env_with(&["User"]);
         let t = TypeExpr::named("User");
         let r = resolve_type_expr(&t, &env).unwrap();
@@ -11861,7 +11861,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_nominal_no_definido_es_error() {
+    fn resolve_undefined_nominal_is_error() {
         let env = TypeEnv::new();
         let t = TypeExpr::named("Usuario");
         let err = resolve_type_expr(&t, &env).unwrap_err();
@@ -11870,7 +11870,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_nominal_con_args_es_error() {
+    fn resolve_nominal_with_args_is_error() {
         // The user writes `User<Int>` but User is not generic.
         let env = env_with(&["User"]);
         let t = TypeExpr::Generic {
@@ -11882,7 +11882,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_generic_con_arg_invalido_propaga_error() {
+    fn resolve_generic_with_invalid_arg_propagates_error() {
         // List<Usuario> — Usuario does not exist.
         let env = TypeEnv::new();
         let t = TypeExpr::Generic {
@@ -11896,7 +11896,7 @@ mod tests {
     // ---- TypeEnv ----
 
     #[test]
-    fn type_env_lookup_devuelve_el_id() {
+    fn type_env_lookup_returns_id() {
         let env = env_with(&["A", "B"]);
         let a = env.lookup("A").unwrap();
         let b = env.lookup("B").unwrap();
@@ -11906,7 +11906,7 @@ mod tests {
     }
 
     #[test]
-    fn type_env_declarar_dos_veces_es_error() {
+    fn type_env_declaring_twice_is_error() {
         let mut env = TypeEnv::new();
         env.declare_nominal("Foo".into()).unwrap();
         let err = env.declare_nominal("Foo".into()).unwrap_err();
@@ -11917,7 +11917,7 @@ mod tests {
     // ---- resolve_program ----
 
     #[test]
-    fn programa_vacio_no_da_errores() {
+    fn empty_program_gives_no_errors() {
         let (env, errors) = resolve_str("");
         assert!(errors.is_empty());
         // Mini-phase MW.1: `Request` and `Response` are pre-registered as
@@ -11931,7 +11931,7 @@ mod tests {
     }
 
     #[test]
-    fn type_con_primitivos_se_resuelve() {
+    fn type_with_primitives_resolves() {
         let (env, errors) = resolve_str("type User { id: Int, name: Str }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
         let id = env.lookup("User").unwrap();
@@ -11943,7 +11943,7 @@ mod tests {
     }
 
     #[test]
-    fn type_con_generico_y_nullable_se_resuelve() {
+    fn type_with_generic_and_nullable_resolves() {
         let (env, errors) = resolve_str("type Post { tags: List<Str>, author: Str? }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
         let id = env.lookup("Post").unwrap();
@@ -11953,7 +11953,7 @@ mod tests {
     }
 
     #[test]
-    fn type_que_referencia_otro_type_local() {
+    fn type_referencing_another_local_type() {
         let (env, errors) = resolve_str(
             "type Address { city: Str }\n\
              type User { home: Address }",
@@ -11966,7 +11966,7 @@ mod tests {
     }
 
     #[test]
-    fn forward_refs_mutuas_se_resuelven() {
+    fn mutual_forward_refs_resolve() {
         // type A { b: B }; type B { a: A }
         let (env, errors) = resolve_str(
             "type A { b: B }\n\
@@ -11982,7 +11982,7 @@ mod tests {
     }
 
     #[test]
-    fn type_con_field_de_tipo_inexistente_reporta_error() {
+    fn type_with_nonexistent_field_type_reports_error() {
         let (_, errors) = resolve_str("type User { home: Address }");
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
@@ -11993,7 +11993,7 @@ mod tests {
     }
 
     #[test]
-    fn type_redeclarado_es_error() {
+    fn redeclared_type_is_error() {
         let (_, errors) = resolve_str("type Foo { x: Int }\ntype Foo { y: Str }");
         assert!(errors
             .iter()
@@ -12001,13 +12001,13 @@ mod tests {
     }
 
     #[test]
-    fn default_literal_compatible_pasa() {
+    fn default_literal_compatible_passes() {
         let (_, errors) = resolve_str("type Cfg { port: Int = 3000, debug: Bool = false }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     #[test]
-    fn default_literal_incompatible_reporta_error() {
+    fn default_literal_incompatible_reports_error() {
         let (_, errors) = resolve_str("type Cfg { port: Int = \"3000\" }");
         assert_eq!(errors.len(), 1);
         let msg = &errors[0].message;
@@ -12017,26 +12017,26 @@ mod tests {
     }
 
     #[test]
-    fn default_null_sobre_campo_nullable_pasa() {
+    fn default_null_on_nullable_field_passes() {
         let (_, errors) = resolve_str("type User { email: Str? = null }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     #[test]
-    fn default_null_sobre_campo_no_nullable_falla() {
+    fn default_null_on_non_nullable_field_fails() {
         let (_, errors) = resolve_str("type User { id: Int = null }");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("User.id"));
     }
 
     #[test]
-    fn default_int_sobre_float_se_acepta_por_coercion() {
+    fn default_int_on_float_accepted_by_coercion() {
         let (_, errors) = resolve_str("type Cfg { ratio: Float = 1 }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     #[test]
-    fn default_no_literal_se_acepta_pending_para_5_3() {
+    fn default_non_literal_accepted_pending_for_5_3() {
         // Default is an expression (not literal): sum. The checker
         // lets it pass — 5.3 checks expressions against types.
         let (_, errors) = resolve_str("type Cfg { port: Int = 3000 + 1 }");
@@ -12046,13 +12046,13 @@ mod tests {
     // ---- FnDef and Assign annotations ----
 
     #[test]
-    fn fndef_con_anotaciones_resueltas() {
+    fn fndef_with_resolved_annotations() {
         let (_, errors) = resolve_str("fn add(a: Int, b: Int) -> Int { return a + b }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     #[test]
-    fn fndef_con_tipo_param_invalido_reporta_error() {
+    fn fndef_with_invalid_param_type_reports_error() {
         let (_, errors) = resolve_str("fn f(x: Foo) { return x }");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("Foo"));
@@ -12061,7 +12061,7 @@ mod tests {
     }
 
     #[test]
-    fn fndef_con_return_invalido_reporta_error() {
+    fn fndef_with_invalid_return_reports_error() {
         let (_, errors) = resolve_str("fn f() -> Foo { return 0 }");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("Foo"));
@@ -12070,7 +12070,7 @@ mod tests {
     }
 
     #[test]
-    fn fndef_con_generico_invalido_reporta_error() {
+    fn fndef_with_invalid_generic_reports_error() {
         // `List<Foo>` where Foo doesn't exist.
         let (_, errors) = resolve_str("fn f(xs: List<Foo>) { return xs }");
         assert_eq!(errors.len(), 1);
@@ -12078,20 +12078,20 @@ mod tests {
     }
 
     #[test]
-    fn assign_con_tipo_invalido_reporta_error() {
+    fn assign_with_invalid_type_reports_error() {
         let (_, errors) = resolve_str("let x: Foo = 0");
         assert_eq!(errors.len(), 1);
         assert!(errors[0].message.contains("Foo"));
     }
 
     #[test]
-    fn assign_con_generico_valido_pasa() {
+    fn assign_with_valid_generic_passes() {
         let (_, errors) = resolve_str("let xs: List<Int> = []");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     #[test]
-    fn anotaciones_dentro_del_body_de_fn_se_validan() {
+    fn annotations_inside_fn_body_are_validated() {
         // The `y: Foo` let is inside the fn — the pass descends and finds it.
         let (_, errors) = resolve_str(
             "fn f() {\n\
@@ -12104,7 +12104,7 @@ mod tests {
     }
 
     #[test]
-    fn multiples_errores_se_acumulan_y_no_cortan() {
+    fn multiple_errors_accumulate_and_do_not_cut() {
         let (_, errors) = resolve_str(
             "type A { x: Foo }\n\
              let y: Bar = 0\n\
@@ -12121,7 +12121,7 @@ mod tests {
     // ---- direct AST constructions, without parser ----
 
     #[test]
-    fn resolve_program_construye_env_via_ast_directo() {
+    fn resolve_program_builds_env_via_direct_ast() {
         // Sanity: we build the AST by hand without going through the parser
         // to confirm that resolve_program does not depend on parser details.
         use crate::ast::TypeExpr as TE;
@@ -12207,17 +12207,17 @@ mod tests {
     // ---- ident / scope ----
 
     #[test]
-    fn ident_desconocido_emite_warning() {
+    fn unknown_ident_emits_warning() {
         assert_error_with("print(no_existe)", &["variable desconocida", "no_existe"]);
     }
 
     #[test]
-    fn ident_conocido_no_emite_error() {
+    fn known_ident_does_not_emit_error() {
         assert_ok("let x = 1\nprint(x)");
     }
 
     #[test]
-    fn ident_tipo_nominal_como_value_es_any() {
+    fn ident_nominal_type_as_value_is_any() {
         // `type User { ... }; let u = User { id: 1, name: "x" }` —
         // the StructLit uses the type; using bare User also doesn't break.
         // The evaluator registers the type as Value in the env.
@@ -12225,7 +12225,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_print_y_len_se_consideran_definidos() {
+    fn builtin_print_and_len_considered_defined() {
         // print and len exist by default.
         assert_ok("print(\"hola\")\nlen([1, 2, 3])");
     }
@@ -12233,98 +12233,98 @@ mod tests {
     // ---- BinOp ----
 
     #[test]
-    fn binop_int_mas_int_es_ok() {
+    fn binop_int_plus_int_is_ok() {
         assert_ok("let x: Int = 1 + 2");
     }
 
     #[test]
-    fn binop_int_mas_float_es_float() {
+    fn binop_int_plus_float_is_float() {
         // Float := Int + Float (coercion).
         assert_ok("let x: Float = 1 + 2.0");
     }
 
     #[test]
-    fn binop_str_mas_str_es_str() {
+    fn binop_str_plus_str_is_str() {
         assert_ok("let s: Str = \"a\" + \"b\"");
     }
 
     #[test]
-    fn binop_str_mas_int_es_error() {
+    fn binop_str_plus_int_is_error() {
         assert_error_with("let x = \"a\" + 1", &["`+`", "Str", "Int"]);
     }
 
     #[test]
-    fn binop_mul_acepta_numericos() {
+    fn binop_mul_accepts_numerics() {
         assert_ok("let x: Float = 2 * 3.5");
     }
 
     #[test]
-    fn binop_mul_rechaza_str() {
+    fn binop_mul_rejects_str() {
         assert_error_with("let x = \"a\" * 2", &["`*`", "operandos numéricos", "Str"]);
     }
 
     #[test]
-    fn binop_comparacion_str_str_es_bool() {
+    fn binop_comparison_str_str_is_bool() {
         assert_ok("let b: Bool = \"a\" < \"b\"");
     }
 
     #[test]
-    fn binop_comparacion_str_int_es_error() {
+    fn binop_comparison_str_int_is_error() {
         assert_error_with("let b = \"a\" < 1", &["comparación", "Str", "Int"]);
     }
 
     #[test]
-    fn binop_and_con_bool_es_ok() {
+    fn binop_and_with_bool_is_ok() {
         assert_ok("let b: Bool = true and false");
     }
 
     #[test]
-    fn binop_and_con_int_es_error() {
+    fn binop_and_with_int_is_error() {
         assert_error_with("let b = 1 and true", &["lógico", "Bool", "Int"]);
     }
 
     // ---- UnaryOp ----
 
     #[test]
-    fn unary_neg_int_es_ok() {
+    fn unary_neg_int_is_ok() {
         assert_ok("let x: Int = -5");
     }
 
     #[test]
-    fn unary_neg_str_es_error() {
+    fn unary_neg_str_is_error() {
         assert_error_with("let x = -\"hola\"", &["negación", "Int", "Str"]);
     }
 
     // ---- R.1.1 — `not` (mini-phase R) ----
 
     #[test]
-    fn unary_not_sobre_bool_literal_es_ok() {
+    fn unary_not_on_bool_literal_is_ok() {
         assert_ok("let x: Bool = not true");
     }
 
     #[test]
-    fn unary_not_sobre_bool_ident_es_ok() {
+    fn unary_not_on_bool_ident_is_ok() {
         assert_ok("let active: Bool = false\nlet inactive: Bool = not active");
     }
 
     #[test]
-    fn unary_not_sobre_int_es_type_error() {
+    fn unary_not_on_int_is_type_error() {
         assert_error_with("let x = not 5", &["not", "Bool", "Int"]);
     }
 
     #[test]
-    fn unary_not_sobre_str_es_type_error() {
+    fn unary_not_on_str_is_type_error() {
         assert_error_with("let x = not \"hola\"", &["not", "Bool", "Str"]);
     }
 
     #[test]
-    fn unary_not_en_condicion_de_if_es_ok() {
+    fn unary_not_in_if_condition_is_ok() {
         // Bool in condition ✓.
         assert_ok("let active = false\nif (not active) { print(\"x\") }");
     }
 
     #[test]
-    fn unary_not_anidado_tipa_bool() {
+    fn nested_unary_not_types_bool() {
         // `not not x` with x: Bool → Bool.
         assert_ok("let x = true\nlet y: Bool = not not x");
     }
@@ -12332,27 +12332,27 @@ mod tests {
     // ---- R.1.2 — operator `%` (mini-phase R) ----
 
     #[test]
-    fn op_modulo_int_int_es_ok() {
+    fn op_modulo_int_int_is_ok() {
         assert_ok("let r: Int = 10 % 3");
     }
 
     #[test]
-    fn op_modulo_con_var_int_es_ok() {
+    fn op_modulo_with_var_int_is_ok() {
         assert_ok("let n: Int = 100\nlet r: Int = n % 7");
     }
 
     #[test]
-    fn op_modulo_con_float_es_type_error() {
+    fn op_modulo_with_float_is_type_error() {
         assert_error_with("let r = 10.0 % 3", &["%", "Int", "Float"]);
     }
 
     #[test]
-    fn op_modulo_con_str_es_type_error() {
+    fn op_modulo_with_str_is_type_error() {
         assert_error_with("let r = \"hola\" % 3", &["%", "Int", "Str"]);
     }
 
     #[test]
-    fn op_modulo_devuelve_int_no_any() {
+    fn op_modulo_returns_int_not_any() {
         // The synthesized type must be concrete Int (not Any),
         // so a Bool binding fails — Bool doesn't admit Int.
         // (Float DOES admit Int via Int→Float promotion, which is why
@@ -12363,12 +12363,12 @@ mod tests {
     // ---- R.1.3 — index assignment (mini-phase R) ----
 
     #[test]
-    fn assign_index_list_int_int_es_ok() {
+    fn assign_index_list_int_int_is_ok() {
         assert_ok("let xs: List<Int> = [1, 2, 3]\nxs[0] = 99");
     }
 
     #[test]
-    fn assign_index_list_str_index_es_error() {
+    fn assign_index_list_str_index_is_error() {
         // List<T> requires Int as the index.
         assert_error_with(
             "let xs: List<Int> = [1, 2]\nxs[\"a\"] = 99",
@@ -12377,7 +12377,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_index_list_valor_tipo_incorrecto_es_error() {
+    fn assign_index_list_wrong_value_type_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\nxs[0] = \"hola\"",
             &["lista", "Int", "Str"],
@@ -12385,12 +12385,12 @@ mod tests {
     }
 
     #[test]
-    fn assign_index_map_correcto_es_ok() {
+    fn assign_index_map_correct_is_ok() {
         assert_ok("let m: Map<Str, Int> = {\"a\": 1}\nm[\"b\"] = 2");
     }
 
     #[test]
-    fn assign_index_map_key_tipo_incorrecto_es_error() {
+    fn assign_index_map_wrong_key_type_is_error() {
         assert_error_with(
             "let m: Map<Str, Int> = {\"a\": 1}\nm[42] = 2",
             &["clave", "Str", "Int"],
@@ -12398,38 +12398,38 @@ mod tests {
     }
 
     #[test]
-    fn assign_index_sobre_no_collection_es_error() {
+    fn assign_index_on_non_collection_is_error() {
         assert_error_with("let x = 5\nx[0] = 1", &["List", "Map"]);
     }
 
     // ---- Range ----
 
     #[test]
-    fn range_de_ints_es_ok() {
+    fn range_of_ints_is_ok() {
         assert_ok("let r = 0..10");
     }
 
     #[test]
-    fn range_con_extremo_no_int_es_error() {
+    fn range_with_non_int_extremity_is_error() {
         assert_error_with("let r = 0..\"diez\"", &["rango", "Int", "Str"]);
     }
 
     // ---- List / Map ----
 
     #[test]
-    fn list_vacia_es_list_any() {
+    fn empty_list_is_list_any() {
         let (_, errors) = check_str("let xs = []");
         assert!(errors.is_empty(), "{:?}", errors);
     }
 
     #[test]
-    fn list_homogenea_int_es_list_int() {
+    fn homogeneous_int_list_is_list_int() {
         // No error; the inferred type is List<Int>.
         assert_ok("let xs: List<Int> = [1, 2, 3]");
     }
 
     #[test]
-    fn list_anotada_con_tipo_incompatible_es_error() {
+    fn annotated_list_with_incompatible_type_is_error() {
         // The RHS synthesizes List<Str>; the annotation is List<Int>.
         assert_error_with(
             "let xs: List<Int> = [\"a\", \"b\"]",
@@ -12438,14 +12438,14 @@ mod tests {
     }
 
     #[test]
-    fn map_vacio_es_map_any_any() {
+    fn empty_map_is_map_any_any() {
         assert_ok("let m = {}");
     }
 
     // ---- StructLit ----
 
     #[test]
-    fn struct_lit_con_tipo_conocido_y_campos_ok() {
+    fn struct_lit_with_known_type_and_fields_ok() {
         assert_ok(
             "type User { id: Int, name: Str }\n\
              let u = User { id: 1, name: \"x\" }",
@@ -12453,12 +12453,12 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_con_tipo_desconocido_es_error() {
+    fn struct_lit_with_unknown_type_is_error() {
         assert_error_with("let u = Usuario { id: 1 }", &["Usuario", "no existe"]);
     }
 
     #[test]
-    fn struct_lit_campo_de_tipo_incompatible_es_error() {
+    fn struct_lit_field_with_incompatible_type_is_error() {
         assert_error_with(
             "type User { id: Int }\n\
              let u = User { id: \"no soy int\" }",
@@ -12467,7 +12467,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_campo_extra_es_error() {
+    fn struct_lit_extra_field_is_error() {
         assert_error_with(
             "type User { id: Int }\n\
              let u = User { id: 1, edad: 30 }",
@@ -12478,7 +12478,7 @@ mod tests {
     // ---- Field access ----
 
     #[test]
-    fn field_access_de_nominal_devuelve_tipo_del_campo() {
+    fn field_access_of_nominal_returns_field_type() {
         // If u.id is Int, assigning it to an Int is OK.
         assert_ok(
             "type User { id: Int, name: Str }\n\
@@ -12488,7 +12488,7 @@ mod tests {
     }
 
     #[test]
-    fn field_access_de_nominal_tipo_incompatible_es_error() {
+    fn field_access_of_nominal_incompatible_type_is_error() {
         assert_error_with(
             "type User { id: Int, name: Str }\n\
              let u = User { id: 1, name: \"x\" }\n\
@@ -12500,27 +12500,27 @@ mod tests {
     // ---- Assign with annotation ----
 
     #[test]
-    fn assign_int_a_int_es_ok() {
+    fn assign_int_to_int_is_ok() {
         assert_ok("let x: Int = 42");
     }
 
     #[test]
-    fn assign_str_a_int_es_error() {
+    fn assign_str_to_int_is_error() {
         assert_error_with("let x: Int = \"hola\"", &["x", "Int", "Str"]);
     }
 
     #[test]
-    fn assign_null_a_nullable_es_ok() {
+    fn assign_null_to_nullable_is_ok() {
         assert_ok("let x: Str? = null");
     }
 
     #[test]
-    fn assign_int_a_float_es_ok_por_coercion() {
+    fn assign_int_to_float_is_ok_by_coercion() {
         assert_ok("let x: Float = 1");
     }
 
     #[test]
-    fn assign_str_a_nullable_str_es_ok() {
+    fn assign_str_to_nullable_str_is_ok() {
         // T compatible with T?.
         assert_ok("let x: Str? = \"hola\"");
     }
@@ -12528,29 +12528,29 @@ mod tests {
     // ---- if / while / for ----
 
     #[test]
-    fn if_con_cond_no_bool_es_error() {
+    fn if_with_non_bool_cond_is_error() {
         assert_error_with("if 1 { print(\"x\") }", &["condición", "if", "Bool", "Int"]);
     }
 
     #[test]
-    fn if_con_cond_bool_es_ok() {
+    fn if_with_bool_cond_is_ok() {
         assert_ok("if true { print(\"sí\") } else { print(\"no\") }");
     }
 
     #[test]
-    fn while_con_cond_no_bool_es_error() {
+    fn while_with_non_bool_cond_is_error() {
         assert_error_with("while 1 { break }", &["while", "Bool"]);
     }
 
     #[test]
-    fn for_sobre_range_bindea_var_como_int() {
+    fn for_on_range_binds_var_as_int() {
         // Inside the for, i must be used as Int and the sum must
         // type-check correctly.
         assert_ok("for i in 0..10 { let n: Int = i + 1 }");
     }
 
     #[test]
-    fn for_sobre_list_int_bindea_elemento_como_int() {
+    fn for_on_list_int_binds_element_as_int() {
         assert_ok(
             "let xs = [1, 2, 3]\n\
              for x in xs { let n: Int = x }",
@@ -12558,20 +12558,20 @@ mod tests {
     }
 
     #[test]
-    fn for_sobre_no_iterable_es_error() {
+    fn for_on_non_iterable_is_error() {
         assert_error_with("for x in 42 { print(x) }", &["for", "List", "Range", "Int"]);
     }
 
     // ---- FnDef / bound params ----
 
     #[test]
-    fn fndef_param_se_bindea_en_body() {
+    fn fndef_param_binds_in_body() {
         // The parameter n is Int from its annotation.
         assert_ok("fn double(n: Int) -> Int { return n * 2 }");
     }
 
     #[test]
-    fn fndef_param_sin_anotacion_es_any() {
+    fn fndef_param_without_annotation_is_any() {
         // Without annotation, n is Any — it doesn't complain about the sum.
         assert_ok("fn double(n) { return n * 2 }");
     }
@@ -12579,7 +12579,7 @@ mod tests {
     // ---- FnExpr / bound params ----
 
     #[test]
-    fn fn_expr_bindea_su_param() {
+    fn fn_expr_binds_its_param() {
         // If it didn't bind, `u` would be unknown.
         assert_ok(
             "type User { id: Int }\n\
@@ -12591,7 +12591,7 @@ mod tests {
     // ---- Match with bindings ----
 
     #[test]
-    fn match_ident_pattern_bindea_var() {
+    fn match_ident_pattern_binds_var() {
         // The arm `x => ...` binds x as the type of the scrutinee.
         assert_ok(
             "let v = 42\n\
@@ -12603,7 +12603,7 @@ mod tests {
     }
 
     #[test]
-    fn match_ok_pattern_bindea_inner_de_result() {
+    fn match_ok_pattern_binds_inner_of_result() {
         // Ok(v) in match over Result<Int> → v is Int.
         // In 5.3.1 the scrutinee is Ok(Int) which has type Result<Int>,
         // and v is bound as Int. We verify by adding v with an Int.
@@ -12642,7 +12642,7 @@ mod tests {
     // in tests/compile_e2e.rs for the real W2 closure.)
 
     #[test]
-    fn match_err_pattern_bindea_inner_como_str() {
+    fn match_err_pattern_binds_inner_as_str() {
         // Err(e) binds e as Str — concatenable with Str.
         assert_ok(
             "let r = Err(\"boom\")\n\
@@ -12656,7 +12656,7 @@ mod tests {
     // ---- Imports ----
 
     #[test]
-    fn from_import_bindea_nombres_en_scope() {
+    fn from_import_binds_names_in_scope() {
         // We can't load a real module here without touching disk.
         // What we validate: the ident brought in by `from` is not
         // reported as unknown.
@@ -12667,7 +12667,7 @@ mod tests {
     }
 
     #[test]
-    fn import_bindea_modulo_como_var() {
+    fn import_binds_module_as_var() {
         // `import foo` leaves `foo` accessible as a variable.
         assert_ok(
             "import utils\n\
@@ -12676,7 +12676,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_de_tipo_importado_es_ok() {
+    fn struct_lit_of_imported_type_is_ok() {
         // `from foo import User; User { ... }` doesn't fail because
         // FromImport registers the name as a nominal without fields.
         // The checker doesn't validate fields (it doesn't know them) and lets it pass.
@@ -12689,7 +12689,7 @@ mod tests {
     // ---- Multiple accumulated errors ----
 
     #[test]
-    fn checker_acumula_varios_errores_de_expresiones() {
+    fn checker_accumulates_several_expression_errors() {
         let (_, errors) = check_str(
             "let a: Int = \"x\"\n\
              let b = 1 + \"y\"\n\
@@ -12706,7 +12706,7 @@ mod tests {
     // ---- 5.3.2: calls and return ----
 
     #[test]
-    fn call_aridad_correcta_y_tipos_ok() {
+    fn call_correct_arity_and_types_ok() {
         assert_ok(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let n: Int = add(1, 2)",
@@ -12714,7 +12714,7 @@ mod tests {
     }
 
     #[test]
-    fn call_aridad_de_menos_es_error() {
+    fn call_too_few_args_is_error() {
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let n = add(1)",
@@ -12723,7 +12723,7 @@ mod tests {
     }
 
     #[test]
-    fn call_aridad_de_mas_es_error() {
+    fn call_too_many_args_is_error() {
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let n = add(1, 2, 3)",
@@ -12732,7 +12732,7 @@ mod tests {
     }
 
     #[test]
-    fn call_tipo_de_arg_incompatible_es_error() {
+    fn call_incompatible_arg_type_is_error() {
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
              let n = add(\"hola\", 2)",
@@ -12741,7 +12741,7 @@ mod tests {
     }
 
     #[test]
-    fn call_coercion_int_a_float_pasa() {
+    fn call_int_to_float_coercion_passes() {
         assert_ok(
             "fn double(x: Float) -> Float { return x * 2.0 }\n\
              let n: Float = double(3)",
@@ -12749,7 +12749,7 @@ mod tests {
     }
 
     #[test]
-    fn call_null_a_param_nullable_pasa() {
+    fn call_null_to_nullable_param_passes() {
         assert_ok(
             "fn greet(name: Str?) -> Str { return \"hola\" }\n\
              let g: Str = greet(null)",
@@ -12757,7 +12757,7 @@ mod tests {
     }
 
     #[test]
-    fn call_recursion_top_level_compila() {
+    fn call_top_level_recursion_compiles() {
         // The signature pre-registration must see `fact` before checking
         // its body so that the recursive call doesn't complain.
         assert_ok(
@@ -12769,7 +12769,7 @@ mod tests {
     }
 
     #[test]
-    fn call_forward_reference_cross_fn_compila() {
+    fn call_cross_fn_forward_reference_compiles() {
         // `a` calls `b` defined later. The pre-registration makes it
         // visible.
         assert_ok(
@@ -12779,20 +12779,20 @@ mod tests {
     }
 
     #[test]
-    fn call_sobre_callee_no_funcion_es_error() {
+    fn call_on_non_function_callee_is_error() {
         // `1(2)` is not a callable function.
         assert_error_with("let r = (1)(2)", &["no es una función", "Int"]);
     }
 
     #[test]
-    fn call_fn_expr_inline_pasa() {
+    fn call_fn_expr_inline_passes() {
         // (fn(x) => x + 1)(2) — the callee resolves to Function.
         // Arity and Any param → any arg passes.
         assert_ok("let r = (fn(x) => x + 1)(2)");
     }
 
     #[test]
-    fn call_fn_expr_inline_aridad_falla() {
+    fn call_fn_expr_inline_arity_fails() {
         // Arity checked even in inline FnExpr.
         assert_error_with(
             "let r = (fn(x, y) => x + y)(1)",
@@ -12803,17 +12803,17 @@ mod tests {
     // ---- Builtins ----
 
     #[test]
-    fn len_con_un_arg_pasa_y_devuelve_int() {
+    fn len_with_one_arg_passes_and_returns_int() {
         assert_ok("let n: Int = len([1, 2, 3])");
     }
 
     #[test]
-    fn len_sin_args_es_error_de_aridad() {
+    fn len_without_args_is_arity_error() {
         assert_error_with("let n = len()", &["len", "1 argumento", "recibió 0"]);
     }
 
     #[test]
-    fn len_con_dos_args_es_error_de_aridad() {
+    fn len_with_two_args_is_arity_error() {
         assert_error_with(
             "let n = len([1], [2])",
             &["len", "1 argumento", "recibió 2"],
@@ -12821,7 +12821,7 @@ mod tests {
     }
 
     #[test]
-    fn print_es_variadic_no_chequea_aridad() {
+    fn print_is_variadic_does_not_check_arity() {
         // print is still Any → any number of args passes.
         assert_ok("print()\nprint(\"x\")\nprint(1, 2, 3, \"y\")");
     }
@@ -12829,12 +12829,12 @@ mod tests {
     // ---- Stmt::Return against return_type ----
 
     #[test]
-    fn return_tipo_compatible_pasa() {
+    fn return_compatible_type_passes() {
         assert_ok("fn double(n: Int) -> Int { return n * 2 }");
     }
 
     #[test]
-    fn return_tipo_incompatible_es_error() {
+    fn return_incompatible_type_is_error() {
         assert_error_with(
             "fn double(n: Int) -> Int { return \"no soy int\" }",
             &["return", "Int", "Str"],
@@ -12842,13 +12842,13 @@ mod tests {
     }
 
     #[test]
-    fn return_sin_anotacion_no_chequea() {
+    fn return_without_annotation_does_not_check() {
         // Without return_type → Any → no check.
         assert_ok("fn f() { return \"cualquier cosa\" }");
     }
 
     #[test]
-    fn return_arrow_implicito_chequea_contra_return_type() {
+    fn return_implicit_arrow_checks_against_return_type() {
         // `fn f() -> Int => "x"` desugars to `body: [Stmt::Return("x", Span::ZERO)]`.
         assert_error_with(
             "fn id(x: Int) -> Int => \"no soy int\"",
@@ -12857,12 +12857,12 @@ mod tests {
     }
 
     #[test]
-    fn return_arrow_implicito_correcto_pasa() {
+    fn return_implicit_arrow_correct_passes() {
         assert_ok("fn double(n: Int) -> Int => n * 2");
     }
 
     #[test]
-    fn return_ok_contra_result_pasa() {
+    fn return_ok_against_result_passes() {
         // Ok(user) types as Result<User>; must match against
         // -> Result<User>.
         assert_ok(
@@ -12874,7 +12874,7 @@ mod tests {
     }
 
     #[test]
-    fn return_err_contra_result_pasa_por_is_compatible_recursivo() {
+    fn return_err_against_result_passes_via_is_compatible_recursive() {
         // Err(_) types as Result<Any>. Without recursion in
         // is_compatible this would fail against Result<User>.
         assert_ok(
@@ -12886,7 +12886,7 @@ mod tests {
     }
 
     #[test]
-    fn return_huerfano_chequea() {
+    fn orphan_return_checks() {
         // R.2.4 (F3): `return` outside of fn is now a static error
         // from the checker. Before, it passed to the evaluator and
         // was reported at runtime; now we catch it earlier.
@@ -12899,7 +12899,7 @@ mod tests {
     // ---- is_compatible recursive on generics ----
 
     #[test]
-    fn is_compatible_list_recursivo() {
+    fn is_compatible_list_recursive() {
         // List<Int> vs List<Float> passes via Int→Float coercion inside.
         assert!(is_compatible(
             &Type::List(Box::new(Type::Int)),
@@ -12913,7 +12913,7 @@ mod tests {
     }
 
     #[test]
-    fn is_compatible_result_recursivo() {
+    fn is_compatible_result_recursive() {
         // Result<Any> matches Result<User>.
         let env = env_with(&["User"]);
         let user = Type::Nominal(env.lookup("User").unwrap());
@@ -12941,7 +12941,7 @@ mod tests {
     }
 
     #[test]
-    fn is_compatible_map_recursivo() {
+    fn is_compatible_map_recursive() {
         // Map<Str, Int> matches Map<Str, Float>.
         assert!(is_compatible(
             &Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
@@ -12955,7 +12955,7 @@ mod tests {
     }
 
     #[test]
-    fn is_compatible_function_estructural() {
+    fn is_compatible_function_structural() {
         // fn(Int) -> Int matches fn(Int) -> Int.
         let a = Type::Function {
             params: vec![Type::Int],
@@ -12977,7 +12977,7 @@ mod tests {
     // ---- 5.3.3: `?` and exhaustive match over Result ----
 
     #[test]
-    fn try_sobre_result_adentro_de_fn_result_pasa() {
+    fn try_on_result_inside_fn_result_passes() {
         // The operand is Result<Int>; the fn declares -> Result<Int>.
         // The `?` unpacks to Int.
         assert_ok(
@@ -12989,7 +12989,7 @@ mod tests {
     }
 
     #[test]
-    fn try_sobre_any_no_chequea() {
+    fn try_on_any_does_not_check() {
         // `users.find(...)` is a built-in method: callee Field → Any.
         // `?` over Any passes without checking (gradual, until 5.3.4).
         assert_ok(
@@ -13003,7 +13003,7 @@ mod tests {
     }
 
     #[test]
-    fn try_sobre_no_result_es_error() {
+    fn try_on_non_result_is_error() {
         // `?` over an Int makes no sense.
         assert_error_with(
             "fn f() -> Result<Int> { let x = 1?\n return Ok(x) }",
@@ -13012,7 +13012,7 @@ mod tests {
     }
 
     #[test]
-    fn try_adentro_de_fn_no_result_es_error() {
+    fn try_inside_fn_non_result_is_error() {
         // The fn returns Int (not Result) and inside there's a `?`. The
         // operand is concrete Result<Int>, so we fire the
         // "fn must return Result" rule.
@@ -13026,7 +13026,7 @@ mod tests {
     }
 
     #[test]
-    fn try_adentro_de_fn_sin_return_type_no_chequea() {
+    fn try_inside_fn_without_return_type_does_not_check() {
         // Without annotation → return_stack is Any → we don't check the
         // containing fn rule. The operand still must be
         // Result, so the `?` unpacks to Int without warnings.
@@ -13039,7 +13039,7 @@ mod tests {
     }
 
     #[test]
-    fn try_top_level_no_chequea_la_regla_de_fn_contenedora() {
+    fn try_top_level_does_not_check_containing_fn_rule() {
         // `?` inside the global scope — without return_stack, we don't
         // fire the "fn must return Result" rule. The operand
         // is checked: Result<Int> → unpacks to Int.
@@ -13047,7 +13047,7 @@ mod tests {
     }
 
     #[test]
-    fn w13_try_adentro_de_http_handler_no_result_pasa() {
+    fn w13_try_inside_http_handler_non_result_passes() {
         // W13 (v0.10.9) — HTTP handler that returns `User` (not Result)
         // and uses `?` inside. Before the fix, the checker rejected with
         // "the `?` operator can only be used inside a function
@@ -13067,7 +13067,7 @@ mod tests {
     }
 
     #[test]
-    fn w13_try_fuera_de_http_handler_sigue_siendo_error() {
+    fn w13_try_outside_http_handler_still_is_error() {
         // W13 negative — the relaxation ONLY applies inside an
         // HTTP handler (`@get/@post/etc`). A regular fn returning
         // a non-Result type and using `?` is still an error (parallel to
@@ -13083,7 +13083,7 @@ mod tests {
     }
 
     #[test]
-    fn try_encadenado_con_field_access_funciona() {
+    fn try_chained_with_field_access_works() {
         // r?.id over Result<User> → User → Int.
         assert_ok(
             "type User { id: Int, name: Str }\n\
@@ -13097,7 +13097,7 @@ mod tests {
     // ---- exhaustive match over Result ----
 
     #[test]
-    fn match_result_con_ok_y_err_es_exhaustivo() {
+    fn match_result_with_ok_and_err_is_exhaustive() {
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r {\n\
@@ -13108,7 +13108,7 @@ mod tests {
     }
 
     #[test]
-    fn match_result_solo_ok_falta_err() {
+    fn match_result_only_ok_missing_err() {
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r {\n\
@@ -13119,7 +13119,7 @@ mod tests {
     }
 
     #[test]
-    fn match_result_solo_err_falta_ok() {
+    fn match_result_only_err_missing_ok() {
         assert_error_with(
             "let r: Result<Int> = Err(\"x\")\n\
              let s = match r {\n\
@@ -13130,7 +13130,7 @@ mod tests {
     }
 
     #[test]
-    fn match_result_con_wildcard_solo_es_exhaustivo() {
+    fn match_result_with_only_wildcard_is_exhaustive() {
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r {\n\
@@ -13140,7 +13140,7 @@ mod tests {
     }
 
     #[test]
-    fn match_result_con_ok_mas_wildcard_es_exhaustivo() {
+    fn match_result_with_ok_plus_wildcard_is_exhaustive() {
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
              let s = match r {\n\
@@ -13151,7 +13151,7 @@ mod tests {
     }
 
     #[test]
-    fn match_result_con_ident_catchall_es_exhaustivo() {
+    fn match_result_with_ident_catchall_is_exhaustive() {
         // An ident binding (catch-all) covers any value — the
         // evaluator treats it as a wildcard.
         assert_ok(
@@ -13163,7 +13163,7 @@ mod tests {
     }
 
     #[test]
-    fn match_sobre_int_no_exige_exhaustividad() {
+    fn match_on_int_does_not_require_exhaustiveness() {
         // Match over a non-Result type: the checker does not require
         // exhaustiveness in 5.3.3.
         assert_ok(
@@ -13176,7 +13176,7 @@ mod tests {
     }
 
     #[test]
-    fn match_sobre_any_no_exige_exhaustividad() {
+    fn match_on_any_does_not_require_exhaustiveness() {
         // Match over a value of type Any (gradual escape): no
         // exhaustiveness is required.
         assert_ok(
@@ -13192,7 +13192,7 @@ mod tests {
     // List<T>: push
 
     #[test]
-    fn list_push_con_tipo_compatible_pasa() {
+    fn list_push_with_compatible_type_passes() {
         assert_ok(
             "let xs: List<Int> = [1, 2]\n\
              xs.push(3)",
@@ -13200,7 +13200,7 @@ mod tests {
     }
 
     #[test]
-    fn list_push_con_tipo_incompatible_es_error() {
+    fn list_push_with_incompatible_type_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\n\
              xs.push(\"x\")",
@@ -13209,7 +13209,7 @@ mod tests {
     }
 
     #[test]
-    fn list_push_aridad_incorrecta_es_error() {
+    fn list_push_wrong_arity_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\n\
              xs.push(1, 2)",
@@ -13220,7 +13220,7 @@ mod tests {
     // List<T>: pop, len
 
     #[test]
-    fn list_pop_devuelve_t() {
+    fn list_pop_returns_t() {
         // If pop over List<Int> returns Int, assigning it to Int is OK.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
@@ -13229,7 +13229,7 @@ mod tests {
     }
 
     #[test]
-    fn list_len_devuelve_int() {
+    fn list_len_returns_int() {
         assert_ok(
             "let xs = [1, 2, 3]\n\
              let n: Int = xs.len()",
@@ -13239,7 +13239,7 @@ mod tests {
     // List<T>: map
 
     #[test]
-    fn list_map_devuelve_list_del_ret_del_callback() {
+    fn list_map_returns_list_of_callback_ret() {
         // map over List<Int> with callback fn(Int) -> Str → List<Str>.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
@@ -13248,7 +13248,7 @@ mod tests {
     }
 
     #[test]
-    fn list_map_con_callback_param_incompatible_es_error() {
+    fn list_map_with_incompatible_callback_param_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.map(fn(x: Str) -> Str { return x })",
@@ -13257,7 +13257,7 @@ mod tests {
     }
 
     #[test]
-    fn list_map_con_callback_sin_anotaciones_es_any() {
+    fn list_map_with_callback_without_annotations_is_any() {
         // Callback without annotations → params = [Any], ret = Any.
         // The map returns List<Any>; assigning it to List<Int> passes via
         // recursive is_compatible + Any.
@@ -13270,7 +13270,7 @@ mod tests {
     // List<T>: filter
 
     #[test]
-    fn list_filter_devuelve_list_t() {
+    fn list_filter_returns_list_t() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let evens: List<Int> = xs.filter(fn(x: Int) -> Bool { return true })",
@@ -13278,7 +13278,7 @@ mod tests {
     }
 
     #[test]
-    fn list_filter_callback_aridad_incorrecta_es_error() {
+    fn list_filter_callback_wrong_arity_is_error() {
         // FnExpr always has `ret = Any` until 5.3.5, so
         // we can't detect "ret is not Bool" over an inline FnExpr.
         // What we DO catch is the callback arity: filter expects
@@ -13293,7 +13293,7 @@ mod tests {
     // List<T>: find
 
     #[test]
-    fn list_find_devuelve_result_t() {
+    fn list_find_returns_result_t() {
         // find over List<User> returns Result<User>.
         assert_ok(
             "type User { id: Int }\n\
@@ -13303,7 +13303,7 @@ mod tests {
     }
 
     #[test]
-    fn list_find_con_try_destrabba_t() {
+    fn list_find_with_try_unblocks_t() {
         // xs.find(...)? inside a fn -> Result<User> should
         // unpack to User.
         assert_ok(
@@ -13318,7 +13318,7 @@ mod tests {
     // List<T>: unknown method
 
     #[test]
-    fn list_metodo_desconocido_es_error() {
+    fn list_unknown_method_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\n\
              xs.lenght()",
@@ -13329,7 +13329,7 @@ mod tests {
     // Map<K, V>: get, has
 
     #[test]
-    fn map_get_devuelve_result_v() {
+    fn map_get_returns_result_v() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let r: Result<Int> = m.get(\"a\")",
@@ -13337,7 +13337,7 @@ mod tests {
     }
 
     #[test]
-    fn map_get_con_clave_incompatible_es_error() {
+    fn map_get_with_incompatible_key_is_error() {
         assert_error_with(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let r = m.get(42)",
@@ -13346,7 +13346,7 @@ mod tests {
     }
 
     #[test]
-    fn map_has_devuelve_bool() {
+    fn map_has_returns_bool() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let b: Bool = m.has(\"a\")",
@@ -13354,7 +13354,7 @@ mod tests {
     }
 
     #[test]
-    fn map_keys_y_values_devuelven_listas() {
+    fn map_keys_and_values_return_lists() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let ks: List<Str> = m.keys()\n\
@@ -13363,7 +13363,7 @@ mod tests {
     }
 
     #[test]
-    fn map_len_devuelve_int() {
+    fn map_len_returns_int() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let n: Int = m.len()",
@@ -13371,7 +13371,7 @@ mod tests {
     }
 
     #[test]
-    fn map_metodo_desconocido_es_error() {
+    fn map_unknown_method_is_error() {
         assert_error_with(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              m.foo()",
@@ -13382,7 +13382,7 @@ mod tests {
     // Str
 
     #[test]
-    fn str_upper_lower_devuelven_str() {
+    fn str_upper_lower_return_str() {
         assert_ok(
             "let s = \"hola\"\n\
              let u: Str = s.upper()\n\
@@ -13391,12 +13391,12 @@ mod tests {
     }
 
     #[test]
-    fn str_len_devuelve_int() {
+    fn str_len_returns_int() {
         assert_ok("let n: Int = \"hola\".len()");
     }
 
     #[test]
-    fn str_metodo_desconocido_es_error() {
+    fn str_unknown_method_is_error() {
         assert_error_with(
             "let s = \"hola\"\n\
              s.upcase()",
@@ -13407,12 +13407,12 @@ mod tests {
     // ---- S.1: contains/starts_with/ends_with ----
 
     #[test]
-    fn str_contains_devuelve_bool() {
+    fn str_contains_returns_bool() {
         assert_ok("let b: Bool = \"hola\".contains(\"ol\")");
     }
 
     #[test]
-    fn str_starts_with_ends_with_devuelven_bool() {
+    fn str_starts_with_ends_with_return_bool() {
         assert_ok(
             "let a: Bool = \"hola\".starts_with(\"ho\")\n\
              let b: Bool = \"hola\".ends_with(\"la\")",
@@ -13420,46 +13420,46 @@ mod tests {
     }
 
     #[test]
-    fn str_contains_con_arg_no_str_es_error() {
+    fn str_contains_with_non_str_arg_is_error() {
         assert_error_with("let b = \"hola\".contains(1)", &["contains", "Str"]);
     }
 
     // ---- S.2: split/trim/replace/repeat ----
 
     #[test]
-    fn str_split_devuelve_list_str() {
+    fn str_split_returns_list_str() {
         assert_ok("let xs: List<Str> = \"a,b,c\".split(\",\")");
     }
 
     #[test]
-    fn str_trim_devuelve_str() {
+    fn str_trim_returns_str() {
         assert_ok("let s: Str = \"  hola  \".trim()");
     }
 
     #[test]
-    fn str_replace_devuelve_str() {
+    fn str_replace_returns_str() {
         assert_ok("let s: Str = \"hola\".replace(\"o\", \"O\")");
     }
 
     #[test]
-    fn str_replace_con_int_es_error() {
+    fn str_replace_with_int_is_error() {
         assert_error_with("let s = \"hola\".replace(\"o\", 42)", &["replace", "Str"]);
     }
 
     #[test]
-    fn str_repeat_con_int_devuelve_str() {
+    fn str_repeat_with_int_returns_str() {
         assert_ok("let s: Str = \"ab\".repeat(3)");
     }
 
     #[test]
-    fn str_repeat_con_str_es_error() {
+    fn str_repeat_with_str_is_error() {
         assert_error_with("let s = \"ab\".repeat(\"3\")", &["repeat", "Int"]);
     }
 
     // ---- S.3: List.sort/reverse/contains ----
 
     #[test]
-    fn list_sort_y_reverse_devuelven_null() {
+    fn list_sort_and_reverse_return_null() {
         assert_ok(
             "let xs: List<Int> = [3, 1, 2]\n\
              xs.sort()\n\
@@ -13468,7 +13468,7 @@ mod tests {
     }
 
     #[test]
-    fn list_contains_con_arg_compatible_devuelve_bool() {
+    fn list_contains_with_compatible_arg_returns_bool() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: Bool = xs.contains(2)",
@@ -13476,7 +13476,7 @@ mod tests {
     }
 
     #[test]
-    fn list_contains_con_arg_incompatible_es_error() {
+    fn list_contains_with_incompatible_arg_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.contains(\"x\")",
@@ -13487,7 +13487,7 @@ mod tests {
     // ---- Mini-batch Mb2 + Rg ----
 
     #[test]
-    fn mb2_list_min_max_sobre_list_int_devuelve_result_int() {
+    fn mb2_list_min_max_on_list_int_returns_result_int() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let lo: Result<Int> = xs.min()\n\
@@ -13496,7 +13496,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_list_min_max_sobre_list_float_devuelve_result_float() {
+    fn mb2_list_min_max_on_list_float_returns_result_float() {
         assert_ok(
             "let xs: List<Float> = [1.0, 2.0]\n\
              let lo: Result<Float> = xs.min()",
@@ -13504,7 +13504,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_list_min_sobre_list_str_es_error() {
+    fn mb2_list_min_on_list_str_is_error() {
         assert_error_with(
             "let xs: List<Str> = [\"a\", \"b\"]\n\
              let r = xs.min()",
@@ -13513,7 +13513,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_list_sum_int_devuelve_int() {
+    fn mb2_list_sum_int_returns_int() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let total: Int = xs.sum()",
@@ -13521,7 +13521,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_list_sum_float_devuelve_float() {
+    fn mb2_list_sum_float_returns_float() {
         assert_ok(
             "let xs: List<Float> = [1.5, 2.5]\n\
              let total: Float = xs.sum()",
@@ -13529,7 +13529,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_list_sum_sobre_str_es_error() {
+    fn mb2_list_sum_on_str_is_error() {
         assert_error_with(
             "let xs: List<Str> = [\"a\"]\n\
              let total = xs.sum()",
@@ -13538,7 +13538,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_str_pad_start_end_devuelven_str() {
+    fn mb2_str_pad_start_end_return_str() {
         assert_ok(
             "let s = \"42\"\n\
              let a: Str = s.pad_start(5, \"0\")\n\
@@ -13547,7 +13547,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_str_pad_start_con_width_no_int_es_error() {
+    fn mb2_str_pad_start_with_non_int_width_is_error() {
         assert_error_with(
             "let r = \"42\".pad_start(\"5\", \"0\")",
             &["pad_start", "Int"],
@@ -13555,12 +13555,12 @@ mod tests {
     }
 
     #[test]
-    fn mb2_str_pad_end_con_ch_no_str_es_error() {
+    fn mb2_str_pad_end_with_non_str_ch_is_error() {
         assert_error_with("let r = \"42\".pad_end(5, 0)", &["pad_end", "Str"]);
     }
 
     #[test]
-    fn mb2_map_keys_sorted_devuelve_list_de_keys() {
+    fn mb2_map_keys_sorted_returns_list_of_keys() {
         assert_ok(
             "let m: Map<Str, Int> = {\"b\": 2, \"a\": 1}\n\
              let ks: List<Str> = m.keys_sorted()",
@@ -13568,19 +13568,19 @@ mod tests {
     }
 
     #[test]
-    fn rg_range_step_by_devuelve_list_int() {
+    fn rg_range_step_by_returns_list_int() {
         assert_ok("let xs: List<Int> = (0..10).step_by(2)");
     }
 
     #[test]
-    fn rg_range_step_by_con_arg_no_int_es_error() {
+    fn rg_range_step_by_with_non_int_arg_is_error() {
         assert_error_with("let xs = (0..10).step_by(\"x\")", &["step_by", "Int"]);
     }
 
     // ---- Mini-batch Mb3: reduce + product + chars + entries + to_map ----
 
     #[test]
-    fn mb3_list_reduce_acc_int_devuelve_int() {
+    fn mb3_list_reduce_acc_int_returns_int() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let total: Int = xs.reduce(0, fn(acc: Int, x: Int) => acc + x)",
@@ -13588,7 +13588,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_list_reduce_acc_distinto_a_t_funciona() {
+    fn mb3_list_reduce_acc_different_from_t_works() {
         // Acc can be Str even if T is Int.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
@@ -13597,7 +13597,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_list_reduce_callback_ret_distinto_de_acc_es_error() {
+    fn mb3_list_reduce_callback_ret_different_from_acc_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let total: Int = xs.reduce(0, fn(acc: Int, x: Int) => \"oops\")",
@@ -13606,7 +13606,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_list_product_int_devuelve_int() {
+    fn mb3_list_product_int_returns_int() {
         assert_ok(
             "let xs: List<Int> = [2, 3, 4]\n\
              let p: Int = xs.product()",
@@ -13614,7 +13614,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_list_product_sobre_str_es_error() {
+    fn mb3_list_product_on_str_is_error() {
         assert_error_with(
             "let xs: List<Str> = [\"a\"]\n\
              let p = xs.product()",
@@ -13623,12 +13623,12 @@ mod tests {
     }
 
     #[test]
-    fn mb3_str_chars_devuelve_list_str() {
+    fn mb3_str_chars_returns_list_str() {
         assert_ok("let cs: List<Str> = \"abc\".chars()");
     }
 
     #[test]
-    fn mb3_map_entries_devuelve_list_de_tuples() {
+    fn mb3_map_entries_returns_list_of_tuples() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let es: List<(Str, Int)> = m.entries()",
@@ -13636,7 +13636,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_list_to_map_sobre_tuple_pairs() {
+    fn mb3_list_to_map_on_tuple_pairs() {
         assert_ok(
             "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"b\", 2)]\n\
              let m: Map<Str, Int> = pairs.to_map()",
@@ -13644,7 +13644,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_list_to_map_sobre_no_tuple_es_error() {
+    fn mb3_list_to_map_on_non_tuple_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\n\
              let m = xs.to_map()",
@@ -13655,7 +13655,7 @@ mod tests {
     // ---- Mini-batch Mb4 + Cmp+ ----
 
     #[test]
-    fn mb4_list_unique_devuelve_list_t() {
+    fn mb4_list_unique_returns_list_t() {
         assert_ok(
             "let xs: List<Int> = [1, 1, 2]\n\
              let r: List<Int> = xs.unique()",
@@ -13663,7 +13663,7 @@ mod tests {
     }
 
     #[test]
-    fn mb4_list_partition_devuelve_tuple_de_listas() {
+    fn mb4_list_partition_returns_tuple_of_lists() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: (List<Int>, List<Int>) = xs.partition(fn(n: Int) => n > 1)",
@@ -13671,7 +13671,7 @@ mod tests {
     }
 
     #[test]
-    fn mb4_list_partition_callback_no_bool_es_error() {
+    fn mb4_list_partition_callback_non_bool_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\n\
              let r = xs.partition(fn(n: Int) => n)",
@@ -13688,12 +13688,12 @@ mod tests {
     }
 
     #[test]
-    fn mb4_str_split_at_devuelve_tuple_str_str() {
+    fn mb4_str_split_at_returns_tuple_str_str() {
         assert_ok("let r: (Str, Str) = \"abc\".split_at(1)");
     }
 
     #[test]
-    fn mb4_str_split_at_con_arg_no_int_es_error() {
+    fn mb4_str_split_at_with_non_int_arg_is_error() {
         assert_error_with("let r = \"abc\".split_at(\"x\")", &["split_at", "Int"]);
     }
 
@@ -13707,7 +13707,7 @@ mod tests {
     }
 
     #[test]
-    fn cmp_multi_for_var_anidado_visible_en_expr() {
+    fn cmp_multi_for_nested_var_visible_in_expr() {
         // The binding `y` from the second for is visible in the expr.
         assert_ok(
             "let xs: List<Int> = [1, 2]\n\
@@ -13722,14 +13722,14 @@ mod tests {
     }
 
     #[test]
-    fn cmp_map_comp_filter_no_bool_es_error() {
+    fn cmp_map_comp_filter_non_bool_is_error() {
         assert_error_with("let m = {n: n for n in 0..3 if n}", &["filtro", "Bool"]);
     }
 
     // ---- Mini-batch Mb5 + Async-cl ----
 
     #[test]
-    fn mb5_list_group_by_devuelve_map_k_list_t() {
+    fn mb5_list_group_by_returns_map_k_list_t() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: Map<Str, List<Int>> = xs.group_by(fn(n: Int) => if (n > 1) { \"big\" } else { \"small\" })",
@@ -13737,7 +13737,7 @@ mod tests {
     }
 
     #[test]
-    fn mb5_list_zip_with_devuelve_list_v() {
+    fn mb5_list_zip_with_returns_list_v() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let ys: List<Int> = [10, 20]\n\
@@ -13746,7 +13746,7 @@ mod tests {
     }
 
     #[test]
-    fn mb5_list_zip_with_arg_no_list_es_error() {
+    fn mb5_list_zip_with_non_list_arg_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1]\n\
              let r = xs.zip_with(42, fn(a: Int, b: Int) => a + b)",
@@ -13755,7 +13755,7 @@ mod tests {
     }
 
     #[test]
-    fn mb5_list_max_by_devuelve_result_t() {
+    fn mb5_list_max_by_returns_result_t() {
         assert_ok(
             "type P { age: Int = 0 }\n\
              let xs: List<P> = [P { age: 1 }]\n\
@@ -13764,7 +13764,7 @@ mod tests {
     }
 
     #[test]
-    fn mb5_list_max_by_callback_no_int_es_error() {
+    fn mb5_list_max_by_callback_non_int_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1]\n\
              let r = xs.max_by(fn(n: Int) => \"oops\")",
@@ -13773,17 +13773,17 @@ mod tests {
     }
 
     #[test]
-    fn mb5_str_lines_devuelve_list_str() {
+    fn mb5_str_lines_returns_list_str() {
         assert_ok("let r: List<Str> = \"a\\nb\".lines()");
     }
 
     #[test]
-    fn mb5_str_is_empty_devuelve_bool() {
+    fn mb5_str_is_empty_returns_bool() {
         assert_ok("let r: Bool = \"\".is_empty()");
     }
 
     #[test]
-    fn async_cl_inline_tipa_como_function_con_future() {
+    fn async_cl_inline_types_as_function_with_future() {
         // The type of the async FnExpr has ret = Future<T>, so the
         // checker validates `.await` inside and lets it be used from an
         // async caller fn.
@@ -13798,7 +13798,7 @@ mod tests {
     // ---- Mini-batch Mb6 ----
 
     #[test]
-    fn mb6_list_scan_devuelve_list_acc() {
+    fn mb6_list_scan_returns_list_acc() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
@@ -13806,7 +13806,7 @@ mod tests {
     }
 
     #[test]
-    fn mb6_list_scan_callback_ret_distinto_de_acc_es_error() {
+    fn mb6_list_scan_callback_ret_different_from_acc_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2]\n\
              let r = xs.scan(0, fn(acc: Int, x: Int) => \"oops\")",
@@ -13815,7 +13815,7 @@ mod tests {
     }
 
     #[test]
-    fn mb6_list_windows_devuelve_list_list_t() {
+    fn mb6_list_windows_returns_list_list_t() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<List<Int>> = xs.windows(2)",
@@ -13823,7 +13823,7 @@ mod tests {
     }
 
     #[test]
-    fn mb6_list_windows_arg_no_int_es_error() {
+    fn mb6_list_windows_non_int_arg_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.windows(\"oops\")",
@@ -13832,7 +13832,7 @@ mod tests {
     }
 
     #[test]
-    fn mb6_map_merge_with_devuelve_map_k_v() {
+    fn mb6_map_merge_with_returns_map_k_v() {
         assert_ok(
             "let a: Map<Str, Int> = {\"x\": 1}\n\
              let b: Map<Str, Int> = {\"x\": 2}\n\
@@ -13843,7 +13843,7 @@ mod tests {
     // ---- Mini-batch Mb8 + Bits-extras ----
 
     #[test]
-    fn mb8_list_starts_with_devuelve_bool() {
+    fn mb8_list_starts_with_returns_bool() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: Bool = xs.starts_with([1, 2])",
@@ -13851,7 +13851,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_list_starts_with_arg_no_list_es_error() {
+    fn mb8_list_starts_with_non_list_arg_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1]\n\
              let r = xs.starts_with(42)",
@@ -13860,7 +13860,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_list_insert_at_devuelve_list_t() {
+    fn mb8_list_insert_at_returns_list_t() {
         assert_ok(
             "let xs: List<Int> = [1, 3]\n\
              let r: List<Int> = xs.insert_at(1, 2)",
@@ -13868,7 +13868,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_list_remove_at_devuelve_list_t() {
+    fn mb8_list_remove_at_returns_list_t() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.remove_at(1)",
@@ -13876,7 +13876,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_list_zip_to_map_devuelve_map_k_v() {
+    fn mb8_list_zip_to_map_returns_map_k_v() {
         assert_ok(
             "let ks: List<Str> = [\"a\"]\n\
              let vs: List<Int> = [1]\n\
@@ -13885,7 +13885,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_str_left_right_devuelven_str() {
+    fn mb8_str_left_right_return_str() {
         assert_ok(
             "let l: Str = \"abc\".left(2)\n\
              let r: Str = \"abc\".right(2)",
@@ -13893,7 +13893,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_str_center_devuelve_str() {
+    fn mb8_str_center_returns_str() {
         assert_ok("let c: Str = \"hi\".center(10, \"-\")");
     }
 
@@ -13908,14 +13908,14 @@ mod tests {
     }
 
     #[test]
-    fn bits_extras_popcount_arg_no_int_es_error() {
+    fn bits_extras_popcount_non_int_arg_is_error() {
         assert_error_with("let r = popcount(\"oops\")", &["popcount", "Int"]);
     }
 
     // ---- Mini-batch Mb7 ----
 
     #[test]
-    fn mb7_list_take_drop_devuelven_list_t() {
+    fn mb7_list_take_drop_return_list_t() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let a: List<Int> = xs.take(2)\n\
@@ -13924,7 +13924,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_list_take_arg_no_int_es_error() {
+    fn mb7_list_take_non_int_arg_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.take(\"x\")",
@@ -13950,7 +13950,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_list_intersperse_sep_incompatible_es_error() {
+    fn mb7_list_intersperse_sep_incompatible_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.intersperse(\"oops\")",
@@ -13959,7 +13959,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_list_cycle_devuelve_list_t() {
+    fn mb7_list_cycle_returns_list_t() {
         assert_ok(
             "let xs: List<Int> = [1]\n\
              let r: List<Int> = xs.cycle(3)",
@@ -13967,12 +13967,12 @@ mod tests {
     }
 
     #[test]
-    fn mb7_str_repeat_with_devuelve_str() {
+    fn mb7_str_repeat_with_returns_str() {
         assert_ok("let r: Str = \"x\".repeat_with(3, \", \")");
     }
 
     #[test]
-    fn mb7_str_repeat_with_args_invalidos_es_error() {
+    fn mb7_str_repeat_with_invalid_args_is_error() {
         assert_error_with(
             "let r = \"x\".repeat_with(\"oops\", \", \")",
             &["repeat_with", "Int"],
@@ -13980,7 +13980,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_map_with_devuelve_map_k_v() {
+    fn mb7_map_with_returns_map_k_v() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let r: Map<Str, Int> = m.with(\"b\", 2)",
@@ -13988,7 +13988,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_map_with_value_tipo_incompatible_es_error() {
+    fn mb7_map_with_incompatible_value_type_is_error() {
         assert_error_with(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let r = m.with(\"b\", \"oops\")",
@@ -13997,7 +13997,7 @@ mod tests {
     }
 
     #[test]
-    fn mb6_map_merge_with_arg_no_map_es_error() {
+    fn mb6_map_merge_with_non_map_arg_is_error() {
         assert_error_with(
             "let a: Map<Str, Int> = {\"x\": 1}\n\
              let r = a.merge_with(42, fn(va: Int, vb: Int) => va)",
@@ -14006,7 +14006,7 @@ mod tests {
     }
 
     #[test]
-    fn async_cl_sync_no_acepta_await_dentro() {
+    fn async_cl_sync_does_not_accept_await_inside() {
         // Sync FnExpr (without `async`) rejects `.await` inside.
         assert_error_with(
             "fn run() -> Int {\n\
@@ -14023,7 +14023,7 @@ mod tests {
     // ---- I.1: indexing with types ----
 
     #[test]
-    fn str_index_devuelve_str() {
+    fn str_index_returns_str() {
         // I.1: `s[i]` now types as Str (previously was an error).
         assert_ok(
             "let s = \"hola\"\n\
@@ -14032,7 +14032,7 @@ mod tests {
     }
 
     #[test]
-    fn str_index_con_arg_no_int_es_error() {
+    fn str_index_with_non_int_arg_is_error() {
         assert_error_with(
             "let s = \"hola\"\n\
              let c = s[\"x\"]",
@@ -14043,7 +14043,7 @@ mod tests {
     // ---- I.2: slicing ----
 
     #[test]
-    fn list_slice_devuelve_list_mismo_tipo() {
+    fn list_slice_returns_list_same_type() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let ys: List<Int> = xs[1..3]\n\
@@ -14054,7 +14054,7 @@ mod tests {
     }
 
     #[test]
-    fn str_slice_devuelve_str() {
+    fn str_slice_returns_str() {
         assert_ok(
             "let s = \"hola\"\n\
              let a: Str = s[0..2]\n\
@@ -14065,7 +14065,7 @@ mod tests {
     }
 
     #[test]
-    fn slice_con_inclusive() {
+    fn slice_with_inclusive() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
              let ys: List<Int> = xs[0..=2]",
@@ -14073,7 +14073,7 @@ mod tests {
     }
 
     #[test]
-    fn slice_bound_no_int_es_error() {
+    fn slice_non_int_bound_is_error() {
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
              let ys = xs[\"a\"..2]",
@@ -14082,7 +14082,7 @@ mod tests {
     }
 
     #[test]
-    fn slice_sobre_tipo_no_soportado_es_error() {
+    fn slice_on_unsupported_type_is_error() {
         assert_error_with(
             "let n: Int = 42\n\
              let r = n[0..1]",
@@ -14093,7 +14093,7 @@ mod tests {
     // Chained
 
     #[test]
-    fn metodo_encadenado_map_filter() {
+    fn chained_method_map_filter() {
         // map(...).filter(...) on a single line — the ret of map
         // (List<Any> because FnExpr.ret=Any until 5.3.5) feeds the
         // filter. Multi-line chaining is still explicit
@@ -14107,7 +14107,7 @@ mod tests {
     // Receivers without built-in methods
 
     #[test]
-    fn metodo_sobre_int_es_error() {
+    fn method_on_int_is_error() {
         assert_error_with(
             "let n = 1\n\
              n.foo()",
@@ -14118,7 +14118,7 @@ mod tests {
     // Nominal: gradual, doesn't check or reject
 
     #[test]
-    fn metodo_sobre_nominal_no_chequea() {
+    fn method_on_nominal_does_not_check() {
         // type without custom methods: user.greet() passes without warning
         // (the evaluator emits it at runtime). It's the gradual rule
         // of 5.3.4 — custom methods over `type` don't exist
@@ -14135,7 +14135,7 @@ mod tests {
     // FnExpr inferred ret — basic forms
 
     #[test]
-    fn fn_expr_arrow_devuelve_tipo_del_expr() {
+    fn fn_expr_arrow_returns_expr_type() {
         // `fn(x: Int) => x * 2` desugars to body=[Return(x*2)];
         // inferred ret = Int. Filter requires Bool, so this must
         // fire the ret check.
@@ -14147,7 +14147,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_expr_arrow_bool_pasa_filter() {
+    fn fn_expr_arrow_bool_passes_filter() {
         // Same scenario but with ret Bool — filter accepts.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
@@ -14156,7 +14156,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_expr_block_un_solo_return_infiere_ese_tipo() {
+    fn fn_expr_block_single_return_infers_that_type() {
         // Block form with one return — ret = type of the return.
         assert_error_with(
             "let xs: List<Int> = [1, 2, 3]\n\
@@ -14166,7 +14166,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_expr_sin_return_es_null() {
+    fn fn_expr_without_return_is_null() {
         // A fn that doesn't explicitly return — ret = Null. For
         // a map, elements end up as List<Null>.
         assert_ok(
@@ -14178,7 +14178,7 @@ mod tests {
     // FnExpr inferred ret — unification (lub) over several returns
 
     #[test]
-    fn fn_expr_lub_int_float_es_float() {
+    fn fn_expr_lub_int_float_is_float() {
         // Two returns: Int and Float → Float (coercion).
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
@@ -14190,7 +14190,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_expr_lub_null_y_t_es_nullable() {
+    fn fn_expr_lub_null_and_t_is_nullable() {
         // One branch returns null, another Int → ret = Int?.
         assert_ok(
             "let xs: List<Int> = [1, 2, 3]\n\
@@ -14202,7 +14202,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_expr_lub_result_ok_y_err_es_result_concreto() {
+    fn fn_expr_lub_result_ok_and_err_is_concrete_result() {
         // Ok(User) + Err("...") → lub(Result<User>, Result<Any>)
         // = Result<User>. Detects that the FnExpr can be used where
         // Result<User> is expected.
@@ -14219,7 +14219,7 @@ mod tests {
     // Expr::Index
 
     #[test]
-    fn index_list_devuelve_t() {
+    fn index_list_returns_t() {
         assert_ok(
             "let xs: List<Int> = [10, 20, 30]\n\
              let n: Int = xs[0]",
@@ -14227,7 +14227,7 @@ mod tests {
     }
 
     #[test]
-    fn index_list_con_indice_no_int_es_error() {
+    fn index_list_with_non_int_index_is_error() {
         assert_error_with(
             "let xs: List<Int> = [10, 20]\n\
              let n = xs[\"x\"]",
@@ -14236,7 +14236,7 @@ mod tests {
     }
 
     #[test]
-    fn index_map_devuelve_v() {
+    fn index_map_returns_v() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let n: Int = m[\"a\"]",
@@ -14244,7 +14244,7 @@ mod tests {
     }
 
     #[test]
-    fn index_map_con_clave_incompatible_es_error() {
+    fn index_map_with_incompatible_key_is_error() {
         assert_error_with(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let n = m[42]",
@@ -14253,7 +14253,7 @@ mod tests {
     }
 
     #[test]
-    fn index_sobre_int_es_error() {
+    fn index_on_int_is_error() {
         assert_error_with(
             "let n = 1\n\
              let x = n[0]",
@@ -14262,7 +14262,7 @@ mod tests {
     }
 
     #[test]
-    fn index_sobre_str_ahora_si_se_implementa() {
+    fn index_on_str_now_implemented() {
         // I.1 (mini-tanda I): `s[i]` devuelve `Str` (un char).
         assert_ok(
             "let s = \"hola\"\n\
@@ -14271,7 +14271,7 @@ mod tests {
     }
 
     #[test]
-    fn index_sobre_any_no_chequea() {
+    fn index_on_any_does_not_check() {
         // Any receiver (var brought in by import) → gradual.
         assert_ok(
             "from foo import xs\n\
@@ -14282,7 +14282,7 @@ mod tests {
     // lub direct
 
     #[test]
-    fn lub_funciones_basicas() {
+    fn lub_basic_functions() {
         assert_eq!(lub(&Type::Int, &Type::Int), Type::Int);
         assert_eq!(lub(&Type::Int, &Type::Any), Type::Int);
         assert_eq!(lub(&Type::Any, &Type::Str), Type::Str);
@@ -14298,7 +14298,7 @@ mod tests {
     }
 
     #[test]
-    fn lub_recursivo_en_result() {
+    fn lub_recursive_in_result() {
         // lub(Result<User>, Result<Any>) → Result<User>.
         let env = env_with(&["User"]);
         let user = Type::Nominal(env.lookup("User").unwrap());
@@ -14314,7 +14314,7 @@ mod tests {
     }
 
     #[test]
-    fn unify_returns_vacio_es_null() {
+    fn unify_returns_empty_is_null() {
         // Without explicit returns → Null (matches the evaluator).
         assert_eq!(unify_returns(&[]), Type::Null);
     }
@@ -14322,7 +14322,7 @@ mod tests {
     // ---- Residual debt from 5a: reassignment against previous type ----
 
     #[test]
-    fn reasignacion_sin_anotacion_a_var_anotada_falla() {
+    fn reassignment_without_annotation_to_annotated_var_fails() {
         // `m: Int = 1; m = "x"` — the first assignment marked `m`
         // as Int-annotated; the second without annotation violates that.
         assert_error_with(
@@ -14333,7 +14333,7 @@ mod tests {
     }
 
     #[test]
-    fn reasignacion_sin_anotacion_a_var_inferida_pasa() {
+    fn reassignment_without_annotation_to_inferred_var_passes() {
         // `n = 1; n = "x"` — the first assignment had NO annotation,
         // so the gradual model allows changing the type.
         assert_ok(
@@ -14343,7 +14343,7 @@ mod tests {
     }
 
     #[test]
-    fn reasignacion_compatible_a_var_anotada_pasa() {
+    fn reassignment_compatible_to_annotated_var_passes() {
         // `m: Int = 1; m = 2` — the reassignment respects the type.
         assert_ok(
             "let m: Int = 1\n\
@@ -14352,7 +14352,7 @@ mod tests {
     }
 
     #[test]
-    fn reasignacion_int_a_float_anotado_pasa_por_coercion() {
+    fn reassignment_int_to_annotated_float_passes_by_coercion() {
         // `f: Float = 1.0; f = 2` — Int → Float via coercion.
         assert_ok(
             "let f: Float = 1.0\n\
@@ -14361,7 +14361,7 @@ mod tests {
     }
 
     #[test]
-    fn re_anotacion_con_otro_tipo_pasa_como_redeclaracion() {
+    fn re_annotation_with_other_type_passes_as_redeclaration() {
         // `m: Int = 1; m: Str = "x"` — the second `m: Str = ...` is
         // an explicit redeclaration; the gradual model allows it
         // (the evaluator does the same). The bug closed by this debt
@@ -14373,7 +14373,7 @@ mod tests {
     }
 
     #[test]
-    fn match_result_con_ok_wildcard_y_err_wildcard_es_exhaustivo() {
+    fn match_result_with_ok_wildcard_and_err_wildcard_is_exhaustive() {
         // `Ok(_)` and `Err(_)` cover the two variants — nothing missing.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
@@ -14385,7 +14385,7 @@ mod tests {
     }
 
     #[test]
-    fn match_result_con_solo_ok_wildcard_falta_err() {
+    fn match_result_with_only_ok_wildcard_missing_err() {
         // OkWildcard counts as the Ok variant, not as a catch-all.
         // If Err is missing, exhaustiveness error.
         assert_error_with(
@@ -14400,7 +14400,7 @@ mod tests {
     // ---- R.2.1: or-patterns in exhaustiveness ----
 
     #[test]
-    fn or_pattern_ok_wildcard_y_err_wildcard_juntos_es_exhaustivo() {
+    fn or_pattern_ok_wildcard_and_err_wildcard_together_is_exhaustive() {
         // `Ok(_) | Err(_)` in a single arm covers both variants —
         // `update_result_coverage` recurses on `Pattern::Or`.
         assert_ok(
@@ -14410,7 +14410,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_solo_ok_wildcards_combinados_falta_err() {
+    fn or_pattern_only_ok_wildcards_combined_missing_err() {
         // `Ok(_) | Ok(_) =>` only covers Ok, missing Err.
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
@@ -14420,13 +14420,13 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_con_literales_int_no_dispara_exhaustividad() {
+    fn or_pattern_with_int_literals_does_not_trigger_exhaustiveness() {
         // Scrutinee `Int`, not `Result`. `1 | 2 | 3` is OK with `_`.
         assert_ok("let s = match 1 { 1 | 2 | 3 => \"chico\", _ => \"otro\" }");
     }
 
     #[test]
-    fn or_pattern_strings_homogeneo() {
+    fn or_pattern_strings_homogeneous() {
         assert_ok(
             "let d = \"lun\"\n\
              let s = match d { \"lun\" | \"mar\" | \"mie\" => \"laboral\", _ => \"x\" }",
@@ -14434,7 +14434,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_con_wildcard_subcase_es_catchall() {
+    fn or_pattern_with_wildcard_subcase_is_catchall() {
         // If a sub-pattern of the Or is `_`, the arm is catch-all
         // (covers anything). Although in practice the user wouldn't
         // write `Ok(_) | _`, we validate it recurses correctly.
@@ -14447,12 +14447,12 @@ mod tests {
     // ---- R.2.2: guards in match ----
 
     #[test]
-    fn guard_bool_es_valido() {
+    fn guard_bool_is_valid() {
         assert_ok("let s = match 5 { x if x > 0 => \"pos\", _ => \"neg\" }");
     }
 
     #[test]
-    fn guard_no_bool_es_error() {
+    fn guard_non_bool_is_error() {
         // `x if x` with x: Int → guard is not Bool.
         assert_error_with(
             "let s = match 5 { x if x => \"y\", _ => \"z\" }",
@@ -14461,7 +14461,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_referencia_binding_del_pattern() {
+    fn guard_references_pattern_binding() {
         // The pattern binding (`v` from `Ok(v)`) must be visible
         // in the guard.
         assert_ok(
@@ -14471,7 +14471,7 @@ mod tests {
     }
 
     #[test]
-    fn arm_con_guard_no_cuenta_para_exhaustividad_result() {
+    fn arm_with_guard_does_not_count_for_result_exhaustiveness() {
         // Only `Ok(_) if true` covers Ok with guard; doesn't count as Ok
         // and Err is missing.
         assert_error_with(
@@ -14482,7 +14482,7 @@ mod tests {
     }
 
     #[test]
-    fn arm_con_guard_no_cuenta_como_catchall() {
+    fn arm_with_guard_does_not_count_as_catchall() {
         // `_ if cond` is not a real catch-all (cond may be false).
         assert_error_with(
             "let r: Result<Int> = Ok(1)\n\
@@ -14492,7 +14492,7 @@ mod tests {
     }
 
     #[test]
-    fn arm_con_guard_seguido_de_catchall_es_exhaustivo() {
+    fn arm_with_guard_followed_by_catchall_is_exhaustive() {
         // With a catch-all without guard at the end, the match is exhaustive.
         assert_ok(
             "let r: Result<Int> = Ok(1)\n\
@@ -14503,12 +14503,12 @@ mod tests {
     // ---- R.2.4 (F3): orphan return/break/continue ----
 
     #[test]
-    fn return_huerfano_top_level_es_error() {
+    fn orphan_return_top_level_is_error() {
         assert_error_with("return 42", &["return", "función"]);
     }
 
     #[test]
-    fn return_adentro_de_fn_es_valido() {
+    fn return_inside_fn_is_valid() {
         assert_ok(
             "fn f() -> Int { return 42 }\n\
              let x = f()",
@@ -14516,17 +14516,17 @@ mod tests {
     }
 
     #[test]
-    fn break_huerfano_top_level_es_error() {
+    fn orphan_break_top_level_is_error() {
         assert_error_with("break", &["break", "loop"]);
     }
 
     #[test]
-    fn continue_huerfano_top_level_es_error() {
+    fn orphan_continue_top_level_is_error() {
         assert_error_with("continue", &["continue", "loop"]);
     }
 
     #[test]
-    fn break_adentro_de_for_es_valido() {
+    fn break_inside_for_is_valid() {
         assert_ok(
             "for i in 0..5 {\n\
                  if i == 3 { break }\n\
@@ -14535,7 +14535,7 @@ mod tests {
     }
 
     #[test]
-    fn continue_adentro_de_while_es_valido() {
+    fn continue_inside_while_is_valid() {
         assert_ok(
             "let x = 0\n\
              while (x < 10) {\n\
@@ -14546,7 +14546,7 @@ mod tests {
     }
 
     #[test]
-    fn break_adentro_de_loop_es_valido() {
+    fn break_inside_loop_is_valid() {
         assert_ok(
             "loop {\n\
                  break\n\
@@ -14555,7 +14555,7 @@ mod tests {
     }
 
     #[test]
-    fn break_anidado_dos_loops_es_valido() {
+    fn nested_break_two_loops_is_valid() {
         assert_ok(
             "for i in 0..3 {\n\
                  for j in 0..3 {\n\
@@ -14566,7 +14566,7 @@ mod tests {
     }
 
     #[test]
-    fn break_adentro_de_fn_interna_no_escapa_loop_externo() {
+    fn break_inside_inner_fn_does_not_escape_outer_loop() {
         // Fitz's parser does NOT allow nested fns (top-level only),
         // but FnExpr (closures) is allowed. break inside a closure
         // that appears inside a loop is NOT inside a loop
@@ -14583,7 +14583,7 @@ mod tests {
     }
 
     #[test]
-    fn return_huerfano_y_break_huerfano_ambos_reportados() {
+    fn orphan_return_and_orphan_break_both_reported() {
         // Both errors should appear in the same program.
         let (_, errors) = check_str("return 42\nbreak");
         let return_errs = errors
@@ -14607,7 +14607,7 @@ mod tests {
     // ---- R.3: custom methods on type ----
 
     #[test]
-    fn metodo_lee_field_como_local_es_valido() {
+    fn method_reads_field_as_local_is_valid() {
         assert_ok(
             "type U {\n\
                  name: Str\n\
@@ -14617,7 +14617,7 @@ mod tests {
     }
 
     #[test]
-    fn metodo_con_typo_en_field_es_error() {
+    fn method_with_field_typo_is_error() {
         assert_error_with(
             "type U {\n\
                  name: Str\n\
@@ -14628,7 +14628,7 @@ mod tests {
     }
 
     #[test]
-    fn metodo_con_return_type_mismatch_es_error() {
+    fn method_with_return_type_mismatch_is_error() {
         assert_error_with(
             "type U {\n\
                  count: Int\n\
@@ -14639,7 +14639,7 @@ mod tests {
     }
 
     #[test]
-    fn metodo_con_param_no_bool_en_if_es_error() {
+    fn method_with_non_bool_param_in_if_is_error() {
         assert_error_with(
             "type U {\n\
                  fn check(n: Int) -> Bool {\n\
@@ -14652,7 +14652,7 @@ mod tests {
     }
 
     #[test]
-    fn metodo_param_shadowea_field_compila() {
+    fn method_param_shadows_field_compiles() {
         // When a param has the same name as a field, the
         // param wins in scope. The checker allows the combination
         // without error.
@@ -14665,7 +14665,7 @@ mod tests {
     }
 
     #[test]
-    fn metodo_break_es_orfano_si_no_hay_loop_local() {
+    fn method_break_is_orphan_if_no_local_loop() {
         // A `break` inside the body of a method without a local loop is
         // orphan. (R.2.4 resets loop_depth at each fn body.)
         assert_error_with(
@@ -14679,7 +14679,7 @@ mod tests {
     }
 
     #[test]
-    fn reasignacion_anotada_propaga_a_uso_posterior() {
+    fn reassignment_annotated_propagates_to_later_use() {
         // Verify that the binding is still `Int` after an
         // incompatible reassignment attempt: the subsequent use
         // expects Int.
@@ -14715,7 +14715,7 @@ mod tests {
     // ---- Function type `Fn(...) -> U` (higher-order, F12) ----
 
     #[test]
-    fn type_expr_function_resuelve_a_type_function() {
+    fn type_expr_function_resolves_to_type_function() {
         // type Box { f: Fn(Int) -> Int } — the field has a function type.
         let (env, errors) = resolve_str("type Box { f: Fn(Int) -> Int }");
         assert!(errors.is_empty(), "errores: {:?}", errors);
@@ -14731,7 +14731,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_function_sin_params_resuelve() {
+    fn type_expr_function_without_params_resolves() {
         let (env, errors) = resolve_str("type Lazy { f: Fn() -> Str }");
         assert!(errors.is_empty(), "errores: {:?}", errors);
         let id = env.lookup("Lazy").unwrap();
@@ -14746,7 +14746,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_function_higher_order_resuelve() {
+    fn type_expr_function_higher_order_resolves() {
         // Fn(Fn(Int) -> Int, Int) -> Int — param is itself a function.
         let (env, errors) = resolve_str("type Apply { f: Fn(Fn(Int) -> Int, Int) -> Int }");
         assert!(errors.is_empty(), "errores: {:?}", errors);
@@ -14766,7 +14766,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_function_con_tipo_inexistente_reporta_error() {
+    fn type_expr_function_with_nonexistent_type_reports_error() {
         let (_, errors) = resolve_str("type Box { f: Fn(NoExiste) -> Int }");
         assert!(!errors.is_empty(), "esperaba error, hubo: {:?}", errors);
         let combined: String = errors.iter().map(|e| e.message.clone()).collect();
@@ -14774,14 +14774,14 @@ mod tests {
     }
 
     #[test]
-    fn anotacion_function_en_param_de_fndef_pasa_checker() {
+    fn function_annotation_in_fndef_param_passes_checker() {
         // fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
         // The checker must type the call `f(x)` against the signature.
         assert_ok("fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }");
     }
 
     #[test]
-    fn anotacion_function_en_param_detecta_aridad_mala() {
+    fn function_annotation_in_param_detects_bad_arity() {
         // apply passes 2 args to an f that takes 1.
         assert_error_with(
             "fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x, x) }",
@@ -14810,7 +14810,7 @@ mod tests {
     }
 
     #[test]
-    fn span_binop_apunta_a_columna_del_operador() {
+    fn span_binop_points_to_operator_column() {
         // `let x: Int = 1 + "a"` — `+` is at column 16. The error
         // now reports the column of the operator, not the column of the `let`.
         let e = first_error("let x: Int = 1 + \"a\"");
@@ -14820,7 +14820,7 @@ mod tests {
     }
 
     #[test]
-    fn span_call_aridad_apunta_a_paren_del_call() {
+    fn span_call_arity_points_to_call_paren() {
         // `fn f(x: Int) -> Int => x` and `let _ = f(1, 2)` — the `(` of the
         // call is at column 41 (after `fn f(x: Int) -> Int => x\n`,
         // accounting that `let _ = f(` starts on line 2).
@@ -14833,7 +14833,7 @@ mod tests {
     }
 
     #[test]
-    fn span_call_arg_apunta_al_argumento_concreto() {
+    fn span_call_arg_points_to_concrete_argument() {
         // The "argument N expects X, received Y" error points to the
         // argument, not to the `(`. Lets us distinguish which of several args
         // has the wrong type.
@@ -14850,7 +14850,7 @@ mod tests {
     }
 
     #[test]
-    fn span_unary_apunta_al_menos() {
+    fn span_unary_points_to_minus() {
         // `let s = -"a"` — `-` is at column 9.
         let e = first_error("let s = -\"a\"");
         assert_eq!(e.line, 1);
@@ -14859,7 +14859,7 @@ mod tests {
     }
 
     #[test]
-    fn span_index_apunta_al_indice_concreto() {
+    fn span_index_points_to_concrete_index() {
         // `let xs: List<Int> = [1, 2, 3]\nlet _ = xs["k"]` — `"k"`
         // is at column 12 of line 2.
         let src = "let xs: List<Int> = [1, 2, 3]\nlet _ = xs[\"k\"]";
@@ -14871,7 +14871,7 @@ mod tests {
     }
 
     #[test]
-    fn span_field_struct_extra_apunta_al_valor_del_extra() {
+    fn span_field_struct_extra_points_to_extra_value() {
         // `type U { id: Int }; let u = U { id: 1, x: 2 }` — the `2` of the
         // extra field is at column 44.
         let src = "type U { id: Int }\nlet u = U { id: 1, x: 2 }";
@@ -14887,7 +14887,7 @@ mod tests {
     }
 
     #[test]
-    fn span_ident_desconocido_apunta_al_ident() {
+    fn span_unknown_ident_points_to_ident() {
         // `let _ = no_existe` — `no_existe` starts at column 9.
         let e = first_error("let _ = no_existe");
         assert_eq!(e.line, 1);
@@ -14896,7 +14896,7 @@ mod tests {
     }
 
     #[test]
-    fn span_try_apunta_al_signo_pregunta() {
+    fn span_try_points_to_question_mark() {
         // `let _ = 42?` — `?` is at column 11.
         let e = first_error("let _ = 42?");
         assert_eq!(e.line, 1);
@@ -14905,7 +14905,7 @@ mod tests {
     }
 
     #[test]
-    fn span_range_apunta_al_extremo_problematico() {
+    fn span_range_points_to_problematic_extreme() {
         // `let _ = 1..\"a\"` — `"a"` is at column 12.
         let e = first_error("let _ = 1..\"a\"");
         assert_eq!(e.line, 1);
@@ -14925,7 +14925,7 @@ mod tests {
     // always runs.
 
     #[test]
-    fn checker_from_python_import_bindea_como_pyany_no_any() {
+    fn checker_from_python_import_binds_as_pyany_not_any() {
         // The checker accepts `from python import math` and binds `math`
         // with type PyAny. Any use goes through the asymmetric rules
         // of PyAny (calls → Result<Any>, field access → PyAny).
@@ -14934,7 +14934,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_call_python_tipa_como_result_any() {
+    fn checker_call_python_types_as_result_any() {
         // 8.4.2 (landed alongside 8.4.1): the call `math.sqrt(16.0)`
         // types as `Result<Any>` — using the result as `Float`
         // directly WITHOUT unpacking fires a type error.
@@ -14945,7 +14945,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_call_python_con_match_compila_limpio() {
+    fn checker_call_python_with_match_compiles_clean() {
         // The canonical pattern (match to unpack) types OK.
         // Covers the exhaustiveness rule over Result (5.3.3) — `Ok`
         // + `Err` exhaustive is enough.
@@ -14957,7 +14957,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_call_python_match_no_exhaustivo_es_error() {
+    fn checker_call_python_match_non_exhaustive_is_error() {
         // The 5.3.3 rule now applies to Python calls: a `match` that
         // omits `Err` (without catch-all) fires an exhaustiveness error
         // because the scrutinee types as Result<Any>.
@@ -14969,7 +14969,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_try_operator_sobre_call_python_compila_dentro_de_fn_result() {
+    fn checker_try_operator_on_call_python_compiles_inside_fn_result() {
         // `?` inside a fn that returns `Result<T>` unpacks
         // the Python `Result<Any>` to the internal `Any` (which matches
         // any T via gradual). On success returns the value; on
@@ -14982,7 +14982,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_try_operator_sobre_call_python_fn_no_result_es_error() {
+    fn checker_try_operator_on_call_python_fn_non_result_is_error() {
         // The 5.3.3 rule on `?` also applies to Python calls:
         // inside a fn that returns `Int` (not `Result<...>`), `?`
         // on `math.sqrt(...)` fires an error because the container
@@ -14997,7 +14997,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_field_access_sobre_pyany_devuelve_pyany() {
+    fn checker_field_access_on_pyany_returns_pyany() {
         // `os.path` is field access over PyAny — the type of the binding
         // is still PyAny. The check passes without errors and a call
         // on the submodule (`os.path.join(...)`) keeps typing
@@ -15011,7 +15011,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_pyany_es_compatible_con_anotacion_concreta() {
+    fn checker_pyany_is_compatible_with_concrete_annotation() {
         // The canonical roadmap pattern: `let row: User = py_call()?`.
         // Statically, `?` unpacks Result<Any> to Any; the
         // User annotation passes via gradual escape (PyAny/Any → User).
@@ -15025,7 +15025,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_import_normal_no_es_pyany() {
+    fn checker_normal_import_is_not_pyany() {
         // `import utils` (without `python` prefix) is still Any,
         // not PyAny — the logic that refines calls to Result<Any> only
         // applies to `from python import`. Validation: a call to
@@ -15040,7 +15040,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn vp_field_access_desde_afuera_es_error() {
+    fn vp_field_access_from_outside_is_error() {
         let (_, errors) = check_str("type C { _x: Int = 0 }\nlet c = C {}\nprint(c._x)\n");
         assert!(
             errors
@@ -15052,7 +15052,7 @@ mod tests {
     }
 
     #[test]
-    fn vp_field_access_desde_adentro_de_metodo_es_ok() {
+    fn vp_field_access_from_inside_method_is_ok() {
         // The method already has `_x` as local (option A), but if the
         // method receives another instance of the same type and accesses
         // `other._x`, that must also be allowed.
@@ -15070,7 +15070,7 @@ mod tests {
     }
 
     #[test]
-    fn vp_field_access_desde_metodo_de_otro_tipo_es_error() {
+    fn vp_field_access_from_method_of_other_type_is_error() {
         let (_, errors) = check_str(
             "type A { _x: Int = 0 }\n\
              type B {\n\
@@ -15085,7 +15085,7 @@ mod tests {
     }
 
     #[test]
-    fn vp_struct_lit_con_field_privado_desde_afuera_es_error() {
+    fn vp_struct_lit_with_private_field_from_outside_is_error() {
         let (_, errors) = check_str(
             "type C { name: Str = \"\", _balance: Int = 0 }\n\
              let c = C { name: \"x\", _balance: 100 }\n",
@@ -15100,7 +15100,7 @@ mod tests {
     }
 
     #[test]
-    fn vp_struct_lit_con_field_privado_desde_adentro_es_ok() {
+    fn vp_struct_lit_with_private_field_from_inside_is_ok() {
         // Canonical pattern: `static fn new(...)` builds via struct lit
         // with the `_field` private fields. Inside the type body it's legitimate.
         let (_, errors) = check_str(
@@ -15117,7 +15117,7 @@ mod tests {
     }
 
     #[test]
-    fn vp_field_assign_a_field_privado_desde_afuera_es_error() {
+    fn vp_field_assign_to_private_field_from_outside_is_error() {
         let (_, errors) = check_str("type C { _x: Int = 0 }\nlet c = C {}\nc._x = 5\n");
         assert!(
             errors.iter().any(|e| e.message.contains("privado")),
@@ -15129,7 +15129,7 @@ mod tests {
     // ---- Mini-batch Vm — private methods (`_method`) ----
 
     #[test]
-    fn vm_call_a_metodo_privado_desde_afuera_es_error() {
+    fn vm_call_to_private_method_from_outside_is_error() {
         let (_, errors) = check_str(
             "type C {\n\
                  fn _hidden() -> Int { return 42 }\n\
@@ -15147,7 +15147,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_call_a_metodo_privado_desde_adentro_es_ok() {
+    fn vm_call_to_private_method_from_inside_is_ok() {
         // Using `static fn` to pass the instance and call the
         // private one (the canonical pattern — instance methods
         // can't call other methods of the same type without
@@ -15167,7 +15167,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_call_a_metodo_privado_desde_otro_tipo_es_error() {
+    fn vm_call_to_private_method_from_other_type_is_error() {
         let (_, errors) = check_str(
             "type A { fn _hidden() -> Int { return 1 } }\n\
              type B {\n\
@@ -15182,7 +15182,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_metodo_publico_no_se_afecta_por_la_regla() {
+    fn vm_public_method_is_not_affected_by_rule() {
         let (_, errors) = check_str(
             "type C {\n\
                  fn greet() -> Str { return \"hola\" }\n\
@@ -15194,7 +15194,7 @@ mod tests {
     }
 
     #[test]
-    fn vp_field_publico_no_se_afecta_por_la_regla() {
+    fn vp_public_field_is_not_affected_by_rule() {
         // Sanity: fields without `_` prefix are still public.
         let (_, errors) = check_str("type C { x: Int = 0 }\nlet c = C { x: 5 }\nprint(c.x)\n");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
@@ -15221,7 +15221,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_stmt_error_no_emite_errores_propios() {
+    fn checker_stmt_error_does_not_emit_own_errors() {
         // The parser produces a `Stmt::Error` in place of the broken
         // stmt. The checker must not add any error on that
         // node (real errors live in the parser's list).
@@ -15235,7 +15235,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_stmt_error_silencioso_pero_errores_reales_se_reportan() {
+    fn checker_stmt_error_silent_but_real_errors_are_reported() {
         // The checker silences the Stmt::Error but keeps reporting
         // genuine errors from valid code. The `let z: Int = "no"`
         // has an incompatible type — the checker must catch it even if
@@ -15253,7 +15253,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_stmt_error_en_fn_body_no_aborta_check() {
+    fn checker_stmt_error_in_fn_body_does_not_abort_check() {
         // `fn foo() { ... }` with a broken stmt inside: the checker
         // keeps checking the rest of the program (the `bar` fn and its
         // incorrect type annotation) without aborting because of the
@@ -15273,7 +15273,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_pipeline_recovering_no_panic_sobre_buffer_muy_roto() {
+    fn checker_pipeline_recovering_does_not_panic_on_very_broken_buffer() {
         // Smoke: a program peppered with errors must not crash the
         // checker. The real validation is that `check_program` returns
         // (no panic) on the AST with several Error nodes.
@@ -15291,7 +15291,7 @@ mod tests {
     }
 
     #[test]
-    fn checker_expr_error_se_propaga_como_any_sin_emitir_error() {
+    fn checker_expr_error_propagates_as_any_without_emitting_error() {
         // `Expr::Error` directly in the AST must synthesize `Type::Any`
         // and not emit any error from the checker. We build the
         // node manually because the parser in 9.0.1 only produces
@@ -15336,7 +15336,7 @@ mod tests {
     }
 
     #[test]
-    fn types_info_persiste_tipos_de_literales() {
+    fn types_info_persists_literal_types() {
         // Program with one literal of each primitive. Each one must
         // end up in the side-table with the corresponding type.
         let info =
@@ -15380,7 +15380,7 @@ mod tests {
     }
 
     #[test]
-    fn types_info_persiste_ident_y_binop() {
+    fn types_info_persists_ident_and_binop() {
         // `let x = 10` declares x: Int. `let y = x + 5` accesses the
         // ident `x` (must type Int) and produces a BinOp (must type
         // Int as well).
@@ -15400,7 +15400,7 @@ mod tests {
     }
 
     #[test]
-    fn types_info_persiste_call_y_field() {
+    fn types_info_persists_call_and_field() {
         // Program with custom type + fn call + field access. Each
         // `Expr` node must be persisted with its synthesized type.
         let src = "\
@@ -15435,7 +15435,7 @@ let s = greet(u)
     }
 
     #[test]
-    fn types_info_persiste_match_arms() {
+    fn types_info_persists_match_arms() {
         // Match over Result<Int>: each arm types its body, the whole
         // match inherits the type of the first arm. We verify that some
         // node from the branches has been persisted.
@@ -15465,7 +15465,7 @@ let v = match r {
     }
 
     #[test]
-    fn types_info_omite_span_zero() {
+    fn types_info_omits_span_zero() {
         // We build a program with a synthetic node (Span::ZERO)
         // and validate that it does NOT appear in the side-table. The policy
         // documented in `TypeInfo::record` is to omit Span::ZERO to
@@ -15491,7 +15491,7 @@ let v = match r {
     }
 
     #[test]
-    fn types_info_expr_error_se_persiste_como_any() {
+    fn types_info_expr_error_persists_as_any() {
         // A `Stmt::Assign` with `Expr::Error` as value must persist
         // the Error node as `Type::Any` in the side-table (as long as
         // its span is known). Policy documented in `TypeInfo` —
@@ -15515,7 +15515,7 @@ let v = match r {
     }
 
     #[test]
-    fn types_info_type_at_devuelve_none_para_span_desconocido() {
+    fn types_info_type_at_returns_none_for_unknown_span() {
         // Lookup by a span the checker never registered must
         // return None. Typical case: the LSP requests hover over an
         // empty position (between tokens).
@@ -15533,7 +15533,7 @@ let v = match r {
     }
 
     #[test]
-    fn types_info_smoke_programa_real() {
+    fn types_info_smoke_real_program() {
         // Smoke on a program with a variety of constructs. We don't
         // match the exact N (fragile against future
         // parser/checker changes), only a conservative floor: at least
@@ -15571,7 +15571,7 @@ print(total)
     }
 
     #[test]
-    fn def_info_registra_uso_de_variable_local() {
+    fn def_info_registers_local_variable_use() {
         // `let x = 1` on line 1, `let y = x` on line 2. The use of
         // `x` on line 2 must register (use_span, def_span) with
         // def_span pointing to the Stmt::Assign on line 1.
@@ -15590,7 +15590,7 @@ print(total)
     }
 
     #[test]
-    fn def_info_no_registra_builtins() {
+    fn def_info_does_not_register_builtins() {
         // `print` is a builtin with def_span = Span::ZERO. Using `print`
         // must not add entries to DefinitionInfo (Span::ZERO is
         // omitted by policy — there's no file to jump to).
@@ -15606,7 +15606,7 @@ print(total)
     }
 
     #[test]
-    fn def_info_registra_uso_de_fn_top_level() {
+    fn def_info_registers_top_level_fn_use() {
         // `fn dobla(n: Int) -> Int => n * 2` on line 1.
         // `dobla(21)` on line 2 — the use of the name `dobla` must
         // register def_span on line 1.
@@ -15621,7 +15621,7 @@ print(total)
     }
 
     #[test]
-    fn def_info_registra_uso_de_param_de_fn() {
+    fn def_info_registers_fn_param_use() {
         // The use of the param `n` inside the body of `fn dobla` is
         // registered as Ident with def_span on the FnDef's line
         // (without own span in `Param`, we approximate to the FnDef).
@@ -15636,7 +15636,7 @@ print(total)
     }
 
     #[test]
-    fn def_info_definition_at_devuelve_none_para_span_desconocido() {
+    fn def_info_definition_at_returns_none_for_unknown_span() {
         let defs = defs_of("let x = 1\nlet y = x\n");
         assert!(
             defs.definition_at(Span::new(999, 999)).is_none(),
@@ -15649,7 +15649,7 @@ print(total)
     }
 
     #[test]
-    fn def_info_no_registra_uso_de_ident_no_definido() {
+    fn def_info_does_not_register_undefined_ident_use() {
         // The ident `nope` doesn't exist in scope — the checker emits
         // an error, but must not register entries in DefinitionInfo
         // (no binding to point to).
@@ -15664,7 +15664,7 @@ print(total)
     // ---- Mini-batch C — list comprehensions ----
 
     #[test]
-    fn checker_list_comp_simple_tipa_como_list_del_expr() {
+    fn checker_list_comp_simple_types_as_list_of_expr() {
         // `[x * 2 for x in [1, 2, 3]]` must type as `List<Int>`
         // (the expr is Int, the iter is List<Int>).
         let src = "let r: List<Int> = [x * 2 for x in [1, 2, 3]]\n";
@@ -15673,7 +15673,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_comp_sobre_range_tipa_int_en_var() {
+    fn checker_list_comp_on_range_types_int_in_var() {
         // The comprehension var over Range must type Int.
         // If the expr uses `var * 2`, the result is List<Int>.
         let src = "let r: List<Int> = [n * 2 for n in 0..10]\n";
@@ -15682,7 +15682,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_comp_filter_no_bool_es_error() {
+    fn checker_list_comp_filter_non_bool_is_error() {
         // The filter must be `Bool`. If it's Int → type error.
         let src = "let r = [x for x in [1, 2, 3] if x]\n";
         let errors = check_recovering(src);
@@ -15696,7 +15696,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_comp_iter_no_iterable_es_error() {
+    fn checker_list_comp_iter_non_iterable_is_error() {
         // Iter Int → type error (not List nor Range).
         let src = "let r = [x for x in 42]\n";
         let errors = check_recovering(src);
@@ -15710,7 +15710,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_comp_var_no_escapa_al_caller() {
+    fn checker_list_comp_var_does_not_escape_to_caller() {
         // The var's local scope means that after the comprehension,
         // `x` is not visible outside. Using `x` outside must emit
         // "variable not defined".
@@ -15727,14 +15727,14 @@ print(total)
     // ---- Mini-batch Fm — format spec compatibility ----
 
     #[test]
-    fn checker_fm_spec_f_con_float_compila_limpio() {
+    fn checker_fm_spec_f_with_float_compiles_clean() {
         let src = "let x: Float = 3.14\nlet s = \"{x:.2f}\"\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 
     #[test]
-    fn checker_fm_spec_f_con_int_compila_limpio() {
+    fn checker_fm_spec_f_with_int_compiles_clean() {
         // Transparent Int → Float promotion.
         let src = "let n: Int = 42\nlet s = \"{n:.2f}\"\n";
         let errors = check_recovering(src);
@@ -15742,7 +15742,7 @@ print(total)
     }
 
     #[test]
-    fn checker_fm_spec_f_con_str_es_error() {
+    fn checker_fm_spec_f_with_str_is_error() {
         let src = "let s: Str = \"hola\"\nlet r = \"{s:.2f}\"\n";
         let errors = check_recovering(src);
         assert!(
@@ -15755,7 +15755,7 @@ print(total)
     }
 
     #[test]
-    fn checker_fm_spec_d_con_float_es_error() {
+    fn checker_fm_spec_d_with_float_is_error() {
         let src = "let x: Float = 3.14\nlet r = \"{x:d}\"\n";
         let errors = check_recovering(src);
         assert!(
@@ -15768,7 +15768,7 @@ print(total)
     }
 
     #[test]
-    fn checker_fm_spec_string_es_compatible_con_cualquier_tipo() {
+    fn checker_fm_spec_string_is_compatible_with_any_type() {
         // The `s` kind accepts any type (via Display).
         let src = "let n: Int = 42\nlet r = \"{n:s}\"\n";
         let errors = check_recovering(src);
@@ -15778,7 +15778,7 @@ print(total)
     // ---- Mini-batch Md — for with Pattern in `var` ----
 
     #[test]
-    fn checker_for_tuple_pattern_sobre_map_bindea_k_y_v_con_tipos_correctos() {
+    fn checker_for_tuple_pattern_on_map_binds_k_and_v_with_correct_types() {
         // `for (k, v) in m` with m: Map<Str, Int> must bind k: Str and v: Int.
         // If I use them correctly, no errors.
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nfor (k, v) in m {\n    let len_k: Int = k.len()\n    let v2: Int = v + 1\n}\n";
@@ -15787,7 +15787,7 @@ print(total)
     }
 
     #[test]
-    fn checker_for_wildcard_pattern_compila_sin_binding() {
+    fn checker_for_wildcard_pattern_compiles_without_binding() {
         // `for _ in xs` binds nothing, must not error even if `_`
         // would be used inside the body (doesn't exist).
         let src = "let xs: List<Int> = [1, 2, 3]\nfor _ in xs {\n    print(\"hola\")\n}\n";
@@ -15796,7 +15796,7 @@ print(total)
     }
 
     #[test]
-    fn checker_for_tuple_pattern_sobre_list_es_error() {
+    fn checker_for_tuple_pattern_on_list_is_error() {
         // `for (a, b) in xs` with xs: List<Int> makes no sense — error.
         let src = "let xs: List<Int> = [1, 2, 3]\nfor (a, b) in xs {\n    print(a)\n}\n";
         let errors = check_recovering(src);
@@ -15808,7 +15808,7 @@ print(total)
     }
 
     #[test]
-    fn checker_for_pattern_int_literal_es_error() {
+    fn checker_for_pattern_int_literal_is_error() {
         // `for 42 in xs` — literal pattern not allowed as for var.
         let src = "for 42 in [1, 2] { print(\"x\") }\n";
         let errors = check_recovering(src);
@@ -15824,7 +15824,7 @@ print(total)
     // ---- Mini-batch It — iterators enumerate/zip/chain ----
 
     #[test]
-    fn checker_list_enumerate_tipa_como_list_tuple_int_t() {
+    fn checker_list_enumerate_types_as_list_tuple_int_t() {
         // `xs.enumerate()` with xs: List<Int> must type `List<(Int, Int)>`.
         let src = "let xs: List<Int> = [1, 2, 3]\nlet ys: List<(Int, Int)> = xs.enumerate()\n";
         let errors = check_recovering(src);
@@ -15832,7 +15832,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_zip_con_tipos_distintos_tipa_list_tuple_t_u() {
+    fn checker_list_zip_with_different_types_types_list_tuple_t_u() {
         // `xs.zip(ys)` with xs: List<Int>, ys: List<Str> must type
         // `List<(Int, Str)>`.
         let src =
@@ -15842,7 +15842,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_chain_con_tipos_iguales_compila() {
+    fn checker_list_chain_with_equal_types_compiles() {
         // `xs.chain(ys)` with both List<Int> must type `List<Int>`.
         let src =
             "let xs: List<Int> = [1, 2]\nlet ys: List<Int> = [3, 4]\nlet zs: List<Int> = xs.chain(ys)\n";
@@ -15851,7 +15851,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_chain_con_tipos_incompatibles_es_error() {
+    fn checker_list_chain_with_incompatible_types_is_error() {
         // `xs.chain(ys)` with xs: List<Int>, ys: List<Str> → error.
         let src =
             "let xs: List<Int> = [1, 2]\nlet ys: List<Str> = [\"a\"]\nlet zs = xs.chain(ys)\n";
@@ -15870,14 +15870,14 @@ print(total)
     // ---- Mini-batch Re+ — Type::Result { ok, err } typed ----
 
     #[test]
-    fn checker_re_plus_result_t_e_anotacion_explicita() {
+    fn checker_re_plus_result_t_e_explicit_annotation() {
         let src = "type ApiError { status: Int, msg: Str }\nfn fetch() -> Result<Int, ApiError> {\n    return Err(ApiError { status: 503, msg: \"down\" })\n}\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 
     #[test]
-    fn checker_re_plus_match_err_bindea_e_con_tipo_inferido() {
+    fn checker_re_plus_match_err_binds_e_with_inferred_type() {
         // The `e` binding from `Err(e)` now types with the E of the Result.
         let src = "type ApiError { status: Int, msg: Str }\nfn fetch() -> Result<Int, ApiError> {\n    return Err(ApiError { status: 503, msg: \"x\" })\n}\nlet code: Int = match fetch() {\n    Ok(v) => v,\n    Err(e) => e.status\n}\n";
         let errors = check_recovering(src);
@@ -15885,7 +15885,7 @@ print(total)
     }
 
     #[test]
-    fn checker_re_plus_result_legacy_sin_e_explicito_sigue_andando() {
+    fn checker_re_plus_result_legacy_without_explicit_e_still_works() {
         // `Result<T>` without E must keep working (default Str).
         let src = "fn div(a: Int, b: Int) -> Result<Int> {\n    if b == 0 { return Err(\"zero\") }\n    return Ok(a / b)\n}\n";
         let errors = check_recovering(src);
@@ -15893,7 +15893,7 @@ print(total)
     }
 
     #[test]
-    fn checker_re_plus_result_aridad_invalida_es_error() {
+    fn checker_re_plus_result_invalid_arity_is_error() {
         // `Result<T, E, X>` with 3 args is an error.
         let src = "let r: Result<Int, Str, Bool> = Ok(1)\n";
         let errors = check_recovering(src);
@@ -15907,7 +15907,7 @@ print(total)
     }
 
     #[test]
-    fn checker_re_plus_result_display_con_e_concreto() {
+    fn checker_re_plus_result_display_with_concrete_e() {
         use crate::types::Type;
         let env = TypeEnv::default();
         let r1 = Type::Result {
@@ -15925,14 +15925,14 @@ print(total)
     }
 
     #[test]
-    fn checker_bits_sobre_int_es_ok() {
+    fn checker_bits_on_int_is_ok() {
         let src = "let a: Int = 5 & 3\nlet b: Int = 5 | 3\nlet c: Int = 5 ^ 3\nlet d: Int = 1 << 4\nlet e: Int = ~0\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 
     #[test]
-    fn checker_bits_sobre_float_es_error() {
+    fn checker_bits_on_float_is_error() {
         let src = "let r = 3.14 & 2\n";
         let errors = check_recovering(src);
         assert!(
@@ -15945,7 +15945,7 @@ print(total)
     }
 
     #[test]
-    fn checker_bits_sobre_bool_es_error() {
+    fn checker_bits_on_bool_is_error() {
         let src = "let r = true & false\n";
         let errors = check_recovering(src);
         assert!(
@@ -15958,7 +15958,7 @@ print(total)
     }
 
     #[test]
-    fn checker_bitnot_sobre_float_es_error() {
+    fn checker_bitnot_on_float_is_error() {
         let src = "let r = ~3.14\n";
         let errors = check_recovering(src);
         assert!(
@@ -15971,7 +15971,7 @@ print(total)
     }
 
     #[test]
-    fn checker_list_enumerate_se_compone_con_for_destructuring_de_md() {
+    fn checker_list_enumerate_composes_with_md_for_destructuring() {
         // The canonical case that motivates the mini-batch: `for (i, x) in xs.enumerate()`.
         let src = "let xs: List<Str> = [\"a\", \"b\"]\nfor (i, x) in xs.enumerate() {\n    let idx: Int = i\n    let val: Str = x\n}\n";
         let errors = check_recovering(src);
@@ -15981,7 +15981,7 @@ print(total)
     // ---- Mini-batch Math + Mb9 + Int/Float methods ----
 
     #[test]
-    fn math_builtins_polimorficos_aceptan_int_y_float() {
+    fn math_builtins_polymorphic_accept_int_and_float() {
         // Math builtins type as Any in scope[0] — codegen
         // does the concrete dispatch. The checker only validates that they exist.
         assert_ok("let a = abs(-5)");
@@ -15992,17 +15992,17 @@ print(total)
     }
 
     #[test]
-    fn mb9_str_swap_case_tipa_str() {
+    fn mb9_str_swap_case_types_str() {
         assert_ok("let s: Str = \"Hola\".swap_case()");
     }
 
     #[test]
-    fn mb9_str_title_tipa_str() {
+    fn mb9_str_title_types_str() {
         assert_ok("let s: Str = \"hola mundo\".title()");
     }
 
     #[test]
-    fn mb9_str_is_alpha_digit_numeric_tipan_bool() {
+    fn mb9_str_is_alpha_digit_numeric_type_bool() {
         assert_ok(
             "let a: Bool = \"hola\".is_alpha()\n\
              let b: Bool = \"123\".is_digit()\n\
@@ -16011,7 +16011,7 @@ print(total)
     }
 
     #[test]
-    fn mb9_list_split_at_tipa_tuple_de_dos_lists() {
+    fn mb9_list_split_at_types_tuple_of_two_lists() {
         assert_ok(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let parts: (List<Int>, List<Int>) = xs.split_at(2)",
@@ -16019,7 +16019,7 @@ print(total)
     }
 
     #[test]
-    fn mb9_map_has_value_tipa_bool() {
+    fn mb9_map_has_value_types_bool() {
         assert_ok(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let r: Bool = m.has_value(1)",
@@ -16027,7 +16027,7 @@ print(total)
     }
 
     #[test]
-    fn int_method_abs_y_to_str_tipan_correctamente() {
+    fn int_method_abs_and_to_str_type_correctly() {
         assert_ok(
             "let n: Int = 5\n\
              let a: Int = n.abs()\n\
@@ -16037,7 +16037,7 @@ print(total)
     }
 
     #[test]
-    fn float_method_abs_to_str_is_nan_is_finite_tipan_correctamente() {
+    fn float_method_abs_to_str_is_nan_is_finite_type_correctly() {
         assert_ok(
             "let x: Float = 3.14\n\
              let a: Float = x.abs()\n\
@@ -16048,12 +16048,12 @@ print(total)
     }
 
     #[test]
-    fn int_method_inexistente_es_error() {
+    fn int_nonexistent_method_is_error() {
         assert_error_with("let n: Int = 5\nlet r = n.foobar()", &["Int", "foobar"]);
     }
 
     #[test]
-    fn float_method_inexistente_es_error() {
+    fn float_nonexistent_method_is_error() {
         assert_error_with(
             "let x: Float = 3.14\nlet r = x.foobar()",
             &["Float", "foobar"],
@@ -16063,7 +16063,7 @@ print(total)
     // ---- Mini-batch Fp — default params ----
 
     #[test]
-    fn fp_call_sin_args_a_fn_con_default_pasa() {
+    fn fp_call_without_args_to_fn_with_default_passes() {
         // `fn greet(name = "amigo") -> Str` can be invoked without args.
         assert_ok(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
@@ -16072,7 +16072,7 @@ print(total)
     }
 
     #[test]
-    fn fp_call_con_arg_a_fn_con_default_pasa() {
+    fn fp_call_with_arg_to_fn_with_default_passes() {
         assert_ok(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r: Str = greet(\"Fitz\")",
@@ -16080,7 +16080,7 @@ print(total)
     }
 
     #[test]
-    fn fp_call_con_mezcla_required_y_default() {
+    fn fp_call_with_mix_required_and_default() {
         // Required + default: 1 or 2 valid args, 0 or 3+ fails.
         assert_ok(
             "fn add(a: Int, b: Int = 1) -> Int { return a + b }\n\
@@ -16090,7 +16090,7 @@ print(total)
     }
 
     #[test]
-    fn fp_call_muy_pocos_args_es_error() {
+    fn fp_call_too_few_args_is_error() {
         // `fn add(a, b)` without defaults — call with 0 args is an error.
         assert_error_with(
             "fn add(a: Int, b: Int) -> Int { return a + b }\n\
@@ -16100,7 +16100,7 @@ print(total)
     }
 
     #[test]
-    fn fp_call_demasiados_args_es_error() {
+    fn fp_call_too_many_args_is_error() {
         assert_error_with(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r = greet(\"a\", \"b\")",
@@ -16109,7 +16109,7 @@ print(total)
     }
 
     #[test]
-    fn fp_default_tipo_incorrecto_es_error_en_llamada() {
+    fn fp_default_wrong_type_is_error_at_call() {
         // The default `"texto"` doesn't match `Int`. When checking the
         // call without args, the default should trigger a type error. Today
         // the checker does NOT validate the default expr — the runtime will.
@@ -16146,7 +16146,7 @@ print(total)
     }
 
     #[test]
-    fn auth_provider_signature_valida_no_da_error() {
+    fn auth_provider_valid_signature_gives_no_error() {
         // Minimal provider: 1 param Map<Str,Str>, return Result<User>.
         // Any `type User { ... }` declared in the program is enough;
         // the provider does NOT execute — it just registers the signature.
@@ -16159,7 +16159,7 @@ print(total)
     }
 
     #[test]
-    fn auth_provider_con_args_es_error() {
+    fn auth_provider_with_args_is_error() {
         // `@auth_provider` doesn't accept args or kwargs in the MVP.
         let src = "type User { id: Int }\n\
                    @auth_provider(123)\n\
@@ -16170,7 +16170,7 @@ print(total)
     }
 
     #[test]
-    fn auth_provider_param_incorrecto_es_error() {
+    fn auth_provider_wrong_param_is_error() {
         // The param must be `Map<Str, Str>` (HTTP headers).
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
@@ -16181,7 +16181,7 @@ print(total)
     }
 
     #[test]
-    fn auth_provider_aridad_incorrecta_es_error() {
+    fn auth_provider_wrong_arity_is_error() {
         // Must have exactly 1 param.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
@@ -16192,7 +16192,7 @@ print(total)
     }
 
     #[test]
-    fn auth_provider_return_no_result_es_error() {
+    fn auth_provider_return_non_result_is_error() {
         // The return must be `Result<T>` with T nominal.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
@@ -16203,7 +16203,7 @@ print(total)
     }
 
     #[test]
-    fn auth_provider_result_de_primitivo_es_error() {
+    fn auth_provider_result_of_primitive_is_error() {
         // `Result<Str>` doesn't work — T must be a custom (nominal) type.
         let src = "@auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<Str> {\n\
@@ -16213,7 +16213,7 @@ print(total)
     }
 
     #[test]
-    fn auth_provider_duplicado_es_error() {
+    fn auth_provider_duplicate_is_error() {
         // Only one `@auth_provider` per program.
         let src = "type User { id: Int }\n\
                    @auth_provider\n\
@@ -16228,7 +16228,7 @@ print(total)
     }
 
     #[test]
-    fn authenticated_sin_provider_es_error() {
+    fn authenticated_without_provider_is_error() {
         // `@authenticated` requires a `@auth_provider` in the
         // program.
         let src = "type User { id: Int }\n\
@@ -16239,7 +16239,7 @@ print(total)
     }
 
     #[test]
-    fn admin_sin_provider_es_error() {
+    fn admin_without_provider_is_error() {
         // `@admin` requires a `@auth_provider` in the program.
         let src = "type User { id: Int, role: Str }\n\
                    @admin\n\
@@ -16249,7 +16249,7 @@ print(total)
     }
 
     #[test]
-    fn authenticated_handler_sin_param_user_es_error() {
+    fn authenticated_handler_without_user_param_is_error() {
         // The protected handler must declare a param compatible with the
         // type the provider returns (`User`). The runtime injects it
         // after successful authentication.
@@ -16265,7 +16265,7 @@ print(total)
     }
 
     #[test]
-    fn authenticated_handler_con_param_user_no_da_error() {
+    fn authenticated_handler_with_user_param_gives_no_error() {
         // Handler with param `user: User` (same type the provider
         // returns) checks clean.
         let src = "type User { id: Int, name: Str }\n\
@@ -16280,7 +16280,7 @@ print(total)
     }
 
     #[test]
-    fn authenticated_sin_handler_http_es_error() {
+    fn authenticated_without_http_handler_is_error() {
         // `@authenticated` over a fn that does NOT have
         // `@get`/`@post`/`@put`/`@delete` makes no sense.
         let src = "type User { id: Int }\n\
@@ -16294,7 +16294,7 @@ print(total)
     }
 
     #[test]
-    fn admin_sin_role_field_en_user_es_error() {
+    fn admin_without_role_field_in_user_is_error() {
         // `@admin` requires that the `User` (provider's return) has a
         // `role: Str` field to discriminate admins. Without that field, error.
         let src = "type User { id: Int, name: Str }\n\
@@ -16309,7 +16309,7 @@ print(total)
     }
 
     #[test]
-    fn admin_con_role_field_no_da_error() {
+    fn admin_with_role_field_gives_no_error() {
         // Complete valid program: provider + `@admin` handler with
         // `User { ..., role: Str }`.
         let src = "type User { id: Int, name: Str, role: Str }\n\
@@ -16324,7 +16324,7 @@ print(total)
     }
 
     #[test]
-    fn auth_decorators_con_args_son_error() {
+    fn auth_decorators_with_args_are_error() {
         // `@authenticated` and `@admin` don't accept args or kwargs.
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
@@ -16340,7 +16340,7 @@ print(total)
     // ----- Phase 9.w.1.iter2.a — @requires("role") (custom RBAC) -----
 
     #[test]
-    fn requires_con_role_str_literal_no_da_error() {
+    fn requires_with_str_literal_role_gives_no_error() {
         // Canonical pattern: `@requires("editor")` over an HTTP handler with
         // a declared provider and User.role: Str. Compiles clean.
         let src = "type User { id: Int, role: Str }\n\
@@ -16355,7 +16355,7 @@ print(total)
     }
 
     #[test]
-    fn requires_sin_role_field_en_user_es_error() {
+    fn requires_without_role_field_in_user_is_error() {
         // Like `@admin`, `@requires` demands `role: Str` in the User type.
         let src = "type User { id: Int, name: Str }\n\
                    @auth_provider\n\
@@ -16369,7 +16369,7 @@ print(total)
     }
 
     #[test]
-    fn requires_apilado_con_dos_roles_no_da_error() {
+    fn requires_stacked_with_two_roles_gives_no_error() {
         // Stacking two distinct `@requires` = OR (user.role must match
         // at least one).
         let src = "type User { id: Int, role: Str }\n\
@@ -16385,7 +16385,7 @@ print(total)
     }
 
     #[test]
-    fn requires_con_role_duplicado_es_error() {
+    fn requires_with_duplicate_role_is_error() {
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16399,7 +16399,7 @@ print(total)
     }
 
     #[test]
-    fn requires_sin_provider_es_error() {
+    fn requires_without_provider_is_error() {
         let src = "type User { id: Int, role: Str }\n\
                    @requires(\"editor\")\n\
                    @get(\"/x\")\n\
@@ -16408,7 +16408,7 @@ print(total)
     }
 
     #[test]
-    fn requires_sin_handler_http_es_error() {
+    fn requires_without_http_handler_is_error() {
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16420,7 +16420,7 @@ print(total)
     }
 
     #[test]
-    fn requires_sin_arg_es_error() {
+    fn requires_without_arg_is_error() {
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16433,7 +16433,7 @@ print(total)
     }
 
     #[test]
-    fn requires_con_kwargs_es_error() {
+    fn requires_with_kwargs_is_error() {
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
                    fn check(headers: Map<Str, Str>) -> Result<User> {\n\
@@ -16446,7 +16446,7 @@ print(total)
     }
 
     #[test]
-    fn requires_sin_param_user_es_error() {
+    fn requires_without_user_param_is_error() {
         // `@requires` needs the injected user to check the role.
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
@@ -16462,80 +16462,80 @@ print(total)
     // ----- Phase 12.7 — @trace/@metric (explicit instrumentation) -----
 
     #[test]
-    fn trace_sin_args_ni_kwargs_compila_limpio() {
+    fn trace_without_args_or_kwargs_compiles_clean() {
         let src = "@trace\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_ok(src);
     }
 
     #[test]
-    fn trace_con_kwarg_name_str_literal_compila_limpio() {
+    fn trace_with_kwarg_name_str_literal_compiles_clean() {
         let src = "@trace(name=\"calc_doble\")\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_ok(src);
     }
 
     #[test]
-    fn trace_con_arg_positional_es_error() {
+    fn trace_with_positional_arg_is_error() {
         let src = "@trace(\"name\")\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_err(src, "no acepta args positionals");
     }
 
     #[test]
-    fn trace_con_kwarg_desconocido_es_error() {
+    fn trace_with_unknown_kwarg_is_error() {
         let src = "@trace(level=\"info\")\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_err(src, "kwarg desconocido");
     }
 
     #[test]
-    fn trace_con_name_no_str_literal_es_error() {
+    fn trace_with_non_str_literal_name_is_error() {
         let src = "@trace(name=42)\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_err(src, "Str literal");
     }
 
     #[test]
-    fn trace_duplicado_apilado_es_error() {
+    fn trace_duplicate_stacked_is_error() {
         let src = "@trace\n@trace(name=\"otro\")\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_err(src, "duplicado");
     }
 
     #[test]
-    fn trace_apilable_con_metric_compila_limpio() {
+    fn trace_stackable_with_metric_compiles_clean() {
         let src = "@trace\n@metric\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_ok(src);
     }
 
     #[test]
-    fn trace_sobre_get_handler_es_error() {
+    fn trace_on_get_handler_is_error() {
         // Auto-instrumentation 12.3 already covers HTTP handlers.
         let src = "@trace\n@get(\"/x\")\nfn h() -> Str => \"ok\"";
         assert_auth_err(src, "auto-instrumentation");
     }
 
     #[test]
-    fn metric_sobre_post_handler_es_error() {
+    fn metric_on_post_handler_is_error() {
         let src = "@metric\n@post(\"/x\")\nfn h(body: Str) -> Str => body";
         assert_auth_err(src, "auto-instrumentation");
     }
 
     #[test]
-    fn metric_sin_args_ni_kwargs_compila_limpio() {
+    fn metric_without_args_or_kwargs_compiles_clean() {
         let src = "@metric\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_ok(src);
     }
 
     #[test]
-    fn metric_con_arg_positional_es_error() {
+    fn metric_with_positional_arg_is_error() {
         let src = "@metric(\"name\")\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_err(src, "no acepta args positionals");
     }
 
     #[test]
-    fn metric_duplicado_apilado_es_error() {
+    fn metric_duplicate_stacked_is_error() {
         let src = "@metric\n@metric\nfn calc(x: Int) -> Int => x * 2";
         assert_auth_err(src, "duplicado");
     }
 
     #[test]
-    fn auth_provider_con_role_field_nullable_no_basta_para_admin() {
+    fn auth_provider_with_nullable_role_field_not_enough_for_admin() {
         // The `role` field must be `Str` (not nullable). If it's `Str?`,
         // admin discrimination doesn't compose (a Null is not admin).
         let src = "type User { id: Int, role: Str? }\n\
@@ -16554,7 +16554,7 @@ print(total)
     // ----------------------------------------------------------------
 
     #[test]
-    fn wsconn_se_resuelve_como_generico_built_in() {
+    fn wsconn_resolves_as_builtin_generic() {
         // `WsConn<Str>` reuses `TypeExpr::Generic`. Fixed arity 1.
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
@@ -16574,7 +16574,7 @@ print(total)
     }
 
     #[test]
-    fn wsconn_sin_argumento_es_error_de_aridad() {
+    fn wsconn_without_argument_is_arity_error() {
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "WsConn".into(),
@@ -16585,7 +16585,7 @@ print(total)
     }
 
     #[test]
-    fn wsconn_display_muestra_inner() {
+    fn wsconn_display_shows_inner() {
         let env = TypeEnv::new();
         let ty = Type::WsConn {
             recv: Box::new(Type::Int),
@@ -16595,7 +16595,7 @@ print(total)
     }
 
     #[test]
-    fn wsconn_bidir_aridad_2_resuelve_recv_send_distintos() {
+    fn wsconn_bidir_arity_2_resolves_distinct_recv_send() {
         // 9.w.2-wsconn-bidir — `WsConn<Int, Str>` recv=Int send=Str.
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
@@ -16613,7 +16613,7 @@ print(total)
     }
 
     #[test]
-    fn wsconn_bidir_display_asimetrico_muestra_in_out() {
+    fn wsconn_bidir_asymmetric_display_shows_in_out() {
         let env = TypeEnv::new();
         let ty = Type::WsConn {
             recv: Box::new(Type::Int),
@@ -16623,7 +16623,7 @@ print(total)
     }
 
     #[test]
-    fn wsconn_bidir_aridad_mayor_a_2_es_error() {
+    fn wsconn_bidir_arity_greater_than_2_is_error() {
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "WsConn".into(),
@@ -16638,7 +16638,7 @@ print(total)
     }
 
     #[test]
-    fn ws_handler_minimal_pasa_checker() {
+    fn ws_handler_minimal_passes_checker() {
         // Minimal handler: `async fn` + `@ws("/chat")` + WsConn<Str>.
         let src = "@ws(\"/chat\")\n\
                    async fn echo(conn: WsConn<Str>) -> Null {\n\
@@ -16654,21 +16654,21 @@ print(total)
     }
 
     #[test]
-    fn ws_handler_sin_async_es_error() {
+    fn ws_handler_without_async_is_error() {
         let src = "@ws(\"/chat\")\n\
                    fn echo(conn: WsConn<Str>) -> Null { return null }";
         assert_auth_err(src, "async fn");
     }
 
     #[test]
-    fn ws_handler_sin_param_wsconn_es_error() {
+    fn ws_handler_without_wsconn_param_is_error() {
         let src = "@ws(\"/chat\")\n\
                    async fn echo() -> Null { return null }";
         assert_auth_err(src, "1 param");
     }
 
     #[test]
-    fn ws_handler_wsconn_con_t_concreto_compila() {
+    fn ws_handler_wsconn_with_concrete_t_compiles() {
         // `WsConn<ChatMsg>` with custom type. The checker must accept it.
         let src = "type ChatMsg { user: Str, text: Str }\n\
                    @ws(\"/chat\")\n\
@@ -16677,14 +16677,14 @@ print(total)
     }
 
     #[test]
-    fn ws_decorator_sin_arg_path_es_error() {
+    fn ws_decorator_without_path_arg_is_error() {
         let src = "@ws()\n\
                    async fn echo(conn: WsConn<Str>) -> Null { return null }";
         assert_auth_err(src, "1 argumento");
     }
 
     #[test]
-    fn ws_method_recv_devuelve_result_t() {
+    fn ws_method_recv_returns_result_t() {
         // `conn.recv()` must type as `Result<T>` where T is the
         // WsConn parameter.
         let src = "@ws(\"/c\")\n\
@@ -16696,7 +16696,7 @@ print(total)
     }
 
     #[test]
-    fn ws_method_send_con_tipo_distinto_es_error() {
+    fn ws_method_send_with_different_type_is_error() {
         // `conn.send(msg: T)` must reject args of a different type than T.
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Str>) -> Null {\n\
@@ -16707,7 +16707,7 @@ print(total)
     }
 
     #[test]
-    fn ws_method_broadcast_devuelve_result_null() {
+    fn ws_method_broadcast_returns_result_null() {
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Str>) -> Null {\n\
                        let r: Result<Null> = conn.broadcast(\"hola\")\n\
@@ -16717,7 +16717,7 @@ print(total)
     }
 
     #[test]
-    fn ws_method_desconocido_es_error() {
+    fn ws_unknown_method_is_error() {
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Str>) -> Null {\n\
                        let _ = conn.zzz()\n\
@@ -16727,7 +16727,7 @@ print(total)
     }
 
     #[test]
-    fn ws_handler_con_authenticated_acepta_2_params() {
+    fn ws_handler_with_authenticated_accepts_2_params() {
         // `@authenticated @ws("/me-chat")` with (WsConn<Str>, user: User).
         let src = "type User { id: Int, name: Str }\n\
                    @auth_provider\n\
@@ -16739,7 +16739,7 @@ print(total)
     }
 
     #[test]
-    fn ws_handler_wsconn_any_es_error() {
+    fn ws_handler_wsconn_any_is_error() {
         // `WsConn<Any>` is not accepted — T must be concrete.
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Any>) -> Null { return null }";
@@ -16756,7 +16756,7 @@ print(total)
     // runtime (evaluator + http.rs) and codegen.
 
     #[test]
-    fn ws_handler_wsconn_bytes_compila() {
+    fn ws_handler_wsconn_bytes_compiles() {
         let src = "@ws(\"/raw\")\n\
                    async fn raw(conn: WsConn<Bytes>) -> Null {\n\
                        match conn.recv() {\n\
@@ -16771,7 +16771,7 @@ print(total)
     }
 
     #[test]
-    fn ws_method_recv_bytes_devuelve_result_bytes() {
+    fn ws_method_recv_bytes_returns_result_bytes() {
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Bytes>) -> Null {\n\
                        let r: Result<Bytes> = conn.recv()\n\
@@ -16781,7 +16781,7 @@ print(total)
     }
 
     #[test]
-    fn ws_method_send_bytes_acepta_bytes_literal() {
+    fn ws_method_send_bytes_accepts_bytes_literal() {
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Bytes>) -> Null {\n\
                        let _r = conn.send(b\"hola\")\n\
@@ -16791,7 +16791,7 @@ print(total)
     }
 
     #[test]
-    fn ws_method_send_bytes_rechaza_str() {
+    fn ws_method_send_bytes_rejects_str() {
         // `conn.send("hola")` over `WsConn<Bytes>` errors: the arg
         // is `Str`, the method expects `Bytes`.
         let src = "@ws(\"/c\")\n\
@@ -16805,7 +16805,7 @@ print(total)
     // ---- Phase 9.w.3 — checker @cron + @background + spawn ----
 
     #[test]
-    fn cron_simple_sin_params_async_pasa_checker() {
+    fn cron_simple_without_params_async_passes_checker() {
         // `@cron("0 0 * * *")` over async fn without params + return Null:
         // valid MVP shape. The checker doesn't validate cron syntax
         // (that's done in runtime/codegen).
@@ -16816,7 +16816,7 @@ print(total)
     }
 
     #[test]
-    fn cron_sync_fn_pasa_checker() {
+    fn cron_sync_fn_passes_checker() {
         // The MVP accepts `@cron` on sync and async (decision confirmed
         // by the author when starting 9.w.3). Sync runs directly, async
         // with `.await` inside the scheduler.
@@ -16827,7 +16827,7 @@ print(total)
     }
 
     #[test]
-    fn cron_sin_args_es_error() {
+    fn cron_without_args_is_error() {
         let src = "@cron\nfn tick() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16840,7 +16840,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_arg_no_str_es_error() {
+    fn cron_with_non_str_arg_is_error() {
         let src = "@cron(60)\nfn tick() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16851,7 +16851,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_params_es_error() {
+    fn cron_with_params_is_error() {
         let src = "@cron(\"0 0 * * *\")\nfn tick(x: Int) -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16864,7 +16864,7 @@ print(total)
     }
 
     #[test]
-    fn cron_combinado_con_get_es_error() {
+    fn cron_combined_with_get_is_error() {
         let src = "@cron(\"0 0 * * *\")\n@get(\"/x\")\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16877,7 +16877,7 @@ print(total)
     }
 
     #[test]
-    fn cron_combinado_con_background_es_error() {
+    fn cron_combined_with_background_is_error() {
         let src = "@cron(\"0 0 * * *\")\n@background\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16890,7 +16890,7 @@ print(total)
     }
 
     #[test]
-    fn cron_return_int_es_error() {
+    fn cron_return_int_is_error() {
         let src = "@cron(\"0 0 * * *\")\nfn h() -> Int { return 1 }";
         let errors = errors_of(src);
         assert!(
@@ -16903,7 +16903,7 @@ print(total)
     }
 
     #[test]
-    fn cron_return_result_es_ok() {
+    fn cron_return_result_is_ok() {
         // `Result<Null>` is valid — useful for logging job failures
         // without aborting the scheduler.
         let src = "@cron(\"0 0 * * *\")\nfn h() -> Result<Null> { return Ok(null) }";
@@ -16912,14 +16912,14 @@ print(total)
     }
 
     #[test]
-    fn background_simple_pasa_checker() {
+    fn background_simple_passes_checker() {
         let src = "@background\nfn send_email(to: Str) -> Null { return null }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
     }
 
     #[test]
-    fn background_con_args_es_error() {
+    fn background_with_args_is_error() {
         let src = "@background(\"x\")\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16932,7 +16932,7 @@ print(total)
     }
 
     #[test]
-    fn background_combinado_con_get_es_error() {
+    fn background_combined_with_get_is_error() {
         let src = "@background\n@get(\"/x\")\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16950,7 +16950,7 @@ print(total)
     // -------------------------------------------------------------
 
     #[test]
-    fn cron_con_tz_valida_pasa_checker() {
+    fn cron_with_valid_tz_passes_checker() {
         // The checker does NOT validate the IANA string (that's runtime); only
         // that it's a Str literal.
         let src = "@cron(\"0 0 * * *\", tz=\"America/Argentina/Buenos_Aires\")\n\
@@ -16960,7 +16960,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_tz_no_str_es_error() {
+    fn cron_with_non_str_tz_is_error() {
         let src = "@cron(\"0 0 * * *\", tz=42)\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -16973,7 +16973,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_retry_completo_pasa_checker() {
+    fn cron_with_complete_retry_passes_checker() {
         let src = "@cron(\"0 0 * * *\", retry={max: 3, backoff: \"exponential\", initial_secs: 1, max_secs: 60})\n\
                    fn h() -> Null { return null }";
         let errors = errors_of(src);
@@ -16981,7 +16981,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_retry_solo_max_pasa_checker() {
+    fn cron_with_retry_only_max_passes_checker() {
         // Reasonable defaults for the 3 remaining sub-params (the
         // runtime checks them, not the checker).
         let src = "@cron(\"0 0 * * *\", retry={max: 5})\nfn h() -> Null { return null }";
@@ -16990,7 +16990,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_retry_no_map_es_error() {
+    fn cron_with_non_map_retry_is_error() {
         let src = "@cron(\"0 0 * * *\", retry=3)\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17003,7 +17003,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_retry_key_desconocida_es_error() {
+    fn cron_with_unknown_retry_key_is_error() {
         let src = "@cron(\"0 0 * * *\", retry={foo: 1})\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17016,7 +17016,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_retry_max_negativo_es_error() {
+    fn cron_with_negative_retry_max_is_error() {
         let src = "@cron(\"0 0 * * *\", retry={max: -1})\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17029,7 +17029,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_retry_backoff_desconocido_es_error() {
+    fn cron_with_unknown_retry_backoff_is_error() {
         let src = "@cron(\"0 0 * * *\", retry={backoff: \"quadratic\"})\n\
                    fn h() -> Null { return null }";
         let errors = errors_of(src);
@@ -17043,7 +17043,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_retry_initial_secs_cero_es_error() {
+    fn cron_with_retry_initial_secs_zero_is_error() {
         let src = "@cron(\"0 0 * * *\", retry={initial_secs: 0})\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17056,14 +17056,14 @@ print(total)
     }
 
     #[test]
-    fn cron_con_catch_up_pasa_checker() {
+    fn cron_with_catch_up_passes_checker() {
         let src = "@cron(\"0 0 * * *\", catch_up=true)\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
     }
 
     #[test]
-    fn cron_con_catch_up_no_bool_es_error() {
+    fn cron_with_non_bool_catch_up_is_error() {
         let src = "@cron(\"0 0 * * *\", catch_up=1)\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17076,7 +17076,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_store_ident_pasa_checker() {
+    fn cron_with_store_ident_passes_checker() {
         // The checker does NOT check that `db` resolves to DbConn — that's
         // runtime. Accepts any non-null expr.
         let src = "let db = 1\n@cron(\"0 0 * * *\", store=db)\nfn h() -> Null { return null }";
@@ -17093,7 +17093,7 @@ print(total)
     }
 
     #[test]
-    fn cron_con_store_null_es_error() {
+    fn cron_with_store_null_is_error() {
         let src = "@cron(\"0 0 * * *\", store=null)\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17106,7 +17106,7 @@ print(total)
     }
 
     #[test]
-    fn cron_kwarg_desconocido_es_error() {
+    fn cron_unknown_kwarg_is_error() {
         let src = "@cron(\"0 0 * * *\", foo=\"bar\")\nfn h() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
@@ -17126,7 +17126,7 @@ print(total)
     // `parse(...).expect("parse OK")`.
 
     #[test]
-    fn cron_todos_los_kwargs_juntos_pasa_checker() {
+    fn cron_all_kwargs_together_passes_checker() {
         let src = "let db = 1\n\
                    @cron(\"0 0 * * *\", tz=\"UTC\", retry={max: 3, backoff: \"linear\"}, catch_up=true, store=db)\n\
                    fn h() -> Null { return null }";
@@ -17141,7 +17141,7 @@ print(total)
     }
 
     #[test]
-    fn background_con_tz_pasa_checker() {
+    fn background_with_tz_passes_checker() {
         let src = "@background(tz=\"America/Argentina/Buenos_Aires\")\n\
                    fn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
@@ -17149,7 +17149,7 @@ print(total)
     }
 
     #[test]
-    fn background_con_retry_pasa_checker() {
+    fn background_with_retry_passes_checker() {
         let src = "@background(retry={max: 3, backoff: \"exponential\"})\n\
                    fn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
@@ -17157,7 +17157,7 @@ print(total)
     }
 
     #[test]
-    fn background_con_store_es_error() {
+    fn background_with_store_is_error() {
         // `store` is NOT valid in `@background` (spawn job persistence
         // is deferred to iter3).
         let src = "let db = 1\n@background(store=db)\nfn send(addr: Str) -> Null { return null }";
@@ -17172,7 +17172,7 @@ print(total)
     }
 
     #[test]
-    fn background_con_catch_up_es_error() {
+    fn background_with_catch_up_is_error() {
         // `catch_up` also doesn't apply to `@background` (it's not scheduling).
         let src = "@background(catch_up=true)\nfn send(addr: Str) -> Null { return null }";
         let errors = errors_of(src);
@@ -17186,7 +17186,7 @@ print(total)
     }
 
     #[test]
-    fn background_con_args_posicional_sigue_siendo_error() {
+    fn background_with_positional_args_still_is_error() {
         // We confirm that the inherited behavior (doesn't accept
         // positionals) is preserved after adding kwargs.
         let src = "@background(\"x\")\nfn h() -> Null { return null }";
@@ -17200,7 +17200,7 @@ print(total)
     }
 
     #[test]
-    fn spawn_sobre_background_devuelve_future() {
+    fn spawn_on_background_returns_future() {
         // `spawn(fn_background())` types as `Future<T>`. We validate
         // via program shape: the `let f = spawn(...)` should
         // allow `.await` inside an async fn.
@@ -17216,7 +17216,7 @@ print(total)
     }
 
     #[test]
-    fn spawn_sin_args_es_error() {
+    fn spawn_without_args_is_error() {
         let src = "async fn caller() -> Null {\n\
                        let _ = spawn()\n\
                        return null\n\
@@ -17232,7 +17232,7 @@ print(total)
     }
 
     #[test]
-    fn spawn_con_var_es_error() {
+    fn spawn_with_var_is_error() {
         // `spawn(x)` where x is a var is not accepted — the target must be
         // a literal call to a `@background` fn.
         let src = "async fn caller() -> Null {\n\
@@ -17249,7 +17249,7 @@ print(total)
     }
 
     #[test]
-    fn spawn_sobre_fn_sin_background_es_error() {
+    fn spawn_on_fn_without_background_is_error() {
         let src = "fn no_marker() -> Int { return 1 }\n\
                    async fn caller() -> Null {\n\
                        let _ = spawn(no_marker())\n\
@@ -17264,7 +17264,7 @@ print(total)
     }
 
     #[test]
-    fn spawn_userdefined_override_no_dispara_dispatch_especial() {
+    fn spawn_userdefined_override_does_not_trigger_special_dispatch() {
         // If the user defines their own `spawn`, the special dispatch
         // does NOT apply (the lookup returns `Function{...}` distinct from
         // `Any`). The call is validated via the general path.
@@ -17277,7 +17277,7 @@ print(total)
     // ===== Phase 10.3.a — ORM decorator checker =====
 
     #[test]
-    fn checker_table_decorator_registra_metadata() {
+    fn checker_table_decorator_registers_metadata() {
         let src = "@table(\"users\") type User { id: Int, name: Str }";
         let (env, errs) = resolve_str(src);
         assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
@@ -17289,7 +17289,7 @@ print(total)
     }
 
     #[test]
-    fn checker_table_sin_args_usa_lowercase_default() {
+    fn checker_table_without_args_uses_lowercase_default() {
         let src = "@table type Post { id: Int }";
         let (env, errs) = resolve_str(src);
         assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
@@ -17299,7 +17299,7 @@ print(total)
     }
 
     #[test]
-    fn checker_primary_decorator_registra_primary_field() {
+    fn checker_primary_decorator_registers_primary_field() {
         let src = "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}";
         let (env, errs) = resolve_str(src);
         assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
@@ -17309,7 +17309,7 @@ print(total)
     }
 
     #[test]
-    fn checker_column_decorator_registra_overrides() {
+    fn checker_column_decorator_registers_overrides() {
         let src = "@table(\"users\") type User {\n  @column(name=\"user_id\", sql_type=\"bigserial\")\n  id: Int\n}";
         let (env, errs) = resolve_str(src);
         assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
@@ -17321,7 +17321,7 @@ print(total)
     }
 
     #[test]
-    fn checker_unique_e_index_se_registran() {
+    fn checker_unique_and_index_get_registered() {
         let src = "@table type T {\n  @unique @index\n  email: Str\n}";
         let (env, errs) = resolve_str(src);
         assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
@@ -17333,7 +17333,7 @@ print(total)
     }
 
     #[test]
-    fn checker_type_sin_table_no_tiene_metadata() {
+    fn checker_type_without_table_has_no_metadata() {
         let src = "type Plain { x: Int }";
         let (env, errs) = resolve_str(src);
         assert!(errs.is_empty(), "esperaba 0 errores: {:?}", errs);
@@ -17342,7 +17342,7 @@ print(total)
     }
 
     #[test]
-    fn checker_decorador_de_field_sin_table_es_error() {
+    fn checker_field_decorator_without_table_is_error() {
         // `@primary` on a field requires the type to have `@table`.
         let src = "type X {\n  @primary\n  id: Int\n}";
         let errs = errors_of(src);
@@ -17354,7 +17354,7 @@ print(total)
     }
 
     #[test]
-    fn checker_dos_primary_componen_composite_pk_v27() {
+    fn checker_two_primary_compose_composite_pk_v27() {
         // v0.10.27 (F2) — 2 `@primary` are now composite PK
         // (previously was an error). The checker accepts; primary_fields
         // ends up with N entries in order of appearance.
@@ -17368,7 +17368,7 @@ print(total)
     }
 
     #[test]
-    fn checker_primary_sobre_mismo_field_dos_veces_es_error() {
+    fn checker_primary_on_same_field_twice_is_error() {
         // The duplicate check is preserved, but now applies only
         // if the SAME field appears twice (not if there are 2 distinct
         // fields with @primary, which is composite).
@@ -17382,7 +17382,7 @@ print(total)
     }
 
     #[test]
-    fn checker_decorator_no_reconocido_sobre_type_es_error() {
+    fn checker_unknown_decorator_on_type_is_error() {
         let src = "@bogus type X { id: Int }";
         let errs = errors_of(src);
         assert!(
@@ -17393,7 +17393,7 @@ print(total)
     }
 
     #[test]
-    fn checker_decorator_no_reconocido_sobre_field_es_error() {
+    fn checker_unknown_decorator_on_field_is_error() {
         let src = "@table type T {\n  @bogus\n  x: Int\n}";
         let errs = errors_of(src);
         assert!(
@@ -17404,7 +17404,7 @@ print(total)
     }
 
     #[test]
-    fn checker_table_con_arg_no_string_es_error() {
+    fn checker_table_with_non_string_arg_is_error() {
         let src = "@table(42) type T { id: Int }";
         let errs = errors_of(src);
         assert!(
@@ -17415,7 +17415,7 @@ print(total)
     }
 
     #[test]
-    fn checker_dos_table_decorators_es_error() {
+    fn checker_two_table_decorators_is_error() {
         let src = "@table(\"a\") @table(\"b\") type T { id: Int }";
         let errs = errors_of(src);
         assert!(
@@ -17429,7 +17429,7 @@ print(total)
     // ===== Phase 10.4.a — relations =====
 
     #[test]
-    fn checker_belongs_to_basico() {
+    fn checker_belongs_to_basic() {
         let src = "@table type User { id: Int }\n\
                    @table type Post {\n  \
                      id: Int\n  \
@@ -17448,7 +17448,7 @@ print(total)
     }
 
     #[test]
-    fn checker_belongs_to_con_kwargs() {
+    fn checker_belongs_to_with_kwargs() {
         let src = "@table type User { id: Int }\n\
                    @table type Post {\n  \
                      id: Int\n  \
@@ -17465,7 +17465,7 @@ print(total)
     }
 
     #[test]
-    fn checker_has_many_marca_field_virtual() {
+    fn checker_has_many_marks_virtual_field() {
         let src = "@table type Post { id: Int, author_id: Int }\n\
                    @table type User {\n  \
                      id: Int\n  \
@@ -17486,7 +17486,7 @@ print(total)
     }
 
     #[test]
-    fn checker_has_many_con_via_explicito() {
+    fn checker_has_many_with_explicit_via() {
         let src = "@table type Post { id: Int, author_id: Int }\n\
                    @table type User {\n  \
                      id: Int\n  \
@@ -17502,7 +17502,7 @@ print(total)
     }
 
     #[test]
-    fn checker_has_one_marca_field_virtual() {
+    fn checker_has_one_marks_virtual_field() {
         let src = "@table type Profile { id: Int, user_id: Int }\n\
                    @table type User {\n  \
                      id: Int\n  \
@@ -17519,7 +17519,7 @@ print(total)
     }
 
     #[test]
-    fn checker_relation_sin_args_es_error() {
+    fn checker_relation_without_args_is_error() {
         let src = "@table type T {\n  \
                      @belongs_to\n  \
                      other_id: Int\n\
@@ -17533,7 +17533,7 @@ print(total)
     }
 
     #[test]
-    fn checker_relation_on_delete_invalido_es_error() {
+    fn checker_relation_invalid_on_delete_is_error() {
         let src = "@table type User { id: Int }\n\
                    @table type Post {\n  \
                      id: Int\n  \
@@ -17549,7 +17549,7 @@ print(total)
     }
 
     #[test]
-    fn checker_dos_relations_en_un_field_es_error() {
+    fn checker_two_relations_in_one_field_is_error() {
         let src = "@table type User { id: Int }\n\
                    @table type Post {\n  \
                      id: Int\n  \
@@ -17582,7 +17582,7 @@ print(total)
     // synthesized (Any would never fire).
 
     #[test]
-    fn checker_belongs_to_navigation_devuelve_future_result_target() {
+    fn checker_belongs_to_navigation_returns_future_result_target() {
         // CONVENTION: navigation uses the NAME of the decorated field, NOT the
         // name of the target type. `@belongs_to("User") user_id: Int` is
         // navigated with `post.user_id(db)`. Parallel to the evaluator (~4463:
@@ -17609,7 +17609,7 @@ print(total)
     }
 
     #[test]
-    fn checker_belongs_to_navigation_con_anotacion_correcta_compila_limpio() {
+    fn checker_belongs_to_navigation_with_correct_annotation_compiles_clean() {
         // `let u: User = post.user_id(db).await?` must compile OK
         // — the refinement returns Future<Result<User>>, await? extracts
         // User, assigning to User OK.
@@ -17631,7 +17631,7 @@ print(total)
     }
 
     #[test]
-    fn checker_has_many_navigation_devuelve_future_result_list_target() {
+    fn checker_has_many_navigation_returns_future_result_list_target() {
         // `let p: Post = user.posts(db).await?` must be ERROR
         // (List<Post> is not compatible with Post — the relation is plural).
         // The virtual field `posts` is the key in meta.relations.
@@ -17654,7 +17654,7 @@ print(total)
     }
 
     #[test]
-    fn checker_has_one_navigation_devuelve_future_result_target() {
+    fn checker_has_one_navigation_returns_future_result_target() {
         // `let n: Int = user.profile(db).await?` must be ERROR
         // (Profile is not Int). Virtual field `profile`.
         let src = "@table type Profile { id: Int, user_id: Int }\n\
@@ -17676,7 +17676,7 @@ print(total)
     }
 
     #[test]
-    fn checker_navigation_no_colisiona_con_static_orm_methods() {
+    fn checker_navigation_does_not_collide_with_static_orm_methods() {
         // `User.where(...).all(db)` still types as `Future<Result<List<User>>>`,
         // NOT as navigation method. The names of static ORM methods
         // (where/all/insert/etc.) cannot be names of fields/relations.
@@ -17700,7 +17700,7 @@ print(total)
     // `fitz build` (previously only the interpreter dispatched `.get`).
 
     #[test]
-    fn checker_db_row_get_int_devuelve_result_int() {
+    fn checker_db_row_get_int_returns_result_int() {
         let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
                      let rows = db.query(\"SELECT id FROM users\", []).await?\n  \
                      let r: DbRow = rows[0]\n  \
@@ -17716,7 +17716,7 @@ print(total)
     }
 
     #[test]
-    fn checker_db_row_get_str_devuelve_result_str() {
+    fn checker_db_row_get_str_returns_result_str() {
         let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
                      let rows = db.query(\"SELECT name FROM users\", []).await?\n  \
                      let r: DbRow = rows[0]\n  \
@@ -17732,7 +17732,7 @@ print(total)
     }
 
     #[test]
-    fn checker_db_row_get_int_anotacion_str_es_error() {
+    fn checker_db_row_get_int_str_annotation_is_error() {
         // `let name: Str = r.get_int("id")?` must be ERROR: get_int
         // refines to `Result<Int>`, `?` extracts Int, assigning to Str → fail.
         let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
@@ -17752,7 +17752,7 @@ print(total)
     }
 
     #[test]
-    fn checker_db_row_metodo_desconocido_es_error() {
+    fn checker_db_row_unknown_method_is_error() {
         let src = "async fn boot(db: DbConn) -> Result<Null> {\n  \
                      let rows = db.query(\"SELECT 1 AS x\", []).await?\n  \
                      let r: DbRow = rows[0]\n  \
@@ -17817,7 +17817,7 @@ print(total)
 
     /// A non-whitelisted method emits a clear error citing the supported ones.
     #[test]
-    fn checker_at_index_using_method_invalido_es_error() {
+    fn checker_at_index_using_invalid_method_is_error() {
         let src = "@table(\"docs\")\n\
                    @index(\"body\", using=\"bloom\")\n\
                    type Doc {\n  id: Int = 0\n  body: Str\n}\n";
@@ -17833,7 +17833,7 @@ print(total)
 
     /// `using=` with non-Str type is an error.
     #[test]
-    fn checker_at_index_using_no_str_es_error() {
+    fn checker_at_index_using_non_str_is_error() {
         let src = "@table(\"docs\")\n\
                    @index(\"body\", using=42)\n\
                    type Doc {\n  id: Int = 0\n  body: Str\n}\n";
@@ -17849,7 +17849,7 @@ print(total)
     // ----- v0.10.29 — `@unique(col1, col2, ...)` composite shortcut -----
 
     #[test]
-    fn checker_at_unique_bare_idents_genera_indexspec_unique() {
+    fn checker_at_unique_bare_idents_generates_indexspec_unique() {
         let src = "@table(\"users\")\n\
                    @unique(email, tenant_id)\n\
                    type User {\n  \
@@ -17876,7 +17876,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_unique_acepta_str_con_commas_compat_index() {
+    fn checker_at_unique_accepts_str_with_commas_compat_index() {
         let src = "@table(\"users\")\n\
                    @unique(\"email, tenant_id\")\n\
                    type User {\n  \
@@ -17899,7 +17899,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_unique_con_name_kwarg_lo_aplica() {
+    fn checker_at_unique_with_name_kwarg_applies_it() {
         let src = "@table(\"users\")\n\
                    @unique(email, name=\"users_email_uniq_custom\")\n\
                    type User {\n  \
@@ -17920,7 +17920,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_unique_sin_args_es_error() {
+    fn checker_at_unique_without_args_is_error() {
         let src = "@table(\"users\")\n\
                    @unique()\n\
                    type User {\n  id: Int = 0\n}\n";
@@ -17934,7 +17934,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_unique_kwarg_invalido_es_error() {
+    fn checker_at_unique_invalid_kwarg_is_error() {
         let src = "@table(\"users\")\n\
                    @unique(email, where_=\"foo\")\n\
                    type User {\n  id: Int = 0\n  email: Str\n}\n";
@@ -17949,7 +17949,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_unique_apilable_genera_multiples_indexes() {
+    fn checker_at_unique_stackable_generates_multiple_indexes() {
         let src = "@table(\"users\")\n\
                    @unique(email)\n\
                    @unique(tenant_id, slug)\n\
@@ -17973,7 +17973,7 @@ print(total)
     // ----- v0.10.29 — `@check_constraint("expr", name="optional")` -----
 
     #[test]
-    fn checker_at_check_constraint_basico_se_registra() {
+    fn checker_at_check_constraint_basic_registers() {
         let src = "@table(\"users\")\n\
                    @check_constraint(\"age >= 0 AND age <= 150\")\n\
                    type User {\n  \
@@ -17993,7 +17993,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_check_constraint_con_name_lo_aplica() {
+    fn checker_at_check_constraint_with_name_applies_it() {
         let src = "@table(\"users\")\n\
                    @check_constraint(\"status IN ('a', 'p')\", name=\"users_status_valid\")\n\
                    type User {\n  \
@@ -18014,7 +18014,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_check_constraint_apilable() {
+    fn checker_at_check_constraint_stackable() {
         let src = "@table(\"users\")\n\
                    @check_constraint(\"age >= 0\")\n\
                    @check_constraint(\"email != ''\")\n\
@@ -18034,7 +18034,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_check_constraint_sin_args_es_error() {
+    fn checker_at_check_constraint_without_args_is_error() {
         let src = "@table(\"users\")\n\
                    @check_constraint()\n\
                    type User {\n  id: Int = 0\n}\n";
@@ -18048,7 +18048,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_check_constraint_str_vacio_es_error() {
+    fn checker_at_check_constraint_empty_str_is_error() {
         let src = "@table(\"users\")\n\
                    @check_constraint(\"\")\n\
                    type User {\n  id: Int = 0\n}\n";
@@ -18061,7 +18061,7 @@ print(total)
     }
 
     #[test]
-    fn checker_at_check_constraint_arg_no_str_es_error() {
+    fn checker_at_check_constraint_non_str_arg_is_error() {
         let src = "@table(\"users\")\n\
                    @check_constraint(42)\n\
                    type User {\n  id: Int = 0\n}\n";
@@ -18109,7 +18109,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_basico_compila() {
+    fn healthz_basic_compiles() {
         // `@healthz fn liveness() -> Bool { return true }` must compile
         // without type errors.
         let src = "@healthz\n\
@@ -18118,14 +18118,14 @@ print(total)
     }
 
     #[test]
-    fn readyz_basico_compila() {
+    fn readyz_basic_compiles() {
         let src = "@readyz\n\
                    fn readiness() -> Bool {\n  return true\n}";
         assert_no_health_err(src);
     }
 
     #[test]
-    fn healthz_con_result_null_compila() {
+    fn healthz_with_result_null_compiles() {
         // `Result<Null>` is also valid: Ok = healthy, Err = unhealthy.
         let src = "@healthz\n\
                    fn liveness() -> Result<Null> {\n  return Ok(null)\n}";
@@ -18133,14 +18133,14 @@ print(total)
     }
 
     #[test]
-    fn healthz_con_result_bool_compila() {
+    fn healthz_with_result_bool_compiles() {
         let src = "@healthz\n\
                    fn liveness() -> Result<Bool> {\n  return Ok(true)\n}";
         assert_no_health_err(src);
     }
 
     #[test]
-    fn healthz_async_compila() {
+    fn healthz_async_compiles() {
         // async fn liveness() -> Bool — the ret is Future<Bool>, valid.
         let src = "async fn pausar(ms: Int) -> Int { return ms }\n\
                    @healthz\n\
@@ -18149,21 +18149,21 @@ print(total)
     }
 
     #[test]
-    fn healthz_con_args_es_error() {
+    fn healthz_with_args_is_error() {
         let src = "@healthz(\"x\")\n\
                    fn liveness() -> Bool {\n  return true\n}";
         assert_health_err(src, "no admite args ni kwargs");
     }
 
     #[test]
-    fn healthz_con_kwargs_es_error() {
+    fn healthz_with_kwargs_is_error() {
         let src = "@healthz(timeout=10)\n\
                    fn liveness() -> Bool {\n  return true\n}";
         assert_health_err(src, "no admite args ni kwargs");
     }
 
     #[test]
-    fn healthz_con_params_es_error() {
+    fn healthz_with_params_is_error() {
         // Probes don't receive input — params is an error.
         let src = "@healthz\n\
                    fn liveness(x: Int) -> Bool {\n  return true\n}";
@@ -18171,7 +18171,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_return_type_invalido_es_error() {
+    fn healthz_invalid_return_type_is_error() {
         // Return must be Bool / Result<Null> / Result<Bool>.
         let src = "@healthz\n\
                    fn liveness() -> Int {\n  return 200\n}";
@@ -18179,7 +18179,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_duplicado_es_error() {
+    fn healthz_duplicate_is_error() {
         // Singleton: two @healthz fire an error citing the first.
         let src = "@healthz\n\
                    fn first() -> Bool {\n  return true\n}\n\
@@ -18189,7 +18189,7 @@ print(total)
     }
 
     #[test]
-    fn readyz_duplicado_es_error() {
+    fn readyz_duplicate_is_error() {
         let src = "@readyz\n\
                    fn first() -> Bool {\n  return true\n}\n\
                    @readyz\n\
@@ -18198,7 +18198,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_y_readyz_separados_compilan() {
+    fn healthz_and_readyz_separate_compile() {
         // `@healthz` + `@readyz` on different fns is OK — they are
         // separate singletons.
         let src = "@healthz\n\
@@ -18209,7 +18209,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_y_readyz_juntos_en_misma_fn_es_error() {
+    fn healthz_and_readyz_together_in_same_fn_is_error() {
         // Stacked on the same fn → conflict.
         let src = "@healthz\n\
                    @readyz\n\
@@ -18218,7 +18218,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_con_get_es_error() {
+    fn healthz_with_get_is_error() {
         // Conflict with normal HTTP decorator.
         let src = "@healthz\n\
                    @get(\"/probe\")\n\
@@ -18227,7 +18227,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_con_cron_es_error() {
+    fn healthz_with_cron_is_error() {
         let src = "@healthz\n\
                    @cron(\"0 0 * * *\")\n\
                    fn job() -> Bool {\n  return true\n}";
@@ -18235,7 +18235,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_con_background_es_error() {
+    fn healthz_with_background_is_error() {
         let src = "@healthz\n\
                    @background\n\
                    fn job() -> Bool {\n  return true\n}";
@@ -18243,7 +18243,7 @@ print(total)
     }
 
     #[test]
-    fn healthz_con_authenticated_es_error() {
+    fn healthz_with_authenticated_is_error() {
         // Probes must NOT be authenticated (K8s doesn't send bearer).
         let src = "type User { id: Int, role: Str }\n\
                    @auth_provider\n\
@@ -18259,7 +18259,7 @@ print(total)
     // ============================================================
 
     #[test]
-    fn secret_type_se_resuelve_y_display_es_redactable() {
+    fn secret_type_resolves_and_display_is_redactable() {
         // `Secret<Str>` must resolve correctly. Its structural
         // display preserves the shape (for typed error messages).
         // Redaction only applies to Value's Display.
@@ -18277,7 +18277,7 @@ print(total)
     }
 
     #[test]
-    fn secret_expose_devuelve_el_inner_tipado() {
+    fn secret_expose_returns_typed_inner() {
         // `.expose()` on `Secret<Str>` must type `Str` (not Any).
         // This enables typed chains: `secret("X")?.expose().len()`.
         let src = "async fn pp() -> Result<Int> {\n\
@@ -18290,7 +18290,7 @@ print(total)
     }
 
     #[test]
-    fn secret_metodo_desconocido_es_error() {
+    fn secret_unknown_method_is_error() {
         // Any method other than `.expose()` must fail with a
         // clear message.
         let src = "async fn pp() -> Result<Null> {\n\
@@ -18310,7 +18310,7 @@ print(total)
     }
 
     #[test]
-    fn secret_expose_con_args_es_error() {
+    fn secret_expose_with_args_is_error() {
         let src = "async fn pp() -> Result<Null> {\n\
                    let p = secret(\"K\")?\n\
                    let _ = p.expose(42)\n\
@@ -18328,7 +18328,7 @@ print(total)
     }
 
     #[test]
-    fn config_tipa_como_any_independiente_del_default() {
+    fn config_types_as_any_independent_of_default() {
         // `config(key, default)` returns Any (future refinement).
         // The user annotates the destination with `let port: Int = config("P", 8080)`.
         let src = "let port: Int = config(\"PORT\", 8080)";
@@ -18341,7 +18341,7 @@ print(total)
     }
 
     #[test]
-    fn secret_builtin_arg_debe_ser_str() {
+    fn secret_builtin_arg_must_be_str() {
         // `secret(42)` with Int as key → type error.
         let src = "let _ = secret(42)";
         let errs = errors_of(src);
@@ -18354,14 +18354,14 @@ print(total)
     // ---- Phase 12.8 — @flag decorator checker ----
 
     #[test]
-    fn flag_decorator_shape_valido_compila_limpio() {
+    fn flag_decorator_valid_shape_compiles_clean() {
         assert_ok("@flag(\"new-checkout\")\nfn f() -> Int { return 1 }");
         assert_ok("@flag(\"dark_mode\")\nfn g() -> Int { return 1 }");
         assert_ok("@flag(\"a1_b2\")\nfn h() -> Int { return 1 }");
     }
 
     #[test]
-    fn flag_decorator_sin_args_es_error() {
+    fn flag_decorator_without_args_is_error() {
         assert_error_with(
             "@flag()\nfn f() -> Int { return 1 }",
             &["@flag", "1 arg positional"],
@@ -18369,7 +18369,7 @@ print(total)
     }
 
     #[test]
-    fn flag_decorator_con_dos_args_es_error() {
+    fn flag_decorator_with_two_args_is_error() {
         assert_error_with(
             "@flag(\"a\", \"b\")\nfn f() -> Int { return 1 }",
             &["@flag", "1 arg positional"],
@@ -18377,7 +18377,7 @@ print(total)
     }
 
     #[test]
-    fn flag_decorator_arg_no_str_literal_es_error() {
+    fn flag_decorator_non_str_literal_arg_is_error() {
         assert_error_with(
             "@flag(123)\nfn f() -> Int { return 1 }",
             &["@flag", "Str literal"],
@@ -18385,7 +18385,7 @@ print(total)
     }
 
     #[test]
-    fn flag_decorator_nombre_vacio_es_error() {
+    fn flag_decorator_empty_name_is_error() {
         assert_error_with(
             "@flag(\"\")\nfn f() -> Int { return 1 }",
             &["@flag", "no puede ser vacío"],
@@ -18393,7 +18393,7 @@ print(total)
     }
 
     #[test]
-    fn flag_decorator_chars_invalidos_es_error() {
+    fn flag_decorator_invalid_chars_is_error() {
         assert_error_with(
             "@flag(\"foo!\")\nfn f() -> Int { return 1 }",
             &["@flag", "inválido"],
@@ -18401,7 +18401,7 @@ print(total)
     }
 
     #[test]
-    fn flag_decorator_duplicado_es_error() {
+    fn flag_decorator_duplicate_is_error() {
         assert_error_with(
             "@flag(\"a\")\n@flag(\"b\")\nfn f() -> Int { return 1 }",
             &["@flag", "duplicado"],
@@ -18409,7 +18409,7 @@ print(total)
     }
 
     #[test]
-    fn flag_decorator_con_kwargs_es_error() {
+    fn flag_decorator_with_kwargs_is_error() {
         assert_error_with(
             "@flag(\"x\", level=\"info\")\nfn f() -> Int { return 1 }",
             &["@flag", "kwargs"],
@@ -18417,7 +18417,7 @@ print(total)
     }
 
     #[test]
-    fn flag_decorator_apilable_sobre_http_handler() {
+    fn flag_decorator_stackable_on_http_handler() {
         // The @flag decorator is NOT restricted to regular fns —
         // it's valid on HTTP/WS handlers. That combination is
         // exactly the 90% case (feature gate on a route).
@@ -18429,7 +18429,7 @@ print(total)
     }
 
     #[test]
-    fn flag_builtin_se_resuelve_como_any() {
+    fn flag_builtin_resolves_as_any() {
         // `flag(...)` is in the global scope as Type::Any (same
         // pattern as jwt/hash/auth) — calls are not checked statically
         // but the binding exists.
@@ -18455,14 +18455,14 @@ print(total)
     }
 
     #[test]
-    fn v2_hover_sobre_lhs_de_let_sin_anotacion_registra_tipo_inferido() {
+    fn v2_hover_on_let_lhs_without_annotation_registers_inferred_type() {
         // `let edad = 200` — span of the LHS `edad` is at (1, 5).
         let ty = types_at_position("let edad = 200\n", 1, 5);
         assert_eq!(ty, Some(Type::Int), "hover sobre `edad` debe ser Int");
     }
 
     #[test]
-    fn v2_hover_sobre_lhs_de_let_con_anotacion_registra_tipo_declarado() {
+    fn v2_hover_on_let_lhs_with_annotation_registers_declared_type() {
         // `let datos: Int? = null` — span of the LHS `datos` at (1, 5).
         // The registered type must be Nullable(Int) (the declared one),
         // not Null (the one inferred from the RHS).
@@ -18476,7 +18476,7 @@ print(total)
     }
 
     #[test]
-    fn v2_hover_sobre_lhs_de_let_str_y_float_funciona() {
+    fn v2_hover_on_let_lhs_str_and_float_works() {
         let ty = types_at_position("let nombre = \"Patagonia\"\n", 1, 5);
         assert_eq!(ty, Some(Type::Str));
 
@@ -18485,7 +18485,7 @@ print(total)
     }
 
     #[test]
-    fn v2_hover_sobre_lhs_de_let_bool_funciona() {
+    fn v2_hover_on_let_lhs_bool_works() {
         let ty = types_at_position("let activa = true\n", 1, 5);
         assert_eq!(ty, Some(Type::Bool));
     }
@@ -18524,7 +18524,7 @@ print(total)
     }
 
     #[test]
-    fn l2_map_sobre_list_int_sin_anotar_callback_tipa_como_list_int() {
+    fn l2_map_on_list_int_unannotated_callback_types_as_list_int() {
         // Pedagogical case from the M1.C5 cap of the course. Before L2 this
         // typed as `List<Any>` because `x` stayed as `Any` without
         // annotation, and `Any * Int` is also `Any`. Now L2 propagates
@@ -18542,7 +18542,7 @@ print(total)
     }
 
     #[test]
-    fn l2_filter_sobre_list_int_sin_anotar_tipa_callback_int_y_ret_bool() {
+    fn l2_filter_on_list_int_unannotated_types_callback_int_and_ret_bool() {
         // `xs.filter(fn(x) => x > 0)` on `List<Int>` must type
         // `List<Int>` (filter preserves T). Inside the callback,
         // `x > 0` requires `x: Int` (Int vs Int OK).
@@ -18554,7 +18554,7 @@ print(total)
     }
 
     #[test]
-    fn l2_map_sobre_list_str_propaga_a_metodos_str() {
+    fn l2_map_on_list_str_propagates_to_str_methods() {
         // `xs.map(fn(s) => s.upper())` on `List<Str>` must type
         // `List<Str>` — `.upper()` requires `s: Str`. If L2
         // didn't propagate, `s: Any` and the result would be `List<Any>`.
@@ -18566,7 +18566,7 @@ print(total)
     }
 
     #[test]
-    fn l2_param_con_anotacion_explicita_gana_sobre_hint() {
+    fn l2_param_with_explicit_annotation_wins_over_hint() {
         // If the student annotates `fn(x: Float) => ...` on `List<Int>`,
         // the annotation wins. The callback param type is Float (not
         // Int from the hint). That may trigger an error if the body
@@ -18585,7 +18585,7 @@ print(total)
     }
 
     #[test]
-    fn l2_find_sobre_list_int_tipa_callback_y_devuelve_result_int() {
+    fn l2_find_on_list_int_types_callback_and_returns_result_int() {
         // `xs.find(fn(x) => x == 2)` on `List<Int>` → `Result<Int>`.
         let ty = type_of_last_let("let r = [1, 2, 3].find(fn(x) => x == 2)\n");
         match ty {
@@ -18597,7 +18597,7 @@ print(total)
     // ---- L2 expanded (2026-06-05) — bidirectional inference for Fn ----
 
     #[test]
-    fn l2x_let_con_anotacion_fn_propaga_a_fnexpr_sin_anotacion() {
+    fn l2x_let_with_fn_annotation_propagates_to_unannotated_fnexpr() {
         // `let f: Fn(Int) -> Int = fn(n) => n * 2` — the param `n` of the
         // FnExpr must be inferred as Int from the let annotation.
         let src = "let f: Fn(Int) -> Int = fn(n) => n * 2\n";
@@ -18614,7 +18614,7 @@ print(total)
     }
 
     #[test]
-    fn l2x_fn_user_defined_con_param_fn_propaga_a_arg_fnexpr() {
+    fn l2x_fn_user_defined_with_fn_param_propagates_to_fnexpr_arg() {
         // `fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
         //  let r = apply(fn(n) => n * 2, 5)` — the `n` of the callback
         // must be inferred as Int from the `f: Fn(Int) -> Int` param.
@@ -18634,7 +18634,7 @@ let r = apply(fn(n) => n * 2, 5)
     }
 
     #[test]
-    fn l2x_anotacion_explicita_del_fnexpr_gana_sobre_hint() {
+    fn l2x_explicit_fnexpr_annotation_wins_over_hint() {
         // If the FnExpr has an explicit param annotation that's not
         // compatible with the let's annotation, the checker emits an error.
         // `let f: Fn(Int) -> Int = fn(n: Str) => n.upper()` — error
@@ -18652,7 +18652,7 @@ let r = apply(fn(n) => n * 2, 5)
     // ---- S1 (2026-06-05) — own spans for Param/Pattern ----
 
     #[test]
-    fn s1_hover_sobre_param_de_fn_def_muestra_tipo_anotado() {
+    fn s1_hover_on_fn_def_param_shows_annotated_type() {
         // `fn double(n: Int) => n * 2` — span of param `n` at col 11.
         // The checker should record `Int` under that span in TypeInfo.
         let ty = types_at_position("fn double(n: Int) => n * 2\n", 1, 11);
@@ -18660,14 +18660,14 @@ let r = apply(fn(n) => n * 2, 5)
     }
 
     #[test]
-    fn s1_hover_sobre_param_sin_anotacion_muestra_any() {
+    fn s1_hover_on_unannotated_param_shows_any() {
         // `fn f(x) => x + 1` — without annotation, x: Any.
         let ty = types_at_position("fn f(x) => x + 1\n", 1, 6);
         assert_eq!(ty, Some(Type::Any), "param sin anotación tipa como Any");
     }
 
     #[test]
-    fn s1_hover_sobre_var_de_for_in_range_muestra_int() {
+    fn s1_hover_on_for_in_range_var_shows_int() {
         // `for i in 0..10 { print(i) }` — span of `i` at col 5.
         // The range produces Int, the Ident pattern binds as Int.
         // Note that `for` currently expands to a `Stmt::For`
@@ -18681,7 +18681,7 @@ let r = apply(fn(n) => n * 2, 5)
     }
 
     #[test]
-    fn s1_hover_sobre_binding_de_match_ok_muestra_inner_type() {
+    fn s1_hover_on_match_ok_binding_shows_inner_type() {
         // `match Ok(42) { Ok(n) => n, Err(_) => 0 }` — span of `n` in
         // `Ok(n)`. n must type as Int (inner of the Result).
         // The span of `n` is where the ident `n` appears inside the
@@ -18697,7 +18697,7 @@ let r = apply(fn(n) => n * 2, 5)
     }
 
     #[test]
-    fn s1_hover_sobre_param_de_metodo_custom_funciona() {
+    fn s1_hover_on_custom_method_param_works() {
         // `double` method on `type Counter { val: Int }`.
         let src = "\
 type Counter { val: Int = 0 }
@@ -18713,7 +18713,7 @@ let r = c.double(5)
     }
 
     #[test]
-    fn l2_nested_callbacks_no_se_contaminan() {
+    fn l2_nested_callbacks_do_not_contaminate() {
         // Nested FnExpr: the outer's hint must not "leak" into the
         // inner. Case: `xs.map(fn(x) => [x, x+1].map(fn(y) => y * 2))`.
         // The inner `fn(y)` receives the `Int` hint from the receiver `[x, x+1]`,

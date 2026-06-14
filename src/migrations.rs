@@ -3581,7 +3581,7 @@ mod tests {
     // had to change `name=` to force regeneration.
 
     #[test]
-    fn diff_indexes_cambio_de_using_dispara_drop_create() {
+    fn diff_indexes_change_of_using_triggers_drop_create() {
         // index name + cols equal, only `using` changes btree→gin
         // → must regenerate (DROP + CREATE).
         let mut current_users = table_users();
@@ -3630,7 +3630,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_indexes_cambio_de_where_clause_dispara_drop_create() {
+    fn diff_indexes_change_of_where_clause_triggers_drop_create() {
         // Partial index: WHERE change → regenerate.
         let mut current_users = table_users();
         current_users.indexes.push(Index {
@@ -3676,7 +3676,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_indexes_canonicaliza_where_clause_para_evitar_regens_espurios() {
+    fn diff_indexes_canonicalizes_where_clause_to_avoid_spurious_regens() {
         // Same WHERE semantics but different formatting
         // (whitespace + case + trivial parens): must NOT trigger
         // regeneration. This closes the typical case where
@@ -3756,7 +3756,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_indexes_cambio_de_unique_dispara_drop_create() {
+    fn diff_indexes_change_of_unique_triggers_drop_create() {
         // unique change → regenerate.
         let mut current_users = table_users();
         current_users.indexes.push(Index {
@@ -3800,7 +3800,7 @@ mod tests {
     }
 
     #[test]
-    fn diff_indexes_btree_vs_none_son_equivalentes() {
+    fn diff_indexes_btree_vs_none_are_equivalent() {
         // `using: None` and `using: Some("btree")` must be treated
         // as equivalent (btree is the Postgres default). Must not
         // trigger regen.
@@ -4422,14 +4422,14 @@ type Plain {
     // ============================================================
 
     #[test]
-    fn split_up_down_sin_marcadores_es_up_completo() {
+    fn split_up_down_without_markers_is_up_complete() {
         let (up, down) = split_up_down("CREATE TABLE x (id int);\n");
         assert_eq!(up.trim(), "CREATE TABLE x (id int);");
         assert!(down.is_none());
     }
 
     #[test]
-    fn split_up_down_con_ambos_marcadores() {
+    fn split_up_down_with_both_markers() {
         let raw = "-- UP\nCREATE TABLE x (id int);\n-- DOWN\nDROP TABLE x;\n";
         let (up, down) = split_up_down(raw);
         assert!(up.contains("CREATE TABLE x"));
@@ -4459,7 +4459,7 @@ type Plain {
     }
 
     #[test]
-    fn split_up_down_sin_up_marker_pero_con_down() {
+    fn split_up_down_without_up_marker_but_with_down() {
         let raw = "CREATE TABLE x (id int);\n-- DOWN\nDROP TABLE x;\n";
         let (up, down) = split_up_down(raw);
         assert!(up.contains("CREATE TABLE x"));
@@ -4467,7 +4467,7 @@ type Plain {
     }
 
     #[test]
-    fn split_up_down_marker_con_chars_extra_no_es_marker() {
+    fn split_up_down_marker_with_extra_chars_is_not_marker() {
         // `-- UP foo` is NOT a marker (extra chars)
         let raw = "-- UP foo\nA;\n";
         let (up, down) = split_up_down(raw);
@@ -4478,7 +4478,7 @@ type Plain {
     }
 
     #[test]
-    fn read_migrations_dir_preserva_up_down() {
+    fn read_migrations_dir_preserves_up_down() {
         let tmp = std::env::temp_dir().join(format!("fitz_test_updown_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
@@ -4502,7 +4502,7 @@ type Plain {
     }
 
     #[test]
-    fn read_migrations_dir_detecta_fitz_files() {
+    fn read_migrations_dir_detects_fitz_files() {
         // v0.10.19 (10.6.d) — `.fitz` and `.sql` interleave by
         // alphabetic order. The `kind` variant indicates the backend.
         let tmp = std::env::temp_dir().join(format!("fitz_test_fitzmig_{}", std::process::id()));
@@ -4636,7 +4636,7 @@ type Plain {
     }
 
     #[test]
-    fn rename_table_sql_emite_alter_rename_to() {
+    fn rename_table_sql_emits_alter_rename_to() {
         let change = Change::RenameTable {
             schema: None,
             old_name: "old_users".to_string(),
@@ -4650,7 +4650,7 @@ type Plain {
     }
 
     #[test]
-    fn rename_column_sql_emite_alter_rename_column() {
+    fn rename_column_sql_emits_alter_rename_column() {
         let change = Change::RenameColumn {
             table: TableRef::public("users"),
             old_name: "name".to_string(),
@@ -4664,7 +4664,7 @@ type Plain {
     }
 
     #[test]
-    fn renamed_from_sin_old_en_current_es_noop_silencioso() {
+    fn renamed_from_without_old_in_current_is_silent_noop() {
         // User left the @renamed_from("old") decorator but already
         // applied the migration and old_name no longer exists in
         // current (current is already renamed). The diff must NOT
@@ -4701,7 +4701,7 @@ type Plain {
     }
 
     #[test]
-    fn rename_table_seguido_de_alter_column_orden_seguro() {
+    fn rename_table_followed_by_alter_column_safe_order() {
         // current: table "old_x" with col `name`.
         // target: table "x" renamed_from="old_x" with col `name`
         // flagged nullable=true (current was false). The diff must
@@ -4760,7 +4760,7 @@ type Plain {
     }
 
     #[test]
-    fn schema_from_program_field_renamed_from_se_carga_a_column() {
+    fn schema_from_program_field_renamed_from_loads_to_column() {
         let src = r#"
 @table("users") type User {
     @primary id: Int = 0
@@ -4775,7 +4775,7 @@ type Plain {
     }
 
     #[test]
-    fn schema_from_program_table_renamed_from_se_carga_a_table() {
+    fn schema_from_program_table_renamed_from_loads_to_table() {
         let src = r#"
 @table("users") @renamed_from("legacy_users") type User {
     @primary id: Int = 0
@@ -4796,7 +4796,7 @@ type Plain {
     // based on `changes.is_empty()`. Here we test the decision.
 
     #[test]
-    fn check_es_verde_cuando_diff_es_vacio() {
+    fn check_is_green_when_diff_is_empty() {
         let s = Schema {
             tables: vec![table_users()],
         };
@@ -4808,7 +4808,7 @@ type Plain {
     }
 
     #[test]
-    fn check_falla_cuando_hay_drift() {
+    fn check_fails_when_there_is_drift() {
         let current = Schema::default();
         let target = Schema {
             tables: vec![table_users()],
@@ -4977,7 +4977,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_text_filter_por_table() {
+    fn format_inspection_text_filter_by_table() {
         let s = inspect_schema_fixture();
         let text = format_inspection_text(&s, None, Some("users"));
         assert!(
@@ -5050,7 +5050,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_json_filter_por_table_devuelve_solo_esa() {
+    fn format_inspection_json_filter_by_table_returns_only_that() {
         let s = inspect_schema_fixture();
         let json_str = format_inspection_json(&s, None, Some("posts")).expect("json");
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -5097,7 +5097,7 @@ type Plain {
     // ============================================================
 
     #[test]
-    fn create_index_con_using_emite_using_method() {
+    fn create_index_with_using_emits_using_method() {
         let table_ref = TableRef {
             schema: None,
             name: "docs".to_string(),
@@ -5126,7 +5126,7 @@ type Plain {
     }
 
     #[test]
-    fn create_index_sin_using_no_emite_clausula() {
+    fn create_index_without_using_does_not_emit_clause() {
         let table_ref = TableRef {
             schema: None,
             name: "users".to_string(),
@@ -5176,7 +5176,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_text_muestra_using_cuando_no_es_btree() {
+    fn format_inspection_text_shows_using_when_not_btree() {
         let schema = Schema {
             tables: vec![Table {
                 name: "docs".to_string(),
@@ -5204,7 +5204,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_json_incluye_using_field() {
+    fn format_inspection_json_includes_using_field() {
         let schema = Schema {
             tables: vec![Table {
                 name: "docs".to_string(),
@@ -5234,7 +5234,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_filter_por_schema_custom() {
+    fn format_inspection_filter_by_custom_schema() {
         // Tables in non-public schemas must appear when we pass
         // --schema <name>, and NOT when we filter to public.
         let schema = Schema {
@@ -5287,7 +5287,7 @@ type Plain {
     // v0.10.29 — Cross-schema FK emit
 
     #[test]
-    fn add_foreign_key_emit_usa_references_schema_qualified() {
+    fn add_foreign_key_emit_uses_references_schema_qualified() {
         let fk = ForeignKey {
             name: "tenants_user_id_fkey".to_string(),
             column: "user_id".to_string(),
@@ -5315,7 +5315,7 @@ type Plain {
     }
 
     #[test]
-    fn add_foreign_key_emit_sin_references_schema_es_compat_anterior() {
+    fn add_foreign_key_emit_without_references_schema_is_backward_compat() {
         let fk = ForeignKey {
             name: "posts_author_id_fkey".to_string(),
             column: "author_id".to_string(),
@@ -5343,7 +5343,7 @@ type Plain {
     // v0.10.29 — @check_constraint emit a CREATE TABLE
 
     #[test]
-    fn create_table_sql_incluye_check_constraints() {
+    fn create_table_sql_includes_check_constraints() {
         let t = Table {
             name: "users".to_string(),
             columns: vec![
@@ -5417,7 +5417,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_text_all_schemas_muestra_todos_los_schemas() {
+    fn format_inspection_text_all_schemas_shows_all_schemas() {
         let s = multi_schema_fixture();
         let text = format_inspection_text_all_schemas(&s, None);
         // Header with detected schemas (alphabetic order).
@@ -5442,7 +5442,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_json_all_schemas_emite_schemas_array() {
+    fn format_inspection_json_all_schemas_emits_schemas_array() {
         let s = multi_schema_fixture();
         let json_str = format_inspection_json_all_schemas(&s, None).expect("json OK");
         let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
@@ -5459,7 +5459,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_text_all_schemas_con_table_filter_aplica_global() {
+    fn format_inspection_text_all_schemas_with_table_filter_applies_global() {
         // `--table users` with `--all-schemas` must show only the
         // tables with that name in ANY schema.
         let s = multi_schema_fixture();
@@ -5476,7 +5476,7 @@ type Plain {
     }
 
     #[test]
-    fn format_inspection_text_all_schemas_sin_tablas_emite_mensaje_vacio() {
+    fn format_inspection_text_all_schemas_without_tables_emits_empty_message() {
         let s = Schema { tables: vec![] };
         let text = format_inspection_text_all_schemas(&s, None);
         assert!(

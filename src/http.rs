@@ -4717,7 +4717,7 @@ mod tests {
     // ---- HttpMethod ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn http_method_desde_nombre_de_decorator() {
+    async fn http_method_from_decorator_name() {
         assert_eq!(
             HttpMethod::from_decorator_name("get"),
             Some(HttpMethod::Get)
@@ -4741,7 +4741,7 @@ mod tests {
     // ---- parse_path_template ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_str_simple_sin_params() {
+    async fn path_str_simple_without_params() {
         let t = parse_path_template(&Expr::Str("/".into(), Span::ZERO)).unwrap();
         assert_eq!(t.path, "/");
         assert!(t.params.is_empty());
@@ -4752,7 +4752,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_strinterp_con_un_param() {
+    async fn path_strinterp_with_one_param() {
         // `"/users/{id}"` → StrInterp([Lit("/users/"), Expr(Ident("id"))])
         let e = Expr::StrInterp(
             vec![
@@ -4767,7 +4767,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_strinterp_con_varios_params_distintos() {
+    async fn path_strinterp_with_multiple_distinct_params() {
         // `"/orgs/{org}/users/{id}"`
         let e = Expr::StrInterp(
             vec![
@@ -4784,13 +4784,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_no_arranca_con_slash_es_error() {
+    async fn path_not_starting_with_slash_is_error() {
         let err = parse_path_template(&Expr::Str("users".into(), Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::MustStartWithSlash);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_con_expresion_no_ident_es_error() {
+    async fn path_with_non_ident_expression_is_error() {
         // `"{a+b}"` — interpolation with BinOp.
         let e = Expr::StrInterp(
             vec![
@@ -4812,7 +4812,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_con_params_duplicados_es_error() {
+    async fn path_with_duplicated_params_is_error() {
         // `"/a/{x}/b/{x}"`
         let e = Expr::StrInterp(
             vec![
@@ -4828,7 +4828,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_no_string_literal_es_error() {
+    async fn path_not_string_literal_is_error() {
         // `@get(42)` — Int instead of string.
         let err = parse_path_template(&Expr::Int(42, Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::NotAStringLiteral);
@@ -4837,7 +4837,7 @@ mod tests {
     // ---- Query params in the template ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn query_template_separa_path_de_query_params() {
+    async fn query_template_separates_path_from_query_params() {
         // `"/items?limit={limit}&offset={offset}"` → path only
         // `/items`, query_params `["limit", "offset"]` in order.
         let e = Expr::StrInterp(
@@ -4859,7 +4859,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn query_template_combina_con_path_params() {
+    async fn query_template_combines_with_path_params() {
         // `"/users/{id}/posts?limit={limit}"` → path
         // `/users/{id}/posts`, path params `["id"]`, query params
         // `["limit"]`.
@@ -4879,7 +4879,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn query_template_key_distinta_del_nombre_es_error() {
+    async fn query_template_key_distinct_from_name_is_error() {
         // `"/x?l={limit}"` — key `l` doesn't match name `limit`.
         let e = Expr::StrInterp(
             vec![
@@ -4897,7 +4897,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn query_template_malformado_es_error() {
+    async fn query_template_malformed_is_error() {
         // `"/x?limit"` — missing `={name}`.
         let e = Expr::Str("/x?limit".into(), Span::ZERO);
         let err = parse_path_template(&e).unwrap_err();
@@ -4909,7 +4909,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn query_template_param_duplicado_con_path_es_error() {
+    async fn query_template_param_duplicated_with_path_is_error() {
         // `"/users/{id}?id={id}"` — `id` appears in both path and
         // query.
         let e = Expr::StrInterp(
@@ -4932,7 +4932,7 @@ mod tests {
     // ---- value_to_json ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn value_to_json_primitivos() {
+    async fn value_to_json_primitives() {
         assert_eq!(
             value_to_json(&Value::Int(42)).unwrap(),
             serde_json::json!(42)
@@ -4956,13 +4956,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn value_to_json_lista() {
+    async fn value_to_json_list() {
         let v = Value::List(shared(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
         assert_eq!(value_to_json(&v).unwrap(), serde_json::json!([1, 2, 3]));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn value_to_json_mapa_con_claves_string() {
+    async fn value_to_json_map_with_string_keys() {
         let v = Value::Map(shared(vec![
             (Value::Str("name".into()), Value::Str("fitz".into())),
             (Value::Str("port".into()), Value::Int(3000)),
@@ -4974,7 +4974,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn value_to_json_mapa_clave_no_string_es_error() {
+    async fn value_to_json_map_non_string_key_is_error() {
         let v = Value::Map(shared(vec![(Value::Int(1), Value::Int(10))]));
         let err = value_to_json(&v).unwrap_err();
         assert!(err.contains("claves de Map en JSON"));
@@ -4997,7 +4997,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn value_to_json_result_anidado_se_etiqueta() {
+    async fn value_to_json_nested_result_is_tagged() {
         // `Ok(42)` adentro de otra cosa (no debería pasar en el output
         // directo del handler, pero queremos un comportamiento total).
         let ok = Value::Result(ResultVariant::Ok(Box::new(Value::Int(42))));
@@ -5011,7 +5011,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn value_to_json_function_es_error() {
+    async fn value_to_json_function_is_error() {
         // Function is not serializable.
         let env = crate::env::Environment::new();
         let v = Value::Function {
@@ -5027,7 +5027,7 @@ mod tests {
     // ---- value_to_outcome (handler → status + body) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_value_pelado_es_200() {
+    async fn outcome_of_bare_value_is_200() {
         let v = Value::Str("hola".into());
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 200);
@@ -5036,7 +5036,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_ok_es_200_con_inner() {
+    async fn outcome_of_ok_is_200_with_inner() {
         let v = Value::Result(ResultVariant::Ok(Box::new(Value::Int(42))));
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 200);
@@ -5044,7 +5044,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_err_es_500_con_error_obj() {
+    async fn outcome_of_err_is_500_with_error_obj() {
         let v = Value::Result(ResultVariant::Err(Box::new(Value::Str(
             "no encontrado".into(),
         ))));
@@ -5055,7 +5055,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_instance_es_objeto_json() {
+    async fn outcome_of_instance_is_json_object() {
         let inst = Value::new_instance(
             "User".into(),
             vec![
@@ -5074,7 +5074,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_tipo_no_serializable_es_500() {
+    async fn outcome_of_non_serializable_type_is_500() {
         // Range is not serializable.
         let v = Value::Range { start: 0, end: 10 };
         let out = value_to_outcome(&v);
@@ -5085,7 +5085,7 @@ mod tests {
     // ---- Status codes custom (Value::HttpResponse) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_http_response_usa_su_status_y_body() {
+    async fn outcome_of_http_response_uses_its_status_and_body() {
         // The evaluator produces `Value::HttpResponse` when the
         // user does `return 401 { ... }`. The outcome uses the
         // response status and serializes the body with the usual
@@ -5105,7 +5105,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_http_response_sin_body_es_null_json() {
+    async fn outcome_of_http_response_without_body_is_null_json() {
         // `HttpResponse { body: None }` → JSON null body. Reserved
         // for 204 No Content if it ever arrives; today the parser
         // requires an explicit body.
@@ -5119,7 +5119,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn outcome_de_http_response_con_body_map_serializa_a_objeto() {
+    async fn outcome_of_http_response_with_body_map_serializes_to_object() {
         // Body = map literal with string keys → JSON object.
         let body = Value::new_map(vec![
             (Value::Str("error".into()), Value::Str("falló".into())),
@@ -5138,25 +5138,25 @@ mod tests {
     // ---- coerce_path_param ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_param_default_a_str_sin_anotacion() {
+    async fn path_param_defaults_to_str_without_annotation() {
         let v = coerce_path_param("42", None).unwrap();
         assert_eq!(v, Value::Str("42".into()));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_param_int_se_parsea_a_int() {
+    async fn path_param_int_parses_to_int() {
         let v = coerce_path_param("42", Some("Int")).unwrap();
         assert_eq!(v, Value::Int(42));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_param_int_invalido_es_error() {
+    async fn path_param_int_invalid_is_error() {
         let err = coerce_path_param("abc", Some("Int")).unwrap_err();
         assert!(err.contains("Int") && err.contains("abc"));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_param_float_se_parsea() {
+    async fn path_param_float_parses() {
         let v = coerce_path_param("3.14", Some("Float")).unwrap();
         assert_eq!(v, Value::Float(3.14));
     }
@@ -5175,7 +5175,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn path_param_tipo_no_soportado_es_error() {
+    async fn path_param_unsupported_type_is_error() {
         // A custom type isn't allowed as a path param: the handler
         // must receive the raw id and rebuild the object inside.
         let err = coerce_path_param("42", Some("User")).unwrap_err();
@@ -5185,14 +5185,14 @@ mod tests {
     // ---- registry ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn registry_arranca_sin_rutas() {
+    async fn registry_starts_without_routes() {
         let r = HttpRegistry::new();
         assert!(r.is_empty());
         assert_eq!(r.routes.len(), 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn with_active_registry_expone_has_active_para_el_evaluator() {
+    async fn with_active_registry_exposes_has_active_for_the_evaluator() {
         // Outside: no registry, decorators emit an explicit error.
         assert!(!has_active_registry());
 
@@ -5227,7 +5227,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_invoca_handler_y_devuelve_outcome() {
+    async fn handle_task_invokes_handler_and_returns_outcome() {
         // `@get("/") fn hello() => "hola"`
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
         let registry = registry_from_source(src).await;
@@ -5245,7 +5245,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_coerciona_path_param_int() {
+    async fn handle_task_coerces_path_param_int() {
         let src = "@get(\"/users/{id}\")\nfn h(id: Int) => id * 2";
         let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
@@ -5264,7 +5264,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_path_param_int_invalido_es_400() {
+    async fn handle_task_path_param_int_invalid_is_400() {
         let src = "@get(\"/users/{id}\")\nfn h(id: Int) => id";
         let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
@@ -5283,7 +5283,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_handler_que_retorna_err_es_500_con_error() {
+    async fn handle_task_handler_returning_err_is_500_with_error() {
         // The handler returns Err("boom"): runtime translates it
         // to 500.
         let src = "@get(\"/\")\nfn h() => Err(\"boom\")";
@@ -5302,7 +5302,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_handler_que_retorna_instance_serializa_a_json() {
+    async fn handle_task_handler_returning_instance_serializes_to_json() {
         let src = "\
             type User { id: Int, name: Str }\n\
             @get(\"/u\")\nfn h() => User { id: 1, name: \"ana\" }\n\
@@ -5325,7 +5325,7 @@ mod tests {
     // ---- Mini-phase MW.1: middleware chain in handle_task ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_middleware_que_retorna_null_continua_al_handler() {
+    async fn handle_task_middleware_returning_null_continues_to_handler() {
         // "Passthrough" middleware: returns nothing → chain
         // continues and the handler runs normally.
         let src = "\
@@ -5349,7 +5349,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_middleware_que_short_circuita_con_401() {
+    async fn handle_task_middleware_short_circuits_with_401() {
         // Middleware cuts the chain with `return 401 { ... }`. The
         // handler is NOT invoked and the response is the
         // middleware's.
@@ -5377,7 +5377,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_dos_middlewares_short_circuita_el_primero_que_corte() {
+    async fn handle_task_two_middlewares_first_short_circuit_wins() {
         // First `logger` (pass), then `auth` (cuts). The handler
         // shouldn't run. If we flip the order and the cut lands
         // first, we verify it below.
@@ -5406,7 +5406,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_middleware_lee_method_y_path_del_request() {
+    async fn handle_task_middleware_reads_method_and_path_from_request() {
         // The middleware inspects req.method and req.path. Verifies
         // that the path carries the SUBSTITUTED path params, not
         // the template (mini-phase MW.1: `/users/{id}` →
@@ -5438,7 +5438,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_middleware_lee_headers_lowercase() {
+    async fn handle_task_middleware_reads_headers_lowercase() {
         // Headers exposed to the middleware with lowercase keys
         // (same criterion as the @header dispatch).
         let src = "\
@@ -5467,7 +5467,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_middleware_que_retorna_valor_invalido_es_500() {
+    async fn handle_task_middleware_returning_invalid_value_is_500() {
         // If the middleware returns anything other than Null or
         // HttpResponse (Int, Str, Instance, ...), the runtime
         // emits 500 with a clear message citing "gate-only".
@@ -5497,7 +5497,7 @@ mod tests {
     // ---- Mini-phase MW.2: cors built-in + header injection ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_response_headers_emite_los_tres_headers_basicos() {
+    async fn cors_response_headers_emits_three_basic_headers() {
         let cfg = CorsConfig::permissive_default();
         let headers = cfg.response_headers(None);
         let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
@@ -5511,7 +5511,7 @@ mod tests {
     // ---- Q.3: AllowOrigin Set + echo of the request Origin ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_set_echo_si_origin_esta_en_la_lista() {
+    async fn cors_set_echo_when_origin_in_list() {
         let cfg = CorsConfig {
             allow_origin: AllowOrigin::Set(vec!["https://a.com".into(), "https://b.com".into()]),
             ..CorsConfig::permissive_default()
@@ -5525,7 +5525,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_set_omite_origin_header_si_request_no_matchea() {
+    async fn cors_set_omits_origin_header_when_request_does_not_match() {
         let cfg = CorsConfig {
             allow_origin: AllowOrigin::Set(vec!["https://a.com".into()]),
             ..CorsConfig::permissive_default()
@@ -5542,7 +5542,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_set_omite_origin_si_request_no_trae_origin() {
+    async fn cors_set_omits_origin_when_request_has_no_origin() {
         // Without an `Origin` header (same-origin request, browser
         // doesn't send it), Set mode also doesn't emit — nothing
         // to echo. The browser wouldn't need it in that case
@@ -5557,7 +5557,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_literal_ignora_el_origin_del_request() {
+    async fn cors_literal_ignores_request_origin() {
         // Literal always emits the same value, regardless of the
         // request.
         let cfg = CorsConfig {
@@ -5570,7 +5570,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn allow_origin_resolve_set_match_y_miss() {
+    async fn allow_origin_resolve_set_match_and_miss() {
         let any = AllowOrigin::Literal("*".to_string());
         assert_eq!(any.resolve(None), Some("*".to_string()));
         assert_eq!(any.resolve(Some("https://x.com")), Some("*".to_string()));
@@ -5591,7 +5591,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_response_headers_emite_max_age_cuando_esta_seteado() {
+    async fn cors_response_headers_emits_max_age_when_set() {
         let cfg = CorsConfig {
             max_age: Some(3600),
             ..CorsConfig::permissive_default()
@@ -5605,7 +5605,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_inyecta_headers_cors_en_response_real() {
+    async fn handle_task_injects_cors_headers_in_real_response() {
         // Normal handler + @middleware(cors()) → the 200 response
         // carries the Access-Control-Allow-* headers.
         let src = "\
@@ -5635,7 +5635,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_inyecta_headers_cors_incluso_en_500_de_error() {
+    async fn handle_task_injects_cors_headers_even_on_500_error() {
         // If the handler returns Err(...), the response is 500 but
         // still carries the CORS headers. Without this the browser
         // sees "CORS error" instead of the actual 500 that
@@ -5665,7 +5665,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_custom_origin_se_propaga_a_headers() {
+    async fn handle_task_custom_origin_propagates_to_headers() {
         let src = "\
             @middleware(cors({\"allow_origin\": \"https://app.x.com\"}))\n\
             @get(\"/\")\n\
@@ -5690,7 +5690,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_cors_set_echo_request_origin_si_matchea() {
+    async fn handle_task_cors_set_echoes_request_origin_when_match() {
         // Q.3: cors with allowed origin list. Request with
         // `Origin: https://a.com` in the list → echo the origin.
         let src = "\
@@ -5719,7 +5719,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_cors_set_omite_origin_si_no_matchea() {
+    async fn handle_task_cors_set_omits_origin_when_no_match() {
         let src = "\
             @middleware(cors({\"allow_origin\": [\"https://a.com\"]}))\n\
             @get(\"/\")\n\
@@ -5750,7 +5750,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_sin_cors_no_emite_headers_extras() {
+    async fn handle_task_without_cors_emits_no_extra_headers() {
         // Sanity: a handler without @middleware(cors(...)) must
         // not carry extra headers (no contamination).
         let src = "@get(\"/\")\nfn h() => \"ok\"";
@@ -5768,7 +5768,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_middleware_corta_antes_de_parsear_body() {
+    async fn handle_task_middleware_stops_before_parsing_body() {
         // If the middleware short-circuits, the body is NOT parsed
         // (the 400 for invalid body that would normally appear is
         // gone). This checks that the order is middlewares → parse
@@ -5801,7 +5801,7 @@ mod tests {
     // ---- ServerConfig (Phase 4.4) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_config_default_es_localhost_3000() {
+    async fn server_config_default_is_localhost_3000() {
         let c = ServerConfig::default_addr();
         assert_eq!(c.host, "127.0.0.1");
         assert_eq!(c.port, 3000);
@@ -5824,7 +5824,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_config_to_socket_addr_host_invalido_es_error() {
+    async fn server_config_to_socket_addr_invalid_host_is_error() {
         let c = ServerConfig {
             host: "no-es-ip".into(),
             port: 80,
@@ -5840,7 +5840,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn set_server_config_segunda_vez_devuelve_existente() {
+    async fn set_server_config_second_time_returns_existing() {
         let ((), _reg) = with_active_registry(|| {
             let first = ServerConfig {
                 host: "127.0.0.1".into(),
@@ -5871,7 +5871,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn registry_resolved_config_devuelve_default_si_no_hay_explicito() {
+    async fn registry_resolved_config_returns_default_when_no_explicit() {
         let mut reg = HttpRegistry::new();
         assert!(reg.server_config.is_none());
         assert_eq!(reg.resolved_config(), ServerConfig::default_addr());
@@ -5894,7 +5894,7 @@ mod tests {
     // ---- json_to_value (free deserialization) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_value_primitivos() {
+    async fn json_to_value_primitives() {
         assert_eq!(json_to_value(&serde_json::json!(null)), Value::Null);
         assert_eq!(json_to_value(&serde_json::json!(true)), Value::Bool(true));
         assert_eq!(json_to_value(&serde_json::json!(42)), Value::Int(42));
@@ -5906,7 +5906,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_value_array_se_vuelve_list() {
+    async fn json_to_value_array_becomes_list() {
         let v = json_to_value(&serde_json::json!([1, 2, "tres"]));
         match v {
             Value::List(items) => {
@@ -5920,7 +5920,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_value_object_se_vuelve_map_con_claves_str() {
+    async fn json_to_value_object_becomes_map_with_str_keys() {
         let v = json_to_value(&serde_json::json!({ "a": 1, "b": "x" }));
         match v {
             Value::Map(pairs) => {
@@ -5979,7 +5979,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_instance_caso_feliz() {
+    async fn json_to_instance_happy_case() {
         let t = type_value(
             "User",
             vec![("id", "Int", false, None), ("name", "Str", false, None)],
@@ -6000,7 +6000,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_instance_campo_faltante_sin_default_ni_nullable_es_error() {
+    async fn json_to_instance_missing_field_without_default_or_nullable_is_error() {
         let t = type_value(
             "User",
             vec![("id", "Int", false, None), ("name", "Str", false, None)],
@@ -6012,7 +6012,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_instance_campo_extra_es_error() {
+    async fn json_to_instance_extra_field_is_error() {
         let t = type_value("User", vec![("id", "Int", false, None)]);
         let json = serde_json::json!({ "id": 1, "rogue": "x" });
         let err = json_to_instance(&json, &t).unwrap_err();
@@ -6021,7 +6021,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_instance_campo_nullable_faltante_queda_null() {
+    async fn json_to_instance_missing_nullable_field_stays_null() {
         let t = type_value(
             "User",
             vec![("id", "Int", false, None), ("email", "Str", true, None)],
@@ -6039,7 +6039,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_instance_default_literal_se_usa_si_falta() {
+    async fn json_to_instance_default_literal_used_when_missing() {
         let t = type_value(
             "User",
             vec![
@@ -6060,7 +6060,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn json_to_instance_body_no_objeto_es_error() {
+    async fn json_to_instance_body_not_object_is_error() {
         let t = type_value("User", vec![("id", "Int", false, None)]);
         let json = serde_json::json!([1, 2, 3]);
         let err = json_to_instance(&json, &t).unwrap_err();
@@ -6071,7 +6071,7 @@ mod tests {
     // ---- handle_task con body ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_post_sin_body_pero_handler_lo_espera_es_400() {
+    async fn handle_task_post_without_body_but_handler_expects_it_is_400() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
@@ -6091,7 +6091,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_post_con_body_valido_construye_instance() {
+    async fn handle_task_post_with_valid_body_builds_instance() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body.name\n\
@@ -6112,7 +6112,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_post_body_json_invalido_es_400() {
+    async fn handle_task_post_invalid_json_body_is_400() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
@@ -6132,7 +6132,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_post_body_campo_faltante_es_400() {
+    async fn handle_task_post_body_missing_field_is_400() {
         let src = "\
             type UserInput { name: Str, email: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
@@ -6153,7 +6153,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_put_con_path_param_y_body() {
+    async fn handle_task_put_with_path_param_and_body() {
         let src = "\
             type UserInput { name: Str }\n\
             @put(\"/users/{id}\")\nfn upd(id: Int, body: UserInput) => body.name\n\
@@ -6168,7 +6168,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn handle_task_body_sin_anotacion_de_tipo_acepta_libre() {
+    async fn handle_task_body_without_type_annotation_accepts_free() {
         // Untyped `body` → arrives as Map<Str,Value>.
         let src = "\
             @post(\"/log\")\nfn log(body) => body[\"name\"]\n\
@@ -6304,7 +6304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_preflight_options_responde_204_con_headers_cors() {
+    async fn e2e_preflight_options_responds_204_with_cors_headers() {
         // OPTIONS on a route with @middleware(cors(...)) returns
         // 204 and the Access-Control-Allow-* headers. The real
         // (GET) handler is NOT invoked — axum routes OPTIONS to
@@ -6325,7 +6325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_options_sin_cors_es_405_method_not_allowed() {
+    async fn e2e_options_without_cors_is_405_method_not_allowed() {
         // If the route has NO @middleware(cors(...)), an OPTIONS
         // responds 405 (axum default — the method isn't registered
         // for that path). Sanity: without CORS, we don't create a
@@ -6336,7 +6336,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_response_real_con_cors_lleva_headers_inyectados() {
+    async fn e2e_real_response_with_cors_carries_injected_headers() {
         // Normal GET on a cors route → 200 + Access-Control-Allow-*
         // headers.
         let src = "\
@@ -6355,7 +6355,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_preflight_set_echo_si_origin_en_la_lista() {
+    async fn e2e_preflight_set_echo_when_origin_in_list() {
         // Q.3: preflight with cors({"allow_origin": [...]}) echoes
         // the Origin if it's allowed.
         let src = "\
@@ -6379,7 +6379,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_preflight_set_sin_match_omite_origin() {
+    async fn e2e_preflight_set_without_match_omits_origin() {
         let src = "\
             @middleware(cors({\"allow_origin\": [\"https://a.com\"]}))\n\
             @get(\"/api\")\n\
@@ -6439,7 +6439,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_preflight_max_age_se_emite_solo_si_fue_seteado() {
+    async fn e2e_preflight_max_age_emitted_only_when_set() {
         let src = "\
             @middleware(cors({\"max_age\": 3600}))\n\
             @get(\"/api\")\n\
@@ -6466,7 +6466,7 @@ mod tests {
     // ONCE with unified methods.
 
     #[tokio::test]
-    async fn bug_options_preflight_duplicado_no_panicea_en_build_router() {
+    async fn bug_options_preflight_duplicate_does_not_panic_in_build_router() {
         // Two handlers on `/tasks` with CORS — pre-fix this
         // panicked. Today build_router finishes without errors.
         let src = "\
@@ -6487,7 +6487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bug_options_preflight_duplicado_merged_methods_en_preflight_response() {
+    async fn bug_options_preflight_duplicate_merged_methods_in_preflight_response() {
         // After the fix, the unified preflight advertises GET +
         // POST. Without the merge, only the first (GET) is
         // advertised → browser rejects POST in the CORS check.
@@ -6527,7 +6527,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bug_options_preflight_duplicado_tres_handlers_con_path_id() {
+    async fn bug_options_preflight_duplicate_three_handlers_with_path_id() {
         // Case from the 6th boilerplate (api-fullstack-postgres):
         // `/tasks/{id}` with GET + PUT + DELETE, each with its own
         // CORS. Pre-fix it panicked on the second handler.
@@ -6556,7 +6556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bug_options_preflight_duplicado_merge_de_headers_case_insensitive() {
+    async fn bug_options_preflight_duplicate_merge_of_headers_case_insensitive() {
         // Two handlers with headers differing only in case — they
         // are not duplicated on merge.
         let src = "\
@@ -6589,7 +6589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_get_simple_responde_200_con_json() {
+    async fn e2e_get_simple_responds_200_with_json() {
         let (status, body) = run_oneshot(
             "@get(\"/\")\nfn index() => \"hola\"",
             axum::http::Method::GET,
@@ -6601,7 +6601,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_get_con_path_param_int() {
+    async fn e2e_get_with_path_param_int() {
         let (status, body) = run_oneshot(
             "@get(\"/users/{id}\")\nfn h(id: Int) => id * 10",
             axum::http::Method::GET,
@@ -6613,7 +6613,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_get_con_path_param_invalido_devuelve_400() {
+    async fn e2e_get_with_invalid_path_param_returns_400() {
         let (status, body) = run_oneshot(
             "@get(\"/users/{id}\")\nfn h(id: Int) => id",
             axum::http::Method::GET,
@@ -6625,7 +6625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_handler_que_retorna_instance_serializa_a_json() {
+    async fn e2e_handler_returning_instance_serializes_to_json() {
         let src = "\
             type User { id: Int, name: Str }\n\
             @get(\"/me\")\nfn me() => User { id: 1, name: \"fitz\" }\n\
@@ -6637,7 +6637,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_method_no_coincide_devuelve_405() {
+    async fn e2e_method_mismatch_returns_405() {
         let (status, _body) = run_oneshot(
             "@get(\"/\")\nfn h() => \"ok\"",
             axum::http::Method::POST,
@@ -6648,7 +6648,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_path_no_existe_devuelve_404() {
+    async fn e2e_path_not_found_returns_404() {
         let (status, _body) = run_oneshot(
             "@get(\"/foo\")\nfn h() => \"ok\"",
             axum::http::Method::GET,
@@ -6659,7 +6659,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_handler_err_devuelve_500_con_objeto_error() {
+    async fn e2e_handler_err_returns_500_with_error_object() {
         let (status, body) = run_oneshot(
             "@get(\"/\")\nfn h() => Err(\"boom\")",
             axum::http::Method::GET,
@@ -6672,7 +6672,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_post_con_body_valido_construye_instance() {
+    async fn e2e_post_with_valid_body_builds_instance() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body.name\n\
@@ -6689,7 +6689,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_post_body_invalido_devuelve_400() {
+    async fn e2e_post_invalid_body_returns_400() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
@@ -6701,7 +6701,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_put_con_path_param_y_body() {
+    async fn e2e_put_with_path_param_and_body() {
         let src = "\
             type UserInput { name: Str }\n\
             @put(\"/users/{id}\")\nfn upd(id: Int, body: UserInput) {\n\
@@ -6722,7 +6722,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_post_sin_body_pero_handler_espera_es_400() {
+    async fn e2e_post_without_body_but_handler_expects_is_400() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
@@ -6735,7 +6735,7 @@ mod tests {
     // ---- 7.6 headers as handler params ----
 
     #[tokio::test]
-    async fn e2e_header_obligatorio_presente_handler_lo_recibe() {
+    async fn e2e_required_header_present_handler_receives_it() {
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
         let (status, body) = run_oneshot_with_headers(
             src,
@@ -6749,7 +6749,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_header_obligatorio_falta_es_400() {
+    async fn e2e_required_header_missing_is_400() {
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
         let (status, body) =
             run_oneshot_with_headers(src, axum::http::Method::GET, "/protected", &[]).await;
@@ -6759,7 +6759,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_header_nullable_falta_handler_recibe_null() {
+    async fn e2e_nullable_header_missing_handler_receives_null() {
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) -> Str { return \"ok\" }";
         let (status, body) =
             run_oneshot_with_headers(src, axum::http::Method::GET, "/traced", &[]).await;
@@ -6769,7 +6769,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn e2e_header_lookup_es_case_insensitive() {
+    async fn e2e_header_lookup_is_case_insensitive() {
         // HTTP is case-insensitive in header names. We send
         // `authorization` (lowercase) and the handler declares
         // `@header(name="Authorization")` — it must match.
@@ -6804,7 +6804,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn default_healthz_responde_200() {
+    async fn default_healthz_responds_200() {
         // Without a declared @healthz, the server auto-mounts
         // /healthz with a default 200 response.
         let (status, body) = oneshot_get(HttpRegistry::new(), "/healthz").await;
@@ -6814,7 +6814,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn default_readyz_responde_200_cuando_no_drena() {
+    async fn default_readyz_responds_200_when_not_draining() {
         let (status, body) = oneshot_get(HttpRegistry::new(), "/readyz").await;
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -6822,7 +6822,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn readyz_responde_503_durante_draining() {
+    async fn readyz_responds_503_during_draining() {
         // With `draining = true`, /readyz returns 503 WITHOUT
         // touching the handler (even if one exists). The test
         // simulates the post-SIGTERM state before axum closes the
@@ -6838,7 +6838,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn healthz_no_se_afecta_por_draining() {
+    async fn healthz_not_affected_by_draining() {
         // Liveness ≠ readiness: even while draining, /healthz keeps
         // returning 200 (the process is alive). K8s only stops
         // routing, it does not restart the pod for liveness.
@@ -6879,7 +6879,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_con_schema_some_registra_openapi_json() {
+    async fn build_router_with_schema_some_registers_openapi_json() {
         // Minimal schema: the router serves it as-is on GET
         // /openapi.json.
         let schema = serde_json::json!({
@@ -6904,7 +6904,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_bearer_subprotocol_entre_varios_csv() {
+    fn ws_bearer_subprotocol_among_several_csv() {
         // The client can offer multiple subprotocols (RFC 6455
         // §4.1). We take the first one matching `bearer.*`.
         let mut h = axum::http::HeaderMap::new();
@@ -6920,14 +6920,14 @@ mod tests {
     }
 
     #[test]
-    fn ws_bearer_subprotocol_ausente() {
+    fn ws_bearer_subprotocol_absent() {
         // Without a `sec-websocket-protocol` header, returns None.
         let h = axum::http::HeaderMap::new();
         assert_eq!(extract_ws_bearer_subprotocol(&h), None);
     }
 
     #[test]
-    fn ws_bearer_subprotocol_sin_match() {
+    fn ws_bearer_subprotocol_without_match() {
         // Header present but no subprotocol matches `bearer.*`.
         let mut h = axum::http::HeaderMap::new();
         h.insert("sec-websocket-protocol", "chat.v1, app.v2".parse().unwrap());
@@ -6935,7 +6935,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_bearer_subprotocol_token_vacio_es_none() {
+    fn ws_bearer_subprotocol_empty_token_is_none() {
         // `bearer.` with no token after it doesn't count.
         let mut h = axum::http::HeaderMap::new();
         h.insert("sec-websocket-protocol", "bearer.".parse().unwrap());
@@ -6943,7 +6943,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_bearer_subprotocol_token_con_dots_internos() {
+    fn ws_bearer_subprotocol_token_with_internal_dots() {
         // JWTs carry internal dots (`header.payload.signature`).
         // The `bearer.` strip_prefix consumes only the first `.`,
         // and the token keeps everything that came after.
@@ -6962,13 +6962,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_con_schema_none_no_registra_openapi_json() {
+    async fn build_router_with_schema_none_does_not_register_openapi_json() {
         let (status, _body) = oneshot_get_openapi(HttpRegistry::new(), None).await;
         assert_eq!(status, 404);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_auto_register_convive_con_rutas_del_usuario() {
+    async fn build_router_auto_register_coexists_with_user_routes() {
         // If the user has `@get("/")` and auto-register adds
         // `/openapi.json`, both work. We verify the schema is still
         // available even with declared routes.
@@ -6984,7 +6984,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usuario_declara_openapi_json_propio_y_gana_sobre_auto_register() {
+    async fn user_declares_own_openapi_json_wins_over_auto_register() {
         // The user declared their own `@get("/openapi.json")`.
         // Auto-register must yield — the user's route is what
         // responds. We verify the response is the user's (a
@@ -7045,7 +7045,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_con_schema_some_registra_docs() {
+    async fn build_router_with_schema_some_registers_docs() {
         // GET /docs returns the embedded HTML. We verify the body
         // references `/openapi.json` (the data-url of Scalar's
         // script) — that guarantees the HTML is connected to the
@@ -7066,7 +7066,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_con_schema_none_no_registra_docs() {
+    async fn build_router_with_schema_none_does_not_register_docs() {
         // Without a schema, /docs is not registered (parity with
         // /openapi.json).
         let (status, _body) = oneshot_get_docs(HttpRegistry::new(), None).await;
@@ -7074,7 +7074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn usuario_declara_docs_propio_y_gana_sobre_auto_register() {
+    async fn user_declares_own_docs_wins_over_auto_register() {
         // The user declared their own `@get("/docs")`. The Scalar
         // UI auto-register yields — the user's route is what
         // responds.
@@ -7107,7 +7107,7 @@ mod tests {
     // ---- 9.w.2-asyncapi-ui — embedded HTML UI for `/asyncapi` ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_con_asyncapi_schema_registra_asyncapi_ui() {
+    async fn build_router_with_asyncapi_schema_registers_asyncapi_ui() {
         // When asyncapi_schema is present (because there are @ws
         // handlers), GET /asyncapi returns the embedded HTML
         // (parallel to OpenAPI's /docs). The body references
@@ -7152,7 +7152,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_sin_asyncapi_schema_no_registra_asyncapi_ui() {
+    async fn build_router_without_asyncapi_schema_does_not_register_asyncapi_ui() {
         // Without asyncapi_schema (HTTP-only program), /asyncapi
         // returns 404.
         use http_body_util::BodyExt;
@@ -7177,7 +7177,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn build_router_asyncapi_json_sigue_disponible() {
+    async fn build_router_asyncapi_json_still_available() {
         // Sanity: the JSON endpoint keeps working independently of
         // the UI.
         use http_body_util::BodyExt;
@@ -7208,7 +7208,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn push_route_acumula_en_el_registry_activo() {
+    async fn push_route_accumulates_in_active_registry() {
         let ((), reg) = with_active_registry(|| {
             let env = crate::env::Environment::new();
             let handler = Value::Function {
@@ -7261,13 +7261,13 @@ mod tests {
     }
 
     #[test]
-    fn hc1_err_con_status_valido_usa_ese_status() {
+    fn hc1_err_with_valid_status_uses_that_status() {
         let outcome = value_to_outcome(&err_instance_with_status(404));
         assert_eq!(outcome.status, 404);
     }
 
     #[test]
-    fn hc1_err_con_status_fuera_de_rango_emite_500_con_msg_claro() {
+    fn hc1_err_with_out_of_range_status_emits_500_with_clear_msg() {
         let outcome = value_to_outcome(&err_instance_with_status(50));
         assert_eq!(outcome.status, 500);
         let body_str = outcome.body.to_string();
@@ -7279,13 +7279,13 @@ mod tests {
     }
 
     #[test]
-    fn hc1_err_con_status_99_es_fuera_de_rango() {
+    fn hc1_err_with_status_99_is_out_of_range() {
         let outcome = value_to_outcome(&err_instance_with_status(99));
         assert_eq!(outcome.status, 500);
     }
 
     #[test]
-    fn hc1_err_con_status_1500_es_fuera_de_rango() {
+    fn hc1_err_with_status_1500_is_out_of_range() {
         let outcome = value_to_outcome(&err_instance_with_status(1500));
         assert_eq!(outcome.status, 500);
     }
@@ -7342,7 +7342,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hpx1_content_type_json_pasa() {
+    async fn hpx1_content_type_json_passes() {
         let reg = registry_with_post_body_route();
         let body = br#"{"foo": 42}"#.to_vec();
         let mut headers = std::collections::HashMap::new();
@@ -7364,7 +7364,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hpx1_content_type_text_plain_rechaza_con_415() {
+    async fn hpx1_content_type_text_plain_rejects_with_415() {
         let reg = registry_with_post_body_route();
         let body = b"plain text".to_vec();
         let mut headers = std::collections::HashMap::new();
@@ -7387,7 +7387,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mp2_content_type_charset_diff_no_oficial_rechaza() {
+    async fn mp2_content_type_charset_diff_unofficial_rejects() {
         // Mini-batch MP2 — `text/plain` (the old test assumed
         // multipart-rejected-with-415; now multipart is accepted
         // so I switched the case). text/plain stays rejected: the
@@ -7415,7 +7415,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hpx1_content_type_ausente_acepta() {
+    async fn hpx1_content_type_absent_accepts() {
         // Without a Content-Type header (curl without -H), we
         // accept raw JSON.
         let reg = registry_with_post_body_route();
@@ -7477,7 +7477,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mwnext_post_middleware_modifica_response() {
+    async fn mwnext_post_middleware_modifies_response() {
         let request = build_request_value(
             HttpMethod::Get,
             "/test",
@@ -7496,7 +7496,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mwnext_post_middleware_sin_post_no_modifica() {
+    async fn mwnext_post_middleware_without_post_does_not_modify() {
         let request = build_request_value(
             HttpMethod::Get,
             "/test",
@@ -7513,7 +7513,7 @@ mod tests {
     // ---- Mini-batch MP — urlencoded bodies ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mp_urlencoded_basico_parsea_a_map() {
+    async fn mp_urlencoded_basic_parses_to_map() {
         let reg = registry_with_post_body_route();
         let body = b"name=Fitz&age=25".to_vec();
         let mut headers = std::collections::HashMap::new();
@@ -7543,7 +7543,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mp_urlencoded_con_url_encoding() {
+    async fn mp_urlencoded_with_url_encoding() {
         let reg = registry_with_post_body_route();
         // "hola mundo" + "Fitz Roy" with encoding (spaces as +).
         let body = b"greeting=hola+mundo&place=Fitz%20Roy".to_vec();
@@ -7575,7 +7575,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mp_urlencoded_body_vacio_es_map_vacio() {
+    async fn mp_urlencoded_empty_body_is_empty_map() {
         let reg = registry_with_post_body_route();
         let mut headers = std::collections::HashMap::new();
         headers.insert(
@@ -7596,7 +7596,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mp2_multipart_sin_boundary_es_400() {
+    async fn mp2_multipart_without_boundary_is_400() {
         // Mini-batch MP2 — `multipart/form-data` without
         // `boundary=` → 400 with a clear message (not 415: multipart
         // IS now accepted as a supported CT but the boundary is
@@ -7630,7 +7630,7 @@ mod tests {
     }
 
     #[test]
-    fn b64_encode_basico() {
+    fn b64_encode_basic() {
         // Standard RFC 4648 test vectors.
         assert_eq!(b64_encode_standard(b"f"), "Zg==");
         assert_eq!(b64_encode_standard(b"fo"), "Zm8=");
@@ -7641,14 +7641,14 @@ mod tests {
     }
 
     #[test]
-    fn b64_encode_binarios() {
+    fn b64_encode_binary() {
         // Arbitrary binary bytes.
         assert_eq!(b64_encode_standard(&[0u8]), "AA==");
         assert_eq!(b64_encode_standard(&[0xff, 0xff, 0xff]), "////");
     }
 
     #[test]
-    fn value_to_json_bytes_emite_base64() {
+    fn value_to_json_bytes_emits_base64() {
         // Mini-batch Bytes + quick win F13: `Value::Bytes` is
         // serialized as a base64 string (not as an array of Int).
         let v = Value::Bytes(b"hola".to_vec());
@@ -7665,7 +7665,7 @@ mod tests {
     }
 
     #[test]
-    fn mp2_extract_boundary_con_comillas() {
+    fn mp2_extract_boundary_with_quotes() {
         // RFC 7578 allows the boundary between double quotes.
         assert_eq!(
             extract_multipart_boundary(r#"multipart/form-data; boundary="my-boundary""#),
@@ -7684,12 +7684,12 @@ mod tests {
     }
 
     #[test]
-    fn mp2_extract_boundary_ausente_devuelve_none() {
+    fn mp2_extract_boundary_absent_returns_none() {
         assert_eq!(extract_multipart_boundary("multipart/form-data"), None);
     }
 
     #[test]
-    fn mp2_parse_multipart_text_field_basico() {
+    fn mp2_parse_multipart_text_field_basic() {
         // Body with a single text field part (without filename).
         // Structure: --<b>\r\n<hdr>\r\n\r\n<body>\r\n--<b>--
         let boundary = "----foo";
@@ -7709,7 +7709,7 @@ mod tests {
     }
 
     #[test]
-    fn mp2_parse_multipart_file_field_construye_instance_file() {
+    fn mp2_parse_multipart_file_field_builds_file_instance() {
         // Body with a file field (with filename) → Value::Instance
         // of the built-in `File` type.
         let boundary = "----foo";
@@ -7740,7 +7740,7 @@ mod tests {
     }
 
     #[test]
-    fn mp2_parse_multipart_mixto_text_y_file() {
+    fn mp2_parse_multipart_mixed_text_and_file() {
         // Form with one text field + one file field.
         let boundary = "X";
         let body = "--X\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nMi título\r\n--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\ncontenido\r\n--X--";
@@ -7757,7 +7757,7 @@ mod tests {
     }
 
     #[test]
-    fn mp2_parse_multipart_binary_file_field_funciona() {
+    fn mp2_parse_multipart_binary_file_field_works() {
         // File.content Bytes — non-UTF8 binary bytes (0xFF) in a
         // FILE field now work (used to be 400; now stored as raw
         // `Value::Bytes`). Enables binary uploads.
@@ -7786,7 +7786,7 @@ mod tests {
     }
 
     #[test]
-    fn mp2_parse_multipart_text_field_sin_filename_sigue_exigiendo_utf8() {
+    fn mp2_parse_multipart_text_field_without_filename_still_requires_utf8() {
         // Text field (without filename) still requires UTF-8 —
         // for binary bytes the user must use `filename=`.
         let boundary = "X";
@@ -7802,7 +7802,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mp2_multipart_end_to_end_acepta_y_parsea() {
+    async fn mp2_multipart_end_to_end_accepts_and_parses() {
         // Full path E2E: `handle_task` receives a valid multipart
         // body and routes it to the handler with the body parsed
         // as `Value::Map<Str, Value>`.
@@ -7829,7 +7829,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hpx1_content_type_con_charset_acepta() {
+    async fn hpx1_content_type_with_charset_accepts() {
         let reg = registry_with_post_body_route();
         let body = br#"{"foo": 42}"#.to_vec();
         let mut headers = std::collections::HashMap::new();
@@ -7970,7 +7970,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 ";
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_ruta_publica_sin_auth_devuelve_200() {
+    async fn auth_public_route_without_auth_returns_200() {
         // Route without `@authenticated`/`@admin` doesn't touch
         // the provider. Smoke: shouldn't break even if the
         // program declares `@auth_provider`.
@@ -7980,7 +7980,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_authenticated_sin_header_devuelve_401() {
+    async fn auth_authenticated_without_header_returns_401() {
         // Without an `Authorization` header → provider emits
         // `Err("falta...")` → wrapper converts to 401 with
         // `{"error": "falta..."}`.
@@ -7994,7 +7994,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_authenticated_token_invalido_devuelve_401() {
+    async fn auth_authenticated_invalid_token_returns_401() {
         // Header present but unknown token →
         // Err("token inválido") → 401.
         let (status, body) = run_oneshot_with_headers(
@@ -8013,7 +8013,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_authenticated_token_valido_devuelve_200_con_user_inyectado() {
+    async fn auth_authenticated_valid_token_returns_200_with_user_injected() {
         // Valid user token → provider returns
         // Ok(User{name:"Alice"}) → wrapper injects `user` as an
         // arg of the handler → handler reads `user.name` and
@@ -8030,7 +8030,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_admin_con_rol_no_admin_devuelve_403() {
+    async fn auth_admin_with_non_admin_role_returns_403() {
         // Valid token but `user.role == "user"` (not "admin") →
         // wrapper emits 403 with "se requiere rol admin".
         let (status, body) = run_oneshot_with_headers(
@@ -8049,7 +8049,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_admin_con_rol_admin_devuelve_200() {
+    async fn auth_admin_with_admin_role_returns_200() {
         // Admin token → user.role == "admin" → handler runs.
         let (status, body) = run_oneshot_with_headers(
             AUTH_E2E_SOURCE,
@@ -8063,7 +8063,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_admin_sin_header_devuelve_401_no_403() {
+    async fn auth_admin_without_header_returns_401_not_403() {
         // Without a header, the provider fails with Err BEFORE
         // evaluating the role. Result: 401 (unauthenticated), not
         // 403 (forbidden).
@@ -8107,7 +8107,7 @@ fn multi_route(user: User) -> Str => user.name\n\
 ";
 
     #[tokio::test(flavor = "current_thread")]
-    async fn requires_role_correcto_devuelve_200_con_user_inyectado() {
+    async fn requires_correct_role_returns_200_with_user_injected() {
         let (status, body) = run_oneshot_with_headers(
             REQUIRES_E2E_SOURCE,
             axum::http::Method::GET,
@@ -8120,7 +8120,7 @@ fn multi_route(user: User) -> Str => user.name\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn requires_role_incorrecto_devuelve_403() {
+    async fn requires_incorrect_role_returns_403() {
         let (status, body) = run_oneshot_with_headers(
             REQUIRES_E2E_SOURCE,
             axum::http::Method::GET,
@@ -8137,7 +8137,7 @@ fn multi_route(user: User) -> Str => user.name\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn requires_apilado_acepta_cualquiera_de_los_dos_roles() {
+    async fn requires_stacked_accepts_either_of_two_roles() {
         // `/multi` requires editor OR publisher. We test both
         // cases.
         let (status_ed, _) = run_oneshot_with_headers(
@@ -8160,7 +8160,7 @@ fn multi_route(user: User) -> Str => user.name\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn requires_apilado_rechaza_role_que_no_matchea_ninguno() {
+    async fn requires_stacked_rejects_role_matching_none() {
         // `/multi` requires editor OR publisher; viewer matches
         // neither → 403.
         let (status, _) = run_oneshot_with_headers(
@@ -8174,7 +8174,7 @@ fn multi_route(user: User) -> Str => user.name\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn requires_sin_header_devuelve_401_no_403() {
+    async fn requires_without_header_returns_401_not_403() {
         // Without a header, the provider fails with Err BEFORE
         // evaluating the role.
         let (status, _) =
@@ -8183,7 +8183,7 @@ fn multi_route(user: User) -> Str => user.name\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_provider_duplicado_es_error_en_runtime() {
+    async fn auth_provider_duplicated_is_runtime_error() {
         // Runtime uniqueness defense: two `@auth_provider`s should
         // emit an error when evaluating the program (the checker
         // also blocks it; we replicate at runtime defensively).
@@ -8212,7 +8212,7 @@ fn h(user: User) -> Str => user.role\n\
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn auth_handler_sin_provider_es_error_en_runtime() {
+    async fn auth_handler_without_provider_is_runtime_error() {
         // Runtime defense: handler with @authenticated but no
         // declared @auth_provider. The checker also blocks it
         // statically; we replicate at runtime to preserve the
@@ -8339,7 +8339,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_broadcast_multi_cliente() {
+    async fn ws_broadcast_multi_client() {
         // Two clients connected to the same endpoint. One sends;
         // BOTH receive the broadcast (including the sender).
         let src = "@ws(\"/room\")\n\
@@ -8385,7 +8385,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_auth_pre_upgrade_devuelve_401_sin_token() {
+    async fn ws_auth_pre_upgrade_returns_401_without_token() {
         // Handler protected by @authenticated. Without
         // Authorization, the handshake should fail with 401 BEFORE
         // the upgrade.
@@ -8409,7 +8409,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_bidir_recv_y_send_tipos_distintos() {
+    async fn ws_bidir_recv_and_send_different_types() {
         // 9.w.2-wsconn-bidir — asymmetric channel: client sends
         // Str (command), server emits ChatMsg (structured event).
         let src = "type ChatMsg { user: Str, text: Str }\n\
@@ -8447,7 +8447,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_auth_via_subprotocol_acepta_token() {
+    async fn ws_auth_via_subprotocol_accepts_token() {
         // 9.w.2-ws-auth-browser — the client sends the token via
         // subprotocol (`bearer.<token>`) instead of the
         // `Authorization` header. The runtime extracts it and
@@ -8521,7 +8521,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_auth_via_subprotocol_token_invalido_rechaza() {
+    async fn ws_auth_via_subprotocol_invalid_token_rejected() {
         // Same @auth_provider as the previous test, but the client
         // sends an invalid token via subprotocol → handshake
         // fails with 401 BEFORE the upgrade.
@@ -8556,7 +8556,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_tipos_custom_marshaling_json() {
+    async fn ws_custom_types_marshaling_json() {
         // Handler that receives a typed `ChatMsg` and returns
         // another. Verifies that automatic JSON marshaling over
         // custom types works in both directions.
@@ -8598,7 +8598,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_heartbeat_envia_ping_periodico() {
+    async fn ws_heartbeat_sends_periodic_ping() {
         // Phase 9.w.2.e — simple handler with
         // `@server(ws_heartbeat_secs=1)`. The client connects and
         // waits; it should receive at least one Ping frame from
@@ -8653,7 +8653,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_broadcast_se_limpia_al_cerrar_conn() {
+    async fn ws_broadcast_is_cleaned_on_conn_close() {
         // The broadcaster should unregister the conn on close.
         let src = "@ws(\"/r\")\n\
                    async fn r(conn: WsConn<Str>) -> Null {\n\
@@ -8718,7 +8718,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_broadcast_binary_multi_cliente() {
+    async fn ws_broadcast_binary_multi_client() {
         // Two connected clients; one sends binary, both receive
         // the broadcast (sender included — Socket.IO/Phoenix
         // convention).
@@ -8767,7 +8767,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ws_recv_bytes_mismatch_si_cliente_envia_text() {
+    async fn ws_recv_bytes_mismatch_when_client_sends_text() {
         // If the handler declares `WsConn<Bytes>` and the client
         // sends a text frame, `recv()` returns `Err`. The handler
         // responds with a sentinel binary literal (`b"mismatch"`)
@@ -8809,7 +8809,7 @@ fn me(user: User) -> Str => \"x\"\n\
     // ================================================================
 
     #[test]
-    fn format_http_log_line_off_devuelve_string_vacio() {
+    fn format_http_log_line_off_returns_empty_string() {
         let line = format_http_log_line(
             std::time::Duration::from_millis(5),
             "GET",
@@ -8823,7 +8823,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn format_http_log_line_simple_incluye_method_path_status_y_elapsed() {
+    fn format_http_log_line_simple_includes_method_path_status_and_elapsed() {
         let line = format_http_log_line(
             std::time::Duration::from_millis(12),
             "GET",
@@ -8842,7 +8842,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn format_http_log_line_verbose_incluye_user_agent_y_content_length() {
+    fn format_http_log_line_verbose_includes_user_agent_and_content_length() {
         let line = format_http_log_line(
             std::time::Duration::from_millis(45),
             "POST",
@@ -8859,7 +8859,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn format_http_log_line_verbose_sin_ua_ni_len_omite_secciones() {
+    fn format_http_log_line_verbose_without_ua_or_len_omits_sections() {
         // Typical case: response without Content-Length
         // (streaming/chunked) and request without User-Agent
         // header.
@@ -8879,7 +8879,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn format_http_log_line_status_4xx_y_5xx_loguean_normal() {
+    fn format_http_log_line_status_4xx_and_5xx_log_normally() {
         // 404/500 are valid HTTP requests — the log logs them
         // the same.
         let line_404 = format_http_log_line(
@@ -8906,7 +8906,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn format_http_log_line_options_preflight_se_loguea_igual() {
+    fn format_http_log_line_options_preflight_logged_same() {
         // OPTIONS preflight (CORS) is real traffic — it's logged.
         let line = format_http_log_line(
             std::time::Duration::from_millis(1),
@@ -8971,7 +8971,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn metrics_request_get_simple_emite_counter_y_histogram() {
+    fn metrics_request_get_simple_emits_counter_and_histogram() {
         let src = "@get(\"/hello\")\nfn h() -> Str => \"ok\"\n";
 
         let captured = capture_metrics(|rt| {
@@ -9053,7 +9053,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn metrics_path_template_no_resuelve_params() {
+    fn metrics_path_template_does_not_resolve_params() {
         // Path with `{id}` must be recorded in metrics as the
         // TEMPLATE, not the resolved path (`/users/42`). This
         // avoids cardinality explosion in production.
@@ -9100,7 +9100,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn metrics_dos_requests_mismo_endpoint_acumulan_counter() {
+    fn metrics_two_requests_same_endpoint_accumulate_counter() {
         let src = "@get(\"/hello\")\nfn h() -> Str => \"ok\"\n";
 
         let captured = capture_metrics(|rt| {
@@ -9136,7 +9136,7 @@ fn me(user: User) -> Str => \"x\"\n\
     }
 
     #[test]
-    fn metrics_status_500_se_registra_con_label_correcto() {
+    fn metrics_status_500_is_recorded_with_correct_label() {
         // Handler returning Result::Err → wrapper converts to 500.
         // We validate the status="500" label is set correctly when
         // outcome.status is not 200.

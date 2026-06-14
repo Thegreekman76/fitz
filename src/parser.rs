@@ -3774,7 +3774,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn span_literal_apunta_al_primer_token() {
+    fn span_literal_points_to_first_token() {
         // In `  42`, the `42` starts at column 3 (1-indexed). The
         // `Expr::Int` node's span reuses the literal token's
         // position.
@@ -3790,7 +3790,7 @@ mod tests {
     }
 
     #[test]
-    fn span_binop_apunta_al_operador_no_al_left() {
+    fn span_binop_points_to_operator_not_left() {
         // In `1 + 2`, the `+` is at column 3. The `Expr::BinOp` span
         // must point at the operator (rustc/clang convention). The
         // `left` (`Expr::Int(1)`) carries its own span at column 1.
@@ -3807,7 +3807,7 @@ mod tests {
     }
 
     #[test]
-    fn span_call_apunta_al_paren_de_apertura() {
+    fn span_call_points_to_opening_paren() {
         // In `f(1, 2)`, the `(` is at column 2. The `Expr::Call` span
         // must point at the `(`, not at the callee (which keeps its
         // own span at column 1).
@@ -3821,7 +3821,7 @@ mod tests {
     }
 
     #[test]
-    fn span_field_apunta_al_punto() {
+    fn span_field_points_to_dot() {
         // In `user.name`, the `.` is at column 5. The `Expr::Field`
         // span points at the `.`; the receiver keeps its span at
         // column 1.
@@ -3835,7 +3835,7 @@ mod tests {
     }
 
     #[test]
-    fn span_index_apunta_al_corchete() {
+    fn span_index_points_to_bracket() {
         // In `xs[0]`, the `[` is at column 3. The `Expr::Index` span
         // points at the `[`; the receiver keeps its span at column 1
         // and the index at column 4.
@@ -3861,7 +3861,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn await_postfix_envuelve_ident_receptor() {
+    fn await_postfix_wraps_ident_receiver() {
         let e = parse_expr("x.await").unwrap();
         match e {
             Expr::Await(inner, _) => {
@@ -3872,7 +3872,7 @@ mod tests {
     }
 
     #[test]
-    fn await_postfix_envuelve_call() {
+    fn await_postfix_wraps_call() {
         // `f(x).await` → Await(Call(...))
         let e = parse_expr("f(x).await").unwrap();
         match e {
@@ -3888,7 +3888,7 @@ mod tests {
     }
 
     #[test]
-    fn await_se_encadena_con_method_chain() {
+    fn await_chains_with_method_chain() {
         // `xs.map(f).await` → Await(Call(callee=Field(xs, "map"), args=[f]))
         let e = parse_expr("xs.map(f).await").unwrap();
         match e {
@@ -3903,7 +3903,7 @@ mod tests {
     }
 
     #[test]
-    fn await_seguido_de_try_es_try_de_await() {
+    fn await_followed_by_try_is_try_of_await() {
         // `expr.await?` → Try(Await(expr))
         // The postfix loop processes `.await` first, then `?`.
         let e = parse_expr("x.await?").unwrap();
@@ -3920,7 +3920,7 @@ mod tests {
     }
 
     #[test]
-    fn await_seguido_de_field_es_field_de_await() {
+    fn await_followed_by_field_is_field_of_await() {
         // `expr.await.name` → Field(Await(expr), "name")
         let e = parse_expr("x.await.name").unwrap();
         match e {
@@ -3933,7 +3933,7 @@ mod tests {
     }
 
     #[test]
-    fn await_doble_anida_los_await() {
+    fn double_await_nests_awaits() {
         // `x.await.await` → Await(Await(x))
         let e = parse_expr("x.await.await").unwrap();
         match e {
@@ -3948,7 +3948,7 @@ mod tests {
     }
 
     #[test]
-    fn span_del_await_apunta_al_punto() {
+    fn await_span_points_to_dot() {
         // In `user.await`, the `.` is at column 5. The `Expr::Await`
         // node's span points at the `.` (parallel to `Field`).
         let e = parse_expr("user.await").unwrap();
@@ -3963,7 +3963,7 @@ mod tests {
     }
 
     #[test]
-    fn future_como_anotacion_de_tipo_parsea_como_generic() {
+    fn future_as_type_annotation_parses_as_generic() {
         // `Future<T>` reuses `TypeExpr::Generic` just like `List<T>`
         // — no new AST variant needed. This test pins the 6.1
         // decision: if a dedicated `TypeExpr::Future` is added in
@@ -4193,7 +4193,7 @@ mod tests {
     // ---------------- R.1.1 — `not` (mini-phase R) ----------------
 
     #[test]
-    fn unary_not_parsea_sobre_bool_literal() {
+    fn unary_not_parses_over_bool_literal() {
         assert_eq!(
             parse_expr("not true").unwrap(),
             Expr::UnaryOp {
@@ -4205,7 +4205,7 @@ mod tests {
     }
 
     #[test]
-    fn unary_not_parsea_sobre_ident() {
+    fn unary_not_parses_over_ident() {
         assert_eq!(
             parse_expr("not active").unwrap(),
             Expr::UnaryOp {
@@ -4234,7 +4234,7 @@ mod tests {
     }
 
     #[test]
-    fn unary_not_tiene_precedencia_mayor_que_eq() {
+    fn unary_not_has_higher_precedence_than_eq() {
         // `not x == y` → `(not x) == y` (left-to-right associativity
         // of unary, higher precedence than ==).
         let expr = parse_expr("not x == y").unwrap();
@@ -4255,7 +4255,7 @@ mod tests {
     }
 
     #[test]
-    fn unary_not_en_condicion_de_if() {
+    fn unary_not_in_if_condition() {
         // `if not active { ... }` parsea OK.
         let stmt = parse_one_stmt("if (not active) { print(\"x\") }");
         match stmt {
@@ -4269,7 +4269,7 @@ mod tests {
     // ---------------- R.1.2 — `%` operator (mini-phase R) ----------------
 
     #[test]
-    fn op_modulo_parsea_con_misma_precedencia_que_mul() {
+    fn op_modulo_parses_with_same_precedence_as_mul() {
         // 10 + 3 % 2 → 10 + (3 % 2)
         let expr = parse_expr("10 + 3 % 2").unwrap();
         match expr {
@@ -4288,7 +4288,7 @@ mod tests {
     }
 
     #[test]
-    fn op_modulo_left_associative_con_mul() {
+    fn op_modulo_left_associative_with_mul() {
         // 10 % 3 * 2 → (10 % 3) * 2 (left-to-right between same
         // precedence levels).
         let expr = parse_expr("10 % 3 * 2").unwrap();
@@ -4322,7 +4322,7 @@ mod tests {
     // ---------------- R.1.3 — index assignment (mini-phase R) ----------------
 
     #[test]
-    fn assign_index_list_parsea() {
+    fn assign_index_list_parses() {
         let stmt = parse_one_stmt("xs[0] = 99");
         match stmt {
             Stmt::Assign {
@@ -4339,7 +4339,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_index_map_str_key_parsea() {
+    fn assign_index_map_str_key_parses() {
         let stmt = parse_one_stmt("m[\"a\"] = 10");
         match stmt {
             Stmt::Assign {
@@ -4356,7 +4356,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_index_con_expresion_compleja_como_index() {
+    fn assign_index_with_complex_expression_as_index() {
         // xs[i + 1] = ...
         let stmt = parse_one_stmt("xs[i + 1] = 99");
         match stmt {
@@ -4379,7 +4379,7 @@ mod tests {
     // ---------------- R.1.4 — inclusive ranges `..=` (mini-phase R) ----------------
 
     #[test]
-    fn range_inclusive_expr_parsea() {
+    fn range_inclusive_expr_parses() {
         let expr = parse_expr("0..=10").unwrap();
         match expr {
             Expr::Range {
@@ -4397,7 +4397,7 @@ mod tests {
     }
 
     #[test]
-    fn range_exclusive_sigue_andando() {
+    fn range_exclusive_still_works() {
         let expr = parse_expr("0..10").unwrap();
         match expr {
             Expr::Range { inclusive, .. } => {
@@ -4408,7 +4408,7 @@ mod tests {
     }
 
     #[test]
-    fn range_inclusive_pattern_en_match() {
+    fn range_inclusive_pattern_in_match() {
         // 0..=59 as a match pattern.
         let stmt = parse_one_stmt("let r = match n { 0..=59 => \"F\", _ => \"otro\" }");
         match stmt {
@@ -4683,14 +4683,14 @@ mod tests {
     // equivalent.
 
     #[test]
-    fn method_chain_multilinea_parsea_igual_que_oneliner() {
+    fn method_chain_multiline_parses_same_as_oneliner() {
         let one = parse_expr("xs.filter(f).map(g)").unwrap();
         let many = parse_expr("xs\n    .filter(f)\n    .map(g)").unwrap();
         assert_eq!(one, many);
     }
 
     #[test]
-    fn method_chain_de_3_lineas_anida_correctamente() {
+    fn method_chain_of_3_lines_nests_correctly() {
         // xs\n.a()\n.b()\n.c() → Call(Field(Call(Field(Call(Field(xs, a)), b)), c))
         let e = parse_expr("xs\n  .a()\n  .b()\n  .c()").unwrap();
         let Expr::Call { callee, .. } = e else {
@@ -4723,7 +4723,7 @@ mod tests {
     }
 
     #[test]
-    fn field_access_multilinea_parsea_igual_que_oneliner() {
+    fn field_access_multiline_parses_same_as_oneliner() {
         // Without parens: just chained field access.
         let one = parse_expr("user.profile.email").unwrap();
         let many = parse_expr("user\n  .profile\n  .email").unwrap();
@@ -4731,7 +4731,7 @@ mod tests {
     }
 
     #[test]
-    fn await_multilinea_se_encadena_al_receptor() {
+    fn await_multiline_chains_to_receiver() {
         // `fut\n  .await` → Await(fut)
         let one = parse_expr("fut.await").unwrap();
         let many = parse_expr("fut\n  .await").unwrap();
@@ -4739,7 +4739,7 @@ mod tests {
     }
 
     #[test]
-    fn method_chain_multilinea_con_newlines_en_blanco_funciona() {
+    fn method_chain_multiline_with_blank_newlines_works() {
         // More than one newline between links: all of them get consumed.
         let one = parse_expr("xs.a().b()").unwrap();
         let many = parse_expr("xs\n\n\n    .a()\n\n    .b()").unwrap();
@@ -4747,7 +4747,7 @@ mod tests {
     }
 
     #[test]
-    fn method_chain_multilinea_no_consume_newline_si_no_sigue_dot() {
+    fn method_chain_multiline_does_not_consume_newline_if_no_dot_follows() {
         // `let x = foo` followed by `bar()` on the next line: two
         // statements, NOT a `foo()` call that "continues". The
         // lookahead only fires when what follows is `.`.
@@ -4756,7 +4756,7 @@ mod tests {
     }
 
     #[test]
-    fn method_chain_multilinea_funciona_en_rhs_de_let() {
+    fn method_chain_multiline_works_in_let_rhs() {
         // Canonical use case: chain as the RHS of a `let`.
         let program =
             parse_program_str("let nombres = users\n  .filter(activo)\n  .map(nombre)").unwrap();
@@ -4775,7 +4775,7 @@ mod tests {
     }
 
     #[test]
-    fn dot_a_inicio_de_statement_sin_receptor_sigue_siendo_error() {
+    fn dot_at_statement_start_without_receiver_is_still_error() {
         // Should not become a continuation of anything: a lone
         // `.foo()` starting a line is still an error (Dot is not primary).
         let result = parse_program_str(".foo()");
@@ -4905,7 +4905,7 @@ mod tests {
     }
 
     #[test]
-    fn return_status_con_body_map() {
+    fn return_status_with_body_map() {
         // `return <Int> { ... }` fires `Stmt::ReturnStatus`. The
         // body is parsed as any `Expr` — here a map literal with
         // explicit string keys.
@@ -4922,7 +4922,7 @@ mod tests {
     }
 
     #[test]
-    fn return_int_sin_body_sigue_como_return_normal() {
+    fn return_int_without_body_is_still_normal_return() {
         // Without `{...}` after the Int, it's still a plain Int
         // Return — does NOT fire ReturnStatus. This preserves the
         // existing syntax (`return 42` in a fn that returns Int).
@@ -4933,7 +4933,7 @@ mod tests {
     }
 
     #[test]
-    fn return_status_solo_con_int_literal() {
+    fn return_status_only_with_int_literal() {
         // Only Int literals fire `ReturnStatus`. A more complex expr
         // (`return x { ... }`) does NOT — it stays as a Return of
         // the full expr (which would fail later anyway).
@@ -4944,7 +4944,7 @@ mod tests {
     }
 
     #[test]
-    fn return_sin_expresion_devuelve_null() {
+    fn return_without_expression_returns_null() {
         // Bare `return` (with newline at the end). The parser models
         // it as `Stmt::Return(Expr::Null(_), Span::ZERO)`.
         assert_eq!(
@@ -4954,7 +4954,7 @@ mod tests {
     }
 
     #[test]
-    fn return_sin_expresion_dentro_de_fn_body() {
+    fn return_without_expression_inside_fn_body() {
         // fn early_exit() { return }
         let src = "fn early_exit() { return }";
         let tokens = crate::lexer::tokenize(src).unwrap();
@@ -4988,7 +4988,7 @@ mod tests {
     // ---- B.1: Span propagation -----------------------------------
 
     #[test]
-    fn stmt_lleva_span_de_la_primera_linea() {
+    fn stmt_carries_span_of_first_line() {
         // Simple stmt at line 1, col 1 → span must be (1, 1).
         let stmt = parse_one_stmt("let x = 42");
         let span = stmt.span();
@@ -4997,7 +4997,7 @@ mod tests {
     }
 
     #[test]
-    fn stmt_lleva_span_de_linea_posterior() {
+    fn stmt_carries_span_of_later_line() {
         // Stmts on lines 2 and 3 — each with its own span.
         let src = "\n  let x = 1\nreturn x";
         let tokens = tokenize(src).expect("lex OK");
@@ -5022,7 +5022,7 @@ mod tests {
     }
 
     #[test]
-    fn span_de_fn_def_apunta_al_fn() {
+    fn span_of_fn_def_points_to_fn() {
         let src = "  fn foo() => 1";
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
@@ -5031,7 +5031,7 @@ mod tests {
     }
 
     #[test]
-    fn span_de_fn_decorada_apunta_al_decorator() {
+    fn span_of_decorated_fn_points_to_decorator() {
         // A decorated `Stmt::FnDef` span points at `@`, not at `fn`.
         let src = "@get(\"/\") fn handler() => 0";
         let tokens = tokenize(src).expect("lex OK");
@@ -5147,7 +5147,7 @@ mod tests {
     }
 
     #[test]
-    fn xor_misma_precedencia_que_or_left_assoc() {
+    fn xor_same_precedence_as_or_left_assoc() {
         // `a xor b xor c` → `(a xor b) xor c`
         let stmt = parse_one_stmt("a xor b xor c");
         let expected = Stmt::Expr(
@@ -5168,7 +5168,7 @@ mod tests {
     }
 
     #[test]
-    fn xor_y_or_chain_libremente_misma_precedencia() {
+    fn xor_and_or_chain_freely_same_precedence() {
         // `a or b xor c` → `(a or b) xor c` (mismo nivel, left-assoc).
         let stmt = parse_one_stmt("a or b xor c");
         let expected = Stmt::Expr(
@@ -5189,7 +5189,7 @@ mod tests {
     }
 
     #[test]
-    fn and_tiene_mayor_precedencia_que_xor() {
+    fn and_has_higher_precedence_than_xor() {
         // `a and b xor c` → `(a and b) xor c`
         let stmt = parse_one_stmt("a and b xor c");
         let expected = Stmt::Expr(
@@ -5210,7 +5210,7 @@ mod tests {
     }
 
     #[test]
-    fn and_tiene_mayor_precedencia_que_or() {
+    fn and_has_higher_precedence_than_or() {
         // `a and b or c` → `(a and b) or c`
         let stmt = parse_one_stmt("a and b or c");
         let expected = Stmt::Expr(
@@ -5231,7 +5231,7 @@ mod tests {
     }
 
     #[test]
-    fn comparacion_tiene_mayor_precedencia_que_and() {
+    fn comparison_has_higher_precedence_than_and() {
         // `a > 0 and a < 10` → `(a > 0) and (a < 10)`
         let stmt = parse_one_stmt("a > 0 and a < 10");
         let expected = Stmt::Expr(
@@ -5739,7 +5739,7 @@ mod tests {
     }
 
     #[test]
-    fn unclosed_interpolation_reporta_columna_del_brace_abierto() {
+    fn unclosed_interpolation_reports_column_of_open_brace() {
         // `"a{x"` — the `{` is at column 3 (after the quote at col 1
         // and the 'a' at col 2). The error must point there, not at
         // column 1 of the string.
@@ -5749,7 +5749,7 @@ mod tests {
     }
 
     #[test]
-    fn error_en_subexpresion_de_interp_apunta_dentro_del_string() {
+    fn error_in_interp_subexpression_points_inside_string() {
         // `"foo{1 +}"` — the `+}` (invalid subexpression) must be
         // reported with a column inside the interpolation block, not
         // at column 1.
@@ -6021,7 +6021,7 @@ mod tests {
     // and that they attach to the FnDef in the right order.
 
     #[test]
-    fn decorator_get_pega_decorator_al_fndef() {
+    fn decorator_get_attaches_decorator_to_fndef() {
         // @get("/")
         // fn index() => "hola"
         let src = "@get(\"/\")\nfn index() => \"hola\"";
@@ -6044,7 +6044,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_post_con_async_handler() {
+    fn decorator_post_with_async_handler() {
         let src =
             "@post(\"/users\")\nasync fn create_user(body: UserInput) -> User {\n  return body\n}";
         let stmt = parse_one_stmt(src);
@@ -6074,7 +6074,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_put_y_delete_reconocidos_por_nombre() {
+    fn decorator_put_and_delete_recognized_by_name() {
         // Note about `/users/{id}`: the parser interprets it as
         // `StrInterp` because `{id}` is Fitz's string interpolation
         // syntax. For the HTTP runtime this is good news, not a bug:
@@ -6114,7 +6114,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_sin_args_admite_parens_vacios() {
+    fn decorator_without_args_allows_empty_parens() {
         // `@server()` — empty parens are valid for symmetry with
         // function calls.
         let stmt = parse_one_stmt("@server()\nfn config() => 0");
@@ -6129,7 +6129,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_admite_multiples_args_y_expresiones() {
+    fn decorator_allows_multiple_args_and_expressions() {
         // `@server(8080, "0.0.0.0")` — positional args with mixed types
         // mixed. The evaluator will validate semantics; the parser only
         // stores them.
@@ -6149,7 +6149,7 @@ mod tests {
     }
 
     #[test]
-    fn decorators_apilados_se_acumulan_en_orden() {
+    fn stacked_decorators_accumulate_in_order() {
         // @get("/admin") + @auth("admin") stacked on the same fn.
         // Each on its own line.
         let src = "@get(\"/admin\")\n@auth(\"admin\")\nfn dash() => \"ok\"";
@@ -6169,7 +6169,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_sin_parens_parsea_con_args_vacios() {
+    fn decorator_without_parens_parses_with_empty_args() {
         // Phase 9.z.2.a — optional parens in decorators (needed for
         // `@test fn ...`). `@get fn h() => 0` parses with
         // `args = kwargs = empty`. Semantic validation that `@get`
@@ -6187,7 +6187,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decorator_sin_parens_parsea() {
+    fn test_decorator_without_parens_parses() {
         // Canonical 9.z.2.a case: `@test fn name() { ... }` without
         // parens after `@test`. The spec's idiomatic form.
         let stmt = parse_one_stmt("@test\nfn suma_funciona() { let x = 1 }");
@@ -6202,21 +6202,21 @@ mod tests {
     }
 
     #[test]
-    fn decorator_sin_handler_errores() {
+    fn decorator_without_handler_errors() {
         // @get("/x") and nothing after: the parser bails because there is no fn.
         let err = parse_program_str("@get(\"/x\")").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn decorator_seguido_de_no_fn_errores() {
+    fn decorator_followed_by_non_fn_errors() {
         // @get("/x") let x = 1  → error claro
         let err = parse_program_str("@get(\"/x\")\nlet x = 1").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn decorator_desconocido_no_es_error_de_parser() {
+    fn unknown_decorator_is_not_parser_error() {
         // Any `@name(args)` that is syntactically valid parses.
         // Whether `@patch` is implemented is the evaluator's call.
         let stmt = parse_one_stmt("@patch(\"/x\")\nfn h() => 0");
@@ -6233,7 +6233,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn decorator_sin_kwargs_deja_vector_vacio() {
+    fn decorator_without_kwargs_leaves_empty_vector() {
         // Regresión: `@get("/x")` mantiene `kwargs = []`.
         let stmt = parse_one_stmt("@get(\"/x\")\nfn h() => 0");
         match stmt {
@@ -6247,7 +6247,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_kwarg_solo_separa_clave_y_valor() {
+    fn decorator_kwarg_only_separates_key_and_value() {
         // `@server(docs=false)` — a single kwarg, no positionals.
         let stmt = parse_one_stmt("@server(docs=false)\nfn cfg() => 0");
         match stmt {
@@ -6262,7 +6262,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_mezcla_positional_y_kwargs_en_ese_orden() {
+    fn decorator_mixes_positional_and_kwargs_in_that_order() {
         // `@server(3000, host="0.0.0.0", docs=false)` —
         // 1 positional + 2 kwargs.
         let src = "@server(3000, host=\"0.0.0.0\", docs=false)\nfn cfg() => 0";
@@ -6283,7 +6283,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_positional_despues_de_kwarg_es_error() {
+    fn decorator_positional_after_kwarg_is_error() {
         // `@get(a=1, "/x")` — kwarg first, then positional: rejected.
         let err = parse_program_str("@get(a=1, \"/x\")\nfn h() => 0").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
@@ -6295,7 +6295,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_kwarg_duplicado_es_error() {
+    fn decorator_duplicate_kwarg_is_error() {
         // `@server(host="a", host="b")` — mismo kwarg dos veces.
         let err = parse_program_str("@server(host=\"a\", host=\"b\")\nfn cfg() => 0").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
@@ -6307,7 +6307,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_eqeq_en_arg_no_se_confunde_con_kwarg() {
+    fn decorator_eqeq_in_arg_is_not_confused_with_kwarg() {
         // `@deco(a == b)` — one positional arg `BinOp(Eq)`, NOT a kwarg
         // with key `a` and value `b`. The lexer makes the difference:
         // `==` is `Token::EqEq`, while `=` is `Token::Eq`.
@@ -7023,7 +7023,7 @@ mod tests {
     }
 
     #[test]
-    fn pattern_int_sin_dotdot_sigue_siendo_int() {
+    fn pattern_int_without_dotdot_is_still_int() {
         // Sanity check: the change for Pattern::Range must not break Pattern::Int.
         let src = "match n { 42 => \"sí\", _ => \"no\" }";
         let stmt = parse_one_stmt(src);
@@ -7036,7 +7036,7 @@ mod tests {
     }
 
     #[test]
-    fn pattern_range_con_float_es_error() {
+    fn pattern_range_with_float_is_error() {
         // 0..1.5 — float as an endpoint is not supported in patterns
         let src = "match n { 0..1.5 => \"x\", _ => \"y\" }";
         let err = parse_program_str(src).unwrap_err();
@@ -7048,7 +7048,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn or_pattern_dos_literales() {
+    fn or_pattern_two_literals() {
         // match n { 1 | 2 => "ok", _ => "x" }
         let src = "match n { 1 | 2 => \"ok\", _ => \"x\" }";
         let stmt = parse_one_stmt(src);
@@ -7065,7 +7065,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_tres_strings() {
+    fn or_pattern_three_strings() {
         let src = "match d { \"a\" | \"b\" | \"c\" => 1, _ => 0 }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7084,7 +7084,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_un_solo_pat_sin_pipe_no_envuelve() {
+    fn or_pattern_single_pat_without_pipe_does_not_wrap() {
         // Sanity: a simple pattern without `|` is not wrapped in Or.
         let src = "match n { 1 => \"x\", _ => \"y\" }";
         let stmt = parse_one_stmt(src);
@@ -7097,7 +7097,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_mezcla_range_y_literal() {
+    fn or_pattern_mixes_range_and_literal() {
         // match n { 0 | 5..=10 => "ok", _ => "no" }
         let src = "match n { 0 | 5..=10 => \"ok\", _ => \"no\" }";
         let stmt = parse_one_stmt(src);
@@ -7120,7 +7120,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_con_ok_err_wildcard() {
+    fn or_pattern_with_ok_err_wildcard() {
         // match r { Ok(_) | Err(_) => "siempre" }
         let src = "match r { Ok(_) | Err(_) => \"siempre\" }";
         let stmt = parse_one_stmt(src);
@@ -7136,7 +7136,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_con_binding_ident_es_error() {
+    fn or_pattern_with_binding_ident_is_error() {
         // match n { 1 | x => "x" } — `x` is an Ident binding, vetoed.
         let src = "match n { 1 | x => \"x\" }";
         let err = parse_program_str(src).unwrap_err();
@@ -7145,7 +7145,7 @@ mod tests {
     }
 
     #[test]
-    fn or_pattern_con_ok_binding_es_error() {
+    fn or_pattern_with_ok_binding_is_error() {
         // match r { Ok(x) | Err(_) => "x" } — `Ok(x)` binding, vetado.
         let src = "match r { Ok(x) | Err(_) => \"x\" }";
         let err = parse_program_str(src).unwrap_err();
@@ -7157,7 +7157,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn guard_simple_sobre_ident_pattern() {
+    fn guard_simple_over_ident_pattern() {
         let src = "match n { x if x > 10 => \"grande\", _ => \"chico\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7171,7 +7171,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_sobre_ok_binding() {
+    fn guard_over_ok_binding() {
         let src = "match r { Ok(v) if v > 0 => \"pos\", _ => \"x\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7187,7 +7187,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_combinado_con_range_pattern() {
+    fn guard_combined_with_range_pattern() {
         let src = "match n { 0..=10 if n > 5 => \"alto\", _ => \"x\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7207,7 +7207,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_combinado_con_or_pattern() {
+    fn guard_combined_with_or_pattern() {
         let src = "match n { 1 | 2 | 3 if n > 1 => \"x\", _ => \"y\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7220,7 +7220,7 @@ mod tests {
     }
 
     #[test]
-    fn guard_es_expresion_compleja() {
+    fn guard_is_complex_expression() {
         // The guard can be any boolean expression.
         let src = "match n { x if x > 0 and x < 100 => \"ok\", _ => \"x\" }";
         let stmt = parse_one_stmt(src);
@@ -7237,7 +7237,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn compound_plus_eq_sobre_ident() {
+    fn compound_plus_eq_over_ident() {
         // `x += 5` must desugar to `x = x + 5`.
         let src = "x += 5";
         let stmt = parse_one_stmt(src);
@@ -7264,7 +7264,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_minus_eq_sobre_ident() {
+    fn compound_minus_eq_over_ident() {
         let src = "x -= 3";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7279,7 +7279,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_star_eq_sobre_ident() {
+    fn compound_star_eq_over_ident() {
         let src = "x *= 7";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7294,7 +7294,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_slash_eq_sobre_ident() {
+    fn compound_slash_eq_over_ident() {
         let src = "x /= 2";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7309,7 +7309,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_plus_eq_sobre_field() {
+    fn compound_plus_eq_over_field() {
         // `c.count += 1` desugar a `c.count = c.count + 1`.
         let src = "c.count += 1";
         let stmt = parse_one_stmt(src);
@@ -7333,7 +7333,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_plus_eq_sobre_index() {
+    fn compound_plus_eq_over_index() {
         // `xs[0] += 10` desugar a `xs[0] = xs[0] + 10`.
         let src = "xs[0] += 10";
         let stmt = parse_one_stmt(src);
@@ -7356,7 +7356,7 @@ mod tests {
     }
 
     #[test]
-    fn compound_rhs_expresion_completa() {
+    fn compound_rhs_complete_expression() {
         // The RHS must parse as a full expression, not just a literal.
         let src = "x += a + b * 2";
         let stmt = parse_one_stmt(src);
@@ -7385,7 +7385,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn type_def_con_solo_fields_sigue_funcionando() {
+    fn type_def_with_only_fields_still_works() {
         let src = "type User { id: Int, name: Str }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7404,7 +7404,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_con_un_metodo_simple() {
+    fn type_def_with_one_simple_method() {
         let src = "type User {\n\
                        name: Str\n\
                        fn greet() -> Str { return \"hola\" }\n\
@@ -7426,7 +7426,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_con_metodo_con_params() {
+    fn type_def_with_method_with_params() {
         let src = "type User {\n\
                        age: Int\n\
                        fn older_than(target: Int) -> Bool { return age > target }\n\
@@ -7443,7 +7443,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_con_metodo_async() {
+    fn type_def_with_async_method() {
         let src = "type User {\n\
                        id: Int\n\
                        async fn fetch() -> Str { return \"...\" }\n\
@@ -7458,7 +7458,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_con_metodo_flecha() {
+    fn type_def_with_arrow_method() {
         // `fn greet() => "x"` desugars to a body with Return.
         let src = "type User {\n\
                        fn name_str() -> Str => \"ada\"\n\
@@ -7474,7 +7474,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_mezcla_fields_y_metodos() {
+    fn type_def_mixes_fields_and_methods() {
         let src = "type Counter {\n\
                        count: Int\n\
                        fn inc() -> Int { return count + 1 }\n\
@@ -7494,7 +7494,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_con_metodo_sin_cuerpo_es_error() {
+    fn type_def_with_method_without_body_is_error() {
         // `fn name()` without a body is an error (we don't allow abstract methods).
         let src = "type X { fn f() }";
         let err = parse_program_str(src).unwrap_err();
@@ -7511,7 +7511,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn struct_lit_simple_en_asignacion() {
+    fn struct_lit_simple_in_assignment() {
         let src = "let u = User { id: 1, name: \"x\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7533,7 +7533,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_vacio() {
+    fn struct_lit_empty() {
         let src = "let u = Empty {}";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7551,7 +7551,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_con_trailing_comma() {
+    fn struct_lit_with_trailing_comma() {
         let src = "let u = User { id: 1, name: \"x\", }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7566,7 +7566,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_multilinea_con_newlines_entre_campos() {
+    fn struct_lit_multiline_with_newlines_between_fields() {
         // No comma between lines — newline as separator.
         let src = "let u = User {\n    id: 1\n    name: \"x\"\n}";
         let stmt = parse_one_stmt(src);
@@ -7582,7 +7582,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_anidado() {
+    fn struct_lit_nested() {
         let src = "let o = Order { user: User { id: 1, name: \"x\" } }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7612,7 +7612,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_con_expresion_compleja_como_valor() {
+    fn struct_lit_with_complex_expression_as_value() {
         // The field value can be any expression.
         let src = "let p = Point { x: 1 + 2, y: f(3) }";
         let stmt = parse_one_stmt(src);
@@ -7629,7 +7629,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_como_argumento_de_funcion() {
+    fn struct_lit_as_function_argument() {
         // Inside parens there is no ambiguity — the struct literal
         // is allowed without wrapping.
         let src = "print(User { id: 1, name: \"x\" })";
@@ -7644,7 +7644,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_dentro_de_lista() {
+    fn struct_lit_inside_list() {
         // Inside `[...]` each item is delimited by `,` or `]` —
         // no ambiguity with blocks.
         let src = "let xs = [User { id: 1, name: \"a\" }, User { id: 2, name: \"b\" }]";
@@ -7663,7 +7663,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_en_return() {
+    fn struct_lit_in_return() {
         let src = "fn make() => User { id: 1, name: \"x\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
@@ -7676,7 +7676,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_como_indice_y_receptor_de_index() {
+    fn struct_lit_as_index_and_index_receiver() {
         // The struct literal can appear inside an indexing `[...]`.
         let src = "let v = m[Key { id: 1 }]";
         let stmt = parse_one_stmt(src);
@@ -7692,7 +7692,7 @@ mod tests {
     }
 
     #[test]
-    fn while_con_struct_literal_sin_parens_da_error_con_hint() {
+    fn while_with_struct_literal_without_parens_gives_error_with_hint() {
         // `while User { id: 1 } { body }` — the parser sees the `{`
         // after `User` and, since we are in a condition, detects
         // that it looks like a struct literal and emits an error
@@ -7708,7 +7708,7 @@ mod tests {
     }
 
     #[test]
-    fn if_con_struct_literal_sin_parens_da_error_con_hint() {
+    fn if_with_struct_literal_without_parens_gives_error_with_hint() {
         let src = "if User { id: 1 } == other { print(x) }";
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
@@ -7720,7 +7720,7 @@ mod tests {
     }
 
     #[test]
-    fn for_con_struct_literal_sin_parens_da_error_con_hint() {
+    fn for_with_struct_literal_without_parens_gives_error_with_hint() {
         let src = "for u in User { id: 1 } { print(u) }";
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
@@ -7732,7 +7732,7 @@ mod tests {
     }
 
     #[test]
-    fn match_con_struct_literal_sin_parens_da_error_con_hint() {
+    fn match_with_struct_literal_without_parens_gives_error_with_hint() {
         let src = "match User { id: 1 } { _ => \"x\" }";
         let err = parse_program_str(src).unwrap_err();
         let msg = err.message.to_lowercase();
@@ -7744,7 +7744,7 @@ mod tests {
     }
 
     #[test]
-    fn if_con_struct_literal_envuelto_en_parens_parsea() {
+    fn if_with_struct_literal_wrapped_in_parens_parses() {
         // With parens yes: the condition sees a full struct literal.
         let src = "if (User { id: 1 }) == other { print(x) }";
         let stmts = parse_program_str(src).expect("debería parsear con paréntesis");
@@ -7761,7 +7761,7 @@ mod tests {
     }
 
     #[test]
-    fn while_con_ident_y_bloque_sin_struct_pattern_sigue_andando() {
+    fn while_with_ident_and_block_without_struct_pattern_still_works() {
         // `while x { print(x) }` — the block body does not have a
         // struct-literal shape, so the flag lets the `{` through for
         // `parse_block` to grab.
@@ -7779,7 +7779,7 @@ mod tests {
     }
 
     #[test]
-    fn for_sobre_lista_de_struct_literals_parsea() {
+    fn for_over_list_of_struct_literals_parses() {
         // Inside `[...]` struct literals are allowed
         // even when the `for` is in no_struct_literal mode.
         let src = "for u in [User { id: 1, name: \"a\" }] { print(u) }";
@@ -7797,7 +7797,7 @@ mod tests {
     }
 
     #[test]
-    fn if_con_typed_assignment_en_bloque_no_se_confunde_con_struct_literal() {
+    fn if_with_typed_assignment_in_block_not_confused_with_struct_literal() {
         // `if x { y: Int = 1 }` — the block has a typed assignment,
         // which shares the initial shape with a struct literal
         // (`Ident :`).
@@ -7812,13 +7812,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn ok_ctor_se_parsea_a_expr_ok() {
+    fn ok_ctor_parses_to_expr_ok() {
         let e = parse_expr("Ok(42)").unwrap();
         assert_eq!(e, Expr::Ok(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO));
     }
 
     #[test]
-    fn err_ctor_se_parsea_a_expr_err() {
+    fn err_ctor_parses_to_expr_err() {
         let e = parse_expr(r#"Err("boom")"#).unwrap();
         assert_eq!(
             e,
@@ -7827,7 +7827,7 @@ mod tests {
     }
 
     #[test]
-    fn ok_con_expresion_compleja_adentro() {
+    fn ok_with_complex_expression_inside() {
         // Ok(1 + 2 * 3) → Ok(Add(1, Mul(2, 3)))
         let e = parse_expr("Ok(1 + 2 * 3)").unwrap();
         let inner = Expr::BinOp {
@@ -7845,21 +7845,21 @@ mod tests {
     }
 
     #[test]
-    fn ok_sin_argumentos_es_error_de_aridad() {
+    fn ok_without_arguments_is_arity_error() {
         let err = parse_expr("Ok()").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(err.message.contains("`Ok`") && err.message.contains("1 argumento"));
     }
 
     #[test]
-    fn err_con_dos_argumentos_es_error_de_aridad() {
+    fn err_with_two_arguments_is_arity_error() {
         let err = parse_expr("Err(1, 2)").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
         assert!(err.message.contains("`Err`"));
     }
 
     #[test]
-    fn try_postfix_envuelve_expresion() {
+    fn try_postfix_wraps_expression() {
         // f(x)? → Try(Call(f, [x]))
         let e = parse_expr("f(x)?").unwrap();
         assert_eq!(
@@ -7876,7 +7876,7 @@ mod tests {
     }
 
     #[test]
-    fn try_sobre_identificador() {
+    fn try_over_identifier() {
         // x? → Try(Ident("x"))
         let e = parse_expr("x?").unwrap();
         assert_eq!(
@@ -7886,7 +7886,7 @@ mod tests {
     }
 
     #[test]
-    fn try_se_encadena_con_field_access() {
+    fn try_chains_with_field_access() {
         // get(id)?.name → Field { object: Try(Call(get, [id])), field: "name" }
         let e = parse_expr("get(id)?.name").unwrap();
         let inner_call = Expr::Call {
@@ -7905,7 +7905,7 @@ mod tests {
     }
 
     #[test]
-    fn try_anidado_con_ok_y_err() {
+    fn try_nested_with_ok_and_err() {
         // Ok(get(id)?) → Ok(Try(Call(get, [id])))
         let e = parse_expr("Ok(get(id)?)").unwrap();
         let inner = Expr::Try(
@@ -7920,7 +7920,7 @@ mod tests {
     }
 
     #[test]
-    fn match_con_patrones_ok_y_err_parsea() {
+    fn match_with_ok_and_err_patterns_parses() {
         // Sanity: the pattern parser already supported Ok/Err; verify
         // that the whole set (match + Ok/Err in value) composes well.
         let stmt = parse_one_stmt(
@@ -7953,7 +7953,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn import_simple_se_parsea() {
+    fn import_simple_parses() {
         // `import utils` → Stmt::Import with alias None.
         assert_eq!(
             parse_one_stmt("import utils"),
@@ -7966,7 +7966,7 @@ mod tests {
     }
 
     #[test]
-    fn import_punteado_acumula_segmentos() {
+    fn dotted_import_accumulates_segments() {
         assert_eq!(
             parse_one_stmt("import sub.foo.bar"),
             Stmt::Import {
@@ -7978,20 +7978,20 @@ mod tests {
     }
 
     #[test]
-    fn import_sin_nombre_es_error() {
+    fn import_without_name_is_error() {
         let err = parse_program_str("import").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn import_path_terminado_en_punto_es_error() {
+    fn import_path_ending_in_dot_is_error() {
         // `import foo.` — missing the following segment.
         let err = parse_program_str("import foo.").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn from_import_un_nombre() {
+    fn from_import_one_name() {
         // `from utils import slugify`
         assert_eq!(
             parse_one_stmt("from utils import slugify"),
@@ -8004,7 +8004,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_varios_nombres_separados_por_coma() {
+    fn from_import_multiple_names_comma_separated() {
         // `from utils import a, b, c`
         assert_eq!(
             parse_one_stmt("from utils import a, b, c"),
@@ -8017,7 +8017,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_con_path_punteado() {
+    fn from_import_with_dotted_path() {
         // `from sub.foo import bar`
         assert_eq!(
             parse_one_stmt("from sub.foo import bar"),
@@ -8030,7 +8030,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_acepta_trailing_comma() {
+    fn from_import_accepts_trailing_comma() {
         // `from utils import a, b,` — coma final permitida.
         assert_eq!(
             parse_one_stmt("from utils import a, b,"),
@@ -8058,7 +8058,7 @@ mod tests {
     }
 
     #[test]
-    fn mln_from_import_parens_multi_linea_canonico() {
+    fn mln_from_import_parens_multi_line_canonical() {
         // Pythonic idiom: `(`/`)` wrapping a list of
         // names separated by commas and newlines.
         let src = "from utils import (\n\
@@ -8077,7 +8077,7 @@ mod tests {
     }
 
     #[test]
-    fn mln_from_import_parens_con_aliases_mixtos() {
+    fn mln_from_import_parens_with_mixed_aliases() {
         // Aliases inside the multi-line parens work the same as in
         // single-line.
         let src = "from utils import (\n\
@@ -8102,7 +8102,7 @@ mod tests {
     }
 
     #[test]
-    fn mln_from_import_parens_sin_trailing_comma() {
+    fn mln_from_import_parens_without_trailing_comma() {
         // The last name before `)` does not require a comma.
         let src = "from utils import (\n\
                        a,\n\
@@ -8119,7 +8119,7 @@ mod tests {
     }
 
     #[test]
-    fn mln_from_import_parens_sin_cerrar_es_error() {
+    fn mln_from_import_parens_unclosed_is_error() {
         let err = parse_program_str("from utils import (a, b\n").unwrap_err();
         assert!(
             err.message.contains("')'") || err.message.contains("import"),
@@ -8129,14 +8129,14 @@ mod tests {
     }
 
     #[test]
-    fn from_sin_import_es_error() {
+    fn from_without_import_is_error() {
         // `from utils slugify` — missing the `import` keyword.
         let err = parse_program_str("from utils slugify").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn from_import_sin_nombres_es_error() {
+    fn from_import_without_names_is_error() {
         // `from utils import` — at least one name is required.
         let err = parse_program_str("from utils import").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
@@ -8145,7 +8145,7 @@ mod tests {
     // PreF8.4: alias tests.
 
     #[test]
-    fn import_con_alias_parsea_el_alias() {
+    fn import_with_alias_parses_the_alias() {
         // `import utils as u`
         assert_eq!(
             parse_one_stmt("import utils as u"),
@@ -8158,7 +8158,7 @@ mod tests {
     }
 
     #[test]
-    fn import_punteado_con_alias() {
+    fn dotted_import_with_alias() {
         // `import sub.foo as f` — the alias applies to the full binding.
         assert_eq!(
             parse_one_stmt("import sub.foo as f"),
@@ -8171,7 +8171,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_con_alias_simple() {
+    fn from_import_with_simple_alias() {
         // `from utils import slugify as s`
         assert_eq!(
             parse_one_stmt("from utils import slugify as s"),
@@ -8184,7 +8184,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_alias_mixto_con_y_sin() {
+    fn from_import_alias_mixed_with_and_without() {
         // `from foo import a as x, b, c as z`
         assert_eq!(
             parse_one_stmt("from foo import a as x, b, c as z"),
@@ -8201,14 +8201,14 @@ mod tests {
     }
 
     #[test]
-    fn import_as_sin_ident_es_error() {
+    fn import_as_without_ident_is_error() {
         // `import foo as` — missing ident after `as`.
         let err = parse_program_str("import foo as").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn from_import_as_sin_ident_es_error() {
+    fn from_import_as_without_ident_is_error() {
         // `from foo import bar as` — missing ident after `as`.
         let err = parse_program_str("from foo import bar as").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
@@ -8237,13 +8237,13 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_simple_se_parsea_como_named() {
+    fn type_expr_simple_parses_as_named() {
         let t = parse_assign_type("let x: Int = 0");
         assert_eq!(t, TypeExpr::named("Int"));
     }
 
     #[test]
-    fn type_expr_generico_un_argumento() {
+    fn type_expr_generic_one_argument() {
         // List<Int>
         let t = parse_assign_type("let xs: List<Int> = []");
         assert_eq!(
@@ -8256,7 +8256,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_generico_dos_argumentos() {
+    fn type_expr_generic_two_arguments() {
         // Map<Str, User>
         let t = parse_assign_type("let m: Map<Str, User> = {}");
         assert_eq!(
@@ -8269,7 +8269,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_generico_anidado() {
+    fn type_expr_generic_nested() {
         // Result<List<User>>  — two consecutive `>` to close.
         let t = parse_assign_type("let r: Result<List<User>> = Ok([])");
         assert_eq!(
@@ -8285,14 +8285,14 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_nullable_sobre_named() {
+    fn type_expr_nullable_over_named() {
         // User?
         let t = parse_assign_type("let u: User? = null");
         assert_eq!(t, TypeExpr::Nullable(Box::new(TypeExpr::named("User"))),);
     }
 
     #[test]
-    fn type_expr_nullable_sobre_generico() {
+    fn type_expr_nullable_over_generic() {
         // List<Int>?  — the `?` applies to the whole atom, not the last arg.
         let t = parse_assign_type("let xs: List<Int>? = null");
         assert_eq!(
@@ -8305,7 +8305,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_nullable_adentro_de_generico() {
+    fn type_expr_nullable_inside_generic() {
         // List<Int?>  — the `?` is inside, not outside.
         let t = parse_assign_type("let xs: List<Int?> = []");
         assert_eq!(
@@ -8318,7 +8318,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_en_param_y_return_de_fndef() {
+    fn type_expr_in_param_and_return_of_fndef() {
         // fn pick(xs: List<Int>) -> Result<Int> { return Ok(0) }
         let stmt = parse_one_stmt("fn pick(xs: List<Int>) -> Result<Int> { return Ok(0) }");
         match stmt {
@@ -8348,7 +8348,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_en_field_de_typedef_con_nullable() {
+    fn type_expr_in_typedef_field_with_nullable() {
         // type User { id: Int, tags: List<Str>?, email: Str? }
         let stmt = parse_one_stmt("type User { id: Int, tags: List<Str>?, email: Str? }");
         match stmt {
@@ -8373,14 +8373,14 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_generico_vacio_es_error() {
+    fn type_expr_generic_empty_is_error() {
         // `List<>` should not parse: at least one argument is required.
         let err = parse_program_str("let xs: List<> = []").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn type_expr_funcion_simple() {
+    fn type_expr_function_simple() {
         // Fn(Int) -> Int
         let t = parse_assign_type("let f: Fn(Int) -> Int = null");
         assert_eq!(
@@ -8393,7 +8393,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_funcion_sin_params() {
+    fn type_expr_function_without_params() {
         // Fn() -> Str
         let t = parse_assign_type("let f: Fn() -> Str = null");
         assert_eq!(
@@ -8406,7 +8406,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_funcion_multiples_params() {
+    fn type_expr_function_multiple_params() {
         // Fn(Int, Str, Bool) -> User
         let t = parse_assign_type("let f: Fn(Int, Str, Bool) -> User = null");
         assert_eq!(
@@ -8423,7 +8423,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_funcion_anidada_como_param() {
+    fn type_expr_function_nested_as_param() {
         // Fn(Fn(Int) -> Int, Int) -> Int — higher-order anotado.
         let t = parse_assign_type("let h: Fn(Fn(Int) -> Int, Int) -> Int = null");
         assert_eq!(
@@ -8442,14 +8442,14 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_funcion_sin_arrow_es_error() {
+    fn type_expr_function_without_arrow_is_error() {
         // `Fn(Int)` without `-> R` → explicit parser error.
         let err = parse_program_str("let f: Fn(Int) = null").unwrap_err();
         assert!(err.message.contains("'->"));
     }
 
     #[test]
-    fn type_expr_generico_sin_cerrar_es_error() {
+    fn type_expr_generic_unclosed_is_error() {
         // The final `>` is missing.
         let err = parse_program_str("let xs: List<Int = []").unwrap_err();
         // The parser fails when it tries to consume `>` and finds `=`.
@@ -8457,14 +8457,14 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_anotacion_sin_nombre_es_error() {
+    fn type_expr_annotation_without_name_is_error() {
         // `:` with no type after.
         let err = parse_program_str("let x: = 1").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn type_expr_display_round_trip_sobre_un_caso_complejo() {
+    fn type_expr_display_round_trip_over_complex_case() {
         // The display must reproduce the form written in the source.
         let t = parse_assign_type("let m: Map<Str, Result<List<User>?>> = {}");
         assert_eq!(t.display_name(), "Map<Str, Result<List<User>?>>");
@@ -8482,7 +8482,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_programa_valido_no_acumula_errores() {
+    fn recovery_valid_program_does_not_accumulate_errors() {
         // Smoke: the recovering API produces the same AST as strict
         // over error-free code, with an empty `Vec<FitzError>`.
         let src = "let x = 1\nlet y = 2\nprint(x + y)";
@@ -8493,7 +8493,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_stmt_roto_a_top_level_inserta_error_y_continua() {
+    fn recovery_broken_stmt_at_top_level_inserts_error_and_continues() {
         // The `1 +` leaves a pending binop — fails. The parser
         // synchronizes to the next Newline and continues with
         // `let y = 2`, which must parse OK.
@@ -8511,7 +8511,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_dos_stmts_rotos_consecutivos_emiten_dos_errores() {
+    fn recovery_two_consecutive_broken_stmts_emit_two_errors() {
         // Two broken lines: the parser must accumulate two errors,
         // not get lost.
         let src = "let a = 1 +\nlet b = *\nlet c = 3";
@@ -8529,7 +8529,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_stmt_roto_dentro_de_bloque_inserta_error_y_sigue() {
+    fn recovery_broken_stmt_inside_block_inserts_error_and_continues() {
         // The `if` body has a broken stmt followed by a valid one.
         let src = "if (x) {\n  let a = 1 +\n  let b = 2\n}";
         let (stmts, errors) = parse_recovering(src);
@@ -8552,7 +8552,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_error_span_apunta_al_token_donde_empezo_el_stmt() {
+    fn recovery_error_span_points_to_token_where_stmt_started() {
         // The broken stmt starts at line 1, col 1 (the `let`). The
         // `Stmt::Error` span reflects this so the LSP underlines it
         // from the start of the stmt, not from the odd character.
@@ -8568,7 +8568,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_error_lleva_linea_y_columna_del_token_problematico() {
+    fn recovery_error_carries_line_and_column_of_problematic_token() {
         // The reported error must point at the token where the
         // problem was detected (the lone `+`), not at the start of
         // the stmt — useful for the LSP underlining the squiggly.
@@ -8581,7 +8581,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_eof_inesperado_se_acumula_como_error() {
+    fn recovery_unexpected_eof_accumulates_as_error() {
         // `let x =` leaves a pending expression at the end of file.
         // The parser must accumulate the error and return what it
         // could build.
@@ -8593,7 +8593,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_cota_de_errores_corta_la_acumulacion() {
+    fn recovery_error_cap_cuts_accumulation() {
         // Generate a program with more than MAX_RECOVERED_ERRORS
         // broken lines. Verify the cap is respected.
         let n = MAX_RECOVERED_ERRORS + 50;
@@ -8604,7 +8604,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_fn_con_body_roto_preserva_estructura() {
+    fn recovery_fn_with_broken_body_preserves_structure() {
         // The `fn foo` body has a broken stmt. The key point: the
         // FnDef remains a FnDef (with a body containing Stmt::Error),
         // it isn't discarded entirely. The stmt after the fn close
@@ -8630,7 +8630,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_parse_strict_sigue_abortando_al_primer_error() {
+    fn recovery_parse_strict_still_aborts_at_first_error() {
         // Key guarantee: strict `parse()` does NOT change behavior.
         // It still returns `Err` on the first error. The strict CLI
         // (`fitz run`/`build`/`check`) keeps working the same.
@@ -8655,7 +8655,7 @@ mod tests {
     }
 
     #[test]
-    fn comprehension_parsea_caso_basico() {
+    fn comprehension_parses_basic_case() {
         let v = parse_first_let_value("let ys = [x for x in xs]");
         match v {
             Expr::ListComp {
@@ -8676,7 +8676,7 @@ mod tests {
 
     // Mini-batch Up — tuple destructuring in list comprehension.
     #[test]
-    fn up_comprehension_acepta_tuple_destructuring() {
+    fn up_comprehension_accepts_tuple_destructuring() {
         let v = parse_first_let_value("let ys = [a + b for (a, b) in pairs]");
         match v {
             Expr::ListComp { var, .. } => {
@@ -8693,7 +8693,7 @@ mod tests {
     }
 
     #[test]
-    fn comprehension_parsea_con_filter_inline() {
+    fn comprehension_parses_with_inline_filter() {
         let v = parse_first_let_value("let ys = [x for x in xs if x > 0]");
         match v {
             Expr::ListComp { filter, .. } => {
@@ -8704,7 +8704,7 @@ mod tests {
     }
 
     #[test]
-    fn comprehension_parsea_sobre_range() {
+    fn comprehension_parses_over_range() {
         let v = parse_first_let_value("let ys = [x * 2 for x in 0..10]");
         match v {
             Expr::ListComp { iter, .. } => {
@@ -8715,7 +8715,7 @@ mod tests {
     }
 
     #[test]
-    fn lista_de_un_elemento_no_se_confunde_con_comprehension() {
+    fn single_element_list_not_confused_with_comprehension() {
         // `[42]` is a single-element list, NOT a comprehension.
         // The parser only detects a comprehension if, after the first expr,
         // `for` follows (not `,` or `]`).
@@ -8741,7 +8741,7 @@ mod tests {
     }
 
     #[test]
-    fn format_spec_precision_float_se_parsea() {
+    fn format_spec_precision_float_parses() {
         let spec = extract_first_strinterp_spec(r#"let r = "{x:.2f}""#).unwrap();
         assert_eq!(spec.precision, Some(2));
         assert!(matches!(
@@ -8759,7 +8759,7 @@ mod tests {
     }
 
     #[test]
-    fn format_spec_align_right_con_width() {
+    fn format_spec_align_right_with_width() {
         let spec = extract_first_strinterp_spec(r#"let r = "{x:>10}""#).unwrap();
         assert!(matches!(spec.align, Some(crate::ast::FormatAlign::Right)));
         assert_eq!(spec.width, Some(10));
@@ -8774,7 +8774,7 @@ mod tests {
     }
 
     #[test]
-    fn format_spec_grouping_y_precision_juntos() {
+    fn format_spec_grouping_and_precision_together() {
         // `,.2f` — thousands separator + 2 decimal places.
         let spec = extract_first_strinterp_spec(r#"let r = "{x:,.2f}""#).unwrap();
         assert_eq!(spec.grouping, Some(','));
@@ -8789,7 +8789,7 @@ mod tests {
     }
 
     #[test]
-    fn interpolation_sin_spec_sigue_funcionando_compat() {
+    fn interpolation_without_spec_still_works_compat() {
         // Classic case without `:` — the second field of StrPart::Expr is None.
         let value = parse_first_let_value(r#"let r = "hola {name}""#);
         match value {
@@ -8806,7 +8806,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn for_con_tuple_pattern_parsea() {
+    fn for_with_tuple_pattern_parses() {
         // `for (k, v) in m { ... }` with a Pattern::Tuple of 2 idents.
         let stmt = parse_one_stmt("for (k, v) in m { print(k) }");
         match stmt {
@@ -8823,7 +8823,7 @@ mod tests {
     }
 
     #[test]
-    fn for_con_wildcard_pattern_parsea() {
+    fn for_with_wildcard_pattern_parses() {
         // `for _ in 0..10 { ... }` with Pattern::Wildcard.
         let stmt = parse_one_stmt("for _ in 0..10 { print(\"x\") }");
         match stmt {
@@ -8835,7 +8835,7 @@ mod tests {
     }
 
     #[test]
-    fn for_con_ident_simple_sigue_funcionando() {
+    fn for_with_simple_ident_still_works() {
         // Regression: `for x in xs` with Pattern::Ident.
         let stmt = parse_one_stmt("for x in xs { print(x) }");
         match stmt {
@@ -8849,7 +8849,7 @@ mod tests {
     // ---- Mini-batch Fp — default params ----
 
     #[test]
-    fn fp_param_con_default_int_se_parsea() {
+    fn fp_param_with_default_int_parses() {
         let stmt = parse_one_stmt("fn f(x: Int = 5) -> Int { return x }");
         match stmt {
             Stmt::FnDef { params, .. } => {
@@ -8866,7 +8866,7 @@ mod tests {
     }
 
     #[test]
-    fn fp_param_default_str_se_parsea() {
+    fn fp_param_default_str_parses() {
         let stmt = parse_one_stmt("fn greet(name: Str = \"amigo\") -> Str { return name }");
         match stmt {
             Stmt::FnDef { params, .. } => {
@@ -8881,7 +8881,7 @@ mod tests {
     }
 
     #[test]
-    fn fp_mezcla_required_y_default_se_parsea() {
+    fn fp_mixes_required_and_default_parses() {
         let stmt = parse_one_stmt("fn f(a: Int, b: Int = 10) -> Int { return a + b }");
         match stmt {
             Stmt::FnDef { params, .. } => {
@@ -8894,7 +8894,7 @@ mod tests {
     }
 
     #[test]
-    fn fp_required_despues_de_default_es_error() {
+    fn fp_required_after_default_is_error() {
         // Python rule: once a param has a default, all following
         // params must have defaults too. `fn f(a = 1, b)` must be rejected.
         let result = parse_program_str("fn f(a: Int = 1, b: Int) -> Int { return a + b }");
@@ -8908,7 +8908,7 @@ mod tests {
     }
 
     #[test]
-    fn fp_param_default_sin_tipo_se_parsea() {
+    fn fp_param_default_without_type_parses() {
         // `fn f(x = 5)` without a type annotation. Gradual: default
         // yes, but the param type stays as Any.
         let stmt = parse_one_stmt("fn f(x = 5) { return x }");
@@ -8924,7 +8924,7 @@ mod tests {
     // ---- Mini-batch Fp.2 — varargs ----
 
     #[test]
-    fn fp2_param_varargs_se_parsea() {
+    fn fp2_param_varargs_parses() {
         let stmt = parse_one_stmt("fn sum(...xs: Int) -> Int { return 0 }");
         match stmt {
             Stmt::FnDef { params, .. } => {
@@ -8937,13 +8937,13 @@ mod tests {
     }
 
     #[test]
-    fn fp2_varargs_solo_ultimo_es_error() {
+    fn fp2_varargs_only_last_is_error() {
         let result = parse_program_str("fn f(...xs: Int, ...ys: Int) -> Int { return 0 }");
         assert!(result.is_err(), "esperaba error por varargs duplicado");
     }
 
     #[test]
-    fn fp2_param_despues_de_varargs_es_error() {
+    fn fp2_param_after_varargs_is_error() {
         let result = parse_program_str("fn f(...xs: Int, y: Int) -> Int { return 0 }");
         assert!(
             result.is_err(),
@@ -8952,13 +8952,13 @@ mod tests {
     }
 
     #[test]
-    fn fp2_varargs_con_default_es_error() {
+    fn fp2_varargs_with_default_is_error() {
         let result = parse_program_str("fn f(...xs: Int = 5) -> Int { return 0 }");
         assert!(result.is_err(), "esperaba error por varargs con default");
     }
 
     #[test]
-    fn fp2_mezcla_required_y_varargs_se_parsea() {
+    fn fp2_mixes_required_and_varargs_parses() {
         let stmt = parse_one_stmt("fn f(a: Str, ...xs: Int) -> Int { return 0 }");
         match stmt {
             Stmt::FnDef { params, .. } => {
@@ -8973,7 +8973,7 @@ mod tests {
     // ---- Mini-batch Fp.3 — named args ----
 
     #[test]
-    fn fp3_call_con_named_arg_emite_named_arg() {
+    fn fp3_call_with_named_arg_emits_named_arg() {
         let src = "let r = f(name: 1)";
         let program = parse_program_str(src).expect("parse OK");
         match &program[0] {
@@ -8994,7 +8994,7 @@ mod tests {
     }
 
     #[test]
-    fn fp3_positional_despues_de_named_es_error() {
+    fn fp3_positional_after_named_is_error() {
         let result = parse_program_str("let r = f(name: 1, 2)");
         assert!(result.is_err(), "esperaba error positional-tras-named");
     }
@@ -9002,7 +9002,7 @@ mod tests {
     // ---- Mini-batch Sp.2 — return in match arm ----
 
     #[test]
-    fn sp2_match_arm_con_return_se_parsea_como_stmt_return() {
+    fn sp2_match_arm_with_return_parses_as_stmt_return() {
         let src = "fn f(n: Int) -> Str {\n  match n {\n    0 => return \"zero\"\n    _ => \"other\"\n  }\n  return \"end\"\n}";
         let stmt = parse_one_stmt(src);
         if let Stmt::FnDef { body, .. } = stmt {
@@ -9022,7 +9022,7 @@ mod tests {
     }
 
     #[test]
-    fn sp2_match_arm_body_es_vec_stmt_de_1_para_expr_simple() {
+    fn sp2_match_arm_body_is_vec_stmt_of_1_for_simple_expr() {
         // Common case: arm body with 1 stmt expr.
         let src = "let r = match 1 { 0 => \"a\"\n_ => \"b\" }";
         let program = parse_program_str(src).expect("parse OK");
@@ -9043,7 +9043,7 @@ mod tests {
     // ===== Phase 10.3.a — decorators on `type` and fields =====
 
     #[test]
-    fn type_acepta_decorator_table_con_string() {
+    fn type_accepts_decorator_table_with_string() {
         let stmts = parse_ok("@table(\"users\") type User { id: Int, name: Str }");
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
@@ -9064,7 +9064,7 @@ mod tests {
     }
 
     #[test]
-    fn type_acepta_decorator_table_sin_args() {
+    fn type_accepts_decorator_table_without_args() {
         let stmts = parse_ok("@table type Post { id: Int }");
         match &stmts[0] {
             Stmt::TypeDef { decorators, .. } => {
@@ -9077,7 +9077,7 @@ mod tests {
     }
 
     #[test]
-    fn type_acepta_decorators_apilados() {
+    fn type_accepts_stacked_decorators() {
         let stmts = parse_ok("@table(\"posts\") @soft_delete type Post { id: Int }");
         match &stmts[0] {
             Stmt::TypeDef { decorators, .. } => {
@@ -9090,7 +9090,7 @@ mod tests {
     }
 
     #[test]
-    fn field_acepta_decorator_primary() {
+    fn field_accepts_decorator_primary() {
         let stmts =
             parse_ok("@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}");
         match &stmts[0] {
@@ -9107,7 +9107,7 @@ mod tests {
     }
 
     #[test]
-    fn field_acepta_decorator_column_con_kwargs() {
+    fn field_accepts_decorator_column_with_kwargs() {
         // NOTE: kwarg `sql_type` (not `type`) — keyword collision.
         let stmts = parse_ok(
             "@table(\"users\") type User {\n  @column(name=\"user_id\", sql_type=\"bigint\")\n  id: Int\n}",
@@ -9127,7 +9127,7 @@ mod tests {
     }
 
     #[test]
-    fn field_acepta_decorators_apilados() {
+    fn field_accepts_stacked_decorators() {
         let stmts = parse_ok("@table type T {\n  @primary @unique @index\n  id: Int\n}");
         match &stmts[0] {
             Stmt::TypeDef { fields, .. } => {
@@ -9143,7 +9143,7 @@ mod tests {
     // ===== T3 — parser error paths (residual audit debt) =====
 
     #[test]
-    fn fn_def_con_params_duplicados_es_error() {
+    fn fn_def_with_duplicate_params_is_error() {
         let tokens = tokenize("fn f(a: Int, a: Int) => a").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar params duplicados");
         let msg = err.to_string();
@@ -9155,7 +9155,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_def_con_params_duplicados_sin_tipo_es_error() {
+    fn fn_def_with_duplicate_params_without_type_is_error() {
         // Must also be caught when there is no type annotation.
         let tokens = tokenize("fn g(x, y, x) => 0").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar params duplicados");
@@ -9168,7 +9168,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_sobre_let_es_error() {
+    fn decorator_over_let_is_error() {
         // The parser only accepts decorators on `fn`, `async fn` or `type`.
         // `@x(1)\nlet y = 2` must fail with a clear message.
         let tokens = tokenize("@get(\"/x\")\nlet y = 2").expect("debe tokenizar");
@@ -9182,7 +9182,7 @@ mod tests {
     }
 
     #[test]
-    fn decorator_sobre_expresion_suelta_es_error() {
+    fn decorator_over_bare_expression_is_error() {
         let tokens = tokenize("@table(\"x\")\n42").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar decorator sobre expresión");
         let msg = err.to_string();
@@ -9194,7 +9194,7 @@ mod tests {
     }
 
     #[test]
-    fn string_con_escape_invalido_es_error_del_lexer() {
+    fn string_with_invalid_escape_is_lexer_error() {
         // The lexer rejects unknown escapes like `\q`. Reported at
         // tokenize, not in parse, but it still counts as an error path of
         // pipeline lex-parse.
@@ -9209,7 +9209,7 @@ mod tests {
     }
 
     #[test]
-    fn parens_sin_cerrar_en_expresion_es_error() {
+    fn parens_unclosed_in_expression_is_error() {
         let tokens = tokenize("let x = (1 + 2").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar paréntesis sin cerrar");
         let msg = err.to_string();
@@ -9220,7 +9220,7 @@ mod tests {
     }
 
     #[test]
-    fn llave_sin_cerrar_en_bloque_es_error() {
+    fn brace_unclosed_in_block_is_error() {
         let tokens = tokenize("fn f() {\n  let x = 1").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar llave sin cerrar");
         let msg = err.to_string();
@@ -9231,7 +9231,7 @@ mod tests {
     }
 
     #[test]
-    fn corchete_sin_cerrar_en_list_literal_es_error() {
+    fn bracket_unclosed_in_list_literal_is_error() {
         let tokens = tokenize("let xs = [1, 2, 3").expect("debe tokenizar");
         let err = parse(tokens).expect_err("debe rechazar corchete sin cerrar");
         let msg = err.to_string();
@@ -9242,7 +9242,7 @@ mod tests {
     }
 
     #[test]
-    fn corchetes_anidados_mal_balanceados_es_error() {
+    fn nested_brackets_mismatched_is_error() {
         // `[1, [2, 3]` — one bracket inside and one outside, the
         // outer one is missing its close.
         let tokens = tokenize("let xs = [1, [2, 3]").expect("debe tokenizar");
@@ -9281,7 +9281,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_ident_dentro_de_strinterp_tiene_span_real_no_col_1() {
+    fn v1_ident_inside_strinterp_has_real_span_not_col_1() {
         // `print("hola {nombre}!")` — the Ident("nombre") span must
         // be (1, 14), NOT (1, 1) (which was the pre-V1 bug).
         let parts = first_strinterp_parts("print(\"hola {nombre}!\")\n");
@@ -9308,7 +9308,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_binop_dentro_de_strinterp_recursa_a_operandos() {
+    fn v1_binop_inside_strinterp_recurses_to_operands() {
         // `print("v: {a + b}")` — the BinOp span and its operands
         // (Ident a, Ident b) must point at the real source.
         let parts = first_strinterp_parts("print(\"v: {a + b}\")\n");
@@ -9332,7 +9332,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_call_dentro_de_strinterp_walkea_callee_y_args() {
+    fn v1_call_inside_strinterp_walks_callee_and_args() {
         // `print("v: {f(x)}")` — Call.callee and Call.args get walked.
         let parts = first_strinterp_parts("print(\"v: {f(x)}\")\n");
         let expr = parts
@@ -9353,7 +9353,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_field_access_dentro_de_strinterp_walkea_object() {
+    fn v1_field_access_inside_strinterp_walks_object() {
         // `print("name: {u.name}")` — Field.object walkea.
         let parts = first_strinterp_parts("print(\"name: {u.name}\")\n");
         let expr = parts

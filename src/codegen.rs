@@ -34103,7 +34103,7 @@ mod tests {
     // ---- Phase 6.6: codegen async (async fn / .await / sleep) ----
 
     #[test]
-    fn async_fn_emite_pub_async_fn_rust() {
+    fn async_fn_emits_pub_async_fn_rust() {
         // `async fn f() -> Int { return 42 }` → `pub async fn f() -> i64`.
         let code = gen("async fn f() -> Int { return 42 }").unwrap();
         let file = ast_test::parse(&code);
@@ -34119,7 +34119,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_fn_no_emite_async() {
+    fn sync_fn_does_not_emit_async() {
         // Sync program must not emit `async fn`.
         let code = gen("fn double(n: Int) -> Int => n * 2").unwrap();
         let file = ast_test::parse(&code);
@@ -34128,7 +34128,7 @@ mod tests {
     }
 
     #[test]
-    fn await_emite_dot_await_rust() {
+    fn await_emits_dot_await_rust() {
         // `inner().await` → `(inner()).await` Rust.
         let code = gen("async fn inner() -> Int { return 1 }\n\
              async fn outer() -> Int { return inner().await }")
@@ -34148,7 +34148,7 @@ mod tests {
     }
 
     #[test]
-    fn sleep_builtin_emite_fitz_sleep_helper_y_call() {
+    fn sleep_builtin_emits_fitz_sleep_helper_and_call() {
         // `sleep(100)` → `__fitz_sleep(100i64)` + helper prelude.
         let code = gen("async fn f() -> Int {\n\
                  let _ = sleep(100).await\n\
@@ -34173,7 +34173,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_async_sin_http_incluye_tokio_time() {
+    fn cargo_toml_async_without_http_includes_tokio_time() {
         // CLI program with async → minimal Cargo.toml + tokio with
         // feature `time` (no axum).
         let toml = cargo_toml_for(
@@ -34186,7 +34186,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
+    fn cargo_toml_async_with_http_includes_tokio_time_and_axum() {
         let toml = cargo_toml_for(
             "foo", true, true, false, false, false, false, false, false, false, false, false, false,
         );
@@ -34196,7 +34196,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_sin_async_sin_http_es_minimal() {
+    fn cargo_toml_without_async_without_http_is_minimal() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
             false,
@@ -34214,7 +34214,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn cargo_toml_con_logging_incluye_tracing_y_subscriber() {
+    fn cargo_toml_with_logging_includes_tracing_and_subscriber() {
         // CLI program with `log.info(...)` → Cargo.toml adds
         // tracing + tracing-subscriber + chrono + serde_json.
         let toml = cargo_toml_for(
@@ -34249,7 +34249,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_logging_con_jobs_no_duplica_chrono() {
+    fn cargo_toml_logging_with_jobs_does_not_duplicate_chrono() {
         // uses_logging + uses_jobs both true → chrono is only emitted
         // once (jobs_lines emits it; logging_lines skips it).
         let toml = cargo_toml_for(
@@ -34265,7 +34265,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_sin_logging_no_incluye_tracing() {
+    fn cargo_toml_without_logging_does_not_include_tracing() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
             false,
@@ -34278,7 +34278,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_logging_con_http_no_duplica_serde_json() {
+    fn cargo_toml_logging_with_http_does_not_duplicate_serde_json() {
         // HTTP already brings serde_json; logging_lines must NOT duplicate.
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, true, false, false, false, false, false,
@@ -34297,7 +34297,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn cargo_toml_con_trace_metric_incluye_tracing_y_metrics() {
+    fn cargo_toml_with_trace_metric_includes_tracing_and_metrics() {
         // CLI program with `@trace`/`@metric` → Cargo.toml adds
         // tracing + metrics. Does NOT emit tracing-subscriber (only
         // if `uses_logging`).
@@ -34323,7 +34323,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_sin_trace_metric_no_incluye_tracing_ni_metrics() {
+    fn cargo_toml_without_trace_metric_does_not_include_tracing_or_metrics() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
             false,
@@ -34333,7 +34333,7 @@ mod tests {
     }
 
     #[test]
-    fn extract_trace_metric_info_lee_kwarg_name_y_fallbackea_a_fn_name() {
+    fn extract_trace_metric_info_reads_kwarg_name_and_falls_back_to_fn_name() {
         use crate::ast::{Decorator, Expr, Span};
         let deco_trace_custom = Decorator {
             name: "trace".to_string(),
@@ -34358,7 +34358,7 @@ mod tests {
     }
 
     #[test]
-    fn program_uses_trace_metric_detecta_decorador_sobre_fn() {
+    fn program_uses_trace_metric_detects_decorator_on_fn() {
         let src = "@trace fn f() { return 1 }";
         let program = parse(tokenize(src).unwrap()).unwrap();
         assert!(program_uses_trace_metric(&program));
@@ -34372,14 +34372,14 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn program_uses_logging_detecta_log_info() {
+    fn program_uses_logging_detects_log_info() {
         let src = "log.info(\"hello\")";
         let program = parse(tokenize(src).unwrap()).unwrap();
         assert!(program_uses_logging(&program));
     }
 
     #[test]
-    fn program_uses_logging_detecta_los_4_niveles() {
+    fn program_uses_logging_detects_the_4_levels() {
         for level in ["info", "warn", "error", "debug"] {
             let src = format!("log.{}(\"x\")", level);
             let program = parse(tokenize(&src).unwrap()).unwrap();
@@ -34392,14 +34392,14 @@ mod tests {
     }
 
     #[test]
-    fn program_uses_logging_no_dispara_sin_log_call() {
+    fn program_uses_logging_does_not_trigger_without_log_call() {
         let src = "print(\"hello\")\nlet x = 42";
         let program = parse(tokenize(src).unwrap()).unwrap();
         assert!(!program_uses_logging(&program));
     }
 
     #[test]
-    fn program_uses_logging_no_dispara_con_log_metodo_inexistente() {
+    fn program_uses_logging_does_not_trigger_with_unknown_log_method() {
         // `log.trace(...)` is NOT one of the 4 supported levels —
         // it must not trigger. Allows detecting typos with false
         // positives from the walker.
@@ -34409,7 +34409,7 @@ mod tests {
     }
 
     #[test]
-    fn program_uses_logging_dispara_dentro_de_fn_body() {
+    fn program_uses_logging_triggers_inside_fn_body() {
         let src = "fn greet(name: Str) -> Null {\n\
                    log.info(\"hi\")\n\
                    return null\n\
@@ -34419,7 +34419,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_log_info_solo_msg_emite_call_a_helper() {
+    fn codegen_log_info_only_msg_emits_call_to_helper() {
         let src = "log.info(\"hola\")";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
@@ -34440,7 +34440,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_log_info_con_kwargs_emite_slice_de_tuples() {
+    fn codegen_log_info_with_kwargs_emits_slice_of_tuples() {
         let src = "log.info(\"login\", user_id: 42, role: \"admin\")";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
@@ -34467,7 +34467,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_log_warn_con_secret_emite_marker_sin_inner() {
+    fn codegen_log_warn_with_secret_emits_marker_without_inner() {
         let src = "fn try_log() -> Result<Null> {\n\
                    let token = secret(\"SECRET_X\")?\n\
                    log.warn(\"rotating\", token: token)\n\
@@ -34493,7 +34493,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_log_info_con_kwarg_reservado_es_error_de_codegen() {
+    fn codegen_log_info_with_reserved_kwarg_is_codegen_error() {
         // `level` is reserved — codegen rejects it with a clear error,
         // parallel to the runtime interpreter (12.3.a.1).
         let src = "log.info(\"x\", level: \"INFO\")";
@@ -34507,7 +34507,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_log_info_con_kwarg_duplicado_es_error() {
+    fn codegen_log_info_with_duplicate_kwarg_is_error() {
         let src = "log.info(\"x\", k: 1, k: 2)";
         let r = gen(src);
         let err = r.unwrap_err();
@@ -34519,7 +34519,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_log_info_sin_msg_es_error() {
+    fn codegen_log_info_without_msg_is_error() {
         let src = "log.info()";
         let r = gen(src);
         let err = r.unwrap_err();
@@ -34531,7 +34531,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_sin_logging_no_emite_preludio_ni_init() {
+    fn codegen_without_logging_does_not_emit_prelude_or_init() {
         // Program that does NOT use log.* — should not emit the prelude
         // nor init.
         let src = "let x = 42\nprint(\"hi\")";
@@ -34549,7 +34549,7 @@ mod tests {
     }
 
     #[test]
-    fn tier3_codegen_http_sin_prometheus_no_emite_prelude_ni_dep() {
+    fn tier3_codegen_http_without_prometheus_does_not_emit_prelude_or_dep() {
         // v0.13.1 — refined gating for the "Smoke gating of emitted
         // deps" debt. HTTP programs WITHOUT literal `@server(prometheus=true)`
         // do NOT bring in PROMETHEUS_PRELUDE or the
@@ -34593,7 +34593,7 @@ mod tests {
     }
 
     #[test]
-    fn tier3_codegen_http_con_prometheus_true_emite_prelude_y_dep() {
+    fn tier3_codegen_http_with_prometheus_true_emits_prelude_and_dep() {
         // v0.13.1 — refined gating. With literal `@server(prometheus=true)`
         // codegen emits the entire Prometheus prelude
         // (handle + init + route) + the `metrics-exporter-prometheus` dep
@@ -34640,7 +34640,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_13_1_program_uses_prometheus_export_detecta_kwarg_true() {
+    fn v0_13_1_program_uses_prometheus_export_detects_kwarg_true() {
         // v0.13.1 — the pure-function detector returns true when
         // some top-level fn has literal `@server(prometheus=true)`.
         // Tolerant to other kwargs in the decorator.
@@ -34657,7 +34657,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_13_1_program_uses_prometheus_export_no_dispara_sin_kwarg() {
+    fn v0_13_1_program_uses_prometheus_export_does_not_trigger_without_kwarg() {
         // HTTP program without `@server(prometheus=...)` or with explicit
         // `false` does NOT trigger the detector.
         use crate::lexer::tokenize;
@@ -34679,7 +34679,7 @@ mod tests {
     }
 
     #[test]
-    fn iter2b_codegen_cli_log_emite_stub_no_op_de_emit_to_otel() {
+    fn iter2b_codegen_cli_log_emits_stub_no_op_of_emit_to_otel() {
         // Phase 12.3.iter2.b — pure CLI programs with `log.*` (without
         // HTTP) do NOT have OTEL_PRELUDE → LOGGING_PRELUDE includes the
         // no-op stub `__fitz_emit_log_to_otel` so that `__fitz_log_emit`
@@ -34705,7 +34705,7 @@ mod tests {
     }
 
     #[test]
-    fn iter2b_codegen_http_log_emite_logger_provider_real_y_log_exporter() {
+    fn iter2b_codegen_http_log_emits_real_logger_provider_and_log_exporter() {
         // Phase 12.3.iter2.b — programs with HTTP + log.* include
         // OTEL_PRELUDE with real LogExporter + LoggerProvider. The
         // no-op stub is NOT emitted (there is a real impl). Emitted
@@ -34762,7 +34762,7 @@ mod tests {
     }
 
     #[test]
-    fn iter2a_codegen_http_emite_with_ids_branch_derivada_de_otel_span() {
+    fn iter2a_codegen_http_emits_with_ids_branch_derived_from_otel_span() {
         // Phase 12.3.iter2.a — when there is an HTTP handler, the
         // codegen wrapper must emit the pattern "open OTel span first,
         // derive SpanContext with `with_ids` from its IDs". Without OTel
@@ -34808,7 +34808,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_con_python_incluye_pyo3() {
+    fn cargo_toml_with_python_includes_pyo3() {
         // CLI program with `from python import` → Cargo.toml adds pyo3
         // with `abi3-py310` + `auto-initialize`.
         let toml = cargo_toml_for(
@@ -34830,7 +34830,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_python_y_http_incluyen_ambos() {
+    fn cargo_toml_python_and_http_include_both() {
         let toml = cargo_toml_for(
             "foo", true, false, true, false, false, false, false, false, false, false, false, false,
         );
@@ -34840,7 +34840,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_sin_python_no_incluye_pyo3() {
+    fn cargo_toml_without_python_does_not_include_pyo3() {
         let toml = cargo_toml_for(
             "foo", true, false, false, false, false, false, false, false, false, false, false,
             false,
@@ -34850,7 +34850,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_con_async_emite_tokio_main_y_async_main() {
+    fn cli_with_async_emits_tokio_main_and_async_main() {
         // CLI program without HTTP with declared async fn → `fn main()`
         // is emitted as `#[tokio::main(...)] async fn main()`.
         let code = gen("async fn pause() -> Int { return 0 }\n\
@@ -34867,7 +34867,7 @@ mod tests {
     }
 
     #[test]
-    fn cli_sync_no_emite_tokio_main() {
+    fn cli_sync_does_not_emit_tokio_main() {
         // Sync CLI program → plain `fn main()`, without `#[tokio::main]`.
         let code = gen("print(\"hi\")").unwrap();
         assert!(
@@ -34878,7 +34878,7 @@ mod tests {
     }
 
     #[test]
-    fn future_t_como_anotacion_de_var_emite_pin_box_dyn_future() {
+    fn future_t_as_var_annotation_emits_pin_box_dyn_future() {
         // `let f: Future<Int> = async_fn()` (without await) → type
         // `Pin<Box<dyn Future<Output = i64>>>`.
         // Validate via `rust_type_for` directly to avoid going through
@@ -35574,7 +35574,7 @@ mod tests {
     }
 
     #[test]
-    fn programa_vacio_genera_main_vacio() {
+    fn empty_program_generates_empty_main() {
         let code = gen("").unwrap();
         let file = ast_test::parse(&code);
         let main = ast_test::find_item_fn(&file, "main").expect("missing fn main");
@@ -35589,7 +35589,7 @@ mod tests {
     }
 
     #[test]
-    fn let_int_anotado_genera_i64() {
+    fn let_int_annotated_generates_i64() {
         let file = ast_test::parse(&gen("let x: Int = 42").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("missing let x");
@@ -35599,7 +35599,7 @@ mod tests {
     }
 
     #[test]
-    fn let_int_inferido_genera_i64() {
+    fn let_int_inferred_generates_i64() {
         let file = ast_test::parse(&gen("let x = 42").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("missing let x");
@@ -35608,7 +35608,7 @@ mod tests {
     }
 
     #[test]
-    fn let_float_anotado_genera_f64_con_coercion_int() {
+    fn let_float_annotated_generates_f64_with_int_coercion() {
         let file = ast_test::parse(&gen("let pi: Float = 3").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "pi").expect("missing let pi");
@@ -35623,7 +35623,7 @@ mod tests {
     }
 
     #[test]
-    fn let_str_genera_string() {
+    fn let_str_generates_string() {
         let file = ast_test::parse(&gen("let name = \"Fitz\"").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "name").expect("missing let name");
@@ -35637,7 +35637,7 @@ mod tests {
     }
 
     #[test]
-    fn binop_int_int_es_int() {
+    fn binop_int_int_is_int() {
         let file = ast_test::parse(&gen("let x = 1 + 2").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("missing let x");
@@ -35651,7 +35651,7 @@ mod tests {
     }
 
     #[test]
-    fn binop_int_float_coerciona_a_float() {
+    fn binop_int_float_coerces_to_float() {
         let file = ast_test::parse(&gen("let x = 1 + 2.0").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("missing let x");
@@ -35666,7 +35666,7 @@ mod tests {
     }
 
     #[test]
-    fn str_interp_genera_format_macro() {
+    fn str_interp_generates_format_macro() {
         // For an Int var inside StrInterp, we generate `format!`
         // passing the var directly (no `.clone()` needed).
         let code = gen("let n = 5\nlet s = \"x es {n}\"").unwrap();
@@ -35687,7 +35687,7 @@ mod tests {
     }
 
     #[test]
-    fn str_interp_con_var_str_clona() {
+    fn str_interp_with_var_str_clones() {
         // For Str, we generate `.clone()` because format! borrows
         // but we keep passing the evaluated `Ident`, which does include
         // the clone.
@@ -35703,7 +35703,7 @@ mod tests {
     }
 
     #[test]
-    fn print_genera_println_macro() {
+    fn print_generates_println_macro() {
         let file = ast_test::parse(&gen("let x: Int = 1\nprint(x)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         assert_eq!(
@@ -35714,7 +35714,7 @@ mod tests {
     }
 
     #[test]
-    fn print_multiples_args_genera_format_string_con_espacios() {
+    fn print_multiple_args_generates_format_string_with_spaces() {
         // The contract is: print(a, b) emits ONE single println! that
         // contains both `a` and `b` (space separation in the
         // format string is the canonical format, but here we just need
@@ -35732,7 +35732,7 @@ mod tests {
     }
 
     #[test]
-    fn print_sin_args_genera_println_vacio() {
+    fn print_without_args_generates_empty_println() {
         // `print()` without args → `println!()` with no internal tokens.
         let file = ast_test::parse(&gen("print()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
@@ -35747,7 +35747,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_top_level_emite_signature_completa() {
+    fn fn_top_level_emits_full_signature() {
         let file = ast_test::parse(&gen("fn double(n: Int) -> Int { return n * 2 }").unwrap());
         let f = ast_test::find_item_fn(&file, "double").expect("missing fn double");
         assert_eq!(ast_test::fn_arity(f), 1);
@@ -35756,7 +35756,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_arrow_emite_return_implicito() {
+    fn fn_arrow_emits_implicit_return() {
         // Both the body with `{ return n * 2 }` and the arrow
         // `=> n * 2` must emit the same signature and a `return` in
         // the body. The difference vs the previous test is only syntactic
@@ -35776,7 +35776,7 @@ mod tests {
     }
 
     #[test]
-    fn llamada_a_fn_top_level_resuelve_return_type() {
+    fn call_to_top_level_fn_resolves_return_type() {
         let file = ast_test::parse(
             &gen("fn double(n: Int) -> Int => n * 2\n\
                  let x = double(5)")
@@ -35795,7 +35795,7 @@ mod tests {
     }
 
     #[test]
-    fn if_else_genera_estructura_rust() {
+    fn if_else_generates_rust_structure() {
         let file = ast_test::parse(
             &gen("let x = 1\nif (x > 0) { print(\"pos\") } else { print(\"neg\") }").unwrap(),
         );
@@ -35809,7 +35809,7 @@ mod tests {
     }
 
     #[test]
-    fn while_genera_estructura_rust() {
+    fn while_generates_rust_structure() {
         let file = ast_test::parse(&gen("let n = 0\nwhile (n < 3) { n = n + 1 }").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let w = ast_test::find_while_loop(stmts).expect("falta while loop");
@@ -35825,7 +35825,7 @@ mod tests {
     }
 
     #[test]
-    fn for_in_range_genera_rust() {
+    fn for_in_range_generates_rust() {
         let file = ast_test::parse(&gen("for i in 0..3 { print(i) }").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let f = ast_test::find_for_loop(stmts).expect("falta for loop");
@@ -35845,7 +35845,7 @@ mod tests {
     }
 
     #[test]
-    fn reasignacion_usa_igual_no_let() {
+    fn reassignment_uses_equals_not_let() {
         let file = ast_test::parse(&gen("let x = 1\nx = 2").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         // Only ONE `let x` — the reassignment is not a let.
@@ -35865,7 +35865,7 @@ mod tests {
     }
 
     #[test]
-    fn neg_genera_unary_rust() {
+    fn neg_generates_unary_rust() {
         let file = ast_test::parse(&gen("let x = -5").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("missing let x");
@@ -35879,7 +35879,7 @@ mod tests {
     }
 
     #[test]
-    fn bool_y_logicos_generan_bool_rust() {
+    fn bool_and_logical_generate_bool_rust() {
         let file = ast_test::parse(&gen("let b = true and false").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "b").expect("missing let b");
@@ -35894,7 +35894,7 @@ mod tests {
     }
 
     #[test]
-    fn comparacion_str_usa_as_str() {
+    fn str_comparison_uses_as_str() {
         // Comparing Strings with `<`/`>` requires `.as_str()` (Strings do
         // not implement `PartialOrd<&str>` directly; only `&str` with `&str`).
         let file = ast_test::parse(&gen("let a = \"hola\"\nlet b = a < \"mundo\"").unwrap());
@@ -35910,7 +35910,7 @@ mod tests {
     // ---- 5b.2: custom types (supported, except equality) ----
 
     #[test]
-    fn type_def_emite_struct_y_alias_arc_mutex() {
+    fn type_def_emits_struct_and_arc_mutex_alias() {
         let file = ast_test::parse(&gen("type User { id: Int, name: Str }").unwrap());
         // The UserData struct with its two fields.
         let s = ast_test::find_item_struct(&file, "UserData").expect("falta UserData");
@@ -35931,7 +35931,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_emite_impl_display_canonico() {
+    fn type_def_emits_canonical_impl_display() {
         let code = gen("type User { id: Int, name: Str }").unwrap();
         let file = ast_test::parse(&code);
         let im = ast_test::find_impl(&file, "Display", "UserData")
@@ -35953,7 +35953,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_emite_arc_new_mutex_new() {
+    fn struct_lit_emits_arc_new_mutex_new() {
         let file = ast_test::parse(
             &gen("type User { id: Int, name: Str }\nlet u = User { id: 1, name: \"x\" }").unwrap(),
         );
@@ -35976,7 +35976,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_aplica_default_inline_si_falta_campo() {
+    fn struct_lit_applies_default_inline_if_field_missing() {
         // `active: Bool = true` must be injected when not provided.
         let code =
             gen("type C { port: Int, active: Bool = true }\nlet c = C { port: 8080 }").unwrap();
@@ -35992,7 +35992,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_nullable_omitido_se_resuelve_como_none() {
+    fn struct_lit_omitted_nullable_resolves_to_none() {
         let code = gen("type U { id: Int, email: Str? }\nlet u = U { id: 1 }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
@@ -36006,7 +36006,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_valor_str_a_campo_nullable_se_envuelve_en_some() {
+    fn struct_lit_str_value_to_nullable_field_wraps_in_some() {
         let code =
             gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: \"a@b\" }").unwrap();
         let file = ast_test::parse(&code);
@@ -36023,7 +36023,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_null_literal_a_campo_nullable_es_none() {
+    fn struct_lit_null_literal_to_nullable_field_is_none() {
         let code =
             gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: null }").unwrap();
         let file = ast_test::parse(&code);
@@ -36038,7 +36038,7 @@ mod tests {
     }
 
     #[test]
-    fn field_access_int_emite_block_sin_field_clone() {
+    fn field_access_int_emits_block_without_field_clone() {
         // F17.4b: field access is emitted as a block with a scoped
         // guard to avoid holding the Mutex cross-expression.
         // For Int (Copy) the block return is `__g.id` (not
@@ -36063,7 +36063,7 @@ mod tests {
     }
 
     #[test]
-    fn field_access_str_emite_lock_clone() {
+    fn field_access_str_emits_lock_clone() {
         let file = ast_test::parse(
             &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nlet s = u.name").unwrap(),
         );
@@ -36079,7 +36079,7 @@ mod tests {
     }
 
     #[test]
-    fn field_assign_emite_lock() {
+    fn field_assign_emits_lock() {
         let file = ast_test::parse(
             &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nu.name = \"y\"").unwrap(),
         );
@@ -36092,7 +36092,7 @@ mod tests {
     }
 
     #[test]
-    fn pasar_instance_a_fn_clona_el_rc() {
+    fn pass_instance_to_fn_clones_the_rc() {
         // The Ident `u` of Nominal type is evaluated as `u.clone()` when
         // passing it to `f(u)`. This preserves the interpreter's aliasing.
         let code =
@@ -36118,7 +36118,7 @@ mod tests {
     }
 
     #[test]
-    fn print_de_instance_usa_show_expr_con_display() {
+    fn print_of_instance_uses_show_expr_with_display() {
         // `print(u)` for u: U → format!("{}", &*u.lock().unwrap()) inside
         // the println!.
         let code = gen("type U { id: Int }\nlet u = U { id: 1 }\nprint(u)").unwrap();
@@ -36135,7 +36135,7 @@ mod tests {
     }
 
     #[test]
-    fn tipo_anidado_compila_con_nullable_de_nominal() {
+    fn nested_type_compiles_with_nullable_of_nominal() {
         // `type Order { user: User? }` translates to a field of type
         // `Option<User>` (= `Option<Arc<Mutex<UserData>>>`).
         let file =
@@ -36155,7 +36155,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_estructural_entre_instancias_emite_lock_eq() {
+    fn structural_equality_between_instances_emits_lock_eq() {
         let code =
             gen("type U { id: Int }\nlet a = U { id: 1 }\nlet b = U { id: 1 }\nlet eq = a == b")
                 .unwrap();
@@ -36178,7 +36178,7 @@ mod tests {
     // ---- 5b.2+: if as expression with value ----
 
     #[test]
-    fn if_como_expresion_emite_branches_sin_punto_y_coma() {
+    fn if_as_expression_emits_branches_without_semicolon() {
         let code = gen("let x = if (true) { 1 } else { 2 }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
@@ -36235,7 +36235,7 @@ mod tests {
     }
 
     #[test]
-    fn if_expresion_unifica_int_float_a_float() {
+    fn if_expression_unifies_int_float_to_float() {
         let code = gen("let x = if (true) { 1 } else { 2.5 }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
@@ -36255,7 +36255,7 @@ mod tests {
     }
 
     #[test]
-    fn if_como_sentencia_mantiene_comportamiento_anterior() {
+    fn if_as_statement_keeps_previous_behavior() {
         // Without assignment and with `print` inside: the if remains a
         // statement; print is not treated as a tail expression
         // (it is not a value-producing expression in Fitz).
@@ -36289,7 +36289,7 @@ mod tests {
     }
 
     #[test]
-    fn if_sin_else_no_se_trata_como_expresion() {
+    fn if_without_else_is_not_treated_as_expression() {
         // Without else, there is no second branch → not a value expression.
         // The last stmt of the then is emitted as a regular statement
         // (with trailing `;`, not as a tail expression).
@@ -36315,7 +36315,7 @@ mod tests {
     // ---- 5b.2+: built-in methods on Str ----
 
     #[test]
-    fn str_len_emite_chars_count_as_i64() {
+    fn str_len_emits_chars_count_as_i64() {
         let file = ast_test::parse(&gen("let s = \"hola\"\nlet n = s.len()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("missing let n");
@@ -36333,7 +36333,7 @@ mod tests {
     }
 
     #[test]
-    fn str_upper_emite_to_uppercase() {
+    fn str_upper_emits_to_uppercase() {
         let file = ast_test::parse(&gen("let s = \"hola\"\nlet u = s.upper()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
@@ -36343,7 +36343,7 @@ mod tests {
     }
 
     #[test]
-    fn str_lower_emite_to_lowercase() {
+    fn str_lower_emits_to_lowercase() {
         let file = ast_test::parse(&gen("let s = \"HOLA\"\nlet l = s.lower()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
@@ -36356,7 +36356,7 @@ mod tests {
     // codegen, so we don't test that path from here.)
 
     #[test]
-    fn type_def_emite_derive_clone_y_impl_partialeq() {
+    fn type_def_emits_derive_clone_and_impl_partialeq() {
         let code = gen("type U { id: Int }").unwrap();
         let file = ast_test::parse(&code);
         let s = ast_test::find_item_struct(&file, "UData").expect("falta UData");
@@ -36381,7 +36381,7 @@ mod tests {
     // ---- 5b.3: lists, maps, indexing, built-in methods ----
 
     #[test]
-    fn list_literal_emite_arc_mutex_vec() {
+    fn list_literal_emits_arc_mutex_vec() {
         // `[1, 2, 3]` is modeled as `Arc<Mutex<Vec<i64>>>`. The items
         // are coerced to the common type (here Int → i64) and built with
         // the vec![] macro.
@@ -36411,7 +36411,7 @@ mod tests {
     }
 
     #[test]
-    fn list_literal_homogeneo_int_float_promueve_a_float() {
+    fn list_literal_homogeneous_int_float_promotes_to_float() {
         // Int+Float in the same list → `List<Float>` (same lub as
         // if-expression and FnExpr ret).
         let file = ast_test::parse(&gen("let xs = [1, 2.5, 3]").unwrap());
@@ -36435,7 +36435,7 @@ mod tests {
     }
 
     #[test]
-    fn list_literal_vacia_es_list_any_a_resolver_por_contexto() {
+    fn empty_list_literal_is_list_any_to_resolve_by_context() {
         // `[]` without context yields `List<Any>`. With annotation, context
         // restricts to List<T> and `Vec::new()` infers from the target.
         let file = ast_test::parse(&gen("let xs: List<Int> = []").unwrap());
@@ -36462,7 +36462,7 @@ mod tests {
     }
 
     #[test]
-    fn list_literal_heterogeneo_emite_fitz_value() {
+    fn list_literal_heterogeneous_emits_fitz_value() {
         // F13 SPIKE — heterogeneous `[1, "dos"]` is no longer an error;
         // emits `Vec<__FitzValue>` with each item wrapped in its
         // variant (`__FitzValue::Int(1)`, `__FitzValue::Str("dos")`).
@@ -36484,7 +36484,7 @@ mod tests {
     }
 
     #[test]
-    fn f13_spike_preludio_emite_fitz_value_enum() {
+    fn f13_spike_prelude_emits_fitz_value_enum() {
         // F13 SPIKE — the `__FitzValue` enum appears in the prelude
         // when the program has heterogeneous lists.
         let code = gen("let xs = [1, \"dos\", true]").unwrap();
@@ -36503,7 +36503,7 @@ mod tests {
     }
 
     #[test]
-    fn f13_spike_lista_homogenea_no_emite_fitz_value() {
+    fn f13_spike_homogeneous_list_does_not_emit_fitz_value() {
         // Sanity: homogeneous lists still don't emit the enum
         // (zero overhead for the 90% case).
         let code = gen("let xs = [1, 2, 3]").unwrap();
@@ -36516,7 +36516,7 @@ mod tests {
     // ---- F13.A — Bytes and heterogeneous Map ----
 
     #[test]
-    fn f13_a_bytes_en_lista_heterogenea_se_envuelve() {
+    fn f13_a_bytes_in_heterogeneous_list_is_wrapped() {
         // F13.A — Bytes inside a heterogeneous list are wrapped
         // as `__FitzValue::Bytes(_)`.
         let code = gen("let xs = [1, b\"raw\"]").unwrap();
@@ -36527,7 +36527,7 @@ mod tests {
     }
 
     #[test]
-    fn f13_a_map_heterogeneo_emite_vec_fv_fv() {
+    fn f13_a_heterogeneous_map_emits_vec_fv_fv() {
         // F13.A — Map<Str, Any> emits Vec<(FV, FV)>: both sides
         // wrapped (even the homogeneous side is wrapped to
         // unify the type).
@@ -36543,7 +36543,7 @@ mod tests {
     }
 
     #[test]
-    fn f13_a_mapa_homogeneo_no_emite_fitz_value() {
+    fn f13_a_homogeneous_map_does_not_emit_fitz_value() {
         // Sanity: homogeneous maps still have no overhead.
         let code = gen("let m = {\"a\": 1, \"b\": 2}").unwrap();
         assert!(
@@ -36555,7 +36555,7 @@ mod tests {
     // ---- F13.B — Nominals in heterogeneous collections ----
 
     #[test]
-    fn f13_b_nominal_en_lista_heterogenea_captura_display() {
+    fn f13_b_nominal_in_heterogeneous_list_captures_display() {
         // F13.B — Nominal inside a heterogeneous list is captured
         // as a String via the Data's Display.
         let code = gen("type User { id: Int }\n\
@@ -36573,7 +36573,7 @@ mod tests {
     }
 
     #[test]
-    fn map_literal_emite_vec_pares() {
+    fn map_literal_emits_vec_pairs() {
         // `{"a": 1, "b": 2}` is modeled as
         // `Arc<Mutex<Vec<(String, i64)>>>` with tuples as items.
         let file = ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}").unwrap());
@@ -36602,7 +36602,7 @@ mod tests {
     }
 
     #[test]
-    fn map_literal_vacio_resuelto_por_anotacion() {
+    fn empty_map_literal_resolved_by_annotation() {
         let file = ast_test::parse(&gen("let m: Map<Str, Int> = {}").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "m").expect("missing let m");
@@ -36621,7 +36621,7 @@ mod tests {
     }
 
     #[test]
-    fn map_literal_valores_heterogeneos_emite_fitz_value() {
+    fn map_literal_heterogeneous_values_emits_fitz_value() {
         // F13.A — `{"a": 1, "b": "x"}` with heterogeneous values is no
         // longer an error; emits Vec<(__FitzValue, __FitzValue)> with each
         // pair wrapped. Before F13.A codegen aborted with "valores
@@ -36639,7 +36639,7 @@ mod tests {
     }
 
     #[test]
-    fn list_indexing_emite_borrow_clone() {
+    fn list_indexing_emits_borrow_clone() {
         // I.1 (mini-batch I): indexing now emits a block
         // with bounds check + negative wrap + clone. We verify
         // that the key pieces are present.
@@ -36663,7 +36663,7 @@ mod tests {
     }
 
     #[test]
-    fn map_indexing_emite_busqueda_lineal_con_panic() {
+    fn map_indexing_emits_linear_search_with_panic() {
         // `m["a"]` → block that does linear search and panics if missing.
         let file =
             ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m[\"a\"]").unwrap());
@@ -36689,7 +36689,7 @@ mod tests {
     }
 
     #[test]
-    fn for_sobre_list_genera_snapshot_iter() {
+    fn for_over_list_generates_snapshot_iter() {
         // `for v in xs` → snapshot via `lock().unwrap().clone().into_iter()`
         // (avoids re-entrancy if the body mutates `xs`). Post-F17.4b
         // the lock replaces the old RefCell borrow.
@@ -36712,12 +36712,12 @@ mod tests {
     }
 
     #[test]
-    fn for_sobre_list_de_any_es_error() {
+    fn for_over_list_of_any_is_error() {
         assert_err_contains("let xs = []\nfor v in xs { print(v) }", &["List<Any>"]);
     }
 
     #[test]
-    fn list_push_emite_lock_push() {
+    fn list_push_emits_lock_push() {
         let file = ast_test::parse(&gen("let xs: List<Int> = []\nxs.push(7)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         // `.push(...)` is emitted as a method call on `lock().unwrap()`.
@@ -36732,7 +36732,7 @@ mod tests {
     }
 
     #[test]
-    fn list_pop_emite_lock_pop_con_expect() {
+    fn list_pop_emits_lock_pop_with_expect() {
         let file = ast_test::parse(&gen("let xs: List<Int> = [1]\nlet x = xs.pop()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("missing let x");
@@ -36754,7 +36754,7 @@ mod tests {
     }
 
     #[test]
-    fn list_len_metodo_emite_lock_len_as_i64() {
+    fn list_len_method_emits_lock_len_as_i64() {
         let file = ast_test::parse(&gen("let xs: List<Int> = []\nlet n = xs.len()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("missing let n");
@@ -36769,7 +36769,7 @@ mod tests {
     }
 
     #[test]
-    fn len_builtin_global_sobre_list_resuelve_a_lock_len() {
+    fn len_builtin_global_over_list_resolves_to_lock_len() {
         // `len(xs)` dispatches by argument type — same code as
         // `xs.len()` for List/Map; for Str it's still chars().count.
         let file = ast_test::parse(&gen("let xs: List<Int> = [1]\nlet n = len(xs)").unwrap());
@@ -36793,7 +36793,7 @@ mod tests {
     }
 
     #[test]
-    fn len_builtin_global_sobre_str_usa_chars_count() {
+    fn len_builtin_global_over_str_uses_chars_count() {
         let file = ast_test::parse(&gen("let s = \"hola\"\nlet n = len(s)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("missing let n");
@@ -36814,7 +36814,7 @@ mod tests {
     }
 
     #[test]
-    fn list_map_con_fnexpr_inline_emite_closure() {
+    fn list_map_with_inline_fnexpr_emits_closure() {
         let file = ast_test::parse(
             &gen("let xs: List<Int> = [1, 2, 3]\nlet ys = xs.map(fn(x) => x * 2)").unwrap(),
         );
@@ -36850,7 +36850,7 @@ mod tests {
     }
 
     #[test]
-    fn list_filter_con_fnexpr_inline_emite_for_manual() {
+    fn list_filter_with_inline_fnexpr_emits_manual_for() {
         // Filter uses a manual for (not .filter()) because the callback
         // takes T by value but `Iterator::filter` wants &T.
         let file = ast_test::parse(
@@ -36876,7 +36876,7 @@ mod tests {
     }
 
     #[test]
-    fn map_method_chaining_funciona() {
+    fn map_method_chaining_works() {
         // `xs.map(f).map(g)` must compose. The test is structural:
         // the output type of the first map feeds the
         // next without friction.
@@ -36901,7 +36901,7 @@ mod tests {
     }
 
     #[test]
-    fn map_has_emite_iter_any() {
+    fn map_has_emits_iter_any() {
         // `m.has(k)` translates to a block
         // `{ let __k = k; (m.clone()).lock().unwrap().iter().any(...) }`. The
         // structural check looks for `iter` + `any` inside the init,
@@ -36927,7 +36927,7 @@ mod tests {
     }
 
     #[test]
-    fn map_keys_emite_lista_nueva_de_claves() {
+    fn map_keys_emits_new_list_of_keys() {
         let file = ast_test::parse(
             &gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\nlet ks = m.keys()").unwrap(),
         );
@@ -36955,7 +36955,7 @@ mod tests {
     }
 
     #[test]
-    fn map_values_emite_lista_nueva_de_valores() {
+    fn map_values_emits_new_list_of_values() {
         let file = ast_test::parse(
             &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet vs = m.values()").unwrap(),
         );
@@ -36981,7 +36981,7 @@ mod tests {
     }
 
     #[test]
-    fn map_len_metodo_emite_borrow_len_as_i64() {
+    fn map_len_method_emits_borrow_len_as_i64() {
         let file =
             ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m.len()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
@@ -37002,7 +37002,7 @@ mod tests {
     }
 
     #[test]
-    fn list_find_emite_result_con_loop() {
+    fn list_find_emits_result_with_loop() {
         // 5b.4: find returns `Result<T, String>` with Ok(item) at the first
         // match and `Err("no encontrado")` if nothing matches. The binding
         // `x` must be typed `Result<i64, String>`.
@@ -37035,7 +37035,7 @@ mod tests {
     }
 
     #[test]
-    fn map_get_emite_result_con_busqueda_lineal() {
+    fn map_get_emits_result_with_linear_search() {
         // 5b.4: get returns `Result<V, String>`. The Err message matches
         // bit-a-bit the interpreter's: `clave no encontrada: <k>` with `<k>`
         // formatted inline (Str with quotes).
@@ -37069,7 +37069,7 @@ mod tests {
     }
 
     #[test]
-    fn fnexpr_suelta_emite_arc_dyn_fn() {
+    fn standalone_fnexpr_emits_arc_dyn_fn() {
         // F12: FnExpr assigned to a var emits `Arc::new(move |...| ...) as
         // Arc<dyn Fn(...) -> ...>`. The var ends up typed as
         // `Arc<dyn Fn(i64) -> i64>` and can be invoked with `f(x)`.
@@ -37094,7 +37094,7 @@ mod tests {
     }
 
     #[test]
-    fn fnexpr_sin_anotacion_de_param_da_error_claro() {
+    fn fnexpr_without_param_annotation_gives_clear_error() {
         // F12: the compilable subset requires annotation on each param of
         // the FnExpr (debt 5b.1). Without annotation → explicit message.
         assert_err_contains(
@@ -37104,7 +37104,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_nombrada_como_valor_emite_arc_new() {
+    fn named_fn_as_value_emits_arc_new() {
         // F12: `let g = square` where `square` is a top-level fn emits
         // `Arc::new(square) as Arc<dyn Fn(...) -> R>` with the signature from
         // fn_sigs.
@@ -37128,7 +37128,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_param_de_tipo_funcion_emite_arc_dyn_fn() {
+    fn fn_param_of_function_type_emits_arc_dyn_fn() {
         // F12: param `f: Fn(Int) -> Int` in the signature of the top-level fn
         // must translate to `Arc<dyn Fn(i64) -> i64>` in the header.
         let file = ast_test::parse(
@@ -37162,7 +37162,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_como_return_type_emite_arc_dyn_fn() {
+    fn fn_as_return_type_emits_arc_dyn_fn() {
         // F12: `-> Fn(Int) -> Int` in a top-level fn emits the header
         // with return `Arc<dyn Fn(i64) -> i64>`. The inner closure that
         // captures `x` is translated with `move`.
@@ -37196,7 +37196,7 @@ mod tests {
     }
 
     #[test]
-    fn closure_que_captura_var_no_copy_clona_afuera() {
+    fn closure_that_captures_non_copy_var_clones_outside() {
         // F12: closure that captures a non-Copy var (Str). The codegen
         // must emit `let saludo = saludo.clone();` outside to
         // preserve semantic aliasing without consuming the caller's
@@ -37226,7 +37226,7 @@ mod tests {
     }
 
     #[test]
-    fn var_de_tipo_funcion_se_llama_con_parens() {
+    fn var_of_function_type_is_called_with_parens() {
         // F12: `f(x)` over a var Fn(Int) -> Int translates literally to
         // `f(x)` Rust — the auto-deref of `Rc<dyn Fn>` resolves it.
         let file = ast_test::parse(
@@ -37245,7 +37245,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_anonima_inline_como_arg_emite_closure_directo() {
+    fn anonymous_inline_fn_as_arg_emits_direct_closure() {
         // F12: `apply(fn(n: Int) => n * 10, 7)` doesn't wrap in an
         // intermediate var — emits the `Arc::new(move |n: i64| ...)` inline
         // as argument.
@@ -37264,7 +37264,7 @@ mod tests {
     }
 
     #[test]
-    fn print_de_lista_emite_iter_inline() {
+    fn print_of_list_emits_iter_inline() {
         // The print/interp builds the string `[a, b, c]` at runtime
         // by first binding the Rc to a var (temporary lifetime).
         let file = ast_test::parse(&gen("let xs: List<Int> = [1, 2]\nprint(xs)").unwrap());
@@ -37292,7 +37292,7 @@ mod tests {
     }
 
     #[test]
-    fn print_de_mapa_emite_iter_inline_con_llaves() {
+    fn print_of_map_emits_iter_inline_with_braces() {
         let file = ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1}\nprint(m)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
@@ -37334,7 +37334,7 @@ mod tests {
     // ============================================================
 
     #[test]
-    fn codegen_emite_struct_fitz_secret_en_preludio() {
+    fn codegen_emits_struct_fitz_secret_in_prelude() {
         // The prelude always emits __FitzSecret<T> + impls; rustc
         // does dead-code elim if unused.
         let src = "let x = 42";
@@ -37354,7 +37354,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_secret_builtin_llama_fitz_secret_helper() {
+    fn codegen_secret_builtin_calls_fitz_secret_helper() {
         let src = "fn main() => 0\n\
                    let _ = secret(\"KEY\")";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -37370,7 +37370,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_config_int_emite_parse_inline() {
+    fn codegen_config_int_emits_parse_inline() {
         // config with Int default must emit an inline block with
         // parse::<i64>() and fallback to the default.
         let src = "let port: Int = config(\"PORT\", 8080)";
@@ -37386,7 +37386,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_config_bool_emite_match_inline() {
+    fn codegen_config_bool_emits_match_inline() {
         let src = "let flag: Bool = config(\"FLAG\", false)";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         assert!(
@@ -37401,7 +37401,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_secret_expose_emite_metodo_rust() {
+    fn codegen_secret_expose_emits_rust_method() {
         // `s.expose()` must translate to `(<s>).expose()` Rust.
         let src = "fn run() -> Result<Str> {\n\
                    let s = secret(\"K\")?\n\
@@ -37417,7 +37417,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_secret_metodo_desconocido_es_error() {
+    fn codegen_secret_unknown_method_is_error() {
         // The checker rejects at compile-time; codegen has a
         // defensive barrier in case the checker is disabled (-no-typecheck).
         // gen_ignoring_check forces codegen to see it.
@@ -37435,7 +37435,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_emite_draining_state_y_shutdown_signal_para_http() {
+    fn codegen_emits_draining_state_and_shutdown_signal_for_http() {
         // Any HTTP program emits the health checks + shutdown signal
         // preamble, even without @healthz/@readyz declared.
         let src = "@server(3000) fn main() => 0\n\
@@ -37456,7 +37456,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_default_healthz_y_readyz_se_montan_sin_user_handlers() {
+    fn codegen_default_healthz_and_readyz_mount_without_user_handlers() {
         // Without @healthz/@readyz declared, the routes are mounted with
         // the default wrappers (__fitz_default_healthz/readyz).
         let src = "@server(3000) fn main() => 0\n\
@@ -37482,7 +37482,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_user_healthz_bool_emite_wrapper_con_mapping_correcto() {
+    fn codegen_user_healthz_bool_emits_wrapper_with_correct_mapping() {
         // @healthz fn liveness() -> Bool { ... } must generate:
         // - wrapper `__fitz_user_healthz` that calls liveness() sync
         // - if/else mapping Bool → ok/unhealthy
@@ -37509,7 +37509,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_user_readyz_result_null_emite_draining_check_y_match() {
+    fn codegen_user_readyz_result_null_emits_draining_check_and_match() {
         // @readyz fn readiness() -> Result<Null> { ... } must generate:
         // - draining check BEFORE the invoke (during shutdown fixed 503)
         // - match Ok(())/Err mapping
@@ -37542,7 +37542,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_async_healthz_emite_await_en_wrapper() {
+    fn codegen_async_healthz_emits_await_in_wrapper() {
         // @healthz async fn liveness() -> Bool { ... } must invoke
         // with .await in the wrapper.
         let src = "@server(3000) fn main() => 0\n\
@@ -37556,7 +37556,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_shutdown_timeout_secs_kwarg_pasa_al_signal_handler() {
+    fn codegen_shutdown_timeout_secs_kwarg_passes_to_signal_handler() {
         // @server(3000, shutdown_timeout_secs=60) must pass 60 as
         // arg of __fitz_shutdown_signal.
         let src = "@server(3000, shutdown_timeout_secs=60) fn main() => 0\n\
@@ -37569,7 +37569,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_shutdown_timeout_secs_default_30_cuando_no_se_setea() {
+    fn codegen_shutdown_timeout_secs_default_30_when_not_set() {
         let src = "@server(3000) fn main() => 0\n\
                    @get(\"/\") fn idx() -> Str => \"x\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -37580,7 +37580,7 @@ mod tests {
     }
 
     #[test]
-    fn http_main_emite_tokio_main_async() {
+    fn http_main_emits_tokio_main_async() {
         // F17.4b: default tokio runtime = `multi_thread` (N workers per
         // cores), real HTTP parallelism. F11 originally left it as
         // `current_thread` due to state's `thread_local!`; F17.4b
@@ -37612,7 +37612,7 @@ mod tests {
     }
 
     #[test]
-    fn http_router_registra_ruta_get() {
+    fn http_router_registers_get_route() {
         let src = "@get(\"/users\") fn list_users() -> Str => \"[]\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
@@ -37635,7 +37635,7 @@ mod tests {
     }
 
     #[test]
-    fn http_path_param_int_genera_extract_path() {
+    fn http_path_param_int_generates_extract_path() {
         let src = "@get(\"/u/{id}\") fn get_user(id: Int) -> Str => \"x\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
@@ -37655,7 +37655,7 @@ mod tests {
     }
 
     #[test]
-    fn http_path_param_str_genera_extract_path_string() {
+    fn http_path_param_str_generates_extract_path_string() {
         let src = "@get(\"/u/{name}\") fn greet(name: Str) -> Str => name";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
@@ -37675,7 +37675,7 @@ mod tests {
     }
 
     #[test]
-    fn http_handler_result_emite_match_ok_err() {
+    fn http_handler_result_emits_match_ok_err() {
         let src = "@get(\"/d/{n}\") fn divide(n: Int) -> Result<Int> { return Ok(n * 2) }";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
@@ -37709,7 +37709,7 @@ mod tests {
     // ---- Custom status codes (return <int> { ... }) ----
 
     #[test]
-    fn status_codes_handler_con_return_status_emite_fitz_response() {
+    fn status_codes_handler_with_return_status_emits_fitz_response() {
         // The `protected` handler has `return 401 { ... }` inside,
         // so its Rust return type becomes `__FitzResponse` and the
         // return body is wrapped with `to_fitz_json`.
@@ -37739,7 +37739,7 @@ mod tests {
     }
 
     #[test]
-    fn status_codes_handler_envuelve_returns_normales_en_200() {
+    fn status_codes_handler_wraps_normal_returns_in_200() {
         // Polymorphic spec: an HTTP fn that contains `Stmt::ReturnStatus`
         // has its return type overridden to `__FitzResponse`. Normal
         // `return user`/`return "x"` are wrapped in
@@ -37769,7 +37769,7 @@ mod tests {
     }
 
     #[test]
-    fn status_codes_wrapper_destructura_fitz_response() {
+    fn status_codes_wrapper_destructures_fitz_response() {
         // The wrapper `__handler_X` that calls a fn returning
         // `__FitzResponse` must emit `from_u16(...)` + `Json(body)`
         // directly instead of the Result/plain-value path.
@@ -37807,7 +37807,7 @@ mod tests {
     }
 
     #[test]
-    fn status_codes_prelude_define_fitz_response() {
+    fn status_codes_prelude_defines_fitz_response() {
         let src = "@get(\"/p\") fn p() -> Str => \"ok\"";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
@@ -37824,7 +37824,7 @@ mod tests {
     // ---- HTTP Query params ----
 
     #[test]
-    fn query_params_obligatorio_emite_match_some_404_si_falta() {
+    fn query_params_required_emits_match_some_404_if_missing() {
         // `@get("/x?limit={limit}") fn h(limit: Int)`: the wrapper
         // extracts `Query<HashMap>` and binds `limit: i64` with coercion.
         // Missing → 400.
@@ -37867,7 +37867,7 @@ mod tests {
     }
 
     #[test]
-    fn query_params_nullable_emite_option_none_si_falta() {
+    fn query_params_nullable_emits_option_none_if_missing() {
         // `limit: Int?` → `Option<i64>`. Missing → None, present OK →
         // Some(v), parse error → 400.
         let src = "@get(\"/items?limit={limit}\") fn list_items(limit: Int?) -> Int => 0";
@@ -37891,7 +37891,7 @@ mod tests {
     }
 
     #[test]
-    fn query_params_str_no_necesita_parse() {
+    fn query_params_str_does_not_need_parse() {
         // `name: Str` → `String`, no `.parse::<...>()`.
         let src = "@get(\"/x?name={name}\") fn h(name: Str) -> Str => name";
         let code = gen(src).unwrap();
@@ -37920,7 +37920,7 @@ mod tests {
     }
 
     #[test]
-    fn query_params_bool_acepta_true_false() {
+    fn query_params_bool_accepts_true_false() {
         let src = "@get(\"/x?on={on}\") fn h(on: Bool) -> Bool => on";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
@@ -37940,7 +37940,7 @@ mod tests {
     }
 
     #[test]
-    fn query_params_path_y_query_combinados_emiten_ambos_extractores() {
+    fn query_params_path_and_query_combined_emit_both_extractors() {
         // `/users/{id}?limit={limit}` with `id: Int, limit: Int?`. Emits
         // both extractors: AxumPath<i64> and AxumQuery<HashMap>.
         let src = "@get(\"/users/{id}?limit={limit}\") \
@@ -37979,7 +37979,7 @@ mod tests {
     }
 
     #[test]
-    fn query_params_template_sin_param_correspondiente_es_error() {
+    fn query_params_template_without_corresponding_param_is_error() {
         // The template declares `?limit={limit}` but the handler doesn't
         // have a `limit` param → clear error.
         let src = "@get(\"/x?limit={limit}\") fn h() -> Int => 0";
@@ -37992,7 +37992,7 @@ mod tests {
     }
 
     #[test]
-    fn query_params_tipo_no_soportado_es_error_de_codegen() {
+    fn query_params_unsupported_type_is_codegen_error() {
         // Lists are not supported as query params.
         let src = "@get(\"/x?ids={ids}\") fn h(ids: List<Int>) -> Int => 0";
         let err = gen(src).expect_err("expected error");
@@ -38004,7 +38004,7 @@ mod tests {
     }
 
     #[test]
-    fn http_body_post_con_tipo_emite_from_fitz_json() {
+    fn http_body_post_with_type_emits_from_fitz_json() {
         // Mini-batch UC: the extractor switched from `axum::Json<serde_json::Value>`
         // to `axum::body::Bytes` to dispatch by Content-Type
         // (JSON vs urlencoded vs 415) inside the wrapper.
@@ -38036,7 +38036,7 @@ mod tests {
     }
 
     #[test]
-    fn uc_http_body_extrae_bytes_no_json() {
+    fn uc_http_body_extracts_bytes_not_json() {
         // Mini-batch UC: we confirm the body extractor is
         // Bytes, not Json<Value>. This is what enables the
         // Content-Type dispatch inside the wrapper.
@@ -38054,7 +38054,7 @@ mod tests {
     }
 
     #[test]
-    fn uc_http_body_dispatch_por_content_type() {
+    fn uc_http_body_dispatches_by_content_type() {
         // Mini-batch UC: the wrapper computes ct_primary and dispatches
         // between JSON, urlencoded and 415.
         let src = "type Input { msg: Str }\n\
@@ -38083,7 +38083,7 @@ mod tests {
     }
 
     #[test]
-    fn uc_http_body_415_msg_matchea_interprete() {
+    fn uc_http_body_415_msg_matches_interpreter() {
         // Mini-batch HA + MP-Build — the codegen 415 msg
         // contains the key phrases the user expects to see, and
         // cites the 3 supported CTs (JSON, urlencoded, multipart)
@@ -38108,7 +38108,7 @@ mod tests {
     }
 
     #[test]
-    fn mp_build_codegen_emite_helpers_multipart() {
+    fn mp_build_codegen_emits_multipart_helpers() {
         // Mini-batch MP-Build — the `__parse_multipart` and
         // `__extract_multipart_boundary` helpers are emitted in the prelude
         // along with the urlencoded ones.
@@ -38125,7 +38125,7 @@ mod tests {
     }
 
     #[test]
-    fn mp_build_codegen_dispatch_incluye_multipart_branch() {
+    fn mp_build_codegen_dispatch_includes_multipart_branch() {
         // The handler wrapper with body now dispatches between
         // JSON, urlencoded and multipart (3 branches), with 415 at the end.
         let src = "type Input { msg: Str }\n\
@@ -38142,7 +38142,7 @@ mod tests {
     }
 
     #[test]
-    fn uc_http_preludio_emite_helpers_urlencoded() {
+    fn uc_http_prelude_emits_urlencoded_helpers() {
         // The `__parse_urlencoded` and `__url_decode` helpers are emitted
         // whenever there are HTTP routes — they are part of the prelude.
         let src = "@get(\"/\") fn index() -> Str => \"ok\"";
@@ -38158,7 +38158,7 @@ mod tests {
     }
 
     #[test]
-    fn uc_http_body_fuerza_hmap_extraction() {
+    fn uc_http_body_forces_hmap_extraction() {
         // Mini-batch UC: when there's body_param, force HeaderMap
         // extraction (we need it to read Content-Type) even
         // without @header / middleware / cors.
@@ -38174,7 +38174,7 @@ mod tests {
     // ---- Mini-batch DZ — division by zero with msg aligned to interpreter ----
 
     #[test]
-    fn dz_div_int_emite_check_de_cero() {
+    fn dz_div_int_emits_zero_check() {
         // `a / b` for Int emits a block with explicit 0 check
         // that panics with "división por cero" — parallel to `eval_div`
         // in the interpreter and before rustc rejects literal `10/0`
@@ -38189,7 +38189,7 @@ mod tests {
     }
 
     #[test]
-    fn dz_div_float_emite_check_de_cero_float() {
+    fn dz_div_float_emits_float_zero_check() {
         // Float division by 0.0 also checks — without this wrap,
         // rustc emits silent `inf`/`NaN`.
         let src = "let x = 10.0 / 2.0\nprint(x)";
@@ -38202,7 +38202,7 @@ mod tests {
     }
 
     #[test]
-    fn dz_division_literal_por_cero_compila_aunque_paniquea_en_runtime() {
+    fn dz_division_literal_by_zero_compiles_even_though_panics_at_runtime() {
         // The zero check wrap prevents rustc from rejecting
         // `10 / 0` with `unconditional_panic`. The program compiles;
         // the panic occurs at runtime with the aligned msg.
@@ -38218,7 +38218,7 @@ mod tests {
     // ---- Mini-batch CT — compare different types: codegen emits literal ----
 
     #[test]
-    fn ct_int_vs_str_eq_emite_false_literal() {
+    fn ct_int_vs_str_eq_emits_false_literal() {
         // `1 == "1"` in the interpreter returns false; codegen
         // must align and emit literal false instead of a Rust
         // `==` between different types (E0308).
@@ -38233,7 +38233,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_int_vs_str_neq_emite_true_literal() {
+    fn ct_int_vs_str_neq_emits_true_literal() {
         let src = "print(1 != \"1\")";
         let code = gen(src).unwrap();
         assert!(
@@ -38244,7 +38244,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_bool_vs_int_eq_emite_false_literal() {
+    fn ct_bool_vs_int_eq_emits_false_literal() {
         let src = "print(true == 1)";
         let code = gen(src).unwrap();
         assert!(
@@ -38255,7 +38255,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_str_vs_null_eq_emite_false_literal() {
+    fn ct_str_vs_null_eq_emits_false_literal() {
         // `"x" == null` (Str is not Nullable, so doesn't fall to the
         // `is_none/is_some` path) → CT incompatible → false.
         let src = "print(\"x\" == null)";
@@ -38268,7 +38268,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_str_eq_str_sigue_emitiendo_comparacion_normal() {
+    fn ct_str_eq_str_keeps_emitting_normal_comparison() {
         // For Str==Str (same type) the CT wrap does NOT apply — it must
         // emit `==` directly between &String.
         let src = "print(\"a\" == \"a\")";
@@ -38281,7 +38281,7 @@ mod tests {
     }
 
     #[test]
-    fn ct_int_eq_float_sigue_coercionando_no_dispara_wrap() {
+    fn ct_int_eq_float_keeps_coercing_does_not_trigger_wrap() {
         // Int↔Float coerces via numeric_coerce, NOT incompatible.
         let src = "print(1 == 1.0)";
         let code = gen(src).unwrap();
@@ -38293,7 +38293,7 @@ mod tests {
     }
 
     #[test]
-    fn http_server_decorator_setea_addr() {
+    fn http_server_decorator_sets_addr() {
         let src = "@server(8080, \"0.0.0.0\") fn main() => 0\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -38308,7 +38308,7 @@ mod tests {
     }
 
     #[test]
-    fn http_sin_server_decorator_usa_default_3000() {
+    fn http_without_server_decorator_uses_default_3000() {
         let src = "@get(\"/\") fn index() -> Str => \"ok\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
@@ -38323,7 +38323,7 @@ mod tests {
     }
 
     #[test]
-    fn http_75_emite_static_openapi_schema_y_handler() {
+    fn http_75_emits_static_openapi_schema_and_handler() {
         // Phase 7.5: the generated code includes the embedded schema
         // as static + the async handler + the /openapi.json route
         // in the Router.
@@ -38352,7 +38352,7 @@ mod tests {
     }
 
     #[test]
-    fn http_75_emite_scalar_html_y_ruta_docs() {
+    fn http_75_emits_scalar_html_and_docs_route() {
         let src = "@get(\"/\") fn index() -> Str => \"hola\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
@@ -38374,7 +38374,7 @@ mod tests {
     }
 
     #[test]
-    fn http_75_server_docs_false_no_emite_rutas_auto() {
+    fn http_75_server_docs_false_does_not_emit_auto_routes() {
         // @server(docs=false): neither the static schema nor the HTML, nor
         // the auto-registered routes. Valid program still compiles.
         let src = "@server(3000, docs=false) fn main() => 0\n\
@@ -38403,7 +38403,7 @@ mod tests {
     }
 
     #[test]
-    fn http_75_usuario_declara_openapi_json_propio_no_se_pisa() {
+    fn http_75_user_declares_own_openapi_json_is_not_overwritten() {
         // If the user declares `@get("/openapi.json")`, codegen
         // must NOT emit the auto route (their handler wins). The
         // user's handler is emitted normally.
@@ -38431,7 +38431,7 @@ mod tests {
     }
 
     #[test]
-    fn http_75_server_decorator_acepta_kwarg_docs() {
+    fn http_75_server_decorator_accepts_docs_kwarg() {
         // @server(3000, docs=true) no longer aborts codegen (the 7.0
         // guard was relaxed for @server in 7.5).
         let src = "@server(3000, docs=true) fn main() => 0\n\
@@ -38446,7 +38446,7 @@ mod tests {
     }
 
     #[test]
-    fn http_75_server_decorator_kwarg_desconocido_es_error() {
+    fn http_75_server_decorator_unknown_kwarg_is_error() {
         let src = "@server(3000, version=\"1.0\") fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let err = gen(src).expect_err("expected error de codegen");
@@ -38462,7 +38462,7 @@ mod tests {
     // ───────────────────────────────────────────────────────────────
 
     #[test]
-    fn v0_15_13_server_host_kwarg_solo_codegen_emite_bind_correcto() {
+    fn v0_15_13_server_host_kwarg_only_codegen_emits_correct_bind() {
         let src = "@server(host=\"0.0.0.0\") fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -38475,7 +38475,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_13_server_port_kwarg_solo_codegen_emite_bind_correcto() {
+    fn v0_15_13_server_port_kwarg_only_codegen_emits_correct_bind() {
         let src = "@server(port=9090) fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -38488,7 +38488,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_13_server_port_y_host_kwargs_mixed_codegen() {
+    fn v0_15_13_server_port_and_host_kwargs_mixed_codegen() {
         // Canonical Dockerized pattern in codegen.
         let src = "@server(port=8080, host=\"0.0.0.0\", prometheus=true) fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
@@ -38501,7 +38501,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_13_server_port_doble_positional_mas_kwarg_codegen_es_error() {
+    fn v0_15_13_server_port_double_positional_plus_kwarg_codegen_is_error() {
         let src = "@server(8080, port=9090) fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let err = gen(src).expect_err("expected error de codegen");
@@ -38513,7 +38513,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_13_server_host_doble_positional_mas_kwarg_codegen_es_error() {
+    fn v0_15_13_server_host_double_positional_plus_kwarg_codegen_is_error() {
         let src = "@server(8080, \"127.0.0.1\", host=\"0.0.0.0\") fn main() => 0\n\
                    @get(\"/\") fn h() -> Str => \"ok\"";
         let err = gen(src).expect_err("expected error de codegen");
@@ -38525,7 +38525,7 @@ mod tests {
     }
 
     #[test]
-    fn http_75_decorator_de_ruta_con_kwarg_sigue_siendo_error() {
+    fn http_75_route_decorator_with_kwarg_keeps_being_error() {
         // HTTP route decorators (@get/@post/@put/@delete) do NOT
         // accept kwargs today. Only @server and @header.
         let src = "@get(\"/x\", foo=1) fn h() -> Str => \"ok\"";
@@ -38538,7 +38538,7 @@ mod tests {
     }
 
     #[test]
-    fn http_76_wrapper_extrae_headermap_y_bindea_header_obligatorio() {
+    fn http_76_wrapper_extracts_headermap_and_binds_required_header() {
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\") fn protected(authorization: Str) -> Str => authorization";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
@@ -38571,7 +38571,7 @@ mod tests {
     }
 
     #[test]
-    fn http_76_wrapper_header_nullable_es_option_string() {
+    fn http_76_wrapper_header_nullable_is_option_string() {
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\") fn traced(x_trace_id: Str?) -> Str => \"ok\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
         let file = ast_test::parse(&code);
@@ -38593,7 +38593,7 @@ mod tests {
     }
 
     #[test]
-    fn http_76_schema_embebido_incluye_header_en_parameters() {
+    fn http_76_embedded_schema_includes_header_in_parameters() {
         // Phase 7.5 + 7.6: the embedded schema in the binary includes
         // the header with in:"header".
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\") fn protected(authorization: Str) -> Str => authorization";
@@ -38612,7 +38612,7 @@ mod tests {
     }
 
     #[test]
-    fn http_decorator_de_ruta_sobre_fn_main_es_error_claro() {
+    fn http_route_decorator_on_fn_main_is_clear_error() {
         // `@get("/") fn main()` must not be ignored silently:
         // 5b.6 generated the async `fn main` from codegen, so the
         // route decorator on `fn main` was muted. R1 catches it.
@@ -38626,7 +38626,7 @@ mod tests {
     }
 
     #[test]
-    fn http_state_compartido_emite_lazy_lock() {
+    fn http_shared_state_emits_lazy_lock() {
         // F11 + F17.4b — codegen emits a `static LazyLock<Arc<Mutex<T>>>`
         // per state var detected, and each fn that references it
         // materializes the Arc at the start of the body via `(*__FITZ_STATE_X).clone()`.
@@ -38656,7 +38656,7 @@ mod tests {
     }
 
     #[test]
-    fn http_state_no_referenciado_no_se_promueve_a_lazy_lock() {
+    fn http_unreferenced_state_is_not_promoted_to_lazy_lock() {
         // If a top-level var is NOT referenced by any HTTP fn,
         // it's not shared state — stays as a local var in `fn main()`.
         let src = "let ignorada = 42\n\
@@ -38671,7 +38671,7 @@ mod tests {
     }
 
     #[test]
-    fn http_cargo_toml_incluye_axum_y_tokio() {
+    fn http_cargo_toml_includes_axum_and_tokio() {
         // The conditional Cargo.toml is tested via `generate_project`,
         // not via `gen` (which only returns main.rs). We go through the
         // public API to validate.
@@ -38707,7 +38707,7 @@ mod tests {
     }
 
     #[test]
-    fn no_http_cargo_toml_es_minimalista() {
+    fn no_http_cargo_toml_is_minimal() {
         use std::path::Path;
         let tokens = crate::lexer::tokenize("print(\"hola\")").unwrap();
         let program = crate::parser::parse(tokens).unwrap();
@@ -38730,7 +38730,7 @@ mod tests {
     }
 
     #[test]
-    fn http_type_emite_impl_to_fitz_json() {
+    fn http_type_emits_impl_to_fitz_json() {
         let src = "type User { id: Int, name: Str }\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
         let code = gen(src).unwrap();
@@ -38748,7 +38748,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_sin_anotacion_de_param_es_error() {
+    fn fn_without_param_annotation_is_error() {
         assert_err_contains(
             "fn double(n) -> Int { return n * 2 }",
             &["parámetro", "anotación"],
@@ -38758,7 +38758,7 @@ mod tests {
     // ---- 5b.4: Result, `?`, match (extras) ------------------------------
 
     #[test]
-    fn result_type_anotacion_emite_result_t_string() {
+    fn result_type_annotation_emits_result_t_string() {
         // Fitz `Result<Int>` → Rust `Result<i64, String>`.
         let code = gen("fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }").unwrap();
         let file = ast_test::parse(&code);
@@ -38771,7 +38771,7 @@ mod tests {
     }
 
     #[test]
-    fn ok_constructor_emite_ok_envoltorio() {
+    fn ok_constructor_emits_ok_wrapper() {
         let code = gen("fn ok42() -> Result<Int> { return Ok(42) }").unwrap();
         let file = ast_test::parse(&code);
         let ok42 = ast_test::find_item_fn(&file, "ok42").expect("missing fn ok42");
@@ -38783,7 +38783,7 @@ mod tests {
     }
 
     #[test]
-    fn err_con_str_literal_emite_string_from() {
+    fn err_with_str_literal_emits_string_from() {
         let code = gen("fn boom() -> Result<Int> { return Err(\"explotó\") }").unwrap();
         let file = ast_test::parse(&code);
         let boom = ast_test::find_item_fn(&file, "boom").expect("missing fn boom");
@@ -38795,7 +38795,7 @@ mod tests {
     }
 
     #[test]
-    fn err_con_no_str_emite_value_directo_post_re_plus() {
+    fn err_with_non_str_emits_direct_value_post_re_plus() {
         // Mini-batch Re+ — `Err(42)` no longer coerces to String. Emit
         // `Err(42i64)` directly and the Result type is
         // `Result<T, i64>` with concrete E. Change from
@@ -38816,7 +38816,7 @@ mod tests {
     }
 
     #[test]
-    fn try_operador_emite_question_mark_rust() {
+    fn try_operator_emits_rust_question_mark() {
         // Inside a fn that returns Result, `expr?` → Rust `<expr>?`.
         let code = gen("fn find_user(id: Int) -> Result<Int> { return Ok(id) }\n\
              fn describe(id: Int) -> Result<Str> { let u = find_user(id)?\n return Ok(\"x\") }")
@@ -38846,7 +38846,7 @@ mod tests {
     }
 
     #[test]
-    fn try_top_level_es_error_de_codegen() {
+    fn try_top_level_is_codegen_error() {
         // `?` at top-level (outside any fn) passes the checker
         // (empty return_stack, no context to check) but
         // codegen catches it: Rust `?` only works inside fns
@@ -38855,7 +38855,7 @@ mod tests {
     }
 
     #[test]
-    fn match_sobre_result_exhaustivo_no_agrega_catch_all() {
+    fn match_over_exhaustive_result_does_not_add_catch_all() {
         // Ok(v) + Err(e) cover the entire Result — no panic added.
         let file = ast_test::parse(
             &gen(
@@ -38874,7 +38874,7 @@ mod tests {
     }
 
     #[test]
-    fn match_no_exhaustivo_sobre_int_agrega_panic() {
+    fn non_exhaustive_match_over_int_adds_panic() {
         // Match on Int without catch-all → we add `_ => panic!(...)`
         // with the same interpreter message.
         let file = ast_test::parse(
@@ -38895,7 +38895,7 @@ mod tests {
     }
 
     #[test]
-    fn match_con_wildcard_no_agrega_panic() {
+    fn match_with_wildcard_does_not_add_panic() {
         // The `_` wildcard already covers everything — no extra catch-all added.
         let file = ast_test::parse(
             &gen("let v = 1\nlet s = match v { 0 => \"cero\", _ => \"otro\" }").unwrap(),
@@ -38909,7 +38909,7 @@ mod tests {
     }
 
     #[test]
-    fn match_ok_binding_introduce_var_en_scope() {
+    fn match_ok_binding_introduces_var_in_scope() {
         // The `u` binding inside the `Ok(u)` arm must be usable
         // (access to `.id`, pass to `print`, etc.).
         let code = gen("type User { id: Int }\n\
@@ -38938,7 +38938,7 @@ mod tests {
     }
 
     #[test]
-    fn print_de_result_emite_match_inline() {
+    fn print_of_result_emits_inline_match() {
         // `print(r)` with `r: Result<T>` produces an inline match that
         // formats `Ok(...)` or `Err("...")` like the interpreter.
         let code = gen("fn ok42() -> Result<Int> { return Ok(42) }\n\
@@ -38963,7 +38963,7 @@ mod tests {
     }
 
     #[test]
-    fn list_find_con_question_mark_emite_chain() {
+    fn list_find_with_question_mark_emits_chain() {
         // Canonical pattern: `users.find(...)?` inside a Result fn.
         let code = gen(
             "type User { id: Int }\n\
@@ -39003,7 +39003,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_emite_pub_en_struct_y_alias() {
+    fn module_emits_pub_on_struct_and_alias() {
         // A module exposes custom types with `pub` on struct + alias.
         let code = gen_module("type User { id: Int, name: Str }").unwrap();
         let file = ast_test::parse(&code);
@@ -39021,7 +39021,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_emite_pub_en_fn() {
+    fn module_emits_pub_on_fn() {
         let code = gen_module("fn add(a: Int, b: Int) -> Int => a + b").unwrap();
         let file = ast_test::parse(&code);
         let add = ast_test::find_item_fn(&file, "add").expect("missing fn add");
@@ -39029,7 +39029,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_let_str_top_level_se_emite_como_pub_static() {
+    fn module_let_str_top_level_is_emitted_as_pub_static() {
         let code = gen_module("let MSG = \"hola\"").unwrap();
         let file = ast_test::parse(&code);
         let msg = ast_test::find_item_static(&file, "MSG").expect("falta static MSG");
@@ -39047,7 +39047,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_let_int_top_level_se_emite_como_pub_const() {
+    fn module_let_int_top_level_is_emitted_as_pub_const() {
         let code = gen_module("let MAX_RETRIES: Int = 5").unwrap();
         let file = ast_test::parse(&code);
         let max = ast_test::find_item_const(&file, "MAX_RETRIES").expect("falta const MAX_RETRIES");
@@ -39068,7 +39068,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_top_level_acepta_expr_const_eval_como_pub_const() {
+    fn module_top_level_accepts_const_eval_expr_as_pub_const() {
         // F14: a const-eval-able RHS (arithmetic BinOp over literals)
         // at module top-level is now accepted and emitted as `pub const`.
         let code = gen_module("let X = 1 + 1").unwrap();
@@ -39079,7 +39079,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_top_level_acepta_expr_no_const_como_pub_fn() {
+    fn module_top_level_accepts_non_const_expr_as_pub_fn() {
         // F14: a non-const-eval RHS (call to fn, field access, etc.) at
         // module top-level is emitted as accessor fn `pub fn X() -> T`.
         let code = gen_module("fn make() -> Int => 42\nlet X: Int = make()").unwrap();
@@ -39100,7 +39100,7 @@ mod tests {
     // tests to seal coverage.
 
     #[test]
-    fn modulo_top_level_let_lista_literal_se_emite_como_accessor_fn() {
+    fn module_top_level_let_literal_list_is_emitted_as_accessor_fn() {
         // `let xs: List<Int> = [1, 2, 3]` at module top — the List
         // literal is not const-eval, emitted as
         // `pub fn xs() -> Arc<Mutex<Vec<i64>>> { ... }`.
@@ -39120,7 +39120,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_top_level_let_map_literal_se_emite_como_accessor_fn() {
+    fn module_top_level_let_literal_map_is_emitted_as_accessor_fn() {
         // `let m: Map<Str, Int> = {"a": 1}` — parallel accessor fn.
         let code = gen_module("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n").unwrap();
         let file = ast_test::parse(&code);
@@ -39138,7 +39138,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_top_level_let_instance_se_emite_como_accessor_fn() {
+    fn module_top_level_let_instance_is_emitted_as_accessor_fn() {
         // `let u: User = User { ... }` — accessor fn that builds the
         // instance on each invocation. Each call site of the importer
         // sees a FRESH instance (not cached).
@@ -39157,7 +39157,7 @@ mod tests {
     // ---- Mini-batch Lt — let-destructure with rich sub-patterns ----
 
     #[test]
-    fn lt_let_pure_irrefutable_emite_path_directo() {
+    fn lt_let_pure_irrefutable_emits_direct_path() {
         // Classic case `let (a, b) = ...`: codegen does NOT use match
         // wrapper. Emits `let (a, b) = ...;` directly (pre-Lt path).
         let code = gen("let (a, b) = (1, 2)\nprint(a)\nprint(b)\n").unwrap();
@@ -39174,7 +39174,7 @@ mod tests {
     }
 
     #[test]
-    fn lt_let_literal_int_subpattern_emite_match_wrapper() {
+    fn lt_let_literal_int_subpattern_emits_match_wrapper() {
         // `let (1, x) = ...`: refutable → match wrapper with catch-all
         // panic. The `x` name is declared in the outer scope.
         let code = gen("let (1, x) = (1, 42)\nprint(x)\n").unwrap();
@@ -39196,7 +39196,7 @@ mod tests {
     }
 
     #[test]
-    fn lt_let_ok_binding_subpattern_extrae_resultado() {
+    fn lt_let_ok_binding_subpattern_extracts_result() {
         // `let (Ok(v), tag) = ...`: bindings = [v, tag].
         let code = gen("let (Ok(v), tag) = (Ok(99), \"result\")\nprint(v)\nprint(tag)\n").unwrap();
         assert!(
@@ -39218,7 +39218,7 @@ mod tests {
     }
 
     #[test]
-    fn lt_let_str_literal_subpattern_usa_guard_inline() {
+    fn lt_let_str_literal_subpattern_uses_inline_guard() {
         // `let ("ada", n) = ...`: the Str literal generates a guard
         // `__s_X.as_str() == "ada"` in the match arm.
         let code = gen("let (\"ada\", n) = (\"ada\", 7)\nprint(n)\n").unwrap();
@@ -39235,7 +39235,7 @@ mod tests {
     }
 
     #[test]
-    fn lt_let_range_subpattern_usa_guard_contains() {
+    fn lt_let_range_subpattern_uses_guard_contains() {
         // `let (0..100, y) = ...`: Range emits guard `(0..100).contains(&__n_X)`.
         let code = gen("let (0..100, y) = (50, \"yes\")\nprint(y)\n").unwrap();
         assert!(
@@ -39246,7 +39246,7 @@ mod tests {
     }
 
     #[test]
-    fn lt_let_single_binding_no_emite_paren() {
+    fn lt_let_single_binding_does_not_emit_paren() {
         // With a single binding, `let mut <name> = match ...` avoids
         // the degenerate tuple `(x,)` that would require a trailing comma.
         let code = gen("let (1, x) = (1, 42)\nprint(x)\n").unwrap();
@@ -39277,7 +39277,7 @@ mod tests {
     }
 
     #[test]
-    fn el_err_list_se_emite_sin_coercion_a_string() {
+    fn el_err_list_is_emitted_without_coercion_to_string() {
         // Pre-El: `Err([1,2,3])` with `Result<Int, List<Int>>` was
         // rejected with codegen error. Post-El: emits `Err(<list>)`
         // directly with `Arc<Mutex<Vec<i64>>>` intact, without coercion
@@ -39306,7 +39306,7 @@ mod tests {
     }
 
     #[test]
-    fn el_err_map_se_emite_directo() {
+    fn el_err_map_is_emitted_directly() {
         let code = gen("fn fail() -> Result<Int, Map<Str, Int>> {\n\
                  return Err({\"a\": 1, \"b\": 2})\n\
              }\n\
@@ -39326,7 +39326,7 @@ mod tests {
     }
 
     #[test]
-    fn f15_module_loader_acepta_imports_transitivos_en_modulo() {
+    fn f15_module_loader_accepts_transitive_imports_in_module() {
         // F15: a module with its own `import` is no longer rejected at
         // codegen-time. The test uses `generate_project` indirectly
         // via the e2e suite; here we just validate at unit level that
@@ -39349,7 +39349,7 @@ mod tests {
     }
 
     #[test]
-    fn modulo_top_level_str_concat_se_emite_como_pub_fn() {
+    fn module_top_level_str_concat_is_emitted_as_pub_fn() {
         // F14: `let X = "a" + "b"` is not const-eval (Rust doesn't accept
         // `String + String` in const) → accessor fn `pub fn X() -> String`.
         let code = gen_module("let GREETING: Str = \"hola, \" + \"Fitz\"").unwrap();
@@ -39368,7 +39368,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_body_de_modulo_puede_referenciar_const_local() {
+    fn module_fn_body_can_reference_local_const() {
         // PREFIX as `pub static`, greet uses it inside its body.
         // We check that module codegen does not complain about
         // "variable desconocida".
@@ -39414,7 +39414,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn build_acepta_from_python_import_emite_preludio() {
+    fn build_accepts_from_python_import_emits_prelude() {
         let code = gen("from python import math\n").expect("8.7.1: from python import compila");
         assert!(
             code.contains("use pyo3::prelude::*;"),
@@ -39447,7 +39447,7 @@ mod tests {
     }
 
     #[test]
-    fn build_acepta_import_python_punteado_emite_binding_con_ultimo_segmento() {
+    fn build_accepts_dotted_import_python_emits_binding_with_last_segment() {
         let code = gen("import python.os.path\n").expect("8.7.1: import python.X compila");
         // Convention: `import python.os.path` → `path` binding (last
         // segment), dotted Python `os.path`.
@@ -39464,7 +39464,7 @@ mod tests {
     }
 
     #[test]
-    fn build_alias_python_emite_binding_con_alias() {
+    fn build_python_alias_emits_binding_with_alias() {
         // `from python import math as m` → `m` binding, dotted `math`.
         let code = gen("from python import math as m\n").expect("8.7.1: alias compila");
         assert!(
@@ -39480,7 +39480,7 @@ mod tests {
     }
 
     #[test]
-    fn build_sin_python_no_emite_preludio() {
+    fn build_without_python_does_not_emit_prelude() {
         let code = gen("let x = 1\nprint(x)\n").expect("CLI básico compila");
         assert!(
             !code.contains("__FitzPyObject"),
@@ -39493,7 +39493,7 @@ mod tests {
     }
 
     #[test]
-    fn build_python_field_access_emite_get_attr_obj() {
+    fn build_python_field_access_emits_get_attr_obj() {
         // `let pi = math.pi` (no annot) → opaque `__fitz_py_get_attr_obj`.
         // Type of `pi` ends up as `__FitzPyObject`. 8.7.2: the
         // receiver `math` translates to the getter `__fitz_py_bind_math()`.
@@ -39508,7 +39508,7 @@ mod tests {
     }
 
     #[test]
-    fn build_python_field_access_con_annotacion_float_emite_extract() {
+    fn build_python_field_access_with_float_annotation_emits_extract() {
         // `let pi: Float = math.pi` → PyAny→Float coercion applies
         // `__fitz_py_extract_f64`.
         let code = gen("from python import math\nlet pi: Float = math.pi\n")
@@ -39521,7 +39521,7 @@ mod tests {
     }
 
     #[test]
-    fn build_python_field_access_con_annotacion_int_emite_extract() {
+    fn build_python_field_access_with_int_annotation_emits_extract() {
         let code = gen("from python import sys\nlet m: Int = sys.maxsize\n")
             .expect("8.7.1: extracción a Int compila");
         assert!(
@@ -39532,7 +39532,7 @@ mod tests {
     }
 
     #[test]
-    fn build_call_python_emite_invoke_con_marshaling() {
+    fn build_call_python_emits_invoke_with_marshaling() {
         // 8.7.2: `math.sqrt(16.0)` → `__fitz_py_invoke(&...,
         // |py| Ok(vec![{ let __a = ...; __a.__fitz_to_py(py, "arg0")? }]))`.
         // Result types as `Result<PyAny>`.
@@ -39556,7 +39556,7 @@ mod tests {
     }
 
     #[test]
-    fn build_call_python_devuelve_result_pyany() {
+    fn build_call_python_returns_result_pyany() {
         // The binding `let raw = math.sqrt(...)` (no annot) synthesizes
         // `Result<PyAny>`. rust_type_for emits `Result<__FitzPyObject, String>`.
         let code = gen("from python import math\nlet raw = math.sqrt(16.0)\n")
@@ -39570,7 +39570,7 @@ mod tests {
     }
 
     #[test]
-    fn build_call_python_con_args_primitivos_marshallan() {
+    fn build_call_python_with_primitive_args_marshal() {
         // Each primitive arg (Int, Float, Str, Bool) is marshalled via
         // `__fitz_to_py(py, "argN")` with the numbered path.
         let code = gen("from python import json\nlet raw = json.dumps([1, 2, 3])\n")
@@ -39593,7 +39593,7 @@ mod tests {
     // anyway.
 
     #[test]
-    fn build_modulo_transitivo_con_from_python_no_falla() {
+    fn build_transitive_module_with_from_python_does_not_fail() {
         // Pre-fix: this case aborted with
         // "imports Python dentro de módulos transitivos no se soportan
         // todavía. Workaround: poné el `from python import` en el main."
@@ -39614,7 +39614,7 @@ mod tests {
     }
 
     #[test]
-    fn build_modulo_transitivo_emite_use_crate_fitz_py() {
+    fn build_transitive_module_emits_use_crate_fitz_py() {
         // The module reuses Python prelude helpers via
         // `use crate::__FitzPyObject; use crate::{__fitz_py_import, ...};`
         // — does not duplicate the prelude.
@@ -39650,7 +39650,7 @@ mod tests {
     }
 
     #[test]
-    fn build_modulo_transitivo_emite_statics_locales() {
+    fn build_transitive_module_emits_local_statics() {
         // Each module emits its own statics + getters (`__FITZ_PY_BIND_X`
         // + `__fitz_py_bind_x()`). pyo3 caches via sys.modules, so the
         // duplicated OnceLock between modules is near zero overhead.
@@ -39679,7 +39679,7 @@ mod tests {
     }
 
     #[test]
-    fn build_solo_modulo_transitivo_usa_python_main_emite_preludio() {
+    fn build_only_transitive_module_uses_python_main_emits_prelude() {
         // If main does NOT directly import Python but a transitive module
         // does, the Python prelude is still emitted in main.rs (the
         // `use crate::__fitz_py_*` of the modules requires it).
@@ -39710,7 +39710,7 @@ mod tests {
     }
 
     #[test]
-    fn build_solo_modulo_transitivo_usa_python_cargo_toml_incluye_pyo3() {
+    fn build_only_transitive_module_uses_python_cargo_toml_includes_pyo3() {
         // Cargo.toml adds pyo3 if ANY module (main or transitive)
         // uses Python — parallel to global `uses_python`.
         let main_src = "from utils import double_pi\nlet v: Float = double_pi()\nprint(v)\n";
@@ -39742,7 +39742,7 @@ mod tests {
     // prefix via output post-processing.
 
     #[test]
-    fn build_main_emite_helpers_py_para_tipo_importado_de_modulo() {
+    fn build_main_emits_py_helpers_for_imported_type_from_module() {
         // Setup: module `utils` defines `type User`. Main imports
         // `User` and uses Python. We expect main.rs to include:
         // `pub(crate) fn __fitz_py_to_instance_User(...)` +
@@ -39775,7 +39775,7 @@ mod tests {
     }
 
     #[test]
-    fn build_main_emite_use_para_tipo_no_importado_directamente() {
+    fn build_main_emits_use_for_type_not_directly_imported() {
         // Setup: module `types_mod` defines `type User`. Main does NOT
         // import `User` directly (only imports a fn from the intermediate
         // module that does use it). Still main must emit
@@ -39801,7 +39801,7 @@ mod tests {
     }
 
     #[test]
-    fn build_modulo_referencia_helper_de_tipo_importado_con_crate_prefix() {
+    fn build_module_references_helper_of_imported_type_with_crate_prefix() {
         // Setup: module `utils` defines `type User` and does `let u: User
         // = json.loads(raw)?`. The module's codegen must reference
         // `crate::__fitz_py_to_instance_User(` (with prefix) because the
@@ -39828,7 +39828,7 @@ mod tests {
     }
 
     #[test]
-    fn build_modulo_importa_helpers_py_primitivos_del_crate_root() {
+    fn build_module_imports_primitive_py_helpers_from_crate_root() {
         // Verify that `emit_module_python_use_decls` imports the
         // primitive helpers `__fitz_py_to_list_i64/f64/string/bool`
         // from the crate root (needed for `PyAny → List<primitive>`
@@ -39860,7 +39860,7 @@ mod tests {
     // correctly shadow the math builtins.
 
     #[test]
-    fn build_fn_importada_con_nombre_de_builtin_matematico_no_es_shadeada() {
+    fn build_imported_fn_with_math_builtin_name_is_not_shadowed() {
         // `from utils import sqrt` + `sqrt(16.0)` must emit the
         // call to the imported fn, NOT `(16.0).sqrt()` (f64 method).
         let main_src = "from utils import sqrt\nlet v: Float = sqrt(16.0)\nprint(v)\n";
@@ -39883,7 +39883,7 @@ mod tests {
     }
 
     #[test]
-    fn build_fn_importada_con_nombre_pow_no_es_shadeada() {
+    fn build_imported_fn_with_name_pow_is_not_shadowed() {
         // Parallel coverage for `pow` (also a math builtin).
         let main_src = "from utils import pow\nlet v: Int = pow(2, 8)\nprint(v)\n";
         let utils_src = "fn pow(b: Int, e: Int) -> Int { return b * e }\n"; // fake user-fn
@@ -39897,7 +39897,7 @@ mod tests {
     }
 
     #[test]
-    fn build_fn_local_con_nombre_de_builtin_sigue_funcionando_como_antes() {
+    fn build_local_fn_with_builtin_name_keeps_working_as_before() {
         // Sanity check: the PRE-existing case — LOCAL fn with builtin
         // name — keeps shadowing correctly (`fn_sigs` covers it
         // as before the fix).
@@ -39912,7 +39912,7 @@ mod tests {
     }
 
     #[test]
-    fn build_emit_mod_decls_deduplica_root_segments() {
+    fn build_emit_mod_decls_dedupes_root_segments() {
         // Bug fix v0.9.44 — two modules under the same parent dir
         // (`types/user.rs` + `types/api.rs`) shared `root_segment`
         // "types" and `emit_mod_decls` emitted `mod types;` twice.
@@ -39936,7 +39936,7 @@ mod tests {
     }
 
     #[test]
-    fn match_range_emite_guard_con_contains() {
+    fn match_range_emits_guard_with_contains() {
         // Range pattern `0..10` → guard with `(0..10).contains(&__n)`.
         let code =
             gen("let n = 5\nlet s = match n { 0..10 => \"chico\", _ => \"grande\" }").unwrap();
@@ -39966,7 +39966,7 @@ mod tests {
     // some top-level fn references it.
 
     #[test]
-    fn cd_ho_pasar_fn_nombrada_a_map() {
+    fn cd_ho_pass_named_fn_to_map() {
         let src = "fn double(n: Int) -> Int { return n * 2 }\n\
                    let xs: List<Int> = [1, 2, 3]\n\
                    let ys: List<Int> = xs.map(double)";
@@ -39980,7 +39980,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_ho_pasar_fn_nombrada_a_filter() {
+    fn cd_ho_pass_named_fn_to_filter() {
         let src = "fn is_even(n: Int) -> Bool { return n % 2 == 0 }\n\
                    let xs: List<Int> = [1, 2, 3, 4]\n\
                    let ys: List<Int> = xs.filter(is_even)";
@@ -39993,7 +39993,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_ho_pasar_fn_nombrada_a_reduce() {
+    fn cd_ho_pass_named_fn_to_reduce() {
         // Binary callback: `xs.reduce(0, sumar)`.
         let src = "fn sumar(acc: Int, x: Int) -> Int { return acc + x }\n\
                    let xs: List<Int> = [1, 2, 3]\n\
@@ -40013,7 +40013,7 @@ mod tests {
     // never even runs because the checker cuts first.
 
     #[test]
-    fn cd_ho_fn_inexistente_aborta_en_checker() {
+    fn cd_ho_nonexistent_fn_aborts_in_checker() {
         let src = "let xs: List<Int> = [1, 2, 3]\n\
                    let ys: List<Int> = xs.map(no_existe)";
         // The checker detects `no_existe` as an unknown variable.
@@ -40028,7 +40028,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_ho_fn_nombrada_con_aridad_incorrecta_aborta_en_checker() {
+    fn cd_ho_named_fn_with_wrong_arity_aborts_in_checker() {
         let src = "fn binaria(a: Int, b: Int) -> Int { return a + b }\n\
                    let xs: List<Int> = [1, 2, 3]\n\
                    let ys: List<Int> = xs.map(binaria)";
@@ -40043,7 +40043,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_ho_fn_nombrada_con_ret_incompatible_aborta_en_checker() {
+    fn cd_ho_named_fn_with_incompatible_ret_aborts_in_checker() {
         let src = "fn to_str(n: Int) -> Str { return \"{n}\" }\n\
                    let xs: List<Int> = [1, 2, 3]\n\
                    let ys: List<Int> = xs.filter(to_str)";
@@ -40058,7 +40058,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_f12_let_int_const_referenciado_por_fn_se_hoistea() {
+    fn cd_f12_let_int_const_referenced_by_fn_is_hoisted() {
         let src = "let MAX = 100\n\
                    fn cap(n: Int) -> Int {\n\
                        if (n > MAX) { return MAX }\n\
@@ -40082,7 +40082,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_f12_let_str_referenciado_por_fn_se_hoistea_a_static() {
+    fn cd_f12_let_str_referenced_by_fn_is_hoisted_to_static() {
         let src = "let GREETING = \"hola\"\n\
                    fn greet(name: Str) -> Str { return \"{GREETING}, {name}\" }\n\
                    print(greet(\"Ada\"))";
@@ -40095,7 +40095,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_f12_let_no_referenciado_por_fn_no_se_hoistea() {
+    fn cd_f12_let_not_referenced_by_fn_is_not_hoisted() {
         // If nothing references it, stays as a local of main(); no hoist.
         let src = "let X = 42\nprint(X)";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -40114,7 +40114,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_f12_let_reasignado_no_se_hoistea() {
+    fn cd_f12_let_reassigned_is_not_hoisted() {
         // Reassignment breaks the hoist (Rust const cannot be mutated).
         let src = "let X = 10\nX = 20\nfn read() -> Int { return X }\nprint(read())";
         let err = gen(src).expect_err("expected error de codegen (X no hoisteable, reasignado)");
@@ -40126,7 +40126,7 @@ mod tests {
     }
 
     #[test]
-    fn cd_f12_const_eval_con_binop_se_hoistea() {
+    fn cd_f12_const_eval_with_binop_is_hoisted() {
         let src = "let LIMIT = 10 * 2 + 5\n\
                    fn check(n: Int) -> Bool { return n < LIMIT }\n\
                    print(check(20))";
@@ -40142,7 +40142,7 @@ mod tests {
     // ---- Phase 9.w.3.c — codegen @cron + @background + spawn ----
 
     #[test]
-    fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
+    fn cargo_toml_with_jobs_includes_cron_and_chrono() {
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
             false,
@@ -40155,7 +40155,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_jobs_sin_http_incluye_signal_feature() {
+    fn cargo_toml_jobs_without_http_includes_signal_feature() {
         // Cron-only mode needs `signal` for ctrl_c.
         let toml = cargo_toml_for(
             "app", false, false, false, false, false, true, false, false, false, false, false,
@@ -40169,7 +40169,7 @@ mod tests {
     }
 
     #[test]
-    fn cargo_toml_jobs_con_http_incluye_signal_feature_post_12_1_c() {
+    fn cargo_toml_jobs_with_http_includes_signal_feature_post_12_1_c() {
         // Pre-12.1.c: HTTP+cron did NOT include signal — `serve()` had its
         // own shutdown_signal with the feature already activated via fitz's
         // runtime. Post-12.1.c: the GENERATED main emits its
@@ -40192,7 +40192,7 @@ mod tests {
     // Bit-a-bit parallel to the fix in `src/cron_jobs.rs::INIT_STORAGE_ONCE`
     // of the interpreter (v0.15.13 only covered `fitz run`).
     #[test]
-    fn v0_15_14_codegen_cron_persistent_emite_oncecell_para_init_storage() {
+    fn v0_15_14_codegen_cron_persistent_emits_oncecell_for_init_storage() {
         // Program with persistent @cron — forces emission of the
         // SQL_HELPERS_PRELUDE that contains `__fitz_cron_init_storage`.
         let src = "let db_result = db.connect(\"postgres://test\").await\n\
@@ -40227,7 +40227,7 @@ mod tests {
     }
 
     #[test]
-    fn cron_decorator_emite_spawn_y_schedule_parsing() {
+    fn cron_decorator_emits_spawn_and_schedule_parsing() {
         let src = "@cron(\"0 0 * * *\")\n\
                    fn cleanup() -> Null { return null }\n";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -40248,7 +40248,7 @@ mod tests {
     }
 
     #[test]
-    fn cron_only_main_bloquea_con_ctrl_c() {
+    fn cron_only_main_blocks_with_ctrl_c() {
         // Program with `@cron` but without `@server` — the CLI main
         // must block with ctrl_c() to not exit before the ticks.
         let src = "@cron(\"*/1 * * * * *\")\nfn tick() -> Null { return null }\n";
@@ -40260,7 +40260,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_11_cron_store_kwarg_con_state_var_materializa_local_antes_de_spawn() {
+    fn v0_15_11_cron_store_kwarg_with_state_var_materializes_local_before_spawn() {
         // v0.15.11 — Regression of bug discovered in TaskHub boilerplate.
         // When `@cron(..., store=X)` references a top-level binding that
         // SOME handler also consumes (typical case: `let db_result =
@@ -40307,7 +40307,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_12_state_var_con_await_usa_oncecell_e_init_eager() {
+    fn v0_15_12_state_var_with_await_uses_oncecell_and_init_eager() {
         // v0.15.12 — Pre-existing bug from TaskHub: `let db_result =
         // db.connect(url).await` top-level with HTTP handlers that
         // consume it hoisted to `LazyLock<T> = LazyLock::new(|| init)`
@@ -40356,7 +40356,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_12_state_var_sin_await_sigue_usando_lazylock() {
+    fn v0_15_12_state_var_without_await_keeps_using_lazylock() {
         // v0.15.12 — the canonical LazyLock path is preserved when the
         // init does NOT contain `.await`. Typical case: HTTP state with a
         // shared list (`let users = []`).
@@ -40385,7 +40385,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_12_expr_contains_await_detecta_await_anidado() {
+    fn v0_15_12_expr_contains_await_detects_nested_await() {
         // Smoke test of the `expr_contains_await` helper. Covers the
         // canonical cases: direct await, await inside Try, await inside
         // Call.callee/args, await inside BinOp/UnaryOp.
@@ -40439,7 +40439,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_12_spawn_clona_vars_outer_antes_del_async_move() {
+    fn v0_15_12_spawn_clones_outer_vars_before_async_move() {
         // v0.15.12 — Pre-existing bug from TaskHub: when the inner
         // call of `spawn(...)` references a var from the outer scope that
         // the caller also uses afterwards, `tokio::spawn`'s `async move`
@@ -40474,7 +40474,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_12_spawn_sin_args_no_emite_shadow_clones() {
+    fn v0_15_12_spawn_without_args_does_not_emit_shadow_clones() {
         // Without args, there is nothing to shadow — codegen must not
         // emit empty clones or anything odd.
         let src = "@background\n\
@@ -40494,7 +40494,7 @@ mod tests {
     }
 
     #[test]
-    fn v0_15_12_spawn_no_clona_idents_que_son_fn_nombradas() {
+    fn v0_15_12_spawn_does_not_clone_idents_that_are_named_fns() {
         // If the arg is a top-level fn (`@background`), its name
         // must NOT appear as a shadow clone — it is not a local var
         // of the scope. The `var_in_any_scope` filter discards
@@ -40518,7 +40518,7 @@ mod tests {
     }
 
     #[test]
-    fn spawn_call_emite_tokio_spawn_y_box_pin() {
+    fn spawn_call_emits_tokio_spawn_and_box_pin() {
         let src = "@background\nfn job() -> Int { return 42 }\n\
                    async fn caller() -> Int {\n\
                        let f = spawn(job())\n\
@@ -40538,7 +40538,7 @@ mod tests {
     }
 
     #[test]
-    fn background_decorator_no_emite_codigo_extra() {
+    fn background_decorator_does_not_emit_extra_code() {
         // `@background` is a checker marker; in codegen the fn is
         // emitted as a normal `pub fn` with no visible difference.
         let src = "@background\nfn send(addr: Str) -> Null { return null }\n\
@@ -40555,7 +40555,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn ok_propagation_coerce_pyany_a_str_adentro_de_return_ok() {
+    fn ok_propagation_coerce_pyany_to_str_inside_return_ok() {
         // v0.9.53 8.7-ok-propagation — `return Ok(json.dumps(...)?)`
         // inside fn `-> Result<Str>` previously failed in rustc with
         // `expected String, found __FitzPyObject` because `gen_ok`
@@ -40579,7 +40579,7 @@ mod tests {
     }
 
     #[test]
-    fn ok_propagation_coerce_pyany_a_int_adentro_de_return_ok() {
+    fn ok_propagation_coerce_pyany_to_int_inside_return_ok() {
         // Variant: PyAny → Int (via __fitz_py_extract_i64).
         let src = "from python import math\n\
                    fn answer() -> Result<Int> {\n  \
@@ -40594,7 +40594,7 @@ mod tests {
     }
 
     #[test]
-    fn ok_propagation_inner_ya_correcto_no_emite_coerce_innecesario() {
+    fn ok_propagation_inner_already_correct_does_not_emit_unnecessary_coerce() {
         // Sanity: if `inner` already types to the expected `T`, must not emit
         // coerce (`coerce` returns the code as-is when `from == to`).
         // The return becomes `return Ok(<inner code>);` without extra wrapping.
@@ -40621,7 +40621,7 @@ mod tests {
     // ---- v0.9.54 8.7.bis — PyAny → Map<Str, V> primitive coercion ----
 
     #[test]
-    fn map_coerce_pyany_a_map_str_str_emite_helper() {
+    fn map_coerce_pyany_to_map_str_str_emits_helper() {
         // Canonical coercion: `let m: Map<Str, Str> = json.loads(raw)?`
         // inside fn `-> Result<Map<Str, Str>>` now emits
         // `__fitz_py_to_map_string_string(&...)` instead of failing
@@ -40641,7 +40641,7 @@ mod tests {
     }
 
     #[test]
-    fn map_coerce_pyany_a_map_str_int_emite_helper() {
+    fn map_coerce_pyany_to_map_str_int_emits_helper() {
         let src = "from python import json\n\
                    fn parse(raw: Str) -> Result<Map<Str, Int>> {\n  \
                        let d = json.loads(raw)?\n  \
@@ -40656,7 +40656,7 @@ mod tests {
     }
 
     #[test]
-    fn map_coerce_pyany_a_map_str_float_emite_helper() {
+    fn map_coerce_pyany_to_map_str_float_emits_helper() {
         let src = "from python import json\n\
                    fn parse(raw: Str) -> Result<Map<Str, Float>> {\n  \
                        let d = json.loads(raw)?\n  \
@@ -40671,7 +40671,7 @@ mod tests {
     }
 
     #[test]
-    fn map_coerce_pyany_a_map_str_bool_emite_helper() {
+    fn map_coerce_pyany_to_map_str_bool_emits_helper() {
         let src = "from python import json\n\
                    fn parse(raw: Str) -> Result<Map<Str, Bool>> {\n  \
                        let d = json.loads(raw)?\n  \
@@ -40686,7 +40686,7 @@ mod tests {
     }
 
     #[test]
-    fn map_coerce_pyany_a_map_compuesto_queda_gradual() {
+    fn map_coerce_pyany_to_compound_map_stays_gradual() {
         // Map<Str, Map<Str, Int>> is composite — stays gradual (documented
         // minor debt). Codegen must NOT emit a helper — produces a Rust
         // build error, NOT a silent panic.
@@ -40705,7 +40705,7 @@ mod tests {
     }
 
     #[test]
-    fn py_await_split_emite_fitz_py_await_obj() {
+    fn py_await_split_emits_fitz_py_await_obj() {
         // Split pattern: the coroutine is bound, then awaited.
         //   let fut = asyncio.sleep(1)?    // fut: PyAny (the coro)
         //   let _ = fut.await              // `__fitz_py_await_obj` applies
@@ -40734,7 +40734,7 @@ mod tests {
     }
 
     #[test]
-    fn py_await_inline_sigue_usando_invoke_await() {
+    fn py_await_inline_keeps_using_invoke_await() {
         // Sanity: the inline `py_call()?.await` pattern still emits
         // `__fitz_py_invoke_await(...)` (original combined helper) and
         // is NOT contaminated with `__fitz_py_await_obj`.
@@ -40756,7 +40756,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn ws_codegen_emite_asyncapi_ui_handler_y_route() {
+    fn ws_codegen_emits_asyncapi_ui_handler_and_route() {
         let src = "@server(43978)\n\
                    fn main() => 0\n\
                    @ws(\"/chat\")\n\
@@ -40785,7 +40785,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_codegen_asyncapi_ui_cede_si_user_declara_handler() {
+    fn ws_codegen_asyncapi_ui_yields_if_user_declares_handler() {
         // If the user declared their own `@get("/asyncapi")`, the
         // auto-register yields (the user's wins).
         let src = "@server(43979)\n\
@@ -40808,7 +40808,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_codegen_emite_helper_bearer_subprotocol() {
+    fn ws_codegen_emits_helper_bearer_subprotocol() {
         // 9.w.2-ws-auth-browser — when there are @ws handlers, the prelude
         // emits the `__fitz_ws_extract_bearer_subprotocol` helper.
         let src = "@server(43989)\n\
@@ -40832,7 +40832,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_codegen_auth_handler_inyecta_authorization_desde_bearer_subproto() {
+    fn ws_codegen_auth_handler_injects_authorization_from_bearer_subproto() {
         // Wrapper with @authenticated should inject
         // `authorization: Bearer <token>` into the provider's map when
         // the client sends the token via subprotocol.
@@ -40855,7 +40855,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_codegen_sin_ws_no_emite_asyncapi_ui() {
+    fn ws_codegen_without_ws_does_not_emit_asyncapi_ui() {
         // HTTP-only program (no @ws handlers) must NOT generate the
         // AsyncAPI UI handler.
         let src = "@server(43980)\n\
@@ -40874,7 +40874,7 @@ mod tests {
     }
 
     #[test]
-    fn py_await_obj_helper_no_emitido_sin_async() {
+    fn py_await_obj_helper_not_emitted_without_async() {
         // Program without async: neither `__fitz_py_await_obj` nor
         // `__fitz_py_invoke_await` are emitted. Sync Python programs do
         // not pay the cost of the tokio + asyncio bridge.
@@ -40902,7 +40902,7 @@ mod tests {
     // ---------------------------------------------------------------
 
     #[test]
-    fn infer_param_int_desde_call_site() {
+    fn infer_param_int_from_call_site() {
         // `fn double(n) => n * 2` + `double(21)` → `n: Int` inferred.
         let src = "fn double(n) => n * 2\nprint(double(21))";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen failed: {}", e));
@@ -40914,7 +40914,7 @@ mod tests {
     }
 
     #[test]
-    fn infer_param_nominal_desde_call_site() {
+    fn infer_param_nominal_from_call_site() {
         // `fn greet(u) => "hola {u.name}"` + call with concrete User
         // now infers as `u: User` and emits the correct Rust
         // signature. Previously this case only worked on codegen
@@ -40948,7 +40948,7 @@ mod tests {
     }
 
     #[test]
-    fn infer_param_str_desde_call_site() {
+    fn infer_param_str_from_call_site() {
         // Str case — `fn shout(s) => s.upper()` + call with Str literal.
         let src = "fn shout(s) -> Str {\n\
                        return s.upper()\n\
@@ -40963,7 +40963,7 @@ mod tests {
     }
 
     #[test]
-    fn fill_inferred_param_types_resuelve_nominal_via_typeenv() {
+    fn fill_inferred_param_types_resolves_nominal_via_typeenv() {
         // Path #1 — `fill_inferred_param_types` now resolves
         // `Type::Nominal(id)` to `TypeExpr::Named(canon_name)` using
         // the `TypeEnv`. Previously it returned None and path #1 left the
@@ -41008,7 +41008,7 @@ mod tests {
     // ---- Phase 10.1.c — codegen of the `db` module ----
 
     #[test]
-    fn codegen_db_connect_emite_helper() {
+    fn codegen_db_connect_emits_helper() {
         // `db.connect(url)` translates to `__fitz_db_connect(url)`.
         // The program needs `async fn main` because the helper is
         // async; we wrap it.
@@ -41028,7 +41028,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_db_query_emite_helper() {
+    fn codegen_db_query_emits_helper() {
         // `conn.query(sql, args).await?` → `__fitz_db_query(&conn, sql, args).await?`.
         let rust = gen("async fn run() -> Result<Bool> {\n  \
                  let conn = db.connect(\"postgres://x@h/d\").await?\n  \
@@ -41043,7 +41043,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_db_exec_emite_helper() {
+    fn codegen_db_exec_emits_helper() {
         let rust = gen("async fn run() -> Result<Bool> {\n  \
                  let conn = db.connect(\"postgres://x@h/d\").await?\n  \
                  let _n = conn.exec(\"INSERT INTO t VALUES (1)\", []).await?\n  \
@@ -41057,7 +41057,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_db_close_emite_helper() {
+    fn codegen_db_close_emits_helper() {
         let rust = gen("async fn run() -> Null {\n  \
                  let conn = db.connect(\"postgres://x@h/d\").await\n  \
                  match conn {\n    \
@@ -41073,7 +41073,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_db_close_devuelve_result_w5() {
+    fn codegen_db_close_returns_result_w5() {
         // W5 (v0.10.6) — `db.close().await?` now compiles because
         // `close()` returns `Future<Result<Null>>` (previously
         // `Future<Null>` and `?` gave a runtime error).
@@ -41103,7 +41103,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_db_no_usa_db_no_emite_prelude() {
+    fn codegen_db_does_not_use_db_does_not_emit_prelude() {
         // A program without `db` must not emit the prelude (saves LoC
         // and avoids compiling unnecessary crypto deps).
         let rust = gen("let x = 42\nprint(x)").expect("codegen OK");
@@ -41118,7 +41118,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_db_cargo_toml_suma_deps() {
+    fn codegen_db_cargo_toml_adds_deps() {
         // A program with db must see sha2/hmac/base64 in the Cargo.toml.
         // We use `cargo_toml_for` directly (parallel to existing tests).
         let toml = cargo_toml_for(
@@ -41175,7 +41175,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_db_cargo_toml_sin_db_no_suma_deps() {
+    fn codegen_db_cargo_toml_without_db_does_not_add_deps() {
         let toml = cargo_toml_for(
             "foo", false, false, false, false, false, false, false, false, false, false, false,
             false,
@@ -41197,7 +41197,7 @@ mod tests {
     // ---- Phase 10.b.3 — ORM read methods in codegen ----
 
     #[test]
-    fn codegen_orm_type_all_emite_select_con_cols_quoted() {
+    fn codegen_orm_type_all_emits_select_with_cols_quoted() {
         // `User.all(db)` emits `SELECT "id", "name", "age" FROM "users"`,
         // wraps in `__fitz_db_query`, deserializes each row to `UserData`
         // with the `__FromFitzDbRow` trait.
@@ -41227,7 +41227,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_type_first_emite_limit_1_y_no_rows_fallback() {
+    fn codegen_orm_type_first_emits_limit_1_and_no_rows_fallback() {
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
                        name: Str\n\
@@ -41253,7 +41253,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_type_count_emite_select_count_star() {
+    fn codegen_orm_type_count_emits_select_count_star() {
         let src = "@table(\"items\") type Item {\n  \
                        @primary id: Int = 0\n  \
                        name: Str\n\
@@ -41275,7 +41275,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_respeta_column_name_override() {
+    fn codegen_orm_respects_column_name_override() {
         // `@column(name="sql_name")` must be respected in the SELECT
         // and in the deserializer (lookup by sql_name, not by field).
         let src = "@table(\"posts\") type Post {\n  \
@@ -41301,7 +41301,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_emite_impl_from_fitz_db_row_per_tipo() {
+    fn codegen_orm_emits_impl_from_fitz_db_row_per_type() {
         // The `impl __FromFitzDbRow for FooData` is emitted per
         // type with `@table` (and not emitted for types without `@table`).
         let src = "@table(\"a\") type Tagged {\n  \
@@ -41327,7 +41327,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_where_chain_emite_query_builder_y_terminal_all() {
+    fn codegen_orm_where_chain_emits_query_builder_and_terminal_all() {
         // 10.b.5 — `User.where(...).all(db)` now DOES compile: emits the
         // QueryBuilder constructor with the first WHERE fragment +
         // terminal `.all(&db)` inside an async block.
@@ -41362,7 +41362,7 @@ mod tests {
     // ---- Phase 10.b.4 — ORM write methods in codegen ----
 
     #[test]
-    fn codegen_orm_insert_emite_insert_returning_con_cols_quoted() {
+    fn codegen_orm_insert_emits_insert_returning_with_cols_quoted() {
         // `User.insert(db, user)` emits `INSERT INTO "users"
         // ("id", "name", "age") VALUES ($1, $2, $3) RETURNING "id",
         // "name", "age"` with parameterized args read from the record.
@@ -41411,7 +41411,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_insert_pk_int_sentinel_zero_emite_branch_runtime() {
+    fn codegen_orm_insert_pk_int_sentinel_zero_emits_runtime_branch() {
         // W4 (v0.10.6) — when there is `@primary id: Int`, codegen emits
         // a runtime branch `if __g.id == 0 { SQL_NO_PK } else { SQL_WITH_PK }`
         // so that Postgres assigns the id via bigserial when the user passes
@@ -41452,7 +41452,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_insert_sin_primary_int_no_emite_branch_runtime() {
+    fn codegen_orm_insert_without_primary_int_does_not_emit_runtime_branch() {
         // W4 — type without `@primary id: Int` (e.g. primary Str, or no
         // primary): the shape does NOT emit a branch — uses the single SQL as
         // before. Guarantees the non-bigserial path is not broken.
@@ -41480,7 +41480,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_insert_respeta_column_name_override() {
+    fn codegen_orm_insert_respects_column_name_override() {
         // `@column(name="sql_name")` must be used in col_list, RETURNING,
         // and NOT in the field accessor (`__g.<fitz_name>`).
         let src = "@table(\"events\") type Event {\n  \
@@ -41516,7 +41516,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_insert_marshalla_nullable_como_option_match() {
+    fn codegen_orm_insert_marshals_nullable_as_option_match() {
         // `Nullable<T>` is emitted as `match field { Some(v) => ...,
         // None => __FitzPgValue::Null }` parallel to `Value::Null` in the
         // evaluator.
@@ -41548,7 +41548,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_update_y_delete_sin_where_aborta_con_mensaje_de_seguridad() {
+    fn codegen_orm_update_and_delete_without_where_aborts_with_safety_message() {
         // 10.b.5 — dispatch on `Type.update(...)` / `Type.delete(...)`
         // WITHOUT prior `.where(...)` is rejected in codegen with a message
         // parallel to the evaluator's safety guard (would affect the whole
@@ -41590,7 +41590,7 @@ mod tests {
     // ---- Phase 10.b.5 — QueryBuilder chain in codegen ----
 
     #[test]
-    fn codegen_orm_chain_de_3_metodos_emite_with_chain_completo() {
+    fn codegen_orm_chain_of_3_methods_emits_complete_with_chain() {
         // `User.where(f).limit(10).all(db)` emits three calls
         // chained on the QueryBuilder + terminal `.all(&db)`.
         let src = "@table(\"users\") type User {\n  \
@@ -41622,7 +41622,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_multiples_wheres_combinan_con_and_y_renumeran() {
+    fn codegen_orm_multiple_wheres_combine_with_and_and_renumber() {
         // Two consecutive `.where(...)`: the second combines with
         // AND via `with_where`. The runtime renumbers the fragment's
         // placeholders so they follow the first where. Codegen does NOT
@@ -41655,7 +41655,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_order_by_y_limit_emiten_with_order_by_y_with_limit() {
+    fn codegen_orm_order_by_and_limit_emit_with_order_by_and_with_limit() {
         // `User.order_by(fn(u) => -u.age).limit(5).all(db)` emits
         // `.with_order_by("age", true)` (DESC because of `-`) and
         // `.with_limit(5i64)`.
@@ -41680,7 +41680,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_group_by_y_count_emiten_with_group_by_y_count() {
+    fn codegen_orm_group_by_and_count_emit_with_group_by_and_count() {
         // `User.group_by(fn(u) => u.role).count(db)` emits
         // `.with_group_by("role", "role")` + terminal `.count(&db)`.
         // In 10.b.5 the GROUP BY is saved in state but `.count`
@@ -41712,7 +41712,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_update_con_where_emite_set_clauses_y_args_init() {
+    fn codegen_orm_update_with_where_emits_set_clauses_and_args_init() {
         // `User.where(...).update(db, {"name": "ada"})` emits the
         // UPDATE's SET as string literal (`"name" = $1`) + initial Vec
         // of args with `<_ as __IntoPgValue>::into_pg("ada".to_string())`.
@@ -41742,7 +41742,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_update_con_map_var_emite_dispatch_dinamico_w7() {
+    fn codegen_orm_update_with_map_var_emits_dynamic_dispatch_w7() {
         // W7 (v0.10.6) — `.update(db, changes)` with `changes: Map<Str, Any>`
         // (var, not literal) now compiles. Codegen emits an IIFE dynamic
         // dispatch that validates keys + runtime types against the
@@ -41785,7 +41785,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_update_con_map_var_jsonb_field_serializa_via_helper_w7() {
+    fn codegen_orm_update_with_map_var_jsonb_field_serializes_via_helper_w7() {
         // W7 — for `Map<Str, Any>` field (jsonb), the dynamic dispatch
         // serializes the runtime value via `__fitz_fitz_value_to_jsonb`
         // and emits the `::jsonb` cast.
@@ -41810,7 +41810,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_delete_con_where_emite_delete_with_where() {
+    fn codegen_orm_delete_with_where_emits_delete_with_where() {
         // `User.where(...).delete(db)` emits terminal `.delete_with_where(&db)`.
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
@@ -41831,7 +41831,7 @@ mod tests {
     // ---- Phase 10.b.6 — Scalar aggregates over QueryBuilder ----
 
     #[test]
-    fn codegen_orm_sum_scalar_emite_aggregate_f64_con_sql_func_uppercase() {
+    fn codegen_orm_sum_scalar_emits_aggregate_f64_with_sql_func_uppercase() {
         // `Order.sum(fn(o) => o.price, db)` emits the
         // `aggregate_f64` helper with `SUM("price")` as agg_expr literal.
         let src = "@table(\"orders\") type Order {\n  \
@@ -41859,7 +41859,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_min_y_max_emiten_aggregate_f64_con_func_correcto() {
+    fn codegen_orm_min_and_max_emit_aggregate_f64_with_correct_func() {
         let src_min = "@table(\"orders\") type Order {\n  \
                            @primary id: Int = 0\n  \
                            price: Float\n\
@@ -41892,7 +41892,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_avg_emite_cast_float8_explicito() {
+    fn codegen_orm_avg_emits_explicit_float8_cast() {
         // AVG needs `::float8` to avoid numeric OID (1700)
         // which the driver does not support. Parallel to the evaluator
         // (orm_qb_avg ~11364).
@@ -41917,7 +41917,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_sum_respeta_column_override_via_meta() {
+    fn codegen_orm_sum_respects_column_override_via_meta() {
         // Field `price` declared with `@column(name="amount_cents")` →
         // the emitted SQL uses the sql_name override, not the Fitz name.
         let src = "@table(\"orders\") type Order {\n  \
@@ -41941,7 +41941,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_sum_sobre_field_inexistente_aborta_con_mensaje_claro() {
+    fn codegen_orm_sum_over_nonexistent_field_aborts_with_clear_message() {
         let src = "@table(\"orders\") type Order {\n  \
                        @primary id: Int = 0\n  \
                        price: Float\n\
@@ -41960,7 +41960,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_sum_con_closure_no_field_aborta_con_mensaje_claro() {
+    fn codegen_orm_sum_with_closure_no_field_aborts_with_clear_message() {
         // The closure body must be `u.field`, not an arbitrary
         // expression. `o.price * 2` is valid in the evaluator only if
         // we lowered to a mini-SQL — for now we reject it.
@@ -41984,7 +41984,7 @@ mod tests {
     // ---- Phase 10.b.7 — Navigation methods on Instance with @table ----
 
     #[test]
-    fn codegen_orm_belongs_to_navigation_emite_where_primary_eq_fk() {
+    fn codegen_orm_belongs_to_navigation_emits_where_primary_eq_fk() {
         // `post.user_id(db)` with `@belongs_to("User") user_id: Int` must
         // emit: WHERE "id" = $1, value = post.user_id (the local-side
         // FK). Terminal: .first (BelongsTo → 1 row).
@@ -42025,7 +42025,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_has_many_navigation_emite_where_fk_eq_primary_y_terminal_all() {
+    fn codegen_orm_has_many_navigation_emits_where_fk_eq_primary_and_terminal_all() {
         // `user.posts(db)` with `@has_many("Post", via="author_id")` must
         // emit: WHERE "author_id" = $1, value = user.id (local primary).
         // Terminal: .all (HasMany → List).
@@ -42058,7 +42058,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_has_one_navigation_emite_terminal_first() {
+    fn codegen_orm_has_one_navigation_emits_terminal_first() {
         // `user.profile(db)` with `@has_one("Profile")` must emit
         // WHERE on the target's FK (user_id by default) and terminal
         // `.first`. Default `via` for HasOne on User = "user_id".
@@ -42091,7 +42091,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_navigation_respeta_column_override_del_target() {
+    fn codegen_orm_navigation_respects_target_column_override() {
         // The target type's sql_name override must appear in the WHERE.
         // Here `User.id` has `@column(name="user_pk")` → WHERE "user_pk" = $1.
         let src = "@table type User {\n  \
@@ -42118,7 +42118,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_navigation_async_block_envolvente() {
+    fn codegen_orm_navigation_async_wrapping_block() {
         // The navigation terminal is async (returns Future<Result<Target>>).
         // The call site `.await?` requires codegen to emit an
         // `(async { ... })` so that the chain types Rust-side.
@@ -42147,7 +42147,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_aggregate_emite_async_block_envolvente() {
+    fn codegen_orm_aggregate_emits_async_wrapping_block() {
         // The terminal is async (returns Future<Result<Float>>) — codegen
         // wraps it in `(async { ... })` so that the call site's `.await?`
         // types correctly.
@@ -42176,7 +42176,7 @@ mod tests {
     // ---- Phase 10.b.8.a — Postgres arrays (List<scalar>) ----
 
     #[test]
-    fn codegen_orm_list_int_field_emite_array_int8_en_insert() {
+    fn codegen_orm_list_int_field_emits_array_int8_in_insert() {
         // Field `tags: List<Int>` must emit:
         //   - deserialize: match on __FitzPgValue::Array, iterate and
         //     coerce each item with __fitz_pg_to_i64.
@@ -42210,7 +42210,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_list_str_field_emite_text_array() {
+    fn codegen_orm_list_str_field_emits_text_array() {
         let src = "@table(\"posts\") type Post {\n  \
                        @primary id: Int = 0\n  \
                        labels: List<Str>\n\
@@ -42236,7 +42236,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_list_float_y_bool_arrays() {
+    fn codegen_orm_list_float_and_bool_arrays() {
         let src = "@table(\"signals\") type Signal {\n  \
                        @primary id: Int = 0\n  \
                        weights: List<Float>\n  \
@@ -42259,7 +42259,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_list_nominal_o_unsupported_aborta() {
+    fn codegen_orm_list_nominal_or_unsupported_aborts() {
         // List<User> is NOT supported (List<Nominal> is debt).
         let src = "@table type User { id: Int }\n\
                    @table(\"groups\") type Group {\n  \
@@ -42284,7 +42284,7 @@ mod tests {
     // ---- Phase 10.b.8.b — Free JSONB (Map<Str, Any>) ----
 
     #[test]
-    fn codegen_orm_map_any_emite_jsonb_helpers_y_cast() {
+    fn codegen_orm_map_any_emits_jsonb_helpers_and_cast() {
         // Field `meta: Map<Str, Any>` must emit:
         //   - db prelude with __fitz_jsonb_to_fitz_value and
         //     __fitz_fitz_value_to_jsonb helpers.
@@ -42345,7 +42345,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_map_concreto_no_jsonb_aborta_con_mensaje_claro() {
+    fn codegen_orm_concrete_map_no_jsonb_aborts_with_clear_message() {
         // Map<Str, Int> is NOT supported (not free JSONB — the homogeneous
         // concrete value does not use __FitzValue). Clear error citing
         // "usá Map<Str, Any>". Needs an ORM call so codegen
@@ -42371,7 +42371,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_cargo_toml_con_db_y_fitz_value_suma_serde_json() {
+    fn codegen_orm_cargo_toml_with_db_and_fitz_value_adds_serde_json() {
         // A program with Map<Str, Any> field in a @table type triggers
         // both uses_db and uses_fitz_value. Cargo.toml must include
         // serde_json with preserve_order.
@@ -42391,7 +42391,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_list_int_nullable_emite_option_envolvente() {
+    fn codegen_orm_list_int_nullable_emits_wrapping_option() {
         // `tags: List<Int>?` (nullable). The deserialize in
         // orm_field_coerce_block has a Nullable arm that recurses to
         // the inner; the SQL cast must still apply (`::int8[]`).
@@ -42445,7 +42445,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_binop_comparaciones_emiten_sql_correcto() {
+    fn codegen_where_binop_comparisons_emit_correct_sql() {
         // == != < <= > >= on fields → SQL operators.
         let r = where_sql_fragment("u.age == 18");
         assert!(
@@ -42473,7 +42473,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_binop_logicos_and_or_emiten_keywords_sql() {
+    fn codegen_where_binop_logical_and_or_emit_sql_keywords() {
         // Fitz uses keywords `and`/`or`/`not` (not symbols `&&`/`||`/`!`).
         let r = where_sql_fragment("u.age > 18 and u.active == true");
         assert!(r.contains(" AND "), "expected keyword `AND` SQL, fue: {r}",);
@@ -42482,7 +42482,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_unaryop_not_emite_not_envolvente() {
+    fn codegen_where_unaryop_not_emits_wrapping_not() {
         let r = where_sql_fragment("not (u.age > 18)");
         assert!(
             r.contains("(NOT (\\\"age\\\" > $1))"),
@@ -42491,7 +42491,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_aritmetica_dentro_del_where() {
+    fn codegen_where_arithmetic_inside_where() {
         // Arithmetic operations inside the where are emitted to SQL.
         let r = where_sql_fragment("u.age + 5 > 25");
         assert!(
@@ -42501,7 +42501,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_is_null_y_is_not_null_emiten_sql_estandar() {
+    fn codegen_where_is_null_and_is_not_null_emit_standard_sql() {
         let r = where_sql_fragment("u.deleted_at.is_null()");
         assert!(
             r.contains("\\\"deleted_at\\\" IS NULL"),
@@ -42515,7 +42515,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_is_in_con_lista_de_literales_emite_in() {
+    fn codegen_where_is_in_with_literal_list_emits_in() {
         let r = where_sql_fragment("u.age.is_in([18, 21, 65])");
         // Must emit IN ($1, $2, $3) — 3 bound placeholders.
         assert!(
@@ -42528,7 +42528,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_is_in_lista_vacia_emite_false() {
+    fn codegen_where_is_in_empty_list_emits_false() {
         let r = where_sql_fragment("u.age.is_in([])");
         assert!(
             r.contains("false"),
@@ -42537,7 +42537,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_like_e_ilike_emiten_operadores_apropiados() {
+    fn codegen_where_like_and_ilike_emit_appropriate_operators() {
         let r = where_sql_fragment("u.name.like(\"a%\")");
         assert!(
             r.contains("\\\"name\\\" LIKE $1"),
@@ -42551,7 +42551,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_starts_with_ends_with_contains_wrapean_con_percent() {
+    fn codegen_where_starts_with_ends_with_contains_wrap_with_percent() {
         // starts_with("ada") → LIKE 'ada%'
         let r = where_sql_fragment("u.name.starts_with(\"ada\")");
         assert!(
@@ -42578,7 +42578,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_field_access_externo_emite_into_pg_binding_w6() {
+    fn codegen_where_external_field_access_emits_into_pg_binding_w6() {
         // W6 (v0.10.6) — `.where(fn(p) => p.lang == body.lang)` compiles.
         // Previously it only accepted `<param>.<field>`; now it delegates to gen_expr
         // over the entire body, which resolves field access on
@@ -42609,7 +42609,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_field_access_externo_chain_compila_w6() {
+    fn codegen_where_external_field_access_chain_compiles_w6() {
         // W6 — longer chain: `req.body.email`. gen_expr recurses
         // over the entire body and emits the nested field access.
         let src = "type Inner { email: Str }\n\
@@ -42630,7 +42630,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_starts_with_acepta_var_externa_w3() {
+    fn codegen_where_starts_with_accepts_external_var_w3() {
         // W3 (v0.10.6) — `.starts_with(<var>)` now compiles. The SQL
         // becomes `LIKE $N || '%'` and the var is bound as Text. No
         // runtime escape — parallel to `.like(var)`.
@@ -42658,7 +42658,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_ends_with_y_contains_aceptan_var_externa_w3() {
+    fn codegen_where_ends_with_and_contains_accept_external_var_w3() {
         // W3 — ends_with and contains also accept vars.
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
@@ -42682,7 +42682,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_starts_with_escapea_caracteres_like_especiales() {
+    fn codegen_where_starts_with_escapes_special_like_characters() {
         // `%` and `_` in the user's string must be escaped with `\` so
         // the resulting pattern is predictable. starts_with("a%b")
         // → LIKE 'a\%b%' (not 'a%b%' which would match anything).
@@ -42694,7 +42694,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_field_inexistente_aborta_con_mensaje_claro() {
+    fn codegen_where_nonexistent_field_aborts_with_clear_message() {
         // `u.does_not_exist` → error with list of available fields.
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
@@ -42714,7 +42714,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_method_desconocido_aborta_con_lista_de_soportados() {
+    fn codegen_where_unknown_method_aborts_with_supported_list() {
         // `u.name.unknown(...)` → clear error listing the supported
         // methods (is_null, is_not_null, is_in, like, ilike,
         // starts_with, ends_with, contains).
@@ -42736,7 +42736,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_respeta_column_override_en_sql_emitido() {
+    fn codegen_where_respects_column_override_in_emitted_sql() {
         // Field with @column(name="full_name") → the SQL must use
         // "full_name", not "name".
         let src = "@table(\"users\") type User {\n  \
@@ -42762,7 +42762,7 @@ mod tests {
     // ---- Phase 10.b.9.b — new operators: between, %, external var ----
 
     #[test]
-    fn codegen_where_between_emite_sql_between_inclusivo() {
+    fn codegen_where_between_emits_inclusive_sql_between() {
         let r = where_sql_fragment("u.age.between(18, 65)");
         assert!(
             r.contains("\\\"age\\\" BETWEEN $1 AND $2"),
@@ -42774,7 +42774,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_between_arity_invalida_aborta() {
+    fn codegen_where_between_invalid_arity_aborts() {
         // `between(low)` with 1 arg → error.
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
@@ -42794,7 +42794,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_modulo_emite_porcentaje_sql() {
+    fn codegen_where_modulo_emits_sql_percent() {
         // `u.age % 2 == 0` (even) → SQL `(("age" % $1) = $2)`.
         let r = where_sql_fragment("u.age % 2 == 0");
         assert!(
@@ -42804,7 +42804,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_var_externa_emite_into_pg_binding() {
+    fn codegen_where_external_var_emits_into_pg_binding() {
         // External var captured from the outer scope → must emit a
         // binding via `__IntoPgValue::into_pg(...)` with the Rust
         // expr of the ident.
@@ -42845,7 +42845,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_has_path_emite_predicate_jsonb_path() {
+    fn codegen_where_has_path_emits_predicate_jsonb_path() {
         let r = where_sql_fragment_with_jsonb("e.data.has_path([\"user\", \"id\"])");
         assert!(
             r.contains("\\\"data\\\" #> $1::text[] IS NOT NULL"),
@@ -42863,7 +42863,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_path_text_emite_extract_text() {
+    fn codegen_where_path_text_emits_extract_text() {
         let r = where_sql_fragment_with_jsonb("e.data.path_text([\"a\", \"b\"]) == \"x\"");
         assert!(
             r.contains("((\\\"data\\\" #>> $1::text[]) = $2)"),
@@ -42872,7 +42872,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_path_int_emite_cast_bigint() {
+    fn codegen_where_path_int_emits_cast_bigint() {
         let r = where_sql_fragment_with_jsonb("e.data.path_int([\"n\"]) == 42");
         assert!(
             r.contains("(((\\\"data\\\" #>> $1::text[])::bigint) = $2)"),
@@ -42885,7 +42885,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_path_float_emite_cast_float8() {
+    fn codegen_where_path_float_emits_cast_float8() {
         let r = where_sql_fragment_with_jsonb("e.data.path_float([\"score\"]) > 0.5");
         assert!(
             r.contains("(((\\\"data\\\" #>> $1::text[])::float8) > $2)"),
@@ -42894,7 +42894,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_path_bool_emite_cast_boolean() {
+    fn codegen_where_path_bool_emits_cast_boolean() {
         let r = where_sql_fragment_with_jsonb("e.data.path_bool([\"flag\"])");
         assert!(
             r.contains("((\\\"data\\\" #>> $1::text[])::boolean)"),
@@ -42903,7 +42903,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_path_vacio_aborta_con_mensaje_claro() {
+    fn codegen_where_path_empty_aborts_with_clear_message() {
         let src = "@table(\"events\") type Event {\n  \
                        @primary id: Int = 0\n  \
                        data: Map<Str, Str>\n\
@@ -42922,7 +42922,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_matches_emite_to_tsquery() {
+    fn codegen_where_matches_emits_to_tsquery() {
         // `.matches("query")` on Str field → `"col" @@ to_tsquery($N)`.
         let r = where_sql_fragment("u.name.matches(\"ada\")");
         assert!(
@@ -42936,7 +42936,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_plainto_matches_emite_plainto_tsquery() {
+    fn codegen_where_plainto_matches_emits_plainto_tsquery() {
         let r = where_sql_fragment("u.name.plainto_matches(\"hola mundo\")");
         assert!(
             r.contains("\\\"name\\\" @@ plainto_tsquery($1)"),
@@ -42945,7 +42945,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_path_sobre_field_no_jsonb_aborta() {
+    fn codegen_where_path_over_non_jsonb_field_aborts() {
         let src = "@table(\"users\") type User {\n  \
                        @primary id: Int = 0\n  \
                        name: Str\n\
@@ -42966,7 +42966,7 @@ mod tests {
     // ---- Phase 10.b.15 — Eager loading (.preload over HasMany) ----
 
     #[test]
-    fn codegen_preload_emite_with_preload_y_dispatch_estatico() {
+    fn codegen_preload_emits_with_preload_and_static_dispatch() {
         // `User.preload("posts").all(db)` must emit the wrapper
         // with .with_preload("posts") + the static dispatch that
         // executes the batch + populate.
@@ -43000,7 +43000,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_preload_belongs_to_aborta_solo_has_many() {
+    fn codegen_preload_belongs_to_aborts_only_has_many() {
         // `.preload(name)` only accepts @has_many. BelongsTo → error.
         let src = "@table type User { @primary id: Int = 0 }\n\
                    @table type Post {\n  \
@@ -43021,7 +43021,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_preload_nombre_inexistente_aborta() {
+    fn codegen_preload_nonexistent_name_aborts() {
         let src = "@table type Post { @primary id: Int = 0, user_id: Int }\n\
                    @table type User {\n  \
                        @primary id: Int = 0\n  \
@@ -43043,7 +43043,7 @@ mod tests {
     // ---- Phase 10.b.14 — GROUP BY + aggregate (Aggregated<Row>) ----
 
     #[test]
-    fn codegen_group_by_count_emite_aggregate_groups_y_list_map() {
+    fn codegen_group_by_count_emits_aggregate_groups_and_list_map() {
         // `User.group_by(fn(u) => u.role).count(db)` must emit the
         // `aggregate_groups` helper with `COUNT(*)` as agg_expr and
         // return `Future<Result<List<Map<Str, Any>>>>`.
@@ -43069,7 +43069,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_group_by_sum_emite_aggregate_groups_y_func_uppercase() {
+    fn codegen_group_by_sum_emits_aggregate_groups_and_func_uppercase() {
         let src = "@table type Sale {\n  \
                        @primary id: Int = 0\n  \
                        region: Str\n  \
@@ -43089,7 +43089,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_group_by_all_aborta_con_mensaje_claro() {
+    fn codegen_group_by_all_aborts_with_clear_message() {
         // `.all(db)` on Aggregated → clear checker error
         // (rejects BEFORE codegen).
         let src = "@table type User {\n  \
@@ -43113,7 +43113,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_group_by_chain_completo_compila() {
+    fn codegen_group_by_full_chain_compiles() {
         // .where + .group_by + .order_by + .limit + aggregate.
         let src = "@table type Sale {\n  \
                        @primary id: Int = 0\n  \
@@ -43137,7 +43137,7 @@ mod tests {
     // ---- Phase 10.b.13.a — Navigation chain (without db = QueryBuilder) ----
 
     #[test]
-    fn codegen_navigation_sin_db_devuelve_query_builder() {
+    fn codegen_navigation_without_db_returns_query_builder() {
         // `user.posts()` (no args) must emit a QueryBuilder<Post>
         // with the implicit WHERE already applied. Type: QueryBuilder<Post>,
         // not Future<...>. Without enveloping async block.
@@ -43165,7 +43165,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_navigation_chain_completo_compila() {
+    fn codegen_navigation_full_chain_compiles() {
         // `u.posts().where(...).limit(5).all(db).await?` chain of
         // 4 ops on the QB returned by navigation.
         let src = "@table type Post {\n  \
@@ -43197,7 +43197,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_navigation_con_db_sigue_funcionando_compat() {
+    fn codegen_navigation_with_db_keeps_working_compat() {
         // Backward compat: `instance.posts(db)` still emits the
         // direct terminal (.all for HasMany).
         let src = "@table type Post {\n  \
@@ -43223,7 +43223,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_navigation_mas_de_un_arg_aborta() {
+    fn codegen_navigation_more_than_one_arg_aborts() {
         // The checker rejects BEFORE codegen (arity check
         // in infer_method_call ~3745). We use `gen_no_check` to
         // skip the checker and test the codegen error itself.
@@ -43257,7 +43257,7 @@ mod tests {
     // ---- Phase 10.b.12.b — Concrete Map<Str, T> (typed JSONB) ----
 
     #[test]
-    fn codegen_orm_map_str_int_concreto_emite_deserialize_y_marshal() {
+    fn codegen_orm_concrete_map_str_int_emits_deserialize_and_marshal() {
         // Field `counts: Map<Str, Int>` must emit:
         //   - struct field types Arc<Mutex<Vec<(String, i64)>>>.
         //   - deserialize: serde_json::from_str of the Text + iter on
@@ -43287,7 +43287,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_map_str_str_concreto_compila_e_insert_marshalea() {
+    fn codegen_orm_concrete_map_str_str_compiles_and_insert_marshals() {
         let src = "@table(\"docs\") type Doc {\n  \
                        @primary id: Int = 0\n  \
                        attrs: Map<Str, Str>\n\
@@ -43311,7 +43311,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_map_concreto_bool_y_float_compilan() {
+    fn codegen_orm_concrete_map_bool_and_float_compile() {
         let src = "@table(\"docs\") type Doc {\n  \
                        @primary id: Int = 0\n  \
                        flags: Map<Str, Bool>\n  \
@@ -43329,7 +43329,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_map_int_keys_no_soportado_aborta() {
+    fn codegen_orm_map_int_keys_unsupported_aborts() {
         // Map<Int, Int> is NOT supported — JSON object only allows
         // string keys. Clear error.
         let src = "@table(\"docs\") type Doc {\n  \
@@ -43351,7 +43351,7 @@ mod tests {
     // ---- Phase 10.b.12.a — NULL inside arrays (List<scalar?>) ----
 
     #[test]
-    fn codegen_orm_list_int_nullable_inner_emite_vec_option() {
+    fn codegen_orm_list_int_nullable_inner_emits_vec_option() {
         // Field `tags: List<Int?>` must deserialize to
         // `Arc<Mutex<Vec<Option<i64>>>>` (each item can be None).
         let src = "@table(\"items\") type Item {\n  \
@@ -43399,7 +43399,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_orm_list_int_nullable_sigue_emitiendo_cast_sql() {
+    fn codegen_orm_list_int_nullable_keeps_emitting_sql_cast() {
         // `List<Int?>` also needs `::int8[]` cast in INSERT —
         // Postgres accepts NULL in arrays without changing the cast type.
         let src = "@table(\"items\") type Item {\n  \
@@ -43420,7 +43420,7 @@ mod tests {
     // ---- Phase 10.b.11 — `.update` with List literal / Map literal ----
 
     #[test]
-    fn codegen_update_con_list_literal_emite_pgvalue_array_directo() {
+    fn codegen_update_with_literal_list_emits_pgvalue_array_directly() {
         // `.update(db, {"tags": [1, 2, 3]})` with tags: List<Int>
         // must emit __FitzPgValue::Array { elem_oid: INT8, ... } and
         // the SET with cast ::int8[].
@@ -43451,7 +43451,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_update_con_map_literal_emite_jsonb_via_fitzvalue() {
+    fn codegen_update_with_literal_map_emits_jsonb_via_fitzvalue() {
         // `.update(db, {"meta": {"k": 1, "active": true}})` with
         // meta: Map<Str, Any> must emit __FitzPgValue::Text(...)
         // with stringify of __FitzValue::Map. The SET carries ::jsonb.
@@ -43476,7 +43476,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_update_array_value_no_lista_literal_aborta() {
+    fn codegen_update_array_value_not_literal_list_aborts() {
         // If the field is List<Int> but the value is not Expr::List
         // (e.g. external var), clear error citing "List literal".
         let src = "@table(\"items\") type Item {\n  \
@@ -43497,7 +43497,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_update_jsonb_value_var_externa_aborta_claro() {
+    fn codegen_update_jsonb_value_external_var_aborts_clearly() {
         let src = "@table(\"docs\") type Doc {\n  \
                        @primary id: Int = 0\n  \
                        meta: Map<Str, Any>\n\
@@ -43516,7 +43516,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_update_jsonb_anidado_compila() {
+    fn codegen_update_nested_jsonb_compiles() {
         // Map literal with nested List/Map → must compile (recursion
         // in the fitz_lit_to_fitz_value_code helper).
         let src = "@table(\"docs\") type Doc {\n  \
@@ -43557,7 +43557,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_has_int_emite_any_postgres() {
+    fn codegen_where_has_int_emits_any_postgres() {
         // `i.tags.has(42)` → `$1 = ANY("tags")`.
         let r = where_sql_fragment_with_array("i.tags.has(42)");
         assert!(
@@ -43571,7 +43571,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_has_str_emite_any_text() {
+    fn codegen_where_has_str_emits_any_text() {
         let r = where_sql_fragment_with_array("i.labels.has(\"rust\")");
         assert!(
             r.contains("$1 = ANY(\\\"labels\\\")"),
@@ -43584,7 +43584,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_has_sobre_field_no_array_aborta() {
+    fn codegen_where_has_over_non_array_field_aborts() {
         let src = "@table(\"items\") type Item {\n  \
                        @primary id: Int = 0\n  \
                        name: Str\n\
@@ -43603,7 +43603,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_contains_all_emite_op_y_cast_int8_array() {
+    fn codegen_where_contains_all_emits_op_and_cast_int8_array() {
         // `i.tags.contains_all([1, 2])` → `"tags" @> $1::int8[]`.
         let r = where_sql_fragment_with_array("i.tags.contains_all([1, 2])");
         assert!(
@@ -43617,7 +43617,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_contained_in_emite_op_y_cast() {
+    fn codegen_where_contained_in_emits_op_and_cast() {
         let r = where_sql_fragment_with_array("i.tags.contained_in([1, 2, 3])");
         assert!(
             r.contains("\\\"tags\\\" <@ $1::int8[]"),
@@ -43626,7 +43626,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_contains_all_arg_no_lista_aborta() {
+    fn codegen_where_contains_all_arg_not_list_aborts() {
         let src = "@table(\"items\") type Item {\n  \
                        @primary id: Int = 0\n  \
                        tags: List<Int>\n\
@@ -43645,7 +43645,7 @@ mod tests {
     }
 
     #[test]
-    fn codegen_where_combinacion_compleja_compila_y_combina_clauses() {
+    fn codegen_where_complex_combination_compiles_and_combines_clauses() {
         // Real-world case: multi-clause filter with AND/OR + is_in +
         // is_null + comparison. Covers the complete translator
         // wiring in a single expression.

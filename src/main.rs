@@ -6040,14 +6040,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pip_inputs_hash_es_deterministico() {
+    fn pip_inputs_hash_is_deterministic() {
         let h1 = pip_inputs_hash(&["requests".to_string()], &[b"foo\n".to_vec()]);
         let h2 = pip_inputs_hash(&["requests".to_string()], &[b"foo\n".to_vec()]);
         assert_eq!(h1, h2);
     }
 
     #[test]
-    fn pip_inputs_hash_es_insensible_al_orden_de_positionals() {
+    fn pip_inputs_hash_is_insensitive_to_positionals_order() {
         // Reordering `--bundle-pip` args must NOT invalidate
         // the cache: `--bundle-pip a --bundle-pip b` and
         // `--bundle-pip b --bundle-pip a` install the same set
@@ -6064,21 +6064,21 @@ mod tests {
     }
 
     #[test]
-    fn pip_inputs_hash_cambia_si_agregas_un_paquete() {
+    fn pip_inputs_hash_changes_when_adding_a_package() {
         let h1 = pip_inputs_hash(&["requests".to_string()], &[]);
         let h2 = pip_inputs_hash(&["requests".to_string(), "httpx".to_string()], &[]);
         assert_ne!(h1, h2);
     }
 
     #[test]
-    fn pip_inputs_hash_cambia_si_cambia_el_contenido_del_requirements() {
+    fn pip_inputs_hash_changes_when_requirements_content_changes() {
         let h1 = pip_inputs_hash(&[], &[b"requests>=2.0\n".to_vec()]);
         let h2 = pip_inputs_hash(&[], &[b"requests>=3.0\n".to_vec()]);
         assert_ne!(h1, h2);
     }
 
     #[test]
-    fn pip_inputs_hash_positionals_vs_requirements_son_distintos() {
+    fn pip_inputs_hash_positionals_vs_requirements_are_different() {
         // The `\n---\n` separator guarantees that ["foo", "bar"]
         // as positionals hashes differently from the same text
         // in a requirements file. Without the separator both
@@ -6089,7 +6089,7 @@ mod tests {
     }
 
     #[test]
-    fn pip_inputs_hash_es_16_chars_hex() {
+    fn pip_inputs_hash_is_16_chars_hex() {
         // Inherited from tarball_hash_short (FNV-1a 64-bit).
         let h = pip_inputs_hash(&["requests".to_string()], &[]);
         assert_eq!(h.len(), 16);
@@ -6097,7 +6097,7 @@ mod tests {
     }
 
     #[test]
-    fn pip_inputs_hash_vacio_devuelve_hash_estable() {
+    fn pip_inputs_hash_empty_returns_stable_hash() {
         // No packages nor requirements (degenerate case — should
         // not trigger at runtime because the pip block only
         // starts if there's something to install, but the helper
@@ -6109,7 +6109,7 @@ mod tests {
     }
 
     #[test]
-    fn pip_inputs_hash_orden_de_requirements_si_invalida_cache() {
+    fn pip_inputs_hash_requirements_order_invalidates_cache() {
         // Reordering requirements files DOES invalidate the
         // cache. Reason: pip processes them in order and two
         // files with conflicts/overrides can produce different

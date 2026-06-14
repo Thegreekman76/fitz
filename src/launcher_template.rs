@@ -405,7 +405,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn placeholders_son_strings_validos_rust() {
+    fn placeholders_are_valid_rust_strings() {
         // The placeholders must be identifiers between double quotes,
         // valid as Rust string literals.
         assert!(PLACEHOLDER_TARBALL_PATH.starts_with("__FITZ_REPLACE_"));
@@ -415,21 +415,21 @@ mod tests {
     }
 
     #[test]
-    fn template_main_rs_contiene_los_3_placeholders() {
+    fn template_main_rs_contains_the_3_placeholders() {
         assert!(LAUNCHER_MAIN_RS_TEMPLATE.contains(PLACEHOLDER_TARBALL_PATH));
         assert!(LAUNCHER_MAIN_RS_TEMPLATE.contains(PLACEHOLDER_REAL_BINARY_PATH));
         assert!(LAUNCHER_MAIN_RS_TEMPLATE.contains(PLACEHOLDER_TARBALL_HASH));
     }
 
     #[test]
-    fn template_cargo_toml_contiene_bin_name_placeholder() {
+    fn template_cargo_toml_contains_bin_name_placeholder() {
         assert!(LAUNCHER_CARGO_TOML_TEMPLATE.contains(PLACEHOLDER_BIN_NAME));
     }
 
     // ---- v0.9.46 distroless-tar-embedded ----
 
     #[test]
-    fn template_cargo_toml_incluye_deps_tar_y_flate2() {
+    fn template_cargo_toml_includes_deps_tar_and_flate2() {
         // The launcher needs `tar` + `flate2` to extract the PBS
         // (and optionally the pip tarball) without invoking the
         // system's `tar` binary. Enables distroless minimal runtimes.
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn template_main_rs_define_extract_tar_gz_y_no_invoca_tar_subprocess() {
+    fn template_main_rs_defines_extract_tar_gz_and_does_not_invoke_tar_subprocess() {
         // The helper must exist.
         assert!(
             LAUNCHER_MAIN_RS_TEMPLATE.contains("fn extract_tar_gz"),
@@ -459,7 +459,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_launcher_main_rs_pip_block_usa_extract_tar_gz() {
+    fn gen_launcher_main_rs_pip_block_uses_extract_tar_gz() {
         // When pip is embedded, the injected block must use the
         // native Rust helper, not a subprocess.
         let result = gen_launcher_main_rs(
@@ -479,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_launcher_main_rs_sustituye_los_3_placeholders() {
+    fn gen_launcher_main_rs_substitutes_the_3_placeholders() {
         let result = gen_launcher_main_rs("/tmp/tarball.tar.gz", "/tmp/fitz-real", "abc123", None);
 
         // The placeholders must no longer appear in the output.
@@ -500,7 +500,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_launcher_main_rs_escapa_backslashes_de_windows() {
+    fn gen_launcher_main_rs_escapes_windows_backslashes() {
         let result = gen_launcher_main_rs(
             r"C:\Users\test\tarball.tar.gz",
             r"C:\Users\test\fitz-real.exe",
@@ -526,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_launcher_main_rs_escapa_double_quotes() {
+    fn gen_launcher_main_rs_escapes_double_quotes() {
         // Improbable but possible edge case (paths with spaces and
         // quotes on Windows — not typical but valid).
         let result = gen_launcher_main_rs("/tmp/a\"b.tar.gz", "/tmp/real", "h", None);
@@ -534,7 +534,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_launcher_main_rs_con_pip_packages_inyecta_bloques() {
+    fn gen_launcher_main_rs_with_pip_packages_injects_blocks() {
         let result = gen_launcher_main_rs(
             "/tmp/pbs.tar.gz",
             "/tmp/fitz-real",
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_launcher_main_rs_pip_packages_escapa_windows_path() {
+    fn gen_launcher_main_rs_pip_packages_escapes_windows_path() {
         let result = gen_launcher_main_rs(
             "/tmp/pbs.tar.gz",
             "/tmp/fitz-real",
@@ -587,35 +587,35 @@ mod tests {
     }
 
     #[test]
-    fn gen_launcher_cargo_toml_sustituye_bin_name() {
+    fn gen_launcher_cargo_toml_substitutes_bin_name() {
         let result = gen_launcher_cargo_toml("hola");
         assert!(!result.contains(PLACEHOLDER_BIN_NAME));
         assert!(result.contains("name = \"hola\""));
     }
 
     #[test]
-    fn tarball_hash_short_devuelve_16_chars_hex() {
+    fn tarball_hash_short_returns_16_hex_chars() {
         let h = tarball_hash_short(b"hello world");
         assert_eq!(h.len(), 16);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn tarball_hash_short_es_deterministico() {
+    fn tarball_hash_short_is_deterministic() {
         let h1 = tarball_hash_short(b"foo bar baz");
         let h2 = tarball_hash_short(b"foo bar baz");
         assert_eq!(h1, h2);
     }
 
     #[test]
-    fn tarball_hash_short_cambia_con_input_distinto() {
+    fn tarball_hash_short_changes_with_different_input() {
         let h1 = tarball_hash_short(b"hello");
         let h2 = tarball_hash_short(b"world");
         assert_ne!(h1, h2);
     }
 
     #[test]
-    fn tarball_hash_short_empty_input_devuelve_offset() {
+    fn tarball_hash_short_empty_input_returns_offset() {
         // FNV-1a over empty input returns the offset basis.
         let h = tarball_hash_short(b"");
         assert_eq!(h, "cbf29ce484222325");

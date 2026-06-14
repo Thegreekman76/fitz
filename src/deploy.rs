@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn deploy_target_from_str_parsea_aliases_y_lowercase() {
+    fn deploy_target_from_str_parses_aliases_and_lowercase() {
         assert_eq!(DeployTarget::parse("docker"), Some(DeployTarget::Docker));
         assert_eq!(DeployTarget::parse("Docker"), Some(DeployTarget::Docker));
         assert_eq!(DeployTarget::parse("compose"), Some(DeployTarget::Compose));
@@ -353,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn run_docker_deploy_sin_dockerfile_es_error() {
+    fn run_docker_deploy_without_dockerfile_is_error() {
         let dir = tempdir().unwrap();
         let manifest = dummy_manifest("demo");
         let options = DeployOptions::default();
@@ -367,7 +367,7 @@ mod tests {
     }
 
     #[test]
-    fn run_compose_deploy_sin_compose_file_es_error() {
+    fn run_compose_deploy_without_compose_file_is_error() {
         let dir = tempdir().unwrap();
         let options = DeployOptions::default();
         let result = run_compose_deploy(dir.path(), &options);
@@ -380,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn deploy_error_messages_son_actionable() {
+    fn deploy_error_messages_are_actionable() {
         let dir = std::env::temp_dir();
         let e = DeployError::MissingDockerfile {
             manifest_dir: dir.clone(),
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn deploy_options_default_no_push_falso_no_detach_falso_no_build_falso() {
+    fn deploy_options_default_no_push_false_no_detach_false_no_build_false() {
         let opts = DeployOptions::default();
         assert!(opts.tag.is_none());
         assert!(!opts.no_push);
@@ -409,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn known_values_lista_docker_y_compose() {
+    fn known_values_lists_docker_and_compose() {
         let values = DeployTarget::known_values();
         assert!(values.contains(&"docker"));
         assert!(values.contains(&"compose"));

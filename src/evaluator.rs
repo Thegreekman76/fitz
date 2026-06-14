@@ -18402,14 +18402,14 @@ mod tests {
     // ---- entry point ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn programa_vacio_no_falla() {
+    async fn empty_program_does_not_fail() {
         assert!(eval(vec![]).await.is_ok());
     }
 
     // ---- Phase 6.4: async evaluator, Value::Future, real .await ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn value_future_display_y_type_name() {
+    async fn value_future_display_and_type_name() {
         // "Alive" Future (with a future inside) and "consumed" Future
         // (Option::None) must have consistent display and type_name.
         let f: crate::value::FitzFuture = Box::pin(async { Ok(Value::Int(1)) });
@@ -18419,7 +18419,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn await_sobre_no_future_es_error_de_runtime() {
+    async fn await_on_non_future_is_runtime_error() {
         // The 6.2 checker catches most cases, but the evaluator also
         // validates: `.await` on Int → clear error.
         let expr = Expr::Await(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
@@ -18439,7 +18439,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn async_fn_llamada_con_await_produce_resultado() {
+    async fn async_fn_called_with_await_produces_result() {
         // `async fn f() -> Int { return 42 }; f().await` evaluates to Int(42).
         // The flow: the call produces Value::Future; .await unwraps it
         // by running the body inside the tokio runtime.
@@ -18453,7 +18453,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn async_fn_llamada_sin_await_produce_future_suelto() {
+    async fn async_fn_called_without_await_produces_loose_future() {
         // Without `.await`, the call to an async fn type-checks and
         // produces `Value::Future`. The user can store it, pass it, etc.
         let (env, res) = parse_eval_into_env(
@@ -18471,7 +18471,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sleep_con_await_pausa_y_produce_null() {
+    async fn sleep_with_await_pauses_and_produces_null() {
         // `sleep(0).await` inside an async fn pauses for zero time and
         // produces Null. We validate the end-to-end integration of the
         // builtin with the tokio runtime: `.await` yields control and
@@ -18486,7 +18486,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sleep_sin_await_devuelve_future_suelto() {
+    async fn sleep_without_await_returns_loose_future() {
         // `let f = sleep(100)` — without await, returns Value::Future.
         // The `sleep` builtin builds the future but doesn't wait for it.
         let (env, res) = parse_eval_into_env("let f = sleep(100)").await;
@@ -18500,7 +18500,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn await_sobre_future_consumido_es_error() {
+    async fn await_on_consumed_future_is_error() {
         // Policy: a future is await-ed only once. If the user tries
         // to do it twice on the same Value::Future, an explicit error
         // is emitted.
@@ -18537,7 +18537,7 @@ mod tests {
     // ---- literals ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_int_literal() {
+    async fn evaluates_int_literal() {
         assert_eq!(
             eval_expr_test(Expr::Int(42, Span::ZERO)).await.unwrap(),
             Value::Int(42)
@@ -18545,7 +18545,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_float_literal() {
+    async fn evaluates_float_literal() {
         assert_eq!(
             eval_expr_test(Expr::Float(3.14, Span::ZERO)).await.unwrap(),
             Value::Float(3.14)
@@ -18553,7 +18553,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_string_literal() {
+    async fn evaluates_string_literal() {
         assert_eq!(
             eval_expr_test(Expr::Str("hola".into(), Span::ZERO))
                 .await
@@ -18563,7 +18563,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_bool_literal() {
+    async fn evaluates_bool_literal() {
         assert_eq!(
             eval_expr_test(Expr::Bool(true, Span::ZERO)).await.unwrap(),
             Value::Bool(true)
@@ -18575,7 +18575,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_null_literal() {
+    async fn evaluates_null_literal() {
         assert_eq!(
             eval_expr_test(Expr::Null(Span::ZERO)).await.unwrap(),
             Value::Null
@@ -18585,7 +18585,7 @@ mod tests {
     // ---- Ident ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ident_resuelve_variable_del_env() {
+    async fn ident_resolves_variable_from_env() {
         let env = Environment::new();
         env.lock().define("x", Value::Int(99));
 
@@ -18596,7 +18596,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ident_no_definido_devuelve_error() {
+    async fn ident_undefined_returns_error() {
         let env = Environment::new();
         let result = eval_expr(&Expr::Ident("nope".into(), Span::ZERO), env).await;
 
@@ -18609,7 +18609,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ident_busca_en_scope_padre() {
+    async fn ident_searches_in_parent_scope() {
         let global = Environment::new();
         global.lock().define("x", Value::Str("from_global".into()));
 
@@ -18623,7 +18623,7 @@ mod tests {
     // ---- Stmt::Expr (intermediate step to verify the stmt→expr wiring) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn stmt_expr_evalua_la_expresion_interna() {
+    async fn stmt_expr_evaluates_inner_expression() {
         let env = Environment::new();
         let stmt = Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO);
         let result = eval_stmt(&stmt, env).await.unwrap();
@@ -18633,13 +18633,13 @@ mod tests {
     // ---- builtins ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn builtin_print_devuelve_null() {
+    async fn builtin_print_returns_null() {
         let result = builtin_print(&[Value::Str("test".into())]).unwrap();
         assert_eq!(result, Value::Null);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn register_builtins_define_print_en_env() {
+    async fn register_builtins_defines_print_in_env() {
         let env = Environment::new();
         register_builtins(&env);
 
@@ -18654,14 +18654,14 @@ mod tests {
     // ---- signals ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fitzerror_se_convierte_a_evalsignal_error() {
+    async fn fitzerror_converts_to_evalsignal_error() {
         let err = FitzError::new(ErrorKind::DivisionByZero, 1, 1, "test");
         let signal: EvalSignal = err.into();
         assert!(matches!(signal, EvalSignal::Error(_)));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn break_fuera_de_loop_es_error() {
+    async fn break_outside_loop_is_error() {
         let result = eval(vec![Stmt::Break(None, None, Span::ZERO)]).await;
         assert!(matches!(
             result.unwrap_err().kind,
@@ -18670,7 +18670,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn continue_fuera_de_loop_es_error() {
+    async fn continue_outside_loop_is_error() {
         let result = eval(vec![Stmt::Continue(None, Span::ZERO)]).await;
         assert!(matches!(
             result.unwrap_err().kind,
@@ -18691,7 +18691,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn add_int_int_da_int() {
+    async fn add_int_int_gives_int() {
         let e = binop(
             BinOpKind::Add,
             Expr::Int(2, Span::ZERO),
@@ -18701,7 +18701,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn add_int_float_promueve_a_float() {
+    async fn add_int_float_promotes_to_float() {
         let e = binop(
             BinOpKind::Add,
             Expr::Int(2, Span::ZERO),
@@ -18711,7 +18711,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn add_float_int_promueve_a_float() {
+    async fn add_float_int_promotes_to_float() {
         let e = binop(
             BinOpKind::Add,
             Expr::Float(1.5, Span::ZERO),
@@ -18721,7 +18721,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn add_strings_concatena() {
+    async fn add_strings_concatenates() {
         let e = binop(
             BinOpKind::Add,
             Expr::Str("hola ".into(), Span::ZERO),
@@ -18734,7 +18734,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn add_tipos_incompatibles_es_type_error() {
+    async fn add_incompatible_types_is_type_error() {
         let e = binop(
             BinOpKind::Add,
             Expr::Str("x".into(), Span::ZERO),
@@ -18749,7 +18749,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sub_mul_funcionan() {
+    async fn sub_mul_work() {
         let sub = binop(
             BinOpKind::Sub,
             Expr::Int(10, Span::ZERO),
@@ -18766,7 +18766,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn div_int_int_trunca() {
+    async fn div_int_int_truncates() {
         // 10 / 3 = 3 (truncated), not 3.33
         let e = binop(
             BinOpKind::Div,
@@ -18777,7 +18777,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn div_int_float_da_float() {
+    async fn div_int_float_gives_float() {
         let e = binop(
             BinOpKind::Div,
             Expr::Int(10, Span::ZERO),
@@ -18787,7 +18787,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn div_por_cero_int_es_error() {
+    async fn div_by_zero_int_is_error() {
         let e = binop(
             BinOpKind::Div,
             Expr::Int(1, Span::ZERO),
@@ -18803,7 +18803,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn div_por_cero_float_es_error() {
+    async fn div_by_zero_float_is_error() {
         let e = binop(
             BinOpKind::Div,
             Expr::Float(1.0, Span::ZERO),
@@ -18821,7 +18821,7 @@ mod tests {
     // ---- BinOp: comparison and equality ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn eq_con_coercion_int_float() {
+    async fn eq_with_int_float_coercion() {
         // 1 == 1.0 → true
         let e = binop(
             BinOpKind::Eq,
@@ -18832,7 +18832,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn eq_tipos_distintos_da_false_sin_error() {
+    async fn eq_different_types_gives_false_without_error() {
         // 1 == "1" → false (no error, just false)
         let e = binop(
             BinOpKind::Eq,
@@ -18843,7 +18843,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn noteq_funciona() {
+    async fn noteq_works() {
         let e = binop(
             BinOpKind::NotEq,
             Expr::Int(1, Span::ZERO),
@@ -18853,7 +18853,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lt_gt_lteq_gteq_numericos() {
+    async fn lt_gt_lteq_gteq_numeric() {
         assert_eq!(
             eval_expr_test(binop(
                 BinOpKind::Lt,
@@ -18897,7 +18897,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn comparacion_con_promocion_int_float() {
+    async fn comparison_with_int_float_promotion() {
         // 2 < 2.5 → true (Int promoted to Float for comparison)
         let e = binop(
             BinOpKind::Lt,
@@ -18908,7 +18908,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn comparacion_de_strings_es_alfabetica() {
+    async fn comparison_of_strings_is_alphabetic() {
         let e = binop(
             BinOpKind::Lt,
             Expr::Str("abc".into(), Span::ZERO),
@@ -18918,7 +18918,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn comparacion_entre_bool_es_type_error() {
+    async fn comparison_between_bool_is_type_error() {
         // Bool isn't compared with <. With == it is.
         let e = binop(
             BinOpKind::Lt,
@@ -18937,7 +18937,7 @@ mod tests {
     // ---- BinOp: logical with short-circuit ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn and_true_true_da_true() {
+    async fn and_true_true_gives_true() {
         let e = binop(
             BinOpKind::And,
             Expr::Bool(true, Span::ZERO),
@@ -18947,7 +18947,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn and_false_corta_y_no_evalua_derecho() {
+    async fn and_false_short_circuits_and_does_not_evaluate_right() {
         // The right side is an undefined Ident. If it were evaluated,
         // it would error. Since `false and ...` short-circuits, it
         // returns false without error.
@@ -18960,7 +18960,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_true_corta_y_no_evalua_derecho() {
+    async fn or_true_short_circuits_and_does_not_evaluate_right() {
         let e = binop(
             BinOpKind::Or,
             Expr::Bool(true, Span::ZERO),
@@ -18970,7 +18970,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_false_true_da_true() {
+    async fn or_false_true_gives_true() {
         let e = binop(
             BinOpKind::Or,
             Expr::Bool(false, Span::ZERO),
@@ -18980,7 +18980,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn and_con_no_bool_izquierda_es_type_error() {
+    async fn and_with_non_bool_left_is_type_error() {
         let e = binop(
             BinOpKind::And,
             Expr::Int(1, Span::ZERO),
@@ -18996,7 +18996,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn and_con_no_bool_derecha_es_type_error() {
+    async fn and_with_non_bool_right_is_type_error() {
         // For the right side to evaluate, the left must be true.
         let e = binop(
             BinOpKind::And,
@@ -19015,7 +19015,7 @@ mod tests {
     // ---- Mini-batch Xor ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn xor_tabla_de_verdad_completa() {
+    async fn xor_complete_truth_table() {
         // T xor T → F, T xor F → T, F xor T → T, F xor F → F.
         for (l, r, expected) in [
             (true, true, false),
@@ -19040,7 +19040,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn xor_evalua_ambos_lados_sin_short_circuit() {
+    async fn xor_evaluates_both_sides_without_short_circuit() {
         // If `false xor <bad>` short-circuited like `and` would, it
         // wouldn't error. Since xor does NOT short-circuit, it
         // evaluates the RHS and triggers TypeError on the undefined Ident.
@@ -19053,7 +19053,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn xor_con_no_bool_es_type_error() {
+    async fn xor_with_non_bool_is_type_error() {
         let e = binop(
             BinOpKind::Xor,
             Expr::Int(1, Span::ZERO),
@@ -19071,7 +19071,7 @@ mod tests {
     // ---- nested BinOp ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn expresion_anidada_2_mas_3_por_4_da_14() {
+    async fn nested_expression_2_plus_3_times_4_gives_14() {
         // 2 + (3 * 4) — Stmt::Expr to verify full wiring.
         let inner = binop(
             BinOpKind::Mul,
@@ -19105,7 +19105,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn doble_negacion_devuelve_el_original() {
+    async fn double_negation_returns_the_original() {
         // -(-7) = 7 (double negation cancels)
         let inner = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
@@ -19121,7 +19121,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn neg_de_bool_es_type_error() {
+    async fn neg_of_bool_is_type_error() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
             operand: Box::new(Expr::Bool(true, Span::ZERO)),
@@ -19137,7 +19137,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn neg_de_string_es_type_error() {
+    async fn neg_of_string_is_type_error() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
             operand: Box::new(Expr::Str("hola".into(), Span::ZERO)),
@@ -19155,7 +19155,7 @@ mod tests {
     // ---- R.1.1 — `not` (mini-phase R) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn not_true_es_false() {
+    async fn not_true_is_false() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Not,
             operand: Box::new(Expr::Bool(true, Span::ZERO)),
@@ -19165,7 +19165,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn not_false_es_true() {
+    async fn not_false_is_true() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Not,
             operand: Box::new(Expr::Bool(false, Span::ZERO)),
@@ -19175,7 +19175,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn doble_not_devuelve_el_original() {
+    async fn double_not_returns_the_original() {
         let inner = Expr::UnaryOp {
             op: UnaryOpKind::Not,
             operand: Box::new(Expr::Bool(true, Span::ZERO)),
@@ -19190,7 +19190,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn not_de_int_es_type_error_en_runtime_gradual() {
+    async fn not_of_int_is_type_error_in_gradual_runtime() {
         // Without --no-typecheck the checker catches it earlier. Inside
         // the evaluator directly, it must emit a type error.
         let e = Expr::UnaryOp {
@@ -19208,7 +19208,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn not_de_str_es_type_error_en_runtime_gradual() {
+    async fn not_of_str_is_type_error_in_gradual_runtime() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Not,
             operand: Box::new(Expr::Str("hola".into(), Span::ZERO)),
@@ -19226,7 +19226,7 @@ mod tests {
     // ---- R.1.2 — `%` operator (mini-phase R) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mod_simple_positivo() {
+    async fn mod_simple_positive() {
         let e = binop(
             BinOpKind::Mod,
             Expr::Int(10, Span::ZERO),
@@ -19236,7 +19236,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mod_exacto_da_cero() {
+    async fn mod_exact_gives_zero() {
         let e = binop(
             BinOpKind::Mod,
             Expr::Int(12, Span::ZERO),
@@ -19246,7 +19246,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mod_negativo_es_euclidean() {
+    async fn mod_negative_is_euclidean() {
         // Euclidean semantics: -7 % 3 = 2 (not -1 like Rust's `%`).
         let e = binop(
             BinOpKind::Mod,
@@ -19257,7 +19257,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mod_por_cero_es_error_runtime() {
+    async fn mod_by_zero_is_runtime_error() {
         let e = binop(
             BinOpKind::Mod,
             Expr::Int(7, Span::ZERO),
@@ -19274,7 +19274,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mod_con_float_es_type_error() {
+    async fn mod_with_float_is_type_error() {
         let e = binop(
             BinOpKind::Mod,
             Expr::Float(10.0, Span::ZERO),
@@ -19324,7 +19324,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_index_map_insert_nuevo_va_al_final() {
+    async fn assign_index_map_insert_new_goes_to_end() {
         let (env, res) = parse_eval_into_env("let m = {\"a\": 1}\nm[\"b\"] = 2").await;
         res.unwrap();
         let m = env.lock().get("m").unwrap();
@@ -19340,7 +19340,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_index_list_out_of_bounds_es_error() {
+    async fn assign_index_list_out_of_bounds_is_error() {
         let (_env, res) = parse_eval_into_env("let xs = [1, 2]\nxs[5] = 99").await;
         let err = res.unwrap_err();
         assert!(
@@ -19351,7 +19351,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_index_list_negativo_fuera_de_rango_es_error() {
+    async fn assign_index_list_negative_out_of_range_is_error() {
         // I.1: `xs[-1] = ...` is now valid (wrap). The error only
         // triggers if the wrap lands outside [0, len).
         let (_env, res) = parse_eval_into_env("let xs = [1, 2]\nxs[-99] = 99").await;
@@ -19364,7 +19364,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_index_sobre_int_es_type_error() {
+    async fn assign_index_on_int_is_type_error() {
         let (_env, res) = parse_eval_into_env("let x = 5\nx[0] = 1").await;
         // The checker catches it first (type error). To validate the
         // pure runtime, we should use --no-typecheck via direct
@@ -19376,7 +19376,7 @@ mod tests {
     // ---- Stmt::Assign ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_define_variable_nueva_en_scope_local() {
+    async fn assign_defines_new_variable_in_local_scope() {
         let env = Environment::new();
         let stmt = Stmt::Assign {
             target: AssignTarget::Ident("x".into(), Span::default()),
@@ -19390,7 +19390,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_reasigna_variable_existente_en_el_mismo_scope() {
+    async fn assign_reassigns_existing_variable_in_same_scope() {
         let env = Environment::new();
         env.lock().define("x", Value::Int(1));
 
@@ -19406,7 +19406,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_desde_child_reasigna_en_el_padre_si_existe() {
+    async fn assign_from_child_reassigns_in_parent_if_exists() {
         let global = Environment::new();
         global.lock().define("x", Value::Int(1));
 
@@ -19424,7 +19424,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_crea_local_si_la_variable_no_existe_en_la_cadena() {
+    async fn assign_creates_local_if_variable_does_not_exist_in_chain() {
         let global = Environment::new();
         let child = Environment::new_child(global.clone());
 
@@ -19442,7 +19442,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_ignora_la_anotacion_de_tipo() {
+    async fn assign_ignores_type_annotation() {
         // type_: Some("Int") with String value — doesn't fail
         // (gradual typing, no runtime checks yet).
         let env = Environment::new();
@@ -19462,7 +19462,7 @@ mod tests {
     // ---- Expr::Call (builtins) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn call_a_print_devuelve_null() {
+    async fn call_to_print_returns_null() {
         // print(...) writes to stdout and returns Null. We verify the
         // return Value; the actual output is checked manually with hello.fitz.
         let env = Environment::new();
@@ -19477,7 +19477,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn call_a_funcion_no_definida_es_error() {
+    async fn call_to_undefined_function_is_error() {
         // Since `Expr::Call` now evaluates the callee as an
         // expression, an undefined ident fails with
         // `UndefinedVariable` (not `UndefinedFunction` as before).
@@ -19499,7 +19499,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn call_a_no_funcion_es_type_error() {
+    async fn call_to_non_function_is_type_error() {
         let env = Environment::new();
         env.lock().define("x", Value::Int(5));
 
@@ -19518,7 +19518,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn call_evalua_args_antes_de_invocar() {
+    async fn call_evaluates_args_before_invoking() {
         // The `1 + 2` arg must reach the builtin as Int(3), not as
         // a BinOp. Since print doesn't let us inspect, we use an
         // indirect assert: if arg eval failed, it would error. If it
@@ -19542,7 +19542,7 @@ mod tests {
     // ---- Expr::StrInterp ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_interp_solo_con_literales_concatena() {
+    async fn str_interp_with_literals_only_concatenates() {
         let e = Expr::StrInterp(
             vec![StrPart::Lit("hola ".into()), StrPart::Lit("mundo".into())],
             Span::ZERO,
@@ -19554,7 +19554,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_interp_interpola_ident() {
+    async fn str_interp_interpolates_ident() {
         let env = Environment::new();
         env.lock().define("name", Value::Str("Fitz".into()));
 
@@ -19573,7 +19573,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_interp_convierte_int_a_string() {
+    async fn str_interp_converts_int_to_string() {
         let env = Environment::new();
         env.lock().define("x", Value::Int(42));
 
@@ -19591,7 +19591,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_interp_evalua_expresiones_internas() {
+    async fn str_interp_evaluates_inner_expressions() {
         // "{1 + 2}" → "3"
         let e = Expr::StrInterp(
             vec![StrPart::Expr(
@@ -19635,7 +19635,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_sin_return_devuelve_null() {
+    async fn fn_without_return_returns_null() {
         // fn f() { } ; f()
         let env = Environment::new();
         eval_stmt(&fn_def("f", vec![], vec![]), env.clone())
@@ -19651,7 +19651,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_return_constante() {
+    async fn fn_returns_constant() {
         // fn f() { return 42 } ; f()
         let env = Environment::new();
         eval_stmt(
@@ -19674,7 +19674,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_con_un_param_arrow_style() {
+    async fn fn_with_one_param_arrow_style() {
         // fn double(n) => n * 2 → body es vec![Return(n * 2)]
         // double(7) → 14
         let env = Environment::new();
@@ -19700,7 +19700,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_con_dos_params_suma() {
+    async fn fn_with_two_params_sums() {
         // fn add(a, b) => a + b ; add(3, 4) → 7
         let env = Environment::new();
         let body = vec![Stmt::Return(
@@ -19725,7 +19725,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_ve_variables_del_scope_donde_se_definio() {
+    async fn fn_sees_variables_from_scope_where_defined() {
         // Basic closure: the function accesses `x` from the global scope.
         //
         //   x = 10
@@ -19751,7 +19751,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_param_sombrea_variable_externa() {
+    async fn fn_param_shadows_external_variable() {
         // x = 100; fn f(x) => x ; f(7) → 7 (not 100 — param shadows)
         let env = Environment::new();
         env.lock().define("x", Value::Int(100));
@@ -19773,7 +19773,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_con_pocos_args_es_error() {
+    async fn fn_with_too_few_args_is_error() {
         // fn f(a, b) ... ; f(1)
         let env = Environment::new();
         eval_stmt(
@@ -19805,7 +19805,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_con_muchos_args_es_error() {
+    async fn fn_with_too_many_args_is_error() {
         let env = Environment::new();
         eval_stmt(
             &fn_def(
@@ -19836,7 +19836,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn return_fuera_de_fn_es_error() {
+    async fn return_outside_fn_is_error() {
         // At the top level, `return 5` has no caller to intercept it.
         let result = eval(vec![Stmt::Return(Expr::Int(5, Span::ZERO), Span::ZERO)]).await;
         assert!(matches!(
@@ -19846,7 +19846,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_con_body_de_varias_sentencias() {
+    async fn fn_with_multi_stmt_body() {
         // fn f(n) {
         //     x = n * 2
         //     return x + 1
@@ -19888,7 +19888,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn return_corta_la_ejecucion_del_body() {
+    async fn return_cuts_body_execution() {
         // fn f() {
         //     return 1
         //     return 2   ← never executed
@@ -19923,7 +19923,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn if_true_sin_else_devuelve_valor_del_then() {
+    async fn if_true_without_else_returns_then_value() {
         // if true { 7 } → 7 (no else needed when cond is true)
         let e = if_expr(
             Expr::Bool(true, Span::ZERO),
@@ -19934,7 +19934,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn if_false_sin_else_devuelve_null() {
+    async fn if_false_without_else_returns_null() {
         let e = if_expr(
             Expr::Bool(false, Span::ZERO),
             vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)],
@@ -19944,7 +19944,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn if_else_toma_la_rama_correcta() {
+    async fn if_else_takes_correct_branch() {
         // if true { 1 } else { 2 } → 1 (then branch when cond true)
         let then = vec![Stmt::Expr(Expr::Int(1, Span::ZERO), Span::ZERO)];
         let else_ = vec![Stmt::Expr(Expr::Int(2, Span::ZERO), Span::ZERO)];
@@ -19960,7 +19960,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn if_condicion_no_bool_es_type_error() {
+    async fn if_condition_non_bool_is_type_error() {
         // if 1 { ... } → error (no truthy coercion in Fitz).
         let e = if_expr(Expr::Int(1, Span::ZERO), vec![], None);
         assert!(matches!(
@@ -19973,7 +19973,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn if_evalua_solo_la_rama_correspondiente() {
+    async fn if_evaluates_only_matching_branch() {
         // The then is an undefined Ident. If evaluated, it would
         // error. Since cond is false, it's not touched → result of else.
         let then = vec![Stmt::Expr(
@@ -19986,7 +19986,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn variables_definidas_dentro_del_if_persisten_afuera() {
+    async fn variables_defined_inside_if_persist_outside() {
         // x = 1
         // if x == 1 { y = 99 }
         // print(y)  → "99" (vars assigned in if persist outside)
@@ -20017,7 +20017,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn else_if_anidado_funciona() {
+    async fn nested_else_if_works() {
         // if false { 1 } else if true { 2 } else { 3 } → 2
         //
         // The parser models `else if` as `else_: vec![Stmt::Expr(Expr::If, Span::ZERO)]`.
@@ -20035,7 +20035,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn if_como_expresion_en_assign() {
+    async fn if_as_expression_in_assign() {
         // let r = if true { 42 } else { 0 } (if as expression in assign)
         let env = Environment::new();
         let stmt = Stmt::Assign {
@@ -20053,7 +20053,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn factorial_recursivo_funciona() {
+    async fn recursive_factorial_works() {
         // The test that ties everything: closures + recursion + if +
         // comparison + BinOp + Return.
         //
@@ -20123,7 +20123,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_wildcard_siempre_matchea() {
+    async fn match_wildcard_always_matches() {
         // match 42 { _ => 99 } → 99
         let e = Expr::Match {
             value: Box::new(Expr::Int(42, Span::ZERO)),
@@ -20134,7 +20134,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_ident_bindea_el_valor() {
+    async fn match_ident_binds_value() {
         // match 42 { n => n + 1 } → 43
         let e = Expr::Match {
             value: Box::new(Expr::Int(42, Span::ZERO)),
@@ -20153,7 +20153,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_toma_el_primer_arm_que_matchea() {
+    async fn match_takes_first_matching_arm() {
         // match "hola" {
         //     x => "primer arm: ${x}",
         //     _ => "segundo arm (not touched)",
@@ -20185,7 +20185,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_binding_vive_solo_en_el_arm() {
+    async fn match_binding_lives_only_in_arm() {
         // The `n` binding must not escape to the enclosing scope.
         let env = Environment::new();
         let e = Expr::Match {
@@ -20203,7 +20203,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_ok_binding_bindea_inner() {
+    async fn match_ok_binding_binds_inner() {
         // match Ok(5) { Ok(v) => v + 1, Err(e) => -1 } → 6
         let e = Expr::Match {
             value: Box::new(Expr::Ok(Box::new(Expr::Int(5, Span::ZERO)), Span::ZERO)),
@@ -20228,7 +20228,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_err_binding_bindea_inner() {
+    async fn match_err_binding_binds_inner() {
         // match Err("boom") { Ok(v) => "ok", Err(e) => e } → "boom"
         let e = Expr::Match {
             value: Box::new(Expr::Err(
@@ -20251,7 +20251,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_ok_no_matchea_err() {
+    async fn match_ok_does_not_match_err() {
         // The Ok(_) pattern does NOT match Err(_) — goes to the next arm.
         let e = Expr::Match {
             value: Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)),
@@ -20268,7 +20268,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_ok_no_matchea_no_result() {
+    async fn match_ok_does_not_match_non_result() {
         // Ok(v) on a non-Result value → doesn't match, falls to wildcard.
         let e = Expr::Match {
             value: Box::new(Expr::Int(5, Span::ZERO)),
@@ -20288,7 +20288,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_ok_wildcard_matchea_pero_no_bindea() {
+    async fn match_ok_wildcard_matches_but_does_not_bind() {
         // Pattern::OkWildcard matches any Ok without binding the
         // inner. Closes the old 3.3 debt where `_` inside got bound
         // as a var named `_`.
@@ -20304,7 +20304,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_err_wildcard_matchea_err() {
+    async fn match_err_wildcard_matches_err() {
         let e = Expr::Match {
             value: Box::new(Expr::Err(
                 Box::new(Expr::Str("boom".into(), Span::ZERO)),
@@ -20323,7 +20323,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_ok_wildcard_no_matchea_err() {
+    async fn match_ok_wildcard_does_not_match_err() {
         // OkWildcard must NOT match Err.
         let e = Expr::Match {
             value: Box::new(Expr::Err(Box::new(Expr::Int(0, Span::ZERO)), Span::ZERO)),
@@ -20337,7 +20337,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_ok_wildcard_no_ensucia_scope() {
+    async fn match_ok_wildcard_does_not_pollute_scope() {
         // After a match with Ok(_), there should be no var named
         // `_` in the env. This was the bug that 3.3 closed.
         let src = "\
@@ -20355,7 +20355,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_literal_int_matchea() {
+    async fn match_literal_int_matches() {
         // match 2 { 1 => "uno", 2 => "dos", _ => "otro" } → "dos"
         let e = Expr::Match {
             value: Box::new(Expr::Int(2, Span::ZERO)),
@@ -20370,7 +20370,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_literal_int_no_coerciona_a_float() {
+    async fn match_literal_int_does_not_coerce_to_float() {
         // match 1.0 { 1 => "int", _ => "no-int" } → "no-int"
         // (In match, equality is structural — no `==` coercion).
         let e = Expr::Match {
@@ -20388,7 +20388,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_literal_str_matchea() {
+    async fn match_literal_str_matches() {
         let e = Expr::Match {
             value: Box::new(Expr::Str("hola".into(), Span::ZERO)),
             arms: vec![
@@ -20402,7 +20402,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_literal_bool_matchea() {
+    async fn match_literal_bool_matches() {
         let e = Expr::Match {
             value: Box::new(Expr::Bool(true, Span::ZERO)),
             arms: vec![
@@ -20421,7 +20421,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_literal_null_matchea() {
+    async fn match_literal_null_matches() {
         let e = Expr::Match {
             value: Box::new(Expr::Null(Span::ZERO)),
             arms: vec![
@@ -20437,7 +20437,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_int_negativo_matchea() {
+    async fn match_int_negative_matches() {
         let e = Expr::Match {
             value: Box::new(Expr::Int(-5, Span::ZERO)),
             arms: vec![
@@ -20456,7 +20456,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_literales_caen_a_ident_si_ninguno_matchea() {
+    async fn match_literals_fall_to_ident_if_none_matches() {
         // match 42 { 1 => "uno", n => "default ${n}" }
         let e = Expr::Match {
             value: Box::new(Expr::Int(42, Span::ZERO)),
@@ -20482,7 +20482,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_sin_arms_es_error() {
+    async fn match_without_arms_is_error() {
         let e = Expr::Match {
             value: Box::new(Expr::Int(1, Span::ZERO)),
             arms: vec![],
@@ -20497,7 +20497,7 @@ print(_)\n";
     // ---- while / loop ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn while_itera_hasta_que_cond_es_falsa() {
+    async fn while_iterates_until_cond_is_false() {
         // i = 0
         // total = 0
         // while i < 5 { total = total + i; i = i + 1 }
@@ -20545,7 +20545,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn while_con_cond_inicialmente_falsa_no_itera() {
+    async fn while_with_initially_false_cond_does_not_iterate() {
         let env = Environment::new();
         env.lock().define("counter", Value::Int(0));
 
@@ -20565,7 +20565,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn while_break_termina_loop() {
+    async fn while_break_ends_loop() {
         let env = Environment::new();
         env.lock().define("i", Value::Int(0));
 
@@ -20607,7 +20607,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn while_continue_salta_a_la_siguiente_iteracion() {
+    async fn while_continue_skips_to_next_iteration() {
         let env = Environment::new();
         env.lock().define("i", Value::Int(0));
         env.lock().define("total", Value::Int(0));
@@ -20671,7 +20671,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn while_cond_no_bool_es_type_error() {
+    async fn while_cond_non_bool_is_type_error() {
         let env = Environment::new();
         let stmt = Stmt::While {
             condition: Expr::Int(1, Span::ZERO),
@@ -20689,7 +20689,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn loop_infinito_se_corta_con_break() {
+    async fn infinite_loop_breaks_with_break() {
         let env = Environment::new();
         env.lock().define("count", Value::Int(0));
 
@@ -20733,7 +20733,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn return_dentro_de_while_dentro_de_fn_propaga() {
+    async fn return_inside_while_inside_fn_propagates() {
         // fn f() {
         //   while true { return 42 }
         // }
@@ -20777,7 +20777,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn type_def_registra_el_tipo_en_el_env() {
+    async fn type_def_registers_type_in_env() {
         // type User { id: Int, name: Str }
         let env = Environment::new();
         let stmt = Stmt::TypeDef {
@@ -20805,7 +20805,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn type_value_type_name_es_type() {
+    async fn type_value_type_name_is_type() {
         let t = Value::Type {
             name: "Foo".into(),
             fields: vec![],
@@ -20817,7 +20817,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn type_se_puede_referenciar_como_ident_sin_error() {
+    async fn type_can_be_referenced_as_ident_without_error() {
         // After defining a type, `User` as Expr::Ident finds it.
         let env = Environment::new();
         eval_stmt(
@@ -20840,7 +20840,7 @@ print(_)\n";
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn llamar_un_type_como_funcion_es_type_error() {
+    async fn calling_a_type_as_function_is_type_error() {
         // User(1) without struct literals → TypeMismatch because Type is not callable.
         // This is explicit debt: instantiation comes in Phase 3.
         let env = Environment::new();
@@ -20874,7 +20874,7 @@ print(_)\n";
     // ---- Phase 2 criterion: the complete program ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_fase_2_corre_end_to_end() {
+    async fn phase_2_criterion_runs_end_to_end() {
         // The roadmap program:
         //   name = "Fitz"
         //   x = 10 + 5
@@ -20952,7 +20952,7 @@ print(_)\n";
     /// over the exact Phase 2 criterion program written as source.
     /// If this passes, the three phases talk to each other well.
     #[tokio::test(flavor = "current_thread")]
-    async fn integracion_criterio_fase_2_lexer_parser_evaluator() {
+    async fn integration_phase_2_criterion_lexer_parser_evaluator() {
         let source = r#"
 name = "Fitz"
 x = 10 + 5
@@ -20967,7 +20967,7 @@ print(double(x))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn integracion_factorial_recursivo_end_to_end() {
+    async fn integration_recursive_factorial_end_to_end() {
         // Pipeline test with recursion + if + return + closure.
         // Verifies the evaluator catches Return correctly via signal.
         let source = r#"
@@ -20985,7 +20985,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hello_fitz_corre_sin_error() {
+    async fn hello_fitz_runs_without_error() {
         // AST replica equivalent to:
         //   name = "Patagonia"
         //   print("Hola, {name}!")
@@ -21053,7 +21053,7 @@ print(factorial(5))
     // ---- List literal ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_list_vacia() {
+    async fn evaluates_empty_list() {
         let v = eval_expr_test(Expr::List(vec![], Span::ZERO))
             .await
             .unwrap();
@@ -21061,7 +21061,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_list_con_literales() {
+    async fn evaluates_list_with_literals() {
         let v = eval_expr_test(Expr::List(
             vec![
                 Expr::Int(1, Span::ZERO),
@@ -21079,7 +21079,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_list_con_expresiones() {
+    async fn evaluates_list_with_expressions() {
         // [1 + 1, 2 * 2]
         let v = eval_expr_test(Expr::List(
             vec![
@@ -21106,13 +21106,13 @@ print(factorial(5))
     // ---- Map literal ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_map_vacio() {
+    async fn evaluates_empty_map() {
         let v = eval_expr_test(Expr::Map(vec![], Span::ZERO)).await.unwrap();
         assert_eq!(v, Value::new_map(vec![]));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_map_con_pares() {
+    async fn evaluates_map_with_pairs() {
         let v = eval_expr_test(Expr::Map(
             vec![
                 (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
@@ -21134,7 +21134,7 @@ print(factorial(5))
     // ---- Range literal ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_range_simple() {
+    async fn evaluates_simple_range() {
         let v = eval_expr_test(Expr::Range {
             start: Box::new(Expr::Int(0, Span::ZERO)),
             end: Box::new(Expr::Int(10, Span::ZERO)),
@@ -21147,7 +21147,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn evalua_range_con_float_es_error() {
+    async fn evaluates_range_with_float_is_error() {
         // 0..1.5 — float no es Int.
         let res = eval_expr_test(Expr::Range {
             start: Box::new(Expr::Int(0, Span::ZERO)),
@@ -21166,7 +21166,7 @@ print(factorial(5))
     // ---- R.1.4 — inclusive ranges `..=` (mini-phase R) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn range_inclusive_evalua_a_value_range_con_end_plus_1() {
+    async fn range_inclusive_evaluates_to_value_range_with_end_plus_1() {
         // 0..=10 is materialized as Value::Range { 0, 11 } via
         // the evaluator's inclusive→exclusive conversion (does not touch
         // Value::Range).
@@ -21182,7 +21182,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_inclusive_itera_end_inclusive() {
+    async fn for_inclusive_iterates_end_inclusive() {
         // for i in 0..=3 → 0, 1, 2, 3 (4 iterations).
         let (env, res) = parse_eval_into_env(
             "let total = 0\nfor i in 0..=3 { total = total + i }\nlet sum = total",
@@ -21194,7 +21194,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_pattern_inclusive_matchea_end() {
+    async fn match_pattern_inclusive_matches_end() {
         // match 100 { 0..=100 => "ok", _ => "fuera" } → "ok"
         let (env, res) =
             parse_eval_into_env("let r = match 100 { 0..=100 => \"ok\", _ => \"fuera\" }").await;
@@ -21203,7 +21203,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_pattern_exclusive_no_matchea_end() {
+    async fn match_pattern_exclusive_does_not_match_end() {
         // match 100 { 0..100 => "in", _ => "out" } → "out" (exclusive)
         let (env, res) =
             parse_eval_into_env("let r = match 100 { 0..100 => \"in\", _ => \"out\" }").await;
@@ -21214,7 +21214,7 @@ print(factorial(5))
     // ---- Or-patterns (R.2.1) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_pattern_literal_int_matchea_primero() {
+    async fn or_pattern_literal_int_matches_first() {
         let (env, res) =
             parse_eval_into_env("let r = match 1 { 1 | 2 | 3 => \"ok\", _ => \"no\" }").await;
         res.unwrap();
@@ -21222,7 +21222,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_pattern_literal_int_matchea_segundo() {
+    async fn or_pattern_literal_int_matches_second() {
         let (env, res) =
             parse_eval_into_env("let r = match 2 { 1 | 2 | 3 => \"ok\", _ => \"no\" }").await;
         res.unwrap();
@@ -21230,7 +21230,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_pattern_literal_int_no_matchea() {
+    async fn or_pattern_literal_int_does_not_match() {
         let (env, res) =
             parse_eval_into_env("let r = match 4 { 1 | 2 | 3 => \"ok\", _ => \"no\" }").await;
         res.unwrap();
@@ -21248,7 +21248,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_pattern_mezcla_int_y_range() {
+    async fn or_pattern_mixes_int_and_range() {
         // 7 → matches Range 5..=10 (second sub-pattern)
         let (env, res) =
             parse_eval_into_env("let r = match 7 { 0 | 5..=10 => \"ok\", _ => \"x\" }").await;
@@ -21257,7 +21257,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_pattern_ok_y_err_wildcard() {
+    async fn or_pattern_ok_and_err_wildcard() {
         let (env, res) =
             parse_eval_into_env("let r = match Ok(42) { Ok(_) | Err(_) => \"cualquier\" }").await;
         res.unwrap();
@@ -21265,7 +21265,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn or_pattern_no_introduce_binding_en_scope() {
+    async fn or_pattern_does_not_introduce_binding_in_scope() {
         // If an or-pattern arm body tried to use a var bound by
         // the pattern, it would fail. We verify that NOTHING
         // is bound by using a literal and a body that does not reference
@@ -21281,7 +21281,7 @@ print(factorial(5))
     // ---- Match guards (R.2.2) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn guard_true_dispara_arm() {
+    async fn guard_true_triggers_arm() {
         let (env, res) =
             parse_eval_into_env("let r = match 10 { x if x > 5 => \"alto\", _ => \"bajo\" }").await;
         res.unwrap();
@@ -21289,7 +21289,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn guard_false_pasa_al_siguiente_arm() {
+    async fn guard_false_passes_to_next_arm() {
         let (env, res) =
             parse_eval_into_env("let r = match 3 { x if x > 5 => \"alto\", _ => \"bajo\" }").await;
         res.unwrap();
@@ -21297,7 +21297,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn guard_sobre_ok_binding_filtra_por_valor() {
+    async fn guard_on_ok_binding_filters_by_value() {
         let (env, res) = parse_eval_into_env(
             "let r = match Ok(5) { Ok(v) if v > 0 => \"pos\", Ok(_) => \"neg\", Err(_) => \"err\" }",
         ).await;
@@ -21306,7 +21306,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn guard_sobre_ok_binding_falla_y_cae_al_siguiente_ok_arm() {
+    async fn guard_on_ok_binding_fails_and_falls_to_next_ok_arm() {
         let (env, res) = parse_eval_into_env(
             "let r = match Ok(-3) { Ok(v) if v > 0 => \"pos\", Ok(_) => \"neg\", Err(_) => \"err\" }",
         ).await;
@@ -21315,7 +21315,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn guard_con_or_pattern_dispara_si_cond_true() {
+    async fn guard_with_or_pattern_triggers_if_cond_true() {
         let (env, res) = parse_eval_into_env(
             "let r = match 4 { 1 | 2 | 3 | 4 if true => \"any\", _ => \"otro\" }",
         )
@@ -21325,7 +21325,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn guard_no_bool_es_error() {
+    async fn guard_non_bool_is_error() {
         let (_env, res) =
             parse_eval_into_env("let r = match 1 { x if x => \"x\", _ => \"y\" }").await;
         let err = res.unwrap_err();
@@ -21335,7 +21335,7 @@ print(factorial(5))
     // ---- Compound operators +=/-=/*=//= (R.2.3) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compound_plus_eq_sobre_ident() {
+    async fn compound_plus_eq_on_ident() {
         let (env, res) = parse_eval_into_env(
             "let total = 0\n\
              total += 5\n\
@@ -21347,7 +21347,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compound_minus_eq_sobre_ident() {
+    async fn compound_minus_eq_on_ident() {
         let (env, res) = parse_eval_into_env(
             "let n = 100\n\
              n -= 30",
@@ -21358,7 +21358,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compound_star_eq_sobre_ident() {
+    async fn compound_star_eq_on_ident() {
         let (env, res) = parse_eval_into_env(
             "let x = 6\n\
              x *= 7",
@@ -21369,7 +21369,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compound_slash_eq_sobre_ident_int() {
+    async fn compound_slash_eq_on_ident_int() {
         let (env, res) = parse_eval_into_env(
             "let q = 20\n\
              q /= 4",
@@ -21380,7 +21380,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compound_plus_eq_sobre_index_lista() {
+    async fn compound_plus_eq_on_list_index() {
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3]\n\
              xs[0] += 10",
@@ -21400,7 +21400,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn compound_acumulado_en_loop() {
+    async fn compound_accumulated_in_loop() {
         // Typical test: accumulate in a loop.
         let (env, res) = parse_eval_into_env(
             "let suma = 0\n\
@@ -21414,7 +21414,7 @@ print(factorial(5))
     // ---- Custom methods on type (R.3) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_sin_params_lee_field() {
+    async fn method_without_params_reads_field() {
         let (env, res) = parse_eval_into_env(
             "type U {\n\
                  name: Str\n\
@@ -21429,7 +21429,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_con_params_combina_fields_y_args() {
+    async fn method_with_params_combines_fields_and_args() {
         let (env, res) = parse_eval_into_env(
             "type C {\n\
                  count: Int\n\
@@ -21446,7 +21446,7 @@ print(factorial(5))
     // ---- Mini-batch St — static methods ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn st_static_method_se_invoca_como_type_method() {
+    async fn st_static_method_is_invoked_as_type_method() {
         let (env, res) = parse_eval_into_env(
             "type C {\n\
                  value: Int = 0\n\
@@ -21466,7 +21466,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn st_static_method_no_accede_a_fields_como_locales() {
+    async fn st_static_method_does_not_access_fields_as_locals() {
         // A static method does NOT receive the fields as locals. If the
         // body tries to use `value` (a field of the type), it must fail
         // with "undefined variable".
@@ -21487,7 +21487,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn st_static_method_invocado_sobre_instancia_es_error() {
+    async fn st_static_method_invoked_on_instance_is_error() {
         // `instance.static_method()` must fail with a clear message
         // suggesting the correct form.
         let (_env, res) = parse_eval_into_env(
@@ -21508,7 +21508,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn st_instance_method_invocado_como_static_es_error() {
+    async fn st_instance_method_invoked_as_static_is_error() {
         // `Type.instance_method()` must fail.
         let (_env, res) = parse_eval_into_env(
             "type C {\n\
@@ -21527,7 +21527,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_param_shadowea_field_homonimo() {
+    async fn method_param_shadows_homonymous_field() {
         // R.3 — if a param has the same name as a field, the
         // param wins inside the body (documented as caveat).
         let (env, res) = parse_eval_into_env(
@@ -21544,7 +21544,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_con_aridad_incorrecta_es_error() {
+    async fn method_with_wrong_arity_is_error() {
         let (_env, res) = parse_eval_into_env(
             "type U {\n\
                  fn f(x: Int) -> Int { return x }\n\
@@ -21558,7 +21558,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_inexistente_es_error() {
+    async fn nonexistent_method_is_error() {
         let (_env, res) = parse_eval_into_env(
             "type U { name: Str }\n\
              let u = U { name: \"x\" }\n\
@@ -21570,7 +21570,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_multiples_arms_de_dispatch() {
+    async fn method_multiple_dispatch_arms() {
         // Multiple methods on the same type, dispatched by name.
         let (env, res) = parse_eval_into_env(
             "type C {\n\
@@ -21593,7 +21593,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_chain_devuelve_instancia_ok() {
+    async fn method_chain_returns_instance_ok() {
         // A method returns a new Instance; we chain another
         // method on the result.
         let (env, res) = parse_eval_into_env(
@@ -21613,7 +21613,7 @@ print(factorial(5))
     // ---- Indexing ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_list_con_int_valido() {
+    async fn index_list_with_valid_int() {
         // [10, 20, 30][1] → 20
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::List(
@@ -21633,7 +21633,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_list_fuera_de_rango_es_error() {
+    async fn index_list_out_of_range_is_error() {
         // [1, 2][5]
         let res = eval_expr_test(Expr::Index {
             object: Box::new(Expr::List(
@@ -21654,7 +21654,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_list_negativo_wrappea_al_final() {
+    async fn index_list_negative_wraps_to_end() {
         // I.1 (mini-batch I): `[1, 2][-1]` now wraps to `[1, 2][1]` = 2.
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::List(
@@ -21674,7 +21674,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_list_con_string_es_type_error() {
+    async fn index_list_with_string_is_type_error() {
         let res = eval_expr_test(Expr::Index {
             object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO)], Span::ZERO)),
             index: Box::new(Expr::Str("a".into(), Span::ZERO)),
@@ -21689,7 +21689,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_map_clave_existente() {
+    async fn index_map_existing_key() {
         // {"a": 1, "b": 2}["b"] → 2
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Map(
@@ -21708,7 +21708,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_map_clave_inexistente_es_error() {
+    async fn index_map_nonexistent_key_is_error() {
         let res = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Map(
                 vec![(Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO))],
@@ -21726,7 +21726,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_sobre_int_es_type_error() {
+    async fn index_on_int_is_type_error() {
         // 42[0] — Int no se indexa
         let res = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Int(42, Span::ZERO)),
@@ -21742,7 +21742,7 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_encadenado_funciona() {
+    async fn chained_index_works() {
         // [[1, 2], [3, 4]][0][1] → 2
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Index {
@@ -21773,7 +21773,7 @@ print(factorial(5))
     // ---- for ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_sobre_lista_itera_los_elementos() {
+    async fn for_on_list_iterates_elements() {
         // total = 1 + 2 + 3 + 4 = 10
         let src = r#"
 total = 0
@@ -21787,7 +21787,7 @@ for x in [1, 2, 3, 4] {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_sobre_range_itera_inclusivo_exclusivo() {
+    async fn for_on_range_iterates_inclusive_exclusive() {
         // 0..3 → 0 + 1 + 2 = 3 (upper bound is exclusive)
         let src = r#"
 total = 0
@@ -21801,7 +21801,7 @@ for i in 0..3 {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_sobre_lista_vacia_no_itera() {
+    async fn for_on_empty_list_does_not_iterate() {
         let src = r#"
 ran = false
 for x in [] {
@@ -21814,7 +21814,7 @@ for x in [] {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_con_break_corta_iteracion() {
+    async fn for_with_break_cuts_iteration() {
         // Cuts when i == 3 → last stays at 2.
         let src = r#"
 last = 0
@@ -21831,7 +21831,7 @@ for i in 0..10 {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_con_continue_salta_iteracion() {
+    async fn for_with_continue_skips_iteration() {
         // 0..5, saltea i == 2 → 0 + 1 + 3 + 4 = 8.
         let src = r#"
 total = 0
@@ -21848,7 +21848,7 @@ for i in 0..5 {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_sobre_map_destructura_pares_kv() {
+    async fn for_on_map_destructures_kv_pairs() {
         // Mini-batch Md — `for (k, v) in m` binds k and v on each iteration.
         let src = r#"
 let m = {"a": 1, "b": 2}
@@ -21864,7 +21864,7 @@ for (k, v) in m {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_sobre_map_con_ident_bindea_como_tuple() {
+    async fn for_on_map_with_ident_binds_as_tuple() {
         // `for kv in m` binds kv as Value::Tuple([k, v]) on each iter.
         let src = r#"
 let m = {"a": 1}
@@ -21880,7 +21880,7 @@ for kv in m {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_sobre_int_es_type_error() {
+    async fn for_on_int_is_type_error() {
         let src = r#"
 for x in 42 {
     print(x)
@@ -21894,7 +21894,7 @@ for x in 42 {
     // ---- Mini-batch It — iterators enumerate/zip/chain ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_enumerate_emite_pares_indice_elem() {
+    async fn list_enumerate_emits_index_elem_pairs() {
         // `[10, 20, 30].enumerate()` → `[(0, 10), (1, 20), (2, 30)]`.
         let src = r#"
 let xs = [10, 20, 30]
@@ -21915,7 +21915,7 @@ let total_len = pairs.len()
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_zip_trunca_al_mas_corto() {
+    async fn list_zip_truncates_to_shortest() {
         // `[1, 2, 3].zip(["a", "b"])` → `[(1, "a"), (2, "b")]` (len 2).
         let src = r#"
 let xs = [1, 2, 3]
@@ -21935,7 +21935,7 @@ let first_y = zs[0].1
     // ---- Mini-batch Bits — bitwise operators ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bits_and_or_xor_sobre_int() {
+    async fn bits_and_or_xor_on_int() {
         let src = "let a: Int = 0xF0\nlet b: Int = 0x0F\nlet and_ab: Int = a & b\nlet or_ab: Int = a | b\nlet xor_ab: Int = a ^ b\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -21945,7 +21945,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bits_shifts_basicos() {
+    async fn bits_basic_shifts() {
         let src = "let a: Int = 1\nlet shl_a: Int = a << 4\nlet shr_a: Int = shl_a >> 2\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -21954,7 +21954,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bits_not_unario_invierte_int() {
+    async fn bits_unary_not_inverts_int() {
         // ~0 = -1 (all bits set in signed i64).
         let src = "let r: Int = ~0\n";
         let (env, res) = parse_eval_into_env(src).await;
@@ -21963,7 +21963,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bits_shift_negativo_es_error_runtime() {
+    async fn bits_shift_negative_is_runtime_error() {
         let src = "let r: Int = 1 << -1\n";
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
@@ -21971,7 +21971,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bits_shift_64_es_error_runtime() {
+    async fn bits_shift_64_is_runtime_error() {
         let src = "let r: Int = 1 << 64\n";
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
@@ -21979,7 +21979,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bits_precedencia_or_menor_que_and() {
+    async fn bits_precedence_or_lower_than_and() {
         // Python/C precedence: `a | b & c` → `a | (b & c)`.
         // 0b1100 | (0b1010 & 0b0110) = 0b1100 | 0b0010 = 0b1110 = 14.
         let src = "let r: Int = 0b1100 | 0b1010 & 0b0110\n";
@@ -21991,7 +21991,7 @@ let first_y = zs[0].1
     // ---- Mini-batch Cmp — compound bitwise ops ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_and_eq_compuesto() {
+    async fn cmp_compound_and_eq() {
         let src = "let x: Int = 0xFF\nx &= 0x0F\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -21999,7 +21999,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_or_xor_eq_compuestos() {
+    async fn cmp_compound_or_xor_eq() {
         let src = "let a: Int = 0b1100\na |= 0b0010\nlet b: Int = 0b1100\nb ^= 0b0101\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22008,7 +22008,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_shl_shr_eq_compuestos() {
+    async fn cmp_compound_shl_shr_eq() {
         let src = "let n: Int = 1\nn <<= 4\nlet m: Int = 16\nm >>= 2\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22017,7 +22017,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_compuesto_sobre_float_es_type_error() {
+    async fn cmp_compound_on_float_is_type_error() {
         let src = "let x: Float = 3.14\nx &= 1\n";
         let (_, res) = parse_eval_into_env(src).await;
         assert!(res.is_err());
@@ -22026,7 +22026,7 @@ let first_y = zs[0].1
     // ---- Mini-batch Err+ — `?` outside fn + Err with non-Str types ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn err_plus_try_en_top_level_con_err_str_da_mensaje_especifico() {
+    async fn err_plus_try_top_level_with_err_str_gives_specific_message() {
         // `?` at top-level with Err must show a clear message
         // (not the generic "return outside function").
         let src = "fn fail() -> Result<Int> { return Err(\"boom\") }\nlet r: Int = fail()?\n";
@@ -22040,7 +22040,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn err_plus_try_top_level_con_err_int_preserva_value_en_mensaje() {
+    async fn err_plus_try_top_level_with_err_int_preserves_value_in_message() {
         let src = "fn fail() -> Result<Int> { return Err(404) }\nlet r: Int = fail()?\n";
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
@@ -22052,7 +22052,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn err_plus_match_desempaca_err_con_tipo_custom() {
+    async fn err_plus_match_unpacks_err_with_custom_type() {
         // Add caveats: the `e` of `Err(e)` matches as Any (gradual),
         // so accessing fields requires knowing the shape. Using
         // `match` as an expression on the RHS of a let to avoid
@@ -22071,7 +22071,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn err_plus_err_int_se_preserva_en_value_no_se_convierte_a_str() {
+    async fn err_plus_err_int_is_preserved_in_value_not_converted_to_str() {
         // The Err(Int) remains Int in the value, not stringified
         // (unlike codegen which does coerce it to Str for
         // compatibility with Result<T, String>).
@@ -22088,7 +22088,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bits_combinado_con_hex_literales_de_lit() {
+    async fn bits_combined_with_hex_literals_from_lit() {
         // Fits with Lit: mask + shift on hex literals.
         let src = "let mask: Int = 0xFF\nlet byte: Int = (0xABCD >> 8) & mask\n";
         let (env, res) = parse_eval_into_env(src).await;
@@ -22097,7 +22097,7 @@ let first_y = zs[0].1
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_chain_concatena_dos_listas() {
+    async fn list_chain_concatenates_two_lists() {
         // `[1, 2].chain([3, 4, 5])` → `[1, 2, 3, 4, 5]`.
         let src = r#"
 let result = [1, 2].chain([3, 4, 5])
@@ -22113,7 +22113,7 @@ let last = result[4]
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_loop_var_persiste_despues_del_loop() {
+    async fn for_loop_var_persists_after_loop() {
         // Consistent with Fitz's block policy: variables of the
         // body (including the iteration variable) persist in the
         // containing scope. After 0..3, i = 2 and last = 2.
@@ -22129,7 +22129,7 @@ for i in 0..3 {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_anidado_funciona() {
+    async fn nested_for_works() {
         // 3 * 3 = 9 total iterations.
         let src = r#"
 total = 0
@@ -22147,7 +22147,7 @@ for i in 0..3 {
     // ---- Pattern::Range ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pattern_range_matchea_valor_dentro() {
+    async fn pattern_range_matches_value_inside() {
         let src = r#"
 let n = 5
 let r = match n {
@@ -22161,7 +22161,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pattern_range_no_matchea_valor_fuera() {
+    async fn pattern_range_does_not_match_value_outside() {
         let src = r#"
 let n = 15
 let r = match n {
@@ -22175,7 +22175,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pattern_range_es_exclusivo_en_el_fin() {
+    async fn pattern_range_is_exclusive_at_end() {
         // n = 10 with pattern 0..10 does NOT match (exclusive). The second arm does.
         let src = r#"
 let n = 10
@@ -22191,7 +22191,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pattern_range_con_negativos() {
+    async fn pattern_range_with_negatives() {
         let src = r#"
 let n = -3
 let r = match n {
@@ -22206,7 +22206,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn pattern_range_no_matchea_no_int() {
+    async fn pattern_range_does_not_match_non_int() {
         // 3.14 against pattern 0..10 → no match, falls to wildcard.
         let src = r#"
 let n = 3.14
@@ -22223,7 +22223,7 @@ let r = match n {
     // ---- builtin len ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_de_lista_devuelve_cantidad_de_elementos() {
+    async fn len_of_list_returns_element_count() {
         let src = "n = len([1, 2, 3, 4, 5])";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22231,7 +22231,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_de_lista_vacia_es_cero() {
+    async fn len_of_empty_list_is_zero() {
         let src = "n = len([])";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22239,7 +22239,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_de_mapa_devuelve_cantidad_de_pares() {
+    async fn len_of_map_returns_pair_count() {
         let src = r#"n = len({"a": 1, "b": 2, "c": 3})"#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22247,7 +22247,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_de_string_cuenta_chars_no_bytes() {
+    async fn len_of_string_counts_chars_not_bytes() {
         // "ñandú" has 5 chars and more than 5 bytes in UTF-8.
         let src = r#"n = len("ñandú")"#;
         let (env, res) = parse_eval_into_env(src).await;
@@ -22256,7 +22256,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_de_range_devuelve_cantidad_de_elementos() {
+    async fn len_of_range_returns_element_count() {
         let src = "n = len(0..10)";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -22264,7 +22264,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_de_range_al_reves_es_cero() {
+    async fn len_of_reverse_range_is_zero() {
         // 10..0 — the evaluator treats reversed ranges as empty.
         let src = "n = len(10..0)";
         let (env, res) = parse_eval_into_env(src).await;
@@ -22273,7 +22273,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_de_int_es_type_error() {
+    async fn len_of_int_is_type_error() {
         let src = "n = len(42)";
         let res = parse_and_eval(src).await;
         let err = res.unwrap_err();
@@ -22281,7 +22281,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn len_con_cantidad_de_args_incorrecta_es_error() {
+    async fn len_with_wrong_arg_count_is_error() {
         let src = "n = len([1], [2])";
         let res = parse_and_eval(src).await;
         let err = res.unwrap_err();
@@ -22297,7 +22297,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_basico_con_todos_los_campos() {
+    async fn struct_literal_basic_with_all_fields() {
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { id: 1, name: \"Fitz\" }\n\
@@ -22318,7 +22318,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_ordena_campos_segun_la_declaracion() {
+    async fn struct_literal_orders_fields_by_declaration() {
         // The literal lists the fields in reverse; the instance must follow
         // the order of the `type`.
         let src = "\
@@ -22339,7 +22339,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_aplica_default_cuando_se_omite_un_campo() {
+    async fn struct_literal_applies_default_when_field_omitted() {
         let src = "\
             type Config { host: Str, port: Int = 3000 }\n\
             let c = Config { host: \"localhost\" }\n\
@@ -22358,7 +22358,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_default_se_evalua_en_el_env_de_instanciacion() {
+    async fn struct_literal_default_evaluates_in_instantiation_env() {
         // The default is an expression: it is evaluated on instantiation, in the
         // scope where the literal occurs. If the user defines a var
         // with that name, the default sees it.
@@ -22380,7 +22380,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_campo_nullable_omitido_es_null() {
+    async fn struct_literal_omitted_nullable_field_is_null() {
         let src = "\
             type User { id: Int, email: Str? }\n\
             let u = User { id: 1 }\n\
@@ -22398,7 +22398,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_campo_nullable_explicito_a_null() {
+    async fn struct_literal_explicit_nullable_field_to_null() {
         let src = "\
             type User { id: Int, email: Str? }\n\
             let u = User { id: 1, email: null }\n\
@@ -22416,7 +22416,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_campo_faltante_sin_default_ni_nullable_es_error() {
+    async fn struct_literal_missing_field_without_default_or_nullable_is_error() {
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { id: 1 }\n\
@@ -22431,7 +22431,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_campo_extra_no_declarado_es_error() {
+    async fn struct_literal_extra_undeclared_field_is_error() {
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { id: 1, name: \"x\", color: \"red\" }\n\
@@ -22446,14 +22446,14 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_de_tipo_no_definido_es_error() {
+    async fn struct_literal_of_undefined_type_is_error() {
         let src = "let u = NoExiste { id: 1 }";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UndefinedVariable(_)));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_sobre_no_tipo_es_type_error() {
+    async fn struct_literal_on_non_type_is_type_error() {
         // `x` is Int, not a Type — instantiating it is an error.
         let src = "\
             let x = 42\n\
@@ -22464,7 +22464,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_sobre_instance_devuelve_el_valor() {
+    async fn field_access_on_instance_returns_value() {
         let src = "\
             type User { id: Int, name: Str }\n\
             let u = User { id: 1, name: \"Fitz\" }\n\
@@ -22478,7 +22478,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_campo_inexistente_es_error() {
+    async fn field_access_nonexistent_field_is_error() {
         let src = "\
             type User { id: Int }\n\
             let u = User { id: 1 }\n\
@@ -22494,7 +22494,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_sobre_no_instance_es_type_error() {
+    async fn field_access_on_non_instance_is_type_error() {
         // "Bare" field access on an Int blows up: there are no properties
         // on primitives. Methods do (`x.upper()` for Str, etc.),
         // but that path goes through `Expr::Call` with callee `Field`, not through
@@ -22508,7 +22508,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn struct_literal_anidado_y_field_access_encadenado() {
+    async fn nested_struct_literal_and_chained_field_access() {
         let src = "\
             type User { id: Int, name: Str }\n\
             type Order { user: User, total: Int }\n\
@@ -22521,7 +22521,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn instance_se_imprime_con_display_esperado() {
+    async fn instance_prints_with_expected_display() {
         // Sanity: printing an instance shows the canonical format.
         // (We do not capture stdout — we use `to_string` of the returned Value.)
         let src = "\
@@ -22550,14 +22550,14 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ok_ctor_evalua_a_value_result_ok() {
+    async fn ok_ctor_evaluates_to_value_result_ok() {
         // Ok(42) → Value::Result(Ok(Int(42)))
         let e = Expr::Ok(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         assert_eq!(eval_expr_test(e).await.unwrap(), ok_value(Value::Int(42)));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn err_ctor_evalua_a_value_result_err() {
+    async fn err_ctor_evaluates_to_value_result_err() {
         // Err("boom") → Value::Result(Err(Str("boom")))
         let e = Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO);
         assert_eq!(
@@ -22567,7 +22567,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ok_ctor_evalua_inner_antes_de_envolver() {
+    async fn ok_ctor_evaluates_inner_before_wrapping() {
         // Ok(1 + 2) → Value::Result(Ok(Int(3)))
         let e = Expr::Ok(
             Box::new(Expr::BinOp {
@@ -22582,7 +22582,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn try_sobre_ok_desempaqueta() {
+    async fn try_on_ok_unpacks() {
         // Ok(7)? evaluated inside a function should be 7.
         // We test it directly: since there is no containing return, the `?`
         // on Ok emits no signal and the expression evaluates to 7.
@@ -22594,7 +22594,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn try_sobre_err_emite_signal_return_con_err() {
+    async fn try_on_err_emits_signal_return_with_err() {
         // Err("boom")? emite EvalSignal::Return(Value::Result(Err("boom"))).
         let e = Expr::Try(
             Box::new(Expr::Err(
@@ -22616,7 +22616,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn try_sobre_no_result_es_type_error() {
+    async fn try_on_non_result_is_type_error() {
         // 42? → error: the `?` operator requires a Result, not Int.
         let e = Expr::Try(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         let env = Environment::new();
@@ -22634,7 +22634,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn try_adentro_de_funcion_con_ok_devuelve_inner() {
+    async fn try_inside_function_with_ok_returns_inner() {
         // fn pass() { return Ok(5)? }  → pass() == 5  (because returning a
         // "bare" Int value comes out as Int, not as Result).
         //
@@ -22661,7 +22661,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn try_adentro_de_funcion_con_err_propaga() {
+    async fn try_inside_function_with_err_propagates() {
         // fn boom() { let _ = Err("nope")? ; return Ok("nunca llega") }
         // boom() returns Value::Result(Err("nope")) without executing the return.
         let env = Environment::new();
@@ -22702,7 +22702,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn programa_e2e_find_user_con_result_y_try() {
+    async fn program_e2e_find_user_with_result_and_try() {
         // Program similar to the Phase 3 success criterion:
         // a manual find_user that returns Result, with `?` and `match`.
         let src = "\
@@ -22736,7 +22736,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn match_e2e_sobre_result_con_ok_y_err() {
+    async fn match_e2e_on_result_with_ok_and_err() {
         let src = "\
             fn divide(a, b) {\n\
             \tif (b == 0) {\n\
@@ -22764,7 +22764,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn try_top_level_con_err_genera_error_de_return_huerfano() {
+    async fn try_top_level_with_err_generates_orphan_return_error() {
         // At top-level, `Err(...)?` emits Return; the global evaluator
         // converts it into "return can only be used inside a function".
         let env = Environment::new();
@@ -22786,7 +22786,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_expr_evalua_a_function() {
+    async fn fn_expr_evaluates_to_function() {
         // `fn(x) => x * 2` — evaluated alone, gives a `Value::Function`.
         let fnexpr = Expr::FnExpr {
             params: vec![crate::ast::Param {
@@ -22814,7 +22814,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_expr_invocada_al_vuelo() {
+    async fn fn_expr_invoked_on_the_fly() {
         // `(fn(x) => x + 1)(2)` → 3
         let src = "let y = (fn(x) => x + 1)(2)\n";
         let (env, res) = parse_eval_into_env(src).await;
@@ -22823,7 +22823,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_expr_captura_el_env_actual() {
+    async fn fn_expr_captures_current_env() {
         // The anonymous body sees `n` defined outside (closure).
         let src = "\
             let n = 10\n\
@@ -22836,7 +22836,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fn_expr_se_pasa_como_argumento() {
+    async fn fn_expr_passes_as_argument() {
         // Pass anonymous fn as callback to a higher-order function
         // declared by the user.
         let src = "\
@@ -22849,7 +22849,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_assign_muta_la_instancia() {
+    async fn field_assign_mutates_instance() {
         // `user.name = "Otro"` changes the field, visible through
         // any alias.
         let src = "\
@@ -22870,7 +22870,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_assign_visible_a_traves_de_alias() {
+    async fn field_assign_visible_through_alias() {
         // Two variables point to the same instance (via `Rc`); mutating
         // through one is seen through the other.
         let src = "\
@@ -22892,7 +22892,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_assign_a_no_instance_es_error() {
+    async fn field_assign_to_non_instance_is_error() {
         // `x.field = ...` on something that is not Instance cuts with type error.
         let src = "\
             let x = 10\n\
@@ -22903,7 +22903,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_assign_a_campo_inexistente_es_error() {
+    async fn field_assign_to_nonexistent_field_is_error() {
         let src = "\
             type User { id: Int }\n\
             let u = User { id: 1 }\n\
@@ -22915,7 +22915,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_call_sobre_tipo_sin_metodo_emite_error_explicito() {
+    async fn method_call_on_type_without_method_emits_explicit_error() {
         // `xs.foo()` does not exist — the dispatch cuts with
         // "has no method called foo".
         let src = "\
@@ -22931,7 +22931,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_push_muta_in_place() {
+    async fn list_push_mutates_in_place() {
         let src = "\
             let xs = [1, 2]\n\
             xs.push(3)\n\
@@ -22952,7 +22952,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_push_visible_a_traves_de_alias() {
+    async fn list_push_visible_through_alias() {
         // Two variables to the same Rc; mutating through one is seen through the other.
         let src = "\
             let a = [1]\n\
@@ -22966,7 +22966,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_pop_devuelve_el_ultimo_y_acorta() {
+    async fn list_pop_returns_last_and_shortens() {
         let src = "\
             let xs = [1, 2, 3]\n\
             let last = xs.pop()\n\
@@ -22981,14 +22981,14 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_pop_sobre_vacia_es_error() {
+    async fn list_pop_on_empty_is_error() {
         let src = "let xs = []\nlet _ = xs.pop()\n";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(err.message.contains("vacía"), "mensaje: {}", err.message);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_map_aplica_fn_a_cada_elemento() {
+    async fn list_map_applies_fn_to_each_element() {
         let src = "let r = [1, 2, 3].map(fn(n) => n * 10)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23003,7 +23003,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_filter_solo_mantiene_los_true() {
+    async fn list_filter_only_keeps_trues() {
         let src = "let r = [1, 2, 3, 4].filter(fn(n) => n == 2 or n == 4)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23014,14 +23014,14 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_filter_callback_no_bool_es_error() {
+    async fn list_filter_callback_non_bool_is_error() {
         let src = "let r = [1, 2].filter(fn(n) => n)\n";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_find_devuelve_ok_cuando_matchea() {
+    async fn list_find_returns_ok_when_matches() {
         let src = "let r = [1, 2, 3].find(fn(n) => n == 2)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23029,7 +23029,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_find_devuelve_err_cuando_no_hay_match() {
+    async fn list_find_returns_err_when_no_match() {
         let src = "let r = [1, 2, 3].find(fn(n) => n == 99)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23040,7 +23040,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_metodo_len() {
+    async fn list_len_method() {
         let src = "let n = [1, 2, 3, 4].len()\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23052,7 +23052,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn map_get_devuelve_ok_si_hay_clave() {
+    async fn map_get_returns_ok_if_key_exists() {
         let src = "let r = {\"a\": 1}.get(\"a\")\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23060,7 +23060,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn map_get_devuelve_err_si_no_hay_clave() {
+    async fn map_get_returns_err_if_no_key() {
         let src = "let r = {\"a\": 1}.get(\"nope\")\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23076,7 +23076,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn map_has_devuelve_true_o_false() {
+    async fn map_has_returns_true_or_false() {
         let src = "\
             let m = {\"a\": 1}\n\
             let yes = m.has(\"a\")\n\
@@ -23089,7 +23089,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn map_keys_y_values_preservan_orden_de_insercion() {
+    async fn map_keys_and_values_preserve_insertion_order() {
         let src = "\
             let m = {\"b\": 2, \"a\": 1}\n\
             let ks = m.keys()\n\
@@ -23115,7 +23115,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_metodo_len_cuenta_chars() {
+    async fn str_len_method_counts_chars() {
         let src = "let n = \"hola\".len()\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -23125,7 +23125,7 @@ let r = match n {
     // ---- Mini-batch Bytes ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bytes_literal_se_evalua_a_value_bytes() {
+    async fn bytes_literal_evaluates_to_value_bytes() {
         let (env, res) = parse_eval_into_env(
             "let a = b\"hola\"\n\
              let b = b\"\\x00\\x01\\xff\"",
@@ -23137,7 +23137,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bytes_len_y_is_empty() {
+    async fn bytes_len_and_is_empty() {
         let (env, res) = parse_eval_into_env(
             "let a = b\"hola\".len()\n\
              let b = b\"\".is_empty()\n\
@@ -23164,7 +23164,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bytes_to_str_err_para_no_utf8() {
+    async fn bytes_to_str_err_for_non_utf8() {
         let (env, res) = parse_eval_into_env("let r = b\"\\xff\\xfe\".to_str()").await;
         res.unwrap();
         let r = env.lock().get("r").clone();
@@ -23189,7 +23189,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn bytes_builtin_len_global_funciona() {
+    async fn bytes_builtin_len_global_works() {
         // global `len(b"...")` also works.
         let (env, res) = parse_eval_into_env("let n = len(b\"abcde\")").await;
         res.unwrap();
@@ -23197,7 +23197,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_upper_y_lower() {
+    async fn str_upper_and_lower() {
         let src = "\
             let a = \"hola\".upper()\n\
             let b = \"MUNDO\".lower()\n\
@@ -23211,7 +23211,7 @@ let r = match n {
     // ---- S.1: contains/starts_with/ends_with ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_contains_basico() {
+    async fn str_contains_basic() {
         let (env, res) = parse_eval_into_env(
             "let a = \"hola mundo\".contains(\"mundo\")\n\
              let b = \"hola mundo\".contains(\"xyz\")",
@@ -23223,14 +23223,14 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_contains_empty_string_es_true() {
+    async fn str_contains_empty_string_is_true() {
         let (env, res) = parse_eval_into_env("let a = \"hola\".contains(\"\")").await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_starts_with_y_ends_with() {
+    async fn str_starts_with_and_ends_with() {
         let (env, res) = parse_eval_into_env(
             "let a = \"hola.fitz\".starts_with(\"hola\")\n\
              let b = \"hola.fitz\".ends_with(\".fitz\")\n\
@@ -23246,7 +23246,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_contains_con_arg_no_str_es_error() {
+    async fn str_contains_with_non_str_arg_is_error() {
         let (_env, res) = parse_eval_into_env("let a = \"hola\".contains(1)").await;
         let err = res.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
@@ -23255,7 +23255,7 @@ let r = match n {
     // ---- S.2: split/trim/replace/repeat ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_split_devuelve_list_str() {
+    async fn str_split_returns_list_str() {
         let (env, res) = parse_eval_into_env("let parts = \"a,b,c\".split(\",\")").await;
         res.unwrap();
         let v = env.lock().get("parts").unwrap();
@@ -23271,7 +23271,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_split_sin_match_devuelve_un_elemento() {
+    async fn str_split_without_match_returns_single_element() {
         let (env, res) = parse_eval_into_env("let parts = \"abc\".split(\"|\")").await;
         res.unwrap();
         let v = env.lock().get("parts").unwrap();
@@ -23285,7 +23285,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_trim_remueve_whitespace_ambos_lados() {
+    async fn str_trim_removes_whitespace_both_sides() {
         let (env, res) = parse_eval_into_env(
             "let a = \"  hola  \".trim()\n\
              let b = \"\\nlinea\\n\".trim()",
@@ -23299,7 +23299,7 @@ let r = match n {
     // ---- Mini-batch Mb: trim_start / trim_end ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb_str_trim_start_recorta_solo_inicio() {
+    async fn mb_str_trim_start_trims_only_start() {
         let (env, res) = parse_eval_into_env(
             "let a = \"  hola  \".trim_start()\n\
              let b = \"\\n\\tlinea\".trim_start()",
@@ -23311,7 +23311,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb_str_trim_end_recorta_solo_final() {
+    async fn mb_str_trim_end_trims_only_end() {
         let (env, res) = parse_eval_into_env(
             "let a = \"  hola  \".trim_end()\n\
              let b = \"linea\\n\\t\".trim_end()",
@@ -23325,7 +23325,7 @@ let r = match n {
     // ---- Mini-batch Mb: List.flatten ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb_list_flatten_concatena_sublistas_en_orden() {
+    async fn mb_list_flatten_concatenates_sublists_in_order() {
         let (env, res) = parse_eval_into_env(
             "let xss: List<List<Int>> = [[1, 2], [3], [4, 5, 6]]\n\
              let flat = xss.flatten()",
@@ -23353,7 +23353,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb_list_flatten_lista_vacia_es_vacia() {
+    async fn mb_list_flatten_empty_list_is_empty() {
         let (env, res) = parse_eval_into_env(
             "let xss: List<List<Int>> = []\n\
              let flat = xss.flatten()",
@@ -23371,7 +23371,7 @@ let r = match n {
     // ---- Mini-batch Mb: List.sort_by with callback ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb_list_sort_by_ascendente() {
+    async fn mb_list_sort_by_ascending() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]\n\
              xs.sort_by(fn(a, b) => a - b)",
@@ -23398,7 +23398,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb_list_sort_by_descendente() {
+    async fn mb_list_sort_by_descending() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [3, 1, 4]\n\
              xs.sort_by(fn(a, b) => b - a)",
@@ -23427,7 +23427,7 @@ let r = match n {
     // ---- Mini-batch Ir — iteradores sobre Range ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ir_range_enumerate_devuelve_pares_indice_valor() {
+    async fn ir_range_enumerate_returns_index_value_pairs() {
         let (env, res) = parse_eval_into_env("let r = (0..3).enumerate()").await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
@@ -23450,7 +23450,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ir_range_zip_trunca_al_mas_corto() {
+    async fn ir_range_zip_truncates_to_shortest() {
         let (env, res) = parse_eval_into_env("let r = (0..10).zip([\"a\", \"b\", \"c\"])").await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
@@ -23466,7 +23466,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ir_range_chain_concatena_con_list_int() {
+    async fn ir_range_chain_concatenates_with_list_int() {
         let (env, res) = parse_eval_into_env("let r = (0..3).chain([100, 200])").await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
@@ -23489,7 +23489,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ir_range_len_exclusivo_e_inclusivo() {
+    async fn ir_range_len_exclusive_and_inclusive() {
         let (env, res) = parse_eval_into_env(
             "let a = (0..10).len()\n\
              let b = (0..=10).len()",
@@ -23503,7 +23503,7 @@ let r = match n {
     // ---- Mini-batch Up: Map.update + comprehension tuple destructuring ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn up_map_update_key_existente() {
+    async fn up_map_update_existing_key() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 10, \"b\": 20}\n\
              let r = m.update(\"a\", fn(v) => v + 100)",
@@ -23521,7 +23521,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn up_map_update_key_inexistente_es_no_op() {
+    async fn up_map_update_nonexistent_key_is_no_op() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 10}\n\
              let r = m.update(\"missing\", fn(v) => v + 1000)",
@@ -23540,7 +23540,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn up_comprehension_con_tuple_destructuring() {
+    async fn up_comprehension_with_tuple_destructuring() {
         let (env, res) = parse_eval_into_env(
             "let pairs: List<(Int, Int)> = [(1, 10), (2, 20), (3, 30)]\n\
              let sums: List<Int> = [a + b for (a, b) in pairs]",
@@ -23569,7 +23569,7 @@ let r = match n {
     // ---- Mini-batch Ex2: List.flat_map/first/last + Map.merge ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex2_list_flat_map_concatena_callback_lists() {
+    async fn ex2_list_flat_map_concatenates_callback_lists() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.flat_map(fn(n) => [n, n * 10])",
@@ -23596,7 +23596,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex2_list_flat_map_callback_no_list_es_error() {
+    async fn ex2_list_flat_map_callback_non_list_is_error() {
         let (_env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
              let r = xs.flat_map(fn(n) => n)",
@@ -23611,7 +23611,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex2_list_first_last_ok_y_err() {
+    async fn ex2_list_first_last_ok_and_err() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [10, 20, 30]\n\
              let a = xs.first()\n\
@@ -23659,7 +23659,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex2_map_merge_preserva_orden_para_pares_nuevos() {
+    async fn ex2_map_merge_preserves_order_for_new_pairs() {
         let (env, res) = parse_eval_into_env(
             "let m1: Map<Str, Int> = {\"a\": 1}\n\
              let m2: Map<Str, Int> = {\"b\": 2, \"c\": 3}\n\
@@ -23690,7 +23690,7 @@ let r = match n {
     // ---- Mini-batch Ex: Str.find/index_of/last_index_of, Map.filter/map_values ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex_str_find_devuelve_result_int() {
+    async fn ex_str_find_returns_result_int() {
         let (env, res) = parse_eval_into_env(
             "let s: Str = \"hola mundo, hola fitz\"\n\
              let a = s.find(\"hola\")\n\
@@ -23708,7 +23708,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex_str_last_index_of_busca_desde_el_final() {
+    async fn ex_str_last_index_of_searches_from_end() {
         let (env, res) = parse_eval_into_env(
             "let s: Str = \"hola mundo, hola fitz\"\n\
              let a = s.last_index_of(\"hola\")",
@@ -23724,7 +23724,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex_str_find_con_chars_no_ascii_devuelve_char_index() {
+    async fn ex_str_find_with_non_ascii_chars_returns_char_index() {
         // "café" has 4 chars (c, a, f, é) but `é` takes 2 bytes
         // in UTF-8. `find` must return the char index (3 for "é"),
         // not the byte index (3 too coincidentally — let's use a non-ASCII char
@@ -23745,7 +23745,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex_map_filter_keeps_pares_donde_pred_true() {
+    async fn ex_map_filter_keeps_pairs_where_pred_true() {
         let (env, res) = parse_eval_into_env(
             "let scores: Map<Str, Int> = {\"ada\": 80, \"bob\": 45, \"cam\": 92}\n\
              let passing = scores.filter(fn(k, v) => v >= 60)",
@@ -23761,7 +23761,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ex_map_map_values_transforma_y_mantiene_keys() {
+    async fn ex_map_map_values_transforms_and_keeps_keys() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
              let doubled = m.map_values(fn(v) => v * 2)",
@@ -23783,7 +23783,7 @@ let r = match n {
     // ---- Mini-batch Lx: any/all/count/find_index ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lx_any_y_all_corto_circuito() {
+    async fn lx_any_and_all_short_circuit() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let a = xs.any(fn(x) => x > 3)\n\
@@ -23800,7 +23800,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lx_any_vacia_es_false_all_vacia_es_true() {
+    async fn lx_any_empty_is_false_all_empty_is_true() {
         let (env, res) = parse_eval_into_env(
             "let empty: List<Int> = []\n\
              let a = empty.any(fn(x) => true)\n\
@@ -23815,7 +23815,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lx_count_devuelve_int() {
+    async fn lx_count_returns_int() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let n = xs.count(fn(x) => x > 2)",
@@ -23826,7 +23826,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lx_find_index_ok_o_err() {
+    async fn lx_find_index_ok_or_err() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [10, 20, 30, 40]\n\
              let a = xs.find_index(fn(x) => x == 30)\n\
@@ -23846,7 +23846,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn lx_callback_no_bool_es_type_error() {
+    async fn lx_callback_non_bool_is_type_error() {
         let (_env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.any(fn(x) => x)",
@@ -23861,7 +23861,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb_list_sort_by_callback_no_int_es_error() {
+    async fn mb_list_sort_by_callback_non_int_is_error() {
         let (_env, res) = parse_eval_into_env(
             "let xs: List<Int> = [3, 1]\n\
              xs.sort_by(fn(a, b) => \"oops\")",
@@ -23876,7 +23876,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_replace_reemplaza_todas_las_ocurrencias() {
+    async fn str_replace_replaces_all_occurrences() {
         let (env, res) = parse_eval_into_env(
             "let a = \"aaa\".replace(\"a\", \"bb\")\n\
              let b = \"hola mundo\".replace(\"o\", \"O\")",
@@ -23888,7 +23888,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_repeat_funciona() {
+    async fn str_repeat_works() {
         let (env, res) = parse_eval_into_env(
             "let a = \"ab\".repeat(3)\n\
              let b = \"x\".repeat(0)",
@@ -23900,7 +23900,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_repeat_con_negativo_es_error() {
+    async fn str_repeat_with_negative_is_error() {
         let (_env, res) = parse_eval_into_env("let a = \"ab\".repeat(-1)").await;
         let err = res.unwrap_err();
         assert!(err.message.contains("negativo"));
@@ -23909,7 +23909,7 @@ let r = match n {
     // ---- S.3: List.sort/reverse/contains ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_sort_int_ascendente() {
+    async fn list_sort_int_ascending() {
         let (env, res) = parse_eval_into_env(
             "let xs = [3, 1, 4, 1, 5, 9, 2, 6]\n\
              xs.sort()",
@@ -23936,7 +23936,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_sort_str_alfabetico() {
+    async fn list_sort_str_alphabetic() {
         let (env, res) = parse_eval_into_env(
             "let xs = [\"zeta\", \"alfa\", \"beta\"]\n\
              xs.sort()",
@@ -23954,7 +23954,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_sort_heterogeneo_es_error() {
+    async fn list_sort_heterogeneous_is_error() {
         let (_env, res) = parse_eval_into_env(
             "let xs = [1, \"dos\", 3]\n\
              xs.sort()",
@@ -23965,7 +23965,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_reverse_invierte_orden() {
+    async fn list_reverse_reverses_order() {
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3, 4, 5]\n\
              xs.reverse()",
@@ -24011,7 +24011,7 @@ let r = match n {
     // ---- I.1: negative indices (mini-batch I) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_negative_index_devuelve_desde_el_final() {
+    async fn list_negative_index_returns_from_end() {
         let (env, res) = parse_eval_into_env(
             "let xs = [10, 20, 30, 40, 50]\n\
              let a = xs[-1]\n\
@@ -24026,7 +24026,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_negative_index_fuera_de_rango_es_error() {
+    async fn list_negative_index_out_of_range_is_error() {
         let (_env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3]\n\
              let a = xs[-4]",
@@ -24037,7 +24037,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_index_devuelve_char_como_str() {
+    async fn str_index_returns_char_as_str() {
         let (env, res) = parse_eval_into_env(
             "let s = \"fitz\"\n\
              let a = s[0]\n\
@@ -24052,7 +24052,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_assign_con_negativo() {
+    async fn list_assign_with_negative() {
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3, 4]\n\
              xs[-1] = 99",
@@ -24072,7 +24072,7 @@ let r = match n {
     // ---- I.2: slicing ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_slice_basico() {
+    async fn list_slice_basic() {
         let (env, res) = parse_eval_into_env(
             "let xs = [10, 20, 30, 40, 50]\n\
              let a = xs[1..3]\n\
@@ -24097,7 +24097,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_slice_inclusive_y_negativos() {
+    async fn list_slice_inclusive_and_negatives() {
         let (env, res) = parse_eval_into_env(
             "let xs = [10, 20, 30, 40, 50]\n\
              let a = xs[1..=3]\n\
@@ -24120,7 +24120,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_slice_clampea_out_of_range() {
+    async fn list_slice_clamps_out_of_range() {
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3]\n\
              let a = xs[100..]\n\
@@ -24145,7 +24145,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_slice_devuelve_copia_no_view() {
+    async fn list_slice_returns_copy_not_view() {
         // Mutating the slice does NOT affect the original.
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3, 4, 5]\n\
@@ -24164,7 +24164,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn str_slice_funciona() {
+    async fn str_slice_works() {
         let (env, res) = parse_eval_into_env(
             "let s = \"hola fitz\"\n\
              let a = s[0..4]\n\
@@ -24193,7 +24193,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn metodo_con_aridad_incorrecta_es_error() {
+    async fn method_with_incorrect_arity_is_error() {
         let src = "let r = \"x\".upper(1)\n";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::WrongArgCount { .. }));
@@ -24204,7 +24204,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn metodos_se_encadenan() {
+    async fn methods_chain() {
         // `.map(...).filter(...)` chains via postfix. The parser cuts
         // statements at newline; multi-line chaining with `.`
         // at the start of the next line is not supported yet (explicit
@@ -24223,7 +24223,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn programa_e2e_criterio_de_exito_fase_3() {
+    async fn program_e2e_phase_3_success_criterion() {
         // `users.find(fn(u) => u.id == id)` — uses method call, anonymous fn,
         // Result, struct literal and field access. `find` already returns
         // `Result<User>` so `find_user` returns it directly. (Using
@@ -24315,7 +24315,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn import_simple_expone_el_modulo_como_namespace() {
+    async fn import_simple_exposes_module_as_namespace() {
         // `import utils` + `utils.greet("Fitz")` — the module exports
         // a fn that returns an interpolated Str.
         let utils = "fn greet(name) => \"hola, {name}\"\n";
@@ -24329,7 +24329,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn import_bindea_bajo_el_ultimo_segmento() {
+    async fn import_binds_under_last_segment() {
         // `import sub.foo` → binding `foo` (not `sub.foo`). The path
         // resolves to `sub/foo.fitz`.
         let foo = "fn one() => 1\n";
@@ -24345,7 +24345,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn from_import_bindea_nombres_directos() {
+    async fn from_import_binds_direct_names() {
         // `from utils import greet, NAME` brings `greet` and `NAME` into
         // the current scope, without exposing the module.
         let utils = "\
@@ -24364,7 +24364,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn from_import_de_tipo_permite_struct_literal() {
+    async fn from_import_of_type_allows_struct_literal() {
         // `from foo import User` + `User { id: 1, name: "x" }` — the
         // struct literal parser expects `Ident { ... }`, and `from
         // import` brings the Value::Type into the scope with that name.
@@ -24380,7 +24380,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn from_import_default_referencia_const_del_modulo() {
+    async fn from_import_default_references_module_const() {
         // PreF8.3: the module's `type User` has defaults that
         // reference consts of the module itself (`MAX`, `HELLO`). The
         // importer does not bring them into scope. The loader pre-evaluates
@@ -24405,7 +24405,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn import_con_alias_bindea_bajo_alias() {
+    async fn import_with_alias_binds_under_alias() {
         // PreF8.4: `import utils as u` → binding `u`, not `utils`.
         let utils = "fn greet(n) => \"hola, {n}\"\n";
         let main = "\
@@ -24420,7 +24420,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn from_import_alias_bindea_bajo_alias() {
+    async fn from_import_alias_binds_under_alias() {
         // PreF8.4: `from utils import greet as g, PREFIX as P`.
         let utils = "\
             let PREFIX = \"saludos, \"\n\
@@ -24441,7 +24441,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn from_import_alias_de_tipo_struct_lit_usa_alias_pero_display_nombre_original() {
+    async fn from_import_alias_of_type_struct_lit_uses_alias_but_display_shows_original_name() {
         // PreF8.4: `from foo import User as Person` + `Person { ... }`.
         // The struct lit uses the alias to look up the binding, but the
         // Display of the instance uses the canonical type name
@@ -24461,7 +24461,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn from_import_default_se_puede_sobrescribir_con_struct_lit() {
+    async fn from_import_default_can_be_overridden_with_struct_lit() {
         // Even if the module defines defaults, the importer can
         // overwrite them at construction.
         let foo = "\
@@ -24479,7 +24479,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn modulo_no_existe_da_error_con_path_resuelto() {
+    async fn module_does_not_exist_gives_error_with_resolved_path() {
         let main = "import inexistente\n";
         let (_env, res) = eval_with_modules(&[], main).await;
         let err = res.unwrap_err();
@@ -24496,7 +24496,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn from_import_de_nombre_inexistente_da_error_claro() {
+    async fn from_import_of_nonexistent_name_gives_clear_error() {
         // The module loads, but the requested name does not exist in it.
         let utils = "fn a() => 1\n";
         let main = "from utils import b\n";
@@ -24508,7 +24508,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_en_modulo_inexistente_da_error_claro() {
+    async fn field_access_on_nonexistent_module_gives_clear_error() {
         // `import utils` + `utils.missing` — the module loads but
         // does not export `missing`.
         let utils = "fn a() => 1\n";
@@ -24526,7 +24526,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn modulo_cargado_dos_veces_no_re_ejecuta_side_effects() {
+    async fn module_loaded_twice_does_not_re_execute_side_effects() {
         // Each time a module is evaluated, its body runs. But the
         // cache makes a second import of the same file return
         // the same `Value::Module` without re-executing the body. To
@@ -24554,7 +24554,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn modulo_cacheado_devuelve_misma_identidad_de_env() {
+    async fn cached_module_returns_same_env_identity() {
         // Loading a module twice from different paths but to
         // the same file (here same path) returns `Value::Module` with
         // the SAME `Arc<Mutex<Environment>>` inside. That is tested by
@@ -24581,7 +24581,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn ciclo_a_b_a_se_detecta() {
+    async fn cycle_a_b_a_is_detected() {
         // a.fitz imports b.fitz which imports a.fitz. While
         // a is being evaluated (still unfinished), b tries to import a and the
         // loader detects the cycle.
@@ -24604,7 +24604,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn import_anidado_resuelve_relativo_al_modulo_importer() {
+    async fn nested_import_resolves_relative_to_importer_module() {
         // `main` imports `sub.foo`, and `sub/foo.fitz` imports `bar`,
         // which has to resolve as `sub/bar.fitz` (relative to
         // `foo`, not to main). This verifies the `base_dir` swap
@@ -24625,7 +24625,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn loader_absoluto_data_sibling_import_resuelve_via_import_root() {
+    async fn loader_absolute_data_sibling_import_resolves_via_import_root() {
         // Loader-absolute mini-phase (Step 4 post-boilerplates) — canonical
         // case: `data/users.fitz` does `from types.user import User`.
         // Before, the loader searched `<base_dir>/types/user.fitz` with
@@ -24667,7 +24667,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn loader_absoluto_no_rompe_imports_relativos_legacy() {
+    async fn loader_absolute_does_not_break_legacy_relative_imports() {
         // The loader-absolute fix preserves backward-compat: if the
         // relative search DOES find the file, it wins over the
         // import_root fallback. Test: `sub/foo.fitz` imports `bar`,
@@ -24698,7 +24698,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn modulo_con_error_de_sintaxis_propaga_error() {
+    async fn module_with_syntax_error_propagates_error() {
         // If the imported module has a parse error, it should
         // propagate to the importer rather than passing silently.
         let busted = "let x = +\n"; // syntax error
@@ -24708,7 +24708,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn modulo_con_error_de_runtime_propaga_error() {
+    async fn module_with_runtime_error_propagates_error() {
         // The module loads (parses fine) but its top-level body
         // triggers an error on evaluation — it should propagate.
         let busted = "let x = no_existe\n";
@@ -24720,7 +24720,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn method_call_sobre_modulo_invoca_funcion_exportada() {
+    async fn method_call_on_module_invokes_exported_function() {
         // `utils.suma(2, 3)` must resolve to `suma` inside utils.
         let utils = "fn suma(a, b) => a + b\n";
         let main = "\
@@ -24733,7 +24733,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn funcion_importada_via_from_import_cierra_sobre_env_del_modulo() {
+    async fn function_imported_via_from_import_closes_over_module_env() {
         // `from utils import greet`, then `greet("x")` executes the
         // body of greet. That body uses a module variable
         // (`PREFIX`) — the closure capture must keep seeing the
@@ -24771,7 +24771,7 @@ let r = match n {
     // real modules (math, json, etc.) and produces `Value::PyObject`.
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn from_python_import_math_bindea_pyobject() {
+    async fn from_python_import_math_binds_pyobject() {
         let (env, res) = parse_eval_into_env("from python import math\n").await;
         res.unwrap();
         let v = env.lock().get("math").expect("math debería estar bindeado");
@@ -24784,7 +24784,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn from_python_import_con_alias_bindea_bajo_alias() {
+    async fn from_python_import_with_alias_binds_under_alias() {
         let (env, res) = parse_eval_into_env("from python import math as m\n").await;
         res.unwrap();
         assert!(matches!(env.lock().get("m"), Some(Value::PyObject(_))));
@@ -24796,7 +24796,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn from_python_import_multiples_modulos() {
+    async fn from_python_import_multiple_modules() {
         let (env, res) = parse_eval_into_env("from python import math, json\n").await;
         res.unwrap();
         assert!(matches!(env.lock().get("math"), Some(Value::PyObject(_))));
@@ -24805,7 +24805,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn from_python_import_modulo_inexistente_emite_modulenotfounderror() {
+    async fn from_python_import_nonexistent_module_emits_modulenotfounderror() {
         let (_env, res) =
             parse_eval_into_env("from python import este_modulo_no_existe_xyz_812\n").await;
         let err = res.unwrap_err();
@@ -24818,7 +24818,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn from_python_path_con_submodulos_no_se_soporta_en_8_1() {
+    async fn from_python_path_with_submodules_not_supported_in_8_1() {
         // `from python.sqlalchemy.orm import Session` is left as minor
         // debt — for 8.1 you have to import `sqlalchemy` and go down with
         // field access (8.1.3+). Message must be clear citing 8.1.
@@ -24833,7 +24833,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn import_python_punteado_no_se_soporta() {
+    async fn dotted_import_python_not_supported() {
         // `import python.math` also stays out of the 8.1 scope.
         // Canonical form: `from python import math`.
         let (_env, res) = parse_eval_into_env("import python.math\n").await;
@@ -24849,7 +24849,7 @@ let r = match n {
     // citing the build flag to recompile.
     #[cfg(not(feature = "python"))]
     #[tokio::test(flavor = "current_thread")]
-    async fn from_python_sin_feature_da_error_de_build() {
+    async fn from_python_without_feature_gives_build_error() {
         let (_env, res) = parse_eval_into_env("from python import math\n").await;
         let err = res.unwrap_err();
         assert!(
@@ -24865,7 +24865,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_math_pi_coerciona_a_float() {
+    async fn field_access_math_pi_coerces_to_float() {
         let (env, res) = parse_eval_into_env("from python import math\nlet p = math.pi\n").await;
         res.unwrap();
         // We take the binding out of the lock so the MutexGuard
@@ -24881,7 +24881,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_funcion_python_queda_pyobject_opaco() {
+    async fn field_access_python_function_stays_opaque_pyobject() {
         // `math.sqrt` is not invoked, only read. It should remain as an
         // opaque PyObject ready for call in 8.1.4.
         let (env, res) = parse_eval_into_env("from python import math\nlet f = math.sqrt\n").await;
@@ -24891,7 +24891,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_atributo_inexistente_emite_attributeerror() {
+    async fn field_access_nonexistent_attribute_emits_attributeerror() {
         let (_env, res) =
             parse_eval_into_env("from python import math\nlet x = math.no_existe_xyz_813\n").await;
         let err = res.unwrap_err();
@@ -24922,7 +24922,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_de_exito_8_1_math_sqrt_y_math_pi() {
+    async fn success_criterion_8_1_math_sqrt_and_math_pi() {
         // The explicit roadmap criterion to close Phase 8.1:
         //   from python import math
         //   print(math.sqrt(16.0))   // 4
@@ -24952,7 +24952,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_via_method_dispatch_sobre_modulo_python() {
+    async fn call_via_method_dispatch_on_python_module() {
         // `math.sqrt(16.0)` directly, without going through an intermediate let.
         // The parser generates `Expr::Call { callee: Expr::Field {...} }`
         // which falls to method dispatch, which for PyObject does
@@ -24973,7 +24973,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_via_pyobject_guardado_en_variable() {
+    async fn call_via_pyobject_stored_in_variable() {
         // `let f = math.sqrt; f(25.0)` — the callable is first extracted
         // (field access) and invoked via Ident. This hits
         // `invoke_value` directly, not `dispatch_method`.
@@ -24991,7 +24991,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_python_con_excepcion_se_envuelve_en_err() {
+    async fn call_python_with_exception_wraps_in_err() {
         // 8.3: `math.sqrt(-1)` raises ValueError in Python. The call does NOT
         // abort — it returns `Result<Float>::Err("ValueError: ...")` which
         // the user has to handle with `match` or `?`.
@@ -25018,7 +25018,7 @@ let r = match n {
     // `Result::Err`, not as a program abort.
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_python_con_list_como_arg_envuelve_typeerror_en_err() {
+    async fn call_python_with_list_arg_wraps_typeerror_in_err() {
         let src = "\
             from python import math\n\
             let xs = [1, 2, 3]\n\
@@ -25043,7 +25043,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_python_arg_int_coerciona() {
+    async fn call_python_arg_int_coerces() {
         // `abs(-7)` with Fitz Int arg → Int 7.
         let src = "\
             from python import builtins\n\
@@ -25063,7 +25063,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_list_de_ints_via_json_dumps() {
+    async fn marshalling_list_of_ints_via_json_dumps() {
         let src = "\
             from python import json\n\
             let xs = [1, 2, 3]\n\
@@ -25110,7 +25110,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_list_de_instances_via_json_dumps() {
+    async fn marshalling_list_of_instances_via_json_dumps() {
         let src = "\
             type User { id: Int, email: Str }\n\
             from python import json\n\
@@ -25140,7 +25140,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_json_loads_de_array_a_list() {
+    async fn marshalling_json_loads_from_array_to_list() {
         let src = "\
             from python import json\n\
             let xs = json.loads(\"[1, 2, 3]\")\n\
@@ -25156,7 +25156,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_json_loads_de_objeto_a_map() {
+    async fn marshalling_json_loads_from_object_to_map() {
         // In Fitz, `{` and `}` inside a string indicate interpolation.
         // For the JSON literal `{"a": 1, ...}` to pass whole to the
         // string, we escape the braces with `\{` and `\}` (the lexer
@@ -25179,7 +25179,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_round_trip_via_json_preserva_estructura() {
+    async fn marshalling_round_trip_via_json_preserves_structure() {
         // dumps + loads on a nested List with Map inside.
         // 8.3: the natural round-trip now carries `Result` inside.
         // To validate that the same structure comes back, we use `match`
@@ -25207,7 +25207,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_8_2_count_by_email_con_counter() {
+    async fn criterion_8_2_count_by_email_with_counter() {
         // `collections.Counter` is a subclass of `dict` and counts
         // occurrences of elements in an iterable. When Fitz passes it
         // `List<Str>` (the emails extracted from the instances), Counter
@@ -25243,7 +25243,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_8_2_round_trip_no_muta_list_original() {
+    async fn criterion_8_2_round_trip_does_not_mutate_original_list() {
         // Cross-cutting decision #4: bidirectional eager copy. The
         // Fitz `List<User>` going to Python does not share state with the
         // Python list; no mutation on the Python side should
@@ -25283,7 +25283,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_8_2_pipeline_completo() {
+    async fn criterion_8_2_complete_pipeline() {
         // End-to-end pipeline of the canonical case:
         //   List<User> Fitz → emails List<Str>
         //                    → Python Counter (Map<Str, Int>)
@@ -25312,7 +25312,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_iterar_map_devuelto_por_python() {
+    async fn marshalling_iterate_map_returned_by_python() {
         // Returns a Python dict and accesses it with Fitz indexing —
         // exactly the typical usage pattern. JSON braces escaped
         // with `\{` / `\}` so the Fitz lexer does not treat them as
@@ -25330,7 +25330,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_arg_no_marshalleable_se_envuelve_en_err_con_path() {
+    async fn marshalling_non_marshalable_arg_wraps_in_err_with_path() {
         // 8.3: Range inside List now produces `Result::Err(Str)`
         // with path "arg0[1]" in the message, not an aborting FitzError.
         let src = "\
@@ -25357,7 +25357,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_python_chained_field_y_call() {
+    async fn call_python_chained_field_and_call() {
         // `json.dumps` with Fitz string → JSON with double quotes
         // inside. 8.3: the return now comes wrapped in Ok.
         let src = "\
@@ -25377,7 +25377,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_8_3_json_loads_malformado_con_match() {
+    async fn criterion_8_3_json_loads_malformed_with_match() {
         // Textually reproduces the roadmap example:
         //   match parse("{ malformado") {
         //     Ok(m)  => ...,
@@ -25410,7 +25410,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_8_3_propagacion_con_try_operator() {
+    async fn criterion_8_3_propagation_with_try_operator() {
         // Operator `?` inside a fn that returns `Result<T>`
         // propagates the Python Err to the caller with the same message.
         // On success unwraps the Ok.
@@ -25442,7 +25442,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_8_3_field_access_no_se_envuelve() {
+    async fn criterion_8_3_field_access_does_not_wrap() {
         // Internal decision: only `call` wraps in `Result`; field
         // access (`math.pi`, `obj.attr`) still returns the
         // coerced value directly. That preserves the ergonomics of reading
@@ -25474,7 +25474,7 @@ let r = match n {
     // -------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_nominal_coerciona_map_a_instance() {
+    async fn nominal_annotation_coerces_map_to_instance() {
         // The Fitz Map literal has the same fields as the `type`;
         // the nominal annotation triggers coercion and binds `row`
         // as `Value::Instance`.
@@ -25503,7 +25503,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_nominal_con_field_faltante_es_error() {
+    async fn nominal_annotation_with_missing_field_is_error() {
         // The Map has `id` but NOT `name`; `name` is neither nullable nor
         // has a default. The coercion aborts with a clear error citing
         // the field and the type.
@@ -25522,7 +25522,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_nominal_aplica_default_si_falta_el_field() {
+    async fn nominal_annotation_applies_default_if_field_missing() {
         // The Map omits `email`, which has a default. The coercion uses the
         // default and builds the complete Instance.
         let src = "\
@@ -25550,7 +25550,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_nominal_aplica_null_para_field_nullable_faltante() {
+    async fn nominal_annotation_applies_null_for_missing_nullable_field() {
         let src = "\
             type User { id: Int, name: Str? }\n\
             let m = {\"id\": 1}\n\
@@ -25575,7 +25575,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_nominal_ignora_fields_extras_del_map() {
+    async fn nominal_annotation_ignores_extra_map_fields() {
         // The Map has a `password_hash` field that the `type` does not
         // declare. We ignore it silently (Python often returns
         // dicts with extras the Fitz model does not need).
@@ -25600,7 +25600,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_nullable_con_null_no_coerciona() {
+    async fn nullable_annotation_with_null_does_not_coerce() {
         // If the annotation tolerates null and the value is Null, no coercion
         // is attempted — Null passes as-is.
         let src = "\
@@ -25613,7 +25613,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_nullable_con_map_coerciona_a_instance() {
+    async fn nullable_annotation_with_map_coerces_to_instance() {
         let src = "\
             type User { id: Int, name: Str }\n\
             let m = {\"id\": 1, \"name\": \"x\"}\n\
@@ -25626,7 +25626,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_con_value_que_no_es_map_pasa_tal_cual() {
+    async fn annotation_with_non_map_value_passes_through() {
         // If the value is already Instance, the coercion does not attempt anything
         // strange — passthrough. (The checker validates the type
         // statically; the runtime does not re-validate.)
@@ -25642,7 +25642,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn anotacion_con_tipo_no_nominal_no_coerciona() {
+    async fn annotation_with_non_nominal_type_does_not_coerce() {
         // If the annotation is `Int` (built-in), we do not coerce —
         // primitives are not built from dicts. The Map is
         // bound as-is (gradual; later use will fail clearly
@@ -25660,7 +25660,7 @@ let r = match n {
     // Test with Python feature: the canonical roadmap pattern.
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn criterio_8_4_dict_python_coerce_a_instance_con_anotacion() {
+    async fn criterion_8_4_python_dict_coerces_to_instance_with_annotation() {
         // The roadmap criterion: `let row: User = py_call(...)?`.
         // json.loads returns Result<Map>; `?` unwraps to Map;
         // the `User` annotation coerces the Map to Instance.
@@ -25703,7 +25703,7 @@ let r = match n {
     // -------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_lista_de_maps_a_lista_de_instances() {
+    async fn coerce_recursive_list_of_maps_to_list_of_instances() {
         // Canonical case: `let users: List<User> = [...]` with items that
         // are Map literals → each Map is coerced to Instance.
         let src = "\
@@ -25734,7 +25734,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_lista_vacia_pasa_sin_problema() {
+    async fn coerce_recursive_empty_list_passes_without_issue() {
         // Edge case: empty list with nominal `List<T>` annotation —
         // produces an empty List<Instance> without error.
         let src = "\
@@ -25752,7 +25752,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_lista_de_primitivos_no_dispara() {
+    async fn coerce_recursive_list_of_primitives_does_not_trigger() {
         // `List<Int>` with Int items — does not touch the coercion (passthrough).
         let src = "\
             let xs: List<Int> = [1, 2, 3]\n\
@@ -25770,7 +25770,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_lista_con_nullable_nominal() {
+    async fn coerce_recursive_list_with_nullable_nominal() {
         // `List<User?>` — items can be Null or Map → Null passes,
         // Map is coerced to Instance.
         let src = "\
@@ -25792,7 +25792,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_map_de_string_a_instance() {
+    async fn coerce_recursive_map_of_string_to_instance() {
         // `Map<Str, User>` with Map values → each value is coerced to
         // Instance, keys are preserved as-is.
         let src = "\
@@ -25819,7 +25819,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_lista_de_maps_falta_campo_requerido_error_claro() {
+    async fn coerce_recursive_list_of_maps_missing_required_field_clear_error() {
         // If a Map inside the List does not have a required field,
         // the error points to the field and the type (not the item index —
         // the caller sees "cannot coerce to User: missing field X").
@@ -25839,7 +25839,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_lista_de_maps_con_default_aplica() {
+    async fn coerce_recursive_list_of_maps_with_default_applies() {
         // If a Map does not have a field with a declared default, the
         // coercion applies the default (does not fail).
         let src = "\
@@ -25867,7 +25867,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn coerce_recursive_passthrough_si_value_no_es_list() {
+    async fn coerce_recursive_passthrough_if_value_is_not_list() {
         // If the annotation is `List<User>` but the value is something that
         // is not a List (e.g. a loose Map), we don't touch it — the
         // checker takes care of rejecting it or the next use fails
@@ -25897,7 +25897,7 @@ let r = match n {
     // -------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn env_builtin_lee_var_existente_como_ok() {
+    async fn env_builtin_reads_existing_var_as_ok() {
         // SAFETY: tests serialized by #[test], each test sets its
         // own var with a unique prefix.
         unsafe {
@@ -25919,7 +25919,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn env_builtin_var_missing_devuelve_err() {
+    async fn env_builtin_missing_var_returns_err() {
         // We confirm the var does not exist beforehand.
         unsafe {
             std::env::remove_var("FITZ_TEST_ENV_MISSING_XYZ");
@@ -25945,7 +25945,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn env_builtin_var_vacia_es_ok_con_string_vacio() {
+    async fn env_builtin_empty_var_is_ok_with_empty_string() {
         // Unix convention: empty var (`KEY=`) exists but is "".
         // env() treats it as Ok("") — the caller who wants to treat it
         // as missing uses `.is_empty()`.
@@ -25968,7 +25968,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn env_or_builtin_var_existente_ignora_default() {
+    async fn env_or_builtin_existing_var_ignores_default() {
         unsafe {
             std::env::set_var("FITZ_TEST_ENV_OR_EXISTS", "real");
         }
@@ -25983,7 +25983,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn env_or_builtin_var_missing_usa_default() {
+    async fn env_or_builtin_missing_var_uses_default() {
         unsafe {
             std::env::remove_var("FITZ_TEST_ENV_OR_MISSING_XYZ");
         }
@@ -25995,7 +25995,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn env_builtin_propagable_con_operador_try() {
+    async fn env_builtin_propagable_with_try_operator() {
         // Canonical usage pattern: `fn get_secret() -> Result<Str> { let s = env("KEY")?; ... }`.
         // The `?` unwraps the Result; if missing, propagates the Err.
         unsafe {
@@ -26023,7 +26023,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn load_env_builtin_carga_archivo_simple() {
+    async fn load_env_builtin_loads_simple_file() {
         // Creates a temporary .env, loads it, validates that the vars
         // are available via env().
         let tmpdir = std::env::temp_dir().join("fitz-test-load-env");
@@ -26068,7 +26068,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn load_env_builtin_archivo_inexistente_devuelve_err() {
+    async fn load_env_builtin_nonexistent_file_returns_err() {
         let src = "let r = load_env(\"/tmp/fitz-no-existe-este-archivo-xyz123.env\")";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -26096,7 +26096,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_8_6_asyncio_sleep_awaiteable_desde_fitz() {
+    async fn phase_8_6_asyncio_sleep_awaitable_from_fitz() {
         // `asyncio.sleep(0)` returns a builtin coroutine that the
         // bridge converts to `Value::Future`. The `.await` inside
         // a Fitz `async fn` that returns `Result<...>` consumes it and
@@ -26122,7 +26122,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_8_6_async_fn_fitz_que_await_python_devuelve_valor_calculado() {
+    async fn phase_8_6_async_fn_fitz_awaiting_python_returns_computed_value() {
         // The test meets the canonical roadmap shape: Fitz `async fn`
         // that internally await-s a Python coroutine and uses
         // its result to compute the return value.
@@ -26147,7 +26147,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_8_6_call_async_devuelve_result_future() {
+    async fn phase_8_6_call_async_returns_result_future() {
         // Without `.await`, the call to `asyncio.sleep(0)` returns
         // `Result<Future<Null>>` (the Future is not awaited until
         // `.await` is applied). We validate the binding's shape.
@@ -26174,7 +26174,7 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn field_access_anidado_modulo_pyobject() {
+    async fn field_access_nested_module_pyobject() {
         // `os.path` is a submodule. Field access should give us another
         // opaque PyObject — checking it with `__name__` confirms
         // it is really the correct submodule.
@@ -26209,7 +26209,7 @@ let r = match n {
     // other decorator is also an error (`@server` lands in 4.4).
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_con_decorator_http_sin_registry_da_error_claro() {
+    async fn fndef_with_http_decorator_without_registry_gives_clear_error() {
         // `parse_and_eval` does not install HttpRegistry, so a
         // `@get(...)` cuts with a suggestion to use `fitz run`.
         let src = "@get(\"/\")\nfn index() => \"hola\"";
@@ -26224,7 +26224,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_con_decorator_desconocido_da_error_de_decorator() {
+    async fn fndef_with_unknown_decorator_gives_decorator_error() {
         let src = "@patch(\"/x\")\nfn h() => 0";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
@@ -26235,7 +26235,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_con_decorator_http_con_registry_activo_registra_la_ruta() {
+    async fn fndef_with_http_decorator_and_active_registry_registers_route() {
         // With active registry, the @get decorator registers the route without
         // error and defines the fn in the env.
 
@@ -26256,7 +26256,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_con_path_param_sin_param_de_handler_es_error() {
+    async fn fndef_with_path_param_without_handler_param_is_error() {
         // `@get("/{id}")` but the handler does not have an `id` param.
         let src = "@get(\"/{id}\")\nfn h() => 0";
         let (res, _reg) =
@@ -26270,7 +26270,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_con_decorator_http_sin_args_es_error() {
+    async fn fndef_with_http_decorator_without_args_is_error() {
         // `@get()` without path.
         let src = "@get()\nfn h() => 0";
         let (res, _reg) =
@@ -26284,7 +26284,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_decorator_http_path_no_string_es_error() {
+    async fn fndef_http_decorator_path_non_string_is_error() {
         // `@get(42)` — path is not a string.
         let src = "@get(42)\nfn h() => 0";
         let (res, _reg) =
@@ -26298,7 +26298,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_decorator_http_path_sin_slash_es_error() {
+    async fn fndef_http_decorator_path_without_slash_is_error() {
         let src = "@get(\"users\")\nfn h() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26311,7 +26311,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_body_se_registra_y_resuelve_type_si_existe() {
+    async fn fndef_body_registers_and_resolves_type_if_exists() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
@@ -26331,7 +26331,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_body_sin_tipo_declarado_queda_sin_resolver() {
+    async fn fndef_body_without_declared_type_stays_unresolved() {
         // `body` without annotation: declared_type = None, runtime
         // deserializes as a free Value.
         let src = "@post(\"/log\")\nfn log(body) => body";
@@ -26345,7 +26345,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_dos_body_params_es_error_al_registrar() {
+    async fn fndef_two_body_params_is_error_at_registration() {
         let src = "\
             type A { x: Int }\n\
             type B { y: Int }\n\
@@ -26362,7 +26362,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_get_con_body_se_registra_sin_problema() {
+    async fn fndef_get_with_body_registers_without_problem() {
         // We allow body in any verb; the evaluator does not force
         // HTTP semantics here (axum/curl accept body in GET).
         let src = "\
@@ -26378,7 +26378,7 @@ let r = match n {
     // ---- @server (Phase 4.4) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_setea_port_y_host() {
+    async fn server_decorator_sets_port_and_host() {
         let src = "\
             @server(8080, \"0.0.0.0\")\nfn main() => 0\n\
             @get(\"/\")\nfn h() => \"ok\"\n\
@@ -26392,7 +26392,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_sin_args_no_pisa_default() {
+    async fn server_decorator_without_args_does_not_overwrite_default() {
         let src = "@server()\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
         let (res, reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26403,7 +26403,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_solo_port_usa_host_default() {
+    async fn server_decorator_only_port_uses_default_host() {
         let src = "@server(9090)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
         let (res, reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26414,7 +26414,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_port_no_int_es_error() {
+    async fn server_port_non_int_is_error() {
         let src = "@server(\"8080\")\nfn cfg() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26427,7 +26427,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_port_fuera_de_rango_es_error() {
+    async fn server_port_out_of_range_is_error() {
         let src = "@server(99999)\nfn cfg() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26440,7 +26440,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_host_invalido_es_error() {
+    async fn server_host_invalid_is_error() {
         let src = "@server(8080, \"no-es-ip\")\nfn cfg() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26453,7 +26453,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_demasiados_args_es_error() {
+    async fn server_too_many_args_is_error() {
         let src = "@server(8080, \"0.0.0.0\", 42)\nfn cfg() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26466,7 +26466,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_dos_decorators_es_error() {
+    async fn server_two_decorators_is_error() {
         let src = "\
             @server(8080)\nfn a() => 0\n\
             @server(9090)\nfn b() => 0\n\
@@ -26482,7 +26482,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn programa_sin_server_decorator_da_resolved_config_default() {
+    async fn program_without_server_decorator_gives_default_resolved_config() {
         let src = "@get(\"/\")\nfn h() => 0";
         let (res, reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26496,7 +26496,7 @@ let r = match n {
     // ---- 7.0 kwargs en decoradores (rechazo runtime) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_acepta_kwarg_docs_false() {
+    async fn server_decorator_accepts_kwarg_docs_false() {
         // 7.4: @server(3000, docs=false) popula enable_docs=false.
         let src = "@server(3000, docs=false)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
         let (res, reg) =
@@ -26508,7 +26508,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_acepta_kwarg_docs_true_explicito() {
+    async fn server_decorator_accepts_explicit_kwarg_docs_true() {
         let src = "@server(3000, docs=true)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
         let (res, reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26518,7 +26518,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_default_enable_docs_es_true() {
+    async fn server_decorator_default_enable_docs_is_true() {
         // Sin kwarg: default true.
         let src = "@server(3000)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
         let (res, reg) =
@@ -26529,7 +26529,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_docs_no_bool_es_error() {
+    async fn server_decorator_docs_non_bool_is_error() {
         let src = "@server(3000, docs=\"si\")\nfn cfg() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26542,7 +26542,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn tier3_server_decorator_acepta_kwarg_prometheus_true() {
+    async fn tier3_server_decorator_accepts_kwarg_prometheus_true() {
         // Phase 12.3.iter2.Tier3 — @server(3000, prometheus=true) populates
         // prometheus_enabled=true. Without the flag, default false.
         let src = "@server(3000, prometheus=true)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
@@ -26554,7 +26554,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn tier3_server_decorator_default_prometheus_es_false() {
+    async fn tier3_server_decorator_default_prometheus_is_false() {
         // Sin kwarg: default false (recorder no instalado, /metrics no
         // se monta).
         let src = "@server(3000)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
@@ -26566,7 +26566,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn tier3_server_decorator_prometheus_no_bool_es_error() {
+    async fn tier3_server_decorator_prometheus_non_bool_is_error() {
         let src = "@server(3000, prometheus=\"si\")\nfn cfg() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26579,7 +26579,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_kwarg_desconocido_es_error() {
+    async fn server_decorator_unknown_kwarg_is_error() {
         let src = "@server(3000, version=\"1.0\")\nfn cfg() => 0";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26594,7 +26594,7 @@ let r = match n {
     // ---- 7.6 @header(name="X") ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_registra_spec_en_routespec() {
+    async fn header_decorator_registers_spec_in_routespec() {
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
         let (res, reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26609,7 +26609,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_param_nullable_se_marca() {
+    async fn header_decorator_nullable_param_is_marked() {
         // @header sobre param Str? → is_nullable = true.
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) => \"ok\"";
         let (res, reg) =
@@ -26622,7 +26622,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_sin_param_correspondiente_es_error() {
+    async fn header_decorator_without_corresponding_param_is_error() {
         // The handler does not have the param derived from the header.
         let src = "@header(name=\"Authorization\")\n@get(\"/x\")\nfn h() => \"ok\"";
         let (res, _reg) =
@@ -26636,7 +26636,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_param_tipo_no_str_es_error() {
+    async fn header_decorator_param_non_str_type_is_error() {
         let src = "@header(name=\"X-Count\")\n@get(\"/x\")\nfn h(x_count: Int) => x_count";
         let (res, _reg) =
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
@@ -26649,7 +26649,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_duplicado_es_error() {
+    async fn header_decorator_duplicate_is_error() {
         // Two @header with the same name → error (case-insensitive match).
         let src = "@header(name=\"Authorization\")\n@header(name=\"authorization\")\n@get(\"/x\")\nfn h(authorization: Str) => authorization";
         let (res, _reg) =
@@ -26663,7 +26663,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_sin_decorator_de_ruta_es_error() {
+    async fn header_decorator_without_route_decorator_is_error() {
         // @header alone (without @get/@post/...) → error.
         let src = "@header(name=\"Authorization\")\nfn h(authorization: Str) => authorization";
         let (res, _reg) =
@@ -26679,7 +26679,7 @@ let r = match n {
     // ---- Q.1: @header(name="X", into="alias") ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_con_into_usa_alias_explicito() {
+    async fn header_decorator_with_into_uses_explicit_alias() {
         // `into="token"` maps the `X-Auth` header to the `token` param
         // (override of the name-derivation convention).
         let src = "\
@@ -26697,7 +26697,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_into_mantiene_nullable_del_param() {
+    async fn header_decorator_into_keeps_param_nullable() {
         let src = "\
             @header(name=\"X-Forwarded-For\", into=\"client_ip\")\n\
             @get(\"/x\")\n\
@@ -26712,7 +26712,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_into_inexistente_es_error_sin_mencionar_convencion() {
+    async fn header_decorator_into_nonexistent_is_error_without_mentioning_convention() {
         // If `into="..."` points to a param that does not exist, the error
         // message does NOT mention the derivation convention (the user
         // requested an explicit alias; mentioning the convention would confuse).
@@ -26737,7 +26737,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_into_string_vacio_es_error() {
+    async fn header_decorator_into_empty_string_is_error() {
         let src = "\
             @header(name=\"X-Auth\", into=\"\")\n\
             @get(\"/x\")\n\
@@ -26754,7 +26754,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_into_no_str_literal_es_error() {
+    async fn header_decorator_into_non_str_literal_is_error() {
         let src = "\
             @header(name=\"X-Auth\", into=42)\n\
             @get(\"/x\")\n\
@@ -26773,7 +26773,7 @@ let r = match n {
     // ---- Q.2: @server(api_version="X.Y.Z") ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_api_version_kwarg_carga_en_registry() {
+    async fn server_api_version_kwarg_loads_in_registry() {
         let src = "\
             @server(3000, api_version=\"2.5.0\")\n\
             fn main() => 0\n\
@@ -26788,7 +26788,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_sin_api_version_kwarg_queda_none() {
+    async fn server_without_api_version_kwarg_stays_none() {
         let src = "\
             @server(3000)\n\
             fn main() => 0\n\
@@ -26803,7 +26803,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_api_version_vacio_es_error() {
+    async fn server_api_version_empty_is_error() {
         let src = "\
             @server(api_version=\"\")\n\
             fn main() => 0\n\
@@ -26821,7 +26821,7 @@ let r = match n {
     // ---- Phase 9.w.2.e: @server(ws_heartbeat_secs=N) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_ws_heartbeat_secs_kwarg_carga_en_registry() {
+    async fn server_ws_heartbeat_secs_kwarg_loads_in_registry() {
         let src = "\
             @server(3000, ws_heartbeat_secs=15)\n\
             fn main() => 0\n\
@@ -26836,7 +26836,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_ws_heartbeat_secs_default_es_30() {
+    async fn server_ws_heartbeat_secs_default_is_30() {
         let src = "\
             @server(3000)\n\
             fn main() => 0\n\
@@ -26851,7 +26851,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_ws_heartbeat_secs_cero_desactiva() {
+    async fn server_ws_heartbeat_secs_zero_disables() {
         let src = "\
             @server(3000, ws_heartbeat_secs=0)\n\
             fn main() => 0\n\
@@ -26866,7 +26866,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_ws_heartbeat_secs_negativo_es_error() {
+    async fn server_ws_heartbeat_secs_negative_is_error() {
         // `-1` is parsed as `UnaryOp::Neg(Int(1))`, not as
         // `Int(-1)`. The evaluator rejects with "not Int literal"
         // (the "n >= 0" check covers the case but rarely
@@ -26887,7 +26887,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_ws_heartbeat_secs_no_int_es_error() {
+    async fn server_ws_heartbeat_secs_non_int_is_error() {
         let src = "\
             @server(ws_heartbeat_secs=\"30\")\n\
             fn main() => 0\n\
@@ -26903,7 +26903,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_api_version_no_str_es_error() {
+    async fn server_api_version_non_str_is_error() {
         let src = "\
             @server(api_version=42)\n\
             fn main() => 0\n\
@@ -26919,7 +26919,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_kwarg_desconocido_lista_docs_y_api_version() {
+    async fn server_unknown_kwarg_lists_docs_and_api_version() {
         let src = "\
             @server(foo=\"bar\")\n\
             fn main() => 0\n\
@@ -26946,7 +26946,7 @@ let r = match n {
     // ───────────────────────────────────────────────────────────────
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_host_kwarg_solo_aplica_y_port_default() {
+    async fn v0_15_13_server_host_kwarg_only_applies_and_port_default() {
         // Original bug: `@server(host="0.0.0.0")` gave
         // "kwarg 'host' no reconocido". After the fix it must parse OK.
         let src = "\
@@ -26959,7 +26959,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_port_kwarg_solo_aplica() {
+    async fn v0_15_13_server_port_kwarg_only_applies() {
         let src = "\
             @server(port=9090)\n\
             fn main() => 0\n\
@@ -26970,7 +26970,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_port_y_host_kwargs_mixed_con_otros() {
+    async fn v0_15_13_server_port_and_host_kwargs_mixed_with_others() {
         // Recommended canonical pattern for Dockerizing:
         // @server(port=8080, host="0.0.0.0", prometheus=true)
         let src = "\
@@ -26987,7 +26987,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_port_positional_mas_host_kwarg_funciona() {
+    async fn v0_15_13_server_port_positional_plus_host_kwarg_works() {
         // Intermediate case: positional port + host kwarg. The reason:
         // the user coming from @server(8080) often just wants
         // to add host="0.0.0.0" without touching the port order.
@@ -27005,7 +27005,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_port_doble_positional_mas_kwarg_es_error() {
+    async fn v0_15_13_server_port_double_positional_plus_kwarg_is_error() {
         // Conflict: port passed twice — clear error Python-style.
         let src = "\
             @server(8080, port=9090)\n\
@@ -27022,7 +27022,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_host_doble_positional_mas_kwarg_es_error() {
+    async fn v0_15_13_server_host_double_positional_plus_kwarg_is_error() {
         let src = "\
             @server(8080, \"127.0.0.1\", host=\"0.0.0.0\")\n\
             fn main() => 0\n\
@@ -27038,7 +27038,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_host_kwarg_no_str_es_error() {
+    async fn v0_15_13_server_host_kwarg_non_str_is_error() {
         let src = "\
             @server(host=42)\n\
             fn main() => 0\n\
@@ -27054,7 +27054,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_port_kwarg_fuera_de_rango_es_error() {
+    async fn v0_15_13_server_port_kwarg_out_of_range_is_error() {
         let src = "\
             @server(port=99999)\n\
             fn main() => 0\n\
@@ -27070,7 +27070,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn v0_15_13_server_host_kwarg_ip_invalida_es_error() {
+    async fn v0_15_13_server_host_kwarg_invalid_ip_is_error() {
         let src = "\
             @server(host=\"not-an-ip\")\n\
             fn main() => 0\n\
@@ -27086,7 +27086,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn header_decorator_kwarg_desconocido_lista_into_y_name() {
+    async fn header_decorator_unknown_kwarg_lists_into_and_name() {
         // The error message about unknown kwarg now cites both
         // `name` and `into` (Q.1).
         let src = "\
@@ -27107,7 +27107,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn get_decorator_con_kwarg_es_error_runtime() {
+    async fn get_decorator_with_kwarg_is_runtime_error() {
         // HTTP route decorators do not accept kwargs (neither in 7.0 nor
         // before 7.6 defines the headers convention).
         let src = "@get(\"/x\", foo=1)\nfn h() => 0";
@@ -27122,7 +27122,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fndef_post_put_delete_se_registran_con_su_method() {
+    async fn fndef_post_put_delete_register_with_their_method() {
         let src = "\
             @post(\"/users\")\nfn create(name) => name\n\
             @put(\"/users/{id}\")\nfn update(id: Int, name) => name\n\
@@ -27153,7 +27153,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn span_runtime_div_zero_apunta_al_operador() {
+    async fn span_runtime_div_zero_points_to_operator() {
         // `print(10 / 0)` — the `/` is at column 10.
         let e = first_runtime_error("print(10 / 0)").await;
         assert_eq!(e.line, 1);
@@ -27162,7 +27162,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn span_runtime_type_mismatch_binop_apunta_al_operador() {
+    async fn span_runtime_type_mismatch_binop_points_to_operator() {
         // `print(1 + true)` — the `+` is at column 9. The static
         // checker also catches it; the runtime error now cites
         // the same position.
@@ -27173,7 +27173,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn span_runtime_ident_desconocido_apunta_al_ident() {
+    async fn span_runtime_unknown_ident_points_to_ident() {
         // `print(unknown_var)` — `unknown_var` starts at column 7.
         let e = first_runtime_error("print(unknown_var)").await;
         assert_eq!(e.line, 1);
@@ -27182,7 +27182,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn span_runtime_index_oob_apunta_al_corchete() {
+    async fn span_runtime_index_oob_points_to_bracket() {
         // `let xs = [1, 2]\nprint(xs[10])` — the `[` is at col 9 of
         // line 2.
         let src = "let xs = [1, 2]\nprint(xs[10])";
@@ -27193,7 +27193,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn span_runtime_arity_mismatch_apunta_al_paren() {
+    async fn span_runtime_arity_mismatch_points_to_paren() {
         // `fn f(x: Int) => x\nprint(f(1, 2))` — the call's `(` is
         // at col 8 of line 2.
         let src = "fn f(x: Int) -> Int => x\nlet _ = f(1, 2)";
@@ -27208,7 +27208,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_un_solo_decorator_se_registra_con_la_ruta() {
+    async fn middleware_single_decorator_registers_with_route() {
         let src = "\
             fn logger(req) {}\n\
             @middleware(logger)\n\
@@ -27226,7 +27226,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_dos_apilados_preservan_orden_top_down() {
+    async fn middleware_two_stacked_preserve_top_down_order() {
         let src = "\
             fn logger(req) {}\n\
             fn auth(req) {}\n\
@@ -27246,7 +27246,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_referenciando_fn_inexistente_es_error_claro() {
+    async fn middleware_referencing_nonexistent_fn_is_clear_error() {
         // In MW.2, collect_middlewares evaluates the full expression
         // of the arg, so the "does not exist" error comes from the
         // identifier evaluator (message consistent with any other
@@ -27267,7 +27267,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_arg_que_no_es_fn_es_error_claro() {
+    async fn middleware_arg_that_is_not_fn_is_clear_error() {
         let src = "\
             let x = 42\n\
             @middleware(x)\n\
@@ -27287,7 +27287,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_despues_del_route_decorator_es_error_de_orden() {
+    async fn middleware_after_route_decorator_is_order_error() {
         let src = "\
             fn logger(req) {}\n\
             @get(\"/x\")\n\
@@ -27307,7 +27307,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_sin_handler_http_es_error_claro() {
+    async fn middleware_without_http_handler_is_clear_error() {
         let src = "\
             fn logger(req) {}\n\
             @middleware(logger)\n\
@@ -27324,7 +27324,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_con_kwargs_es_error() {
+    async fn middleware_with_kwargs_is_error() {
         let src = "\
             fn logger(req) {}\n\
             @middleware(logger, level=\"debug\")\n\
@@ -27342,7 +27342,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_con_aridad_distinta_de_uno_es_error() {
+    async fn middleware_with_arity_other_than_one_is_error() {
         let src = "\
             fn logger(req) {}\n\
             fn auth(req) {}\n\
@@ -27365,7 +27365,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_allow_origin_lista_construye_set() {
+    async fn cors_allow_origin_list_builds_set() {
         let src = "let c = cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]})";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -27385,7 +27385,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_allow_origin_lista_con_no_str_es_error() {
+    async fn cors_allow_origin_list_with_non_str_is_error() {
         let src = "let c = cors({\"allow_origin\": [\"https://a.com\", 42]})";
         let (_env, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
@@ -27397,7 +27397,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_allow_origin_tipo_invalido_menciona_str_y_list() {
+    async fn cors_allow_origin_invalid_type_mentions_str_and_list() {
         // Passing Int in allow_origin → error citing both valid forms.
         let src = "let c = cors({\"allow_origin\": 42})";
         let (_env, res) = parse_eval_into_env(src).await;
@@ -27414,7 +27414,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_sin_args_emite_value_corsconfig_con_defaults() {
+    async fn cors_without_args_emits_value_corsconfig_with_defaults() {
         let src = "let c = cors()";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -27435,7 +27435,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_con_map_vacio_emite_defaults_iguales_a_sin_args() {
+    async fn cors_with_empty_map_emits_defaults_equal_to_without_args() {
         let src = "let c = cors({})";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -27453,7 +27453,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_override_completo_funciona_y_solo_pisa_los_keys_pasados() {
+    async fn cors_complete_override_works_and_only_overwrites_passed_keys() {
         let src = "\
             let c = cors({\
                 \"allow_origin\": \"https://app.example.com\",\
@@ -27480,7 +27480,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_override_parcial_mantiene_defaults_para_no_pasados() {
+    async fn cors_partial_override_keeps_defaults_for_unpassed() {
         let src = "let c = cors({\"max_age\": 600})";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -27499,7 +27499,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_key_desconocida_es_error() {
+    async fn cors_unknown_key_is_error() {
         let src = "let c = cors({\"foo\": 1})";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
@@ -27512,7 +27512,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_tipo_incorrecto_en_value_es_error_con_contexto_de_key() {
+    async fn cors_incorrect_value_type_is_error_with_key_context() {
         let src = "let c = cors({\"max_age\": \"forever\"})";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
@@ -27525,7 +27525,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cors_dos_args_es_error_de_aridad() {
+    async fn cors_two_args_is_arity_error() {
         let src = "let c = cors({}, {})";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
@@ -27536,7 +27536,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_cors_carga_slot_cors_de_la_ruta() {
+    async fn middleware_cors_loads_cors_slot_of_route() {
         // @middleware(cors(...)) on a handler must load
         // route.cors (it does not enter the middlewares chain).
         let src = "\
@@ -27560,7 +27560,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_cors_mas_user_fn_carga_ambos_slots() {
+    async fn middleware_cors_plus_user_fn_loads_both_slots() {
         let src = "\
             fn logger(req) {}\n\
             @middleware(logger)\n\
@@ -27578,7 +27578,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn middleware_dos_cors_es_error_uno_por_ruta() {
+    async fn middleware_two_cors_is_one_per_route_error() {
         let src = "\
             @middleware(cors())\n\
             @middleware(cors({\"max_age\": 100}))\n\
@@ -27600,7 +27600,7 @@ let r = match n {
     // ---------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_decorator_sin_registry_es_no_op_silencioso() {
+    async fn test_decorator_without_registry_is_silent_no_op() {
         // `fitz run` with a `@test` present must NOT abort — the
         // decorator is a silent no-op. The fn remains defined in the
         // env normally (parallel to Rust's `#[cfg(test)]`: outside the
@@ -27617,7 +27617,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_decorator_con_registry_registra_la_fn() {
+    async fn test_decorator_with_registry_registers_fn() {
         // With an active `TestRegistry`, `@test fn` pushes a `TestSpec`
         // to the registry. The fn also remains in the env.
         let src = "@test fn suma() { assert_eq(2 + 2, 4) }";
@@ -27632,7 +27632,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_decorator_async_fn_registra_is_async_true() {
+    async fn test_decorator_async_fn_registers_is_async_true() {
         let src = "@test async fn carga() { let x = sleep(0).await }";
         let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(src).await;
@@ -27645,7 +27645,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_decorator_preserva_orden_de_declaracion() {
+    async fn test_decorator_preserves_declaration_order() {
         let src = "\
             @test fn primero() { let x = 1 }\n\
             @test fn segundo() { let y = 2 }\n\
@@ -27663,7 +27663,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_decorator_con_params_es_error() {
+    async fn test_decorator_with_params_is_error() {
         // El MVP no admite fixtures: `@test fn t(ctx) { ... }` → error.
         let (_, res) = parse_eval_into_env("@test fn t(x: Int) { let y = x }").await;
         let err = res.unwrap_err();
@@ -27675,7 +27675,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_decorator_con_args_es_error() {
+    async fn test_decorator_with_args_is_error() {
         // `@test("nombre")` not supported in MVP.
         let (_, res) = parse_eval_into_env("@test(\"slow\") fn t() { let x = 1 }").await;
         let err = res.unwrap_err();
@@ -27687,7 +27687,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn test_decorator_con_kwargs_es_error() {
+    async fn test_decorator_with_kwargs_is_error() {
         // `@test(slow=true)` no soportado en MVP.
         let (_, res) = parse_eval_into_env("@test(slow=true) fn t() { let x = 1 }").await;
         let err = res.unwrap_err();
@@ -27699,19 +27699,19 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_true_no_falla() {
+    async fn assert_true_does_not_fail() {
         let (_, res) = parse_eval_into_env("assert(true)").await;
         res.expect("assert(true) no debe fallar");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_true_con_msg_no_falla() {
+    async fn assert_true_with_msg_does_not_fail() {
         let (_, res) = parse_eval_into_env("assert(true, \"no aplica\")").await;
         res.expect("assert(true, msg) no debe fallar");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_false_falla_con_mensaje_generico() {
+    async fn assert_false_fails_with_generic_message() {
         let (_, res) = parse_eval_into_env("assert(false)").await;
         let err = res.unwrap_err();
         assert!(
@@ -27722,7 +27722,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_false_con_msg_incluye_la_razon() {
+    async fn assert_false_with_msg_includes_reason() {
         let (_, res) = parse_eval_into_env("assert(false, \"x debe ser positivo\")").await;
         let err = res.unwrap_err();
         assert!(
@@ -27733,7 +27733,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_con_no_bool_es_type_error() {
+    async fn assert_with_non_bool_is_type_error() {
         // The first arg of `assert` must be `Bool` strictly (not
         // truthy/falsy). `assert(1)` gives a clear type error.
         let (_, res) = parse_eval_into_env("assert(1)").await;
@@ -27746,13 +27746,13 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_eq_iguales_no_falla() {
+    async fn assert_eq_equal_does_not_fail() {
         let (_, res) = parse_eval_into_env("assert_eq(2 + 2, 4)").await;
         res.expect("assert_eq(4, 4) no debe fallar");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_eq_distintos_falla_con_left_right() {
+    async fn assert_eq_different_fails_with_left_right() {
         let (_, res) = parse_eval_into_env("assert_eq(2, 3)").await;
         let err = res.unwrap_err();
         assert!(
@@ -27764,21 +27764,21 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_eq_int_y_float_coerciona() {
+    async fn assert_eq_int_and_float_coerces() {
         // `Value::PartialEq` coerciona Int↔Float. assert_eq lo refleja.
         let (_, res) = parse_eval_into_env("assert_eq(2, 2.0)").await;
         res.expect("assert_eq(2, 2.0) OK por coerción Int↔Float");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_eq_listas_estructural() {
+    async fn assert_eq_lists_structural() {
         // Igualdad estructural recursiva en listas.
         let (_, res) = parse_eval_into_env("assert_eq([1, 2, 3], [1, 2, 3])").await;
         res.expect("listas estructuralmente iguales");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_eq_aridad_1_es_error() {
+    async fn assert_eq_arity_1_is_error() {
         let (_, res) = parse_eval_into_env("assert_eq(1)").await;
         let err = res.unwrap_err();
         assert!(
@@ -27789,13 +27789,13 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_ne_distintos_no_falla() {
+    async fn assert_ne_different_does_not_fail() {
         let (_, res) = parse_eval_into_env("assert_ne(1, 2)").await;
         res.expect("assert_ne(1, 2) OK");
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_ne_iguales_falla() {
+    async fn assert_ne_equal_fails() {
         let (_, res) = parse_eval_into_env("assert_ne(\"x\", \"x\")").await;
         let err = res.unwrap_err();
         assert!(
@@ -27806,7 +27806,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_throws_callback_que_tira_pasa() {
+    async fn assert_throws_callback_that_throws_passes() {
         // The callback raises via `assert(false)`. assert_throws catches
         // it and returns Null.
         let (_, res) =
@@ -27815,7 +27815,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_throws_callback_que_no_tira_falla() {
+    async fn assert_throws_callback_that_does_not_throw_fails() {
         // The callback returns normally — assert_throws must fail.
         let (_, res) = parse_eval_into_env("assert_throws(fn() => 1 + 1)").await;
         let err = res.unwrap_err();
@@ -27827,7 +27827,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_throws_callback_con_params_es_error() {
+    async fn assert_throws_callback_with_params_is_error() {
         let (_, res) = parse_eval_into_env("assert_throws(fn(x) => x)").await;
         let err = res.unwrap_err();
         assert!(
@@ -27838,7 +27838,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_throws_callback_async_es_error_en_mvp() {
+    async fn assert_throws_callback_async_is_error_in_mvp() {
         // Async callbacks produce a loose Future that breaks the
         // "throw" semantics. Explicit MVP restriction.
         let src = "\
@@ -27855,7 +27855,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assert_throws_arg_no_funcion_es_type_error() {
+    async fn assert_throws_arg_non_function_is_type_error() {
         let (_, res) = parse_eval_into_env("assert_throws(42)").await;
         let err = res.unwrap_err();
         assert!(
@@ -27880,13 +27880,13 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_comp_basica_doubla_cada_elemento() {
+    async fn list_comp_basic_doubles_each_element() {
         let items = eval_to_list_vec("let r = [x * 2 for x in [1, 2, 3]]").await;
         assert_eq!(items, vec![Value::Int(2), Value::Int(4), Value::Int(6)],);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_comp_sobre_range_exclusivo() {
+    async fn list_comp_on_exclusive_range() {
         let items = eval_to_list_vec("let r = [n for n in 0..5]").await;
         assert_eq!(items.len(), 5);
         assert_eq!(items[0], Value::Int(0));
@@ -27894,13 +27894,13 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_comp_con_filter_solo_pares() {
+    async fn list_comp_with_filter_only_pairs() {
         let items = eval_to_list_vec("let r = [x for x in [1, 2, 3, 4, 5] if x % 2 == 0]").await;
         assert_eq!(items, vec![Value::Int(2), Value::Int(4)]);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_comp_var_no_escapa_al_caller_estilo_python() {
+    async fn list_comp_var_does_not_escape_to_caller_python_style() {
         // Design decision: the comprehension's var lives in a dedicated
         // child env, so it does not shadow nor define a new var in
         // the containing scope (unlike `for ... in`).
@@ -27917,7 +27917,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn list_comp_iter_de_tipo_no_iterable_es_error() {
+    async fn list_comp_iter_of_non_iterable_type_is_error() {
         let src = "let r = [x for x in 42]";
         let (_, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
@@ -27972,7 +27972,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_list_min_vacia_es_err() {
+    async fn mb2_list_min_empty_is_err() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let r = xs.min()",
@@ -28011,7 +28011,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_list_sum_vacia_es_cero() {
+    async fn mb2_list_sum_empty_is_zero() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let total = xs.sum()",
@@ -28022,7 +28022,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_list_sum_str_es_error_runtime() {
+    async fn mb2_list_sum_str_is_runtime_error() {
         // The checker rejects statically (sum does not accept List<Str>),
         // but since `fitz run` is not yet strict in this wrap helper,
         // we verify directly that the runtime aborts if a
@@ -28041,7 +28041,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_str_pad_start_basico() {
+    async fn mb2_str_pad_start_basic() {
         let (env, res) = parse_eval_into_env(
             "let s = \"42\"\n\
              let p = s.pad_start(5, \"0\")",
@@ -28052,7 +28052,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_str_pad_end_basico() {
+    async fn mb2_str_pad_end_basic() {
         let (env, res) = parse_eval_into_env(
             "let s = \"hi\"\n\
              let p = s.pad_end(5, \".\")",
@@ -28063,7 +28063,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_str_pad_no_op_si_mas_largo() {
+    async fn mb2_str_pad_no_op_if_longer() {
         let (env, res) = parse_eval_into_env(
             "let s = \"hola, mundo\"\n\
              let p = s.pad_start(5, \"*\")",
@@ -28074,7 +28074,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_str_pad_ch_multi_char_es_error() {
+    async fn mb2_str_pad_ch_multi_char_is_error() {
         let (_, res) = parse_eval_into_env(
             "let s = \"42\"\n\
              let p = s.pad_start(5, \"ab\")",
@@ -28146,7 +28146,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb2_map_keys_sorted_vacio() {
+    async fn mb2_map_keys_sorted_empty() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {}\n\
              let ks = m.keys_sorted()",
@@ -28162,7 +28162,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rg_range_step_by_basico() {
+    async fn rg_range_step_by_basic() {
         let (env, res) = parse_eval_into_env("let xs = (0..10).step_by(2)").await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
@@ -28185,7 +28185,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rg_range_step_by_inclusivo() {
+    async fn rg_range_step_by_inclusive() {
         let (env, res) = parse_eval_into_env("let xs = (0..=10).step_by(3)").await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
@@ -28209,7 +28209,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rg_range_step_by_cero_es_error() {
+    async fn rg_range_step_by_zero_is_error() {
         let (_, res) = parse_eval_into_env("let xs = (0..10).step_by(0)").await;
         let err = res.unwrap_err();
         assert!(
@@ -28220,7 +28220,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn rg_range_step_by_negativo_es_error() {
+    async fn rg_range_step_by_negative_is_error() {
         let (_, res) = parse_eval_into_env("let xs = (0..10).step_by(-1)").await;
         let err = res.unwrap_err();
         assert!(
@@ -28245,7 +28245,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb3_list_reduce_vacia_devuelve_init() {
+    async fn mb3_list_reduce_empty_returns_init() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let total: Int = xs.reduce(42, fn(acc, x) => acc + x)",
@@ -28256,7 +28256,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb3_list_reduce_acc_tipo_distinto_del_elem() {
+    async fn mb3_list_reduce_acc_type_different_from_elem() {
         // Acc can be of a different type than the elements.
         // Example: List<Int> reduced to a Str.
         let (env, res) = parse_eval_into_env(
@@ -28280,7 +28280,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb3_list_product_vacia_es_uno() {
+    async fn mb3_list_product_empty_is_one() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let p: Int = xs.product()",
@@ -28302,7 +28302,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb3_str_chars_basico() {
+    async fn mb3_str_chars_basic() {
         let (env, res) = parse_eval_into_env(
             "let s = \"abc\"\n\
              let cs: List<Str> = s.chars()",
@@ -28345,7 +28345,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb3_map_entries_devuelve_pares_en_orden() {
+    async fn mb3_map_entries_returns_pairs_in_order() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
              let es: List<(Str, Int)> = m.entries()",
@@ -28370,7 +28370,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb3_list_to_map_basico() {
+    async fn mb3_list_to_map_basic() {
         let (env, res) = parse_eval_into_env(
             "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"b\", 2)]\n\
              let m: Map<Str, Int> = pairs.to_map()",
@@ -28435,7 +28435,7 @@ let r = match n {
     // ---- Mini-batch Mb4: unique + partition + invert + split_at ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb4_list_unique_preserva_orden_de_1ra_aparicion() {
+    async fn mb4_list_unique_preserves_first_appearance_order() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 2, 3, 1, 4, 3]\n\
              let r: List<Int> = xs.unique()",
@@ -28478,7 +28478,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb4_list_partition_divide_en_truthy_falsy() {
+    async fn mb4_list_partition_splits_into_truthy_falsy() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5, 6]\n\
              let split: (List<Int>, List<Int>) = xs.partition(fn(n: Int) => n % 2 == 0)",
@@ -28544,7 +28544,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb4_map_invert_values_duplicados_last_write_wins() {
+    async fn mb4_map_invert_duplicate_values_last_write_wins() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 1}\n\
              let inv: Map<Int, Str> = m.invert()",
@@ -28564,7 +28564,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb4_str_split_at_basico() {
+    async fn mb4_str_split_at_basic() {
         let (env, res) =
             parse_eval_into_env("let pair: (Str, Str) = \"hola mundo\".split_at(4)").await;
         res.unwrap();
@@ -28578,7 +28578,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb4_str_split_at_idx_0_y_len() {
+    async fn mb4_str_split_at_idx_0_and_len() {
         let (env, res) = parse_eval_into_env(
             "let a: (Str, Str) = \"abc\".split_at(0)\n\
              let b: (Str, Str) = \"abc\".split_at(3)\n\
@@ -28612,7 +28612,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb4_str_split_at_negativo_es_error() {
+    async fn mb4_str_split_at_negative_is_error() {
         let (_, res) = parse_eval_into_env("let pair: (Str, Str) = \"abc\".split_at(-1)").await;
         let err = res.unwrap_err();
         assert!(
@@ -28654,7 +28654,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_multi_for_con_filter() {
+    async fn cmp_multi_for_with_filter() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let ys: List<Int> = [10, 20]\n\
@@ -28683,7 +28683,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_map_comp_basico() {
+    async fn cmp_map_comp_basic() {
         let (env, res) =
             parse_eval_into_env("let squares: Map<Int, Int> = {n: n * n for n in 1..=4}").await;
         res.unwrap();
@@ -28701,7 +28701,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_map_comp_con_filter() {
+    async fn cmp_map_comp_with_filter() {
         let (env, res) =
             parse_eval_into_env("let big: Map<Int, Int> = {n: n * 10 for n in 0..10 if n > 5}")
                 .await;
@@ -28716,7 +28716,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_map_comp_last_write_wins_en_duplicados() {
+    async fn cmp_map_comp_last_write_wins_on_duplicates() {
         // If the key repeats, the last value wins.
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 1, 3]\n\
@@ -28759,7 +28759,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_list_insert_at_basico() {
+    async fn mb8_list_insert_at_basic() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 4, 5]\n\
              let r: List<Int> = xs.insert_at(2, 3)",
@@ -28784,7 +28784,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_list_insert_at_idx_grande_clamp_al_final() {
+    async fn mb8_list_insert_at_large_idx_clamps_to_end() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.insert_at(99, 9)",
@@ -28800,7 +28800,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_list_remove_at_basico() {
+    async fn mb8_list_remove_at_basic() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [10, 20, 30, 40]\n\
              let r: List<Int> = xs.remove_at(2)",
@@ -28816,7 +28816,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_list_remove_at_idx_fuera_de_rango_error() {
+    async fn mb8_list_remove_at_idx_out_of_range_error() {
         let (_, res) = parse_eval_into_env(
             "let xs: List<Int> = [1]\n\
              let r: List<Int> = xs.remove_at(5)",
@@ -28831,7 +28831,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_list_zip_to_map_combina_keys_y_values() {
+    async fn mb8_list_zip_to_map_combines_keys_and_values() {
         let (env, res) = parse_eval_into_env(
             "let ks: List<Str> = [\"a\", \"b\", \"c\"]\n\
              let vs: List<Int> = [1, 2, 3]\n\
@@ -28846,7 +28846,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_str_left_right_basicos() {
+    async fn mb8_str_left_right_basic() {
         let (env, res) = parse_eval_into_env(
             "let s = \"hola mundo\"\n\
              let l: Str = s.left(4)\n\
@@ -28859,7 +28859,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_str_center_basico() {
+    async fn mb8_str_center_basic() {
         let (env, res) = parse_eval_into_env(
             "let s = \"hi\"\n\
              let c: Str = s.center(10, \"-\")",
@@ -28870,7 +28870,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb8_str_center_width_menor_que_len_sin_cambios() {
+    async fn mb8_str_center_width_less_than_len_no_changes() {
         let (env, res) = parse_eval_into_env(
             "let s = \"hola mundo\"\n\
              let c: Str = s.center(5, \"*\")",
@@ -28912,7 +28912,7 @@ let r = match n {
     //                       repeat_with + with ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_list_take_y_drop() {
+    async fn mb7_list_take_and_drop() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let a: List<Int> = xs.take(3)\n\
@@ -28931,7 +28931,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_list_init_y_tail() {
+    async fn mb7_list_init_and_tail() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4]\n\
              let i: List<Int> = xs.init()\n\
@@ -28956,7 +28956,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_list_init_y_tail_sobre_vacia() {
+    async fn mb7_list_init_and_tail_on_empty() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let i: List<Int> = xs.init()\n\
@@ -29000,7 +29000,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_list_cycle_repite_n_veces() {
+    async fn mb7_list_cycle_repeats_n_times() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
              let r: List<Int> = xs.cycle(3)",
@@ -29014,7 +29014,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_list_cycle_n_cero_es_vacia() {
+    async fn mb7_list_cycle_n_zero_is_empty() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.cycle(0)",
@@ -29028,28 +29028,28 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_str_repeat_with_intercala_sep() {
+    async fn mb7_str_repeat_with_intersperses_sep() {
         let (env, res) = parse_eval_into_env("let r: Str = \"hi\".repeat_with(3, \", \")").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("hi, hi, hi".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_str_repeat_with_n_cero_es_vacio() {
+    async fn mb7_str_repeat_with_n_zero_is_empty() {
         let (env, res) = parse_eval_into_env("let r: Str = \"hi\".repeat_with(0, \", \")").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_str_repeat_with_n_negativo_es_error() {
+    async fn mb7_str_repeat_with_n_negative_is_error() {
         let (_, res) = parse_eval_into_env("let r: Str = \"hi\".repeat_with(-1, \",\")").await;
         let err = res.unwrap_err();
         assert!(err.message.contains("negativo"), "msg fue: {}", err.message);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_map_with_inserta_o_sobreescribe() {
+    async fn mb7_map_with_inserts_or_overwrites() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let m2: Map<Str, Int> = m.with(\"b\", 2)\n\
@@ -29074,7 +29074,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb7_map_with_no_muta_receptor() {
+    async fn mb7_map_with_does_not_mutate_receiver() {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let m2: Map<Str, Int> = m.with(\"b\", 2)\n\
@@ -29088,7 +29088,7 @@ let r = match n {
     // ---- Mini-batch Mb6 — scan + windows + merge_with ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb6_list_scan_acumula_outputs_intermedios() {
+    async fn mb6_list_scan_accumulates_intermediate_outputs() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4]\n\
              let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
@@ -29116,7 +29116,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb6_list_scan_lista_vacia_devuelve_vacia() {
+    async fn mb6_list_scan_empty_list_returns_empty() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
@@ -29132,7 +29132,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb6_list_windows_size_3_sobre_lista_de_5() {
+    async fn mb6_list_windows_size_3_on_list_of_5() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let r: List<List<Int>> = xs.windows(3)",
@@ -29148,7 +29148,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb6_list_windows_n_mayor_que_len_devuelve_vacia() {
+    async fn mb6_list_windows_n_greater_than_len_returns_empty() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
              let r: List<List<Int>> = xs.windows(5)",
@@ -29164,7 +29164,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb6_list_windows_n_cero_es_error() {
+    async fn mb6_list_windows_n_zero_is_error() {
         let (_, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<List<Int>> = xs.windows(0)",
@@ -29179,7 +29179,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb6_map_merge_with_resuelve_conflicts_via_callback() {
+    async fn mb6_map_merge_with_resolves_conflicts_via_callback() {
         let (env, res) = parse_eval_into_env(
             "let a: Map<Str, Int> = {\"x\": 1, \"y\": 2}\n\
              let b: Map<Str, Int> = {\"y\": 10, \"z\": 3}\n\
@@ -29302,7 +29302,7 @@ let r = match n {
     //                     lines + is_empty ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb5_list_group_by_agrupa_por_key() {
+    async fn mb5_list_group_by_groups_by_key() {
         let (env, res) = parse_eval_into_env(
             "let nums: List<Int> = [1, 2, 3, 4, 5, 6]\n\
              let r: Map<Str, List<Int>> = nums.group_by(fn(n: Int) => if (n % 2 == 0) { \"par\" } else { \"impar\" })",
@@ -29322,7 +29322,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb5_list_zip_with_combina_y_trunca_al_corto() {
+    async fn mb5_list_zip_with_combines_and_truncates_to_shortest() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4]\n\
              let ys: List<Int> = [10, 20]\n\
@@ -29351,7 +29351,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb5_list_max_by_devuelve_item_con_max_ranking() {
+    async fn mb5_list_max_by_returns_item_with_max_ranking() {
         let (env, res) = parse_eval_into_env(
             "type P { age: Int = 0, name: Str = \"\" }\n\
              let xs: List<P> = [P { age: 28, name: \"Bob\" }, P { age: 42, name: \"Cam\" }, P { age: 35, name: \"Ada\" }]\n\
@@ -29373,7 +29373,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb5_list_min_by_lista_vacia_devuelve_err() {
+    async fn mb5_list_min_by_empty_list_returns_err() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let r: Result<Int> = xs.min_by(fn(n: Int) => n)",
@@ -29389,7 +29389,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb5_str_lines_separa_por_newline() {
+    async fn mb5_str_lines_splits_by_newline() {
         let (env, res) = parse_eval_into_env(
             "let s = \"uno\\ndos\\ntres\"\n\
              let ls: List<Str> = s.lines()",
@@ -29419,7 +29419,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb5_str_lines_termina_con_newline_no_agrega_vacia() {
+    async fn mb5_str_lines_ends_with_newline_does_not_add_empty() {
         let (env, res) = parse_eval_into_env(
             "let s = \"a\\nb\\n\"\n\
              let ls: List<Str> = s.lines()",
@@ -29435,7 +29435,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb5_str_is_empty_basico() {
+    async fn mb5_str_is_empty_basic() {
         let (env, res) = parse_eval_into_env(
             "let a: Bool = \"\".is_empty()\n\
              let b: Bool = \"hola\".is_empty()",
@@ -29449,7 +29449,7 @@ let r = match n {
     // ---- Mini-batch Async-cl: async fn as inline closure ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn async_cl_inline_devuelve_future() {
+    async fn async_cl_inline_returns_future() {
         // `async fn(...) => ...` produces a Value::Function with
         // is_async = true. On invocation, returns a lazy Value::Future
         // the caller must `.await`.
@@ -29467,7 +29467,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn async_cl_inline_con_sleep_dentro() {
+    async fn async_cl_inline_with_sleep_inside() {
         let (env, res) = parse_eval_into_env(
             "async fn run() -> Int {\n\
                  let delayed = async fn(n: Int) -> Int {\n\
@@ -29485,7 +29485,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn async_cl_pasada_como_arg_funciona() {
+    async fn async_cl_passed_as_arg_works() {
         // An async closure can be passed as arg to another async fn.
         let (env, res) = parse_eval_into_env(
             "async fn apply_async(f, n: Int) -> Int {\n\
@@ -29504,7 +29504,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cmp_var_de_for_anidado_no_escapa() {
+    async fn cmp_nested_for_var_does_not_escape() {
         // After evaluating, neither `x` nor `y` is in the caller.
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
@@ -29520,7 +29520,7 @@ let r = match n {
     // ---- Mini-batch Math: numeric builtins ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn math_abs_int_y_float() {
+    async fn math_abs_int_and_float() {
         let (env, res) = parse_eval_into_env(
             "let a: Int = abs(-5)\n\
              let b: Float = abs(-3.14)\n\
@@ -29534,7 +29534,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn math_min_max_basicos() {
+    async fn math_min_max_basic() {
         let (env, res) = parse_eval_into_env(
             "let a: Int = min(3, 5)\n\
              let b: Int = max(3, 5)\n\
@@ -29550,7 +29550,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn math_pow_y_sqrt() {
+    async fn math_pow_and_sqrt() {
         let (env, res) = parse_eval_into_env(
             "let a: Float = pow(2, 10)\n\
              let b: Float = sqrt(16)\n\
@@ -29646,7 +29646,7 @@ let r = match n {
     // ---- Mini-batch Mb9: List.split_at(i) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb9_list_split_at_basico() {
+    async fn mb9_list_split_at_basic() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let parts = xs.split_at(2)",
@@ -29670,7 +29670,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mb9_list_split_at_clamp_extremos() {
+    async fn mb9_list_split_at_clamps_extremes() {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let a = xs.split_at(0)\n\
@@ -29754,7 +29754,7 @@ let r = match n {
     // ---- Mini-batch Fp — default params ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp_call_sin_args_usa_default() {
+    async fn fp_call_without_args_uses_default() {
         let (env, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r: Str = greet()",
@@ -29765,7 +29765,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp_call_con_arg_overridea_default() {
+    async fn fp_call_with_arg_overrides_default() {
         let (env, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r: Str = greet(\"Fitz\")",
@@ -29776,7 +29776,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp_mezcla_required_y_default() {
+    async fn fp_mixes_required_and_default() {
         let (env, res) = parse_eval_into_env(
             "fn add(a: Int, b: Int = 10) -> Int { return a + b }\n\
              let r1: Int = add(5)\n\
@@ -29791,7 +29791,7 @@ let r = match n {
     // ---- Mini-batch Fp.2 — varargs at runtime ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp2_varargs_sin_args_recibe_lista_vacia() {
+    async fn fp2_varargs_without_args_receives_empty_list() {
         let (env, res) = parse_eval_into_env(
             "fn count(...xs: Int) -> Int { return xs.len() }\n\
              let r: Int = count()",
@@ -29802,7 +29802,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp2_varargs_con_args_recibe_lista() {
+    async fn fp2_varargs_with_args_receives_list() {
         let (env, res) = parse_eval_into_env(
             "fn sum(...xs: Int) -> Int {\n\
                 let total: Int = 0\n\
@@ -29822,7 +29822,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp2_varargs_con_required_y_extras() {
+    async fn fp2_varargs_with_required_and_extras() {
         let (env, res) = parse_eval_into_env(
             "fn join(prefix: Str, ...xs: Str) -> Int { return xs.len() }\n\
              let r: Int = join(\"x\", \"a\", \"b\", \"c\")",
@@ -29835,7 +29835,7 @@ let r = match n {
     // ---- Mini-batch Fp.3 — named args at runtime ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp3_call_solo_named_args() {
+    async fn fp3_call_only_named_args() {
         let (env, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\", greeting: Str = \"Hola\") -> Str {\n\
                 return \"{greeting}, {name}\"\n\
@@ -29848,7 +29848,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp3_call_mezcla_posicional_y_named() {
+    async fn fp3_call_mixes_positional_and_named() {
         let (env, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\", greeting: Str = \"Hola\") -> Str {\n\
                 return \"{greeting}, {name}\"\n\
@@ -29861,7 +29861,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp3_named_arg_orden_libre() {
+    async fn fp3_named_arg_free_order() {
         let (env, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\", greeting: Str = \"Hola\") -> Str {\n\
                 return \"{greeting}, {name}\"\n\
@@ -29874,7 +29874,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp3_named_arg_inexistente_es_error() {
+    async fn fp3_named_arg_nonexistent_is_error() {
         let (_, res) = parse_eval_into_env(
             "fn greet(name: Str) -> Str { return name }\n\
              let r = greet(unknown: \"x\")",
@@ -29886,7 +29886,7 @@ let r = match n {
     // ---- Mini-batch Sp.2 — return in match arm ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sp2_return_en_match_arm_corta_la_fn() {
+    async fn sp2_return_in_match_arm_cuts_fn() {
         let (env, res) = parse_eval_into_env(
             "fn classify(n: Int) -> Str {\n\
                 match n {\n\
@@ -29906,7 +29906,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sp2_arm_con_bloque_de_varios_stmts() {
+    async fn sp2_arm_with_multi_stmt_block() {
         let (env, res) = parse_eval_into_env(
             "fn f(n: Int) -> Int {\n\
                 match n {\n\
@@ -29925,7 +29925,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp_demasiados_args_es_error() {
+    async fn fp_too_many_args_is_error() {
         let (_, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r = greet(\"a\", \"b\")",
@@ -29935,7 +29935,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fp_default_expr_compleja_se_evalua_en_cada_call() {
+    async fn fp_default_complex_expr_evaluates_on_each_call() {
         // Default expr can be any expr — evaluated in the
         // closure's env each time it is called without that arg.
         // (Design decision: evaluated-per-call, NOT cached).
@@ -29991,7 +29991,7 @@ let r = match n {
     // ----------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn register_builtins_define_jwt_y_hash_como_modulos() {
+    async fn register_builtins_defines_jwt_and_hash_as_modules() {
         let env = Environment::new();
         register_builtins(&env);
         // `jwt` and `hash` are in the global env as Value::Module.
@@ -30059,7 +30059,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_decode_secret_incorrecto_devuelve_err() {
+    async fn jwt_decode_incorrect_secret_returns_err() {
         let payload = Value::new_map(vec![(Value::Str("k".into()), Value::Int(1))]);
         let secret_good = Value::Str("secret-correcto-de-32-bytes-xxxx".into());
         let secret_bad = Value::Str("secret-distinto-de-32-bytes-xxxx".into());
@@ -30088,7 +30088,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_decode_token_malformado_devuelve_err() {
+    async fn jwt_decode_malformed_token_returns_err() {
         let token = Value::Str("no-es-un-jwt-valido".into());
         let secret = Value::Str("cualquier-secret".into());
         let decoded = builtin_jwt_decode(&[token, secret]).unwrap();
@@ -30096,7 +30096,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_encode_alg_desconocido_es_error() {
+    async fn jwt_encode_unknown_alg_is_error() {
         let payload = Value::new_map(vec![]);
         let secret = Value::Str("x".into());
         let bad_alg = Value::Str("MD5".into());
@@ -30107,7 +30107,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_encode_y_decode_con_alg_explicito_hs384() {
+    async fn jwt_encode_and_decode_with_explicit_alg_hs384() {
         let payload = Value::new_map(vec![(Value::Str("ok".into()), Value::Bool(true))]);
         let secret =
             Value::Str("secret-mas-largo-para-hs384-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
@@ -30127,7 +30127,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_encode_payload_no_map_es_error() {
+    async fn jwt_encode_payload_non_map_is_error() {
         let result =
             builtin_jwt_encode(&[Value::Str("no es Map".into()), Value::Str("secret".into())]);
         assert!(result.is_err());
@@ -30136,13 +30136,13 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_encode_secret_no_str_es_error() {
+    async fn jwt_encode_secret_non_str_is_error() {
         let result = builtin_jwt_encode(&[Value::new_map(vec![]), Value::Int(42)]);
         assert!(result.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_encode_aridad_incorrecta_es_error() {
+    async fn jwt_encode_wrong_arity_is_error() {
         let r1 = builtin_jwt_encode(&[]);
         assert!(r1.is_err());
         let r2 = builtin_jwt_encode(&[Value::new_map(vec![])]);
@@ -30158,7 +30158,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hash_password_y_verify_round_trip() {
+    async fn hash_password_and_verify_round_trip() {
         let plain = "contraseña-secreta-del-usuario";
         let hashed = builtin_hash_password(&[Value::Str(plain.into())]).unwrap();
         let hashed_str = match &hashed {
@@ -30185,7 +30185,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hash_password_genera_salts_distintos_por_call() {
+    async fn hash_password_generates_different_salts_per_call() {
         // Argon2id uses a random salt on each call, so two
         // password() of the same plain produce different hashes. Both
         // verify OK against the original plain.
@@ -30200,7 +30200,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hash_verify_hash_malformado_devuelve_false_no_error() {
+    async fn hash_verify_malformed_hash_returns_false_not_error() {
         // Malformed hash does not panic — returns false. Security
         // decision: we do not leak to the attacker that the hash in the DB
         // is corrupt.
@@ -30213,13 +30213,13 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hash_password_no_str_es_error() {
+    async fn hash_password_non_str_is_error() {
         let result = builtin_hash_password(&[Value::Int(42)]);
         assert!(result.is_err());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hash_password_aridad_incorrecta_es_error() {
+    async fn hash_password_wrong_arity_is_error() {
         let r0 = builtin_hash_password(&[]);
         assert!(r0.is_err());
         let r2 = builtin_hash_password(&[Value::Str("a".into()), Value::Str("b".into())]);
@@ -30227,7 +30227,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hash_verify_aridad_incorrecta_es_error() {
+    async fn hash_verify_wrong_arity_is_error() {
         let r0 = builtin_hash_verify(&[]);
         assert!(r0.is_err());
         let r1 = builtin_hash_verify(&[Value::Str("a".into())]);
@@ -30313,7 +30313,7 @@ let r = match n {
     /// a Fitz expression runs correctly via normal
     /// field-access dispatch on Value::Module.
     #[tokio::test(flavor = "current_thread")]
-    async fn jwt_y_hash_via_field_access_en_programa_fitz() {
+    async fn jwt_and_hash_via_field_access_in_fitz_program() {
         let (env, res) = parse_eval_into_env(
             "let token = jwt.encode({\"sub\": \"x\"}, \"secret-32-bytes-aaaaaaaaaaaaaaaaa\")\n\
              let pw = hash.password(\"pass\")\n\
@@ -30346,31 +30346,31 @@ let r = match n {
     // env of the evaluator.
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_solo_msg_devuelve_null() {
+    async fn log_info_only_msg_returns_null() {
         let r = builtin_log_info(&[Value::Str("hola".into())]).unwrap();
         assert_eq!(r, Value::Null);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_warn_solo_msg_devuelve_null() {
+    async fn log_warn_only_msg_returns_null() {
         let r = builtin_log_warn(&[Value::Str("ojo".into())]).unwrap();
         assert_eq!(r, Value::Null);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_error_solo_msg_devuelve_null() {
+    async fn log_error_only_msg_returns_null() {
         let r = builtin_log_error(&[Value::Str("malo".into())]).unwrap();
         assert_eq!(r, Value::Null);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_debug_solo_msg_devuelve_null() {
+    async fn log_debug_only_msg_returns_null() {
         let r = builtin_log_debug(&[Value::Str("trace".into())]).unwrap();
         assert_eq!(r, Value::Null);
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_msg_no_str_es_error_con_mencion_a_msg() {
+    async fn log_msg_non_str_is_error_mentioning_msg() {
         let r = builtin_log_info(&[Value::Int(42)]);
         assert!(r.is_err());
         let err = r.unwrap_err();
@@ -30379,7 +30379,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_aridad_incorrecta_es_error_positional() {
+    async fn log_wrong_arity_is_positional_error() {
         let r0 = builtin_log_info(&[]);
         assert!(r0.is_err());
         let r2 = builtin_log_info(&[Value::Str("a".into()), Value::Str("b".into())]);
@@ -30387,7 +30387,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_disponible_en_programa_fitz_via_module_access() {
+    async fn log_available_in_fitz_program_via_module_access() {
         let (env, res) = parse_eval_into_env(
             "log.info(\"hola\")\n\
              log.warn(\"ojo\")\n\
@@ -30402,7 +30402,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_con_kwargs_heterogeneos_compila_y_ejecuta() {
+    async fn log_info_with_heterogeneous_kwargs_compiles_and_runs() {
         // Kwargs syntax in function calls is `name: value` (`=` is
         // reserved for decorators). Same shape as `db.connect(url,
         // max_conns: 5)` / `DbConn.transaction(cb, isolation: "...")`.
@@ -30417,7 +30417,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_con_kwarg_reservado_level_es_error() {
+    async fn log_info_with_reserved_kwarg_level_is_error() {
         let (_, res) = parse_eval_into_env("log.info(\"test\", level: \"INFO\")").await;
         let err = res.unwrap_err();
         assert!(
@@ -30428,7 +30428,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_con_kwarg_reservado_msg_es_error() {
+    async fn log_info_with_reserved_kwarg_msg_is_error() {
         let (_, res) = parse_eval_into_env("log.info(\"test\", msg: \"override\")").await;
         let err = res.unwrap_err();
         assert!(
@@ -30439,7 +30439,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_con_kwarg_reservado_timestamp_es_error() {
+    async fn log_info_with_reserved_kwarg_timestamp_is_error() {
         let (_, res) = parse_eval_into_env("log.info(\"test\", timestamp: \"now\")").await;
         let err = res.unwrap_err();
         assert!(
@@ -30450,7 +30450,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_con_kwarg_no_serializable_es_error() {
+    async fn log_info_with_non_serializable_kwarg_is_error() {
         // A function as kwarg is not serializable (not primitive/Secret/List/Map).
         let (_, res) = parse_eval_into_env(
             "fn f() -> Int { return 0 }\n\
@@ -30466,7 +30466,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_kwargs_msg_no_str_es_error() {
+    async fn log_info_kwargs_msg_non_str_is_error() {
         // Kwargs path with Int positional msg — must reject.
         let (_, res) = parse_eval_into_env("log.info(42, foo: \"bar\")").await;
         let err = res.unwrap_err();
@@ -30478,7 +30478,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn log_info_kwargs_sin_msg_positional_es_error() {
+    async fn log_info_kwargs_without_positional_msg_is_error() {
         // Only kwargs, without the positional msg — must reject.
         let (_, res) = parse_eval_into_env("log.info(foo: \"bar\")").await;
         let err = res.unwrap_err();
@@ -30492,7 +30492,7 @@ let r = match n {
     // ---- Phase 9.w.3 — runtime cron + background + spawn ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_decorator_sin_registry_activo_es_error() {
+    async fn cron_decorator_without_active_registry_is_error() {
         // `@cron("...")` without HTTP context/registry → clear error.
         // Defensive replica of the checker (which does not check context).
         let (_, res) =
@@ -30506,7 +30506,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_decorator_con_registry_registra_job() {
+    async fn cron_decorator_with_registry_registers_job() {
         // With an active HttpRegistry, `@cron("...")` pushes a CronJob
         // to the cron_registry. The fn also remains in the env.
         let (env, registry) = crate::http::with_active_registry_async(|| async {
@@ -30530,7 +30530,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_async_fn_registra_is_async_true() {
+    async fn cron_async_fn_registers_is_async_true() {
         let (_env, registry) = crate::http::with_active_registry_async(|| async {
             let (env, res) = parse_eval_into_env(
                 "@cron(\"*/1 * * * * *\")\nasync fn tick() -> Null { return null }",
@@ -30546,7 +30546,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_expression_invalida_es_error_claro() {
+    async fn cron_expression_invalid_is_clear_error() {
         // The checker does not validate the cron expression syntax; the
         // runtime does it on register via `cron::Schedule::from_str`.
         let result = crate::http::with_active_registry_async(|| async {
@@ -30573,7 +30573,7 @@ let r = match n {
     // -----------------------------------------------------------------
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_con_tz_valida_se_propaga_al_registry() {
+    async fn cron_with_valid_tz_propagates_to_registry() {
         let (_env, registry) = crate::http::with_active_registry_async(|| async {
             let (env, res) = parse_eval_into_env(
                 "@cron(\"0 0 * * *\", tz=\"America/Argentina/Buenos_Aires\")\n\
@@ -30589,7 +30589,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_con_tz_invalida_es_error_runtime() {
+    async fn cron_with_invalid_tz_is_runtime_error() {
         let result = crate::http::with_active_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(
                 "@cron(\"0 0 * * *\", tz=\"Mars/Olympus_Mons\")\n\
@@ -30608,7 +30608,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_con_retry_completo_se_propaga_al_registry() {
+    async fn cron_with_complete_retry_propagates_to_registry() {
         let (_env, registry) = crate::http::with_active_registry_async(|| async {
             let (env, res) = parse_eval_into_env(
                 "@cron(\"0 0 * * *\", retry={max: 3, backoff: \"linear\", initial_secs: 2, max_secs: 30})\n\
@@ -30628,7 +30628,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_con_retry_solo_max_aplica_defaults() {
+    async fn cron_with_retry_only_max_applies_defaults() {
         // Without explicit backoff/initial_secs/max_secs: defaults expo/1/60.
         let (_env, registry) = crate::http::with_active_registry_async(|| async {
             let (env, res) = parse_eval_into_env(
@@ -30649,7 +30649,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_con_catch_up_se_propaga_al_registry() {
+    async fn cron_with_catch_up_propagates_to_registry() {
         let (_env, registry) = crate::http::with_active_registry_async(|| async {
             let (env, res) = parse_eval_into_env(
                 "@cron(\"0 0 * * *\", catch_up=true)\n\
@@ -30665,7 +30665,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_con_store_no_dbconn_es_error_runtime() {
+    async fn cron_with_store_non_dbconn_is_runtime_error() {
         // `store=x` with `x` being an Int → clear error citing DbConn.
         let result = crate::http::with_active_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(
@@ -30686,7 +30686,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn cron_con_store_var_inexistente_es_error_claro() {
+    async fn cron_with_nonexistent_store_var_is_clear_error() {
         let result = crate::http::with_active_registry_async(|| async {
             let (_env, res) = parse_eval_into_env(
                 "@cron(\"0 0 * * *\", store=db)\n\
@@ -30708,7 +30708,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn background_decorator_no_registra_en_runtime() {
+    async fn background_decorator_does_not_register_at_runtime() {
         // `@background` is only a checker marker; at runtime it is
         // no-op. The fn remains defined in the env normally.
         let (env, res) =
@@ -30721,7 +30721,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn spawn_sobre_background_fn_retorna_future() {
+    async fn spawn_on_background_fn_returns_future() {
         // `spawn(send_email(...))` returns `Value::Future` which the
         // caller can `.await` or discard. The target must be
         // a fn with `@background` (defensive runtime validation
@@ -30742,7 +30742,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn spawn_y_await_devuelve_valor_target() {
+    async fn spawn_and_await_returns_target_value() {
         // `spawn(fn_call).await` resolves to the value the target fn
         // would have returned if called directly.
         let (env, res) = parse_eval_into_env(
@@ -30766,7 +30766,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn spawn_userdefined_override_no_dispara_dispatch_especial() {
+    async fn spawn_userdefined_override_does_not_trigger_special_dispatch() {
         // If the user defines `fn spawn(...)`, the lookup returns
         // Value::Function and `is_spawn_builtin` returns false → the
         // normal dispatch runs. We validate the call resolves to the
@@ -30790,7 +30790,7 @@ let r = match n {
     // we have Postgres in docker in the CI setup.
 
     #[tokio::test(flavor = "current_thread")]
-    async fn db_modulo_registrado_como_value_module() {
+    async fn db_module_registered_as_value_module() {
         // The `db` module stays in the env as `Value::Module`
         // after `register_builtins`. Field access on it
         // returns `Value::Builtin` for `connect`.
@@ -30811,7 +30811,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn db_connect_devuelve_future() {
+    async fn db_connect_returns_future() {
         // `db.connect("...")` without .await must return a
         // Value::Future. The real connection error only appears on
         // .await — here we test the immediate shape.
@@ -30826,7 +30826,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn db_connect_arg_no_str_es_error_de_tipo() {
+    async fn db_connect_arg_non_str_is_type_error() {
         let (_env, res) = parse_eval_into_env("let f = db.connect(42)").await;
         let err = res.unwrap_err();
         assert!(
@@ -30837,7 +30837,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn db_connect_url_invalida_devuelve_err_via_await() {
+    async fn db_connect_invalid_url_returns_err_via_await() {
         // The future's .await resolves to `Result::Err(...)` with the
         // URL parse message. Without real Postgres, we do not need a
         // TCP connection — the URL parse fails first.
@@ -30860,7 +30860,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn db_connect_url_con_sslmode_require_resuelve_y_falla_en_red() {
+    async fn db_connect_url_with_sslmode_require_resolves_and_fails_on_network() {
         // v0.10.23 (Phase 10.1.b) — sslmode=require now parses OK
         // and the connect attempts the real TCP connection (which fails
         // because "h" does not resolve DNS). The test validates that the flow
@@ -30894,7 +30894,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn db_conn_metodo_desconocido_da_error_claro() {
+    async fn db_conn_unknown_method_gives_clear_error() {
         // If we build an opaque DbConn by hand and call a
         // nonexistent method, dispatch_method returns a clear message
         // listing the supported methods.
@@ -30936,7 +30936,7 @@ let r = match n {
     // ---- Phase 10.3.b1 — ORM builder `User.all(db)` ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_value_type_cachea_table_metadata_al_evaluarse() {
+    async fn orm_value_type_caches_table_metadata_on_evaluation() {
         // After `@table("users") type User { ... }`, the
         // `Value::Type` in the env has `table_metadata = Some(...)`
         // with the SQL name and fields.
@@ -30961,7 +30961,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_type_sin_table_no_tiene_metadata() {
+    async fn orm_type_without_table_has_no_metadata() {
         let (env, res) = parse_eval_into_env("type Plain { x: Int }").await;
         res.expect("evaluación OK");
         let v = env.lock().get("Plain").unwrap();
@@ -30972,7 +30972,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_all_sobre_type_sin_table_error_claro() {
+    async fn orm_all_on_type_without_table_clear_error() {
         // `Plain.all(db)` without `@table` must be rejected — generic error
         // for static method not found (ORM dispatch only activates
         // if there's table_metadata).
@@ -30992,7 +30992,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_all_sin_args_es_error_de_aridad() {
+    async fn orm_all_without_args_is_arity_error() {
         // `User.all()` without the db → arity error.
         let (_env, res) =
             parse_eval_into_env("@table(\"users\") type User { id: Int }\nlet f = User.all()")
@@ -31006,7 +31006,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_all_con_arg_no_dbconn_es_error_de_tipo() {
+    async fn orm_all_with_non_dbconn_arg_is_type_error() {
         let (_env, res) =
             parse_eval_into_env("@table(\"users\") type User { id: Int }\nlet f = User.all(42)")
                 .await;
@@ -31650,7 +31650,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_where_devuelve_query_builder() {
+    async fn orm_where_returns_query_builder() {
         // `User.where(...)` without .all() must return a QueryBuilder.
         let (env, res) = parse_eval_into_env(
             "@table(\"users\") type User {\n  id: Int\n  name: Str\n  age: Int\n}\n\
@@ -31663,7 +31663,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_where_con_closure_invalida_es_error() {
+    async fn orm_where_with_invalid_closure_is_error() {
         // The closure parameter does not exist as a field of the type.
         let (_env, res) = parse_eval_into_env(
             "@table(\"users\") type User {\n  id: Int\n}\n\
@@ -31834,7 +31834,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_order_by_devuelve_query_builder() {
+    async fn orm_order_by_returns_query_builder() {
         let (env, res) = parse_eval_into_env(
             "@table(\"users\") type User {\n  id: Int\n  age: Int\n}\n\
              let qb = User.where(fn(u) => u.age > 0).order_by(fn(u) => u.age)",
@@ -31846,7 +31846,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_order_by_field_inexistente_es_error() {
+    async fn orm_order_by_nonexistent_field_is_error() {
         let (_env, res) = parse_eval_into_env(
             "@table(\"users\") type User {\n  id: Int\n}\n\
              let qb = User.where(fn(u) => u.id > 0).order_by(fn(u) => u.missing)",
@@ -31861,7 +31861,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_limit_con_arg_no_int_es_error() {
+    async fn orm_limit_with_non_int_arg_is_error() {
         let (_env, res) = parse_eval_into_env(
             "@table(\"users\") type User { id: Int }\n\
              let qb = User.where(fn(u) => u.id > 0).limit(\"diez\")",
@@ -31876,7 +31876,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_qb_metodo_desconocido_lista_soportados() {
+    async fn orm_qb_unknown_method_lists_supported() {
         let (_env, res) = parse_eval_into_env(
             "@table(\"users\") type User { id: Int }\n\
              let qb = User.where(fn(u) => u.id > 0).bogus_method()",
@@ -31912,7 +31912,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_insert_con_instancia_de_otro_type_es_error() {
+    async fn orm_insert_with_instance_of_other_type_is_error() {
         let (_env, res) = parse_eval_into_env(
             "@table(\"users\") type User { id: Int, name: Str }\n\
              type Other { x: Int }\n\
@@ -31928,7 +31928,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_update_sin_where_es_error_explicito() {
+    async fn orm_update_without_where_is_explicit_error() {
         // The safety guard: `.update` without a prior `.where` is
         // rejected to avoid accidental mass updates.
         let (_env, res) = parse_eval_into_env(
@@ -31963,7 +31963,7 @@ let r = match n {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_flag_builtin_default_false_sin_env_var_ni_manifest() {
+    async fn phase_12_8_flag_builtin_default_false_without_env_var_or_manifest() {
         let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         super::set_flag_defaults(std::collections::HashMap::new());
         super::clear_flag_cache();
@@ -31978,7 +31978,7 @@ let r = match n {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_flag_builtin_env_var_override_true() {
+    async fn phase_12_8_flag_builtin_env_var_override_true() {
         let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         super::set_flag_defaults(std::collections::HashMap::new());
         super::clear_flag_cache();
@@ -31997,7 +31997,7 @@ let r = match n {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_flag_builtin_manifest_default_se_aplica() {
+    async fn phase_12_8_flag_builtin_manifest_default_applies() {
         let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         super::clear_flag_cache();
         unsafe {
@@ -32015,7 +32015,7 @@ let r = match n {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_flag_env_var_gana_a_manifest_default() {
+    async fn phase_12_8_flag_env_var_wins_over_manifest_default() {
         let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         super::clear_flag_cache();
         let mut defaults = std::collections::HashMap::new();
@@ -32037,7 +32037,7 @@ let r = match n {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_flags_is_enabled_alias_de_flag() {
+    async fn phase_12_8_flags_is_enabled_alias_of_flag() {
         let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         super::clear_flag_cache();
         unsafe {
@@ -32056,7 +32056,7 @@ let r = match n {
 
     #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_flags_list_devuelve_manifest_keys_y_env_vars() {
+    async fn phase_12_8_flags_list_returns_manifest_keys_and_env_vars() {
         let _guard = FLAG_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         super::clear_flag_cache();
         let mut defaults = std::collections::HashMap::new();
@@ -32094,7 +32094,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_parse_flag_env_value_acepta_variantes() {
+    async fn phase_12_8_parse_flag_env_value_accepts_variants() {
         for &raw in &["true", "1", "yes", "on", "TRUE", "True", "YES"] {
             assert_eq!(super::parse_flag_env_value(raw), Some(true), "raw={}", raw);
         }
@@ -32107,7 +32107,7 @@ let r = match n {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn fase_12_8_flag_env_name_formato_correcto() {
+    async fn phase_12_8_flag_env_name_correct_format() {
         assert_eq!(super::flag_env_name("foo"), "FITZ_FLAG_FOO");
         assert_eq!(
             super::flag_env_name("new-checkout"),
@@ -32119,7 +32119,7 @@ let r = match n {
     // ---- Phase 10.4 — ORM delete with `.where(...)` guard ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn orm_delete_sin_where_es_error_explicito_via_dispatch_directo() {
+    async fn orm_delete_without_where_is_explicit_error_via_direct_dispatch() {
         // Build a QueryBuilder with where=None manually and
         // verify that delete rejects it. Since we have no public API
         // to build it without a closure, we simulate via a functional

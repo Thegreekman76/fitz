@@ -183,14 +183,14 @@ mod tests {
     }
 
     #[test]
-    fn from_resolved_vacio_emite_lockfile_v1_sin_packages() {
+    fn from_resolved_empty_emits_lockfile_v1_without_packages() {
         let l = Lockfile::from_resolved(&[]);
         assert_eq!(l.version, CURRENT_LOCKFILE_VERSION);
         assert!(l.packages.is_empty());
     }
 
     #[test]
-    fn from_resolved_path_dep_no_emite_source() {
+    fn from_resolved_path_dep_does_not_emit_source() {
         let l = Lockfile::from_resolved(&[dep("utils", "0.1.0", "../utils")]);
         assert_eq!(l.packages.len(), 1);
         assert_eq!(l.packages[0].name, "utils");
@@ -203,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn from_resolved_ordena_alfabeticamente_por_nombre() {
+    fn from_resolved_sorts_alphabetically_by_name() {
         let l = Lockfile::from_resolved(&[
             dep("zeta", "1.0.0", "../zeta"),
             dep("alfa", "0.1.0", "../alfa"),
@@ -214,7 +214,7 @@ mod tests {
     }
 
     #[test]
-    fn serializa_omite_packages_y_source_vacios() {
+    fn serializes_omits_empty_packages_and_source() {
         let l = Lockfile::from_resolved(&[]);
         let toml_text = l.to_toml_string().unwrap();
         // Only the version header, no [[package]].
@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_preserva_estructura() {
+    fn round_trip_preserves_structure() {
         let original =
             Lockfile::from_resolved(&[dep("a", "0.1.0", "../a"), dep("b", "0.2.0", "../b")]);
         let toml_text = original.to_toml_string().unwrap();
@@ -233,7 +233,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_acepta_lockfile_vacio() {
+    fn parse_accepts_empty_lockfile() {
         let text = "version = 1\n";
         let l = Lockfile::parse(text).unwrap();
         assert_eq!(l.version, 1);
@@ -241,7 +241,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_rechaza_version_futura() {
+    fn parse_rejects_future_version() {
         let text = "version = 999\n";
         let err = Lockfile::parse(text).unwrap_err();
         match err {
@@ -251,7 +251,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_acepta_lockfile_con_packages() {
+    fn parse_accepts_lockfile_with_packages() {
         let text = r#"
 version = 1
 
@@ -275,7 +275,7 @@ source = "git+https://github.com/foo/bar#abc123"
     }
 
     #[test]
-    fn lockfile_matches_detecta_igualdad_estructural() {
+    fn lockfile_matches_detects_structural_equality() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fitz.lock");
         let l = Lockfile::from_resolved(&[dep("x", "1.0.0", "../x")]);
@@ -284,7 +284,7 @@ source = "git+https://github.com/foo/bar#abc123"
     }
 
     #[test]
-    fn lockfile_matches_detecta_diferencia() {
+    fn lockfile_matches_detects_difference() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fitz.lock");
         let original = Lockfile::from_resolved(&[dep("x", "1.0.0", "../x")]);
@@ -294,7 +294,7 @@ source = "git+https://github.com/foo/bar#abc123"
     }
 
     #[test]
-    fn lockfile_matches_false_si_no_existe() {
+    fn lockfile_matches_false_if_does_not_exist() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("no-existe.lock");
         let l = Lockfile::from_resolved(&[]);
@@ -302,7 +302,7 @@ source = "git+https://github.com/foo/bar#abc123"
     }
 
     #[test]
-    fn write_lockfile_no_escribe_si_iguala() {
+    fn write_lockfile_does_not_write_if_equal() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fitz.lock");
         let l = Lockfile::from_resolved(&[dep("x", "1.0.0", "../x")]);
@@ -320,7 +320,7 @@ source = "git+https://github.com/foo/bar#abc123"
     }
 
     #[test]
-    fn write_lockfile_escribe_si_difiere() {
+    fn write_lockfile_writes_if_differs() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fitz.lock");
         let old = Lockfile::from_resolved(&[dep("x", "1.0.0", "../x")]);
@@ -335,7 +335,7 @@ source = "git+https://github.com/foo/bar#abc123"
     }
 
     #[test]
-    fn write_lockfile_escribe_si_no_existe() {
+    fn write_lockfile_writes_if_does_not_exist() {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fitz.lock");
         let l = Lockfile::from_resolved(&[]);

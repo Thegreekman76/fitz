@@ -268,7 +268,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn init_otel_sin_env_var_es_noop_y_flag_false() {
+    fn init_otel_without_env_var_is_noop_and_flag_false() {
         // The OnceLock is process-global — an earlier test might
         // have installed one. Since we can't clear it
         // deterministically, we only assert that `is_otel_enabled()`
@@ -277,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn tracer_devuelve_boxed_tracer_aun_sin_init() {
+    fn tracer_returns_boxed_tracer_even_without_init() {
         // Without a provider installed, `global::tracer` returns a
         // NoOp that neither panics nor sends anything. We validate
         // that the API exists and does not abort.

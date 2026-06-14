@@ -1276,7 +1276,7 @@ mod tests {
     }
 
     #[test]
-    fn map_literal_preserva_orden_de_pares() {
+    fn map_literal_preserves_pair_order() {
         // `{"a": 1, "b": 2}`
         let map = Expr::Map(
             vec![
@@ -1296,7 +1296,7 @@ mod tests {
     }
 
     #[test]
-    fn range_expr_envuelve_extremos() {
+    fn range_expr_wraps_endpoints() {
         // `0..10`
         let r = Expr::Range {
             start: Box::new(Expr::Int(0, Span::ZERO)),
@@ -1314,7 +1314,7 @@ mod tests {
     }
 
     #[test]
-    fn index_expr_envuelve_objeto_e_indice() {
+    fn index_expr_wraps_object_and_index() {
         // `xs[0]`
         let ix = Expr::Index {
             object: Box::new(Expr::Ident("xs".into(), Span::ZERO)),
@@ -1331,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn for_stmt_envuelve_var_iter_y_body() {
+    fn for_stmt_wraps_var_iter_and_body() {
         // `for x in xs { print(x) }`
         let f = Stmt::For {
             var: Pattern::Ident("x".into(), Span::default()),
@@ -1360,7 +1360,7 @@ mod tests {
     }
 
     #[test]
-    fn pattern_range_guarda_extremos_como_int() {
+    fn pattern_range_stores_endpoints_as_int() {
         // `match n { 0..10 => "chico", _ => "grande" }` — the pattern only.
         let p = Pattern::Range {
             start: 0,
@@ -1382,7 +1382,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_guarda_tipo_y_campos_en_orden() {
+    fn struct_lit_stores_type_and_fields_in_order() {
         // `User { id: 1, name: "x" }`
         let lit = Expr::StructLit {
             type_name: "User".into(),
@@ -1412,7 +1412,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn ok_ctor_envuelve_inner() {
+    fn ok_ctor_wraps_inner() {
         // `Ok(42)` → Expr::Ok(Box(Int(42)), Span::ZERO)
         let e = Expr::Ok(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         match e {
@@ -1422,7 +1422,7 @@ mod tests {
     }
 
     #[test]
-    fn err_ctor_envuelve_inner() {
+    fn err_ctor_wraps_inner() {
         // `Err("boom")` → Expr::Err(Box(Str("boom")), Span::ZERO)
         let e = Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO);
         match e {
@@ -1432,7 +1432,7 @@ mod tests {
     }
 
     #[test]
-    fn try_expr_envuelve_operando() {
+    fn try_expr_wraps_operand() {
         // `x?` → Expr::Try(Box(Ident("x")), Span::ZERO)
         let e = Expr::Try(Box::new(Expr::Ident("x".into(), Span::ZERO)), Span::ZERO);
         match e {
@@ -1442,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn try_y_ctors_son_componibles() {
+    fn try_and_ctors_are_composable() {
         // `Ok(get(id)?)` — a `?` inside an `Ok` constructor.
         let e = Expr::Ok(
             Box::new(Expr::Try(
@@ -1484,7 +1484,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn call_admite_callee_como_expresion() {
+    fn call_accepts_callee_as_expression() {
         // `xs.map(f)` → Call with callee = Field { object: xs, field: "map" }.
         let call = Expr::Call {
             callee: Box::new(Expr::Field {
@@ -1505,7 +1505,7 @@ mod tests {
     }
 
     #[test]
-    fn fn_expr_envuelve_params_y_body() {
+    fn fn_expr_wraps_params_and_body() {
         // `fn(x) => x * 2` — nameless version.
         let fnexpr = Expr::FnExpr {
             params: vec![Param {
@@ -1543,7 +1543,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn import_simple_guarda_path_de_un_segmento() {
+    fn import_simple_stores_single_segment_path() {
         // `import utils` → Stmt::Import { path: ["utils"], alias: None }
         let s = Stmt::Import {
             path: vec!["utils".into()],
@@ -1560,7 +1560,7 @@ mod tests {
     }
 
     #[test]
-    fn import_punteado_guarda_segmentos_en_orden() {
+    fn dotted_import_stores_segments_in_order() {
         // `import sub.foo` → Stmt::Import { path: ["sub", "foo"], alias: None }
         let s = Stmt::Import {
             path: vec!["sub".into(), "foo".into()],
@@ -1578,7 +1578,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_guarda_path_y_nombres() {
+    fn from_import_stores_path_and_names() {
         // `from utils import slugify, parse` — no aliases.
         let s = Stmt::FromImport {
             path: vec!["utils".into()],
@@ -1602,7 +1602,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn decorator_guarda_nombre_y_args() {
+    fn decorator_stores_name_and_args() {
         // `@get("/users/{id}")` — a decorator with a string arg.
         let d = Decorator {
             name: "get".into(),
@@ -1616,7 +1616,7 @@ mod tests {
     }
 
     #[test]
-    fn fndef_default_sin_decorators_vector_vacio() {
+    fn fndef_default_without_decorators_has_empty_vector() {
         // A fn declared without `@...` on top should have an empty
         // `decorators` vector.
         let f = Stmt::FnDef {
@@ -1636,7 +1636,7 @@ mod tests {
     }
 
     #[test]
-    fn fndef_admite_varios_decorators_en_orden() {
+    fn fndef_accepts_multiple_decorators_in_order() {
         // `@get("/x") @auth("admin") fn h() {}` — two stacked decorators.
         let f = Stmt::FnDef {
             name: "h".into(),
@@ -1668,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_target_admite_ident_y_field() {
+    fn assign_target_accepts_ident_and_field() {
         // `x = 1` — Ident target.
         let s1 = Stmt::Assign {
             target: AssignTarget::Ident("x".into(), Span::default()),
@@ -1709,13 +1709,13 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn type_expr_named_display_es_el_nombre() {
+    fn type_expr_named_display_is_the_name() {
         assert_eq!(TypeExpr::named("Int").display_name(), "Int");
         assert_eq!(TypeExpr::named("User").display_name(), "User");
     }
 
     #[test]
-    fn type_expr_generic_display_con_args() {
+    fn type_expr_generic_display_with_args() {
         let t = TypeExpr::Generic {
             name: "List".into(),
             args: vec![TypeExpr::named("Int")],
@@ -1730,13 +1730,13 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_nullable_display_con_signo_de_pregunta() {
+    fn type_expr_nullable_display_with_question_mark() {
         let t = TypeExpr::Nullable(Box::new(TypeExpr::named("Str")));
         assert_eq!(t.display_name(), "Str?");
     }
 
     #[test]
-    fn type_expr_display_anidado_preserva_estructura() {
+    fn type_expr_display_nested_preserves_structure() {
         // Result<List<User>?>
         let t = TypeExpr::Generic {
             name: "Result".into(),
@@ -1749,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_head_name_ignora_genericos_y_nullables() {
+    fn type_expr_head_name_ignores_generics_and_nullables() {
         assert_eq!(TypeExpr::named("User").head_name(), "User");
 
         let g = TypeExpr::Generic {
@@ -1769,7 +1769,7 @@ mod tests {
     }
 
     #[test]
-    fn type_expr_is_nullable_solo_a_nivel_top() {
+    fn type_expr_is_nullable_only_at_top_level() {
         assert!(!TypeExpr::named("Int").is_nullable());
         assert!(TypeExpr::Nullable(Box::new(TypeExpr::named("Int"))).is_nullable());
         // `List<Int?>` is not nullable itself; the inner field is.

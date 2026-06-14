@@ -851,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_fn_con_default() {
+    fn parser_fn_with_default() {
         let items = parse("def greet(name: str, prefix: str = \"Hi\") -> str: ...");
         if let StubItem::Fn(f) = &items[0] {
             assert_eq!(f.params.len(), 2);
@@ -861,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_class_con_fields() {
+    fn parser_class_with_fields() {
         let src = "class User:\n    id: int\n    name: str\n    age: int = 0\n";
         let items = parse(src);
         assert_eq!(items.len(), 1);
@@ -899,7 +899,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_var_con_default() {
+    fn parser_var_with_default() {
         let items = parse("DEBUG: bool = False");
         if let StubItem::Var(v) = &items[0] {
             assert_eq!(v.name, "DEBUG");

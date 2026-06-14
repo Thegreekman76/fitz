@@ -1418,14 +1418,14 @@ mod tests {
     // ---- Mini-batch F8 — non-ASCII (Unicode) identifiers ----
 
     #[test]
-    fn f8_identifiers_griegos_y_simbolos_matematicos() {
+    fn f8_identifiers_greek_and_math_symbols() {
         // `π`, `σ`, etc. — Greek letters. is_alphabetic returns true.
         assert_eq!(toks("π"), vec![Token::Ident("π".into()), Token::EOF],);
         assert_eq!(toks("σ"), vec![Token::Ident("σ".into()), Token::EOF],);
     }
 
     #[test]
-    fn f8_identifiers_con_acentos_y_n_tilde() {
+    fn f8_identifiers_with_accents_and_n_tilde() {
         // Typical Spanish: `función`, `niño`, `café`.
         for ident in ["función", "niño", "café", "año"] {
             assert_eq!(
@@ -1456,7 +1456,7 @@ mod tests {
     }
 
     #[test]
-    fn f8_identifiers_mixto_unicode_y_ascii() {
+    fn f8_identifiers_mixed_unicode_and_ascii() {
         // Combining Unicode + ASCII + `_` also works.
         assert_eq!(
             toks("user_名"),
@@ -1471,7 +1471,7 @@ mod tests {
     // ---- Mini-batch Bytes — `b"..."` literal ----
 
     #[test]
-    fn bytes_literal_ascii_basico() {
+    fn bytes_literal_basic_ascii() {
         assert_eq!(
             toks(r#"b"hola""#),
             vec![Token::Bytes(b"hola".to_vec()), Token::EOF]
@@ -1479,7 +1479,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_literal_con_escape_hex() {
+    fn bytes_literal_with_hex_escape() {
         assert_eq!(
             toks(r#"b"\x00\xff""#),
             vec![Token::Bytes(vec![0x00, 0xff]), Token::EOF]
@@ -1487,7 +1487,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_literal_con_escapes_comunes() {
+    fn bytes_literal_with_common_escapes() {
         assert_eq!(
             toks(r#"b"\n\r\t\0\\\"""#),
             vec![
@@ -1498,12 +1498,12 @@ mod tests {
     }
 
     #[test]
-    fn bytes_literal_vacio() {
+    fn bytes_literal_empty() {
         assert_eq!(toks(r#"b"""#), vec![Token::Bytes(vec![]), Token::EOF]);
     }
 
     #[test]
-    fn bytes_literal_ident_b_sin_comilla_sigue_siendo_ident() {
+    fn bytes_literal_ident_b_without_quote_is_still_ident() {
         // A lone `b` (without a quote) is a normal identifier, not
         // a bytes-literal trigger.
         assert_eq!(
@@ -1528,7 +1528,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_literal_escape_invalido_es_error() {
+    fn bytes_literal_invalid_escape_is_error() {
         // `\z` is not a supported escape → clear error.
         let err = tokenize(r#"b"\z""#).unwrap_err();
         assert!(
@@ -1539,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn f8_emojis_son_rechazados() {
+    fn f8_emojis_are_rejected() {
         // Emojis are not `is_alphabetic` (Unicode Symbol, not Letter)
         // — the lexer rejects them with UnexpectedChar.
         let err = tokenize("🚀").unwrap_err();
@@ -1551,7 +1551,7 @@ mod tests {
     }
 
     #[test]
-    fn f8_digitos_unicode_no_pueden_arrancar_identifier() {
+    fn f8_unicode_digits_cannot_start_identifier() {
         // Same as ASCII: an identifier can't start with a digit (ASCII
         // or Unicode). `٢` (Arabic-Indic 2) IS is_numeric, but the
         // lexer enters `read_number` only for things that start with
@@ -1605,7 +1605,7 @@ mod tests {
     }
 
     #[test]
-    fn triple_string_con_newlines_los_preserva() {
+    fn triple_string_with_newlines_preserves_them() {
         let src = "\"\"\"linea uno\nlinea dos\"\"\"";
         assert_eq!(
             toks(src),
@@ -1614,13 +1614,13 @@ mod tests {
     }
 
     #[test]
-    fn triple_string_vacio() {
+    fn triple_string_empty() {
         let src = "\"\"\"\"\"\"";
         assert_eq!(toks(src), vec![Token::Str("".into()), Token::EOF]);
     }
 
     #[test]
-    fn triple_string_con_comilla_doble_interna_se_preserva() {
+    fn triple_string_with_internal_double_quote_is_preserved() {
         // `"""a "b" c"""` → content `a "b" c`. A lone inner quote
         // doesn't close; only `"""` in a row closes.
         let src = "\"\"\"a \"b\" c\"\"\"";
@@ -1628,7 +1628,7 @@ mod tests {
     }
 
     #[test]
-    fn triple_string_sin_cerrar_es_error() {
+    fn triple_string_unclosed_is_error() {
         let src = "\"\"\"sin cerrar";
         let res = tokenize(src);
         let err = res.unwrap_err();
@@ -1655,7 +1655,7 @@ mod tests {
     // ---- F9 — extended escapes (\u, \x, \0, \b) ----
 
     #[test]
-    fn f9_escape_null_y_backspace() {
+    fn f9_escape_null_and_backspace() {
         // `\0` → NUL (U+0000). `\b` → backspace (U+0008).
         assert_eq!(
             toks(r#""a\0b""#),
@@ -1668,7 +1668,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escape_unicode_basic_y_extendido() {
+    fn f9_escape_unicode_basic_and_extended() {
         // BMP: `\u{00E9}` = 'é'. Supplementary: `\u{1F600}` = 😀.
         assert_eq!(
             toks(r#""caf\u{00E9}""#),
@@ -1691,7 +1691,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escape_unicode_vacio_es_error() {
+    fn f9_escape_unicode_empty_is_error() {
         let err = tokenize(r#""\u{}""#).unwrap_err();
         assert!(
             err.message.contains("vacío"),
@@ -1701,7 +1701,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escape_unicode_sin_cerrar_es_error() {
+    fn f9_escape_unicode_unclosed_is_error() {
         // `"` appears before `}` → the lexer hits a non-hex char
         // (the `"`) and reports an invalid digit inside `\u{...}`.
         let err = tokenize(r#""\u{ABC""#).unwrap_err();
@@ -1713,7 +1713,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escape_unicode_surrogate_rechazado() {
+    fn f9_escape_unicode_surrogate_rejected() {
         // U+D800 is the first high-surrogate code point, invalid as a
         // Unicode scalar.
         let err = tokenize(r#""\u{D800}""#).unwrap_err();
@@ -1725,7 +1725,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escape_unicode_too_long_es_error() {
+    fn f9_escape_unicode_too_long_is_error() {
         // 7 hex digits exceed the allowed maximum (6, up to 10FFFF).
         let err = tokenize(r#""\u{1234567}""#).unwrap_err();
         assert!(
@@ -1749,7 +1749,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escape_hex_byte_fuera_de_ascii_rechazado() {
+    fn f9_escape_hex_byte_outside_ascii_rejected() {
         // `\x80` and above are not ASCII; explicit rejection suggesting \u{...}.
         let err = tokenize(r#""\x80""#).unwrap_err();
         assert!(
@@ -1760,7 +1760,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escape_hex_byte_pocos_digitos_es_error() {
+    fn f9_escape_hex_byte_too_few_digits_is_error() {
         let err = tokenize(r#""\x4""#).unwrap_err();
         assert!(
             err.message.contains("2 dígitos"),
@@ -1770,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn f9_escapes_extendidos_funcionan_en_triple_string() {
+    fn f9_extended_escapes_work_in_triple_string() {
         // The same escapes (\u/\x/\0/\b) work inside `"""..."""`.
         let src = "\"\"\"\\u{00E9}-\\x41-\\0\"\"\"";
         assert_eq!(toks(src), vec![Token::Str("é-A-\0".into()), Token::EOF]);
@@ -1904,7 +1904,7 @@ print("Hola, {name}!")"#;
     // ---- Phase 9.z.1.b — trivia (comments + blank lines) ----
 
     #[test]
-    fn tokenize_default_no_captura_trivia() {
+    fn tokenize_default_does_not_capture_trivia() {
         // The fast `tokenize` must not spend memory on trivia. The test
         // indirectly confirms that the lexer is not slowed down (there
         // is no side-table to populate).
@@ -1914,7 +1914,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn tokenize_with_trivia_captura_comment_de_linea() {
+    fn tokenize_with_trivia_captures_line_comment() {
         let (_toks, trivia) = tokenize_with_trivia("// hola\nlet x = 1\n").unwrap();
         assert_eq!(trivia.comments.len(), 1);
         let c = &trivia.comments[0];
@@ -1925,7 +1925,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn tokenize_with_trivia_captura_comment_trailing() {
+    fn tokenize_with_trivia_captures_trailing_comment() {
         let (_toks, trivia) = tokenize_with_trivia("let x = 1 // explicación\n").unwrap();
         assert_eq!(trivia.comments.len(), 1);
         let c = &trivia.comments[0];
@@ -1936,7 +1936,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn tokenize_with_trivia_captura_comment_de_bloque() {
+    fn tokenize_with_trivia_captures_block_comment() {
         let (_toks, trivia) = tokenize_with_trivia("/* foo bar */\nlet x = 1\n").unwrap();
         assert_eq!(trivia.comments.len(), 1);
         let c = &trivia.comments[0];
@@ -1946,7 +1946,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn tokenize_with_trivia_captura_blank_lines() {
+    fn tokenize_with_trivia_captures_blank_lines() {
         let src = "let x = 1\n\nlet y = 2\n\n\nlet z = 3\n";
         let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
         // Blank lines: 2 (between x and y), 4 and 5 (between y and z).
@@ -1954,7 +1954,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn tokenize_with_trivia_no_cuenta_line_de_comment_como_blank() {
+    fn tokenize_with_trivia_does_not_count_comment_line_as_blank() {
         let src = "let x = 1\n// solo comment\nlet y = 2\n";
         let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
         assert!(
@@ -1967,7 +1967,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn tokenize_with_trivia_orden_de_comments_es_source_order() {
+    fn tokenize_with_trivia_comments_order_is_source_order() {
         let src = "// uno\nlet x = 1\n// dos\nlet y = 2\n// tres\n";
         let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
         assert_eq!(trivia.comments.len(), 3);
@@ -1979,7 +1979,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn tokenize_with_trivia_mix_de_comments_y_blanks() {
+    fn tokenize_with_trivia_mix_of_comments_and_blanks() {
         let src = "\n// header\n\nlet x = 1\n\n// otro\nlet y = 2 // trailing\n";
         let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
         assert_eq!(trivia.comments.len(), 3);
@@ -1999,54 +1999,54 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn num_separador_en_int_se_parsea_como_entero_sin_underscores() {
+    fn num_separator_in_int_parses_as_integer_without_underscores() {
         assert_eq!(first_token_of("1_000_000"), Token::Int(1_000_000));
         assert_eq!(first_token_of("1_2_3"), Token::Int(123));
     }
 
     #[test]
-    fn num_separador_en_float_funciona_en_int_y_fraction() {
+    fn num_separator_in_float_works_in_int_and_fraction() {
         assert_eq!(first_token_of("1_000.5"), Token::Float(1000.5));
         assert_eq!(first_token_of("3.14_15"), Token::Float(3.1415));
         assert_eq!(first_token_of("1_000.000_1"), Token::Float(1000.0001));
     }
 
     #[test]
-    fn num_separador_doble_o_terminal_es_error() {
+    fn num_separator_double_or_terminal_is_error() {
         assert!(tokenize("1__0").is_err(), "doble underscore");
         assert!(tokenize("1_000_").is_err(), "underscore al final");
     }
 
     #[test]
-    fn num_notacion_cientifica_basica_produce_float() {
+    fn num_scientific_notation_basic_produces_float() {
         assert_eq!(first_token_of("1e10"), Token::Float(1e10));
         assert_eq!(first_token_of("3.14e2"), Token::Float(314.0));
         assert_eq!(first_token_of("2.5E3"), Token::Float(2500.0));
     }
 
     #[test]
-    fn num_notacion_cientifica_con_signo() {
+    fn num_scientific_notation_with_sign() {
         assert_eq!(first_token_of("1e-10"), Token::Float(1e-10));
         assert_eq!(first_token_of("1e+3"), Token::Float(1000.0));
         assert_eq!(first_token_of("3.14E-2"), Token::Float(0.0314));
     }
 
     #[test]
-    fn num_separador_en_exponente() {
+    fn num_separator_in_exponent() {
         // `1e1_0` → `1e10` after stripping separators.
         assert_eq!(first_token_of("1e1_0"), Token::Float(1e10));
         assert_eq!(first_token_of("1_000e1_0"), Token::Float(1000e10));
     }
 
     #[test]
-    fn num_exponente_sin_digitos_es_error() {
+    fn num_exponent_without_digits_is_error() {
         assert!(tokenize("1e").is_err(), "`e` solo sin dígitos");
         assert!(tokenize("1e+").is_err(), "`e+` sin dígitos");
         assert!(tokenize("1e-").is_err(), "`e-` sin dígitos");
     }
 
     #[test]
-    fn num_int_clasico_sigue_funcionando() {
+    fn num_int_classic_still_works() {
         // Regression — without separators or scientific notation, same
         // result as before.
         assert_eq!(first_token_of("42"), Token::Int(42));
@@ -2054,7 +2054,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn num_tuple_field_access_no_se_confunde_con_separador() {
+    fn num_tuple_field_access_not_confused_with_separator() {
         // `t.0` produces Ident("t"), Dot, Int(0) — it is not confused
         // with any separator parsing. `t.0.0` (nested tuple access)
         // keeps working: the prev_was_dot flag forces Int instead of
@@ -2077,7 +2077,7 @@ print("Hola, {name}!")"#;
     // ---------------------------------------------------------------
 
     #[test]
-    fn lit_hex_basico_lower_y_upper_case() {
+    fn lit_hex_basic_lower_and_upper_case() {
         // Hex digits are case-insensitive (parallel to Rust/Python).
         assert_eq!(first_token_of("0xFF"), Token::Int(255));
         assert_eq!(first_token_of("0xff"), Token::Int(255));
@@ -2086,7 +2086,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn lit_binario_y_octal_basicos() {
+    fn lit_binary_and_octal_basic() {
         assert_eq!(first_token_of("0b1010"), Token::Int(10));
         assert_eq!(first_token_of("0b0"), Token::Int(0));
         assert_eq!(first_token_of("0o755"), Token::Int(0o755));
@@ -2094,7 +2094,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn lit_separadores_en_hex_bin_oct() {
+    fn lit_separators_in_hex_bin_oct() {
         // `_` between valid digits for each base.
         assert_eq!(first_token_of("0xDEAD_BEEF"), Token::Int(0xDEAD_BEEF));
         assert_eq!(first_token_of("0b1010_1010"), Token::Int(0b1010_1010));
@@ -2102,7 +2102,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn lit_sin_digitos_tras_prefijo_es_error() {
+    fn lit_without_digits_after_prefix_is_error() {
         // `0x`, `0b`, `0o` alone without digits.
         assert!(tokenize("0x").is_err());
         assert!(tokenize("0b").is_err());
@@ -2110,7 +2110,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn lit_digito_invalido_para_la_base_corta_el_literal() {
+    fn lit_invalid_digit_for_base_cuts_the_literal() {
         // `0b2` lexes `0b` + ... but there is no valid '2' in binary.
         // The lexer bails after the prefix's '0', firing a "no digits
         // after prefix" error.
@@ -2120,7 +2120,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn lit_overflow_es_error_explicito() {
+    fn lit_overflow_is_explicit_error() {
         // i64::MAX = 0x7FFF_FFFF_FFFF_FFFF (positive). One more nibble → overflow.
         assert!(tokenize("0xFFFFFFFFFFFFFFFF").is_err());
         // Equivalent in binary.
@@ -2131,7 +2131,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn lit_underscore_terminal_o_doble_es_error_en_hex() {
+    fn lit_underscore_terminal_or_double_is_error_in_hex() {
         assert!(tokenize("0xFF_").is_err(), "underscore al final");
         assert!(tokenize("0xF__F").is_err(), "doble underscore");
     }
@@ -2141,7 +2141,7 @@ print("Hola, {name}!")"#;
     // ---------------------------------------------------------------
 
     #[test]
-    fn cmp_tokens_compuestos_bit_a_bit() {
+    fn cmp_compound_tokens_bit_by_bit() {
         use Token::*;
         let toks: Vec<Token> = tokenize("x &= 1 |= 2 ^= 3 <<= 4 >>= 5")
             .unwrap()
@@ -2157,7 +2157,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn cmp_prefijos_mayuscula_hex_bin_oct() {
+    fn cmp_uppercase_prefixes_hex_bin_oct() {
         // Mini-batch Cmp — `0X`/`0B`/`0O` (uppercase) work the same
         // as the lowercase variants.
         assert_eq!(first_token_of("0XFF"), Token::Int(255));
@@ -2166,7 +2166,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn cmp_token_amp_solo_sigue_funcionando() {
+    fn cmp_token_amp_alone_still_works() {
         // Regression: a lone `&` (without `=` after) is still Token::Amp.
         let toks: Vec<Token> = tokenize("a & b")
             .unwrap()
@@ -2178,7 +2178,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn cmp_shl_solo_sigue_funcionando() {
+    fn cmp_shl_alone_still_works() {
         // Regression: a lone `<<` is still Token::Shl.
         let toks: Vec<Token> = tokenize("a << 2")
             .unwrap()
@@ -2190,7 +2190,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn lit_decimal_clasico_sigue_funcionando() {
+    fn lit_decimal_classic_still_works() {
         // Regression: anything that starts with `0` without a hex/bin/oct
         // prefix is still parsed as decimal.
         assert_eq!(first_token_of("0"), Token::Int(0));
@@ -2204,13 +2204,13 @@ print("Hola, {name}!")"#;
     // Go" debt (design decision #5).
 
     #[test]
-    fn l1_semicolon_emite_newline() {
+    fn l1_semicolon_emits_newline() {
         // a lone `;` → one Newline + EOF.
         assert_eq!(toks(";"), vec![Token::Newline, Token::EOF]);
     }
 
     #[test]
-    fn l1_dos_exprs_separadas_por_semicolon_producen_dos_stmts_via_newline() {
+    fn l1_two_exprs_separated_by_semicolon_produce_two_stmts_via_newline() {
         // `1 + 1; 2 + 2` must produce tokens equivalent to
         // `1 + 1\n2 + 2`. The parser then reads them as 2 stmts.
         let got = toks("1 + 1; 2 + 2");
@@ -2228,7 +2228,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn l1_semicolon_seguido_de_newline_real_no_duplica_newlines_en_parser() {
+    fn l1_semicolon_followed_by_real_newline_does_not_duplicate_newlines_in_parser() {
         // `1;\n2` produces two consecutive Newlines (one from `;`, one
         // from the real `\n`). The parser already tolerates repeated
         // Newlines as a single separator — checked by the `recovery_*`
@@ -2246,7 +2246,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn l1_semicolon_adentro_de_string_no_se_interpreta() {
+    fn l1_semicolon_inside_string_is_not_interpreted() {
         // Strings preserve `;` as a literal char — the lexer only
         // intercepts it at the scanner's top level, not inside a string
         // literal (which has its own state machine).
@@ -2255,7 +2255,7 @@ print("Hola, {name}!")"#;
     }
 
     #[test]
-    fn l1_semicolon_adentro_de_comentario_se_consume_como_parte_del_comment() {
+    fn l1_semicolon_inside_comment_is_consumed_as_part_of_comment() {
         // `// hola; mundo` is consumed entirely as a line comment —
         // there is still only a single Newline at the end.
         let got = toks("// hola; mundo\n42");

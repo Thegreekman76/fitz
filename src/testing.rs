@@ -275,7 +275,7 @@ mod tests {
     }
 
     #[test]
-    fn has_active_registry_es_false_por_default() {
+    fn has_active_registry_is_false_by_default() {
         // Outside `with_active_test_registry`, the thread_local is None.
         // We cannot guarantee the state inside other tests of the
         // same binary (they run on different threads), but absent
@@ -284,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn with_active_test_registry_instala_y_devuelve() {
+    fn with_active_test_registry_installs_and_returns() {
         let prev = has_active_test_registry();
         assert!(!prev, "el registry no debería estar instalado al arrancar");
 
@@ -307,7 +307,7 @@ mod tests {
     }
 
     #[test]
-    fn with_active_test_registry_anidados_se_aislan() {
+    fn with_active_test_registry_nested_are_isolated() {
         // Defensive case: if two `with_active` nest, the inner one
         // does not contaminate the outer one. Mirror of the
         // `http::with_active_registry` behavior.
@@ -336,7 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn with_test_source_etiqueta_los_specs() {
+    fn with_test_source_labels_the_specs() {
         // 9.z.2.b: the runner uses `with_test_source` to label
         // tests with the file they come from. Here we validate the
         // flow: inside the scope, `current_test_source` returns the
@@ -352,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn with_test_source_anidados_se_restauran() {
+    fn with_test_source_nested_are_restored() {
         with_test_source("outer.fitz".to_string(), || {
             assert_eq!(current_test_source(), Some("outer.fitz".to_string()));
             with_test_source("inner.fitz".to_string(), || {
@@ -364,7 +364,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn with_active_test_registry_async_funciona() {
+    async fn with_active_test_registry_async_works() {
         // Tokio test to validate the async variant.
         let (out, reg) = with_active_test_registry_async(|| async {
             push_test(TestSpec {

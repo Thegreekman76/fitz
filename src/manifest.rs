@@ -725,7 +725,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nombres_validos_pasan() {
+    fn valid_names_pass() {
         assert!(is_valid_package_name("fitz-uuid"));
         assert!(is_valid_package_name("a"));
         assert!(is_valid_package_name("mi-app"));
@@ -735,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn nombres_invalidos_fallan() {
+    fn invalid_names_fail() {
         assert!(!is_valid_package_name(""), "vacío");
         assert!(!is_valid_package_name("Foo"), "mayúscula inicial");
         assert!(!is_valid_package_name("FOO"), "todas mayúsculas");
@@ -750,13 +750,13 @@ mod tests {
     }
 
     #[test]
-    fn nombre_de_64_caracteres_es_valido() {
+    fn name_with_64_characters_is_valid() {
         // Cota inclusiva: 64 OK, 65 no (test arriba).
         assert!(is_valid_package_name(&"a".repeat(64)));
     }
 
     #[test]
-    fn new_default_emite_manifest_consistente() {
+    fn new_default_emits_consistent_manifest() {
         let m = Manifest::new_default("mi-app").unwrap();
         assert_eq!(m.package.name, "mi-app");
         assert_eq!(m.package.version, "0.1.0");
@@ -767,7 +767,7 @@ mod tests {
     }
 
     #[test]
-    fn new_default_rechaza_nombre_invalido() {
+    fn new_default_rejects_invalid_name() {
         let err = Manifest::new_default("Foo").unwrap_err();
         match err {
             ManifestError::InvalidName(n) => assert_eq!(n, "Foo"),
@@ -776,7 +776,7 @@ mod tests {
     }
 
     #[test]
-    fn round_trip_preserva_fields_basicos() {
+    fn round_trip_preserves_basic_fields() {
         let original = Manifest::new_default("test-app").unwrap();
         let toml = original.to_toml_string().unwrap();
         let parsed = Manifest::parse(&toml).unwrap();
@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn serializacion_omite_fields_opcionales_vacios() {
+    fn serialization_omits_empty_optional_fields() {
         let m = Manifest::new_default("mi-app").unwrap();
         let toml = m.to_toml_string().unwrap();
         // `authors`, `description`, `license`, `dependencies` must be
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_acepta_manifest_minimo() {
+    fn parse_accepts_minimal_manifest() {
         let toml_text = r#"
 [package]
 name = "mi-app"
@@ -810,7 +810,7 @@ edition = "2026"
     }
 
     #[test]
-    fn parse_acepta_manifest_completo() {
+    fn parse_accepts_complete_manifest() {
         let toml_text = r#"
 [package]
 name = "mi-app"
@@ -844,7 +844,7 @@ http-helpers = "0.3.2"
     // ---- Phase 12.8 — [flags] section ----
 
     #[test]
-    fn flags_seccion_vacia_o_ausente_default_empty_map() {
+    fn flags_section_empty_or_absent_defaults_to_empty_map() {
         let toml_text = r#"
 [package]
 name = "mi-app"
@@ -856,7 +856,7 @@ edition = "2026"
     }
 
     #[test]
-    fn flags_seccion_parsea_pares_bool() {
+    fn flags_section_parses_bool_pairs() {
         let toml_text = r#"
 [package]
 name = "mi-app"
@@ -876,7 +876,7 @@ beta_feature = true
     }
 
     #[test]
-    fn flags_no_bool_value_es_error_de_parse() {
+    fn flags_non_bool_value_is_parse_error() {
         // TOML strict: the `[flags]` field expects bool; if the value
         // is a string it fails with a clear parse error.
         let toml_text = r#"
@@ -896,7 +896,7 @@ foo = "yes"
     }
 
     #[test]
-    fn parse_falla_con_field_faltante_obligatorio() {
+    fn parse_fails_with_missing_required_field() {
         let toml_text = r#"
 [package]
 name = "mi-app"
@@ -907,7 +907,7 @@ name = "mi-app"
     }
 
     #[test]
-    fn find_manifest_encuentra_en_dir_actual() {
+    fn find_manifest_finds_in_current_dir() {
         let tmp = tempfile::tempdir().unwrap();
         let manifest_path = tmp.path().join(MANIFEST_FILE);
         std::fs::write(
@@ -925,7 +925,7 @@ name = "mi-app"
     }
 
     #[test]
-    fn find_manifest_camina_hacia_arriba() {
+    fn find_manifest_walks_upward() {
         let tmp = tempfile::tempdir().unwrap();
         let manifest_path = tmp.path().join(MANIFEST_FILE);
         std::fs::write(
@@ -945,7 +945,7 @@ name = "mi-app"
     // ---- Phase 9.y.3.a — Dependency / Lib / resolve_dependencies ----
 
     #[test]
-    fn parse_dependency_version_corta() {
+    fn parse_dependency_short_version() {
         let toml_text = r#"
 [package]
 name = "x"
@@ -984,7 +984,7 @@ utils = { path = "../utils" }
     }
 
     #[test]
-    fn parse_dependency_git_reservada_se_acepta_a_nivel_parse() {
+    fn parse_dependency_git_reserved_is_accepted_at_parse_level() {
         // El parser acepta la forma; el resolver es quien rechaza.
         let toml_text = r#"
 [package]
@@ -1007,7 +1007,7 @@ helpers = { git = "https://github.com/foo/bar", tag = "v1.0.0" }
     }
 
     #[test]
-    fn parse_seccion_lib() {
+    fn parse_lib_section() {
         let toml_text = r#"
 [package]
 name = "mi-lib"
@@ -1040,7 +1040,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_dependencies_path_dep_devuelve_resolved_dep() {
+    fn resolve_dependencies_path_dep_returns_resolved_dep() {
         let tmp = tempfile::tempdir().unwrap();
         let _abs_utils = scaffold_lib_dep(tmp.path(), "utils", "0.1.0");
 
@@ -1075,7 +1075,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_dependencies_version_corta_aborta_citando_9y5() {
+    fn resolve_dependencies_short_version_aborts_citing_9y5() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies
@@ -1094,7 +1094,7 @@ entry = "src/lib.fitz"
     // ---- Phase 9.y.4 — manifest editing (add/remove preserve format) ----
 
     #[test]
-    fn add_dep_a_manifest_sin_dependencies_crea_la_seccion() {
+    fn add_dep_to_manifest_without_dependencies_creates_the_section() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n";
         let spec = AddDepSpec::Path {
             path: "../utils".to_string(),
@@ -1108,7 +1108,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn add_dep_path_emite_inline_table() {
+    fn add_dep_path_emits_inline_table() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nya = { path = \"../ya\" }\n";
         let spec = AddDepSpec::Path {
             path: "../nuevo".to_string(),
@@ -1120,7 +1120,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn add_dep_git_con_tag_emite_inline_table() {
+    fn add_dep_git_with_tag_emits_inline_table() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
         let spec = AddDepSpec::Git {
             url: "https://github.com/foo/bar".to_string(),
@@ -1134,7 +1134,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn add_dep_git_con_rev_emite_inline_table() {
+    fn add_dep_git_with_rev_emits_inline_table() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
         let spec = AddDepSpec::Git {
             url: "https://x.com/r".to_string(),
@@ -1148,7 +1148,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn add_dep_sobreescribe_si_ya_existia() {
+    fn add_dep_overwrites_if_already_existed() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nfoo = { path = \"../viejo\" }\n";
         let spec = AddDepSpec::Path {
             path: "../nuevo".to_string(),
@@ -1162,7 +1162,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn add_dep_preserva_comentarios_del_usuario() {
+    fn add_dep_preserves_user_comments() {
         let original = "# Mi proyecto Fitz\n[package]\nname = \"x\"  # NOTA: cambiar antes de publicar\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"  # entry CLI\n";
         let spec = AddDepSpec::Path {
             path: "../u".to_string(),
@@ -1174,7 +1174,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn remove_dep_quita_entry_y_reporta_true() {
+    fn remove_dep_removes_entry_and_reports_true() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nuno = { path = \"../uno\" }\ndos = { path = \"../dos\" }\n";
         let (updated, removed) = remove_dep_from_manifest(original, "uno").unwrap();
         assert!(removed);
@@ -1183,7 +1183,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn remove_dep_reporta_false_si_no_existia() {
+    fn remove_dep_reports_false_if_did_not_exist() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nuno = { path = \"../uno\" }\n";
         let (updated, removed) = remove_dep_from_manifest(original, "no-existe").unwrap();
         assert!(!removed);
@@ -1192,7 +1192,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn remove_dep_borra_seccion_si_queda_vacia() {
+    fn remove_dep_deletes_section_if_left_empty() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nuno = { path = \"../uno\" }\n";
         let (updated, removed) = remove_dep_from_manifest(original, "uno").unwrap();
         assert!(removed);
@@ -1203,7 +1203,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn remove_dep_sin_seccion_dependencies_es_no_op() {
+    fn remove_dep_without_dependencies_section_is_no_op() {
         let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
         let (updated, removed) = remove_dep_from_manifest(original, "foo").unwrap();
         assert!(!removed);
@@ -1211,7 +1211,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn add_y_remove_son_inverso_aproximadamente() {
+    fn add_and_remove_are_approximately_inverse() {
         // After add+remove of the SAME dep, the manifest must end up
         // semantically equivalent to the original. We accept small
         // formatting differences (toml_edit may normalize whitespace)
@@ -1234,7 +1234,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_dependencies_path_inexistente_aborta() {
+    fn resolve_dependencies_nonexistent_path_aborts() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies.insert(
@@ -1251,7 +1251,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_dependencies_path_sin_lib_aborta() {
+    fn resolve_dependencies_path_without_lib_aborts() {
         let tmp = tempfile::tempdir().unwrap();
         let dep_dir = tmp.path().join("solo-bin");
         std::fs::create_dir_all(dep_dir.join("src")).unwrap();
@@ -1300,7 +1300,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_git_dep_sin_tag_ni_rev_aborta_pidiendo_uno() {
+    fn resolve_git_dep_without_tag_or_rev_aborts_requesting_one() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies.insert(
@@ -1317,7 +1317,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_git_dep_con_tag_y_rev_juntos_aborta() {
+    fn resolve_git_dep_with_tag_and_rev_together_aborts() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies.insert(
@@ -1330,7 +1330,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_git_dep_tag_vacio_aborta() {
+    fn resolve_git_dep_empty_tag_aborts() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies.insert(
@@ -1343,7 +1343,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_path_y_git_juntos_aborta_combinacion_invalida() {
+    fn resolve_path_and_git_together_aborts_invalid_combination() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies.insert(
@@ -1361,7 +1361,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_tag_sin_git_aborta_pidiendo_url() {
+    fn resolve_tag_without_git_aborts_requesting_url() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies
@@ -1372,7 +1372,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn parse_git_ref_devuelve_tag_o_rev_correcto() {
+    fn parse_git_ref_returns_correct_tag_or_rev() {
         let t = parse_git_ref("x", Some("v1.0.0"), None).unwrap();
         assert_eq!(t, crate::git_dep::GitRef::Tag("v1.0.0".to_string()));
 
@@ -1381,7 +1381,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn resolve_dependencies_detailed_vacia_aborta_invalid_shape() {
+    fn resolve_dependencies_detailed_empty_aborts_invalid_shape() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies.insert(
@@ -1398,7 +1398,7 @@ entry = "src/lib.fitz"
     }
 
     #[test]
-    fn find_manifest_devuelve_none_si_no_hay() {
+    fn find_manifest_returns_none_if_not_present() {
         let tmp = tempfile::tempdir().unwrap();
         let nested = tmp.path().join("a").join("b");
         std::fs::create_dir_all(&nested).unwrap();

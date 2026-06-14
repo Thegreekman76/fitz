@@ -613,7 +613,7 @@ mod tests {
     }
 
     #[test]
-    fn format_json_shape_flat_con_kwargs_basicos() {
+    fn format_json_shape_flat_with_basic_kwargs() {
         let kvs = vec![
             ("user_id".into(), Value::Int(42)),
             ("role".into(), Value::Str("admin".into())),
@@ -641,7 +641,7 @@ mod tests {
     }
 
     #[test]
-    fn format_json_secret_directo_se_redacta() {
+    fn format_json_secret_direct_is_redacted() {
         let kvs = vec![(
             "token".into(),
             make_secret(Value::Str("super-secret".into())),
@@ -663,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn format_json_secret_adentro_de_list_se_redacta_recursivo() {
+    fn format_json_secret_inside_list_is_redacted_recursive() {
         let kvs = vec![(
             "tokens".into(),
             make_list(vec![
@@ -685,7 +685,7 @@ mod tests {
     }
 
     #[test]
-    fn format_json_secret_adentro_de_map_se_redacta_recursivo() {
+    fn format_json_secret_inside_map_is_redacted_recursive() {
         let kvs = vec![(
             "config".into(),
             make_map(vec![
@@ -706,7 +706,7 @@ mod tests {
     }
 
     #[test]
-    fn format_json_orden_de_campos_estable_timestamp_level_msg_kwargs() {
+    fn format_json_field_order_stable_timestamp_level_msg_kwargs() {
         let kvs = vec![("a".into(), Value::Int(1)), ("b".into(), Value::Int(2))];
         let line = format_json("error", "fail", &kvs);
         // serde_json with preserve_order respects insertion order.
@@ -722,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn format_pretty_contiene_level_uppercase_y_kwargs_inline() {
+    fn format_pretty_contains_level_uppercase_and_kwargs_inline() {
         let kvs = vec![
             ("user_id".into(), Value::Int(42)),
             ("active".into(), Value::Bool(true)),
@@ -737,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    fn format_pretty_secret_se_redacta() {
+    fn format_pretty_secret_is_redacted() {
         let kvs = vec![("token".into(), make_secret(Value::Str("secret-x".into())))];
         let line = format_pretty("warn", "auth", &kvs);
         let stripped = strip_ansi(&line);
@@ -746,7 +746,7 @@ mod tests {
     }
 
     #[test]
-    fn format_pretty_strings_con_comillas_dobles() {
+    fn format_pretty_strings_with_double_quotes() {
         let kvs = vec![("role".into(), Value::Str("admin".into()))];
         let line = format_pretty("info", "ok", &kvs);
         let stripped = strip_ansi(&line);
@@ -761,14 +761,14 @@ mod tests {
     }
 
     #[test]
-    fn value_to_json_redacted_float_nan_fallback_a_string() {
+    fn value_to_json_redacted_float_nan_fallback_to_string() {
         let v = Value::Float(f64::NAN);
         let json = value_to_json_redacted(&v);
         assert!(json.is_string());
     }
 
     #[test]
-    fn detect_format_respeta_override_env_json() {
+    fn detect_format_respects_env_override_json() {
         // Save the previous value so we don't contaminate other tests.
         let prev = std::env::var("FITZ_LOG_FORMAT").ok();
         unsafe {
@@ -784,7 +784,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_format_respeta_override_env_pretty() {
+    fn detect_format_respects_env_override_pretty() {
         let prev = std::env::var("FITZ_LOG_FORMAT").ok();
         unsafe {
             std::env::set_var("FITZ_LOG_FORMAT", "pretty");
@@ -798,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_format_override_invalido_cae_a_auto_detect() {
+    fn detect_format_invalid_override_falls_back_to_auto_detect() {
         let prev = std::env::var("FITZ_LOG_FORMAT").ok();
         unsafe {
             std::env::set_var("FITZ_LOG_FORMAT", "yaml-no-existe");
@@ -839,7 +839,7 @@ mod tests {
     }
 
     #[test]
-    fn strip_ansi_test_helper_quita_secuencias() {
+    fn strip_ansi_test_helper_removes_sequences() {
         // Self-check of the helper: if the anti-ANSI logic breaks,
         // all the pretty tests can pass falsely.
         let s = "\x1b[1;32mINFO\x1b[0m hola";
@@ -849,7 +849,7 @@ mod tests {
     // ---- Phase 12.3.b.1 — SpanContext + trace_id correlation in logs ----
 
     #[test]
-    fn span_context_new_root_genera_ids_otel_compatible() {
+    fn span_context_new_root_generates_otel_compatible_ids() {
         let ctx = SpanContext::new_root();
         // trace_id = 32 hex chars (16 bytes × 2).
         assert_eq!(ctx.trace_id.len(), 32);
@@ -862,7 +862,7 @@ mod tests {
     }
 
     #[test]
-    fn span_context_new_root_genera_ids_distintos_entre_calls() {
+    fn span_context_new_root_generates_distinct_ids_between_calls() {
         let a = SpanContext::new_root();
         let b = SpanContext::new_root();
         assert_ne!(a.trace_id, b.trace_id, "trace_id debería ser único");
@@ -870,7 +870,7 @@ mod tests {
     }
 
     #[test]
-    fn span_context_new_child_hereda_trace_id_y_registra_parent() {
+    fn span_context_new_child_inherits_trace_id_and_registers_parent() {
         let parent = SpanContext::new_root();
         let child = parent.new_child();
         assert_eq!(
@@ -886,7 +886,7 @@ mod tests {
     }
 
     #[test]
-    fn span_context_grandchild_mantiene_trace_id_y_actualiza_parent() {
+    fn span_context_grandchild_keeps_trace_id_and_updates_parent() {
         let root = SpanContext::new_root();
         let child = root.new_child();
         let grandchild = child.new_child();
@@ -897,7 +897,7 @@ mod tests {
     }
 
     #[test]
-    fn iter2b_value_to_any_value_primitivos_mapean_directo() {
+    fn iter2b_value_to_any_value_primitives_map_direct() {
         // Phase 12.3.iter2.b — `value_to_any_value` converts a Fitz
         // Value to an OTel AnyValue for the LogRecord. Primitives go
         // through directly.
@@ -930,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn iter2b_value_to_any_value_secret_se_redacta() {
+    fn iter2b_value_to_any_value_secret_is_redacted() {
         // Phase 12.3.iter2.b — Secret is exported as `"***"` to the
         // OTel backend, parallel to the Phase 12.3.a redaction in
         // stderr.
@@ -950,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn iter2b_value_to_any_value_list_y_map_son_recursivos() {
+    fn iter2b_value_to_any_value_list_and_map_are_recursive() {
         // Phase 12.3.iter2.b — structured List/Map go as ListAny/Map
         // preserving the shape (not as string).
         use opentelemetry::logs::AnyValue;
@@ -974,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn iter2a_span_context_with_ids_preserva_ids_pasados_y_parent_es_none() {
+    fn iter2a_span_context_with_ids_preserves_passed_ids_and_parent_is_none() {
         // Phase 12.3.iter2.a — constructor for Fitz↔OTel trace_id
         // correlation. `dispatch_request` uses it to derive its own
         // SpanContext from the OTel span when the provider is
@@ -990,13 +990,13 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn current_span_context_devuelve_none_fuera_de_scope() {
+    async fn current_span_context_returns_none_out_of_scope() {
         // Without `with_span_context(...)`, the TaskLocal is not set.
         assert!(current_span_context().is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn current_span_context_devuelve_some_adentro_de_with_span_context() {
+    async fn current_span_context_returns_some_inside_with_span_context() {
         let ctx = SpanContext::new_root();
         let trace_id_expected = ctx.trace_id.clone();
         let span_id_expected = ctx.span_id.clone();
@@ -1011,7 +1011,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn format_json_sin_span_omite_trace_id_y_span_id() {
+    async fn format_json_without_span_omits_trace_id_and_span_id() {
         // Without an active span, the JSON does NOT include trace_id
         // or span_id.
         let line = format_json("info", "test", &[]);
@@ -1022,7 +1022,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn format_json_con_span_activo_incluye_trace_id_y_span_id() {
+    async fn format_json_with_active_span_includes_trace_id_and_span_id() {
         let ctx = SpanContext::new_root();
         let trace_id_expected = ctx.trace_id.clone();
         let span_id_expected = ctx.span_id.clone();
@@ -1045,7 +1045,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn format_json_orden_es_timestamp_level_msg_trace_span_kwargs() {
+    async fn format_json_order_is_timestamp_level_msg_trace_span_kwargs() {
         // The order matters for queryability — trace_id/span_id go
         // between msg and kwargs so that downstream tools find them
         // with a fixed pattern.
@@ -1068,7 +1068,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn format_pretty_sin_span_no_emite_trace_part() {
+    async fn format_pretty_without_span_does_not_emit_trace_part() {
         let line = format_pretty("info", "test", &[]);
         let stripped = strip_ansi(&line);
         assert!(
@@ -1082,7 +1082,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn format_pretty_con_span_activo_emite_trace_y_span_dim() {
+    async fn format_pretty_with_active_span_emits_trace_and_span_dim() {
         let ctx = SpanContext::new_root();
         let trace_id_expected = ctx.trace_id.clone();
         let span_id_expected = ctx.span_id.clone();
@@ -1104,7 +1104,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn format_pretty_con_span_e_inclusion_de_kwargs() {
+    async fn format_pretty_with_span_and_kwargs_inclusion() {
         // Visual order: ts LEVEL msg trace= span= k=v
         // We validate that both are present and that the kwargs go
         // after the span info.

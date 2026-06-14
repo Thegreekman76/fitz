@@ -1020,13 +1020,13 @@ mod tests {
     // -------- type_expr_to_schema --------
 
     #[test]
-    fn schema_de_int() {
+    fn schema_for_int() {
         let s = type_expr_to_schema(&named("Int"));
         assert_eq!(s, json!({ "type": "integer", "format": "int64" }));
     }
 
     #[test]
-    fn schema_de_float_str_bool_null() {
+    fn schema_for_float_str_bool_null() {
         assert_eq!(
             type_expr_to_schema(&named("Float")),
             json!({ "type": "number" })
@@ -1046,13 +1046,13 @@ mod tests {
     }
 
     #[test]
-    fn schema_de_nullable_agrega_flag_nullable() {
+    fn schema_for_nullable_adds_nullable_flag() {
         let s = type_expr_to_schema(&nullable(named("Str")));
         assert_eq!(s, json!({ "type": "string", "nullable": true }));
     }
 
     #[test]
-    fn schema_de_list_es_array_con_items() {
+    fn schema_for_list_is_array_with_items() {
         let s = type_expr_to_schema(&generic("List", vec![named("Int")]));
         assert_eq!(
             s,
@@ -1064,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_de_map_str_es_object_con_additional_properties() {
+    fn schema_for_map_str_is_object_with_additional_properties() {
         let s = type_expr_to_schema(&generic("Map", vec![named("Str"), named("Int")]));
         assert_eq!(
             s,
@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_de_map_no_str_lleva_description() {
+    fn schema_for_map_non_str_has_description() {
         let s = type_expr_to_schema(&generic("Map", vec![named("Int"), named("Str")]));
         let obj = s.as_object().unwrap();
         assert_eq!(obj.get("type"), Some(&json!("object")));
@@ -1086,20 +1086,20 @@ mod tests {
     }
 
     #[test]
-    fn schema_de_nominal_es_ref_a_components_schemas() {
+    fn schema_for_nominal_is_ref_to_components_schemas() {
         let s = type_expr_to_schema(&named("User"));
         assert_eq!(s, json!({ "$ref": "#/components/schemas/User" }));
     }
 
     #[test]
-    fn schema_de_result_en_posicion_de_valor_es_el_inner() {
+    fn schema_for_result_in_value_position_is_the_inner() {
         // In value position (not return), Result<T> flattens to the inner T.
         let s = type_expr_to_schema(&generic("Result", vec![named("Int")]));
         assert_eq!(s, json!({ "type": "integer", "format": "int64" }));
     }
 
     #[test]
-    fn schema_de_list_de_nominales_anida_ref() {
+    fn schema_for_list_of_nominals_nests_ref() {
         let s = type_expr_to_schema(&generic("List", vec![named("User")]));
         assert_eq!(
             s,
@@ -1113,7 +1113,7 @@ mod tests {
     // -------- build_responses --------
 
     #[test]
-    fn responses_sin_return_type_solo_emite_200_any() {
+    fn responses_without_return_type_only_emit_200_any() {
         let r = build_responses(&None, &[]);
         let obj = r.as_object().unwrap();
         assert!(obj.contains_key("200"));
@@ -1124,7 +1124,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_con_return_type_concreto_emite_solo_200() {
+    fn responses_with_concrete_return_type_emit_only_200() {
         let r = build_responses(&Some(named("Int")), &[]);
         let obj = r.as_object().unwrap();
         assert!(obj.contains_key("200"));
@@ -1136,7 +1136,7 @@ mod tests {
     // ---- Q.4: status codes custom en schema ----
 
     #[test]
-    fn responses_suma_entries_por_status_codes_custom() {
+    fn responses_adds_entries_for_custom_status_codes() {
         let r = build_responses(&Some(named("Str")), &[401, 404]);
         let obj = r.as_object().unwrap();
         // 200 still there (from the return type Str).
@@ -1154,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_status_custom_no_pisa_200_existente() {
+    fn responses_custom_status_does_not_overwrite_existing_200() {
         // If a handler does `return 200 { ... }` and also has a
         // `Str` return type, the return type's 200 entry wins — we
         // keep the strong schema over the polymorphic one.
@@ -1164,7 +1164,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_status_custom_no_pisa_500_de_result() {
+    fn responses_custom_status_does_not_overwrite_500_from_result() {
         // Result<T> generates 200+500. A custom `return 500 { ... }`
         // must not duplicate them.
         let r = build_responses(&Some(generic("Result", vec![named("Int")])), &[500]);
@@ -1175,13 +1175,13 @@ mod tests {
     }
 
     #[test]
-    fn responses_status_custom_desconocido_usa_response_phrase_default() {
+    fn responses_unknown_custom_status_uses_default_response_phrase() {
         let r = build_responses(&None, &[418]);
         assert_eq!(r["418"]["description"], json!("Response"));
     }
 
     #[test]
-    fn collect_status_codes_simple_extraccion_y_orden() {
+    fn collect_status_codes_simple_extraction_and_order() {
         use crate::ast::Span;
         // body: `return 404 { ... }; return 401 { ... }; return 404 { ... }`
         let body = vec![
@@ -1206,7 +1206,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_status_codes_status_no_literal_se_omite() {
+    fn collect_status_codes_non_literal_status_is_omitted() {
         use crate::ast::Span;
         // `return <ident> { ... }` is not inferable — skipped.
         let body = vec![crate::ast::Stmt::ReturnStatus {
@@ -1218,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn collect_status_codes_status_fuera_de_rango_se_omite() {
+    fn collect_status_codes_status_out_of_range_is_omitted() {
         use crate::ast::Span;
         // 1000 is not a valid HTTP status → skip (parser/runtime
         // would catch it but the schema shouldn't emit codes that
@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn oapi_returnstatus_con_ident_a_const_top_level_aparece_en_schema() {
+    fn oapi_returnstatus_with_ident_to_top_level_const_appears_in_schema() {
         // `return NOT_FOUND { ... }` where NOT_FOUND is a top-level
         // Int const resolves to 404 and lands in the schema.
         let src = "\
@@ -1278,7 +1278,7 @@ mod tests {
     }
 
     #[test]
-    fn oapi_err_struct_con_status_ident_aparece_en_schema() {
+    fn oapi_err_struct_with_status_ident_appears_in_schema() {
         // `Err(ApiErr { status: NOT_FOUND, ... })` with NOT_FOUND as
         // a top-level const resolves.
         let src = "\
@@ -1302,7 +1302,7 @@ mod tests {
     }
 
     #[test]
-    fn oapi_ident_no_resuelve_se_omite_silenciosamente() {
+    fn oapi_ident_unresolved_is_silently_omitted() {
         // If the Ident doesn't point at a top-level Int const (local
         // var, fn param, etc.), it's omitted — schema falls back to
         // the 500 default.
@@ -1332,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_para_handler_con_returnstatus_emite_codes() {
+    fn schema_for_handler_with_returnstatus_emits_codes() {
         let src = "\
             @get(\"/p\")\n\
             fn protected() -> Str {\n\
@@ -1347,7 +1347,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_codes_dentro_de_if_else_se_detectan() {
+    fn schema_codes_inside_if_else_are_detected() {
         // `Stmt::ReturnStatus` inside an `if`/`else` is detected
         // recursively. The walker descends into the then/else branch.
         let src = "\
@@ -1365,7 +1365,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_con_result_emite_200_y_500() {
+    fn responses_with_result_emit_200_and_500() {
         let r = build_responses(&Some(generic("Result", vec![named("User")])), &[]);
         let obj = r.as_object().unwrap();
         assert!(obj.contains_key("200"));
@@ -1382,7 +1382,7 @@ mod tests {
     // -------- type_def_to_schema --------
 
     #[test]
-    fn type_def_emite_object_con_properties_y_required() {
+    fn type_def_emits_object_with_properties_and_required() {
         let fields = vec![
             Field {
                 name: "id".into(),
@@ -1408,7 +1408,7 @@ mod tests {
     }
 
     #[test]
-    fn type_def_excluye_de_required_los_nullables_y_con_default() {
+    fn type_def_excludes_nullables_and_default_from_required() {
         let fields = vec![
             Field {
                 name: "id".into(),
@@ -1465,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn generador_emite_estructura_top_level_openapi_3_1() {
+    fn generator_emits_top_level_openapi_3_1_structure() {
         let src = "@get(\"/\")\nfn root() => \"hola\"";
         let schema = schema_for(src);
         assert_eq!(schema["openapi"], json!("3.1.0"));
@@ -1490,7 +1490,7 @@ mod tests {
     }
 
     #[test]
-    fn sin_api_version_kwarg_default_sigue_siendo_0_1_0() {
+    fn without_api_version_kwarg_default_remains_0_1_0() {
         let src = "\
             @server(3000)\n\
             fn main() => 0\n\
@@ -1513,7 +1513,7 @@ mod tests {
     }
 
     #[test]
-    fn ruta_get_simple_aparece_en_paths_con_operation_id() {
+    fn simple_get_route_appears_in_paths_with_operation_id() {
         let src = "@get(\"/health\")\nfn ping() => \"ok\"";
         let schema = schema_for(src);
         let get = &schema["paths"]["/health"]["get"];
@@ -1522,7 +1522,7 @@ mod tests {
     }
 
     #[test]
-    fn ruta_con_path_param_emite_parameter_in_path() {
+    fn route_with_path_param_emits_parameter_in_path() {
         let src = "@get(\"/users/{id}\")\nfn get_user(id: Int) => id";
         let schema = schema_for(src);
         let params = schema["paths"]["/users/{id}"]["get"]["parameters"]
@@ -1539,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn ruta_con_query_param_nullable_es_no_requerido() {
+    fn route_with_nullable_query_param_is_not_required() {
         let src = "@get(\"/search?limit={limit}\")\nfn search(limit: Int?) => limit";
         let schema = schema_for(src);
         let params = schema["paths"]["/search"]["get"]["parameters"]
@@ -1553,7 +1553,7 @@ mod tests {
     }
 
     #[test]
-    fn ruta_post_con_body_de_type_custom_emite_request_body_y_ref() {
+    fn route_post_with_custom_type_body_emits_request_body_and_ref() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
@@ -1573,7 +1573,7 @@ mod tests {
     }
 
     #[test]
-    fn ruta_con_header_obligatorio_aparece_en_parameters() {
+    fn route_with_required_header_appears_in_parameters() {
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) -> Str => authorization";
         let schema = schema_for(src);
         let params = schema["paths"]["/protected"]["get"]["parameters"]
@@ -1587,7 +1587,7 @@ mod tests {
     }
 
     #[test]
-    fn ruta_con_header_nullable_es_no_requerido() {
+    fn route_with_nullable_header_is_not_required() {
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) -> Str => \"ok\"";
         let schema = schema_for(src);
         let params = schema["paths"]["/traced"]["get"]["parameters"]
@@ -1599,7 +1599,7 @@ mod tests {
     }
 
     #[test]
-    fn return_result_user_emite_200_user_y_500_error() {
+    fn return_result_user_emits_200_user_and_500_error() {
         let src = "\
             type User { id: Int, name: Str }\n\
             @get(\"/users/{id}\")\nfn get_user(id: Int) -> Result<User> => Ok(User { id: id, name: \"x\" })\n\
@@ -1616,7 +1616,7 @@ mod tests {
     // ---- HC.2 mini-batch — Err({ status: ... }) status codes in schema ----
 
     #[test]
-    fn err_con_status_field_literal_aparece_en_schema_responses() {
+    fn err_with_status_field_literal_appears_in_schema_responses() {
         let src = "\
             type User { id: Int, name: Str }\n\
             type ApiErr { status: Int, message: Str }\n\
@@ -1680,7 +1680,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
 ";
 
     #[test]
-    fn auth_schema_emite_security_schemes_bearer_auth() {
+    fn auth_schema_emits_security_schemes_bearer_auth() {
         let schema = schema_for(AUTH_SCHEMA_SRC);
         let security_schemes = schema["components"]["securitySchemes"].as_object();
         assert!(
@@ -1694,7 +1694,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[test]
-    fn auth_schema_handler_publico_no_tiene_security() {
+    fn auth_schema_public_handler_has_no_security() {
         let schema = schema_for(AUTH_SCHEMA_SRC);
         let op = &schema["paths"]["/public"]["get"];
         assert!(
@@ -1729,7 +1729,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[test]
-    fn auth_schema_admin_handler_emite_401_y_403() {
+    fn auth_schema_admin_handler_emits_401_and_403() {
         let schema = schema_for(AUTH_SCHEMA_SRC);
         let op = &schema["paths"]["/admin"]["get"];
         let sec = op["security"].as_array().expect("security debe ser array");
@@ -1745,7 +1745,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     }
 
     #[test]
-    fn auth_schema_programa_sin_auth_no_emite_security_schemes() {
+    fn auth_schema_program_without_auth_does_not_emit_security_schemes() {
         // Without auth handlers, components.securitySchemes must be
         // omitted (don't emit an empty object — less noise in the
         // schema).

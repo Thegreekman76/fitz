@@ -3355,7 +3355,7 @@ mod tests {
     }
 
     #[test]
-    fn error_con_posicion_mapea_a_range_0_based_de_1_caracter() {
+    fn error_with_position_maps_to_0_based_1_character_range() {
         let errs = vec![err_at(3, 5, "tipo incompatible")];
         let diags = fitz_errors_to_diagnostics(&errs);
         assert_eq!(diags.len(), 1);
@@ -3368,7 +3368,7 @@ mod tests {
     }
 
     #[test]
-    fn error_sin_posicion_mapea_a_range_degenerado_al_inicio() {
+    fn error_without_position_maps_to_degenerate_range_at_start() {
         let errs = vec![err_at(0, 0, "sin línea ni columna")];
         let diags = fitz_errors_to_diagnostics(&errs);
         assert_eq!(diags[0].range.start, Position::new(0, 0));
@@ -3376,7 +3376,7 @@ mod tests {
     }
 
     #[test]
-    fn error_con_hint_concatena_sugerencia_al_message() {
+    fn error_with_hint_concatenates_suggestion_to_message() {
         let err = err_at(1, 1, "variable no definida").with_hint("¿quisiste decir `name`?");
         let diags = fitz_errors_to_diagnostics(&[err]);
         assert!(
@@ -3394,20 +3394,20 @@ mod tests {
     }
 
     #[test]
-    fn error_sin_hint_no_agrega_la_palabra_sugerencia() {
+    fn error_without_hint_does_not_add_suggestion_word() {
         let errs = vec![err_at(1, 1, "tipo incompatible")];
         let diags = fitz_errors_to_diagnostics(&errs);
         assert!(!diags[0].message.contains("Sugerencia"));
     }
 
     #[test]
-    fn lista_vacia_devuelve_vec_vacio() {
+    fn empty_list_returns_empty_vec() {
         let diags = fitz_errors_to_diagnostics(&[]);
         assert!(diags.is_empty());
     }
 
     #[test]
-    fn multiples_errores_preservan_orden() {
+    fn multiple_errors_preserve_order() {
         let errs = vec![
             err_at(1, 1, "primero"),
             err_at(5, 3, "segundo"),
@@ -3423,14 +3423,14 @@ mod tests {
     // Tests over `check_source` — entire LSP-style pipeline.
 
     #[test]
-    fn check_source_programa_valido_no_emite_errores() {
+    fn check_source_valid_program_emits_no_errors() {
         let src = "let x = 1\nlet y = 2\nprint(x + y)";
         let errs = check_source(src);
         assert!(errs.is_empty(), "errores inesperados: {errs:?}");
     }
 
     #[test]
-    fn check_source_error_de_tipo_sale_del_checker() {
+    fn check_source_type_error_comes_from_checker() {
         let src = "let x: Int = \"texto\"";
         let errs = check_source(src);
         assert!(!errs.is_empty(), "checker debería rechazar Int = Str");
@@ -3441,7 +3441,7 @@ mod tests {
     }
 
     #[test]
-    fn check_source_recovery_no_aborta_ante_stmts_rotos() {
+    fn check_source_recovery_does_not_abort_on_broken_stmts() {
         // The parser with recovery should give us partial AST +
         // errors; the checker checks what it recovered. Without
         // recovery, the pipeline would abort at the first error. The
@@ -3460,7 +3460,7 @@ mod tests {
     // retains the `TypeInfo` populated by F16.
 
     #[test]
-    fn check_source_with_types_programa_valido_devuelve_type_info_no_vacio() {
+    fn check_source_with_types_valid_program_returns_non_empty_type_info() {
         let src = "let x = 42\nlet y = x + 1";
         let (_program, _env, type_info, _defs, errors) = check_source_with_types(src);
         assert!(errors.is_empty(), "errores inesperados: {errors:?}");
@@ -3471,7 +3471,7 @@ mod tests {
     }
 
     #[test]
-    fn check_source_with_types_error_lexer_devuelve_type_info_vacio() {
+    fn check_source_with_types_lexer_error_returns_empty_type_info() {
         // Unclosed string — lexer aborts before the parser/checker,
         // so `TypeInfo` can't be populated.
         let src = "let x = \"sin cerrar";
@@ -3487,7 +3487,7 @@ mod tests {
     }
 
     #[test]
-    fn check_source_with_types_error_de_tipo_no_borra_type_info() {
+    fn check_source_with_types_type_error_does_not_clear_type_info() {
         // The checker checks what it can even with errors: valid
         // Exprs end up in TypeInfo, invalid ones too with the
         // "best-effort" type.
@@ -3503,7 +3503,7 @@ mod tests {
     // Tests over `hover_for_position` and `make_hover` (Phase 9.x.2.b).
 
     #[test]
-    fn hover_for_position_devuelve_tipo_en_posicion_exacta_de_literal() {
+    fn hover_for_position_returns_type_at_exact_literal_position() {
         // `let x = 42` — the literal `42` starts at col 9 (1-based),
         // which is LSP col 8 (0-based). The cursor at (line=0,
         // char=8) should match the Int.
@@ -3514,7 +3514,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_for_position_devuelve_tipo_en_medio_de_un_ident_usado_como_expr() {
+    fn hover_for_position_returns_type_in_middle_of_ident_used_as_expr() {
         // The left side of a `let` is an AssignTarget, not an Expr
         // — those idents do NOT enter TypeInfo. To test the cursor
         // "in the middle of an identifier" case we need the ident
@@ -3535,7 +3535,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_for_position_linea_sin_spans_devuelve_none() {
+    fn hover_for_position_line_without_spans_returns_none() {
         // Single-line program; cursor on line 5 → no spans.
         let src = "let x = 1";
         let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -3544,7 +3544,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_for_position_cursor_antes_del_primer_token_devuelve_none() {
+    fn hover_for_position_cursor_before_first_token_returns_none() {
         // `   let x = 1` — cursor at col 0 is before any Expr (the
         // first Expr is `1` at col 13 (1-based)).
         let src = "   let x = 1";
@@ -3557,7 +3557,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_for_position_dos_lineas_no_cruza_la_linea() {
+    fn hover_for_position_two_lines_does_not_cross_line() {
         // We make sure the heuristic doesn't "escape" to the
         // previous line when the cursor's line is empty of spans.
         let src = "let x = 42\n   ";
@@ -3567,7 +3567,7 @@ mod tests {
     }
 
     #[test]
-    fn make_hover_emite_markdown_con_bloque_fitz() {
+    fn make_hover_emits_markdown_with_fitz_block() {
         let env = TypeEnv::default();
         let hover = make_hover(&Type::Int, &env);
         match &hover.contents {
@@ -3581,7 +3581,7 @@ mod tests {
     }
 
     #[test]
-    fn make_hover_formatea_tipos_compuestos_con_display() {
+    fn make_hover_formats_composite_types_with_display() {
         let env = TypeEnv::default();
         let list_int = Type::List(Box::new(Type::Int));
         let hover = make_hover(&list_int, &env);
@@ -3593,7 +3593,7 @@ mod tests {
     }
 
     #[test]
-    fn hover_end_to_end_pipeline_devuelve_int_para_un_literal() {
+    fn hover_end_to_end_pipeline_returns_int_for_a_literal() {
         // Combined smoke: pipeline + hover over the literal `42`.
         let src = "let x = 42";
         let (_program, env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -3607,7 +3607,7 @@ mod tests {
     }
 
     #[test]
-    fn check_source_y_with_types_devuelven_la_misma_lista_de_errores() {
+    fn check_source_and_with_types_return_same_error_list() {
         // Sanity check: both APIs share the pipeline, the errors
         // should be equivalent (same order, same count, same
         // messages).
@@ -3626,7 +3626,7 @@ mod tests {
     // `make_definition_location` (Phase 9.x.3.b).
 
     #[test]
-    fn definition_for_position_devuelve_span_de_declaracion_de_var_local() {
+    fn definition_for_position_returns_local_var_declaration_span() {
         // `let x = 1` on line 0, `let y = x` on line 1. The use of
         // `x` is on line 1, col 8 (0-based) — the returned
         // `def_span` must be on line 1 (1-based, the Stmt::Assign of
@@ -3638,14 +3638,14 @@ mod tests {
     }
 
     #[test]
-    fn definition_for_position_linea_sin_idents_devuelve_none() {
+    fn definition_for_position_line_without_idents_returns_none() {
         let src = "let x = 1\n";
         let (_program, _env, _type_info, def_info, _errs) = check_source_with_types(src);
         assert!(definition_for_position(&def_info, 5, 0).is_none());
     }
 
     #[test]
-    fn definition_for_position_no_resuelve_uso_de_builtin() {
+    fn definition_for_position_does_not_resolve_builtin_use() {
         // `print(42)` — `print` is a builtin with def_span
         // Span::ZERO. It must not appear in DefinitionInfo (filtered
         // by policy), so the lookup returns None.
@@ -3656,7 +3656,7 @@ mod tests {
     }
 
     #[test]
-    fn make_definition_location_convierte_1_based_a_0_based() {
+    fn make_definition_location_converts_1_based_to_0_based() {
         let uri = Url::parse("file:///test.fitz").unwrap();
         // def_span at line 3, col 5 (1-based) → LSP line 2, col 4 (0-based).
         let loc = make_definition_location(uri.clone(), Span::new(3, 5));
@@ -3666,7 +3666,7 @@ mod tests {
     }
 
     #[test]
-    fn definition_end_to_end_pipeline_devuelve_location_de_def() {
+    fn definition_end_to_end_pipeline_returns_def_location() {
         // Smoke combinado: pipeline + definition_for_position +
         // make_definition_location.
         let src = "let x = 1\nlet y = x\n";
@@ -3686,7 +3686,7 @@ mod tests {
     // paths.
 
     #[test]
-    fn position_to_offset_y_back_son_inversas() {
+    fn position_to_offset_and_back_are_inverses() {
         // Sanity: the composed inverse recovers the position.
         let text = "abc\nde\nfghi";
         for (line, ch) in [(0, 0), (0, 2), (1, 0), (1, 1), (2, 3)] {
@@ -3697,13 +3697,13 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_scope_level_en_documento_vacio() {
+    fn detect_context_scope_level_in_empty_document() {
         let ctx = detect_completion_context("", 0, 0).unwrap();
         assert_eq!(ctx, CompletionContext::ScopeLevel);
     }
 
     #[test]
-    fn detect_context_after_dot_tras_ident_y_punto() {
+    fn detect_context_after_dot_after_ident_and_dot() {
         // `obj.` with cursor right after the `.`.
         let text = "obj.";
         let ctx = detect_completion_context(text, 0, 4).unwrap();
@@ -3723,7 +3723,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_after_dot_traduce_recv_col_con_smp_antes() {
+    fn detect_context_after_dot_translates_recv_col_with_smp_before() {
         // v0.13.2 — comment with emoji + receiver + dot. The client
         // sends the cursor at col_utf16 = post-`.` offset in UTF-16.
         // `detect_completion_context` must build AfterDot with
@@ -3761,7 +3761,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_after_dot_con_prefix_partial() {
+    fn detect_context_after_dot_with_partial_prefix() {
         // `obj.fo` with cursor at the end → the user already typed
         // "fo" of the method. The context is still AfterDot; VSCode
         // filters by the prefix client-side.
@@ -3771,7 +3771,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_scope_level_en_medio_de_ident() {
+    fn detect_context_scope_level_in_middle_of_ident() {
         // `obj` without a `.` afterwards → scope-level. Cursor in
         // the middle of the ident; VSCode filters the typed prefix.
         let text = "obj";
@@ -3782,7 +3782,7 @@ mod tests {
     // ---- v0.9.51 J mini-batch — UTF-8 position + F15 sub-stmt recovery ----
 
     #[test]
-    fn position_to_offset_cuenta_utf16_code_units_no_chars_unicode() {
+    fn position_to_offset_counts_utf16_code_units_not_unicode_chars() {
         // v0.13.2 — the server omits `positionEncoding` (LSP default
         // = UTF-16). `position_to_offset` counts UTF-16 code units
         // to match what VSCode sends.
@@ -3811,7 +3811,7 @@ mod tests {
     }
 
     #[test]
-    fn position_to_offset_tolera_mid_surrogate() {
+    fn position_to_offset_tolerates_mid_surrogate() {
         // v0.13.2 — if the client sends a position in the middle of
         // a surrogate pair (col_utf16 == 4 inside "// 😀"), our
         // counting uses `>=` and returns the offset at the END of
@@ -3826,7 +3826,7 @@ mod tests {
     }
 
     #[test]
-    fn offset_to_position_cuenta_utf16_paralelo_a_position_to_offset() {
+    fn offset_to_position_counts_utf16_parallel_to_position_to_offset() {
         // Round-trip: offset → position (UTF-16) → offset must
         // return the same offset (as long as the offset is on a
         // char boundary).
@@ -3841,7 +3841,7 @@ mod tests {
     }
 
     #[test]
-    fn offset_to_position_emoji_retorna_utf16_units() {
+    fn offset_to_position_emoji_returns_utf16_units() {
         // v0.13.2 — `offset_to_position` returns char_utf16 (not
         // char_unicode). For `"🎉a"`, the offset of `a` (byte 4)
         // must return (0, 2) because 🎉 takes 2 UTF-16 units.
@@ -3853,7 +3853,7 @@ mod tests {
     }
 
     #[test]
-    fn utf16_to_unicode_char_identidad_para_ascii() {
+    fn utf16_to_unicode_char_identity_for_ascii() {
         // For pure ASCII, char_utf16 == char_unicode.
         let text = "let x = 42";
         for col_utf16 in [0u32, 4, 6, 9, 10] {
@@ -3866,7 +3866,7 @@ mod tests {
     }
 
     #[test]
-    fn utf16_to_unicode_char_colapsa_smp() {
+    fn utf16_to_unicode_char_collapses_smp() {
         // For Supplementary Multilingual Plane chars (emoji), 1
         // Unicode char = 2 UTF-16 code units. The helper collapses.
         let text = "// 🎉 hola";
@@ -3897,7 +3897,7 @@ mod tests {
     }
 
     #[test]
-    fn utf16_to_unicode_char_multilinea() {
+    fn utf16_to_unicode_char_multiline() {
         // Each line resets the counter.
         let text = "🎉\nlet x = 42";
         // Line 0: just the emoji (utf16 0..2, unicode 0..1).
@@ -3912,7 +3912,7 @@ mod tests {
     }
 
     #[test]
-    fn f15_recovery_sub_stmt_preserva_field_access_con_dot_huerfano() {
+    fn f15_recovery_sub_stmt_preserves_field_access_with_orphan_dot() {
         // Pre-fix: `user.<EOF>` aborted the entire stmt
         // (Stmt::Error). Post-fix: `parse_with_recovery` returns an
         // AST with
@@ -3954,7 +3954,7 @@ mod tests {
     }
 
     #[test]
-    fn f15_recovery_sub_stmt_completion_after_dot_funciona_sobre_var_local() {
+    fn f15_recovery_sub_stmt_completion_after_dot_works_on_local_var() {
         // LSP case: cursor at `user.<cursor>` inside a fn, with
         // `user: User` declared locally. Pre-fix: the whole stmt
         // was discarded, completion only saw top-level vars via
@@ -3985,7 +3985,7 @@ mod tests {
     // ---- v0.9.47 LSPz mini-batch — chain a.b.c. + from import ----
 
     #[test]
-    fn detect_context_chain_de_dos_segmentos_captura_recv_completo() {
+    fn detect_context_chain_of_two_segments_captures_complete_recv() {
         // `a.b.|` with cursor right after the second `.` → AfterDot
         // with recv_name = "a.b" (chain, not just "b").
         let text = "a.b.";
@@ -4005,7 +4005,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_chain_de_tres_segmentos_con_prefix_partial() {
+    fn detect_context_chain_of_three_segments_with_partial_prefix() {
         // `obj.field.method.upper` with cursor at the end — 3-
         // segment chain + typed "upper" prefix.
         let text = "obj.field.method.upper";
@@ -4022,7 +4022,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_from_import_con_cursor_tras_import_keyword() {
+    fn detect_context_from_import_with_cursor_after_import_keyword() {
         // `from foo import |` → FromImportList with mod_path = ["foo"].
         let text = "from foo import ";
         let ctx = detect_completion_context(text, 0, 16).unwrap();
@@ -4035,7 +4035,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_from_import_con_items_previos() {
+    fn detect_context_from_import_with_previous_items() {
         // `from foo import X, Y, |` → FromImportList same (previous
         // items are skipped walking back-to-front by comma + ident +
         // ws).
@@ -4050,7 +4050,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_context_from_import_con_mod_path_punteado() {
+    fn detect_context_from_import_with_dotted_mod_path() {
         // `from sub.utils import |` → mod_path = ["sub", "utils"].
         // (English unchanged — same form.)
         let text = "from sub.utils import ";
@@ -4064,7 +4064,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_completions_devuelve_exports_del_modulo() {
+    fn from_import_completions_returns_module_exports() {
         // Setup: tempdir with a main.fitz and a utils.fitz. The
         // helper resolves utils.fitz from main.fitz's URI and lists
         // the module's fns/types/consts.
@@ -4088,7 +4088,7 @@ mod tests {
     }
 
     #[test]
-    fn from_import_completions_modulo_inexistente_devuelve_vacio() {
+    fn from_import_completions_nonexistent_module_returns_empty() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let main_path = tmp.path().join("main.fitz");
         std::fs::write(&main_path, "from no_existe import \n").unwrap();
@@ -4098,7 +4098,7 @@ mod tests {
     }
 
     #[test]
-    fn completion_at_position_sin_uri_no_completa_from_import() {
+    fn completion_at_position_without_uri_does_not_complete_from_import() {
         // The `completion_at_position` wrapper (no URI) cannot
         // resolve the target module file — for FromImportList it
         // returns empty. Only the `_with_uri` wrapper covers it.
@@ -4114,7 +4114,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_level_completion_incluye_top_level_y_builtins_y_keywords() {
+    fn scope_level_completion_includes_top_level_and_builtins_and_keywords() {
         // Cursor at line 3 col 0 — outside any declared stmt,
         // scope-level context.
         let src = "let x = 1\nfn foo() => 0\ntype Bar { id: Int }\n";
@@ -4145,7 +4145,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_nominal_lista_fields_del_type() {
+    fn after_dot_on_nominal_lists_fields_of_type() {
         // `type Point { x: Int, y: Int }` + `let p = Point { x: 1, y: 2 }`
         // + ident `p` on line 2 col 0 (1-based: line 3, col 1).
         // After-dot on `p.` should list x, y.
@@ -4167,7 +4167,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_list_lista_metodos_built_in() {
+    fn after_dot_on_list_lists_built_in_methods() {
         // `let xs = [1, 2, 3]` + `xs.` on line 1.
         let src = "let xs = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -4184,7 +4184,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_str_lista_3_metodos() {
+    fn after_dot_on_str_lists_3_methods() {
         // User case typing `obj.` at the end of the buffer: the
         // parser abandons the entire stmt because of the orphan `.`
         // (debt F15 sub-stmt recovery), the Expr::Ident doesn't
@@ -4208,7 +4208,7 @@ mod tests {
     // binary mode (vs. JSON-marshalled text).
 
     #[test]
-    fn after_dot_sobre_wsconn_bytes_lista_4_metodos_modo_binary() {
+    fn after_dot_on_wsconn_bytes_lists_4_methods_binary_mode() {
         // Note: the trailing `\` strips leading whitespace, so line
         // 2 of the real src is `let r = conn.recv()`. We use a valid
         // call (not orphan `conn.`) so the parser doesn't abandon
@@ -4250,7 +4250,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_wsconn_bidir_recv_send_tipos_distintos() {
+    fn after_dot_on_wsconn_bidir_recv_send_different_types() {
         // 9.w.2-wsconn-bidir — `WsConn<Str, ChatMsg>`: recv types
         // `Result<Str>`, send expects `msg: ChatMsg`.
         let src = "type ChatMsg { user: Str, text: Str }\n\
@@ -4276,7 +4276,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_wsconn_str_mantiene_detalle_text() {
+    fn after_dot_on_wsconn_str_keeps_text_detail() {
         // Sanity: `WsConn<Str>` (historical path) is not
         // contaminated with the binary detail. Same shape as the
         // Bytes test — valid call + cursor between `.` and `recv`.
@@ -4297,7 +4297,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_receiver_sin_tipo_devuelve_metodos_any() {
+    fn after_dot_on_typeless_receiver_returns_any_methods() {
         // `desconocido.` — unresolved ident. v0.9.51 F15 sub-stmt
         // recovery: the parser now preserves the stmt as
         // `Expr::Field { object: Ident("desconocido"), field: "" }`
@@ -4323,7 +4323,7 @@ mod tests {
     // (S.1/S.2), List methods (S.3), and tuple field access (T.1).
 
     #[test]
-    fn after_dot_sobre_str_incluye_metodos_de_mini_tanda_s() {
+    fn after_dot_on_str_includes_methods_from_s_mini_batch() {
         // The 7 new methods added in S.1/S.2 must appear in the
         // completion list for `Str` receivers.
         let src = "let s = \"hola\"\ns.\n";
@@ -4353,7 +4353,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_list_incluye_sort_reverse_y_contains() {
+    fn after_dot_on_list_includes_sort_reverse_and_contains() {
         // S.3 mini-batch: sort, reverse, contains are added to the
         // canonical List methods list.
         let src = "let xs = [1, 2, 3]\nxs.\n";
@@ -4372,7 +4372,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_list_incluye_enumerate_zip_y_chain() {
+    fn after_dot_on_list_includes_enumerate_zip_and_chain() {
         // Mini-tanda It: enumerate, zip, chain se suman a List.
         let src = "let xs = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -4393,7 +4393,7 @@ mod tests {
     }
 
     #[test]
-    fn up_after_dot_map_incluye_update() {
+    fn up_after_dot_map_includes_update() {
         let src = "let m = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4405,7 +4405,7 @@ mod tests {
     }
 
     #[test]
-    fn up_after_dot_nominal_muestra_param_names_en_signature() {
+    fn up_after_dot_nominal_shows_param_names_in_signature() {
         // Up mini-batch: the signature of a custom method must show
         // `fn(x: Int, y: Int)` instead of `fn(Int, Int)`.
         let src = "type Point {\n\
@@ -4434,7 +4434,7 @@ mod tests {
     }
 
     #[test]
-    fn ex2_after_dot_list_incluye_flat_map_first_last() {
+    fn ex2_after_dot_list_includes_flat_map_first_last() {
         let src = "let xs = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
@@ -4448,7 +4448,7 @@ mod tests {
     }
 
     #[test]
-    fn ex2_after_dot_map_incluye_merge() {
+    fn ex2_after_dot_map_includes_merge() {
         let src = "let m = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4460,7 +4460,7 @@ mod tests {
     }
 
     #[test]
-    fn ex_after_dot_str_incluye_search_methods() {
+    fn ex_after_dot_str_includes_search_methods() {
         let src = "let s = \"hi\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4474,7 +4474,7 @@ mod tests {
     }
 
     #[test]
-    fn ex_after_dot_map_incluye_filter_y_map_values() {
+    fn ex_after_dot_map_includes_filter_and_map_values() {
         let src = "let m = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4488,7 +4488,7 @@ mod tests {
     }
 
     #[test]
-    fn vm_after_dot_oculta_metodos_privados() {
+    fn vm_after_dot_hides_private_methods() {
         // Vm mini-batch: `_method` methods do NOT appear in `instance.`.
         let src = "type C {\n\
                        fn greet() -> Str { return \"hi\" }\n\
@@ -4511,7 +4511,7 @@ mod tests {
     }
 
     #[test]
-    fn vp_after_dot_oculta_fields_privados() {
+    fn vp_after_dot_hides_private_fields() {
         // Vp mini-batch: `_field` fields do NOT appear in
         // `instance.` — they are a private convention and only
         // accessible from methods of the same type.
@@ -4532,7 +4532,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_list_incluye_any_all_count_find_index() {
+    fn after_dot_on_list_includes_any_all_count_find_index() {
         // Lx mini-batch: 4 functional predicates on List.
         let src = "let xs = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -4553,7 +4553,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_list_incluye_flatten_y_sort_by() {
+    fn after_dot_on_list_includes_flatten_and_sort_by() {
         // Mb mini-batch: flatten + sort_by are added to List.
         let src = "let xs = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -4578,7 +4578,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_range_lista_iteradores_y_len() {
+    fn after_dot_on_range_lists_iterators_and_len() {
         // Ir mini-batch: after `r.` on a Range, we suggest
         // enumerate/zip/chain/len (the subset that makes sense for
         // a numeric iterable).
@@ -4600,7 +4600,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_after_dot_sobre_list_incluye_min_max_sum() {
+    fn mb2_after_dot_on_list_includes_min_max_sum() {
         // Mb2 mini-batch: List adds 3 numeric methods.
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -4615,7 +4615,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_after_dot_sobre_str_incluye_pad_start_y_pad_end() {
+    fn mb2_after_dot_on_str_includes_pad_start_and_pad_end() {
         let src = "let s: Str = \"x\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4634,7 +4634,7 @@ mod tests {
     }
 
     #[test]
-    fn mb2_after_dot_sobre_map_incluye_keys_sorted() {
+    fn mb2_after_dot_on_map_includes_keys_sorted() {
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4646,7 +4646,7 @@ mod tests {
     }
 
     #[test]
-    fn rg_after_dot_sobre_range_incluye_step_by() {
+    fn rg_after_dot_on_range_includes_step_by() {
         let src = "let r = 0..10\nr.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4660,7 +4660,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_after_dot_sobre_list_incluye_reduce_product_to_map() {
+    fn mb3_after_dot_on_list_includes_reduce_product_to_map() {
         // Mini-tanda Mb3: List suma reduce/product/to_map.
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
@@ -4675,7 +4675,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_after_dot_sobre_str_incluye_chars() {
+    fn mb3_after_dot_on_str_includes_chars() {
         let src = "let s: Str = \"abc\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4689,7 +4689,7 @@ mod tests {
     }
 
     #[test]
-    fn mb3_after_dot_sobre_map_incluye_entries() {
+    fn mb3_after_dot_on_map_includes_entries() {
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4703,7 +4703,7 @@ mod tests {
     }
 
     #[test]
-    fn mb4_after_dot_sobre_list_incluye_unique_y_partition() {
+    fn mb4_after_dot_on_list_includes_unique_and_partition() {
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
@@ -4717,7 +4717,7 @@ mod tests {
     }
 
     #[test]
-    fn mb4_after_dot_sobre_map_incluye_invert() {
+    fn mb4_after_dot_on_map_includes_invert() {
         let src = "let m: Map<Int, Str> = {1: \"a\"}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4731,7 +4731,7 @@ mod tests {
     }
 
     #[test]
-    fn mb4_after_dot_sobre_str_incluye_split_at() {
+    fn mb4_after_dot_on_str_includes_split_at() {
         let src = "let s: Str = \"abc\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4743,7 +4743,7 @@ mod tests {
     }
 
     #[test]
-    fn mb5_after_dot_sobre_list_incluye_group_by_zip_with_max_min_by() {
+    fn mb5_after_dot_on_list_includes_group_by_zip_with_max_min_by() {
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
@@ -4757,7 +4757,7 @@ mod tests {
     }
 
     #[test]
-    fn mb6_after_dot_sobre_list_incluye_scan_y_windows() {
+    fn mb6_after_dot_on_list_includes_scan_and_windows() {
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
@@ -4771,7 +4771,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_after_dot_sobre_list_incluye_starts_ends_with_insert_remove_at_zip_to_map() {
+    fn mb8_after_dot_on_list_includes_starts_ends_with_insert_remove_at_zip_to_map() {
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
@@ -4791,7 +4791,7 @@ mod tests {
     }
 
     #[test]
-    fn mb8_after_dot_sobre_str_incluye_left_right_center() {
+    fn mb8_after_dot_on_str_includes_left_right_center() {
         let src = "let s: Str = \"x\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4805,7 +4805,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_after_dot_sobre_list_incluye_take_drop_init_tail_intersperse_cycle() {
+    fn mb7_after_dot_on_list_includes_take_drop_init_tail_intersperse_cycle() {
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
@@ -4819,7 +4819,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_after_dot_sobre_str_incluye_repeat_with() {
+    fn mb7_after_dot_on_str_includes_repeat_with() {
         let src = "let s: Str = \"x\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4831,7 +4831,7 @@ mod tests {
     }
 
     #[test]
-    fn mb7_after_dot_sobre_map_incluye_with() {
+    fn mb7_after_dot_on_map_includes_with() {
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4843,7 +4843,7 @@ mod tests {
     }
 
     #[test]
-    fn mb6_after_dot_sobre_map_incluye_merge_with() {
+    fn mb6_after_dot_on_map_includes_merge_with() {
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4855,7 +4855,7 @@ mod tests {
     }
 
     #[test]
-    fn mb5_after_dot_sobre_str_incluye_lines_y_is_empty() {
+    fn mb5_after_dot_on_str_includes_lines_and_is_empty() {
         let src = "let s: Str = \"abc\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4869,7 +4869,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_tuple_lista_indices_numericos_con_tipo() {
+    fn after_dot_on_tuple_lists_numeric_indices_with_type() {
         // T.1 mini-batch: after `t.` we suggest `0`, `1`, ... as
         // labels, with the field's type in `detail`.
         let src = "let t = (1, \"x\", true)\nt.\n";
@@ -4892,7 +4892,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_nominal_incluye_metodos_custom_r3() {
+    fn after_dot_on_nominal_includes_custom_methods_r3() {
         // V.5 + R.3 mini-batch: besides fields, the custom methods
         // of the type appear in the list with METHOD kind and detail
         // showing the signature. Test covers the 3 cases: method
@@ -4958,7 +4958,7 @@ mod tests {
     // ---- Math + Mb9 mini-batch + Int/Float methods ----
 
     #[test]
-    fn mb9_after_dot_sobre_str_incluye_swap_case_title_is_alpha_is_digit_is_numeric() {
+    fn mb9_after_dot_on_str_includes_swap_case_title_is_alpha_is_digit_is_numeric() {
         let src = "let s: Str = \"x\"\ns.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4972,7 +4972,7 @@ mod tests {
     }
 
     #[test]
-    fn mb9_after_dot_sobre_list_incluye_split_at() {
+    fn mb9_after_dot_on_list_includes_split_at() {
         let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
@@ -4984,7 +4984,7 @@ mod tests {
     }
 
     #[test]
-    fn mb9_after_dot_sobre_map_incluye_has_value() {
+    fn mb9_after_dot_on_map_includes_has_value() {
         let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -4996,7 +4996,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_int_incluye_abs_to_str_to_str_base() {
+    fn after_dot_on_int_includes_abs_to_str_to_str_base() {
         let src = "let n: Int = 5\nn.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -5010,7 +5010,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_float_incluye_abs_to_str_is_nan_is_finite() {
+    fn after_dot_on_float_includes_abs_to_str_is_nan_is_finite() {
         let src = "let x: Float = 3.14\nx.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
@@ -5026,7 +5026,7 @@ mod tests {
     // ---- LSPy mini-batch — exact Range + scope-aware autocomplete ----
 
     #[test]
-    fn lspy_ident_range_at_position_devuelve_run_de_ident() {
+    fn lspy_ident_range_at_position_returns_ident_run() {
         let src = "let foo_bar = 42";
         // Cursor in the middle of the ident "foo_bar" (col 6 = `o`
         // of "foo").
@@ -5036,14 +5036,14 @@ mod tests {
     }
 
     #[test]
-    fn lspy_ident_range_at_position_devuelve_none_si_no_hay_ident() {
+    fn lspy_ident_range_at_position_returns_none_if_no_ident() {
         let src = "let x = 42";
         // Cursor on `=` (col 6).
         assert!(ident_range_at_position(src, 0, 6).is_none());
     }
 
     #[test]
-    fn lspy_ident_range_from_def_salta_keyword_let() {
+    fn lspy_ident_range_from_def_skips_let_keyword() {
         let src = "let foo = 42";
         // def_span points to "let" (col 1 = "l"). The helper must
         // skip "let " and return the range of "foo".
@@ -5054,7 +5054,7 @@ mod tests {
     }
 
     #[test]
-    fn lspy_ident_range_from_def_salta_fn_keyword() {
+    fn lspy_ident_range_from_def_skips_fn_keyword() {
         let src = "fn greet(name: Str) -> Str { return name }";
         let span = Span::new(1, 1);
         let range = ident_range_from_def(src, span).expect("debería resolver");
@@ -5063,7 +5063,7 @@ mod tests {
     }
 
     #[test]
-    fn lspy_make_hover_with_range_incluye_range_del_ident() {
+    fn lspy_make_hover_with_range_includes_ident_range() {
         let src = "let count = 42\n";
         let ty = Type::Int;
         let env = TypeEnv::new();
@@ -5084,7 +5084,7 @@ mod tests {
     }
 
     #[test]
-    fn lspy_diagnostics_con_source_extiende_range_a_ident() {
+    fn lspy_diagnostics_with_source_extends_range_to_ident() {
         let src = "let xyz = unknown_var\n";
         // Build a synthetic FitzError pointing to "unknown_var" (col 11).
         let err = FitzError::new(
@@ -5101,7 +5101,7 @@ mod tests {
     }
 
     #[test]
-    fn lspy_scope_aware_completion_incluye_params_de_fn() {
+    fn lspy_scope_aware_completion_includes_fn_params() {
         let src = "fn greet(name: Str, age: Int) -> Str {\n    \n    return name\n}\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         // Cursor on line 2 (inside greet's body). LSP uses 0-based.
@@ -5115,7 +5115,7 @@ mod tests {
     }
 
     #[test]
-    fn lspy_scope_aware_completion_incluye_let_locals() {
+    fn lspy_scope_aware_completion_includes_let_locals() {
         let src = "fn f() -> Int {\n    let mi_var: Int = 5\n    \n    return mi_var\n}\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         // Cursor on line 3 (after the let).
@@ -5128,7 +5128,7 @@ mod tests {
     }
 
     #[test]
-    fn lspy_scope_aware_completion_excluye_let_locales_definidos_despues() {
+    fn lspy_scope_aware_completion_excludes_let_locals_defined_after() {
         // A `let` on line 3 must NOT appear if the cursor is on
         // line 2 (forward references are not allowed).
         let src = "fn f() -> Int {\n    \n    let posterior: Int = 5\n    return 0\n}\n";
@@ -5143,7 +5143,7 @@ mod tests {
     }
 
     #[test]
-    fn lspy_scope_aware_completion_incluye_for_var() {
+    fn lspy_scope_aware_completion_includes_for_var() {
         // Source on a single line to avoid parser recovery issues
         // over blank lines / orphan `}`.
         let src = "fn f() -> Int {\n    for item in [1, 2, 3] {\n        let y: Int = item\n    }\n    return 0\n}\n";
@@ -5165,7 +5165,7 @@ mod tests {
     // ---- LSPx mini-batch — cross-module go-to-definition ----
 
     #[test]
-    fn lspx_cross_module_resuelve_from_import() {
+    fn lspx_cross_module_resolves_from_import() {
         // Setup: two temporary files in a single tmpdir.
         // `foo.fitz` declares `type User { ... }` and a const.
         // `app.fitz` does `from foo import User`. We check that
@@ -5231,7 +5231,7 @@ mod tests {
     }
 
     #[test]
-    fn lspx_cross_module_name_inexistente_devuelve_none() {
+    fn lspx_cross_module_nonexistent_name_returns_none() {
         use std::io::Write;
         let dir = std::env::temp_dir().join(format!("fitz-lspx-none-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -5260,7 +5260,7 @@ mod tests {
     }
 
     #[test]
-    fn fp_scope_level_fn_con_default_incluye_signature_y_default_en_detail() {
+    fn fp_scope_level_fn_with_default_includes_signature_and_default_in_detail() {
         let src = "fn greet(name: Str = \"amigo\") -> Str { return name }\n\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
@@ -5282,7 +5282,7 @@ mod tests {
     }
 
     #[test]
-    fn scope_level_incluye_math_builtins() {
+    fn scope_level_includes_math_builtins() {
         let src = "let a = 1\n\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
@@ -5300,7 +5300,7 @@ mod tests {
     // Phase 10 — LSP ORM/DB completions.
 
     #[test]
-    fn scope_level_incluye_db_module_y_dbconn_dbrow_types() {
+    fn scope_level_includes_db_module_and_dbconn_dbrow_types() {
         let src = "let a = 1\n\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
@@ -5318,7 +5318,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_db_lista_connect() {
+    fn after_dot_on_db_lists_connect() {
         let src = "let x = db.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         // Cursor right after the dot: line 0, col 11.
@@ -5334,7 +5334,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_dbconn_lista_query_exec_close() {
+    fn after_dot_on_dbconn_lists_query_exec_close() {
         // Direct dispatch test `Type::DbConn` → query/exec/close.
         // Same pattern as `after_dot_sobre_wsconn_*`: we use a
         // complete call `conn.close()` so the parser doesn't
@@ -5356,7 +5356,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_dbrow_lista_get_int_get_str_get_float_get_bool_len() {
+    fn after_dot_on_dbrow_lists_get_int_get_str_get_float_get_bool_len() {
         // v0.10.22 — direct dispatch `Type::DbRow` → typed
         // extraction methods (get_int/get_str/get_float/get_bool) +
         // len. Pattern: param `r: DbRow` + complete call `r.len()`
@@ -5376,7 +5376,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_type_con_table_lista_orm_estaticos() {
+    fn after_dot_on_type_with_table_lists_orm_statics() {
         let src = "@table(\"users\") type User {\n  @primary\n  id: Int\n  name: Str\n}\nUser.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         // Cursor after `User.` at line 5, col 5.
@@ -5399,7 +5399,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_query_builder_lista_chain_y_terminales() {
+    fn after_dot_on_query_builder_lists_chain_and_terminals() {
         // Phase 10.3+ — the QueryBuilder types as
         // `Type::QueryBuilder<Row>` and after-dot lists the chain
         // methods + terminals. Simple test: `let qb = User.where(...)`
@@ -5433,7 +5433,7 @@ mod tests {
     }
 
     #[test]
-    fn after_dot_sobre_type_sin_table_no_lista_orm_estaticos() {
+    fn after_dot_on_type_without_table_does_not_list_orm_statics() {
         // A type without @table must NOT offer all/where/insert.
         let src = "type Plain {\n  id: Int\n}\nPlain.\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);

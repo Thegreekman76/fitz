@@ -315,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn loader_no_python_imports_devuelve_vacio() {
+    fn loader_no_python_imports_returns_empty() {
         let program = parse_program("let x = 42");
         let dir = tempfile::tempdir().unwrap();
         let mut env = TypeEnv::new();
@@ -324,7 +324,7 @@ mod tests {
     }
 
     #[test]
-    fn loader_python_import_sin_pyi_adyacente_devuelve_vacio() {
+    fn loader_python_import_without_adjacent_pyi_returns_empty() {
         let program = parse_program("from python import math");
         let dir = tempfile::tempdir().unwrap();
         let mut env = TypeEnv::new();
@@ -334,7 +334,7 @@ mod tests {
     }
 
     #[test]
-    fn loader_python_import_con_pyi_carga_nominales() {
+    fn loader_python_import_with_pyi_loads_nominals() {
         let stub_src = "\
 class User:
     id: int
@@ -374,7 +374,7 @@ class Order:
     }
 
     #[test]
-    fn loader_alias_preserva_module_name_y_alias() {
+    fn loader_alias_preserves_module_name_and_alias() {
         let stub_src = "class Foo: ...\n";
         let dir = temp_dir_with_stub("mylib", stub_src);
         let program = parse_program("from python import mylib as ml");
@@ -402,7 +402,7 @@ class Order:
     }
 
     #[test]
-    fn loader_pyi_solo_fns_skipea_fns_en_b_porque_son_para_c() {
+    fn loader_pyi_only_fns_skips_fns_in_b_because_they_are_for_c() {
         // 8-pyi.B policy: we only materialize `class`. Stub fns/vars
         // are skipped until 8-pyi.C (typed field access).
         // We verify that `LoadedStub.items` stays empty for a stub
@@ -423,7 +423,7 @@ class Order:
     // 8-pyi.C: pass-2 tests (load_callables).
 
     #[test]
-    fn callables_registra_nominal_sintetico_con_field_por_fn() {
+    fn callables_registers_synthetic_nominal_with_field_per_fn() {
         let stub_src = "\
 def add(a: int, b: int) -> int: ...
 def greet(name: str) -> str: ...
@@ -454,7 +454,7 @@ def greet(name: str) -> str: ...
     }
 
     #[test]
-    fn callables_var_top_level_registra_field_directo_sin_wrap() {
+    fn callables_top_level_var_registers_direct_field_without_wrap() {
         let stub_src = "VERSION: str\nMAX_SIZE: int\n";
         let dir = temp_dir_with_stub("config", stub_src);
         let program = parse_program("from python import config");
@@ -470,7 +470,7 @@ def greet(name: str) -> str: ...
     }
 
     #[test]
-    fn callables_alias_usa_binding_name_en_pyi_modules() {
+    fn callables_alias_uses_binding_name_in_pyi_modules() {
         let stub_src = "def hi() -> str: ...\n";
         let dir = temp_dir_with_stub("greetings", stub_src);
         let program = parse_program("from python import greetings as g");
@@ -483,7 +483,7 @@ def greet(name: str) -> str: ...
     }
 
     #[test]
-    fn callables_fn_que_retorna_class_del_stub_resuelve_nominal() {
+    fn callables_fn_returning_class_from_stub_resolves_nominal() {
         let stub_src = "\
 class User:
     id: int
@@ -511,7 +511,7 @@ def fetch_user(uid: int) -> User: ...
     }
 
     #[test]
-    fn loader_multiple_imports_carga_cada_pyi() {
+    fn loader_multiple_imports_loads_each_pyi() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a.pyi"), "class A:\n    x: int\n").unwrap();
         fs::write(dir.path().join("b.pyi"), "class B:\n    y: str\n").unwrap();
@@ -524,7 +524,7 @@ def fetch_user(uid: int) -> User: ...
     }
 
     #[test]
-    fn loader_fn_que_referencia_class_skipeada_no_contamina_env() {
+    fn loader_fn_referencing_skipped_class_does_not_contaminate_env() {
         // 8-pyi.B regression bug: the stub had `def fn(...) -> User`
         // where User was already in skip_set (the program declares it
         // as `type`). Processing the fn called
@@ -565,7 +565,7 @@ def list_users() -> list[User]: ...
     }
 
     #[test]
-    fn loader_fitz_type_gana_sobre_pyi() {
+    fn loader_fitz_type_wins_over_pyi() {
         // If the program already has `type User { ... }` and the .pyi
         // also declares `class User: ...`, the .fitz fields
         // win (they do not get overwritten).

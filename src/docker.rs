@@ -467,7 +467,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_shape_cli_puro_sin_server_sin_db() {
+    fn detect_shape_cli_only_without_server_without_db() {
         let shape = shape_from_source("print(\"hola\")", "demo");
         assert_eq!(shape.package_name, "demo");
         assert_eq!(shape.server_port, None);
@@ -475,7 +475,7 @@ mod tests {
     }
 
     #[test]
-    fn detect_shape_server_con_port_literal() {
+    fn detect_shape_server_with_port_literal() {
         let src = r#"
 @server(3000)
 fn main() => 0
@@ -489,7 +489,7 @@ fn root() => "ok"
     }
 
     #[test]
-    fn detect_shape_server_con_port_y_host() {
+    fn detect_shape_server_with_port_and_host() {
         let src = r#"
 @server(8080, "0.0.0.0")
 fn main() => 0
@@ -499,7 +499,7 @@ fn main() => 0
     }
 
     #[test]
-    fn detect_shape_server_sin_port_default_none() {
+    fn detect_shape_server_without_port_defaults_to_none() {
         // `@server()` without valid args → no literal port detected; the
         // template uses the default logic (no EXPOSE / no ports).
         let src = r#"
@@ -536,7 +536,7 @@ async fn run() -> Null {
     }
 
     #[test]
-    fn detect_shape_db_local_no_es_global() {
+    fn detect_shape_db_local_is_not_global() {
         // `db.X(...)` where `db` is a local ident: the heuristic still
         // marks it as `uses_db = true` (same as codegen). 12.4.a favors
         // simplicity over precision — the Docker helper is inference,
@@ -552,7 +552,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn render_dockerfile_sin_server_no_emite_expose() {
+    fn render_dockerfile_without_server_does_not_emit_expose() {
         let shape = DockerShape {
             package_name: "demo".into(),
             server_port: None,
@@ -570,7 +570,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn render_dockerfile_con_server_emite_expose_y_port_runtime() {
+    fn render_dockerfile_with_server_emits_expose_and_port_runtime() {
         let shape = DockerShape {
             package_name: "myapp".into(),
             server_port: Some(8080),
@@ -584,7 +584,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn render_dockerignore_excluye_target_env_y_git() {
+    fn render_dockerignore_excludes_target_env_and_git() {
         let dockerignore = render_dockerignore();
         assert!(dockerignore.contains("target/"));
         assert!(dockerignore.contains(".git/"));
@@ -595,7 +595,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn render_compose_sin_db_sin_server_solo_app() {
+    fn render_compose_without_db_without_server_only_app() {
         let shape = DockerShape {
             package_name: "cli".into(),
             server_port: None,
@@ -617,7 +617,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn render_compose_con_server_emite_ports() {
+    fn render_compose_with_server_emits_ports() {
         let shape = DockerShape {
             package_name: "web".into(),
             server_port: Some(3000),
@@ -629,7 +629,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn render_compose_con_db_emite_postgres_y_database_url() {
+    fn render_compose_with_db_emits_postgres_and_database_url() {
         let shape = DockerShape {
             package_name: "api".into(),
             server_port: Some(3000),
@@ -651,7 +651,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn render_compose_con_db_sin_server_no_emite_ports() {
+    fn render_compose_with_db_without_server_does_not_emit_ports() {
         let shape = DockerShape {
             package_name: "worker".into(),
             server_port: None,
@@ -664,7 +664,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn init_escribe_tres_archivos_en_dir_vacio() {
+    fn init_writes_three_files_in_empty_dir() {
         let dir = tempdir().expect("tempdir");
         let shape = DockerShape {
             package_name: "demo".into(),
@@ -681,7 +681,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn init_skipea_archivos_existentes_sin_force() {
+    fn init_skips_existing_files_without_force() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join("Dockerfile"), "viejo contenido").unwrap();
         let shape = DockerShape {
@@ -703,7 +703,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn init_force_sobrescribe_archivos_existentes() {
+    fn init_force_overwrites_existing_files() {
         let dir = tempdir().expect("tempdir");
         fs::write(dir.path().join(".dockerignore"), "viejo").unwrap();
         let shape = DockerShape {
@@ -720,7 +720,7 @@ fn run(db) -> Int {
     }
 
     #[test]
-    fn init_error_si_target_dir_no_existe() {
+    fn init_error_if_target_dir_does_not_exist() {
         let shape = DockerShape {
             package_name: "demo".into(),
             server_port: None,
@@ -734,7 +734,7 @@ fn run(db) -> Int {
     // ---- 12.4.b — uses_python / uses_cron / conditional healthcheck ----
 
     #[test]
-    fn detect_shape_uses_python_con_from_import() {
+    fn detect_shape_uses_python_with_from_import() {
         let src = r#"
 from python import math
 
@@ -746,7 +746,7 @@ fn area(r: Float) -> Float => math.pi * r * r
     }
 
     #[test]
-    fn detect_shape_uses_python_con_import_directo() {
+    fn detect_shape_uses_python_with_direct_import() {
         let src = r#"
 import python
 "#;
@@ -755,7 +755,7 @@ import python
     }
 
     #[test]
-    fn detect_shape_sin_python_no_dispara_uses_python() {
+    fn detect_shape_without_python_does_not_trigger_uses_python() {
         let src = r#"
 import utils
 from helpers import double
@@ -766,7 +766,7 @@ from helpers import double
     }
 
     #[test]
-    fn detect_shape_uses_cron_con_decorator() {
+    fn detect_shape_uses_cron_with_decorator() {
         let src = r#"
 @cron("0 * * * *")
 fn limpiar() => 0
@@ -776,7 +776,7 @@ fn limpiar() => 0
     }
 
     #[test]
-    fn detect_shape_sin_cron_no_dispara_uses_cron() {
+    fn detect_shape_without_cron_does_not_trigger_uses_cron() {
         let src = r#"
 @get("/")
 fn root() => "ok"
@@ -789,7 +789,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_dockerfile_con_python_runtime_es_slim_bookworm() {
+    fn render_dockerfile_with_python_runtime_is_slim_bookworm() {
         let shape = DockerShape {
             package_name: "demo".into(),
             server_port: Some(3000),
@@ -804,7 +804,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_dockerfile_sin_python_runtime_es_distroless() {
+    fn render_dockerfile_without_python_runtime_is_distroless() {
         let shape = DockerShape {
             package_name: "demo".into(),
             server_port: Some(3000),
@@ -817,7 +817,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_compose_con_cron_emite_restart_unless_stopped() {
+    fn render_compose_with_cron_emits_restart_unless_stopped() {
         let shape = DockerShape {
             package_name: "scheduler".into(),
             server_port: None,
@@ -831,7 +831,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_compose_sin_cron_no_emite_restart() {
+    fn render_compose_without_cron_does_not_emit_restart() {
         let shape = DockerShape {
             package_name: "cli".into(),
             server_port: None,
@@ -843,7 +843,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_compose_con_python_y_server_emite_healthcheck_http() {
+    fn render_compose_with_python_and_server_emits_healthcheck_http() {
         let shape = DockerShape {
             package_name: "api-py".into(),
             server_port: Some(3000),
@@ -859,7 +859,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_compose_con_distroless_no_emite_healthcheck_http() {
+    fn render_compose_with_distroless_does_not_emit_healthcheck_http() {
         // Without uses_python, the runtime is distroless (no wget) — we
         // cannot emit a shell-based healthcheck. A comment explaining how
         // to add it by hand is included instead.
@@ -879,7 +879,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_compose_cli_puro_no_emite_healthcheck_ni_comentario() {
+    fn render_compose_cli_only_does_not_emit_healthcheck_nor_comment() {
         // Without server_port there is no HTTP request to check. Neither
         // healthcheck nor explanatory comment.
         let shape = DockerShape {
@@ -894,7 +894,7 @@ fn main() => 0
     }
 
     #[test]
-    fn render_compose_combinacion_completa() {
+    fn render_compose_complete_combination() {
         // HTTP + DB + cron + python: all the smart bits enabled.
         let shape = DockerShape {
             package_name: "fullstack".into(),

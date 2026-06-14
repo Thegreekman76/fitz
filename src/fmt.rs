@@ -1351,28 +1351,28 @@ mod tests {
     }
 
     #[test]
-    fn formatea_print_simple() {
+    fn formats_simple_print() {
         check("print(\"hola\")\n", "print(\"hola\")\n");
     }
 
     #[test]
-    fn formatea_let_preserva_keyword() {
+    fn formats_let_preserves_keyword() {
         check("let x = 1\n", "let x = 1\n");
     }
 
     #[test]
-    fn formatea_assign_sin_let_preserva() {
+    fn formats_assign_without_let_preserves() {
         // If the source does not have `let`, the formatter does not emit it either.
         check("name = \"Patagonia\"\n", "name = \"Patagonia\"\n");
     }
 
     #[test]
-    fn formatea_let_con_anotacion_de_tipo() {
+    fn formats_let_with_type_annotation() {
         check("let x: Int = 5\n", "let x: Int = 5\n");
     }
 
     #[test]
-    fn formatea_fn_def_simple() {
+    fn formats_simple_fn_def() {
         check(
             "fn double(n: Int) -> Int { return n * 2 }\n",
             "fn double(n: Int) -> Int {\n    return n * 2\n}\n",
@@ -1380,7 +1380,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_fn_def_arrow_se_normaliza_a_bloque() {
+    fn formats_fn_def_arrow_normalizes_to_block() {
         // The parser converts the arrow form (`=> expr`) to
         // `body: [Return(expr)]`. Since the AST does not preserve the
         // arrow form vs block, the formatter always emits a block.
@@ -1392,7 +1392,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_if_else_como_stmt() {
+    fn formats_if_else_as_stmt() {
         check(
             "if (x > 0) { print(\"pos\") } else { print(\"non-pos\") }\n",
             "if (x > 0) {\n    print(\"pos\")\n} else {\n    print(\"non-pos\")\n}\n",
@@ -1400,7 +1400,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_while_y_for() {
+    fn formats_while_and_for() {
         check(
             "while (i < 10) { i = i + 1 }\n",
             "while (i < 10) {\n    i = i + 1\n}\n",
@@ -1412,12 +1412,12 @@ mod tests {
     }
 
     #[test]
-    fn formatea_loop_con_break() {
+    fn formats_loop_with_break() {
         check("loop { break }\n", "loop {\n    break\n}\n");
     }
 
     #[test]
-    fn formatea_type_def_con_fields_y_defaults() {
+    fn formats_type_def_with_fields_and_defaults() {
         check(
             "type User { id: Int, name: Str = \"anon\", email: Str? }\n",
             "type User {\n    id: Int\n    name: Str = \"anon\"\n    email: Str?\n}\n",
@@ -1425,7 +1425,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_struct_lit_inline() {
+    fn formats_struct_lit_inline() {
         check(
             "let u = User { id: 1, name: \"x\" }\n",
             "let u = User { id: 1, name: \"x\" }\n",
@@ -1433,7 +1433,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_lista_y_mapa_inline() {
+    fn formats_list_and_map_inline() {
         check("let xs = [1, 2, 3]\n", "let xs = [1, 2, 3]\n");
         check(
             "let m = {\"a\": 1, \"b\": 2}\n",
@@ -1442,7 +1442,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_match_sobre_result() {
+    fn formats_match_over_result() {
         check(
             "let r = match x { Ok(v) => v, Err(_) => 0, }\n",
             "let r = match x {\n    Ok(v) => v,\n    Err(_) => 0,\n}\n",
@@ -1450,12 +1450,12 @@ mod tests {
     }
 
     #[test]
-    fn formatea_str_interp_con_var() {
+    fn formats_str_interp_with_var() {
         check("print(\"hola, {name}\")\n", "print(\"hola, {name}\")\n");
     }
 
     #[test]
-    fn formatea_decorator_apilable() {
+    fn formats_stackable_decorator() {
         check(
             "@get(\"/users\") fn list() => 1\n",
             "@get(\"/users\")\nfn list() {\n    return 1\n}\n",
@@ -1463,7 +1463,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_import_y_from_import_con_alias() {
+    fn formats_import_and_from_import_with_alias() {
         check("import utils\n", "import utils\n");
         check("import utils as u\n", "import utils as u\n");
         check(
@@ -1473,7 +1473,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_async_y_await() {
+    fn formats_async_and_await() {
         check(
             "async fn ping() -> Int { return sleep(0).await }\n",
             "async fn ping() -> Int {\n    return sleep(0).await\n}\n",
@@ -1481,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_ok_err_try() {
+    fn formats_ok_err_try() {
         check(
             "fn f() -> Result<Int> { return Ok(g()?) }\n",
             "fn f() -> Result<Int> {\n    return Ok(g()?)\n}\n",
@@ -1489,7 +1489,7 @@ mod tests {
     }
 
     #[test]
-    fn formatea_blank_line_entre_fn_defs() {
+    fn formats_blank_line_between_fn_defs() {
         check(
             "fn a() => 1\nfn b() => 2\n",
             "fn a() {\n    return 1\n}\n\nfn b() {\n    return 2\n}\n",
@@ -1497,7 +1497,7 @@ mod tests {
     }
 
     #[test]
-    fn idempotente_sobre_programa_complejo() {
+    fn idempotent_over_complex_program() {
         check_idempotent(
             r#"
 let x = 10
@@ -1530,33 +1530,33 @@ fn main() {
     // ---- Phase 9.z.1.b — comment + blank line preservation ----
 
     #[test]
-    fn preserva_comment_de_linea_antes_de_stmt() {
+    fn preserves_line_comment_before_stmt() {
         check("// header\nlet x = 1\n", "// header\nlet x = 1\n");
     }
 
     #[test]
-    fn preserva_multiple_comments_seguidos() {
+    fn preserves_multiple_consecutive_comments() {
         check("// uno\n// dos\nlet x = 1\n", "// uno\n// dos\nlet x = 1\n");
     }
 
     #[test]
-    fn preserva_blank_line_entre_stmts() {
+    fn preserves_blank_line_between_stmts() {
         check("let x = 1\n\nlet y = 2\n", "let x = 1\n\nlet y = 2\n");
     }
 
     #[test]
-    fn preserva_comment_trailing_en_misma_linea() {
+    fn preserves_trailing_comment_on_same_line() {
         check("let x = 1 // explicación\n", "let x = 1  // explicación\n");
     }
 
     #[test]
-    fn normaliza_comment_sin_espacio_post_slash() {
+    fn normalizes_comment_without_space_after_slashes() {
         // `//foo` is normalized to `// foo`.
         check("//foo\nlet x = 1\n", "// foo\nlet x = 1\n");
     }
 
     #[test]
-    fn preserva_comment_entre_stmts_con_blank() {
+    fn preserves_comment_between_stmts_with_blank() {
         check(
             "let x = 1\n\n// separador\nlet y = 2\n",
             "let x = 1\n\n// separador\nlet y = 2\n",
@@ -1564,7 +1564,7 @@ fn main() {
     }
 
     #[test]
-    fn comments_adentro_de_fn_body_se_preservan() {
+    fn comments_inside_fn_body_are_preserved() {
         check(
             "fn f() {\n    // primera\n    let x = 1\n    // segunda\n    return x\n}\n",
             "fn f() {\n    // primera\n    let x = 1\n    // segunda\n    return x\n}\n",
@@ -1572,7 +1572,7 @@ fn main() {
     }
 
     #[test]
-    fn idempotente_con_comments_y_blanks() {
+    fn idempotent_with_comments_and_blanks() {
         check_idempotent(
             r#"// header del archivo
 // segunda línea de header
@@ -1594,7 +1594,7 @@ fn main() {
     }
 
     #[test]
-    fn preserva_smoke_de_02_hola_de_la_guia() {
+    fn preserves_smoke_of_02_hola_from_guide() {
         // Replicates the contents of examples/guide/02-hola.fitz.
         // The manual smoke confirmed that the round-trip preserves everything.
         let original = "// 02-hola.fitz — El primer programa de la guía.\n\
@@ -1608,13 +1608,13 @@ fn main() {
     }
 
     #[test]
-    fn multiples_blanks_consecutivas_se_colapsan_a_una() {
+    fn multiple_consecutive_blanks_collapse_to_one() {
         // The user could have 3 blanks; the formatter collapses to 1.
         check("let x = 1\n\n\n\nlet y = 2\n", "let x = 1\n\nlet y = 2\n");
     }
 
     #[test]
-    fn idempotente_sobre_match_y_result() {
+    fn idempotent_over_match_and_result() {
         check_idempotent(
             r#"
 fn divide(a: Int, b: Int) -> Result<Int> {

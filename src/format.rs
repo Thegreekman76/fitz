@@ -377,19 +377,19 @@ mod tests {
 
     #[test]
     #[allow(clippy::approx_constant)] // 1.234 no es PI, es un Float genérico.
-    fn fixed_precision_float_redondea_a_n_decimales() {
+    fn fixed_precision_float_rounds_to_n_decimals() {
         let s = format_value_with_spec(&Value::Float(1.2345), &fixed(2)).unwrap();
         assert_eq!(s, "1.23");
     }
 
     #[test]
-    fn fixed_precision_int_promueve_a_float() {
+    fn fixed_precision_int_promotes_to_float() {
         let s = format_value_with_spec(&Value::Int(42), &fixed(2)).unwrap();
         assert_eq!(s, "42.00");
     }
 
     #[test]
-    fn width_con_zero_pad_para_int() {
+    fn width_with_zero_pad_for_int() {
         let spec = FormatSpec {
             zero_pad: true,
             width: Some(5),
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[test]
-    fn align_right_con_fill_espacio_default() {
+    fn align_right_with_default_space_fill() {
         let spec = FormatSpec {
             align: Some(FormatAlign::Right),
             width: Some(5),
@@ -413,7 +413,7 @@ mod tests {
     }
 
     #[test]
-    fn align_left_con_fill_custom() {
+    fn align_left_with_custom_fill() {
         let spec = FormatSpec {
             fill: Some('*'),
             align: Some(FormatAlign::Left),
@@ -426,7 +426,7 @@ mod tests {
     }
 
     #[test]
-    fn align_center_con_padding_balanceado() {
+    fn align_center_with_balanced_padding() {
         let spec = FormatSpec {
             align: Some(FormatAlign::Center),
             width: Some(7),
@@ -438,7 +438,7 @@ mod tests {
     }
 
     #[test]
-    fn sign_plus_muestra_signo_en_positivos() {
+    fn sign_plus_shows_sign_on_positives() {
         let spec = FormatSpec {
             sign: Some(FormatSign::Plus),
             kind: Some(FormatKind::Decimal),
@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn hex_con_alternate_emite_prefix_0x() {
+    fn hex_with_alternate_emits_0x_prefix() {
         let spec = FormatSpec {
             alternate: true,
             kind: Some(FormatKind::HexLower),
@@ -470,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn grouping_coma_int() {
+    fn grouping_comma_int() {
         let spec = FormatSpec {
             grouping: Some(','),
             kind: Some(FormatKind::Decimal),
@@ -481,7 +481,7 @@ mod tests {
     }
 
     #[test]
-    fn percent_multiplica_por_100() {
+    fn percent_multiplies_by_100() {
         let spec = FormatSpec {
             precision: Some(1),
             kind: Some(FormatKind::Percent),
@@ -492,7 +492,7 @@ mod tests {
     }
 
     #[test]
-    fn fixed_con_str_es_error_tipo_incompatible() {
+    fn fixed_with_str_is_incompatible_type_error() {
         let spec = fixed(2);
         let err = format_value_with_spec(&Value::Str("abc".into()), &spec).unwrap_err();
         assert!(err.contains("`f`"), "error: {err}");

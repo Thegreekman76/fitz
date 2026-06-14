@@ -840,14 +840,14 @@ mod tests {
     }
 
     #[test]
-    fn unused_variable_se_usa_no_flaguea() {
+    fn unused_variable_used_does_not_flag() {
         let src = "let x = 5\nprint(x)";
         let findings = lint(src);
         assert!(findings.is_empty(), "no debería flaguear: {:?}", findings);
     }
 
     #[test]
-    fn unused_variable_prefijo_underscore_se_ignora() {
+    fn unused_variable_underscore_prefix_is_ignored() {
         let src = "let _temp = 5\nprint(\"hola\")";
         let findings = lint(src);
         assert!(
@@ -858,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn unused_variable_supresion_con_allow_funciona() {
+    fn unused_variable_suppression_with_allow_works() {
         let src = "// @allow(unused_variable)\nlet x = 5\nprint(\"hola\")";
         let findings = lint(src);
         assert!(
@@ -869,7 +869,7 @@ mod tests {
     }
 
     #[test]
-    fn unused_variable_dentro_de_fn() {
+    fn unused_variable_inside_fn() {
         let src = "fn f() {\n    let local = 1\n    return 0\n}\nf()";
         let findings = lint(src);
         assert_eq!(names(&findings), vec!["unused_variable"]);
@@ -885,14 +885,14 @@ mod tests {
     }
 
     #[test]
-    fn unused_import_usado_no_flaguea() {
+    fn unused_import_used_does_not_flag() {
         let src = "from math import sqrt\nprint(sqrt(16.0))";
         let findings = lint(src);
         assert!(findings.is_empty(), "{:?}", findings);
     }
 
     #[test]
-    fn unused_import_import_modulo() {
+    fn unused_import_module_import() {
         let src = "import math\nprint(\"hola\")";
         let findings = lint(src);
         assert_eq!(names(&findings), vec!["unused_import"]);
@@ -900,7 +900,7 @@ mod tests {
     }
 
     #[test]
-    fn useless_match_wildcard_se_flaguea() {
+    fn useless_match_wildcard_is_flagged() {
         let src = "let x = 5\nmatch x { _ => print(\"hola\") }";
         let findings = lint(src);
         let useless: Vec<&LintFinding> = findings
@@ -911,7 +911,7 @@ mod tests {
     }
 
     #[test]
-    fn useless_match_dos_arms_no_se_flaguea() {
+    fn useless_match_two_arms_does_not_flag() {
         let src = "let x = 5\nmatch x {\n    0 => print(\"cero\"),\n    _ => print(\"otro\"),\n}";
         let findings = lint(src);
         let useless: Vec<&LintFinding> = findings
@@ -922,7 +922,7 @@ mod tests {
     }
 
     #[test]
-    fn string_concat_literales_se_flaguea() {
+    fn string_concat_literals_is_flagged() {
         let src = "let x = \"a\" + \"b\"\nprint(x)";
         let findings = lint(src);
         let sc: Vec<&LintFinding> = findings
@@ -933,7 +933,7 @@ mod tests {
     }
 
     #[test]
-    fn string_concat_con_var_no_se_flaguea() {
+    fn string_concat_with_var_does_not_flag() {
         // Only "both literals" triggers. Concat with var stays OK.
         let src = "let x = \"a\"\nlet y = x + \"b\"\nprint(y)";
         let findings = lint(src);
@@ -945,7 +945,7 @@ mod tests {
     }
 
     #[test]
-    fn programa_limpio_no_emite_findings() {
+    fn clean_program_emits_no_findings() {
         let src =
             "fn greet(name: Str) -> Str {\n    return \"Hola, {name}\"\n}\nprint(greet(\"Fitz\"))";
         let findings = lint(src);
@@ -953,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn findings_se_ordenan_por_linea_columna() {
+    fn findings_are_sorted_by_line_column() {
         let src = "let z = 1\nlet a = 2\nprint(\"hola\")";
         let findings = lint(src);
         assert_eq!(findings.len(), 2);
@@ -962,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn supresion_solo_aplica_a_la_linea_inmediata_anterior() {
+    fn suppression_only_applies_to_immediately_previous_line() {
         // The comment is 2 lines above; the suppress should NOT
         // work (it only applies to the immediately previous line).
         let src = "// @allow(unused_variable)\n\nlet x = 5\nprint(\"hola\")";

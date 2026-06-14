@@ -408,7 +408,7 @@ class DateTime: pass
 ";
 
     #[test]
-    fn modelo_simple_emite_type_con_fields_primitivos() {
+    fn simple_model_emits_type_with_primitive_fields() {
         let code = format!(
             "{}\nclass User:\n    __table__ = _Table([\n        _named('id', Column(Integer())),\n        _named('email', Column(String())),\n    ])\n",
             MOCK_BOILERPLATE
@@ -420,7 +420,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn mapping_de_tipos_primitivos() {
+    fn mapping_of_primitive_types() {
         let code = format!(
             "{}\nclass T:\n    __table__ = _Table([\n        _named('a', Column(Integer())),\n        _named('b', Column(BigInteger())),\n        _named('c', Column(Float())),\n        _named('d', Column(String())),\n        _named('e', Column(Boolean())),\n        _named('f', Column(DateTime())),\n    ])\n",
             MOCK_BOILERPLATE
@@ -435,7 +435,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn nullable_anota_con_sufijo_pregunta() {
+    fn nullable_annotates_with_question_suffix() {
         let code = format!(
             "{}\nclass T:\n    __table__ = _Table([\n        _named('a', Column(Integer(), nullable=True)),\n        _named('b', Column(String(), nullable=False)),\n    ])\n",
             MOCK_BOILERPLATE
@@ -447,7 +447,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn default_literal_se_emite_inline() {
+    fn default_literal_emits_inline() {
         let code = format!(
             "{}\nclass T:\n    __table__ = _Table([\n        _named('a', Column(Integer(), default=42)),\n        _named('b', Column(String(), default='hola')),\n        _named('c', Column(Boolean(), default=True)),\n    ])\n",
             MOCK_BOILERPLATE
@@ -459,7 +459,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn default_callable_se_ignora() {
+    fn default_callable_is_ignored() {
         // `default=callable` is common in SQLAlchemy (`default=datetime.utcnow`);
         // emitting `= func()` adds nothing, we ignore it.
         let code = format!(
@@ -475,7 +475,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn tipo_desconocido_cae_a_any_con_comentario() {
+    fn unknown_type_falls_back_to_any_with_comment() {
         let code = format!(
             "{}\nclass JSON: pass\nclass T:\n    __table__ = _Table([\n        _named('payload', Column(JSON())),\n    ])\n",
             MOCK_BOILERPLATE
@@ -506,7 +506,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn archivo_sin_modelos_es_error_claro() {
+    fn file_without_models_is_clear_error() {
         let code = "x = 1\n";
         let err = run(code).expect_err("no debería haber modelos");
         assert!(
@@ -517,7 +517,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn clases_sin_table_attribute_se_ignoran() {
+    fn classes_without_table_attribute_are_ignored() {
         // `Helper` does not have `__table__` — must be filtered out.
         let code = format!(
             "{}\nclass Helper:\n    def hello(self): pass\nclass User:\n    __table__ = _Table([_named('id', Column(Integer()))])\n",
@@ -529,7 +529,7 @@ class DateTime: pass
     }
 
     #[test]
-    fn header_cita_archivo_fuente() {
+    fn header_cites_source_file() {
         let code = format!(
             "{}\nclass User:\n    __table__ = _Table([_named('id', Column(Integer()))])\n",
             MOCK_BOILERPLATE

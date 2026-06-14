@@ -950,7 +950,7 @@ mod tests {
     use crate::env::Environment;
 
     #[test]
-    fn retry_config_default_es_no_retry() {
+    fn retry_config_default_is_no_retry() {
         let cfg = RetryConfig::default();
         assert_eq!(cfg.max, 0);
         assert_eq!(cfg.backoff, BackoffKind::Exponential);
@@ -959,7 +959,7 @@ mod tests {
     }
 
     #[test]
-    fn delay_exponential_duplica_cada_attempt() {
+    fn delay_exponential_doubles_each_attempt() {
         let cfg = RetryConfig {
             max: 5,
             backoff: BackoffKind::Exponential,
@@ -974,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn delay_exponential_capeado_por_max_secs() {
+    fn delay_exponential_capped_by_max_secs() {
         let cfg = RetryConfig {
             max: 10,
             backoff: BackoffKind::Exponential,
@@ -988,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn delay_linear_multiplica_attempt_por_initial() {
+    fn delay_linear_multiplies_attempt_by_initial() {
         let cfg = RetryConfig {
             max: 5,
             backoff: BackoffKind::Linear,
@@ -1001,7 +1001,7 @@ mod tests {
     }
 
     #[test]
-    fn delay_constant_siempre_initial() {
+    fn delay_constant_always_initial() {
         let cfg = RetryConfig {
             max: 5,
             backoff: BackoffKind::Constant,
@@ -1013,7 +1013,7 @@ mod tests {
     }
 
     #[test]
-    fn backoff_kind_from_str_acepta_los_tres() {
+    fn backoff_kind_from_str_accepts_all_three() {
         assert_eq!(
             BackoffKind::from_str_strict("exponential").unwrap(),
             BackoffKind::Exponential
@@ -1029,13 +1029,13 @@ mod tests {
     }
 
     #[test]
-    fn backoff_kind_from_str_rechaza_otros() {
+    fn backoff_kind_from_str_rejects_others() {
         let err = BackoffKind::from_str_strict("quadratic").unwrap_err();
         assert!(err.contains("exponential"), "msg: {}", err);
     }
 
     #[test]
-    fn cron_job_options_default_es_utc_in_memory() {
+    fn cron_job_options_default_is_utc_in_memory() {
         let opts = CronJobOptions::default();
         assert_eq!(opts.tz, chrono_tz::UTC);
         assert!(opts.retry.is_none());
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_register_con_defaults_es_backwards_compat() {
+    fn registry_register_with_defaults_is_backwards_compat() {
         // Without tz/retry/catch_up/store: behavior equals MVP.
         let registry = CronRegistry::new();
         let env = Environment::new();
@@ -1069,7 +1069,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_register_con_opciones_custom_preserva_campos() {
+    fn registry_register_with_custom_options_preserves_fields() {
         let registry = CronRegistry::new();
         let env = Environment::new();
         let opts = CronJobOptions {
@@ -1106,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn registry_register_cron_invalido_devuelve_err() {
+    fn registry_register_invalid_cron_returns_err() {
         let registry = CronRegistry::new();
         let env = Environment::new();
         let res = registry.register(

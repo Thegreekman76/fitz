@@ -678,19 +678,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn importa_math_devuelve_pyobject() {
+    fn importing_math_returns_pyobject() {
         let v = import_module("math").expect("math debería importar");
         assert!(matches!(v, Value::PyObject(_)));
     }
 
     #[test]
-    fn importa_json_devuelve_pyobject() {
+    fn importing_json_returns_pyobject() {
         let v = import_module("json").expect("json debería importar");
         assert!(matches!(v, Value::PyObject(_)));
     }
 
     #[test]
-    fn importa_submodulo_devuelve_pyobject() {
+    fn importing_submodule_returns_pyobject() {
         // `os.path` always exists in any Python installation.
         let v = import_module("os.path").expect("os.path debería importar");
         assert!(matches!(v, Value::PyObject(_)));
@@ -714,7 +714,7 @@ mod tests {
     }
 
     #[test]
-    fn dos_imports_del_mismo_modulo_son_iguales() {
+    fn two_imports_of_the_same_module_are_equal() {
         // Python caches imports (sys.modules), so two
         // `import math` return the same object. Our `PartialEq`
         // on `Value::PyObject` (Py::as_ptr) should reflect that.
@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn imports_de_modulos_distintos_no_son_iguales() {
+    fn imports_of_distinct_modules_are_not_equal() {
         let a = import_module("math").unwrap();
         let b = import_module("json").unwrap();
         assert_ne!(a, b);
@@ -796,7 +796,7 @@ mod tests {
     }
 
     #[test]
-    fn get_attr_inexistente_emite_attributeerror() {
+    fn get_attr_missing_emits_attributeerror() {
         let math = handle_of(import_module("math").unwrap());
         let err = get_attr(&math, "no_existe_xyz_813").expect_err("attr no debería existir");
         assert!(
@@ -868,7 +868,7 @@ mod tests {
     }
 
     #[test]
-    fn call_str_upper_via_call_no_aplica_es_metodo() {
+    fn call_str_upper_via_call_does_not_apply_is_method() {
         // `str.upper("hola")` is valid in Python (unbound method). We use
         // this case to verify that a Str argument marshals correctly.
         let builtins = handle_of(import_module("builtins").unwrap());
@@ -907,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn call_excepcion_python_envuelve_en_result_err() {
+    fn call_python_exception_wraps_in_result_err() {
         // 8.3: `math.sqrt(-1)` raises ValueError in Python. The call does
         // not abort — it returns `Value::Result(Err(Str("ValueError: ...")))`.
         // The user has to handle it with `match` or `?`.
@@ -923,7 +923,7 @@ mod tests {
     }
 
     #[test]
-    fn call_arg_no_marshalleable_envuelve_en_result_err() {
+    fn call_non_marshallable_arg_wraps_in_result_err() {
         // 8.3: Range is not marshaleable. Instead of aborting with
         // FitzError, the error is wrapped in `Result::Err(Str(...))`
         // — uniformity: EVERY error from the call path looks like `Err` to
@@ -940,7 +940,7 @@ mod tests {
     }
 
     #[test]
-    fn call_pyobject_passthrough_preserva_identidad() {
+    fn call_pyobject_passthrough_preserves_identity() {
         // Pass a Value::PyObject as arg: should reach the Python callable
         // unchanged. We validate with `id(x) == id(x)` via `is`.
         let builtins = handle_of(import_module("builtins").unwrap());
@@ -957,7 +957,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
-    fn list_de_ints_se_marshalla_a_list_python() {
+    fn list_of_ints_marshalls_to_python_list() {
         // `json.dumps([1, 2, 3])` → "[1, 2, 3]". The round-trip via
         // json validates that the Python list we produced has the
         // correct elements in order.
@@ -1004,7 +1004,7 @@ mod tests {
     }
 
     #[test]
-    fn map_de_str_a_int_se_marshalla_a_dict() {
+    fn map_from_str_to_int_marshalls_to_dict() {
         // `json.dumps({"a": 1, "b": 2})` → '{"a": 1, "b": 2}'.
         // PyDict preserves insertion order (Python 3.7+), same
         // as `serde_json::preserve_order` that the rest of the
@@ -1020,7 +1020,7 @@ mod tests {
     }
 
     #[test]
-    fn map_con_keys_no_hashables_es_error_con_path() {
+    fn map_with_non_hashable_keys_is_error_with_path() {
         // 8.3: List as key → `Result::Err(Str)` with message citing
         // the path "arg0" and the "hashable" restriction.
         let json = handle_of(import_module("json").unwrap());
@@ -1037,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn instance_se_marshalla_a_dict_por_field_name() {
+    fn instance_marshalls_to_dict_by_field_name() {
         // An `Instance` with type_name="User" and ordered fields
         // {id: 1, name: "x"} → `{"id": 1, "name": "x"}` after
         // `json.dumps`. Verifies that field order is preserved
@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn list_de_instances_se_marshalla() {
+    fn list_of_instances_marshalls() {
         // Pre-canonical case from the roadmap: `List<User>` passed to a
         // Python function. The list marshals to list[dict].
         let json = handle_of(import_module("json").unwrap());
@@ -1089,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn null_dentro_de_list_se_marshalla_a_none() {
+    fn null_inside_list_marshalls_to_none() {
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![Value::Int(1), Value::Null, Value::Int(3)]);
@@ -1098,7 +1098,7 @@ mod tests {
     }
 
     #[test]
-    fn elemento_no_marshalleable_en_list_es_error_con_path() {
+    fn non_marshallable_element_in_list_is_error_with_path() {
         // 8.3: Range inside list → `Result::Err(Str)` with path
         // "arg0[1]" in the message.
         let json = handle_of(import_module("json").unwrap());
@@ -1122,7 +1122,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
-    fn json_loads_de_array_devuelve_list() {
+    fn json_loads_of_array_returns_list() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
         let v = ok_inner(call(&loads, &[Value::Str("[1, 2, 3]".into())]).unwrap());
@@ -1133,7 +1133,7 @@ mod tests {
     }
 
     #[test]
-    fn json_loads_de_array_vacio_devuelve_list_vacia() {
+    fn json_loads_of_empty_array_returns_empty_list() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
         let v = ok_inner(call(&loads, &[Value::Str("[]".into())]).unwrap());
@@ -1141,7 +1141,7 @@ mod tests {
     }
 
     #[test]
-    fn json_loads_de_objeto_devuelve_map_con_orden_de_insercion() {
+    fn json_loads_of_object_returns_map_with_insertion_order() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
         let v = ok_inner(call(&loads, &[Value::Str("{\"a\": 1, \"b\": 2}".into())]).unwrap());
@@ -1157,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn json_loads_de_array_heterogeneo() {
+    fn json_loads_of_heterogeneous_array() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
         let v = ok_inner(call(&loads, &[Value::Str("[1, \"dos\", true, null]".into())]).unwrap());
@@ -1173,7 +1173,7 @@ mod tests {
     }
 
     #[test]
-    fn json_loads_de_array_anidado() {
+    fn json_loads_of_nested_array() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
         let v = ok_inner(call(&loads, &[Value::Str("[[1, 2], [3, 4]]".into())]).unwrap());
@@ -1187,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn json_loads_de_dict_de_dict() {
+    fn json_loads_of_dict_of_dict() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
         let v = ok_inner(
@@ -1231,7 +1231,7 @@ mod tests {
     }
 
     #[test]
-    fn pylist_directo_de_python_se_coerce_a_list() {
+    fn pylist_direct_from_python_coerces_to_list() {
         // `list("abc")` in Python gives `['a', 'b', 'c']`. We cross a
         // live PyList, not a deserialized JSON, to validate that
         // dispatch over PyList works regardless of which API it comes from.
@@ -1249,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn pydict_directo_de_python_se_coerce_a_map() {
+    fn pydict_direct_from_python_coerces_to_map() {
         // `dict(zip(["a", "b"], [1, 2]))` in Python gives `{"a": 1, "b": 2}`.
         // We validate a dict built at runtime, not a JSON loads.
         let builtins = handle_of(import_module("builtins").unwrap());
@@ -1269,7 +1269,7 @@ mod tests {
     }
 
     #[test]
-    fn campo_no_marshalleable_en_instance_es_error_con_path() {
+    fn non_marshallable_field_in_instance_is_error_with_path() {
         // 8.3: Range as a field value → `Result::Err(Str)` with
         // path "arg0.User.<field>" or similar.
         let json = handle_of(import_module("json").unwrap());
@@ -1297,7 +1297,7 @@ mod tests {
     // -------------------------------------------------------------------
 
     #[test]
-    fn call_exitoso_devuelve_value_result_ok() {
+    fn call_success_returns_value_result_ok() {
         // Explicit shape validation: the `Value` returned by `call`
         // is always `Value::Result(Ok(...))` for success (not
         // `Value::Float` directly). Confirms the 8.3 invariant.
@@ -1312,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    fn call_jsonloads_malformado_es_err_con_jsondecodeerror() {
+    fn call_jsonloads_malformed_is_err_with_jsondecodeerror() {
         // Textual criterion of the 8.3 roadmap:
         //   match parse("{ malformado") {
         //     Ok(m)  => print("ok: {m}"),
@@ -1331,7 +1331,7 @@ mod tests {
     }
 
     #[test]
-    fn call_typeerror_python_se_envuelve_no_aborta() {
+    fn call_python_typeerror_wraps_does_not_abort() {
         // `int("no es un número")` raises ValueError. The call does not
         // abort — the Err contains the readable message.
         let builtins = handle_of(import_module("builtins").unwrap());

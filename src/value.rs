@@ -1044,24 +1044,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn display_int_sin_decimales() {
+    fn display_int_without_decimals() {
         assert_eq!(Value::Int(42).to_string(), "42");
         assert_eq!(Value::Int(-7).to_string(), "-7");
     }
 
     #[test]
-    fn display_float_entero_lleva_punto_cero() {
+    fn display_float_integer_carries_dot_zero() {
         assert_eq!(Value::Float(3.0).to_string(), "3.0");
         assert_eq!(Value::Float(-0.0).to_string(), "-0.0");
     }
 
     #[test]
-    fn display_float_con_decimales_se_muestra_normal() {
+    fn display_float_with_decimals_shows_normally() {
         assert_eq!(Value::Float(3.14).to_string(), "3.14");
     }
 
     #[test]
-    fn display_str_sin_comillas() {
+    fn display_str_without_quotes() {
         // print("hola") should show `hola`, not `"hola"`.
         assert_eq!(Value::Str("hola".into()).to_string(), "hola");
     }
@@ -1078,7 +1078,7 @@ mod tests {
     }
 
     #[test]
-    fn type_name_devuelve_el_nombre_del_tipo() {
+    fn type_name_returns_the_type_name() {
         assert_eq!(Value::Int(0).type_name(), "Int");
         assert_eq!(Value::Float(0.0).type_name(), "Float");
         assert_eq!(Value::Str("".into()).type_name(), "Str");
@@ -1095,7 +1095,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_display_con_escapes_hex() {
+    fn bytes_display_with_hex_escapes() {
         assert_eq!(
             Value::Bytes(vec![0x00, 0x01, 0xff]).to_string(),
             "b\"\\x00\\x01\\xff\""
@@ -1103,7 +1103,7 @@ mod tests {
     }
 
     #[test]
-    fn bytes_display_con_escapes_comunes() {
+    fn bytes_display_with_common_escapes() {
         assert_eq!(
             Value::Bytes(b"a\nb\tc\\d\"e".to_vec()).to_string(),
             "b\"a\\nb\\tc\\\\d\\\"e\""
@@ -1111,21 +1111,21 @@ mod tests {
     }
 
     #[test]
-    fn bytes_igualdad_byte_a_byte() {
+    fn bytes_equality_byte_by_byte() {
         assert_eq!(Value::Bytes(vec![1, 2, 3]), Value::Bytes(vec![1, 2, 3]));
         assert_ne!(Value::Bytes(vec![1, 2, 3]), Value::Bytes(vec![1, 2, 4]));
         assert_ne!(Value::Bytes(vec![1, 2]), Value::Bytes(vec![1, 2, 3]));
     }
 
     #[test]
-    fn bytes_distinto_de_str_aunque_mismo_contenido() {
+    fn bytes_distinct_from_str_even_with_same_content() {
         // Bytes("hola") and Str("hola") are distinct types —
         // PartialEq returns false (parallel to Int vs Str).
         assert_ne!(Value::Bytes(b"hola".to_vec()), Value::Str("hola".into()));
     }
 
     #[test]
-    fn igualdad_int_y_float_se_coerciona() {
+    fn equality_int_and_float_coerces() {
         // In Fitz, `1 == 1.0` is true. Reflects the Int↔Float
         // promotion.
         assert_eq!(Value::Int(1), Value::Float(1.0));
@@ -1133,19 +1133,19 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_entre_tipos_distintos_es_false() {
+    fn equality_between_different_types_is_false() {
         assert_ne!(Value::Int(1), Value::Str("1".into()));
         assert_ne!(Value::Bool(true), Value::Int(1));
         assert_ne!(Value::Null, Value::Bool(false));
     }
 
     #[test]
-    fn igualdad_null_consigo_mismo() {
+    fn equality_null_with_itself() {
         assert_eq!(Value::Null, Value::Null);
     }
 
     #[test]
-    fn igualdad_strings() {
+    fn equality_strings() {
         assert_eq!(Value::Str("hola".into()), Value::Str("hola".into()));
         assert_ne!(Value::Str("hola".into()), Value::Str("chau".into()));
     }
@@ -1155,18 +1155,18 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn display_list_vacia() {
+    fn display_list_empty() {
         assert_eq!(Value::new_list(vec![]).to_string(), "[]");
     }
 
     #[test]
-    fn display_list_con_ints() {
+    fn display_list_with_ints() {
         let v = Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
         assert_eq!(v.to_string(), "[1, 2, 3]");
     }
 
     #[test]
-    fn display_list_strings_van_con_comillas_dentro() {
+    fn display_list_strings_carry_quotes_inside() {
         // Bare strings carry no quotes (print), but inside a list
         // they carry quotes so `1` and `"1"` can be told apart.
         let v = Value::new_list(vec![
@@ -1178,19 +1178,19 @@ mod tests {
     }
 
     #[test]
-    fn display_list_anidada() {
+    fn display_list_nested() {
         let inner = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
         let outer = Value::new_list(vec![inner.clone(), inner]);
         assert_eq!(outer.to_string(), "[[1, 2], [1, 2]]");
     }
 
     #[test]
-    fn display_map_vacio() {
+    fn display_map_empty() {
         assert_eq!(Value::new_map(vec![]).to_string(), "{}");
     }
 
     #[test]
-    fn display_map_preserva_orden_y_comillas_en_strings() {
+    fn display_map_preserves_order_and_quotes_in_strings() {
         let m = Value::new_map(vec![
             (Value::Str("a".into()), Value::Int(1)),
             (Value::Str("b".into()), Value::Int(2)),
@@ -1204,19 +1204,19 @@ mod tests {
     }
 
     #[test]
-    fn display_range_negativo() {
+    fn display_range_negative() {
         assert_eq!(Value::Range { start: -5, end: 5 }.to_string(), "-5..5");
     }
 
     #[test]
-    fn type_name_de_list_map_range() {
+    fn type_name_of_list_map_range() {
         assert_eq!(Value::new_list(vec![]).type_name(), "List");
         assert_eq!(Value::new_map(vec![]).type_name(), "Map");
         assert_eq!(Value::Range { start: 0, end: 1 }.type_name(), "Range");
     }
 
     #[test]
-    fn igualdad_list_estructural() {
+    fn equality_list_structural() {
         let a = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
         let b = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
         let c = Value::new_list(vec![Value::Int(1), Value::Int(3)]);
@@ -1225,7 +1225,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_list_coerciona_int_float_adentro() {
+    fn equality_list_coerces_int_float_inside() {
         // [1, 2] == [1.0, 2.0] — the Int↔Float coercion applies
         // inside lists.
         let a = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
@@ -1234,7 +1234,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_map_estructural() {
+    fn equality_map_structural() {
         let a = Value::new_map(vec![(Value::Str("k".into()), Value::Int(1))]);
         let b = Value::new_map(vec![(Value::Str("k".into()), Value::Int(1))]);
         let c = Value::new_map(vec![(Value::Str("k".into()), Value::Int(2))]);
@@ -1243,7 +1243,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_map_sensible_al_orden() {
+    fn equality_map_order_sensitive() {
         // Since we use Vec<(K,V)>, order matters for equality. This
         // is consistent with how we print them (preserving order).
         let a = Value::new_map(vec![
@@ -1258,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_range() {
+    fn equality_range() {
         assert_eq!(
             Value::Range { start: 0, end: 10 },
             Value::Range { start: 0, end: 10 },
@@ -1270,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_entre_tipos_distintos_es_false_para_nuevos() {
+    fn equality_between_different_types_is_false_for_new_ones() {
         // Sanity: list != map, list != range, etc.
         assert_ne!(Value::new_list(vec![]), Value::new_map(vec![]));
         assert_ne!(
@@ -1284,19 +1284,19 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn type_name_de_instance() {
+    fn type_name_of_instance() {
         let i = Value::new_instance("User".into(), vec![]);
         assert_eq!(i.type_name(), "Instance");
     }
 
     #[test]
-    fn display_instance_vacia_muestra_llaves_juntas() {
+    fn display_instance_empty_shows_braces_together() {
         let i = Value::new_instance("Empty".into(), vec![]);
         assert_eq!(i.to_string(), "Empty {}");
     }
 
     #[test]
-    fn display_instance_con_campos() {
+    fn display_instance_with_fields() {
         let i = Value::new_instance(
             "User".into(),
             vec![
@@ -1309,7 +1309,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_instance_estructural() {
+    fn equality_instance_structural() {
         let a = Value::new_instance(
             "Point".into(),
             vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
@@ -1327,7 +1327,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_instance_distinto_type_name_es_false() {
+    fn equality_instance_different_type_name_is_false() {
         // Same field shape, different type → not equal.
         let a = Value::new_instance("User".into(), vec![("id".into(), Value::Int(1))]);
         let b = Value::new_instance("Admin".into(), vec![("id".into(), Value::Int(1))]);
@@ -1347,56 +1347,56 @@ mod tests {
     }
 
     #[test]
-    fn type_name_de_result() {
+    fn type_name_of_result() {
         assert_eq!(ok(Value::Int(1)).type_name(), "Result");
         assert_eq!(err(Value::Str("boom".into())).type_name(), "Result");
     }
 
     #[test]
-    fn display_ok_envuelve_inner() {
+    fn display_ok_wraps_inner() {
         // Same criterion as List/Map: strings inside carry quotes.
         assert_eq!(ok(Value::Int(42)).to_string(), "Ok(42)");
         assert_eq!(ok(Value::Str("hola".into())).to_string(), "Ok(\"hola\")");
     }
 
     #[test]
-    fn display_err_envuelve_inner() {
+    fn display_err_wraps_inner() {
         assert_eq!(err(Value::Str("boom".into())).to_string(), "Err(\"boom\")");
         assert_eq!(err(Value::Int(404)).to_string(), "Err(404)");
     }
 
     #[test]
-    fn display_result_anidado() {
+    fn display_result_nested() {
         // Ok(Err("x")) — unlikely but structurally legal.
         let inner = err(Value::Str("x".into()));
         assert_eq!(ok(inner).to_string(), "Ok(Err(\"x\"))");
     }
 
     #[test]
-    fn igualdad_ok_estructural() {
+    fn equality_ok_structural() {
         assert_eq!(ok(Value::Int(1)), ok(Value::Int(1)));
         assert_ne!(ok(Value::Int(1)), ok(Value::Int(2)));
     }
 
     #[test]
-    fn igualdad_err_estructural() {
+    fn equality_err_structural() {
         assert_eq!(err(Value::Str("x".into())), err(Value::Str("x".into())));
         assert_ne!(err(Value::Str("x".into())), err(Value::Str("y".into())));
     }
 
     #[test]
-    fn igualdad_ok_vs_err_es_false() {
+    fn equality_ok_vs_err_is_false() {
         assert_ne!(ok(Value::Int(1)), err(Value::Int(1)));
     }
 
     #[test]
-    fn igualdad_result_coerciona_int_float_adentro() {
+    fn equality_result_coerces_int_float_inside() {
         // The Int↔Float coercion applies recursively inside the inner.
         assert_eq!(ok(Value::Int(1)), ok(Value::Float(1.0)));
     }
 
     #[test]
-    fn igualdad_result_con_otros_tipos_es_false() {
+    fn equality_result_with_other_types_is_false() {
         assert_ne!(ok(Value::Int(1)), Value::Int(1));
         assert_ne!(err(Value::Str("x".into())), Value::Str("x".into()));
     }
@@ -1408,7 +1408,7 @@ mod tests {
     use crate::env::Environment;
 
     #[test]
-    fn type_name_de_module() {
+    fn type_name_of_module() {
         let env = Environment::new();
         let m = Value::Module {
             name: "utils".into(),
@@ -1418,7 +1418,7 @@ mod tests {
     }
 
     #[test]
-    fn display_module_muestra_nombre() {
+    fn display_module_shows_name() {
         let env = Environment::new();
         let m = Value::Module {
             name: "utils".into(),
@@ -1428,7 +1428,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_module_es_por_identidad_del_env() {
+    fn equality_module_is_by_env_identity() {
         // Same env → equal. Models "the same file imported twice
         // is the same module".
         let env = Environment::new();

@@ -301,7 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_url_strips_otros_schemes() {
+    fn sanitize_url_strips_other_schemes() {
         assert_eq!(sanitize_url("http://x.com/r"), "x.com_r");
         assert_eq!(sanitize_url("git://example.org/p"), "example.org_p");
         assert_eq!(sanitize_url("ssh://user@host/r.git"), "user_host_r.git");
@@ -309,7 +309,7 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_url_preserva_letras_numeros_punto_guion_underscore() {
+    fn sanitize_url_preserves_letters_numbers_dot_hyphen_underscore() {
         assert_eq!(
             sanitize_url("https://github.com/some-user_name/proj.v1"),
             "github.com_some-user_name_proj.v1"
@@ -317,26 +317,26 @@ mod tests {
     }
 
     #[test]
-    fn sanitize_url_trunca_a_200_chars() {
+    fn sanitize_url_truncates_to_200_chars() {
         let very_long = format!("https://github.com/{}", "a".repeat(300));
         let s = sanitize_url(&very_long);
         assert!(s.len() <= 200);
     }
 
     #[test]
-    fn sanitize_url_sin_prefix_acepta_input_raw() {
+    fn sanitize_url_without_prefix_accepts_raw_input() {
         // URLs without scheme (rare) are accepted as-is.
         assert_eq!(sanitize_url("just/a/path"), "just_a_path");
     }
 
     #[test]
-    fn gitref_as_str_funciona_para_ambas_variantes() {
+    fn gitref_as_str_works_for_both_variants() {
         assert_eq!(GitRef::Tag("v1.0".to_string()).as_str(), "v1.0");
         assert_eq!(GitRef::Rev("abc123".to_string()).as_str(), "abc123");
     }
 
     #[test]
-    fn cache_path_for_combina_url_sanitizada_y_ref() {
+    fn cache_path_for_combines_sanitized_url_and_ref() {
         let tmp = tempfile::tempdir().unwrap();
         // Override the cache so as not to touch the real home during tests.
         let prev = std::env::var(CACHE_DIR_ENV).ok();
@@ -360,7 +360,7 @@ mod tests {
     }
 
     #[test]
-    fn lockfile_source_string_formato_cargo_style() {
+    fn lockfile_source_string_cargo_style_format() {
         let s = lockfile_source_string(
             "https://github.com/foo/bar",
             "abc123def456789012345678901234567890abcd",

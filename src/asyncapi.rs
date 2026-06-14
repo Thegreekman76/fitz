@@ -490,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_emite_version_3_0_0() {
+    fn asyncapi_emits_version_3_0_0() {
         let src = "@ws(\"/chat\")\n\
                    async fn chat(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
@@ -498,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_channel_simple_con_str() {
+    fn asyncapi_simple_channel_with_str() {
         let src = "@ws(\"/echo\")\n\
                    async fn echo(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
@@ -510,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_genera_dos_operations_por_channel() {
+    fn asyncapi_generates_two_operations_per_channel() {
         let src = "@ws(\"/echo\")\n\
                    async fn echo(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_tipo_custom_emite_payload_object() {
+    fn asyncapi_custom_type_emits_payload_object() {
         let src = "type ChatMsg { user: Str, text: Str }\n\
                    @ws(\"/chat\")\n\
                    async fn chat(conn: WsConn<ChatMsg>) -> Null { return null }";
@@ -539,7 +539,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_sin_ws_emite_channels_vacios() {
+    fn asyncapi_without_ws_emits_empty_channels() {
         let src = "@get(\"/x\")\nfn x() -> Str => \"y\"";
         let s = schema_for(src);
         assert!(s["channels"].as_object().unwrap().is_empty());
@@ -547,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_authenticated_handler_emite_security() {
+    fn asyncapi_authenticated_handler_emits_security() {
         let src = "type User { id: Int, name: Str, role: Str }\n\
                    @auth_provider\n\
                    fn check(h: Map<Str, Str>) -> Result<User> { return Err(\"x\") }\n\
@@ -567,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_programa_sin_auth_no_emite_security_schemes() {
+    fn asyncapi_program_without_auth_does_not_emit_security_schemes() {
         let src = "@ws(\"/x\")\n\
                    async fn x(conn: WsConn<Str>) -> Null { return null }";
         let s = schema_for(src);
@@ -579,7 +579,7 @@ mod tests {
     // ---- 9.w.2-wsconn-bidir — `WsConn<In, Out>` AsyncAPI ----
 
     #[test]
-    fn asyncapi_wsconn_bidir_emite_dos_messages_distintos() {
+    fn asyncapi_wsconn_bidir_emits_two_distinct_messages() {
         // 9.w.2-wsconn-bidir — asymmetric channel generates `msg_in`
         // (receive) and `msg_out` (send) instead of the single `msg`.
         let src = "type ChatMsg { user: Str, text: Str }\n\
@@ -601,7 +601,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_wsconn_bidir_operations_apuntan_a_messages_distintos() {
+    fn asyncapi_wsconn_bidir_operations_point_to_distinct_messages() {
         let src = "type ChatMsg { user: Str, text: Str }\n\
                    @ws(\"/cmd\")\n\
                    async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null { return null }";
@@ -623,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_wsconn_simetrico_sigue_emitiendo_msg_unico() {
+    fn asyncapi_wsconn_symmetric_keeps_emitting_single_msg() {
         // Compat: `WsConn<T>` (symmetric) still emits the single
         // `msg` (does not break existing consumers).
         let src = "@ws(\"/c\")\n\
@@ -638,7 +638,7 @@ mod tests {
     // ---- 9.w.2-binary-frames — `WsConn<Bytes>` AsyncAPI ----
 
     #[test]
-    fn asyncapi_wsconn_bytes_emite_payload_binary() {
+    fn asyncapi_wsconn_bytes_emits_payload_binary() {
         let src = "@ws(\"/raw\")\n\
                    async fn raw(conn: WsConn<Bytes>) -> Null { return null }";
         let s = schema_for(src);
@@ -650,7 +650,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_wsconn_bytes_summary_dice_binario() {
+    fn asyncapi_wsconn_bytes_summary_says_binary() {
         let src = "@ws(\"/raw\")\n\
                    async fn raw(conn: WsConn<Bytes>) -> Null { return null }";
         let s = schema_for(src);
@@ -665,7 +665,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_wsconn_str_no_se_pisa_con_bytes() {
+    fn asyncapi_wsconn_str_does_not_collide_with_bytes() {
         // Sanity: T = Str still emits `application/json`, doesn't
         // get contaminated by the Bytes adjustment.
         let src = "@ws(\"/c\")\n\
@@ -678,7 +678,7 @@ mod tests {
     }
 
     #[test]
-    fn asyncapi_multiples_channels_se_ordenan_por_path() {
+    fn asyncapi_multiple_channels_are_sorted_by_path() {
         let src = "@ws(\"/zeta\")\n\
                    async fn z(conn: WsConn<Str>) -> Null { return null }\n\
                    @ws(\"/alpha\")\n\

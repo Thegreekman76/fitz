@@ -140,7 +140,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn define_y_get_en_scope_simple() {
+    fn define_and_get_in_simple_scope() {
         let env = Environment::new();
         env.lock().define("x", Value::Int(42));
 
@@ -148,13 +148,13 @@ mod tests {
     }
 
     #[test]
-    fn get_devuelve_none_si_no_existe() {
+    fn get_returns_none_if_not_exists() {
         let env = Environment::new();
         assert_eq!(env.lock().get("inexistente"), None);
     }
 
     #[test]
-    fn child_ve_variables_del_padre() {
+    fn child_sees_parent_variables() {
         let global = Environment::new();
         global.lock().define("x", Value::Int(1));
 
@@ -163,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn child_puede_sombrear_al_padre_con_define() {
+    fn child_can_shadow_parent_with_define() {
         // define() always writes local — it shadows the parent.
         let global = Environment::new();
         global.lock().define("x", Value::Int(1));
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_desde_child_reasigna_en_el_padre() {
+    fn assign_from_child_reassigns_in_parent() {
         // assign() walks the chain. It rewrites where the variable exists.
         let global = Environment::new();
         global.lock().define("x", Value::Int(1));
@@ -191,13 +191,13 @@ mod tests {
     }
 
     #[test]
-    fn assign_a_variable_no_definida_devuelve_err() {
+    fn assign_to_undefined_variable_returns_err() {
         let env = Environment::new();
         assert!(env.lock().assign("x", Value::Int(1)).is_err());
     }
 
     #[test]
-    fn has_busca_en_cadena_de_scopes() {
+    fn has_searches_through_scope_chain() {
         let global = Environment::new();
         global.lock().define("global_var", Value::Int(1));
 
@@ -215,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    fn assign_actualiza_solo_el_scope_correcto() {
+    fn assign_updates_only_the_correct_scope() {
         // global.x exists, middle.y exists. From leaf, reassign both.
         let global = Environment::new();
         global.lock().define("x", Value::Int(10));
@@ -235,7 +235,7 @@ mod tests {
     }
 
     #[test]
-    fn shadowing_local_no_afecta_lookups_del_padre_hacia_arriba() {
+    fn local_shadowing_does_not_affect_parent_lookups_upward() {
         // If a child shadows x, the parent is not affected when a
         // sibling of that child runs get.
         let global = Environment::new();

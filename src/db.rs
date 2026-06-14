@@ -3749,13 +3749,13 @@ mod tests {
     }
 
     #[test]
-    fn url_sslmode_prefer_sigue_no_implementado() {
+    fn url_sslmode_prefer_still_not_implemented() {
         let r = ConnectionConfig::parse("postgres://user@host/db?sslmode=prefer");
         assert!(matches!(r, Err(DbError::NotImplemented(_))));
     }
 
     #[test]
-    fn url_sslmode_allow_sigue_no_implementado() {
+    fn url_sslmode_allow_still_not_implemented() {
         let r = ConnectionConfig::parse("postgres://user@host/db?sslmode=allow");
         assert!(matches!(r, Err(DbError::NotImplemented(_))));
     }
@@ -3767,7 +3767,7 @@ mod tests {
     }
 
     #[test]
-    fn url_sslrootcert_con_verify_ca_parsea_ok() {
+    fn url_sslrootcert_with_verify_ca_parses_ok() {
         let c = ConnectionConfig::parse(
             "postgres://user@host/db?sslmode=verify-ca&sslrootcert=/etc/ssl/ca.pem",
         )
@@ -3780,7 +3780,7 @@ mod tests {
     }
 
     #[test]
-    fn url_sslrootcert_url_encoded_se_decodifica() {
+    fn url_sslrootcert_url_encoded_is_decoded() {
         let c = ConnectionConfig::parse(
             "postgres://user@host/db?sslmode=verify-full&sslrootcert=%2Fhome%2Fme%2Fca.pem",
         )
@@ -3792,7 +3792,7 @@ mod tests {
     }
 
     #[test]
-    fn url_sslrootcert_con_sslmode_disable_es_error() {
+    fn url_sslrootcert_with_sslmode_disable_is_error() {
         // Contradictory combo: make it explicit to the user.
         let r = ConnectionConfig::parse(
             "postgres://user@host/db?sslmode=disable&sslrootcert=/etc/ssl/ca.pem",
@@ -3801,7 +3801,7 @@ mod tests {
     }
 
     #[test]
-    fn url_sslrootcert_con_sslmode_require_es_error() {
+    fn url_sslrootcert_with_sslmode_require_is_error() {
         // require validates NOTHING — passing a rootcert is a
         // sign of confusion; better to abort.
         let r = ConnectionConfig::parse(
@@ -3811,7 +3811,7 @@ mod tests {
     }
 
     #[test]
-    fn url_sslrootcert_sin_sslmode_es_error() {
+    fn url_sslrootcert_without_sslmode_is_error() {
         let r = ConnectionConfig::parse("postgres://user@host/db?sslrootcert=/etc/ssl/ca.pem");
         assert!(matches!(r, Err(DbError::InvalidUrl(_))));
     }
@@ -3861,7 +3861,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_message_encoding_con_param_types() {
+    fn parse_message_encoding_with_param_types() {
         let msg = FrontendMessage::Parse {
             statement_name: "s1",
             sql: "SELECT $1",
@@ -3956,7 +3956,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_backend_data_row_con_null() {
+    fn parse_backend_data_row_with_null() {
         let mut payload = Vec::new();
         payload.extend_from_slice(&3i16.to_be_bytes()); // 3 values
                                                         // Value 1: "42"
@@ -4038,7 +4038,7 @@ mod tests {
     }
 
     #[test]
-    fn scram_rechaza_nonce_que_no_extiende_client() {
+    fn scram_rejects_nonce_that_does_not_extend_client() {
         let mut client = ScramClient::new_with_nonce("user", "pencil", "myclientnonce");
         let server_first =
             "r=ATTACKERNONCE+xxxxxxxxxxxxxxxxxxxxxxxxxxxxx,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
@@ -4047,7 +4047,7 @@ mod tests {
     }
 
     #[test]
-    fn scram_rechaza_server_final_invalido() {
+    fn scram_rejects_invalid_server_final() {
         let mut client = ScramClient::new_with_nonce("user", "pencil", "rOprNGfwEbeRWgbNEkqO");
         let server_first =
             "r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,s=W22ZaJ0SNY7soEsUEjb6gQ==,i=4096";
@@ -4058,7 +4058,7 @@ mod tests {
     }
 
     #[test]
-    fn scram_rechaza_server_error() {
+    fn scram_rejects_server_error() {
         let client = ScramClient::new_with_nonce("user", "pencil", "nonce");
         let r = client.verify("e=invalid-username");
         assert!(matches!(r, Err(DbError::Auth(_))));
@@ -4240,7 +4240,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_array_text_con_quoted_strings() {
+    fn parse_array_text_with_quoted_strings() {
         let v = parse_text_value(oid::TEXT_ARRAY, Some(b"{\"hola\",\"chau\"}")).unwrap();
         match v {
             PgValue::Array { elem_oid, values } => {
@@ -4255,7 +4255,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_array_text_con_escapes() {
+    fn parse_array_text_with_escapes() {
         // {"a,b","c\"d","e\\f"} → ["a,b", "c\"d", "e\\f"]
         let raw = b"{\"a,b\",\"c\\\"d\",\"e\\\\f\"}";
         let v = parse_text_value(oid::TEXT_ARRAY, Some(raw)).unwrap();
@@ -4275,7 +4275,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_array_con_null_sin_quotes() {
+    fn parse_array_with_null_without_quotes() {
         // {1,NULL,3} → [1, null, 3]
         let v = parse_text_value(oid::INT4_ARRAY, Some(b"{1,NULL,3}")).unwrap();
         match v {
@@ -4401,7 +4401,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_array_con_null() {
+    fn encode_array_with_null() {
         let v = PgValue::Array {
             elem_oid: oid::INT4,
             values: vec![PgValue::Int(1), PgValue::Null, PgValue::Int(3)],
@@ -4485,7 +4485,7 @@ mod tests {
     }
 
     #[test]
-    fn redact_url_sin_password_no_cambia() {
+    fn redact_url_without_password_does_not_change() {
         assert_eq!(
             redact_url("postgres://alice@host/db"),
             "postgres://alice@host/db"
@@ -4578,7 +4578,7 @@ mod tests {
     // ================================================================
 
     #[test]
-    fn format_db_log_line_off_devuelve_string_vacio() {
+    fn format_db_log_line_off_returns_empty_string() {
         let line = format_db_log_line(
             std::time::Duration::from_millis(5),
             "SELECT 1",
@@ -4589,7 +4589,7 @@ mod tests {
     }
 
     #[test]
-    fn format_db_log_line_simple_incluye_ms_y_sql() {
+    fn format_db_log_line_simple_includes_ms_and_sql() {
         let line = format_db_log_line(
             std::time::Duration::from_millis(12),
             "SELECT id FROM users WHERE id = $1",
@@ -4614,7 +4614,7 @@ mod tests {
     }
 
     #[test]
-    fn format_db_log_line_verbose_incluye_params() {
+    fn format_db_log_line_verbose_includes_params() {
         let line = format_db_log_line(
             std::time::Duration::from_micros(4100), // ~4.1ms
             "INSERT INTO users (name, age) VALUES ($1, $2)",
@@ -4664,7 +4664,7 @@ mod tests {
     }
 
     #[test]
-    fn format_db_log_line_verbose_sin_args_no_emite_params() {
+    fn format_db_log_line_verbose_without_args_does_not_emit_params() {
         let line = format_db_log_line(
             std::time::Duration::from_millis(1),
             "BEGIN",
@@ -4694,20 +4694,20 @@ mod tests {
     // v0.10.29 — secret redaction in FITZ_DB_LOG=verbose
 
     #[test]
-    fn should_redact_param_detecta_password_en_where() {
+    fn should_redact_param_detects_password_in_where() {
         let sql = "select * from users where password = $1";
         assert!(should_redact_param(sql, 1));
     }
 
     #[test]
-    fn should_redact_param_detecta_password_en_update() {
+    fn should_redact_param_detects_password_in_update() {
         let sql = "update users set password = $1 where id = $2";
         assert!(should_redact_param(sql, 1));
         assert!(!should_redact_param(sql, 2));
     }
 
     #[test]
-    fn should_redact_param_detecta_secret_y_api_key() {
+    fn should_redact_param_detects_secret_and_api_key() {
         assert!(should_redact_param(
             "insert into vault (secret) values ($1)",
             1
@@ -4738,7 +4738,7 @@ mod tests {
     }
 
     #[test]
-    fn should_redact_param_no_confunde_dolar_1_con_dolar_10() {
+    fn should_redact_param_does_not_confuse_dollar_1_with_dollar_10() {
         // Edge case: the needle `$1` must not match inside `$10`.
         let sql = "select * from users where id = $10 and email = $1";
         // $1 → must not redact (email is not sensitive).
@@ -4805,7 +4805,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_max_conns_value_invalido_fallback_default() {
+    fn parse_max_conns_invalid_value_fallback_default() {
         assert_eq!(parse_max_conns_value(""), DEFAULT_MAX_CONNS);
         assert_eq!(parse_max_conns_value("0"), DEFAULT_MAX_CONNS);
         assert_eq!(parse_max_conns_value("201"), DEFAULT_MAX_CONNS);
@@ -4814,7 +4814,7 @@ mod tests {
     }
 
     #[test]
-    fn db_error_server_display_incluye_sqlstate_code() {
+    fn db_error_server_display_includes_sqlstate_code() {
         let err = DbError::Server {
             severity: "ERROR".into(),
             code: "23505".into(),
@@ -4829,7 +4829,7 @@ mod tests {
     }
 
     #[test]
-    fn db_error_server_display_sin_code_omite_corchetes() {
+    fn db_error_server_display_without_code_omits_brackets() {
         let err = DbError::Server {
             severity: "ERROR".into(),
             code: String::new(),
@@ -4841,7 +4841,7 @@ mod tests {
     }
 
     #[test]
-    fn enrich_db_error_suma_sql_y_params_al_mensaje() {
+    fn enrich_db_error_adds_sql_and_params_to_message() {
         let err = DbError::Server {
             severity: "ERROR".into(),
             code: "23505".into(),
@@ -4858,7 +4858,7 @@ mod tests {
     }
 
     #[test]
-    fn enrich_db_error_respeta_redaction_para_secrets() {
+    fn enrich_db_error_respects_redaction_for_secrets() {
         let err = DbError::Server {
             severity: "ERROR".into(),
             code: "23502".into(),
@@ -4882,14 +4882,14 @@ mod tests {
     }
 
     #[test]
-    fn enrich_db_error_pass_through_para_no_server_errors() {
+    fn enrich_db_error_pass_through_for_non_server_errors() {
         let err = DbError::Protocol("badly framed message".into());
         let enriched = enrich_db_error_with_context(err, "SELECT 1", &[]);
         assert_eq!(enriched.to_string(), "protocolo: badly framed message");
     }
 
     #[test]
-    fn enrich_db_error_trunca_sql_largo() {
+    fn enrich_db_error_truncates_long_sql() {
         let long_sql =
             "SELECT id, name, ".to_string() + &"col, ".repeat(100) + "x FROM users WHERE id = $1";
         let err = DbError::Server {

@@ -280,21 +280,21 @@ mod tests {
     static ENV_VAR_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     #[test]
-    fn pbs_release_es_string_yyyymmdd() {
+    fn pbs_release_is_yyyymmdd_string() {
         // Sanity check on the format of the pinned release.
         assert_eq!(PBS_RELEASE.len(), 8, "release debería ser YYYYMMDD");
         assert!(PBS_RELEASE.chars().all(|c| c.is_ascii_digit()));
     }
 
     #[test]
-    fn python_version_es_3_14_x() {
+    fn python_version_is_3_14_x() {
         // Sanity check: we are pinned to CPython 3.14.x (latest
         // stable inside the `abi3-py310` range that PyO3 supports).
         assert!(PYTHON_VERSION.starts_with("3.14."));
     }
 
     #[test]
-    fn tarball_name_formato_canonico() {
+    fn tarball_name_canonical_format() {
         let name = tarball_name("x86_64-pc-windows-msvc");
         assert_eq!(
             name,
@@ -306,7 +306,7 @@ mod tests {
     }
 
     #[test]
-    fn download_url_apunta_a_github_releases() {
+    fn download_url_points_to_github_releases() {
         let url = download_url("x86_64-unknown-linux-gnu");
         assert!(url.starts_with(
             "https://github.com/astral-sh/python-build-standalone/releases/download/"
@@ -318,7 +318,7 @@ mod tests {
     }
 
     #[test]
-    fn supported_triples_cubre_5_plataformas() {
+    fn supported_triples_covers_5_platforms() {
         let triples = supported_triples();
         assert_eq!(triples.len(), 5);
         assert!(triples.contains(&"x86_64-unknown-linux-gnu"));
@@ -329,7 +329,7 @@ mod tests {
     }
 
     #[test]
-    fn host_triple_detecta_el_host_actual() {
+    fn host_triple_detects_current_host() {
         // On any supported platform this must return Ok. If the test
         // runs on an unsupported platform (e.g. musl), it returns Err
         // — acceptable, it is not our target.
@@ -347,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_path_for_combina_root_y_tarball_name() {
+    fn cache_path_for_combines_root_and_tarball_name() {
         let _guard = ENV_VAR_LOCK.lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var(CACHE_DIR_ENV).ok();
@@ -369,7 +369,7 @@ mod tests {
     }
 
     #[test]
-    fn cache_root_usa_env_override() {
+    fn cache_root_uses_env_override() {
         let _guard = ENV_VAR_LOCK.lock();
         let tmp = tempfile::tempdir().unwrap();
         let prev = std::env::var(CACHE_DIR_ENV).ok();
@@ -388,7 +388,7 @@ mod tests {
     }
 
     #[test]
-    fn pbs_error_display_unsupported_triple_lista_soportados() {
+    fn pbs_error_display_unsupported_triple_lists_supported() {
         let s = format!("{}", PbsError::UnsupportedHostTriple);
         for triple in supported_triples() {
             assert!(
@@ -399,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn pbs_error_display_download_failed_incluye_url_y_stderr() {
+    fn pbs_error_display_download_failed_includes_url_and_stderr() {
         let err = PbsError::DownloadFailed {
             url: "https://example.com/x.tar.gz".to_string(),
             triple: "x86_64-unknown-linux-gnu".to_string(),
